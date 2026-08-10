@@ -690,15 +690,14 @@ class ReportRepairConfig(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="REPORT_REPAIR_")
 
     enabled: bool = Field(default=True, description="Enable unhappy-path report repair")
-    # S2: validators + W5: tighter default (3.0 instead of 2.0) reduces
-    # false-positive LLM calls on legitimately-concise reports.
-    size_ratio_threshold: float = Field(default=3.0, ge=1.0, description="Word-count ratio (earlier/last) that triggers repair")
+    # S2: validators + factor-2 accuracy guard for concise reports.
+    size_ratio_threshold: float = Field(default=2.0, ge=1.0, description="Word-count ratio (earlier/last) that triggers repair")
     # W2: tighter default timeout (30s instead of 120s) — repair should be
     # fast; on timeout we fall back to combine. 120s is excessive given the
-    # prompt is bounded to ~3 messages.
+    # prompt is bounded to recent messages.
     timeout_seconds: int = Field(default=30, description="Timeout for the repair LLM call")
     # S2: validator — must be >=1 message.
-    lookback_messages: int = Field(default=3, ge=1, description="Number of assistant messages to consider")
+    lookback_messages: int = Field(default=5, ge=1, description="Number of recent assistant messages to pass to LLM repair")
 
 
 class LanguageConfig(BaseSettings):

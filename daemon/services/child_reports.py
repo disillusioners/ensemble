@@ -46,15 +46,6 @@ content. If the last message is a valid summary, return it. If the real content 
 in an earlier message, extract and compose the correct report. Be concise — your \
 output REPLACES the report content sent to the parent agent.
 
---- Message {n_minus_2} (word count: {wc_n_minus_2}) ---
-{msg_n_minus_2}
-
---- Message {n_minus_1} (word count: {wc_n_minus_1}) ---
-{msg_n_minus_1}
-
---- Message {n} — LAST (word count: {wc_n}) ---
-{msg_n}
-
 Return ONLY the report text, no preamble."""
 
 
@@ -1043,22 +1034,21 @@ Provide a concise summary:"""
         return None
 
     @staticmethod
-    def _is_likely_truncated_report(messages: list[dict], *, ratio: float = 3.0) -> bool:
+    def _is_likely_truncated_report(messages: list[dict], *, ratio: float = 2.0) -> bool:
         """Check if the last assistant message is likely truncated.
 
         Returns True if any of the penultimate messages (n-1 or n-2) has a
         word count > ``ratio`` × the last message's word count, indicating
         the real content may be in an earlier message.
 
-        W5 tuning: skip repair when the last message has >=5 words (a 5+
-        word message is unlikely to be a truncation) AND require the earlier
-        message to have >=20 words (don't trigger on tiny earlier messages).
+        The factor-2 ratio (default) is an accuracy guard to prevent
+        false positives on legitimately-concise reports.
 
         Args:
             messages: List of message dicts (already filtered to real
                 assistant messages — no synthetic/context_kind). Must be
                 in chronological order.
-            ratio: Size ratio threshold (default 3.0).
+            ratio: Size ratio threshold (default 2.0).
 
         Returns:
             True if the report looks truncated and should trigger repair.
@@ -1069,15 +1059,14 @@ Provide a concise summary:"""
         if not last_content or not last_content.strip():
             return True  # empty last message → definitely truncated
         last_wc = len(last_content.split())
-        # W5: floor — a 5+ word last message is unlikely to be a truncation.
-        if last_wc >= 5:
-            return False
         for msg in messages[-3:-1]:  # n-1 and n-2 (if present)
             earlier_wc = len((msg.get("content", "") or "").split())
-            # W5: also require the earlier message to have >=20 words so
-            # tiny earlier messages don't false-positive the heuristic.
-            if earlier_wc >= 20 and earlier_wc > ratio * last_wc:
+            if earlier_wc > ratio * last_wc:
                 return True
+        logger.debug(
+            f"[ReportRepairer] Repair skipped: last_wc={last_wc}, "
+            f"earlier_wcs={[len((m.get('content', '') or '').split()) for m in messages[-3:-1]]}"
+        )
         return False
 
     async def _repair_report_with_llm(
@@ -1111,27 +1100,24 @@ Provide a concise summary:"""
 
         n = len(messages)
 
-        # Build the prompt — use NEGATIVE indexing so n=2 correctly maps
-        # msg_n_minus_1 → the earlier (longer) message and msg_n → the last.
-        def _get(idx: int) -> tuple[str, int]:
-            c = messages[idx].get("content", "") or ""
-            return c, len(c.split())
+        # Build message sections dynamically so the prompt can scale to
+        # any number of lookback messages (default 5, configurable via
+        # ``lookback_messages``). The last message is marked LAST so the
+        # LLM knows which one might be truncated.
+        sections: list[str] = []
+        for i, msg in enumerate(messages, start=1):
+            content = (msg.get("content", "") or "")
+            wc = len(content.split())
+            header = f"--- Message {i}/{n} (word count: {wc}) ---"
+            if i == n:
+                header = f"--- Message {i}/{n} — LAST (word count: {wc}) ---"
+            sections.append(f"{header}\n{content}")
+        messages_block = "\n\n".join(sections)
 
-        msg_n_minus_2, wc_n_minus_2 = _get(-3) if n >= 3 else ("", 0)
-        msg_n_minus_1, wc_n_minus_1 = _get(-2) if n >= 2 else ("", 0)
-        msg_n, wc_n = _get(-1) if n >= 1 else ("", 0)
-
-        prompt = REPORT_REPAIR_PROMPT.format(
-            count=n,
-            n=n,
-            n_minus_1=n - 1,
-            n_minus_2=n - 2,
-            wc_n_minus_2=wc_n_minus_2,
-            wc_n_minus_1=wc_n_minus_1,
-            wc_n=wc_n,
-            msg_n_minus_2=msg_n_minus_2,
-            msg_n_minus_1=msg_n_minus_1,
-            msg_n=msg_n,
+        prompt = (
+            REPORT_REPAIR_PROMPT.format(count=n, n=n)
+            + "\n\n"
+            + messages_block
         )
 
         timeout = config.timeout_seconds
@@ -1252,9 +1238,11 @@ Provide a concise summary:"""
             return last_content  # happy path, skip repair entirely
 
         # --- Truncation check ---
-        # NOTE: lookback_messages currently affects only the combine fallback
-        # slice (recent = assistant_msgs[-lookback:]). The heuristic/repair
-        # slices use [-3:] internally.
+        # ``lookback_messages`` controls the slice passed to both the
+        # truncation heuristic and the LLM repair (which formats every
+        # message in the slice). The heuristic only inspects n-1 and n-2
+        # from that slice (``messages[-3:-1]``); the rest provides the
+        # LLM with extra context to reconstruct the report.
         lookback = report_repair_cfg.lookback_messages
         recent = assistant_msgs[-lookback:] if len(assistant_msgs) >= lookback else assistant_msgs
         if not self._is_likely_truncated_report(recent, ratio=report_repair_cfg.size_ratio_threshold):

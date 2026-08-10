@@ -521,12 +521,10 @@ async def test_unhappy_path_report_repair_combine_fallback():
     from daemon.services.child_reports import ChildReportsService
     from daemon.config import Config
 
-    # Pad earlier messages to >=20 words so the W5 heuristic floor
-    # (ChildReportsService._is_likely_truncated_report, line ~1075) fires;
-    # otherwise the function returns the last_content directly (happy path)
-    # and the combine fallback is never exercised. Mirrors the fix applied
-    # to tests/postgres/test_report_repair_pg.py (commit 21381589) where
-    # 4-word messages caused the same W5 short-circuit.
+    # Earlier messages are padded to trigger the truncation heuristic.
+    # Spec (2026-08-08): no earlier_wc floor — substantive earlier messages
+    # trigger repair purely on the 2× ratio. The padding mirrors the W5-era
+    # setup but is no longer strictly required; kept for readability.
     long_1 = "alpha report content detailed findings " + " ".join(f"item{i}" for i in range(20))
     long_2 = "beta report content implementation details " + " ".join(f"item{i}" for i in range(20))
     short_signoff = "ok"

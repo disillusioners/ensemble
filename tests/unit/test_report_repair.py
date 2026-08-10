@@ -139,13 +139,13 @@ _MEDIUM = "word " * 10  # 10 words
 class TestIsLikelyTruncatedReport:
     """Tests for ``ChildReportsService._is_likely_truncated_report``.
 
-    W5 tuning (2026-08-08): default ratio 2.0→3.0; ``last_wc >= 5`` early-exit
-    (5+ word last message is unlikely to be a truncation); ``earlier_wc >= 20``
-    floor (tiny earlier messages don't false-positive).
+    Spec (2026-08-08): default ratio 2.0; no ``last_wc`` floor and no
+    ``earlier_wc`` floor. Returns True when any penultimate message (n-1
+    or n-2) has word count > 2 × the last message's word count.
     """
 
     def test_n_minus_1_much_larger_triggers(self):
-        """n-1 (50 words) >> n (1 word): 50 > 3×1 → returns True."""
+        """n-1 (50 words) >> n (1 word): 50 > 2×1 → returns True."""
         messages = [
             _assistant_msg(_LONG_1),
             _assistant_msg(_SHORT),
@@ -153,7 +153,7 @@ class TestIsLikelyTruncatedReport:
         assert ChildReportsService._is_likely_truncated_report(messages) is True
 
     def test_n_minus_1_similar_does_not_trigger(self):
-        """Two MEDIUM messages (10 words each): last_wc=10≥5 floor → False."""
+        """Two MEDIUM messages (10 words each): 10 is not > 2×10 → False."""
         messages = [
             _assistant_msg(_MEDIUM),
             _assistant_msg(_MEDIUM),
@@ -161,17 +161,17 @@ class TestIsLikelyTruncatedReport:
         assert ChildReportsService._is_likely_truncated_report(messages) is False
 
     def test_n_minus_2_larger_triggers(self):
-        """n-2 (50 words) >> n (1 word): 50 > 3×1 → returns True (n-1 is MEDIUM, below floor)."""
+        """n-2 (50 words) >> n (1 word): 50 > 2×1 → returns True (n-1 is MEDIUM, below threshold)."""
         messages = [
             _assistant_msg(_LONG_1),  # n-2: 50 words
-            _assistant_msg(_MEDIUM),  # n-1: 10 words (<2× of 1 = 2)
+            _assistant_msg(_MEDIUM),  # n-1: 10 words
             _assistant_msg(_SHORT),   # n: 1 word
         ]
-        # n-2 (50) > 3× n (1) → True
+        # n-2 (50) > 2× n (1) → True
         assert ChildReportsService._is_likely_truncated_report(messages) is True
 
     def test_exactly_2x_boundary_does_not_trigger(self):
-        """last_wc=10≥5 floor → returns False (early exit before ratio check)."""
+        """Boundary: 20 not > 2×10=20 → False (strictly greater is required)."""
         last = "a " * 10  # 10 words
         prev = "a " * 20   # 20 words
         messages = [
@@ -206,8 +206,8 @@ class TestIsLikelyTruncatedReport:
         assert ChildReportsService._is_likely_truncated_report([]) is False
 
     def test_custom_ratio(self):
-        """Custom ratio parameter is respected (with last_wc floor and earlier_wc floor)."""
-        # last=1 word (passes last_wc<5), prev=25 words (passes earlier_wc>=20).
+        """Custom ratio parameter is respected (no floors applied)."""
+        # last=1 word, prev=25 words.
         last = "a"
         prev = "word " * 25
         messages = [_assistant_msg(prev), _assistant_msg(last)]
@@ -216,22 +216,33 @@ class TestIsLikelyTruncatedReport:
         # 25 > 1.5×1 → True (ratio is well below 25)
         assert ChildReportsService._is_likely_truncated_report(messages, ratio=1.5) is True
 
-    def test_last_wc_floor_blocks_legit_concise_last(self):
-        """W5: last_wc >= 5 → return False (don't trigger on legitimately-concise last message)."""
-        # last = 6 words (≥5 floor), prev = 30 words (>3×6).
-        # Without the floor: 30 > 3×6 → True. With floor: False.
+    def test_no_last_wc_floor_triggers_on_ratio(self):
+        """Spec: no ``last_wc`` floor — even a 6-word last message triggers when ratio met."""
+        # last = 6 words, prev = 30 words (>2×6=12) → True.
         last = "a " * 6
         prev = "word " * 30
         messages = [_assistant_msg(prev), _assistant_msg(last)]
-        assert ChildReportsService._is_likely_truncated_report(messages) is False
+        assert ChildReportsService._is_likely_truncated_report(messages) is True
 
-    def test_earlier_wc_floor_blocks_tiny_earlier(self):
-        """W5: earlier_wc < 20 → don't trigger (small earlier message is not 'substantive')."""
-        # last = 1 word, prev = 15 words (≥1 but <20 floor).
-        # Without earlier floor: 15 > 3×1 → True. With floor: False.
+    def test_no_earlier_wc_floor_triggers_on_ratio(self):
+        """Spec: no ``earlier_wc`` floor — a 15-word earlier message triggers when ratio met."""
+        # last = 1 word, prev = 15 words (>2×1=2) → True.
         last = "a"
         prev = "word " * 15
         messages = [_assistant_msg(prev), _assistant_msg(last)]
+        assert ChildReportsService._is_likely_truncated_report(messages) is True
+
+    def test_governor_style_short_vs_long_triggers(self):
+        """Realistic case: short sign-off (~10 words) after substantive report (~50 words)."""
+        last = "word " * 10   # 10 words — concise sign-off
+        prev = "word " * 50   # 50 words — substantive report
+        messages = [_assistant_msg(prev), _assistant_msg(last)]
+        # 50 > 2×10=20 → True
+        assert ChildReportsService._is_likely_truncated_report(messages) is True
+
+    def test_single_message_returns_false(self):
+        """Single-message list → returns False (no earlier to compare)."""
+        messages = [_assistant_msg(_SHORT)]
         assert ChildReportsService._is_likely_truncated_report(messages) is False
 
 
@@ -431,7 +442,8 @@ class TestGetLastAssistantMessageRaw:
     @pytest.mark.asyncio
     async def test_truncated_llm_timeout_falls_back_to_combine(self):
         """Last message truncated → LLM times out → combines messages."""
-        # W5: earlier messages must be >=20 words to pass the earlier_wc floor.
+        # Spec (2026-08-08): no earlier_wc floor — substantive earlier
+        # messages trigger repair purely on the 2× ratio.
         earlier_a = "alpha content " + "extra padding word " * 20  # ~25 words
         earlier_b = "beta content " + "extra padding word " * 20   # ~25 words
         messages = [
@@ -456,7 +468,8 @@ class TestGetLastAssistantMessageRaw:
     @pytest.mark.asyncio
     async def test_truncated_llm_exception_falls_back_to_combine(self):
         """Last message truncated → LLM raises → combines messages."""
-        # W5: earlier messages must be >=20 words to pass the earlier_wc floor.
+        # Spec (2026-08-08): no earlier_wc floor — substantive earlier
+        # messages trigger repair purely on the 2× ratio.
         earlier_a = "alpha content " + "extra padding word " * 20  # ~25 words
         earlier_b = "beta content " + "extra padding word " * 20   # ~25 words
         messages = [
@@ -647,21 +660,18 @@ class TestN2IndexingRegression:
 
         # Both messages must appear in the prompt (NOT the short one duplicated).
         assert long_earlier in prompt_content, (
-            "msg_n_minus_1 must contain the long earlier message — W1 fix"
+            "earlier message must appear in the prompt — n=2 regression check"
         )
-        assert short_last in prompt_content, "msg_n must contain the short last message"
+        assert short_last in prompt_content, "last message must appear in the prompt"
 
-        # Bug-detector: if msg_n_minus_1 == msg_n == "done", the prompt
-        # would only have the short message and the long one would be missing.
-        # Stronger assertion: the prompt must have TWO distinct message sections
-        # containing the long message and "done" respectively.
-        assert prompt_content.count("--- Message") == 3, (
-            "prompt must include Message n_minus_2, n_minus_1, and n sections"
+        # Dynamic formatting: exactly as many sections as there are messages.
+        assert prompt_content.count("--- Message") == 2, (
+            "prompt must include exactly 2 message sections for n=2"
         )
 
     @pytest.mark.asyncio
-    async def test_n_2_prompt_msg_n_minus_2_is_empty(self):
-        """n=2 prompt: msg_n_minus_2 section is empty (only n-1 and n exist)."""
+    async def test_n_2_prompt_has_two_sections(self):
+        """n=2 prompt: exactly 2 message sections, no empty placeholders."""
         service = _make_service()
 
         messages = [
@@ -689,10 +699,15 @@ class TestN2IndexingRegression:
 
         prompt_content = captured_llm_input[0][1].content
 
-        # Word count for n_minus_2 must be 0 (no such message exists)
-        assert "(word count: 0)" in prompt_content, (
-            "n_minus_2 word count must be 0 when n=2 (only 2 messages exist)"
-        )
+        # Dynamic formatting: 2 sections for n=2, no empty placeholders.
+        assert prompt_content.count("--- Message") == 2
+        # No "(word count: 0)" stubs — every section is a real message.
+        assert "(word count: 0)" not in prompt_content
+        # Both real messages appear.
+        assert _LONG_1 in prompt_content
+        assert _SHORT in prompt_content
+        # Last message is marked LAST.
+        assert "LAST" in prompt_content
 
     @pytest.mark.asyncio
     async def test_n_3_prompt_indices_correct(self):
@@ -726,13 +741,18 @@ class TestN2IndexingRegression:
         prompt_content = captured_llm_input[0][1].content
 
         # All three distinct messages should be in the prompt, each in its slot.
-        assert msg_a in prompt_content, "msg_n_minus_2 = first message (alpha)"
-        assert msg_b in prompt_content, "msg_n_minus_1 = middle message (beta)"
-        assert msg_c in prompt_content, "msg_n = last message (done)"
+        assert msg_a in prompt_content, "first message must appear in the prompt"
+        assert msg_b in prompt_content, "middle message must appear in the prompt"
+        assert msg_c in prompt_content, "last message must appear in the prompt"
+
+        # Dynamic formatting: 3 sections for n=3, no empty placeholders.
+        assert prompt_content.count("--- Message") == 3
+        # Last message is marked LAST.
+        assert "LAST" in prompt_content
 
     @pytest.mark.asyncio
-    async def test_n_1_prompt_msg_n_minus_1_and_2_empty(self):
-        """n=1 prompt: msg_n_minus_1 and msg_n_minus_2 sections are empty."""
+    async def test_n_1_prompt_has_one_section(self):
+        """n=1 prompt: exactly 1 message section, no empty placeholders."""
         service = _make_service()
 
         messages = [_assistant_msg(_SHORT)]  # just one message
@@ -757,8 +777,12 @@ class TestN2IndexingRegression:
 
         prompt_content = captured_llm_input[0][1].content
 
-        # Two "(word count: 0)" entries for n_minus_1 and n_minus_2
-        assert prompt_content.count("(word count: 0)") == 2
+        # Dynamic formatting: 1 section for n=1, no empty placeholders.
+        assert prompt_content.count("--- Message") == 1
+        # No "(word count: 0)" stubs.
+        assert "(word count: 0)" not in prompt_content
+        # The single message is marked LAST.
+        assert "LAST" in prompt_content
 
 
 # ---------------------------------------------------------------------------
@@ -912,7 +936,8 @@ class TestEndToEndPersistence:
         """Truncated child + LLM fails → parent report contains combined content."""
         from daemon.config import Config
 
-        # W5: earlier messages must be >=20 words to pass the earlier_wc floor.
+        # Spec (2026-08-08): no earlier_wc floor — substantive earlier
+        # messages trigger repair purely on the 2× ratio.
         long_1 = "alpha detailed findings report " + "padding word " * 20  # ~25 words
         long_2 = "beta implementation details report " + "padding word " * 20  # ~25 words
         short_signoff = "ok"
@@ -951,7 +976,8 @@ class TestEndToEndPersistence:
             )
 
         # Raw is the combined content (LLM failed → fallback).
-        # earlier_wc must be >= 20 for the heuristic to fire.
+        # Spec (2026-08-08): no earlier_wc floor — the 2× ratio alone
+        # is enough to trigger repair.
         assert raw is not None
         assert raw != short_signoff
         assert "alpha detailed findings" in raw
@@ -969,21 +995,22 @@ class TestEndToEndPersistence:
 
 
 class TestConfigDefaults:
-    """W5/W2 config default tests (ratio 3.0, timeout 30, lookback 3)."""
+    """Config default tests (ratio 2.0, timeout 30, lookback 5)."""
 
-    def test_size_ratio_threshold_default_is_3(self):
-        """W5: default size_ratio_threshold is 3.0 (was 2.0)."""
+    def test_size_ratio_threshold_default_is_2(self):
+        """Spec: default size_ratio_threshold is 2.0 (was 3.0 under W5)."""
         cfg = ReportRepairConfig()
-        assert cfg.size_ratio_threshold == 3.0
+        assert cfg.size_ratio_threshold == 2.0
 
     def test_timeout_default_is_30(self):
         """W2: default timeout_seconds is 30 (was 120)."""
         cfg = ReportRepairConfig()
         assert cfg.timeout_seconds == 30
 
-    def test_lookback_default_is_3(self):
+    def test_lookback_default_is_5(self):
+        """Spec: default lookback_messages is 5 (was 3 under W5)."""
         cfg = ReportRepairConfig()
-        assert cfg.lookback_messages == 3
+        assert cfg.lookback_messages == 5
 
     def test_lookback_validator_rejects_zero(self):
         """S2: lookback_messages must be >= 1."""
