@@ -82,12 +82,21 @@ def _derive_task_flags_from_queue_type(
     Returns:
         ``(is_deferred, is_background)`` — the caller's flags overridden
         by the queue type when applicable.
+
+    Raises:
+        ValueError: If ``queue_type`` is a non-``None`` value outside the
+            recognized queue types.
     """
     if queue_type == "defer":
         return True, is_background
     if queue_type == "background":
         return is_deferred, True
-    return is_deferred, is_background
+    if queue_type in {"fifo", "parallel", None}:
+        return is_deferred, is_background
+    raise ValueError(
+        f"Unknown queue_type {queue_type!r}; expected one of "
+        "{'fifo', 'parallel', 'defer', 'background'} or None"
+    )
 
 
 def _build_message_content(message: str, images: list[str] | None) -> str | list:

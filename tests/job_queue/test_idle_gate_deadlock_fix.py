@@ -343,18 +343,54 @@ class TestFlagDerivationHelper:
             None, is_deferred=True, is_background=True
         ) == (True, True)
 
-    def test_unknown_queue_type_preserves_caller_flags(self):
-        """Defensive: an unknown ``queue_type`` is treated as a normal
-        queue (caller flags pass through).
+    def test_unknown_queue_type_raises_value_error(self):
+        """Fail closed on unknown ``queue_type`` (reviewer W1).
 
-        The CHECK constraint on ``job_queues.queue_type`` enforces
-        the four valid values, so this branch is purely defensive
-        against future schema drift. It documents the contract for
-        future maintainers.
+        The CHECK constraint on ``job_queues.queue_type`` enforces the
+        four valid values, so an unrecognized value indicates a
+        programming or configuration error. Silently passing through
+        caller flags would let a future schema drift silently
+        re-introduce the idle-gate deadlock the helper was extracted
+        to prevent. The fix raises ``ValueError`` instead so the
+        caller fails fast and surfaces the regression.
         """
+        with pytest.raises(ValueError):
+            _derive_task_flags_from_queue_type("nonsense")
+        with pytest.raises(ValueError):
+            _derive_task_flags_from_queue_type("")
+        with pytest.raises(ValueError):
+            _derive_task_flags_from_queue_type("DEFER")
+        with pytest.raises(ValueError):
+            _derive_task_flags_from_queue_type("unknown")
+
+    def test_recognized_passthrough_queue_types_preserve_caller_flags(self):
+        """``"fifo"`` / ``"parallel"`` / ``None`` preserve caller flags.
+
+        These are the only non-flag-mandating queue types; the helper
+        must remain a no-op for them so the caller's intent is the
+        only signal we have. ``None`` is the legitimate
+        ``enqueue_message_job`` "queue could not be resolved" case
+        and MUST keep passing through (it is not an error — a queue
+        lookup failure is recoverable upstream).
+        """
+        # ``"fifo"`` — recognized passthrough
+        assert _derive_task_flags_from_queue_type("fifo") == (False, False)
         assert _derive_task_flags_from_queue_type(
-            "unknown", is_deferred=True
+            "fifo", is_deferred=True
         ) == (True, False)
+        assert _derive_task_flags_from_queue_type(
+            "fifo", is_background=True
+        ) == (False, True)
+        # ``"parallel"`` — recognized passthrough
+        assert _derive_task_flags_from_queue_type("parallel") == (False, False)
+        assert _derive_task_flags_from_queue_type(
+            "parallel", is_deferred=True, is_background=True
+        ) == (True, True)
+        # ``None`` — unresolved queue is NOT an error
+        assert _derive_task_flags_from_queue_type(None) == (False, False)
+        assert _derive_task_flags_from_queue_type(
+            None, is_deferred=True, is_background=True
+        ) == (True, True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
