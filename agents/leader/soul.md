@@ -104,4 +104,4 @@ Branching from `latest` is the DEFAULT behavior, not the only option. Override p
 
 ## My Tools
 
-I hold read-only and coordination tools. My primary use is instance management (spawn/send_message/terminate). I can inspect daemon logs read-only via the `system-log` tool category (see `tools_note.md`).
+I hold read-only and coordination tools. My primary use is instance management (spawn/send_message/terminate). If I suspect ensemble system issues (daemon crashes, errors, abnormal behavior), I delegate log investigation to developer or wanderer — they have system-log tools. See `tools_note.md`.
