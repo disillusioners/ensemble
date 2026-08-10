@@ -476,7 +476,26 @@ class TestReportLaneGuard:
         assert claimed.worker_id == "worker-1"
 
     def test_process_message_blocked_by_cross_system_guard(self, engine, task_repo):
-        """PROCESS_MESSAGE with matching work_id is blocked by the work_id-keyed guard."""
+        """PROCESS_MESSAGE is blocked by the cross-system guard when an
+        active JobItem on the instance has a genuinely-in-flight backing
+        Task.
+
+        Note (post-self-deadlock-fix 2026-08-02, commit 338a72b0): the
+        cross-system guard excludes the candidate task's own row from
+        the in-flight check — otherwise the candidate's own backing
+        JobItem (linkage contract: ``JobItem.job_id == Task.work_id``)
+        would block the claim forever. To trigger the guard in this
+        test we insert a PAUSED sibling Task whose ``work_id`` matches
+        the active JobItem's ``job_id``. PAUSED is in the cross-system
+        guard's in-flight set (``pending/running/paused``) but NOT in
+        the per-instance guard's RUNNING-only set, so this setup
+        isolates the cross-system guard.
+
+        Same invariant (RUNNING sibling variant) is covered by
+        ``tests/message_queue_redesign/test_task_repository.py::test_claim_still_blocks_genuine_other_inflight_work``.
+        """
+        from sqlalchemy import text
+
         parent_id = _seed_instance(engine)
         jid = _seed_job(
             engine,
@@ -484,7 +503,45 @@ class TestReportLaneGuard:
             status=AdmissionState.ACTIVE.value,
             job_metadata={"message_id": "msg-user-123"},
         )
-        # message_id differs because it is no longer the correlation axis.
+
+        # Insert a PAUSED sibling Task whose work_id matches the active
+        # JobItem. PAUSED counts as "in-flight" for the cross-system
+        # guard but NOT for the per-instance guard, isolating the
+        # cross-system guard from the per-instance guard.
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO task (task_type, instance_id, message_id, status,
+                                      retry_count, created_at, cancel_requested,
+                                      retry_scheduled, work_id, is_deferred,
+                                      is_background, worker_id, started_at)
+                    VALUES (:task_type, :instance_id, :message_id, :status,
+                            :retry_count, :created_at, :cancel_requested,
+                            :retry_scheduled, :work_id, :is_deferred,
+                            :is_background, :worker_id, :started_at)
+                    """
+                ),
+                {
+                    "task_type": TaskType.PROCESS_MESSAGE.value,
+                    "instance_id": parent_id,
+                    "message_id": "msg-sibling",
+                    "status": TaskStatus.PAUSED.value,
+                    "retry_count": 0,
+                    "created_at": datetime.now(timezone.utc),
+                    "cancel_requested": False,
+                    "retry_scheduled": False,
+                    "work_id": jid,
+                    "is_deferred": False,
+                    "is_background": False,
+                    "worker_id": "worker-sibling",
+                    "started_at": datetime.now(timezone.utc),
+                },
+            )
+
+        # Candidate PROCESS_MESSAGE task — message_id differs (work_id
+        # is no longer the correlation axis; the guard key is "another
+        # Task with matching work_id is genuinely in-flight").
         msg_task = task_repo.create(
             task_type=TaskType.PROCESS_MESSAGE.value,
             instance_id=parent_id,
@@ -492,18 +549,13 @@ class TestReportLaneGuard:
         )
         assert msg_task.status == TaskStatus.PENDING.value
 
-        # Align Task.work_id to JobItem.job_id so the new guard fires.
-        with Session(engine) as s:
-            t = s.get(Task, msg_task.id)
-            assert t is not None
-            t.work_id = jid
-            s.commit()
-
-        # Matching work_id to the backing active JobItem fires the guard.
+        # Genuine in-flight backing Task for an active JobItem on this
+        # instance MUST block the candidate claim via the cross-system
+        # guard.
         claimed = task_repo.claim_pending_task(worker_id="worker-1")
         assert claimed is None, (
-            f"PROCESS_MESSAGE with matching work_id MUST be blocked "
-            f"by the cross-system guard (got {claimed})"
+            f"PROCESS_MESSAGE with matching-work_id in-flight backing Task "
+            f"MUST be blocked by the cross-system guard (got {claimed})"
         )
 
         # The PROCESS_MESSAGE task must still be PENDING (not claimed).
