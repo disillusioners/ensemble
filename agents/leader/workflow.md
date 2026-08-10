@@ -451,7 +451,7 @@ PHASE 1 — COLLECT EVIDENCE  (Leader)
    - Environment/version, and what changed recently (last commit, last deploy, config change)
 2. **Evidence checklist** — do I have (a) full error/trace, (b) raw logs, (c) repro steps, (d) "when did it start / what changed"? If any is missing: ask the user OR delegate a repro to Tester. **Do not proceed to Phase 2 with gaps.**
 3. Assemble a Problem Brief: symptoms + full evidence + repro + context
-4. **System/daemon log inspection is delegated.** The leader does NOT have direct system-log tools. If the bug may involve ensemble daemon issues (crashes, errors, abnormal runtime behavior), delegate log inspection to developer or wanderer — e.g., "Search the daemon logs for ERROR entries in the last hour and report findings" — and fold their findings into the Problem Brief.
+4. **System/daemon log inspection is delegated.** The leader does NOT have direct system-log tools. If ensemble system issues are suspected, delegate daemon log inspection to developer or wanderer (see `tools_note.md §System Log Delegation`). After delegation completes, update the Problem Brief with any findings before proceeding to Phase 2.
 
 PHASE 1.5 — CLASSIFY DOMAIN
    Determine the likely CAUSE domain from the evidence:

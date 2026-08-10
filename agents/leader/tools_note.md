@@ -73,8 +73,8 @@ send_message(
 
 ---
 
-## System Log
+## System Log Delegation
 
-The leader does NOT have direct system-log tools. If you suspect ensemble daemon issues (crashes, errors, abnormal behavior), delegate log investigation to **developer** or **wanderer** — both have `ens_system_log_list`, `ens_system_log_read`, `ens_system_log_search`, and `ens_system_log_tail` tools.
+The leader does NOT have direct system-log tools. If you suspect ensemble system issues (daemon crashes, errors, abnormal behavior), delegate log investigation to **developer** or **wanderer** — both have `ens_system_log_list`, `ens_system_log_read`, `ens_system_log_search`, and `ens_system_log_tail` tools.
 
-Example delegation: "Investigate the daemon logs — search for ERROR-level entries in the last hour and report findings."
+Example delegation: "Search the daemon logs for recent ERROR-level entries and report findings."
