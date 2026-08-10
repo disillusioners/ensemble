@@ -1994,8 +1994,21 @@ class TaskRepository:
                 to NULL when no row exists).
 
         Returns:
-            True if at least one non-deferred PENDING, RUNNING, or PAUSED
-            task exists (scoped per ``project_id``); False otherwise.
+            True if at least one non-deferred RUNNING or PAUSED task
+            exists (scoped per ``project_id``), OR a PENDING non-deferred
+            task exists whose linked JobItem is NOT still queued
+            (i.e. it is genuinely claimable). False otherwise.
+
+        FIX 2A (idle-gate deadlock, 2026-08-10): a PENDING task whose
+        linked JobItem is still ``admission_state='queued'`` is
+        UNCLAIMABLE — the queue-awareness guard in
+        :meth:`claim_pending_task` blocks it until the JobItem leaves
+        the queued bucket. The pre-fix predicate counted such a task
+        as active non-deferred work, which held the defer-queue idle
+        gate forever and deadlocked the queue. The split-statement
+        union below excludes that case while keeping the
+        "claimable PENDING counts" semantics for direct-queue tasks
+        (no JobItem at all → EXISTS is false → still counted).
 
         Dialect notes:
             * ``t.is_deferred = :is_deferred_false`` with a Python
@@ -2018,38 +2031,97 @@ class TaskRepository:
         """
         with self.engine.begin() as conn:
             if project_id is None:
+                # FIX 2A (idle-gate deadlock, 2026-08-10): exclude pending
+                # tasks whose linked JobItem is still ``admission_state='queued'``.
+                # The queue-awareness guard in :meth:`claim_pending_task`
+                # (~repository.py lines 1068-1073) blocks claiming such a
+                # Task UNTIL the JobItem leaves the queued bucket, so a
+                # PENDING task with a queued JobItem cannot be claimed —
+                # but the pre-fix predicate counted it as active
+                # non-deferred work and the defer-queue idle gate stayed
+                # wedged, deadlocking the entire queue. The exclusion
+                # mirrors the claim guard so the predicate and the claim
+                # can never disagree.
                 stmt = text("""
                     SELECT EXISTS(
                         SELECT 1 FROM task t
                         JOIN instances i ON t.instance_id = i.instance_id
-                        WHERE t.status IN (:status_pending, :status_running, :status_paused)
+                        WHERE t.status IN (:status_running, :status_paused)
                           AND t.is_deferred = :is_deferred_false
                     )
                 """)
                 row = conn.execute(stmt, {
-                    "status_pending": TaskStatus.PENDING.value,
                     "status_running": TaskStatus.RUNNING.value,
                     "status_paused": TaskStatus.PAUSED.value,
                     "is_deferred_false": False,
                 }).fetchone()
+                # Union with the pending-only branch: a PENDING task
+                # counts only if its linked JobItem is NOT still queued.
+                # Direct-queue tasks (no JobItem row) have no matching
+                # ``_qi`` row → the EXISTS is false → they still count,
+                # which is correct — they are genuinely claimable.
+                pending_stmt = text("""
+                    SELECT EXISTS(
+                        SELECT 1 FROM task t
+                        JOIN instances i ON t.instance_id = i.instance_id
+                        WHERE t.status = :status_pending
+                          AND t.is_deferred = :is_deferred_false
+                          AND NOT EXISTS (
+                              SELECT 1 FROM job_queue_items _qi
+                              WHERE _qi.job_id = t.work_id
+                                AND _qi.admission_state = :qi_queued
+                                AND _qi.deleted_at IS NULL
+                          )
+                    )
+                """)
+                pending_row = conn.execute(pending_stmt, {
+                    "status_pending": TaskStatus.PENDING.value,
+                    "is_deferred_false": False,
+                    "qi_queued": AdmissionState.QUEUED.value,
+                }).fetchone()
+                return bool(row[0]) or bool(pending_row[0])
             else:
+                # Same fix as the ``project_id=None`` branch — see FIX 2A
+                # comment above for the rationale. Project-scoped probe
+                # also excludes pending tasks whose linked JobItem is
+                # still queued.
                 stmt = text("""
                     SELECT EXISTS(
                         SELECT 1 FROM task t
                         JOIN instances i ON t.instance_id = i.instance_id
-                        WHERE t.status IN (:status_pending, :status_running, :status_paused)
+                        WHERE t.status IN (:status_running, :status_paused)
                           AND t.is_deferred = :is_deferred_false
                           AND i.project_id = :project_id
                     )
                 """)
                 row = conn.execute(stmt, {
-                    "status_pending": TaskStatus.PENDING.value,
                     "status_running": TaskStatus.RUNNING.value,
                     "status_paused": TaskStatus.PAUSED.value,
                     "is_deferred_false": False,
                     "project_id": project_id,
                 }).fetchone()
-            return bool(row[0])
+                pending_stmt = text("""
+                    SELECT EXISTS(
+                        SELECT 1 FROM task t
+                        JOIN instances i ON t.instance_id = i.instance_id
+                        WHERE t.status = :status_pending
+                          AND t.is_deferred = :is_deferred_false
+                          AND i.project_id = :project_id
+                          AND NOT EXISTS (
+                              SELECT 1 FROM job_queue_items _qi
+                              WHERE _qi.job_id = t.work_id
+                                AND _qi.admission_state = :qi_queued
+                                AND _qi.deleted_at IS NULL
+                          )
+                    )
+                """)
+                pending_row = conn.execute(pending_stmt, {
+                    "status_pending": TaskStatus.PENDING.value,
+                    "is_deferred_false": False,
+                    "project_id": project_id,
+                    "qi_queued": AdmissionState.QUEUED.value,
+                }).fetchone()
+                return bool(row[0]) or bool(pending_row[0])
 
     def has_active_non_background_work(self, project_id: str | None = None) -> bool:
         """Return True if there is any non-background in-flight task.
@@ -2093,8 +2165,17 @@ class TaskRepository:
 
         Returns:
             True if at least one ``is_background=false`` task exists
-            with status ``pending``, ``running``, or ``paused`` across
-            ANY project (defer tasks included); False otherwise.
+            with status ``running`` or ``paused`` across ANY project
+            (defer tasks included), OR a PENDING ``is_background=false``
+            task exists whose linked JobItem is NOT still queued
+            (genuinely claimable); False otherwise.
+
+        FIX 2A (idle-gate deadlock, 2026-08-10): a PENDING task whose
+        linked JobItem is still ``admission_state='queued'`` is
+        UNCLAIMABLE and must not count as active non-background work —
+        otherwise the gate would stay wedged forever and the queue
+        would deadlock. Mirrors the exclusion in
+        :meth:`has_active_non_deferred_work`.
 
         Dialect notes mirror :meth:`has_active_non_deferred_work`
         exactly — Python ``False`` booleans as bound parameters so the
@@ -2113,21 +2194,51 @@ class TaskRepository:
             # asymmetry — background work waits across projects, not
             # within them.
             del project_id
+            # FIX 2A (idle-gate deadlock, 2026-08-10): mirror the
+            # exclusion logic from
+            # :meth:`has_active_non_deferred_work` — a PENDING task
+            # whose linked JobItem is still ``admission_state='queued'``
+            # is UNCLAIMABLE (the queue-awareness guard in
+            # :meth:`claim_pending_task` blocks it) and must NOT count
+            # as active non-background work. Pre-fix it held the
+            # background-queue idle gate forever and deadlocked the
+            # queue. The exclusion is mirrored here so the defer and
+            # background predicates cannot drift on the deadlock case.
+            # RUNNING + PAUSED tasks always count (unchanged); only the
+            # PENDING branch gets the exclusion.
             stmt = text("""
                 SELECT EXISTS(
                     SELECT 1 FROM task t
                     JOIN instances i ON t.instance_id = i.instance_id
-                    WHERE t.status IN (:status_pending, :status_running, :status_paused)
+                    WHERE t.status IN (:status_running, :status_paused)
                       AND t.is_background = :is_background_false
                 )
             """)
             row = conn.execute(stmt, {
-                "status_pending": TaskStatus.PENDING.value,
                 "status_running": TaskStatus.RUNNING.value,
                 "status_paused": TaskStatus.PAUSED.value,
                 "is_background_false": False,
             }).fetchone()
-            return bool(row[0])
+            pending_stmt = text("""
+                SELECT EXISTS(
+                    SELECT 1 FROM task t
+                    JOIN instances i ON t.instance_id = i.instance_id
+                    WHERE t.status = :status_pending
+                      AND t.is_background = :is_background_false
+                      AND NOT EXISTS (
+                          SELECT 1 FROM job_queue_items _qi
+                          WHERE _qi.job_id = t.work_id
+                            AND _qi.admission_state = :qi_queued
+                            AND _qi.deleted_at IS NULL
+                      )
+                )
+            """)
+            pending_row = conn.execute(pending_stmt, {
+                "status_pending": TaskStatus.PENDING.value,
+                "is_background_false": False,
+                "qi_queued": AdmissionState.QUEUED.value,
+            }).fetchone()
+            return bool(row[0]) or bool(pending_row[0])
 
     def count_by_status(self) -> dict[str, int]:
         """Get count of tasks by status.

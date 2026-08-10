@@ -768,12 +768,42 @@ class JobRepository:
         del project_id  # intentionally ignored — background is system-wide
         try:
             with self.engine.begin() as conn:
+                # FIX 2B (idle-gate deadlock, 2026-08-10): LEFT JOIN the
+                # ``task`` table and exclude ``'queued'`` JobItems whose
+                # linked Task is still ``status='pending'``. Such a
+                # JobItem is UNCLAIMABLE — the queue-awareness guard in
+                # ``TaskRepository.claim_pending_task``
+                # (``task/repository.py`` ~lines 1068-1073) blocks the
+                # Task until the JobItem leaves the queued bucket, so the
+                # Task can never reach running. Pre-fix the predicate
+                # counted this queued item as active non-background work
+                # and the background gate stayed wedged forever,
+                # deadlocking the queue.
+                #
+                # ``'queued'`` JobItems whose linked Task is missing
+                # (no ``task`` row — direct-queue enqueue, no shared
+                # work_id) OR whose linked Task is in a non-pending
+                # state (running/paused/etc.) STILL count — those
+                # represent genuinely-running or genuinely-claimable
+                # work that should be holding the background gate. The
+                # LEFT JOIN keeps ``t.status`` NULL for the no-task
+                # case, so we have to spell out the NULL guard
+                # explicitly: ``t.status IS NULL OR t.status != 'pending'``.
+                # Without the explicit NULL check, SQL's three-valued
+                # logic would evaluate ``NULL = 'pending'`` to NULL,
+                # the AND to NULL, the NOT to NULL, and the WHERE
+                # clause would silently drop the row (regression
+                # regression: pinned by
+                # ``tests/job_queue/test_idle_gate_deadlock_fix.py::
+                # TestJobSideBackgroundPredicateExclusion::
+                # test_queued_jobitem_without_task_returns_true``).
                 row = conn.execute(
                     text(
                         "SELECT EXISTS ("
                         "  SELECT 1 FROM job_queue_items j"
                         "  LEFT JOIN job_queues q ON j.queue_id = q.queue_id"
                         "  LEFT JOIN instances i ON j.instance_id = i.instance_id"
+                        "  LEFT JOIN task t ON t.work_id = j.job_id"
                         "  WHERE j.admission_state IN ('queued', 'active')"
                         "    AND j.deleted_at IS NULL"
                         "    AND (q.queue_type IS NULL"
@@ -783,6 +813,9 @@ class JobRepository:
                         "             AND i.status != :term_error"
                         "             AND i.status != :term_terminated"
                         "             AND i.status != :term_failed))"
+                        "    AND (j.admission_state != :state_queued"
+                        "         OR t.status IS NULL"
+                        "         OR t.status != :task_pending)"
                         ")"
                     ),
                     {
@@ -791,6 +824,8 @@ class JobRepository:
                         "term_error": "error",
                         "term_terminated": "terminated",
                         "term_failed": "failed",
+                        "state_queued": "queued",
+                        "task_pending": "pending",
                     },
                 ).first()
         except Exception as e:
