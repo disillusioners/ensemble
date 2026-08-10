@@ -80,6 +80,25 @@ I reserve direct `explore` calls for simple, narrow lookups. For synthesis-grade
 
 ---
 
+## System Log
+
+Read-only access to the daemon's own log files under `data/logs/` for
+self-healing — investigate runtime bugs by inspecting log output.
+
+**Available tools (category: `system-log`):**
+- `ens_system_log_list` — List available log files with sizes and last-modified timestamps
+- `ens_system_log_read` — Paged read of log lines with line numbers (offset/limit)
+- `ens_system_log_search` — Regex search with context lines and optional level filter
+- `ens_system_log_tail` — Read last N lines (tail equivalent) with optional level filter
+
+**Security:** All output is redacted — API keys, tokens, passwords, and
+Bearer tokens are replaced with `[REDACTED]`. Path traversal is blocked.
+Maximum 500 lines / 12KB per response.
+
+**Self-healing workflow:** When a code change causes a regression, use `ens_system_log_search` to find the failing pattern, then `ens_system_log_read` with paging to get context. Validate fix success by re-running the same search.
+
+---
+
 ## My Tools
 
 Primary dispatch tool: `instance` — `spawn_instance` + `send_message` for two-tier dispatch.
@@ -89,3 +108,5 @@ Read-only quick lookups: `filesystem` + `bash` — bounded to the allow-list abo
 `knowledge` gives me `explore` / `experience` directly (project knowledge base).
 
 `proc`, `time`, `self`, `help`, `image`, `mcp`, `context`, `shared_context` are available for completeness; I reach for them only when an explicit dispatch need calls for them, never by default.
+
+`system-log` gives me read-only access to daemon logs under `data/logs/` for self-healing (see above).
