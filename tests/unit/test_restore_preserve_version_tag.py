@@ -72,7 +72,7 @@ def _make_mock_manager() -> MagicMock:
     * ``_mcp_service`` — explicitly set to ``None`` so
       ``_get_mcp_tool_names`` short-circuits its MCP-cache branch and uses
       the stored / empty-list fallback.
-    * ``shared_context_metadata_repo`` — accessed by
+    * ``shared_meta_kv_repo`` — accessed by
       ``_apply_post_cache_appends``; auto-mocked via ``MagicMock``.
     * ``config.queue.llm_retry_transient_attempts``,
       ``config.queue.llm_retry_timeout_attempts`` — integer defaults for
@@ -96,7 +96,7 @@ def _make_mock_manager() -> MagicMock:
     manager.instances = {}
     manager.prompt_cache = MagicMock()
     manager._mcp_service = None  # force _get_mcp_tool_names fallback path
-    manager.shared_context_metadata_repo = MagicMock()
+    manager.shared_meta_kv_repo = MagicMock()
 
     mock_config = MagicMock()
     mock_config.queue.llm_retry_transient_attempts = 3

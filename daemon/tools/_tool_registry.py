@@ -52,7 +52,7 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
     "doc_write",
     "comment_edit",
     "skill_search",
-    "shared_context_metadata",
+    "shared_meta_kv",
 })
 
 
@@ -266,7 +266,7 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     "mcp": "daemon.tools.mcp_tools",
     "external_opencode": "daemon.tools.external_opencode",
     "context": "daemon.tools.context_tools",
-    "shared_context": "daemon.tools.shared_context_tools",
+    "shared_meta_kv": "daemon.tools.shared_meta_kv_tools",
     "db": "daemon.tools.db_tools",
     "infra": "daemon.tools.infra",
     "system": "daemon.tools.system",

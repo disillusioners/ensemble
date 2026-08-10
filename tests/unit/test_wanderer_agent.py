@@ -59,7 +59,7 @@ TOOL_CATEGORIES: dict[str, list[str]] = {
 # 'blueprint' per migration.
 EXPECTED_ALLOW_CATEGORIES = [
     "bash", "proc", "filesystem", "time", "self", "help",
-    "explore", "mcp", "context", "shared_context", "rag", "instance", "blueprint",
+    "explore", "mcp", "context", "shared_meta_kv", "rag", "instance", "blueprint",
 ]
 
 

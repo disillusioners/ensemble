@@ -19,7 +19,7 @@ Implementation strategy
 capturing-graph pattern from
 :mod:`tests.services.test_instance_messaging_shared_context_injection`:
 
-* build a manager mock with controllable ``shared_context_metadata_repo``
+* build a manager mock with controllable ``shared_meta_kv_repo``
   / instance metadata / ``shared_context_injected`` flag state
 * patch the graph's ``astream`` to capture ``graph_input`` and
   immediately end iteration
@@ -146,7 +146,7 @@ def _make_manager(
     # Shared-context metadata repo: real interface, mocked return.
     repo = MagicMock()
     repo.get_all_as_dict.return_value = shared_context_kvs or {}
-    manager.shared_context_metadata_repo = repo
+    manager.shared_meta_kv_repo = repo
 
     return manager
 

@@ -81,7 +81,7 @@ Primary dispatch surface: `instance` — `spawn_instance`, `send_message`, `get_
 | `knowledge` | `explore`, `experience` | RAG knowledge base for project context |
 | `mcp` | MCP-pass-through tools | Auxiliary MCP servers where configured |
 | `context` | `context_*` | Per-instance context inspection |
-| `shared_context` | `shared_context_*` | Cross-instance shared context (for piping research findings to planning workers) |
+| `shared_meta_kv` | `shared_meta_kv_*` | Cross-instance shared meta KV (for piping research findings to planning workers) |
 
 My allow list is intentional and minimal — only what a planning dispatcher actually needs.
 

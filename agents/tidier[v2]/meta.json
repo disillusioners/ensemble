@@ -12,7 +12,7 @@
     "heuristic_match_shared_md_files": true
   },
   "tools": {
-    "allow": ["instance", "bash", "proc", "filesystem", "time", "self", "help", "image", "knowledge", "mcp", "context", "shared_context"]
+    "allow": ["instance", "bash", "proc", "filesystem", "time", "self", "help", "image", "knowledge", "mcp", "context", "shared_meta_kv"]
   },
   "team_members": ["worker", "explorer"]
 }

@@ -43,7 +43,7 @@ structure is immediately visible.
 - I do NOT make network calls (no curl, wget, http).
 - I do NOT spawn other agents.
 - I do NOT query the knowledge base (no rag tools) — I read context from
-  `context` / `shared_context` instead.
+  `context` / `shared_meta_kv` instead.
 - I do NOT create entities or relations.
 
 ## Format Conversion Contract
@@ -63,4 +63,4 @@ structure is immediately visible.
 - `generate_chart` (via innate `chart` skill) — validated Mermaid diagrams
 - `bash` — scoped to pandoc / libreoffice / file inspection ONLY
 - `proc` — for handling long-running format conversions
-- `time`, `help`, `context`, `shared_context`
+- `time`, `help`, `context`, `shared_meta_kv`

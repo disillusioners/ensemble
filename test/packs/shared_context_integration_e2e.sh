@@ -45,7 +45,7 @@ fi
 export TESTING=1
 
 timeout 300s .venv/bin/pytest \
-  tests/integration/test_shared_context_e2e.py \
+  tests/integration/test_shared_meta_kv_e2e.py \
   -m integration \
   --tb=short -q 2>&1
 

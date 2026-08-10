@@ -57,9 +57,9 @@ def _build_engine():
     )
 
     from daemon.repositories.instance.models import Instance, InstanceHierarchy
-    from daemon.repositories.shared_context.models import SharedContextMetadata
+    from daemon.repositories.shared_meta_kv.models import SharedMetaKV
 
-    _ = (Instance, InstanceHierarchy, SharedContextMetadata)
+    _ = (Instance, InstanceHierarchy, SharedMetaKV)
     SQLModel.metadata.create_all(engine)
     return engine
 
@@ -79,26 +79,26 @@ def _build_manager_stub(
         A ``SimpleNamespace`` with:
 
         * ``manager`` — duck-typed manager with
-          ``_shared_context_metadata_repo``, ``_instance_repository``,
+          ``_shared_meta_kv_repo``, ``_instance_repository``,
           ``_project_repository``, ``_skill_injection_service``.
         * ``shared_repo`` — the real
-          :class:`SharedContextMetadataRepository`.
+          :class:`SharedMetaKVRepository`.
         * ``instance_repo`` — the real
           :class:`SQLModelInstanceRepository`.
     """
     from daemon.repositories.instance.repository import SQLModelInstanceRepository
-    from daemon.repositories.shared_context.repository import (
-        SharedContextMetadataRepository,
+    from daemon.repositories.shared_meta_kv.repository import (
+        SharedMetaKVRepository,
     )
 
-    shared_repo = SharedContextMetadataRepository(engine)
+    shared_repo = SharedMetaKVRepository(engine)
     instance_repo = SQLModelInstanceRepository(engine)
 
     if project_repo is None:
         project_repo = _MagicMock_get_returning_none()
 
     manager = SimpleNamespace(
-        _shared_context_metadata_repo=shared_repo,
+        _shared_meta_kv_repo=shared_repo,
         _instance_repository=instance_repo,
         _project_repository=project_repo,
         _skill_injection_service=skill_service,
@@ -340,7 +340,7 @@ class TestContextResolutionUsesCorrectKey:
 # ============================================================================
 
 
-class TestSharedContextMetadataIsolation:
+class TestSharedMetaKVIsolation:
     """Test 3: Each context_key has an isolated KV store.
 
     A child instance sees only the KV belonging to its inherited

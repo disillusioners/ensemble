@@ -582,7 +582,7 @@ class TestContextSlotReadsProjectInjectedFlag:
         builders run — so ``_fetch_project_payload`` and
         ``_fetch_kv_metadata`` are NEVER invoked, meaning
         ``project_repo.get`` and
-        ``shared_context_metadata_repo.get_all_as_dict`` are NEVER
+        ``shared_meta_kv_repo.get_all_as_dict`` are NEVER
         called. If either call fires, the once-per-instance
         contract regressed and every turn pays the full DB /
         RAG cost.
@@ -602,7 +602,7 @@ class TestContextSlotReadsProjectInjectedFlag:
 
         manager = SimpleNamespace(
             _project_repository=project_repo,
-            _shared_context_metadata_repo=shared_repo,
+            _shared_meta_kv_repo=shared_repo,
             _skill_injection_service=None,
         )
 

@@ -2,14 +2,14 @@
 # Test Pack: shared_context_tool_filter_check — Static agent tool-filter audit
 # Timeout: 30s
 #
-# Verifies that the ``shared_context`` tool category appears in
+# Verifies that the ``shared_meta_kv`` tool category appears in
 # ``tools.allow`` for EVERY agent definition (20 active + 2 templates
 # = 22 total). A missing entry means the agent cannot use the
-# ``shared_context_metadata`` tool — this is a config-level guard,
+# ``shared_meta_kv`` tool — this is a config-level guard,
 # not a runtime check.
 #
 # Uses ``python -c`` for JSON parsing (more portable than ``jq``).
-# Exits 0 if all 22 agents have ``"shared_context"`` in ``tools.allow``,
+# Exits 0 if all 22 agents have ``"shared_meta_kv"`` in ``tools.allow``,
 # exits 1 otherwise (with the offending agent's id on stdout/stderr).
 set -euo pipefail
 
@@ -93,13 +93,13 @@ for agent_id in agent_ids:
         missing.append((agent_id, "'tools.allow' missing or not a list"))
         continue
 
-    if "shared_context" not in allow:
-        missing.append((agent_id, "'shared_context' not in tools.allow"))
+    if "shared_meta_kv" not in allow:
+        missing.append((agent_id, "'shared_meta_kv' not in tools.allow"))
         continue
 
 # Report.
 if missing:
-    print(f"FAIL: {len(missing)}/{expected_count} agents missing 'shared_context':", file=sys.stderr)
+    print(f"FAIL: {len(missing)}/{expected_count} agents missing 'shared_meta_kv':", file=sys.stderr)
     for agent_id, reason in missing:
         print(f"  - {agent_id}: {reason}", file=sys.stderr)
     sys.exit(1)
@@ -110,7 +110,7 @@ if malformed:
         print(f"  - {agent_id}: {reason}", file=sys.stderr)
     sys.exit(1)
 
-print(f"OK: all {expected_count} agents have 'shared_context' in tools.allow")
+print(f"OK: all {expected_count} agents have 'shared_meta_kv' in tools.allow")
 sys.exit(0)
 PYEOF
 

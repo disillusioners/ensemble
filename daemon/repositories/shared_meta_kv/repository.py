@@ -1,9 +1,12 @@
-"""Shared Context Metadata repository (Phase 1).
+"""Shared Meta KV repository.
 
-Persistence layer for the ``shared_context_metadata`` table.
+Persistence layer for the ``shared_context_metadata`` table (the DB
+table name is preserved for backwards compatibility — only the Python
+symbols have been renamed to ``SharedMetaKV`` /
+:func:`SharedMetaKVRepository`).
 
 The repository is intentionally narrow: a thin CRUD layer on top of
-:class:`SharedContextMetadata`. The write path uses dialect-aware
+:class:`SharedMetaKV`. The write path uses dialect-aware
 ``INSERT ... ON CONFLICT DO UPDATE`` via SQLAlchemy's
 ``sqlite.insert`` / ``postgresql.insert`` (same pattern as
 :class:`SQLModelProjectRepository.set_metadata_record`) so concurrent
@@ -30,13 +33,13 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, select
 
-from .models import SharedContextMetadata
+from .models import SharedMetaKV
 
 
 logger = logging.getLogger(__name__)
 
 
-class SharedContextMetadataRepository:
+class SharedMetaKVRepository:
     """SQLModel-based repository for the shared metadata KV table.
 
     The repository takes a SQLAlchemy ``Engine`` only — same pattern
@@ -98,14 +101,14 @@ class SharedContextMetadataRepository:
 
     # ==================== READ ====================
 
-    def get_all(self, context_key: str) -> list[SharedContextMetadata]:
+    def get_all(self, context_key: str) -> list[SharedMetaKV]:
         """Return all metadata rows for ``context_key``.
 
         Args:
             context_key: The caller-supplied partition identifier.
 
         Returns:
-            List of :class:`SharedContextMetadata` rows. Empty list if
+            List of :class:`SharedMetaKV` rows. Empty list if
             no rows match.
         """
         # Hold ``_set_many_lock`` so a concurrent ``set_many`` cannot
@@ -115,8 +118,8 @@ class SharedContextMetadataRepository:
         # re-enters safely.
         with self._set_many_lock:
             with Session(self.engine) as session:
-                stmt = select(SharedContextMetadata).where(
-                    SharedContextMetadata.context_key == context_key
+                stmt = select(SharedMetaKV).where(
+                    SharedMetaKV.context_key == context_key
                 )
                 return list(session.exec(stmt))
 
@@ -124,7 +127,7 @@ class SharedContextMetadataRepository:
         self,
         context_key: str,
         keys: list[str],
-    ) -> list[SharedContextMetadata]:
+    ) -> list[SharedMetaKV]:
         """Return metadata rows for ``context_key`` matching ``keys``.
 
         Args:
@@ -132,16 +135,16 @@ class SharedContextMetadataRepository:
             keys: Subset of meta_keys to fetch.
 
         Returns:
-            List of :class:`SharedContextMetadata` rows whose
+            List of :class:`SharedMetaKV` rows whose
             ``meta_key`` is in ``keys``. Empty list if no match or
             ``keys`` is empty.
         """
         if not keys:
             return []
         with Session(self.engine) as session:
-            stmt = select(SharedContextMetadata).where(
-                SharedContextMetadata.context_key == context_key,
-                SharedContextMetadata.meta_key.in_(keys),
+            stmt = select(SharedMetaKV).where(
+                SharedMetaKV.context_key == context_key,
+                SharedMetaKV.meta_key.in_(keys),
             )
             return list(session.exec(stmt))
 
@@ -169,7 +172,7 @@ class SharedContextMetadataRepository:
         self,
         context_key: str,
         kvs: dict[str, Any],
-    ) -> list[SharedContextMetadata]:
+    ) -> list[SharedMetaKV]:
         """Upsert a batch of ``(meta_key → meta_value)`` pairs atomically.
 
         Bounds enforcement (P0-1):
@@ -197,7 +200,7 @@ class SharedContextMetadataRepository:
             kvs: Mapping of ``meta_key → meta_value`` to upsert.
 
         Returns:
-            List of :class:`SharedContextMetadata` instances reflecting
+            List of :class:`SharedMetaKV` instances reflecting
             the persisted state for each input key. Returned rows are
             fetched from the database after the upsert so callers see
             the assigned ``id`` and final ``updated_at`` timestamp.
@@ -247,7 +250,7 @@ class SharedContextMetadataRepository:
                 # so concurrent writers cannot lose updates via a stale
                 # SELECT → INSERT/UPDATE race.
                 for key, value in kvs.items():
-                    stmt = insert_fn(SharedContextMetadata).values(
+                    stmt = insert_fn(SharedMetaKV).values(
                         context_key=context_key,
                         meta_key=key,
                         meta_value=value,
@@ -264,9 +267,9 @@ class SharedContextMetadataRepository:
 
                 # Read back the persisted state so callers see the
                 # assigned id and final updated_at.
-                stmt = select(SharedContextMetadata).where(
-                    SharedContextMetadata.context_key == context_key,
-                    SharedContextMetadata.meta_key.in_(list(kvs.keys())),
+                stmt = select(SharedMetaKV).where(
+                    SharedMetaKV.context_key == context_key,
+                    SharedMetaKV.meta_key.in_(list(kvs.keys())),
                 )
                 return list(session.exec(stmt))
 
@@ -286,9 +289,9 @@ class SharedContextMetadataRepository:
         if not keys:
             return 0
         with Session(self.engine) as session:
-            stmt = sql_delete(SharedContextMetadata).where(
-                SharedContextMetadata.context_key == context_key,
-                SharedContextMetadata.meta_key.in_(keys),
+            stmt = sql_delete(SharedMetaKV).where(
+                SharedMetaKV.context_key == context_key,
+                SharedMetaKV.meta_key.in_(keys),
             )
             result = session.exec(stmt)
             session.commit()
@@ -304,8 +307,8 @@ class SharedContextMetadataRepository:
             Number of rows actually deleted (``result.rowcount``).
         """
         with Session(self.engine) as session:
-            stmt = sql_delete(SharedContextMetadata).where(
-                SharedContextMetadata.context_key == context_key
+            stmt = sql_delete(SharedMetaKV).where(
+                SharedMetaKV.context_key == context_key
             )
             result = session.exec(stmt)
             session.commit()

@@ -1,6 +1,6 @@
-"""LangChain tool category for the shared context metadata KV store.
+"""LangChain tool category for the shared meta KV store.
 
-Exposes a single internal tool, ``shared_context_metadata``, that manages a
+Exposes a single internal tool, ``shared_meta_kv``, that manages a
 small key-value store partitioned by ``context_key`` (the tree-root instance
 id of the caller). The store is intended for lightweight metadata that an
 agent wants to remember across turns or share with sibling agents in the
@@ -10,6 +10,11 @@ Unlike :mod:`daemon.tools.context_tools`, the ``context_key`` is
 auto-resolved from the caller via closure — the agent never passes it
 explicitly. This keeps the surface area minimal and prevents accidental
 cross-context writes.
+
+The underlying DB table is ``shared_context_metadata`` (kept for
+backwards compatibility) — only the Python symbols and tool name have
+been renamed to disambiguate from the ``context`` document-reading
+toolset.
 """
 
 import asyncio
@@ -26,12 +31,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-CATEGORY_NAME = "Shared Context"
+CATEGORY_NAME = "Shared Meta KV"
 CATEGORY_DOC = """\
-Shared context metadata tools for managing a lightweight key-value store
+Shared meta KV tools for managing a lightweight key-value store
 partitioned by context_key (the tree-root instance id of the caller).
 
-Internal agents can call ``shared_context_metadata`` directly to upsert,
+Internal agents can call ``shared_meta_kv`` directly to upsert,
 delete, or clear metadata rows. External agent systems connected via the
 hosted MCP use the equivalent ``ensemble_context_metadata*`` tools.
 
@@ -41,8 +46,8 @@ current state as JSON without mutating anything.
 """
 
 
-def create_shared_context_tools(manager: "InstanceManager", current_instance_id: str) -> list:
-    """Create the Shared Context Metadata tool category tools.
+def create_shared_meta_kv_tools(manager: "InstanceManager", current_instance_id: str) -> list:
+    """Create the Shared Meta KV tool category tools.
 
     Args:
         manager: The InstanceManager instance. Used (lazily, inside the
@@ -58,17 +63,17 @@ def create_shared_context_tools(manager: "InstanceManager", current_instance_id:
 
     Returns:
         List containing the single tool function
-        ``[shared_context_metadata]``.
+        ``[shared_meta_kv]``.
     """
 
-    @register_tool_category("shared_context")
+    @register_tool_category("shared_meta_kv")
     @tool
-    async def shared_context_metadata(
+    async def shared_meta_kv(
         set_kv: dict[str, Any] | None = None,
         delete_keys: list[str] | None = None,
         clear_all: bool = False,
     ) -> str:
-        """Manage the shared context metadata KV store for the calling instance.
+        """Manage the shared meta KV store for the calling instance.
 
         The metadata store is partitioned by ``context_key`` (the tree-root
         instance id of the caller). The ``context_key`` is auto-resolved
@@ -110,7 +115,7 @@ def create_shared_context_tools(manager: "InstanceManager", current_instance_id:
                 context_key = current_instance_id
         except Exception as e:
             logger.warning(
-                "shared_context_metadata: get_tree_root_id(%s) failed, falling back to current_instance_id: %s",
+                "shared_meta_kv: get_tree_root_id(%s) failed, falling back to current_instance_id: %s",
                 current_instance_id,
                 e,
             )
@@ -119,10 +124,10 @@ def create_shared_context_tools(manager: "InstanceManager", current_instance_id:
         # Acquire the repo lazily so a partially-initialised manager
         # does not break factory calls — only tool invocations fail.
         try:
-            repo = manager.shared_context_metadata_repo
+            repo = manager.shared_meta_kv_repo
         except Exception as e:
             logger.warning(
-                "shared_context_metadata: failed to acquire repo for instance %s: %s",
+                "shared_meta_kv: failed to acquire repo for instance %s: %s",
                 current_instance_id,
                 e,
             )
@@ -145,10 +150,10 @@ def create_shared_context_tools(manager: "InstanceManager", current_instance_id:
             return json.dumps(kvs, indent=2)
         except Exception as e:
             logger.warning(
-                "shared_context_metadata failed for context_key=%s: %s",
+                "shared_meta_kv failed for context_key=%s: %s",
                 context_key,
                 e,
             )
             return json.dumps({"_error": "metadata operation failed; see server logs"})
 
-    return [shared_context_metadata]
+    return [shared_meta_kv]

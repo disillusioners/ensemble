@@ -108,7 +108,7 @@ def _make_manager(
 
     manager = MagicMock()
     manager._project_repository = project_repo
-    manager._shared_context_metadata_repo = kv_repo
+    manager._shared_meta_kv_repo = kv_repo
     manager._skill_injection_service = skill_service
     # Default: no matcher. Per-test setup swaps this in.
     manager._blueprint_matcher = matcher

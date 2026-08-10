@@ -121,7 +121,7 @@ def _stub_manager(
 
     manager = MagicMock()
     manager._project_repository = project_repo
-    manager._shared_context_metadata_repo = kv_repo
+    manager._shared_meta_kv_repo = kv_repo
     manager._skill_injection_service = skill_service
     # Default skill-result cache stub — readers can be swapped per-test.
     manager._context_skill_results = {}
@@ -705,7 +705,7 @@ class TestGetMessagesHumanMessagesMode:
 
         # Empty KV / skill service so the context rebuild doesn't try
         # touching real DB / services.
-        manager._shared_context_metadata_repo = MagicMock(
+        manager._shared_meta_kv_repo = MagicMock(
             get_all_as_dict=MagicMock(return_value={})
         )
         manager._skill_injection_service = MagicMock(
@@ -848,7 +848,7 @@ class TestPromptInjectionDefense:
             system_prompt=persona,
             instance_id="inst-hm",
             instance_repository=MagicMock(),
-            shared_context_metadata_repo=None,
+            shared_meta_kv_repo=None,
             parent_id=None,
             agent_id="agent-x",
             project_id=None,

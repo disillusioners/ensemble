@@ -17,7 +17,7 @@
       "self",
       "project",
       "help",
-      "shared_context",
+      "shared_meta_kv",
       "knowledge",
       "time"
     ]

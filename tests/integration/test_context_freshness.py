@@ -13,7 +13,7 @@ still exercising real repositories and real filesystem I/O.
 Patterns mirrored from the existing suite:
 
 * ``tests/integration/test_shared_context_e2e.py`` — real
-  ``SharedContextMetadataRepository`` + ``SQLModelInstanceRepository``
+  ``SharedMetaKVRepository`` + ``SQLModelInstanceRepository``
   over an in-memory SQLite engine.
 * ``tests/integration/test_skill_injection_persistence.py`` — real
   ``SkillRepository`` with a mocked ``SkillInjectionService``.
@@ -49,7 +49,7 @@ def _build_engine_with_shared_context_and_instance():
 
     Mirrors ``_build_in_memory_engine`` in
     ``tests/integration/test_shared_context_e2e.py`` — the same engine is
-    shared by both repositories so the SharedContextMetadata KV table and
+    shared by both repositories so the SharedMetaKV KV table and
     the Instance/InstanceHierarchy tables live in the same SQLite session.
 
     Returns:
@@ -68,10 +68,10 @@ def _build_engine_with_shared_context_and_instance():
     # ``create_all`` then provisions both the shared-context metadata
     # table and the instance hierarchy tables in the same engine so
     # the two repositories can share it.
-    from daemon.repositories.shared_context.models import SharedContextMetadata
+    from daemon.repositories.shared_meta_kv.models import SharedMetaKV
     from daemon.repositories.instance.models import Instance, InstanceHierarchy
 
-    _ = (SharedContextMetadata, Instance, InstanceHierarchy)
+    _ = (SharedMetaKV, Instance, InstanceHierarchy)
     SQLModel.metadata.create_all(engine)
     return engine
 
@@ -150,26 +150,26 @@ def _build_manager_stub(
         A ``SimpleNamespace`` exposing:
 
         * ``manager`` — duck-typed manager with
-          ``_shared_context_metadata_repo``, ``_instance_repository``,
+          ``_shared_meta_kv_repo``, ``_instance_repository``,
           ``_project_repository``, ``_skill_injection_service``.
         * ``shared_repo`` — the real
-          :class:`SharedContextMetadataRepository`.
+          :class:`SharedMetaKVRepository`.
         * ``instance_repo`` — the real
           :class:`SQLModelInstanceRepository`.
     """
     from daemon.repositories.instance.repository import SQLModelInstanceRepository
-    from daemon.repositories.shared_context.repository import (
-        SharedContextMetadataRepository,
+    from daemon.repositories.shared_meta_kv.repository import (
+        SharedMetaKVRepository,
     )
 
-    shared_repo = SharedContextMetadataRepository(engine)
+    shared_repo = SharedMetaKVRepository(engine)
     instance_repo = SQLModelInstanceRepository(engine)
 
     if project_repo is None:
         project_repo = MagicMock_get_returning_none()
 
     manager = SimpleNamespace(
-        _shared_context_metadata_repo=shared_repo,
+        _shared_meta_kv_repo=shared_repo,
         _instance_repository=instance_repo,
         _project_repository=project_repo,
         _skill_injection_service=skill_service,
@@ -251,9 +251,9 @@ def _create_root_instance(instance_repo: Any, instance_id: str) -> None:
 class TestKVFreshness:
     """Task 4a: a KV written mid-session shows up on the next ``assemble_context_messages`` call.
 
-    The orchestrator reads ``shared_context_metadata_repo.get_all_as_dict(context_key)``
+    The orchestrator reads ``shared_meta_kv_repo.get_all_meta_kv_as_dict(context_key)``
     on every call — never caches. This test pins that contract end-to-end
-    against the real ``SharedContextMetadataRepository``: a value
+    against the real ``SharedMetaKVRepository``: a value
     written between two consecutive ``assemble_context_messages`` calls
     must be reflected in the second call's output.
     """
@@ -264,12 +264,12 @@ class TestKVFreshness:
 
         Steps:
 
-        1. Set up real ``SharedContextMetadataRepository`` +
+        1. Set up real ``SharedMetaKVRepository`` +
            ``SQLModelInstanceRepository`` on an in-memory SQLite engine.
         2. Call ``assemble_context_messages`` — result must NOT contain
            the marker (KV is empty).
         3. Write the marker via ``shared_repo.set_many`` (same path the
-           ``shared_context_metadata`` tool layer uses).
+           ``shared_meta_kv`` tool layer uses).
         4. Call ``assemble_context_messages`` again with identical args —
            result MUST now contain the marker.
         """
@@ -312,8 +312,8 @@ class TestKVFreshness:
         )
 
         # ── Write the KV via the real repo. Same path as the
-        # ``shared_context_metadata`` tool layer (see
-        # ``daemon/tools/shared_context_tools.py:122``).
+        # ``shared_meta_kv`` tool layer (see
+        # ``daemon/tools/shared_meta_kv_tools.py:122``).
         bundle.shared_repo.set_many(context_key, {"marker_key": marker})
 
         # ── Second call: same instance, same everything. The orchestrator

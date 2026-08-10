@@ -256,7 +256,7 @@ def _make_path_b_service(manager: MagicMock) -> InstanceMessagingService:
     manager._instance_repository = MagicMock()
     manager._instance_repository.get = MagicMock(return_value=None)
     manager._project_repository = MagicMock()
-    manager.shared_context_metadata_repo = MagicMock()
+    manager.shared_meta_kv_repo = MagicMock()
     # Skill injection / metrics services are optional — ``None`` is
     # handled by ``getattr(..., None)`` everywhere in the function.
     manager._skill_injection_service = None

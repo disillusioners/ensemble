@@ -19,8 +19,8 @@ from .job_queue.queue_repository import JobQueueRepository
 from .mcp_server.repository import SQLModelMcpServerRepository
 from .db_connection.repository import DbConnectionRepository
 from .infra.repository import SQLModelInfraRepository
-from .shared_context.repository import SharedContextMetadataRepository
-from .shared_context.models import SharedContextMetadata
+from .shared_meta_kv.repository import SharedMetaKVRepository
+from .shared_meta_kv.models import SharedMetaKV
 from .skill.repository import (
     SkillABTestRepository,
     SkillEmbeddingRepository,
@@ -625,14 +625,18 @@ def create_infra_repository(
     return SQLModelInfraRepository(engine)
 
 
-def create_shared_context_metadata_repository(
+def create_shared_meta_kv_repository(
     engine: Engine,
     create_tables: bool = False,
-) -> SharedContextMetadataRepository:
-    """Create a SharedContextMetadataRepository bound to ``engine``.
+) -> SharedMetaKVRepository:
+    """Create a SharedMetaKVRepository bound to ``engine``.
 
-    Persistence layer for the ``shared_context_metadata`` table
-    (Phase 1 of the Shared Context Metadata KV system). One table:
+    Persistence layer for the ``shared_context_metadata`` DB table
+    (table name kept for backwards compatibility — only the Python
+    symbols have been renamed to ``SharedMetaKV`` /
+    :func:`SharedMetaKVRepository`).
+
+    One table:
 
     * ``shared_context_metadata`` — generic ``(context_key,
       meta_key) → meta_value`` KV store with a composite
@@ -652,12 +656,12 @@ def create_shared_context_metadata_repository(
             no migration file required.
 
     Returns:
-        Configured :class:`SharedContextMetadataRepository` instance.
+        Configured :class:`SharedMetaKVRepository` instance.
     """
     if create_tables:
-        SharedContextMetadata.__table__.create(engine)
+        SharedMetaKV.__table__.create(engine)
 
-    return SharedContextMetadataRepository(engine)
+    return SharedMetaKVRepository(engine)
 
 
 def create_skill_repository(
@@ -1042,7 +1046,7 @@ __all__ = [
     "create_job_queue_repository",
     "create_mcp_server_repository",
     "create_infra_repository",
-    "create_shared_context_metadata_repository",
+    "create_shared_meta_kv_repository",
     "create_skill_repository",
     "create_skill_lineage_repository",
     "create_skill_usage_repository",

@@ -25,7 +25,7 @@
       "knowledge",
       "mcp",
       "context",
-      "shared_context",
+      "shared_meta_kv",
       "dynamic-skill",
       "system-log"
     ]

@@ -7,7 +7,7 @@
   "innate_skills": ["test-pack", "todo", "dynamic-skill"],
   "skill_injection": true,
   "tools": {
-    "allow": ["instance", "bash", "proc", "filesystem", "time", "self", "help", "image", "knowledge", "mcp", "context", "shared_context", "db", "blueprint"]
+    "allow": ["instance", "bash", "proc", "filesystem", "time", "self", "help", "image", "knowledge", "mcp", "context", "shared_meta_kv", "db", "blueprint"]
   },
   "team_members": ["explorer", "worker"]
 }

@@ -20,7 +20,7 @@
       "knowledge",
       "mcp",
       "context",
-      "shared_context",
+      "shared_meta_kv",
       "project"
     ]
   }

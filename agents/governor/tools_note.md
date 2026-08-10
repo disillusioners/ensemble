@@ -90,14 +90,14 @@ terminate_instance(instance_id = <councilor_id>)
 
 **Do not terminate councilors for slowness or disagreement.** Slowness is not misbehavior; disagreement is resolved by synthesis, not by termination.
 
-### `shared_context_metadata` — COUNCIL MANIFEST (W4)
+### `shared_meta_kv` — COUNCIL MANIFEST (W4)
 
-The governor uses `shared_context_metadata` to persist the council manifest for crash recovery.
+The governor uses `shared_meta_kv` to persist the council manifest for crash recovery.
 
 **Write the manifest before first spawn (Step 0.5):**
 
 ```raw
-shared_context_metadata(
+shared_meta_kv(
   action = "set",
   key    = "council_manifest",
   value  = {
@@ -117,7 +117,7 @@ shared_context_metadata(
 
 The manifest fields and councilor entry schema must match the authoritative schema in `workflow.md`.
 
-**Update as councilors are dispatched, complete, extended, or terminated.** Each councilor status change (SPAWNED → DISPATCHED → RUNNING → COMPLETED/FAILED/TIMED_OUT/PARTIAL_TIMED_OUT), each dispatch outcome, each deadline extension, each termination, and each result write goes through `shared_context_metadata`.
+**Update as councilors are dispatched, complete, extended, or terminated.** Each councilor status change (SPAWNED → DISPATCHED → RUNNING → COMPLETED/FAILED/TIMED_OUT/PARTIAL_TIMED_OUT), each dispatch outcome, each deadline extension, each termination, and each result write goes through `shared_meta_kv`.
 
 **Clear on successful delivery (Step 6):** Remove the `council_manifest` key after the final answer is delivered.
 
@@ -162,9 +162,9 @@ The governor uses the `instance` category for general instance operations and th
 
 The governor may query the project knowledge base via the `knowledge` category to ground council convening decisions — for example, to verify which councilor-agent is most appropriate for a task type, or to recall known model strengths. The governor does **not** write to the knowledge base on the councilor's behalf.
 
-### `shared_context` — Cross-Instance Context
+### `shared_meta_kv` — Cross-Instance Shared Meta KV
 
-Used alongside `shared_context_metadata` (the manifest lives in this system's metadata store). The governor reads and writes shared context only for council orchestration state — never for the underlying task.
+Used alongside `shared_meta_kv` (the manifest lives in this system's metadata store). The governor reads and writes shared context only for council orchestration state — never for the underlying task.
 
 ### `project` — Project Context Verification
 
@@ -182,4 +182,4 @@ I do **not** read or write project files. Councilors are reviewers and evaluator
 - All read-only review and analysis is delegated to councilors; mutating work is outside the council.
 - **No commits, branch switches, or reformatting.** These are out of scope.
 
-The only state I may write is the council manifest in `shared_context_metadata`, which is governance metadata—not project content.
+The only state I may write is the council manifest in `shared_meta_kv`, which is governance metadata—not project content.

@@ -877,8 +877,8 @@ def _reconstruct_full_system_prompt(
         system_prompt=system_prompt,
         instance_id=instance_id,
         instance_repository=instance_repo,
-        shared_context_metadata_repo=getattr(
-            manager, "shared_context_metadata_repo", None
+        shared_meta_kv_repo=getattr(
+            manager, "shared_meta_kv_repo", None
         ),
         parent_id=getattr(instance_meta, "parent_id", None),
         agent_id=agent_id,

@@ -31,10 +31,10 @@ cd "$PROJECT_DIR"
 # NOTE: test_shared_context_injection.py and test_shared_context_prompt_injection.py
 # were deleted in eeef8845. test_shared_context_message_body_injection.py also deleted.
 timeout 180s .venv/bin/pytest \
-  tests/unit/test_shared_context_metadata_repo.py \
+  tests/unit/test_shared_meta_kv_repo.py \
   tests/unit/services/test_context_injection.py \
-  tests/unit/test_shared_context_tool.py \
-  tests/unit/test_shared_context_concurrency.py \
+  tests/unit/test_shared_meta_kv_tool.py \
+  tests/unit/test_shared_meta_kv_concurrency.py \
   tests/services/test_instance_messaging_shared_context_injection.py \
   --tb=short -q 2>&1
 

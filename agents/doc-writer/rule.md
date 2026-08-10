@@ -30,7 +30,7 @@
   read-only diagnostics that produce no files.
 - **NEVER spawn other agents** (no `explore`, `experience`, `spawn_instance`).
 - **NEVER query the knowledge base** (no rag tools). Read context from
-  `context` / `shared_context` instead.
+  `context` / `shared_meta_kv` instead.
 - **NEVER chain multiple commands** in a single bash call.
 
 ## Notes

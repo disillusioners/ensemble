@@ -111,7 +111,7 @@ def _make_manager(instance_repo):
     manager._skill_repo = MagicMock()
     manager._skill_clone_service = None
     manager._project_repository = MagicMock()
-    manager.shared_context_metadata_repo = MagicMock()
+    manager.shared_meta_kv_repo = MagicMock()
     manager.prompt_cache = MagicMock()
     manager.config = SimpleNamespace(llm=SimpleNamespace(allowed_models=[]))
     return manager
@@ -414,7 +414,7 @@ class TestGetMessagesMakesNoDBWrites:
 
         # Context rebuild path itself must NOT have written to the shared-
         # context KV or the project repo.
-        manager.shared_context_metadata_repo.set.assert_not_called()
+        manager.shared_meta_kv_repo.set.assert_not_called()
         manager._project_repository.update.assert_not_called()
 
     @pytest.mark.asyncio

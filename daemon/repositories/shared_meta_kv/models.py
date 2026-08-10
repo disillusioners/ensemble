@@ -1,11 +1,16 @@
-"""Shared Context Metadata model (Phase 1).
+"""Shared Meta KV model.
 
-This module defines the ``SharedContextMetadata`` SQLModel used by
-the Shared Context Metadata KV system. It is a thin, generic
-key-value store keyed by ``(context_key, meta_key)`` where
-``context_key`` is an opaque caller-supplied partition identifier
-(e.g. a session id, an instance id, a project tag) and ``meta_key``
-is the per-context key.
+This module defines the ``SharedMetaKV`` SQLModel used by the
+Shared Meta KV system. It is a thin, generic key-value store keyed by
+``(context_key, meta_key)`` where ``context_key`` is an opaque
+caller-supplied partition identifier (e.g. a session id, an instance
+id, a project tag) and ``meta_key`` is the per-context key.
+
+The underlying DB table is ``shared_context_metadata`` (kept for
+backwards compatibility) and the ``UniqueConstraint`` name
+``uq_shared_context_metadata_key`` (the DB constraint name) is also
+preserved — only the Python symbols have been renamed to disambiguate
+from the ``context`` document-reading toolset.
 
 The design mirrors :class:`ProjectMetadataRecord` — same
 ``sa_column=Column(...)`` style, same ``JSONBType`` payload
@@ -25,7 +30,7 @@ from sqlmodel import SQLModel, Field
 from daemon.repositories.infra.types import JSONBType
 
 
-class SharedContextMetadata(SQLModel, table=True):
+class SharedMetaKV(SQLModel, table=True):
     """Generic metadata KV row for any caller-supplied context key.
 
     Mirrors :class:`daemon.repositories.project.models.ProjectMetadataRecord`

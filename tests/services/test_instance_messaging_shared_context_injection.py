@@ -26,7 +26,7 @@ tests focused on the persistent-context SSE emission.
 Each test follows the same shape:
 
 * build a manager mock with controllable
-  ``shared_context_metadata_repo`` / instance metadata /
+  ``shared_meta_kv_repo`` / instance metadata /
   ``shared_context_injected`` flag state
 * patch the graph's ``astream`` to capture ``graph_input`` and
   immediately end iteration
@@ -90,7 +90,7 @@ def _make_manager(
     """Build a manager mock with controlled shared-context state.
 
     ``shared_context_kvs=None`` (default) makes the
-    ``shared_context_metadata_repo.get_all_as_dict`` return an empty
+    ``shared_meta_kv_repo.get_all_meta_kv_as_dict`` return an empty
     dict — the same as the production "no metadata for this
     context yet" path. Pass a populated dict to exercise the
     injection branch; pass ``raise_on_get_kvs`` to exercise the
@@ -143,7 +143,7 @@ def _make_manager(
     manager._instance_repository.get_tree_root_id = MagicMock(
         return_value=None
     )
-    manager.shared_context_metadata_repo = repo
+    manager.shared_meta_kv_repo = repo
     return manager
 
 

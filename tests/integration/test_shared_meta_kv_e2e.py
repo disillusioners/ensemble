@@ -1,4 +1,4 @@
-"""End-to-end integration tests for the shared_context_metadata system.
+"""End-to-end integration tests for the shared_meta_kv system.
 
 Historical note: this module previously contained four tests that exercised
 the legacy ``system_prompt`` and ``message_body`` injection helpers in
@@ -29,6 +29,6 @@ pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(
         not os.environ.get("OPENAI_API_KEY"),
-        reason="Set OPENAI_API_KEY to run shared_context integration tests",
+        reason="Set OPENAI_API_KEY to run shared_meta_kv integration tests",
     ),
 ]

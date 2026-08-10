@@ -396,7 +396,7 @@ def _apply_post_cache_appends(
     system_prompt: str,
     instance_id: str,
     instance_repository: Any,
-    shared_context_metadata_repo: Any,
+    shared_meta_kv_repo: Any,
     parent_id: str | None,
     agent_id: str,
     project_id: str | None,
@@ -425,7 +425,7 @@ def _apply_post_cache_appends(
         system_prompt: The cached system prompt to append to.
         instance_id: The instance identifier used for context lookups.
         instance_repository: Repository used by the context appenders.
-        shared_context_metadata_repo: Repository for shared context metadata.
+        shared_meta_kv_repo: Repository for shared meta KV.
         parent_id: Parent instance identifier, if any.
         agent_id: Resolved agent identifier (kept for signature
             compatibility — see _apply_post_cache_appends callers).
@@ -845,7 +845,7 @@ class InstanceLifecycleService:
             system_prompt=system_prompt,
             instance_id=instance_id,
             instance_repository=instance_repository,
-            shared_context_metadata_repo=self._manager.shared_context_metadata_repo,
+            shared_meta_kv_repo=self._manager.shared_meta_kv_repo,
             parent_id=parent_id,
             agent_id=resolved_agent_id,
             project_id=project_id,
@@ -2620,7 +2620,7 @@ class InstanceLifecycleService:
             system_prompt=system_prompt,
             instance_id=instance_id,
             instance_repository=instance_repository,
-            shared_context_metadata_repo=self._manager.shared_context_metadata_repo,
+            shared_meta_kv_repo=self._manager.shared_meta_kv_repo,
             parent_id=meta.parent_id,
             agent_id=resolved_agent_id,
             project_id=meta.project_id,

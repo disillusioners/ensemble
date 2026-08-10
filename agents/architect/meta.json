@@ -13,7 +13,7 @@
   },
   "skill_search_interval": 5,
   "tools": {
-    "allow": ["instance", "council", "bash", "proc", "filesystem", "time", "self", "help", "image", "knowledge", "mcp", "context", "shared_context"],
+    "allow": ["instance", "council", "bash", "proc", "filesystem", "time", "self", "help", "image", "knowledge", "mcp", "context", "shared_meta_kv"],
     "deny": ["edit_file", "db_conn_add", "db_conn_delete"]
   },
   "team_members": ["worker", "explorer", "governor"]

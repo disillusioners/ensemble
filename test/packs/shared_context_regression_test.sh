@@ -3,7 +3,7 @@
 # Timeout: 5 minutes (300s) outer guard, delegates to core_unit_test.sh
 #
 # Runs the existing 673-test core unit pack (tools, agents, persistence,
-# queue, registry) to validate that introducing the shared_context
+# queue, registry) to validate that introducing the shared_meta_kv
 # feature did not regress any core daemon behavior.
 #
 # This is a SEPARATE pack from shared_context_unit_test.sh so each

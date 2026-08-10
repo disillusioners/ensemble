@@ -1,9 +1,9 @@
-"""Unit tests for ``SharedContextMetadataRepository``.
+"""Unit tests for ``SharedMetaKVRepository``.
 
 Mirrors the engine-setup pattern used in ``tests/repositories/conftest.py``
 and ``tests/repositories/infra/conftest.py``: an in-memory SQLite engine via
 ``StaticPool`` so the database survives across threads, with the
-``shared_context_metadata`` table created on fixture setup.
+``shared_meta_kv`` table created on fixture setup.
 
 The tests target the CRUD surface required by the Shared Context Metadata
 KV system (Phase 1) — the same operations the tool layer and the system
@@ -18,9 +18,9 @@ import pytest
 from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel, create_engine
 
-from daemon.repositories.shared_context.models import SharedContextMetadata
-from daemon.repositories.shared_context.repository import (
-    SharedContextMetadataRepository,
+from daemon.repositories.shared_meta_kv.models import SharedMetaKV
+from daemon.repositories.shared_meta_kv.repository import (
+    SharedMetaKVRepository,
 )
 
 
@@ -29,12 +29,12 @@ from daemon.repositories.shared_context.repository import (
 
 @pytest.fixture
 def engine():
-    """In-memory SQLite engine with the ``shared_context_metadata`` table.
+    """In-memory SQLite engine with the ``shared_meta_kv`` table.
 
     Uses ``StaticPool`` (per the project's standard pattern) so the
     in-memory database is shared across threads. ``SQLModel.metadata.create_all``
     creates every table currently registered on the global SQLModel
-    metadata; importing :class:`SharedContextMetadata` registers it.
+    metadata; importing :class:`SharedMetaKV` registers it.
     """
     engine = create_engine(
         "sqlite:///:memory:",
@@ -44,7 +44,7 @@ def engine():
     # Reference the model so static analyzers don't flag it as unused —
     # the import already registers the table on SQLModel.metadata, but
     # the explicit reference documents the dependency for readers.
-    _ = SharedContextMetadata
+    _ = SharedMetaKV
     SQLModel.metadata.create_all(engine)
     yield engine
     engine.dispose()
@@ -52,8 +52,8 @@ def engine():
 
 @pytest.fixture
 def repo(engine):
-    """A :class:`SharedContextMetadataRepository` bound to the test engine."""
-    return SharedContextMetadataRepository(engine)
+    """A :class:`SharedMetaKVRepository` bound to the test engine."""
+    return SharedMetaKVRepository(engine)
 
 
 @pytest.fixture
@@ -66,7 +66,7 @@ def context_key() -> str:
 
 
 class TestSetMany:
-    """Tests for :meth:`SharedContextMetadataRepository.set_many`."""
+    """Tests for :meth:`SharedMetaKVRepository.set_many`."""
 
     def test_set_many_creates_new(self, repo, context_key):
         """Upserting three new keys inserts three rows and round-trips via ``get_all``."""

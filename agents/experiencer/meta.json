@@ -8,7 +8,7 @@
   "llm_model": "quick",
   "innate_skills": [],
   "tools": {
-    "allow": ["rag", "help", "time", "mcp", "context", "shared_context"]
+    "allow": ["rag", "help", "time", "mcp", "context", "shared_meta_kv"]
   },
   "team_members": []
 }

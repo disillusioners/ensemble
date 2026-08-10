@@ -1,4 +1,4 @@
-"""Unit tests for concurrent ``SharedContextMetadataRepository.set_many`` access.
+"""Unit tests for concurrent ``SharedMetaKVRepository.set_many`` access.
 
 The repository uses dialect-aware ``INSERT ... ON CONFLICT DO UPDATE``
 to make overlapping writes race-free: every concurrent upsert on the
@@ -16,7 +16,7 @@ multiple threads simultaneously and assert:
 
 The shared engine uses ``StaticPool`` (per the project's standard
 test pattern) so the in-memory SQLite database is shared across
-threads — same setup as ``tests/unit/test_shared_context_metadata_repo.py``.
+threads — same setup as ``tests/unit/test_shared_meta_kv_repo.py``.
 """
 
 from __future__ import annotations
@@ -28,18 +28,18 @@ import pytest
 from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel, create_engine
 
-from daemon.repositories.shared_context.models import SharedContextMetadata
-from daemon.repositories.shared_context.repository import (
-    SharedContextMetadataRepository,
+from daemon.repositories.shared_meta_kv.models import SharedMetaKV
+from daemon.repositories.shared_meta_kv.repository import (
+    SharedMetaKVRepository,
 )
 
 
-# ─── Fixtures (mirror test_shared_context_metadata_repo.py) ────────────────────
+# ─── Fixtures (mirror test_shared_meta_kv_repo.py) ────────────────────
 
 
 @pytest.fixture
 def engine():
-    """In-memory SQLite engine with the ``shared_context_metadata`` table.
+    """In-memory SQLite engine with the ``shared_meta_kv`` table.
 
     Uses ``StaticPool`` so the in-memory database is shared across
     threads — required for the concurrent tests below. SQLAlchemy's
@@ -53,7 +53,7 @@ def engine():
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
-    _ = SharedContextMetadata
+    _ = SharedMetaKV
     SQLModel.metadata.create_all(engine)
     yield engine
     engine.dispose()
@@ -61,8 +61,8 @@ def engine():
 
 @pytest.fixture
 def repo(engine):
-    """A :class:`SharedContextMetadataRepository` bound to the test engine."""
-    return SharedContextMetadataRepository(engine)
+    """A :class:`SharedMetaKVRepository` bound to the test engine."""
+    return SharedMetaKVRepository(engine)
 
 
 @pytest.fixture

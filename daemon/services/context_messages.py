@@ -903,7 +903,7 @@ def _fetch_kv_metadata(
 ) -> dict[str, Any] | None:
     """Read shared-context KV metadata for ``context_key``.
 
-    Pulls ``self._shared_context_metadata_repo`` off the manager
+    Pulls ``self._shared_meta_kv_repo`` off the manager
     (duck-typed; matches ``InstanceManager`` /
     ``InstanceLifecycleService``). The repo returns an empty dict
     when nothing is stored, which is the normal happy path.
@@ -917,7 +917,7 @@ def _fetch_kv_metadata(
         attached. Any exception is logged + swallowed so a missing
         repo or transient DB error never blocks context rebuild.
     """
-    repo = getattr(manager, "_shared_context_metadata_repo", None)
+    repo = getattr(manager, "_shared_meta_kv_repo", None)
     if repo is None:
         return None
 
@@ -1157,7 +1157,7 @@ async def assemble_context_messages(
             default.
         manager: :class:`InstanceManager` exposing
             ``_project_repository``,
-            ``_shared_context_metadata_repo``, and
+            ``_shared_meta_kv_repo``, and
             ``_skill_injection_service``.
         instance_repository: Repository exposing
             ``get_tree_root_id(parent_id)`` for tree-root

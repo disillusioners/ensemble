@@ -56,10 +56,10 @@ Constraints on the complete-to-ask flow:
 
 ## Step 0.5: Write Council Manifest (W4/D8) — BEFORE FIRST SPAWN
 
-Before spawning any councilor, write the council manifest to `shared_context_metadata` under the key `council_manifest`. This is the **crash-recovery anchor**.
+Before spawning any councilor, write the council manifest to `shared_meta_kv` under the key `council_manifest`. This is the **crash-recovery anchor**.
 
 ```raw
-1. Call shared_context_metadata to set:
+1. Call shared_meta_kv to set:
    "council_manifest": {
      "request_id": "<uuid>",
      "councilor_agent_id": <validated agent_id>,
@@ -104,7 +104,7 @@ Before spawning any councilor, write the council manifest to `shared_context_met
 **On restore (crash recovery):**
 
 ```raw
-1. Read council_manifest from shared_context_metadata
+1. Read council_manifest from shared_meta_kv
 2. If manifest exists with councilors:
    a. For each councilor, call get_instance_info(instance_id)
    b. Update status: COMPLETED / FAILED / RUNNING / TIMED_OUT / PARTIAL_TIMED_OUT
@@ -138,7 +138,7 @@ For each canonical model in the validated model list (up to 4):
         "status":           "SPAWNED",
         "result":           null
       }
-   3. Update shared_context_metadata with the new councilor entry
+   3. Update shared_meta_kv with the new councilor entry
 
    `dispatch_status` is intentionally absent until Step 2 completes the
    dispatch. It must then be set to exactly `DISPATCHED` or `FAILED`; the
@@ -167,7 +167,7 @@ The directive below is **copy-pasteable as-is**. Do not alter punctuation, capit
 ⛔ READ-ONLY MODE: You are acting as a councilor in a council. You MUST NOT:
 - Write, create, edit, or delete ANY file
 - Run ANY bash command that modifies state (no git commit, no file writes, no DB changes)
-- Modify, create, or delete any project data (db, knowledge/experience RAG, mcp, self/inner_soul, todo, shared_context, proc)
+- Modify, create, or delete any project data (db, knowledge/experience RAG, mcp, self/inner_soul, todo, shared_meta_kv, proc)
 - Spawn, terminate, or message other instances
 - Emit ready-to-execute patches, diffs, or full file contents as output (describe issues; do not produce copy-pasteable patches)
 
@@ -218,7 +218,7 @@ For each councilor in manifest (status = SPAWNED):
      → Do NOT retry silently
      → Proceed with remaining councilors
 
-  5. Update shared_context_metadata
+  5. Update shared_meta_kv
 ```
 
 **Skill-aware dispatch (mandatory when present):** If the convening message contained a `Councilor skill:` line (parsed into `councilor_skill` in Step 0), you MUST pass that skill name as the `load_skill` parameter in EVERY councilor dispatch `send_message` call — initial dispatch and every refinement / re-query message. Do not omit it for any councilor; do not omit it on later rounds. With-skill form:
@@ -256,7 +256,7 @@ Wait for councilor results, respecting the tiered deadline and degraded quorum.
    a. Update manifest:
       councilor.status = "COMPLETED" or "FAILED"
    b. Store the result for analysis
-   c. Update shared_context_metadata
+   c. Update shared_meta_kv
 
 3. Periodically check time (D9 tiered deadlines):
    a. For each RUNNING councilor, check if the deadline has been exceeded.
@@ -374,12 +374,12 @@ Present the synthesized answer to the requester.
 1. Present the synthesized answer (NORMAL or DEGRADED path).
 2. If disagreements were unresolved, surface them — quote the councilor
    positions, explain my reasoning, recommend the preferred position.
-3. Clear the council manifest from shared_context_metadata on successful
+3. Clear the council manifest from shared_meta_kv on successful
    delivery.
 4. Report completion to the caller.
 ```
 
-**Cleanup is part of delivery.** Lingering councilors were terminated in Step 5 before the error clear; leaving the manifest behind pollutes shared_context_metadata.
+**Cleanup is part of delivery.** Lingering councilors were terminated in Step 5 before the error clear; leaving the manifest behind pollutes shared_meta_kv.
 
 ---
 
@@ -423,7 +423,7 @@ Refinement rounds are **optional** and **capped**.
 If the governor instance is restored after a crash or restart:
 
 ```raw
-1. Read shared_context_metadata["council_manifest"].
+1. Read shared_meta_kv["council_manifest"].
 2. If manifest exists:
    a. For each councilor entry:
       - Call get_instance_info(instance_id)

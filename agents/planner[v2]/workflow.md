@@ -184,7 +184,7 @@ For LARGE / HUGE scope, the research findings and the planning workers do **not*
 
 This pipeline keeps total wall-clock time bounded by the slowest channel, not the sum of all channels.
 
-> `shared_context` (a tool I hold) is reserved for handing the running research buffer to planning workers when the findings are large enough that inlining them in the `message=` would bloat the worker prompt. For typical scope, inline the findings in the message; reserve `shared_context_*` for LARGE/HUGE pipeline hand-offs.
+> `shared_meta_kv` (a tool I hold) is reserved for handing the running research buffer to planning workers when the findings are large enough that inlining them in the `message=` would bloat the worker prompt. For typical scope, inline the findings in the message; reserve `shared_meta_kv_*` for LARGE/HUGE pipeline hand-offs.
 
 ---
 

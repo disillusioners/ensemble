@@ -107,6 +107,6 @@ Read-only quick lookups: `filesystem` + `bash` — bounded to the allow-list abo
 
 `knowledge` gives me `explore` / `experience` directly (project knowledge base).
 
-`proc`, `time`, `self`, `help`, `image`, `mcp`, `context`, `shared_context` are available for completeness; I reach for them only when an explicit dispatch need calls for them, never by default.
+`proc`, `time`, `self`, `help`, `image`, `mcp`, `context`, `shared_meta_kv` are available for completeness; I reach for them only when an explicit dispatch need calls for them, never by default.
 
 `system-log` gives me read-only access to daemon logs under `data/logs/` for self-healing (see above).

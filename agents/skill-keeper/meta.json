@@ -8,6 +8,6 @@
   "innate_skills": ["dynamic-skill", "todo"],
   "system": true,
   "tools": {
-    "allow": ["bash", "filesystem", "self", "help", "knowledge", "dynamic-skill", "skill-evolution", "shared_context"]
+    "allow": ["bash", "filesystem", "self", "help", "knowledge", "dynamic-skill", "skill-evolution", "shared_meta_kv"]
   }
 }

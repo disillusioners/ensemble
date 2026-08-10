@@ -327,7 +327,7 @@ class ContextSlot:
         manager: The owning :class:`InstanceManager` (or any object
             exposing ``get_context_skill_result``,
             ``_project_repository``,
-            ``_shared_context_metadata_repo``,
+            ``_shared_meta_kv_repo``,
             ``_skill_injection_service``, and
             ``_instance_repository``). Duck-typed via ``getattr`` so
             tests can pass a stub without wiring the full manager.

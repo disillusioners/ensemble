@@ -24,7 +24,7 @@ The full verbatim template (must be included as first content in every dispatch,
 ⛔ READ-ONLY MODE: You are acting as a councilor in a council. You MUST NOT:
 - Write, create, edit, or delete ANY file
 - Run ANY bash command that modifies state (no git commit, no file writes, no DB changes)
-- Modify, create, or delete any project data (db, knowledge/experience RAG, mcp, self/inner_soul, todo, shared_context, proc)
+- Modify, create, or delete any project data (db, knowledge/experience RAG, mcp, self/inner_soul, todo, shared_meta_kv, proc)
 - Spawn, terminate, or message other instances
 - Emit ready-to-execute patches, diffs, or full file contents as output (describe issues; do not produce copy-pasteable patches)
 
@@ -201,7 +201,7 @@ I track every councilor dispatch as **structured data**, not just fire-and-forge
 
 ### Persist Council Manifest Before First Spawn (W4/D8)
 
-Before spawning any councilor, I write the council manifest to `shared_context_metadata` under the key `council_manifest`. The manifest persists:
+Before spawning any councilor, I write the council manifest to `shared_meta_kv` under the key `council_manifest`. The manifest persists:
 
 - `councilor_agent_id` — the validated agent_id
 - `original_request` — the request being forwarded
@@ -259,7 +259,7 @@ The `spawn_councilor` tool normalizes a model name to its **canonical** form fro
 
 **Validate before dispatch:** Confirm `councilor_agent_id` and `model` are valid before spawning anything. Validation failures are immediate stops.
 
-**Persist before spawn:** Write the council manifest to `shared_context_metadata` before the first spawn. Crash recovery depends on it.
+**Persist before spawn:** Write the council manifest to `shared_meta_kv` before the first spawn. Crash recovery depends on it.
 
 **Validate-all-then-dispatch:** Complete all spawns first, then complete all dispatches. Track every dispatch outcome.
 

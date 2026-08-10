@@ -37,7 +37,7 @@ from .repositories import (
     create_message_queue_repository,
     create_mcp_server_repository,
     create_infra_repository,
-    create_shared_context_metadata_repository,
+    create_shared_meta_kv_repository,
     create_skill_repository,
     create_blueprint_repository,
     create_blueprint_embedding_repository,
@@ -65,7 +65,7 @@ from .repositories.message_queue.models import MessageQueue, MessageStatus, Mess
 from .repositories.task.models import Task, TaskType, TaskStatus
 from .repositories.event.models import Event, EventKind
 from .repositories.db_connection.models import DbConnectionConfig
-from .repositories.shared_context.models import SharedContextMetadata
+from .repositories.shared_meta_kv.models import SharedMetaKV
 from sqlmodel import Session
 from sqlalchemy import text, select
 from .tools import create_instance_tools
@@ -543,7 +543,7 @@ class InstanceManager:
         # above. The model was imported at module level so it is
         # registered with ``SQLModel.metadata`` before ``create_all()``
         # runs.
-        self._shared_context_metadata_repo = create_shared_context_metadata_repository(
+        self._shared_meta_kv_repo = create_shared_meta_kv_repository(
             engine=self._engine,
             create_tables=False,
         )
@@ -1632,17 +1632,18 @@ class InstanceManager:
         return self._infra_repository
 
     @property
-    def shared_context_metadata_repo(self) -> "SharedContextMetadataRepository":
-        """Public read-only access to the shared :class:`SharedContextMetadataRepository`.
+    def shared_meta_kv_repo(self) -> "SharedMetaKVRepository":
+        """Public read-only access to the shared :class:`SharedMetaKVRepository`.
 
-        Used by the Shared Context Metadata KV layer to read/write
-        rows in ``shared_context_metadata``. Constructed once in
+        Used by the Shared Meta KV layer to read/write
+        rows in the ``shared_context_metadata`` table (table name kept
+        for backwards compatibility). Constructed once in
         ``__init__`` with the shared engine so all callers share one
         repository bound to the same engine — preventing per-call
         engine allocation and lock contention (C3, matching the
         ``infra_repository`` wiring immediately above).
         """
-        return self._shared_context_metadata_repo
+        return self._shared_meta_kv_repo
 
     @property
     def credential_manager(self):

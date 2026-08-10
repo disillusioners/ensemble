@@ -1,8 +1,8 @@
-"""Tests for the ``shared_context_metadata`` LangChain tool.
+"""Tests for the ``shared_meta_kv`` LangChain tool.
 
 Mirrors the pattern used in ``tests/unit/tools/test_context_tools.py``:
 the factory is called with a ``MagicMock`` manager (so the tool body
-sees the real ``shared_context_metadata_repo`` and
+sees the real ``shared_meta_kv_repo`` and
 ``_instance_repository`` attributes) and we drive the tool via
 ``ainvoke`` to exercise the full async path. ``asyncio.to_thread`` is
 not mocked — the real ``set_many`` / ``delete_many`` / etc. on the
@@ -22,7 +22,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from daemon.tools.shared_context_tools import create_shared_context_tools
+from daemon.tools.shared_meta_kv_tools import create_shared_meta_kv_tools
 
 
 # ─── Fixtures ──────────────────────────────────────────────────────────────────
@@ -32,21 +32,21 @@ from daemon.tools.shared_context_tools import create_shared_context_tools
 def manager():
     """A mock ``InstanceManager`` with the two attributes the tool touches.
 
-    ``shared_context_metadata_repo`` and ``_instance_repository`` are
+    ``shared_meta_kv_repo`` and ``_instance_repository`` are
     private/public names that match what the real InstanceManager
     exposes — see ``daemon/manager.py``. Each is a MagicMock so the
     tool's body records every call for assertion.
     """
     mgr = MagicMock()
-    mgr.shared_context_metadata_repo = MagicMock()
+    mgr.shared_meta_kv_repo = MagicMock()
     mgr._instance_repository = MagicMock()
     return mgr
 
 
 @pytest.fixture
 def tool(manager):
-    """The single ``shared_context_metadata`` tool from the factory."""
-    tools = create_shared_context_tools(manager, "inst-current")
+    """The single ``shared_meta_kv`` tool from the factory."""
+    tools = create_shared_meta_kv_tools(manager, "inst-current")
     assert len(tools) == 1
     return tools[0]
 
@@ -56,12 +56,12 @@ def tool(manager):
 
 class TestFactoryShape:
     def test_factory_returns_single_tool(self):
-        tools = create_shared_context_tools(MagicMock(), "inst-1")
+        tools = create_shared_meta_kv_tools(MagicMock(), "inst-1")
         assert len(tools) == 1
-        assert tools[0].name == "shared_context_metadata"
+        assert tools[0].name == "shared_meta_kv"
 
     def test_tool_has_correct_category(self, tool):
-        assert getattr(tool, "_tool_category", None) == "shared_context"
+        assert getattr(tool, "_tool_category", None) == "shared_meta_kv"
 
 
 # ─── WRITE paths ───────────────────────────────────────────────────────────────
@@ -74,14 +74,14 @@ class TestSetKV:
     async def test_setting_kv_pairs(self, tool, manager):
         """Passing ``set_kv`` calls ``repo.set_many`` with the resolved context_key."""
         manager._instance_repository.get_tree_root_id.return_value = "root-1"
-        manager.shared_context_metadata_repo.get_all_as_dict.return_value = {
+        manager.shared_meta_kv_repo.get_all_as_dict.return_value = {
             "some_key": "some_value"
         }
 
         result = await tool.ainvoke({"set_kv": {"topic": "auth", "priority": 2}})
 
         # set_many was called with the resolved context_key + the dict.
-        manager.shared_context_metadata_repo.set_many.assert_called_once_with(
+        manager.shared_meta_kv_repo.set_many.assert_called_once_with(
             "root-1",
             {"topic": "auth", "priority": 2},
         )
@@ -100,18 +100,18 @@ class TestDeleteKeys:
     async def test_deleting_kv_pairs(self, tool, manager):
         """Passing ``delete_keys`` calls ``repo.delete_many`` with the resolved key."""
         manager._instance_repository.get_tree_root_id.return_value = "root-1"
-        manager.shared_context_metadata_repo.get_all_as_dict.return_value = {
+        manager.shared_meta_kv_repo.get_all_as_dict.return_value = {
             "some_key": "some_value"
         }
 
         result = await tool.ainvoke({"delete_keys": ["old_decision", "stale_flag"]})
 
-        manager.shared_context_metadata_repo.delete_many.assert_called_once_with(
+        manager.shared_meta_kv_repo.delete_many.assert_called_once_with(
             "root-1",
             ["old_decision", "stale_flag"],
         )
         # set_many must NOT be touched when only delete_keys is supplied.
-        manager.shared_context_metadata_repo.set_many.assert_not_called()
+        manager.shared_meta_kv_repo.set_many.assert_not_called()
 
         snapshot = json.loads(result)
         assert snapshot == {"some_key": "some_value"}
@@ -124,18 +124,18 @@ class TestClearAll:
     async def test_clear_all(self, tool, manager):
         """``clear_all=True`` calls ``repo.delete_all`` with the resolved key."""
         manager._instance_repository.get_tree_root_id.return_value = "root-1"
-        manager.shared_context_metadata_repo.get_all_as_dict.return_value = {
+        manager.shared_meta_kv_repo.get_all_as_dict.return_value = {
             "some_key": "some_value"
         }
 
         result = await tool.ainvoke({"clear_all": True})
 
-        manager.shared_context_metadata_repo.delete_all.assert_called_once_with(
+        manager.shared_meta_kv_repo.delete_all.assert_called_once_with(
             "root-1",
         )
         # The clear_all branch must not also call delete_many / set_many.
-        manager.shared_context_metadata_repo.delete_many.assert_not_called()
-        manager.shared_context_metadata_repo.set_many.assert_not_called()
+        manager.shared_meta_kv_repo.delete_many.assert_not_called()
+        manager.shared_meta_kv_repo.set_many.assert_not_called()
 
         snapshot = json.loads(result)
         assert snapshot == {"some_key": "some_value"}
@@ -151,20 +151,20 @@ class TestReadSnapshot:
     async def test_reading_current_state(self, tool, manager):
         """No args → ``repo.get_all_as_dict`` is called and result returned as JSON."""
         manager._instance_repository.get_tree_root_id.return_value = "root-1"
-        manager.shared_context_metadata_repo.get_all_as_dict.return_value = {
+        manager.shared_meta_kv_repo.get_all_as_dict.return_value = {
             "topic": "auth",
             "lang": "en",
         }
 
         result = await tool.ainvoke({})
 
-        manager.shared_context_metadata_repo.get_all_as_dict.assert_called_once_with(
+        manager.shared_meta_kv_repo.get_all_as_dict.assert_called_once_with(
             "root-1",
         )
         # No mutating calls happen on a read.
-        manager.shared_context_metadata_repo.set_many.assert_not_called()
-        manager.shared_context_metadata_repo.delete_many.assert_not_called()
-        manager.shared_context_metadata_repo.delete_all.assert_not_called()
+        manager.shared_meta_kv_repo.set_many.assert_not_called()
+        manager.shared_meta_kv_repo.delete_many.assert_not_called()
+        manager.shared_meta_kv_repo.delete_all.assert_not_called()
 
         snapshot = json.loads(result)
         assert snapshot == {"topic": "auth", "lang": "en"}
@@ -180,7 +180,7 @@ class TestContextKeyResolution:
     async def test_context_key_resolution_from_instance_id(self, tool, manager):
         """The tool asks the instance repo for the tree-root id of ``current_instance_id``."""
         manager._instance_repository.get_tree_root_id.return_value = "tree-root-42"
-        manager.shared_context_metadata_repo.get_all_as_dict.return_value = {
+        manager.shared_meta_kv_repo.get_all_as_dict.return_value = {
             "some_key": "some_value"
         }
 
@@ -191,7 +191,7 @@ class TestContextKeyResolution:
             "inst-current",
         )
         # And the repo was hit with that resolved id.
-        manager.shared_context_metadata_repo.set_many.assert_called_once_with(
+        manager.shared_meta_kv_repo.set_many.assert_called_once_with(
             "tree-root-42",
             {"k": "v"},
         )
@@ -203,7 +203,7 @@ class TestContextKeyResolution:
     async def test_context_key_fallback_when_root_id_empty(self, tool, manager):
         """When ``get_tree_root_id`` returns falsy, ``current_instance_id`` is used."""
         manager._instance_repository.get_tree_root_id.return_value = None
-        manager.shared_context_metadata_repo.get_all_as_dict.return_value = {
+        manager.shared_meta_kv_repo.get_all_as_dict.return_value = {
             "some_key": "some_value"
         }
 
@@ -213,7 +213,7 @@ class TestContextKeyResolution:
         manager._instance_repository.get_tree_root_id.assert_called_once_with(
             "inst-current",
         )
-        manager.shared_context_metadata_repo.set_many.assert_called_once_with(
+        manager.shared_meta_kv_repo.set_many.assert_called_once_with(
             "inst-current",
             {"k": "v"},
         )
@@ -240,7 +240,7 @@ class TestErrorSanitization:
         manager._instance_repository.get_tree_root_id.return_value = "root-1"
         # Inject an exception containing secret text that must NOT appear in the response.
         secret = "SECRET_INTERNAL_DETAIL_DO_NOT_LEAK"
-        manager.shared_context_metadata_repo.set_many.side_effect = RuntimeError(secret)
+        manager.shared_meta_kv_repo.set_many.side_effect = RuntimeError(secret)
 
         result = await tool.ainvoke({"set_kv": {"k": "v"}})
 

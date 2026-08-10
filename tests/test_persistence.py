@@ -471,7 +471,7 @@ class TestGetInstanceMessages:
             # The post-cache appender touches these on the manager — provide
             # MagicMocks so ``getattr`` resolves them.
             manager._project_repository = MagicMock()
-            manager.shared_context_metadata_repo = MagicMock()
+            manager.shared_meta_kv_repo = MagicMock()
 
             messages = await get_instance_messages(
                 mock_checkpointer, "inst-123", manager=manager

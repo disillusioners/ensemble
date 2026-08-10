@@ -10,7 +10,7 @@
   "tags": ["environment", "setup", "dependencies"],
   "innate_skills": ["todo"],
   "tools": {
-    "allow": ["bash", "proc", "filesystem", "help", "mcp", "system", "shared_context"]
+    "allow": ["bash", "proc", "filesystem", "help", "mcp", "system", "shared_meta_kv"]
   },
   "llm_model": null,
   "team_members": []

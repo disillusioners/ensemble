@@ -7,7 +7,7 @@
   "version": "1.0.0",
   "innate_skills": ["chart"],
   "tools": {
-    "allow": ["filesystem", "bash", "proc", "time", "help", "context", "shared_context"]
+    "allow": ["filesystem", "bash", "proc", "time", "help", "context", "shared_meta_kv"]
   },
   "team_members": []
 }

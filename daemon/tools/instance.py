@@ -192,7 +192,7 @@ from .rag_tools import create_rag_tools
 from .critical_notes import create_critical_notes_tools
 from .project_history import create_project_history_tools
 from .context_tools import create_context_tools
-from .shared_context_tools import create_shared_context_tools
+from .shared_meta_kv_tools import create_shared_meta_kv_tools
 from .db_tools import create_db_tools
 from .infra import create_infra_tools
 from .system import create_system_tools
@@ -2002,8 +2002,8 @@ Returns:
     # Always available — internal agents store and read lightweight metadata
     # (e.g., "last_seen", "topic", "user_locale") keyed by the context_key
     # partition. Auto-resolves context_key from the caller via closure.
-    shared_context_tool_list = create_shared_context_tools(manager, current_instance_id)
-    tools.extend(shared_context_tool_list)
+    shared_meta_kv_tool_list = create_shared_meta_kv_tools(manager, current_instance_id)
+    tools.extend(shared_meta_kv_tool_list)
 
     # ── Blueprint tools (project blueprint search/get/list, restricted create/update) ──
     # Always available — read tools are unrestricted; write tools (create/update)
