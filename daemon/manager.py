@@ -4494,6 +4494,44 @@ class InstanceManager:
             # name so subsequent re-runs converge on a single state.
             "ALTER TABLE job_queues DROP CONSTRAINT IF EXISTS ck_job_queues_queue_type",
             "ALTER TABLE job_queues ADD CONSTRAINT ck_job_queues_queue_type CHECK (queue_type IN ('fifo', 'parallel', 'defer', 'background'))",
+            # ── Idle-gate deadlock task-flag backfill (2026-08-10) ─────
+            # SQLite counterpart: 20260810_000001_fix_idle_gate_stuck_task_flags.sql.
+            # Backfills ``task.is_deferred`` and ``task.is_background``
+            # for tasks whose linked JobItem sits on a defer / background
+            # queue but whose task flag was never stamped (the pre-fix
+            # bug: enqueue_message_job forwarded the caller's flags
+            # verbatim, so a defer/background queue's task often carried
+            # ``is_deferred=False`` / ``is_background=False``). The
+            # Task-side and Job-side idle-gate predicates then counted
+            # the offending task as non-deferred / non-background work
+            # and the queue's JobItems never got activated — permanent
+            # deadlock. The two UPDATE statements are kept byte-identical
+            # to the SQLite migration so the two paths converge on the
+            # same final state. Both are guarded by the ``is_deferred =
+            # FALSE`` / ``is_background = FALSE`` predicates so they are
+            # idempotent on re-run (already-correct rows are skipped).
+            (
+                "UPDATE task SET is_deferred = TRUE "
+                "WHERE task.is_deferred = FALSE "
+                "AND EXISTS ("
+                "SELECT 1 FROM job_queue_items ji "
+                "JOIN job_queues q ON ji.queue_id = q.queue_id "
+                "WHERE ji.job_id = task.work_id "
+                "AND q.queue_type = 'defer' "
+                "AND ji.deleted_at IS NULL"
+                ")"
+            ),
+            (
+                "UPDATE task SET is_background = TRUE "
+                "WHERE task.is_background = FALSE "
+                "AND EXISTS ("
+                "SELECT 1 FROM job_queue_items ji "
+                "JOIN job_queues q ON ji.queue_id = q.queue_id "
+                "WHERE ji.job_id = task.work_id "
+                "AND q.queue_type = 'background' "
+                "AND ji.deleted_at IS NULL"
+                ")"
+            ),
         ]
         with self._engine.begin() as conn:
             for stmt in statements:
