@@ -48,13 +48,55 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _derive_task_flags_from_queue_type(
+    queue_type: str | None,
+    is_deferred: bool = False,
+    is_background: bool = False,
+) -> tuple[bool, bool]:
+    """Derive ``is_deferred`` / ``is_background`` from a queue's ``queue_type``.
+
+    The queue's ``queue_type`` is the source of truth for these flags — a
+    task's flags MUST match the lane of the queue it is enqueued on:
+
+      * ``"defer"`` queue → ``is_deferred=True`` (a defer-queue task must
+        be defer-flagged so the idle-gate predicate
+        ``TaskRepository.has_active_non_deferred_work`` does not count it
+        as non-deferred work and wedge the defer queue).
+      * ``"background"`` queue → ``is_background=True`` (mirror of the
+        above for the background lane).
+      * ``"fifo"`` / ``"parallel"`` / ``None`` → fall through with the
+        caller's flags intact (normal lanes do not require a flag).
+
+    Extracted into a module-level helper so the logic can be unit-tested
+    directly without standing up the full ``enqueue_message_job`` stack
+    (fix / unit test for the idle-gate deadlock, 2026-08-10).
+
+    Args:
+        queue_type: The queue's ``queue_type`` attribute (one of
+            ``"fifo"``, ``"parallel"``, ``"defer"``, ``"background"``,
+            or ``None`` when the queue could not be resolved). When
+            ``None`` the caller's flags are returned unchanged.
+        is_deferred: Caller-supplied ``is_deferred`` (default False).
+        is_background: Caller-supplied ``is_background`` (default False).
+
+    Returns:
+        ``(is_deferred, is_background)`` — the caller's flags overridden
+        by the queue type when applicable.
+    """
+    if queue_type == "defer":
+        return True, is_background
+    if queue_type == "background":
+        return is_deferred, True
+    return is_deferred, is_background
+
+
 def _build_message_content(message: str, images: list[str] | None) -> str | list:
     """Build multimodal content array for messages with optional images.
-    
+
     Args:
         message: The text content of the message.
         images: Optional list of base64 image data URIs.
-        
+
     Returns:
         String message if no images, otherwise list with text and image_url blocks.
     """
@@ -1792,6 +1834,14 @@ class InstanceMessagingService:
 
         # 1c. Resolve queue_id (cross-project guard).
         queue_id_for_job: str | None = None
+        # FIX 1 (idle-gate deadlock, 2026-08-10): track the resolved
+        # queue's ``queue_type`` so we can derive ``is_deferred`` /
+        # ``is_background`` from the queue's lane AFTER resolution.
+        # Without this, the flags flow straight from the caller into
+        # the Task row, and a defer/background queue's task carries
+        # the wrong flag — the idle-gate predicate then counts it as
+        # non-deferred/non-background work and the queue deadlocks.
+        resolved_queue_type: str | None = None
         queue_repo = getattr(
             getattr(self._manager, "_job_queue_service", None),
             "_queue_repo",
@@ -1822,6 +1872,11 @@ class InstanceMessagingService:
                             == project_id_for_job
                         ):
                             queue_id_for_job = requested.queue_id
+                            # Capture the queue_type for the flag override
+                            # below — see FIX 1 comment above.
+                            resolved_queue_type = getattr(
+                                requested, "queue_type", None
+                            )
                         else:
                             mismatch_reason = (
                                 "not_found_or_repo_error"
@@ -1854,6 +1909,11 @@ class InstanceMessagingService:
                             queue = None
                         if queue is not None:
                             queue_id_for_job = queue.queue_id
+                            # Capture the queue_type for the flag override
+                            # below — see FIX 1 comment above.
+                            resolved_queue_type = getattr(
+                                queue, "queue_type", None
+                            )
                 except Exception as queue_lookup_err:
                     logger.debug(
                         f"enqueue_message_job: unexpected error "
@@ -1867,6 +1927,25 @@ class InstanceMessagingService:
         # MessageQueue rows FIRST. The JobItem must not be visible to the
         # dispatch bus until its authoritative Task already exists.
         job_id = str(uuid.uuid4())
+
+        # FIX 1 (idle-gate deadlock, 2026-08-10): override
+        # ``is_deferred`` / ``is_background`` from the resolved queue's
+        # ``queue_type``. Queue type is the source of truth for the
+        # task flags — without this override, a defer/background queue's
+        # task carries the caller-supplied (often False) flag,
+        # ``TaskRepository.has_active_non_deferred_work`` /
+        # ``has_active_non_background_work`` counts it as conflicting
+        # work, and the defer/background idle-gate in
+        # ``JobProcessor._process_next_job`` skips the queue — the
+        # queue's JobItems never get activated and the Task stays
+        # PENDING forever (deadlock). Helper kept module-level so the
+        # rule is unit-testable without a full manager stack.
+        is_deferred, is_background = _derive_task_flags_from_queue_type(
+            resolved_queue_type,
+            is_deferred=is_deferred,
+            is_background=is_background,
+        )
+
         ctx = await asyncio.to_thread(
             self._prepare_enqueued_message,
             instance_id=instance_id,
