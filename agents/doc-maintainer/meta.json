@@ -18,7 +18,7 @@
             "glob_files",
             "grep_files",
             "skill_search",
-            "shared_context_metadata",
+            "shared_meta_kv",
             "time",
             "help"
         ]
