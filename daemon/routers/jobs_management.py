@@ -1,5 +1,6 @@
 """Job Queue Management API endpoints."""
 
+import asyncio
 import logging
 from typing import Any
 
@@ -16,6 +17,7 @@ from .schemas import (
     JobResponse,
     JobNotFoundResponse,
     JobCleanupResponse,
+    CleanupPreflightResponse,
 )
 from .jobs_crud import (
     get_job_queue_service,
@@ -559,6 +561,37 @@ async def retry_job(
     )
 
 
+@router.get(
+    "/cleanup/preflight",
+    response_model=CleanupPreflightResponse,
+    responses={
+        200: {"description": "System-wide bad-state count"},
+        503: {"description": "Service not initialized"},
+    },
+)
+async def cleanup_preflight(request: Request):
+    """Return the system-wide bad-state Task count (read-only).
+
+    "Bad state" = a Task in ``paused``/``pending`` whose linked JobItem
+    is already terminal (``done``/``dead``). This is a pure COUNT query
+    with no writes, so it is intentionally NOT guarded by
+    ``is_write_paused`` (W1 fix): the preflight MUST surface stale rows
+    even during a write pause (database migration), which is precisely
+    when bad-state items accumulate most because the cleanup endpoint
+    itself cannot run.
+
+    Used by the frontend to render the red-glow + tooltip on the System
+    Cleanup button.
+    """
+    manager = _get_manager(request)
+    task_repo = getattr(manager, "_task_repo", None)
+    if task_repo is None:
+        # No task repo available — report zero rather than 500.
+        return CleanupPreflightResponse(bad_state_count=0)
+    count = await asyncio.to_thread(task_repo.count_bad_state_tasks)
+    return CleanupPreflightResponse(bad_state_count=count)
+
+
 @router.post(
     "/cleanup",
     response_model=JobCleanupResponse,
@@ -574,7 +607,7 @@ async def cleanup_jobs(
 ):
     """Cancel ALL non-terminal jobs ("system reset" for the job board).
 
-    Splits the work into three buckets so each side uses the right
+    Splits the work into four buckets so each side uses the right
     cancellation tool:
 
     * **queued (PENDING)** -- batch UPDATE: ``admission_state='queued'
@@ -596,6 +629,13 @@ async def cleanup_jobs(
       also drains the ghost rows. Reported as ``orphaned_reaped``
       (separate from the two main counters) so existing callers that
       only read ``total_processed`` see no behavioural change.
+    * **bad-state Tasks** -- Tasks stuck in ``paused``/``pending``
+      whose linked JobItem is already terminal (``done``/``dead``).
+      These are reconciled to ``CANCELLED`` via
+      :meth:`TaskRepository.batch_reconcile_bad_state_tasks`. Reported
+      as ``reconciled_bad_state`` (excluded from ``total_processed``,
+      same as ``orphaned_reaped``) because they are Task rows, not
+      JobItem rows.
 
     Already-terminal jobs (``admission_state IN ('done', 'dead')``) and
     soft-deleted rows are left untouched.
@@ -606,7 +646,8 @@ async def cleanup_jobs(
         .. code-block:: json
 
             {"cancelled_queued": N, "cancelled_active": N,
-             "orphaned_reaped": N, "total_processed": N}
+             "orphaned_reaped": N, "reconciled_bad_state": N,
+             "total_processed": N}
 
     Raises:
         503: When writes are paused for migration.

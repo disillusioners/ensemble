@@ -87,9 +87,10 @@ class TestCleanupEndpointRegistration:
         assert cleanup_route.response_model is JobCleanupResponse
 
     def test_job_cleanup_response_schema_has_four_counters(self):
-        """The response schema must carry exactly the four contract fields.
+        """The response schema must carry exactly the five contract fields.
 
-        Counter contract (Phase 2 — System Cleanup reaper):
+        Counter contract (Phase 2 — System Cleanup reaper; Phase 4 —
+        bad-state Task reconciliation):
 
           * ``cancelled_queued``   — batch-UPDATE PENDING rows
           * ``cancelled_active``   — per-row cancel cascade (PROCESSING)
@@ -97,11 +98,15 @@ class TestCleanupEndpointRegistration:
                                      (Phase 2 of the System Cleanup
                                      button — instance gone but
                                      ``admission_state='active'``).
+          * ``reconciled_bad_state`` — bad-state Tasks (paused/pending
+                                       with terminal JobItem) reconciled
+                                       to CANCELLED (Phase 4).
           * ``total_processed``    — sum of the first two only.
 
-        ``orphaned_reaped`` is kept OUT of the ``total_processed``
-        invariant so existing operator dashboards / tests that sum
-        only the first two counters continue to reconcile.
+        ``orphaned_reaped`` and ``reconciled_bad_state`` are kept OUT of
+        the ``total_processed`` invariant so existing operator dashboards
+        / tests that sum only the first two counters continue to
+        reconcile.
         """
         from daemon.routers.schemas import JobCleanupResponse
 
@@ -110,6 +115,7 @@ class TestCleanupEndpointRegistration:
             "cancelled_queued",
             "cancelled_active",
             "orphaned_reaped",
+            "reconciled_bad_state",
             "total_processed",
         }
 
@@ -168,6 +174,7 @@ class TestCleanupNonTerminalJobsService:
             "cancelled_queued": 7,
             "cancelled_active": 0,
             "orphaned_reaped": 0,
+            "reconciled_bad_state": 0,
             "total_processed": 7,
         }
 
@@ -199,6 +206,7 @@ class TestCleanupNonTerminalJobsService:
             "cancelled_queued": 2,
             "cancelled_active": 2,
             "orphaned_reaped": 0,
+            "reconciled_bad_state": 0,
             "total_processed": 4,
         }
 
@@ -227,6 +235,7 @@ class TestCleanupNonTerminalJobsService:
             "cancelled_queued": 0,
             "cancelled_active": 2,
             "orphaned_reaped": 0,
+            "reconciled_bad_state": 0,
             "total_processed": 2,
         }
 
@@ -258,6 +267,7 @@ class TestCleanupNonTerminalJobsService:
             "cancelled_queued": 1,
             "cancelled_active": 2,
             "orphaned_reaped": 0,
+            "reconciled_bad_state": 0,
             "total_processed": 3,
         }
 
@@ -321,6 +331,7 @@ class TestCleanupNonTerminalJobsService:
             "cancelled_queued": 0,
             "cancelled_active": 0,
             "orphaned_reaped": 2,
+            "reconciled_bad_state": 0,
             "total_processed": 0,
         }
 
@@ -357,6 +368,7 @@ class TestCleanupNonTerminalJobsService:
             "cancelled_queued": 2,
             "cancelled_active": 0,
             "orphaned_reaped": 0,
+            "reconciled_bad_state": 0,
             "total_processed": 2,
         }
 
@@ -420,6 +432,7 @@ class TestCleanupJobsEndpoint:
             "cancelled_queued": 4,
             "cancelled_active": 2,
             "orphaned_reaped": 0,
+            "reconciled_bad_state": 0,
             "total_processed": 6,
         }
         service.cleanup_non_terminal_jobs.assert_awaited_once_with()
@@ -451,6 +464,7 @@ class TestCleanupJobsEndpoint:
             "cancelled_queued": 1,
             "cancelled_active": 0,
             "orphaned_reaped": 3,
+            "reconciled_bad_state": 0,
             "total_processed": 1,
         }
 

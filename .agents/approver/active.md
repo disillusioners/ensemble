@@ -1,8 +1,8 @@
 # Approver Active State
 
-Plan: Instance Lifecycle Hooks
-Slug: instance-life-circle-hooks
+Plan: Task-JobItem Reconciliation Fix
+Slug: task-job-reconciliation
 Iteration: 001
 Status: APPROVED
-Started: 2026-08-08T12:44:55Z
-Completed: 2026-08-08T12:44:55Z
+Started: 2026-08-11T06:28:05Z
+Completed: 2026-08-11T06:28:05Z

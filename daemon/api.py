@@ -336,6 +336,7 @@ async def lifespan(app: FastAPI):
     job_queue_mgmt_service = JobQueueMgmtService(
         queue_repo=queue_repo,
         job_repo=job_repository,
+        task_repo=manager._task_repo,
     )
     
     # Create DispatchEventBus for event-driven job dispatch

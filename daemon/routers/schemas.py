@@ -197,6 +197,12 @@ class JobCleanupResponse(BaseModel):
         had to be force-finalized via the orphan reaper. Excluded from
         ``total_processed`` so the contract for the existing two
         counters is preserved.
+      * ``reconciled_bad_state`` — number of bad-state Tasks (paused/
+        pending whose linked JobItem is already terminal done/dead)
+        that were batch-reconciled to CANCELLED by
+        :meth:`TaskRepository.batch_reconcile_bad_state_tasks`. Like
+        ``orphaned_reaped``, this is excluded from ``total_processed``
+        because it reconciles Task rows, not JobItem rows.
       * ``total_processed`` — sum of ``cancelled_queued`` +
         ``cancelled_active``.
     """
@@ -219,6 +225,15 @@ class JobCleanupResponse(BaseModel):
         description=(
             "Number of orphan active jobs (instance terminal or missing) "
             "that were force-finalized to clear the ghost active counter"
+        ),
+    )
+    reconciled_bad_state: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Number of bad-state Tasks (paused/pending whose linked "
+            "JobItem is terminal) batch-reconciled to CANCELLED. "
+            "Excluded from total_processed."
         ),
     )
     total_processed: int = Field(
@@ -252,6 +267,7 @@ class JobCleanupResponse(BaseModel):
                 "cancelled_queued": 12,
                 "cancelled_active": 3,
                 "orphaned_reaped": 1,
+                "reconciled_bad_state": 2,
                 "total_processed": 15,
             }
         }
@@ -284,6 +300,14 @@ class JobQueueResponse(BaseModel):
     updated_at: str = Field(..., description="Queue last update timestamp")
     active_jobs: int = Field(default=0, description="Number of currently active jobs")
     pending_jobs: int = Field(default=0, description="Number of pending jobs")
+    bad_state_jobs: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Number of bad-state tasks (paused/pending) whose linked "
+            "JobItem is terminal (done/dead)"
+        ),
+    )
     
     model_config = {
         "json_schema_extra": {
@@ -299,7 +323,36 @@ class JobQueueResponse(BaseModel):
                 "created_at": "2025-03-15T10:00:00",
                 "updated_at": "2025-03-15T10:00:00",
                 "active_jobs": 0,
-                "pending_jobs": 5
+                "pending_jobs": 5,
+                "bad_state_jobs": 0
+            }
+        }
+    }
+
+
+class CleanupPreflightResponse(BaseModel):
+    """Response for ``GET /api/jobs/cleanup/preflight``.
+
+    Read-only system-wide bad-state count used by the frontend to render
+    the red-glow + tooltip on the System Cleanup button. The preflight is
+    intentionally NOT guarded by ``is_write_paused`` (W1): it is a pure
+    COUNT query and must surface stale rows even during a write pause,
+    which is precisely when bad-state items accumulate most.
+    """
+
+    bad_state_count: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "System-wide count of bad-state tasks (paused/pending) whose "
+            "linked JobItem is terminal (done/dead)"
+        ),
+    )
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "bad_state_count": 2
             }
         }
     }

@@ -109,6 +109,7 @@ def _queue_to_response(queue_data) -> JobQueueResponse:
             updated_at=queue_data["updated_at"],
             active_jobs=queue_data.get("active_jobs", 0),
             pending_jobs=queue_data.get("pending_jobs", 0),
+            bad_state_jobs=queue_data.get("bad_state_jobs", 0),
         )
     else:
         # JobQueue model object
@@ -125,6 +126,7 @@ def _queue_to_response(queue_data) -> JobQueueResponse:
             updated_at=queue_data.updated_at,
             active_jobs=0,
             pending_jobs=0,
+            bad_state_jobs=0,
         )
 
 

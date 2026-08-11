@@ -2376,6 +2376,136 @@ class TaskRepository:
             )
         return count
 
+    # --------------------------------------------------------
+    # Phase 4: bad-state visibility + batch reconciliation
+    # --------------------------------------------------------
+
+    def count_bad_state_tasks(
+        self,
+        queue_id: str | None = None,
+        project_id: str | None = None,
+    ) -> int:
+        """Count Tasks in bad state — paused/pending whose linked JobItem is terminal.
+
+        "Bad state" definition is identical to Phase 1
+        (:meth:`reconcile_terminal_task`) and Phase 2 (the defensive NOT
+        EXISTS predicate in the idle gates): ``task.status IN
+        ('paused','pending')`` AND a non-deleted ``job_queue_items`` row
+        exists with ``jqi.job_id = task.work_id`` AND
+        ``jqi.admission_state IN ('done','dead')``.
+
+        Self-contained SYNC method using raw-SQL ``text()``. Optional
+        ``queue_id`` and ``project_id`` filters (both on the JobItem side)
+        scope the count to a single queue or project. With neither
+        filter, returns the system-wide count.
+
+        Uses ``COUNT(DISTINCT t.id)`` so a Task with two terminal JobItem
+        rows (race / soft-delete + recreate) is counted once.
+
+        Args:
+            queue_id: Optional queue filter (``job_queue_items.queue_id``).
+            project_id: Optional project filter
+                (``job_queue_items.project_id``).
+
+        Returns:
+            Count of bad-state Task rows.
+        """
+        params: dict[str, Any] = {
+            "status_paused": TaskStatus.PAUSED.value,
+            "status_pending": TaskStatus.PENDING.value,
+            "qi_done": AdmissionState.DONE.value,
+            "qi_dead": AdmissionState.DEAD.value,
+        }
+        queue_clause = ""
+        project_clause = ""
+        if queue_id is not None:
+            queue_clause = " AND jqi.queue_id = :queue_id"
+            params["queue_id"] = queue_id
+        if project_id is not None:
+            project_clause = " AND jqi.project_id = :project_id"
+            params["project_id"] = project_id
+        stmt = text(f"""
+            SELECT COUNT(DISTINCT t.id) FROM task t
+            WHERE t.status IN (:status_paused, :status_pending)
+              AND EXISTS (
+                  SELECT 1 FROM job_queue_items jqi
+                  WHERE jqi.job_id = t.work_id
+                    AND jqi.admission_state IN (:qi_done, :qi_dead)
+                    AND jqi.deleted_at IS NULL{queue_clause}{project_clause}
+              )
+        """)
+        with self.engine.begin() as conn:
+            row = conn.execute(stmt, params).fetchone()
+        return int(row[0]) if row else 0
+
+    def batch_reconcile_bad_state_tasks(
+        self,
+        queue_id: str | None = None,
+        project_id: str | None = None,
+    ) -> int:
+        """Batch-reconcile ALL bad-state Tasks to CANCELLED.
+
+        Mirrors the SET clause of Phase 1's :meth:`reconcile_terminal_task`
+        exactly (status, cancel_requested, cancel_requested_at,
+        completed_at) but operates on every matching row in a single
+        UPDATE instead of one per ``work_id``. The WHERE clause is the
+        same bad-state definition: ``status IN ('paused','pending')`` AND
+        a non-deleted terminal JobItem exists.
+
+        Idempotent: the WHERE clause only matches bad-state rows, so a
+        second call after all rows are reconciled returns 0.
+
+        Args:
+            queue_id: Optional queue filter (``job_queue_items.queue_id``).
+            project_id: Optional project filter
+                (``job_queue_items.project_id``).
+
+        Returns:
+            Number of Task rows transitioned to CANCELLED
+            (``result.rowcount``).
+        """
+        now = datetime.now(timezone.utc)
+        params: dict[str, Any] = {
+            "status_cancelled": TaskStatus.CANCELLED.value,
+            "cancel_requested_true": True,
+            "now": now,
+            "status_paused": TaskStatus.PAUSED.value,
+            "status_pending": TaskStatus.PENDING.value,
+            "qi_done": AdmissionState.DONE.value,
+            "qi_dead": AdmissionState.DEAD.value,
+        }
+        queue_clause = ""
+        project_clause = ""
+        if queue_id is not None:
+            queue_clause = " AND jqi.queue_id = :queue_id"
+            params["queue_id"] = queue_id
+        if project_id is not None:
+            project_clause = " AND jqi.project_id = :project_id"
+            params["project_id"] = project_id
+        with self.engine.begin() as conn:
+            result = conn.execute(text(f"""
+                UPDATE task SET status = :status_cancelled,
+                                cancel_requested = :cancel_requested_true,
+                                cancel_requested_at = :now,
+                                completed_at = :now
+                WHERE status IN (:status_paused, :status_pending)
+                  AND EXISTS (
+                      SELECT 1 FROM job_queue_items jqi
+                      WHERE jqi.job_id = task.work_id
+                        AND jqi.admission_state IN (:qi_done, :qi_dead)
+                        AND jqi.deleted_at IS NULL{queue_clause}{project_clause}
+                  )
+            """), params)
+            count = result.rowcount
+        if count > 0:
+            logger.info(
+                "task.reconciled_bad_state_batch",
+                count=count,
+                queue_id=queue_id,
+                project_id=project_id,
+            )
+        return count
+
     def count_by_status(self) -> dict[str, int]:
         """Get count of tasks by status.
 

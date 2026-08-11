@@ -1231,16 +1231,56 @@ class JobQueueService:
                 exc,
             )
 
+        # 4) Bad-state Task reconciliation — Tasks stuck in paused/pending
+        # whose linked JobItem is already terminal (done/dead). These are
+        # NOT JobItem rows (the prior three buckets handle those), so the
+        # count is excluded from ``total_processed`` (same treatment as
+        # ``orphaned_reaped``). Best-effort: failures here must not block
+        # the main counters.
+        reconciled_bad_state = 0
+        try:
+            # Deferred import to avoid a circular import at module load
+            # (task.repository imports from daemon.services).
+            from daemon.repositories.task.repository import TaskRepository
+
+            task_repo = (
+                getattr(self._instance_manager, "_task_repo", None)
+                if self._instance_manager
+                else None
+            )
+            if task_repo is None:
+                # Construct a transient repo from the JobRepository engine.
+                engine = getattr(self._repository, "engine", None)
+                if engine is not None:
+                    task_repo = TaskRepository(engine)
+            if task_repo is not None:
+                reconciled_bad_state = await asyncio.to_thread(
+                    task_repo.batch_reconcile_bad_state_tasks
+                )
+                if reconciled_bad_state > 0:
+                    logger.info(
+                        "cleanup_non_terminal_jobs: reconciled_bad_state=%d",
+                        reconciled_bad_state,
+                    )
+        except Exception as exc:  # noqa: BLE001 — best-effort
+            logger.warning(
+                "cleanup_non_terminal_jobs: "
+                "batch_reconcile_bad_state_tasks failed: %s",
+                exc,
+            )
+
         total = cancelled_queued + cancelled_active
         logger.info(
             "cleanup_non_terminal_jobs: cancelled_queued=%d cancelled_active=%d "
-            "orphaned_reaped=%d total=%d",
-            cancelled_queued, cancelled_active, orphaned_reaped, total,
+            "orphaned_reaped=%d reconciled_bad_state=%d total=%d",
+            cancelled_queued, cancelled_active, orphaned_reaped,
+            reconciled_bad_state, total,
         )
         return {
             "cancelled_queued": cancelled_queued,
             "cancelled_active": cancelled_active,
             "orphaned_reaped": orphaned_reaped,
+            "reconciled_bad_state": reconciled_bad_state,
             "total_processed": total,
         }
     

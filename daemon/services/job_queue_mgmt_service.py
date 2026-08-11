@@ -38,6 +38,7 @@ class JobQueueMgmtService:
         queue_repo: JobQueueRepository,
         job_repo: JobRepository,
         dispatch_bus: "DispatchEventBus" | None = None,
+        task_repo: Any | None = None,
     ):
         """Initialize the JobQueueMgmtService.
         
@@ -45,10 +46,14 @@ class JobQueueMgmtService:
             queue_repo: Repository for queue database operations.
             job_repo: Repository for job database operations.
             dispatch_bus: Optional DispatchEventBus for resume notifications.
+            task_repo: Optional TaskRepository for bad-state task counts
+                (Phase 4). May be ``None`` in tests that do not exercise
+                ``bad_state_jobs``.
         """
         self._queue_repo = queue_repo
         self._job_repo = job_repo
         self._dispatch_bus = dispatch_bus
+        self._task_repo = task_repo
     
     # ========== System Queue Provisioning ==========
     
@@ -287,6 +292,16 @@ class JobQueueMgmtService:
         queue_dict["active_jobs"] = counts.get(AdmissionState.ACTIVE.value, 0)
         queue_dict["pending_jobs"] = counts.get(AdmissionState.QUEUED.value, 0)
 
+        # Phase 4: bad-state task count for the queue badge. Best-effort —
+        # ``_task_repo`` is optional (may be ``None`` in tests).
+        if self._task_repo is not None:
+            queue_dict["bad_state_jobs"] = await asyncio.to_thread(
+                self._task_repo.count_bad_state_tasks,
+                queue_id=queue.queue_id,
+            )
+        else:
+            queue_dict["bad_state_jobs"] = 0
+
         return queue_dict
     
     async def get_queue(
@@ -336,6 +351,14 @@ class JobQueueMgmtService:
             queue_dict = queue.to_dict()
             queue_dict["active_jobs"] = counts.get(AdmissionState.ACTIVE.value, 0)
             queue_dict["pending_jobs"] = counts.get(AdmissionState.QUEUED.value, 0)
+            # Phase 4: bad-state task count for the queue badge.
+            if self._task_repo is not None:
+                queue_dict["bad_state_jobs"] = await asyncio.to_thread(
+                    self._task_repo.count_bad_state_tasks,
+                    queue_id=queue.queue_id,
+                )
+            else:
+                queue_dict["bad_state_jobs"] = 0
             result.append(queue_dict)
         
         return result
