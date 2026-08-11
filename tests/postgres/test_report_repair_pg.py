@@ -232,8 +232,8 @@ async def test_pg_unhappy_path_combine_fallback(pg_engine):
     service, manager = _build_service(pg_engine)
 
     messages = [
-        # Spec (2026-08-08): no earlier_wc floor — substantive earlier
-        # messages trigger the truncation heuristic purely on the 2× ratio.
+        # Spec (2026-08-11): no earlier_wc floor — substantive earlier
+        # messages trigger the truncation heuristic purely on the 5× ratio.
         # Padding to >=20 words mirrors the W5-era setup but is no longer
         # required to trip the heuristic; kept for readability.
         {"role": "assistant", "content": "alpha detailed findings report content padding word word word word word word word word word word word word word word word word word"},

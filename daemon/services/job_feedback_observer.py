@@ -1126,9 +1126,15 @@ class JobFeedbackObserver:
             instance_id: The parent instance ID (for LLM checkpoint fetch).
         """
         try:
+            # 2026-08-11: skip_repair=True — this is the interim
+            # in-progress notification path. Repair only runs on the
+            # terminal completion path (call sites #3 and #4 below).
+            # Without this, both interim and terminal would invoke
+            # LLM repair on the same message (the double-repair bug).
             progress_text = (
                 await self._instance_manager._get_last_assistant_message_raw(
-                    instance_id
+                    instance_id,
+                    skip_repair=True,
                 )
             )
             await self._job_queue_service.notify_watchers(
@@ -2642,9 +2648,13 @@ class JobFeedbackObserver:
             else:
                 content = last_content
                 if content is None:
+                    # 2026-08-11: terminal completion path. Pass
+                    # agent_id (already in scope) so the exclusion check
+                    # can skip repair for wanderer/explorer reports.
                     content = (
                         await self._instance_manager._get_last_assistant_message_raw(
-                            instance_id
+                            instance_id,
+                            agent_id=agent_id,
                         )
                     )
                 get_completion_registry().complete(

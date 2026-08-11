@@ -5591,34 +5591,74 @@ class InstanceManager:
             message_id=message_id,
         )
 
-    async def _get_last_assistant_message(self, instance_id: str, agent_id: str) -> str | None:
+    async def _get_last_assistant_message(
+        self,
+        instance_id: str,
+        agent_id: str,
+        *,
+        skip_repair: bool = False,
+    ) -> str | None:
         """Get the last assistant message from instance history.
-        
+
         This is the default/simple approach for completion reports - just
         pass the agent's last response to the parent.
-        
+
         Args:
             instance_id: The instance ID to get message from.
-            agent_id: The agent ID (e.g., "developer", "leader").
-            
+            agent_id: The agent ID (e.g., "developer", "leader"). Also
+                drives the exclusion check in the raw call: when
+                ``agent_id`` is in ``report_repair.repair_excluded_agents``
+                (default: ``{"wanderer", "explorer"}``), repair is
+                skipped.
+            skip_repair: When True, propagate to the raw call so the
+                truncation check + LLM repair + combine fallback are
+                all skipped. Used by interim paths (e.g.,
+                ``_emit_in_progress``) that can fire on a non-terminal
+                turn and must not double-repair alongside the terminal
+                completion path.
+
         Returns:
             Formatted string with instance info and last message.
         """
-        return await self._child_reports_service._get_last_assistant_message(instance_id, agent_id)
+        return await self._child_reports_service._get_last_assistant_message(
+            instance_id,
+            agent_id,
+            skip_repair=skip_repair,
+        )
 
-    async def _get_last_assistant_message_raw(self, instance_id: str) -> str | None:
+    async def _get_last_assistant_message_raw(
+        self,
+        instance_id: str,
+        *,
+        skip_repair: bool = False,
+        agent_id: str | None = None,
+    ) -> str | None:
         """Get the raw last assistant message content (no formatting).
-        
+
         Returns just the actual agent response content, matching the format
         used by MessageJobHandler when setting result_summary=result.content.
-        
+
         Args:
             instance_id: The instance ID to get message from.
-            
+            skip_repair: When True, return the raw last content immediately
+                after fetching — skip the truncation check, LLM repair,
+                and combine fallback entirely. Used by the interim
+                ``_emit_in_progress`` path to prevent double-repair
+                with the terminal completion path.
+            agent_id: Optional agent ID for the exclusion check. When
+                ``agent_id`` is in
+                ``report_repair.repair_excluded_agents`` (default:
+                ``{"wanderer", "explorer"}``), repair is skipped.
+                ``None`` means "unknown agent" — repair runs (safe default).
+
         Returns:
             The raw assistant message content, or None if not found.
         """
-        return await self._child_reports_service._get_last_assistant_message_raw(instance_id)
+        return await self._child_reports_service._get_last_assistant_message_raw(
+            instance_id,
+            skip_repair=skip_repair,
+            agent_id=agent_id,
+        )
 
         
     async def _generate_and_broadcast_title(

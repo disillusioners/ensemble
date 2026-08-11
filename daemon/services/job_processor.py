@@ -140,6 +140,10 @@ class JobProcessor:
         result_summary = None
         if hasattr(self._instance_manager, '_get_last_assistant_message_raw'):
             try:
+                # 2026-08-11: terminal job-summary path. Leave agent_id=None
+                # (the exclusion check is bypassed — repair runs). The
+                # exclusion only fires when the caller has agent_id
+                # readily available; this helper receives only instance_id.
                 result_summary = await self._instance_manager._get_last_assistant_message_raw(instance_id)
             except Exception as e:
                 logger.warning(f"Failed to get result_summary for {job_type_label} job {job_id[:8]}...: {e}")

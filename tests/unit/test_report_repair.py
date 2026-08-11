@@ -139,13 +139,14 @@ _MEDIUM = "word " * 10  # 10 words
 class TestIsLikelyTruncatedReport:
     """Tests for ``ChildReportsService._is_likely_truncated_report``.
 
-    Spec (2026-08-08): default ratio 2.0; no ``last_wc`` floor and no
-    ``earlier_wc`` floor. Returns True when any penultimate message (n-1
-    or n-2) has word count > 2 × the last message's word count.
+    Spec (2026-08-11): default ratio 5.0 (was 2.0 pre-2026-08-11);
+    no ``last_wc`` floor and no ``earlier_wc`` floor. Returns True
+    when any penultimate message (n-1 or n-2) has word count > 5 ×
+    the last message's word count.
     """
 
     def test_n_minus_1_much_larger_triggers(self):
-        """n-1 (50 words) >> n (1 word): 50 > 2×1 → returns True."""
+        """n-1 (50 words) >> n (1 word): 50 > 5×1 → returns True."""
         messages = [
             _assistant_msg(_LONG_1),
             _assistant_msg(_SHORT),
@@ -153,7 +154,7 @@ class TestIsLikelyTruncatedReport:
         assert ChildReportsService._is_likely_truncated_report(messages) is True
 
     def test_n_minus_1_similar_does_not_trigger(self):
-        """Two MEDIUM messages (10 words each): 10 is not > 2×10 → False."""
+        """Two MEDIUM messages (10 words each): 10 is not > 5×10 → False."""
         messages = [
             _assistant_msg(_MEDIUM),
             _assistant_msg(_MEDIUM),
@@ -161,24 +162,34 @@ class TestIsLikelyTruncatedReport:
         assert ChildReportsService._is_likely_truncated_report(messages) is False
 
     def test_n_minus_2_larger_triggers(self):
-        """n-2 (50 words) >> n (1 word): 50 > 2×1 → returns True (n-1 is MEDIUM, below threshold)."""
+        """n-2 (50 words) >> n (1 word): 50 > 5×1 → True (n-1 is MEDIUM, below threshold)."""
         messages = [
             _assistant_msg(_LONG_1),  # n-2: 50 words
             _assistant_msg(_MEDIUM),  # n-1: 10 words
             _assistant_msg(_SHORT),   # n: 1 word
         ]
-        # n-2 (50) > 2× n (1) → True
+        # n-2 (50) > 5× n (1) → True
         assert ChildReportsService._is_likely_truncated_report(messages) is True
 
-    def test_exactly_2x_boundary_does_not_trigger(self):
-        """Boundary: 20 not > 2×10=20 → False (strictly greater is required)."""
+    def test_exactly_5x_boundary_does_not_trigger(self):
+        """Boundary (2026-08-11 spec): 50 not > 5×10=50 → False (strictly greater is required)."""
         last = "a " * 10  # 10 words
-        prev = "a " * 20   # 20 words
+        prev = "a " * 50   # 50 words
         messages = [
             _assistant_msg(prev),
             _assistant_msg(last),
         ]
         assert ChildReportsService._is_likely_truncated_report(messages) is False
+
+    def test_5x_just_past_boundary_triggers(self):
+        """Just past boundary (2026-08-11 spec): 51 > 5×10=50 → True."""
+        last = "a " * 10  # 10 words
+        prev = "a " * 51   # 51 words
+        messages = [
+            _assistant_msg(prev),
+            _assistant_msg(last),
+        ]
+        assert ChildReportsService._is_likely_truncated_report(messages) is True
 
     def test_fewer_than_2_messages_returns_false(self):
         """Fewer than 2 messages → returns False."""
@@ -218,27 +229,47 @@ class TestIsLikelyTruncatedReport:
 
     def test_no_last_wc_floor_triggers_on_ratio(self):
         """Spec: no ``last_wc`` floor — even a 6-word last message triggers when ratio met."""
-        # last = 6 words, prev = 30 words (>2×6=12) → True.
+        # last = 6 words, prev = 35 words (>5×6=30) → True.
         last = "a " * 6
-        prev = "word " * 30
+        prev = "word " * 35
         messages = [_assistant_msg(prev), _assistant_msg(last)]
         assert ChildReportsService._is_likely_truncated_report(messages) is True
 
     def test_no_earlier_wc_floor_triggers_on_ratio(self):
         """Spec: no ``earlier_wc`` floor — a 15-word earlier message triggers when ratio met."""
-        # last = 1 word, prev = 15 words (>2×1=2) → True.
+        # last = 1 word, prev = 15 words (>5×1=5) → True.
         last = "a"
         prev = "word " * 15
         messages = [_assistant_msg(prev), _assistant_msg(last)]
         assert ChildReportsService._is_likely_truncated_report(messages) is True
 
     def test_governor_style_short_vs_long_triggers(self):
-        """Realistic case: short sign-off (~10 words) after substantive report (~50 words)."""
+        """Realistic case (2026-08-11): short sign-off (~10 words) after substantive report (~55 words).
+
+        Boundary case is 50 words (10×5=50, not > → False). The prod
+        incident that prompted factor-5 was 36-word final after 143-word
+        prior (ratio 4× → False). 55-word prior represents a substantive
+        report that genuinely warrants repair.
+        """
         last = "word " * 10   # 10 words — concise sign-off
-        prev = "word " * 50   # 50 words — substantive report
+        prev = "word " * 55   # 55 words — substantive report
         messages = [_assistant_msg(prev), _assistant_msg(last)]
-        # 50 > 2×10=20 → True
+        # 55 > 5×10=50 → True
         assert ChildReportsService._is_likely_truncated_report(messages) is True
+
+    def test_governor_36_word_prod_incident_does_not_trigger(self):
+        """Regression (2026-08-11): 36-word final after 143-word prior (ratio 4×) → False.
+
+        This was the prod incident that caused the original fix — a
+        governor's intentional 36-word final message was being repaired
+        because the prior turn was 143 words (ratio ~4× at factor 2).
+        With factor 5 default, 143 is NOT > 5×36=180 → no repair.
+        """
+        last = "word " * 36   # 36 words — intentional concise final
+        prev = "word " * 143  # 143 words — prior turn
+        messages = [_assistant_msg(prev), _assistant_msg(last)]
+        # 143 > 5×36=180 → False (so no repair)
+        assert ChildReportsService._is_likely_truncated_report(messages) is False
 
     def test_single_message_returns_false(self):
         """Single-message list → returns False (no earlier to compare)."""
@@ -442,8 +473,8 @@ class TestGetLastAssistantMessageRaw:
     @pytest.mark.asyncio
     async def test_truncated_llm_timeout_falls_back_to_combine(self):
         """Last message truncated → LLM times out → combines messages."""
-        # Spec (2026-08-08): no earlier_wc floor — substantive earlier
-        # messages trigger repair purely on the 2× ratio.
+        # Spec (2026-08-11): no earlier_wc floor — substantive earlier
+        # messages trigger repair purely on the 5× ratio.
         earlier_a = "alpha content " + "extra padding word " * 20  # ~25 words
         earlier_b = "beta content " + "extra padding word " * 20   # ~25 words
         messages = [
@@ -468,8 +499,8 @@ class TestGetLastAssistantMessageRaw:
     @pytest.mark.asyncio
     async def test_truncated_llm_exception_falls_back_to_combine(self):
         """Last message truncated → LLM raises → combines messages."""
-        # Spec (2026-08-08): no earlier_wc floor — substantive earlier
-        # messages trigger repair purely on the 2× ratio.
+        # Spec (2026-08-11): no earlier_wc floor — substantive earlier
+        # messages trigger repair purely on the 5× ratio.
         earlier_a = "alpha content " + "extra padding word " * 20  # ~25 words
         earlier_b = "beta content " + "extra padding word " * 20   # ~25 words
         messages = [
@@ -605,6 +636,227 @@ class TestGetLastAssistantMessageRaw:
 
         result = await service._get_last_assistant_message_raw("test-instance-id")
         assert result is None
+
+    # ------------------------------------------------------------------
+    # 2026-08-11: skip_repair + agent_id exclusion guards
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_skip_repair_true_returns_raw_without_llm(self):
+        """skip_repair=True on a truncated-shaped message → returns raw last_content, LLM NOT called.
+
+        Mirrors the interim ``_emit_in_progress`` path which must NOT
+        trigger repair even on an interim turn (the double-repair bug):
+        only the terminal completion path runs repair.
+        """
+        messages = [
+            _assistant_msg(_LONG_1),  # 50 words
+            _assistant_msg(_LONG_2),  # 40 words
+            _assistant_msg(_SHORT),    # 1 word — looks truncated
+        ]
+        service = _make_service()
+
+        mock_llm_class = _make_llm_mock()
+        with (
+            patch("daemon.services.child_reports.get_instance_messages", new=AsyncMock(return_value=messages)),
+            patch("daemon.services.child_reports.ThinkingChatOpenAI", mock_llm_class),
+        ):
+            result = await service._get_last_assistant_message_raw(
+                "test-instance-id", skip_repair=True
+            )
+
+        # Even though the heuristic would trigger, the skip flag returns raw content.
+        assert result == "done"
+        mock_llm_class.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_skip_repair_false_default_triggers_repair(self):
+        """skip_repair=False (default) on truncated-shaped message → triggers repair, LLM IS called.
+
+        Mirrors the terminal completion path which runs repair as before.
+        """
+        messages = [
+            _assistant_msg(_LONG_1),
+            _assistant_msg(_LONG_2),
+            _assistant_msg(_SHORT),
+        ]
+        service = _make_service()
+
+        mock_llm_class = _make_llm_mock("Repaired terminal content.")
+        with (
+            patch("daemon.services.child_reports.get_instance_messages", new=AsyncMock(return_value=messages)),
+            patch("daemon.services.child_reports.ThinkingChatOpenAI", mock_llm_class),
+        ):
+            # Default skip_repair (False) — repair runs.
+            result = await service._get_last_assistant_message_raw("test-instance-id")
+
+        assert result == "Repaired terminal content."
+        mock_llm_class.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_wanderer_agent_id_excluded_skips_repair(self):
+        """agent_id="wanderer" (in repair_excluded_agents) → returns raw last_content, LLM NOT called.
+
+        Exploration agents produce short, intentionally-concise reports.
+        Repairing them wastes LLM time and corrupts the report with
+        hallucinated content.
+        """
+        messages = [
+            _assistant_msg(_LONG_1),
+            _assistant_msg(_LONG_2),
+            _assistant_msg(_SHORT),
+        ]
+        service = _make_service()
+
+        mock_llm_class = _make_llm_mock()
+        with (
+            patch("daemon.services.child_reports.get_instance_messages", new=AsyncMock(return_value=messages)),
+            patch("daemon.services.child_reports.ThinkingChatOpenAI", mock_llm_class),
+        ):
+            result = await service._get_last_assistant_message_raw(
+                "test-instance-id", agent_id="wanderer"
+            )
+
+        assert result == "done"
+        mock_llm_class.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_explorer_agent_id_excluded_skips_repair(self):
+        """agent_id="explorer" (in repair_excluded_agents) → returns raw last_content, LLM NOT called."""
+        messages = [
+            _assistant_msg(_LONG_1),
+            _assistant_msg(_LONG_2),
+            _assistant_msg(_SHORT),
+        ]
+        service = _make_service()
+
+        mock_llm_class = _make_llm_mock()
+        with (
+            patch("daemon.services.child_reports.get_instance_messages", new=AsyncMock(return_value=messages)),
+            patch("daemon.services.child_reports.ThinkingChatOpenAI", mock_llm_class),
+        ):
+            result = await service._get_last_assistant_message_raw(
+                "test-instance-id", agent_id="explorer"
+            )
+
+        assert result == "done"
+        mock_llm_class.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_non_excluded_agent_id_still_triggers_repair(self):
+        """agent_id="developer" (NOT in repair_excluded_agents) → repair runs (LLM called)."""
+        messages = [
+            _assistant_msg(_LONG_1),
+            _assistant_msg(_LONG_2),
+            _assistant_msg(_SHORT),
+        ]
+        service = _make_service()
+
+        mock_llm_class = _make_llm_mock("Developer repaired content.")
+        with (
+            patch("daemon.services.child_reports.get_instance_messages", new=AsyncMock(return_value=messages)),
+            patch("daemon.services.child_reports.ThinkingChatOpenAI", mock_llm_class),
+        ):
+            result = await service._get_last_assistant_message_raw(
+                "test-instance-id", agent_id="developer"
+            )
+
+        assert result == "Developer repaired content."
+        mock_llm_class.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_agent_id_none_skips_exclusion_check(self):
+        """agent_id=None → exclusion check is bypassed, repair runs as default."""
+        messages = [
+            _assistant_msg(_LONG_1),
+            _assistant_msg(_LONG_2),
+            _assistant_msg(_SHORT),
+        ]
+        service = _make_service()
+
+        mock_llm_class = _make_llm_mock("Repaired content.")
+        with (
+            patch("daemon.services.child_reports.get_instance_messages", new=AsyncMock(return_value=messages)),
+            patch("daemon.services.child_reports.ThinkingChatOpenAI", mock_llm_class),
+        ):
+            # No agent_id passed → repair runs (cannot match exclusion).
+            result = await service._get_last_assistant_message_raw("test-instance-id")
+
+        assert result == "Repaired content."
+        mock_llm_class.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_skip_repair_takes_precedence_over_agent_id(self):
+        """skip_repair=True short-circuits before agent_id check (either way raw is returned)."""
+        messages = [
+            _assistant_msg(_LONG_1),
+            _assistant_msg(_LONG_2),
+            _assistant_msg(_SHORT),
+        ]
+        service = _make_service()
+
+        mock_llm_class = _make_llm_mock()
+        with (
+            patch("daemon.services.child_reports.get_instance_messages", new=AsyncMock(return_value=messages)),
+            patch("daemon.services.child_reports.ThinkingChatOpenAI", mock_llm_class),
+        ):
+            # Non-excluded agent_id — but skip_repair=True still returns raw.
+            result = await service._get_last_assistant_message_raw(
+                "test-instance-id", skip_repair=True, agent_id="developer"
+            )
+
+        assert result == "done"
+        mock_llm_class.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_custom_excluded_agents_via_config(self):
+        """Custom repair_excluded_agents set via config → that agent is excluded too."""
+        messages = [
+            _assistant_msg(_LONG_1),
+            _assistant_msg(_LONG_2),
+            _assistant_msg(_SHORT),
+        ]
+        service = _make_service(
+            report_repair=ReportRepairConfig(repair_excluded_agents={"custom_agent"})
+        )
+
+        mock_llm_class = _make_llm_mock()
+        with (
+            patch("daemon.services.child_reports.get_instance_messages", new=AsyncMock(return_value=messages)),
+            patch("daemon.services.child_reports.ThinkingChatOpenAI", mock_llm_class),
+        ):
+            result = await service._get_last_assistant_message_raw(
+                "test-instance-id", agent_id="custom_agent"
+            )
+
+        # custom_agent is in the custom exclusion set → no repair.
+        assert result == "done"
+        mock_llm_class.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_skip_repair_propagates_through_wrapped(self):
+        """``_get_last_assistant_message`` propagates skip_repair to the raw call."""
+        messages = [
+            _assistant_msg(_LONG_1),
+            _assistant_msg(_LONG_2),
+            _assistant_msg(_SHORT),
+        ]
+        service = _make_service()
+
+        mock_llm_class = _make_llm_mock()
+        with (
+            patch("daemon.services.child_reports.get_instance_messages", new=AsyncMock(return_value=messages)),
+            patch("daemon.services.child_reports.ThinkingChatOpenAI", mock_llm_class),
+        ):
+            wrapped = await service._get_last_assistant_message(
+                "test-instance-id", "developer", skip_repair=True
+            )
+
+        # skip_repair=True → raw call returns "done" without LLM.
+        assert wrapped is not None
+        assert "done" in wrapped
+        assert "below is the response:" in wrapped
+        mock_llm_class.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -936,8 +1188,8 @@ class TestEndToEndPersistence:
         """Truncated child + LLM fails → parent report contains combined content."""
         from daemon.config import Config
 
-        # Spec (2026-08-08): no earlier_wc floor — substantive earlier
-        # messages trigger repair purely on the 2× ratio.
+        # Spec (2026-08-11): no earlier_wc floor — substantive earlier
+        # messages trigger repair purely on the 5× ratio.
         long_1 = "alpha detailed findings report " + "padding word " * 20  # ~25 words
         long_2 = "beta implementation details report " + "padding word " * 20  # ~25 words
         short_signoff = "ok"
@@ -976,7 +1228,7 @@ class TestEndToEndPersistence:
             )
 
         # Raw is the combined content (LLM failed → fallback).
-        # Spec (2026-08-08): no earlier_wc floor — the 2× ratio alone
+        # Spec (2026-08-11): no earlier_wc floor — the 5× ratio alone
         # is enough to trigger repair.
         assert raw is not None
         assert raw != short_signoff
@@ -995,12 +1247,22 @@ class TestEndToEndPersistence:
 
 
 class TestConfigDefaults:
-    """Config default tests (ratio 2.0, timeout 30, lookback 5)."""
+    """Config default tests (ratio 5.0, timeout 30, lookback 5)."""
 
-    def test_size_ratio_threshold_default_is_2(self):
-        """Spec: default size_ratio_threshold is 2.0 (was 3.0 under W5)."""
+    def test_size_ratio_threshold_default_is_5(self):
+        """Spec (2026-08-11): default size_ratio_threshold is 5.0 (was 2.0 prior)."""
         cfg = ReportRepairConfig()
-        assert cfg.size_ratio_threshold == 2.0
+        assert cfg.size_ratio_threshold == 5.0
+
+    def test_repair_excluded_agents_default(self):
+        """Spec (2026-08-11): default excludes ``{"wanderer", "explorer"}``."""
+        cfg = ReportRepairConfig()
+        assert cfg.repair_excluded_agents == {"wanderer", "explorer"}
+
+    def test_repair_excluded_agents_overridable(self):
+        """Repair-excluded set can be overridden via constructor."""
+        cfg = ReportRepairConfig(repair_excluded_agents={"custom_agent"})
+        assert cfg.repair_excluded_agents == {"custom_agent"}
 
     def test_timeout_default_is_30(self):
         """W2: default timeout_seconds is 30 (was 120)."""

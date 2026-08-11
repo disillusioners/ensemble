@@ -1011,44 +1011,82 @@ Provide a concise summary:"""
 
         return completion_event, parent_event
 
-    async def _get_last_assistant_message(self, instance_id: str, agent_id: str) -> str | None:
+    async def _get_last_assistant_message(
+        self,
+        instance_id: str,
+        agent_id: str,
+        *,
+        skip_repair: bool = False,
+    ) -> str | None:
         """Get the last assistant message from instance history.
-        
+
         This is the default/simple approach for completion reports - just
         pass the agent's last response to the parent.
-        
+
         Args:
             instance_id: The instance ID to get message from.
-            agent_id: The agent ID (e.g., "developer", "leader").
-            
+            agent_id: The agent ID (e.g., "developer", "leader"). Also
+                drives the exclusion check in the raw call: when
+                ``agent_id`` is in ``report_repair.repair_excluded_agents``
+                (default: ``{"wanderer", "explorer"}``), repair is
+                skipped.
+            skip_repair: When True, propagate to the raw call so the
+                truncation check + LLM repair + combine fallback are
+                all skipped. Used by interim paths (e.g.,
+                ``_emit_in_progress``) that can fire on a non-terminal
+                turn and must not double-repair alongside the terminal
+                completion path.
+
         Returns:
             Formatted string with instance info and last message.
         """
         # Get the report prefix
         prefix = self._get_instance_report_prefix(instance_id, agent_id)
-        
-        raw_content = await self._get_last_assistant_message_raw(instance_id)
-        
+
+        raw_content = await self._get_last_assistant_message_raw(
+            instance_id,
+            skip_repair=skip_repair,
+            agent_id=agent_id,
+        )
+
         if raw_content:
             return f"{prefix}, below is the response:\n{raw_content}"
         return None
 
     @staticmethod
-    def _is_likely_truncated_report(messages: list[dict], *, ratio: float = 2.0) -> bool:
+    def _is_likely_truncated_report(messages: list[dict], *, ratio: float = 5.0) -> bool:
         """Check if the last assistant message is likely truncated.
 
         Returns True if any of the penultimate messages (n-1 or n-2) has a
         word count > ``ratio`` × the last message's word count, indicating
         the real content may be in an earlier message.
 
-        The factor-2 ratio (default) is an accuracy guard to prevent
-        false positives on legitimately-concise reports.
+        The strict greater-than comparison (``earlier_wc > ratio * last_wc``)
+        means the boundary (``wc(n-1) == ratio * wc(n)``) does NOT trigger
+        — only messages that are strictly larger than the multiple count.
+        This is the same as ``wc(n-1) > 5 * wc(n)`` for the default.
+
+        The factor-5 ratio (default) is an accuracy guard to prevent
+        false positives on legitimately-concise reports. Was 2.0 prior
+        to 2026-08-11; a prod incident (36-word final message after
+        143-word prior turn → ratio 4×) triggered repair on an
+        intentional short report, wasting ~19s of LLM time AND
+        firing twice on the same message (once on interim in-progress
+        turn, once on terminal completion). Factor 5 absorbs the
+        intentional case while still catching mid-sentence truncation
+        (e.g., a 5-word fragment after a 100-word turn → 20× ratio).
+
+        Slicing: ``messages[-3:-1]`` yields the 3rd-from-last and
+        2nd-from-last messages (n-2 and n-1 when the list has at
+        least 3 messages). For a 2-element list, ``[-3:-1]`` yields
+        just the first element (n-1), which is the correct
+        comparison — there is no n-2 to inspect.
 
         Args:
             messages: List of message dicts (already filtered to real
                 assistant messages — no synthetic/context_kind). Must be
                 in chronological order.
-            ratio: Size ratio threshold (default 2.0).
+            ratio: Size ratio threshold (default 5.0).
 
         Returns:
             True if the report looks truncated and should trigger repair.
@@ -1192,7 +1230,13 @@ Provide a concise summary:"""
             combined = combined[:MAX_COMBINED_REPORT_CHARS] + "…[truncated]…"
         return combined
 
-    async def _get_last_assistant_message_raw(self, instance_id: str) -> str | None:
+    async def _get_last_assistant_message_raw(
+        self,
+        instance_id: str,
+        *,
+        skip_repair: bool = False,
+        agent_id: str | None = None,
+    ) -> str | None:
         """Get the raw last assistant message content (no formatting).
 
         Returns just the actual agent response content, matching the format
@@ -1205,6 +1249,21 @@ Provide a concise summary:"""
 
         Args:
             instance_id: The instance ID to get message from.
+            skip_repair: When True, return the raw last content immediately
+                after fetching — skip the truncation check, LLM repair,
+                and combine fallback entirely. Used by the interim
+                ``_emit_in_progress`` path (which can fire on a
+                non-terminal turn) to prevent the double-repair bug
+                where interim notification + terminal completion both
+                trigger repair on the same message.
+            agent_id: Optional agent ID for the exclusion check. When
+                the agent_id is in ``report_repair.repair_excluded_agents``
+                (default: ``{"wanderer", "explorer"}``), repair is
+                skipped — exploration agents naturally produce short,
+                legitimately-concise reports and repairing them wastes
+                LLM time and corrupts the report with hallucinated
+                content. ``None`` means "unknown agent" — repair runs
+                (safe default).
 
         Returns:
             The raw assistant message content, or None if not found.
@@ -1230,12 +1289,36 @@ Provide a concise summary:"""
         last = assistant_msgs[-1]
         last_content = (last.get("content", "") or "").strip()
 
+        # --- Repair skip flag (interim path) ---
+        # 2026-08-11: PRIMARY fix for the double-repair bug. The interim
+        # in-progress notification path can fire on a non-terminal turn
+        # AND the terminal completion path can fire on the same message
+        # — both were running repair, wasting ~19s of LLM time and
+        # discarding both outputs. Interim callers MUST pass
+        # ``skip_repair=True`` so repair runs only on the terminal path.
+        if skip_repair:
+            return last_content
+
         # --- Repair disable short-circuit ---
         # S4: Config has ``default_factory`` for ``report_repair`` — always
         # present, no need for ``getattr`` defensive guard.
         report_repair_cfg = self._config.report_repair
         if not report_repair_cfg.enabled:
             return last_content  # happy path, skip repair entirely
+
+        # --- Agent exclusion check ---
+        # 2026-08-11: exploration agents (wanderer, explorer) produce
+        # short, intentionally-concise reports. Repairing them wastes
+        # LLM time and can corrupt the report with hallucinated content.
+        # The exclusion set is configured via REPORT_REPAIR_EXCLUDED_AGENTS;
+        # default is {"wanderer", "explorer"}.
+        excluded = report_repair_cfg.repair_excluded_agents
+        if agent_id is not None and agent_id in excluded:
+            logger.info(
+                f"[ReportRepairer] Skipping repair for instance {instance_id[:8]}... "
+                f"agent_id={agent_id!r} (in repair_excluded_agents)"
+            )
+            return last_content
 
         # --- Truncation check ---
         # ``lookback_messages`` controls the slice passed to both the

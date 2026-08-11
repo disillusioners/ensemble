@@ -685,13 +685,33 @@ class ReportRepairConfig(BaseSettings):
     its earlier messages, the LLM repair node re-composed the report from
     the last 3 assistant messages. If the LLM fails or times out, the 3
     messages are combined into one report.
+
+    The factor-5 size ratio threshold (default) is an accuracy guard
+    to prevent false positives on legitimately-concise reports —
+    an earlier message must be at least 5× the last message's word
+    count before repair is triggered. Was 2.0 prior to 2026-08-11; a
+    prod incident (governor 36-word final message after a 143-word
+    prior turn) showed that factor 2 fired on intentional short
+    reports. Factor 5 absorbs intentional concision while still
+    catching mid-sentence truncation.
     """
 
     model_config = SettingsConfigDict(env_prefix="REPORT_REPAIR_")
 
     enabled: bool = Field(default=True, description="Enable unhappy-path report repair")
-    # S2: validators + factor-2 accuracy guard for concise reports.
-    size_ratio_threshold: float = Field(default=2.0, ge=1.0, description="Word-count ratio (earlier/last) that triggers repair")
+    # Factor-5 accuracy guard (was 2.0 pre-2026-08-11). Intentional short
+    # reports (e.g., governor's 36-word final message after a 143-word
+    # prior turn) are NOT repaired — only mid-sentence truncation is.
+    size_ratio_threshold: float = Field(default=5.0, ge=1.0, description="Word-count ratio (earlier/last) that triggers repair")
+    # Agent IDs whose reports are NEVER repaired. Exploration agents
+    # (wanderer, explorer) naturally produce short, legitimately-concise
+    # reports — repairing them wastes LLM time and corrupts the report
+    # with hallucinated content. Override via REPORT_REPAIR_EXCLUDED_AGENTS
+    # env var (comma-separated) to add or remove IDs.
+    repair_excluded_agents: set[str] = Field(
+        default_factory=lambda: {"wanderer", "explorer"},
+        description="Agent IDs whose reports are never repaired (exploration agents naturally produce short reports)",
+    )
     # W2: tighter default timeout (30s instead of 120s) — repair should be
     # fast; on timeout we fall back to combine. 120s is excessive given the
     # prompt is bounded to recent messages.

@@ -948,6 +948,12 @@ def create_job_tools(
         if not needs_result and not needs_error:
             return record
         try:
+            # 2026-08-11: terminal enrichment path (caller already
+            # determined the record is terminal or errored — see
+            # ``needs_result`` / ``needs_error`` gates above). Leave
+            # defaults (skip_repair=False, agent_id=None) so repair
+            # runs; the exclusion check is bypassed because this
+            # helper only has ``record.instance_id`` available.
             fetched = await manager._get_last_assistant_message_raw(
                 record.instance_id
             )
