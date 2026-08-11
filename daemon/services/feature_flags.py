@@ -37,3 +37,15 @@ See increment3-plan.md §6b.
 When this flag is **removed** (Phase 4c), the wrappers are the sole
 codepath and the C7 ``_status_write_guard`` is permanently enabled.
 """
+
+TASK_RECONCILIATION_BEST_EFFORT: bool = True
+"""Phase 1 task-job reconciliation kill-switch.
+
+When ``True`` (default), the post-commit Step 4 in
+``_finalize_job_db_sync`` reconciles orphaned Tasks (paused/pending)
+to ``cancelled`` when their linked JobItem is already terminal.
+
+Set to ``False`` to disable reconciliation if unexpected behavior is
+observed post-deploy. Steps 1-3 (JobItem UPDATE, Instance UPDATE,
+lock release) run regardless of this flag.
+"""

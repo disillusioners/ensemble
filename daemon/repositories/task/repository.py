@@ -2327,6 +2327,55 @@ class TaskRepository:
             }).fetchone()
             return bool(row[0]) or bool(pending_row[0])
 
+    def reconcile_terminal_task(self, work_id: str) -> int:
+        """Reconcile an orphaned Task to terminal status when its linked
+        JobItem is already terminal. Best-effort — caller wraps in try/except.
+
+        Self-contained: the WHERE clause verifies the JobItem is terminal
+        (admission_state IN 'done','dead' AND deleted_at IS NULL) before
+        cancelling the Task. The call site does NOT need to pre-check.
+
+        Guards against touching running tasks or already-terminal tasks:
+        - Running tasks are excluded by the `status IN ('paused','pending')` guard.
+        - Already-terminal tasks (completed/failed/cancelled) need no transition.
+        - The AND EXISTS subquery ensures we only reconcile when the linked
+          JobItem is truly terminal — prevents accidental cancellation of
+          Tasks whose JobItem is still active/queued (pause-first crash recovery).
+
+        Returns the count of updated rows (0 or 1 in normal operation).
+        """
+        now = datetime.now(timezone.utc)
+        with self.engine.begin() as conn:
+            result = conn.execute(text("""
+                UPDATE task SET status = :status_cancelled,
+                                cancel_requested = :cancel_requested_true,
+                                cancel_requested_at = :now,
+                                completed_at = :now
+                WHERE work_id = :work_id
+                  AND status IN (:status_paused, :status_pending)
+                  AND EXISTS (SELECT 1 FROM job_queue_items ji
+                              WHERE ji.job_id = task.work_id
+                                AND ji.admission_state IN (:qi_done, :qi_dead)
+                                AND ji.deleted_at IS NULL)
+            """), {
+                "status_cancelled": TaskStatus.CANCELLED.value,
+                "cancel_requested_true": True,
+                "now": now,
+                "work_id": work_id,
+                "status_paused": TaskStatus.PAUSED.value,
+                "status_pending": TaskStatus.PENDING.value,
+                "qi_done": AdmissionState.DONE.value,
+                "qi_dead": AdmissionState.DEAD.value,
+            })
+            count = result.rowcount
+        if count > 0:
+            logger.info(
+                "task.reconciled_to_cancelled",
+                work_id=work_id,
+                count=count,
+            )
+        return count
+
     def count_by_status(self) -> dict[str, int]:
         """Get count of tasks by status.
 

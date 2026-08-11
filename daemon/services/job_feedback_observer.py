@@ -3468,6 +3468,35 @@ class JobFeedbackObserver:
                         e,
                     )
 
+        # ─── Step 4 (POST-COMMIT): Reconcile orphaned Task to terminal.
+        # Opens its own engine.begin() via the repo method — does NOT
+        # share the caller's WriteGuardSession. Best-effort: failure is
+        # logged, not fatal. Mirrors the post-commit reconcile_turn_mirror
+        # pattern above. Per phase1-plan.md.
+        #
+        # Note: this method (_finalize_job_db_sync) is SYNC and runs
+        # inside asyncio.to_thread from the async caller, so we call
+        # reconcile_terminal_task directly (no asyncio.to_thread wrapper).
+        if job_id is not None:
+            from daemon.services.feature_flags import (
+                TASK_RECONCILIATION_BEST_EFFORT,
+            )
+            if TASK_RECONCILIATION_BEST_EFFORT:
+                task_repo = getattr(
+                    self._instance_manager, "_task_repo", None
+                )
+                if task_repo is not None and hasattr(
+                    task_repo, "reconcile_terminal_task"
+                ):
+                    try:
+                        task_repo.reconcile_terminal_task(job_id)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "Step 4 reconcile_terminal_task failed "
+                            "for work_id=%s: %s",
+                            job_id, exc,
+                        )
+
         logger.info(
             f"Observer: finalized job {job_id[:8] if job_id else 'no_job'}... status={terminal_status} "
             f"for instance {instance_id[:8]}... (released {released} lock(s), "
