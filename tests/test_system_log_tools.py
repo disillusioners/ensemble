@@ -1109,6 +1109,172 @@ class TestSystemLogEdgeCases:
         assert "no matches" in result.lower()
         assert "scanned 3 lines" in result
 
+    # ─────────────────────────────────────────────────────────────────
+    # Scan-direction edge cases (tail-first deque strategy).
+    # The deque(maxlen=MAX_LINES_SCAN) auto-evicts the OLDEST entries
+    # so the retained window is the LAST N lines. The three tests
+    # below pin down three sharp edges of that strategy:
+    #   (A) before-context is silently dropped when the match sits at
+    #       the FIRST retained line (the rolling context_buffer is
+    #       empty at that point — only after-context survives).
+    #   (B) match exactly at line (total - cap) is OUTSIDE the window
+    #       and is therefore NOT found; match at (total - cap + 1) is
+    #       the FIRST line inside the window and IS found.
+    #   (C) an empty file is a 0-line scan that hits the no-matches
+    #       branch and reports "scanned 0 lines" verbatim.
+    # ─────────────────────────────────────────────────────────────────
+
+    def test_search_before_context_evicted_at_deque_boundary(
+        self, log_dir, monkeypatch,
+    ):
+        """EDGE (A): before-context is silently dropped when match is at
+        the FIRST retained deque entry.
+
+        With MAX_LINES_SCAN=10 and a 20-line file, the deque retains the
+        LAST 10 lines (positions 11..20). A match at line 11 sits at the
+        very first position of the retained window — the rolling
+        ``context_buffer`` is empty at that point, so no before-context
+        is emitted. After-context (lines 12, 13) IS present because the
+        after-context walk proceeds forward into the retained window.
+        """
+        from daemon.tools import system_log_tools
+        from daemon.tools.system_log_tools import create_system_log_tools
+
+        monkeypatch.setattr(system_log_tools, "MAX_LINES_SCAN", 10)
+
+        # 20 lines. Match at line 11 = first retained deque entry
+        # (lines 1-10 evicted by deque maxlen=10). context=2 asks for
+        # 2 before + 2 after, but the context_buffer is empty when
+        # line 11 is processed so before-context is empty.
+        lines = []
+        for i in range(1, 21):
+            if i == 11:
+                lines.append("BOUNDARY_MATCH_AT_LINE_11\n")
+            else:
+                lines.append(f"filler line {i}\n")
+        (log_dir / "ensemble.log").write_text("".join(lines), encoding="utf-8")
+
+        tools = create_system_log_tools(_make_manager(), "test-instance-id")
+        search_tool = _tool_by_name(tools, "ens_system_log_search")
+        result = search_tool.invoke(
+            {
+                "pattern": "BOUNDARY_MATCH_AT_LINE_11",
+                "filename": "ensemble.log",
+                "context": 2,
+            },
+        )
+
+        # Match IS found at line 11 with the >>> marker.
+        assert "    11 >>> BOUNDARY_MATCH_AT_LINE_11" in result, (
+            f"Expected match marker at line 11; got: {result!r}"
+        )
+        # After-context lines 12, 13 ARE present (format: line_no + 5
+        # spaces + content).
+        assert "    12 " in result
+        assert "filler line 12" in result
+        assert "    13 " in result
+        assert "filler line 13" in result
+        # Before-context lines 9, 10 are NOT present — they were
+        # evicted from the deque before the rolling context_buffer
+        # had a chance to populate. Silent drop is by design (the
+        # alternative would require a head buffer, which would
+        # double the memory footprint).
+        assert "filler line 9" not in result
+        assert "filler line 10" not in result
+        # Scanned count reflects the cap.
+        assert "scanned 10 lines" in result
+
+    @pytest.mark.parametrize(
+        "match_line, should_find",
+        [
+            (10, False),  # outside_window: at line total-cap, evicted
+            (11, True),   # first_inside_window: at line total-cap+1, retained
+        ],
+        ids=["outside_window", "first_inside_window"],
+    )
+    def test_search_match_at_exact_cutoff_boundary(
+        self, log_dir, monkeypatch, match_line, should_find,
+    ):
+        """EDGE (B): match exactly at the deque cutoff — outside vs first-inside.
+
+        Parametrized over two cases at the sharp edge of the retained
+        window:
+          - ``outside_window`` (match_line == total - cap): the line
+            was the LAST entry pushed off the deque when it overflowed;
+            it is NOT in the recent_lines and is NOT found.
+          - ``first_inside_window`` (match_line == total - cap + 1):
+            the line is the FIRST entry kept after overflow; it IS
+            in the recent_lines and IS found.
+
+        The "no matches" message echoes the pattern name, so we use the
+        ``>>>`` marker (only emitted next to actual matches) to
+        distinguish a real match from the no-matches path.
+        """
+        from daemon.tools import system_log_tools
+        from daemon.tools.system_log_tools import create_system_log_tools
+
+        monkeypatch.setattr(system_log_tools, "MAX_LINES_SCAN", 10)
+
+        # 20 lines total. With cap=10 the deque retains positions
+        # 11..20. match_line=10 sits BEFORE the window (evicted);
+        # match_line=11 sits at the FIRST position of the window
+        # (retained).
+        lines = []
+        for i in range(1, 21):
+            if i == match_line:
+                lines.append(f"CUTOFF_MATCH_AT_LINE_{match_line}\n")
+            else:
+                lines.append(f"line {i}\n")
+        (log_dir / "ensemble.log").write_text("".join(lines), encoding="utf-8")
+
+        tools = create_system_log_tools(_make_manager(), "test-instance-id")
+        search_tool = _tool_by_name(tools, "ens_system_log_search")
+        result = search_tool.invoke(
+            {
+                "pattern": f"CUTOFF_MATCH_AT_LINE_{match_line}",
+                "filename": "ensemble.log",
+            },
+        )
+
+        if should_find:
+            # first_inside_window: match IS found (>>> marker present).
+            assert ">>>" in result, (
+                f"Expected match marker for first_inside_window; got: {result!r}"
+            )
+            assert f"CUTOFF_MATCH_AT_LINE_{match_line}" in result
+            assert "no matches" not in result.lower()
+        else:
+            # outside_window: no match marker (>>>). The "no matches"
+            # message echoes the pattern name, but the >>> marker is
+            # only emitted next to actual matches.
+            assert ">>>" not in result, (
+                f"Expected no match marker for outside_window; got: {result!r}"
+            )
+            assert "no matches" in result.lower()
+        # Boundary correctness proof: scanned count == cap, regardless
+        # of whether the match was inside or outside the window.
+        assert "scanned 10 lines" in result
+
+    def test_search_empty_file(self, log_dir):
+        """EDGE (C): empty log file returns 'no matches' with 'scanned 0 lines'.
+
+        A 0-byte file produces an empty deque, so the for-loop body
+        never executes. ``scanned = len(recent_lines) == 0`` and
+        ``results`` stays empty, falling through to the
+        "No matches found" branch with the literal "scanned 0 lines"
+        fragment in the message.
+        """
+        from daemon.tools.system_log_tools import create_system_log_tools
+
+        (log_dir / "ensemble.log").write_text("", encoding="utf-8")
+        tools = create_system_log_tools(_make_manager(), "test-instance-id")
+        search_tool = _tool_by_name(tools, "ens_system_log_search")
+        result = search_tool.invoke(
+            {"pattern": "anything", "filename": "ensemble.log"},
+        )
+        assert "no matches" in result.lower()
+        assert "scanned 0 lines" in result
+
     def test_list_with_many_files_byte_cap(self, log_dir):
         """List with many files exceeds byte cap and reports truncation."""
         from daemon.tools.system_log_tools import create_system_log_tools
