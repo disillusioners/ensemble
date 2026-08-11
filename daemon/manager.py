@@ -4533,6 +4533,30 @@ class InstanceManager:
                 "AND ji.deleted_at IS NULL"
                 ")"
             ),
+            # ── Reconcile stuck tasks with terminal JobItems (2026-08-11) ──
+            # SQLite counterpart: 20260811_000001_reconcile_stuck_tasks_with_terminal_jobitems.sql.
+            # Cancels Task rows stuck in 'paused'/'pending' when their linked
+            # JobItem (task.work_id = job_queue_items.job_id) has already
+            # transitioned to a terminal admission_state ('done'/'dead'). The
+            # Task is never finalized by the JobItem terminal transition, so
+            # it blocks the defer/background idle-gate indefinitely. The UPDATE
+            # uses the portable ``WHERE EXISTS`` subquery form (ANSI, works on
+            # both drivers) and is idempotent: the ``status IN ('paused',
+            # 'pending')`` guard means a second run (or a re-run after the
+            # Phase 1 reconciliation code lands) matches 0 rows. The statement
+            # is byte-identical to the SQLite .sql migration so both paths
+            # converge on the same final state.
+            (
+                "UPDATE task "
+                "SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP "
+                "WHERE status IN ('paused', 'pending') "
+                "AND EXISTS ("
+                "    SELECT 1 FROM job_queue_items ji "
+                "    WHERE ji.job_id = task.work_id "
+                "      AND ji.admission_state IN ('done', 'dead') "
+                "      AND ji.deleted_at IS NULL"
+                ");"
+            ),
         ]
         with self._engine.begin() as conn:
             for stmt in statements:
