@@ -618,6 +618,52 @@ class TestSystemLogSearchInvocation:
         # The match scan is bounded by the cap.
         assert "scanned 20 lines" in result
 
+    def test_search_directory_path_returns_graceful_error(self, tools, log_dir):
+        """ens_system_log_search on a directory path returns an error string.
+
+        Regression: the scan-direction fix (commit f28de084) moved the
+        ``_open_log_file`` call OUT of the ``except OSError`` guard. The
+        remaining narrow ``except FileNotFoundError`` then leaked
+        ``IsADirectoryError`` (raised when the resolved path is a
+        directory, not a regular file) uncaught out of the tool. This
+        test creates a real subdirectory inside the log dir, asks the
+        search tool to treat it as a filename, and asserts a graceful
+        error string is returned — NOT a Python traceback / uncaught
+        ``IsADirectoryError`` propagating through ``tool.invoke``.
+        """
+        # Build a subdirectory inside the log directory (passes the
+        # _validate_filename path-confinement check) and ask the search
+        # tool to "search" it as if it were a log file.
+        subdir = log_dir / "subdir-not-a-log"
+        subdir.mkdir()
+        search_tool = _tool_by_name(tools, "ens_system_log_search")
+        result = search_tool.invoke(
+            {"pattern": "anything", "filename": "subdir-not-a-log"},
+        )
+        # Friendly error message — matches the sibling tail tool's pattern.
+        # Must NOT be a raw Python traceback or a swallowed IsADirectoryError
+        # exception leaking through the tool boundary.
+        assert isinstance(result, str)
+        assert "not a file" in result.lower() or "not found" in result.lower() or "error" in result.lower()
+        # Defensive sanity: a leaked traceback would contain these markers.
+        assert "Traceback" not in result
+        assert "IsADirectoryError" not in result
+
+    def test_search_missing_file_returns_friendly_error(self, tools, log_dir):
+        """Missing file still returns the friendly 'not found' message.
+
+        Regression-guard: ensures the merged single-try did not regress
+        the existing ``FileNotFoundError`` branch — the friendly message
+        must still be returned (not a leaked OSError / traceback).
+        """
+        search_tool = _tool_by_name(tools, "ens_system_log_search")
+        result = search_tool.invoke(
+            {"pattern": "anything", "filename": "does-not-exist.log"},
+        )
+        assert isinstance(result, str)
+        assert "not found" in result.lower()
+        assert "Traceback" not in result
+
 
 class TestSystemLogTailInvocation:
     """Invocation tests for ens_system_log_tail."""

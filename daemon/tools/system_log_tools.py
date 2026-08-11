@@ -502,20 +502,25 @@ def create_system_log_tools(
         #   * ``>>>`` match marker + 6-wide line numbers
         #   * trailing-block flush logic
         #   * OSError handling
+        # Both _open_log_file and the file iteration live inside a single
+        # try so ALL OSError subclasses (FileNotFoundError, IsADirectoryError,
+        # PermissionError, ELOOP from O_NOFOLLOW on a swapped symlink, etc.)
+        # are converted into friendly error strings. The previous split-try
+        # arrangement let IsADirectoryError / PermissionError propagate
+        # uncaught out of the tool (regression vs. tail).
         log_dir = _resolve_log_dir()
-        try:
-            f = _open_log_file(filepath, log_dir)
-        except FileNotFoundError:
-            return f"Log file not found: {filename}"
-
         recent_lines = deque(maxlen=MAX_LINES_SCAN)
         try:
-            with f:
+            with _open_log_file(filepath, log_dir) as f:
                 for i, raw_line in enumerate(f):
                     # (0-indexed absolute file line number, raw text).
                     # Store raw here so the count pass is cheap; truncation
                     # + redaction happen during the scan pass below.
                     recent_lines.append((i, raw_line.rstrip("\n")))
+        except FileNotFoundError:
+            return f"Log file not found: {filename}"
+        except IsADirectoryError:
+            return f"Not a file: {filename}"
         except OSError as e:
             return f"Error reading file: {e}"
 
