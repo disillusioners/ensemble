@@ -4543,12 +4543,20 @@ class InstanceManager:
             # uses the portable ``WHERE EXISTS`` subquery form (ANSI, works on
             # both drivers) and is idempotent: the ``status IN ('paused',
             # 'pending')`` guard means a second run (or a re-run after the
-            # Phase 1 reconciliation code lands) matches 0 rows. The statement
-            # is byte-identical to the SQLite .sql migration so both paths
+            # Phase 1 reconciliation code lands) matches 0 rows. The SET
+            # clause mirrors the runtime reconciliation
+            # (``reconcile_terminal_task`` /
+            # ``batch_reconcile_bad_state_tasks``) which cancels with
+            # ``cancel_requested=1`` and stamps
+            # ``cancel_requested_at``/``completed_at``. The statement is
+            # byte-identical to the SQLite .sql migration so both paths
             # converge on the same final state.
             (
                 "UPDATE task "
-                "SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP "
+                "SET status = 'cancelled', "
+                "    cancel_requested = 1, "
+                "    cancel_requested_at = CURRENT_TIMESTAMP, "
+                "    completed_at = CURRENT_TIMESTAMP "
                 "WHERE status IN ('paused', 'pending') "
                 "AND EXISTS ("
                 "    SELECT 1 FROM job_queue_items ji "

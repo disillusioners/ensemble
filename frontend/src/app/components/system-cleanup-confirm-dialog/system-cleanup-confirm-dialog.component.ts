@@ -33,6 +33,15 @@ export interface SystemCleanupConfirmData {
   selector: 'app-system-cleanup-confirm-dialog',
   standalone: true,
   imports: [MatDialogModule, MatButtonModule],
+  styles: [
+    `
+      .bad-state-warning {
+        color: #f43f5e;
+        margin-top: 12px;
+        font-weight: 500;
+      }
+    `,
+  ],
   template: `
     <h2 mat-dialog-title>System Cleanup</h2>
     <div mat-dialog-content>
@@ -47,13 +56,6 @@ export interface SystemCleanupConfirmData {
       <button mat-button (click)="dialogRef.close(false)">Cancel</button>
       <button mat-raised-button color="warn" (click)="dialogRef.close(true)">Cleanup</button>
     </div>
-    <style>
-      .bad-state-warning {
-        color: #f43f5e;
-        margin-top: 12px;
-        font-weight: 500;
-      }
-    </style>
   `,
 })
 export class SystemCleanupConfirmDialogComponent {

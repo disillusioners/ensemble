@@ -83,7 +83,8 @@ def _read_migration_up_sql() -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 #
 # Mirrors the ``task`` columns the migration's WHERE/UPDATE clause
-# references (``id``, ``work_id``, ``status``, ``updated_at``) and the
+# references (``id``, ``work_id``, ``status``,
+# ``cancel_requested``, ``cancel_requested_at``, ``completed_at``) and the
 # ``job_queue_items`` columns referenced by the EXISTS subquery
 # (``job_id``, ``admission_state``, ``deleted_at``). We do NOT bring
 # in the full SQLModel ``Task`` and ``JobQueueItem`` models because
@@ -95,7 +96,9 @@ CREATE TABLE IF NOT EXISTS task (
     id TEXT PRIMARY KEY,
     work_id TEXT NOT NULL,
     status TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    cancel_requested INTEGER NOT NULL DEFAULT 0,
+    cancel_requested_at TEXT,
+    completed_at TEXT
 )
 """
 
@@ -157,10 +160,10 @@ def _insert_task(
     with engine.begin() as conn:
         conn.execute(
             text(
-                "INSERT INTO task (id, work_id, status, updated_at) "
-                "VALUES (:id, :work_id, :status, :updated_at)"
+                "INSERT INTO task (id, work_id, status) "
+                "VALUES (:id, :work_id, :status)"
             ),
-            {"id": task_id, "work_id": work_id, "status": status, "updated_at": "2026-01-01 00:00:00"},
+            {"id": task_id, "work_id": work_id, "status": status},
         )
 
 

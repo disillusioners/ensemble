@@ -27,7 +27,9 @@
 -- Reconcile tasks whose linked JobItem is already terminal.
 UPDATE task
 SET status = 'cancelled',
-    updated_at = CURRENT_TIMESTAMP
+    cancel_requested = 1,
+    cancel_requested_at = CURRENT_TIMESTAMP,
+    completed_at = CURRENT_TIMESTAMP
 WHERE status IN ('paused', 'pending')
   AND EXISTS (
       SELECT 1 FROM job_queue_items ji
