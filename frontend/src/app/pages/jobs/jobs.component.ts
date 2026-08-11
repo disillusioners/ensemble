@@ -2,6 +2,7 @@ import { Component, signal, computed, inject, OnInit, OnDestroy, effect } from '
 import { Router } from '@angular/router';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
+import { HttpClient } from '@angular/common/http';
 import { MatButtonModule } from '@angular/material/button';
 import { MatButtonToggleModule } from '@angular/material/button-toggle';
 import { MatIconModule } from '@angular/material/icon';
@@ -12,7 +13,7 @@ import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatDialog, MatDialogModule } from '@angular/material/dialog';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatCheckboxModule } from '@angular/material/checkbox';
-import { Subscription, switchMap, of, catchError, tap } from 'rxjs';
+import { Subscription, switchMap, of, catchError, tap, firstValueFrom } from 'rxjs';
 import { JobService } from '../../services/job.service';
 import { JobSseService } from '../../services/job-sse.service';
 import { ProjectService } from '../../services/project.service';
@@ -82,6 +83,14 @@ export class JobsComponent implements OnInit, OnDestroy {
   private readonly workService = inject(WorkService);
   private readonly dialog = inject(MatDialog);
   private readonly snackBar = inject(MatSnackBar);
+  /**
+   * Phase 4 — used for the lightweight ``GET /api/jobs/cleanup/preflight``
+   * preflight call that drives the red-glow + tooltip on the System
+   * Cleanup button. We inject ``HttpClient`` directly because
+   * ``ApiService`` exposes a fixed menu of endpoints and does not
+   * currently include a generic GET helper for one-off read payloads.
+   */
+  private readonly http = inject(HttpClient);
 
   private readonly STORAGE_KEY = 'job-page-selected-project';
   private readonly VIEW_MODE_KEY = 'job-page-view-mode';
@@ -113,6 +122,12 @@ export class JobsComponent implements OnInit, OnDestroy {
   // in-flight. Used to disable the System Cleanup button via
   // [disabled] in the template.
   readonly cleanupInProgress = signal(false);
+
+  // Phase 4 — system-wide bad-state count surfaced from
+  // ``GET /api/jobs/cleanup/preflight``. Drives the red-glow pulse
+  // animation and contextual tooltip on the System Cleanup button.
+  readonly badStateCount = signal<number>(0);
+  readonly hasBadState = computed(() => this.badStateCount() > 0);
 
   // Deleted jobs filter
   readonly showDeleted = signal(false);
@@ -376,6 +391,9 @@ export class JobsComponent implements OnInit, OnDestroy {
     // switching to the All Work view later is instantaneous. The fetch
     // is harmless if the user never toggles the view mode.
     this.loadWorks();
+    // Phase 4 — fetch the bad-state preflight so the red-glow + tooltip
+    // appear on first paint when the system has stale rows.
+    this.refreshBadStateCount();
   }
 
   private tryRestoreProject(): void {
@@ -464,6 +482,29 @@ export class JobsComponent implements OnInit, OnDestroy {
         this.loading.set(false);
       }
     });
+  }
+
+  /**
+   * Phase 4 — fetch the system-wide bad-state count from
+   * ``GET /api/jobs/cleanup/preflight``. The endpoint is intentionally
+   * NOT gated by ``is_write_paused`` (per reviewer correction W1) so
+   * the badge keeps surfacing stale rows during database migrations
+   * when the cleanup itself is blocked.
+   *
+   * Errors are intentionally swallowed — the red-glow + tooltip are
+   * UX-only and a transient preflight failure should not surface as
+   * a snackbar to the operator.
+   */
+  private refreshBadStateCount(): void {
+    firstValueFrom(
+      this.http.get<{ bad_state_count: number }>('/api/jobs/cleanup/preflight')
+    )
+      .then((result) => {
+        this.badStateCount.set(result.bad_state_count);
+      })
+      .catch(() => {
+        // Fail silently — badge is UX-only.
+      });
   }
 
   /**
@@ -601,6 +642,9 @@ export class JobsComponent implements OnInit, OnDestroy {
     } else {
       this.loadJobs();
     }
+    // Phase 4 — refresh the preflight count alongside the main list so
+    // the red-glow + tooltip reflect post-refresh reality.
+    this.refreshBadStateCount();
   }
 
   /**
@@ -947,6 +991,11 @@ export class JobsComponent implements OnInit, OnDestroy {
     const dialogRef = this.dialog.open(SystemCleanupConfirmDialogComponent, {
       width: '420px',
       panelClass: 'dark-modal-panel',
+      // Phase 4 — surface the bad-state preflight count in the
+      // confirmation dialog so the operator sees a warning before
+      // committing to a full system cleanup. The dialog component
+      // is responsible for the conditional rendering.
+      data: { bad_state_count: this.badStateCount() },
     });
 
     dialogRef.afterClosed().subscribe((confirmed: boolean | undefined) => {
@@ -958,13 +1007,22 @@ export class JobsComponent implements OnInit, OnDestroy {
         next: (result) => {
           this.cleanupInProgress.set(false);
           const orphaned = result.orphaned_reaped ?? 0;
-          const orphanSuffix = orphaned > 0 ? `, reaped ${orphaned} orphan active` : '';
+          const reconciled = result.reconciled_bad_state ?? 0;
+          const parts: string[] = [
+            `Cancelled ${result.cancelled_queued} queued`,
+            `${result.cancelled_active} active`,
+          ];
+          if (orphaned > 0) parts.push(`${orphaned} orphaned`);
+          if (reconciled > 0) parts.push(`${reconciled} bad-state`);
           this.snackBar.open(
-            `Cancelled ${result.cancelled_queued} queued, ${result.cancelled_active} active${orphanSuffix} jobs`,
+            `${parts.join(', ')} jobs`,
             'Close',
             { duration: 3000, panelClass: 'success-snackbar' }
           );
           this.onRefresh();
+          // Phase 4 — refresh the preflight after a successful cleanup
+          // so the red-glow + tooltip clear once the rows are gone.
+          this.refreshBadStateCount();
         },
         error: (err) => {
           console.error('Failed to cleanup jobs:', err);

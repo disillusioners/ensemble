@@ -74,7 +74,10 @@
         (click)="onSystemCleanup()"
         [disabled]="cleanupInProgress()"
         class="cleanup-btn"
-        matTooltip="Cancel ALL pending and running jobs across ALL projects">
+        [class.has-bad-state]="hasBadState()"
+        [matTooltip]="hasBadState()
+          ? '⚠ ' + badStateCount() + ' bad-state items detected. Click to fix.'
+          : 'Cancel ALL pending and running jobs across ALL projects'">
         <mat-icon [class.spinning]="cleanupInProgress()">cleaning_services</mat-icon>
         System Cleanup
       </button>

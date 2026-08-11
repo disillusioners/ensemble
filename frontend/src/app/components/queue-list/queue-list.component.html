@@ -145,6 +145,12 @@
                   {{ queue.pending_jobs }} pending
                 </span>
               }
+              @if (queue.bad_state_jobs > 0) {
+                <span class="count-badge bad-state"
+                      matTooltip="Tasks whose linked JobItem is already terminal. Click System Cleanup to fix.">
+                  {{ queue.bad_state_jobs }} bad-state
+                </span>
+              }
             </div>
           </div>
         }

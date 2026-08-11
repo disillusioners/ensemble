@@ -470,6 +470,31 @@
   animation: spin 1s linear infinite;
 }
 
+// Phase 4 — red-glow pulse for the System Cleanup button when any
+// bad-state tasks exist anywhere in the system. Uses literal
+// ``#f43f5e`` because this file does not declare an ``$accent-rose``
+// SCSS variable (it relies on CSS custom properties instead).
+@keyframes pulse-glow {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(244, 63, 94, 0.7);
+  }
+  50% {
+    box-shadow: 0 0 0 8px rgba(244, 63, 94, 0);
+  }
+}
+
+.cleanup-btn.has-bad-state {
+  animation: pulse-glow 1.5s ease-in-out infinite;
+  border-color: #f43f5e !important;
+  color: #f43f5e !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cleanup-btn.has-bad-state {
+    animation: none;
+  }
+}
+
 // Button Styles
 .refresh-btn,
 .create-btn {

@@ -16,6 +16,13 @@ export interface JobQueue {
   updated_at: string;
   active_jobs: number;
   pending_jobs: number;
+  /**
+   * Mirrors the field on the canonical ``JobQueue`` model — see
+   * ``../models/job-queue.model.ts``. Re-declared here because the
+   * test helpers intentionally avoid a runtime import of the
+   * production model to keep mocks deterministic.
+   */
+  bad_state_jobs: number;
 }
 
 export function createMockQueue(overrides?: Partial<JobQueue>): JobQueue {
@@ -32,6 +39,7 @@ export function createMockQueue(overrides?: Partial<JobQueue>): JobQueue {
     updated_at: new Date().toISOString(),
     active_jobs: 2,
     pending_jobs: 5,
+    bad_state_jobs: 0,
     ...overrides,
   };
 }
@@ -43,6 +51,9 @@ export function createMockQueueList(count: number): JobQueue[] {
       queue_name: `Queue ${i}`,
       active_jobs: i % 3,
       pending_jobs: i * 2,
+      // Vary bad_state_jobs so tests can assert on the per-queue
+      // badge without each test having to override the field.
+      bad_state_jobs: i % 4 === 0 ? 0 : i,
     })
   );
 }

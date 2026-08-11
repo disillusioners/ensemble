@@ -18,6 +18,15 @@ export interface JobCleanupResult {
   cancelled_queued: number;
   cancelled_active: number;
   orphaned_reaped?: number;
+  /**
+   * Phase 4 — number of bad-state tasks (paused/pending whose
+   * linked JobItem is already terminal) reconciled to CANCELLED by
+   * the cleanup pass. Excluded from ``total_processed`` for the
+   * same reason ``orphaned_reaped`` is — see backend
+   * ``JobQueueService.cleanup_non_terminal_jobs`` for the
+   * ``validate_total_processed`` invariant.
+   */
+  reconciled_bad_state?: number;
   total_processed: number;
 }
 

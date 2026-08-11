@@ -15,6 +15,13 @@ export interface JobQueue {
   updated_at: string;
   active_jobs: number;
   pending_jobs: number;
+  /**
+   * Number of bad-state tasks (paused/pending) whose linked JobItem
+   * is already terminal (done/dead). Surfaced as a red badge in the
+   * queue list and consumed by the System Cleanup button to drive
+   * the animated red-glow + tooltip.
+   */
+  bad_state_jobs: number;
 }
 
 export interface JobQueueCreateRequest {

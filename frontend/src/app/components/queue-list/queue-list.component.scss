@@ -337,6 +337,11 @@ $accent-rose: #f43f5e;
       background: rgba($accent-amber, 0.15);
       color: $accent-amber;
     }
+
+    &.bad-state {
+      background: rgba($accent-rose, 0.15);
+      color: $accent-rose;
+    }
   }
 }
 

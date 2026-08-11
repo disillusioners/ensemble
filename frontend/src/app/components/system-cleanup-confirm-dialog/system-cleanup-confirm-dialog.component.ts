@@ -5,12 +5,14 @@ import { MatButtonModule } from '@angular/material/button';
 /**
  * Dialog data payload for the System Cleanup confirmation.
  *
- * Currently empty — the dialog renders a fixed copy that does not
- * depend on any caller-supplied counts. Kept as an exported
- * interface so future enhancements (e.g. preflight counts from the
- * backend) can extend the shape without breaking call sites.
+ * Phase 4 — the dialog now accepts the preflight bad-state count so
+ * the operator sees a contextual warning before committing to a
+ * full system cleanup. ``bad_state_count`` is optional for backward
+ * compatibility with any existing call site that opens the dialog
+ * without a payload.
  */
 export interface SystemCleanupConfirmData {
+  bad_state_count?: number;
   // Reserved for future use (e.g. pending counts passed in by caller).
 }
 
@@ -35,11 +37,23 @@ export interface SystemCleanupConfirmData {
     <h2 mat-dialog-title>System Cleanup</h2>
     <div mat-dialog-content>
       <p>This will cancel ALL pending and running jobs across ALL projects. This action cannot be undone. Continue?</p>
+      @if (data.bad_state_count && data.bad_state_count > 0) {
+        <p class="bad-state-warning">
+          ⚠ {{ data.bad_state_count }} bad-state tasks will be reconciled.
+        </p>
+      }
     </div>
     <div mat-dialog-actions align="end">
       <button mat-button (click)="dialogRef.close(false)">Cancel</button>
       <button mat-raised-button color="warn" (click)="dialogRef.close(true)">Cleanup</button>
     </div>
+    <style>
+      .bad-state-warning {
+        color: #f43f5e;
+        margin-top: 12px;
+        font-weight: 500;
+      }
+    </style>
   `,
 })
 export class SystemCleanupConfirmDialogComponent {

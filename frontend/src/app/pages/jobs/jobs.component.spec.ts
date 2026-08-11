@@ -4,6 +4,7 @@ import { Job, JobStatus, JobSource } from '../../models/job.model';
 import { Project } from '../../models/project.model';
 import { createMockJob, createMockJobList } from '../../testing/job-test-helpers';
 import { ConfirmDialogComponent } from '../../components/confirm-dialog/confirm-dialog.component';
+import { SystemCleanupConfirmDialogComponent } from '../../components/system-cleanup-confirm-dialog/system-cleanup-confirm-dialog.component';
 
 // Storage key matching the component
 const STORAGE_KEY = 'job-page-selected-project';
@@ -127,7 +128,10 @@ const mockDialog = {
     this.nextResult = undefined;
   },
 
-  open(component: unknown, config?: { data?: unknown }): MockDialogRef {
+  open(
+    component: unknown,
+    config?: { data?: unknown; width?: string; panelClass?: string }
+  ): MockDialogRef {
     this.openCalls.push({ component, data: config?.data });
     return new MockDialogRef(this.nextResult);
   },
@@ -1569,6 +1573,321 @@ describe('JobsComponent Logic', () => {
       // root-scoped list — the very thing this fix was meant to
       // prevent.
       expect(filtersArg.root_only).toBe(false);
+    });
+  });
+
+  /**
+   * Phase 4 — bad-state visibility + enhanced cleanup tests.
+   *
+   * Covers:
+   *   * ``hasBadState`` computed signal transitions with
+   *     ``badStateCount``.
+   *   * The data payload passed to the System Cleanup confirm
+   *     dialog (``bad_state_count``) so the dialog can render its
+   *     warning copy.
+   *   * The snackbar text format after a successful cleanup
+   *     includes ``reconciled_bad_state`` only when it is non-zero,
+   *     alongside the existing ``cancelled_queued`` /
+   *     ``cancelled_active`` / ``orphaned_reaped`` counters.
+   *
+   * Uses a dedicated test class (``BadStateAwareJobsComponent``)
+   * instead of the existing ``MockJobsComponent`` because the
+   * latter's ``onSystemCleanup`` does not exercise the dialog or
+   * snackbar paths — those are the very surfaces Phase 4 changed.
+   */
+  describe('Bad-state visibility (Phase 4)', () => {
+    /**
+     * Captures every ``MatSnackBar.open()`` call so the test can
+     * assert on the formatted message string. Mirrors the slice of
+     * the real ``MatSnackBar`` API the component uses.
+     */
+    const mockSnackBar = {
+      openCalls: [] as Array<{
+        message: string;
+        action: string;
+        config?: { duration?: number; panelClass?: string };
+      }>,
+      reset(): void {
+        this.openCalls = [];
+      },
+      open(
+        message: string,
+        action: string,
+        config?: { duration?: number; panelClass?: string }
+      ): { afterDismissed: () => Observable<void> } {
+        this.openCalls.push({ message, action, config });
+        return {
+          afterDismissed: () => new Observable<void>(() => {}),
+        };
+      },
+    };
+
+    /**
+     * Mirrors the real ``JobsComponent.onSystemCleanup`` body
+     * closely enough to exercise the dialog + snackbar code paths
+     * that Phase 4 changed. Avoids the TestBed setup that would
+     * otherwise be required to spin up the full component.
+     */
+    class BadStateAwareJobsComponent {
+      readonly filters = signal<{ project_id?: string }>({});
+      readonly cleanupInProgress = signal(false);
+      readonly badStateCount = signal<number>(0);
+      readonly hasBadState = computed(() => this.badStateCount() > 0);
+
+      constructor(private readonly jobService: {
+        cleanupAllJobs: jest.Mock;
+      }) {}
+
+      onSystemCleanup(): void {
+        if (this.cleanupInProgress()) {
+          return;
+        }
+
+        const dialogRef = mockDialog.open(SystemCleanupConfirmDialogComponent, {
+          width: '420px',
+          panelClass: 'dark-modal-panel',
+          data: { bad_state_count: this.badStateCount() },
+        });
+
+        dialogRef.afterClosed().subscribe((confirmed: boolean | undefined) => {
+          if (!confirmed) {
+            return;
+          }
+          this.cleanupInProgress.set(true);
+          this.jobService.cleanupAllJobs().subscribe({
+            next: (result: {
+              cancelled_queued: number;
+              cancelled_active: number;
+              orphaned_reaped?: number;
+              reconciled_bad_state?: number;
+            }) => {
+              this.cleanupInProgress.set(false);
+              const orphaned = result.orphaned_reaped ?? 0;
+              const reconciled = result.reconciled_bad_state ?? 0;
+              const parts: string[] = [
+                `Cancelled ${result.cancelled_queued} queued`,
+                `${result.cancelled_active} active`,
+              ];
+              if (orphaned > 0) parts.push(`${orphaned} orphaned`);
+              if (reconciled > 0) parts.push(`${reconciled} bad-state`);
+              mockSnackBar.open(
+                `${parts.join(', ')} jobs`,
+                'Close',
+                { duration: 3000, panelClass: 'success-snackbar' }
+              );
+            },
+            error: () => {
+              this.cleanupInProgress.set(false);
+            },
+          });
+        });
+      }
+    }
+
+    let component: BadStateAwareJobsComponent;
+    let cleanupService: { cleanupAllJobs: jest.Mock };
+
+    /**
+     * Build a minimal mock observable that captures the ``next`` and
+     * ``error`` callbacks supplied to ``subscribe`` so a test can
+     * drive the success path synchronously.
+     */
+    const buildCleanupMock = () => {
+      let nextFn: ((r: any) => void) | null = null;
+      let errorFn: ((e: any) => void) | null = null;
+      const obs: any = {
+        pipe: () => obs,
+        subscribe: (observer: any) => {
+          if (typeof observer === 'function') {
+            nextFn = observer;
+          } else {
+            nextFn = observer.next;
+            errorFn = observer.error;
+          }
+          return { unsubscribe: () => {} };
+        },
+      };
+      return {
+        obs,
+        invokeNext: (r: any) => nextFn && nextFn(r),
+        invokeError: (e: any) => errorFn && errorFn(e),
+      };
+    };
+
+    beforeEach(() => {
+      cleanupService = { cleanupAllJobs: jest.fn() };
+      component = new BadStateAwareJobsComponent(cleanupService);
+      component.filters.set({ project_id: 'project-123' });
+      mockDialog.reset();
+      mockDialog.nextResult = true;
+      mockSnackBar.reset();
+    });
+
+    describe('hasBadState computed', () => {
+      it('should be false when badStateCount is 0', () => {
+        component.badStateCount.set(0);
+        expect(component.hasBadState()).toBe(false);
+      });
+
+      it('should be true when badStateCount is greater than 0', () => {
+        component.badStateCount.set(1);
+        expect(component.hasBadState()).toBe(true);
+      });
+
+      it('should be true for large badStateCount values', () => {
+        component.badStateCount.set(42);
+        expect(component.hasBadState()).toBe(true);
+      });
+
+      it('should reactively update when badStateCount changes', () => {
+        component.badStateCount.set(0);
+        expect(component.hasBadState()).toBe(false);
+        component.badStateCount.set(3);
+        expect(component.hasBadState()).toBe(true);
+        component.badStateCount.set(0);
+        expect(component.hasBadState()).toBe(false);
+      });
+    });
+
+    describe('onSystemCleanup dialog data', () => {
+      it('should pass bad_state_count to the System Cleanup dialog', () => {
+        component.badStateCount.set(7);
+
+        component.onSystemCleanup();
+
+        expect(mockDialog.openCalls).toHaveLength(1);
+        const call = mockDialog.openCalls[0];
+        expect(call.component).toBe(SystemCleanupConfirmDialogComponent);
+        expect(call.data).toEqual({ bad_state_count: 7 });
+      });
+
+      it('should pass bad_state_count=0 when no bad-state rows exist', () => {
+        component.badStateCount.set(0);
+
+        component.onSystemCleanup();
+
+        expect(mockDialog.openCalls[0].data).toEqual({ bad_state_count: 0 });
+      });
+
+      it('should reflect the current badStateCount at the moment of click', () => {
+        component.badStateCount.set(2);
+        // Simulate: count changes between user opening the page and
+        // clicking the button (e.g. an SSE update bumped the count).
+        component.badStateCount.set(15);
+
+        component.onSystemCleanup();
+
+        // The dialog must reflect the value at click time, not at
+        // page load.
+        expect(mockDialog.openCalls[0].data).toEqual({ bad_state_count: 15 });
+      });
+    });
+
+    describe('onSystemCleanup snackbar text', () => {
+      it('should include reconciled_bad_state count when > 0', () => {
+        const { obs, invokeNext } = buildCleanupMock();
+        cleanupService.cleanupAllJobs.mockReturnValue(obs);
+
+        component.onSystemCleanup();
+        invokeNext({
+          cancelled_queued: 3,
+          cancelled_active: 1,
+          total_processed: 4,
+          reconciled_bad_state: 5,
+        });
+
+        expect(mockSnackBar.openCalls).toHaveLength(1);
+        expect(mockSnackBar.openCalls[0].message).toBe(
+          'Cancelled 3 queued, 1 active, 5 bad-state jobs'
+        );
+        expect(mockSnackBar.openCalls[0].config?.panelClass).toBe('success-snackbar');
+      });
+
+      it('should NOT mention bad-state when reconciled_bad_state is 0', () => {
+        const { obs, invokeNext } = buildCleanupMock();
+        cleanupService.cleanupAllJobs.mockReturnValue(obs);
+
+        component.onSystemCleanup();
+        invokeNext({
+          cancelled_queued: 2,
+          cancelled_active: 4,
+          total_processed: 6,
+          reconciled_bad_state: 0,
+        });
+
+        expect(mockSnackBar.openCalls[0].message).toBe(
+          'Cancelled 2 queued, 4 active jobs'
+        );
+        expect(mockSnackBar.openCalls[0].message).not.toContain('bad-state');
+      });
+
+      it('should NOT mention bad-state when reconciled_bad_state is undefined', () => {
+        // The backend makes ``reconciled_bad_state`` optional; the
+        // snackbar must not break or show "undefined" when the
+        // field is absent.
+        const { obs, invokeNext } = buildCleanupMock();
+        cleanupService.cleanupAllJobs.mockReturnValue(obs);
+
+        component.onSystemCleanup();
+        invokeNext({
+          cancelled_queued: 1,
+          cancelled_active: 0,
+          total_processed: 1,
+        });
+
+        expect(mockSnackBar.openCalls[0].message).toBe(
+          'Cancelled 1 queued, 0 active jobs'
+        );
+        expect(mockSnackBar.openCalls[0].message).not.toContain('bad-state');
+        expect(mockSnackBar.openCalls[0].message).not.toContain('undefined');
+      });
+
+      it('should include all three counts when orphaned AND bad-state are > 0', () => {
+        const { obs, invokeNext } = buildCleanupMock();
+        cleanupService.cleanupAllJobs.mockReturnValue(obs);
+
+        component.onSystemCleanup();
+        invokeNext({
+          cancelled_queued: 5,
+          cancelled_active: 2,
+          total_processed: 7,
+          orphaned_reaped: 3,
+          reconciled_bad_state: 4,
+        });
+
+        expect(mockSnackBar.openCalls[0].message).toBe(
+          'Cancelled 5 queued, 2 active, 3 orphaned, 4 bad-state jobs'
+        );
+      });
+
+      it('should include orphaned but not bad-state when only orphaned > 0', () => {
+        const { obs, invokeNext } = buildCleanupMock();
+        cleanupService.cleanupAllJobs.mockReturnValue(obs);
+
+        component.onSystemCleanup();
+        invokeNext({
+          cancelled_queued: 1,
+          cancelled_active: 2,
+          total_processed: 3,
+          orphaned_reaped: 1,
+        });
+
+        expect(mockSnackBar.openCalls[0].message).toBe(
+          'Cancelled 1 queued, 2 active, 1 orphaned jobs'
+        );
+      });
+
+      it('should not show a snackbar when the dialog is dismissed', () => {
+        mockDialog.nextResult = false;
+        const { obs } = buildCleanupMock();
+        cleanupService.cleanupAllJobs.mockReturnValue(obs);
+
+        component.onSystemCleanup();
+
+        // No cleanup request was made and no snackbar was opened.
+        expect(cleanupService.cleanupAllJobs).not.toHaveBeenCalled();
+        expect(mockSnackBar.openCalls).toHaveLength(0);
+      });
     });
   });
 });
