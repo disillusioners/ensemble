@@ -52,8 +52,19 @@ def _normalize_sql(sql: str) -> str:
     what this normalization preserves. This is the test that catches
     real drift (one path updated, the other forgotten) while tolerating
     benign formatting differences.
+
+    Boolean-literal tolerance: SQLite accepts ``= 1`` / ``= 0`` for a
+    BOOLEAN column while PostgreSQL requires ``= TRUE`` / ``= FALSE``.
+    The two mirrors are functionally identical, so we fold both forms
+    to a single canonical token ('true'/'false') before comparison.
     """
-    return re.sub(r"\s+", "", sql).strip().lower()
+    normalized = re.sub(r"\s+", "", sql).strip().lower()
+    # Fold SQLite integer booleans to the keyword form. Match '=1' / '=0'
+    # so we don't accidentally touch unrelated integer literals like
+    # version numbers or admission-state codes.
+    normalized = re.sub(r"=1\b", "=true", normalized)
+    normalized = re.sub(r"=0\b", "=false", normalized)
+    return normalized
 
 
 def _read_sql_up_section(sql_path: Path) -> str:
