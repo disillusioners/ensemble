@@ -32,7 +32,7 @@ import { FileTreeComponent } from '../../components/file-tree/file-tree.componen
 import { CodeViewerComponent } from '../../components/code-viewer/code-viewer.component';
 import { DiffViewerComponent } from '../../components/diff-viewer/diff-viewer.component';
 import { FileTabsComponent } from '../../components/file-tabs/file-tabs.component';
-import { VsCodeViewerComponent } from '../../components/vscode-viewer/vscode-viewer.component';
+import { VsCodeEditorCacheComponent } from '../../components/vscode-editor-cache/vscode-editor-cache.component';
 import {
   ConfirmDialogComponent,
   ConfirmDialogData,
@@ -73,7 +73,7 @@ import {
     CodeViewerComponent,
     DiffViewerComponent,
     FileTabsComponent,
-    VsCodeViewerComponent,
+    VsCodeEditorCacheComponent,
   ],
   template: `
     <div class="workspace-container">
@@ -196,10 +196,10 @@ import {
                   >
                     <mat-icon>visibility_off</mat-icon>
                   </button>
-                  <app-vscode-viewer
+                  <app-vscode-editor-cache
                     [projectId]="projectId"
                     [workdir]="validatedWorkdir()"
-                  ></app-vscode-viewer>
+                  ></app-vscode-editor-cache>
                 </div>
               }
             }
