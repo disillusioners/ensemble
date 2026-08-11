@@ -466,99 +466,144 @@ def create_system_log_tools(
         context_before = ctx
         context_after = ctx
 
-        # Streaming search — never read the whole file. Buffer context_before
-        # lines via deque; read ahead for context_after lines.
+        # === TAIL-FIRST SCAN STRATEGY ===
+        # Stream the file once into a bounded deque(maxlen=MAX_LINES_SCAN)
+        # of (zero-indexed line number, raw text) tuples. Because the deque
+        # auto-evicts the oldest entries when full, after a full file pass
+        # the deque holds the LAST MAX_LINES_SCAN lines (the recent end) —
+        # exactly what an agent searching its own debug logs wants, since
+        # recent context is the high-signal region.
+        #
+        # We then iterate the deque in forward (chronological) order
+        # applying the original match/context/level/limit/byte-cap logic
+        # unchanged. This sidesteps the correctness pitfalls of a true
+        # reverse-context scan (where context_before would need a head
+        # buffer instead of a tail buffer, and after-context lookahead
+        # would still have to know the file EOF).
+        #
+        # Memory bound: deque's maxlen enforces the cap; each entry's text
+        # is a single logical line — no full-file read_text(). Truncation
+        # and redaction are applied during scan (lazy, like the original).
+        #
+        # Line numbers remain ABSOLUTE: the (i, ...) tuple captures the
+        # 0-indexed position from enumerate(f) over the whole file, so
+        # ``line_no = i + 1`` reflects true file position even though we
+        # only iterate the recent slice.
+        #
+        # Behavior preserved vs. the original forward scan:
+        #   * regex compile + "Invalid regex pattern" error
+        #   * ``level`` case-insensitive substring filter (`` - LEVEL - ``)
+        #   * ``context`` clamped to [0, MAX_CONTEXT], non-int → friendly error
+        #   * ``limit`` capped at 50
+        #   * per-line _truncate_line BEFORE regex (caps line length)
+        #   * _redact_line AFTER truncation (so [REDACTED] survives)
+        #   * ``MAX_BYTES_RESPONSE`` truncation with the marker
+        #   * ``---`` separators between match blocks
+        #   * ``>>>`` match marker + 6-wide line numbers
+        #   * trailing-block flush logic
+        #   * OSError handling
+        # Both _open_log_file and the file iteration live inside a single
+        # try so ALL OSError subclasses (FileNotFoundError, IsADirectoryError,
+        # PermissionError, ELOOP from O_NOFOLLOW on a swapped symlink, etc.)
+        # are converted into friendly error strings. The previous split-try
+        # arrangement let IsADirectoryError / PermissionError propagate
+        # uncaught out of the tool (regression vs. tail).
+        log_dir = _resolve_log_dir()
+        recent_lines = deque(maxlen=MAX_LINES_SCAN)
+        try:
+            with _open_log_file(filepath, log_dir) as f:
+                for i, raw_line in enumerate(f):
+                    # (0-indexed absolute file line number, raw text).
+                    # Store raw here so the count pass is cheap; truncation
+                    # + redaction happen during the scan pass below.
+                    recent_lines.append((i, raw_line.rstrip("\n")))
+        except FileNotFoundError:
+            return f"Log file not found: {filename}"
+        except IsADirectoryError:
+            return f"Not a file: {filename}"
+        except OSError as e:
+            return f"Error reading file: {e}"
+
+        scanned = len(recent_lines)  # ≤ MAX_LINES_SCAN by deque maxlen
+
+        # Iterate the bounded deque in forward order. The match / context /
+        # limit / byte-cap body below is identical to the original forward
+        # streaming implementation, just driven by the deque instead of
+        # direct file iteration.
         results = []
         match_count = 0
         total_bytes = 0
-        scanned = 0
         context_buffer = deque(maxlen=context_before) if context_before else deque()
         after_remaining = 0  # how many post-context lines we still owe
         block = []  # current match block being assembled
 
-        try:
-            # dir_fd + O_NOFOLLOW — closes the TOCTOU window between
-            # validation and open(). A symlink swap or rotation race
-            # between _validate_filename and this open() would have
-            # pointed the read outside the log dir; now O_NOFOLLOW
-            # raises ELOOP and we return an error.
-            log_dir = _resolve_log_dir()
-            try:
-                f = _open_log_file(filepath, log_dir)
-            except FileNotFoundError:
-                return f"Log file not found: {filename}"
-            with f:
-                for i, raw_line in enumerate(f):
-                    if scanned >= MAX_LINES_SCAN:
+        for i, line in recent_lines:
+            line_no = i + 1  # absolute 1-indexed file line number
+            # Truncate BEFORE regex (caps line length to prevent
+            # catastrophic backtracking on pathological input).
+            line = _truncate_line(line)
+            # Redact AFTER truncation (so [REDACTED] doesn't get
+            # truncated in the middle of the placeholder).
+            line = _redact_line(line)
+
+            # Level filter (substring match on standard format)
+            passes_level = (
+                level_upper is None
+                or f" - {level_upper} - " in line
+            )
+
+            is_match = passes_level and bool(regex.search(line))
+
+            if is_match:
+                match_count += 1
+                # Finalize any prior block before starting a new match
+                if results and block:
+                    sep = "---"
+                    if total_bytes + len(sep) > MAX_BYTES_RESPONSE:
+                        results.append(f"... (truncated at {MAX_BYTES_RESPONSE // 1024} KB limit)")
                         break
-                    scanned += 1
-                    line = raw_line.rstrip("\n")
-                    # Truncate BEFORE regex (caps line length to prevent
-                    # catastrophic backtracking on pathological input).
-                    line = _truncate_line(line)
-                    # Redact AFTER truncation (so [REDACTED] doesn't get
-                    # truncated in the middle of the placeholder).
-                    line = _redact_line(line)
-
-                    # Level filter (substring match on standard format)
-                    passes_level = (
-                        level_upper is None
-                        or f" - {level_upper} - " in line
-                    )
-
-                    is_match = passes_level and bool(regex.search(line))
-
-                    if is_match:
-                        match_count += 1
-                        # Finalize any prior block before starting a new match
-                        if results and block:
-                            sep = "---"
-                            if total_bytes + len(sep) > MAX_BYTES_RESPONSE:
-                                results.append(f"... (truncated at {MAX_BYTES_RESPONSE // 1024} KB limit)")
-                                break
-                            results.append(sep)
-                            total_bytes += len(sep) + 1
-                            block_text = "\n".join(block)
-                            if total_bytes + len(block_text) > MAX_BYTES_RESPONSE:
-                                results.append(f"... (truncated at {MAX_BYTES_RESPONSE // 1024} KB limit)")
-                                break
-                            results.append(block_text)
-                            total_bytes += len(block_text) + 1
-                            block = []
-                        # Build new block: context_before (buffer) + match line
-                        block = []
-                        for ctx_no, ctx_line in context_buffer:
-                            block.append(f"{ctx_no + 1:>6}     {ctx_line}")
-                        block.append(f"{i + 1:>6} >>> {line}")
-                        after_remaining = context_after
-                    elif after_remaining > 0:
-                        block.append(f"{i + 1:>6}     {line}")
-                        after_remaining -= 1
-                    else:
-                        # Not a match, not in context — just update buffer
-                        if context_before:
-                            context_buffer.append((i, line))
-                        continue
-
-                    # Emit block when current match finishes after-context window
-                    if is_match or after_remaining == 0:
-                        block_text = "\n".join(block)
-                        if total_bytes + len(block_text) > MAX_BYTES_RESPONSE:
-                            results.append(f"... (truncated at {MAX_BYTES_RESPONSE // 1024} KB limit)")
-                            break
-                        results.append(block_text)
-                        total_bytes += len(block_text) + 1
-                        block = []  # reset for next iteration
-
-                    # Update rolling context buffer for next iteration
-                    if context_before:
-                        context_buffer.append((i, line))
-
-                    # Cap match count at limit (allow current match to render)
-                    if match_count >= limit and after_remaining == 0:
+                    results.append(sep)
+                    total_bytes += len(sep) + 1
+                    block_text = "\n".join(block)
+                    if total_bytes + len(block_text) > MAX_BYTES_RESPONSE:
+                        results.append(f"... (truncated at {MAX_BYTES_RESPONSE // 1024} KB limit)")
                         break
-        except OSError as e:
-            return f"Error reading file: {e}"
+                    results.append(block_text)
+                    total_bytes += len(block_text) + 1
+                    block = []
+                # Build new block: context_before (buffer) + match line
+                block = []
+                for ctx_no, ctx_line in context_buffer:
+                    # ctx_no is 0-indexed absolute file line number; +1 = 1-indexed
+                    block.append(f"{ctx_no + 1:>6}     {ctx_line}")
+                block.append(f"{line_no:>6} >>> {line}")
+                after_remaining = context_after
+            elif after_remaining > 0:
+                block.append(f"{line_no:>6}     {line}")
+                after_remaining -= 1
+            else:
+                # Not a match, not in context — just update buffer
+                if context_before:
+                    context_buffer.append((i, line))
+                continue
+
+            # Emit block when current match finishes after-context window
+            if is_match or after_remaining == 0:
+                block_text = "\n".join(block)
+                if total_bytes + len(block_text) > MAX_BYTES_RESPONSE:
+                    results.append(f"... (truncated at {MAX_BYTES_RESPONSE // 1024} KB limit)")
+                    break
+                results.append(block_text)
+                total_bytes += len(block_text) + 1
+                block = []  # reset for next iteration
+
+            # Update rolling context buffer for next iteration
+            if context_before:
+                context_buffer.append((i, line))
+
+            # Cap match count at limit (allow current match to render)
+            if match_count >= limit and after_remaining == 0:
+                break
 
         # Flush any trailing block if we hit limits mid-context
         if block and not (

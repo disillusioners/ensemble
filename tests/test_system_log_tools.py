@@ -408,6 +408,262 @@ class TestSystemLogSearchInvocation:
         # Message is non-empty.
         assert len(result) > 0
 
+    # ─────────────────────────────────────────────────────────────────
+    # Tail-first scan regression tests (fix ens_system_log_search scan
+    # direction). The bug: forward scan + MAX_LINES_SCAN=50_000 cap
+    # caused patterns in lines > 50,000 to never be found. The fix
+    # windows the LAST MAX_LINES_SCAN lines instead.
+    # ─────────────────────────────────────────────────────────────────
+
+    def test_search_finds_recent_matches_on_large_file(self, log_dir, monkeypatch):
+        """CORE REGRESSION: a match beyond MAX_LINES_SCAN from line 1 is now found.
+
+        This reproduces the exact PROD scenario:
+          - log file >> 50,000 lines
+          - relevant patterns appear AFTER line MAX_LINES_SCAN from line 1
+          - forward-scan code returned 'No matches' 100% of the time
+          - tail-first scan now finds them (they're inside the recent
+            MAX_LINES_SCAN window)
+        """
+        from daemon.tools import system_log_tools
+        from daemon.tools.system_log_tools import create_system_log_tools
+
+        # Lower the cap to a small value to keep the test fast.
+        monkeypatch.setattr(system_log_tools, "MAX_LINES_SCAN", 50)
+
+        # 100 lines total. Markers at file positions 60, 61, 62, 63 — well
+        # beyond the old forward-scan window of 1..50.
+        lines = []
+        for i in range(1, 101):
+            if 60 <= i <= 63:
+                lines.append(f"2026-08-08 08:00:{i:02d} - daemon.x - ERROR - MATCH_BEYOND_CAP_LINE_{i}\n")
+            else:
+                lines.append(f"2026-08-08 08:00:{i:02d} - daemon.x - INFO - filler line {i}\n")
+        (log_dir / "ensemble.log").write_text("".join(lines), encoding="utf-8")
+
+        tools = create_system_log_tools(_make_manager(), "test-instance-id")
+        search_tool = _tool_by_name(tools, "ens_system_log_search")
+        result = search_tool.invoke(
+            {"pattern": "MATCH_BEYOND_CAP_LINE", "filename": "ensemble.log"},
+        )
+
+        # Old forward-scan code: scanned 1..50, found no MATCH markers,
+        # returned 'No matches found for pattern ...'. Tail-first: deque
+        # retains lines 51..100, finds all four markers.
+        assert "no matches" not in result.lower(), (
+            f"Expected to find MATCH_BEYOND_CAP_LINE markers in recent region; "
+            f"old forward-scan bug would yield 'No matches'. Got: {result!r}"
+        )
+        assert "MATCH_BEYOND_CAP_LINE_60" in result
+        assert "MATCH_BEYOND_CAP_LINE_61" in result
+        assert "MATCH_BEYOND_CAP_LINE_62" in result
+        assert "MATCH_BEYOND_CAP_LINE_63" in result
+        # Cap held: scanned == 50.
+        assert "scanned 50 lines" in result
+
+    def test_search_finds_matches_beyond_old_forward_window(self, log_dir, monkeypatch):
+        """Strict bug repro: matches at positions > MAX_LINES_SCAN are found.
+
+        With the old forward-scan, scanning stopped at line MAX_LINES_SCAN
+        and any pattern past that point was unreachable. With the
+        tail-first scan, those patterns are inside the recent window.
+        """
+        from daemon.tools import system_log_tools
+        from daemon.tools.system_log_tools import create_system_log_tools
+
+        monkeypatch.setattr(system_log_tools, "MAX_LINES_SCAN", 50)
+
+        # 80 lines: 1-50 are filler, 51-79 are filler-with-no-match, 80 has marker.
+        lines = []
+        for i in range(1, 81):
+            if i == 80:
+                lines.append(f"2026-08-08 08:00:{i:02d} - daemon.x - ERROR - MATCH_LINE_AT_80\n")
+            else:
+                lines.append(f"2026-08-08 08:00:{i:02d} - daemon.x - INFO - nothing\n")
+        (log_dir / "ensemble.log").write_text("".join(lines), encoding="utf-8")
+
+        tools = create_system_log_tools(_make_manager(), "test-instance-id")
+        search_tool = _tool_by_name(tools, "ens_system_log_search")
+        result = search_tool.invoke(
+            {"pattern": "MATCH_LINE_AT_80", "filename": "ensemble.log"},
+        )
+
+        # Old forward-scan code scanned 1..50, found nothing. New code finds
+        # the marker at position 80 (within the recent-50 window).
+        assert "MATCH_LINE_AT_80" in result, (
+            f"Expected MATCH_LINE_AT_80; old forward-scan bug would yield 'No matches'. "
+            f"Got: {result!r}"
+        )
+        # Result is single match, so match_count == 1.
+        assert "1 match(es)" in result
+        # Header reports scanned == cap.
+        assert "scanned 50 lines" in result
+
+    def test_search_still_works_on_small_file(self, tools, log_dir):
+        """A match near the end of a small file is found (sanity check).
+
+        With file_size <= MAX_LINES_SCAN, tail-first scan reads the whole
+        file (deque never overflows) and behavior matches the old forward
+        scan.
+        """
+        f = log_dir / "ensemble.log"
+        f.write_text(
+            "\n".join([
+                "2026-08-08 08:00:00 - daemon.api - INFO - Server started",
+                "2026-08-08 08:00:01 - daemon.api - INFO - Heartbeat",
+                "2026-08-08 08:00:02 - daemon.api - ERROR - UNIQUE_SMALL_FILE_MATCH",
+            ]) + "\n",
+            encoding="utf-8",
+        )
+        search_tool = _tool_by_name(tools, "ens_system_log_search")
+        result = search_tool.invoke(
+            {"pattern": "UNIQUE_SMALL_FILE_MATCH", "filename": "ensemble.log"},
+        )
+        assert "UNIQUE_SMALL_FILE_MATCH" in result
+        # File has 3 lines, all scanned (file < cap).
+        assert "scanned 3 lines" in result
+
+    def test_search_scan_cap_still_respected(self, log_dir, monkeypatch):
+        """Cap holds from the recent end: a pattern BEFORE the cap is NOT found.
+
+        With MAX_LINES_SCAN=10 and a 20-line file, the tool scans only
+        the last 10 lines (positions 11..20). A marker placed at line 2
+        (which falls BEFORE the trailing window) must NOT produce a match
+        row — proving the cap still bounds work, just from the recent end.
+        """
+        from daemon.tools import system_log_tools
+        from daemon.tools.system_log_tools import create_system_log_tools
+
+        monkeypatch.setattr(system_log_tools, "MAX_LINES_SCAN", 10)
+
+        # The no-matches "found pattern 'X' ..." message echoes the pattern
+        # name, so we check for the match marker prefix ``>>>`` (only
+        # emitted next to actual matches) and a position-distinctive
+        # content fragment rather than the raw pattern string.
+        lines = []
+        for i in range(1, 21):
+            if i == 2:
+                lines.append("EARLY_LINE_TWO_DISTINCTIVE_CONTENT\n")
+            else:
+                lines.append(f"line {i}\n")
+        (log_dir / "ensemble.log").write_text("".join(lines), encoding="utf-8")
+
+        tools = create_system_log_tools(_make_manager(), "test-instance-id")
+        search_tool = _tool_by_name(tools, "ens_system_log_search")
+        result = search_tool.invoke(
+            {"pattern": "EARLY_LINE_TWO_DISTINCTIVE_CONTENT", "filename": "ensemble.log"},
+        )
+        # No match marker (>>> prefix) should appear — only the no-matches
+        # message echoes the pattern string.
+        assert ">>>" not in result, (
+            f"Expected no match marker; old forward-scan would have found line 2. "
+            f"Got: {result!r}"
+        )
+        # Header reports exactly the cap-sized scan, proving the bound holds.
+        assert "scanned 10 lines" in result
+        # No-matches path renders the familiar message.
+        assert "no matches" in result.lower()
+
+    def test_search_context_correct_under_reverse_scan(self, log_dir, monkeypatch):
+        """Context (before+after) and absolute line numbers stay correct.
+
+        Place a match in the recent region of a file larger than the cap,
+        ask for context=2, and assert:
+          (a) The pre-context lines (with their absolute line numbers) appear
+          (b) The post-context lines (with their absolute line numbers) appear
+          (c) The match line itself shows its true file line number (> cap)
+        """
+        from daemon.tools import system_log_tools
+        from daemon.tools.system_log_tools import create_system_log_tools
+
+        monkeypatch.setattr(system_log_tools, "MAX_LINES_SCAN", 20)
+
+        # 30 lines. Match at line 26; pre-context lines 24-25; post-context
+        # lines 27-28. cap=20 means tail-first retains the LAST 20 lines
+        # (positions 11..30), which includes 24-28.
+        lines = []
+        for i in range(1, 31):
+            if i == 26:
+                lines.append("CTX_MATCH_LINE_AT_26\n")
+            else:
+                lines.append(f"noise line {i}\n")
+        (log_dir / "ensemble.log").write_text("".join(lines), encoding="utf-8")
+
+        tools = create_system_log_tools(_make_manager(), "test-instance-id")
+        search_tool = _tool_by_name(tools, "ens_system_log_search")
+        result = search_tool.invoke(
+            {
+                "pattern": "CTX_MATCH_LINE_AT_26",
+                "filename": "ensemble.log",
+                "context": 2,
+            },
+        )
+
+        # Match found.
+        assert "CTX_MATCH_LINE_AT_26" in result
+        # Match line number (absolute, 1-indexed) is rendered correctly.
+        # Match marker format is ``{line_no:>6} >>> {line}``.
+        assert "    26 >>> CTX_MATCH_LINE_AT_26" in result
+        # Pre-context lines (24, 25) appear as context rows (6-wide number
+        # column, 5-space indent, then content).
+        assert "    24 " in result
+        assert "noise line 24" in result
+        assert "    25 " in result
+        assert "noise line 25" in result
+        # Post-context lines (27, 28) appear as context rows.
+        assert "    27 " in result
+        assert "noise line 27" in result
+        assert "    28 " in result
+        assert "noise line 28" in result
+        # The match scan is bounded by the cap.
+        assert "scanned 20 lines" in result
+
+    def test_search_directory_path_returns_graceful_error(self, tools, log_dir):
+        """ens_system_log_search on a directory path returns an error string.
+
+        Regression: the scan-direction fix (commit f28de084) moved the
+        ``_open_log_file`` call OUT of the ``except OSError`` guard. The
+        remaining narrow ``except FileNotFoundError`` then leaked
+        ``IsADirectoryError`` (raised when the resolved path is a
+        directory, not a regular file) uncaught out of the tool. This
+        test creates a real subdirectory inside the log dir, asks the
+        search tool to treat it as a filename, and asserts a graceful
+        error string is returned — NOT a Python traceback / uncaught
+        ``IsADirectoryError`` propagating through ``tool.invoke``.
+        """
+        # Build a subdirectory inside the log directory (passes the
+        # _validate_filename path-confinement check) and ask the search
+        # tool to "search" it as if it were a log file.
+        subdir = log_dir / "subdir-not-a-log"
+        subdir.mkdir()
+        search_tool = _tool_by_name(tools, "ens_system_log_search")
+        result = search_tool.invoke(
+            {"pattern": "anything", "filename": "subdir-not-a-log"},
+        )
+        # Friendly error message — matches the sibling tail tool's pattern.
+        # Must NOT be a raw Python traceback or a swallowed IsADirectoryError
+        # exception leaking through the tool boundary.
+        assert isinstance(result, str)
+        assert "not a file" in result.lower() or "not found" in result.lower() or "error" in result.lower()
+        # Defensive sanity: a leaked traceback would contain these markers.
+        assert "Traceback" not in result
+        assert "IsADirectoryError" not in result
+
+    def test_search_missing_file_returns_friendly_error(self, tools, log_dir):
+        """Missing file still returns the friendly 'not found' message.
+
+        Regression-guard: ensures the merged single-try did not regress
+        the existing ``FileNotFoundError`` branch — the friendly message
+        must still be returned (not a leaked OSError / traceback).
+        """
+        search_tool = _tool_by_name(tools, "ens_system_log_search")
+        result = search_tool.invoke(
+            {"pattern": "anything", "filename": "does-not-exist.log"},
+        )
+        assert isinstance(result, str)
+        assert "not found" in result.lower()
+        assert "Traceback" not in result
+
 
 class TestSystemLogTailInvocation:
     """Invocation tests for ens_system_log_tail."""
@@ -801,21 +1057,27 @@ class TestSystemLogEdgeCases:
             assert "not a file" in result.lower()
 
     def test_search_respects_max_lines_scan(self, log_dir, monkeypatch):
-        """Search stops at MAX_LINES_SCAN (50,000) to prevent DoS."""
+        """Search is bounded by MAX_LINES_SCAN (50,000) to prevent DoS.
+
+        Under the tail-first scan strategy, the cap bounds the LAST
+        ``MAX_LINES_SCAN`` lines (the recent end), not the first. A file
+        larger than the cap will be windowed to its trailing ``MAX_LINES_SCAN``
+        lines and the header reports the actual scanned count.
+        """
         from daemon.tools import system_log_tools
         from daemon.tools.system_log_tools import create_system_log_tools
 
         # Lower the cap to make the test fast and deterministic
         monkeypatch.setattr(system_log_tools, "MAX_LINES_SCAN", 10)
 
-        # Create 20 lines, only first 10 should be scanned
+        # Create 20 lines; with cap=10 the tool scans only the last 10.
         f = log_dir / "ensemble.log"
         f.write_text("\n".join(f"line {i}" for i in range(20)), encoding="utf-8")
 
         tools = create_system_log_tools(_make_manager(), "test-instance-id")
         search_tool = _tool_by_name(tools, "ens_system_log_search")
         result = search_tool.invoke({"pattern": "line", "filename": "ensemble.log"})
-        # Header should mention only 10 lines scanned
+        # Header should mention only 10 lines scanned (bounded by cap)
         assert "scanned 10 lines" in result
 
     def test_search_with_context_groups(self, tools, log_file):
@@ -846,6 +1108,172 @@ class TestSystemLogEdgeCases:
         result = search_tool.invoke({"pattern": "DOES_NOT_EXIST", "filename": "ensemble.log"})
         assert "no matches" in result.lower()
         assert "scanned 3 lines" in result
+
+    # ─────────────────────────────────────────────────────────────────
+    # Scan-direction edge cases (tail-first deque strategy).
+    # The deque(maxlen=MAX_LINES_SCAN) auto-evicts the OLDEST entries
+    # so the retained window is the LAST N lines. The three tests
+    # below pin down three sharp edges of that strategy:
+    #   (A) before-context is silently dropped when the match sits at
+    #       the FIRST retained line (the rolling context_buffer is
+    #       empty at that point — only after-context survives).
+    #   (B) match exactly at line (total - cap) is OUTSIDE the window
+    #       and is therefore NOT found; match at (total - cap + 1) is
+    #       the FIRST line inside the window and IS found.
+    #   (C) an empty file is a 0-line scan that hits the no-matches
+    #       branch and reports "scanned 0 lines" verbatim.
+    # ─────────────────────────────────────────────────────────────────
+
+    def test_search_before_context_evicted_at_deque_boundary(
+        self, log_dir, monkeypatch,
+    ):
+        """EDGE (A): before-context is silently dropped when match is at
+        the FIRST retained deque entry.
+
+        With MAX_LINES_SCAN=10 and a 20-line file, the deque retains the
+        LAST 10 lines (positions 11..20). A match at line 11 sits at the
+        very first position of the retained window — the rolling
+        ``context_buffer`` is empty at that point, so no before-context
+        is emitted. After-context (lines 12, 13) IS present because the
+        after-context walk proceeds forward into the retained window.
+        """
+        from daemon.tools import system_log_tools
+        from daemon.tools.system_log_tools import create_system_log_tools
+
+        monkeypatch.setattr(system_log_tools, "MAX_LINES_SCAN", 10)
+
+        # 20 lines. Match at line 11 = first retained deque entry
+        # (lines 1-10 evicted by deque maxlen=10). context=2 asks for
+        # 2 before + 2 after, but the context_buffer is empty when
+        # line 11 is processed so before-context is empty.
+        lines = []
+        for i in range(1, 21):
+            if i == 11:
+                lines.append("BOUNDARY_MATCH_AT_LINE_11\n")
+            else:
+                lines.append(f"filler line {i}\n")
+        (log_dir / "ensemble.log").write_text("".join(lines), encoding="utf-8")
+
+        tools = create_system_log_tools(_make_manager(), "test-instance-id")
+        search_tool = _tool_by_name(tools, "ens_system_log_search")
+        result = search_tool.invoke(
+            {
+                "pattern": "BOUNDARY_MATCH_AT_LINE_11",
+                "filename": "ensemble.log",
+                "context": 2,
+            },
+        )
+
+        # Match IS found at line 11 with the >>> marker.
+        assert "    11 >>> BOUNDARY_MATCH_AT_LINE_11" in result, (
+            f"Expected match marker at line 11; got: {result!r}"
+        )
+        # After-context lines 12, 13 ARE present (format: line_no + 5
+        # spaces + content).
+        assert "    12 " in result
+        assert "filler line 12" in result
+        assert "    13 " in result
+        assert "filler line 13" in result
+        # Before-context lines 9, 10 are NOT present — they were
+        # evicted from the deque before the rolling context_buffer
+        # had a chance to populate. Silent drop is by design (the
+        # alternative would require a head buffer, which would
+        # double the memory footprint).
+        assert "filler line 9" not in result
+        assert "filler line 10" not in result
+        # Scanned count reflects the cap.
+        assert "scanned 10 lines" in result
+
+    @pytest.mark.parametrize(
+        "match_line, should_find",
+        [
+            (10, False),  # outside_window: at line total-cap, evicted
+            (11, True),   # first_inside_window: at line total-cap+1, retained
+        ],
+        ids=["outside_window", "first_inside_window"],
+    )
+    def test_search_match_at_exact_cutoff_boundary(
+        self, log_dir, monkeypatch, match_line, should_find,
+    ):
+        """EDGE (B): match exactly at the deque cutoff — outside vs first-inside.
+
+        Parametrized over two cases at the sharp edge of the retained
+        window:
+          - ``outside_window`` (match_line == total - cap): the line
+            was the LAST entry pushed off the deque when it overflowed;
+            it is NOT in the recent_lines and is NOT found.
+          - ``first_inside_window`` (match_line == total - cap + 1):
+            the line is the FIRST entry kept after overflow; it IS
+            in the recent_lines and IS found.
+
+        The "no matches" message echoes the pattern name, so we use the
+        ``>>>`` marker (only emitted next to actual matches) to
+        distinguish a real match from the no-matches path.
+        """
+        from daemon.tools import system_log_tools
+        from daemon.tools.system_log_tools import create_system_log_tools
+
+        monkeypatch.setattr(system_log_tools, "MAX_LINES_SCAN", 10)
+
+        # 20 lines total. With cap=10 the deque retains positions
+        # 11..20. match_line=10 sits BEFORE the window (evicted);
+        # match_line=11 sits at the FIRST position of the window
+        # (retained).
+        lines = []
+        for i in range(1, 21):
+            if i == match_line:
+                lines.append(f"CUTOFF_MATCH_AT_LINE_{match_line}\n")
+            else:
+                lines.append(f"line {i}\n")
+        (log_dir / "ensemble.log").write_text("".join(lines), encoding="utf-8")
+
+        tools = create_system_log_tools(_make_manager(), "test-instance-id")
+        search_tool = _tool_by_name(tools, "ens_system_log_search")
+        result = search_tool.invoke(
+            {
+                "pattern": f"CUTOFF_MATCH_AT_LINE_{match_line}",
+                "filename": "ensemble.log",
+            },
+        )
+
+        if should_find:
+            # first_inside_window: match IS found (>>> marker present).
+            assert ">>>" in result, (
+                f"Expected match marker for first_inside_window; got: {result!r}"
+            )
+            assert f"CUTOFF_MATCH_AT_LINE_{match_line}" in result
+            assert "no matches" not in result.lower()
+        else:
+            # outside_window: no match marker (>>>). The "no matches"
+            # message echoes the pattern name, but the >>> marker is
+            # only emitted next to actual matches.
+            assert ">>>" not in result, (
+                f"Expected no match marker for outside_window; got: {result!r}"
+            )
+            assert "no matches" in result.lower()
+        # Boundary correctness proof: scanned count == cap, regardless
+        # of whether the match was inside or outside the window.
+        assert "scanned 10 lines" in result
+
+    def test_search_empty_file(self, log_dir):
+        """EDGE (C): empty log file returns 'no matches' with 'scanned 0 lines'.
+
+        A 0-byte file produces an empty deque, so the for-loop body
+        never executes. ``scanned = len(recent_lines) == 0`` and
+        ``results`` stays empty, falling through to the
+        "No matches found" branch with the literal "scanned 0 lines"
+        fragment in the message.
+        """
+        from daemon.tools.system_log_tools import create_system_log_tools
+
+        (log_dir / "ensemble.log").write_text("", encoding="utf-8")
+        tools = create_system_log_tools(_make_manager(), "test-instance-id")
+        search_tool = _tool_by_name(tools, "ens_system_log_search")
+        result = search_tool.invoke(
+            {"pattern": "anything", "filename": "ensemble.log"},
+        )
+        assert "no matches" in result.lower()
+        assert "scanned 0 lines" in result
 
     def test_list_with_many_files_byte_cap(self, log_dir):
         """List with many files exceeds byte cap and reports truncation."""
