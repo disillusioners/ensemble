@@ -205,8 +205,8 @@ async def test_source(test_request: SourceTestRequest):
         # WhatsApp not implemented yet
         success, message = False, "WhatsApp adapter not yet implemented"
     elif test_request.source_type == SourceType.discord:
-        # Discord not implemented yet
-        success, message = False, "Discord adapter not yet implemented"
+        from daemon.sources.adapters.discord import DiscordAdapter
+        success, message = await DiscordAdapter.test_connection(temp_config)
     elif test_request.source_type == SourceType.scheduler:
         # Scheduler doesn't require external connection test
         success, message = True, "Scheduler sources don't require connection testing"

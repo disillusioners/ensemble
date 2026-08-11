@@ -421,6 +421,13 @@ class SourceRegistry:
             adapter._source_repo = self._source_repo
             logger.info(f"SlackAdapter created: default_agent={adapter._default_agent}")
             return adapter
+        elif source_type == "discord":
+            from .adapters.discord import DiscordAdapter
+            adapter = DiscordAdapter(config, on_message, manager=self._manager)
+            # Inject source_repo for DB lookup during send()
+            adapter._source_repo = self._source_repo
+            logger.info(f"DiscordAdapter created: default_agent={adapter._default_agent}")
+            return adapter
         else:
             logger.warning(f"Unsupported source type: {source_type}")
             return None

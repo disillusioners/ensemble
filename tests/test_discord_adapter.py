@@ -13,6 +13,7 @@ Gateway or REST calls.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import re
 from unittest.mock import AsyncMock, MagicMock, patch, call
@@ -58,7 +59,7 @@ from daemon.sources.mapper import (
 
 def make_discord_config(
     source_id: str = "discord-main",
-    bot_token: str = "test-bot-token-1234567890",
+    bot_token: str = "MTIzNDU2Nzg5.Mabcdef.test_signature_123",
     agent: str = "ari",
     **config_kwargs,
 ) -> SourceConfig:
@@ -66,6 +67,11 @@ def make_discord_config(
 
     Mirrors ``make_telegram_config`` / ``make_slack_config``. The default
     config sets ``require_mention=True`` to match production defaults.
+
+    FIX 9: the default token matches Discord's 3-segment shape so
+    ``test_connection`` pre-flight format checks pass on the default
+    config. Adapter construction (``__init__``) does NOT validate the
+    token format, so any string still works for the rest of the suite.
     """
     config = {**config_kwargs, "agent": agent}
     return SourceConfig(
@@ -538,6 +544,7 @@ class TestMentionGating:
         assert adapter_with_repo._is_bot_mentioned(msg) is False
 
     def test_guild_message_no_mention_allowed_when_not_required(self, adapter):
+        adapter._bot_user_id = "999999999999999999"
         adapter._require_mention = False
         msg = self._make_message(guild_id=987654321098765432, content="hello")
         assert adapter._is_bot_mentioned(msg) is True
@@ -554,11 +561,41 @@ class TestMentionGating:
         msg.mentions = [user]
         assert adapter_with_repo._is_bot_mentioned(msg) is True
 
-    def test_bot_user_id_unresolved_fails_open(self, adapter):
+    def test_guild_message_dropped_when_bot_id_unresolved(self, adapter):
+        """FIX 2 regression: guild messages must be DROPPED (fail CLOSED) when
+        the bot's own user ID is not yet known. discord.py CAN dispatch
+        on_message before on_ready; without this guard we would process
+        untrusted content without mention verification.
+        """
         adapter._bot_user_id = None
         adapter._require_mention = True
         msg = self._make_message(guild_id=987654321098765432, content="hi")
-        assert adapter._is_bot_mentioned(msg) is True
+        assert adapter._is_bot_mentioned(msg) is False
+
+    def test_guild_always_active_override_dropped_when_bot_id_unresolved(self, adapter):
+        """Unresolved identity must override permissive channel settings."""
+        adapter._bot_user_id = None
+        adapter._channel_mention_config = {
+            "987654321098765432": DiscordAdapter.MENTION_ALWAYS_ACTIVE,
+        }
+        msg = self._make_message(guild_id=987654321098765432, content="hi")
+        assert adapter._is_bot_mentioned(msg) is False
+
+    def test_guild_require_mention_false_dropped_when_bot_id_unresolved(self, adapter):
+        """Unresolved identity must override require_mention=False."""
+        adapter._bot_user_id = None
+        adapter._require_mention = False
+        msg = self._make_message(guild_id=987654321098765432, content="hi")
+        assert adapter._is_bot_mentioned(msg) is False
+
+    def test_guild_disabled_override_dropped_when_bot_id_unresolved(self, adapter):
+        """The identity guard runs before even restrictive overrides."""
+        adapter._bot_user_id = None
+        adapter._channel_mention_config = {
+            "987654321098765432": DiscordAdapter.MENTION_DISABLED,
+        }
+        msg = self._make_message(guild_id=987654321098765432, content="hi")
+        assert adapter._is_bot_mentioned(msg) is False
 
     def test_channel_mention_config_always_active(self, adapter_with_repo):
         adapter_with_repo._require_mention = True
@@ -695,7 +732,8 @@ def _make_full_message(
     msg.content = content
     msg.attachments = attachments or []
     msg.mentions = mentions or []
-    msg.message_reference = message_reference
+    msg.message_reference = message_reference  # legacy attr (pre-fix readers)
+    msg.reference = message_reference  # discord.py 2.7+ uses `.reference`
     msg.id = message_id
     return msg
 
@@ -833,6 +871,177 @@ class TestInboundNormalization:
         assert d["channel_type"] == "thread"
         assert d["thread_id"] == "777888999000111222"
         assert d["parent_channel_id"] == "555444333222111333"
+
+    def test_non_image_attachments_excluded_from_images(self, adapter):
+        """FIX 6 regression: only attachments with ``content_type``
+        starting with ``image/`` populate ``incoming.images``. PDFs, text
+        files, and unknown-content-type attachments must be excluded.
+        """
+        # Mix of image and non-image attachments.
+        img = MagicMock()
+        img.filename = "cat.png"
+        img.url = "https://example.com/cat.png"
+        img.content_type = "image/png"
+        pdf = MagicMock()
+        pdf.filename = "doc.pdf"
+        pdf.url = "https://example.com/doc.pdf"
+        pdf.content_type = "application/pdf"
+        txt = MagicMock()
+        txt.filename = "note.txt"
+        txt.url = "https://example.com/note.txt"
+        txt.content_type = "text/plain"
+        # Unknown content_type — must be excluded.
+        unknown = MagicMock()
+        unknown.filename = "blob"
+        unknown.url = "https://example.com/blob"
+        unknown.content_type = None  # default to no content_type
+
+        msg = _make_full_message(
+            content="look at these",
+            attachments=[img, pdf, txt, unknown],
+        )
+        incoming = adapter._normalize_incoming(msg)
+        assert incoming is not None
+        # Only the image must be in `images`.
+        assert incoming.images == ["https://example.com/cat.png"]
+
+    def test_attachment_only_with_non_image_returns_placeholder_but_no_images(
+        self, adapter,
+    ):
+        """FIX 6 regression: when the only attachments are non-image, the
+        placeholder still appears in ``content`` but ``images`` must be
+        None (not a list of non-image URLs).
+        """
+        pdf = MagicMock()
+        pdf.filename = "doc.pdf"
+        pdf.url = "https://example.com/doc.pdf"
+        pdf.content_type = "application/pdf"
+
+        msg = _make_full_message(content="", attachments=[pdf])
+        incoming = adapter._normalize_incoming(msg)
+        assert incoming is not None
+        assert incoming.content == "[File attachment: doc.pdf]"
+        assert incoming.images is None
+
+
+class TestReplyReference:
+    """Regression tests for the discord.py reply-reference attribute name.
+
+    discord.py 2.7.1 exposes reply metadata as ``Message.reference``
+    (a ``MessageReference`` object). The adapter previously read
+    ``message.message_reference`` — an attribute that does NOT exist
+    on real discord ``Message`` objects — so reply chains were silently
+    broken for production traffic.
+
+    The bug hid because ``MagicMock`` auto-creates any attribute name,
+    so a test that did ``msg.message_reference = ref`` would satisfy the
+    old buggy read. The tests below pin down the CORRECT attribute by
+    using a stub that raises ``AttributeError`` for ``message_reference``
+    (mirroring real discord.Message) and only exposes ``reference``.
+    """
+
+    def test_reply_to_id_uses_message_reference_attribute(self, adapter):
+        """Adapter MUST read ``.reference`` (real discord.py attribute).
+
+        Pre-fix, the adapter read ``message.message_reference``, which
+        does not exist on real discord ``Message`` objects. With real
+        messages, ``getattr(message, "message_reference", None)`` always
+        returned ``None`` and reply chains were silently lost.
+
+        This test builds a stub message that mirrors real discord.Message:
+        ``.reference`` is populated, ``.message_reference`` raises
+        ``AttributeError``. With the fix in place, ``reply_to_id`` is
+        populated; if the bug were reintroduced, ``reply_to_id`` would
+        stay ``None``.
+        """
+
+        class _DiscordMessageLike:
+            """Minimal discord.Message stub: ``.reference`` exists, ``.message_reference`` does not."""
+
+            def __init__(self, reference):
+                self.reference = reference
+                self.content = "hello"
+                self.id = 111222333444555666
+                self.attachments = []
+                self.mentions = []
+
+                author = MagicMock()
+                author.id = 123456789012345678
+                author.bot = False
+                author.name = "alice"
+                author.display_name = "Alice"
+                self.author = author
+
+                channel = MagicMock()
+                channel.id = 987654321098765432
+                channel.name = "general"
+                channel.parent_id = None
+                self.channel = channel
+
+                self.guild = None  # DM -> no guild
+
+            @property
+            def message_reference(self):
+                # Real discord.Message has NO `message_reference` attribute.
+                # Accessing it raises AttributeError, just like the real class.
+                raise AttributeError(
+                    "discord.Message exposes reply metadata as `.reference`, "
+                    "not `.message_reference`"
+                )
+
+        ref = MagicMock()
+        ref.message_id = 123456789012345678
+
+        msg = _DiscordMessageLike(reference=ref)
+
+        incoming = adapter._normalize_incoming(msg)
+        assert incoming is not None
+        assert incoming.reply_to_id == "123456789012345678"
+
+    def test_reply_to_id_none_when_reference_attr_missing(self, adapter):
+        """No ``.reference`` -> reply_to_id stays ``None`` (matches real Discord behavior).
+
+        Builds a stub identical to the one above but WITHOUT a
+        ``reference`` attribute at all, matching what a real discord
+        message looks like when it is NOT a reply. With the fix in
+        place, ``reply_to_id`` is ``None``; with the bug, it would also
+        be ``None`` because ``.message_reference`` raises too.
+        """
+
+        class _DiscordMessageNoReply:
+            """discord.Message stub for a NON-reply message."""
+
+            def __init__(self):
+                self.content = "hello"
+                self.id = 111222333444555666
+                self.attachments = []
+                self.mentions = []
+
+                author = MagicMock()
+                author.id = 123456789012345678
+                author.bot = False
+                author.name = "alice"
+                author.display_name = "Alice"
+                self.author = author
+
+                channel = MagicMock()
+                channel.id = 987654321098765432
+                channel.name = "general"
+                channel.parent_id = None
+                self.channel = channel
+
+                self.guild = None
+
+            # Note: NO `.reference` attribute (non-reply message)
+            @property
+            def message_reference(self):
+                raise AttributeError("discord.Message has no `message_reference`")
+
+        msg = _DiscordMessageNoReply()
+
+        incoming = adapter._normalize_incoming(msg)
+        assert incoming is not None
+        assert incoming.reply_to_id is None
 
 
 # ==================== Message splitting (5-tier chain) ====================
@@ -1011,6 +1220,147 @@ class TestCircuitBreaker:
         # Each chunk raises -> send() returns False; circuit count increases.
         assert result is False
         assert adapter_with_repo._circuit_breaker.failure_count >= 1
+
+    @pytest.mark.asyncio
+    async def test_not_found_does_not_increment_failure_count(self, adapter_with_repo):
+        """FIX 3 regression: discord.NotFound (404) is a PERMANENT client
+        error. The adapter must NOT count it as a circuit-breaker failure
+        — otherwise 5 distinct 404s across different channels would open
+        the circuit and block ALL sends.
+        """
+        try:
+            import discord
+        except ImportError:
+            pytest.skip("discord.py not installed")
+
+        adapter_with_repo._status = SourceStatus.RUNNING
+        fake_target = MagicMock()
+        # discord.NotFound signature: (response, message)
+        fake_resp = MagicMock()
+        fake_resp.status = 404
+        fake_target.send = AsyncMock(
+            side_effect=discord.NotFound(fake_resp, "unknown channel")
+        )
+        adapter_with_repo._route_outgoing = AsyncMock(return_value=fake_target)
+
+        initial = adapter_with_repo._circuit_breaker.failure_count
+        out = OutgoingMessage(
+            external_user_id="987654321098765432:555444333222111333",
+            content="hello",
+            source_id="discord-main",
+        )
+        result = await adapter_with_repo.send(out)
+        assert result is False
+        # Crucial assertion: the count did NOT increase.
+        assert adapter_with_repo._circuit_breaker.failure_count == initial
+
+    @pytest.mark.asyncio
+    async def test_forbidden_does_not_increment_failure_count(self, adapter_with_repo):
+        """FIX 3 regression: discord.Forbidden (403) is a PERMANENT auth
+        error — must not open the circuit.
+        """
+        try:
+            import discord
+        except ImportError:
+            pytest.skip("discord.py not installed")
+
+        adapter_with_repo._status = SourceStatus.RUNNING
+        fake_target = MagicMock()
+        fake_resp = MagicMock()
+        fake_resp.status = 403
+        fake_target.send = AsyncMock(
+            side_effect=discord.Forbidden(fake_resp, "missing access")
+        )
+        adapter_with_repo._route_outgoing = AsyncMock(return_value=fake_target)
+
+        initial = adapter_with_repo._circuit_breaker.failure_count
+        out = OutgoingMessage(
+            external_user_id="987654321098765432:555444333222111333",
+            content="hello",
+            source_id="discord-main",
+        )
+        result = await adapter_with_repo.send(out)
+        assert result is False
+        assert adapter_with_repo._circuit_breaker.failure_count == initial
+
+    @pytest.mark.asyncio
+    async def test_5xx_increments_failure_count(self, adapter_with_repo):
+        """FIX 3 regression: discord.HTTPException with a 5xx status IS a
+        transport-class failure and MUST increment the circuit breaker.
+        """
+        try:
+            import discord
+        except ImportError:
+            pytest.skip("discord.py not installed")
+
+        adapter_with_repo._status = SourceStatus.RUNNING
+        fake_target = MagicMock()
+        fake_resp = MagicMock()
+        fake_resp.status = 503
+        fake_target.send = AsyncMock(
+            side_effect=discord.HTTPException(fake_resp, "service unavailable")
+        )
+        adapter_with_repo._route_outgoing = AsyncMock(return_value=fake_target)
+
+        initial = adapter_with_repo._circuit_breaker.failure_count
+        out = OutgoingMessage(
+            external_user_id="987654321098765432:555444333222111333",
+            content="hello",
+            source_id="discord-main",
+        )
+        result = await adapter_with_repo.send(out)
+        assert result is False
+        # Crucial assertion: the count DID increase.
+        assert adapter_with_repo._circuit_breaker.failure_count == initial + 1
+
+    @pytest.mark.asyncio
+    async def test_timeout_increments_failure_count(self, adapter_with_repo):
+        """FIX 3 regression: ``asyncio.TimeoutError`` is a transient failure
+        — must increment the circuit breaker.
+        """
+        adapter_with_repo._status = SourceStatus.RUNNING
+        fake_target = MagicMock()
+        fake_target.send = AsyncMock(side_effect=asyncio.TimeoutError())
+        adapter_with_repo._route_outgoing = AsyncMock(return_value=fake_target)
+
+        initial = adapter_with_repo._circuit_breaker.failure_count
+        out = OutgoingMessage(
+            external_user_id="987654321098765432:555444333222111333",
+            content="hello",
+            source_id="discord-main",
+        )
+        result = await adapter_with_repo.send(out)
+        assert result is False
+        assert adapter_with_repo._circuit_breaker.failure_count == initial + 1
+
+    @pytest.mark.asyncio
+    async def test_rate_limit_429_does_not_increment_failure_count(self, adapter_with_repo):
+        """FIX 3 regression: 429 (rate limit) is handled internally by
+        discord.py; if it escapes, we must NOT count it as a failure.
+        """
+        try:
+            import discord
+        except ImportError:
+            pytest.skip("discord.py not installed")
+
+        adapter_with_repo._status = SourceStatus.RUNNING
+        fake_target = MagicMock()
+        fake_resp = MagicMock()
+        fake_resp.status = 429
+        fake_target.send = AsyncMock(
+            side_effect=discord.HTTPException(fake_resp, "rate limited")
+        )
+        adapter_with_repo._route_outgoing = AsyncMock(return_value=fake_target)
+
+        initial = adapter_with_repo._circuit_breaker.failure_count
+        out = OutgoingMessage(
+            external_user_id="987654321098765432:555444333222111333",
+            content="hello",
+            source_id="discord-main",
+        )
+        result = await adapter_with_repo.send(out)
+        assert result is False
+        assert adapter_with_repo._circuit_breaker.failure_count == initial
 
 
 # ==================== Outbound send routing ====================
@@ -1303,7 +1653,7 @@ class TestTestConnection:
             source_type="discord",
             name="Test",
             config={},
-            credentials={"bot_token": "valid"},
+            credentials={"bot_token": "MTIzNDU2Nzg5.Mabcdef.test_signature_123"},
         )
 
         mock_resp = AsyncMock()
@@ -1333,7 +1683,7 @@ class TestTestConnection:
             source_type="discord",
             name="Test",
             config={},
-            credentials={"bot_token": "bad"},
+            credentials={"bot_token": "MTIzNDU2Nzg5.Mabcdef.test_signature_123"},
         )
         mock_resp = AsyncMock()
         mock_resp.status = 401
@@ -1358,7 +1708,7 @@ class TestTestConnection:
             source_type="discord",
             name="Test",
             config={},
-            credentials={"bot_token": "x"},
+            credentials={"bot_token": "MTIzNDU2Nzg5.Mabcdef.test_signature_123"},
         )
         session = MagicMock()
         session.__aenter__ = AsyncMock(return_value=session)
@@ -1371,6 +1721,53 @@ class TestTestConnection:
             ok, msg = await DiscordAdapter.test_connection(cfg)
         assert ok is False
         assert "timed out" in msg
+
+    @pytest.mark.asyncio
+    async def test_invalid_token_format_returns_error(self):
+        """FIX 9 regression: a token with the wrong shape must be rejected
+        up front without an API call.
+        """
+        from daemon.sources.base import SourceConfig
+
+        cfg = SourceConfig(
+            source_id="test",
+            source_type="discord",
+            name="Test",
+            config={},
+            credentials={"bot_token": "not-a-token"},
+        )
+        ok, msg = await DiscordAdapter.test_connection(cfg)
+        assert ok is False
+        assert "invalid format" in msg.lower()
+
+    @pytest.mark.asyncio
+    async def test_valid_format_invalid_token_returns_401(self):
+        """FIX 9 regression: a token with the right SHAPE but wrong VALUE
+        must fall through to the API call (and receive 401 there)."""
+        from daemon.sources.base import SourceConfig
+
+        cfg = SourceConfig(
+            source_id="test",
+            source_type="discord",
+            name="Test",
+            config={},
+            credentials={"bot_token": "MTIzNDU2Nzg5.Mabcdef.test_signature_123"},
+        )
+        mock_resp = AsyncMock()
+        mock_resp.status = 401
+        session = MagicMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        get_cm = MagicMock()
+        get_cm.__aenter__ = AsyncMock(return_value=mock_resp)
+        get_cm.__aexit__ = AsyncMock(return_value=None)
+        session.get = MagicMock(return_value=get_cm)
+        with patch("aiohttp.ClientSession", return_value=session) as session_mock:
+            ok, msg = await DiscordAdapter.test_connection(cfg)
+        # Confirm we did reach the API call (not short-circuited).
+        assert session_mock.called
+        assert ok is False
+        assert "Invalid bot token" in msg
 
 
 # ==================== Registry integration ====================
@@ -1478,7 +1875,11 @@ class TestArchivedThreadRouting:
 
     @pytest.mark.asyncio
     async def test_archived_thread_routes_to_parent(self, adapter_with_repo):
-        """When thread is archived, _route_outgoing falls back to parent channel."""
+        """FIX 1 regression: when the thread is archived, ``_route_outgoing``
+        must fetch the PARENT channel (not the thread itself). The thread's
+        own ID is what ``channel_id`` carries in the mapping, so the
+        adapter must consult ``parent_channel_id`` explicitly.
+        """
         adapter_with_repo._status = SourceStatus.RUNNING
 
         # Set up thread manager with an archived thread.
@@ -1493,21 +1894,27 @@ class TestArchivedThreadRouting:
             "987654321098765432", "777888999000111222", archived=True
         )
 
-        # Mock the client so get_channel returns a fake parent channel.
+        # Mock the client so the parent-channel fetch returns the fake parent.
         fake_parent = MagicMock()
         fake_parent.send = AsyncMock(return_value=MagicMock())
         fake_client = MagicMock()
-        fake_client.get_channel = MagicMock(return_value=fake_parent)
+        fake_client.get_channel = MagicMock(return_value=None)
+        fake_client.fetch_channel = AsyncMock(return_value=fake_parent)
         adapter_with_repo._client = fake_client
 
-        # The mapping metadata has thread_id set.
+        # Mapping carries the thread's own ID as ``channel_id`` (matches
+        # real production writes from ``_normalize_incoming``) plus the
+        # explicit ``parent_channel_id``.
         adapter_with_repo._source_repo.get_instance_mapping = MagicMock(
             return_value=MagicMock(
                 mapping_metadata={
                     "discord": {
                         "guild_id": "987654321098765432",
-                        "channel_id": "555444333222111333",
+                        # thread's own ID
+                        "channel_id": "777888999000111222",
                         "thread_id": "777888999000111222",
+                        # parent channel ID (separate field)
+                        "parent_channel_id": "555444333222111333",
                     }
                 }
             )
@@ -1520,9 +1927,17 @@ class TestArchivedThreadRouting:
         )
         result = await adapter_with_repo.send(out)
         assert result is True
-        # The parent channel (channel_id) should have received the send,
-        # NOT the thread (thread_id).
-        fake_parent.send.assert_awaited()
+        # The PARENT channel should receive the send, NOT the thread.
+        fake_client.fetch_channel.assert_awaited_with(555444333222111333)
+        # And the thread ID must NOT have been used as the fetch target.
+        called_with_thread_id = any(
+            c.args == (777888999000111222,)
+            for c in fake_client.fetch_channel.await_args_list
+        )
+        assert not called_with_thread_id, (
+            "FIX 1 violation: archived thread fallback must use "
+            "parent_channel_id, not the thread's own ID"
+        )
 
     @pytest.mark.asyncio
     async def test_active_thread_sends_to_thread(self, adapter_with_repo):
@@ -1550,8 +1965,9 @@ class TestArchivedThreadRouting:
                 mapping_metadata={
                     "discord": {
                         "guild_id": "987654321098765432",
-                        "channel_id": "555444333222111333",
+                        "channel_id": "777888999000111222",
                         "thread_id": "777888999000111222",
+                        "parent_channel_id": "555444333222111333",
                     }
                 }
             )
@@ -1565,3 +1981,680 @@ class TestArchivedThreadRouting:
         result = await adapter_with_repo.send(out)
         assert result is True
         fake_thread_chan.send.assert_awaited()
+
+
+
+# ==================== Start lifecycle (COVERAGE 1) ====================
+
+
+class _FakeDiscordClient:
+    """Drop-in replacement for ``discord.Client`` for lifecycle tests.
+
+    Captures registered event handlers so tests can fire them on demand.
+    Defaults to "fires on_ready then idles" so simple start()-succeeds
+    tests do not need to manage the lifecycle manually.
+    """
+
+    instances: list["_FakeDiscordClient"] = []
+
+    def __init__(self, *, intents=None, fail_on_start: BaseException | None = None):
+        self.intents = intents
+        self._events: list = []
+        self._fail_on_start = fail_on_start
+        self._start_called = False
+        self._start_token: str | None = None
+        self._closed = False
+        self.user = MagicMock()
+        self.user.id = 999999999999999999
+        self.user.name = "test-bot"
+        self.latency = 0.05
+        self._is_ready_flag = True
+        # Channel/user resolution hooks for send-side tests.
+        self.get_channel = MagicMock(return_value=None)
+        self.fetch_channel = AsyncMock(return_value=None)
+        self.fetch_user = AsyncMock(return_value=None)
+        self.close = AsyncMock(side_effect=self._close_impl)
+        _FakeDiscordClient.instances.append(self)
+
+    def event(self, fn):
+        # Mirror discord.py's decorator: register the callback.
+        self._events.append(fn)
+        return fn
+
+    async def start(self, token):
+        self._start_called = True
+        self._start_token = token
+        if self._fail_on_start is not None:
+            raise self._fail_on_start
+        # Fire the on_ready callback (zero-arg) and on_message (one-arg).
+        for cb in list(self._events):
+            try:
+                sig = inspect.signature(cb)
+            except (TypeError, ValueError):
+                sig = None
+            if sig is not None and len(sig.parameters) == 0:
+                await cb()
+                return
+
+    def is_ready(self):
+        return self._is_ready_flag
+
+    async def _close_impl(self):
+        self._closed = True
+
+
+class TestStartLifecycle:
+    """End-to-end lifecycle coverage for ``start()``."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_instances(self):
+        _FakeDiscordClient.instances.clear()
+
+    @pytest.mark.asyncio
+    async def test_start_success(self, mock_on_message):
+        """Happy path: ``client.start()`` fires ``on_ready``; adapter
+        transitions STOPPED → STARTING → RUNNING and captures bot identity.
+        """
+        cfg = make_discord_config()
+        a = DiscordAdapter(cfg, mock_on_message)
+
+        # Patch discord.Client at the module level — start() does a local
+        # ``import discord`` but Python reuses the cached module object,
+        # so patching ``discord.Client`` is sufficient.
+        import discord as _discord_mod
+
+        with patch.object(_discord_mod, "Client") as ClientMock:
+            ClientMock.side_effect = lambda *, intents: _FakeDiscordClient(
+                intents=intents
+            )
+            await a.start()
+
+        assert a.status == SourceStatus.RUNNING
+        assert a._bot_user_id == "999999999999999999"
+        assert a._bot_user_name == "test-bot"
+        assert a._ttl_task is not None
+        assert a._client_task is not None
+        assert len(_FakeDiscordClient.instances) == 1
+
+        # Clean up — cancels the eviction task so the test exits cleanly.
+        await a.stop()
+        racer_tasks = [
+            task for task in asyncio.all_tasks()
+            if task is not asyncio.current_task()
+            and any(
+                marker in task.get_name()
+                for marker in ("discord-ready-wait", "discord-error-wait")
+            )
+        ]
+        assert racer_tasks == []
+
+    @pytest.mark.asyncio
+    async def test_start_success_no_pending_tasks(self, mock_on_message):
+        """A successful start/stop awaits the losing readiness racer."""
+        cfg = make_discord_config()
+        a = DiscordAdapter(cfg, mock_on_message)
+        import discord as _discord_mod
+
+        with patch.object(_discord_mod, "Client") as ClientMock:
+            ClientMock.side_effect = lambda *, intents: _FakeDiscordClient(
+                intents=intents
+            )
+            await a.start()
+            await a.stop()
+
+        assert not [
+            task for task in asyncio.all_tasks()
+            if task is not asyncio.current_task()
+            and task.get_name().startswith(("discord-ready-wait", "discord-error-wait"))
+        ]
+
+    @pytest.mark.asyncio
+    async def test_start_idempotent(self, mock_on_message):
+        """FIX 4 regression: calling ``start()`` twice does NOT create a
+        second ``discord.Client`` (the early-return guard prevents it,
+        and ``_start_lock`` serializes any race).
+        """
+        cfg = make_discord_config()
+        a = DiscordAdapter(cfg, mock_on_message)
+
+        import discord as _discord_mod
+
+        with patch.object(_discord_mod, "Client") as ClientMock:
+            ClientMock.side_effect = lambda *, intents: _FakeDiscordClient(
+                intents=intents
+            )
+            await a.start()
+            # Second call — should be a no-op.
+            await a.start()
+
+        # Only one Client was instantiated.
+        assert len(_FakeDiscordClient.instances) == 1
+
+        await a.stop()
+
+    @pytest.mark.asyncio
+    async def test_start_lock_serializes_concurrent_calls(self, mock_on_message):
+        """FIX 4 regression: concurrent ``start()`` invocations are
+        serialized by ``_start_lock`` so we never spawn two client tasks.
+        """
+        cfg = make_discord_config()
+        a = DiscordAdapter(cfg, mock_on_message)
+
+        import discord as _discord_mod
+
+        with patch.object(_discord_mod, "Client") as ClientMock:
+            ClientMock.side_effect = lambda *, intents: _FakeDiscordClient(
+                intents=intents
+            )
+            await asyncio.gather(a.start(), a.start(), a.start())
+
+        # All three concurrent starts collapsed to a single client.
+        assert len(_FakeDiscordClient.instances) == 1
+
+        await a.stop()
+
+    @pytest.mark.asyncio
+    async def test_start_privileged_intents_required_surfaces_immediately(
+        self, mock_on_message
+    ):
+        """FIX 5 regression: ``PrivilegedIntentsRequired`` (or any
+        synchronous client failure) must surface immediately, NOT after
+        the 30s ready timeout. Measured by monkeypatching the timeout
+        constant to a tiny value and verifying we fail fast.
+        """
+        import discord
+
+        cfg = make_discord_config()
+        a = DiscordAdapter(cfg, mock_on_message)
+
+        boom = discord.PrivilegedIntentsRequired("missing MESSAGE_CONTENT")
+
+        with patch.object(discord, "Client") as ClientMock:
+            ClientMock.side_effect = lambda *, intents: _FakeDiscordClient(
+                intents=intents, fail_on_start=boom,
+            )
+            # Shrink the timeout to keep the test fast even if the fix is
+            # missing (it would still fail, just via TimeoutError).
+            with patch(
+                "daemon.sources.adapters.discord.adapter.GATEWAY_READY_TIMEOUT_SECONDS",
+                1.0,
+            ):
+                start = asyncio.get_event_loop().time()
+                with pytest.raises(RuntimeError) as excinfo:
+                    await a.start()
+                elapsed = asyncio.get_event_loop().time() - start
+
+        # The error message must surface the REAL gateway error,
+        # not a generic "timed out" message.
+        assert "PrivilegedIntentsRequired" in str(excinfo.value) or "missing" in str(
+            excinfo.value
+        )
+        # And it must surface quickly — well under the 30s default.
+        assert elapsed < 5.0, (
+            f"start() took {elapsed:.2f}s — gateway error not surfaced "
+            f"immediately (FIX 5 regression)"
+        )
+        assert a.status == SourceStatus.ERROR
+        assert not [
+            task for task in asyncio.all_tasks()
+            if task is not asyncio.current_task()
+            and task.get_name().startswith(("discord-ready-wait", "discord-error-wait"))
+        ]
+
+    @pytest.mark.asyncio
+    async def test_start_gateway_error_no_pending_tasks(self, mock_on_message):
+        """A fast Gateway failure awaits the other readiness racer."""
+        import discord
+
+        cfg = make_discord_config()
+        a = DiscordAdapter(cfg, mock_on_message)
+        boom = discord.PrivilegedIntentsRequired("missing MESSAGE_CONTENT")
+
+        with patch.object(discord, "Client") as ClientMock:
+            ClientMock.side_effect = lambda *, intents: _FakeDiscordClient(
+                intents=intents, fail_on_start=boom,
+            )
+            with patch(
+                "daemon.sources.adapters.discord.adapter.GATEWAY_READY_TIMEOUT_SECONDS",
+                1.0,
+            ):
+                with pytest.raises(RuntimeError):
+                    await a.start()
+
+        assert not [
+            task for task in asyncio.all_tasks()
+            if task is not asyncio.current_task()
+            and task.get_name().startswith(("discord-ready-wait", "discord-error-wait"))
+        ]
+
+        """If the client NEVER fires on_ready and NEVER errors, the
+        30s ready timeout must still kick in and raise.
+        """
+        cfg = make_discord_config()
+        a = DiscordAdapter(cfg, mock_on_message)
+
+        # Build a fake client that never fires on_ready.
+        class _HangingClient(_FakeDiscordClient):
+            async def start(self, token):
+                # Just sleep forever — never fire on_ready.
+                await asyncio.sleep(100)
+
+        import discord as _discord_mod
+
+        with patch.object(_discord_mod, "Client") as ClientMock:
+            ClientMock.side_effect = lambda *, intents: _HangingClient(intents=intents)
+            with patch(
+                "daemon.sources.adapters.discord.adapter.GATEWAY_READY_TIMEOUT_SECONDS",
+                0.5,
+            ):
+                start = asyncio.get_event_loop().time()
+                with pytest.raises(RuntimeError, match="timed out"):
+                    await a.start()
+                elapsed = asyncio.get_event_loop().time() - start
+
+        # Should fire close to the configured timeout (0.5s), not 30s.
+        assert elapsed < 3.0
+        assert a.status == SourceStatus.ERROR
+        assert not [
+            task for task in asyncio.all_tasks()
+            if task is not asyncio.current_task()
+            and task.get_name().startswith(("discord-ready-wait", "discord-error-wait"))
+        ]
+
+    @pytest.mark.asyncio
+    async def test_start_timeout_no_pending_tasks(self, mock_on_message):
+        """A Gateway timeout awaits the cancelled readiness racers."""
+        cfg = make_discord_config()
+        a = DiscordAdapter(cfg, mock_on_message)
+
+        class _HangingClient(_FakeDiscordClient):
+            async def start(self, token):
+                await asyncio.sleep(100)
+
+        import discord as _discord_mod
+
+        with patch.object(_discord_mod, "Client") as ClientMock:
+            ClientMock.side_effect = lambda *, intents: _HangingClient(intents=intents)
+            with patch(
+                "daemon.sources.adapters.discord.adapter.GATEWAY_READY_TIMEOUT_SECONDS",
+                0.05,
+            ):
+                with pytest.raises(RuntimeError, match="timed out"):
+                    await a.start()
+
+        assert not [
+            task for task in asyncio.all_tasks()
+            if task is not asyncio.current_task()
+            and task.get_name().startswith(("discord-ready-wait", "discord-error-wait"))
+        ]
+
+        """If the caller cancels ``start()`` mid-flight, no orphaned
+        Gateway task survives.
+        """
+        cfg = make_discord_config()
+        a = DiscordAdapter(cfg, mock_on_message)
+
+        # Build a fake client that blocks forever.
+        class _HangingClient(_FakeDiscordClient):
+            async def start(self, token):
+                await asyncio.sleep(100)
+
+        import discord as _discord_mod
+
+        with patch.object(_discord_mod, "Client") as ClientMock:
+            ClientMock.side_effect = lambda *, intents: _HangingClient(intents=intents)
+            with patch(
+                "daemon.sources.adapters.discord.adapter.GATEWAY_READY_TIMEOUT_SECONDS",
+                5.0,
+            ):
+                task = asyncio.create_task(a.start())
+                await asyncio.sleep(0.05)
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+
+        # The client task should be cancelled (or None) — no orphaned task.
+        assert a._client_task is None or a._client_task.cancelled() or a._client_task.done()
+
+
+# ==================== _handle_message end-to-end (COVERAGE 2) ====================
+
+
+class TestHandleMessageE2E:
+    """End-to-end ``_handle_message()`` coverage — the full pipeline."""
+
+    def _msg(self, *, guild_id=None, channel_id=987654321098765432, parent_id=None,
+             author_id=123456789012345678, content="hello", bot=False):
+        author = MagicMock()
+        author.id = author_id
+        author.bot = bot
+        author.name = "alice"
+        author.display_name = "Alice"
+        channel = MagicMock()
+        channel.id = channel_id
+        channel.parent_id = parent_id
+        channel.name = "general"
+        guild = MagicMock() if guild_id is not None else None
+        if guild is not None:
+            guild.id = guild_id
+            guild.name = "Test Guild"
+        msg = MagicMock()
+        msg.author = author
+        msg.channel = channel
+        msg.guild = guild
+        msg.content = content
+        msg.mentions = []
+        msg.attachments = []
+        msg.id = 111222333444555666
+        return msg
+
+    @pytest.mark.asyncio
+    async def test_handle_message_dm_emits_incoming(self, adapter):
+        """DM message → _on_message is awaited with an IncomingMessage."""
+        msg = self._msg(guild_id=None, content="hello")
+        await adapter._handle_message(msg)
+        assert adapter._on_message.await_count == 1
+        incoming = adapter._on_message.await_args.args[0]
+        assert incoming.external_user_id == "dm:123456789012345678"
+
+    @pytest.mark.asyncio
+    async def test_handle_message_guild_mention_emits_incoming(self, adapter_with_repo):
+        """Guild message with explicit mention → emitted."""
+        bot_id = adapter_with_repo._bot_user_id
+        msg = self._msg(
+            guild_id=987654321098765432,
+            content=f"<@{bot_id}> hello",
+        )
+        await adapter_with_repo._handle_message(msg)
+        assert adapter_with_repo._on_message.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_handle_message_guild_no_mention_skipped(self, adapter_with_repo):
+        """Guild message WITHOUT mention and require_mention=True → NOT emitted."""
+        adapter_with_repo._require_mention = True
+        msg = self._msg(guild_id=987654321098765432, content="hello")
+        await adapter_with_repo._handle_message(msg)
+        assert adapter_with_repo._on_message.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_handle_message_own_message_skipped(self, adapter_with_repo):
+        """Messages authored by the bot itself → NOT emitted."""
+        # Configure client so message.author == client.user (own message).
+        bot_id = int(adapter_with_repo._bot_user_id)
+        client = MagicMock()
+        client.user = MagicMock()
+        client.user.id = bot_id
+        adapter_with_repo._client = client
+
+        msg = self._msg(
+            guild_id=987654321098765432,
+            author_id=bot_id,
+            content="my own message",
+        )
+        await adapter_with_repo._handle_message(msg)
+        assert adapter_with_repo._on_message.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_handle_message_disallowed_guild_skipped(self, mock_on_message):
+        """Message from a non-allowlisted guild → NOT emitted."""
+        cfg = make_discord_config(allowed_guild_ids=[111222333444555666])
+        a = DiscordAdapter(cfg, mock_on_message)
+        msg = self._msg(guild_id=987654321098765432, content="hi")
+        await a._handle_message(msg)
+        assert a._on_message.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_handle_message_thread_registers(self, adapter_with_repo):
+        """Thread-mode message → thread registered via ``_thread_manager``."""
+        adapter_with_repo._thread_manager = DiscordThreadManager(manager=MagicMock())
+        bot_id = adapter_with_repo._bot_user_id
+        msg = self._msg(
+            guild_id=987654321098765432,
+            channel_id=777888999000111222,
+            parent_id=555444333222111333,
+            content=f"<@{bot_id}> hi",
+        )
+        await adapter_with_repo._handle_message(msg)
+        assert adapter_with_repo._on_message.await_count == 1
+        # Thread should now be registered.
+        thread = await adapter_with_repo._thread_manager.get_thread(
+            "987654321098765432", "777888999000111222",
+        )
+        assert thread is not None
+
+
+# ==================== _emit_message callback (COVERAGE 3) ====================
+
+
+class TestEmitMessage:
+    """The ``_emit_message`` plumbing that calls the user-provided callback."""
+
+    @pytest.mark.asyncio
+    async def test_emit_message_calls_callback(self, adapter):
+        incoming = IncomingMessage(
+            external_user_id="dm:123456789012345678",
+            content="hello",
+            source_id="discord-main",
+        )
+        await adapter._emit_message(incoming)
+        assert adapter._on_message.await_count == 1
+        assert adapter._on_message.await_args.args[0] is incoming
+
+    @pytest.mark.asyncio
+    async def test_emit_message_callback_error_logged(self, adapter, caplog):
+        """If the callback raises, the error must be logged — not crash."""
+
+        async def boom(msg):
+            raise RuntimeError("callback crashed")
+
+        a = DiscordAdapter(make_discord_config(), boom)
+        incoming = IncomingMessage(
+            external_user_id="dm:123456789012345678",
+            content="hello",
+            source_id="discord-main",
+        )
+        with caplog.at_level(logging.ERROR):
+            # NOTE: base impl re-raises — we just verify the message goes through.
+            with pytest.raises(RuntimeError, match="callback crashed"):
+                await a._emit_message(incoming)
+
+
+# ==================== _periodic_eviction_loop (COVERAGE 4) ====================
+
+
+class TestPeriodicEvictionLoop:
+    """Coverage for the periodic TTL eviction background loop."""
+
+    @pytest.mark.asyncio
+    async def test_eviction_loop_calls_thread_manager(self, mock_on_message):
+        cfg = make_discord_config(eviction_interval_seconds=1)
+        a = DiscordAdapter(cfg, mock_on_message, manager=MagicMock())
+        mock_tm = MagicMock()
+        mock_tm.evict_expired = AsyncMock(return_value=[])
+        a._thread_manager = mock_tm
+
+        # Patch ``asyncio.sleep`` so each iteration only yields briefly,
+        # then cancel the task after the first evict pass.
+        task = asyncio.create_task(a._periodic_eviction_loop())
+        real_sleep = asyncio.sleep
+
+        async def fast_sleep(*args, **kwargs):
+            await real_sleep(0)
+            if mock_tm.evict_expired.await_count >= 1:
+                # Trigger cancellation of the loop from outside.
+                task.cancel()
+            return None
+
+        with patch("asyncio.sleep", side_effect=fast_sleep):
+            await task
+
+        assert mock_tm.evict_expired.await_count >= 1
+
+    @pytest.mark.asyncio
+    async def test_eviction_loop_cancels_cleanly(self, mock_on_message):
+        cfg = make_discord_config()
+        a = DiscordAdapter(cfg, mock_on_message, manager=MagicMock())
+        a._thread_manager = MagicMock()
+        a._thread_manager.evict_expired = AsyncMock(return_value=[])
+
+        task = asyncio.create_task(a._periodic_eviction_loop())
+        await asyncio.sleep(0.01)
+        task.cancel()
+        # Should NOT raise — CancelledError is caught and silenced.
+        await task
+
+    @pytest.mark.asyncio
+    async def test_eviction_loop_survives_evict_error(self, mock_on_message):
+        """If ``evict_expired`` raises, the loop must continue."""
+        cfg = make_discord_config(eviction_interval_seconds=1)
+        a = DiscordAdapter(cfg, mock_on_message, manager=MagicMock())
+
+        call_count = {"n": 0}
+
+        async def sometimes_fails():
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise RuntimeError("evict boom")
+            return []
+
+        a._thread_manager = MagicMock()
+        a._thread_manager.evict_expired = sometimes_fails
+
+        task = asyncio.create_task(a._periodic_eviction_loop())
+        real_sleep = asyncio.sleep
+
+        async def fast_sleep(*args, **kwargs):
+            await real_sleep(0)
+            if call_count["n"] >= 2:
+                task.cancel()
+            return None
+
+        with patch("asyncio.sleep", side_effect=fast_sleep):
+            await task
+
+        # The loop survived the first failure and continued calling.
+        assert call_count["n"] >= 2
+
+
+# ==================== DM routing path (COVERAGE 5) ====================
+
+
+class TestDMRouting:
+    """DM-mode routing through ``_route_outgoing`` and ``send``."""
+
+    @pytest.mark.asyncio
+    async def test_dm_routing_creates_dm_channel(self, adapter_with_repo):
+        adapter_with_repo._status = SourceStatus.RUNNING
+
+        fake_dm_chan = MagicMock()
+        fake_dm_chan.send = AsyncMock(return_value=MagicMock())
+
+        fake_user = MagicMock()
+        fake_user.create_dm = AsyncMock(return_value=fake_dm_chan)
+
+        fake_client = MagicMock()
+        fake_client.fetch_user = AsyncMock(return_value=fake_user)
+        adapter_with_repo._client = fake_client
+
+        out = OutgoingMessage(
+            external_user_id="dm:123456789012345678",
+            content="hi",
+            source_id="discord-main",
+        )
+        result = await adapter_with_repo.send(out)
+        assert result is True
+        fake_client.fetch_user.assert_awaited_with(123456789012345678)
+        fake_user.create_dm.assert_awaited()
+        fake_dm_chan.send.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_dm_routing_user_not_found(self, adapter_with_repo):
+        adapter_with_repo._status = SourceStatus.RUNNING
+
+        fake_client = MagicMock()
+        fake_client.fetch_user = AsyncMock(return_value=None)
+        adapter_with_repo._client = fake_client
+
+        out = OutgoingMessage(
+            external_user_id="dm:123456789012345678",
+            content="hi",
+            source_id="discord-main",
+        )
+        result = await adapter_with_repo.send(out)
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_dm_routing_resolves_via_resolve_target(self, adapter_with_repo):
+        """``_resolve_send_target`` for a DM returns mode='dm' without
+        touching the source repo."""
+        info = await adapter_with_repo._resolve_send_target(
+            "dm:123456789012345678"
+        )
+        assert info is not None
+        assert info["mode"] == "dm"
+        assert info["user_id"] == "123456789012345678"
+        assert info["channel_id"] is None
+        # DM mode MUST NOT touch the repo.
+        adapter_with_repo._source_repo.get_instance_mapping.assert_not_called()
+
+
+# ==================== Token format validation unit test ====================
+
+
+class TestTokenFormatHelper:
+    """Unit tests for the ``_is_valid_discord_token_format`` helper."""
+
+    def test_valid_format(self):
+        from daemon.sources.adapters.discord.adapter import (
+            _is_valid_discord_token_format,
+        )
+        assert _is_valid_discord_token_format(
+            "MTIzNDU2Nzg5.Mabcdef.test_signature_123"
+        )
+
+    def test_no_dots(self):
+        from daemon.sources.adapters.discord.adapter import (
+            _is_valid_discord_token_format,
+        )
+        assert not _is_valid_discord_token_format("not-a-token")
+
+    def test_one_dot(self):
+        from daemon.sources.adapters.discord.adapter import (
+            _is_valid_discord_token_format,
+        )
+        assert not _is_valid_discord_token_format("foo.bar")
+
+    def test_two_dots_extra_segment(self):
+        from daemon.sources.adapters.discord.adapter import (
+            _is_valid_discord_token_format,
+        )
+        assert not _is_valid_discord_token_format("a.b.c.d")
+
+    def test_empty(self):
+        from daemon.sources.adapters.discord.adapter import (
+            _is_valid_discord_token_format,
+        )
+        assert not _is_valid_discord_token_format("")
+
+
+# ==================== _get_guild_threads regression (FIX 8) ====================
+
+
+class TestGuildThreadsLockRegression:
+    """FIX 8 regression: concurrent ``register_thread`` for the same new
+    guild_id must serialize on ``_guilds_guard`` and produce a single,
+    consistent ``OrderedDict``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_concurrent_register_same_new_guild(self):
+        mgr = DiscordThreadManager(manager=MagicMock())
+        # Fire many concurrent registers for the SAME brand-new guild_id.
+        async def reg(i):
+            await mgr.register_thread(
+                "new-guild", "222", f"t{i}", instance_id=f"i{i}"
+            )
+        await asyncio.gather(*[reg(i) for i in range(20)])
+        # Exactly one OrderedDict was created, with 20 entries.
+        assert len(mgr._threads) == 1
+        assert len(mgr._threads["new-guild"]) == 20

@@ -28,7 +28,13 @@ MAX_USER_ID_LENGTH = 256
 SOURCE_TYPE_TELEGRAM = "telegram"
 SOURCE_TYPE_WEBHOOK = "webhook"
 SOURCE_TYPE_SLACK = "slack"
-VALID_SOURCE_TYPES = {SOURCE_TYPE_TELEGRAM, SOURCE_TYPE_WEBHOOK, SOURCE_TYPE_SLACK}
+SOURCE_TYPE_DISCORD = "discord"
+VALID_SOURCE_TYPES = {
+    SOURCE_TYPE_TELEGRAM,
+    SOURCE_TYPE_WEBHOOK,
+    SOURCE_TYPE_SLACK,
+    SOURCE_TYPE_DISCORD,
+}
 
 # Slack composite ID pattern: workspace_id:channel_type:channel_id[:thread_ts]
 # workspace_id: starts with T, W, or B followed by alphanumeric
@@ -36,6 +42,20 @@ VALID_SOURCE_TYPES = {SOURCE_TYPE_TELEGRAM, SOURCE_TYPE_WEBHOOK, SOURCE_TYPE_SLA
 # channel_id: starts with appropriate prefix
 # thread_ts: timestamp with dot (e.g., 1234567890.123456)
 SLACK_ID_PATTERN = re.compile(r'^[A-Z0-9]+:[UWC][A-Z0-9]+(:[0-9.]+)?$')
+
+# Discord ID pattern. The single source of truth for canonical external
+# user IDs lives in `daemon.sources.adapters.discord.constants`. We
+# re-import the literal regex here so the mapper doesn't depend on the
+# adapter package (which in turn imports discord.py — a heavy dep that
+# we don't want to drag into lightweight mapping validation paths).
+# Layout:
+#   DM:      dm:{user_id}
+#   Channel: {guild_id}:{channel_id}
+#   Thread:  {guild_id}:{parent_channel_id}:{thread_id}
+# Discord snowflakes are 17-19 digit integers.
+DISCORD_ID_PATTERN = (
+    r"^(dm:\d{17,19}|\d{17,19}:\d{17,19}(:\d{17,19})?)$"
+)
 
 
 class ValidationError(Exception):
@@ -97,6 +117,19 @@ def validate_external_user_id(source_type: str, user_id: str) -> str:
                 f"Invalid Slack ID '{user_id}': expected format "
                 "{workspace}:{channel_type}{id}[:{thread_ts}] "
                 "(e.g., T123456:U123456 or T123456:C123456:1234567890.123456)"
+            )
+        return user_id
+
+    elif source_type == SOURCE_TYPE_DISCORD:
+        # Discord external_user_id formats:
+        #   DM:      dm:{user_id}
+        #   Channel: {guild_id}:{channel_id}
+        #   Thread:  {guild_id}:{parent_channel_id}:{thread_id}
+        if not re.match(DISCORD_ID_PATTERN, user_id):
+            raise ValidationError(
+                f"Invalid Discord ID '{user_id}': expected format "
+                "dm:{user_id} or {guild}:{channel}[:{thread}] "
+                "(snowflakes are 17-19 digit integers)"
             )
         return user_id
 
