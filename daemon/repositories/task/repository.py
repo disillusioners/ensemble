@@ -2042,24 +2042,52 @@ class TaskRepository:
                 # wedged, deadlocking the entire queue. The exclusion
                 # mirrors the claim guard so the predicate and the claim
                 # can never disagree.
+                # Phase 2 defensive idle-gate (2026-08-11): exclude
+                # RUNNING/PAUSED tasks whose linked JobItem is already
+                # terminal (done/dead). Such a task is an orphan — Phase 1
+                # reconciliation should have cleaned it up, but if a race,
+                # transient DB failure, or pre-Phase-1 data left the task
+                # row while the JobItem went terminal, counting it as
+                # active work would block the defer-queue idle gate
+                # forever. The NOT EXISTS subquery is the defense-in-depth
+                # twin of Phase 1 reconciliation.
                 stmt = text("""
                     SELECT EXISTS(
                         SELECT 1 FROM task t
                         JOIN instances i ON t.instance_id = i.instance_id
                         WHERE t.status IN (:status_running, :status_paused)
                           AND t.is_deferred = :is_deferred_false
+                          AND NOT EXISTS (
+                              SELECT 1 FROM job_queue_items _qi
+                              WHERE _qi.job_id = t.work_id
+                                AND _qi.admission_state IN (:qi_done, :qi_dead)
+                                AND _qi.deleted_at IS NULL
+                          )
                     )
                 """)
                 row = conn.execute(stmt, {
                     "status_running": TaskStatus.RUNNING.value,
                     "status_paused": TaskStatus.PAUSED.value,
                     "is_deferred_false": False,
+                    "qi_done": AdmissionState.DONE.value,
+                    "qi_dead": AdmissionState.DEAD.value,
                 }).fetchone()
                 # Union with the pending-only branch: a PENDING task
                 # counts only if its linked JobItem is NOT still queued.
                 # Direct-queue tasks (no JobItem row) have no matching
                 # ``_qi`` row → the EXISTS is false → they still count,
                 # which is correct — they are genuinely claimable.
+                # Phase 2 defensive idle-gate (2026-08-11): the existing
+                # NOT EXISTS above excludes PENDING tasks with a queued
+                # JobItem (unclaimable). This SECOND NOT EXISTS excludes
+                # PENDING tasks whose JobItem is already terminal (done/
+                # dead) — an orphaned task whose JobItem completed but
+                # the task row was not reconciled. Without this, the
+                # pending-only branch would still count the orphan,
+                # partially re-introducing the idle-gate deadlock. The
+                # two NOT EXISTS clauses are COMPLEMENTARY and must stay
+                # separate (W4/Reviewer C2): one excludes queued, one
+                # excludes done/dead.
                 pending_stmt = text("""
                     SELECT EXISTS(
                         SELECT 1 FROM task t
@@ -2072,12 +2100,20 @@ class TaskRepository:
                                 AND _qi.admission_state = :qi_queued
                                 AND _qi.deleted_at IS NULL
                           )
+                          AND NOT EXISTS (
+                              SELECT 1 FROM job_queue_items _qi
+                              WHERE _qi.job_id = t.work_id
+                                AND _qi.admission_state IN (:qi_done, :qi_dead)
+                                AND _qi.deleted_at IS NULL
+                          )
                     )
                 """)
                 pending_row = conn.execute(pending_stmt, {
                     "status_pending": TaskStatus.PENDING.value,
                     "is_deferred_false": False,
                     "qi_queued": AdmissionState.QUEUED.value,
+                    "qi_done": AdmissionState.DONE.value,
+                    "qi_dead": AdmissionState.DEAD.value,
                 }).fetchone()
                 return bool(row[0]) or bool(pending_row[0])
             else:
@@ -2085,6 +2121,10 @@ class TaskRepository:
                 # comment above for the rationale. Project-scoped probe
                 # also excludes pending tasks whose linked JobItem is
                 # still queued.
+                # Phase 2 defensive idle-gate (2026-08-11): same
+                # terminal-JobItem exclusion as the project_id=None
+                # branch above — see that comment for the full
+                # rationale.
                 stmt = text("""
                     SELECT EXISTS(
                         SELECT 1 FROM task t
@@ -2092,6 +2132,12 @@ class TaskRepository:
                         WHERE t.status IN (:status_running, :status_paused)
                           AND t.is_deferred = :is_deferred_false
                           AND i.project_id = :project_id
+                          AND NOT EXISTS (
+                              SELECT 1 FROM job_queue_items _qi
+                              WHERE _qi.job_id = t.work_id
+                                AND _qi.admission_state IN (:qi_done, :qi_dead)
+                                AND _qi.deleted_at IS NULL
+                          )
                     )
                 """)
                 row = conn.execute(stmt, {
@@ -2099,7 +2145,13 @@ class TaskRepository:
                     "status_paused": TaskStatus.PAUSED.value,
                     "is_deferred_false": False,
                     "project_id": project_id,
+                    "qi_done": AdmissionState.DONE.value,
+                    "qi_dead": AdmissionState.DEAD.value,
                 }).fetchone()
+                # Phase 2 defensive idle-gate (2026-08-11): same SECOND
+                # NOT EXISTS terminal-JobItem exclusion as the
+                # project_id=None pending branch — see that comment for
+                # the full rationale.
                 pending_stmt = text("""
                     SELECT EXISTS(
                         SELECT 1 FROM task t
@@ -2113,6 +2165,12 @@ class TaskRepository:
                                 AND _qi.admission_state = :qi_queued
                                 AND _qi.deleted_at IS NULL
                           )
+                          AND NOT EXISTS (
+                              SELECT 1 FROM job_queue_items _qi
+                              WHERE _qi.job_id = t.work_id
+                                AND _qi.admission_state IN (:qi_done, :qi_dead)
+                                AND _qi.deleted_at IS NULL
+                          )
                     )
                 """)
                 pending_row = conn.execute(pending_stmt, {
@@ -2120,6 +2178,8 @@ class TaskRepository:
                     "is_deferred_false": False,
                     "project_id": project_id,
                     "qi_queued": AdmissionState.QUEUED.value,
+                    "qi_done": AdmissionState.DONE.value,
+                    "qi_dead": AdmissionState.DEAD.value,
                 }).fetchone()
                 return bool(row[0]) or bool(pending_row[0])
 
@@ -2206,19 +2266,38 @@ class TaskRepository:
             # background predicates cannot drift on the deadlock case.
             # RUNNING + PAUSED tasks always count (unchanged); only the
             # PENDING branch gets the exclusion.
+            # Phase 2 defensive idle-gate (2026-08-11): exclude
+            # RUNNING/PAUSED tasks whose linked JobItem is already
+            # terminal (done/dead). Same defense-in-depth as the defer
+            # predicate — an orphaned task blocks the background-queue
+            # idle gate forever if reconciliation missed it. See the
+            # full rationale in has_active_non_deferred_work above.
             stmt = text("""
                 SELECT EXISTS(
                     SELECT 1 FROM task t
                     JOIN instances i ON t.instance_id = i.instance_id
                     WHERE t.status IN (:status_running, :status_paused)
                       AND t.is_background = :is_background_false
+                      AND NOT EXISTS (
+                          SELECT 1 FROM job_queue_items _qi
+                          WHERE _qi.job_id = t.work_id
+                            AND _qi.admission_state IN (:qi_done, :qi_dead)
+                            AND _qi.deleted_at IS NULL
+                      )
                 )
             """)
             row = conn.execute(stmt, {
                 "status_running": TaskStatus.RUNNING.value,
                 "status_paused": TaskStatus.PAUSED.value,
                 "is_background_false": False,
+                "qi_done": AdmissionState.DONE.value,
+                "qi_dead": AdmissionState.DEAD.value,
             }).fetchone()
+            # Phase 2 defensive idle-gate (2026-08-11): same SECOND
+            # NOT EXISTS terminal-JobItem exclusion as the defer
+            # pending branches. The existing NOT EXISTS (queued) and
+            # this new NOT EXISTS (done/dead) are complementary and
+            # must stay separate.
             pending_stmt = text("""
                 SELECT EXISTS(
                     SELECT 1 FROM task t
@@ -2231,12 +2310,20 @@ class TaskRepository:
                             AND _qi.admission_state = :qi_queued
                             AND _qi.deleted_at IS NULL
                       )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM job_queue_items _qi
+                          WHERE _qi.job_id = t.work_id
+                            AND _qi.admission_state IN (:qi_done, :qi_dead)
+                            AND _qi.deleted_at IS NULL
+                      )
                 )
             """)
             pending_row = conn.execute(pending_stmt, {
                 "status_pending": TaskStatus.PENDING.value,
                 "is_background_false": False,
                 "qi_queued": AdmissionState.QUEUED.value,
+                "qi_done": AdmissionState.DONE.value,
+                "qi_dead": AdmissionState.DEAD.value,
             }).fetchone()
             return bool(row[0]) or bool(pending_row[0])
 
