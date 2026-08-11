@@ -4554,7 +4554,7 @@ class InstanceManager:
             (
                 "UPDATE task "
                 "SET status = 'cancelled', "
-                "    cancel_requested = 1, "
+                "    cancel_requested = TRUE, "
                 "    cancel_requested_at = CURRENT_TIMESTAMP, "
                 "    completed_at = CURRENT_TIMESTAMP "
                 "WHERE status IN ('paused', 'pending') "
