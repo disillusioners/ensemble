@@ -1100,5 +1100,152 @@ class TestLargeAsciiTableFenceBalanced:
 
 
 # --------------------------------------------------------------------------- #
+# 14. Bold/italic whitespace-boundary fixes (C7)
+# --------------------------------------------------------------------------- #
+
+
+class TestBoldWhitespaceBoundary:
+    """C7: ``**`` adjacent to interior whitespace must not form bold.
+
+    Per CommonMark, emphasis markers are invalidated when the content
+    starts or ends with a space: ``**foo **`` and ``** foo**`` are NOT
+    bold. The OLD regex ``\\*\\*(.+?)\\*\\*`` matched these, producing
+    broken Slack output (``*foo *`` with a stray trailing space, or
+    worse: the list-marker step turned ``* foo*`` into ``• foo*``).
+    """
+
+    def test_bold_trailing_space_preserved(
+        self, formatter: SlackMrkdwnFormatter
+    ) -> None:
+        """``**bold **`` stays unchanged (space before closing ``**``)."""
+        assert formatter.format("**bold **") == "**bold **"
+
+    def test_bold_leading_space_preserved(
+        self, formatter: SlackMrkdwnFormatter
+    ) -> None:
+        """``** bold**`` stays unchanged (space after opening ``**``)."""
+        assert formatter.format("** bold**") == "** bold**"
+
+    def test_bold_trailing_space_in_sentence(
+        self, formatter: SlackMrkdwnFormatter
+    ) -> None:
+        """``**foo ** bar`` — the mismatched ``**`` is left as-is."""
+        assert formatter.format("**foo ** bar") == "**foo ** bar"
+
+    def test_bold_leading_space_in_sentence(
+        self, formatter: SlackMrkdwnFormatter
+    ) -> None:
+        """``** foo** bar`` — must NOT become a bullet ``• foo* bar``."""
+        result = formatter.format("** foo** bar")
+        assert result == "** foo** bar"
+        assert "\u2022" not in result
+
+    def test_normal_bold_still_works(
+        self, formatter: SlackMrkdwnFormatter
+    ) -> None:
+        """Sanity: ``**bold**`` still becomes ``*bold*`` after the fix."""
+        assert formatter.format("**bold**") == "*bold*"
+
+    def test_bold_with_internal_spaces_still_works(
+        self, formatter: SlackMrkdwnFormatter
+    ) -> None:
+        """``**a b c**`` → ``*a b c*`` (spaces in the MIDDLE are fine)."""
+        assert formatter.format("**a b c**") == "*a b c*"
+
+    def test_bold_wrapping_italic_still_works(
+        self, formatter: SlackMrkdwnFormatter
+    ) -> None:
+        """``**bold *italic* text**`` still nests correctly."""
+        result = formatter.format("**bold *italic* text**")
+        assert result == "*bold _italic_ text*"
+
+
+class TestUnderscoreBoldWhitespaceBoundary:
+    """C7 (underscore variant): ``__ foo__`` and ``__foo __`` are not bold."""
+
+    def test_underscore_bold_trailing_space(
+        self, formatter: SlackMrkdwnFormatter
+    ) -> None:
+        """``__bold __`` stays unchanged."""
+        assert formatter.format("__bold __") == "__bold __"
+
+    def test_underscore_bold_leading_space(
+        self, formatter: SlackMrkdwnFormatter
+    ) -> None:
+        """``__ bold__`` stays unchanged."""
+        assert formatter.format("__ bold__") == "__ bold__"
+
+    def test_normal_underscore_bold_still_works(
+        self, formatter: SlackMrkdwnFormatter
+    ) -> None:
+        """Sanity: ``__bold__`` still becomes ``*bold*``."""
+        assert formatter.format("__bold__") == "*bold*"
+
+
+class TestItalicAsteriskBoundary:
+    """C7 (italic variant): runs of asterisks must not be misread as italic.
+
+    The OLD italic regex used ``\\S`` at the content boundaries, which
+    matches ``*``. This caused ``****`` to be parsed as italic wrapping
+    ``**``, producing ``_**_``. The fix uses ``[^\\s*]`` so asterisks
+    cannot appear at the content edges.
+    """
+
+    def test_empty_bold_not_italic(
+        self, formatter: SlackMrkdwnFormatter
+    ) -> None:
+        """``****`` (four asterisks) stays unchanged (was ``_**_``)."""
+        assert formatter.format("****") == "****"
+
+    def test_four_asterisks_between_words(
+        self, formatter: SlackMrkdwnFormatter
+    ) -> None:
+        """``a****b`` stays unchanged (was ``a_**_b``)."""
+        assert formatter.format("a****b") == "a****b"
+
+    def test_single_char_italic_still_works(
+        self, formatter: SlackMrkdwnFormatter
+    ) -> None:
+        """Sanity: ``*a*`` still becomes ``_a_``."""
+        assert formatter.format("*a*") == "_a_"
+
+    def test_real_italic_still_works(
+        self, formatter: SlackMrkdwnFormatter
+    ) -> None:
+        """Sanity: ``*italic*`` still becomes ``_italic_``."""
+        assert formatter.format("*italic*") == "_italic_"
+
+    def test_math_expression_still_preserved(
+        self, formatter: SlackMrkdwnFormatter
+    ) -> None:
+        """Sanity: ``2 * 3 * 4`` still stays unchanged."""
+        assert formatter.format("2 * 3 * 4") == "2 * 3 * 4"
+
+
+class TestBoldItalicAsteriskBoundary:
+    """C7 (bold+italic variant): ``***`` runs without valid content are skipped."""
+
+    def test_five_asterisks_not_bold_italic(
+        self, formatter: SlackMrkdwnFormatter
+    ) -> None:
+        """``*****`` (5 bare asterisks) should not crash or produce italic."""
+        result = formatter.format("*****")
+        # Should not contain underscore-italic artifacts.
+        assert "_" not in result
+
+    def test_single_char_bold_italic_still_works(
+        self, formatter: SlackMrkdwnFormatter
+    ) -> None:
+        """Sanity: ``***a***`` still becomes ``*_a_*``."""
+        assert formatter.format("***a***") == "*_a_*"
+
+    def test_normal_bold_italic_still_works(
+        self, formatter: SlackMrkdwnFormatter
+    ) -> None:
+        """Sanity: ``***bold+italic***`` still becomes ``*_bold+italic_*``."""
+        assert formatter.format("***bold+italic***") == "*_bold+italic_*"
+
+
+# --------------------------------------------------------------------------- #
 # End
 # --------------------------------------------------------------------------- #

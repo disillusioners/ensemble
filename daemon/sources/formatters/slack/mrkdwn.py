@@ -84,24 +84,33 @@ class SlackMrkdwnFormatter(OutputFormatter):
 
         # Step 3: Handle ***bold+italic*** (must run BEFORE **bold** to avoid
         # the bold regex swallowing the outer pair and leaving the inner * as
-        # an unmatched italic marker).
+        # an unmatched italic marker). The [^\s*] boundary prevents runs of
+        # asterisks (e.g. "******") from being misinterpreted.
         text = re.sub(
-            r"\*\*\*(\S(?:[^*]*\S)?)\*\*\*",
+            r"\*\*\*([^\s*](?:[^*]*[^\s*])?)\*\*\*",
             rf"{_BOLD_PLACEHOLDER_OPEN}_\1_{_BOLD_PLACEHOLDER_CLOSE}",
             text,
         )
 
         # Step 4: Convert **bold** to placeholders.
+        # The (?!\s) / (?<!\s) lookarounds require the content to start and
+        # end with a non-whitespace character, matching CommonMark's rule that
+        # ** foo** and **foo ** are NOT valid bold (the space adjacent to the
+        # delimiter disables the emphasis). Without this, "**foo **" would
+        # capture "foo " (trailing space) and produce "*foo *" which Slack
+        # renders as non-bold text with a stray asterisk.
         text = re.sub(
-            r"\*\*(.+?)\*\*",
+            r"\*\*(?!\s)(.+?)(?<!\s)\*\*",
             rf"{_BOLD_PLACEHOLDER_OPEN}\1{_BOLD_PLACEHOLDER_CLOSE}",
             text,
         )
 
         # Step 5: Convert __bold__ to placeholders (with word boundaries to avoid
-        # false positives on dunders like __init__).
+        # false positives on dunders like __init__). The (?!\s) / (?<!\s)
+        # lookarounds additionally reject __ foo__ and __foo __ (space adjacent
+        # to the delimiter disables emphasis, per CommonMark).
         text = re.sub(
-            r"(?<![A-Za-z0-9])__(.+?)__(?![A-Za-z0-9])",
+            r"(?<![A-Za-z0-9])__(?!\s)(.+?)(?<!\s)__(?![A-Za-z0-9])",
             rf"{_BOLD_PLACEHOLDER_OPEN}\1{_BOLD_PLACEHOLDER_CLOSE}",
             text,
         )
@@ -109,11 +118,15 @@ class SlackMrkdwnFormatter(OutputFormatter):
         # Step 6: Convert *italic* to _italic_.
         # At this point, all bold/heading markers are inside placeholders,
         # so single * pairs are safe to convert. The content between the
-        # asterisks must start and end with a non-whitespace character; this
-        # avoids false positives on math expressions like "2 * 3 * 4" while
-        # still allowing the common "a *quick* brown fox" form (the *s are
-        # adjacent to letters, not whitespace).
-        text = re.sub(r"(?<!\*)\*(\S(?:[^*\n]*\S)?)\*(?!\*)", r"_\1_", text)
+        # asterisks must start and end with a non-whitespace, non-asterisk
+        # character; this avoids false positives on math expressions like
+        # "2 * 3 * 4" while still allowing "a *quick* brown fox", and prevents
+        # runs of asterisks (e.g. "****") from being misinterpreted as italic.
+        text = re.sub(
+            r"(?<!\*)\*([^\s*](?:[^*\n]*[^\s*])?)\*(?!\*)",
+            r"_\1_",
+            text,
+        )
 
         # Step 7: Restore bold/heading placeholders to *text* (Slack bold).
         text = text.replace(_BOLD_PLACEHOLDER_OPEN, "*").replace(

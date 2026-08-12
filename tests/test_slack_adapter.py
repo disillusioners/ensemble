@@ -606,6 +606,124 @@ class TestSlackAdapterSend:
         # Verify thread_ts from mapping was used
         assert captured_params.get("thread_ts") == "1234567890.123456"
 
+    @pytest.mark.asyncio
+    async def test_short_message_applies_mrkdwn_formatting(
+        self, mock_slack_adapter, mock_source_repo
+    ):
+        """Short messages with markdown should be converted to Slack mrkdwn."""
+        mock_slack_adapter._status = SourceStatus.RUNNING
+        mock_slack_adapter._app = MagicMock()
+
+        mock_mapping = MagicMock()
+        mock_mapping.mapping_metadata = {
+            "slack_channel_id": "C123456",
+        }
+        mock_source_repo.get_instance_mapping = MagicMock(return_value=mock_mapping)
+        mock_slack_adapter._source_repo = mock_source_repo
+
+        captured_params = {}
+
+        async def capture_params(*args, **kwargs):
+            captured_params.update(kwargs)
+            return True, {}
+
+        mock_slack_adapter._safe_api_call = AsyncMock(side_effect=capture_params)
+
+        message = OutgoingMessage(
+            external_user_id="T123456:U123456",
+            content="**bold text** and *italic*",
+            source_id="slack-main",
+        )
+
+        await mock_slack_adapter.send(message)
+
+        # Should send via the "text" param (short path), and the text should
+        # be converted to Slack mrkdwn — NOT raw markdown.
+        assert "blocks" not in captured_params
+        assert captured_params.get("text") == "*bold text* and _italic_"
+        assert "**" not in captured_params.get("text", "")
+
+    @pytest.mark.asyncio
+    async def test_short_message_plain_text_unchanged(
+        self, mock_slack_adapter, mock_source_repo
+    ):
+        """Short messages without markdown should be sent verbatim."""
+        mock_slack_adapter._status = SourceStatus.RUNNING
+        mock_slack_adapter._app = MagicMock()
+
+        mock_mapping = MagicMock()
+        mock_mapping.mapping_metadata = {
+            "slack_channel_id": "C123456",
+        }
+        mock_source_repo.get_instance_mapping = MagicMock(return_value=mock_mapping)
+        mock_slack_adapter._source_repo = mock_source_repo
+
+        captured_params = {}
+
+        async def capture_params(*args, **kwargs):
+            captured_params.update(kwargs)
+            return True, {}
+
+        mock_slack_adapter._safe_api_call = AsyncMock(side_effect=capture_params)
+
+        message = OutgoingMessage(
+            external_user_id="T123456:U123456",
+            content="Hello World",
+            source_id="slack-main",
+        )
+
+        await mock_slack_adapter.send(message)
+
+        # Plain text should pass through the formatter unchanged.
+        assert "blocks" not in captured_params
+        assert captured_params.get("text") == "Hello World"
+
+    @pytest.mark.asyncio
+    async def test_fallback_to_simple_text_applies_mrkdwn_formatting(
+        self, mock_slack_adapter, mock_source_repo
+    ):
+        """Fallback-to-text path (when blocks builder returns empty) must format."""
+        mock_slack_adapter._status = SourceStatus.RUNNING
+        mock_slack_adapter._app = MagicMock()
+
+        mock_mapping = MagicMock()
+        mock_mapping.mapping_metadata = {
+            "slack_channel_id": "C123456",
+        }
+        mock_source_repo.get_instance_mapping = MagicMock(return_value=mock_mapping)
+        mock_slack_adapter._source_repo = mock_source_repo
+
+        # Force the long-content branch by making content > 400 chars, then
+        # force the fallback-to-simple-text branch by having the blocks
+        # builder return empty.
+        long_content = "**bold lead** " + ("x" * 500)
+
+        with patch(
+            "daemon.sources.adapters.slack.adapter.markdown_to_slack_blocks",
+            return_value=[],
+        ):
+            captured_params = {}
+
+            async def capture_params(*args, **kwargs):
+                captured_params.update(kwargs)
+                return True, {}
+
+            mock_slack_adapter._safe_api_call = AsyncMock(side_effect=capture_params)
+
+            message = OutgoingMessage(
+                external_user_id="T123456:U123456",
+                content=long_content,
+                source_id="slack-main",
+            )
+
+            await mock_slack_adapter.send(message)
+
+        # Should fall back to text-only path and format the markdown.
+        assert "blocks" not in captured_params
+        sent_text = captured_params.get("text", "")
+        assert "**" not in sent_text
+        assert "*bold lead*" in sent_text
+
 
 # ==================== _process_event Tests ====================
 
