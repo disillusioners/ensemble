@@ -154,6 +154,8 @@ export class AddSourceModalComponent implements OnInit {
         { key: 'bot_token', label: 'Bot Token', type: 'password', placeholder: 'your-discord-bot-token', hint: 'From Discord Developer Portal', required: true, section: 'credentials' },
         { key: 'application_id', label: 'Application ID', type: 'text', placeholder: '123456789', hint: 'From Discord Developer Portal', required: true, section: 'credentials' },
         { key: 'guild_id', label: 'Server ID (Guild)', type: 'text', placeholder: '987654321', hint: 'Optional: Restrict to specific server', section: 'config' },
+        { key: 'agent', label: 'Default Agent', type: 'select', placeholder: 'Select an agent...', hint: 'Agent to handle incoming messages', section: 'config', options: [] },
+        { key: 'require_mention', label: 'Require @-mention in channels', type: 'checkbox', placeholder: '', hint: 'Only respond when the bot is @-mentioned in server channels. DMs are unaffected.', section: 'config', defaultValue: true },
       ]
     },
     slack: {
@@ -192,7 +194,7 @@ export class AddSourceModalComponent implements OnInit {
     for (const [type, config] of Object.entries(this.baseSourceTypeConfigs)) {
       configs[type as SourceType] = {
         fields: config.fields.map(field => {
-          if (field.key === 'default_agent') {
+          if (field.key === 'default_agent' || field.key === 'agent') {
             return { ...field, options: agentOptions };
           }
           return field;
