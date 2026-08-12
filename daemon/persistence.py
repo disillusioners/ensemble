@@ -873,6 +873,14 @@ def _reconstruct_full_system_prompt(
 
     instance_repo = getattr(manager, "_instance_repository", None)
 
+    # Source_type is read from the persisted instance metadata so the
+    # platform-context appender receives it as a direct parameter. The
+    # appender is intentionally pure (no DB lookup) — see the bug fix
+    # referenced in the append_platform_context docstring.
+    source_type = (
+        (getattr(instance_meta, "instance_metadata", None) or {}).get("source_type")
+    )
+
     system_prompt, _user_language = _apply_post_cache_appends(
         system_prompt=system_prompt,
         instance_id=instance_id,
@@ -887,5 +895,6 @@ def _reconstruct_full_system_prompt(
         manager=manager,
         agent_meta=agent_meta,
         disable_auto_load_tracking=True,
+        source_type=source_type,
     )
     return system_prompt, getattr(instance_meta, "created_at", None)

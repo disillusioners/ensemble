@@ -274,6 +274,96 @@ def append_user_language(system_prompt: str, language: str) -> str:
     return system_prompt + language_section
 
 
+# ---------------------------------------------------------------------------
+# Chat platform context (Discord / Slack / Telegram)
+#
+# Whitelist-only: only recognized source_types inject platform-specific
+# formatting instructions. Unknown source_types silently skip. This protects
+# against stale rows (e.g., an adapter renamed) and against buggy writes.
+#
+# The instructions are appended to the system prompt of ROOT instances only
+# (parent_id is None). Children spawned by the root do NOT receive this
+# section — the root's instructions tell it which formatting target to use,
+# and children inherit awareness only through the root's own communication.
+# ---------------------------------------------------------------------------
+_PLATFORM_INSTRUCTIONS: dict[str, str] = {
+    "discord": (
+        "\n---\n\n## Chat Platform: Discord\n\n"
+        "You are communicating with users via Discord. Format guidelines:\n"
+        "- Discord supports native markdown: **bold**, *italic*, "
+        "~~strikethrough~~, `inline code`, ```code blocks```, > blockquotes\n"
+        "- Discord message limit: 2000 characters (long messages are auto-split)\n"
+        "- Markdown tables and headers are auto-converted for Discord display\n"
+        "- Use concise, conversational tone — Discord users expect quick responses\n"
+    ),
+    "slack": (
+        "\n---\n\n## Chat Platform: Slack\n\n"
+        "You are communicating with users via Slack. Format guidelines:\n"
+        "- Slack uses mrkdwn format: *bold* (single asterisks), _italic_ "
+        "(single underscores), ~strikethrough~ (single tildes)\n"
+        "- DO NOT use double asterisks (**) for bold — use single (*)\n"
+        "- DO NOT use double underscores (__) for italic — use single (_)\n"
+        "- Slack message limit: 4000 characters\n"
+        "- Code blocks use ```triple backticks```\n"
+        "- Use concise, professional tone appropriate for workplace communication\n"
+    ),
+    "telegram": (
+        "\n---\n\n## Chat Platform: Telegram\n\n"
+        "You are communicating with users via Telegram. Format guidelines:\n"
+        "- Telegram supports MarkdownV2 formatting\n"
+        "- Use **bold**, *italic*, __underline__, ~~strikethrough~~, "
+        "`inline code`, ```pre formatted```\n"
+        "- Telegram message limit: 4096 characters\n"
+        "- Keep responses concise — mobile users prefer short messages\n"
+    ),
+}
+
+
+def append_platform_context(
+    system_prompt: str,
+    source_type: str | None = None,
+    parent_id: Optional[str] = None,
+) -> str:
+    """Append platform-specific formatting instructions to a system prompt.
+
+    Active ONLY when:
+
+      - ``parent_id`` is ``None`` (this is a root instance), AND
+      - ``source_type`` is a recognized platform key present in
+        :data:`_PLATFORM_INSTRUCTIONS`.
+
+    Children (``parent_id`` set) and unrecognized ``source_type`` values pass
+    through unchanged. The function is intentionally pure: callers are
+    responsible for resolving ``source_type`` from the instance metadata
+    BEFORE calling this appender — at spawn time the instance row has not
+    been INSERTed yet, so a DB lookup here would return ``None`` and the
+    feature would silently no-op.
+
+    Mirrors :func:`append_user_language` (value passed in as a parameter)
+    and :func:`append_current_time` (no DB lookup).
+
+    Args:
+        system_prompt: The base system prompt to append to.
+        source_type: Optional chat platform key (e.g. ``"discord"``,
+            ``"slack"``, ``"telegram"``). When ``None`` or unrecognized,
+            the prompt is returned unchanged.
+        parent_id: Optional parent instance ID. When set, the appender is
+            skipped (root-only gate).
+
+    Returns:
+        The system prompt with the matching platform section appended, or
+        the original ``system_prompt`` unchanged when the gate does not pass.
+    """
+    # Gate 1: root-instance only. Children never receive platform context.
+    if parent_id is not None:
+        return system_prompt
+    # Gate 2: whitelist-only. Unknown source_types silently skip.
+    section = _PLATFORM_INSTRUCTIONS.get(source_type)
+    if not section:
+        return system_prompt
+    return system_prompt + section
+
+
 def append_allowed_models(
     system_prompt: str,
     agent_meta: Any,
@@ -406,6 +496,7 @@ def _apply_post_cache_appends(
     auto_load_instance_id: str | None = None,
     auto_load_instance_repository: Any = None,
     disable_auto_load_tracking: bool = False,
+    source_type: str | None = None,
 ) -> tuple[str, str]:
     """Apply the shared post-cache append chain for spawn and restore.
 
@@ -441,6 +532,13 @@ def _apply_post_cache_appends(
         disable_auto_load_tracking: When ``True``, suppresses the
             ``last_injected_skill_ids`` metadata write entirely
             (legacy — no-op in the human_messages path).
+        source_type: Optional chat platform key (e.g. ``"discord"``,
+            ``"slack"``, ``"telegram"``). Forwarded to
+            :func:`append_platform_context` so the platform-specific
+            formatting instructions are appended at spawn/restore
+            time. Callers must resolve this from ``instance_metadata``
+            BEFORE calling — the appender itself is pure and does not
+            perform a DB lookup.
 
     Returns:
         A tuple containing the system prompt with all post-cache sections
@@ -456,6 +554,11 @@ def _apply_post_cache_appends(
     system_prompt = append_allowed_models(system_prompt, agent_meta, manager)
     user_language = get_language_preference(project_repository)
     system_prompt = append_user_language(system_prompt, user_language)
+    system_prompt = append_platform_context(
+        system_prompt,
+        source_type=source_type,
+        parent_id=parent_id,
+    )
     # ADR-7 / Phase 2: the per-turn ``[SYSTEM CONTEXT: ...]`` HumanMessages
     # carry agent-facing reference data. Add the PERSONA-level defense
     # instruction so the LLM treats those messages as observational
@@ -692,6 +795,7 @@ class InstanceLifecycleService:
         invoked_as_tool: bool = False,
         model: str | None = None,
         version_tag: str | None = None,
+        source_type: str | None = None,
     ) -> tuple[str, str | None]:
         """Create a new agent instance.
 
@@ -719,6 +823,12 @@ class InstanceLifecycleService:
                 implicit ``None`` case. The resolved tag is persisted
                 as ``Instance.agent_tag`` (C1) so the same version is
                 reloaded on restore from the database.
+            source_type: Optional chat platform type (e.g. ``"discord"``,
+                ``"slack"``, ``"telegram"``). When set and the instance is a
+                root (``parent_id is None``), stored in ``instance_metadata``
+                so :func:`append_platform_context` can inject platform-specific
+                formatting rules into the system prompt. Silently skipped for
+                unknown source_types and child instances.
 
         Returns:
             A ``(instance_id, validated_model_override)`` tuple where
@@ -852,6 +962,7 @@ class InstanceLifecycleService:
             project_repository=project_repository,
             manager=self._manager,
             agent_meta=metadata,
+            source_type=source_type,
         )
 
         # Create tools with this manager reference
@@ -1040,7 +1151,14 @@ class InstanceLifecycleService:
         # Store MCP tool names for cache key consistency
         if mcp_tool_names:
             instance_metadata["mcp_tool_names"] = mcp_tool_names
-        
+
+        # Store source_type (chat platform) for the platform-context appender.
+        # Additive JSONB key — no migration. Only consumed by root instances
+        # (parent_id is None) whose source_type matches the whitelist in
+        # _PLATFORM_INSTRUCTIONS.
+        if source_type:
+            instance_metadata["source_type"] = source_type
+
         logger.info(f"Spawning instance {instance_id} (agent={resolved_agent_id}, parent={parent_id}, name={instance_name})")
 
         # M8 fix: child creation + parent source inheritance + initial
@@ -2616,6 +2734,9 @@ class InstanceLifecycleService:
 
         # Apply the post-cache append chain for context, metadata, time,
         # language preference, and auto-loaded skills.
+        source_type = (
+            (getattr(meta, "instance_metadata", None) or {}).get("source_type")
+        )
         system_prompt, user_language = _apply_post_cache_appends(
             system_prompt=system_prompt,
             instance_id=instance_id,
@@ -2627,6 +2748,7 @@ class InstanceLifecycleService:
             project_repository=project_repository,
             manager=self._manager,
             agent_meta=agent_meta,
+            source_type=source_type,
         )
 
         # Create tools with this manager reference

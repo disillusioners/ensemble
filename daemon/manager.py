@@ -5127,6 +5127,7 @@ class InstanceManager:
         invoked_as_tool: bool = False,
         model: str | None = None,
         version_tag: str | None = None,
+        source_type: str | None = None,
     ) -> tuple[str, str | None]:
         """Create a new agent instance.
 
@@ -5147,6 +5148,11 @@ class InstanceManager:
                 allowed, the override is silently ignored and the default model
                 is used.
             version_tag: Optional agent version tag. ``None`` selects the base agent.
+            source_type: Optional chat platform type (e.g. ``"discord"``,
+                ``"slack"``, ``"telegram"``). When set, stored in
+                ``instance_metadata`` so the platform-context system-prompt
+                appender can inject formatting rules into root instances.
+                No-op for child instances (parent_id set).
 
         Returns:
             A ``(instance_id, validated_model_override)`` tuple. ``validated_model_override``
@@ -5170,6 +5176,7 @@ class InstanceManager:
             invoked_as_tool=invoked_as_tool,
             model=model,
             version_tag=version_tag,
+            source_type=source_type,
         )
 
     async def ensure_mcp_preloaded(self, instance_id: str) -> None:

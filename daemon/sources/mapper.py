@@ -280,6 +280,7 @@ class InstanceMapper:
         agent_id: str,
         force_new: bool = False,
         extra_mapping_metadata: dict | None = None,
+        source_type: str | None = None,
     ) -> str:
         """Get existing instance or create a new one.
 
@@ -293,6 +294,10 @@ class InstanceMapper:
             agent_id: The agent identifier.
             force_new: If True, delete any existing mapping and create a fresh instance.
             extra_mapping_metadata: Additional metadata to store with the mapping.
+            source_type: Optional chat platform type (e.g. "discord", "slack",
+                "telegram"). Threaded into the spawned instance's metadata so
+                the platform-context appender can inject formatting rules into
+                the root instance's system prompt.
 
         Returns:
             The agent_instance_id (UUID string).
@@ -357,6 +362,7 @@ class InstanceMapper:
             agent_instance_id = await self.manager.spawn_instance_with_mcp(
                 instance_id=instance_id,
                 agent_id=effective_agent_id,
+                source_type=source_type,
             )
             
             # Create mapping

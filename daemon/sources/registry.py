@@ -843,6 +843,7 @@ class SourceRegistry:
                 agent_id=agent_dir,
                 force_new=force_new,
                 extra_mapping_metadata=extra_mapping_metadata,
+                source_type=source_type,
             )
             
             logger.debug(f"Got instance_id={instance_id}")
