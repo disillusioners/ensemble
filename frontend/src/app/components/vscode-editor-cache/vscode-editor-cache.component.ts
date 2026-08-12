@@ -56,7 +56,7 @@ const MAX_CACHED_VSCODE = 3;
   standalone: true,
   imports: [VsCodeViewerComponent],
   template: `
-    <div #host class="vscode-editor-cache-host"></div>
+    <ng-container #host></ng-container>
   `,
   styleUrl: './vscode-editor-cache.component.scss',
 })
@@ -78,9 +78,8 @@ export class VsCodeEditorCacheComponent implements OnDestroy {
 
   /**
    * View-container anchor for the dynamic viewers. Read from the
-   * `<div #host>` template ref so the created components become
-   * children of the host div (not siblings of this component, which
-   * would put them outside the workspace's layout block).
+   * `<ng-container #host>` template ref; the anchor renders no DOM node,
+   * so created viewers attach directly without a phantom sibling layout box.
    */
   private readonly hostVcr = viewChild('host', { read: ViewContainerRef });
 
