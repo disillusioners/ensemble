@@ -6,6 +6,9 @@ import { MatMenuModule } from '@angular/material/menu';
 import { Agent } from '../../models';
 import { deduplicateAgentsById } from '../../utils/agent-dedup';
 
+const RECENT_AGENTS_KEY = 'ensemble_recent_agents';
+const MAX_RECENT = 5;
+
 const colorMap: Record<string, string> = {
   'accent-amber': '#f59e0b',
   'accent-cyan': '#10a7f7',
@@ -37,9 +40,9 @@ export class AgentSwitcherComponent {
 
   private readonly host = inject(ElementRef<HTMLElement>);
 
-  isOpen = signal(false);
-  focusedIndex = signal(-1);
-  searchQuery = signal('');
+  readonly isOpen = signal(false);
+  readonly focusedIndex = signal(-1);
+  readonly searchQuery = signal('');
 
   // Filter out system agents from selection
   readonly selectableAgents = computed(() =>
@@ -61,6 +64,35 @@ export class AgentSwitcherComponent {
       const desc = (agent.description ?? '').toLowerCase();
       return name.includes(query) || desc.includes(query);
     });
+  });
+
+  // Track recently selected agent IDs (persisted in localStorage, max 5).
+  // Initialized from localStorage so the list survives page reloads.
+  readonly recentAgentIds = signal<string[]>(loadRecentAgentIds());
+
+  // Recently selected agents, mapped to live Agent objects and filtered by search.
+  // Stale IDs (agent no longer in the list) are silently dropped.
+  readonly recentAgents = computed<Agent[]>(() => {
+    const ids = this.recentAgentIds();
+    if (ids.length === 0) return [];
+    const available = this.deduplicatedAgents();
+    const byId = new Map(available.map(a => [a.id, a]));
+    const query = this.searchQuery().trim().toLowerCase();
+    const result: Agent[] = [];
+    for (const id of ids) {
+      const agent = byId.get(id);
+      if (!agent) continue; // stale — agent removed from list
+      if (!query) {
+        result.push(agent);
+      } else {
+        const name = (agent.name ?? '').toLowerCase();
+        const desc = (agent.description ?? '').toLowerCase();
+        if (name.includes(query) || desc.includes(query)) {
+          result.push(agent);
+        }
+      }
+    }
+    return result;
   });
 
   // Keep focusedIndex within bounds as the filtered list shrinks/grows
@@ -134,6 +166,7 @@ export class AgentSwitcherComponent {
   }
 
   selectAgent(agent: Agent): void {
+    this._recordRecentAgent(agent.id);
     const versionTag = this.defaultVersions()[agent.id] ?? null;
     this.agentChange.emit({ agent, versionTag });
     this.isOpen.set(false);
@@ -145,6 +178,15 @@ export class AgentSwitcherComponent {
     this.isOpen.set(false);
     this.focusedIndex.set(-1);
     this.searchQuery.set('');
+  }
+
+  /** Record a recently-selected agent ID to localStorage and update the signal. */
+  private _recordRecentAgent(id: string): void {
+    const current = this.recentAgentIds();
+    // Deduplicate: remove old occurrence, prepend to front, trim to MAX_RECENT
+    const updated = [id, ...current.filter(x => x !== id)].slice(0, MAX_RECENT);
+    this.recentAgentIds.set(updated);
+    saveRecentAgentIds(updated);
   }
 
   onTriggerKeydown(event: KeyboardEvent): void {
@@ -307,7 +349,7 @@ export class AgentSwitcherComponent {
     const menu = this.dropdownMenu?.nativeElement;
     if (!menu) return;
 
-    const items = menu.querySelectorAll('.menu-item');
+    const items = menu.querySelectorAll('.menu-item:not(.recent-item)');
     const item = items[index] as HTMLElement;
     if (item) {
       item.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
@@ -318,7 +360,7 @@ export class AgentSwitcherComponent {
     const menu = this.dropdownMenu?.nativeElement;
     if (!menu) return;
 
-    const items = menu.querySelectorAll('.menu-item');
+    const items = menu.querySelectorAll('.menu-item:not(.recent-item)');
     const item = items[index] as HTMLElement;
     if (item) {
       item.focus();
@@ -425,5 +467,27 @@ export class AgentSwitcherComponent {
     if (this.isOpen()) {
       this.updateDropdownMaxHeight();
     }
+  }
+}
+
+// ── Recent agents localStorage helpers (module-level, SSR-safe) ─────────────
+
+function loadRecentAgentIds(): string[] {
+  try {
+    const raw = localStorage.getItem(RECENT_AGENTS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((x): x is string => typeof x === 'string').slice(0, MAX_RECENT);
+  } catch {
+    return [];
+  }
+}
+
+function saveRecentAgentIds(ids: string[]): void {
+  try {
+    localStorage.setItem(RECENT_AGENTS_KEY, JSON.stringify(ids));
+  } catch {
+    // localStorage may be unavailable (SSR, Safari private mode) — silently skip
   }
 }

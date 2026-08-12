@@ -33,6 +33,7 @@ describe('AgentSwitcherComponent', () => {
   let component: AgentSwitcherComponent;
 
   beforeEach(async () => {
+    localStorage.clear();
     await TestBed.configureTestingModule({
       imports: [AgentSwitcherComponent],
       providers: [provideNoopAnimations()],
@@ -264,6 +265,142 @@ describe('AgentSwitcherComponent', () => {
       input.value = 'tester';
       component.onSearchInput({ target: input } as unknown as Event);
       expect(component.filteredAgents().map(a => a.id)).toEqual(['tester']);
+    });
+  });
+
+  // ── Recent agents (localStorage tracking + recentAgents computed) ──────────
+  describe('recent agents', () => {
+    const RECENT_KEY = 'ensemble_recent_agents';
+
+    it('selectAgent() writes agent id to localStorage', () => {
+      const dev = component.selectableAgents().find(a => a.id === 'dev')!;
+      component.selectAgent(dev);
+      const stored = JSON.parse(localStorage.getItem(RECENT_KEY)!);
+      expect(stored).toEqual(['dev']);
+    });
+
+    it('selecting the same agent twice moves it to front (no duplicate)', () => {
+      const dev = component.selectableAgents().find(a => a.id === 'dev')!;
+      const tester = component.selectableAgents().find(a => a.id === 'tester')!;
+      component.selectAgent(dev);
+      component.selectAgent(tester);
+      component.selectAgent(dev); // move dev back to front
+      const stored = JSON.parse(localStorage.getItem(RECENT_KEY)!);
+      expect(stored).toEqual(['dev', 'tester']);
+      expect(stored.length).toBe(2);
+    });
+
+    it('trims the list to max 5 entries', () => {
+      // We need more than 5 agents to test trimming. Provide extra agents.
+      fixture.componentRef.setInput('agents', [
+        ...AGENTS,
+        { id: 'a4', agent_id: 'a4', name: 'Agent4', description: 'desc4', icon: 'star', color: 'accent-blue' },
+        { id: 'a5', agent_id: 'a5', name: 'Agent5', description: 'desc5', icon: 'star', color: 'accent-blue' },
+        { id: 'a6', agent_id: 'a6', name: 'Agent6', description: 'desc6', icon: 'star', color: 'accent-blue' },
+        { id: 'a7', agent_id: 'a7', name: 'Agent7', description: 'desc7', icon: 'star', color: 'accent-blue' },
+      ]);
+      fixture.detectChanges();
+
+      const agents = component.deduplicatedAgents();
+      // Select 7 agents (all non-system, sorted alphabetically)
+      agents.forEach(a => component.selectAgent(a));
+      const stored = JSON.parse(localStorage.getItem(RECENT_KEY)!);
+      expect(stored.length).toBe(5);
+    });
+
+    it('recentAgents() excludes IDs not in the current agents() list (stale entries)', () => {
+      // Pre-populate localStorage with an id that doesn't exist in AGENTS
+      localStorage.setItem(RECENT_KEY, JSON.stringify(['ghost', 'dev']));
+      // Force signal re-init by creating a fresh component
+      fixture.destroy();
+      fixture = TestBed.createComponent(AgentSwitcherComponent);
+      component = fixture.componentInstance;
+      fixture.componentRef.setInput('agents', AGENTS);
+      fixture.detectChanges();
+
+      const recent = component.recentAgents().map(a => a.id);
+      expect(recent).toEqual(['dev']); // 'ghost' filtered out
+    });
+
+    it('recentAgents() respects search filter (empty → all recent; typed → matching only)', () => {
+      const dev = component.selectableAgents().find(a => a.id === 'dev')!;
+      const tester = component.selectableAgents().find(a => a.id === 'tester')!;
+      component.selectAgent(dev);
+      component.selectAgent(tester);
+
+      // Empty search → both recent agents
+      expect(component.recentAgents().map(a => a.id)).toEqual(['tester', 'dev']);
+
+      // Search "dev" → only Developer matches among recent
+      component.searchQuery.set('dev');
+      expect(component.recentAgents().map(a => a.id)).toEqual(['dev']);
+
+      // No match → empty
+      component.searchQuery.set('zzznomatch');
+      expect(component.recentAgents()).toEqual([]);
+    });
+
+    it('first-load with empty localStorage → recentAgents() returns []', () => {
+      expect(component.recentAgents()).toEqual([]);
+    });
+
+    it('constructor initializes from existing localStorage (pre-populated)', () => {
+      localStorage.setItem(RECENT_KEY, JSON.stringify(['tester', 'dev']));
+      fixture.destroy();
+      fixture = TestBed.createComponent(AgentSwitcherComponent);
+      component = fixture.componentInstance;
+      fixture.componentRef.setInput('agents', AGENTS);
+      fixture.detectChanges();
+
+      const recent = component.recentAgents().map(a => a.id);
+      expect(recent).toEqual(['tester', 'dev']);
+    });
+
+    it('handles corrupt JSON in localStorage gracefully (recentAgents returns [])', () => {
+      localStorage.setItem(RECENT_KEY, 'not-json{');
+      fixture.destroy();
+      fixture = TestBed.createComponent(AgentSwitcherComponent);
+      component = fixture.componentInstance;
+      fixture.componentRef.setInput('agents', AGENTS);
+      fixture.detectChanges();
+      expect(component.recentAgents()).toEqual([]);
+    });
+
+    it('handles non-array JSON value in localStorage (scalar → [])', () => {
+      localStorage.setItem(RECENT_KEY, '"text"');
+      fixture.destroy();
+      fixture = TestBed.createComponent(AgentSwitcherComponent);
+      component = fixture.componentInstance;
+      fixture.componentRef.setInput('agents', AGENTS);
+      fixture.detectChanges();
+      expect(component.recentAgents()).toEqual([]);
+    });
+
+    it('filters out non-string elements from localStorage array', () => {
+      localStorage.setItem(RECENT_KEY, JSON.stringify([123, 'dev', null]));
+      fixture.destroy();
+      fixture = TestBed.createComponent(AgentSwitcherComponent);
+      component = fixture.componentInstance;
+      fixture.componentRef.setInput('agents', AGENTS);
+      fixture.detectChanges();
+      const recent = component.recentAgents().map(a => a.id);
+      expect(recent).toEqual(['dev']); // 123 and null dropped
+    });
+
+    it('handles localStorage.setItem throwing (signal still updates in-memory)', () => {
+      const dev = component.selectableAgents().find(a => a.id === 'dev')!;
+      // Simulate QuotaExceededError
+      const original = Storage.prototype.setItem;
+      Storage.prototype.setItem = jest.fn(() => {
+        throw new DOMException('quota exceeded', 'QuotaExceededError');
+      });
+      try {
+        expect(() => component.selectAgent(dev)).not.toThrow();
+        // Signal still updated in-memory
+        expect(component.recentAgentIds()).toEqual(['dev']);
+      } finally {
+        Storage.prototype.setItem = original; // always restore
+      }
     });
   });
 });

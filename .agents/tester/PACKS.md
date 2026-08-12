@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 249 packs
-- Unit: 196 | Integration: 19 | Mock: 8 | E2E: 14 | Postgres: 4 | Manual: 1 | SharedContext: 5 | Frontend: 5 | Regression: 1
+- Total: 251 packs
+- Unit: 196 | Integration: 19 | Mock: 8 | E2E: 14 | Postgres: 4 | Manual: 1 | SharedContext: 5 | Frontend: 7 | Regression: 1
 - Last full-suite run: 2026-07-23 on `feature/defer-queue-idle-gate` @ c7db8598 (see `RESULTS/2026-07-23-defer-queue-idle-gate-full-suite.md`) — 2412 tests, 2373 pass, 39 pre-existing SQLite-path failures (dual-driver migration bug, NOT defer-queue regression), 82 new feature tests all green
 - Context Injection Restructure: 2026-07-28 on `feature/context-injection-restructure` @ `2de4af3a` — 209 new feature tests ALL PASS, 694 core regression pass with 0 NEW failures (41 pre-existing matching baseline). See `RESULTS/2026-07-28-context-injection-restructure.md`
 - V2 Agent Validation: 2026-07-30 on `feature/v2-developer-planner` — static validation of developer[v2] + planner[v2] agent definitions (16/16 checks PASS: meta.json, file completeness, skill-set.yaml, opencode absence, mermaid syntax, registry compat). See `RESULTS/2026-07-30-v2-developer-planner-validation.md`
@@ -649,3 +649,10 @@ VS Code Server Editor Integration feature (`feature/vscode-server-editor` @ bf3c
 | llm_load_balance_integration_test | tests/test_llm_load_balance_integration.py | Resolution priority chain (override > llm_models > llm_model > default), persistence gating by source, single-resolution invariant, allowed-models filtering | 5 min | 2026-08-01 | ✅ PASS (17/17, feature/llm-model-load-balance) |
 | llm_config_override_unit_test | tests/unit/test_llm_config_override.py | Model config override: _build_llm_config pure config-builder, _resolve_model_override allow-list matching, restore-on-resume persistence, allowed-models CSV/JSON parsing | 2 min | 2026-08-01 | ✅ PASS (31/31, feature/llm-model-load-balance) |
 S (31/31, feature/llm-model-load-balance) |
+
+## Frontend Test Packs
+
+| Pack | Location | Scope | Timeout | Last Run | Status |
+|------|----------|-------|---------|----------|--------|
+| agent_switcher_unit_test | `cd frontend && npx jest --testPathPatterns=agent-switcher --no-coverage` | AgentSwitcherComponent: Recent agents section (localStorage persistence, move-to-front dedup, max 5 trimming, stale ID filtering, search filter, edge cases). 37 tests. | 2 min | 2026-08-12 | ✅ PASS (37/37 in 1.3s, feature/recent-agents-switcher) |
+| frontend_jest_regression | `cd frontend && npx jest --no-coverage` | Full frontend Jest suite — all Angular specs. Smoke regression to catch cross-component breakage. 1,918 tests, 52 suites. | 5 min | 2026-08-12 | ✅ PASS (1918/1918 in 9.4s, feature/recent-agents-switcher) |
