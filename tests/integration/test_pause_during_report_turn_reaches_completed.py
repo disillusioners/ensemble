@@ -183,40 +183,43 @@ def _seed_two_orphans_at_completed_processing_state(
 def test_pause_during_report_turn_resume_reaches_completed(
     lifecycle_service, engine, write_guard
 ) -> None:
-    """Pause during a ``process_report`` turn → resume → both
-    orphan rows reconcile → leader completes (Task 12b primary).
+    """Pause during a ``process_report`` turn → resume → tasks
+    resume naturally → leader completes (Task 12b primary).
+
+    Phase 4b/4c (2026-08-12, pause/resume redesign): the resume
+    cascade transitions the Tasks ``PAUSED → PENDING`` (was
+    ``PAUSED → CANCELLED`` pre-migration). The Tasks stay live so
+    the WorkerPool can re-claim them and complete the orphan
+    messages naturally. The cascade no longer reconciles the
+    orphan message_queue rows directly (UPDATE 4 removed).
 
     Seeds the exact production state (2 orphan ``processing``
     ``completion_report`` rows, backing Tasks at ``paused``),
-    runs the resume cascade, then runs the post-reconcile re-fire
-    against a stub ``ChildReportsService`` that emulates the
-    ``_process_child_completion_db_sync`` short-circuit (the
-    instance is at ``WAITING_CHILDREN`` in production; here we
-    pre-seed it at ``WAITING_CHILDREN`` post-cascade so the
-    re-fire's idempotency guard fires).
+    runs the resume cascade, then simulates the WorkerPool's
+    claim+complete path against the PENDING Tasks. The
+    complete_task call fires ``reconcile_turn_mirror``, which
+    marks the orphan messages as completed (per the new
+    CASE WHEN terminal_reason='cancelled' THEN 'failed' ELSE
+    'completed' rule).
 
     Verifies:
-      * UPDATE 4 reconciles both orphan rows.
-      * After the cascade + re-fire, the leader reaches
-        ``COMPLETED``.
+      * The resume cascade leaves the Tasks in PENDING (not
+        CANCELLED) and the message_queue rows in PROCESSING
+        (not completed) — the cascade does NOT reconcile
+        non-terminal Tasks' messages.
+      * After the WorkerPool completes the PENDING Tasks, the
+        orphan messages are marked as completed (via
+        ``reconcile_turn_mirror``).
+      * The instance reaches ``COMPLETED``.
     """
     ensure_schema(engine)
     iid, msg1, msg2 = _seed_two_orphans_at_completed_processing_state(
         engine
     )
-    # Move the instance to WAITING_CHILDREN (production state at
-    # resume time) — the resume cascade will then move it to
-    # RUNNING via UPDATE 1, but we want to test the re-fire
-    # against a near-WAITING_CHILDREN state.
-    from daemon.repositories.instance.models import (
-        InstanceStatus, Instance,
-    )
-    # Actually keep it at PAUSED for the cascade to do its work.
-    # The re-fire checks ``pending_count`` and if it's 0, calls
-    # ``_process_child_completion_db_sync`` which has its own
-    # idempotency guards.
 
-    # Run the cascade.
+    # Run the cascade. With the new behavior, the cascade
+    # transitions the Tasks PAUSED → PENDING and does NOT touch
+    # the message_queue rows.
     result = lifecycle_service._resume_cascade_db_sync(
         engine, write_guard,
         tree_ids=[iid],
@@ -224,13 +227,50 @@ def test_pause_during_report_turn_resume_reaches_completed(
         is_root_resume=True,
     )
 
-    # UPDATE 4 reconciled both orphan rows.
-    assert msg1 in result.reconciled_message_ids
-    assert msg2 in result.reconciled_message_ids
-    # Tasks were cancelled.
-    assert len(result.cancelled_task_ids) == 2
+    # Phase 4b/4c: Tasks are PENDING, messages still PROCESSING,
+    # no reconciliation in the cascade.
+    assert result.reconciled_message_ids == []
+    assert len(result.resumed_task_ids) == 2
+    assert read_message(engine, msg1)["status"] == MessageStatus.PROCESSING.value
+    assert read_message(engine, msg2)["status"] == MessageStatus.PROCESSING.value
 
-    # Both queue rows are now ``completed``.
+    # Simulate the WorkerPool's claim+complete path: the WorkerPool
+    # claims the PENDING tasks, drives the graph, and calls
+    # complete_task. The complete_task call fires
+    # reconcile_turn_mirror, which marks the orphan messages as
+    # completed.
+    from sqlmodel import select
+    from daemon.repositories.task.models import Task as TaskModel
+    # First, look up the task IDs (avoiding detached-instance
+    # issues by not relying on the session-bound objects).
+    task_ids = []
+    with Session(engine) as s:
+        paused_tasks = s.exec(
+            select(TaskModel).where(
+                TaskModel.instance_id == iid,
+                TaskModel.status == TaskStatus.PENDING.value,
+            )
+        ).all()
+        task_ids = [t.id for t in paused_tasks]
+    assert len(task_ids) == 2, (
+        f"expected 2 PENDING tasks after cascade, got {len(task_ids)}"
+    )
+    # Complete each task. Use the TaskRepository's complete_task,
+    # which fires reconcile_turn_mirror.
+    task_repo = TaskRepository(engine)
+    for task_id in task_ids:
+        # First transition PENDING → RUNNING (simulating the
+        # Worker's claim).
+        with Session(engine) as s:
+            task = s.get(TaskModel, task_id)
+            task.status = TaskStatus.RUNNING.value
+            s.add(task)
+            s.commit()
+        # Then complete (RUNNING → COMPLETED), which fires
+        # reconcile_turn_mirror.
+        task_repo.complete_task(task_id, result={"summary": "test"})
+
+    # Now the orphan messages are COMPLETED.
     assert read_message(engine, msg1)["status"] == MessageStatus.COMPLETED.value
     assert read_message(engine, msg2)["status"] == MessageStatus.COMPLETED.value
 
@@ -284,16 +324,17 @@ def test_post_reconcile_refire_self_heals_orphan(
     future incident by re-evaluating the parent-completion
     guard.
 
-    We verify the contract by directly invoking the re-fire
-    helper after UPDATE 4 has run. The re-fire inspects the
-    instance's own queue (now reconciled to ``completed``) and
-    fires the completion cascade via
-    ``_process_child_completion_db_sync``.
+    Phase 4b/4c (2026-08-12, pause/resume redesign): the resume
+    cascade no longer reconciles orphan messages (UPDATE 4
+    removed). The re-fire path is also removed — the WorkerPool's
+    natural claim+complete path owns the orphan message cleanup.
 
-    For this test we stub the manager's ``ChildReportsService``
-    so the re-fire can complete without a full manager. The
-    stub returns ``idempotency_skip`` (the instance is already
-    terminal in the test's setup).
+    This test now verifies that the resume cascade leaves the
+    orphan message in PROCESSING (the natural-completion
+    pre-condition) and that ``pending_count`` is 1 (the parent
+    still has outstanding work to observe). When the WorkerPool
+    later completes the PENDING Task, ``reconcile_turn_mirror``
+    marks the message as completed.
     """
     ensure_schema(engine)
     scenario = seed_orphan_scenario(engine)
@@ -314,10 +355,10 @@ def test_post_reconcile_refire_self_heals_orphan(
         is_root_resume=True,
     )
 
-    # Both UPDATE 2 and UPDATE 4 fired. The re-fire path inspects
-    # the queue post-cascade. After UPDATE 4 the queue is empty
-    # (reconciled), so ``pending_count`` should be 0. We verify
-    # the pre-condition for the re-fire to fire.
+    # Phase 4b/4c: the cascade no longer reconciles the orphan
+    # message. ``pending_count`` is 1 (the orphan is still
+    # ``processing``). The WorkerPool will claim the PENDING Task
+    # and complete the message naturally.
     from daemon.repositories.message_queue.predicates import (
         message_queue_counts_as_pending,
     )
@@ -339,9 +380,9 @@ def test_post_reconcile_refire_self_heals_orphan(
         for row in candidates
         if message_queue_counts_as_pending(row, engine)
     )
-    # Post-reconcile: no rows in base status filter (the orphan
-    # is now completed).
-    assert pending_count == 0
+    # Post-cascade: orphan is still pending (the cascade does NOT
+    # reconcile non-terminal Tasks' messages anymore).
+    assert pending_count == 1
 
 
 def _seed_two_orphans_at_waiting_children_state(
@@ -409,50 +450,45 @@ def _seed_two_orphans_at_waiting_children_state(
 def test_phase2_post_reconcile_refire_resolves_orphan_via_guard(
     engine, write_guard, monkeypatch
 ) -> None:
-    """Phase 2 A5.1: the post-reconcile re-fire resolves the
-    orphan via the parent-completion guard.
+    """Phase 4b/4c (2026-08-12, pause/resume redesign): the
+    resume cascade no longer reconciles orphan messages (UPDATE 4
+    removed) and the post-reconcile re-fire is removed. The
+    WorkerPool's natural claim+complete path owns the orphan
+    message cleanup.
 
-    The sibling test ``test_post_reconcile_refire_self_heals_orphan``
-    (line 274 above) only verifies the precondition
-    (``pending_count == 0`` after UPDATE 4) — it does NOT verify
-    that the re-fire actually fires
-    ``_process_child_completion_db_sync`` and transitions the
-    instance. This test goes further.
+    This test verifies the new behavior: the resume cascade
+    leaves the orphan messages in PROCESSING (the natural-
+    completion pre-condition). When the WorkerPool later claims
+    and completes the PENDING Task, ``reconcile_turn_mirror``
+    marks the message as completed. The instance is then driven
+    to COMPLETED via the natural finalize path.
 
     Scenario:
-      * Root instance at ``WAITING_CHILDREN`` (the stuck state
-        the re-fire is designed to fix).
+      * Root instance at ``WAITING_CHILDREN`` (the stuck state).
       * Two ``process_report`` Tasks at ``PAUSED`` (the cascade
-        will cancel them via UPDATE 2).
+        transitions them ``PAUSED → PENDING``).
       * Two orphan ``completion_report`` rows at
         ``status='processing'`` with ``processing_task_id=NULL``
         (the exact production orphan shape).
 
     Run the cascade. UPDATE 1 is a no-op (instance is not
-    ``paused``). UPDATE 2 cancels the Tasks. UPDATE 4 reconciles
-    the orphan rows. The re-fire inspects the instance's own
-    queue (``pending_count == 0`` after UPDATE 4) and calls
-    ``_process_child_completion_db_sync``. The function
-    short-circuits on terminal/paused states
-    (``child_reports.py:1212-1219``); the instance is at
-    ``WAITING_CHILDREN`` so it proceeds through the root-bus
-    gate, the pending-tasks guard, and the own-queue
-    ``pending_count`` guard, then transitions the instance to
-    ``COMPLETED``.
+    ``paused``). ResumeTurn transitions the Tasks
+    ``PAUSED → PENDING``. The orphan messages remain PROCESSING
+    (the cascade no longer reconciles non-terminal Tasks'
+    messages). Simulate the WorkerPool's claim+complete path to
+    drive the natural completion, then verify the instance
+    reaches ``COMPLETED``.
 
     Verifies:
-      * UPDATE 4 reconciles both orphan rows.
-      * The re-fire fires (the instance transitions AWAY from
-        ``WAITING_CHILDREN`` — the strongest evidence the re-fire
-        actually ran).
+      * The cascade leaves the Tasks in PENDING (not CANCELLED).
+      * The orphan messages are STILL PROCESSING after the cascade.
+      * The WorkerPool's claim+complete path marks the orphan
+        messages as completed (via ``reconcile_turn_mirror``).
       * The instance reaches ``COMPLETED``.
 
     The bus singleton is monkeypatched so the parent-completion
     guard's ``get_dependency_bus()`` lookup returns a mock with
-    ``count_pending_for_target_sync`` returning 0; without this
-    the guard raises ``RuntimeError`` per the A8 hard error at
-    ``child_reports.py:1274-1281`` and the re-fire's try/except
-    at ``instance_lifecycle.py:3421-3430`` swallows it.
+    ``count_pending_for_target_sync`` returning 0.
     """
     ensure_schema(engine)
     iid, msg1, msg2 = _seed_two_orphans_at_waiting_children_state(
@@ -486,17 +522,36 @@ def test_phase2_post_reconcile_refire_resolves_orphan_via_guard(
         is_root_resume=True,
     )
 
-    # UPDATE 4 reconciled both orphan rows (the cascade's job).
+    # Phase 4b/4c: the cascade does NOT reconcile the orphan
+    # messages. Both queue rows are still PROCESSING.
+    assert read_message(engine, msg1)["status"] == MessageStatus.PROCESSING.value
+    assert read_message(engine, msg2)["status"] == MessageStatus.PROCESSING.value
+
+    # Simulate the WorkerPool's claim+complete path.
+    from sqlmodel import select
+    from daemon.repositories.task.models import Task as TaskModel
+    task_ids = []
+    with Session(engine) as s:
+        paused_tasks = s.exec(
+            select(TaskModel).where(
+                TaskModel.instance_id == iid,
+                TaskModel.status == TaskStatus.PENDING.value,
+            )
+        ).all()
+        task_ids = [t.id for t in paused_tasks]
+    assert len(task_ids) == 2
+    task_repo = TaskRepository(engine)
+    for task_id in task_ids:
+        # PENDING → RUNNING (claim)
+        with Session(engine) as s:
+            task = s.get(TaskModel, task_id)
+            task.status = TaskStatus.RUNNING.value
+            s.add(task)
+            s.commit()
+        # RUNNING → COMPLETED (fires reconcile_turn_mirror)
+        task_repo.complete_task(task_id, result={"summary": "test"})
+
+    # The WorkerPool's complete_task fires reconcile_turn_mirror,
+    # which marks the orphan messages as COMPLETED.
     assert read_message(engine, msg1)["status"] == MessageStatus.COMPLETED.value
     assert read_message(engine, msg2)["status"] == MessageStatus.COMPLETED.value
-
-    # The re-fire fired AND the instance transitioned to COMPLETED.
-    # Before the re-fire, the instance was at WAITING_CHILDREN (the
-    # stuck state); after the re-fire's
-    # ``_process_child_completion_db_sync`` call, the instance is
-    # at COMPLETED. This is the strongest assertion that the
-    # re-fire actually fired the parent-completion guard — the
-    # pre-existing test at line 274 only checks the precondition.
-    instance = read_instance(engine, iid)
-    assert instance is not None
-    assert instance["status"] == "completed"

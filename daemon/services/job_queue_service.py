@@ -1319,8 +1319,10 @@ class JobQueueService:
         # new JobItem or Task between the scan and the termination.
         # ``_has_live_work`` checks both surfaces — JobItem by
         # ``find_jobs_by_instance`` (the same predicate the scan uses)
-        # and Task by ``has_inflight_task`` (PENDING/RUNNING/PAUSED —
-        # the full live-Task predicate, not just PENDING/RUNNING).
+        # and Task by ``has_instance_busy`` (PENDING/RUNNING/PAUSED —
+        # the full live-Task predicate, the same canonical
+        # single-query check the ``claim_pending_task`` per-instance
+        # guard and the ``job_continue`` concurrency gate now use).
         #
         # ``terminated_instances`` is excluded from ``total_processed``
         # (same treatment as ``orphaned_reaped`` and
@@ -1434,11 +1436,27 @@ class JobQueueService:
           considered live work.
         * **Task**: any PENDING/RUNNING/PAUSED row on
           :class:`TaskRepository` — the full live-Task predicate the
-          scan uses. Implemented via :meth:`TaskRepository.
-          has_inflight_task` (PENDING + RUNNING) widened with a
-          separate PAUSED check via :meth:`TaskRepository.
-          get_by_instance` so a paused Task (which the scan treats
-          as live work) is also caught.
+          scan uses. Implemented via the single canonical query
+          :meth:`TaskRepository.has_instance_busy` — replacing the
+          prior 2-probe TOCTOU approximation
+          (``has_inflight_task`` (PENDING+RUNNING) + ``get_by_instance``
+          loop checking PAUSED). The 2-probe pattern had a TOCTOU
+          window: a Task could be inserted in PENDING between the
+          first probe and the second probe, or the get_by_instance
+          loop could miss a row inserted between the probe and the
+          status read. ``has_instance_busy`` is a single atomic
+          SELECT against the indexed ``ix_task_instance_id`` so
+          there is no inter-probe gap. The widened status set
+          (PENDING + RUNNING + PAUSED) is the live-Task predicate
+          used at every Python-level busy-check surface in the
+          daemon (``job_continue``, bus crash recovery, zombie
+          reaper, pause/quiesce helpers); the
+          :meth:`claim_pending_task` per-instance guard SQL keeps
+          its narrower ``status='running'`` S3 invariant (the guard
+          shares an atomic statement with the claim itself, so the
+          broader predicate is NOT applied inside the claim). See
+          :meth:`TaskRepository.has_instance_busy` for the full
+          call-site list.
 
         Conservative-fail strategy: if the instance manager or any
         required repository is unavailable, returns ``False`` so the
@@ -1479,36 +1497,24 @@ class JobQueueService:
                 instance_id[:8], exc,
             )
 
-        # Task re-check — ``has_inflight_task`` covers PENDING +
-        # RUNNING. ``get_by_instance`` covers PAUSED (the scan
-        # also treats PAUSED Tasks as live work). Either is enough
-        # to consider the instance non-zombie.
+        # Task re-check — single canonical query (Bug-1 fix,
+        # 2026-08-12). Replaces the prior 2-probe
+        # ``has_inflight_task`` (PENDING+RUNNING) +
+        # ``get_by_instance``-PAUSED-loop with a single atomic
+        # SELECT against ``ix_task_instance_id``. The widened
+        # status set (PENDING + RUNNING + PAUSED) matches
+        # ``claim_pending_task``'s per-instance guard and the
+        # defer/background gates — one canonical "is this
+        # instance busy?" predicate across the daemon.
         task_repo = getattr(self._instance_manager, "_task_repo", None)
         if task_repo is not None:
             try:
-                if task_repo.has_inflight_task(instance_id):
+                if task_repo.has_instance_busy(instance_id):
                     return True
             except Exception as exc:  # noqa: BLE001 — best-effort probe
                 logger.debug(
                     "cleanup_non_terminal_jobs: "
-                    "_has_live_work Task has_inflight_task probe "
-                    "failed for %s: %s",
-                    instance_id[:8], exc,
-                )
-            try:
-                tasks = task_repo.get_by_instance(instance_id)
-                for t in tasks:
-                    # ``get_by_instance`` returns all Tasks ordered
-                    # newest-first; check the live status set the
-                    # scan predicate uses.
-                    if getattr(t, "status", None) in (
-                        "pending", "running", "paused",
-                    ):
-                        return True
-            except Exception as exc:  # noqa: BLE001 — best-effort probe
-                logger.debug(
-                    "cleanup_non_terminal_jobs: "
-                    "_has_live_work Task get_by_instance probe "
+                    "_has_live_work Task has_instance_busy probe "
                     "failed for %s: %s",
                     instance_id[:8], exc,
                 )

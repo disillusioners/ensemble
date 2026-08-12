@@ -161,20 +161,47 @@ class _CascadeUpdateResult(NamedTuple):
     instance_id IN (...)`` statement, eliminating the crash window where
     half the tree was paused/resumed and the other half was still in
     the pre-cascade status.
+
+    Phase 4b/4c (2026-08-12, pause/resume redesign): the resume
+    cascade's Task transition is now ``PAUSED → PENDING`` (was
+    ``PAUSED → CANCELLED`` pre-migration). The Task stays live
+    throughout the pause/resume cycle, so the resume cascade no
+    longer needs to surface cancelled-task ids for downstream
+    bus-watcher release (the worker pool's natural claim path owns
+    the terminal transition). The field names are kept accurate to
+    the new semantics:
+
+    * ``resumed_task_ids`` — the integer Task ids that were just
+      transitioned ``PAUSED → PENDING``. Retained for structured
+      logging and observability; no longer drives bus-watcher
+      release (the Tasks are live, not terminal).
+    * ``resumed_task_work_ids`` — the corresponding ``work_id``
+      strings. Same rationale.
+
+    The legacy ``cancelled_task_message_ids`` / ``reconciled_message_ids``
+    fields have been removed: with ``PAUSED → PENDING``, the
+    reconciler does NOT mark linked ``message_queue`` rows as
+    completed (Task is non-terminal), so there is no
+    ``completed`` set to surface for post-reconcile re-fire.
     """
 
     updated_ids: list[str]        # IDs that were updated (skipped excluded)
     skipped_ids: list[str]        # IDs that were already in target status
     agent_ids_by_instance: dict[str, str | None]
-    cancelled_task_ids: list[int] = []  # task IDs cancelled by resume cascade (UPDATE 2)
-    # Phase 2 (Bug B): the work_ids/message_ids returned by UPDATE 2's
-    # RETURNING clause. UPDATE 4 (cascade-scoped ``completion_report``
-    # reconciliation) consumed these as its sole eligibility input; the
-    # fields are exposed for structured logging and the post-reconcile
-    # re-fire (Task 17 / A5.1).
-    cancelled_task_work_ids: list[str] = []
-    cancelled_task_message_ids: list[str | None] = []
-    reconciled_message_ids: list[str] = []  # message_queue rows reconciled by UPDATE 4
+    resumed_task_ids: list[int] = []  # task IDs transitioned PAUSED → PENDING (UPDATE 2)
+    # Phase 4b/4c: the work_ids corresponding to the resumed Task rows.
+    # These Tasks are still LIVE (status='pending'); the WorkerPool will
+    # claim them and drive graph.astream naturally. Retained for
+    # structured logging and test assertions on the cascade's effect.
+    resumed_task_work_ids: list[str] = []
+    # Phase 4b/4c: always empty. Pre-migration UPDATE 4 surfaced the
+    # reconciled message_ids for the post-reconcile completion
+    # re-fire; with the new ``PAUSED → PENDING`` transition, the
+    # reconciler does NOT mark linked ``message_queue`` rows as
+    # completed (Task is non-terminal) and the re-fire is removed.
+    # The field is retained as an empty list for backward compatibility
+    # with test assertions and external callers.
+    reconciled_message_ids: list[str] = []
 
 # UUID validation pattern (compiled once at module level)
 _UUID_PATTERN = re.compile(r'^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$', re.IGNORECASE)
@@ -2320,39 +2347,18 @@ class InstanceLifecycleService:
             resumed_ids = []
             db_result = None
 
-        # Release any PENDING bus watchers keyed on the cancelled task ids.
-        # UPDATE 2 in ``_resume_cascade_db_sync`` flipped paused tasks to
-        # CANCELLED with ``retry_scheduled=true``; ``retry_scheduled=true``
-        # intentionally prevents the retry engine from running its own
-        # watcher-cancellation pass, so this caller is the only place
-        # where the watchers can be dropped. Without this the parent's
-        # ``_bus_count_pending_for_target_sync`` stays > 0 and the
-        # parent remains in ``waiting_children`` even after all
-        # children have terminated (production incident 2026-07-08,
-        # leader 088d3335).
-        cancelled_task_ids = (
-            list(db_result.cancelled_task_ids) if db_result is not None else []
-        )
-        for cancelled_task_id in cancelled_task_ids:
-            try:
-                from .dependency_bus import cancel_bus_watchers_for_task_async
-                released = await cancel_bus_watchers_for_task_async(
-                    cancelled_task_id=cancelled_task_id,
-                    origin="resume_cascade",
-                )
-                if released:
-                    logger.info(
-                        f"resume_instance_cascade: released {released} bus "
-                        f"watcher(s) for task {cancelled_task_id} (origin="
-                        f"resume_cascade)"
-                    )
-            except Exception as bus_cancel_err:
-                logger.warning(
-                    f"resume_instance_cascade: bus watcher cancellation "
-                    f"failed for task {cancelled_task_id} (non-fatal, "
-                    f"parent may stay waiting_children until next "
-                    f"reconcile): {bus_cancel_err}"
-                )
+        # Phase 4b/4c (2026-08-12, pause/resume redesign): the resume
+        # cascade now transitions ``PAUSED → PENDING`` (was
+        # ``PAUSED → CANCELLED`` pre-migration). The Tasks stay live —
+        # the WorkerPool re-claims them naturally — so the bus-watcher
+        # release loop is gone. The pre-migration loop released
+        # dependency-bus watchers keyed on the cancelled Task ids
+        # (because ``retry_scheduled=true`` prevented the retry engine
+        # from sweeping them); with PAUSED → PENDING, the Tasks remain
+        # live and the bus watchers remain PENDING until the natural
+        # completion fires them. The WorkerPool's claim+complete path
+        # drives the terminal transition, which the watcher FIRE
+        # observes normally.
 
         # Post-commit side effects: SSE status_change per resumed node.
         for node_id in resumed_ids:
@@ -3684,178 +3690,6 @@ status=InstanceStatus.IDLE.value,
             )
             return 0
 
-    def _post_reconcile_completion_refire(
-        self,
-        *,
-        engine,
-        write_guard,
-        tree_ids: list[str],
-    ) -> None:
-        """Phase 2 A5.1: post-reconcile completion re-fire.
-
-        For each instance in ``tree_ids`` whose ``message_queue``
-        ``pending_count`` (per the shared positive-polarity predicate)
-        is now 0 AFTER the cascade has reconciled the orphan rows,
-        synchronously call
-        ``ChildReportsService._process_child_completion_db_sync`` to
-        re-evaluate the parent-completion guard. The function's
-        idempotency guards at ``child_reports.py:1212-1219`` make
-        this safe: a re-entry on a terminal/paused instance is a
-        no-op.
-
-        This self-heals the production failure (parent stuck at
-        ``WAITING_CHILDREN`` after pause/resume during a
-        ``process_report`` turn) WITHOUT requiring the operator to
-        run the Phase 2.5 cleanup. Historical stuck instances
-        (orphaned before this fix shipped) still need the cleanup
-        script — the re-fire has nothing to attach to for an
-        already-stuck instance.
-
-        NOTE: This is the SYNC half of the re-fire. The async
-        ``_dispatch_post_commit_side_effects`` (SSE, CompletionRegistry,
-        bus ``emit_terminal_for_child_instance``) fires on the event
-        loop in the async caller once the sync helper returns the
-        ``_ChildCompletionDbResult`` outcome. We do NOT call the bus
-        emit directly here — running an async coroutine from a worker
-        thread that has no event loop is a deadlock hazard. The
-        outcome from the sync helper is sufficient for the async
-        caller to fire the appropriate side effects on the next
-        ``asyncio.to_thread`` return.
-
-        Best-Effort Nature:
-            The re-fire is intentionally best-effort. Three
-            properties follow from this:
-
-            * **May defer for root instances.** The
-              ``_process_child_completion_db_sync`` helper consults
-              the bus to count pending children. For root instances
-              whose bus watchers are not yet released (e.g. the
-              children that produced the orphan rows have not yet
-              had their watchers FIRE'd), the helper returns
-              ``deferred_waiting_children`` and the instance stays
-              at ``WAITING_CHILDREN`` — the same observable state as
-              before this re-fire ran. The next natural child
-              event (bus watcher FIRE) will re-fire the completion
-              check.
-
-            * **No SSE/bus side effects here.** This sync helper
-              only mutates DB state (instance status, message
-              queue rows). The SSE broadcasts, CompletionRegistry
-              updates, and bus ``emit_terminal_for_child_instance``
-              are fired by the async caller on the event loop AFTER
-              ``asyncio.to_thread`` returns the
-              ``_ChildCompletionDbResult`` outcome. A sync helper
-              that tried to await a coroutine from a worker thread
-              with no event loop would deadlock — this is by
-              design, not a bug.
-
-            * **Failures are swallowed per-instance.** If the
-              re-fire raises (e.g. transient DB error, missing bus
-              singleton, unexpected exception), the catch at
-              ``instance_lifecycle.py:3421-3430`` records a warning
-              and continues to the next ``tree_id`` entry. The
-              parent stays at ``WAITING_CHILDREN`` until the next
-              natural event — identical observable behavior to the
-              pre-Phase-2 state where the operator cleanup script
-              was the only recovery path. The shared
-              ``pending_count`` predicate at
-              ``child_reports.py:1459`` plus the UPDATE 4
-              reconciliation have already committed, so the queue
-              is consistent; only the parent-completion transition
-              is delayed.
-
-        Args:
-            engine: The SQLAlchemy engine.
-            write_guard: The shared ``WritePauseGuard`` (unused here
-                but kept for symmetry with other cascade helpers; the
-                sync helper opens its own ``WriteGuardSession``).
-            tree_ids: The instance IDs whose orphan rows were just
-                reconciled by UPDATE 4.
-        """
-        from sqlmodel import Session, select
-
-        from ..repositories.message_queue.models import (
-            MessageQueue,
-            MessageStatus,
-        )
-        from ..repositories.message_queue.predicates import (
-            message_queue_counts_as_pending,
-        )
-        from .child_reports import ChildReportsService
-
-        child_reports = ChildReportsService(self._manager)
-
-        for instance_id in tree_ids:
-            try:
-                # Evaluate ``pending_count`` via the shared predicate
-                # for the current state of this instance's own queue.
-                # The base status filter mirrors ``child_reports.py:1459``.
-                with Session(engine) as session:
-                    candidates = list(
-                        session.exec(
-                            select(MessageQueue).where(
-                                MessageQueue.instance_id == instance_id,
-                                MessageQueue.status.in_([
-                                    MessageStatus.READY.value,
-                                    MessageStatus.PROCESSING.value,
-                                    MessageStatus.RETRYING.value,
-                                ]),
-                            )
-                        )
-                    )
-                pending_count = sum(
-                    1
-                    for row in candidates
-                    if message_queue_counts_as_pending(row, engine)
-                )
-                if pending_count > 0:
-                    # Parent still has live own-queue work — leave
-                    # it alone; the next natural child-completion
-                    # event will re-fire.
-                    continue
-
-                # No pending own-queue work. Re-fire the completion
-                # check via the existing sync helper. The helper
-                # runs the same WriteGuardSession path as the
-                # normal child-completion flow; ``completed_message_
-                # id=None`` and ``last_content=""`` are supported
-                # values per the function's signature. The
-                # idempotency guards at ``child_reports.py:1212-1219``
-                # short-circuit if the instance is already in a
-                # terminal state — protects against double-fire.
-                logger.info(
-                    "resume_cascade_db_sync: post-reconcile re-fire "
-                    "for instance %s (pending_count=0 after UPDATE 4)",
-                    instance_id[:8],
-                )
-                # We invoke the sync helper directly; it is the
-                # minimal primitive for re-evaluation. The async
-                # caller (``resume_instance_cascade``) does not see
-                # this outcome directly, but the state changes
-                # (e.g. ``instances.status=COMPLETED``) commit and
-                # the next event-loop tick will see them.
-                result = child_reports._process_child_completion_db_sync(
-                    instance_id=instance_id,
-                    completed_message_id=None,
-                    last_content="",
-                )
-                logger.info(
-                    "resume_cascade_db_sync: post-reconcile re-fire "
-                    "for %s returned outcome=%s",
-                    instance_id[:8],
-                    result.outcome,
-                )
-            except Exception as e:
-                # Per-instance: never propagate; one instance's
-                # failure must not block the others.
-                logger.warning(
-                    "resume_cascade_db_sync: post-reconcile re-fire "
-                    "failed for instance %s (%s: %s)",
-                    instance_id[:8],
-                    type(e).__name__,
-                    e,
-                )
-
     def _resume_cascade_db_sync(
         self,
         engine,
@@ -3865,12 +3699,50 @@ status=InstanceStatus.IDLE.value,
         ancestor_ids: set[str],
         is_root_resume: bool,
     ) -> _CascadeUpdateResult:
-        """Resume a tree and retire each paused turn through ``ResumeTurn``.
+        """Resume a tree and clear each paused turn through ``ResumeTurn``.
 
-        The instance update remains tree-scoped.  Each paused Task is a
-        separate turn transition: ``ResumeTurn`` changes it to CANCELLED and
-        reconciles its mirrors, while this wrapper retains the legacy resume
-        bookkeeping and post-reconcile completion re-fire.
+        Phase 4b/4c (2026-08-12, pause/resume redesign). The instance
+        update remains tree-scoped. Each paused Task is a separate
+        turn transition: ``ResumeTurn`` transitions it ``PAUSED →
+        PENDING`` (was ``PAUSED → CANCELLED`` pre-migration) and
+        reconciles its mirrors. The Task stays live throughout the
+        pause/resume cycle so the worker pool can re-claim it
+        naturally — closing the T2–T4 race window the prior
+        cancel-and-recreate flow opened (see architecture
+        recommendation §4).
+
+        Differences from the pre-migration behavior:
+
+        * **No ``cancel_requested`` / ``completed_at`` /
+          ``retry_scheduled`` stamping.** The Task is not terminal;
+          stamping these columns would mis-classify a live Task as
+          a superseded-then-completed one and confuse the
+          retry-recovery sweep (``stale_task_recovery`` does not
+          sweep PENDING tasks, but it does sweep cancelled ones
+          that lack ``retry_scheduled``).
+
+        * **No post-reconcile completion re-fire.** With the Task
+          in PENDING, ``reconcile_turn_mirror`` does NOT mark
+          linked ``message_queue`` rows as completed (Task is
+          non-terminal). The re-fire's pre-condition — at least
+          one ``reconciled_message_id`` — is never met, so the
+          re-fire becomes a no-op. The worker pool will pick up
+          the PENDING Task and drive the natural completion path,
+          which correctly marks the message as completed via
+          ``_finalize_job_db_sync``.
+
+        * **No bus-watcher release.** With the Task no longer
+          terminal, the dependency-bus watchers keyed on the
+          source task id remain PENDING until the worker pool's
+          natural completion fires them — this is the correct
+          behavior (watchers should only be released when the
+          source work is actually terminal, not when it has been
+          pre-emptively cancelled).
+
+        The ``resumed_task_ids`` / ``resumed_task_work_ids``
+        outbox fields surface the Task ids for structured logging
+        and test assertions, but no longer drive downstream
+        mutation in the async caller.
         """
         del ancestor_ids, is_root_resume  # retained for the public helper contract
         if not tree_ids:
@@ -3878,18 +3750,15 @@ status=InstanceStatus.IDLE.value,
                 updated_ids=[],
                 skipped_ids=[],
                 agent_ids_by_instance={},
-                cancelled_task_ids=[],
-                cancelled_task_work_ids=[],
-                cancelled_task_message_ids=[],
+                resumed_task_ids=[],
+                resumed_task_work_ids=[],
                 reconciled_message_ids=[],
             )
 
         now_iso = datetime.now(timezone.utc).isoformat()
-        now_dt = datetime.now(timezone.utc)
         task_repo = self._task_repo
-        cancelled_task_ids: list[int] = []
-        cancelled_task_work_ids: list[str] = []
-        cancelled_task_message_ids: list[str | None] = []
+        resumed_task_ids: list[int] = []
+        resumed_task_work_ids: list[str] = []
         deferred_reconcile_ids: list[str] = []
         transition_results: list[TransitionResult] = []
 
@@ -3925,7 +3794,7 @@ status=InstanceStatus.IDLE.value,
 
             task_rows = session.execute(
                 text(
-                    "SELECT id, work_id, message_id "
+                    "SELECT id, work_id "
                     "FROM task "
                     "WHERE instance_id IN :tree_ids "
                     "  AND status = :paused_status"
@@ -3938,6 +3807,12 @@ status=InstanceStatus.IDLE.value,
 
             for row in task_rows:
                 work_id = str(row["work_id"])
+                # ResumeTurn transitions PAUSED → PENDING (the Task
+                # stays live so the WorkerPool can re-claim it under
+                # the same work_id; the LangGraph checkpoint reloads
+                # under the same work_id and the resume
+                # ``_resume_processing_background`` drives the graph
+                # turn with is_retry=True).
                 result = ResumeTurn(
                     work_id=work_id,
                     task_repo=transition_task_repo,
@@ -3947,23 +3822,13 @@ status=InstanceStatus.IDLE.value,
                 if result is not None:
                     transition_results.append(result)
 
-                # These columns are task-local resume metadata, not lifecycle
-                # status.  Keep the old contract (the resume driver owns the
-                # graph turn and the retry engine must not mint a child).
-                task_record = session.get(Task, int(row["id"]))
-                if task_record is not None and task_record.status == TaskStatus.CANCELLED.value:
-                    task_record.cancel_requested = True
-                    task_record.cancel_requested_at = now_iso
-                    task_record.completed_at = now_dt
-                    task_record.retry_scheduled = True
-                    task_record.error = (
-                        "Superseded by resume cascade — "
-                        "resume_processing_job owns graph driving"
-                    )
-                    session.add(task_record)
-                    cancelled_task_ids.append(int(row["id"]))
-                    cancelled_task_work_ids.append(work_id)
-                    cancelled_task_message_ids.append(row["message_id"])
+                # Phase 4b/4c: NO cancel/cancel_requested/
+                # completed_at/retry_scheduled stamping. The Task is
+                # PENDING (not terminal) — the worker pool owns the
+                # natural terminal transition via claim_pending_task
+                # and complete_task.
+                resumed_task_ids.append(int(row["id"]))
+                resumed_task_work_ids.append(work_id)
 
             # Keep the queue admission mirror canonical while the
             # transition's post-commit reconciler runs.  This is a no-op for
@@ -3990,43 +3855,27 @@ status=InstanceStatus.IDLE.value,
         # A transition may reconcile in-session or expose the Increment-1
         # reconciler as a separate transaction.  The second call is guarded
         # and idempotent, and keeps both implementations behaviorally equal.
+        # Note: with PAUSED → PENDING the reconciler sees a NON-terminal
+        # Task, so the ``message_queue`` UPDATE inside the reconciler is a
+        # no-op (the WHERE clause requires ``:terminal`` which is false
+        # for a PENDING Task). This is the correct new behavior — the
+        # worker pool will pick up the PENDING Task and the natural
+        # complete_task path will mark the message as completed via
+        # ``_finalize_job_db_sync``.
         if task_repo is not None:
             for work_id in dict.fromkeys(
-                cancelled_task_work_ids + deferred_reconcile_ids
+                resumed_task_work_ids + deferred_reconcile_ids
             ):
                 task_repo.reconcile_turn_mirror(work_id)
 
-        candidate_message_ids = [
-            message_id for message_id in cancelled_task_message_ids if message_id
-        ]
-        reconciled_message_ids: list[str] = []
-        if candidate_message_ids:
-            with Session(engine) as session:
-                rows = session.execute(
-                    select(MessageQueue.message_id).where(
-                        MessageQueue.message_id.in_(candidate_message_ids),
-                        MessageQueue.status == MessageStatus.COMPLETED.value,
-                    )
-                ).all()
-                reconciled_message_ids = [
-                    str(row[0] if isinstance(row, tuple) else row[0])
-                    for row in rows
-                ]
-
-        if reconciled_message_ids:
-            try:
-                self._post_reconcile_completion_refire(
-                    engine=engine,
-                    tree_ids=list(tree_ids),
-                    write_guard=write_guard,
-                )
-            except Exception as refire_error:
-                logger.warning(
-                    "resume_cascade_db_sync: post-reconcile re-fire raised "
-                    "(%s: %s); parent may stay waiting_children until next event",
-                    type(refire_error).__name__,
-                    refire_error,
-                )
+        # Phase 4b/4c: NO post-reconcile completion re-fire. The
+        # pre-condition (``reconciled_message_ids`` non-empty) is
+        # never met because the Task is PENDING, not terminal —
+        # ``reconcile_turn_mirror`` does not mark any message as
+        # completed. The worker pool's natural claim+complete path
+        # drives the completion, so the parent-completion guard
+        # (via ``message_queue_counts_as_pending``) correctly
+        # observes the work as it progresses.
 
         for result in transition_results:
             if result.wakeup_payload or result.sse_payload:
@@ -4038,19 +3887,21 @@ status=InstanceStatus.IDLE.value,
                 )
 
         logger.info(
-            "resume_cascade_db_sync: cancelled %d task(s) [work_ids=%s], "
-            "reconciler normalized %d message_queue row(s) [message_ids=%s]",
-            len(cancelled_task_ids),
-            cancelled_task_work_ids,
-            len(reconciled_message_ids),
-            reconciled_message_ids,
+            "resume_cascade_db_sync: resumed %d task(s) PAUSED → PENDING "
+            "[work_ids=%s]",
+            len(resumed_task_ids),
+            resumed_task_work_ids,
         )
         return _CascadeUpdateResult(
             updated_ids=list(tree_ids),
             skipped_ids=[],
             agent_ids_by_instance={},
-            cancelled_task_ids=cancelled_task_ids,
-            cancelled_task_work_ids=cancelled_task_work_ids,
-            cancelled_task_message_ids=cancelled_task_message_ids,
-            reconciled_message_ids=reconciled_message_ids,
+            resumed_task_ids=resumed_task_ids,
+            resumed_task_work_ids=resumed_task_work_ids,
+            # Phase 4b/4c: always empty (UPDATE 4 removed). The
+            # ``reconcile_turn_mirror`` no longer marks linked
+            # messages as completed for non-terminal Tasks. Retained
+            # for backward compatibility with callers/tests that
+            # inspect this field.
+            reconciled_message_ids=[],
         )

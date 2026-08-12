@@ -6265,11 +6265,25 @@ class InstanceManager:
                     #     (PAUSED→CANCELLED)
                     #   • COMPLETED / FAILED — task finished; message
                     #     is orphan
-                    # Task statuses that mean "leave it alone —
-                    # worker is/will be driving":
-                    #   • PENDING  — worker will claim naturally
-                    #   • RUNNING  — worker has claimed and is
-                    #     processing (LLM call active)
+                    # statuses that mean "we CANCEL the task +
+                    # complete the message so resume is the sole
+                    # driver":
+                    #   • PENDING  — Phase 4b/4c: the resume cascade
+                    #     transitioned the Task ``PAUSED → PENDING``.
+                    #     If we leave it alone the WorkerPool will
+                    #     re-claim it and race
+                    #     ``_resume_processing_background`` on the
+                    #     same checkpoint, corrupting LangGraph
+                    #     state via the add_messages reducer's
+                    #     project-context-message replacement. Cancel
+                    #     the PENDING task AND complete the orphan
+                    #     message_queue row so resume is the sole
+                    #     driver (matches the pre-migration CANCELLED
+                    #     handling below).
+                    #   • RUNNING  — worker is actively driving
+                    #     ``graph.astream``; skip — completing the
+                    #     message here would kill the in-flight LLM
+                    #     call or skip natural delivery.
                     # No task row at all → defensive: do NOT touch
                     # orphan messages.
                     try:
@@ -6295,22 +6309,73 @@ class InstanceManager:
                         skipped_phantom_count += 1
                         continue
 
-                    if stale_task.status in (
-                        TaskStatus.PENDING.value,
-                        TaskStatus.RUNNING.value,
-                    ):
-                        # Worker is processing (RUNNING) or about
-                        # to claim (PENDING). Marking the message
-                        # COMPLETED here would kill the active LLM
-                        # call or skip natural delivery.
+                    if stale_task.status == TaskStatus.RUNNING.value:
+                        # Worker has already claimed and is actively
+                        # driving ``graph.astream``. Marking the
+                        # message COMPLETED here would kill the
+                        # in-flight LLM call or skip natural delivery.
                         logger.info(
                             f"[RESUME] skipping message "
                             f"{msg.message_id[:8]}... — task "
-                            f"{stale_task.id} status="
-                            f"{stale_task.status} is worker-driven "
-                            f"(phantom-completion guard)"
+                            f"{stale_task.id} status=RUNNING is "
+                            f"worker-driven (phantom-completion guard)"
                         )
                         skipped_phantom_count += 1
+                        continue
+
+                    if stale_task.status == TaskStatus.PENDING.value:
+                        # Phase 4b/4c (2026-08-12, pause/resume redesign):
+                        # the resume cascade transitions the Task
+                        # ``PAUSED → PENDING`` (was
+                        # ``PAUSED → CANCELLED`` pre-migration). The
+                        # Task is therefore LIVE here, and the
+                        # WorkerPool would otherwise re-claim it and
+                        # race ``_resume_processing_background`` on
+                        # the same checkpoint — corrupting the
+                        # LangGraph state via the add_messages
+                        # reducer's project-context-message
+                        # replacement. Cancel the PENDING task AND
+                        # complete the orphan message_queue row so
+                        # the resume path is the sole driver
+                        # (matching the pre-migration behavior for
+                        # CANCELLED tasks at line 6320-6363).
+                        try:
+                            await asyncio.to_thread(
+                                self._queue_repository.complete,
+                                msg.message_id,
+                            )
+                            completed_count += 1
+                            logger.info(
+                                f"Completed orphan message entry "
+                                f"{msg.message_id[:8]}... for resume "
+                                f"(paired PENDING task {stale_task.id})"
+                            )
+                        except Exception as complete_err:
+                            logger.warning(
+                                f"Failed to complete orphan message "
+                                f"{msg.message_id[:8]}...: "
+                                f"{complete_err}"
+                            )
+                        try:
+                            await asyncio.to_thread(
+                                self._task_repo.cancel_task,
+                                stale_task.id,
+                                "Superseded by resume_processing_job graph driver",
+                            )
+                            logger.info(
+                                f"[RESUME] cancelled stale PENDING "
+                                f"task {stale_task.id} (message "
+                                f"{msg.message_id[:8]}...) — graph "
+                                f"driving owned by "
+                                f"resume_processing_job"
+                            )
+                        except Exception as cancel_err:
+                            logger.warning(
+                                f"Failed to cancel PENDING task "
+                                f"{stale_task.id} for message "
+                                f"{msg.message_id[:8]}...: "
+                                f"{cancel_err}"
+                            )
                         continue
 
                     # stale_task.status is PAUSED / CANCELLED /
@@ -6333,9 +6398,12 @@ class InstanceManager:
                         )
                     # Cancel the WorkerPool task that drives this
                     # message so it is NOT re-armed/re-claimed on
-                    # resume. ``_resume_cascade_db_sync``
-                    # transitions PAUSED tasks PAUSED→CANCELLED;
-                    # without cancelling here, the re-claimed
+                    # resume. Phase 4b/4c: ``_resume_cascade_db_sync``
+                    # transitions PAUSED tasks ``PAUSED → PENDING``
+                    # (was ``PAUSED → CANCELLED`` pre-migration);
+                    # the PENDING-task branch above is the new
+                    # entry into this cancel path. Without
+                    # cancelling here, the re-claimed
                     # ``process_message`` task would re-drive the
                     # graph a SECOND time (a duplicate turn that
                     # races with ``_resume_processing_background``
@@ -6457,6 +6525,20 @@ class InstanceManager:
         checkpoint. Under the asyncio.Lock gate the second caller blocks
         on the same event loop until the holder releases; there is no
         contention return path.
+
+        Phase 4b/4c (2026-08-12, pause/resume redesign): the resume
+        cascade now transitions the Task ``PAUSED → PENDING`` (was
+        ``PAUSED → CANCELLED`` pre-migration). The Task stays live
+        throughout the pause/resume cycle, so this background task
+        drives the graph turn via ``_process_message_with_tracking``
+        with ``is_retry=True`` (reload the LangGraph checkpoint under
+        the same ``work_id``). The WorkerPool may ALSO claim the
+        PENDING task — the per-instance guard (``status='running'``)
+        ensures only ONE driver runs at a time per instance, but the
+        cleanup logic in ``_schedule_explicit_handle_resume`` may
+        cancel PENDING tasks to prevent duplicate-turn races. The
+        Task's terminal transition is owned by the natural
+        ``complete_task`` / ``fail_task`` flow.
 
         Phase 1 (2026-06-27, Virtual Job Management Surface): ``old_job_id``
         is now the Task's stable ``work_id`` (UUID4 string) — the same
@@ -6620,14 +6702,17 @@ class InstanceManager:
 
                 # 5. Task lifecycle is now owned by the WorkerPool re-claim path.
                 #
-                # Phase 3 (pause/resume redesign, 2026-06-25) — W2 fix:
-                # the resume path no longer calls ``complete_task()`` on
-                # the original paused task. The new lifecycle is:
+                # Phase 4b/4c (2026-08-12, pause/resume redesign) — the
+                # resume path no longer calls ``complete_task()`` on the
+                # original paused task. The Task stays live throughout the
+                # pause/resume cycle and the resume cascade transitions
+                # it ``PAUSED → PENDING`` (was ``PAUSED → CANCELLED``
+                # pre-migration). The lifecycle is:
                 #
                 #   1. Pause: ``task`` RUNNING → PAUSED (Phase 2, in
                 #      ``_pause_cascade_db_sync``).
-                #   2. Resume: ``task`` PAUSED → PENDING (Phase 3 Task
-                #      1, in ``_resume_cascade_db_sync``).
+                #   2. Resume: ``task`` PAUSED → PENDING (Phase 4b/4c,
+                #      in ``_resume_cascade_db_sync``).
                 #   3. WorkerPool: ``task`` PENDING → RUNNING via
                 #      ``claim_pending_task`` (per-instance guard now
                 #      passes because the instance is RUNNING).
@@ -6635,13 +6720,13 @@ class InstanceManager:
                 #      ``complete_task`` / ``fail_task`` (after the
                 #      graph turn finishes).
                 #
-                # The pre-Phase 3 code completed the task here so the
+                # The pre-Phase 4b/4c code completed the task here so the
                 # per-instance guard released for the bus-fired child
                 # completion report. With the new state machine, the
                 # WorkerPool re-claim is the canonical release path —
-                # completing the task here would race with the
-                # re-claim and potentially flip a PENDING task to
-                # COMPLETED before a worker can pick it up.
+                # completing the task here would race with the re-claim
+                # and potentially flip a PENDING task to COMPLETED
+                # before a worker can pick it up.
                 #
                 # The follow-up Tasks (e.g. the bus-fired child
                 # completion report) are now claimable as soon as the
@@ -6658,8 +6743,37 @@ class InstanceManager:
                 # this safety net was dead code. Look the Task up by
                 # ``work_id`` and fail it by ``id`` so the per-instance
                 # guard releases — otherwise the next ``job_continue``
-                # call is blocked by ``has_inflight_task`` (which counts
-                # PENDING + RUNNING tasks for the instance).
+                # call is blocked by ``has_instance_busy`` (which counts
+                # PENDING + RUNNING + PAUSED tasks for the instance).
+                #
+                # Phase 4b/4c (2026-08-12, pause/resume redesign):
+                # post-resume the Task is ``pending`` (was
+                # ``cancelled`` pre-migration). The ``fail_task``
+                # ``WHERE status = 'running'`` guard means the call
+                # is a no-op if the WorkerPool has already claimed
+                # and completed the Task (the typical race outcome);
+                # if the WorkerPool claimed but the graph turn has
+                # not yet finished, ``fail_task`` will also no-op
+                # and the WorkerPool will complete naturally — in
+                # both cases the next ``job_continue`` is unblocked
+                # once the WorkerPool marks the Task terminal.
+                #
+                # W1 (2026-08-12, concurrency-gate review): the
+                # ``fail_task`` ``status='running'`` guard does NOT
+                # match a PENDING Task (post-resume). When the
+                # resume background task fails before the WorkerPool
+                # claims, ``fail_task`` returns ``None`` and the
+                # Task stays PENDING — ``has_instance_busy`` keeps
+                # returning ``True`` forever, permanently blocking
+                # the instance and ``job_continue``. The fallback
+                # below calls ``cancel_task`` (whose broader
+                # ``WHERE status IN (running, pending, paused)``
+                # guard at ``repository.py:3158-3187`` matches
+                # PENDING) to force the Task terminal so the
+                # instance unblocks. The WorkerPool's natural
+                # completion path remains the preferred outcome —
+                # this fallback only fires when resume failed
+                # before any worker picked the Task up.
                 failed_task = None
                 try:
                     task = await asyncio.to_thread(
@@ -6678,6 +6792,33 @@ class InstanceManager:
                         )
                 except Exception:
                     pass
+
+                # Phase 4b/4c (W1 fix): if ``fail_task`` returned
+                # ``None`` the Task was not RUNNING (post-resume it
+                # is PENDING — the ``fail_task``
+                # ``WHERE status = 'running'`` guard does not match
+                # PENDING). Fall back to ``cancel_task`` which
+                # handles PENDING/PRESSED tasks via a broader inline
+                # UPDATE guard. Without this fallback the Task stays
+                # non-terminal and ``has_instance_busy`` returns
+                # ``True`` forever, permanently blocking the
+                # instance.
+                if failed_task is None and task is not None:
+                    try:
+                        cancelled_task = await asyncio.to_thread(
+                            self._task_repo.cancel_task,
+                            task.id,
+                            f"Resume failed (task was not RUNNING): {e}",
+                        )
+                        if cancelled_task is not None:
+                            failed_task = cancelled_task
+                            logger.info(
+                                f"[RESUME] instance={instance_id[:8]} "
+                                f"fail_task no-op'd (task was PENDING), "
+                                f"fell back to cancel_task"
+                            )
+                    except Exception:
+                        pass
 
                 # Phase 2 Batch 2 — fire watcher notification only if
                 # the atomic fail_task returned non-None (i.e. we won

@@ -448,10 +448,19 @@ class TestCleanupNonTerminalJobsService:
         # returns ``True`` (we don't read the return here — the loop
         # counts every awaited call).
         manager.terminate_instance = AsyncMock(return_value=None)
-        # C3: Task re-check uses ``_task_repo``. Pin both probes so a
+        # C3: Task re-check uses ``_task_repo``. Pin the probe so a
         # bare MagicMock truthy default does not skip every zombie.
+        # Bug-1 fix (2026-08-12): the reaper's ``_has_live_work``
+        # method now uses a single ``has_instance_busy`` query
+        # (PENDING + RUNNING + PAUSED) — the prior 2-probe
+        # ``has_inflight_task`` + ``get_by_instance`` pattern is
+        # gone. Mock only ``has_instance_busy``; the
+        # ``get_by_instance`` attribute is no longer consulted by
+        # the production code but is kept on the MagicMock so any
+        # straggling call site (regressions, future code that
+        # forgets to migrate) does not accidentally AttributeError.
         manager._task_repo = MagicMock()
-        manager._task_repo.has_inflight_task = MagicMock(return_value=False)
+        manager._task_repo.has_instance_busy = MagicMock(return_value=False)
         manager._task_repo.get_by_instance = MagicMock(return_value=[])
         service._instance_manager = manager
 
@@ -517,7 +526,16 @@ class TestCleanupNonTerminalJobsService:
         manager._instance_repository = instance_repo
         manager.terminate_instance = AsyncMock(return_value=None)
         manager._task_repo = MagicMock()
-        manager._task_repo.has_inflight_task = MagicMock(return_value=False)
+        # Bug-1 fix (2026-08-12): the reaper now uses
+        # ``has_instance_busy`` (PENDING + RUNNING + PAUSED) — a
+        # single canonical query — instead of the prior 2-probe
+        # ``has_inflight_task`` + ``get_by_instance`` pattern. The
+        # ``_has_live_work`` method below is pinned to override the
+        # production single-query implementation, so the
+        # ``has_instance_busy`` mock attribute on the manager is
+        # NOT consulted by this test — but we set it for parity
+        # with the rest of the test class.
+        manager._task_repo.has_instance_busy = MagicMock(return_value=False)
         manager._task_repo.get_by_instance = MagicMock(return_value=[])
         service._instance_manager = manager
 
@@ -588,11 +606,17 @@ class TestCleanupNonTerminalJobsService:
                 None,
             ]
         )
-        # C3: pin probes so the re-check returns ``False`` (so we
-        # exercise the raise-vs-succeed branch instead of the skip
-        # branch — which has its own test).
+        # C3: pin the reaper's ``_has_live_work`` Task probe so the
+        # re-check returns ``False`` (so we exercise the
+        # raise-vs-succeed branch instead of the skip branch —
+        # which has its own test). Bug-1 fix (2026-08-12): the
+        # probe is now ``has_instance_busy`` (PENDING + RUNNING +
+        # PAUSED) — a single canonical query — instead of the
+        # prior 2-probe ``has_inflight_task`` + ``get_by_instance``
+        # pattern. ``get_by_instance`` is no longer consulted by
+        # the production code but is kept on the mock for parity.
         manager._task_repo = MagicMock()
-        manager._task_repo.has_inflight_task = MagicMock(return_value=False)
+        manager._task_repo.has_instance_busy = MagicMock(return_value=False)
         manager._task_repo.get_by_instance = MagicMock(return_value=[])
         service._instance_manager = manager
         # Pin C3 re-check to False so both reach the cascade.

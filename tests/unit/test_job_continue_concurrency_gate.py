@@ -1,32 +1,36 @@
 """Phase 2.5 / Task 2.5.11 — ``job_continue`` concurrency gate.
 
 Verifies the post-D13 ``job_continue`` tool rejects concurrent calls
-against the same instance using the new
-``TaskRepository.has_inflight_task(instance_id)`` gate (Task 2.5.8).
+against the same instance using the canonical
+``TaskRepository.has_instance_busy(instance_id)`` gate (Task 2.5.8
++ Bug-1 fix 2026-08-12).
 
 Pre-D13 the tool rejected by querying
 ``JobRepository.find_processing_message_jobs_by_instance`` — a
 DB-level concurrency gate over MESSAGE ``JobItem`` rows. After D13
 no MESSAGE ``JobItem`` rows are created, so the gate moved onto the
-``task`` table: any PENDING or RUNNING ``task`` row for the instance
-counts as in-flight and the tool refuses to enqueue a follow-up
-message.
+``task`` table: any PENDING, RUNNING, or PAUSED ``task`` row for
+the instance counts as live work and the tool refuses to enqueue
+a follow-up message.
 
 The test surface uses ``create_job_tools`` against a fake
 ``JobQueueService`` + mock ``InstanceManager`` so the gate logic is
 exercised end-to-end without spinning up a real engine.
 
-Behaviour contract (Task 2.5.8):
+Behaviour contract (Task 2.5.8 + Bug-1 fix 2026-08-12):
 
-  * ``has_inflight_task(instance_id) is True`` → tool returns
+  * ``has_instance_busy(instance_id) is True`` → tool returns
     ``{"error": "Instance ... has a task still in flight — wait for it
     to complete first"}`` and ``enqueue_message`` is NOT called.
-  * ``has_inflight_task(instance_id) is False`` → tool proceeds to
+  * ``has_instance_busy(instance_id) is False`` → tool proceeds to
     ``enqueue_message`` and returns the new ``message_id`` / ``job_id``.
-  * PAUSED tasks are EXCLUDED by ``has_inflight_task`` — paused is a
-    quiescent state and a ``job_continue`` against a paused instance
-    is allowed to proceed (the user opted to unpause via a separate
-    flow).
+  * PAUSED tasks ARE INCLUDED by ``has_instance_busy`` — a paused
+    instance has live work (the Task still holds the per-instance
+    serialization slot) and a ``job_continue`` against a paused
+    instance must be rejected. (The pre-fix ``has_inflight_task``
+    gate excluded PAUSED — that was a concurrency leak: a paused
+    instance was treated as "not busy" and a follow-up enqueue
+    would race the resume on the langgraph ``thread_id``.)
 
 Run with::
 
@@ -71,12 +75,23 @@ def dead_letter_service():
 def task_repo():
     """``TaskRepository`` mock with the gate primitive.
 
-    ``has_inflight_task(instance_id)`` is the new DB-level concurrency
-    gate (Task 2.5.8). The default ``False`` keeps happy-path tests
-    passing; tests exercising the rejection path override the return
-    value explicitly.
+    ``has_instance_busy(instance_id)`` is the canonical
+    DB-level concurrency gate (Task 2.5.8 + Bug-1 fix
+    2026-08-12). The default ``False`` keeps happy-path tests
+    passing; tests exercising the rejection path override the
+    return value explicitly.
+
+    Note: the pre-fix ``has_inflight_task`` was kept on the mock
+    for backwards-compat with any straggling call sites (the
+    production method is still defined; only the gate-consumer
+    has moved to ``has_instance_busy``). The default return is
+    ``False`` for both so the happy-path is unchanged.
     """
     repo = MagicMock()
+    repo.has_instance_busy = MagicMock(return_value=False)
+    # Kept on the mock in case a future straggling
+    # ``has_inflight_task`` call site needs a default; the gate
+    # in ``job_continue`` no longer consults this attribute.
     repo.has_inflight_task = MagicMock(return_value=False)
     return repo
 
@@ -159,21 +174,22 @@ def _make_instance(*, status: str = "running"):
 
 
 class TestJobContinueConcurrencyGate:
-    """The ``has_inflight_task`` gate rejects concurrent ``job_continue`` calls.
+    """The ``has_instance_busy`` gate rejects concurrent ``job_continue`` calls.
 
     The classic race the gate prevents: two concurrent agent turns
     attempting to enqueue follow-up work on the same instance. Pre-D13
     the gate was the ``find_processing_message_jobs_by_instance``
     check (a list of PROCESSING MESSAGE ``JobItem`` rows). Post-D13
-    it's ``has_inflight_task`` (True iff any PENDING or RUNNING
-    ``task`` row exists for the instance).
+    it's ``has_instance_busy`` (True iff any PENDING, RUNNING, or
+    PAUSED ``task`` row exists for the instance — the canonical
+    "is this instance busy?" predicate; Bug-1 fix 2026-08-12).
     """
 
     @pytest.mark.asyncio
     async def test_rejects_when_task_repo_reports_inflight(
         self, job_service, mock_manager, tools, task_repo
     ):
-        """Gate fires: ``has_inflight_task`` returns True → tool rejects.
+        """Gate fires: ``has_instance_busy`` returns True → tool rejects.
 
         The error message is the contract Task 2.5.8 specifies — the
         pre-D13 wording ("has a job still processing") is gone. The
@@ -188,7 +204,7 @@ class TestJobContinueConcurrencyGate:
             status="running"
         )
         # Gate: a Task is already driving this instance.
-        task_repo.has_inflight_task = MagicMock(return_value=True)
+        task_repo.has_instance_busy = MagicMock(return_value=True)
 
         job_continue = tools[12]
         result = await job_continue.ainvoke({
@@ -213,9 +229,9 @@ class TestJobContinueConcurrencyGate:
         Mirrors the happy-path baseline in
         ``tests/test_job_queue_tools.py::test_job_continue_happy_path``
         — kept here so the new gate wiring is verified by the gate
-        contract: ``has_inflight_task`` is called exactly once with the
-        ``instance_id`` from the old job, and when it returns False,
-        the tool enqueues normally.
+        contract: ``has_instance_busy`` is called exactly once with
+        the ``instance_id`` from the old job, and when it returns
+        False, the tool enqueues normally.
         """
         from daemon.manager import AsyncMessageResult
 
@@ -225,8 +241,8 @@ class TestJobContinueConcurrencyGate:
         mock_manager._instance_repository.get.return_value = _make_instance(
             status="running"
         )
-        # Gate: no Task is driving this instance.
-        task_repo.has_inflight_task = MagicMock(return_value=False)
+        # Gate: no live Task is driving this instance.
+        task_repo.has_instance_busy = MagicMock(return_value=False)
         mock_manager.enqueue_message_job.return_value = AsyncMessageResult(
             message_id="msg-1",
             instance_id="inst-1",
@@ -245,10 +261,10 @@ class TestJobContinueConcurrencyGate:
         assert result["message_id"] == "msg-1"
         mock_manager.enqueue_message_job.assert_awaited_once()
         # The gate must have been consulted with the right instance_id.
-        # NOTE: ``has_inflight_task`` is invoked via ``asyncio.to_thread``
+        # NOTE: ``has_instance_busy`` is invoked via ``asyncio.to_thread``
         # so the mock's call counter (not await counter) is what
         # advances — ``assert_called_with`` is the right assertion.
-        task_repo.has_inflight_task.assert_called_with("inst-1")
+        task_repo.has_instance_busy.assert_called_with("inst-1")
 
     @pytest.mark.asyncio
     async def test_two_concurrent_calls_first_succeeds_second_rejected(
@@ -265,7 +281,7 @@ class TestJobContinueConcurrencyGate:
         drive both graph turns for the same instance (a corruption
         window on the langgraph checkpoint).
 
-        The test mocks ``has_inflight_task`` to return False the FIRST
+        The test mocks ``has_instance_busy`` to return False the FIRST
         time it is awaited (caller A passes the gate) and True on
         every subsequent call (caller B is rejected). This is the
         realistic observable behaviour: the first enqueue has already
@@ -294,7 +310,7 @@ class TestJobContinueConcurrencyGate:
         def _gate_side_effect(instance_id: str) -> bool:
             call_log.append(instance_id)
             return len(call_log) > 1  # True after the first call
-        task_repo.has_inflight_task = MagicMock(side_effect=_gate_side_effect)
+        task_repo.has_instance_busy = MagicMock(side_effect=_gate_side_effect)
 
         # The first enqueue resolves normally; the second never
         # enqueues (gate rejects before we reach it).
@@ -351,47 +367,54 @@ class TestJobContinueConcurrencyGate:
         assert call_log == ["inst-1", "inst-1"]
 
     @pytest.mark.asyncio
-    async def test_paused_tasks_do_not_block_gate(
+    async def test_paused_tasks_now_block_gate(
         self, job_service, mock_manager, tools, task_repo
     ):
-        """PAUSED tasks must NOT count as in-flight.
+        """PAUSED tasks MUST count as in-flight — the Bug-1 fix (2026-08-12).
 
-        Sister invariant to ``TaskRepository.has_inflight_task``'s
-        docstring: ``has_inflight_task`` excludes PAUSED because
-        paused tasks are NOT actively driving the graph. A
-        ``job_continue`` call against an instance whose only task is
-        PAUSED is allowed to proceed — the user has explicitly paused
-        and is now opting to enqueue more work.
+        Sister invariant to ``TaskRepository.has_instance_busy``'s
+        docstring: ``has_instance_busy`` INCLUDES PAUSED because
+        paused tasks are live work the instance still owns — a
+        ``job_continue`` call against an instance whose only task
+        is PAUSED is REJECTED. The pre-fix
+        ``has_inflight_task`` gate excluded PAUSED and that was
+        a concurrency leak: a paused instance was treated as
+        "not busy" and a follow-up enqueue would race the resume
+        on the langgraph ``thread_id``.
 
-        Companion primitive
-        ``TaskRepository.find_paused_or_running_by_instance`` DOES
-        include PAUSED — it is the root-vs-child routing decision for
-        ``resume_processing_job``, which needs to recognise paused
-        state to fire checkpoint resume.
+        The companion primitive
+        ``TaskRepository.find_paused_or_running_by_instance`` ALSO
+        includes PAUSED — for the same reason, paused work is
+        live work.
 
-        NOTE: the tool's instance-status pre-check (``InstanceStatus.PAUSED``)
-        returns an error before the ``has_inflight_task`` gate fires —
-        so the gate-must-fire assertion requires a RUNNING instance
-        (the instance must pass the status pre-check for the gate to
-        even be consulted). We verify here that the gate itself does
-        NOT short-circuit (it returns False because the only Task is
-        PAUSED) by checking the gate was called and the tool's error
-        message is from the gate-rejection branch, not the
-        instance-paused branch.
+        NOTE: the tool's instance-status pre-check
+        (``InstanceStatus.PAUSED``) returns an error before the
+        ``has_instance_busy`` gate fires — so the
+        gate-must-fire assertion requires a RUNNING instance
+        (the instance must pass the status pre-check for the
+        gate to even be consulted). The instance is RUNNING
+        here, but the underlying Task is PAUSED — simulating
+        a freshly-paused Task on an instance whose pause
+        hadn't yet propagated to the instance-status table.
         """
         from daemon.manager import AsyncMessageResult
 
-        # Use a RUNNING instance (not paused) — the paused pre-check
-        # would otherwise short-circuit before the gate fires.
+        # Use a RUNNING instance (not paused) — the paused
+        # instance-status pre-check would otherwise short-circuit
+        # before the gate fires. The Task is PAUSED — the gate
+        # must now reject (the Bug-1 fix behaviour).
         old_job = _make_old_job(instance_id="inst-1")
         job_service.get_job.return_value = old_job
         job_service.get_work.return_value = old_job
         mock_manager._instance_repository.get.return_value = _make_instance(
             status="running"
         )
-        # The Task is PAUSED — ``has_inflight_task`` excludes PAUSED
-        # so the gate returns False (the tool is allowed to proceed).
-        task_repo.has_inflight_task = MagicMock(return_value=False)
+        # The Task is PAUSED — ``has_instance_busy`` INCLUDES
+        # PAUSED so the gate returns True (the tool is rejected).
+        # This is the new Bug-1-fix behaviour; the pre-fix
+        # ``has_inflight_task`` returned False and the test
+        # asserted the happy path.
+        task_repo.has_instance_busy = MagicMock(return_value=True)
         mock_manager.enqueue_message_job.return_value = AsyncMessageResult(
             message_id="msg-1",
             instance_id="inst-1",
@@ -405,16 +428,19 @@ class TestJobContinueConcurrencyGate:
             "message": "Continue",
         })
 
-        # Tool proceeded past the gate. (The instance is RUNNING so
-        # the status pre-check passes.)
-        # NOTE: ``has_inflight_task`` is invoked via ``asyncio.to_thread``
-        # so we assert ``assert_called_once`` (not ``assert_awaited_once``).
-        task_repo.has_inflight_task.assert_called_once()
-        assert "error" not in result, (
-            f"gate must NOT fire when the only Task is PAUSED; got {result!r}"
+        # Tool was rejected by the gate. (The instance is RUNNING so
+        # the status pre-check passes — the gate must fire here.)
+        # NOTE: ``has_instance_busy`` is invoked via
+        # ``asyncio.to_thread`` so we assert ``assert_called_once``
+        # (not ``assert_awaited_once``).
+        task_repo.has_instance_busy.assert_called_once()
+        assert "error" in result, (
+            f"gate MUST fire when the only Task is PAUSED "
+            f"(Bug-1 fix); got {result!r}"
         )
-        assert result["new_job_id"] == "new-job-1"
-        # The gate returned False — tool proceeded to enqueue.
-        mock_manager.enqueue_message_job.assert_awaited_once()
-        # The gate's return value was consulted and was False.
-        task_repo.has_inflight_task.assert_called_with("inst-1")
+        assert "has a task still in flight" in result["error"]
+        assert "inst-1" in result["error"]
+        # The gate's True return value short-circuited the enqueue.
+        mock_manager.enqueue_message_job.assert_not_awaited()
+        # The gate returned True — tool was rejected.
+        task_repo.has_instance_busy.assert_called_with("inst-1")

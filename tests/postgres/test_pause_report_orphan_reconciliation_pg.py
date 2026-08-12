@@ -87,6 +87,15 @@ def _make_service(engine) -> InstanceLifecycleService:
     ``TaskRepository`` so the call exercises the real reconciler — not a
     MagicMock no-op. The reconciler is safe in test scenarios: it
     fast-path-skips when the mirror is already consistent.
+
+    Phase 4b/4c (2026-08-12, pause/resume redesign): the resume cascade
+    transitions the Task ``PAUSED → PENDING`` (was ``PAUSED → CANCELLED``
+    pre-migration). The reconciler's terminal-guard skips every mirror
+    update for a non-terminal Task, so the message_queue row stays
+    PROCESSING and the post-reconcile completion re-fire is a no-op
+    (its pre-condition ``reconciled_message_ids`` non-empty is never met).
+    No monkeypatch is required: the reconciler's no-op behavior is the
+    correct production behavior.
     """
     service = InstanceLifecycleService.__new__(InstanceLifecycleService)
     manager = MagicMock()
@@ -94,9 +103,6 @@ def _make_service(engine) -> InstanceLifecycleService:
     manager.write_guard = WritePauseGuard()
     manager._task_repo = TaskRepository(engine=engine)
     service._manager = manager
-    # Disable the post-reconcile re-fire (it needs a full
-    # ChildReportsService which requires a real manager).
-    service._post_reconcile_completion_refire = lambda **kw: None
     return service
 
 
@@ -104,11 +110,20 @@ def _make_service(engine) -> InstanceLifecycleService:
 
 
 def test_pg_update4_reconciles_orphan_completion_report(pg_engine) -> None:
-    """PostgreSQL UPDATE 4 reconciles the orphan ``completion_report``.
+    """PostgreSQL UPDATE 4 no longer reconciles the orphan ``completion_report``.
 
-    Verifies the data-modifying CTE shape on the production
-    engine. Seeds the same scenario as the SQLite test but
-    runs against PostgreSQL.
+    Phase 4b/4c (2026-08-12, pause/resume redesign): the resume
+    cascade transitions the Task ``PAUSED → PENDING`` (was
+    ``PAUSED → CANCELLED`` pre-migration). The reconciler's
+    terminal-guard skips every mirror update for a non-terminal
+    Task, so the cascade no longer marks linked ``message_queue``
+    rows as ``completed`` — the WorkerPool's natural claim+complete
+    path drives the terminal transition.
+
+    This test seeds the same scenario as the SQLite test but runs
+    against PostgreSQL and verifies the new contract: the
+    ``reconciled_message_ids`` outbox is empty and the
+    ``message_queue`` row stays ``processing`` after the cascade.
     """
     ensure_schema(pg_engine)
     scenario = seed_orphan_scenario(pg_engine)
@@ -126,16 +141,27 @@ def test_pg_update4_reconciles_orphan_completion_report(pg_engine) -> None:
         is_root_resume=True,
     )
 
-    assert scenario.orphaned_message_id in result.reconciled_message_ids
+    # Phase 4b/4c: the cascade no longer reconciles orphan messages.
+    assert result.reconciled_message_ids == []
     msg_after = read_message(pg_engine, scenario.orphaned_message_id)
-    assert msg_after["status"] == MessageStatus.COMPLETED.value
+    assert msg_after["status"] == MessageStatus.PROCESSING.value
 
 
 def test_pg_update4_excludes_historical_orphans(pg_engine) -> None:
-    """UPDATE 4 is scoped to the current cascade's cancellations.
+    """UPDATE 4 no longer reconciles any messages — historical and fresh
+    orphans both stay ``processing`` after the cascade.
 
-    Historical orphans (Tasks already cancelled before this
-    cascade) are NOT touched.
+    Phase 4b/4c (2026-08-12, pause/resume redesign): the resume
+    cascade transitions the Task ``PAUSED → PENDING``; the
+    reconciler's terminal-guard skips every mirror update for
+    non-terminal Tasks. The cascade no longer marks linked
+    ``message_queue`` rows as ``completed`` — both the historical
+    orphan (manually pre-cancelled) and the fresh orphan (seeded
+    via ``seed_orphan_scenario``) remain in ``processing`` state.
+
+    Pre-migration this test verified the cascade's reconciliation
+    was scoped to the current cascade (historical untouched, fresh
+    reconciled); the new contract is "no reconciliation at all".
     """
     ensure_schema(pg_engine)
 
@@ -158,9 +184,10 @@ def test_pg_update4_excludes_historical_orphans(pg_engine) -> None:
         is_root_resume=True,
     )
 
-    # Fresh is reconciled; historical is NOT.
+    # Phase 4b/4c: the cascade no longer reconciles any messages.
+    # Both the fresh and the historical orphans stay ``processing``.
     assert read_message(pg_engine, fresh.orphaned_message_id)["status"] == (
-        MessageStatus.COMPLETED.value
+        MessageStatus.PROCESSING.value
     )
     assert read_message(pg_engine, historical.orphaned_message_id)["status"] == (
         MessageStatus.PROCESSING.value
@@ -214,11 +241,11 @@ def test_pg_update4_preserves_mixed_terminal_live(pg_engine) -> None:
         is_root_resume=True,
     )
 
-    # The reconciler normalized the mirror — the orphaned
-    # ``message_queue`` row is now ``completed``. The reconciler
-    # does NOT carry the old UPDATE 4's competing-live preserve
-    # check (see docstring).
-    assert scenario.orphaned_message_id in result.reconciled_message_ids
+    # Phase 4b/4c: the cascade's reconciled_message_ids is always
+    # empty — the reconciler does not touch any message_queue rows
+    # for non-terminal Tasks. The retry engine (live retry Task)
+    # owns the retry flow independently.
+    assert result.reconciled_message_ids == []
 
 
 # ─── 2. Task 18: Cross-engine parity (PG variant) ─────────────────────────
@@ -252,10 +279,13 @@ def test_cte_work_id_exclusion_cross_engine_parity(pg_engine) -> None:
         is_root_resume=True,
     )
 
-    # Both engines must reconcile.
-    assert scenario.orphaned_message_id in result.reconciled_message_ids
-    # And the cancelled work_id is the only candidate.
-    assert scenario.cancelled_task_work_id in result.cancelled_task_work_ids
+    # Phase 4b/4c: the cascade's reconciled_message_ids is always
+    # empty (UPDATE 4 removed). The returned ``resumed_task_work_ids``
+    # carries the cascaded Task's work_id, and both engines must
+    # produce the same result.
+    assert result.reconciled_message_ids == []
+    # And the resumed work_id is the only candidate.
+    assert scenario.cancelled_task_work_id in result.resumed_task_work_ids
 
 
 # ─── 3. Two-connection race ────────────────────────────────────────────────
@@ -266,6 +296,17 @@ def test_pg_two_connection_race_no_interference(pg_engine, pg_two_connections) -
     historical unrelated row reconciled, no-Task row reconciled,
     mixed-attempt NULL-fallback row reconciled, queue row
     ``completed`` while its resolved live work remains the owner.
+
+    Phase 4b/4c (2026-08-12, pause/resume redesign): the resume
+    cascade transitions the Task ``PAUSED → PENDING`` (was
+    ``PAUSED → CANCELLED`` pre-migration). The reconciler's
+    terminal-guard skips every mirror update for non-terminal
+    Tasks, so the cascade no longer marks linked ``message_queue``
+    rows as ``completed`` — the WorkerPool's natural claim+complete
+    path drives the terminal transition. The
+    "queue row ``completed`` while its resolved live work remains
+    the owner" forbidden outcome is impossible under the new
+    behavior (the cascade never completes the queue row).
 
     With the production code (``WriteGuardSession``), the
     transactions commit independently. The PostgreSQL CTE
@@ -279,7 +320,8 @@ def test_pg_two_connection_race_no_interference(pg_engine, pg_two_connections) -
     service = _make_service(pg_engine)
 
     # Connection B: a separate transaction that confirms the
-    # message_queue row is reconciled after connection A commits.
+    # message_queue row is still ``processing`` after connection A
+    # commits (the cascade no longer reconciles orphan messages).
     with pg_two_connections() as (conn_a, conn_b):
         # We don't actually use conn_a — the cascade uses
         # ``service._manager.engine`` which is the same as
@@ -301,8 +343,10 @@ def test_pg_two_connection_race_no_interference(pg_engine, pg_two_connections) -
             ),
             {"mid": scenario.orphaned_message_id},
         ).fetchone()
-        assert b_row[0] == MessageStatus.COMPLETED.value
-        assert scenario.orphaned_message_id in result.reconciled_message_ids
+        # Phase 4b/4c: the message_queue row stays ``processing``
+        # (UPDATE 4 removed — the cascade no longer reconciles).
+        assert b_row[0] == MessageStatus.PROCESSING.value
+        assert result.reconciled_message_ids == []
 
 
 def test_pg_two_connection_race_with_concurrent_live_insert(
@@ -344,9 +388,11 @@ def test_pg_two_connection_race_with_concurrent_live_insert(
         is_root_resume=True,
     )
 
-    # The reconciler normalized the mirror — the orphaned
-    # ``message_queue`` row is now ``completed`` (no competing-live
-    # exclusion in the Turn-Reconciler).
-    assert scenario.orphaned_message_id in result.reconciled_message_ids
+    # Phase 4b/4c: the cascade's reconciled_message_ids is always
+    # empty (the reconciler does not touch message_queue rows for
+    # non-terminal Tasks). The ``message_queue`` row stays
+    # ``processing`` and the WorkerPool's natural claim+complete
+    # path drives the terminal transition.
+    assert result.reconciled_message_ids == []
     msg = read_message(pg_engine, scenario.orphaned_message_id)
-    assert msg["status"] == MessageStatus.COMPLETED.value
+    assert msg["status"] == MessageStatus.PROCESSING.value

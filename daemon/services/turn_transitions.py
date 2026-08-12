@@ -249,31 +249,68 @@ class SuspendTurn(_StatusTransition):
 class ResumeTurn(_StatusTransition):
     """RESUME_TURN transition — consume the suspension handle on resume.
 
-    Phase 3 (Increment 4, 2026-08-01). This transition:
+    Phase 4b/4c (2026-08-12, pause/resume redesign). This transition:
 
-      1. Transitions the Task ``PAUSED → CANCELLED`` (existing behavior).
+      1. Transitions the Task ``PAUSED → PENDING`` (was ``CANCELLED``
+         pre-migration). The new behavior keeps the same ``work_id``
+         live throughout the pause/resume cycle, so the worker pool
+         can re-claim it naturally and the LangGraph checkpoint
+         reloads under the same ``work_id`` (matching the documented
+         design intent). This closes the T2–T4 race window the prior
+         cancel-and-recreate flow opened (the architecture
+         recommendation §4 amplifier risk).
       2. CLEARS ``suspension_reason=NULL, resume_target_turn_id=NULL``
          in the same guarded UPDATE so the handle is atomically
          consumed (§7 invariant 7: "successful resume consumes the
          handle exactly once").
       3. Calls ``reconcile_turn_mirror`` to bring JobItem,
          MessageQueue, lock, watcher, and instance mirrors into
-         the prescribed state.
+         the prescribed state. The Task is NOT terminal
+         (``status='pending'``) so the reconciler does NOT mark
+         linked ``message_queue`` rows as completed — the worker
+         pool will claim and drive the Task naturally, and the
+         message's terminal status follows the Task's natural
+         ``complete_task`` / ``fail_task`` call.
 
     A duplicate answer-gate resume sees the cleared handle and
     becomes idempotent (§9.1 step 10); the answer-gate selector
     ``find_suspended_turn_for_answer`` returns ``None`` once the
     handle is consumed.
+
+    ``wakeup_payload.work_id`` is always ``self.work_id`` (the same
+    Task that was paused is the one that will be re-claimed). The
+    legacy ``new_work_id`` parameter is retained for backward
+    compatibility with the cancel-and-recreate call sites but is
+    always ``None`` in production — the cascade path no longer mints
+    a fresh child ``work_id`` for the resumed Task.
+
+    Lifecycle (post Phase 4b/4c):
+
+      1. Pause: ``task`` RUNNING → PAUSED (in
+         ``_pause_cascade_db_sync``).
+      2. Resume: ``task`` PAUSED → PENDING (this transition).
+      3. WorkerPool OR ``_resume_processing_background`` claims:
+         ``task`` PENDING → RUNNING.
+      4. Worker / resume path: ``task`` RUNNING → COMPLETED/FAILED
+         via ``complete_task`` / ``fail_task`` after the graph
+         turn finishes.
     """
     MIRROR_SET = ALL_8_MIRRORS
     def __init__(self, work_id, task_repo=None, new_work_id=None, **kwargs):
         super().__init__(work_id, task_repo, kwargs.get("instance_id"))
+        # ``new_work_id`` retained for backward compatibility with the
+        # cancel-and-recreate flow but always None in production —
+        # the resume keeps the same work_id (PAUSED → PENDING).
         self.new_work_id = new_work_id
 
     def run(self, session):
-        # Phase 3: status + handle clear in one guarded UPDATE.
+        # Phase 4b/4c: status + handle clear in one guarded UPDATE.
         # The ``status='paused'`` guard prevents racy concurrent
-        # consumes from double-clearing the handle.
+        # consumes from double-clearing the handle. The transition
+        # is PAUSED → PENDING (was PAUSED → CANCELLED pre-migration) —
+        # the Task stays live so the worker pool can re-claim it
+        # under the same work_id (closes the T2–T4 race window the
+        # cancel-and-recreate flow opened).
         result = session.execute(
             text(
                 "UPDATE task SET status = :new_status, "
@@ -282,7 +319,7 @@ class ResumeTurn(_StatusTransition):
                 "WHERE work_id = :work_id AND status = :old_status"
             ),
             {
-                "new_status": "cancelled",
+                "new_status": "pending",
                 "work_id": self.work_id,
                 "old_status": "paused",
             },
@@ -291,12 +328,14 @@ class ResumeTurn(_StatusTransition):
         self._reconcile()
         return self._result(
             "paused",
-            "cancelled",
+            "pending",
             rowcount=rowcount,
-            cross_turn_side_effects=("instance_running", "schedule_resume_job"),
+            cross_turn_side_effects=("instance_running",),
             wakeup_payload={
-                "event": "schedule_resume_job",
-                "work_id": self.new_work_id or self.work_id,
+                # The wakeup payload points at the SAME work_id —
+                # the Task stays alive throughout pause/resume.
+                "event": "resume_claimed",
+                "work_id": self.work_id,
             },
         )
 

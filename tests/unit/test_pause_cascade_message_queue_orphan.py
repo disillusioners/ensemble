@@ -124,17 +124,24 @@ def test_reachable_site_terminal_orphan_excluded(engine: Engine) -> None:
     """The reachable production site (``child_reports.py:1459``)
     excludes terminal-only orphan rows — parent can complete.
 
-    This is the EXACT production scenario: a ``processing``
-    ``completion_report`` whose backing Task is ``cancelled``.
-    The shared predicate excludes this row so the parent can
-    complete.
+    Phase 4b/4c (2026-08-12, pause/resume redesign): the resume
+    cascade no longer reconciles orphan messages (UPDATE 4
+    removed). The cascade transitions the Task ``PAUSED →
+    PENDING`` (live, not CANCELLED). The orphan message remains
+    in PROCESSING with a live (PENDING) backing Task, so the
+    parent-completion predicate still counts it as pending —
+    the WorkerPool's natural claim+complete path will drive the
+    terminal transition.
+
+    This test verifies the new contract: the resume cascade
+    leaves both the message (PROCESSING) and the task (PENDING)
+    in non-terminal states, and ``pending_count`` stays at 1
+    until the WorkerPool completes the PENDING Task.
     """
     ensure_schema(engine)
     scenario = seed_orphan_scenario(engine)
 
-    # The backing Task is in PAUSED state pre-cascade. After
-    # the cascade runs, it becomes CANCELLED. The guard should
-    # exclude this row from pending_count.
+    # The backing Task is in PAUSED state pre-cascade.
     from tests.helpers.pause_report_orphan_scenarios import seed_paused_task, read_task
     from daemon.services.instance_lifecycle import InstanceLifecycleService
     from daemon.write_pause_guard import WritePauseGuard
@@ -150,7 +157,7 @@ def test_reachable_site_terminal_orphan_excluded(engine: Engine) -> None:
     # (still "live" by the predicate — pending_count = 1).
     assert _count_pending(engine, instance_id=scenario.instance_id) == 1
 
-    # Run the cascade: task becomes cancelled, message is reconciled.
+    # Run the cascade. The Task transitions PAUSED → PENDING.
     service._resume_cascade_db_sync(
         engine, wg,
         tree_ids=[scenario.instance_id],
@@ -158,9 +165,15 @@ def test_reachable_site_terminal_orphan_excluded(engine: Engine) -> None:
         is_root_resume=True,
     )
 
-    # Post-cascade: the message is completed (not in base filter);
-    # the task is cancelled; pending_count = 0.
-    assert _count_pending(engine, instance_id=scenario.instance_id) == 0
+    # Post-cascade: the message is still PROCESSING, the task
+    # is PENDING (live). The orphan row is still counted as
+    # pending until the WorkerPool completes the PENDING Task
+    # (the natural completion path).
+    assert _count_pending(engine, instance_id=scenario.instance_id) == 1, (
+        "Phase 4b/4c: the resume cascade no longer reconciles the "
+        "orphan message — pending_count stays at 1 until the "
+        "WorkerPool drives the natural completion"
+    )
 
 
 def test_reachable_site_no_task_row_counts(engine: Engine) -> None:

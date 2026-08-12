@@ -379,19 +379,16 @@ concurrent transition is left alone.
 def test_resume_transitions_task_to_pending(
     lifecycle_service, engine, write_guard
 ):
-    """Phase 3 W2: the task's PAUSED → CANCELLED transition happens
+    """Phase 3 W2: the task's PAUSED → PENDING transition happens
     atomically with the instance's transition.
 
-    Phase 4 (resume re-claim bug fix): the cascade now transitions
-    PAUSED tasks to **CANCELLED** (not PENDING). Re-arming to PENDING
-    allowed the WorkerPool to re-claim and re-process the message as
-    a FRESH turn, racing with ``resume_processing_job`` under the
-    ExecutionGate and corrupting the checkpoint. Setting to
-    CANCELLED makes the task non-claimable
-    (``claim_pending_task`` filters ``status='pending'``) and lets
-    ``resume_processing_job`` own the graph turn exclusively. The
-    test name is preserved for grep/back-compat; the behaviour pin
-    is on ``status == CANCELLED``.
+    Phase 4b/4c (2026-08-12, pause/resume redesign): the cascade
+    transitions PAUSED tasks to **PENDING** (was CANCELLED
+    pre-migration). The Task stays live so the WorkerPool can
+    re-claim it under the same work_id; this closes the T2–T4
+    race window the prior cancel-and-recreate flow opened
+    (architecture recommendation §4). The test name reflects the
+    new behaviour.
     """
     iid = _seed_instance(engine, status=InstanceStatus.PAUSED.value)
     task_id = _seed_task(
@@ -415,10 +412,12 @@ def test_resume_transitions_task_to_pending(
 
     tasks = _read_tasks(engine, iid)
     assert len(tasks) == 1
-    # Phase 4: PAUSED tasks are now transitioned to CANCELLED, not
-    # PENDING, to prevent the WorkerPool re-claim race.
-    assert tasks[0].status == TaskStatus.CANCELLED.value, (
-        f"task {task_id} expected CANCELLED (Phase 4), "
+    # Phase 4b/4c: PAUSED tasks are now transitioned to PENDING
+    # (was CANCELLED pre-migration). The Task stays live so the
+    # WorkerPool can re-claim it under the same work_id.
+    assert tasks[0].status == TaskStatus.PENDING.value, (
+        f"task {task_id} expected PENDING (Phase 4b/4c "
+        f"PAUSED → PENDING migration), "
         f"got {tasks[0].status}"
     )
 
@@ -427,10 +426,9 @@ def test_resume_skips_non_paused_tasks(lifecycle_service, engine, write_guard):
     """Resume must NOT touch PENDING/COMPLETED/FAILED/RUNNING tasks.
 
     The ``WHERE status = 'paused'`` guard mirrors the pause cascade's
-    guard: only PAUSED tasks are eligible for the PAUSED → CANCELLED
-    transition (Phase 4: was PAUSED → PENDING, changed to prevent the
-    WorkerPool re-claim race). RUNNING tasks are left alone (no
-    double-claim).
+    guard: only PAUSED tasks are eligible for the PAUSED → PENDING
+    transition (Phase 4b/4c: was PAUSED → CANCELLED pre-migration).
+    RUNNING tasks are left alone (no double-claim).
     """
     iid = _seed_instance(engine, status=InstanceStatus.PAUSED.value)
     _seed_task(engine, instance_id=iid, status=TaskStatus.PENDING.value)
@@ -448,14 +446,15 @@ def test_resume_skips_non_paused_tasks(lifecycle_service, engine, write_guard):
 
     tasks = _read_tasks(engine, iid)
     statuses = sorted(t.status for t in tasks)
-    # PENDING/COMPLETED/RUNNING preserved; PAUSED → CANCELLED (Phase 4)
+    # PENDING/COMPLETED/RUNNING preserved; PAUSED → PENDING
+    # (Phase 4b/4c: was PAUSED → CANCELLED pre-migration)
     assert statuses == sorted([
         TaskStatus.PENDING.value,
         TaskStatus.COMPLETED.value,
         TaskStatus.RUNNING.value,
-        TaskStatus.CANCELLED.value,  # flipped from PAUSED
+        TaskStatus.PENDING.value,  # flipped from PAUSED
     ]), (
-        f"expected exactly one PAUSED → CANCELLED transition; got {statuses}"
+        f"expected exactly one PAUSED → PENDING transition; got {statuses}"
     )
 
 
@@ -469,6 +468,9 @@ def test_resume_three_tables_single_transaction(
     together. A crash mid-cascade cannot leave the tree in a
     split-brain state (instance RUNNING + job still PAUSED) — the
     inverse of the pre-Phase 2 bug.
+
+    Phase 4b/4c: the task UPDATE transitions PAUSED → PENDING
+    (was PAUSED → CANCELLED pre-migration).
     """
     iid = _seed_instance(engine, status=InstanceStatus.PAUSED.value)
     _seed_job(engine, instance_id=iid, status=JobStatus.PROCESSING.value)
@@ -492,11 +494,11 @@ def test_resume_three_tables_single_transaction(
     assert all(j.admission_state == AdmissionState.ACTIVE.value for j in jobs)
 
     tasks = _read_tasks(engine, iid)
-    # Phase 4: PAUSED tasks transition to CANCELLED, not PENDING.
+    # Phase 4b/4c: PAUSED tasks transition to PENDING, not CANCELLED.
     # The three tables reflect the transition in lockstep:
     #   instance PAUSED → RUNNING, job PAUSED → PROCESSING,
-    #   task PAUSED → CANCELLED.
-    assert all(t.status == TaskStatus.CANCELLED.value for t in tasks)
+    #   task PAUSED → PENDING.
+    assert all(t.status == TaskStatus.PENDING.value for t in tasks)
 
 
 def test_resume_empty_tree_ids_short_circuits(
@@ -522,18 +524,15 @@ def test_resume_does_not_complete_paused_task(
     lifecycle_service, engine, write_guard
 ):
     """W2 fix: the resume cascade does NOT call ``complete_task`` on
-    the re-armed task. ``resume_processing_job`` (WorkerPool path)
-    owns the task lifecycle for the resumed graph turn.
+    the re-armed task. The WorkerPool re-claim path (or the
+    ``_resume_processing_background`` driver) owns the task
+    lifecycle for the resumed graph turn.
 
-    Phase 4 behaviour: the cascade transitions the PAUSED task to
-    CANCELLED (not PENDING, not COMPLETED). The CANCELLED value
-    pins the contract — resume does not mark the task completed
-    (the worker that picks up ``resume_processing_job``'s graph
-    turn is the sole owner of the task's terminal transition). The
-    task is also not re-armed to PENDING/RUNNING because the
-    WorkerPool re-claim path would race with
-    ``resume_processing_job`` under the ExecutionGate and corrupt
-    the checkpoint (Phase 4 root-cause).
+    Phase 4b/4c behaviour: the cascade transitions the PAUSED task
+    to PENDING (not CANCELLED, not COMPLETED). The PENDING value
+    pins the contract — the Task stays live so the WorkerPool can
+    re-claim it under the same work_id (the natural completion
+    path owns the terminal transition).
     """
     iid = _seed_instance(engine, status=InstanceStatus.PAUSED.value)
     task_id = _seed_task(
@@ -549,16 +548,15 @@ def test_resume_does_not_complete_paused_task(
         is_root_resume=True,
     )
 
-    # Task is CANCELLED (Phase 4), NOT COMPLETED — the resume
+    # Task is PENDING (Phase 4b/4c), NOT COMPLETED — the resume
     # cascade does not own the task's terminal lifecycle.
     tasks = _read_tasks(engine, iid)
     assert len(tasks) == 1
     assert tasks[0].id == task_id
-    assert tasks[0].status == TaskStatus.CANCELLED.value, (
-        f"task {task_id} should be CANCELLED (Phase 4 — WorkerPool "
-        f"path owns terminal transition), "
-        f"got {tasks[0].status} — resume is incorrectly completing "
-        f"or re-arming the task"
+    assert tasks[0].status == TaskStatus.PENDING.value, (
+        f"task {task_id} should be PENDING (Phase 4b/4c — "
+        f"WorkerPool re-claim owns terminal transition), "
+        f"got {tasks[0].status}"
     )
 
 
@@ -859,28 +857,26 @@ def test_paused_to_cancelled_via_terminate_still_works(engine):
 
 
 @pytest.mark.asyncio
-async def test_resume_cascade_returns_cancelled_task_ids_and_releases_watchers(
+async def test_resume_cascade_returns_resumed_task_ids_and_keeps_watchers_pending(
     lifecycle_service, engine, write_guard
 ):
-    """Production incident (leader 088d3335, 2026-07-08): the resume
-    cascade's UPDATE 2 transitions paused tasks to CANCELLED with
-    ``retry_scheduled=true``. ``retry_scheduled=true`` intentionally
-    skips the retry engine's orphan-watcher sweep, so unless the resume
-    cascade itself surfaces the cancelled task ids AND the async caller
-    invokes ``cancel_bus_watchers_for_task_async`` for each, the
-    PENDING ``dependency_watchers`` rows stay alive forever and the
-    parent remains in ``waiting_children`` even after all its
-    children have terminated (the leader had 22 children all
-    ``completed``/``terminated`` but stayed ``waiting_children``
-    because a single PENDING watcher remained).
+    """Phase 4b/4c (2026-08-12, pause/resume redesign): the resume
+    cascade transitions the Task ``PAUSED → PENDING`` (was
+    ``PAUSED → CANCELLED`` pre-migration). The Task stays live so
+    the WorkerPool can re-claim it under the same work_id; the
+    bus-watcher release loop is no longer needed because the
+    watcher is released naturally when the WorkerPool completes
+    the re-claimed Task.
 
-    This test pins both halves of the fix:
+    This test pins the new contract:
 
       1. ``_resume_cascade_db_sync`` returns the integer ids of the
-         tasks it just cancelled via ``RETURNING id``.
-      2. ``resume_instance_cascade`` (the async caller) awaits
-         ``cancel_bus_watchers_for_task_async`` for each id so the
-         bus's ``count_pending_for_target(parent)`` drops to 0.
+         tasks it just resumed (``PAUSED → PENDING``) via the
+         outbox payload.
+      2. The Task is in PENDING (not CANCELLED) after the cascade.
+      3. The bus watchers remain PENDING (not CANCELLED) — the
+         WorkerPool's natural completion flow owns the watcher
+         release.
     """
     from daemon.services.dependency_bus import (
         DependencyBus,
@@ -889,8 +885,10 @@ async def test_resume_cascade_returns_cancelled_task_ids_and_releases_watchers(
     )
 
     # ── Seed: parent (leader) + child (developer) + a PAUSED task on the
-    # child whose PENDING watcher would otherwise keep the parent in
-    # waiting_children forever.
+    # child. The bus watcher will remain PENDING after the resume
+    # cascade (Phase 4b/4c: tasks are not cancelled, so the
+    # retry-engine-skip and bus-watcher-release loop is no longer
+    # needed).
     parent_id = _seed_instance(engine, status=InstanceStatus.PAUSED.value)
     child_id = _seed_instance(
         engine,
@@ -901,10 +899,10 @@ async def test_resume_cascade_returns_cancelled_task_ids_and_releases_watchers(
     child_task_id = _read_tasks(engine, child_id)[0].id
 
     # Wire a real bus with a watcher whose source_task_id matches the
-    # paused task. After resume the task is cancelled with
-    # ``retry_scheduled=true`` (so the retry engine will not sweep
-    # the watcher); the bus's PENDING watcher can ONLY be released
-    # by the resume cascade caller.
+    # paused task. The watcher remains PENDING after the resume
+    # cascade (Phase 4b/4c) — the WorkerPool's natural completion
+    # flow will release it when the re-claimed PENDING Task is
+    # driven to terminal.
     bus_repo = DependencyWatcherRepository(engine=engine)
     bus = DependencyBus(repository=bus_repo)
     await bus.start()
@@ -929,8 +927,7 @@ async def test_resume_cascade_returns_cancelled_task_ids_and_releases_watchers(
     assert bus_repo.count_pending_for_target(parent_id) == 1
     assert await bus.count_pending_for_target(parent_id) == 1
 
-    # ── Exercise: drive the sync cascade, then drive the async caller
-    # hook that releases the cancelled task's bus watchers.
+    # ── Exercise: drive the sync cascade.
     result = lifecycle_service._resume_cascade_db_sync(
         engine,
         write_guard,
@@ -940,20 +937,20 @@ async def test_resume_cascade_returns_cancelled_task_ids_and_releases_watchers(
     )
 
     # Fix-hypothesis #1: result surfaces the integer task id of the
-    # cancelled task via ``RETURNING id``.
-    assert child_task_id in result.cancelled_task_ids, (
-        f"_resume_cascade_db_sync must RETURN the cancelled task ids "
-        f"(returned {result.cancelled_task_ids})"
+    # resumed task (PAUSED → PENDING) via the outbox payload.
+    assert child_task_id in result.resumed_task_ids, (
+        f"_resume_cascade_db_sync must RETURN the resumed task ids "
+        f"(returned {result.resumed_task_ids})"
     )
 
-    # Fix-hypothesis #2: the task row is now CANCELLED with the
-    # supersede error (regression guard for the UPDATE 2 changes).
-    cancelled_rows = _read_tasks(engine, child_id)
-    assert cancelled_rows[0].status == TaskStatus.CANCELLED.value
-    # Read the ``error`` column directly via SQL — the SQLModel
-    # ``Task.error`` mapping uses a SQLite datetime adapter that is
-    # known to trip on the in-memory engine (cf. Phase 3 W2 SELECT
-    # list in ``_read_tasks``), so we sidestep it here.
+    # Fix-hypothesis #2 (Phase 4b/4c): the task row is now PENDING
+    # (was CANCELLED pre-migration). No ``Superseded by resume
+    # cascade`` error is stamped — the task is alive and will be
+    # re-claimed by the WorkerPool.
+    resumed_rows = _read_tasks(engine, child_id)
+    assert resumed_rows[0].status == TaskStatus.PENDING.value
+    # Read the ``error`` column directly via SQL — it should be
+    # NULL (the task is alive, not superseded).
     from sqlalchemy import text as _text
 
     with engine.connect() as _conn:
@@ -964,27 +961,14 @@ async def test_resume_cascade_returns_cancelled_task_ids_and_releases_watchers(
             ),
             {"iid": child_id},
         ).scalar_one_or_none()
-    assert error_value is not None and "Superseded by resume cascade" in error_value, (
-        f"cancelled task must carry the supersede error, got {error_value!r}"
+    assert error_value is None, (
+        f"resumed task must NOT carry a supersede error "
+        f"(task is alive, not superseded), got {error_value!r}"
     )
 
-    # Simulate the async caller: for each cancelled_task_id, invoke
-    # ``cancel_bus_watchers_for_task_async`` (the same helper the
-    # caller awaits in production).
-    from daemon.services.dependency_bus import (
-        cancel_bus_watchers_for_task_async,
-    )
-
-    for tid in result.cancelled_task_ids:
-        await cancel_bus_watchers_for_task_async(
-            cancelled_task_id=tid,
-            origin="resume_cascade_test",
-        )
-
-    # After release: the watcher is marked CANCELLED in the DB and the
-    # bus reports 0 pending for the parent — which is the precondition
-    # for the parent leaving ``waiting_children``.
-    watcher_state = None
+    # Phase 4b/4c: NO bus-watcher release loop. The watcher
+    # remains PENDING (the WorkerPool's natural completion will
+    # release it when the re-claimed PENDING Task finishes).
     with Session(engine) as s:
         from sqlmodel import select as _select
         row = s.exec(
@@ -994,16 +978,16 @@ async def test_resume_cascade_returns_cancelled_task_ids_and_releases_watchers(
         ).first()
         watcher_state = row.state if row else None
 
-    assert watcher_state == DependencyWatcherState.CANCELLED.value, (
-        f"watcher should be CANCELLED after resume cascade release, "
-        f"got {watcher_state}"
+    assert watcher_state == DependencyWatcherState.PENDING.value, (
+        f"watcher should remain PENDING after resume cascade "
+        f"(WorkerPool owns the release), got {watcher_state}"
     )
-    assert bus_repo.count_pending_for_target(parent_id) == 0, (
-        "parent must report 0 pending watchers after resume cascade "
-        "releases the cancelled-task watcher (else parent stays "
-        "waiting_children forever — the production bug)"
+    assert bus_repo.count_pending_for_target(parent_id) == 1, (
+        "parent must still see 1 pending watcher — the WorkerPool "
+        "will release it when the re-claimed PENDING Task is "
+        "completed naturally"
     )
-    assert await bus.count_pending_for_target(parent_id) == 0
+    assert await bus.count_pending_for_target(parent_id) == 1
 
     await bus.stop()
     set_dependency_bus(None)

@@ -1016,10 +1016,13 @@ async def init_dependency_bus(app, manager) -> None:
         # in the recovered set, we ask the bus whether the target
         # still has any PENDING watchers. If the answer is 0 (all
         # watchers fired before the crash), the recovery decides:
-        #   * If a report Task is in flight (``has_inflight_task``),
+        #   * If the instance has any live work
+        #     (``has_instance_busy`` — PENDING + RUNNING + PAUSED),
         #     stamp the row and defer — the task's lifecycle event
         #     will drive ``_process_event`` → ``_finalize_job``
-        #     naturally when its turn ends.
+        #     naturally when its turn ends (PAUSED tasks resume
+        #     and complete too, so they still count as
+        #     "will drive").
         #   * Otherwise, invoke ``_finalize_job`` directly via the
         #     single finalize path with the bus error override, so
         #     the parent job transitions PROCESSING → COMPLETED/ERROR.
@@ -1145,7 +1148,7 @@ async def init_dependency_bus(app, manager) -> None:
                 # ``_finalize_job`` path only when nothing else
                 # will (the genuine stuck-parent case).
                 #
-                # **Why the ``has_inflight_task`` guard matters**:
+                # **Why the ``has_instance_busy`` guard matters**:
                 # in the new design, finalization happens *after*
                 # a report Task's turn ends. A naive "always
                 # finalize on recovery" (what the deleted
@@ -1153,11 +1156,14 @@ async def init_dependency_bus(app, manager) -> None:
                 # finalize a job whose report Task is still
                 # PENDING and about to run — re-introducing the
                 # orphan-Task bug. The guard makes recovery
-                # **defer** when a turn is pending, and
-                # **finalize** only when nothing else will (the
-                # genuine stuck-parent case: report Task already
-                # ran/crashed, no turn pending, watcher fired,
-                # job still PROCESSING).
+                # **defer** when ANY live Task exists (PENDING +
+                # RUNNING + PAUSED), and **finalize** only when
+                # nothing else will (the genuine stuck-parent case:
+                # report Task already ran/crashed, no live task,
+                # watcher fired, job still PROCESSING). PAUSED
+                # Tasks count too — they will resume and complete,
+                # so deferring lets the natural path drive the
+                # finalize when the pause is lifted.
                 #
                 # **Known limitation (in-memory bus state)**: the
                 # bus's ``_parent_errored`` and the new
@@ -1171,13 +1177,22 @@ async def init_dependency_bus(app, manager) -> None:
                 logger.info(
                     f"bus crash recovery: target="
                     f"{target_id[:8]}... has 0 PENDING watchers — "
-                    f"deciding: defer if report Task in flight, "
+                    f"deciding: defer if any live task, "
                     f"else finalize via single path "
                     f"(no FollowUp enqueue — bus path is internal "
                     f"plumbing, not an LLM message source)"
                 )
 
-                # ─── Decision: in-flight check via has_inflight_task ───
+                # ─── Decision: live-work check via has_instance_busy ───
+                # Bug-1 fix (2026-08-12): the prior ``has_inflight_task``
+                # call checked PENDING + RUNNING only — a PAUSED Task
+                # would (incorrectly) pass the "no live work" check
+                # and the reaper would finalize a parent whose report
+                # Task was PAUSED about to resume, re-introducing the
+                # orphan-Task bug. ``has_instance_busy`` widens the
+                # status set to PENDING + RUNNING + PAUSED, matching
+                # the canonical predicate the claim path and zombie
+                # reaper now share.
                 _task_repo = getattr(manager, "_task_repo", None)
                 _observer = getattr(
                     manager, "_job_feedback_observer", None
@@ -1186,11 +1201,11 @@ async def init_dependency_bus(app, manager) -> None:
                 if _task_repo is not None:
                     try:
                         _has_inflight = await asyncio.to_thread(
-                            _task_repo.has_inflight_task, target_id
+                            _task_repo.has_instance_busy, target_id
                         )
                     except Exception as inflight_err:
                         logger.warning(
-                            f"bus crash recovery: has_inflight_task "
+                            f"bus crash recovery: has_instance_busy "
                             f"check failed target={target_id[:8]}...: "
                             f"{inflight_err} — defaulting to defer "
                             f"(safe: a task may still be in flight)"
@@ -1206,14 +1221,17 @@ async def init_dependency_bus(app, manager) -> None:
                     _has_inflight = True
 
                 if _has_inflight:
-                    # A report Task is pending or running. It will
-                    # drive the parent's lifecycle event → finalize
-                    # via the natural path (``_process_event``).
-                    # Stamp the row to dedup (no double-recovery
-                    # on next restart) but DO NOT finalize here.
+                    # A report Task is pending, running, or paused.
+                    # The PENDING/RUNNING case: it will drive the
+                    # parent's lifecycle event → finalize via the
+                    # natural path (``_process_event``). The PAUSED
+                    # case: it will resume and complete when the
+                    # user unpauses, then drive the same natural
+                    # finalize path. Either way, deferring lets the
+                    # natural path do the work.
                     logger.info(
                         f"bus crash recovery: target="
-                        f"{target_id[:8]}... has in-flight task — "
+                        f"{target_id[:8]}... has live task — "
                         f"deferring to natural finalize path, stamping row"
                     )
                     try:

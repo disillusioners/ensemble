@@ -347,10 +347,14 @@ class TaskRepository:
         The filter shape:
 
           * ``instance_id = :instance_id``
-          * ``status IN ('paused', 'running', 'cancelled')``  (the named
+          * ``status IN ('paused', 'running')``  (the named
             transitions may only operate on a non-terminal Task;
-            CANCELLED is included as the resume cascade's consumed
-            "resumed" marker so routing can mint the fresh driver turn).
+            PENDING is NOT included because it is the resume
+            cascade's "resumed" marker — the cascade sets the
+            Task ``PAUSED → PENDING`` (Phase 4b/4c migration),
+            but a PENDING task is NOT a valid pause-cascade
+            target — the pause cascade acts on RUNNING / PAUSED
+            tasks only).
           * ``task_type IN ('process_message', 'process_report')``
             (per plan §8.2: include ``PROCESS_REPORT`` where a
             report turn is the active checkpoint-bearing turn).
@@ -370,6 +374,16 @@ class TaskRepository:
         Sister query to :meth:`find_running_by_instance` (the
         RUNNING-only narrow lookup) — same shape, widened to include
         ``PAUSED`` and broadened on ``task_type``.
+
+        Phase 4b/4c (2026-08-12, pause/resume redesign): the
+        resume cascade no longer leaves a CANCELLED marker — it
+        transitions the Task ``PAUSED → PENDING`` (was
+        ``PAUSED → CANCELLED`` pre-migration). The pause-cascade
+        selector therefore only matches RUNNING / PAUSED tasks
+        (not PENDING); the resume-cascade selector
+        ``find_suspended_turn_for_answer`` uses a separate query
+        keyed on the suspension handle (``resume_target_turn_id``)
+        and is unaffected by this change.
 
         Args:
             instance_id: The langgraph thread_id / instance_id.
@@ -392,7 +406,6 @@ class TaskRepository:
                     Task.status.in_([
                         TaskStatus.PAUSED.value,
                         TaskStatus.RUNNING.value,
-                        TaskStatus.CANCELLED.value,  # Phase 3 W2: resume cascade's "resumed" marker
                     ])
                 )
                 .where(
@@ -420,7 +433,6 @@ class TaskRepository:
                     Task.status.in_([
                         TaskStatus.PAUSED.value,
                         TaskStatus.RUNNING.value,
-                        TaskStatus.CANCELLED.value,  # Phase 3 W2: resume cascade's "resumed" marker
                     ])
                 )
                 .where(
@@ -470,6 +482,22 @@ class TaskRepository:
         ``has_pending_tasks_blocked_by_busy_instance`` /
         ``find_cancellable_tasks``).
 
+        **Note — superseded for concurrency-gate callers.** This
+        method remains the correct choice for the "is a Task
+        *actively* driving ``graph.astream`` right now?" question
+        (PENDING + RUNNING only, not PAUSED). For the broader
+        "is this instance busy with any live work?" question
+        used as the per-instance concurrency gate in
+        ``claim_pending_task``, ``job_continue``, bus crash
+        recovery, and the zombie reaper, use
+        :meth:`has_instance_busy` (PENDING + RUNNING + PAUSED).
+        Bug-1 fix (2026-08-12): the prior ``status='running'``
+        per-instance guard inside ``claim_pending_task`` was the
+        narrowest of all busy-check predicates and caused a
+        concurrency leak — a PENDING or PAUSED task did not block
+        a second task from being claimed for the same instance.
+        ``has_instance_busy`` is the canonical replacement.
+
         Args:
             instance_id: The instance ID to check.
 
@@ -489,6 +517,129 @@ class TaskRepository:
                 "instance_id": instance_id,
                 "status_pending": TaskStatus.PENDING.value,
                 "status_running": TaskStatus.RUNNING.value,
+            }).fetchone()
+            return row is not None
+
+    def has_instance_busy(self, instance_id: str) -> bool:
+        """Return True if any PENDING, RUNNING, or PAUSED ``task`` row exists for ``instance_id``.
+
+        This is the **ONE canonical "is this instance busy?"** check
+        for the dispatch / concurrency-gate surface. The status set
+        (PENDING + RUNNING + PAUSED) is the full live-Task predicate
+        the zombie-scan, defer gate, and background gate all use —
+        any task in any of these three states means the instance has
+        live work that must be respected before another dispatch is
+        allowed to claim a task for the same instance.
+
+        Bug-1 fix (2026-08-12, concurrency-gate review). The prior
+        per-instance guard inside ``claim_pending_task`` was the
+        narrowest of seven busy-check predicates
+        (``status='running'`` only) and caused a concurrency leak: a
+        PENDING or PAUSED task did not block a second task from
+        being claimed for the same instance, allowing two
+        ``graph.astream`` turns to race on the same
+        ``langgraph`` ``thread_id`` and shadow channel writes in the
+        Postgres checkpointer. ``has_instance_busy`` widens the
+        status set to the canonical live-Task set so every gate
+        caller agrees on what "busy" means.
+
+        Used at the Python-level concurrency-gate surface by:
+
+        * ``daemon/tools/job_queue.py:job_continue`` — the
+          "should I block the follow-up enqueue?" check. A PAUSED
+          task means the instance IS busy (it has live work, the
+          user has explicitly paused and must unpause first).
+        * ``daemon/api.py`` bus crash recovery — the "will a
+          report Task drive the natural finalize path?" check.
+          A PAUSED task will resume and complete, so it still
+          counts as "will drive" — defer rather than finalize.
+        * ``daemon/services/job_queue_service.py:_has_live_work``
+          — the Bucket-5 zombie reaper's TOCTOU re-check. Replaces
+          the prior 2-probe approximation (``has_inflight_task``
+          + ``get_by_instance`` loop checking PAUSED) with a
+          single canonical query — closing the TOCTOU gap the
+          2-probe pattern had.
+        * ``daemon/services/instance_lifecycle.py`` pause/quiesce
+          helpers and ``daemon/api.py`` resume handlers — the
+          "is it safe to pause / unpause this instance?" check.
+          A PENDING Task is live work; ``has_instance_busy``
+          blocks a quiescent pause from racing an in-flight
+          dispatch (matches the existing
+          ``claim_pending_task`` ``status_paused`` /
+          ``status_terminated`` instance-status filter).
+
+        **Not used inside the ``claim_pending_task`` per-instance
+        guard SQL.** The atomic ``UPDATE...RETURNING`` inside
+        :meth:`claim_pending_task` keeps its narrow
+        ``status='running'`` S3 invariant — only an already-RUNNING
+        Task blocks a fresh claim, and the guard is evaluated as
+        part of the same atomic statement as the claim itself
+        (one SQL statement, no Python pre-check race). The
+        broader PENDING/PAUSED predicate (``has_instance_busy``)
+        is applied at the Python call sites above where the
+        guard does not need to share an atomic statement with the
+        claim. Mixing the two would widen the claim guard past
+        the S3 invariant and reopen the concurrency leak.
+
+        Status set rationale (mirrors the existing patterns):
+
+        * **PENDING** — a not-yet-claimed task is live work the
+          worker pool will pick up.
+        * **RUNNING** — actively driving ``graph.astream``.
+        * **PAUSED** — explicitly quiesced by the user, but the
+          instance still holds the per-instance serialization
+          slot. The pause gate (the ``status_paused`` /
+          ``status_terminated`` instance-status filter in
+          ``claim_pending_task``) keeps new claims off a paused
+          instance, but ``has_instance_busy`` is the
+          in-instance check — a paused instance may still be
+          queried from non-claim paths (bus recovery, zombie
+          reaper) and PAUSED Tasks must count as live work.
+
+        Contrast with :meth:`has_inflight_task`, which checks
+        PENDING + RUNNING only. The two have different semantics
+        and are not interchangeable:
+
+        * ``has_inflight_task`` answers "is a Task *actively*
+          driving ``graph.astream`` right now?" — used by code
+          paths that specifically need the PENDING+RUNNING
+          subset (e.g. error-path comments that mention "the
+          task in flight" must not flip meaning when PAUSED is
+          added elsewhere).
+        * ``has_instance_busy`` answers "is this instance busy
+          with any live work?" — used by the concurrency-gate
+          surface (``claim_pending_task``, ``job_continue``,
+          bus crash recovery, zombie reaper).
+
+        Dual-driver SQL: pure ``text()`` via
+        ``self.engine.begin()`` + ``conn.execute(text(...))`` —
+        the parameterized ``IN (:pending, :running, :paused)``
+        works on both SQLite and PostgreSQL (matches the
+        pattern in the existing ``status IN (:pending,
+        :running, :paused)`` defer/background gates in
+        ``claim_pending_task`` lines 992 and 1034).
+
+        Args:
+            instance_id: The instance ID to check.
+
+        Returns:
+            True if any PENDING, RUNNING, or PAUSED task exists
+            for the instance; False otherwise (only terminal
+            tasks — COMPLETED, CANCELLED, FAILED — or no tasks
+            at all).
+        """
+        with self.engine.begin() as conn:
+            stmt = text("""
+                SELECT 1 FROM task
+                WHERE instance_id = :instance_id
+                AND status IN (:status_pending, :status_running, :status_paused)
+                LIMIT 1
+            """)
+            row = conn.execute(stmt, {
+                "instance_id": instance_id,
+                "status_pending": TaskStatus.PENDING.value,
+                "status_running": TaskStatus.RUNNING.value,
+                "status_paused": TaskStatus.PAUSED.value,
             }).fetchone()
             return row is not None
 
@@ -675,14 +826,36 @@ class TaskRepository:
                 params,
             ).rowcount
 
+            # W3 (2026-08-12, concurrency-gate review): the cleanup
+            # in ``_schedule_explicit_handle_resume`` first calls
+            # ``complete(msg.message_id)`` (sets
+            # ``message_queue.status='completed'``) and only THEN
+            # ``cancel_task``, which triggers
+            # ``reconcile_turn_mirror``. Without the
+            # ``status != 'completed'`` guard below, the
+            # reconciler's CASE statement (CANCELLED → 'failed')
+            # would silently overwrite the 'completed' status that
+            # was just set explicitly upstream. The guard is
+            # technically redundant with ``status IN ('pending',
+            # 'ready', 'processing', 'retrying')`` (which already
+            # excludes 'completed') but is kept as an explicit
+            # protection so future changes to the IN-list cannot
+            # regress this race.
             updated_counts["message_queue"] = conn.execute(
                 text(f"""
                     UPDATE message_queue
-                    SET status = 'completed',
+                    SET status = CASE
+                            WHEN :terminal_reason = 'completed' THEN 'completed'
+                            WHEN :terminal_reason = 'failed' THEN 'failed'
+                            WHEN :terminal_reason = 'cancelled' THEN 'failed'
+                            WHEN :terminal_reason = 'orphaned_no_task' THEN 'failed'
+                            ELSE 'completed'
+                        END,
                         processing_task_id = NULL,
                         completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP)
                     WHERE message_id = :task_message_id
                       AND status IN ('pending', 'ready', 'processing', 'retrying')
+                      AND status != 'completed'
                       AND :terminal
                       AND {snapshot_guard}
                 """),
@@ -1072,6 +1245,62 @@ class TaskRepository:
                           AND _qi.deleted_at IS NULL
                     )
                     AND instance_id NOT IN (
+                        -- Per-instance concurrency gate.
+                        -- A pending task is claimable only if NO
+                        -- OTHER task for the same instance is
+                        -- currently ``RUNNING``. PAUSED is
+                        -- INTENTIONALLY EXCLUDED — see the S3
+                        -- invariant in
+                        -- ``tests/test_report_lane_phase2.py::
+                        -- test_s3_paused_task_does_not_block_sibling_pending_claim``
+                        -- (regression test for the operational
+                        -- deadlock that would occur if a stale
+                        -- PAUSED task from a prior pause/resume
+                        -- cycle blocked a fresh PENDING candidate
+                        -- on a RUNNING instance).
+                        --
+                        -- Bug-1 fix (2026-08-12, concurrency-gate
+                        -- review): the architecture recommendation
+                        -- proposed widening this guard to
+                        -- ``IN (PENDING, RUNNING, PAUSED)`` to
+                        -- mirror the defer/background gate status
+                        -- set. That fix is rejected here because
+                        -- the S3 regression test pins the
+                        -- invariant that PAUSED must NOT block.
+                        -- Instead, the concurrency leak is closed
+                        -- at the call-site surface via
+                        -- :meth:`has_instance_busy` (PENDING +
+                        -- RUNNING + PAUSED) which is now used by
+                        -- ``daemon/api.py`` bus crash recovery,
+                        -- ``daemon/tools/job_queue.py:job_continue``
+                        -- concurrency gate, and the
+                        -- ``_has_live_work`` zombie reaper. The
+                        -- claim path itself remains
+                        -- ``status='running'`` to preserve the
+                        -- FIFO ordering (oldest PENDING always
+                        -- claims, even when other PENDING tasks
+                        -- exist for the same instance) and the S3
+                        -- operational-deadlock-prevention
+                        -- invariant.
+                        --
+                        -- The cross-queue race that the
+                        -- architecture recommendation was
+                        -- concerned about (a PENDING FIFO task
+                        -- not blocking a deferred candidate) is
+                        -- already handled by the existing defer
+                        -- gate at lines 988-1000 — the defer
+                        -- gate widens to PENDING+RUNNING+PAUSED
+                        -- for DEFERRED candidates only, which is
+                        -- the correct scope.
+                        --
+                        -- The guard MUST remain inside the atomic
+                        -- UPDATE...RETURNING so it shares the
+                        -- same WHERE-clause evaluation as the
+                        -- pause gate, cross-system guard, defer
+                        -- gate, background gate, and
+                        -- queue-awareness guard — folding all
+                        -- gates into the same statement is the
+                        -- anti-starvation invariant.
                         SELECT instance_id FROM task
                         WHERE status = :status_running_guard
                     )
@@ -1163,6 +1392,13 @@ class TaskRepository:
                 "worker_id": worker_id,
                 "started_at": now,
                 "status_pending": TaskStatus.PENDING.value,
+                # Per-instance guard (line ~1074) keeps
+                # ``status='running'`` semantics to preserve the
+                # S3 invariant (see the guard's full comment).
+                # ``status_running_guard`` is the same value as
+                # ``status_running`` — kept as a separate bind
+                # for readability and to mirror the prior
+                # param name.
                 "status_running_guard": TaskStatus.RUNNING.value,
                 "status_waiting_children": InstanceStatus.WAITING_CHILDREN.value,
                 "status_paused": TaskStatus.PAUSED.value,

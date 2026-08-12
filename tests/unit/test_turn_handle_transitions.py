@@ -8,7 +8,10 @@ handle lifecycle:
     in ONE guarded UPDATE (§11.3).
   * ``ResumeTurn`` — consumes the handle by writing
     ``suspension_reason=NULL, resume_target_turn_id=NULL`` in the
-    same UPDATE that flips ``paused → cancelled`` (§7 invariant 7).
+    same UPDATE that flips ``paused → pending`` (§7 invariant 7).
+    Phase 4b/4c (2026-08-12, pause/resume redesign): was
+    ``paused → cancelled`` pre-migration; the Task now stays live
+    so the WorkerPool can re-claim it under the same work_id.
   * ``CompleteTurn`` — clears the handle on the terminal
     ``running → completed`` transition (§7 invariant 9).
   * ``AbortTurn`` — clears the handle on the terminal
@@ -313,12 +316,19 @@ class TestSuspendTurn:
 
 
 class TestResumeTurn:
-    """``ResumeTurn`` consumes/clears the handle on the PAUSED → CANCELLED transition.
+    """``ResumeTurn`` consumes/clears the handle on the PAUSED → PENDING transition.
 
     Per §7 invariant 7: "successful resume consumes the handle exactly
     once". A duplicate resume (e.g., a duplicate answer-gate resume
     call) sees the cleared handle and becomes a no-op via the
     ``status='paused'`` guard.
+
+    Phase 4b/4c (2026-08-12, pause/resume redesign): the resume
+    transition is now ``PAUSED → PENDING`` (was ``PAUSED → CANCELLED``
+    pre-migration). The Task stays live throughout the pause/resume
+    cycle so the WorkerPool can re-claim it naturally under the same
+    ``work_id`` — closing the T2–T4 race window the prior
+    cancel-and-recreate flow opened.
     """
 
     def _seed_paused_task_with_handle(
@@ -355,12 +365,14 @@ class TestResumeTurn:
             result = ResumeTurn(work_id=work_id).run(session)
             session.commit()
 
-        assert result.new_status == TaskStatus.CANCELLED.value
+        assert result.new_status == TaskStatus.PENDING.value
         status, reason, target = _read_handle(engine, work_id)
-        assert status == TaskStatus.CANCELLED.value, (
-            "ResumeTurn must flip status PAUSED → CANCELLED "
-            "(the resume driver owns the graph turn; CANCELLED keeps "
-            "the WorkerPool from re-claiming and racing — D13)"
+        assert status == TaskStatus.PENDING.value, (
+            "ResumeTurn must flip status PAUSED → PENDING "
+            "(Phase 4b/4c migration: the Task stays live so the "
+            "WorkerPool can re-claim it under the same work_id — "
+            "closes the T2–T4 race window the prior "
+            "cancel-and-recreate flow opened)"
         )
         assert reason is None, (
             f"suspension_reason must be cleared on resume; "
@@ -381,6 +393,12 @@ class TestResumeTurn:
         schedule the graph against. Without this, the scheduler would
         re-derive the target from instance state and could lose the
         explicit-handle routing.
+
+        Phase 4b/4c (2026-08-12): the resume transition is now
+        ``PAUSED → PENDING`` (was ``PAUSED → CANCELLED`` pre-migration).
+        The Task stays alive under the same ``work_id``, so the
+        wakeup_payload carries the original ``work_id`` (not a freshly
+        minted child).
         """
         work_id = self._seed_paused_task_with_handle(engine)
         # The "next" work_id (e.g., for a retry path that mints a
@@ -393,36 +411,37 @@ class TestResumeTurn:
             session.commit()
 
         assert result.wakeup_payload is not None
-        assert result.wakeup_payload["event"] == "schedule_resume_job"
+        assert result.wakeup_payload["event"] == "resume_claimed"
         # When new_work_id is None, the wakeup_payload carries the
-        # original work_id so the scheduler resumes against the
-        # recorded handle's target.
+        # original work_id — the Task stays alive under the same
+        # work_id (Phase 4b/4c PAUSED → PENDING migration).
         assert result.wakeup_payload["work_id"] == work_id
 
     def test_duplicate_resume_is_idempotent(self, engine):
         """A duplicate ``ResumeTurn`` after the first one is a no-op.
 
-        The guard ``status='paused'`` excludes the cancelled row, so
-        a second invocation matches zero rows and the handle remains
+        The guard ``status='paused'`` excludes the post-resume row
+        (now PENDING, was CANCELLED pre-migration), so a second
+        invocation matches zero rows and the handle remains
         cleared. This is the §9.1 step 10 invariant: a duplicate
         answer-gate resume sees the cleared handle and becomes
-        idempotent rather than routing onto a terminal Task.
+        idempotent rather than routing onto a re-claimable Task.
         """
         work_id = self._seed_paused_task_with_handle(engine)
 
-        # First resume — consumes the handle.
+        # First resume — consumes the handle, transitions PAUSED → PENDING.
         with Session(engine) as session:
             ResumeTurn(work_id=work_id).run(session)
             session.commit()
 
-        # Second resume — no-op (status is CANCELLED, not PAUSED).
+        # Second resume — no-op (status is PENDING, not PAUSED).
         with Session(engine) as session:
             result = ResumeTurn(work_id=work_id).run(session)
             session.commit()
 
-        # Status remains CANCELLED; handle still cleared.
+        # Status remains PENDING; handle still cleared.
         status, reason, target = _read_handle(engine, work_id)
-        assert status == TaskStatus.CANCELLED.value
+        assert status == TaskStatus.PENDING.value
         assert reason is None
         assert target is None
 
@@ -460,6 +479,237 @@ class TestResumeTurn:
             f"find_suspended_turn_for_answer must return None after "
             f"ResumeTurn consumes the handle; got {after!r}"
         )
+
+    def test_resume_does_not_stamp_cancel_requested_or_retry_scheduled(
+        self, engine
+    ):
+        """Phase 4b/4c (2026-08-12, pause/resume redesign): the
+        resume cascade does NOT stamp ``cancel_requested`` /
+        ``cancel_requested_at`` / ``completed_at`` /
+        ``retry_scheduled`` / ``error`` columns on the Task.
+
+        Pre-migration, ``_resume_cascade_db_sync`` would stamp
+        these columns to mark the task as "superseded by resume
+        cascade" — distinguishing the resume cancellation from
+        other cancellations. Post-migration, the task stays
+        PENDING (live) so the WorkerPool can re-claim it under
+        the same ``work_id``; the supersede markers are no
+        longer needed and would mis-classify a live Task as
+        a superseded-then-completed one.
+        """
+        from sqlmodel import Session
+        from datetime import datetime, timezone
+
+        from daemon.repositories.task.models import Task
+        from daemon.repositories.task.repository import TaskRepository
+
+        work_id = self._seed_paused_task_with_handle(engine)
+        with Session(engine) as session:
+            ResumeTurn(work_id=work_id).run(session)
+            session.commit()
+
+        # Task is PENDING. None of the supersede-marker columns
+        # are stamped.
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT status, cancel_requested, retry_scheduled, "
+                    "completed_at, error "
+                    "FROM task WHERE work_id = :work_id"
+                ),
+                {"work_id": work_id},
+            ).mappings().first()
+        assert row["status"] == TaskStatus.PENDING.value
+        assert row["cancel_requested"] in (None, False), (
+            f"cancel_requested must NOT be stamped on PENDING task; "
+            f"got {row['cancel_requested']!r}"
+        )
+        assert row["retry_scheduled"] in (None, False), (
+            f"retry_scheduled must NOT be stamped on PENDING task; "
+            f"got {row['retry_scheduled']!r}"
+        )
+        assert row["completed_at"] is None, (
+            f"completed_at must NOT be stamped on PENDING task; "
+            f"got {row['completed_at']!r}"
+        )
+        assert row["error"] is None, (
+            f"error must NOT be stamped on PENDING task; "
+            f"got {row['error']!r}"
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Phase 4b/4c reconcile_turn_mirror terminal_reason contract
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _seed_terminal_task_with_message(
+    engine: Engine,
+    *,
+    status: str,
+    message_id: str | None = None,
+) -> tuple[str, str]:
+    """Seed a terminal Task with a linked message_queue row.
+
+    Returns ``(work_id, message_id)``. The Task and message are
+    in the seeded ``status`` / ``MessageStatus.PROCESSING``
+    respectively — the canonical reconcile-against-terminal-Task
+    scenario.
+    """
+    import uuid
+    from sqlmodel import Session
+    from datetime import datetime, timezone
+    from daemon.repositories.message_queue.models import (
+        MessageQueue,
+        MessageStatus,
+        MessageType,
+    )
+    from daemon.repositories.task.models import (
+        Task,
+        TaskStatus,
+        TaskType,
+    )
+
+    work_id = f"work-{uuid.uuid4().hex[:12]}"
+    instance_id = f"inst-{uuid.uuid4().hex[:8]}"
+    message_id = message_id or f"msg-{uuid.uuid4().hex[:12]}"
+    now = datetime.now(timezone.utc)
+    with Session(engine) as s:
+        s.add(
+            Task(
+                work_id=work_id,
+                task_type=TaskType.PROCESS_MESSAGE.value,
+                instance_id=instance_id,
+                message_id=message_id,
+                status=status,
+                created_at=now,
+            )
+        )
+        s.add(
+            MessageQueue(
+                message_id=message_id,
+                instance_id=instance_id,
+                content="test message",
+                type=MessageType.AGENT.value,
+                source="test",
+                status=MessageStatus.PROCESSING.value,
+                enqueued_at=now,
+                last_activity_at=now,
+            )
+        )
+        s.commit()
+    return work_id, message_id
+
+
+def _read_message_status(engine: Engine, message_id: str) -> str | None:
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT status FROM message_queue WHERE message_id = :mid"),
+            {"mid": message_id},
+        ).first()
+    return row[0] if row else None
+
+
+def test_reconcile_marks_message_completed_for_completed_task(engine):
+    """When the Task's terminal_reason is ``completed``, the
+    message_queue row is marked ``completed`` (the natural
+    success state).
+    """
+    from daemon.repositories.task.repository import TaskRepository
+
+    work_id, message_id = _seed_terminal_task_with_message(
+        engine, status=TaskStatus.COMPLETED.value
+    )
+    repo = TaskRepository(engine)
+    repo.reconcile_turn_mirror(work_id)
+    assert _read_message_status(engine, message_id) == "completed"
+
+
+def test_reconcile_marks_message_failed_for_failed_task(engine):
+    """When the Task's terminal_reason is ``failed``, the
+    message_queue row is marked ``failed`` (the natural
+    error state).
+    """
+    from daemon.repositories.task.repository import TaskRepository
+
+    work_id, message_id = _seed_terminal_task_with_message(
+        engine, status=TaskStatus.FAILED.value
+    )
+    repo = TaskRepository(engine)
+    repo.reconcile_turn_mirror(work_id)
+    assert _read_message_status(engine, message_id) == "failed"
+
+
+def test_reconcile_marks_message_failed_for_cancelled_task(engine):
+    """When the Task's terminal_reason is ``cancelled``, the
+    message_queue row is marked ``failed`` (NOT ``completed``).
+
+    The ``MessageStatus`` enum does not have a ``cancelled`` value
+    (only ``pending`` / ``ready`` / ``processing`` / ``retrying``
+    / ``completed`` / ``failed``). The semantic fix uses
+    ``failed`` for cancelled tasks — it's the existing
+    terminal-non-success status, requires no enum change, and
+    correctly signals "this message did not complete
+    successfully".
+
+    Phase 4b/4c (2026-08-12, pause/resume redesign): this
+    case occurs when ``AbortTurn`` cancels a Task (e.g. via
+    ``force_cancel``), or via the legacy ``ResumeTurn`` flow
+    (now removed). The contract pins the message_queue
+    terminal-state mapping.
+    """
+    from daemon.repositories.task.repository import TaskRepository
+
+    work_id, message_id = _seed_terminal_task_with_message(
+        engine, status=TaskStatus.CANCELLED.value
+    )
+    repo = TaskRepository(engine)
+    repo.reconcile_turn_mirror(work_id)
+    assert _read_message_status(engine, message_id) == "failed", (
+        f"cancelled tasks must mark message_queue.status='failed' "
+        f"(no 'cancelled' value exists in the MessageStatus enum); "
+        f"got {_read_message_status(engine, message_id)!r}"
+    )
+
+
+def test_reconcile_does_not_touch_message_for_pending_task(engine):
+    """When the Task is non-terminal (PENDING), the message_queue
+    row is NOT touched by ``reconcile_turn_mirror``.
+
+    Phase 4b/4c (2026-08-12, pause/resume redesign): the resume
+    cascade transitions Tasks ``PAUSED → PENDING``. The
+    reconciler must not mark the linked message as terminal
+    (the message is still in flight — the WorkerPool will
+    drive the natural completion).
+    """
+    from daemon.repositories.task.repository import TaskRepository
+
+    work_id, message_id = _seed_terminal_task_with_message(
+        engine, status=TaskStatus.PENDING.value
+    )
+    repo = TaskRepository(engine)
+    repo.reconcile_turn_mirror(work_id)
+    # Message is STILL PROCESSING (not completed/failed).
+    assert _read_message_status(engine, message_id) == "processing"
+
+
+def test_reconcile_does_not_touch_message_for_paused_task(engine):
+    """When the Task is non-terminal (PAUSED), the message_queue
+    row is NOT touched by ``reconcile_turn_mirror``.
+
+    PAUSED is a non-terminal state (the resume cascade will
+    transition the task to PENDING, then the WorkerPool will
+    drive it to completion). The message must stay in its
+    current base state.
+    """
+    from daemon.repositories.task.repository import TaskRepository
+
+    work_id, message_id = _seed_terminal_task_with_message(
+        engine, status=TaskStatus.PAUSED.value
+    )
+    repo = TaskRepository(engine)
+    repo.reconcile_turn_mirror(work_id)
+    assert _read_message_status(engine, message_id) == "processing"
 
 
 def _instance_id_for_work_id(engine: Engine, work_id: str) -> str:
@@ -658,7 +908,17 @@ class TestTransitionResultForHandleOperations:
 
     def test_resume_result_carries_schedule_event(self, engine):
         """``ResumeTurn`` result's wakeup_payload is
-        ``{'event': 'schedule_resume_job', 'work_id': <target>}``."""
+        ``{'event': 'resume_claimed', 'work_id': <target>}``.
+
+        Phase 4b/4c (2026-08-12, pause/resume redesign): the wakeup
+        event is renamed from ``schedule_resume_job`` (which described
+        the pre-migration cancel-and-recreate flow's need to mint a
+        new child task) to ``resume_claimed`` (which describes the
+        new direct ``PAUSED → PENDING`` transition — the Task is
+        already the same ``work_id`` the resume path will drive, so
+        no scheduling is required; the WorkerPool re-claim is the
+        natural completion path).
+        """
         work_id = _seed_running_task(engine)
         # Set up the paused-task-with-handle precondition.
         with engine.begin() as conn:
@@ -677,5 +937,5 @@ class TestTransitionResultForHandleOperations:
             session.commit()
 
         assert result.wakeup_payload is not None
-        assert result.wakeup_payload["event"] == "schedule_resume_job"
+        assert result.wakeup_payload["event"] == "resume_claimed"
         assert result.wakeup_payload["work_id"] == work_id

@@ -520,13 +520,16 @@ def test_cascade_resume_3level_hierarchy(lifecycle_service, engine, write_guard)
             f"got {jobs[0].admission_state}"
         )
 
-    # All three tasks CANCELLED (resume cascade cancels paused tasks —
-    # resume_processing_job owns graph driving, not the worker re-claim path)
+    # All three tasks PENDING (Phase 4b/4c: resume cascade transitions
+    # PAUSED → PENDING, was PAUSED → CANCELLED pre-migration; the Task
+    # stays live so the WorkerPool can re-claim it under the same
+    # work_id).
     for iid in [gp_id, p_id, c_id]:
         tasks = _read_tasks(engine, iid)
         assert len(tasks) == 1
-        assert tasks[0].status == TaskStatus.CANCELLED.value, (
-            f"task for {iid[:8]} expected CANCELLED, got {tasks[0].status}"
+        assert tasks[0].status == TaskStatus.PENDING.value, (
+            f"task for {iid[:8]} expected PENDING (Phase 4b/4c "
+            f"PAUSED → PENDING migration), got {tasks[0].status}"
         )
 
 
@@ -650,7 +653,9 @@ def test_partial_tree_resume_only_subtree(lifecycle_service, engine, write_guard
     assert result.updated_ids == [child1_id]
 
     # child1 RUNNING, job PROCESSING (Phase 4: pause/resume doesn't
-    # touch job row), task CANCELLED.
+    # touch job row), task PENDING (Phase 4b/4c PAUSED → PENDING
+    # migration — the Task stays live so the WorkerPool can re-claim
+    # it under the same work_id).
     inst = _read_instance(engine, child1_id)
     assert inst.status == InstanceStatus.RUNNING.value
     jobs = _read_jobs(engine, child1_id)
@@ -658,7 +663,7 @@ def test_partial_tree_resume_only_subtree(lifecycle_service, engine, write_guard
     assert jobs[0].admission_state == AdmissionState.ACTIVE.value
     tasks = _read_tasks(engine, child1_id)
     assert len(tasks) == 1
-    assert tasks[0].status == TaskStatus.CANCELLED.value
+    assert tasks[0].status == TaskStatus.PENDING.value
 
     # parent STILL RUNNING
     inst = _read_instance(engine, parent_id)
@@ -1076,17 +1081,13 @@ def test_phase2_update2_returning_includes_work_id_and_message_id(
             is_root_resume=True,
         )
 
-    # The returned set must include work_id and message_id
-    assert scenario.cancelled_task_id in result.cancelled_task_ids
-    assert scenario.cancelled_task_work_id in result.cancelled_task_work_ids
-    assert scenario.orphaned_message_id in result.cancelled_task_message_ids
-    # And the ordering must align across the three lists (the
-    # production code relies on zip() on the three lists).
-    assert len(result.cancelled_task_ids) == len(
-        result.cancelled_task_work_ids
-    )
-    assert len(result.cancelled_task_ids) == len(
-        result.cancelled_task_message_ids
+    # The returned set must include work_id
+    assert scenario.cancelled_task_id in result.resumed_task_ids
+    assert scenario.cancelled_task_work_id in result.resumed_task_work_ids
+
+    # And the ordering must align across the two lists.
+    assert len(result.resumed_task_ids) == len(
+        result.resumed_task_work_ids
     )
 
 
@@ -1096,13 +1097,22 @@ def test_phase2_update2_returning_includes_work_id_and_message_id(
 def test_phase2_update4_reconciles_orphan_completion_report(
     lifecycle_service, engine, write_guard, caplog
 ) -> None:
-    """UPDATE 4 reconciles the orphan ``completion_report`` to ``completed``.
+    """Phase 4b/4c migration: the resume cascade transitions the Task
+    ``PAUSED → PENDING`` (was ``PAUSED → CANCELLED`` pre-migration).
+    The Task stays live so the WorkerPool can re-claim it under the
+    same work_id; the cascade no longer reconciles the orphan
+    ``message_queue`` row (the ``reconcile_turn_mirror`` only marks
+    messages as completed for TERMINAL tasks — PENDING is not
+    terminal). The orphan cleanup is now owned by the resume path's
+    cleanup logic in ``_schedule_explicit_handle_resume`` (which
+    completes the orphan message and cancels the PENDING task so the
+    resume path's graph driver is the sole actor) OR by the
+    WorkerPool's natural claim+complete path.
 
-    This is the EXACT production scenario (Bug B) — a paused
-    ``process_report`` Task whose ``completion_report`` is
-    ``processing`` with ``processing_task_id=NULL``. The resume
-    cascade must (a) cancel the Task and (b) reconcile the queue
-    row, all in the same ``WriteGuardSession``.
+    This test verifies the post-cascade DB state matches the new
+    contract: the Task is PENDING, the message_queue row is still
+    PROCESSING (not yet completed — the WorkerPool will claim the
+    PENDING Task and complete naturally).
     """
     ensure_schema(engine)
     scenario = seed_orphan_scenario(engine)
@@ -1121,25 +1131,21 @@ def test_phase2_update4_reconciles_orphan_completion_report(
             is_root_resume=True,
         )
 
-    # Result carries the reconciled message_id
-    assert scenario.orphaned_message_id in result.reconciled_message_ids
-    # UPDATE 2 cancelled the paused Task
-    assert scenario.cancelled_task_id in result.cancelled_task_ids
+    # Result carries the resumed Task id
+    assert scenario.cancelled_task_id in result.resumed_task_ids
+    # Reconciled message_ids is empty (no UPDATE 4 in the new flow —
+    # the resume cascade no longer reconciles orphan messages)
+    assert result.reconciled_message_ids == []
 
-    # Post-conditions: the message_queue row is now ``completed``
-    # (Turn-Reconciler migration Increment 1, 2026-08-01: the
-    # reconciler replaces the old UPDATE 4 block; the reconciler
-    # sets status/processing_task_id/completed_at but does NOT
-    # stamp the old ``manual-Phase2-resume: orphaned ...`` audit
-    # suffix in ``error_message`` — that was UPDATE 4-specific).
-    msg_after = _read_orphan_message(engine, scenario)
-    assert msg_after["status"] == MessageStatus.COMPLETED.value
-    assert msg_after["processing_task_id"] is None
-    assert msg_after["completed_at"] is not None
-
-    # The Task was cancelled.
+    # Post-conditions (Phase 4b/4c):
+    #   * Task is PENDING (was CANCELLED pre-migration)
+    #   * message_queue row is STILL PROCESSING (the reconciler
+    #     does not mark non-terminal Task's messages as completed)
     task_after = _read_cancelled_task(engine, scenario)
-    assert task_after["status"] == TaskStatus.CANCELLED.value
+    assert task_after["status"] == TaskStatus.PENDING.value
+    msg_after = _read_orphan_message(engine, scenario)
+    assert msg_after["status"] == MessageStatus.PROCESSING.value
+    assert msg_after["completed_at"] is None
 
 
 # ─── 3. UPDATE 4 placement — between UPDATE 2 and UPDATE 3 ──────────────────
@@ -1148,14 +1154,12 @@ def test_phase2_update4_reconciles_orphan_completion_report(
 def test_phase2_update4_runs_before_update3_jobitem_activation(
     lifecycle_service, engine, write_guard
 ) -> None:
-    """UPDATE 4 runs between UPDATE 2 and UPDATE 3 (JobItem activation).
-
-    If UPDATE 4 ran AFTER UPDATE 3, a worker could re-claim the
-    JobItem between UPDATE 3 and UPDATE 4 and observe the
-    still-orphaned ``processing`` queue row. The order is verified
-    by seeding a JobItem and checking it ends up in the canonical
-    ``active`` admission state with the queue row already
-    ``completed``.
+    """Phase 4b/4c migration: the resume cascade no longer reconciles
+    orphan messages (UPDATE 4 removed). The cascade's UPDATE 3 (the
+    JobItem ``admission_state`` activation) is verified to run for the
+    targeted tree. The message_queue row is still PROCESSING after
+    the cascade (the WorkerPool will claim the PENDING Task and
+    complete the message naturally).
     """
     ensure_schema(engine)
     scenario = seed_orphan_scenario(engine)
@@ -1181,10 +1185,11 @@ def test_phase2_update4_runs_before_update3_jobitem_activation(
         job = s.get(JobItem, jid)
     assert job.admission_state == AdmissionState.ACTIVE.value
 
-    # The queue row must be ``completed`` (UPDATE 4 succeeded
-    # before UPDATE 3)
+    # The queue row is STILL PROCESSING (UPDATE 4 removed —
+    # the WorkerPool's natural claim+complete path will mark it
+    # completed when the PENDING Task is claimed and finished).
     msg_after = _read_orphan_message(engine, scenario)
-    assert msg_after["status"] == MessageStatus.COMPLETED.value
+    assert msg_after["status"] == MessageStatus.PROCESSING.value
 
 
 # ─── 4. UPDATE 4 scope — historical orphans outside the cascade are NOT touched
@@ -1193,9 +1198,11 @@ def test_phase2_update4_runs_before_update3_jobitem_activation(
 def test_phase2_update4_does_not_touch_historical_orphans(
     lifecycle_service, engine, write_guard
 ) -> None:
-    """Historical orphans (cancelled BEFORE this cascade) are NOT
-    reconciled by UPDATE 4. Eligibility is the returned cancellation
-    set, NOT a tree-wide scan.
+    """Phase 4b/4c migration: the resume cascade no longer reconciles
+    any messages (UPDATE 4 removed entirely). Both the fresh and the
+    historical orphan messages remain PROCESSING after the cascade —
+    the WorkerPool will claim the PENDING Tasks and complete the
+    messages naturally.
     """
     ensure_schema(engine)
 
@@ -1223,10 +1230,12 @@ def test_phase2_update4_does_not_touch_historical_orphans(
         is_root_resume=True,
     )
 
-    # The fresh orphan IS reconciled.
+    # Phase 4b/4c: NEITHER orphan is reconciled by the cascade.
+    # The cascade no longer touches message_queue rows (UPDATE 4
+    # removed); the WorkerPool's natural claim+complete path owns
+    # the terminal transition.
     fresh_msg = _read_orphan_message(engine, fresh)
-    assert fresh_msg["status"] == MessageStatus.COMPLETED.value
-    # The historical orphan is NOT touched (still processing).
+    assert fresh_msg["status"] == MessageStatus.PROCESSING.value
     hist_msg = _read_orphan_message(engine, historical)
     assert hist_msg["status"] == MessageStatus.PROCESSING.value
 
@@ -1237,9 +1246,13 @@ def test_phase2_update4_does_not_touch_historical_orphans(
 def test_phase2_update4_only_touches_completion_report_rows(
     lifecycle_service, engine, write_guard
 ) -> None:
-    """UPDATE 4 only matches ``type='completion_report'`` and
-    ``status IN ('processing', 'retrying')``. Other message types
-    (human, agent, system, error_report) are left alone.
+    """Phase 4b/4c migration: the resume cascade no longer reconciles
+    any messages (UPDATE 4 removed). Non-``completion_report`` rows
+    are untouched — but this is a TRIVIAL pass because the cascade
+    no longer touches any messages at all. The WorkerPool's natural
+    claim+complete path owns the message completion. This test
+    remains to document that the cascade is message-agnostic
+    (does not differentiate by message type).
     """
     ensure_schema(engine)
     scenario = seed_orphan_scenario(engine)
@@ -1289,10 +1302,11 @@ def test_phase2_update4_only_touches_completion_report_rows(
 def test_phase2_update4_only_matches_processing_or_retrying(
     lifecycle_service, engine, write_guard
 ) -> None:
-    """UPDATE 4 only matches ``status IN ('processing', 'retrying')``.
-
-    ``READY`` rows are NOT touched (READY rows are legitimate
-    own-queue work that the parent will process naturally).
+    """Phase 4b/4c migration: the resume cascade no longer reconciles
+    any messages (UPDATE 4 removed). The READY row remains READY
+    (a TRIVIAL pass — the cascade no longer touches messages at
+    all). Documented for the resume cascade's message-agnostic
+    behavior.
     """
     ensure_schema(engine)
     scenario = seed_orphan_scenario(engine)
@@ -1350,16 +1364,10 @@ def test_cte_work_id_exclusion_cross_engine_parity_sqlite(
         is_root_resume=True,
     )
 
-    # Reconciled set: the only candidate was the just-cancelled Task,
-    # and there is no competing live work — so reconciliation is
-    # permitted.
-    assert scenario.orphaned_message_id in result.reconciled_message_ids
-    # The cancelled Task list contains the only candidate work_id.
-    assert scenario.cancelled_task_work_id in result.cancelled_task_work_ids
-    # The log line includes the work_id.
-    log_records = [
-        r for r in caplog.records if "cancelled" in r.getMessage()
-    ] if False else None  # caplog not in scope; skip log check.
+    # Phase 4b/4c: the cascade no longer reconciles any messages
+    # (UPDATE 4 removed). The returned ``reconciled_message_ids``
+    # is empty; the returned ``resumed_task_work_ids`` carries the
+    # cascaded Task's work_id.
 
 
 # ─── 7. Mixed attempt (ambiguous retry) is preserved ───────────────────────
@@ -1368,26 +1376,17 @@ def test_cte_work_id_exclusion_cross_engine_parity_sqlite(
 def test_phase2_update4_preserves_mixed_terminal_live_attempts(
     lifecycle_service, engine, write_guard
 ) -> None:
-    """Competing live retry: the reconciler's ``message_queue`` update
-    runs even when a competing live Task shares the same ``message_id``.
+    """Phase 4b/4c migration: the resume cascade no longer reconciles
+    any messages (UPDATE 4 removed). The cascade's outbox surface
+    is just the resumed Task ids; the message_queue row stays
+    PROCESSING after the cascade and is completed by the
+    WorkerPool's natural claim+complete path.
 
-    Turn-Reconciler migration (Increment 1, 2026-08-01): the
-    reconciler replaces the old UPDATE 4 block. The old UPDATE 4 had
-    a competing-live check (``state.work_id <> ct.work_id AND
-    state.status IN (pending, running, paused)``) that preserved the
-    ``message_queue`` row when a retry was in flight. The reconciler
-    does NOT carry that check — its ``message_queue`` update keys on
-    the Task's own ``message_id`` and sets ``status='completed'``
-    regardless of competing live work. This is by design: the
-    reconciler is the authoritative mirror normalization primitive,
-    and the retry engine owns the retry flow (a live retry Task
-    proceeds independently of the ``message_queue`` row's
-    ``status``).
-
-    The test still verifies the cascade ran (the Task WAS cancelled)
-    and that the reconciler normalized the mirror (the orphaned
-    ``message_queue`` row is now ``completed``). The old "preserve"
-    assertion is removed.
+    The pre-migration test verified the competing-live-retry
+    preservation logic; the new behavior is that the resume cascade
+    does not touch any message_queue rows at all, so there is no
+    competing-live concern — the WorkerPool's natural flow owns the
+    message completion.
     """
     ensure_schema(engine)
     scenario = seed_orphan_scenario(engine)
@@ -1408,10 +1407,8 @@ def test_phase2_update4_preserves_mixed_terminal_live_attempts(
         s.add(retry_task)
         s.commit()
 
-    # Run the cascade. The cancelled Task is the just-cancelled
-    # one; the retry Task is still RUNNING. The reconciler's
-    # ``message_queue`` update keys on the Task's own message_id
-    # and does NOT check for competing live work.
+    # Run the cascade. The paused Task is now PENDING (was
+    # CANCELLED pre-migration). The retry Task is still RUNNING.
     result = lifecycle_service._resume_cascade_db_sync(
         engine,
         write_guard,
@@ -1420,13 +1417,14 @@ def test_phase2_update4_preserves_mixed_terminal_live_attempts(
         is_root_resume=True,
     )
 
-    # The cancelled Task was cancelled (the cascade ran).
-    assert scenario.cancelled_task_id in result.cancelled_task_ids
-    # The reconciler normalized the mirror — the orphaned
-    # ``message_queue`` row is now ``completed``. The reconciler
-    # does NOT carry the old UPDATE 4's competing-live preserve
-    # check (see docstring).
-    assert scenario.orphaned_message_id in result.reconciled_message_ids
+    # The paused Task was transitioned PAUSED → PENDING.
+    assert scenario.cancelled_task_id in result.resumed_task_ids
+    # The cascade did NOT touch any messages (UPDATE 4 removed).
+    assert result.reconciled_message_ids == []
+    # The message_queue row is still PROCESSING (WorkerPool owns
+    # the natural completion).
+    msg_after = _read_orphan_message(engine, scenario)
+    assert msg_after["status"] == MessageStatus.PROCESSING.value
 
 
 # ─── 8. Atomicity — all-or-nothing commit ───────────────────────────────────
@@ -1435,7 +1433,7 @@ def test_phase2_update4_preserves_mixed_terminal_live_attempts(
 def test_phase2_update4_atomicity_rollback(
     lifecycle_service, engine, write_guard, monkeypatch
 ) -> None:
-    """If UPDATE 3 raises after UPDATE 1/2/4 commit, all writes
+    """If UPDATE 3 raises after UPDATE 1/2 commit, all writes
     roll back. Verified by monkey-patching the UPDATE 3 ``text()``
     call to raise. After the helper returns (no exception, the
     helper swallows and rolls back), the DB state must match
@@ -1446,12 +1444,12 @@ def test_phase2_update4_atomicity_rollback(
 
     # The simplest reliable monkey-patch: replace the ``session.execute``
     # call to raise on the UPDATE 3 statement specifically. We do this
-    # by checking the SQL text. The cascade issues:
+    # by checking the SQL text. The cascade issues (Phase 4b/4c):
     #   1. UPDATE instances ...
-    #   2. UPDATE task ... RETURNING ...
-    #   3. SELECT 1 FROM task ... (competing-live check)
-    #   4. UPDATE message_queue ... (UPDATE 4 itself)
-    #   5. UPDATE job_queue_items ... (UPDATE 3)
+    #   2. UPDATE task ... (ResumeTurn PAUSED → PENDING)
+    #   3. UPDATE job_queue_items ... (UPDATE 3 — admission_state
+    #      activation, formerly paired with UPDATE 4's message
+    #      reconciliation; UPDATE 4 removed)
     from unittest.mock import MagicMock
     from sqlmodel import Session
 
@@ -1477,10 +1475,11 @@ def test_phase2_update4_atomicity_rollback(
         # The helper may propagate or swallow — we accept either
         pass
 
-    # After rollback, the Task is still PAUSED (UPDATE 2 rolled back)
+    # After rollback, the Task is still PAUSED (ResumeTurn rolled back)
     task_after = _read_cancelled_task(engine, scenario)
     assert task_after["status"] == TaskStatus.PAUSED.value
-    # The queue row is still PROCESSING (UPDATE 4 rolled back)
+    # The queue row is still PROCESSING (UPDATE 4 removed — the
+    # cascade no longer touches message_queue at all)
     msg_after = _read_orphan_message(engine, scenario)
     assert msg_after["status"] == MessageStatus.PROCESSING.value
     # The instance is still PAUSED (UPDATE 1 rolled back)
@@ -1496,10 +1495,16 @@ def test_phase2_resume_cascade_idempotent(
 ) -> None:
     """Running the cascade twice does not double-reconcile.
 
-    On the first run, the Task is cancelled and the queue row
-    is reconciled. On the second run, there is no PAUSED Task
-    to cancel (UPDATE 2's ``status='paused'`` predicate matches
-    zero rows) and UPDATE 4 has nothing to reconcile.
+    Phase 4b/4c: on the first run, the Task is transitioned
+    ``PAUSED → PENDING`` and the cascade surfaces the resumed
+    Task ids. On the second run, there is no PAUSED Task to
+    transition (``ResumeTurn``'s ``status='paused'`` predicate
+    matches zero rows) and the outbox lists are empty.
+
+    The pre-migration behavior (reconciling orphan messages via
+    UPDATE 4) is removed; the cascade no longer touches any
+    message_queue rows. The WorkerPool's natural claim+complete
+    path owns the terminal transition.
     """
     ensure_schema(engine)
     scenario = seed_orphan_scenario(engine)
@@ -1512,13 +1517,13 @@ def test_phase2_resume_cascade_idempotent(
         ancestor_ids=set(),
         is_root_resume=True,
     )
-    assert scenario.orphaned_message_id in result1.reconciled_message_ids
-    assert len(result1.cancelled_task_ids) == 1
+    assert result1.reconciled_message_ids == []
+    assert len(result1.resumed_task_ids) == 1
 
     # Second pass (the instance is no longer PAUSED — but the helper
-    # is still called with the tree_ids arg). UPDATE 2's predicate
-    # ``status='paused'`` matches zero rows → no cancellation, no
-    # reconciliation. UPDATE 4 is a no-op.
+    # is still called with the tree_ids arg). ResumeTurn's predicate
+    # ``status='paused'`` matches zero rows → no transition, no
+    # cascade side effect.
     result2 = lifecycle_service._resume_cascade_db_sync(
         engine,
         write_guard,
@@ -1526,7 +1531,7 @@ def test_phase2_resume_cascade_idempotent(
         ancestor_ids=set(),
         is_root_resume=True,
     )
-    assert result2.cancelled_task_ids == []
+    assert result2.resumed_task_ids == []
     assert result2.reconciled_message_ids == []
 
 

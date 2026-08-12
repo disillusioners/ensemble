@@ -118,15 +118,6 @@ def test_pause_resume_cascade_behavior_is_unchanged(
     )
     assert baseline._read_task_status(engine, answer_work_id) == TaskStatus.PENDING.value
 
-    refire_calls: list[list[str]] = []
-    original_refire = lifecycle_service._post_reconcile_completion_refire
-
-    def record_refire(**kwargs: Any) -> None:
-        refire_calls.append(list(kwargs["tree_ids"]))
-        original_refire(**kwargs)
-
-    lifecycle_service._post_reconcile_completion_refire = record_refire
-
     resume_result = lifecycle_service._resume_cascade_db_sync(
         engine,
         write_guard,
@@ -135,21 +126,25 @@ def test_pause_resume_cascade_behavior_is_unchanged(
         is_root_resume=True,
     )
     assert resume_result.updated_ids == [instance_id]
-    assert resume_result.cancelled_task_work_ids == [work_id]
-    assert refire_calls == [[instance_id]]
+    assert resume_result.resumed_task_work_ids == [work_id]
     assert _instance_status(engine, instance_id) == InstanceStatus.RUNNING.value
 
-    # The old turn is terminal and all five known orphan surfaces are clean.
-    assert baseline._read_task_status(engine, work_id) == TaskStatus.CANCELLED.value
-    assert baseline._read_message_status(engine, message_id) == MessageStatus.COMPLETED.value
+    # Phase 4b/4c: the resumed Task is now PENDING (was CANCELLED
+    # pre-migration) and the reconciler is a no-op for non-terminal
+    # tasks — the message_queue row, JobItem admission, job_locks
+    # row, and report_injection all stay in their pre-resume state
+    # until the WorkerPool's natural claim+complete path drives the
+    # terminal transition.
+    assert baseline._read_task_status(engine, work_id) == TaskStatus.PENDING.value
+    assert baseline._read_message_status(engine, message_id) == MessageStatus.PROCESSING.value
     assert baseline._read_message_processing_task_id(engine, message_id) is None
-    assert baseline._read_job_item_admission(engine, work_id) == AdmissionState.DONE.value
-    assert baseline._read_lock_count(engine, work_id) == 0
+    assert baseline._read_job_item_admission(engine, work_id) == AdmissionState.ACTIVE.value
+    assert baseline._read_lock_count(engine, work_id) == 1
     assert baseline._count_report_injections(
         engine,
         parent_instance_id=instance_id,
         state=ReportInjectionState.PENDING.value,
-    ) == 0
+    ) == 1
     assert baseline._read_job_watcher_count(engine, work_id) == 1
     assert baseline._read_task_status(engine, answer_work_id) == TaskStatus.PENDING.value
 

@@ -341,7 +341,8 @@ class TestPauseResumeRoot:
         assert routed_task.status == TaskStatus.PAUSED.value
         assert routed_task.task_type == TaskType.PROCESS_MESSAGE.value
 
-        # 4. Resume cascade — instance RUNNING, task PAUSED → CANCELLED
+        # 4. Resume cascade — instance RUNNING, task PAUSED → PENDING
+        #    (Phase 4b/4c: was PAUSED → CANCELLED pre-migration).
         resume_result = lifecycle_service._resume_cascade_db_sync(
             engine,
             write_guard,
@@ -360,18 +361,31 @@ class TestPauseResumeRoot:
         assert inst_after_resume.status == InstanceStatus.RUNNING.value, (
             "instance must transition PAUSED → RUNNING on resume"
         )
-        assert task_status_after_resume == TaskStatus.CANCELLED.value, (
-            "task must transition PAUSED → CANCELLED on resume (the "
-            "resume driver owns the graph turn; CANCELLED keeps the "
-            "WorkerPool from re-claiming and racing)"
+        assert task_status_after_resume == TaskStatus.PENDING.value, (
+            "task must transition PAUSED → PENDING on resume "
+            "(Phase 4b/4c — the Task stays live so the WorkerPool "
+            "can re-claim it under the same work_id; closes the "
+            "T2–T4 race window the prior cancel-and-recreate flow opened)"
         )
 
-        # 5. The consumed CANCELLED row remains routable as the resume
-        # cascade's marker so resume_processing_job can mint a fresh driver turn.
+        # 5. Phase 4b/4c: the cascaded task is PENDING, not CANCELLED.
+        #    The pause-cascade selector ``find_paused_or_cancellable_turn``
+        #    only matches RUNNING / PAUSED (not PENDING), so the
+        #    selector returns None — the cascaded task is NOT a
+        #    pause-cascade target. The resume path uses the
+        #    ``resume_target_turn_id`` handle (cleared by ResumeTurn
+        #    to ``NULL``) to find the resume point, so no separate
+        #    selector is needed.
         routed_after_resume = task_repo.find_paused_or_cancellable_turn(iid)
-        assert routed_after_resume is not None
-        assert routed_after_resume.status == TaskStatus.CANCELLED.value
-        assert routed_after_resume.id == task_id
+        assert routed_after_resume is None, (
+            "After the resume cascade the task is PENDING — the "
+            "pause-cascade selector should NOT match it (PENDING "
+            "is not a valid pause-cascade target)"
+        )
+        # Verify the task is still PENDING (regression guard for
+        # the new PAUSED → PENDING transition).
+        task_status_post_resume = _read_task_status(engine, iid)
+        assert task_status_post_resume == TaskStatus.PENDING.value
 
         # 6. Finalize WITHOUT a JobItem — the post-D13 no-JobItem path.
         # Step 1 (JobItem UPDATE) is skipped because ``job_id is None``;
@@ -379,6 +393,36 @@ class TestPauseResumeRoot:
         # We construct a JobFeedbackObserver with the minimum surface
         # the ``_finalize_job_db_sync`` helper needs (engine, write_guard,
         # bus singleton).
+        #
+        # Phase 4b/4c (2026-08-12, pause/resume redesign): the resume
+        # cascade left the Task in PENDING. The F14 pending-tasks gate
+        # in ``_finalize_job_db_sync`` would defer finalization while
+        # the PENDING task is still alive (the gate is designed to
+        # prevent premature finalization when a child has been sent
+        # but not yet completed). In production, the WorkerPool
+        # re-claims the PENDING task and drives it to completion
+        # naturally before the parent finalizes. To exercise the
+        # finalize path in this test, we simulate the Worker's
+        # ``complete_task`` call first, then run finalize.
+        task_repo = TaskRepository(engine)
+        routed_for_complete = task_repo.find_paused_or_cancellable_turn(iid)
+        # The task is PENDING (not in find_paused_or_cancellable_turn's
+        # status filter), so we look it up by status directly.
+        from sqlmodel import select
+        from daemon.repositories.task.models import Task as TaskModel
+        with Session(engine) as s:
+            task_row = s.exec(
+                select(TaskModel).where(
+                    TaskModel.instance_id == iid,
+                    TaskModel.status == TaskStatus.PENDING.value,
+                )
+            ).first()
+        assert task_row is not None, "resumed task should be PENDING"
+        # Simulate the WorkerPool's claim + complete: transition
+        # PENDING → RUNNING → COMPLETED.
+        task_repo.claim_pending_task(worker_id="test-worker")
+        task_repo.complete_task(task_row.id, result={"summary": "resumed"})
+
         from daemon.services.job_feedback_observer import (
             JobFeedbackObserver,
         )
@@ -754,7 +798,22 @@ class TestFindPausedOrCancellableTurn:
     def test_cancelled_resume_marker_is_routable(
         self, engine, write_guard, lifecycle_service
     ):
-        """CANCELLED resume-cascade marker remains routable."""
+        """CANCELLED tasks are NOT routable by the pause-cascade
+        selector (Phase 4b/4c migration).
+
+        Pre-migration, the resume cascade's ``PAUSED → CANCELLED``
+        transition left a CANCELLED marker that the pause-cascade
+        selector surfaced as a "cancellable" turn (so the cascade
+        could mint a fresh driver turn). Post-migration, the
+        resume cascade transitions ``PAUSED → PENDING`` instead —
+        the selector therefore matches RUNNING / PAUSED only and
+        returns ``None`` for CANCELLED tasks (which are terminal).
+
+        The resume path uses the ``resume_target_turn_id`` handle
+        (cleared by ResumeTurn to ``NULL``) to find the resume
+        point, so the selector change does not affect resume
+        routing.
+        """
         iid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
         _seed_task(
             engine,
@@ -763,9 +822,10 @@ class TestFindPausedOrCancellableTurn:
             task_type=TaskType.PROCESS_MESSAGE.value,
         )
         task_repo = TaskRepository(engine)
-        routed = task_repo.find_paused_or_cancellable_turn(iid)
-        assert routed is not None
-        assert routed.status == TaskStatus.CANCELLED.value
+        # Phase 4b/4c: CANCELLED is a terminal status and is NOT
+        # routable by the pause-cascade selector (the selector
+        # matches RUNNING / PAUSED only).
+        assert task_repo.find_paused_or_cancellable_turn(iid) is None
 
     def test_completed_terminal_returns_none(
         self, engine, write_guard, lifecycle_service

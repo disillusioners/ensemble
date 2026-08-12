@@ -846,32 +846,38 @@ def create_job_tools(
             if instance_meta.status == InstanceStatus.PAUSED.value:
                 return {"error": "Instance is paused — unpause it first"}
 
-            # 5a. Pre-check: reject if the instance has an in-flight Task. After
+            # 5a. Pre-check: reject if the instance has any live Task. After
             #     D13 (Phase 2 of the decouple-architecture migration),
             #     messages create ``Task`` rows instead of ``JobItem``
             #     rows — the previous ``find_processing_message_jobs_by_instance``
             #     check became a no-op pass-through (it always returned []).
-            #     Replaced with ``TaskRepository.has_inflight_task(instance_id)``
-            #     which checks for ANY PENDING or RUNNING ``task`` row
-            #     belonging to the instance.
+            #     Replaced with ``TaskRepository.has_instance_busy(instance_id)``
+            #     which checks for ANY PENDING, RUNNING, or PAUSED
+            #     ``task`` row belonging to the instance — the canonical
+            #     "is this instance busy?" predicate.
             #
-            #     PAUSED tasks are intentionally EXCLUDED by
-            #     ``has_inflight_task`` — paused tasks are not actively
-            #     driving the graph, so a ``job_continue`` against a paused
-            #     instance is allowed to proceed (the instance is already
-            #     in a quiescent state and the user is opting to enqueue
-            #     more work). The companion primitive
+            #     Bug-1 fix (2026-08-12): the prior ``has_inflight_task``
+            #     gate was PENDING + RUNNING only. A PAUSED task was
+            #     treated as "not busy" and ``job_continue`` was allowed
+            #     to enqueue a follow-up message against a paused
+            #     instance — a concurrency leak: the user has explicitly
+            #     paused the instance, so the live Task still owns the
+            #     per-instance serialization slot, and a follow-up
+            #     enqueue would race the resume. ``has_instance_busy``
+            #     widens the status set to PENDING + RUNNING + PAUSED
+            #     so a paused instance is correctly recognised as
+            #     busy. Sister primitive to the
             #     ``TaskRepository.find_paused_or_running_by_instance``
-            #     does include PAUSED — it is the root-vs-child routing
-            #     decision for ``resume_processing_job``, which needs to
-            #     recognise paused state to fire checkpoint resume.
+            #     selector used by ``resume_processing_job`` — both
+            #     include PAUSED for the same reason (paused work is
+            #     live work).
             #
-            #     The check is sync (TaskRepository.has_inflight_task is a
+            #     The check is sync (TaskRepository.has_instance_busy is a
             #     pure DB query); wrap in asyncio.to_thread so the event
             #     loop isn't blocked.
             if getattr(manager, "_task_repo", None) is not None:
                 has_inflight = await asyncio.to_thread(
-                    manager._task_repo.has_inflight_task, instance_id
+                    manager._task_repo.has_instance_busy, instance_id
                 )
                 if has_inflight:
                     return {"error": f"Instance {instance_id} has a task still in flight — wait for it to complete first"}
