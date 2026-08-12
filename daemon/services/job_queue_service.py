@@ -1300,11 +1300,30 @@ class JobQueueService:
         # the instance, but a race / partial-cancel / observer-feedback
         # gap can leave the instance stuck in ``running``/``paused``/
         # ``idle``/``queued``/``waiting``/``waiting_children`` even though
-        # all of its JobItems and Tasks are gone). The transition goes
-        # through ``transition_status_if`` (race-safe — ``WHERE status IN
-        # (:allowed_from)`` prevents clobbering a concurrent terminal-
-        # state write from another path), and is excluded from
-        # ``total_processed`` (same treatment as ``orphaned_reaped`` and
+        # all of its JobItems and Tasks are gone).
+        #
+        # C2 (2026-08-12): terminate each zombie through the full
+        # ``InstanceManager.terminate_instance()`` cascade instead of a
+        # raw ``transition_status_if`` UPDATE. The raw UPDATE skipped
+        # 15+ cleanup steps (child cascade, in-memory cleanup, MCP
+        # connections, graph-task cancellation, ``job_locks`` release,
+        # ``task`` deletion, hierarchy links, event emission). The full
+        # ``terminate_instance()`` is idempotent — it short-circuits on
+        # already-terminal instances — so a TOCTOU loss vs. another
+        # cleanup path is safe.
+        #
+        # C3 (2026-08-12): re-verify the instance still has no live
+        # work immediately before ``terminate_instance``. The zombie
+        # scan and the per-row termination are not in the same DB
+        # transaction, so a concurrent dispatch may have inserted a
+        # new JobItem or Task between the scan and the termination.
+        # ``_has_live_work`` checks both surfaces — JobItem by
+        # ``find_jobs_by_instance`` (the same predicate the scan uses)
+        # and Task by ``has_inflight_task`` (PENDING/RUNNING/PAUSED —
+        # the full live-Task predicate, not just PENDING/RUNNING).
+        #
+        # ``terminated_instances`` is excluded from ``total_processed``
+        # (same treatment as ``orphaned_reaped`` and
         # ``reconciled_bad_state``) because it operates on the
         # ``instances`` table, not ``job_queue_items``.
         terminated_instances = 0
@@ -1320,22 +1339,27 @@ class JobQueueService:
                 )
                 for zid in zombie_ids:
                     try:
-                        updated = await asyncio.to_thread(
-                            instance_repo.transition_status_if,
-                            zid,
-                            InstanceStatus.TERMINATED.value,
-                            # Allow transition from any non-terminal state
-                            # so the same call covers the full
-                            # ``alive-but-stuck`` set.
-                            (
-                                InstanceStatus.IDLE.value,
-                                InstanceStatus.RUNNING.value,
-                                InstanceStatus.WAITING.value,
-                                InstanceStatus.PAUSED.value,
-                                InstanceStatus.QUEUED.value,
-                                InstanceStatus.WAITING_CHILDREN.value,
-                            ),
-                        )
+                        # C3: TOCTOU re-check — verify the instance still
+                        # has no live work right before terminating. A
+                        # concurrent dispatch may have created new work
+                        # between the scan and this termination.
+                        if self._has_live_work(zid):
+                            logger.info(
+                                "cleanup_non_terminal_jobs: "
+                                "skip zombie %s — live work appeared after scan",
+                                zid[:8],
+                            )
+                            continue
+                        # C2: Use full ``terminate_instance()`` instead
+                        # of raw UPDATE. This cascades to children,
+                        # releases locks, deletes tasks, closes MCP
+                        # connections, etc. Idempotent — safe if already
+                        # terminal. ``terminate_instance`` is async so
+                        # we ``await`` directly (no ``asyncio.to_thread``
+                        # wrapper needed, unlike the sync
+                        # ``transition_status_if`` we used to call).
+                        await self._instance_manager.terminate_instance(zid)
+                        terminated_instances += 1
                     except Exception as exc:  # noqa: BLE001 — best-effort
                         logger.warning(
                             "cleanup_non_terminal_jobs: "
@@ -1343,8 +1367,6 @@ class JobQueueService:
                             zid[:8], exc,
                         )
                         continue
-                    if updated is not None:
-                        terminated_instances += 1
                 if terminated_instances > 0:
                     logger.info(
                         "cleanup_non_terminal_jobs: "
@@ -1392,7 +1414,107 @@ class JobQueueService:
             return False
         
         return meta.status not in TERMINAL_STATUSES
-    
+
+    def _has_live_work(self, instance_id: str) -> bool:
+        """Return True if ``instance_id`` has any live (non-terminal) work.
+
+        C3 (2026-08-12) — TOCTOU guard for the Bucket 5 zombie reaper.
+        Between the ``find_zombie_instances`` scan and the
+        ``terminate_instance`` call, a concurrent dispatch may have
+        created new live work for the instance. This helper performs
+        a fast re-check of the SAME predicates used by the scan so a
+        newly-revived instance is not killed mid-dispatch:
+
+        * **JobItem**: any row on :class:`JobRepository` with
+          ``admission_state IN ('queued','active')`` and
+          ``deleted_at IS NULL`` (the live-JobItem predicate the
+          scan uses). Implemented via :meth:`JobRepository.
+          find_jobs_by_instance`, which already filters on
+          :data:`ACTIVE_ADMISSION_STATES`. Any non-empty result is
+          considered live work.
+        * **Task**: any PENDING/RUNNING/PAUSED row on
+          :class:`TaskRepository` — the full live-Task predicate the
+          scan uses. Implemented via :meth:`TaskRepository.
+          has_inflight_task` (PENDING + RUNNING) widened with a
+          separate PAUSED check via :meth:`TaskRepository.
+          get_by_instance` so a paused Task (which the scan treats
+          as live work) is also caught.
+
+        Conservative-fail strategy: if the instance manager or any
+        required repository is unavailable, returns ``False`` so the
+        reaper falls through to ``terminate_instance`` — the
+        ``terminate_instance`` cascade is itself idempotent and
+        short-circuits on already-terminal instances, so the worst
+        case is a no-op rather than a stuck zombie.
+
+        Both repository calls are wrapped in ``try/except`` because
+        a transient DB error must not block the cleanup path — if
+        either probe fails we conservatively assume there is NO new
+        live work (so the candidate keeps its place in the reaper)
+        and let ``terminate_instance`` do its own safety check.
+
+        Args:
+            instance_id: The instance ID to re-check.
+
+        Returns:
+            True iff either live JobItem or live Task exists for the
+            instance; False otherwise (or on any probe failure /
+            missing repo).
+        """
+        if not self._instance_manager:
+            return False
+
+        # JobItem re-check — use the same ``find_jobs_by_instance``
+        # the cancel path uses, scoped to one instance_id. The
+        # method filters on ``ACTIVE_ADMISSION_STATES`` so we
+        # automatically get the live-only predicate.
+        try:
+            live_jobs = self._repository.find_jobs_by_instance(instance_id)
+            if live_jobs:
+                return True
+        except Exception as exc:  # noqa: BLE001 — best-effort probe
+            logger.debug(
+                "cleanup_non_terminal_jobs: "
+                "_has_live_work JobItem probe failed for %s: %s",
+                instance_id[:8], exc,
+            )
+
+        # Task re-check — ``has_inflight_task`` covers PENDING +
+        # RUNNING. ``get_by_instance`` covers PAUSED (the scan
+        # also treats PAUSED Tasks as live work). Either is enough
+        # to consider the instance non-zombie.
+        task_repo = getattr(self._instance_manager, "_task_repo", None)
+        if task_repo is not None:
+            try:
+                if task_repo.has_inflight_task(instance_id):
+                    return True
+            except Exception as exc:  # noqa: BLE001 — best-effort probe
+                logger.debug(
+                    "cleanup_non_terminal_jobs: "
+                    "_has_live_work Task has_inflight_task probe "
+                    "failed for %s: %s",
+                    instance_id[:8], exc,
+                )
+            try:
+                tasks = task_repo.get_by_instance(instance_id)
+                for t in tasks:
+                    # ``get_by_instance`` returns all Tasks ordered
+                    # newest-first; check the live status set the
+                    # scan predicate uses.
+                    if getattr(t, "status", None) in (
+                        "pending", "running", "paused",
+                    ):
+                        return True
+            except Exception as exc:  # noqa: BLE001 — best-effort probe
+                logger.debug(
+                    "cleanup_non_terminal_jobs: "
+                    "_has_live_work Task get_by_instance probe "
+                    "failed for %s: %s",
+                    instance_id[:8], exc,
+                )
+
+        return False
+
     async def retry_job(self, job_id: str) -> JobItem | None:
         """Retry a failed job by creating a new job with the same parameters.
         

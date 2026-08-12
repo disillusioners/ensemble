@@ -389,16 +389,29 @@ class TestCleanupNonTerminalJobsService:
 
     @pytest.mark.asyncio
     async def test_cleanup_terminates_zombie_instances(self):
-        """Non-terminal instances with no live work are transitioned to
-        ``TERMINATED`` via :meth:`SQLModelInstanceRepository.transition_status_if`.
+        """Non-terminal instances with no live work are terminated via
+        :meth:`InstanceManager.terminate_instance`.
+
+        C2 (2026-08-12) — Bucket 5 was previously driving a raw
+        ``transition_status_if`` UPDATE that skipped 15+ cleanup
+        steps. The fix is to call ``terminate_instance`` directly,
+        which cascades to children, releases ``job_locks``, deletes
+        Tasks, closes MCP connections, emits lifecycle events, etc.
+        ``terminate_instance`` is idempotent so a TOCTOU race vs.
+        another terminal-write path is safe.
+
+        C3 (2026-08-12) — ``_has_live_work`` re-checks the instance
+        immediately before termination. The mocks below set both
+        JobItem and Task probes to empty so the re-check returns
+        ``False`` and the termination proceeds for every zombie.
 
         Setup:
 
         * No queued / active jobs to cancel (queued batch returns 0,
           ``find_active_jobs`` is empty).
-        * ``find_zombie_instances`` returns two ids; ``transition_status_if``
-          is stubbed to return a non-``None`` instance for both — the
-          race-safe transition succeeded.
+        * ``find_zombie_instances`` returns two ids.
+        * ``manager.terminate_instance`` is an ``AsyncMock`` returning
+          ``None`` (success) so the ``await`` resolves to a no-op.
 
         Asserts:
 
@@ -406,7 +419,7 @@ class TestCleanupNonTerminalJobsService:
         * ``result["total_processed"] == 0`` — Bucket 5 is excluded from
           the invariant (same treatment as ``orphaned_reaped`` and
           ``reconciled_bad_state``).
-        * ``transition_status_if`` is called for each zombie id.
+        * ``terminate_instance`` was awaited once per zombie id.
         """
         from daemon.services.job_queue_service import JobQueueService
 
@@ -414,6 +427,11 @@ class TestCleanupNonTerminalJobsService:
         repo = MagicMock()
         repo.batch_cancel_queued = MagicMock(return_value=0)
         repo.find_active_jobs = MagicMock(return_value=[])
+        # C3: live-Work re-check uses ``find_jobs_by_instance``. A bare
+        # MagicMock would return a truthy MagicMock by default, so we
+        # pin the probe to ``[]`` so the re-check returns ``False``
+        # and the termination proceeds.
+        repo.find_jobs_by_instance = MagicMock(return_value=[])
         service._repository = repo
 
         # Wire up a stubbed ``_instance_manager`` so the Bucket 5
@@ -422,14 +440,19 @@ class TestCleanupNonTerminalJobsService:
         instance_repo.find_zombie_instances = MagicMock(
             return_value=["zombie-A", "zombie-B"]
         )
-        instance_repo.transition_status_if = MagicMock(
-            side_effect=[
-                SimpleNamespace(instance_id="zombie-A"),
-                SimpleNamespace(instance_id="zombie-B"),
-            ]
-        )
         manager = MagicMock()
         manager._instance_repository = instance_repo
+        # C2: ``terminate_instance`` is async — must be AsyncMock or
+        # ``await`` will raise TypeError. Returning ``None`` mirrors
+        # the production code path where ``terminate_instance``
+        # returns ``True`` (we don't read the return here — the loop
+        # counts every awaited call).
+        manager.terminate_instance = AsyncMock(return_value=None)
+        # C3: Task re-check uses ``_task_repo``. Pin both probes so a
+        # bare MagicMock truthy default does not skip every zombie.
+        manager._task_repo = MagicMock()
+        manager._task_repo.has_inflight_task = MagicMock(return_value=False)
+        manager._task_repo.get_by_instance = MagicMock(return_value=[])
         service._instance_manager = manager
 
         result = await service.cleanup_non_terminal_jobs()
@@ -438,36 +461,45 @@ class TestCleanupNonTerminalJobsService:
         assert result["terminated_instances"] == 2
         # Bucket 5 is excluded from ``total_processed``.
         assert result["total_processed"] == 0
-        # The repo method was queried for the zombie set and the
-        # race-safe transition was attempted for each id.
+        # The repo method was queried for the zombie set and the full
+        # terminate_instance cascade was invoked for each id.
         instance_repo.find_zombie_instances.assert_called_once_with()
-        assert instance_repo.transition_status_if.call_count == 2
-        called_ids = [
+        assert manager.terminate_instance.await_count == 2
+        awaited_ids = [
             call.args[0]
-            for call in instance_repo.transition_status_if.call_args_list
+            for call in manager.terminate_instance.await_args_list
         ]
-        assert called_ids == ["zombie-A", "zombie-B"]
-        # The new status argument is ``TERMINATED`` (the bucket's
-        # contractual target state) and the ``allowed_from`` tuple
-        # covers every non-terminal ``InstanceStatus`` value the
-        # reaper is allowed to clobber.
-        for call in instance_repo.transition_status_if.call_args_list:
-            assert call.args[1] == "terminated"
-            assert "idle" in call.args[2]
-            assert "running" in call.args[2]
-            assert "paused" in call.args[2]
-            assert "queued" in call.args[2]
-            assert "waiting" in call.args[2]
-            assert "waiting_children" in call.args[2]
+        assert awaited_ids == ["zombie-A", "zombie-B"]
 
     @pytest.mark.asyncio
     async def test_cleanup_skips_zombies_whose_transition_loses_race(self):
-        """A ``transition_status_if`` that returns ``None`` (the row was
-        already terminal at the moment of the UPDATE) must NOT be
-        counted as ``terminated_instances``. The race-safe transition
-        does not clobber the terminal state, so the reaper is
-        best-effort: it counts the row only when the transition
-        actually flipped the status.
+        """C3 (2026-08-12) re-frame: a zombie that has *acquired live
+        work between the scan and the termination* must be skipped, not
+        terminated.
+
+        The pre-C2 implementation tested the ``transition_status_if``
+        returning ``None`` (race-loss) case. With the C2 fix,
+        ``terminate_instance`` is idempotent on already-terminal
+        instances and would short-circuit cheaply instead of being
+        "skipped". The C3 ``_has_live_work`` re-check is the new skip
+        path: if a concurrent dispatch created a new JobItem or Task
+        for an instance between the scan and the termination, that
+        instance is no longer a zombie and must NOT be terminated.
+
+        Setup:
+
+        * Three zombies returned by the scan.
+        * ``_has_live_work`` returns ``True`` only for the middle id
+          (``"loser"``) — the one a concurrent dispatcher snuck a
+          new JobItem onto. Returns ``False`` for the other two.
+
+        Asserts:
+
+        * ``result["terminated_instances"] == 2`` — the live-work
+          instance was skipped, the other two were terminated.
+        * ``terminate_instance`` was awaited exactly twice (for the
+          two non-live-work zombies) — the live-work instance never
+          reached the cascade.
         """
         from daemon.services.job_queue_service import JobQueueService
 
@@ -481,34 +513,108 @@ class TestCleanupNonTerminalJobsService:
         instance_repo.find_zombie_instances = MagicMock(
             return_value=["winner", "loser", "winner2"]
         )
-        # First call wins, second loses (returns None), third wins.
-        instance_repo.transition_status_if = MagicMock(
-            side_effect=[
-                SimpleNamespace(instance_id="winner"),
-                None,
-                SimpleNamespace(instance_id="winner2"),
-            ]
-        )
         manager = MagicMock()
         manager._instance_repository = instance_repo
+        manager.terminate_instance = AsyncMock(return_value=None)
+        manager._task_repo = MagicMock()
+        manager._task_repo.has_inflight_task = MagicMock(return_value=False)
+        manager._task_repo.get_by_instance = MagicMock(return_value=[])
         service._instance_manager = manager
+
+        # C3 re-check: ``_has_live_work`` returns ``True`` only for the
+        # middle id — simulating a concurrent dispatch that landed a
+        # new live JobItem / Task on that instance between the scan
+        # and the per-row termination.
+        live_work_map = {"loser": True, "winner": False, "winner2": False}
+        service._has_live_work = lambda zid: live_work_map.get(zid, False)
 
         result = await service.cleanup_non_terminal_jobs()
 
-        # The ``loser`` row dropped out of the count.
+        # The ``loser`` row dropped out of the count (TOCTOU re-check
+        # caught it).
         assert result["terminated_instances"] == 2
-        # All three candidates were attempted.
-        assert instance_repo.transition_status_if.call_count == 3
+        # ``terminate_instance`` was awaited exactly twice — for
+        # ``winner`` and ``winner2``. ``loser`` never reached the
+        # cascade because the C3 re-check returned ``True``.
+        assert manager.terminate_instance.await_count == 2
+        awaited_ids = [
+            call.args[0]
+            for call in manager.terminate_instance.await_args_list
+        ]
+        assert awaited_ids == ["winner", "winner2"]
 
     @pytest.mark.asyncio
     async def test_cleanup_continues_when_terminate_zombie_raises(self):
-        """An exception raised by ``transition_status_if`` for a single
-        zombie must NOT abort the loop. The next zombie still runs and
-        the final count reflects only the successful transitions.
+        """An exception raised by :meth:`InstanceManager.terminate_instance`
+        for a single zombie must NOT abort the loop. The next zombie
+        still runs and the final count reflects only the successful
+        terminations.
 
-        Outer-try: a failure in ``find_zombie_instances`` itself must
-        be swallowed too — the bucket must never break the main
+        C2 (2026-08-12) — re-framed from
+        ``transition_status_if``-raises to
+        ``terminate_instance``-raises. The exception site is now the
+        full cascade rather than the raw UPDATE — the loop's
+        best-effort ``try/except`` still catches the exception and
+        ``continue``s to the next zombie.
+
+        Setup:
+
+        * Two zombies returned by the scan.
+        * ``manager.terminate_instance`` (AsyncMock) raises for
+          ``zombie-A`` and returns ``None`` for ``zombie-B``.
+        * ``_has_live_work`` is pinned to ``False`` so both reach the
+          cascade (skipping the C3 path is out of scope here).
+        """
+        from daemon.services.job_queue_service import JobQueueService
+
+        service = JobQueueService.__new__(JobQueueService)
+        repo = MagicMock()
+        repo.batch_cancel_queued = MagicMock(return_value=0)
+        repo.find_active_jobs = MagicMock(return_value=[])
+        service._repository = repo
+
+        instance_repo = MagicMock()
+        instance_repo.find_zombie_instances = MagicMock(
+            return_value=["zombie-A", "zombie-B"]
+        )
+        manager = MagicMock()
+        manager._instance_repository = instance_repo
+        # C2: ``terminate_instance`` raises for ``zombie-A`` and
+        # succeeds for ``zombie-B``. ``side_effect`` consumes the
+        # list positionally across the two awaits.
+        manager.terminate_instance = AsyncMock(
+            side_effect=[
+                RuntimeError("simulated terminate cascade failure"),
+                None,
+            ]
+        )
+        # C3: pin probes so the re-check returns ``False`` (so we
+        # exercise the raise-vs-succeed branch instead of the skip
+        # branch — which has its own test).
+        manager._task_repo = MagicMock()
+        manager._task_repo.has_inflight_task = MagicMock(return_value=False)
+        manager._task_repo.get_by_instance = MagicMock(return_value=[])
+        service._instance_manager = manager
+        # Pin C3 re-check to False so both reach the cascade.
+        service._has_live_work = lambda zid: False
+
+        result = await service.cleanup_non_terminal_jobs()
+
+        # ``zombie-A`` raised and was skipped; ``zombie-B`` succeeded.
+        assert result["terminated_instances"] == 1
+        # Both zombies reached the cascade — the failure did not abort
+        # the loop.
+        assert manager.terminate_instance.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_cleanup_swallows_find_zombie_instances_failure(self):
+        """Outer-try: a failure in ``find_zombie_instances`` itself
+        must be swallowed — the bucket must never break the main
         cleanup counters.
+
+        Companion to :meth:`test_cleanup_continues_when_terminate_zombie_raises`,
+        which covers the inner-per-zombie exception path. Together
+        they pin both try/except layers.
         """
         from daemon.services.job_queue_service import JobQueueService
 
@@ -1336,3 +1442,133 @@ class TestInstanceRepositoryZombieScan:
         count_result = repo.count_zombie_instances()
 
         assert len(find_result) == count_result == 2
+
+    def test_find_zombie_instances_with_null_jobitem_instance_id(
+        self, repo, task_repo, job_repo
+    ):
+        """C1 (2026-08-12) regression test — NULL ``instance_id`` on
+        ``job_queue_items`` MUST NOT poison the zombie scan.
+
+        Before the ``NOT EXISTS`` fix, the anti-join was expressed
+        as ``i.instance_id NOT IN (SELECT DISTINCT jqi.instance_id
+        ...)``. SQL three-valued logic evaluates ``x NOT IN (..., NULL)``
+        to ``UNKNOWN`` for every ``x``, so a single ``job_queue_items``
+        row with ``instance_id IS NULL`` silently caused the entire
+        scan to return ``[]`` — Bucket 5 matched nothing in production.
+
+        After the fix (``NOT EXISTS (SELECT 1 ... WHERE jqi.instance_id
+        = i.instance_id ...)``), the outer row is excluded only by the
+        EXISTS-correlated equality match; NULL rows on the inner side
+        simply don't match any outer instance_id and the scan returns
+        the true zombies.
+
+        Setup:
+
+        * A true zombie instance with no live work.
+        * A ``job_queue_items`` row with ``instance_id=None`` (this is
+          the row whose NULL value was poisoning the scan pre-fix).
+
+        Asserts:
+
+        * ``find_zombie_instances`` returns the true zombie — proving
+          the NULL row did NOT poison the scan.
+
+        Also verified against ``count_zombie_instances`` so the
+        count variant (same NOT EXISTS template) is covered.
+        """
+        # True zombie — should be found even with a NULL-instance_id
+        # JobItem co-existing in the table.
+        self._create_instance(
+            repo, instance_id="zombie-real", status="running"
+        )
+        # A JobItem with ``instance_id=None`` — must not poison the
+        # scan. ``_create_job`` accepts the ``instance_id`` kwarg,
+        # which forwards straight to the JobItem column.
+        self._create_job(job_repo, instance_id=None,
+                         admission_state="queued")
+
+        result = repo.find_zombie_instances()
+
+        assert result == ["zombie-real"]
+        # Count variant is driven by the same SQL template via
+        # ``_build_zombie_scan_sql(count_only=True)`` — must agree.
+        assert repo.count_zombie_instances() == 1
+
+    def test_find_zombie_instances_skips_parents_with_live_children(
+        self, repo, task_repo, job_repo
+    ):
+        """W1 (2026-08-12) — a non-terminal parent with a non-terminal
+        child instance MUST NOT be returned: terminating the parent
+        would orphan the still-executing child.
+
+        The third ``NOT EXISTS`` predicate in
+        :meth:`SQLModelInstanceRepository._build_zombie_scan_sql`
+        walks ``instances child`` for ``child.parent_id = i.instance_id``
+        and excludes any parent that has at least one non-terminal
+        child row.
+
+        Setup:
+
+        * A parent with a live (running) child — must NOT appear in
+          the result (parent-of-live is excluded by the W1 guard).
+        * The live child itself — IS a non-terminal instance with
+          no live JobItem/Task of its own, so it IS a zombie
+          (correct — the scan evaluates each instance independently
+          against its own children; a child is not excluded merely
+          because its parent is alive).
+        * A parent whose only child is terminal — IS a zombie (the
+          W1 guard only excludes parents with non-terminal children).
+        * A childless parent — IS a zombie (no child rows means the
+          NOT EXISTS is naturally true).
+        """
+        # Parent with a live child — must NOT be returned (W1).
+        self._create_instance(
+            repo, instance_id="parent-of-live", status="running"
+        )
+        self._create_instance(
+            repo, instance_id="child-of-live", status="running"
+        )
+        # Tie parent_id — direct on the row, since the instance model
+        # carries ``parent_id`` natively (see Instance.parent_id).
+        from sqlmodel import Session as SQLModelSession
+
+        from daemon.repositories.instance.models import Instance
+
+        with SQLModelSession(repo.engine) as session:
+            child = session.get(Instance, "child-of-live")
+            child.parent_id = "parent-of-live"
+            session.add(child)
+            session.commit()
+
+        # Parent whose only child is terminal — IS a zombie.
+        self._create_instance(
+            repo, instance_id="parent-terminal-child",
+            status="waiting_children",
+        )
+        self._create_instance(
+            repo, instance_id="child-terminal", status="completed"
+        )
+        with SQLModelSession(repo.engine) as session:
+            child = session.get(Instance, "child-terminal")
+            child.parent_id = "parent-terminal-child"
+            session.add(child)
+            session.commit()
+
+        # Childless parent — IS a zombie.
+        self._create_instance(
+            repo, instance_id="parent-childless", status="paused"
+        )
+
+        result = repo.find_zombie_instances()
+
+        # The W1 guard excludes ``parent-of-live`` (its child is live).
+        # The other three rows are all valid zombies: ``child-of-live``
+        # is a non-terminal instance with no live work of its own,
+        # ``parent-terminal-child`` has only a terminal child (W1
+        # does not exclude it), and ``parent-childless`` has no
+        # children at all.
+        assert sorted(result) == [
+            "child-of-live",
+            "parent-childless",
+            "parent-terminal-child",
+        ]

@@ -787,8 +787,14 @@ class SQLModelInstanceRepository:
     # dead (``completed``, ``error``, ``terminated``, ``failed``). The
     # value set is duplicated here as a frozen tuple of strings (rather
     # than re-derived from :class:`InstanceStatus`) so the SQL template
-    # stays a plain ``NOT IN (,,,)`` predicate with bound parameters,
+    # stays a plain ``NOT IN (,)`` predicate with bound parameters,
     # matching the :meth:`count_bad_state_tasks` pattern.
+    #
+    # W1: This same terminal set is also reused in the third
+    # ``NOT EXISTS`` clause of :meth:`_build_zombie_scan_sql` to
+    # exclude parents that still have non-terminal children — a
+    # ``WAITING_CHILDREN`` instance may have children still executing,
+    # and terminating the parent would orphan them.
     _TERMINAL_STATUSES_FOR_ZOMBIE_SCAN: tuple[str, ...] = (
         "completed",
         "error",
@@ -819,12 +825,31 @@ class SQLModelInstanceRepository:
         """Return the raw-SQL ``text()`` statement for the zombie scan.
 
         A "zombie instance" is one whose ``instances.status`` is NOT in
-        the terminal set AND has no live JobItem AND no live Task.
-        Implemented as two ``NOT IN (SELECT DISTINCT ...)`` anti-joins
-        instead of ``NOT EXISTS`` because we need ``SELECT DISTINCT`` on
-        the instance_id (Task and JobItem may have multiple rows per
-        instance) and ``NOT IN`` keeps the SQL trivially portable between
-        PostgreSQL and SQLite.
+        the terminal set AND has no live JobItem AND no live Task AND
+        has no non-terminal child instance.
+
+        Each anti-join is expressed as a ``NOT EXISTS (SELECT 1 ... WHERE
+        jqi.instance_id = i.instance_id ...)`` correlated subquery — NOT
+        as ``NOT IN (SELECT DISTINCT jqi.instance_id ...)``. C1 (2026-08-12):
+        ``job_queue_items.instance_id`` is nullable, and SQL three-valued
+        logic makes ``NOT IN (..., NULL)`` evaluate to UNKNOWN for every
+        row (the NULL poisoning bug). A single ``job_queue_items``
+        row with ``instance_id IS NULL`` was silently producing an empty
+        scan, so Bucket 5 matched nothing in production. ``NOT EXISTS``
+        is NULL-safe because the correlation is an equality predicate
+        (``jqi.instance_id = i.instance_id``) on the outer row —
+        NULL = NULL is UNKNOWN but the outer row is excluded only by
+        the EXISTS-correlated match, not by NULL membership.
+
+        The third ``NOT EXISTS`` (W1, 2026-08-12) excludes parents
+        whose children are still non-terminal — terminating a parent
+        with live children would orphan them. The instance model is
+        self-referential via ``instances.parent_id``; the scan walks
+        the child rows for each candidate parent.
+
+        See :meth:`find_orphan_active_jobs` in
+        ``daemon/repositories/job_queue/repository.py`` for the
+        reference pattern on ``NOT EXISTS`` use in this codebase.
 
         Args:
             count_only: When True, return a ``COUNT(DISTINCT)`` statement;
@@ -844,7 +869,9 @@ class SQLModelInstanceRepository:
         # ``expanding`` parameter style is dialect-fragile on SQLite
         # when used inside ``NOT IN (...)``. The lists are short,
         # closed, and defined as class-level tuples above, so baking is
-        # safe and avoids the expanding-param issue.
+        # safe and avoids the expanding-param issue. The same terminal
+        # CSV is reused by the W1 anti-join — that subquery compares
+        # ``child.status`` against it.
         terminal_csv = ", ".join(
             f"'{s}'" for s in self._TERMINAL_STATUSES_FOR_ZOMBIE_SCAN
         )
@@ -857,14 +884,21 @@ class SQLModelInstanceRepository:
         return text(f"""
             {select_clause} FROM instances i
             WHERE i.status NOT IN ({terminal_csv})
-              AND i.instance_id NOT IN (
-                SELECT DISTINCT jqi.instance_id FROM job_queue_items jqi
-                WHERE jqi.admission_state IN ({live_jobitem_csv})
+              AND NOT EXISTS (
+                SELECT 1 FROM job_queue_items jqi
+                WHERE jqi.instance_id = i.instance_id
+                  AND jqi.admission_state IN ({live_jobitem_csv})
                   AND jqi.deleted_at IS NULL
               )
-              AND i.instance_id NOT IN (
-                SELECT DISTINCT t.instance_id FROM task t
-                WHERE t.status IN ({live_task_csv})
+              AND NOT EXISTS (
+                SELECT 1 FROM task t
+                WHERE t.instance_id = i.instance_id
+                  AND t.status IN ({live_task_csv})
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM instances child
+                WHERE child.parent_id = i.instance_id
+                  AND child.status NOT IN ({terminal_csv})
               )
         """)
 
@@ -890,9 +924,12 @@ class SQLModelInstanceRepository:
 
         Self-contained SYNC method using raw-SQL ``text()`` — runs
         inside the calling thread's event-loop wrapper
-        (``asyncio.to_thread`` on the consumer side). The SQL is plain
-        ``NOT IN (SELECT DISTINCT ...)`` anti-joins so it works on both
-        PostgreSQL and SQLite without dialect-specific syntax.
+        (``asyncio.to_thread`` on the consumer side). The SQL uses three
+        NULL-safe ``NOT EXISTS`` correlated subqueries (anti-joins
+        against ``job_queue_items``, ``task``, and child ``instances``)
+        so it works on both PostgreSQL and SQLite without dialect-
+        specific syntax. See :meth:`_build_zombie_scan_sql` for the
+        NULL-poisoning rationale and the W1 parent-child guard.
 
         Returns:
             List of ``instance_id`` strings that should be terminated.
