@@ -401,7 +401,20 @@ class DiscordAdapter(MessageSourceAdapter):
             client = discord.Client(intents=intents)
             self._client = client
 
-            async def _on_ready() -> None:
+            # NOTE: The function names MUST be the canonical discord.py
+            # event names (``on_ready``, ``on_message``) — no leading
+            # underscore. ``discord.Client.event()`` registers the
+            # callback via ``setattr(self, coro.__name__, coro)``, and
+            # the gateway dispatcher does
+            # ``getattr(self, 'on_ready', None)``. Naming these
+            # ``_on_ready`` / ``_on_message`` (as earlier revisions did)
+            # silently registers them under ``self._on_ready`` /
+            # ``self._on_message``; the dispatcher then finds no
+            # ``on_ready`` attribute, the event is dropped on the floor,
+            # and ``start()`` times out at ``GATEWAY_READY_TIMEOUT_SECONDS``
+            # with the gateway connected but no callback invoked. The
+            # canonical names below restore the contract.
+            async def on_ready() -> None:
                 # Capture bot identity and signal readiness.
                 user = client.user
                 if user is not None:
@@ -413,12 +426,12 @@ class DiscordAdapter(MessageSourceAdapter):
                 )
                 self._ready_event.set()
 
-            async def _on_message(message: Any) -> None:
+            async def on_message(message: Any) -> None:
                 # Stub registered in Phase 1; real handler in Phase 2.
                 await self._handle_message(message)
 
-            client.event(_on_ready)
-            client.event(_on_message)
+            client.event(on_ready)
+            client.event(on_message)
 
             # Spawn the Gateway task.
             self._client_task = asyncio.create_task(
