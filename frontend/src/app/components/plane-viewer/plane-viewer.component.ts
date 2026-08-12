@@ -6,7 +6,7 @@ import { DomSanitizer, SafeResourceUrl } from '@angular/platform-browser';
   standalone: true,
   template: `
     @if (safeUrl) {
-      <iframe [src]="safeUrl" style="width:100%; height:100%; border:none; display:block;"></iframe>
+      <iframe [src]="safeUrl" sandbox="allow-scripts allow-same-origin allow-forms allow-popups" style="width:100%; height:100%; border:none; display:block;"></iframe>
     }
   `,
 })
@@ -18,7 +18,7 @@ export class PlaneViewerComponent implements OnInit {
   constructor(private sanitizer: DomSanitizer) {}
 
   ngOnInit(): void {
-    if (this.url) {
+    if (this.url && /^https?:\/\//i.test(this.url)) {
       this.safeUrl = this.sanitizer.bypassSecurityTrustResourceUrl(this.url);
     }
   }

@@ -533,5 +533,6 @@ async def get_plane_config():
     the feature.
     """
     url = (os.environ.get("PLANE_BASE_URL", "") or "").strip()
-    enabled = bool(url)
-    return PlaneConfigResponse(enabled=enabled, url=url if enabled else "")
+    if not url or not re.match(r'^https?://', url, re.IGNORECASE):
+        return PlaneConfigResponse(enabled=False, url="")
+    return PlaneConfigResponse(enabled=True, url=url)

@@ -1,17 +1,21 @@
-import { Component, signal, inject, OnInit } from '@angular/core';
+import { Component, signal, inject, OnInit, HostListener, DestroyRef } from '@angular/core';
 import { Router, RouterOutlet, RouterLink, RouterLinkActive, NavigationEnd } from '@angular/router';
 import { CommonModule } from '@angular/common';
 import { HttpClient } from '@angular/common/http';
 import { filter } from 'rxjs/operators';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { MatToolbarModule } from '@angular/material/toolbar';
 import { MatIconModule } from '@angular/material/icon';
 import { MatButtonModule } from '@angular/material/button';
 import { MatMenuModule } from '@angular/material/menu';
 import { ApiService } from './services/api.service';
 import { SseService } from './services/sse.service';
+import { TabStateService } from './services/tab-state.service';
+import { WorkspaceOverlayService } from './services/workspace-overlay.service';
 import { NotificationBellComponent } from './components/notification-bell/notification-bell.component';
 import { JobQueueIndicatorComponent } from './components/job-queue-indicator/job-queue-indicator.component';
 import { PlaneViewerComponent } from './components/plane-viewer/plane-viewer.component';
+import { WorkspaceComponent } from './pages/workspace/workspace.component';
 import type { HealthResponse, MigrationAvailability } from './models';
 
 interface SettingsMenuItem {
@@ -39,7 +43,8 @@ interface PlaneConfig {
     MatMenuModule,
     NotificationBellComponent,
     JobQueueIndicatorComponent,
-    PlaneViewerComponent
+    PlaneViewerComponent,
+    WorkspaceComponent
   ],
   templateUrl: './app.html',
   styleUrl: './app.scss'
@@ -49,6 +54,15 @@ export class App implements OnInit {
   private readonly http = inject(HttpClient);
   private readonly router = inject(Router);
   readonly sseService = inject(SseService);
+  /**
+   * Singleton state for the global workspace overlay. Exposed to the
+   * template so the overlay element's inputs/outputs can bind directly
+   * to its signals. The same service instance is injected by the chat
+   * page (toggle handlers, tabWorkspaceEffect) and any other consumer
+   * that needs to show/hide the overlay.
+   */
+  protected readonly workspaceOverlayService = inject(WorkspaceOverlayService);
+  private readonly tabStateService = inject(TabStateService);
 
   readonly health = signal<HealthResponse | null>(null);
   readonly isStreaming = this.sseService.isStreaming;
@@ -83,13 +97,33 @@ export class App implements OnInit {
   ]);
 
   constructor() {
-    // Track /plan route so the root-mounted iframe overlay is shown
-    // only on that route (display-toggled for cross-route caching).
+    // Initialize synchronously so a deep-link to /plan shows the overlay
+    // on the very first paint, before the first NavigationEnd fires.
+    this.isPlanRoute.set(this.router.url === '/plan' || this.router.url.startsWith('/plan/'));
     this.router.events.pipe(
-      filter(event => event instanceof NavigationEnd)
+      filter(event => event instanceof NavigationEnd),
+      takeUntilDestroyed(this.destroyRef)
     ).subscribe(() => {
       this.isPlanRoute.set(this.router.url === '/plan' || this.router.url.startsWith('/plan/'));
-    });
+     });
+   }
+
+  /**
+   * Global Alt+` hotkey that toggles the workspace overlay from any
+   * route. Bound at the document level so it fires regardless of which
+   * element has focus. The gate on `activeProjectId` mirrors the
+   * chat-header toggle: the overlay only makes sense when a project
+   * tab is active (the "All" tab has no project to show).
+   */
+  @HostListener('document:keydown', ['$event'])
+  onGlobalKeydown(event: KeyboardEvent): void {
+    if (event.altKey && event.key === '`') {
+      const activeProjectId = this.tabStateService.activeProjectId();
+      if (activeProjectId === null || activeProjectId === 'all') return;
+      event.preventDefault();
+      event.stopPropagation();
+      this.workspaceOverlayService.toggle(activeProjectId);
+    }
   }
 
   ngOnInit(): void {
