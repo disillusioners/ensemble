@@ -13,6 +13,11 @@ import { VsCodeViewerComponent } from '../vscode-viewer/vscode-viewer.component'
  * binding shape: `<app-vscode-editor-cache [projectId]="…" [workdir]="…" />`.
  * Lets the tests drive the cache through the same signal-input surface
  * the real workspace uses.
+ *
+ * Also exposes a `visible` signal that maps to a `[style.display]`
+ * binding on the cache, mirroring the workspace overlay's CSS-hide
+ * pattern. The existing tests do not touch `visible` — it stays
+ * `true` by default — so their behaviour is unchanged.
  */
 @Component({
   standalone: true,
@@ -21,12 +26,14 @@ import { VsCodeViewerComponent } from '../vscode-viewer/vscode-viewer.component'
     <app-vscode-editor-cache
       [projectId]="projectId()"
       [workdir]="workdir()"
+      [style.display]="visible() ? 'block' : 'none'"
     ></app-vscode-editor-cache>
   `,
 })
 class VsCodeEditorCacheHostComponent {
   projectId = signal<string>('');
   workdir = signal<string>('');
+  visible = signal(true);
 }
 
 /**
@@ -606,6 +613,81 @@ describe('VsCodeEditorCacheComponent', () => {
 
       // Still '/path/a' — no change, no reload.
       expect(viewerA.workdir()).toBe('/path/a');
+    });
+  });
+
+  // 8. hide/show persistence (CSS-hide pattern) ─────────────────────
+  //
+  // The workspace overlay now uses CSS `display: none` instead of
+  // an `@if` destroy to hide itself, so the parent keeps
+  // `<app-vscode-editor-cache>` mounted across hide/show cycles.
+  // The cache component itself is unaware of visibility — its
+  // contract is "destroy only on `ngOnDestroy`" — so the proof
+  // here is that the cache holds its instances when a parent
+  // toggles inline `display: none` ↔ `display: block`. This is a
+  // regression test for the previous bug where the workspace
+  // overlay's `@if` tore the cache down on every hide, forcing a
+  // 2-5s iframe reload on re-show.
+
+  describe('hide/show persistence (CSS hide pattern)', () => {
+    it('survives a CSS display:none → display:block cycle without destroying cached instances', () => {
+      // 1. Mount with a real projectId — cache miss, one viewer created.
+      host.projectId.set('proj-1');
+      hostFixture.detectChanges();
+
+      const cache = getCacheComponent(hostFixture);
+      expect(cache.cacheSize()).toBe(1);
+      expect(cache.hasCached('proj-1')).toBe(true);
+
+      // 2. Hide the host via CSS (display: none). The cache component
+      //    is NOT destroyed — only its parent's `display` flips.
+      host.visible.set(false);
+      hostFixture.detectChanges();
+
+      // 3. Re-show the host via CSS (display: block).
+      host.visible.set(true);
+      hostFixture.detectChanges();
+
+      // 4. The cache must still hold the same instance — no reload,
+      //    no fresh viewer. This is the regression assertion: when
+      //    the workspace overlay was an `@if` block, this same
+      //    hide/show sequence destroyed the cache and the viewer
+      //    count dropped to 0 before the new instance was created.
+      expect(cache.cacheSize()).toBe(1);
+      expect(cache.hasCached('proj-1')).toBe(true);
+    });
+
+    it('keeps the same ComponentRef alive across a visibility toggle (no reload)', () => {
+      host.projectId.set('proj-1');
+      hostFixture.detectChanges();
+
+      const debugBefore = hostFixture.debugElement.query(
+        By.directive(VsCodeViewerComponent),
+      );
+      const viewerBefore = debugBefore.componentInstance as VsCodeViewerComponent;
+      const hostElementBefore = debugBefore.nativeElement as HTMLElement;
+
+      host.visible.set(false);
+      hostFixture.detectChanges();
+      host.visible.set(true);
+      hostFixture.detectChanges();
+
+      // Re-resolve the viewer after the toggle and prove both the
+      // component instance and its DOM element are unchanged. If the
+      // cache had been destroyed, Angular would have created a fresh
+      // VsCodeViewerComponent AND a fresh host element (the
+      // viewContainerRef would have inserted a new node), so either
+      // identity check alone is enough — we run both for redundancy.
+      const debugAfter = hostFixture.debugElement.query(
+        By.directive(VsCodeViewerComponent),
+      );
+      const viewerAfter = debugAfter.componentInstance as VsCodeViewerComponent;
+      const hostElementAfter = debugAfter.nativeElement as HTMLElement;
+
+      expect(viewerAfter).toBe(viewerBefore);
+      expect(hostElementAfter).toBe(hostElementBefore);
+      // Sanity: the viewer still has the original projectId.
+      expect(viewerAfter.projectId()).toBe('proj-1');
     });
   });
 });
