@@ -1012,6 +1012,73 @@ class TestAssembleContextMessages:
         # Must NOT be the scope guide.
         assert "[SYSTEM CONTEXT: Project Scope Guide]" not in result[0].content
 
+    def test_scope_guide_when_project_payload_is_none_but_id_is_default(self) -> None:
+        """ID-based detection fires even when project lookup returns ``None``.
+
+        The orchestrator's ``_fetch_project_payload`` helper returns
+        ``(None, [], [])`` when the project repo lookup fails (or the
+        repo is missing). Even in that failure mode, the ID-based
+        check on ``SYSTEM_DEFAULT_PROJECT_ID`` must still fire and
+        emit the scope guide — otherwise a transient repo failure
+        would silently drop the scope guide.
+        """
+        from daemon import constants as consts
+
+        original = consts.SYSTEM_DEFAULT_PROJECT_ID
+        consts.SYSTEM_DEFAULT_PROJECT_ID = "default-uuid"
+        try:
+            # ``project=None`` simulates a failed repo lookup; the ID
+            # match still triggers the scope guide.
+            manager, instance_repo, agent_meta = self._make_manager(project=None)
+            result = _flatten_context_result(self._run(
+                assemble_context_messages(
+                    instance_id="inst-1", user_query="hi",
+                    project_id="default-uuid",
+                    agent_meta=agent_meta, manager=manager,
+                    instance_repository=instance_repo,
+                )
+            ))
+            assert result[0].additional_kwargs["context_kind"] == "project_scope_guide"
+            assert "[SYSTEM CONTEXT: Project Scope Guide]" in result[0].content
+        finally:
+            consts.SYSTEM_DEFAULT_PROJECT_ID = original
+
+    def test_kv_metadata_not_fetched_for_system_default(self) -> None:
+        """Scope-guide path skips the ``_fetch_kv_metadata`` DB read.
+
+        The scope guide does not consume KV metadata, so the
+        orchestrator must NOT spend a DB round-trip on it for every
+        system-default turn. This guards the wasted-I/O fix.
+        """
+        from daemon import constants as consts
+
+        original = consts.SYSTEM_DEFAULT_PROJECT_ID
+        consts.SYSTEM_DEFAULT_PROJECT_ID = "default-id"
+        try:
+            project = MagicMock()
+            project.name = "__system_default__"
+            project.to_dict.return_value = {
+                "project_id": "default-id",
+                "name": "__system_default__",
+            }
+            manager, instance_repo, agent_meta = self._make_manager(project=project)
+            self._run(
+                assemble_context_messages(
+                    instance_id="inst-1", user_query="hi",
+                    project_id="default-id",
+                    agent_meta=agent_meta, manager=manager,
+                    instance_repository=instance_repo,
+                )
+            )
+            # The kv repo's ``get_all_as_dict`` must NOT have been called.
+            assert manager._shared_meta_kv_repo.get_all_as_dict.call_count == 0, (
+                "_fetch_kv_metadata must be skipped for system-default "
+                "instances — the scope guide path does not consume KV "
+                "metadata and the DB read is wasted I/O"
+            )
+        finally:
+            consts.SYSTEM_DEFAULT_PROJECT_ID = original
+
 
 # ─── Mode-based gate (regression for the 2026-07-28 bug) ────────────────────
 

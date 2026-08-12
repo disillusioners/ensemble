@@ -1321,9 +1321,6 @@ async def assemble_context_messages(
     project, critical_notes, history_entries = await asyncio.to_thread(
         _fetch_project_payload, project_id, manager
     )
-    kv_metadata = await asyncio.to_thread(
-        _fetch_kv_metadata, context_key, manager
-    )
 
     # Detect the system default project. ``SYSTEM_DEFAULT_PROJECT_ID``
     # is set at startup (it is ``None`` at import time), so we read it
@@ -1337,6 +1334,14 @@ async def assemble_context_messages(
             and getattr(project, "name", None) == SYSTEM_DEFAULT_PROJECT_NAME
         )
     )
+
+    # KV metadata is only consumed by build_project_context_message;
+    # skip the DB read for system-default instances (scope guide path).
+    kv_metadata: dict[str, Any] | None = None
+    if not is_system_default:
+        kv_metadata = await asyncio.to_thread(
+            _fetch_kv_metadata, context_key, manager
+        )
 
     if is_system_default:
         # Inject the scope guide instead of the unhelpful default-project

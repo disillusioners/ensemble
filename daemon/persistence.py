@@ -634,6 +634,7 @@ def _messages_have_context_block(messages: list[Any]) -> bool:
     _CONTEXT_KINDS = frozenset({
         "project", "shared_context", "auto_load_skills", "skills",
         "task_context", "blueprint",  # C10: blueprint context MUST persist in checkpoints
+        "project_scope_guide",  # C10: scope guide MUST persist in checkpoints to avoid rebuild duplication
     })
 
     for msg in messages:
