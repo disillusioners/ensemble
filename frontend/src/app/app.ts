@@ -115,10 +115,23 @@ export class App implements OnInit {
    * element has focus. The gate on `activeProjectId` mirrors the
    * chat-header toggle: the overlay only makes sense when a project
    * tab is active (the "All" tab has no project to show).
+   *
+   * Two refinements:
+   * - Skips when focus is in an input/textarea/contentEditable so the
+   *   hotkey doesn't fire while the user is typing in chat or message
+   *   fields.
+   * - Uses `event.code === 'Backquote'` (layout-independent physical key)
+   *   and excludes Ctrl/Meta to dodge AltGr conflicts on European
+   *   keyboard layouts (where AltGr+` produces the localized character).
    */
   @HostListener('document:keydown', ['$event'])
   onGlobalKeydown(event: KeyboardEvent): void {
-    if (event.altKey && event.key === '`') {
+    // Don't intercept while typing in inputs/textareas
+    const target = event.target as HTMLElement;
+    if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target.isContentEditable) return;
+
+    // Alt+` (without Ctrl/Meta = excludes AltGr on European layouts)
+    if (event.altKey && !event.ctrlKey && !event.metaKey && event.code === 'Backquote') {
       const activeProjectId = this.tabStateService.activeProjectId();
       if (activeProjectId === null || activeProjectId === 'all') return;
       event.preventDefault();

@@ -79,7 +79,7 @@
        is rendered at the App root so the Alt+` hotkey works from any
        route and the editor cache survives navigation. -->
   <app-workspace
-    [projectId]="workspaceOverlayService.workspaceProjectId() || ''"
+    [projectId]="(workspaceOverlayService.showWorkspace() ? workspaceOverlayService.workspaceProjectId() : null) || ''"
     [visible]="workspaceOverlayService.showWorkspace()"
     [style.display]="workspaceOverlayService.showWorkspace() ? 'flex' : 'none'"
     (hide)="workspaceOverlayService.hide()"

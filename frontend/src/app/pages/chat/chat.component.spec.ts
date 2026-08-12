@@ -398,18 +398,16 @@ class TestableChatComponent {
     this.navigateCalls.push({ path: ['/'] });
   }
 
-  // Workspace overlay handlers — mirror ChatComponent. After the
+  // Workspace overlay handler — mirrors ChatComponent. After the
   // refactor that lifts workspace state into the root-provided
-  // WorkspaceOverlayService, these handlers are thin delegators: they
-  // exist so the template binding (e.g. `(hide)="onWorkspaceHide()"` on
-  // the overlay element) still works, but the actual state lives in
-  // `workspaceOverlayService`.
+  // WorkspaceOverlayService, this handler is a thin delegator: it
+  // exists so the template binding (e.g. the project-tab workspace
+  // icon) still works, but the actual state lives in
+  // `workspaceOverlayService`. The Hide action is bound directly in
+  // app.html to `workspaceOverlayService.hide()`, so no separate
+  // `onWorkspaceHide` shim is needed here.
   protected onWorkspaceToggle(projectId: string): void {
     this.workspaceOverlayService.toggle(projectId);
-  }
-
-  protected onWorkspaceHide(): void {
-    this.workspaceOverlayService.hide();
   }
 
   protected get hasRealProject(): boolean {
@@ -931,13 +929,6 @@ describe('ChatComponent - Project-Aware Navigation', () => {
 
       expect(component.workspaceOverlayService.showWorkspace()).toBe(true);
       expect(component.workspaceOverlayService.workspaceProjectId()).toBe('proj-b');
-    });
-
-    it('should close the overlay via onWorkspaceHide', () => {
-      component.onWorkspaceToggle('proj-a');
-      component.onWorkspaceHide();
-
-      expect(component.workspaceOverlayService.showWorkspace()).toBe(false);
     });
 
     it('should require a real project for the header toggle', () => {

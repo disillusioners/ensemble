@@ -37,7 +37,7 @@ export class WorkspaceOverlayService {
   toggle(projectId?: string): void {
     const currentId = this.workspaceProjectId();
     const targetId = projectId ?? currentId;
-    if (targetId === null) return;
+    if (!targetId) return;
 
     if (this.showWorkspace() && currentId === targetId) {
       this.showWorkspace.set(false);

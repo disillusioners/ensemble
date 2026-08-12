@@ -1025,14 +1025,6 @@ export class ChatComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Handle the workspace overlay's Hide button. State is preserved by
-   * WorkspaceService's LRU cache, so no extra work is needed here.
-   */
-  protected onWorkspaceHide(): void {
-    this.workspaceOverlayService.hide();
-  }
-
-  /**
    * Toggle the workspace overlay from the chat header button. Targets
    * the currently active project (resolved via existing projectId getter).
    */

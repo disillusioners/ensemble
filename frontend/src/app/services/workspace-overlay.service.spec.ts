@@ -66,6 +66,12 @@ describe('WorkspaceOverlayService', () => {
       expect(service.workspaceProjectId()).toBeNull();
     });
 
+    it('should be a no-op when toggle is called with empty string', () => {
+      service.toggle('');
+      expect(service.showWorkspace()).toBe(false);
+      expect(service.workspaceProjectId()).toBeNull();
+    });
+
     it('toggles off when the current project is the only one shown', () => {
       service.toggle('proj-a');
       expect(service.showWorkspace()).toBe(true);
