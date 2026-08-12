@@ -53,6 +53,7 @@ export class App implements OnInit {
   private readonly api = inject(ApiService);
   private readonly http = inject(HttpClient);
   private readonly router = inject(Router);
+  private readonly destroyRef = inject(DestroyRef);
   readonly sseService = inject(SseService);
   /**
    * Singleton state for the global workspace overlay. Exposed to the
