@@ -1,8 +1,8 @@
 # Approver Active State
 
-Plan: Discord Source Adapter
-Slug: discord-source
-Iteration: 003
-Status: ESCALATED
-Started: 2026-08-11T21:38:09Z
-Escalated: 2026-08-11T21:58:00Z
+Plan: Project-Manager Agent
+Slug: project-manager-agent
+Iteration: 002
+Status: IN_PROGRESS
+Started: 2026-08-12T20:18:16Z
+Last Verdict: REJECTED (iteration 001)
