@@ -203,6 +203,14 @@ class JobCleanupResponse(BaseModel):
         :meth:`TaskRepository.batch_reconcile_bad_state_tasks`. Like
         ``orphaned_reaped``, this is excluded from ``total_processed``
         because it reconciles Task rows, not JobItem rows.
+      * ``terminated_instances`` — number of zombie instances
+        (non-terminal ``instances.status`` with no live JobItem and
+        no live Task) transitioned to ``TERMINATED`` by Bucket 5 of
+        the cleanup pipeline via
+        :meth:`SQLModelInstanceRepository.transition_status_if`.
+        Excluded from ``total_processed`` because it operates on the
+        ``instances`` table, not ``job_queue_items`` — same treatment
+        as ``orphaned_reaped`` and ``reconciled_bad_state``.
       * ``total_processed`` — sum of ``cancelled_queued`` +
         ``cancelled_active``.
     """
@@ -234,6 +242,14 @@ class JobCleanupResponse(BaseModel):
             "Number of bad-state Tasks (paused/pending whose linked "
             "JobItem is terminal) batch-reconciled to CANCELLED. "
             "Excluded from total_processed."
+        ),
+    )
+    terminated_instances: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Number of zombie instances (non-terminal with no live work) "
+            "that were terminated. Excluded from total_processed."
         ),
     )
     total_processed: int = Field(
@@ -333,11 +349,11 @@ class JobQueueResponse(BaseModel):
 class CleanupPreflightResponse(BaseModel):
     """Response for ``GET /api/jobs/cleanup/preflight``.
 
-    Read-only system-wide bad-state count used by the frontend to render
-    the red-glow + tooltip on the System Cleanup button. The preflight is
+    Read-only system-wide counts used by the frontend to render the
+    red-glow + tooltip on the System Cleanup button. The preflight is
     intentionally NOT guarded by ``is_write_paused`` (W1): it is a pure
     COUNT query and must surface stale rows even during a write pause,
-    which is precisely when bad-state items accumulate most.
+    which is precisely when bad-state / zombie items accumulate most.
     """
 
     bad_state_count: int = Field(
@@ -348,11 +364,20 @@ class CleanupPreflightResponse(BaseModel):
             "linked JobItem is terminal (done/dead)"
         ),
     )
+    zombie_instance_count: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "System-wide count of zombie instances (non-terminal with "
+            "no live work)"
+        ),
+    )
 
     model_config = {
         "json_schema_extra": {
             "example": {
-                "bad_state_count": 2
+                "bad_state_count": 2,
+                "zombie_instance_count": 1,
             }
         }
     }

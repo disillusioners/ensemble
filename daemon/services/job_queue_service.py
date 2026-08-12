@@ -1138,7 +1138,7 @@ class JobQueueService:
         """Cancel ALL non-terminal, non-deleted jobs ("system reset").
 
         Drives the ``POST /api/jobs/cleanup`` endpoint. Splits the work
-        into two buckets so each side uses the right cancellation tool:
+        into five buckets so each side uses the right cancellation tool:
 
         * **queued** — a single batch UPDATE on the JobItem table
           (``admission_state='queued' → 'done'``,
@@ -1152,20 +1152,44 @@ class JobQueueService:
           (lock release → ``_finalize_terminal(Decision.NO_RETRY)`` →
           ``notify_watchers``) so reuse keeps the cleanup semantics
           byte-for-byte identical to a user-initiated single cancel.
+        * **orphan reaper** — force-finalize ``job_type='message'``
+          mirrors whose instance is already terminal or missing (a
+          ghost active row that slipped through the observer feedback
+          path).
+        * **bad-state Tasks** — Tasks stuck in ``paused``/``pending``
+          whose linked JobItem is already terminal; reconciled to
+          ``CANCELLED`` in batch.
+        * **instance reaper** (Bucket 5) — non-terminal ``instances``
+          rows with no live JobItem AND no live Task. These are
+          instances whose work was just cancelled by the prior four
+          buckets but whose own ``status`` did not advance to a
+          terminal value (e.g. orphan reaper case where the
+          ``cancel_job`` cascade did not run, or a crash-after-cancel
+          gap that left the instance stuck in ``running``/``paused``).
+          Each is transitioned to ``TERMINATED`` via
+          :meth:`SQLModelInstanceRepository.transition_status_if`,
+          which is race-safe (``WHERE status IN (:allowed_from)``
+          prevents clobbering a concurrent terminal-state write).
 
         Already-terminal jobs (``admission_state IN ('done', 'dead')``)
-        are left untouched.
+        and instances (``status`` already in the terminal set) are left
+        untouched.
 
         Returns:
-            ``{"cancelled_queued": N, "cancelled_active": M, "total_processed": N + M}``
-            where ``cancelled_queued`` is the batch UPDATE rowcount and
-            ``cancelled_active`` is the number of active-side ``cancel_job``
-            calls that returned ``True``. Per-cancel failures
-            (e.g. a race flipped ``active → done`` mid-iteration) are
-            logged at WARNING and counted as ``0`` — the endpoint still
-            returns successfully with a partial count. Best-effort
-            semantics match the existing single-job :meth:`cancel_job`
-            which also returns ``False`` for non-cancellable states.
+            ``{"cancelled_queued": N, "cancelled_active": M,
+            "orphaned_reaped": G, "reconciled_bad_state": T,
+            "terminated_instances": Z, "total_processed": N + M}``
+            where ``cancelled_queued`` is the batch UPDATE rowcount,
+            ``cancelled_active`` is the number of active-side
+            ``cancel_job`` calls that returned ``True``, and
+            ``terminated_instances`` is the number of zombie instance
+            rows flipped to ``TERMINATED`` by Bucket 5. The
+            ``orphaned_reaped``, ``reconciled_bad_state`` and
+            ``terminated_instances`` counters are excluded from
+            ``total_processed`` because they reconcile / terminate
+            other tables (``job_queue_items`` for orphans,
+            ``task`` for bad-state, ``instances`` for zombies), not
+            the JobItem rows the first two buckets handle.
         """
         # 1) Queued batch — single SQL UPDATE, no per-row logic needed.
         cancelled_queued = await asyncio.to_thread(
@@ -1269,18 +1293,85 @@ class JobQueueService:
                 exc,
             )
 
+        # 5) Instance-Level Reaper — non-terminal ``instances`` rows with
+        # no live JobItem AND no live Task. Runs AFTER buckets 1-4 so
+        # instances whose work was just cancelled by the active-side
+        # ``cancel_job`` cascade get re-evaluated (the cascade terminates
+        # the instance, but a race / partial-cancel / observer-feedback
+        # gap can leave the instance stuck in ``running``/``paused``/
+        # ``idle``/``queued``/``waiting``/``waiting_children`` even though
+        # all of its JobItems and Tasks are gone). The transition goes
+        # through ``transition_status_if`` (race-safe — ``WHERE status IN
+        # (:allowed_from)`` prevents clobbering a concurrent terminal-
+        # state write from another path), and is excluded from
+        # ``total_processed`` (same treatment as ``orphaned_reaped`` and
+        # ``reconciled_bad_state``) because it operates on the
+        # ``instances`` table, not ``job_queue_items``.
+        terminated_instances = 0
+        try:
+            instance_repo = (
+                getattr(self._instance_manager, "_instance_repository", None)
+                if self._instance_manager
+                else None
+            )
+            if instance_repo is not None:
+                zombie_ids = await asyncio.to_thread(
+                    instance_repo.find_zombie_instances
+                )
+                for zid in zombie_ids:
+                    try:
+                        updated = await asyncio.to_thread(
+                            instance_repo.transition_status_if,
+                            zid,
+                            InstanceStatus.TERMINATED.value,
+                            # Allow transition from any non-terminal state
+                            # so the same call covers the full
+                            # ``alive-but-stuck`` set.
+                            (
+                                InstanceStatus.IDLE.value,
+                                InstanceStatus.RUNNING.value,
+                                InstanceStatus.WAITING.value,
+                                InstanceStatus.PAUSED.value,
+                                InstanceStatus.QUEUED.value,
+                                InstanceStatus.WAITING_CHILDREN.value,
+                            ),
+                        )
+                    except Exception as exc:  # noqa: BLE001 — best-effort
+                        logger.warning(
+                            "cleanup_non_terminal_jobs: "
+                            "terminate zombie %s failed: %s",
+                            zid[:8], exc,
+                        )
+                        continue
+                    if updated is not None:
+                        terminated_instances += 1
+                if terminated_instances > 0:
+                    logger.info(
+                        "cleanup_non_terminal_jobs: "
+                        "terminated_instances=%d",
+                        terminated_instances,
+                    )
+        except Exception as exc:  # noqa: BLE001 — best-effort
+            logger.warning(
+                "cleanup_non_terminal_jobs: "
+                "zombie instance reaper failed: %s",
+                exc,
+            )
+
         total = cancelled_queued + cancelled_active
         logger.info(
             "cleanup_non_terminal_jobs: cancelled_queued=%d cancelled_active=%d "
-            "orphaned_reaped=%d reconciled_bad_state=%d total=%d",
+            "orphaned_reaped=%d reconciled_bad_state=%d "
+            "terminated_instances=%d total=%d",
             cancelled_queued, cancelled_active, orphaned_reaped,
-            reconciled_bad_state, total,
+            reconciled_bad_state, terminated_instances, total,
         )
         return {
             "cancelled_queued": cancelled_queued,
             "cancelled_active": cancelled_active,
             "orphaned_reaped": orphaned_reaped,
             "reconciled_bad_state": reconciled_bad_state,
+            "terminated_instances": terminated_instances,
             "total_processed": total,
         }
     

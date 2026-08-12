@@ -565,31 +565,56 @@ async def retry_job(
     "/cleanup/preflight",
     response_model=CleanupPreflightResponse,
     responses={
-        200: {"description": "System-wide bad-state count"},
+        200: {"description": "System-wide bad-state + zombie instance counts"},
         503: {"description": "Service not initialized"},
     },
 )
 async def cleanup_preflight(request: Request):
-    """Return the system-wide bad-state Task count (read-only).
+    """Return system-wide bad-state Task + zombie instance counts (read-only).
 
     "Bad state" = a Task in ``paused``/``pending`` whose linked JobItem
-    is already terminal (``done``/``dead``). This is a pure COUNT query
-    with no writes, so it is intentionally NOT guarded by
-    ``is_write_paused`` (W1 fix): the preflight MUST surface stale rows
-    even during a write pause (database migration), which is precisely
-    when bad-state items accumulate most because the cleanup endpoint
-    itself cannot run.
+    is already terminal (``done``/``dead``).
+
+    "Zombie instance" = an ``instances`` row whose ``status`` is not in
+    the terminal set (``completed``/``error``/``terminated``/``failed``)
+    and which has no live JobItem (``admission_state`` in
+    ``queued``/``active``) and no live Task (``status`` in
+    ``pending``/``running``/``paused``). These instances survived the
+    prior cleanup passes (queued batch + per-row cancel + orphan reaper
+    + bad-state reconciliation) but their own status never advanced to
+    a terminal value, so a Bucket 5 instance reaper is needed to
+    actually terminate them.
+
+    Both counts come from pure COUNT queries with no writes, so the
+    preflight is intentionally NOT guarded by ``is_write_paused`` (W1
+    fix): the preflight MUST surface stale rows even during a write
+    pause (database migration), which is precisely when bad-state /
+    zombie items accumulate most because the cleanup endpoint itself
+    cannot run.
 
     Used by the frontend to render the red-glow + tooltip on the System
     Cleanup button.
     """
     manager = _get_manager(request)
     task_repo = getattr(manager, "_task_repo", None)
-    if task_repo is None:
-        # No task repo available — report zero rather than 500.
-        return CleanupPreflightResponse(bad_state_count=0)
-    count = await asyncio.to_thread(task_repo.count_bad_state_tasks)
-    return CleanupPreflightResponse(bad_state_count=count)
+    instance_repo = getattr(manager, "_instance_repository", None)
+
+    bad_state_count = 0
+    if task_repo is not None:
+        bad_state_count = await asyncio.to_thread(
+            task_repo.count_bad_state_tasks
+        )
+
+    zombie_instance_count = 0
+    if instance_repo is not None:
+        zombie_instance_count = await asyncio.to_thread(
+            instance_repo.count_zombie_instances
+        )
+
+    return CleanupPreflightResponse(
+        bad_state_count=bad_state_count,
+        zombie_instance_count=zombie_instance_count,
+    )
 
 
 @router.post(
@@ -607,7 +632,7 @@ async def cleanup_jobs(
 ):
     """Cancel ALL non-terminal jobs ("system reset" for the job board).
 
-    Splits the work into four buckets so each side uses the right
+    Splits the work into five buckets so each side uses the right
     cancellation tool:
 
     * **queued (PENDING)** -- batch UPDATE: ``admission_state='queued'
@@ -636,18 +661,26 @@ async def cleanup_jobs(
       as ``reconciled_bad_state`` (excluded from ``total_processed``,
       same as ``orphaned_reaped``) because they are Task rows, not
       JobItem rows.
+    * **instance reaper (Bucket 5)** -- non-terminal ``instances`` rows
+      with no live JobItem and no live Task. These are terminated via
+      :meth:`SQLModelInstanceRepository.transition_status_if` (race-
+      safe). Reported as ``terminated_instances`` (excluded from
+      ``total_processed``, same as the other two reaper counters)
+      because it operates on the ``instances`` table, not
+      ``job_queue_items``.
 
     Already-terminal jobs (``admission_state IN ('done', 'dead')``) and
-    soft-deleted rows are left untouched.
+    already-terminal instances (``status IN ('completed', 'error',
+    'terminated', 'failed')``) are left untouched.
 
     Returns:
         200 with :class:`JobCleanupResponse`:
 
         .. code-block:: json
 
-            {"cancelled_queued": N, "cancelled_active": N,
-             "orphaned_reaped": N, "reconciled_bad_state": N,
-             "total_processed": N}
+            {"cancelled_queued": N, "cancelled_active": M,
+             "orphaned_reaped": G, "reconciled_bad_state": T,
+             "terminated_instances": Z, "total_processed": N + M}
 
     Raises:
         503: When writes are paused for migration.

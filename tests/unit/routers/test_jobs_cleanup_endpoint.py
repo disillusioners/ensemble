@@ -86,27 +86,31 @@ class TestCleanupEndpointRegistration:
         )
         assert cleanup_route.response_model is JobCleanupResponse
 
-    def test_job_cleanup_response_schema_has_four_counters(self):
-        """The response schema must carry exactly the five contract fields.
+    def test_job_cleanup_response_schema_has_six_counters(self):
+        """The response schema must carry exactly the six contract fields.
 
         Counter contract (Phase 2 — System Cleanup reaper; Phase 4 —
-        bad-state Task reconciliation):
+        bad-state Task reconciliation; Phase 5 — instance-level reaper):
 
-          * ``cancelled_queued``   — batch-UPDATE PENDING rows
-          * ``cancelled_active``   — per-row cancel cascade (PROCESSING)
-          * ``orphaned_reaped``    — force-finalized ghost active rows
-                                     (Phase 2 of the System Cleanup
-                                     button — instance gone but
-                                     ``admission_state='active'``).
+          * ``cancelled_queued``     — batch-UPDATE PENDING rows
+          * ``cancelled_active``     — per-row cancel cascade (PROCESSING)
+          * ``orphaned_reaped``      — force-finalized ghost active rows
+                                       (Phase 2 of the System Cleanup
+                                       button — instance gone but
+                                       ``admission_state='active'``).
           * ``reconciled_bad_state`` — bad-state Tasks (paused/pending
                                        with terminal JobItem) reconciled
                                        to CANCELLED (Phase 4).
-          * ``total_processed``    — sum of the first two only.
+          * ``terminated_instances`` — non-terminal instances with no
+                                       live work transitioned to
+                                       TERMINATED by the Bucket 5
+                                       instance-level reaper.
+          * ``total_processed``      — sum of the first two only.
 
-        ``orphaned_reaped`` and ``reconciled_bad_state`` are kept OUT of
-        the ``total_processed`` invariant so existing operator dashboards
-        / tests that sum only the first two counters continue to
-        reconcile.
+        ``orphaned_reaped``, ``reconciled_bad_state`` and
+        ``terminated_instances`` are kept OUT of the ``total_processed``
+        invariant so existing operator dashboards / tests that sum
+        only the first two counters continue to reconcile.
         """
         from daemon.routers.schemas import JobCleanupResponse
 
@@ -116,6 +120,7 @@ class TestCleanupEndpointRegistration:
             "cancelled_active",
             "orphaned_reaped",
             "reconciled_bad_state",
+            "terminated_instances",
             "total_processed",
         }
 
@@ -175,6 +180,7 @@ class TestCleanupNonTerminalJobsService:
             "cancelled_active": 0,
             "orphaned_reaped": 0,
             "reconciled_bad_state": 0,
+            "terminated_instances": 0,
             "total_processed": 7,
         }
 
@@ -207,6 +213,7 @@ class TestCleanupNonTerminalJobsService:
             "cancelled_active": 2,
             "orphaned_reaped": 0,
             "reconciled_bad_state": 0,
+            "terminated_instances": 0,
             "total_processed": 4,
         }
 
@@ -236,6 +243,7 @@ class TestCleanupNonTerminalJobsService:
             "cancelled_active": 2,
             "orphaned_reaped": 0,
             "reconciled_bad_state": 0,
+            "terminated_instances": 0,
             "total_processed": 2,
         }
 
@@ -268,6 +276,7 @@ class TestCleanupNonTerminalJobsService:
             "cancelled_active": 2,
             "orphaned_reaped": 0,
             "reconciled_bad_state": 0,
+            "terminated_instances": 0,
             "total_processed": 3,
         }
 
@@ -332,6 +341,7 @@ class TestCleanupNonTerminalJobsService:
             "cancelled_active": 0,
             "orphaned_reaped": 2,
             "reconciled_bad_state": 0,
+            "terminated_instances": 0,
             "total_processed": 0,
         }
 
@@ -369,8 +379,182 @@ class TestCleanupNonTerminalJobsService:
             "cancelled_active": 0,
             "orphaned_reaped": 0,
             "reconciled_bad_state": 0,
+            "terminated_instances": 0,
             "total_processed": 2,
         }
+
+    # ----------------------------------------------------------
+    # Phase 5 — Bucket 5: instance-level reaper
+    # ----------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_cleanup_terminates_zombie_instances(self):
+        """Non-terminal instances with no live work are transitioned to
+        ``TERMINATED`` via :meth:`SQLModelInstanceRepository.transition_status_if`.
+
+        Setup:
+
+        * No queued / active jobs to cancel (queued batch returns 0,
+          ``find_active_jobs`` is empty).
+        * ``find_zombie_instances`` returns two ids; ``transition_status_if``
+          is stubbed to return a non-``None`` instance for both — the
+          race-safe transition succeeded.
+
+        Asserts:
+
+        * ``result["terminated_instances"] == 2`` — both zombies reaped.
+        * ``result["total_processed"] == 0`` — Bucket 5 is excluded from
+          the invariant (same treatment as ``orphaned_reaped`` and
+          ``reconciled_bad_state``).
+        * ``transition_status_if`` is called for each zombie id.
+        """
+        from daemon.services.job_queue_service import JobQueueService
+
+        service = JobQueueService.__new__(JobQueueService)
+        repo = MagicMock()
+        repo.batch_cancel_queued = MagicMock(return_value=0)
+        repo.find_active_jobs = MagicMock(return_value=[])
+        service._repository = repo
+
+        # Wire up a stubbed ``_instance_manager`` so the Bucket 5
+        # reaper sees a real instance repo to call.
+        instance_repo = MagicMock()
+        instance_repo.find_zombie_instances = MagicMock(
+            return_value=["zombie-A", "zombie-B"]
+        )
+        instance_repo.transition_status_if = MagicMock(
+            side_effect=[
+                SimpleNamespace(instance_id="zombie-A"),
+                SimpleNamespace(instance_id="zombie-B"),
+            ]
+        )
+        manager = MagicMock()
+        manager._instance_repository = instance_repo
+        service._instance_manager = manager
+
+        result = await service.cleanup_non_terminal_jobs()
+
+        # Both zombies reaped.
+        assert result["terminated_instances"] == 2
+        # Bucket 5 is excluded from ``total_processed``.
+        assert result["total_processed"] == 0
+        # The repo method was queried for the zombie set and the
+        # race-safe transition was attempted for each id.
+        instance_repo.find_zombie_instances.assert_called_once_with()
+        assert instance_repo.transition_status_if.call_count == 2
+        called_ids = [
+            call.args[0]
+            for call in instance_repo.transition_status_if.call_args_list
+        ]
+        assert called_ids == ["zombie-A", "zombie-B"]
+        # The new status argument is ``TERMINATED`` (the bucket's
+        # contractual target state) and the ``allowed_from`` tuple
+        # covers every non-terminal ``InstanceStatus`` value the
+        # reaper is allowed to clobber.
+        for call in instance_repo.transition_status_if.call_args_list:
+            assert call.args[1] == "terminated"
+            assert "idle" in call.args[2]
+            assert "running" in call.args[2]
+            assert "paused" in call.args[2]
+            assert "queued" in call.args[2]
+            assert "waiting" in call.args[2]
+            assert "waiting_children" in call.args[2]
+
+    @pytest.mark.asyncio
+    async def test_cleanup_skips_zombies_whose_transition_loses_race(self):
+        """A ``transition_status_if`` that returns ``None`` (the row was
+        already terminal at the moment of the UPDATE) must NOT be
+        counted as ``terminated_instances``. The race-safe transition
+        does not clobber the terminal state, so the reaper is
+        best-effort: it counts the row only when the transition
+        actually flipped the status.
+        """
+        from daemon.services.job_queue_service import JobQueueService
+
+        service = JobQueueService.__new__(JobQueueService)
+        repo = MagicMock()
+        repo.batch_cancel_queued = MagicMock(return_value=0)
+        repo.find_active_jobs = MagicMock(return_value=[])
+        service._repository = repo
+
+        instance_repo = MagicMock()
+        instance_repo.find_zombie_instances = MagicMock(
+            return_value=["winner", "loser", "winner2"]
+        )
+        # First call wins, second loses (returns None), third wins.
+        instance_repo.transition_status_if = MagicMock(
+            side_effect=[
+                SimpleNamespace(instance_id="winner"),
+                None,
+                SimpleNamespace(instance_id="winner2"),
+            ]
+        )
+        manager = MagicMock()
+        manager._instance_repository = instance_repo
+        service._instance_manager = manager
+
+        result = await service.cleanup_non_terminal_jobs()
+
+        # The ``loser`` row dropped out of the count.
+        assert result["terminated_instances"] == 2
+        # All three candidates were attempted.
+        assert instance_repo.transition_status_if.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_cleanup_continues_when_terminate_zombie_raises(self):
+        """An exception raised by ``transition_status_if`` for a single
+        zombie must NOT abort the loop. The next zombie still runs and
+        the final count reflects only the successful transitions.
+
+        Outer-try: a failure in ``find_zombie_instances`` itself must
+        be swallowed too — the bucket must never break the main
+        cleanup counters.
+        """
+        from daemon.services.job_queue_service import JobQueueService
+
+        service = JobQueueService.__new__(JobQueueService)
+        repo = MagicMock()
+        repo.batch_cancel_queued = MagicMock(return_value=0)
+        repo.find_active_jobs = MagicMock(return_value=[])
+        service._repository = repo
+
+        instance_repo = MagicMock()
+        instance_repo.find_zombie_instances = MagicMock(
+            side_effect=RuntimeError("simulated zombie scan failure")
+        )
+        manager = MagicMock()
+        manager._instance_repository = instance_repo
+        service._instance_manager = manager
+
+        result = await service.cleanup_non_terminal_jobs()
+
+        # Outer-try swallowed the find failure; counter is 0.
+        assert result["terminated_instances"] == 0
+
+    @pytest.mark.asyncio
+    async def test_cleanup_without_instance_manager_does_not_crash(self):
+        """When ``_instance_manager`` is ``None`` (e.g. during very
+        early daemon startup, or in a unit test that never wires an
+        instance manager), Bucket 5 must be a no-op. The main
+        counters still report so the endpoint is not broken.
+        """
+        from daemon.services.job_queue_service import JobQueueService
+
+        service = JobQueueService.__new__(JobQueueService)
+        repo = MagicMock()
+        repo.batch_cancel_queued = MagicMock(return_value=1)
+        repo.find_active_jobs = MagicMock(return_value=[])
+        service._repository = repo
+        # ``_instance_manager`` left unset — the bucket's outer
+        # ``if self._instance_manager`` guard skips it.
+        # (use a sentinel: explicitly None)
+        service._instance_manager = None
+
+        result = await service.cleanup_non_terminal_jobs()
+
+        assert result["cancelled_queued"] == 1
+        assert result["terminated_instances"] == 0
+        assert result["total_processed"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -433,6 +617,7 @@ class TestCleanupJobsEndpoint:
             "cancelled_active": 2,
             "orphaned_reaped": 0,
             "reconciled_bad_state": 0,
+            "terminated_instances": 0,
             "total_processed": 6,
         }
         service.cleanup_non_terminal_jobs.assert_awaited_once_with()
@@ -465,6 +650,7 @@ class TestCleanupJobsEndpoint:
             "cancelled_active": 0,
             "orphaned_reaped": 3,
             "reconciled_bad_state": 0,
+            "terminated_instances": 0,
             "total_processed": 1,
         }
 
@@ -529,6 +715,193 @@ class TestCleanupJobsEndpoint:
         ):
             response = cleanup_client.post("/jobs/cleanup")
         assert response.status_code == 503
+
+    def test_cleanup_includes_terminated_instances_when_set(
+        self, cleanup_client
+    ):
+        """``terminated_instances`` is surfaced in the response when
+        the Bucket 5 instance reaper flipped non-terminal instances
+        to ``TERMINATED``. ``total_processed`` stays pinned to
+        ``cancelled_queued + cancelled_active`` so dashboards keyed
+        off that single number do not silently jump when the
+        instance reaper succeeds.
+        """
+        from daemon.routers.jobs_crud import get_job_queue_service
+
+        service = self._stub_service(
+            {
+                "cancelled_queued": 1,
+                "cancelled_active": 0,
+                "orphaned_reaped": 0,
+                "reconciled_bad_state": 0,
+                "terminated_instances": 2,
+                "total_processed": 1,
+            }
+        )
+        get_job_queue_service.set_service(service)
+
+        response = cleanup_client.post("/jobs/cleanup")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body == {
+            "cancelled_queued": 1,
+            "cancelled_active": 0,
+            "orphaned_reaped": 0,
+            "reconciled_bad_state": 0,
+            "terminated_instances": 2,
+            "total_processed": 1,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Group 3b — Schema invariants (Phase 5: terminated_instances)
+# ---------------------------------------------------------------------------
+
+
+class TestJobCleanupResponseInvariant:
+    """Pin the ``validate_total_processed`` invariant in the presence
+    of the new ``terminated_instances`` counter.
+
+    The bucket is excluded from ``total_processed`` (same as
+    ``orphaned_reaped`` and ``reconciled_bad_state``), so a payload
+    with ``terminated_instances=5`` and ``total_processed=3`` must
+    validate as long as ``cancelled_queued + cancelled_active == 3``.
+    """
+
+    def test_terminated_instances_excluded_from_total(self):
+        from daemon.routers.schemas import JobCleanupResponse
+
+        response = JobCleanupResponse(
+            cancelled_queued=2,
+            cancelled_active=1,
+            orphaned_reaped=0,
+            reconciled_bad_state=0,
+            terminated_instances=5,
+            total_processed=3,
+        )
+        # Invariant still holds: 2 + 1 == 3.
+        assert response.total_processed == 3
+        assert response.terminated_instances == 5
+
+    def test_terminated_instances_invariant_fails_when_total_mismatches(self):
+        """The ``validate_total_processed`` check must STILL fail when
+        the caller accidentally sums ``terminated_instances`` into the
+        total. Pinning this catches future refactors that try to
+        re-include the new counter.
+        """
+        from pydantic import ValidationError
+
+        from daemon.routers.schemas import JobCleanupResponse
+
+        with pytest.raises(ValidationError):
+            JobCleanupResponse(
+                cancelled_queued=2,
+                cancelled_active=1,
+                terminated_instances=5,
+                # Wrong: caller double-counted terminated_instances.
+                total_processed=8,
+            )
+
+
+# ---------------------------------------------------------------------------
+# Group 3c — Preflight endpoint: /jobs/cleanup/preflight
+# ---------------------------------------------------------------------------
+
+
+class TestCleanupPreflightEndpoint:
+    """Pin the read-only preflight that surfaces both the bad-state
+    Task count and the zombie-instance count so the frontend can
+    render the red-glow + tooltip on the System Cleanup button.
+    """
+
+    @pytest.fixture
+    def preflight_app(self):
+        """FastAPI app with the management router. Each test sets
+        its own ``app.state.manager`` so the test body controls
+        the dependency that the endpoint resolves."""
+        app = FastAPI()
+        from daemon.routers.jobs_management import router as management_router
+
+        app.include_router(management_router)
+        yield app
+
+    def test_preflight_returns_zero_counts_when_manager_lacks_repos(
+        self, preflight_app
+    ):
+        """When the manager exposes neither ``_task_repo`` nor
+        ``_instance_repository`` (e.g. very early boot), the
+        preflight returns zero for both counters rather than 500.
+        """
+        manager = MagicMock(spec=[])  # no ``_task_repo`` / ``_instance_repository``
+        preflight_app.state.manager = manager
+        with TestClient(preflight_app) as client:
+            response = client.get("/jobs/cleanup/preflight")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body == {
+            "bad_state_count": 0,
+            "zombie_instance_count": 0,
+        }
+
+    def test_preflight_returns_both_counts_when_repos_available(
+        self, preflight_app
+    ):
+        """When both ``_task_repo`` and ``_instance_repository`` are
+        available on the manager, the preflight invokes
+        ``count_bad_state_tasks`` and ``count_zombie_instances``
+        and surfaces both counts in the response.
+        """
+        task_repo = MagicMock()
+        task_repo.count_bad_state_tasks = MagicMock(return_value=7)
+        instance_repo = MagicMock()
+        instance_repo.count_zombie_instances = MagicMock(return_value=3)
+
+        manager = MagicMock()
+        manager._task_repo = task_repo
+        manager._instance_repository = instance_repo
+        preflight_app.state.manager = manager
+
+        with TestClient(preflight_app) as client:
+            response = client.get("/jobs/cleanup/preflight")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body == {
+            "bad_state_count": 7,
+            "zombie_instance_count": 3,
+        }
+        # Both repos were queried — the endpoint does not short-circuit
+        # after the first one.
+        task_repo.count_bad_state_tasks.assert_called_once_with()
+        instance_repo.count_zombie_instances.assert_called_once_with()
+
+    def test_preflight_zombie_count_independent_of_task_repo(
+        self, preflight_app
+    ):
+        """The ``zombie_instance_count`` path must run even when
+        ``_task_repo`` is missing (or raises). Pinning the per-counter
+        isolation so a task-repo outage cannot blind the operator to
+        zombie instances.
+        """
+        instance_repo = MagicMock()
+        instance_repo.count_zombie_instances = MagicMock(return_value=4)
+
+        manager = MagicMock()
+        # No ``_task_repo`` attribute.
+        del manager._task_repo
+        manager._instance_repository = instance_repo
+        preflight_app.state.manager = manager
+
+        with TestClient(preflight_app) as client:
+            response = client.get("/jobs/cleanup/preflight")
+
+        assert response.status_code == 200
+        body = response.json()
+        # Task count falls back to 0; zombie count is real.
+        assert body["bad_state_count"] == 0
+        assert body["zombie_instance_count"] == 4
 
 
 # ---------------------------------------------------------------------------
@@ -743,3 +1116,223 @@ class TestRepositoryPrimitives:
         # touch the row.
         msg_row = repo.get(active_message.job_id)
         assert msg_row.admission_state == AdmissionState.ACTIVE.value
+
+
+# ---------------------------------------------------------------------------
+# Group 4b — Repository primitives (find_zombie_instances,
+#                              count_zombie_instances) — Phase 5
+# ---------------------------------------------------------------------------
+
+
+class TestInstanceRepositoryZombieScan:
+    """Pin the two Phase 5 repository methods that drive Bucket 5 of
+    the System Cleanup pipeline.
+
+    Using real SQLite (StaticPool) so SQL semantics match production;
+    the SQL guard is the race-safety boundary on both dialects.
+    """
+
+    @pytest.fixture
+    def engine(self):
+        from sqlalchemy import create_engine
+        from sqlalchemy.pool import StaticPool
+        from sqlmodel import SQLModel
+
+        eng = create_engine(
+            "sqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        SQLModel.metadata.create_all(eng)
+        yield eng
+        eng.dispose()
+
+    @pytest.fixture
+    def repo(self, engine):
+        from daemon.repositories.instance.repository import (
+            SQLModelInstanceRepository,
+        )
+
+        return SQLModelInstanceRepository(engine)
+
+    @pytest.fixture
+    def task_repo(self, engine):
+        from daemon.repositories.task.repository import TaskRepository
+
+        return TaskRepository(engine)
+
+    @pytest.fixture
+    def job_repo(self, engine):
+        from daemon.repositories.job_queue.repository import JobRepository
+
+        return JobRepository(engine)
+
+    def _create_instance(
+        self, repo, instance_id: str = "inst-1", status: str = "running",
+        project_id: str = "test-project",
+    ):
+        """Create an instance row directly via the SQLModel session.
+
+        Bypasses the higher-level ``create`` path so tests can pin the
+        ``status`` field without orchestrating a full lifecycle.
+        """
+        from sqlmodel import Session as SQLModelSession
+
+        from daemon.repositories.instance.models import Instance
+
+        with SQLModelSession(repo.engine) as session:
+            inst = Instance(
+                instance_id=instance_id,
+                project_id=project_id,
+                agent_id="tester",
+                agent_dir="/tmp/tester",
+                agent_name="Tester",
+                status=status,
+            )
+            session.add(inst)
+            session.commit()
+
+    def _create_task(
+        self, task_repo, instance_id: str, status: str = "running",
+    ):
+        from daemon.repositories.task.models import Task, TaskStatus
+
+        # Map the strings to the TaskStatus enum so the test uses the
+        # same surface as the production code path.
+        status_enum = TaskStatus(status)
+        task = Task(
+            instance_id=instance_id,
+            agent_id="tester",
+            agent_dir="/tmp/tester",
+            status=status_enum.value,
+        )
+        from sqlmodel import Session as SQLModelSession
+
+        with SQLModelSession(task_repo.engine) as session:
+            session.add(task)
+            session.commit()
+
+    def _create_job(
+        self, job_repo, instance_id: str,
+        admission_state: str = "active",
+    ):
+        from sqlmodel import Session as SQLModelSession
+
+        from daemon.repositories.job_queue.models import JobItem
+
+        with SQLModelSession(job_repo.engine) as session:
+            job = JobItem(
+                agent_id="tester",
+                agent_dir="/tmp/tester",
+                message="hello",
+                source="api",
+                project_id="test-project",
+                priority=5,
+                instance_id=instance_id,
+                admission_state=admission_state,
+            )
+            session.add(job)
+            session.commit()
+
+    def test_find_zombie_instances_returns_empty_when_none(
+        self, repo, task_repo, job_repo
+    ):
+        """No instances -> empty list. Sanity baseline."""
+        assert repo.find_zombie_instances() == []
+
+    def test_find_zombie_instances_excludes_terminal_statuses(
+        self, repo, task_repo, job_repo
+    ):
+        """Already-terminal instances (any of completed / error /
+        terminated / failed) MUST NOT be in the result. The
+        reaper only acts on the non-terminal set."""
+        for terminal in ("completed", "error", "terminated", "failed"):
+            self._create_instance(
+                repo,
+                instance_id=f"inst-{terminal}",
+                status=terminal,
+            )
+        # No live JobItem or Task is needed for terminal instances —
+        # the status filter alone is sufficient.
+
+        result = repo.find_zombie_instances()
+
+        assert result == []
+
+    def test_find_zombie_instances_excludes_instances_with_active_jobitem(
+        self, repo, task_repo, job_repo
+    ):
+        """An instance with a live (queued/active) JobItem is NOT a
+        zombie — the JobItem is doing real work."""
+        self._create_instance(
+            repo, instance_id="inst-busy", status="running"
+        )
+        self._create_job(job_repo, instance_id="inst-busy",
+                         admission_state="active")
+
+        result = repo.find_zombie_instances()
+
+        assert result == []
+
+    def test_find_zombie_instances_excludes_instances_with_live_task(
+        self, repo, task_repo, job_repo
+    ):
+        """An instance with a live (pending/running/paused) Task is
+        NOT a zombie — the Task is doing real work."""
+        self._create_instance(
+            repo, instance_id="inst-task-busy", status="running"
+        )
+        self._create_task(task_repo, instance_id="inst-task-busy",
+                          status="running")
+
+        result = repo.find_zombie_instances()
+
+        assert result == []
+
+    def test_find_zombie_instances_returns_only_true_zombies(
+        self, repo, task_repo, job_repo
+    ):
+        """A true zombie is: non-terminal status, no live JobItem,
+        no live Task. Returned instances must match the SQL predicate
+        exactly."""
+        # True zombies — should be returned.
+        self._create_instance(
+            repo, instance_id="zombie-A", status="running"
+        )
+        self._create_instance(
+            repo, instance_id="zombie-B", status="paused"
+        )
+        # Live instance — must NOT be returned.
+        self._create_instance(
+            repo, instance_id="alive", status="running"
+        )
+        self._create_job(job_repo, instance_id="alive",
+                         admission_state="queued")
+        # Terminal instance — must NOT be returned.
+        self._create_instance(
+            repo, instance_id="done", status="completed"
+        )
+
+        result = repo.find_zombie_instances()
+
+        assert sorted(result) == ["zombie-A", "zombie-B"]
+
+    def test_count_zombie_instances_matches_find(
+        self, repo, task_repo, job_repo
+    ):
+        """``count_zombie_instances`` must agree with
+        ``len(find_zombie_instances())`` for the same DB state."""
+        self._create_instance(
+            repo, instance_id="z1", status="running"
+        )
+        self._create_instance(
+            repo, instance_id="z2", status="paused"
+        )
+        self._create_instance(
+            repo, instance_id="terminal", status="completed"
+        )
+
+        find_result = repo.find_zombie_instances()
+        count_result = repo.count_zombie_instances()
+
+        assert len(find_result) == count_result == 2

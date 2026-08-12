@@ -129,6 +129,16 @@ export class JobsComponent implements OnInit, OnDestroy {
   readonly badStateCount = signal<number>(0);
   readonly hasBadState = computed(() => this.badStateCount() > 0);
 
+  // Phase 5 — system-wide zombie-instance count from the same
+  // preflight endpoint. Parallel to ``badStateCount`` and surfaced in
+  // the confirm dialog + snackbar so the operator knows how many
+  // non-terminal instances (with no live work) the cleanup is about
+  // to terminate.
+  readonly zombieInstanceCount = signal<number>(0);
+  readonly hasZombieInstances = computed(
+    () => this.zombieInstanceCount() > 0
+  );
+
   // Deleted jobs filter
   readonly showDeleted = signal(false);
 
@@ -491,16 +501,26 @@ export class JobsComponent implements OnInit, OnDestroy {
    * the badge keeps surfacing stale rows during database migrations
    * when the cleanup itself is blocked.
    *
+   * Phase 5 — the preflight now also returns ``zombie_instance_count``
+   * (parallel to ``bad_state_count``) which the confirm dialog uses to
+   * surface a separate instance-termination warning.
+   *
    * Errors are intentionally swallowed — the red-glow + tooltip are
    * UX-only and a transient preflight failure should not surface as
    * a snackbar to the operator.
    */
   private refreshBadStateCount(): void {
     firstValueFrom(
-      this.http.get<{ bad_state_count: number }>('/api/jobs/cleanup/preflight')
+      this.http.get<{
+        bad_state_count: number;
+        zombie_instance_count: number;
+      }>('/api/jobs/cleanup/preflight')
     )
       .then((result) => {
         this.badStateCount.set(result.bad_state_count);
+        this.zombieInstanceCount.set(
+          result.zombie_instance_count ?? 0
+        );
       })
       .catch(() => {
         // Fail silently — badge is UX-only.
@@ -993,9 +1013,15 @@ export class JobsComponent implements OnInit, OnDestroy {
       panelClass: 'dark-modal-panel',
       // Phase 4 — surface the bad-state preflight count in the
       // confirmation dialog so the operator sees a warning before
-      // committing to a full system cleanup. The dialog component
-      // is responsible for the conditional rendering.
-      data: { bad_state_count: this.badStateCount() },
+      // committing to a full system cleanup. Phase 5 — also surface
+      // the zombie-instance count so the operator sees how many
+      // non-terminal instances (with no live work) are about to be
+      // terminated. The dialog component is responsible for the
+      // conditional rendering.
+      data: {
+        bad_state_count: this.badStateCount(),
+        zombie_instance_count: this.zombieInstanceCount(),
+      },
     });
 
     dialogRef.afterClosed().subscribe((confirmed: boolean | undefined) => {
@@ -1008,12 +1034,14 @@ export class JobsComponent implements OnInit, OnDestroy {
           this.cleanupInProgress.set(false);
           const orphaned = result.orphaned_reaped ?? 0;
           const reconciled = result.reconciled_bad_state ?? 0;
+          const terminated = result.terminated_instances ?? 0;
           const parts: string[] = [
             `Cancelled ${result.cancelled_queued} queued`,
             `${result.cancelled_active} active`,
           ];
           if (orphaned > 0) parts.push(`${orphaned} orphaned`);
           if (reconciled > 0) parts.push(`${reconciled} bad-state`);
+          if (terminated > 0) parts.push(`${terminated} instances terminated`);
           this.snackBar.open(
             `${parts.join(', ')} jobs`,
             'Close',

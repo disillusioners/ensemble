@@ -27,6 +27,14 @@ export interface JobCleanupResult {
    * ``validate_total_processed`` invariant.
    */
   reconciled_bad_state?: number;
+  /**
+   * Bucket 5 — number of zombie instances (non-terminal with no live
+   * work) terminated by the cleanup pass. Excluded from
+   * ``total_processed`` for the same reason ``orphaned_reaped`` and
+   * ``reconciled_bad_state`` are — it operates on the ``instances``
+   * table, not ``job_queue_items``.
+   */
+  terminated_instances?: number;
   total_processed: number;
 }
 

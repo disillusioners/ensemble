@@ -779,6 +779,149 @@ class SQLModelInstanceRepository:
         """
         return self.set_metadata(instance_id, "title", title)
 
+    # --------------------------------------------------------
+    # ZOMBIE-INSTANCE SCAN — System Cleanup Bucket 5
+    # --------------------------------------------------------
+
+    # Terminal ``InstanceStatus`` values that mark an instance as already
+    # dead (``completed``, ``error``, ``terminated``, ``failed``). The
+    # value set is duplicated here as a frozen tuple of strings (rather
+    # than re-derived from :class:`InstanceStatus`) so the SQL template
+    # stays a plain ``NOT IN (,,,)`` predicate with bound parameters,
+    # matching the :meth:`count_bad_state_tasks` pattern.
+    _TERMINAL_STATUSES_FOR_ZOMBIE_SCAN: tuple[str, ...] = (
+        "completed",
+        "error",
+        "terminated",
+        "failed",
+    )
+
+    # Statuses that mark a Task as "still in flight" for the purpose of
+    # the zombie-instance scan. ``pending``/``running``/``paused`` mirror
+    # the bad-state reconciliation set; a Task in any of these is enough
+    # to consider the instance alive.
+    _LIVE_TASK_STATUSES_FOR_ZOMBIE_SCAN: tuple[str, ...] = (
+        "pending",
+        "running",
+        "paused",
+    )
+
+    # Admission states on ``job_queue_items`` that mean the JobItem is
+    # still doing real work (``queued`` = PENDING, ``active`` = PROCESSING).
+    # Rows in ``done``/``dead`` (or soft-deleted) are excluded because
+    # they are not live work.
+    _LIVE_JOBITEM_STATES_FOR_ZOMBIE_SCAN: tuple[str, ...] = (
+        "queued",
+        "active",
+    )
+
+    def _build_zombie_scan_sql(self, count_only: bool) -> Any:
+        """Return the raw-SQL ``text()`` statement for the zombie scan.
+
+        A "zombie instance" is one whose ``instances.status`` is NOT in
+        the terminal set AND has no live JobItem AND no live Task.
+        Implemented as two ``NOT IN (SELECT DISTINCT ...)`` anti-joins
+        instead of ``NOT EXISTS`` because we need ``SELECT DISTINCT`` on
+        the instance_id (Task and JobItem may have multiple rows per
+        instance) and ``NOT IN`` keeps the SQL trivially portable between
+        PostgreSQL and SQLite.
+
+        Args:
+            count_only: When True, return a ``COUNT(DISTINCT)`` statement;
+                otherwise return a row-level ``SELECT i.instance_id``
+                statement.
+
+        Returns:
+            A :class:`sqlalchemy.sql.expression.TextClause` ready to be
+            executed with the standard bound-parameter dict.
+        """
+        if count_only:
+            select_clause = "SELECT COUNT(DISTINCT i.instance_id)"
+        else:
+            select_clause = "SELECT i.instance_id"
+        # NOTE: terminal / live sets are baked into the SQL string as
+        # literal lists (not bound parameters) because SQLAlchemy's
+        # ``expanding`` parameter style is dialect-fragile on SQLite
+        # when used inside ``NOT IN (...)``. The lists are short,
+        # closed, and defined as class-level tuples above, so baking is
+        # safe and avoids the expanding-param issue.
+        terminal_csv = ", ".join(
+            f"'{s}'" for s in self._TERMINAL_STATUSES_FOR_ZOMBIE_SCAN
+        )
+        live_task_csv = ", ".join(
+            f"'{s}'" for s in self._LIVE_TASK_STATUSES_FOR_ZOMBIE_SCAN
+        )
+        live_jobitem_csv = ", ".join(
+            f"'{s}'" for s in self._LIVE_JOBITEM_STATES_FOR_ZOMBIE_SCAN
+        )
+        return text(f"""
+            {select_clause} FROM instances i
+            WHERE i.status NOT IN ({terminal_csv})
+              AND i.instance_id NOT IN (
+                SELECT DISTINCT jqi.instance_id FROM job_queue_items jqi
+                WHERE jqi.admission_state IN ({live_jobitem_csv})
+                  AND jqi.deleted_at IS NULL
+              )
+              AND i.instance_id NOT IN (
+                SELECT DISTINCT t.instance_id FROM task t
+                WHERE t.status IN ({live_task_csv})
+              )
+        """)
+
+    def find_zombie_instances(self) -> list[str]:
+        """Return ``instance_id`` strings for non-terminal instances with no live work.
+
+        A "zombie instance" is one whose ``instances.status`` is NOT in
+        the terminal set (``completed``, ``error``, ``terminated``,
+        ``failed``) AND has:
+
+        * no active/queued ``job_queue_items`` rows
+          (``admission_state IN ('queued','active')``,
+          ``deleted_at IS NULL``), and
+        * no pending/running/paused ``task`` rows.
+
+        Used by the System Cleanup endpoint's Bucket 5 (instance-level
+        reaper) to terminate the leftover non-terminal instance rows
+        that no longer have any live work driving them. Without this
+        bucket, an instance whose last Task was cancelled and whose last
+        JobItem was finalised can stay in ``running``/``paused``/``idle``
+        forever, blocking the operator from a clean reset and
+        inflating dashboard counters.
+
+        Self-contained SYNC method using raw-SQL ``text()`` — runs
+        inside the calling thread's event-loop wrapper
+        (``asyncio.to_thread`` on the consumer side). The SQL is plain
+        ``NOT IN (SELECT DISTINCT ...)`` anti-joins so it works on both
+        PostgreSQL and SQLite without dialect-specific syntax.
+
+        Returns:
+            List of ``instance_id`` strings that should be terminated.
+        """
+        stmt = self._build_zombie_scan_sql(count_only=False)
+        with self.engine.begin() as conn:
+            rows = conn.execute(stmt).fetchall()
+        return [row[0] for row in rows if row and row[0] is not None]
+
+    def count_zombie_instances(self) -> int:
+        """System-wide count of zombie instances (see :meth:`find_zombie_instances`).
+
+        Same predicate as :meth:`find_zombie_instances` but returns
+        ``COUNT(DISTINCT i.instance_id)`` so the preflight endpoint can
+        surface a single number for the frontend badge/tooltip without
+        paying the cost of hydrating every matching row.
+
+        Self-contained SYNC method using raw-SQL ``text()`` — the
+        preflight wraps it in ``asyncio.to_thread`` to keep the request
+        non-blocking.
+
+        Returns:
+            Count of non-terminal instances with no live work.
+        """
+        stmt = self._build_zombie_scan_sql(count_only=True)
+        with self.engine.begin() as conn:
+            row = conn.execute(stmt).fetchone()
+        return int(row[0]) if row else 0
+
     def find_instances_with_metadata_key(
         self, key: str, value: Any
     ) -> list[Instance]:

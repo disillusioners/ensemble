@@ -10,9 +10,15 @@ import { MatButtonModule } from '@angular/material/button';
  * full system cleanup. ``bad_state_count`` is optional for backward
  * compatibility with any existing call site that opens the dialog
  * without a payload.
+ *
+ * Phase 5 — ``zombie_instance_count`` carries the parallel count of
+ * non-terminal instances with no live work that the cleanup is about
+ * to terminate. Both counts default to undefined and the dialog
+ * renders a warning block only when the value is > 0.
  */
 export interface SystemCleanupConfirmData {
   bad_state_count?: number;
+  zombie_instance_count?: number;
   // Reserved for future use (e.g. pending counts passed in by caller).
 }
 
@@ -35,7 +41,8 @@ export interface SystemCleanupConfirmData {
   imports: [MatDialogModule, MatButtonModule],
   styles: [
     `
-      .bad-state-warning {
+      .bad-state-warning,
+      .zombie-warning {
         color: #f43f5e;
         margin-top: 12px;
         font-weight: 500;
@@ -45,10 +52,20 @@ export interface SystemCleanupConfirmData {
   template: `
     <h2 mat-dialog-title>System Cleanup</h2>
     <div mat-dialog-content>
-      <p>This will cancel ALL pending and running jobs across ALL projects. This action cannot be undone. Continue?</p>
+      <p>
+        This will cancel ALL pending and running jobs AND terminate ALL
+        non-terminal instances across ALL projects. This action cannot
+        be undone. Continue?
+      </p>
       @if (data.bad_state_count && data.bad_state_count > 0) {
         <p class="bad-state-warning">
           ⚠ {{ data.bad_state_count }} bad-state tasks will be reconciled.
+        </p>
+      }
+      @if (data.zombie_instance_count && data.zombie_instance_count > 0) {
+        <p class="zombie-warning">
+          ⚠ {{ data.zombie_instance_count }} non-terminal instances with no
+          live work will be terminated.
         </p>
       }
     </div>
