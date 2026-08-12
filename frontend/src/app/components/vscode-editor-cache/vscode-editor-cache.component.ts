@@ -231,6 +231,7 @@ export class VsCodeEditorCacheComponent implements OnDestroy {
     for (const [key, ref] of this._cache) {
       const host = ref.location.nativeElement as HTMLElement;
       host.style.display = key === activePid ? 'block' : 'none';
+      host.style.height = key === activePid ? '100%' : '';
     }
   }
 

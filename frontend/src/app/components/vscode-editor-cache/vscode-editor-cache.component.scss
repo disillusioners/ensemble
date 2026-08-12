@@ -1,3 +1,8 @@
+:host {
+  display: block;
+  height: 100%;
+}
+
 /**
  * Cache host container. The dynamically-created `VsCodeViewerComponent`
  * instances are inserted as children of this div by the component's
