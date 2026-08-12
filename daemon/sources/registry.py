@@ -26,6 +26,24 @@ logger = logging.getLogger(__name__)
 _executor = ThreadPoolExecutor(max_workers=4)
 
 
+class _HealthCheckFailed(Exception):
+    """Raised by the supervisor inner loop when ``health_check()`` returns False.
+
+    Propagated to the outer ``except Exception`` block so that backoff is
+    applied. Without this sentinel, a health-check failure would ``break``
+    out of the inner loop and re-enter ``start()`` at the top of the outer
+    loop. If ``start()`` returns instantly (``_status == RUNNING`` from a
+    prior run that was never reset by ``stop()`` — as happens with the
+    Discord adapter when the client task dies after ``on_ready``), no
+    exception is raised and the outer ``except`` (with backoff) is never
+    reached, producing a tight infinite restart loop.
+    """
+
+    def __init__(self, source_id: str) -> None:
+        self.source_id = source_id
+        super().__init__(f"Health check failed for: {source_id}")
+
+
 class SourceRegistry:
     """Registry for managing message source adapters.
     
@@ -636,10 +654,19 @@ class SourceRegistry:
                         # Periodic health check
                         if not await adapter.health_check():
                             logger.warning(f"Health check failed for: {source_id}")
-                            raise Exception("Health check failed")
+                            raise _HealthCheckFailed(source_id)
                         
                         await asyncio.sleep(5)  # Check every 5 seconds
                     except asyncio.CancelledError:
+                        raise
+                    except _HealthCheckFailed:
+                        # Re-raise to outer except so backoff is applied.
+                        # Without this, breaking out of the inner loop
+                        # would re-enter start() at the top of the outer
+                        # loop; start() returns instantly because
+                        # _status == RUNNING, no exception is raised, and
+                        # the outer except (with backoff) is never
+                        # reached — causing a tight crash loop.
                         raise
                     except Exception as e:
                         logger.error(f"Error in adapter run loop {source_id}: {e}")

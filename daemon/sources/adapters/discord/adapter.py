@@ -352,6 +352,15 @@ class DiscordAdapter(MessageSourceAdapter):
             self._gateway_error.clear()
             self._gateway_error_detail = None
             self._stopped = False
+            # Set the grace deadline at the very START of start() so it
+            # is always in effect — even if start() later raises. Without
+            # this, a start() exception would leave the deadline at 0.0,
+            # and any subsequent health_check() during a restart window
+            # would immediately fail. (If start() succeeds, the deadline
+            # is re-set below to extend the window from that point.)
+            self._health_check_grace_until = (
+                time.monotonic() + HEALTH_CHECK_GRACE_SECONDS
+            )
 
             # Local imports so that ``import discord`` is deferred until a
             # Discord source is actually configured (keeps base imports fast
@@ -498,12 +507,15 @@ class DiscordAdapter(MessageSourceAdapter):
                 raise RuntimeError(self._error)
 
             self._status = SourceStatus.RUNNING
-            # Open the startup grace window so the supervisor's immediate
-            # post-start() health check tolerates transient
-            # ``is_ready()=False`` / unstable latency while the Gateway
-            # stabilizes. Without this, Discord's gateway can transiently
-            # report unhealthy for a few hundred ms after ``on_ready``,
-            # crash-looping the adapter. See ``health_check()``.
+            # Extend the startup grace window from the confirmed-ready
+            # point so the supervisor's immediate post-start() health
+            # check tolerates transient ``is_ready()=False`` / unstable
+            # latency while the Gateway stabilizes. (The deadline was
+            # already set at the top of start(); we extend it here for
+            # a fresh window from the confirmed-ready moment.) Without
+            # this, Discord's gateway can transiently report unhealthy
+            # for a few hundred ms after ``on_ready``, crash-looping
+            # the adapter. See ``health_check()``.
             self._health_check_grace_until = (
                 time.monotonic() + HEALTH_CHECK_GRACE_SECONDS
             )
@@ -591,10 +603,12 @@ class DiscordAdapter(MessageSourceAdapter):
         """Return True iff the Gateway is connected and latency is healthy.
 
         During the startup grace period (``HEALTH_CHECK_GRACE_SECONDS``
-        after ``start()`` returns), returns True as long as the client
-        task is alive, tolerating transient ``is_ready()=False`` or
-        unstable latency while the Gateway stabilizes. After the grace
-        window expires, the original strict checks apply unchanged.
+        after ``start()`` begins or confirms ready), returns True
+        unconditionally — absorbing ALL startup transients including a
+        client task that dies immediately after ``on_ready`` (e.g. late
+        ``PrivilegedIntentsRequired`` or a reconnect race). After the
+        grace window expires, strict checks apply: client task alive,
+        ``is_ready()=True``, and latency below threshold.
         """
         if self._status != SourceStatus.RUNNING:
             return False
@@ -605,21 +619,23 @@ class DiscordAdapter(MessageSourceAdapter):
         in_grace = time.monotonic() < self._health_check_grace_until
 
         try:
-            # During the startup grace window, only verify the client
-            # task is alive. ``is_ready()`` and ``latency`` can be
-            # transiently False/None for a few hundred ms after
-            # ``on_ready`` while the Gateway stabilizes — failing the
-            # health check on that would crash-loop the adapter because
-            # the supervisor runs health_check() immediately after
-            # start() with no grace period. A done client task, however,
-            # IS a real failure (e.g. uncaught exception in
-            # ``_client_task``).
+            # During the startup grace window, tolerate transient
+            # ``is_ready()=False`` or unstable latency while the Gateway
+            # stabilizes. The grace window absorbs ALL startup transients
+            # including a client task that dies immediately after
+            # ``on_ready`` (e.g. late ``PrivilegedIntentsRequired`` or a
+            # reconnect race). Failing the health check on a dead task
+            # during grace would bypass backoff: the supervisor's inner
+            # health-check loop would break, re-enter ``start()`` which
+            # returns instantly because ``_status == RUNNING``, and repeat
+            # at infinite speed. After grace expires, a dead task is
+            # correctly treated as a real failure below.
             if in_grace:
-                if self._client_task is not None and self._client_task.done():
-                    return False
                 return True
 
             # Strict checks after grace period.
+            if self._client_task is not None and self._client_task.done():
+                return False
             if not client.is_ready():
                 return False
             latency = client.latency
