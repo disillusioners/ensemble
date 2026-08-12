@@ -37,6 +37,8 @@
 - Project Scope Guide: 2026-08-12 on `feature/project-scope-guide` @ `e4f56d92` — 681 test assertions across 6 packs + static checks, ALL PASS. 7 new scope-guide tests PASS (builder + orchestrator: system-default→scope guide, name-based fallback, real-project→JSON dump negative). 4 regression packs green (context_skills 137, blueprint_injection 23, shared_context_all 129, scoped health 234). concurrency_atomic 91 PASS. ensure.md 4/4 Critical PASS. Full suite NOT warranted (single-module change). See `RESULTS/2026-08-12-project-scope-guide-test.md`
 - Ari Prompt Delegation Fix: 2026-08-12 on `feature/ari-prompt-delegation-fix` — 381 test assertions across 4 packs (25 Ari unit + 194 tool/registry/spawn + 161 keyword sweep + static grep/loader analysis), ALL PASS. meta.json changes verified safe: no_force_explore absent (loader graceful via `.get()`), knowledge+mcp removed from allow, deny=[edit_file,write_file] added. 1 quick fix: stale Gaia tool_filter assertions (pre-existing drift from 2e5861fd, commit 2b2e42a9). ensure.md 1/1 in-scope Core PASS. See `RESULTS/2026-08-12-ari-prompt-delegation-fix-test.md`
 
+- Plane Iframe Feature: 2026-08-12 on `feature/plane-iframe` @ `1c6922fd` + test commit `bbed5f7c` — 2,148 test assertions across 4 packs + 1 build check, ALL PASS. 4 NEW plane endpoint tests PASS (env unset, valid URL, XSS scheme rejection, empty string). api_unit_test regression 213/8skip/0 fail. Frontend tsc --noEmit 0 errors. Frontend jest 1931/1931 in 7.7s. No production bugs found — implementation correct on first run. ensure.md 2/2 in-scope Core PASS (no regressions in changed packs, dev.sh check). See `RESULTS/2026-08-12-plane-iframe-feature-test.md`
+
 ## Unit Test Packs
 
 | Pack | Location | Scope | Timeout | Last Run | Status |
@@ -655,4 +657,10 @@ S (31/31, feature/llm-model-load-balance) |
 | Pack | Location | Scope | Timeout | Last Run | Status |
 |------|----------|-------|---------|----------|--------|
 | agent_switcher_unit_test | `cd frontend && npx jest --testPathPatterns=agent-switcher --no-coverage` | AgentSwitcherComponent: Recent agents section (localStorage persistence, move-to-front dedup, max 5 trimming, stale ID filtering, search filter, edge cases). 37 tests. | 2 min | 2026-08-12 | ✅ PASS (37/37 in 1.3s, feature/recent-agents-switcher) |
-| frontend_jest_regression | `cd frontend && npx jest --no-coverage` | Full frontend Jest suite — all Angular specs. Smoke regression to catch cross-component breakage. 1,918 tests, 52 suites. | 5 min | 2026-08-12 | ✅ PASS (1918/1918 in 9.4s, feature/recent-agents-switcher) |
+| frontend_jest_regression | `cd frontend && npx jest --no-coverage` | Full frontend Jest suite — all Angular specs. Smoke regression to catch cross-component breakage. 1,931 tests, 53 suites. | 5 min | 2026-08-12 | ✅ PASS (1931/1931 in 7.7s, feature/plane-iframe) |
+
+## Plane Iframe Feature Packs
+
+| Pack | Location | Scope | Timeout | Last Run | Status |
+|------|----------|-------|---------|----------|--------|
+| plane_settings_unit_test | tests/api/test_plane_settings.py | GET /api/settings/plane endpoint: PLANE_BASE_URL unset→disabled, valid https URL→enabled, non-http scheme (XSS payload)→disabled, empty string→disabled. Real FastAPI app via ASGI, monkeypatch env isolation. 4 tests. | 2 min | 2026-08-12 | ✅ PASS (4/4 in 1.08s, feature/plane-iframe @ bbed5f7c) |

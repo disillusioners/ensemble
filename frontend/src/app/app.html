@@ -71,4 +71,17 @@
       <app-plane-viewer [url]="planeUrl()"></app-plane-viewer>
     </div>
   }
+
+  <!-- Global workspace overlay. Always mounted, display-toggled for
+       caching. The `[visible]` input lets the workspace component
+       disconnect SSE and skip keyboard handling while hidden; the
+       `[style.display]` binding controls actual layout. The element
+       is rendered at the App root so the Alt+` hotkey works from any
+       route and the editor cache survives navigation. -->
+  <app-workspace
+    [projectId]="workspaceOverlayService.workspaceProjectId() || ''"
+    [visible]="workspaceOverlayService.showWorkspace()"
+    [style.display]="workspaceOverlayService.showWorkspace() ? 'flex' : 'none'"
+    (hide)="workspaceOverlayService.hide()"
+  ></app-workspace>
 </div>

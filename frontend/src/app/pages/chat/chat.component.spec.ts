@@ -1,4 +1,4 @@
-import { signal, computed, effect, Component, Inject } from '@angular/core';
+import { signal, computed, effect, Component, Inject, inject } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import type { Agent, InstanceInfo } from '../../models';
 import { ProjectTab } from '../../models/tab.model';
@@ -73,12 +73,53 @@ interface TestMessagePayload {
   images?: string[];
 }
 
+// Mock WorkspaceOverlayService — mirrors production semantics:
+// `showWorkspace` and `workspaceProjectId` are independent
+// WritableSignals, and the toggle/hide/show methods mutate them with
+// the same contract as the real service. Tests construct one of these
+// and pass it to the testable component (or provide it via TestBed),
+// so they observe exactly the same state transitions production would.
+class MockWorkspaceOverlayService {
+  readonly showWorkspace = signal(false);
+  readonly workspaceProjectId = signal<string | null>(null);
+
+  toggle(projectId?: string): void {
+    const currentId = this.workspaceProjectId();
+    const targetId = projectId ?? currentId;
+    if (targetId === null) return;
+
+    if (this.showWorkspace() && currentId === targetId) {
+      this.showWorkspace.set(false);
+      return;
+    }
+    this.workspaceProjectId.set(targetId);
+    this.showWorkspace.set(true);
+  }
+
+  hide(): void {
+    this.showWorkspace.set(false);
+  }
+
+  show(projectId: string): void {
+    this.workspaceProjectId.set(projectId);
+    this.showWorkspace.set(true);
+  }
+}
+
 // Testable ChatComponent (mirrors actual component logic)
 class TestableChatComponent {
   private readonly api = mockApiService;
   private readonly sseService = mockSseService;
   private readonly snackBar = mockSnackBar;
   protected readonly tabStateService: MockTabStateService;
+  /**
+   * Singleton state holder for the workspace overlay. Mirrors the
+   * production injection: in production ChatComponent injects
+   * `WorkspaceOverlayService` (providedIn: 'root'); here we wire a
+   * `MockWorkspaceOverlayService` so tests can observe the same
+   * state that the (real) App root would see.
+   */
+  readonly workspaceOverlayService: MockWorkspaceOverlayService;
 
   readonly currentInstanceId = signal<string | null>(null);
   readonly currentInstance = signal<InstanceInfo | null>(null);
@@ -91,10 +132,6 @@ class TestableChatComponent {
   readonly watchoverPending = signal(false);
   private readonly processedWatchoverDenials = new Set<string>();
 
-  // Workspace overlay state — mirrors ChatComponent signals
-  readonly showWorkspace = signal(false);
-  readonly workspaceProjectId = signal<string | null>(null);
-
   /** Mirrors ChatComponent.SEND_COOLDOWN_MS */
   private readonly SEND_COOLDOWN_MS = 3000;
   private lastSendTime = 0;
@@ -104,8 +141,12 @@ class TestableChatComponent {
   // Navigation calls tracked for testing
   navigateCalls: Array<{ path: string[] }> = [];
 
-  constructor(tabStateService: MockTabStateService) {
+  constructor(
+    tabStateService: MockTabStateService,
+    workspaceOverlayService: MockWorkspaceOverlayService = new MockWorkspaceOverlayService()
+  ) {
     this.tabStateService = tabStateService;
+    this.workspaceOverlayService = workspaceOverlayService;
     // Run the tab→workspace sync once with the initial activeProjectId,
     // mirroring the production `tabWorkspaceEffect` initial run.
     this.runTabWorkspaceEffect();
@@ -119,15 +160,17 @@ class TestableChatComponent {
    */
   runTabWorkspaceEffect(): void {
     const projectId = this.tabStateService.activeProjectId();
+    const isOpen = this.workspaceOverlayService.showWorkspace();
+    const currentId = this.workspaceOverlayService.workspaceProjectId();
 
     if (projectId === null) {
-      this.showWorkspace.set(false);
-      this.workspaceProjectId.set(null);
+      if (isOpen)    this.workspaceOverlayService.hide();
+      if (currentId) this.workspaceOverlayService.workspaceProjectId.set(null);
       return;
     }
 
-    if (this.showWorkspace() && this.workspaceProjectId() !== projectId) {
-      this.workspaceProjectId.set(projectId);
+    if (isOpen && currentId !== projectId) {
+      this.workspaceOverlayService.workspaceProjectId.set(projectId);
     }
   }
 
@@ -355,18 +398,18 @@ class TestableChatComponent {
     this.navigateCalls.push({ path: ['/'] });
   }
 
-  // Workspace overlay handlers — mirrors ChatComponent
+  // Workspace overlay handlers — mirror ChatComponent. After the
+  // refactor that lifts workspace state into the root-provided
+  // WorkspaceOverlayService, these handlers are thin delegators: they
+  // exist so the template binding (e.g. `(hide)="onWorkspaceHide()"` on
+  // the overlay element) still works, but the actual state lives in
+  // `workspaceOverlayService`.
   protected onWorkspaceToggle(projectId: string): void {
-    if (this.showWorkspace() && this.workspaceProjectId() === projectId) {
-      this.showWorkspace.set(false);
-      return;
-    }
-    this.workspaceProjectId.set(projectId);
-    this.showWorkspace.set(true);
+    this.workspaceOverlayService.toggle(projectId);
   }
 
   protected onWorkspaceHide(): void {
-    this.showWorkspace.set(false);
+    this.workspaceOverlayService.hide();
   }
 
   protected get hasRealProject(): boolean {
@@ -380,7 +423,7 @@ class TestableChatComponent {
 
   protected onHeaderWorkspaceToggle(): void {
     if (!this.hasRealProject) return;
-    this.onWorkspaceToggle(this.projectId);
+    this.workspaceOverlayService.toggle(this.projectId);
   }
 
   // Simulates the navigation that happens after instance creation in handleInstanceIdChange
@@ -863,53 +906,53 @@ describe('ChatComponent - Project-Aware Navigation', () => {
 
   describe('Workspace overlay', () => {
     it('should start hidden with no project id', () => {
-      expect(component.showWorkspace()).toBe(false);
-      expect(component.workspaceProjectId()).toBeNull();
+      expect(component.workspaceOverlayService.showWorkspace()).toBe(false);
+      expect(component.workspaceOverlayService.workspaceProjectId()).toBeNull();
     });
 
     it('should open the overlay for the toggled project', () => {
       component.onWorkspaceToggle('proj-a');
 
-      expect(component.showWorkspace()).toBe(true);
-      expect(component.workspaceProjectId()).toBe('proj-a');
+      expect(component.workspaceOverlayService.showWorkspace()).toBe(true);
+      expect(component.workspaceOverlayService.workspaceProjectId()).toBe('proj-a');
     });
 
     it('should toggle off when the same project is clicked again', () => {
       component.onWorkspaceToggle('proj-a');
       component.onWorkspaceToggle('proj-a');
 
-      expect(component.showWorkspace()).toBe(false);
-      expect(component.workspaceProjectId()).toBe('proj-a');
+      expect(component.workspaceOverlayService.showWorkspace()).toBe(false);
+      expect(component.workspaceOverlayService.workspaceProjectId()).toBe('proj-a');
     });
 
     it('should switch projects when a different project is clicked while open', () => {
       component.onWorkspaceToggle('proj-a');
       component.onWorkspaceToggle('proj-b');
 
-      expect(component.showWorkspace()).toBe(true);
-      expect(component.workspaceProjectId()).toBe('proj-b');
+      expect(component.workspaceOverlayService.showWorkspace()).toBe(true);
+      expect(component.workspaceOverlayService.workspaceProjectId()).toBe('proj-b');
     });
 
     it('should close the overlay via onWorkspaceHide', () => {
       component.onWorkspaceToggle('proj-a');
       component.onWorkspaceHide();
 
-      expect(component.showWorkspace()).toBe(false);
+      expect(component.workspaceOverlayService.showWorkspace()).toBe(false);
     });
 
     it('should require a real project for the header toggle', () => {
       tabStateService.setActiveTab('all');
       component.onHeaderWorkspaceToggle();
 
-      expect(component.showWorkspace()).toBe(false);
+      expect(component.workspaceOverlayService.showWorkspace()).toBe(false);
     });
 
     it('should open the overlay from the header for the active project', () => {
       tabStateService.setActiveTab('proj-header');
       component.onHeaderWorkspaceToggle();
 
-      expect(component.showWorkspace()).toBe(true);
-      expect(component.workspaceProjectId()).toBe('proj-header');
+      expect(component.workspaceOverlayService.showWorkspace()).toBe(true);
+      expect(component.workspaceOverlayService.workspaceProjectId()).toBe('proj-header');
     });
   });
 
@@ -917,39 +960,39 @@ describe('ChatComponent - Project-Aware Navigation', () => {
     it('should follow workspace to the newly active project when workspace is open', () => {
       // Open workspace on proj-a
       component.onWorkspaceToggle('proj-a');
-      expect(component.showWorkspace()).toBe(true);
-      expect(component.workspaceProjectId()).toBe('proj-a');
+      expect(component.workspaceOverlayService.showWorkspace()).toBe(true);
+      expect(component.workspaceOverlayService.workspaceProjectId()).toBe('proj-a');
 
       // Simulate user clicking the proj-b tab — activeProjectId changes
       tabStateService.setActiveTab('proj-b');
       component.runTabWorkspaceEffect();
 
-      expect(component.showWorkspace()).toBe(true);
-      expect(component.workspaceProjectId()).toBe('proj-b');
+      expect(component.workspaceOverlayService.showWorkspace()).toBe(true);
+      expect(component.workspaceOverlayService.workspaceProjectId()).toBe('proj-b');
     });
 
     it('should NOT auto-open workspace when switching to a project tab while closed', () => {
       // Workspace is closed by default
-      expect(component.showWorkspace()).toBe(false);
+      expect(component.workspaceOverlayService.showWorkspace()).toBe(false);
 
       tabStateService.setActiveTab('proj-b');
       component.runTabWorkspaceEffect();
 
-      expect(component.showWorkspace()).toBe(false);
-      expect(component.workspaceProjectId()).toBeNull();
+      expect(component.workspaceOverlayService.showWorkspace()).toBe(false);
+      expect(component.workspaceOverlayService.workspaceProjectId()).toBeNull();
     });
 
     it('should hide the workspace when switching to the All tab', () => {
       // Open workspace on a project
       component.onWorkspaceToggle('proj-a');
-      expect(component.showWorkspace()).toBe(true);
+      expect(component.workspaceOverlayService.showWorkspace()).toBe(true);
 
       // Switch to All tab
       tabStateService.setActiveTab('all');
       component.runTabWorkspaceEffect();
 
-      expect(component.showWorkspace()).toBe(false);
-      expect(component.workspaceProjectId()).toBeNull();
+      expect(component.workspaceOverlayService.showWorkspace()).toBe(false);
+      expect(component.workspaceOverlayService.workspaceProjectId()).toBeNull();
     });
 
     it('should be a no-op when switching to the same project that is already open', () => {
@@ -957,8 +1000,8 @@ describe('ChatComponent - Project-Aware Navigation', () => {
       tabStateService.setActiveTab('proj-a');
       component.runTabWorkspaceEffect();
 
-      expect(component.showWorkspace()).toBe(true);
-      expect(component.workspaceProjectId()).toBe('proj-a');
+      expect(component.workspaceOverlayService.showWorkspace()).toBe(true);
+      expect(component.workspaceOverlayService.workspaceProjectId()).toBe('proj-a');
     });
   });
 
@@ -978,15 +1021,15 @@ describe('ChatComponent - Project-Aware Navigation', () => {
       component.runTabWorkspaceEffect();
 
       expect(tabStateService.setActiveTabCalls).toContain('proj-b');
-      expect(component.showWorkspace()).toBe(true);
-      expect(component.workspaceProjectId()).toBe('proj-b');
+      expect(component.workspaceOverlayService.showWorkspace()).toBe(true);
+      expect(component.workspaceOverlayService.workspaceProjectId()).toBe('proj-b');
     });
 
     it('should switch the active tab AND close the workspace when icon is clicked on the same project', () => {
       // Open workspace on proj-a while on proj-a tab
       tabStateService.setActiveTab('proj-a');
       component.onWorkspaceToggle('proj-a');
-      expect(component.showWorkspace()).toBe(true);
+      expect(component.workspaceOverlayService.showWorkspace()).toBe(true);
 
       // Click the icon again — setActiveTab('proj-a') then toggle
       tabStateService.setActiveTab('proj-a');
@@ -994,7 +1037,7 @@ describe('ChatComponent - Project-Aware Navigation', () => {
       component.runTabWorkspaceEffect();
 
       expect(tabStateService.setActiveTabCalls).toContain('proj-a');
-      expect(component.showWorkspace()).toBe(false);
+      expect(component.workspaceOverlayService.showWorkspace()).toBe(false);
     });
   });
 });
@@ -1018,8 +1061,15 @@ describe('ChatComponent - Project-Aware Navigation', () => {
   template: '',
 })
 class TestTabWorkspaceEffectHostComponent {
-  readonly showWorkspace = signal(false);
-  readonly workspaceProjectId = signal<string | null>(null);
+  /**
+   * Injected mock workspace overlay service. Mirrors production: the
+   * real ChatComponent receives the root-provided `WorkspaceOverlayService`
+   * via `inject(...)`; here we inject the mock so the test can drive
+   * and observe the same state transitions the real App root would.
+   * Exposed as a public field so tests can read the `showWorkspace`
+   * and `workspaceProjectId` signals directly.
+   */
+  readonly workspaceOverlayService = inject(MockWorkspaceOverlayService);
 
   /**
    * Tracks how many times the effect's body has run. We use this to
@@ -1033,32 +1083,33 @@ class TestTabWorkspaceEffectHostComponent {
     // Lives inside TestBed's injection context so `effect()` has an
     // injector to register against.
     //
-    // CRITICAL: showWorkspace() and workspaceProjectId() MUST be read
-    // unconditionally at the top of the effect (not inside the non-null
-    // branch) so Angular's reactive graph keeps them as dependencies
-    // across every run. If we conditionally read them, then a run that
-    // hits the `projectId === null` branch will drop those deps, and
-    // subsequent mutations to those signals will not retrigger the
-    // effect. The production code at chat.component.ts:131-145 enforces
+    // CRITICAL: workspaceOverlayService.showWorkspace() and
+    // .workspaceProjectId() MUST be read unconditionally at the top
+    // of the effect (not inside the non-null branch) so Angular's
+    // reactive graph keeps them as dependencies across every run. If
+    // we conditionally read them, then a run that hits the
+    // `projectId === null` branch will drop those deps, and subsequent
+    // mutations to those signals will not retrigger the effect. The
+    // production code at chat.component.ts:tabWorkspaceEffect enforces
     // this — we mirror it exactly here so this test host is a faithful
     // double of production.
     effect(() => {
       this.effectRunCount++;
       const projectId = this.tabState.activeProjectId();
-      const isOpen = this.showWorkspace();         // always read → always tracked
-      const currentId = this.workspaceProjectId(); // always read → always tracked
+      const isOpen = this.workspaceOverlayService.showWorkspace();         // always read → always tracked
+      const currentId = this.workspaceOverlayService.workspaceProjectId(); // always read → always tracked
 
       // Switching to "All" tab → hide workspace
       if (projectId === null) {
-        if (isOpen)    this.showWorkspace.set(false);
-        if (currentId) this.workspaceProjectId.set(null);
+        if (isOpen)    this.workspaceOverlayService.hide();
+        if (currentId) this.workspaceOverlayService.workspaceProjectId.set(null);
         return;
       }
 
       // For project tabs: only sync workspace if it's already open.
       // Do NOT auto-open on plain tab switch.
       if (isOpen && currentId !== projectId) {
-        this.workspaceProjectId.set(projectId);
+        this.workspaceOverlayService.workspaceProjectId.set(projectId);
       }
     }, { allowSignalWrites: true });
   }
@@ -1068,27 +1119,34 @@ describe('ChatComponent tabWorkspaceEffect — real Angular effect wiring', () =
   let fixture: ComponentFixture<TestTabWorkspaceEffectHostComponent>;
   let host: TestTabWorkspaceEffectHostComponent;
   let tabStateService: MockTabStateService;
+  let workspaceOverlayService: MockWorkspaceOverlayService;
 
   beforeEach(async () => {
     tabStateService = new MockTabStateService();
+    workspaceOverlayService = new MockWorkspaceOverlayService();
 
     await TestBed.configureTestingModule({
       imports: [TestTabWorkspaceEffectHostComponent],
       providers: [
         { provide: MockTabStateService, useValue: tabStateService },
+        { provide: MockWorkspaceOverlayService, useValue: workspaceOverlayService },
       ],
     }).compileComponents();
 
     fixture = TestBed.createComponent(TestTabWorkspaceEffectHostComponent);
     host = fixture.componentInstance;
+    // Sanity: the host's injected service must be the same instance we
+    // configured in TestBed (the real production code uses the
+    // root-provided singleton, so the test mirrors that contract).
+    expect(host.workspaceOverlayService).toBe(workspaceOverlayService);
     // Initial detectChanges runs the effect once (initial pass).
     fixture.detectChanges();
   });
 
   it('registers and runs the effect on initial render', () => {
     expect(host.effectRunCount).toBeGreaterThanOrEqual(1);
-    expect(host.showWorkspace()).toBe(false);
-    expect(host.workspaceProjectId()).toBeNull();
+    expect(host.workspaceOverlayService.showWorkspace()).toBe(false);
+    expect(host.workspaceOverlayService.workspaceProjectId()).toBeNull();
   });
 
   it('re-runs the effect (reactive graph) when activeProjectId changes via setActiveTab', () => {
@@ -1101,8 +1159,8 @@ describe('ChatComponent tabWorkspaceEffect — real Angular effect wiring', () =
     fixture.detectChanges();
 
     expect(host.effectRunCount).toBeGreaterThan(beforeCount);
-    expect(host.showWorkspace()).toBe(false);
-    expect(host.workspaceProjectId()).toBeNull();
+    expect(host.workspaceOverlayService.showWorkspace()).toBe(false);
+    expect(host.workspaceOverlayService.workspaceProjectId()).toBeNull();
   });
 
   it('follows the open workspace to the newly active project via the real effect', () => {
@@ -1113,8 +1171,8 @@ describe('ChatComponent tabWorkspaceEffect — real Angular effect wiring', () =
     fixture.detectChanges();
 
     // Open workspace on proj-a (mirrors user clicking the icon)
-    host.showWorkspace.set(true);
-    host.workspaceProjectId.set('proj-a');
+    host.workspaceOverlayService.showWorkspace.set(true);
+    host.workspaceOverlayService.workspaceProjectId.set('proj-a');
     fixture.detectChanges();
     const beforeCount = host.effectRunCount;
 
@@ -1123,8 +1181,8 @@ describe('ChatComponent tabWorkspaceEffect — real Angular effect wiring', () =
     fixture.detectChanges();
 
     expect(host.effectRunCount).toBeGreaterThan(beforeCount);
-    expect(host.showWorkspace()).toBe(true);
-    expect(host.workspaceProjectId()).toBe('proj-b');
+    expect(host.workspaceOverlayService.showWorkspace()).toBe(true);
+    expect(host.workspaceOverlayService.workspaceProjectId()).toBe('proj-b');
   });
 
   it('hides the workspace via the real effect when switching to the All tab', () => {
@@ -1136,8 +1194,8 @@ describe('ChatComponent tabWorkspaceEffect — real Angular effect wiring', () =
     fixture.detectChanges();
 
     // Open workspace on proj-a
-    host.showWorkspace.set(true);
-    host.workspaceProjectId.set('proj-a');
+    host.workspaceOverlayService.showWorkspace.set(true);
+    host.workspaceOverlayService.workspaceProjectId.set('proj-a');
     fixture.detectChanges();
     const beforeCount = host.effectRunCount;
 
@@ -1146,8 +1204,8 @@ describe('ChatComponent tabWorkspaceEffect — real Angular effect wiring', () =
     fixture.detectChanges();
 
     expect(host.effectRunCount).toBeGreaterThan(beforeCount);
-    expect(host.showWorkspace()).toBe(false);
-    expect(host.workspaceProjectId()).toBeNull();
+    expect(host.workspaceOverlayService.showWorkspace()).toBe(false);
+    expect(host.workspaceOverlayService.workspaceProjectId()).toBeNull();
   });
 
   it('keeps showWorkspace/workspaceProjectId tracked after All-tab dep-drop', () => {
@@ -1170,8 +1228,8 @@ describe('ChatComponent tabWorkspaceEffect — real Angular effect wiring', () =
     //    initially sees the workspace signals in its dep set.
     tabStateService.setActiveTab('proj-a');
     fixture.detectChanges();
-    host.showWorkspace.set(true);
-    host.workspaceProjectId.set('proj-a');
+    host.workspaceOverlayService.showWorkspace.set(true);
+    host.workspaceOverlayService.workspaceProjectId.set('proj-a');
     fixture.detectChanges();
 
     // 2. Switch to All tab. With the buggy effect, this run hits the
@@ -1179,8 +1237,8 @@ describe('ChatComponent tabWorkspaceEffect — real Angular effect wiring', () =
     //    workspaceProjectId, so Angular drops them from the dep set.
     tabStateService.setActiveTab('all');
     fixture.detectChanges();
-    expect(host.showWorkspace()).toBe(false);
-    expect(host.workspaceProjectId()).toBeNull();
+    expect(host.workspaceOverlayService.showWorkspace()).toBe(false);
+    expect(host.workspaceOverlayService.workspaceProjectId()).toBeNull();
     const countAfterAllTab = host.effectRunCount;
 
     // 3. While the active tab is STILL 'all' (so a non-null run cannot
@@ -1188,7 +1246,7 @@ describe('ChatComponent tabWorkspaceEffect — real Angular effect wiring', () =
     //    buggy effect this write is invisible to the effect (the dep
     //    was dropped in step 2). With the fixed effect showWorkspace
     //    is still tracked, so the effect reruns.
-    host.showWorkspace.set(true);
+    host.workspaceOverlayService.showWorkspace.set(true);
     fixture.detectChanges();
 
     // Core assertion: the effect must have rerun because showWorkspace
