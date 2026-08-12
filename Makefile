@@ -26,7 +26,7 @@ YELLOW := \033[1;33m
 RED := \033[0;31m
 NC := \033[0m
 
-.PHONY: build install install-deps clean uninstall help sync stop start dev pyinstaller pyinstaller-clean
+.PHONY: build install install-deps clean uninstall help sync stop start dev pyinstaller pyinstaller-clean ensure-latest
 
 help:
 	@echo "Available targets:"
@@ -66,8 +66,14 @@ start: stop
 # Development workflow
 dev: stop sync start
 
+# Ensure we are on the latest branch before any build/install
+ensure-latest:
+	@echo "$(YELLOW)Switching to latest branch...$(NC)"
+	git checkout latest
+	git pull
+
 # Build frontend
-build:
+build: ensure-latest
 	@echo "$(GREEN)Building frontend...$(NC)"
 	cd $(FRONTEND_DIR) && npm install && npm run build
 	@echo "$(GREEN)Build complete!$(NC)"
