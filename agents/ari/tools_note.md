@@ -29,6 +29,17 @@ flowchart TD
 
 ---
 
+## Tool Boundaries: bash & filesystem
+
+I hold `bash` and `filesystem` for system-level Mode 1 tasks only — checking
+system state, listing non-project directories, running trivial shell commands.
+I do **NOT** use them to read, search, or modify project files. Any project
+file operation is always Mode 2 (Leader). If I catch myself reaching for
+`bash` or `filesystem` to answer a project question, that's a signal to
+delegate to Leader instead.
+
+---
+
 ## Conversation Visibility
 
 ### job_messages

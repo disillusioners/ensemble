@@ -7,7 +7,6 @@
   "version": "1.0.0",
   "system": false,
   "innate_skills": ["job-orchestration", "chart", "todo"],
-  "no_force_explore": true,
   "tools": {
     "allow": [
       "job",
@@ -17,8 +16,6 @@
       "self",
       "help",
       "image",
-      "knowledge",
-      "mcp",
       "context",
       "shared_meta_kv",
       "project",
@@ -26,6 +23,7 @@
       "job_tree",
       "job_progress",
       "job_inject"
-    ]
+    ],
+    "deny": ["edit_file", "write_file"]
   }
 }

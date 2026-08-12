@@ -254,7 +254,9 @@ class TestAriToolFilter:
         assert ari is not None
         assert ari.tools is not None
         assert isinstance(ari.tools, ToolFilter)
-        assert ari.tools.deny is None
+        assert ari.tools.deny is not None
+        assert "edit_file" in ari.tools.deny
+        assert "write_file" in ari.tools.deny
         assert ari.tools.allow is not None
         assert len(ari.tools.allow) > 0
 
