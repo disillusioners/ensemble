@@ -824,7 +824,18 @@ class SourceRegistry:
                         f"Slack message missing metadata for source={source_id}, "
                         f"user={msg.external_user_id}. Routing may fail."
                     )
-            
+            elif source_type == "discord" and msg.metadata:
+                discord_meta = msg.metadata.get("discord", {})
+                if discord_meta:
+                    extra_mapping_metadata = {
+                        "discord": discord_meta,
+                    }
+                else:
+                    logger.warning(
+                        f"Discord message missing metadata for source={source_id}, "
+                        f"user={msg.external_user_id}. Routing may fail."
+                    )
+
             # Get or create the instance
             instance_id = await mapper.get_or_create_instance(
                 source_id=source_id,
