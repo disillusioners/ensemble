@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from sqlalchemy import text
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
@@ -567,6 +568,47 @@ class TestReportLaneGuardPG:
             status=AdmissionState.ACTIVE.value,
             job_metadata={"message_id": "msg-user-pg-123"},
         )
+
+        # Insert a PAUSED sibling Task whose work_id matches the active
+        # JobItem. PAUSED counts as "in-flight" for the cross-system guard
+        # but NOT for the per-instance guard, isolating the cross-system
+        # guard from the per-instance guard. Mirrors the SQLite test in
+        # tests/test_report_lane_phase2.py:478-565 (post-self-deadlock fix
+        # 2026-08-02): without a distinct in-flight sibling, the self-
+        # deadlock exclusion would match the candidate task's own backing
+        # JobItem and the guard would never fire.
+        now = datetime.now(timezone.utc)
+        with pg_engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO task (task_type, instance_id, message_id, status,
+                                      retry_count, created_at, cancel_requested,
+                                      retry_scheduled, work_id, is_deferred,
+                                      is_background, worker_id, started_at)
+                    VALUES (:task_type, :instance_id, :message_id, :status,
+                            :retry_count, :created_at, :cancel_requested,
+                            :retry_scheduled, :work_id, :is_deferred,
+                            :is_background, :worker_id, :started_at)
+                    """
+                ),
+                {
+                    "task_type": TaskType.PROCESS_MESSAGE.value,
+                    "instance_id": parent_id,
+                    "message_id": "msg-sibling",
+                    "status": TaskStatus.PAUSED.value,
+                    "retry_count": 0,
+                    "created_at": now,
+                    "cancel_requested": False,
+                    "retry_scheduled": False,
+                    "work_id": jid,
+                    "is_deferred": False,
+                    "is_background": False,
+                    "worker_id": "worker-sibling",
+                    "started_at": now,
+                },
+            )
+
         msg_task = task_repo.create(
             task_type=TaskType.PROCESS_MESSAGE.value,
             instance_id=parent_id,
@@ -574,20 +616,20 @@ class TestReportLaneGuardPG:
         )
         assert msg_task.status == TaskStatus.PENDING.value
 
-        # Align Task.work_id to JobItem.job_id so the new guard fires.
-        with Session(pg_engine) as s:
-            t = s.get(Task, msg_task.id)
-            assert t is not None
-            t.work_id = jid
-            s.commit()
-
-        # Guard fires — PROCESS_MESSAGE with backing active JobItem
-        # (matching work_id) is blocked on PG.
+        # Guard fires — PROCESS_MESSAGE with backing active JobItem (whose
+        # work_id matches a genuinely-in-flight sibling Task) is blocked
+        # on PG.
         claimed = task_repo.claim_pending_task(worker_id="pg-worker-1")
         assert claimed is None, (
-            f"PROCESS_MESSAGE with matching work_id MUST be blocked "
-            f"on PG (got {claimed})"
+            f"PROCESS_MESSAGE with matching-work_id in-flight backing Task "
+            f"MUST be blocked by the cross-system guard on PG (got {claimed})"
         )
+
+        # The PROCESS_MESSAGE task must still be PENDING (not claimed).
+        with Session(pg_engine) as s:
+            t = s.get(Task, msg_task.id)
+            assert t.status == TaskStatus.PENDING.value
+            assert t.worker_id is None
 
 
 # =============================================================================

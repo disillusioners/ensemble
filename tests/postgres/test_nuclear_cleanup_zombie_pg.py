@@ -42,7 +42,7 @@ from sqlmodel import Session as SQLModelSession
 
 from daemon.repositories.instance.models import Instance
 from daemon.repositories.instance.repository import SQLModelInstanceRepository
-from daemon.repositories.job_queue.models import JobItem
+from daemon.repositories.job_queue.models import JobItem, JobLock
 from daemon.repositories.task.models import Task, TaskStatus
 
 
@@ -110,7 +110,18 @@ def _create_job(
     instance_id: str,
     admission_state: str = "active",
 ):
-    """Insert a JobItem row directly via SQLModel session."""
+    """Insert a JobItem row directly via SQLModel session.
+
+    PG-specific: the ``trg_job_queue_items_active_lock_guard`` DEFERRABLE
+    trigger (see ``tests/postgres/test_jq_proxy_phase2_constraints.py``)
+    enforces the ``admission_state='active' <-> JobLock row exists``
+    invariant. When ``admission_state='active'`` we seed a matching
+    ``JobLock`` row inside the same transaction so the INSERT does not
+    raise ``admission_state=active requires a job_locks row``. The
+    ``admission_state='queued'`` path does not need a lock (a queued
+    JobItem is awaiting dispatch and holds no slot). Mirrors the seed
+    pattern in ``tests/postgres/test_report_lane_phase2_pg.py::_seed_job``.
+    """
     job = JobItem(
         agent_id="tester",
         agent_dir="/tmp/tester",
@@ -123,6 +134,14 @@ def _create_job(
     )
     with SQLModelSession(engine) as session:
         session.add(job)
+        if admission_state == "active":
+            session.add(JobLock(
+                project_id="default",
+                queue_id="system_fifo_queue",
+                job_id=job.job_id,
+                instance_id=instance_id,
+                lock_slot=0,
+            ))
         session.commit()
 
 
