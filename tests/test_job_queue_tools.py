@@ -28,8 +28,8 @@ def setup_system_default_project():
 class TestJobQueueToolRegistration:
     """Tests for tool registration."""
 
-    def test_create_job_tools_returns_17_tools(self):
-        """Verify create_job_tools returns exactly 17 tools (16 original + job_continue)."""
+    def test_create_job_tools_returns_expected_count(self):
+        """Verify create_job_tools returns the expected tool count."""
         job_service = AsyncMock()
         job_service.use_virtual_job_resolver = False
         queue_mgmt_service = AsyncMock()
@@ -37,7 +37,8 @@ class TestJobQueueToolRegistration:
 
         tools = create_job_tools(job_service, queue_mgmt_service, dead_letter_service)
 
-        assert len(tools) == 17
+        # 16 original + job_continue + job_messages + job_tree + job_progress + job_inject = 21
+        assert len(tools) == 21
 
     def test_each_tool_has_job_category(self):
         """Verify each tool has _tool_category == 'job' attribute."""
@@ -1785,7 +1786,7 @@ class TestResolverRoutedTools:
             current_instance_id="watcher-inst-1",
             watcher_repo=watcher_repo,
         )
-        watch_job = tools[13]
+        watch_job = tools[17]  # P0 tools (job_messages, job_tree, job_progress, job_inject) shifted the index
 
         work_id = "job-abcdef12-3456"
         record = _make_work_record(
@@ -1842,7 +1843,7 @@ class TestResolverRoutedTools:
             watcher_repo=watcher_repo,
             manager=manager,
         )
-        watch_job = tools[13]
+        watch_job = tools[17]  # P0 tools (job_messages, job_tree, job_progress, job_inject) shifted the index
 
         work_id = "job-abcdef12-3456"
         record = _make_work_record(
@@ -1890,7 +1891,7 @@ class TestResolverRoutedTools:
             watcher_repo=watcher_repo,
             manager=manager,
         )
-        watch_job = tools[13]
+        watch_job = tools[17]  # P0 tools (job_messages, job_tree, job_progress, job_inject) shifted the index
 
         work_id = "job-abcdef12-3456"
         record = _make_work_record(
@@ -1928,7 +1929,7 @@ class TestResolverRoutedTools:
             watcher_repo=watcher_repo,
             # NOTE: no manager= → enrichment is a no-op
         )
-        watch_job = tools[13]
+        watch_job = tools[17]  # P0 tools (job_messages, job_tree, job_progress, job_inject) shifted the index
 
         work_id = "job-abcdef12-3456"
         record = _make_work_record(
@@ -1970,7 +1971,7 @@ class TestResolverRoutedTools:
             watcher_repo=watcher_repo,
             manager=manager,
         )
-        watch_job = tools[13]
+        watch_job = tools[17]  # P0 tools (job_messages, job_tree, job_progress, job_inject) shifted the index
 
         work_id = "job-abcdef12-3456"
         record = _make_work_record(
@@ -2020,7 +2021,7 @@ class TestResolverRoutedTools:
             watcher_repo=watcher_repo,
             manager=manager,
         )
-        watch_jobs = tools[16]  # see tools list: ..., watch_job, unwatch_job, list_watched_jobs, watch_jobs
+        watch_jobs = tools[20]  # P0 tools (job_messages, job_tree, job_progress, job_inject) shifted the index
 
         rec1 = _make_work_record(
             "job-aaaa-1111", kind="job", status="completed",

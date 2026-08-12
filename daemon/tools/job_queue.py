@@ -1,8 +1,9 @@
 """Job queue management tools for LangGraph agents."""
 
 import asyncio
+import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, UTC
 from typing import Annotated, Any, TYPE_CHECKING
 
 from langchain_core.tools import tool
@@ -30,6 +31,8 @@ Create, list, and manage jobs and job queues.
 """
 
 TERMINAL_STATES = set(ALL_TERMINAL_STATES)
+
+logger = logging.getLogger(__name__)
 
 
 # `WorkRecord.to_dict()` (defined in `daemon.services.work_resolver`) is
@@ -258,6 +261,106 @@ Example:
         old_job_id="job_abc123",
         message="Now add unit tests for the login flow"
     )""",
+
+    "job_messages": """Get conversation messages for a job's instance tree.
+
+Collects messages from the root instance and all descendants spawned by
+the job, reading from LangGraph checkpoints. Messages include role,
+content snippet (first 200 chars), and tool call names (arguments
+truncated to 100 chars for safety).
+
+Security: tool_call arguments are truncated and outputs are omitted
+to prevent leakage of secrets, file contents, or credentials.
+
+Access control: the caller's project_id must match the job's
+project_id (when both are set).
+
+Args:
+    job_id: The job ID to inspect. Required.
+    limit: Max messages to return (default 50, max 200).
+    offset: Pagination offset (default 0).
+
+Returns:
+    Dictionary with job_id, root_instance, child_instances,
+    messages list, total_messages, and pagination metadata.
+    Returns {"error": "..."} on failure.
+
+Example:
+    job_messages(job_id="job_abc123", limit=20)""",
+
+    "job_tree": """Get the instance hierarchy tree for a job.
+
+Shows all instances spawned by the job in a nested tree structure.
+Each node has instance_id, agent_id, agent_name, status, and children.
+Counts total and active (non-terminal) instances.
+
+Terminal statuses: completed, terminated, error, failed.
+
+Args:
+    job_id: The job ID to inspect. Required.
+
+Returns:
+    Dictionary with job_id, tree (nested dict), total_instances,
+    active_instances, and truncated flag.
+    Returns {"error": "..."} on failure.
+
+Example:
+    job_tree(job_id="job_abc123")""",
+
+    "job_progress": """Get a progress snapshot for a running job.
+
+Pulls the current state of a job's instance: status, elapsed time
+since creation, last assistant message (truncated to 200 chars), and
+instance tree counts (total, active, completed).
+
+Active = not in terminal status (completed, terminated, error, failed).
+
+Access control: the caller's project_id must match the job's
+project_id (when both are set).
+
+Args:
+    job_id: The job ID to check. Required.
+
+Returns:
+    Dictionary with job_id, status, elapsed_seconds,
+    last_assistant_message, and instance_tree.
+    Returns {"error": "..."} on failure.
+
+Example:
+    job_progress(job_id="job_abc123")""",
+
+    "job_inject": """Inject a message into a RUNNING or WAITING_CHILDREN job's instance mid-execution.
+
+Routes the message through the RAM-only ``InstanceManager.set_injection``
+queue (the same mechanism the HTTP POST /messages API uses for live turns).
+The agent_node pulls + clears the queue on its next LLM invocation and
+threads the content as a fresh HumanMessage into the conversation.
+
+Unlike ``job_continue`` (which creates a new Task and requires the
+instance to be IDLE/terminal), ``job_inject`` piggybacks on the existing
+turn — it does NOT spawn a new job, does NOT interrupt tool execution,
+and does NOT race with the active ``enqueue_message_job`` path.
+
+Eligibility: the job's instance must be in ``RUNNING`` or
+``WAITING_CHILDREN`` status. PAUSED / IDLE / terminal instances should
+use ``job_continue`` instead (the message gets enqueued via the normal
+queue path on the next dispatch).
+
+Access control: the caller's project_id must match the job's
+project_id (when both are set).
+
+Args:
+    job_id: The job ID whose instance will receive the injection. Required.
+    message: Text to inject into the live turn. Required.
+
+Returns:
+    Dictionary with job_id, instance_id, status="injected",
+    pending_count (how many messages now queued before consumption),
+    content, timestamp.
+    Returns {"error": "..."} on failure.
+
+Example:
+    job_inject(job_id="job_abc123", message="Also remember to add tests")""",
 }
 
 
@@ -1176,11 +1279,433 @@ def create_job_tools(
             return f"Error watching jobs: {str(e)}"
     watch_jobs._full_doc_ = _FULL_DOCS["watch_jobs"]
 
+    # --------------------------------------------------------
+    # P0 Job Visibility Tools — job_messages & job_tree
+    # --------------------------------------------------------
+    # These tools read conversation messages and the instance
+    # hierarchy spawned by a job. Data sources:
+    #   - job_service.get_work(job_id) → WorkRecord (.instance_id)
+    #   - manager._instance_repository (get, get_children, get_tree_ids)
+    #   - manager.get_messages(instance_id) → checkpoint messages
+    # There is NO event table; events are transient SSE only.
+
+    @register_tool_category("job")
+    @tool
+    async def job_messages(
+        job_id: Annotated[str, Field(description="Job ID to inspect")],
+        limit: Annotated[int, Field(default=50, ge=1, le=200, description="Max messages to return")] = 50,
+        offset: Annotated[int, Field(default=0, ge=0, description="Pagination offset")] = 0,
+    ) -> dict:
+        """Get conversation messages for a job's instance tree.
+
+        Collects messages from the root instance and all descendants.
+        Use tool_help("job_messages") for details."""
+        try:
+            record = await job_service.get_work(job_id)
+            if record is None:
+                return {"error": f"Job {job_id} not found"}
+
+            instance_id = record.instance_id
+            if not instance_id:
+                return {"error": f"Job {job_id} has no associated instance_id"}
+
+            if manager is None:
+                return {"error": "Instance manager not available"}
+
+            # C2: Project-scoped access control. Verify the caller's
+            # project matches the job's project. If either is None
+            # (no project scoping), allow access (backward compatible).
+            if current_instance_id and record.project_id:
+                caller = manager._instance_repository.get(current_instance_id) if manager else None
+                if caller and caller.project_id and caller.project_id != record.project_id:
+                    return {"error": "Access denied: job does not belong to caller's project"}
+
+            root_instance = manager._instance_repository.get(instance_id)
+            if root_instance is None:
+                return {"error": f"Instance {instance_id} not found"}
+
+            all_instance_ids = manager._instance_repository.get_tree_ids(instance_id)
+
+            # Safety cap: reading LangGraph checkpoints for many instances
+            # can be slow. Direct the caller to job_tree for an overview.
+            if len(all_instance_ids) > 20:
+                return {
+                    "error": (
+                        f"Instance tree too large ({len(all_instance_ids)} instances) "
+                        "— use job_tree for overview"
+                    )
+                }
+
+            # Build an instance_id → agent_id lookup for tagging messages.
+            agent_map: dict[str, str | None] = {instance_id: record.agent_id or root_instance.agent_id}
+            for child_id in all_instance_ids:
+                if child_id == instance_id:
+                    continue
+                child_inst = manager._instance_repository.get(child_id)
+                agent_map[child_id] = child_inst.agent_id if child_inst else None
+
+            # W2: Fetch messages concurrently (max 5 parallel) to avoid
+            # sequential checkpoint reads.
+            sem = asyncio.Semaphore(5)
+
+            async def _fetch_messages(iid: str) -> tuple[str, list[dict]]:
+                async with sem:
+                    try:
+                        msgs = await manager.get_messages(iid)
+                    except Exception as e:
+                        logger.warning(
+                            "Failed to read messages for instance %s: %s: %s",
+                            iid, type(e).__name__, e,
+                        )
+                        return iid, []
+                    return iid, msgs
+
+            fetch_results = await asyncio.gather(
+                *[_fetch_messages(iid) for iid in all_instance_ids]
+            )
+
+            collected: list[dict] = []
+            for iid, msgs in fetch_results:
+                for msg in msgs:
+                    summary: dict = {
+                        "instance_id": iid,
+                        "agent_id": agent_map.get(iid),
+                        "role": msg.get("role", "unknown"),
+                        "content_snippet": (msg.get("content") or "")[:200],
+                    }
+                    if msg.get("tool_calls"):
+                        summary["tool_calls"] = [
+                            {
+                                "name": tc.get("name", "unknown"),
+                                "arguments_snippet": (str(tc.get("args") or tc.get("arguments") or ""))[:100],
+                            }
+                            for tc in msg["tool_calls"]
+                        ]
+                    collected.append(summary)
+
+            total = len(collected)
+            paginated = collected[offset:offset + limit]
+
+            child_instances = [
+                {"instance_id": ci, "agent_id": agent_map.get(ci)}
+                for ci in all_instance_ids
+                if ci != instance_id
+            ]
+
+            return {
+                "job_id": job_id,
+                "root_instance": {
+                    "instance_id": instance_id,
+                    "agent_id": record.agent_id or root_instance.agent_id,
+                },
+                "child_instances": child_instances,
+                "messages": paginated,
+                "total_messages": total,
+                "returned_count": len(paginated),
+                "has_more": (offset + len(paginated)) < total,
+                "next_offset": (offset + len(paginated)) if (offset + len(paginated)) < total else None,
+            }
+        except Exception as e:
+            logger.error("Failed to get job messages for %s: %s", job_id, e, exc_info=True)
+            return {"error": "Internal error reading job messages"}
+
+    job_messages._full_doc_ = _FULL_DOCS["job_messages"]
+
+    @register_tool_category("job")
+    @tool
+    async def job_tree(
+        job_id: Annotated[str, Field(description="Job ID to inspect")],
+    ) -> dict:
+        """Get the instance hierarchy tree for a job.
+
+        Shows all instances spawned by the job in a tree structure.
+        Use tool_help("job_tree") for details."""
+        try:
+            record = await job_service.get_work(job_id)
+            if record is None:
+                return {"error": f"Job {job_id} not found"}
+
+            instance_id = record.instance_id
+            if not instance_id:
+                return {"error": f"Job {job_id} has no associated instance_id"}
+
+            if manager is None:
+                return {"error": "Instance manager not available"}
+
+            # C2: Project-scoped access control. Verify the caller's
+            # project matches the job's project. If either is None
+            # (no project scoping), allow access (backward compatible).
+            if current_instance_id and record.project_id:
+                caller = manager._instance_repository.get(current_instance_id) if manager else None
+                if caller and caller.project_id and caller.project_id != record.project_id:
+                    return {"error": "Access denied: job does not belong to caller's project"}
+
+            root = manager._instance_repository.get(instance_id)
+            if root is None:
+                return {"error": f"Instance {instance_id} not found"}
+
+            terminal_statuses = {
+                InstanceStatus.COMPLETED.value,
+                InstanceStatus.TERMINATED.value,
+                InstanceStatus.ERROR.value,
+                InstanceStatus.FAILED.value,
+            }
+
+            # W1: Use get_tree_ids() BFS (batched, depth-limited to 256)
+            # instead of recursive get_children() to avoid N+1 queries.
+            all_ids = manager._instance_repository.get_tree_ids(instance_id)
+
+            MAX_TREE_NODES = 200
+            truncated = len(all_ids) > MAX_TREE_NODES
+
+            # Bulk-load all instances in one query pass (avoid N+1).
+            # Build a flat dict of instance_id -> Instance.
+            instance_map: dict[str, Any] = {}
+            for iid in all_ids:
+                inst = manager._instance_repository.get(iid)
+                if inst is not None:
+                    instance_map[iid] = inst
+
+            # Build parent -> [children] lookup from instances.parent_id.
+            children_map: dict[str, list] = {}
+            for iid, inst in instance_map.items():
+                pid = inst.parent_id
+                if pid and pid in instance_map:
+                    if pid not in children_map:
+                        children_map[pid] = []
+                    children_map[pid].append(inst)
+
+            # Build tree recursively from the flat maps (no DB queries here).
+            seen: set[str] = set()
+            def _build_node(iid: str) -> dict:
+                if iid in seen:
+                    logger.warning("Circular reference detected: instance %s already visited in tree", iid)
+                    return {"instance_id": iid, "_cycle": True}
+                seen.add(iid)
+                inst = instance_map.get(iid)
+                if inst is None:
+                    return {"instance_id": iid}
+                node = {
+                    "instance_id": inst.instance_id,
+                    "agent_id": inst.agent_id,
+                    "agent_name": inst.agent_name,
+                    "status": inst.status,
+                    "children": [],
+                }
+                for child in children_map.get(iid, []):
+                    node["children"].append(_build_node(child.instance_id))
+                return node
+
+            tree_node = _build_node(instance_id)
+
+            # Count total and active (non-terminal) instances across the tree.
+            def _count(node: dict) -> tuple[int, int]:
+                # Cycle nodes have no "status" key — don't count them as active.
+                if node.get("_cycle"):
+                    return 0, 0
+                total = 1
+                active = 0 if node.get("status") in terminal_statuses else 1
+                for child in node.get("children", []):
+                    t, a = _count(child)
+                    total += t
+                    active += a
+                return total, active
+
+            total_count, active_count = _count(tree_node)
+
+            return {
+                "job_id": job_id,
+                "tree": tree_node,
+                "total_instances": total_count,
+                "active_instances": active_count,
+                "truncated": truncated,
+            }
+        except Exception as e:
+            logger.error("Failed to get job tree for %s: %s", job_id, e, exc_info=True)
+            return {"error": "Internal error reading job tree"}
+
+    job_tree._full_doc_ = _FULL_DOCS["job_tree"]
+
+    @register_tool_category("job")
+    @tool
+    async def job_progress(
+        job_id: Annotated[str, Field(description="Job ID to check progress for")],
+    ) -> dict:
+        """Get a progress snapshot for a running job.
+
+        Use tool_help("job_progress") for details."""
+        try:
+            record = await job_service.get_work(job_id)
+            if record is None:
+                return {"error": f"Job {job_id} not found"}
+
+            instance_id = record.instance_id
+            if not instance_id:
+                return {"error": f"Job {job_id} has no associated instance_id"}
+
+            if manager is None:
+                return {"error": "Instance manager not available"}
+
+            # C2: Project-scoped access control. Verify the caller's
+            # project matches the job's project. If either is None
+            # (no project scoping), allow access (backward compatible).
+            if current_instance_id and record.project_id:
+                caller = manager._instance_repository.get(current_instance_id) if manager else None
+                if caller and caller.project_id and caller.project_id != record.project_id:
+                    return {"error": "Access denied: job does not belong to caller's project"}
+
+            root_instance = manager._instance_repository.get(instance_id)
+            if root_instance is None:
+                return {"error": f"Instance {instance_id} not found"}
+
+            # Compute elapsed time since the root instance was created.
+            # ``created_at`` is an ISO string that may be tz-naive; assume
+            # UTC when no tz info is present (matches daemon clock).
+            created_raw = root_instance.created_at
+            if created_raw is None:
+                elapsed_seconds = 0.0
+            else:
+                try:
+                    created = datetime.fromisoformat(created_raw)
+                    if created.tzinfo is None:
+                        created = created.replace(tzinfo=UTC)
+                    elapsed_seconds = (datetime.now(UTC) - created).total_seconds()
+                except Exception as e:
+                    logger.warning(
+                        "Failed to parse created_at %r for instance %s: %s: %s",
+                        created_raw, instance_id, type(e).__name__, e,
+                    )
+                    elapsed_seconds = 0.0
+
+            # Fetch the root instance's messages and extract the most recent
+            # assistant message. Mirrors the safety pattern in job_messages
+            # (try/except → empty list on failure so callers degrade gracefully).
+            try:
+                root_messages = await manager.get_messages(instance_id)
+            except Exception as e:
+                logger.warning(
+                    "Failed to read messages for instance %s: %s: %s",
+                    instance_id, type(e).__name__, e,
+                )
+                root_messages = []
+
+            last_assistant: dict | None = None
+            for msg in root_messages:
+                if msg.get("role") == "assistant":
+                    last_assistant = msg
+            last_assistant_payload: dict | None = None
+            if last_assistant is not None:
+                last_assistant_payload = {
+                    "content_snippet": (last_assistant.get("content") or "")[:200],
+                    "timestamp": last_assistant.get("created_at"),
+                }
+
+            # Walk the instance tree once to count active vs completed.
+            # Reuse the same terminal-status set as job_tree for consistency.
+            terminal_statuses = {
+                InstanceStatus.COMPLETED.value,
+                InstanceStatus.TERMINATED.value,
+                InstanceStatus.ERROR.value,
+                InstanceStatus.FAILED.value,
+            }
+
+            all_ids = manager._instance_repository.get_tree_ids(instance_id)
+            active_count = 0
+            completed_count = 0
+            for iid in all_ids:
+                inst = manager._instance_repository.get(iid)
+                if inst is None:
+                    continue
+                if inst.status in terminal_statuses:
+                    completed_count += 1
+                else:
+                    active_count += 1
+
+            return {
+                "job_id": job_id,
+                "status": root_instance.status,
+                "elapsed_seconds": round(elapsed_seconds, 1),
+                "last_assistant_message": last_assistant_payload,
+                "instance_tree": {
+                    "total_instances": len(all_ids),
+                    "active_instances": active_count,
+                    "completed_instances": completed_count,
+                },
+            }
+        except Exception as e:
+            logger.error("Failed to get job progress for %s: %s", job_id, e, exc_info=True)
+            return {"error": "Internal error reading job progress"}
+
+    job_progress._full_doc_ = _FULL_DOCS["job_progress"]
+
+    @register_tool_category("job")
+    @tool
+    async def job_inject(
+        job_id: Annotated[str, Field(description="Job ID whose instance will receive the injection")],
+        message: Annotated[str, Field(description="Text to inject into the live turn")],
+    ) -> dict:
+        """Inject a message into a RUNNING job's instance mid-execution.
+
+        Use tool_help("job_inject") for details."""
+        try:
+            record = await job_service.get_work(job_id)
+            if record is None:
+                return {"error": f"Job {job_id} not found"}
+
+            instance_id = record.instance_id
+            if not instance_id:
+                return {"error": f"Job {job_id} has no associated instance_id"}
+
+            if manager is None:
+                return {"error": "Instance manager not available"}
+
+            # Access control: project-scoped check (same as job_messages).
+            if current_instance_id and record.project_id:
+                caller = manager._instance_repository.get(current_instance_id)
+                if caller and caller.project_id and caller.project_id != record.project_id:
+                    return {"error": "Access denied: job does not belong to caller's project"}
+
+            instance_meta = manager._instance_repository.get(instance_id)
+            if instance_meta is None:
+                return {"error": f"Instance {instance_id} not found"}
+
+            if instance_meta.status not in (
+                InstanceStatus.RUNNING.value,
+                InstanceStatus.WAITING_CHILDREN.value,
+            ):
+                return {
+                    "error": (
+                        f"Instance is {instance_meta.status} — job_inject "
+                        "only works on RUNNING or WAITING_CHILDREN instances. "
+                        "Use job_continue for IDLE/terminal instances."
+                    )
+                }
+
+            # set_injection appends to the RAM queue; the agent_node
+            # consumes it on its next LLM call. See graph.py:2607.
+            entry = manager.set_injection(instance_id, message)
+            pending_count = manager.get_injection_count(instance_id)
+
+            return {
+                "job_id": job_id,
+                "instance_id": instance_id,
+                "status": "injected",
+                "pending_count": pending_count,
+                "content": entry.get("content"),
+                "timestamp": entry.get("timestamp"),
+            }
+        except Exception as e:
+            logger.error("Failed to inject message for job %s: %s", job_id, e, exc_info=True)
+            return {"error": "Internal error injecting message"}
+
+    job_inject._full_doc_ = _FULL_DOCS["job_inject"]
+
     return [
         job_create, job_get, job_list, job_cancel, job_retry,
         job_delete, job_restore, queue_list, queue_create,
         queue_update, dlq_list, dlq_replay,
         job_continue,   # moved to end of non-watch tools (was index 7)
+        job_messages, job_tree, job_progress, job_inject,
         watch_job, unwatch_job, list_watched_jobs, watch_jobs,
     ]
 

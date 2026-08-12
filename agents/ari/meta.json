@@ -21,7 +21,11 @@
       "mcp",
       "context",
       "shared_meta_kv",
-      "project"
+      "project",
+      "job_messages",
+      "job_tree",
+      "job_progress",
+      "job_inject"
     ]
   }
 }
