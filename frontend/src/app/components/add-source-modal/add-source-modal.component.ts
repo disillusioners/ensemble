@@ -187,7 +187,7 @@ export class AddSourceModalComponent implements OnInit {
   private get sourceTypeConfigs(): Record<SourceType, SourceTypeConfig> {
     const agentOptions: SelectOption[] = this.agents().map(agent => ({
       value: agent.id,
-      label: agent.name
+      label: agent.version_tag ? `${agent.name} (${agent.version_tag})` : agent.name
     }));
     
     const configs: Record<SourceType, SourceTypeConfig> = {} as Record<SourceType, SourceTypeConfig>;
