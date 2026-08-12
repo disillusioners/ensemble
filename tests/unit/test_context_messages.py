@@ -63,6 +63,7 @@ from daemon.services.context_messages import (
     CONTEXT_SUFFIX,
     assemble_context_messages,
     build_project_context_message,
+    build_project_scope_guide_message,
     build_shared_context_message,
     build_skills_message,
     escape_for_context_block,
@@ -469,6 +470,34 @@ class TestBuildProjectContextMessage:
             < content.index("⚡ Critical Notes")
             < content.index("📜 Recent History")
         )
+
+
+# ─── build_project_scope_guide_message ───────────────────────────────────────
+
+
+class TestBuildProjectScopeGuideMessage:
+    """Tests for the scope-guide message (non-scoped mode)."""
+
+    def test_returns_human_message(self) -> None:
+        msg = build_project_scope_guide_message()
+        assert msg is not None
+        assert isinstance(msg, HumanMessage)
+
+    def test_context_kind_metadata(self) -> None:
+        msg = build_project_scope_guide_message()
+        assert msg.additional_kwargs["context_kind"] == "project_scope_guide"
+        assert msg.additional_kwargs["injected_message"] is True
+
+    def test_title_in_content(self) -> None:
+        msg = build_project_scope_guide_message()
+        assert "[SYSTEM CONTEXT: Project Scope Guide]" in msg.content
+
+    def test_guide_mentions_key_tools(self) -> None:
+        """The guide must mention the tools an agent can use to find a project."""
+        msg = build_project_scope_guide_message()
+        assert "project_search" in msg.content
+        assert "project_list" in msg.content
+        assert "project_id" in msg.content
 
 
 # ─── build_shared_context_message ────────────────────────────────────────────
@@ -908,6 +937,80 @@ class TestAssembleContextMessages:
         assert "skills" in kinds
         # No project message because every repo call failed.
         assert "project" not in kinds
+
+    # ── System default project → scope guide injection ──
+
+    def test_scope_guide_when_system_default_project_id(self) -> None:
+        """When project_id == SYSTEM_DEFAULT_PROJECT_ID, inject scope guide."""
+        # Patch the module-level SYSTEM_DEFAULT_PROJECT_ID to a known value.
+        from daemon import constants as consts
+        original = consts.SYSTEM_DEFAULT_PROJECT_ID
+        consts.SYSTEM_DEFAULT_PROJECT_ID = "default-uuid"
+        try:
+            project = MagicMock()
+            project.name = "__system_default__"
+            project.to_dict.return_value = {
+                "project_id": "default-uuid",
+                "name": "__system_default__",
+            }
+            manager, instance_repo, agent_meta = self._make_manager(project=project)
+            result = _flatten_context_result(self._run(
+                assemble_context_messages(
+                    instance_id="inst-1", user_query="hi",
+                    project_id="default-uuid",
+                    agent_meta=agent_meta, manager=manager,
+                    instance_repository=instance_repo,
+                )
+            ))
+            assert len(result) >= 1
+            assert result[0].additional_kwargs["context_kind"] == "project_scope_guide"
+            assert "[SYSTEM CONTEXT: Project Scope Guide]" in result[0].content
+            # Must NOT contain the project JSON dump.
+            assert "## Related Project" not in result[0].content
+        finally:
+            consts.SYSTEM_DEFAULT_PROJECT_ID = original
+
+    def test_scope_guide_when_project_name_is_default(self) -> None:
+        """Name-based detection: project.name == __system_default__ even if ID differs."""
+        project = MagicMock()
+        project.name = "__system_default__"
+        project.to_dict.return_value = {
+            "project_id": "some-uuid",
+            "name": "__system_default__",
+        }
+        manager, instance_repo, agent_meta = self._make_manager(project=project)
+        # Use a project_id that is NOT the system default ID constant.
+        result = _flatten_context_result(self._run(
+            assemble_context_messages(
+                instance_id="inst-1", user_query="hi",
+                project_id="some-uuid",
+                agent_meta=agent_meta, manager=manager,
+                instance_repository=instance_repo,
+            )
+        ))
+        assert result[0].additional_kwargs["context_kind"] == "project_scope_guide"
+
+    def test_normal_project_context_when_real_project(self) -> None:
+        """A real (non-default) project still gets the normal project JSON dump."""
+        project = MagicMock()
+        project.name = "my-real-project"
+        project.to_dict.return_value = {
+            "project_id": "real-1",
+            "name": "my-real-project",
+        }
+        manager, instance_repo, agent_meta = self._make_manager(project=project)
+        result = _flatten_context_result(self._run(
+            assemble_context_messages(
+                instance_id="inst-1", user_query="hi",
+                project_id="real-1",
+                agent_meta=agent_meta, manager=manager,
+                instance_repository=instance_repo,
+            )
+        ))
+        assert result[0].additional_kwargs["context_kind"] == "project"
+        assert "## Related Project" in result[0].content
+        # Must NOT be the scope guide.
+        assert "[SYSTEM CONTEXT: Project Scope Guide]" not in result[0].content
 
 
 # ─── Mode-based gate (regression for the 2026-07-28 bug) ────────────────────

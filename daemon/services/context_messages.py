@@ -48,7 +48,8 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage
 
-from daemon.constants import BLUEPRINT_ACTIVE_METADATA_KEY
+from daemon import constants as _constants
+from daemon.constants import BLUEPRINT_ACTIVE_METADATA_KEY, SYSTEM_DEFAULT_PROJECT_NAME
 from .skill_metrics_service import REPLACED_SKILLS_METADATA_KEY
 
 logger = logging.getLogger(__name__)
@@ -74,6 +75,7 @@ CONTEXT_KIND_AUTO_LOAD_SKILLS = "auto_load_skills"
 CONTEXT_KIND_SKILLS = "skills"
 CONTEXT_KIND_TASK_CONTEXT = "task_context"
 CONTEXT_KIND_BLUEPRINT = "blueprint"
+CONTEXT_KIND_PROJECT_SCOPE_GUIDE = "project_scope_guide"
 
 
 # ─── Internal helpers ─────────────────────────────────────────────────────────
@@ -469,6 +471,67 @@ def build_project_context_message(
         kind=CONTEXT_KIND_PROJECT,
         title="Related Project",
         content=body,
+    )
+
+
+# ─── Project scope guide (non-scoped mode) ────────────────────────────────────
+
+
+# Static guide text injected when the instance operates under the system
+# default project. ``_make_context_message`` wraps the text with the
+# ``[SYSTEM CONTEXT: Project Scope Guide]`` prefix without escaping —
+# this is trusted static text, NOT user content, so the nested code
+# fences are intentional and safe.
+_PROJECT_SCOPE_GUIDE_CONTENT = """\
+## Non-Scoped Mode — Project Selection Required
+
+You are currently operating **without a specific project scope**. Many ensemble tools (jobs, queues, project tools, knowledge tools) require a `project_id` to function correctly. Using the wrong project leads to misplaced jobs, lost context, and broken workflows.
+
+### What You Should Do
+
+1. **Identify the correct project** for your task. Use these tools:
+   - `project_search(query="...")` — Search projects by name or description
+   - `project_list()` — List all available projects
+
+2. **Pass the correct `project_id`** when calling tools that need it (jobs, queues, etc.)
+
+3. **When spawning child instances**, pass the correct `project_id` so they inherit the right scope.
+
+### How to Identify the Right Project
+
+- Match by **name** — the project name usually reflects the codebase or feature area
+- Match by **description** — read what the project covers
+- Match by **tags** and **shortnames** — useful aliases and categorization
+- Match by **main_directory** — the filesystem path tells you which codebase it covers
+
+### Example
+
+If asked to "fix a bug in the ensemble scheduler":
+```
+project_search(query="scheduler")  → find the matching project
+# Use the returned project_id for all subsequent tool calls
+```
+
+Do NOT guess or use a default project_id. Always verify the project matches your task scope before proceeding."""
+
+
+def build_project_scope_guide_message() -> HumanMessage:
+    """Build the ``[SYSTEM CONTEXT: Project Scope Guide]`` message.
+
+    Injected when an instance operates under the system default project
+    (``__system_default__``) instead of the unhelpful default-project
+    JSON dump. The guide teaches the agent how to find and select the
+    correct project for its task.
+
+    The content is static guidance text — no arguments needed.
+
+    Returns:
+        Tagged :class:`HumanMessage` carrying the scope-guide body.
+    """
+    return _make_context_message(
+        kind=CONTEXT_KIND_PROJECT_SCOPE_GUIDE,
+        title="Project Scope Guide",
+        content=_PROJECT_SCOPE_GUIDE_CONTENT,
     )
 
 
@@ -1262,14 +1325,33 @@ async def assemble_context_messages(
         _fetch_kv_metadata, context_key, manager
     )
 
-    project_msg = build_project_context_message(
-        project=project,
-        critical_notes=critical_notes,
-        kv_metadata=kv_metadata,
-        history_entries=history_entries,
+    # Detect the system default project. ``SYSTEM_DEFAULT_PROJECT_ID``
+    # is set at startup (it is ``None`` at import time), so we read it
+    # at call time via ``_constants.SYSTEM_DEFAULT_PROJECT_ID``. The
+    # name-based check is a robust fallback that also works in unit
+    # tests where the ID constant was never set.
+    is_system_default = (
+        project_id == _constants.SYSTEM_DEFAULT_PROJECT_ID
+        or (
+            project is not None
+            and getattr(project, "name", None) == SYSTEM_DEFAULT_PROJECT_NAME
+        )
     )
-    if project_msg is not None:
+
+    if is_system_default:
+        # Inject the scope guide instead of the unhelpful default-project
+        # JSON dump.
+        project_msg = build_project_scope_guide_message()
         persistent_msgs.append(project_msg)
+    else:
+        project_msg = build_project_context_message(
+            project=project,
+            critical_notes=critical_notes,
+            kv_metadata=kv_metadata,
+            history_entries=history_entries,
+        )
+        if project_msg is not None:
+            persistent_msgs.append(project_msg)
 
     # ── 2. Shared context (RAG) message — PERSISTENT ──
     # Gate the entire RAG path on ``context_injection.heuristic_match_shared_md_files``
@@ -1464,8 +1546,10 @@ __all__ = [
     "CONTEXT_KIND_SKILLS",
     "CONTEXT_KIND_TASK_CONTEXT",
     "CONTEXT_KIND_BLUEPRINT",
+    "CONTEXT_KIND_PROJECT_SCOPE_GUIDE",
     # Pure builder functions
     "build_project_context_message",
+    "build_project_scope_guide_message",
     "build_shared_context_message",
     "build_auto_load_skills_message",
     "auto_load_skills_message_id",
