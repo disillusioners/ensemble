@@ -36,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from collections import OrderedDict
 from typing import Any, Awaitable, Callable, ClassVar
 
@@ -59,6 +60,7 @@ from .constants import (
     DISCORD_TOKEN_PATTERN,
     EVICTION_INTERVAL_SECONDS,
     GATEWAY_READY_TIMEOUT_SECONDS,
+    HEALTH_CHECK_GRACE_SECONDS,
     MAX_CHANNEL_LOCKS,
     TEST_CONNECTION_TIMEOUT_SECONDS,
 )
@@ -221,6 +223,13 @@ class DiscordAdapter(MessageSourceAdapter):
         # plan.
         self._start_lock = asyncio.Lock()
         self._stopped = False
+        # Monotonic deadline (set in ``start()`` after RUNNING) that
+        # suppresses transient ``is_ready()=False`` / unstable-latency
+        # failures during the post-``on_ready`` Gateway stabilization
+        # window. Prevents the supervisor's immediate post-start()
+        # health check from crash-looping the adapter. See
+        # ``health_check()``.
+        self._health_check_grace_until: float = 0.0
 
         # --- Resilience --------------------------------------------------
         self._circuit_breaker = CircuitBreaker(
@@ -489,6 +498,15 @@ class DiscordAdapter(MessageSourceAdapter):
                 raise RuntimeError(self._error)
 
             self._status = SourceStatus.RUNNING
+            # Open the startup grace window so the supervisor's immediate
+            # post-start() health check tolerates transient
+            # ``is_ready()=False`` / unstable latency while the Gateway
+            # stabilizes. Without this, Discord's gateway can transiently
+            # report unhealthy for a few hundred ms after ``on_ready``,
+            # crash-looping the adapter. See ``health_check()``.
+            self._health_check_grace_until = (
+                time.monotonic() + HEALTH_CHECK_GRACE_SECONDS
+            )
 
             # Start the TTL eviction loop AFTER the Gateway is confirmed.
             self._ttl_task = asyncio.create_task(
@@ -570,13 +588,38 @@ class DiscordAdapter(MessageSourceAdapter):
             logger.info(f"Discord adapter stopped: {self.source_id}")
 
     async def health_check(self) -> bool:
-        """Return True iff the Gateway is connected and latency is healthy."""
+        """Return True iff the Gateway is connected and latency is healthy.
+
+        During the startup grace period (``HEALTH_CHECK_GRACE_SECONDS``
+        after ``start()`` returns), returns True as long as the client
+        task is alive, tolerating transient ``is_ready()=False`` or
+        unstable latency while the Gateway stabilizes. After the grace
+        window expires, the original strict checks apply unchanged.
+        """
         if self._status != SourceStatus.RUNNING:
             return False
         client = self._client
         if client is None:
             return False
+
+        in_grace = time.monotonic() < self._health_check_grace_until
+
         try:
+            # During the startup grace window, only verify the client
+            # task is alive. ``is_ready()`` and ``latency`` can be
+            # transiently False/None for a few hundred ms after
+            # ``on_ready`` while the Gateway stabilizes — failing the
+            # health check on that would crash-loop the adapter because
+            # the supervisor runs health_check() immediately after
+            # start() with no grace period. A done client task, however,
+            # IS a real failure (e.g. uncaught exception in
+            # ``_client_task``).
+            if in_grace:
+                if self._client_task is not None and self._client_task.done():
+                    return False
+                return True
+
+            # Strict checks after grace period.
             if not client.is_ready():
                 return False
             latency = client.latency
