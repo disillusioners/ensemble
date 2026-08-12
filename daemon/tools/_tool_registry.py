@@ -53,6 +53,11 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
     "comment_edit",
     "skill_search",
     "shared_meta_kv",
+    # P0 job visibility tools — created by create_job_tools() factory
+    "job_messages",
+    "job_tree",
+    "job_progress",
+    "job_inject",
 })
 
 
