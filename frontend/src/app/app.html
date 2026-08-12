@@ -14,6 +14,9 @@
         <a routerLink="/schedules" routerLinkActive="active" class="nav-link">Schedules</a>
         <a routerLink="/jobs" routerLinkActive="active" class="nav-link">Jobs</a>
         <a routerLink="/skills" routerLinkActive="active" class="nav-link">Skills</a>
+        @if (planeEnabled()) {
+          <a routerLink="/plan" routerLinkActive="active" class="nav-link">Plan</a>
+        }
       </nav>
     </div>
     
@@ -54,4 +57,18 @@
   <main class="app-main">
     <router-outlet></router-outlet>
   </main>
+
+  <!-- Plane iframe — always mounted, display-toggled for caching.
+       Stays alive across route changes so iframe state is preserved. -->
+  @if (planeEnabled()) {
+    <div
+      class="plane-overlay"
+      [style.display]="isPlanRoute() ? 'flex' : 'none'"
+    >
+      <button class="plane-overlay-close" mat-icon-button (click)="closePlan()">
+        <mat-icon>close</mat-icon>
+      </button>
+      <app-plane-viewer [url]="planeUrl()"></app-plane-viewer>
+    </div>
+  }
 </div>

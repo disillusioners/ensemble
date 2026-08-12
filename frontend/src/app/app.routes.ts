@@ -24,5 +24,11 @@ export const routes: Routes = [
   { path: 'schedules', loadComponent: () => import('./pages/schedules/schedules.component').then(m => m.SchedulesComponent) },
   { path: 'mcp-servers', loadComponent: () => import('./components/mcp-server-list/mcp-server-list.component').then(m => m.McpServerListComponent) },
   { path: 'migration', loadComponent: () => import('./components/migration/migration.component').then(m => m.MigrationComponent) },
+  // /plan is a thin route whose content is rendered by the root-mounted
+  // Plane iframe overlay (app.html). The component itself is invisible;
+  // the overlay covers it when the route is active. Keeping the route
+  // registered ensures the Angular router reflects /plan in the URL bar
+  // and activates the nav link's `active` class.
+  { path: 'plan', loadComponent: () => import('./pages/plan/plan.component').then(m => m.PlanComponent) },
   { path: '**', redirectTo: '' }
 ];

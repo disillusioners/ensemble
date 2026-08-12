@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+import os
 import re
 import shutil
 from typing import Any
@@ -31,6 +32,7 @@ from .schemas import (
     DefaultAgentVersionUpdate,
     BlueprintPeakHoursResponse,
     BlueprintPeakHoursUpdate,
+    PlaneConfigResponse,
 )
 
 # Peak-hours gate metadata keys — these are the same keys read by
@@ -516,3 +518,20 @@ async def set_blueprint_peak_hours(body: BlueprintPeakHoursUpdate):
     return BlueprintPeakHoursResponse(
         start=body.start, end=body.end, tz_offset=body.tz_offset,
     )
+
+
+# ==================== Plane Config Endpoint ====================
+
+
+@router.get("/plane", response_model=PlaneConfigResponse)
+async def get_plane_config():
+    """Get the Plane integration config.
+
+    Reads the ``PLANE_BASE_URL`` environment variable. Returns
+    ``enabled=True`` with the URL when set (non-empty); otherwise
+    ``enabled=False`` with an empty URL string so the frontend hides
+    the feature.
+    """
+    url = (os.environ.get("PLANE_BASE_URL", "") or "").strip()
+    enabled = bool(url)
+    return PlaneConfigResponse(enabled=enabled, url=url if enabled else "")
