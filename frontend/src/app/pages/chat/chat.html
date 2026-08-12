@@ -195,12 +195,21 @@
     <!-- Workspace overlay. Renders on top of the instance sidebar and chat area.
          Closes via the Hide button or by toggling the same project's icon. The
          WorkspaceService LRU cache preserves background state across hide/show
-         cycles. -->
-    @if (showWorkspace()) {
-      <app-workspace
-        [projectId]="workspaceProjectId()!"
-        (hide)="onWorkspaceHide()"
-      ></app-workspace>
-    }
+         cycles.
+
+         Always mounted (no @if destroy) so the VS Code editor cache and
+         any other expensive subtree survives hide/show. The
+         `[style.display]` binding toggles between `flex` (visible) and
+         `none` (hidden); the `[visible]` input lets the workspace
+         component disconnect SSE and skip keyboard handling while
+         hidden. The cache itself has no knowledge of visibility — that
+         is the parent's job, which is exactly the contract this
+         template enforces. -->
+    <app-workspace
+      [projectId]="workspaceProjectId() || ''"
+      [visible]="showWorkspace()"
+      [style.display]="showWorkspace() ? 'flex' : 'none'"
+      (hide)="onWorkspaceHide()"
+    ></app-workspace>
   </div>
 </div>

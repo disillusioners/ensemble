@@ -4,9 +4,11 @@ import {
   EventEmitter,
   HostListener,
   Input,
+  OnChanges,
   OnDestroy,
   OnInit,
   Output,
+  SimpleChanges,
   ViewChild,
   effect,
   inject,
@@ -216,7 +218,7 @@ import {
   `,
   styleUrl: './workspace.component.scss',
 })
-export class WorkspaceComponent implements OnInit, OnDestroy {
+export class WorkspaceComponent implements OnInit, OnChanges, OnDestroy {
   private readonly route = inject(ActivatedRoute);
   readonly workspace = inject(WorkspaceService);
   private readonly destroyRef = inject(DestroyRef);
@@ -263,6 +265,32 @@ export class WorkspaceComponent implements OnInit, OnDestroy {
    * workspace view.
    */
   @Output() public readonly hide = new EventEmitter<void>();
+
+  /**
+   * Whether the workspace is currently visible to the user.
+   *
+   * The default is `true` so the standalone route page
+   * (`/projects/:projectId/workspace`) — which does not bind
+   * `[visible]` — keeps rendering normally. Overlay hosts that keep
+   * the component always-mounted (so the VS Code editor cache and
+   * other expensive subtrees survive a hide/show cycle) MUST bind
+   * `[visible]` to their visibility state.
+   *
+   * When `false`:
+   *   - The host should also apply `display: none` via a
+   *     `[style.display]` binding (the parent template does this).
+   *   - SSE is disconnected (saves a long-lived connection and the
+   *     associated HTTP polls for changes the user cannot see).
+   *   - Window keyboard handlers are no-ops (Ctrl+S / Escape must
+   *     not fire while the workspace is invisible, otherwise the
+   *     wrong instance could be saved or the overlay dismissed
+   *     while the user is doing something else).
+   *
+   * Project data still loads when the user switches projects while
+   * the workspace is hidden, so re-showing the overlay is instant.
+   * SSE is re-connected when visibility flips back to `true`.
+   */
+  @Input() public visible: boolean = true;
 
   // `selectedPath` and `currentFile` are computed signals on the
   // service (derived from `_activeFilePath` and the per-path content
@@ -360,6 +388,36 @@ export class WorkspaceComponent implements OnInit, OnDestroy {
     }
     this._initialised = true;
     this.loadProject(this._projectId);
+  }
+
+  /**
+   * React to input changes from the parent template.
+   *
+   * Only `visible` needs lifecycle handling — `projectId` is wired
+   * through a setter (so input changes reliably trigger `loadProject`
+   * without depending on `ngOnChanges` timing) and `visible` defaults
+   * to `true` for the standalone route, so the only state transition
+   * we care about here is a hide/show flip from the parent.
+   *
+   * On the visible→hidden edge we drop the SSE connection (the
+   * user cannot see the workspace, so receiving file-change pushes
+   * is wasted work). On the hidden→visible edge we re-establish SSE
+   * only when there is a project loaded — the standalone route
+   * starts invisible→visible during `ngOnInit`/route resolution, so
+   * `_projectId` may be empty and `loadProject` is responsible for
+   * the initial connect.
+   */
+  ngOnChanges(changes: SimpleChanges): void {
+    if (changes['visible']) {
+      const isVisible = changes['visible'].currentValue as boolean;
+      if (isVisible) {
+        if (this._projectId) {
+          this.workspace.connectSSE(this._projectId);
+        }
+      } else {
+        this.workspace.disconnectSSE();
+      }
+    }
   }
 
   ngOnDestroy(): void {
@@ -632,9 +690,15 @@ export class WorkspaceComponent implements OnInit, OnDestroy {
    * Ctrl/Cmd+S — trigger save. Prevented from the browser default so
    * the page does not try to save as HTML. Active only when the Save
    * button is logically visible (a file is selected).
+   *
+   * No-op while the workspace overlay is hidden — the host keeps the
+   * component mounted across hide/show cycles, so the window-level
+   * handler would otherwise fire for keystrokes the user did not
+   * intend against this overlay.
    */
   @HostListener('window:keydown', ['$event'])
   onSaveKeydown(event: KeyboardEvent): void {
+    if (!this.visible) return;
     if (!(event.ctrlKey || event.metaKey) || event.key !== 's') {
       return;
     }
@@ -653,9 +717,15 @@ export class WorkspaceComponent implements OnInit, OnDestroy {
    * project list. Active only in VS Code mode; in builtin mode the
    * Escape key is left alone so it does not interfere with editor
    * overlays (find dialog, etc.).
+   *
+   * No-op while the workspace overlay is hidden — the host keeps the
+   * component mounted across hide/show cycles, so the window-level
+   * handler would otherwise dismiss an already-hidden overlay (or
+   * fire when the user is doing something unrelated in the chat).
    */
   @HostListener('window:keydown.escape')
   onEscapeKey(): void {
+    if (!this.visible) return;
     if (this.editorMode() === 'vscode') {
       this.onHide();
     }
@@ -760,7 +830,11 @@ export class WorkspaceComponent implements OnInit, OnDestroy {
         }
 
         // SSE needs the new projectId targeted for file-change refresh.
-        this.workspace.connectSSE(projectId);
+        // Skip when the overlay is hidden — the host keeps us mounted
+        // across hide/show, and `ngOnChanges` re-connects on re-show.
+        if (this.visible) {
+          this.workspace.connectSSE(projectId);
+        }
         this.loadValidatedWorkdir(projectId);
         return;
       }
@@ -786,7 +860,11 @@ export class WorkspaceComponent implements OnInit, OnDestroy {
       .getFileTree(projectId)
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe((res) => this.fileTree?.setTree(res.tree));
-    this.workspace.connectSSE(projectId);
+    // Skip when the overlay is hidden — the host keeps us mounted
+    // across hide/show, and `ngOnChanges` re-connects on re-show.
+    if (this.visible) {
+      this.workspace.connectSSE(projectId);
+    }
     this.loadValidatedWorkdir(projectId);
   }
 }
