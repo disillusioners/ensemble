@@ -409,6 +409,12 @@ async def start_source(source_id: str, request: Request):
                         await manager.source_registry._handle_message(source_id, msg)
                     adapter = SlackAdapter(config, on_message)
                     adapter._source_repo = manager._source_repository
+                elif source_type == "discord":
+                    from daemon.sources.adapters.discord import DiscordAdapter
+                    async def on_message(msg):
+                        await manager.source_registry._handle_message(source_id, msg)
+                    adapter = DiscordAdapter(config, on_message, manager=manager)
+                    adapter._source_repo = manager._source_repository
                 else:
                     raise ValueError(f"Source type '{source_type}' adapter not yet implemented")
                 
