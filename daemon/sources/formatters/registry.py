@@ -76,5 +76,7 @@ def get_or_passthrough(source_type: str) -> OutputFormatter:
 # Auto-register built-in formatters on import.
 # We import lazily to avoid circular import issues during package init.
 from daemon.sources.formatters.slack import SlackMrkdwnFormatter  # noqa: E402
+from daemon.sources.formatters.discord import DiscordFormatter  # noqa: E402
 
 register("slack", SlackMrkdwnFormatter())
+register("discord", DiscordFormatter())

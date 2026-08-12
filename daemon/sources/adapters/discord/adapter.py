@@ -1576,6 +1576,15 @@ class DiscordAdapter(MessageSourceAdapter):
             logger.warning("Discord send: empty content after stripping")
             return False
 
+        # Apply Discord-specific markdown formatter (converts ATX headers
+        # to bold and markdown tables to ASCII art in code blocks). Discord
+        # renders most other markdown natively so this is intentionally
+        # narrow. The import is lazy to avoid pulling the formatters
+        # package in at module import time.
+        from daemon.sources.formatters.registry import get_or_passthrough
+
+        content = get_or_passthrough("discord").format(content)
+
         try:
             target_info = await self._resolve_send_target(
                 message.external_user_id
