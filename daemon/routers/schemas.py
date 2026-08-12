@@ -953,3 +953,18 @@ class BlueprintPeakHoursUpdate(BaseModel):
         le=14,
         description="UTC offset in whole hours (-12 to 14, e.g. 7 for GMT+7)",
     )
+
+
+# ==================== Plane Config Schemas ====================
+
+
+class PlaneConfigResponse(BaseModel):
+    """Response for GET /api/settings/plane.
+
+    The frontend uses this to decide whether to show the "Plan" nav
+    item and mount the Plane iframe. ``enabled`` is true only when the
+    ``PLANE_BASE_URL`` environment variable is set to a non-empty value.
+    """
+
+    enabled: bool = Field(..., description="Whether Plane integration is enabled")
+    url: str = Field(..., description="The Plane base URL (empty string if disabled)")

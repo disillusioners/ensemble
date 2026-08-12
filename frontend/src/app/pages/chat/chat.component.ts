@@ -11,6 +11,7 @@ import { Subscription } from 'rxjs';
 import { ApiService } from '../../services/api.service';
 import { SseService } from '../../services/sse.service';
 import { TabStateService } from '../../services/tab-state.service';
+import { WorkspaceOverlayService } from '../../services/workspace-overlay.service';
 import { InstanceService, sortByCreatedAtDesc } from '../../services/instance.service';
 import { ProjectService } from '../../services/project.service';
 import { InstanceListComponent } from '../../components/instance-list/instance-list.component';
@@ -23,7 +24,6 @@ import {
   WatchoverDialogComponent,
   WatchoverDialogResult,
 } from '../../components/watchover-dialog/watchover-dialog.component';
-import { WorkspaceComponent } from '../workspace/workspace.component';
 import type { Agent, InstanceInfo, Message } from '../../models';
 
 const NEXT_AGENT_STORAGE_KEY = 'ensemble-next-instance-agent';
@@ -44,8 +44,7 @@ const NEXT_AGENT_STORAGE_KEY = 'ensemble-next-instance-agent';
     ChatInterfaceComponent,
     MessageInputComponent,
     TodoListComponent,
-    QuestionWizardComponent,
-    WorkspaceComponent
+    QuestionWizardComponent
   ],
   templateUrl: './chat.html',
   styleUrl: './chat.scss'
@@ -60,6 +59,14 @@ export class ChatComponent implements OnInit, OnDestroy {
   private readonly projectService = inject(ProjectService);
   private readonly snackBar = inject(MatSnackBar);
   private readonly dialog = inject(MatDialog);
+  /**
+   * Workspace overlay state is owned by the root-provided singleton
+   * service so the overlay element itself can live at the App root
+   * (where the Alt+` global hotkey is bound) and survive route changes.
+   * Exposed to the template so the chat-header button's active-state
+   * class can bind directly to the service's signals.
+   */
+  protected readonly workspaceOverlayService = inject(WorkspaceOverlayService);
   private routeSubscription: Subscription | null = null;
 
   protected get projectId(): string {
@@ -155,22 +162,31 @@ export class ChatComponent implements OnInit, OnDestroy {
    * - Switching tabs while the workspace is CLOSED does NOT auto-open it.
    *
    * Uses `allowSignalWrites: true` because the effect writes back to
-   * local signals (showWorkspace / workspaceProjectId), mirroring the
-   * pattern used by other write-emitting effects in this component.
+   * the workspace overlay service's signals (the canonical state holder),
+   * mirroring the pattern used by other write-emitting effects in this
+   * component.
+   *
+   * CRITICAL: the overlay service's `showWorkspace()` and
+   * `workspaceProjectId()` MUST be read unconditionally at the top of
+   * the effect (not inside the non-null branch) so Angular's reactive
+   * graph keeps them as dependencies across every run. If we
+   * conditionally read them, then a run that hits the `projectId ===
+   * null` branch will drop those deps, and subsequent mutations to
+   * those signals will not retrigger the effect.
    */
   private tabWorkspaceEffect = effect(() => {
     const projectId = this.tabStateService.activeProjectId();
-    const isOpen = this.showWorkspace();         // always read → always tracked
-    const currentId = this.workspaceProjectId(); // always read → always tracked
+    const isOpen = this.workspaceOverlayService.showWorkspace();         // always read → always tracked
+    const currentId = this.workspaceOverlayService.workspaceProjectId(); // always read → always tracked
 
     if (projectId === null) {
-      if (isOpen)    this.showWorkspace.set(false);
-      if (currentId) this.workspaceProjectId.set(null);
+      if (isOpen)    this.workspaceOverlayService.hide();
+      if (currentId) this.workspaceOverlayService.workspaceProjectId.set(null);
       return;
     }
 
     if (isOpen && currentId !== projectId) {
-      this.workspaceProjectId.set(projectId);
+      this.workspaceOverlayService.workspaceProjectId.set(projectId);
     }
   }, { allowSignalWrites: true });
 
@@ -989,24 +1005,23 @@ export class ChatComponent implements OnInit, OnDestroy {
     this.api.resumeInstance(instanceId).subscribe({ error: (err: any) => console.error('Resume failed:', err) });
   }
 
-  // Workspace overlay state. The overlay covers the chat area (header +
-  // interface + input) when shown. Closing it via Hide triggers the
-  // WorkspaceService LRU cache to retain project state, so re-opening
-  // restores the prior file tree.
-  readonly showWorkspace = signal(false);
-  readonly workspaceProjectId = signal<string | null>(null);
+  // Workspace overlay state. The overlay element itself is mounted at
+  // the App root so it survives route changes and can be toggled by
+  // the Alt+` global hotkey. State (whether the overlay is shown and
+  // which project it is bound to) lives in the root-provided
+  // WorkspaceOverlayService singleton.
+  //
+  // The toggle handlers below delegate to the service. The chat-header
+  // button's active-state binding reads the service's signals directly
+  // (see `workspaceOverlayService` above) so the UI stays in sync with
+  // the same source of truth that the App root uses.
 
   /**
    * Handle workspace icon click from the project tab bar.
    * Same project toggles off; different project switches to that project.
    */
   protected onWorkspaceToggle(projectId: string): void {
-    if (this.showWorkspace() && this.workspaceProjectId() === projectId) {
-      this.showWorkspace.set(false);
-      return;
-    }
-    this.workspaceProjectId.set(projectId);
-    this.showWorkspace.set(true);
+    this.workspaceOverlayService.toggle(projectId);
   }
 
   /**
@@ -1014,7 +1029,7 @@ export class ChatComponent implements OnInit, OnDestroy {
    * WorkspaceService's LRU cache, so no extra work is needed here.
    */
   protected onWorkspaceHide(): void {
-    this.showWorkspace.set(false);
+    this.workspaceOverlayService.hide();
   }
 
   /**
@@ -1023,7 +1038,7 @@ export class ChatComponent implements OnInit, OnDestroy {
    */
   protected onHeaderWorkspaceToggle(): void {
     if (!this.hasRealProject) return;
-    this.onWorkspaceToggle(this.projectId);
+    this.workspaceOverlayService.toggle(this.projectId);
   }
 
   // Expose for template
