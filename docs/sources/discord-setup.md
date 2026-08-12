@@ -79,7 +79,7 @@ flowchart TD
 ### Generate the Bot Invite URL
 
 1. Go to the **OAuth2** tab in your application settings
-2. Under **OAuth2 URL Generator**, select the `bot` scope
+2. Under **OAuth2 URL Generator**, select the `bot` and `applications.commands` scopes
 3. Set the following **Bot Permissions**:
 
 | Permission | Purpose |
@@ -87,8 +87,11 @@ flowchart TD
 | Send Messages | Send responses back to channels and DMs |
 | Read Message History | Read recent messages in channels |
 | View Channels | See channels the bot can access |
+| Use Slash Commands | Allow users to use the bot's slash commands (e.g., `/new`) |
 
 4. Copy the generated URL at the bottom — you'll use it in Step 4
+
+> 💡 **Slash Commands:** The `applications.commands` scope is **required** for the bot to register slash commands. If the bot was invited without it, slash commands will never appear — re-invite with the updated URL. After re-inviting, global slash commands may take **up to 1 hour** to propagate. For instant testing, configure `allowed_guild_ids` in the source — the adapter syncs commands to specific guilds immediately on startup.
 
 ## Step 3: Get the Bot Token
 
@@ -226,6 +229,12 @@ The Discord adapter should show `status: "running"`.
 - DMs always respond regardless of `require_mention`
 - Check that the bot is in the server and has **View Channels** permission
 - Verify the server or channel ID isn't excluded by `allowed_guild_ids` or `allowed_channels`
+
+### Slash commands not appearing (e.g., `/new`)
+- Ensure the bot was invited with the `applications.commands` scope — re-invite with the updated OAuth2 URL if it was invited without it
+- Global slash command propagation can take up to 1 hour; restart the source or set `allowed_guild_ids` in config for instant guild-specific sync
+- Check the adapter logs on startup for a `Synced N slash commands ...` line — if absent or showing a warning, the sync request failed (often due to missing scope or network issues)
+- The text-based `/new` (typing `/new` as a regular message) is independent of slash command registration and continues to work as a fallback
 
 ### Gateway disconnects / connection refused
 - Check your network can reach `discord.com` on the WebSocket (Gateway) port

@@ -207,6 +207,10 @@ class DiscordAdapter(MessageSourceAdapter):
         self._client: Any = None
         self._client_task: asyncio.Task | None = None
         self._ready_event: asyncio.Event = asyncio.Event()
+        # Slash command tree attached to the existing discord.Client.
+        # Created on every ``start()`` (deferred import); cleared on
+        # ``stop()``. ``None`` between stop and the next start.
+        self._command_tree: Any = None
         # FIX 5: Set when ``_client_task`` terminates with an exception
         # (e.g. ``PrivilegedIntentsRequired``). Raced against ``_ready_event``
         # so that a real startup failure surfaces immediately instead of
@@ -376,6 +380,7 @@ class DiscordAdapter(MessageSourceAdapter):
             # and avoids forcing discord.py into non-Discord test runs).
             import discord
             from discord import Intents as _Intents
+            from discord.app_commands import CommandTree
 
             # Build Intents from config dict.
             intents = _Intents.none()
@@ -401,6 +406,25 @@ class DiscordAdapter(MessageSourceAdapter):
             client = discord.Client(intents=intents)
             self._client = client
 
+            # --- Slash command support (standalone CommandTree on Client) ---
+            # Build a CommandTree on the existing discord.Client — NOT a
+            # commands.Bot. The tree must be created and populated BEFORE
+            # client.start() runs so the @tree.command decorator registers
+            # the slash command handler with the tree before the gateway
+            # handshake. tree.sync() is called later, inside on_ready.
+            tree = CommandTree(client)
+            self._command_tree = tree
+
+            @tree.command(
+                name="new",
+                description="Start a new conversation (reset chat history)",
+            )
+            async def new_command(interaction: discord.Interaction) -> None:
+                # Bridge to the slash handler — defer (ephemeral=True)
+                # happens inside _handle_new_slash so the 3s acknowledgement
+                # is fired before any heavy work.
+                await self._handle_new_slash(interaction)
+
             # NOTE: The function names MUST be the canonical discord.py
             # event names (``on_ready``, ``on_message``) — no leading
             # underscore. ``discord.Client.event()`` registers the
@@ -424,6 +448,35 @@ class DiscordAdapter(MessageSourceAdapter):
                     f"Discord Gateway ready: source={self.source_id}, "
                     f"user=@{self._bot_user_name} (id={self._bot_user_id})"
                 )
+
+                # Sync slash commands with Discord. ``tree`` is captured
+                # from the enclosing ``start()`` closure scope.
+                # Guild-specific sync propagates instantly — used when
+                # ``allowed_guild_ids`` is set so the operator sees the
+                # command during development without waiting on Discord's
+                # global propagation window (~1 hour). A sync failure is
+                # logged at WARNING and does NOT block adapter startup —
+                # the text-based ``/new`` fallback still works.
+                try:
+                    if self._allowed_guild_ids:
+                        for gid in self._allowed_guild_ids:
+                            synced = await tree.sync(
+                                guild=discord.Object(id=gid)
+                            )
+                            logger.info(
+                                f"Synced {len(synced)} slash commands "
+                                f"to guild {gid}"
+                            )
+                    else:
+                        synced = await tree.sync()
+                        logger.info(
+                            f"Synced {len(synced)} slash commands (global)"
+                        )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        f"Failed to sync slash commands: {e}"
+                    )
+
                 self._ready_event.set()
 
             async def on_message(message: Any) -> None:
@@ -613,6 +666,11 @@ class DiscordAdapter(MessageSourceAdapter):
             self._client = None
             # ``_ready_event`` is reusable for the next start.
             self._ready_event.clear()
+            # The CommandTree is owned by the client (closed above) and
+            # has no standalone lifecycle — dereference for symmetry with
+            # ``self._client = None`` so a stale tree never lingers into
+            # the next ``start()``.
+            self._command_tree = None
 
             # 7. Release channel locks (drop them; the locks will be GC'd).
             async with self._channel_locks_guard:
@@ -1049,6 +1107,149 @@ class DiscordAdapter(MessageSourceAdapter):
             message_type=message_type,
             reply_to_id=reply_to_id,
         )
+
+    async def _handle_new_slash(self, interaction: Any) -> None:
+        """Handle the ``/new`` slash command interaction.
+
+        Equivalent to the text-based ``/new`` detection in
+        :meth:`_normalize_incoming` (line 1038-1041) but triggered via
+        Discord's native slash command UI. Builds the same
+        ``external_user_id`` scheme and emits a ``message_type="command"``
+        ``IncomingMessage`` so the registry's ``send()`` performs the
+        actual ``delete`` mapping, terminates the previous instance, and
+        delivers the ``Started new conversation!`` confirmation through
+        the normal channel.
+
+        The interaction is acknowledged with an ephemeral defer to satisfy
+        Discord's 3-second response window; a followup ephemeral message
+        is sent for immediate user feedback that the command was received.
+        """
+        # Acknowledge immediately — Discord requires a response within 3s.
+        await interaction.response.defer(ephemeral=True)
+
+        user = interaction.user
+        user_id = str(user.id) if user else ""
+        channel_id = (
+            str(interaction.channel_id) if interaction.channel_id else ""
+        )
+        guild_id = (
+            str(interaction.guild_id) if interaction.guild_id else ""
+        )
+
+        # Build external_user_id using the SAME scheme as
+        # ``_build_external_user_id`` (dm:/channel:/thread: variants).
+        if not guild_id or guild_id == "None":
+            # DM
+            external_user_id = f"dm:{user_id}"
+            is_dm = True
+            thread_id: str | None = None
+            parent_channel_id: str | None = None
+        else:
+            # Resolve channel to detect threads. ``interaction.channel``
+            # may be ``None`` for unusual contexts (e.g. some DM edge
+            # cases) — guard with ``getattr``.
+            channel = interaction.channel
+            parent_id = getattr(channel, "parent_id", None) if channel else None
+            if parent_id is not None:
+                # Thread
+                external_user_id = (
+                    f"{guild_id}:{str(parent_id)}:{channel_id}"
+                )
+                thread_id = channel_id
+                parent_channel_id = str(parent_id)
+            else:
+                # Regular channel
+                external_user_id = f"{guild_id}:{channel_id}"
+                thread_id = None
+                parent_channel_id = None
+            is_dm = False
+
+        # Build discord metadata mirroring ``_normalize_incoming``'s dict
+        # shape so downstream consumers see identical keys for text vs
+        # slash command paths.
+        discord_meta: dict[str, Any] = {
+            "guild_id": guild_id if not is_dm else None,
+            "guild_name": (
+                getattr(interaction.guild, "name", None)
+                if not is_dm and interaction.guild else None
+            ),
+            "channel_id": channel_id,
+            "channel_name": (
+                getattr(interaction.channel, "name", None)
+                if interaction.channel else None
+            ),
+            "channel_type": (
+                "dm" if is_dm else "thread" if thread_id else "text"
+            ),
+            "thread_id": thread_id,
+            "thread_name": (
+                getattr(interaction.channel, "name", None)
+                if thread_id else None
+            ),
+            "parent_channel_id": parent_channel_id,
+            "user_id": user_id,
+            "user_name": getattr(user, "name", None) if user else None,
+            "user_display_name": (
+                getattr(user, "display_name", None) if user else None
+            ),
+            "message_id": None,  # interactions have no message id
+            "is_dm": is_dm,
+        }
+
+        incoming = IncomingMessage(
+            external_user_id=external_user_id,
+            content="/new",
+            source_id=self.source_id,
+            images=None,
+            metadata={
+                "discord": discord_meta,
+                "agent": self._default_agent,
+                "force_new_instance": True,
+                "command": "/new",
+            },
+            message_type="command",
+            reply_to_id=None,
+        )
+
+        # Register the thread with the thread manager if this slash
+        # command was invoked inside a thread (mirrors the path in
+        # ``_handle_message`` at line 777-792).
+        if (
+            self._thread_manager is not None
+            and thread_id
+        ):
+            try:
+                await self._thread_manager.register_thread(
+                    guild_id=guild_id,
+                    channel_id=parent_channel_id or channel_id,
+                    thread_id=thread_id,
+                    instance_id=None,
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    f"Failed to register Discord thread from slash "
+                    f"command: {e}"
+                )
+
+        # Emit to the registry — it handles delete mapping, terminates
+        # the old instance, creates a new one, and sends the
+        # ``Started new conversation!`` confirmation through the normal
+        # channel.
+        await self._emit_message(incoming)
+
+        # Send ephemeral confirmation to the user. The registry's
+        # outbound ``Started new conversation!`` message still flows
+        # through the regular channel — this followup is just immediate
+        # UI feedback that the slash interaction was received.
+        try:
+            await interaction.followup.send(
+                "✨ Starting new conversation...",
+                ephemeral=True,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                f"Failed to send /new slash followup: {e}"
+            )
 
     # ------------------------------------------------------------------
     # Outbound: OutgoingMessage -> Discord
