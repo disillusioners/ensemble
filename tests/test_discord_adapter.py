@@ -2014,6 +2014,21 @@ class _FakeDiscordClient:
         self.fetch_channel = AsyncMock(return_value=None)
         self.fetch_user = AsyncMock(return_value=None)
         self.close = AsyncMock(side_effect=self._close_impl)
+        # ``discord.app_commands.CommandTree(client)`` reads ``client.http``
+        # AND ``client._connection`` in its constructor, and
+        # ``tree.sync()`` issues an HTTP PUT via ``client.http.bulk_upsert_*``
+        # commands (returning a list of command dicts). The fake client is
+        # not aware of an attached ``CommandTree`` until the adapter wires
+        # one in ``start()`` — leave ``_command_tree`` as ``None`` so the
+        # constructor's de-dup check passes. ``application_id`` must be
+        # non-None or ``tree.sync()`` raises ``MissingApplicationID``
+        # (caught by the adapter's defensive try/except around sync).
+        self.http = MagicMock()
+        self.http.bulk_upsert_global_commands = AsyncMock(return_value=[])
+        self.http.bulk_upsert_guild_commands = AsyncMock(return_value=[])
+        self._connection = MagicMock()
+        self._connection._command_tree = None
+        self.application_id = 987654321012345678
         _FakeDiscordClient.instances.append(self)
 
     def event(self, fn):
