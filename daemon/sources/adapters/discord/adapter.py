@@ -329,20 +329,29 @@ class DiscordAdapter(MessageSourceAdapter):
         """
         if self._status == SourceStatus.RUNNING:
             return
-        if self._status == SourceStatus.STARTING:
-            # Defensive — do not double-start.
-            return
 
         # FIX 4: serialize concurrent ``start()`` invocations against
         # ``stop()`` so we never leak an orphaned Gateway task between
         # the ``_stopped=False`` reset and the ``_client_task`` creation.
+        # NOTE: do NOT short-circuit on SourceStatus.STARTING here. The
+        # registry supervisor (``_run_adapter_safe``) pre-sets
+        # ``adapter._status = SourceStatus.STARTING`` before invoking
+        # ``start()`` to publish the transition to the DB; an early
+        # return on STARTING would make ``start()`` a no-op, the
+        # supervisor would mark the adapter RUNNING with no client/task
+        # ever created, and the next health check would fail — exactly
+        # the "adapter never connects" crash loop this guard was
+        # intended to prevent. The ``_start_lock`` below is the actual
+        # serialization primitive; concurrent double-starts are still
+        # impossible.
         async with self._start_lock:
             # Re-check status under the lock; another concurrent start()
             # may have completed while we were waiting.
             if self._status == SourceStatus.RUNNING:
                 return
-            if self._status == SourceStatus.STARTING:
-                return
+            # See note above — the supervisor sets STARTING before
+            # calling us, so we must NOT short-circuit on STARTING here
+            # either. The lock makes concurrent entry impossible.
 
             self._circuit_breaker.reset()
             self._status = SourceStatus.STARTING
