@@ -34,6 +34,13 @@ DISCORD_ID_PATTERN = r"^(dm:\d{17,19}|\d{17,19}:\d{17,19}(:\d{17,19})?)$"
 # `DiscordAdapter._split_message()`.
 DISCORD_MAX_MESSAGE_LENGTH = 2000
 
+# Grace period (seconds) after start() during which health_check()
+# returns True as long as the client task is alive, even if the
+# Gateway is still stabilizing. Prevents crash loops where the
+# supervisor's immediate post-start() health check sees transient
+# is_ready()=False or unstable latency.
+HEALTH_CHECK_GRACE_SECONDS = 15.0
+
 # Gateway latency threshold (ms) above which `health_check()` returns False.
 # Discord's API docs treat >5s heartbeat latency as effectively disconnected.
 DISCORD_LATENCY_THRESHOLD_MS = 5000.0
