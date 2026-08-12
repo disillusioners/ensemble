@@ -458,6 +458,12 @@ class SlackAdapter(MessageSourceAdapter):
 
         async with lock:
             try:
+                # Lazy import to avoid pulling the formatters package in at
+                # module import time; mirrors the pattern used by blocks.py.
+                from daemon.sources.formatters.registry import get_or_passthrough
+
+                slack_formatter = get_or_passthrough("slack")
+
                 # Prepare message parameters
                 # Use blocks for longer/formatted content (>400 chars or contains code blocks)
                 if len(message.content) > BLOCKS_CONTENT_THRESHOLD or "```" in message.content:
@@ -473,17 +479,25 @@ class SlackAdapter(MessageSourceAdapter):
                         if reply_ts:
                             params["thread_ts"] = reply_ts
                     else:
-                        # Fallback to simple text
+                        # Fallback to simple text. Apply mrkdwn formatting so
+                        # **bold** / *italic* in the original markdown source
+                        # are converted to Slack's syntax even when the Block
+                        # Kit builder returns no blocks.
+                        formatted_text = slack_formatter.format(message.content)
                         params = {
                             "channel": channel_id,
-                            "text": message.content,
+                            "text": formatted_text,
                         }
                         if reply_ts:
                             params["thread_ts"] = reply_ts
                 else:
+                    # Short messages: apply mrkdwn formatting so **bold** and
+                    # *italic* are converted to Slack's mrkdwn syntax instead
+                    # of being rendered as raw asterisks.
+                    formatted_text = slack_formatter.format(message.content)
                     params = {
                         "channel": channel_id,
-                        "text": message.content,
+                        "text": formatted_text,
                     }
 
                     # Add thread reply if available
