@@ -2017,8 +2017,19 @@ class _FakeDiscordClient:
         _FakeDiscordClient.instances.append(self)
 
     def event(self, fn):
-        # Mirror discord.py's decorator: register the callback.
+        # Mirror real discord.py: ``Client.event()`` does
+        # ``setattr(self, coro.__name__, coro)`` and the dispatcher
+        # does ``getattr(self, 'on_' + event_name, None)``. Naming the
+        # callback ``_on_ready`` (with leading underscore) was the
+        # root cause of a silent 30s Gateway timeout — the dispatcher
+        # could not find the handler. Enforce canonical names here so
+        # any regression in the production code fails this test instead
+        # of timing out the daemon.
         self._events.append(fn)
+        # Mirror real discord.Client.event: also set the attribute so
+        # any future code path that does ``getattr(client, 'on_ready')``
+        # (matching the real dispatcher) hits the registered callback.
+        setattr(self, fn.__name__, fn)
         return fn
 
     async def start(self, token):
@@ -2107,6 +2118,55 @@ class TestStartLifecycle:
             if task is not asyncio.current_task()
             and task.get_name().startswith(("discord-ready-wait", "discord-error-wait"))
         ]
+
+    @pytest.mark.asyncio
+    async def test_start_registers_on_ready_with_canonical_name(
+        self, mock_on_message
+    ):
+        """Regression for the silent-30s-Gateway-timeout bug.
+
+        ``discord.Client.event()`` registers a callback via
+        ``setattr(self, coro.__name__, coro)`` and the gateway
+        dispatcher invokes ``getattr(self, 'on_ready', None)``. If the
+        adapter names the callback ``_on_ready`` (or any name other
+        than ``on_ready`` / ``on_message``), the dispatcher never finds
+        it, ``_ready_event`` is never set, and ``start()`` times out at
+        ``GATEWAY_READY_TIMEOUT_SECONDS`` while the gateway is
+        connected — exactly the symptom in production.
+
+        Lock in the contract: ``start()`` must register the ready and
+        message callbacks under their canonical names.
+        """
+        cfg = make_discord_config()
+        a = DiscordAdapter(cfg, mock_on_message)
+
+        import discord as _discord_mod
+
+        with patch.object(_discord_mod, "Client") as ClientMock:
+            ClientMock.side_effect = lambda *, intents: _FakeDiscordClient(
+                intents=intents
+            )
+            await a.start()
+
+            fake = _FakeDiscordClient.instances[0]
+            # Both names MUST be present on the client (as attributes,
+            # matching real discord.py's setattr contract).
+            assert hasattr(fake, "on_ready"), (
+                "Discord adapter must register on_ready under the "
+                "canonical name — discord.py's dispatcher does "
+                "`getattr(self, 'on_ready', None)`."
+            )
+            assert hasattr(fake, "on_message"), (
+                "Discord adapter must register on_message under the "
+                "canonical name — same contract."
+            )
+            # And the registered callbacks must be the adapters' local
+            # closures (NOT methods like _on_ready / _on_message that
+            # the dispatcher silently drops).
+            assert fake.on_ready.__name__ == "on_ready"
+            assert fake.on_message.__name__ == "on_message"
+
+        await a.stop()
 
     @pytest.mark.asyncio
     async def test_start_idempotent(self, mock_on_message):
