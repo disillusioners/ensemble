@@ -292,3 +292,206 @@ class TestNoDisableToggle:
         from daemon.mcp.builtin_servers import plane as plane_mod
         mod_src = inspect.getsource(plane_mod)
         assert "MCP_DISABLE_BUILT_IN_PLANE" not in mod_src
+
+
+# ---------------------------------------------------------------------------
+# Class 6: TestDoublePrefixGuard
+# ---------------------------------------------------------------------------
+
+class TestDoublePrefixGuard:
+    """Document behavior when a server-side tool name already starts with 'plane_'.
+
+    The prefix override is a simple string concatenation: ``f"{prefix}_{tool_name}"``.
+    If the MCP server's tool is already named ``plane_list_issues``, the exposed
+    name becomes ``plane_plane_list_issues``. This is intentional (no dedup)
+    because the override is meant for servers whose tools DON'T already match
+    the prefix.
+    """
+
+    def test_double_prefix_documented(self):
+        """Server tool named 'plane_get_data' → exposed as 'plane_plane_get_data'."""
+        schemas = [_schema_dict(name="plane_get_data", description="Already prefixed")]
+        tools = create_lazy_mcp_tools(
+            server_name="plane",
+            schemas=schemas,
+            session_provider=_make_provider(),
+            shared_session_cache={},
+            shared_session_lock=asyncio.Lock(),
+            tool_name_prefix="plane",
+        )
+        assert len(tools) == 1
+        assert tools[0].name == "plane_plane_get_data"
+
+    def test_double_prefix_still_not_mcp_tool(self):
+        """Even with double prefix, is_mcp_tool returns False (no 'mcp_' prefix)."""
+        assert is_mcp_tool("plane_plane_get_data") is False
+
+
+# ---------------------------------------------------------------------------
+# Class 7: TestCategoryCollision
+# ---------------------------------------------------------------------------
+
+class TestCategoryCollision:
+    """Verify 'plane' category and 'mcp' category don't overlap.
+
+    A tool named ``plane_list_issues`` should NOT be discovered by the
+    'mcp' category expansion because ``is_mcp_tool()`` returns False for
+    names not starting with 'mcp_'.
+    """
+
+    def test_plane_tool_not_in_mcp_category(self):
+        """plane_list_issues is NOT in the mcp category after expansion."""
+        from daemon.tools.instance import resolve_tool_filter
+
+        tool_categories = {
+            "plane": ["plane_list_issues", "plane_create_issue"],
+            "mcp": [],  # Empty — will be expanded from all_tool_names
+        }
+        all_tool_names = {
+            "plane_list_issues", "plane_create_issue",
+            "mcp_ctx7_get_docs",
+            "mcp_webfetch_fetch",
+        }
+
+        # Expand mcp category: only tools where is_mcp_tool() is True
+        result = resolve_tool_filter(
+            allow=["mcp"],
+            deny=[],
+            tool_categories=tool_categories,
+            all_tool_names=all_tool_names,
+        )
+
+        # plane tools should NOT be in the mcp allow set
+        assert "plane_list_issues" not in result
+        assert "plane_create_issue" not in result
+        # Standard mcp tools SHOULD be in the set
+        assert "mcp_ctx7_get_docs" in result
+        assert "mcp_webfetch_fetch" in result
+
+    def test_plane_category_independent_from_mcp(self):
+        """Allowing 'plane' doesn't pull in any mcp_ tools."""
+        from daemon.tools.instance import resolve_tool_filter
+
+        tool_categories = {
+            "plane": ["plane_list_issues"],
+            "mcp": [],
+        }
+        all_tool_names = {
+            "plane_list_issues",
+            "mcp_ctx7_get_docs",
+        }
+
+        result = resolve_tool_filter(
+            allow=["plane"],
+            deny=[],
+            tool_categories=tool_categories,
+            all_tool_names=all_tool_names,
+        )
+
+        assert result == {"plane_list_issues"}
+
+
+# ---------------------------------------------------------------------------
+# Class 8: TestMultipleBuiltinServers
+# ---------------------------------------------------------------------------
+
+class TestMultipleBuiltinServers:
+    """Verify Plane's addition doesn't affect context7 or webfetch built-in servers.
+
+    Context7 and webfetch use the default ``tool_name_prefix=None``, so their
+    tools should still follow the ``mcp_{server}_{tool}`` convention.
+    """
+
+    def test_context7_uses_default_prefix(self):
+        """Context7 tools use 'mcp_ctx7_' prefix (not affected by Plane override)."""
+        schemas = [_schema_dict(name="get_docs", description="Get docs")]
+        tools = create_lazy_mcp_tools(
+            server_name="ctx7",
+            schemas=schemas,
+            session_provider=_make_provider(),
+            shared_session_cache={},
+            shared_session_lock=asyncio.Lock(),
+            # No tool_name_prefix → default mcp_{server}_ behavior
+        )
+        assert len(tools) == 1
+        assert tools[0].name == "mcp_ctx7_get_docs"
+
+    def test_webfetch_uses_default_prefix(self):
+        """WebFetch tools use 'mcp_webfetch_' prefix (not affected by Plane override)."""
+        schemas = [_schema_dict(name="fetch", description="Fetch URL")]
+        tools = create_lazy_mcp_tools(
+            server_name="webfetch",
+            schemas=schemas,
+            session_provider=_make_provider(),
+            shared_session_cache={},
+            shared_session_lock=asyncio.Lock(),
+            # No tool_name_prefix → default mcp_{server}_ behavior
+        )
+        assert len(tools) == 1
+        assert tools[0].name == "mcp_webfetch_fetch"
+
+    def test_context7_is_mcp_tool_true(self):
+        """Context7 tools are still detected as MCP tools (is_mcp_tool → True)."""
+        assert is_mcp_tool("mcp_ctx7_get_docs") is True
+
+    def test_webfetch_is_mcp_tool_true(self):
+        """WebFetch tools are still detected as MCP tools (is_mcp_tool → True)."""
+        assert is_mcp_tool("mcp_webfetch_fetch") is True
+
+
+# ---------------------------------------------------------------------------
+# Class 9: TestToolNamePrefixResolution
+# ---------------------------------------------------------------------------
+
+class TestToolNamePrefixResolution:
+    """Verify _get_tool_name_prefix() in mcp_service.py returns correct values.
+
+    PlaneServerDefinition has tool_name_prefix='plane'.
+    Context7ServerDefinition and WebFetchServerDefinition have tool_name_prefix=None (default).
+    Non-builtin servers return None.
+    """
+
+    def test_plane_prefix_resolution(self):
+        """_get_tool_name_prefix('plane') returns 'plane'."""
+        from daemon.mcp.builtin_servers import get_registry
+        registry = get_registry()
+        defn = registry.get_by_name("plane")
+        assert defn is not None
+        assert defn.tool_name_prefix == "plane"
+
+    def test_context7_prefix_resolution_none(self):
+        """_get_tool_name_prefix('context7') returns None (default)."""
+        from daemon.mcp.builtin_servers import get_registry
+        registry = get_registry()
+        defn = registry.get_by_name("context7")
+        assert defn is not None
+        assert defn.tool_name_prefix is None
+
+    def test_webfetch_prefix_resolution_none(self):
+        """_get_tool_name_prefix('webfetch') returns None (default)."""
+        from daemon.mcp.builtin_servers import get_registry
+        registry = get_registry()
+        defn = registry.get_by_name("webfetch")
+        assert defn is not None
+        assert defn.tool_name_prefix is None
+
+    def test_nonexistent_server_prefix_none(self):
+        """_get_tool_name_prefix for non-builtin server returns None."""
+        from daemon.mcp.builtin_servers import get_registry
+        registry = get_registry()
+        defn = registry.get_by_name("nonexistent-server-xyz")
+        assert defn is None
+
+    def test_plane_transport_not_stdio(self):
+        """Plane uses streamable-http, not stdio — this is why it bypasses warmup pool."""
+        defn = PlaneServerDefinition()
+        config = defn.get_base_config()
+        assert config["transport"] == "streamable-http"
+        assert config["transport"] != "stdio"
+
+    def test_context7_transport_stdio(self):
+        """Context7 uses stdio transport (goes through warmup pool)."""
+        from daemon.mcp.builtin_servers.context7 import Context7ServerDefinition
+        defn = Context7ServerDefinition()
+        config = defn.get_base_config()
+        assert config["transport"] == "stdio"
