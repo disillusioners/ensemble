@@ -120,6 +120,29 @@ class PlaneServerDefinition(BuiltinServerDefinition):
         return "plane"
 
     @property
+    def read_only_tools(self) -> bool:
+        """CR-3: Plane is exposed read-only to the agent.
+
+        The project-manager agent's ``meta.json`` declares
+        ``tools.allow: ["plane"]`` and ``tools.deny`` entries for
+        specific Plane write verbs, but a deny-list approach is
+        brittle: a future Plane MCP server release can add new
+        write verbs (e.g. ``plane_export_data``) that aren't yet on
+        the deny list. Declaring ``read_only_tools = True`` at
+        definition time drops the entire write set from the tool
+        list the agent sees, so the LLM can never call them — the
+        deny list becomes belt-and-suspenders, not the primary
+        enforcement.
+
+        Pattern-matching is delegated to the resilience layer's
+        ``is_read_tool(tool_name, resilience_config)`` so the same
+        ``read_tool_patterns`` / ``write_tool_patterns`` tuple that
+        drives caching also drives filtering — no chance for the
+        two classifiers to disagree on what counts as a write.
+        """
+        return True
+
+    @property
     def resilience_config(self):  # type: ignore[override]
         """Plane-specific resilience tuning.
 

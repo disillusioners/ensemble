@@ -60,12 +60,24 @@ class McpTransientError(McpError):
 class McpUnavailableError(McpError):
     """Server unavailable (circuit OPEN, server down).
 
-    Non-retryable in the *retry* sense — the circuit breaker
-    already knows the server is down. ``_lazy_coroutine`` handles
-    this by returning the configured fallback JSON (graceful
-    degradation) rather than raising. Distinguished from
-    ``McpTransientError`` so callers can pick: a transient blip
-    retries, a sustained outage degrades immediately.
+    Reserved — the circuit-OPEN path in ``_lazy_coroutine`` currently
+    returns fallback JSON directly without raising this exception.
+    Callers that want exception-based degradation can raise it
+    themselves.
+
+    Non-retryable in the *retry* sense — the circuit breaker already
+    knows the server is down. The natural caller pattern is to
+    raise ``McpUnavailableError`` from a custom resilience layer
+    that wants explicit exception-based degradation instead of the
+    default "return fallback JSON" path. The base ``McpError``
+    catch-all in ``_lazy_coroutine`` handles the case where a
+    custom layer does raise it (the error is surfaced as a
+    ``ToolException`` so LangGraph's ToolNode routes it to the
+    agent).
+
+    Distinguished from ``McpTransientError`` so callers can pick:
+    a transient blip retries, a sustained outage degrades
+    immediately.
     """
 
 

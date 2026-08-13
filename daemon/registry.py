@@ -63,31 +63,54 @@ AGENT_ID_ALIASES: dict[str, str] = {}
 
 class ToolFilter(BaseModel):
     """Tool filtering configuration for an agent.
-    
+
     Controls which tools an agent can access.
     - allow: If present, ONLY these tools/categories are included
-    - deny: Tools/categories to exclude (deny wins over allow)
+    - deny: Tools/categories to exclude from the agent's callable tools.
+      deny wins over allow. Also strips the category's backing agent(s)
+      from the auto-derived ``team_members`` set (see
+      :data:`daemon.tools._auth.TOOL_REQUIRED_AGENTS`).
+    - deny_spawn: Tool categories whose backing agents are blocked from
+      the auto-derived ``team_members`` set. Unlike ``deny``, this does
+      NOT remove the category from the agent's callable tools — the
+      agent can still call the tools, just cannot auto-spawn the backing
+      agent directly. Use when an agent needs a tool (e.g. ``chart``)
+      but must not spawn its backing agent (e.g. ``charter``).
     - Both empty/missing: All tools allowed (backward compatible)
     """
-    
+
     allow: Annotated[list[str] | None, Field(
         default=None,
         description="List of tool categories or individual tool names to allow. "
                     "If present, only these tools are included."
     )] = None
-    
+
     deny: Annotated[list[str] | None, Field(
         default=None,
         description="List of tool categories or individual tool names to deny. "
-                    "These are excluded even if in allow."
+                    "These are excluded even if in allow. A denied category "
+                    "also strips its backing agent(s) from the implied "
+                    "team_members set used by the spawn-authorization gate."
     )] = None
-    
+
+    deny_spawn: Annotated[list[str] | None, Field(
+        default=None,
+        description="List of tool categories whose backing agents are blocked "
+                    "from the auto-derived team_members set. Unlike ``deny``, "
+                    "this does NOT remove the tools from the agent's callable "
+                    "set — the agent keeps tool access but cannot spawn the "
+                    "backing agent directly. Use for agents that need a tool "
+                    "(e.g. ``chart``) but must not spawn its backing agent "
+                    "(e.g. ``charter``)."
+    )] = None
+
     model_config = ConfigDict(
         extra="ignore",
         json_schema_extra={
             "example": {
                 "allow": ["bash", "filesystem", "instance", "help"],
-                "deny": ["write_file", "edit_file"]
+                "deny": ["write_file", "edit_file"],
+                "deny_spawn": ["chart", "image"]
             }
         }
     )

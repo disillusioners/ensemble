@@ -77,6 +77,30 @@ class BuiltinServerDefinition(ABC):
         return None
 
     @property
+    def read_only_tools(self) -> bool:
+        """When True, the MCP tool layer filters out write tools at discovery time.
+
+        CR-3: the legacy contract is "expose all tools, let meta.json
+        ``tools.deny`` filter at the agent layer". That works for
+        servers whose tool surface is small and stable, but for a
+        server that can grow new write tools (e.g. Plane's MCP server
+        could add ``plane_export_data`` or ``plane_archive_project``
+        in a future release), a deny-list approach is one step behind
+        the server. This property lets the BUILTIN definition declare
+        the read-only intent at definition time, so the discovery
+        layer (``McpService._get_read_only_tools``) drops write tools
+        from the agent's tool list BEFORE the LLM ever sees them —
+        the strongest possible enforcement.
+
+        Subclasses override to ``True`` when the agent should only
+        see read tools from this server. Default ``False`` preserves
+        the current behavior (all tools exposed, deny-list filters at
+        the agent layer). The meta.json deny list for write tools
+        remains in effect as a belt-and-suspenders backup.
+        """
+        return False
+
+    @property
     def resilience_config(self) -> "ResilienceConfig | None":
         """Per-server resilience configuration. ``None`` = no resilience.
 

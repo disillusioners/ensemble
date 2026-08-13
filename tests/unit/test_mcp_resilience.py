@@ -1079,3 +1079,327 @@ class TestLazyCoroutineResilienceIntegration:
         # Verify session.call_tool was called WITHOUT runtime.
         forwarded_kwargs = session.call_tool.call_args.args[1]
         assert "runtime" not in forwarded_kwargs
+
+
+# ---------------------------------------------------------------------------
+# Concurrency / state-preservation regression tests (T-6)
+#
+# These cover the fixes from the deep review:
+#   - CR-4: probe-in-flight flag prevents HALF_OPEN thundering herd
+#   - CR-5: cache generation counter closes the read-during-invalidation
+#     TOCTOU race
+#   - CR-6: write tools execute exactly once on transient failure
+# ---------------------------------------------------------------------------
+
+
+class TestCircuitBreakerHalfOpenProbeFlag:
+    """CR-4: HALF_OPEN probe-in-flight flag prevents thundering herd."""
+
+    @pytest.mark.asyncio
+    async def test_only_one_caller_probes_when_entering_half_open(self):
+        """Concurrent can_execute() on the OPEN→HALF_OPEN transition →
+        exactly ONE caller gets True; the rest get False.
+
+        Without the ``_probe_in_flight`` flag, every concurrent caller
+        would see ``state == HALF_OPEN`` and return True, racing
+        through the gate to the failing server. With the flag, the
+        first caller claims the probe slot and the rest degrade.
+        """
+        cb = CircuitBreaker(failure_threshold=2, recovery_timeout=0.0)
+        # Trip the breaker.
+        await cb.record_failure()
+        await cb.record_failure()
+        assert cb.get_state() == "open"
+
+        # Fire 10 concurrent can_execute calls. All should race for
+        # the HALF_OPEN gate; exactly one should win.
+        results = await asyncio.gather(
+            *(cb.can_execute() for _ in range(10))
+        )
+        true_count = sum(1 for r in results if r is True)
+        false_count = sum(1 for r in results if r is False)
+        assert true_count == 1, (
+            f"Expected exactly 1 probe granted, got {true_count}"
+        )
+        assert false_count == 9
+        # The breaker is now in HALF_OPEN with the probe in flight.
+        assert cb.get_state() == "half_open"
+        # The next probe claim (after a record_success) is allowed.
+        await cb.record_success()
+        assert cb.get_state() == "closed"
+        # New HALF_OPEN cycle: recovery_timeout=0.0 + record_failure
+        # → next can_execute() should grant a fresh probe.
+        await cb.record_failure()
+        await cb.record_failure()
+        assert cb.get_state() == "open"
+        # Force back to HALF_OPEN.
+        fresh = await cb.can_execute()
+        assert fresh is True
+        assert cb.get_state() == "half_open"
+
+    @pytest.mark.asyncio
+    async def test_probe_failure_returns_to_open(self):
+        """HALF_OPEN probe fails → circuit goes back to OPEN.
+
+        Verifies the recovery cycle: a successful CLOSED → failure
+        path OPEN → recovery_timeout → HALF_OPEN probe → failure
+        → back to OPEN, ready for the next recovery attempt.
+        """
+        cb = CircuitBreaker(failure_threshold=2, recovery_timeout=0.0)
+        # Trip the breaker.
+        await cb.record_failure()
+        await cb.record_failure()
+        assert cb.get_state() == "open"
+
+        # Recovery timeout has elapsed; first caller probes.
+        first = await cb.can_execute()
+        assert first is True
+        assert cb.get_state() == "half_open"
+
+        # Probe fails → back to OPEN.
+        await cb.record_failure()
+        assert cb.get_state() == "open"
+
+        # Another recovery_timeout=0.0 elapsed → next can_execute
+        # can probe again.
+        second = await cb.can_execute()
+        assert second is True
+        assert cb.get_state() == "half_open"
+
+
+class TestResultCacheGenerationCounter:
+    """CR-5: generation counter closes the read-during-invalidation TOCTOU race."""
+
+    @pytest.mark.asyncio
+    async def test_invalidate_bumps_generation(self):
+        """invalidate_server bumps the per-server generation counter."""
+        cache = ResultCache(default_ttl=60.0, max_entries=10)
+        await cache.set("plane", "list", {"k": 1}, "v1")
+        # No generation yet → reads return the value.
+        assert cache._generations.get("plane", 0) == 0
+        await cache.invalidate_server("plane")
+        # Generation bumped at least once.
+        assert cache._generations.get("plane", 0) >= 1
+
+    @pytest.mark.asyncio
+    async def test_stale_entry_rejected_after_invalidation(self):
+        """An entry set before invalidation is rejected on read.
+
+        Simulates the race: ``invalidate_server`` removes existing
+        entries, but a ``set`` that started before the invalidation
+        lands a new entry after the purge. The generation check
+        catches it: the entry's stamped generation is older than the
+        current generation, so the next ``get`` returns a miss.
+        """
+        cache = ResultCache(default_ttl=60.0, max_entries=10)
+        # Set with gen 0.
+        await cache.set("plane", "list", {"k": 1}, "v1")
+        # Simulate concurrent invalidate.
+        await cache.invalidate_server("plane")
+        # Bump generation explicitly to the value a concurrent
+        # "reader" would see AFTER its pre-invalidation set lands.
+        cache._generations["plane"] = cache._generations.get("plane", 0) + 1
+        # Now simulate the "reader" writing AFTER the bump — its
+        # set captures the NEW generation, so it's a valid entry.
+        await cache.set("plane", "list", {"k": 1}, "v2")
+        value, hit = await cache.get("plane", "list", {"k": 1})
+        assert hit is True
+        assert value == "v2"
+        # Now invalidate again and try to plant a STALE entry
+        # (simulating a reader that started before this second
+        # invalidation but is still about to write).
+        await cache.invalidate_server("plane")
+        # Force the entry's stamp to a generation number that
+        # existed BEFORE this last invalidation — equivalent to a
+        # set that started before invalidate_server ran.
+        for key, entry in cache._entries.items():
+            # Stamp with the pre-invalidation generation.
+            value, expiry, _ = entry
+            cache._entries[key] = (value, expiry, cache._generations["plane"] - 1)
+        # Read should reject the stale-stamped entry.
+        _, hit = await cache.get("plane", "list", {"k": 1})
+        assert hit is False, (
+            "Stamped generation should be < current generation → "
+            "treated as stale"
+        )
+
+    @pytest.mark.asyncio
+    async def test_set_after_invalidation_uses_new_generation(self):
+        """A set AFTER invalidate_server stamps the bumped generation.
+
+        This is the happy path: the racing reader's set happens to
+        land after the invalidation, so its stamp is the new
+        generation. Its value should be retrievable.
+        """
+        cache = ResultCache(default_ttl=60.0, max_entries=10)
+        await cache.invalidate_server("plane")
+        gen_after = cache._generations.get("plane", 0)
+        # Set after the invalidation.
+        await cache.set("plane", "list", {"k": 1}, "v1")
+        _, hit = await cache.get("plane", "list", {"k": 1})
+        assert hit is True
+        # The entry was stamped with the post-invalidation generation.
+        for key, entry in cache._entries.items():
+            if key.startswith("plane:"):
+                _, _, stamped_gen = entry
+                assert stamped_gen == gen_after
+
+
+class TestResilienceManagerRegisterState:
+    """ResilienceManager.register() preserves state on re-call with same config."""
+
+    def test_register_preserves_circuit_breaker_state(self):
+        """Re-calling register() with the SAME config doesn't reset the CB.
+
+        The fix from the deep review: previous behavior was to
+        re-instantiate the CircuitBreaker on every register(),
+        losing failure_count / state. Now register() replaces the
+        CB only when the threshold/recovery_timeout actually
+        change.
+        """
+        mgr = ResilienceManager()
+        config = ResilienceConfig(
+            circuit_failure_threshold=5,
+            circuit_recovery_timeout=60.0,
+        )
+        mgr.register("plane", config)
+        cb = mgr.get_circuit_breaker("plane")
+
+        # Simulate some state on the CB.
+        asyncio.run(cb.record_failure())
+        asyncio.run(cb.record_failure())
+        assert cb.failure_count == 2
+
+        # Re-register with the same config — state must survive.
+        mgr.register("plane", config)
+        cb_after = mgr.get_circuit_breaker("plane")
+        assert cb_after is cb, (
+            "Same-config re-register should NOT replace the CB"
+        )
+        assert cb_after.failure_count == 2, (
+            "Failure count must be preserved across same-config re-registration"
+        )
+
+    def test_register_with_new_thresholds_replaces_cb(self):
+        """Re-registering with DIFFERENT thresholds creates a new CB.
+
+        Opposite of the same-config case: when the operator
+        changes the resilience tuning, the new thresholds must
+        take effect. The old CB's failure history is dropped —
+        acceptable, since the operator explicitly opted into a
+        new policy.
+        """
+        mgr = ResilienceManager()
+        mgr.register(
+            "plane", ResilienceConfig(circuit_failure_threshold=5)
+        )
+        cb = mgr.get_circuit_breaker("plane")
+        asyncio.run(cb.record_failure())
+        assert cb.failure_count == 1
+
+        mgr.register(
+            "plane", ResilienceConfig(circuit_failure_threshold=99)
+        )
+        cb_new = mgr.get_circuit_breaker("plane")
+        assert cb_new is not cb
+        assert cb_new.failure_threshold == 99
+        assert cb_new.failure_count == 0
+
+
+class TestWriteToolNoRetry:
+    """CR-6: write tools execute exactly once on transient failure."""
+
+    @pytest.mark.asyncio
+    async def test_write_tool_does_not_retry_on_transient_error(self):
+        """A write tool with ``retry_writes=False`` (default) runs once.
+
+        A transient error on a write tool does NOT consume a retry
+        slot — the call is single-attempt, matching the
+        "non-idempotent side effects" contract.
+        """
+        attempts = {"n": 0}
+
+        async def flaky_write(*args, **kwargs):
+            attempts["n"] += 1
+            raise McpTransientError("transient")
+
+        policy = RetryPolicy(
+            max_attempts=3, base_delay=0.0, jitter=False
+        )
+        with pytest.raises(McpTransientError):
+            await policy.execute(flaky_write, is_write=True)
+        assert attempts["n"] == 1, (
+            f"Write tool should execute once, got {attempts['n']} attempts"
+        )
+
+    @pytest.mark.asyncio
+    async def test_read_tool_still_retries_on_transient_error(self):
+        """A read tool STILL retries on transient error (default behavior).
+
+        Regression guard: the CR-6 short-circuit must ONLY apply
+        to writes. Reads continue to retry normally so a transient
+        blip on a list_/get_/search_ call still recovers.
+        """
+        attempts = {"n": 0}
+
+        async def flaky_read(*args, **kwargs):
+            attempts["n"] += 1
+            if attempts["n"] < 3:
+                raise McpTransientError("transient")
+            return "ok"
+
+        policy = RetryPolicy(
+            max_attempts=3, base_delay=0.0, jitter=False
+        )
+        result = await policy.execute(flaky_read, is_write=False)
+        assert result == "ok"
+        assert attempts["n"] == 3
+
+    @pytest.mark.asyncio
+    async def test_write_tool_with_retry_writes_true_does_retry(self):
+        """When ``retry_writes=True`` is explicitly set, writes DO retry.
+
+        Operators can opt a known-idempotent write (e.g. a
+        ``set_status`` that uses server-side equality) into retry
+        by setting the flag. Default ``False`` is the safe
+        "don't retry" default.
+        """
+        attempts = {"n": 0}
+
+        async def flaky_idempotent_write(*args, **kwargs):
+            attempts["n"] += 1
+            if attempts["n"] < 2:
+                raise McpTransientError("transient")
+            return "ok"
+
+        policy = RetryPolicy(
+            max_attempts=3, base_delay=0.0, jitter=False,
+            retry_writes=True,
+        )
+        result = await policy.execute(flaky_idempotent_write, is_write=True)
+        assert result == "ok"
+        assert attempts["n"] == 2
+
+    @pytest.mark.asyncio
+    async def test_write_tool_auth_error_does_not_retry(self):
+        """Auth errors on writes propagate immediately (no retry).
+
+        Even with ``retry_writes=True``, auth errors propagate
+        immediately — the ``McpError`` short-circuit in
+        ``RetryPolicy.execute`` runs before the write check has a
+        chance to take effect, so writes still fail fast on bad
+        credentials.
+        """
+        attempts = {"n": 0}
+
+        async def auth_fail(*args, **kwargs):
+            attempts["n"] += 1
+            raise McpAuthError("bad key")
+
+        policy = RetryPolicy(
+            max_attempts=3, base_delay=0.0, jitter=False,
+            retry_writes=True,
+        )
+        with pytest.raises(McpAuthError):
+            await policy.execute(auth_fail, is_write=True)
+        assert attempts["n"] == 1

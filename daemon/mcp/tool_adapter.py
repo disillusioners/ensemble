@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import random
 import re
 from typing import TYPE_CHECKING, Any, Callable, Protocol, runtime_checkable
 
@@ -50,15 +49,6 @@ def _fallback_content(fallback_message: str) -> tuple[list[dict], None]:
         as ``_convert_call_tool_result`` on the happy path.
     """
     return [{"type": "text", "text": fallback_message}], None
-
-
-# Module-level alias — avoids importing ``random`` from inside the
-# retry loop on every attempt. Pure-Python ``random.uniform`` is
-# already the fastest option for per-call jitter; just re-exported
-# under a shorter name for readability.
-def random_module_uniform(a: float, b: float) -> float:
-    """``random.uniform(a, b)`` — indirection for testability."""
-    return random.uniform(a, b)
 
 
 # ---------------------------------------------------------------------------
@@ -653,6 +643,7 @@ def _build_lazy_coroutine(
                 probe_timeout=config.probe_timeout,
                 cb=cb,
                 retry_policy=config.retry_policy,
+                is_read=is_read,
             )
 
         except McpAuthError:
@@ -662,8 +653,9 @@ def _build_lazy_coroutine(
             # Raise ToolException so LangGraph's ToolNode routes it
             # to the agent as a structured error.
             raise ToolException(
-                f"Plane authentication failed — check "
-                f"PLANE_MCP_API_KEY"
+                f"Authentication failed for MCP server "
+                f"'{server_name}' — check the configured "
+                f"credentials."
             )
         except (McpTransientError, asyncio.TimeoutError):
             # All retries exhausted (or single attempt failed for
@@ -738,6 +730,7 @@ def _build_lazy_coroutine(
         probe_timeout: float,
         cb: Any | None,
         retry_policy: Any | None,
+        is_read: bool = True,
     ) -> tuple[Any, bool]:
         """Single MCP call wrapped in ``RetryPolicy.execute`` if configured.
 
@@ -756,6 +749,27 @@ def _build_lazy_coroutine(
         between attempts (HALF_OPEN → CLOSED via success). The
         loop uses ``cb.get_state()`` to pick the right timeout per
         attempt.
+
+        CR-6: when ``is_read=False`` and the caller's
+        ``retry_policy.retry_writes`` is ``False`` (the default),
+        the retry policy is dropped to a single attempt — writes
+        that would retry on a transient error can create duplicate
+        side effects (e.g. duplicate issue creation). The write
+        never consumes more than one attempt slot.
+
+        T-1: when a classified exception is being re-raised after
+        exhausting retries, ``raise classified from e`` preserves
+        the original cause while propagating the classified
+        ``McpTransientError`` so the outer handler records a
+        circuit-breaker failure correctly. The previous bare
+        ``raise`` re-raised ``e`` directly, which could be a raw
+        transport exception that the outer ``except`` clause
+        didn't recognize.
+
+        Tidier-1: the per-attempt delay math is delegated to
+        ``retry_policy._compute_delay(attempt)`` so the two retry
+        paths (``RetryPolicy.execute`` and this inlined loop)
+        cannot drift on the exponential-backoff / jitter formula.
         """
         from daemon.mcp.errors import (
             McpAuthError,
@@ -772,10 +786,22 @@ def _build_lazy_coroutine(
                 raw = await session.call_tool(original_tool_name, kwargs)
             return _convert_call_tool_result(raw), False
 
+        # CR-6: writes never retry by default. A transient blip on a
+        # create_/update_/delete_ call could create duplicate issues
+        # or double-assign. We drop the retry policy so the loop
+        # below runs exactly once.
+        if not is_read and not getattr(retry_policy, "retry_writes", False):
+            effective_policy = None
+        else:
+            effective_policy = retry_policy
+
         # With retry: classify each attempt's exception, retry only
         # transient ones, propagate auth/tool errors immediately.
         last_exc: Exception | None = None
-        for attempt in range(1, retry_policy.max_attempts + 1):
+        max_attempts = (
+            effective_policy.max_attempts if effective_policy is not None else 1
+        )
+        for attempt in range(1, max_attempts + 1):
             # Pick timeout per attempt: probe when HALF_OPEN, otherwise
             # the configured timeout. ``cb`` may be None when the
             # server didn't opt into circuit breaking.
@@ -798,18 +824,16 @@ def _build_lazy_coroutine(
                 return _convert_call_tool_result(raw), use_probe
             except (asyncio.TimeoutError, McpTransientError) as e:
                 last_exc = e
-                if attempt >= retry_policy.max_attempts:
+                if attempt >= max_attempts:
                     # Out of retries — re-raise so the outer handler
                     # can record a circuit failure + degrade.
                     raise
-                delay = min(
-                    retry_policy.base_delay * (2 ** (attempt - 1)),
-                    retry_policy.max_delay,
-                )
-                if retry_policy.jitter:
-                    delay += random_module_uniform(0, delay * 0.5)
+                # Tidier-1: reuse the same delay math as
+                # ``RetryPolicy.execute`` so the two paths can't
+                # diverge.
+                delay = effective_policy._compute_delay(attempt)
                 logger.debug(
-                    f"MCP retry {attempt}/{retry_policy.max_attempts} "
+                    f"MCP retry {attempt}/{max_attempts} "
                     f"for {adapted_tool_name} after {delay:.2f}s "
                     f"({type(e).__name__})"
                 )
@@ -825,14 +849,21 @@ def _build_lazy_coroutine(
                     raise McpAuthError(str(e)) from e
                 if isinstance(classified, McpTransientError):
                     last_exc = classified
-                    if attempt >= retry_policy.max_attempts:
-                        raise
-                    delay = min(
-                        retry_policy.base_delay * (2 ** (attempt - 1)),
-                        retry_policy.max_delay,
-                    )
-                    if retry_policy.jitter:
-                        delay += random_module_uniform(0, delay * 0.5)
+                    if attempt >= max_attempts:
+                        # T-1: raise the classified exception with
+                        # ``from e`` so the original cause is
+                        # preserved AND the outer handler sees the
+                        # classified ``McpTransientError`` /
+                        # ``McpError`` and records a circuit
+                        # failure correctly. The bare ``raise``
+                        # here used to re-raise ``e`` (the raw
+                        # transport exception), which the outer
+                        # ``except (McpTransientError,
+                        # asyncio.TimeoutError)`` clause could
+                        # miss.
+                        raise classified from e
+                    # Tidier-1: same delay helper.
+                    delay = effective_policy._compute_delay(attempt)
                     await asyncio.sleep(delay)
                     continue
                 # Non-retryable McpError (tool error, etc.) or

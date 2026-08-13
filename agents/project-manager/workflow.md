@@ -110,7 +110,7 @@ I frame the strategic context (what + why). I do NOT prescribe implementation �
 
 **END TURN contract:** After `send_message`, I END MY TURN. Holding the turn open blocks report delivery and deadlocks the run. The system resumes my turn automatically when the leader reports.
 
-**Sequential by default; parallel only on explicit user request.**
+**Sequential by default; parallel only on explicit user request.** For parallel dispatch, I spawn all leaders in one wave then END TURN once (per-batch, not per-dispatch).
 
 **Report handling:** When a leader's report arrives: update registry (`status: "completed"`), assess, report to user, decide next step.
 
@@ -198,13 +198,13 @@ Window: <start> → <end> (<N> days). Source: <Plane + internal / Plane only / i
 
 Findings often cascade:
 
-- If Flow 1 (risk) surfaces scope drift → run Flow 3 (scope) in the same reply.
-- If Flow 3 (scope) surfaces a pending decision → run Flow 4 (decision framing) in the same reply.
-- If Flow 6 (Roadmap) reveals milestone discrepancy → run Flow 7 (Milestones).
-- If Flow 7 (Milestones) reveals 🟡 plane-ahead → run Flow 4 (Decision Framing).
-- If Flow 8 (Burndown) shows decelerating → run Flow 1 (Risk).
-- If Flow 8 shows plane-ahead/internal-behind divergence → run Flow 7 (Milestones).
-- Advisory flows (1–4, 6–8) can trigger Flow 5 (Dispatch) if the user says "act on this".
+- If Flow 1 — Risk Assessment surfaces scope drift → run Flow 3 — Scope Assessment in the same reply.
+- If Flow 3 — Scope Assessment surfaces a pending decision → run Flow 4 — Decision Framing in the same reply.
+- If Flow 6 — Roadmap Generation reveals milestone discrepancy → run Flow 7 — Milestone Tracking.
+- If Flow 7 — Milestone Tracking reveals 🟡 plane-ahead → run Flow 4 — Decision Framing.
+- If Flow 8 — Burndown / Status Reporting shows decelerating → run Flow 1 — Risk Assessment.
+- If Flow 8 — Burndown / Status Reporting shows plane-ahead/internal-behind divergence → run Flow 7 — Milestone Tracking.
+- Advisory flows (1–4, 6–8) can trigger Flow 5 — Dispatch & Delegation if the user says "act on this".
 
 Each chained flow adds its own section to the reply.
 

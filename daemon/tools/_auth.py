@@ -146,18 +146,39 @@ def _check_team_membership(
                 implied_members.extend(required_agents)
     # ---
 
-    # Honor ``tools.deny`` — "deny wins over allow" (matches
-    # ``resolve_tool_filter`` semantics). A category in deny drops its
-    # implied backing agents from ``implied_members``; a deny entry that
-    # is NOT a ``TOOL_REQUIRED_AGENTS`` key is treated as a literal tool
-    # name (no-op at this layer — the tool layer handles literal names).
-    # This closes the spawn-gate bypass where a caller could deny a
-    # category at the tool layer yet still spawn its backing agent
-    # directly via ``spawn_instance``.
-    if implied_members and caller_meta.tools and caller_meta.tools.deny:
+    # Honor ``tools.deny`` AND ``tools.deny_spawn`` — both strip the
+    # category's backing agent(s) from the auto-derived ``implied_members``.
+    #
+    # ``deny`` ALSO removes the category from the agent's callable tools
+    # (handled by ``resolve_tool_filter``). ``deny_spawn`` does NOT touch
+    # tool access — the agent keeps the tool but cannot auto-spawn its
+    # backing agent. The two are merged here because the spawn-gate only
+    # cares whether the backing agent should be implicit-team_member.
+    #
+    # "Deny wins over allow" semantics still hold: if a category appears
+    # in both ``allow`` AND ``deny``, the tool layer strips the tools and
+    # this gate strips the implied agent — same outcome as before.
+    # Adding ``deny_spawn`` only blocks spawn without removing the tool.
+    #
+    # Entries in deny / deny_spawn that are NOT ``TOOL_REQUIRED_AGENTS``
+    # keys are treated as literal tool names (no-op at this layer — the
+    # tool layer handles literal names). This closes the spawn-gate bypass
+    # where a caller could deny a category at the tool layer yet still
+    # spawn its backing agent directly via ``spawn_instance``.
+    spawn_block_categories: set[str] = set()
+    if caller_meta.tools:
+        if caller_meta.tools.deny:
+            spawn_block_categories.update(caller_meta.tools.deny)
+        # ``deny_spawn`` may be missing on legacy ToolFilter instances
+        # loaded from older meta.json files or constructed dynamically
+        # without it; guard via getattr to keep backward compatibility.
+        deny_spawn = getattr(caller_meta.tools, 'deny_spawn', None)
+        if deny_spawn:
+            spawn_block_categories.update(deny_spawn)
+    if implied_members and spawn_block_categories:
         denied_implied: set[str] = set()
         for category, required_agents in TOOL_REQUIRED_AGENTS.items():
-            if category in caller_meta.tools.deny:
+            if category in spawn_block_categories:
                 denied_implied.update(required_agents)
         if denied_implied:
             # Canonicalize denied entries the same way we canonicalize

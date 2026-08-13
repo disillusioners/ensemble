@@ -57,8 +57,6 @@
       "bash",
       "terminate_instance",
       "council",
-      "charter",
-      "image-reader",
       "self",
       "question",
       "mcp",
@@ -70,6 +68,10 @@
       "plane_create_cycle",
       "plane_update_cycle",
       "plane_assign_issue"
+    ],
+    "deny_spawn": [
+      "chart",
+      "image"
     ]
   },
   "team_members": ["leader"],

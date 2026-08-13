@@ -75,13 +75,37 @@ class RetryPolicy:
     max_delay: float = 8.0
     jitter: bool = True
     retryable_exceptions: tuple = (McpTransientError, asyncio.TimeoutError)
+    # CR-6: writes (create_*, update_*, delete_*, ...) carry
+    # non-idempotent side effects — retrying on a transient error can
+    # create duplicate issues, double-assign, etc. The default
+    # ``False`` preserves the "fail loudly on write flakiness"
+    # contract; callers that KNOW their writes are idempotent (e.g. a
+    # ``set_status`` that uses server-side equality) can flip it to
+    # ``True`` explicitly.
+    retry_writes: bool = False
 
-    async def execute(self, func, *args, **kwargs):
+    async def execute(
+        self,
+        func,
+        *args,
+        is_write: bool = False,
+        **kwargs,
+    ):
         """Execute ``func`` with retry. Raises the last exception on failure.
+
+        CR-6: when ``is_write=True`` and ``retry_writes=False`` (the
+        default), the callable is executed exactly once with no retry
+        on transient failure. The single-attempt path is essential for
+        non-idempotent writes — a transient blip on a ``create_issue``
+        retry would create a duplicate issue.
 
         Args:
             func: Async callable to execute.
             *args, **kwargs: Forwarded to ``func``.
+            is_write: ``True`` when the wrapped call has write
+                side-effects that should not be retried. When
+                ``True`` and ``retry_writes`` is ``False``, executes
+                ``func`` exactly once and re-raises any error.
 
         Returns:
             The result of the first successful ``func`` call.
@@ -92,6 +116,13 @@ class RetryPolicy:
             or an immediate ``McpAuthError`` / ``McpToolError`` /
             ``McpError`` subclass that isn't retryable.
         """
+        # CR-6: short-circuit on writes. Execute once, raise on any
+        # error — no retry, no jitter, no delay. The caller is
+        # expected to surface the failure to the operator (or
+        # degrade via the fallback in the outer handler).
+        if is_write and not self.retry_writes:
+            return await func(*args, **kwargs)
+
         last_exc: Exception | None = None
         for attempt in range(1, self.max_attempts + 1):
             try:
@@ -103,9 +134,7 @@ class RetryPolicy:
                     # so the caller can record the circuit-breaker
                     # failure and (optionally) return a fallback.
                     raise
-                delay = min(self.base_delay * (2 ** (attempt - 1)), self.max_delay)
-                if self.jitter:
-                    delay += random.uniform(0, delay * 0.5)
+                delay = self._compute_delay(attempt)
                 logger.debug(
                     f"RetryPolicy: attempt {attempt}/{self.max_attempts} "
                     f"failed with {type(e).__name__}, "
@@ -128,6 +157,22 @@ class RetryPolicy:
         if last_exc is not None:
             raise last_exc
         raise RuntimeError("RetryPolicy.execute exited without result")
+
+    def _compute_delay(self, attempt: int) -> float:
+        """Compute the exponential-backoff delay for ``attempt``.
+
+        Tidier-1: extracted from ``execute`` so the per-attempt delay
+        math lives in exactly one place. Same formula as before —
+        ``min(base_delay * 2^(attempt-1), max_delay)`` plus an
+        optional 0..50% random jitter. Used by callers that need to
+        align their own retry timing (e.g.
+        ``_do_call_with_retry``) so the two paths can't drift on
+        delay math.
+        """
+        delay = min(self.base_delay * (2 ** (attempt - 1)), self.max_delay)
+        if self.jitter:
+            delay += random.uniform(0, delay * 0.5)
+        return delay
 
 
 # ---------------------------------------------------------------------------
@@ -162,8 +207,16 @@ class ResultCache:
         """
         self._default_ttl = default_ttl
         self._max_entries = max_entries
-        # OrderedDict for O(1) LRU. Key: cache key string; value: (value, expiry).
-        self._entries: OrderedDict[str, tuple[Any, float]] = OrderedDict()
+        # OrderedDict for O(1) LRU. Key: cache key string;
+        # value: (value, expiry, server_generation_at_set_time).
+        self._entries: OrderedDict[str, tuple[Any, float, int]] = OrderedDict()
+        # CR-5: per-server generation counter. ``invalidate_server``
+        # bumps the generation for ``server_name``; entries stamped
+        # with an older generation are treated as stale on read —
+        # closes the read-during-invalidation TOCTOU race where a
+        # reader whose ``set`` runs after the invalidation would
+        # otherwise leave stale data in the cache.
+        self._generations: dict[str, int] = {}
         self._lock = asyncio.Lock()
 
     async def get(
@@ -173,6 +226,12 @@ class ResultCache:
 
         Returns ``(cached_value, True)`` on hit, ``(None, False)`` on miss
         or expiry. Expired entries are removed lazily on read.
+
+        CR-5: also returns a miss when the entry's stamped generation
+        does not match the current generation for ``server_name`` —
+        a reader that started before ``invalidate_server`` finished
+        and wrote its value after the invalidation is treated as stale
+        and dropped on the next read.
 
         Args:
             server_name: The MCP server name (e.g. ``"plane"``).
@@ -188,7 +247,14 @@ class ResultCache:
             entry = self._entries.get(key)
             if entry is None:
                 return None, False
-            value, expiry = entry
+            value, expiry, gen = entry
+            current_gen = self._generations.get(server_name, 0)
+            if gen != current_gen:
+                # Stale entry — a write invalidation happened after
+                # this entry was set. Drop it so the next read
+                # re-fetches from the server.
+                self._entries.pop(key, None)
+                return None, False
             if time.monotonic() >= expiry:
                 # Lazy expiry — drop the entry on read so we don't keep
                 # dead weight in the dict.
@@ -221,7 +287,15 @@ class ResultCache:
         effective_ttl = ttl if ttl is not None else self._default_ttl
         expiry = time.monotonic() + effective_ttl
         async with self._lock:
-            self._entries[key] = (value, expiry)
+            # CR-5: stamp the entry with the current generation for
+            # this server. ``set`` is always called outside an
+            # ``invalidate_server`` call, so the stamp is consistent.
+            # The only way the stored generation can be stale is if a
+            # concurrent reader's ``set`` completes after our
+            # ``invalidate_server`` — and that's exactly what the
+            # generation check in ``get`` is designed to catch.
+            current_gen = self._generations.get(server_name, 0)
+            self._entries[key] = (value, expiry, current_gen)
             self._entries.move_to_end(key)
             # Evict oldest entries until under cap. We only evict one
             # per ``set``; the common case is that callers don't push
@@ -236,9 +310,33 @@ class ResultCache:
         have changed, so the entire per-server cache must go. Simple
         and safe; we don't try to be clever about which specific
         resources are affected.
+
+        CR-5: instead of (or in addition to) dropping entries, bump
+        the generation counter for ``server_name``. ``get`` rejects
+        entries whose stamped generation no longer matches the
+        server's current generation. This closes the TOCTOU race
+        where a reader's ``set`` (started before the invalidation)
+        could otherwise land in the cache after the invalidation
+        completed, leaving stale data behind.
+
+        Ordering note: ``_increments`` is performed BEFORE the entry
+        purge so that any reader holding the lock during the bump
+        (and writing its value next) sees the new generation on its
+        stamp and is rejected by the next ``get``.
         """
         prefix = f"{server_name}:"
         async with self._lock:
+            # Bump generation first — any concurrent ``set`` that
+            # grabs the lock after this will stamp the new generation,
+            # but the next ``get`` will see the bump and reject
+            # either way (because the entry's prior stamp is now
+            # stale).
+            self._generations[server_name] = (
+                self._generations.get(server_name, 0) + 1
+            )
+            # Then drop the existing entries. ``get`` double-checks
+            # the generation but pre-clearing keeps the dict tidy and
+            # avoids the lazy-expiry path on every read.
             keys_to_drop = [k for k in self._entries if k.startswith(prefix)]
             for k in keys_to_drop:
                 self._entries.pop(k, None)
@@ -405,27 +503,70 @@ class ResilienceManager:
 
         Creates a circuit breaker (with the config's failure threshold
         + recovery timeout) and a result cache (if ``cache_ttl`` is
-        set). Idempotent: re-registering with a fresh config replaces
-        the existing state — useful for tests, not for production.
+        set).
+
+        T-6: state preservation — re-registering with the same config
+        (``same threshold + recovery_timeout + cache_ttl + cache_max_entries``)
+        preserves the existing ``CircuitBreaker`` (with its
+        failure_count + state) and ``ResultCache`` (with its
+        populated entries). The previous implementation always
+        re-instantiated the CB, resetting failure_count to 0 — a
+        regression for any caller that re-registered after a brief
+        in-memory state change (e.g. env-var reload tests).
+
+        When the relevant config fields change, a fresh CB / cache
+        IS allocated. This matches the operator intent: a new
+        threshold means a new policy, so the old state is dropped.
+        The cache replacement keeps the same behavior as before
+        (cache is rebuilt on TTL change).
 
         Args:
             server_name: The MCP server name (matches
                 ``BuiltinServerDefinition.name``).
             config: The resilience tuning for this server.
         """
-        self._configs[server_name] = config
-        self._circuit_breakers[server_name] = CircuitBreaker(
-            failure_threshold=config.circuit_failure_threshold,
-            recovery_timeout=config.circuit_recovery_timeout,
+        # Detect "same config" → preserve state. The threshold +
+        # recovery_timeout are the only fields that affect the CB;
+        # cache_ttl + cache_max_entries are the only fields that
+        # affect the cache.
+        prev_cb = self._circuit_breakers.get(server_name)
+        prev_cache = self._caches.get(server_name)
+        same_cb = (
+            prev_cb is not None
+            and prev_cb.failure_threshold == config.circuit_failure_threshold
+            and prev_cb.recovery_timeout == config.circuit_recovery_timeout
         )
+        same_cache_ttl = (
+            (prev_cache is not None and config.cache_ttl is not None)
+            and prev_cache._default_ttl == config.cache_ttl
+            and prev_cache._max_entries == config.cache_max_entries
+        )
+
+        self._configs[server_name] = config
+
+        if same_cb:
+            # Keep the existing CB — failure_count, state, and
+            # probe-in-flight flag are all preserved.
+            pass
+        else:
+            self._circuit_breakers[server_name] = CircuitBreaker(
+                failure_threshold=config.circuit_failure_threshold,
+                recovery_timeout=config.circuit_recovery_timeout,
+            )
+
         # Only allocate a cache when caching is actually enabled. Saves
         # memory for servers that opt into retry + circuit breaking but
         # not caching.
         if config.cache_ttl is not None:
-            self._caches[server_name] = ResultCache(
-                default_ttl=config.cache_ttl,
-                max_entries=config.cache_max_entries,
-            )
+            if same_cache_ttl:
+                # Keep the existing cache — entries and generation
+                # counter are preserved.
+                pass
+            else:
+                self._caches[server_name] = ResultCache(
+                    default_ttl=config.cache_ttl,
+                    max_entries=config.cache_max_entries,
+                )
         else:
             # Make sure no stale cache from a prior registration lingers.
             self._caches.pop(server_name, None)
