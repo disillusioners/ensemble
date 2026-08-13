@@ -694,3 +694,224 @@ class TestPlaneReadToolClassification:
     def test_plane_remove_label_is_write(self):
         """``plane_remove_label`` is a write tool."""
         assert self._is_read("plane_remove_label") is False
+
+
+# ---------------------------------------------------------------------------
+# Class 12: TestPlaneReadOnlyFilter (CR-3)
+# ---------------------------------------------------------------------------
+#
+# CR-3 added the ``read_only_tools`` property on Plane's builtin
+# definition. When True, ``McpService`` filters the schema list at
+# discovery time using ``is_read_tool(name, resilience_config)`` so the
+# LLM never sees write tools in its tool list. The deny-list in
+# meta.json is belt-and-suspenders, not the primary enforcement.
+#
+# These tests pin three independent layers:
+#
+#   1. The property itself: ``PlaneServerDefinition.read_only_tools``
+#      is True; other builtins default to False.
+#   2. The filter invariant: when a mixed list of read + write
+#      schemas passes through ``is_read_tool`` with Plane's
+#      ``resilience_config``, only the read schemas survive.
+#   3. The end-to-end list-shape: the surviving schemas are exactly
+#      the ones an LLM would see if the filter were applied to a
+#      realistic Plane tool surface.
+
+
+class TestPlaneReadOnlyFilter:
+    """CR-3: ``PlaneServerDefinition.read_only_tools`` and the schema
+    filter it gates inside ``McpService``.
+
+    The filter is the only thing keeping new write verbs (added by
+    future Plane MCP server releases) out of the LLM's tool list.
+    Without it, the deny-list in ``project-manager/meta.json``
+    could fall behind the server surface and silently expose a
+    write verb the agent was never supposed to see.
+    """
+
+    def test_plane_read_only_tools_property_is_true(self):
+        """``PlaneServerDefinition().read_only_tools`` is True.
+
+        Pins the declaration: the Plane builtin opts into the
+        read-only filter at definition time. If a future refactor
+        drops the override, this test fails immediately and the
+        CR-3 contract is preserved as an explicit decision.
+        """
+        defn = PlaneServerDefinition()
+        assert defn.read_only_tools is True, (
+            "PlaneServerDefinition.read_only_tools must be True — "
+            "CR-3 requires the read-only filter at discovery time."
+        )
+
+    def test_other_builtins_default_read_only_false(self):
+        """Other builtins default ``read_only_tools=False``.
+
+        Only Plane opts into the filter today. Context7 and
+        WebFetch default to the legacy "expose all tools, let
+        meta.json deny-list filter" behavior. Pin the default
+        here so a future addition of another read-only server
+        (or accidental flip of the base class) is an explicit,
+        tested decision.
+        """
+        from daemon.mcp.builtin_servers.context7 import (
+            Context7ServerDefinition,
+        )
+        from daemon.mcp.builtin_servers.webfetch import (
+            WebFetchServerDefinition,
+        )
+
+        assert Context7ServerDefinition().read_only_tools is False, (
+            "Context7 must NOT default to read_only_tools=True — "
+            "its tool surface is small + stable and the agent "
+            "needs both reads and writes."
+        )
+        assert WebFetchServerDefinition().read_only_tools is False, (
+            "WebFetch must NOT default to read_only_tools=True — "
+            "same reasoning as Context7."
+        )
+
+    def test_read_only_filter_drops_write_tools_from_schema_list(self):
+        """The McpService filter applied to a realistic Plane tool
+        surface drops every write verb.
+
+        Simulates the CR-3 contract end-to-end: take a mixed
+        list of read + write schemas (using the exact
+        ``is_read_tool(name, PlaneServerDefinition.resilience_config)``
+        classifier the McpService filter uses), keep only the
+        reads, and assert the surviving set is exactly the read
+        verbs. If the Plane patterns ever drift (e.g. a new
+        write pattern is added without ``write_tool_patterns``
+        being updated), this test fails.
+        """
+        from daemon.mcp.resilience import is_read_tool
+
+        defn = PlaneServerDefinition()
+        cfg = defn.resilience_config
+
+        # Realistic Plane tool surface — covers every read/write
+        # verb in the documented schema. Names are unprefixed;
+        # ``is_read_tool`` strips the prefix before matching.
+        mixed_schemas = [
+            {"name": "list_issues"},
+            {"name": "list_projects"},
+            {"name": "list_cycles"},
+            {"name": "get_issue"},
+            {"name": "get_project"},
+            {"name": "get_cycle"},
+            {"name": "search_issues"},
+            # Write verbs — every one of these MUST be dropped.
+            {"name": "create_issue"},
+            {"name": "update_issue"},
+            {"name": "delete_issue"},
+            {"name": "create_project"},
+            {"name": "add_comment"},
+            {"name": "remove_comment"},
+            {"name": "add_label"},
+            {"name": "remove_label"},
+            {"name": "set_priority"},
+            {"name": "edit_issue"},
+            {"name": "assign_issue"},
+            {"name": "create_cycle"},
+            {"name": "update_cycle"},
+        ]
+
+        # Apply the same filter the McpService applies: build the
+        # adapted prefix (``plane_``) and let ``is_read_tool``
+        # classify each name. The prefix is added so the function
+        # sees the canonical Plane naming convention.
+        effective_prefix = "plane_"
+        surviving = [
+            s for s in mixed_schemas
+            if is_read_tool(f"{effective_prefix}{s['name']}", cfg)
+        ]
+        surviving_names = sorted(s["name"] for s in surviving)
+
+        expected_reads = sorted([
+            "list_issues", "list_projects", "list_cycles",
+            "get_issue", "get_project", "get_cycle",
+            "search_issues",
+        ])
+        assert surviving_names == expected_reads, (
+            f"CR-3 filter must keep ONLY read verbs. "
+            f"Survived: {surviving_names}; expected: {expected_reads}"
+        )
+
+        # Spot-check: no write verb survived. This is the core
+        # CR-3 guarantee — the LLM can never call any of these.
+        write_verbs = {
+            "create_issue", "update_issue", "delete_issue",
+            "create_project", "add_comment", "remove_comment",
+            "add_label", "remove_label", "set_priority",
+            "edit_issue", "assign_issue", "create_cycle",
+            "update_cycle",
+        }
+        leaked = set(surviving_names) & write_verbs
+        assert not leaked, (
+            f"CR-3 must drop every write verb from the schema list. "
+            f"Leaked: {sorted(leaked)}"
+        )
+
+    def test_read_only_filter_keeps_read_tools_with_new_verbs(self):
+        """A read verb not in the test list still survives the filter.
+
+        Forward-compat guard: the filter is pattern-based, so
+        any new ``list_*`` / ``get_*`` / ``search_*`` tool added
+        to Plane's server (a future ``list_milestones`` for
+        example) automatically passes the filter without a
+        meta.json change. This is the value CR-3 adds over a
+        pure deny-list.
+        """
+        from daemon.mcp.resilience import is_read_tool
+
+        defn = PlaneServerDefinition()
+        cfg = defn.resilience_config
+
+        # A new verb that didn't exist when the deny-list was
+        # written. ``is_read_tool`` must classify it correctly
+        # because the read patterns (``list_``, ``get_``,
+        # ``search_``) are pattern-based.
+        assert is_read_tool("plane_list_milestones", cfg) is True, (
+            "Read patterns must be pattern-based so future read "
+            "verbs (e.g. list_milestones) survive the filter "
+            "without a meta.json change."
+        )
+        assert is_read_tool("plane_get_release", cfg) is True
+        assert is_read_tool("plane_search_users", cfg) is True
+
+        # A future write verb also works without a meta.json
+        # change — the write patterns catch it. The deny-list
+        # is the second line of defense; the read-only filter
+        # is the first.
+        assert is_read_tool("plane_export_data", cfg) is False, (
+            "Write patterns must be pattern-based so future "
+            "write verbs (e.g. export_data) are dropped "
+            "automatically — deny-list falls behind if it "
+            "isn't kept in sync."
+        )
+
+    def test_builtin_base_class_default_is_false(self):
+        """The base ``BuiltinServerDefinition.read_only_tools`` default
+        is False (preserves legacy behavior for non-Plane builtins).
+
+        Pins the abstract default so a refactor of the base
+        class can't silently turn the read-only filter on for
+        every builtin. The CR-3 fix is opt-in per server, not
+        a forced opt-in.
+        """
+        from daemon.mcp.builtin_servers.base import (
+            BuiltinServerDefinition,
+        )
+
+        # Direct instance — but the base is ABC; check via a
+        # concrete subclass that doesn't override the property.
+        # We use Plane here but temporarily monkey-patch the
+        # override to verify the BASE class default is False.
+        defn = PlaneServerDefinition()
+
+        # Temporarily shadow Plane's override with the base default.
+        base_default = BuiltinServerDefinition.read_only_tools.fget(defn)
+        assert base_default is False, (
+            "BuiltinServerDefinition.read_only_tools base default "
+            "must be False — CR-3 is opt-in per server, not a "
+            "forced opt-in across all builtins."
+        )
