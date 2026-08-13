@@ -82,6 +82,11 @@ TRANSIENT_EXCEPTIONS: tuple[type[Exception], ...] = (
     LLMResponseValidationError,
     # Proxy returning non-JSON response (e.g., HTML error page)
     openai.APIResponseValidationError,
+    # NOTE: IndexError is intentionally NOT in TRANSIENT_EXCEPTIONS.
+    # LangChain's .invoke() raises IndexError on choices[0] when the LLM
+    # returns choices: []. This is treated as a malformed (non-retryable)
+    # response — retrying would likely hit the same malformed payload.
+    # See _run_with_classification's except IndexError handler.
 )
 
 
@@ -194,6 +199,17 @@ def classify_llm_errors(llm_with_tools: Any) -> RunnableLambda:
         except openai.APIResponseValidationError as e:
             # Proxy returned non-JSON (HTML error page) — transient
             logger.warning(f"[LLM] Response validation error (proxy issue), will retry: {_truncate_error(e)}")
+            raise
+        except IndexError as e:
+            # Malformed LLM response (e.g., empty choices array). LangChain's
+            # .invoke() crashes on choices[0] when the provider returns
+            # choices: []. This is non-retryable — retrying typically hits the
+            # same malformed payload, so we re-raise to let the upstream
+            # error pipeline handle it (instance_messaging / task_processor).
+            logger.error(
+                f"[LLM] Malformed LLM response (IndexError, likely empty "
+                f"choices array, will not retry): {_truncate_error(e)}"
+            )
             raise
         except Exception as e:
             logger.error(f"[LLM] Unexpected error (will not retry): {type(e).__name__}: {_truncate_error(e)}")

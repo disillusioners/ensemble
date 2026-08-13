@@ -387,7 +387,9 @@ class ProcessMessageProcessor(BaseProcessor):
                 holder_id=f"task:{task.id}",
                 holder_kind="task",
                 callbacks=callbacks,
-                error_handler_id={"task_id": task.id},
+                error_handler_id={
+                    "task_id": str(task.id) if task.id is not None else None,
+                },
             )
         except OperationCancelledError:
             # Cancellation requested via cancellation_token (pause /
@@ -432,7 +434,7 @@ class ProcessMessageProcessor(BaseProcessor):
                 instance_id=task.instance_id,
                 error=e,
                 message_id=task.message_id,
-                task_id=task.id,
+                task_id=str(task.id) if task.id is not None else None,
             )
 
             # Phase 4 fix: fire the skill metrics completion hook

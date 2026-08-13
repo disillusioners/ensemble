@@ -3030,7 +3030,7 @@ def create_agent_node(
                 lambda: current_llm.invoke(compact_messages)
             )
         except (openai.APITimeoutError, openai.APIConnectionError, ConnectionResetError,
-                BrokenPipeError, ConnectionAbortedError, TransientAPIError, LLMResponseValidationError) as e:
+                BrokenPipeError, ConnectionAbortedError, TransientAPIError, LLMResponseValidationError, IndexError) as e:
             transient = retry_config.get('transient_attempts', 'N/A') if retry_config else 'N/A'
             timeout = retry_config.get('timeout_attempts', 'N/A') if retry_config else 'N/A'
             category = 'timeout' if isinstance(e, TIMEOUT_EXCEPTIONS) else 'transient' if isinstance(e, TRANSIENT_EXCEPTIONS) else 'non-retryable'

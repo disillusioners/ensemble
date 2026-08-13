@@ -379,6 +379,49 @@ class TestHandleMessageProcessingError:
         assert error_data["task_id"] == "task-abc"
 
     @pytest.mark.asyncio
+    async def test_handle_error_with_integer_task_id(
+        self, mock_manager, mock_event_bus, mock_lifecycle_publisher,
+        mock_send_error_report,
+    ):
+        """Integer task_id (from Task.id, an INTEGER PK) must NOT crash the handler.
+
+        Regression: ``task_id`` arrives as an int from
+        ``task_processor.py`` (``task_id=task.id`` where ``task.id`` is
+        ``INTEGER PRIMARY KEY AUTOINCREMENT``). The logging line used
+        ``task_id[:8]`` which raises ``TypeError: 'int' object is not
+        subscriptable``, killing the error handler before any of its
+        3 critical side-effects run — leaving child instances orphaned
+        and parents stuck in WAITING_CHILDREN.
+
+        The fix wraps the slice in ``str(task_id)[:8]`` so the handler
+        completes all 3 side-effects regardless of task_id type.
+        """
+        # Must NOT raise TypeError — the call itself is the assertion
+        await handle_message_processing_error(
+            instance_manager=mock_manager,
+            instance_id="inst-123",
+            error=ValueError("boom"),
+            task_id=18441,  # int, not str — mirrors task.id from the DB
+        )
+
+        # 1. Error event in DB still fires
+        mock_event_bus.create_error_event.assert_awaited_once()
+        error_data = mock_event_bus.create_error_event.call_args.kwargs["error"]
+        assert error_data["task_id"] == 18441
+        assert "boom" in error_data["error"]
+
+        # 2. Lifecycle event publish still fires
+        mock_lifecycle_publisher.assert_awaited_once()
+        lifecycle_kwargs = mock_lifecycle_publisher.call_args.kwargs
+        assert lifecycle_kwargs["instance_id"] == "inst-123"
+        assert lifecycle_kwargs["status"] == "error"
+
+        # 3. Error report to parent still fires
+        mock_send_error_report.assert_awaited_once()
+        report_kwargs = mock_send_error_report.call_args.kwargs
+        assert report_kwargs["instance_id"] == "inst-123"
+
+    @pytest.mark.asyncio
     async def test_no_event_bus_falls_back_to_event_repo(self):
         """If the manager has no _event_bus, fall back to _event_repo."""
         manager = MagicMock(spec=["_event_repo", "_instance_repository",

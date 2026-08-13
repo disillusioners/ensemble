@@ -873,3 +873,138 @@ class TestRetryByCategory:
         assert strategy(state) is True   # timeout count=1 (reset!)
         state = self._make_mock_retry_state(error, attempt_number=2)
         assert strategy(state) is False  # timeout count=2, exhausted again
+
+
+class TestIndexErrorHandler:
+    """Tests for IndexError handling — empty/malformed choices[] from LLM.
+
+    LangChain's BaseChatModel._generate() (chat_models.py:402) indexes
+    choices[0] unconditionally. When the LLM proxy returns a structurally
+    malformed response (e.g. choices: []), LangChain raises IndexError
+    ("list index out of range") out of .invoke(). The classifier must:
+
+    - log the error clearly at ERROR level so production diagnostics can
+      distinguish a malformed-LLM-response crash from a generic bug
+    - re-raise the IndexError unchanged so the upstream error pipeline
+      (instance_messaging / task_processor) can finalize the instance
+    - NOT retry — retrying likely hits the same malformed payload
+    """
+
+    def _create_mock_llm_raising(self, exc):
+        """Helper: LLM whose .invoke() raises `exc`."""
+        mock_llm = MagicMock()
+        mock_llm.invoke.side_effect = exc
+        return mock_llm
+
+    def test_index_error_propagates_unchanged(self):
+        """IndexError raised by the LLM must be re-raised as IndexError,
+        not wrapped or converted to a different type."""
+        original = IndexError("list index out of range")
+
+        mock_llm = self._create_mock_llm_raising(original)
+        classified = classify_llm_errors(mock_llm)
+
+        with pytest.raises(IndexError) as exc_info:
+            classified.invoke([])
+
+        # Must be exactly the same IndexError instance (not a wrapper).
+        assert exc_info.value is original
+        assert isinstance(exc_info.value, IndexError)
+        assert "list index out of range" in str(exc_info.value)
+
+    def test_index_error_message_preserved_on_re_raise(self):
+        """The original IndexError message must survive re-raise so callers
+        (and the upstream pipeline) can see 'list index out of range'."""
+        original = IndexError("list index out of range")
+
+        mock_llm = self._create_mock_llm_raising(original)
+        classified = classify_llm_errors(mock_llm)
+
+        with pytest.raises(IndexError) as exc_info:
+            classified.invoke([])
+
+        assert str(exc_info.value) == "list index out of range"
+
+    def test_index_error_logs_at_error_level(self, caplog):
+        """The handler must log the IndexError at ERROR level with the
+        'Malformed LLM response' / 'will not retry' tag so production
+        log-scrapers can identify this crash signature."""
+        original = IndexError("list index out of range")
+
+        mock_llm = self._create_mock_llm_raising(original)
+        classified = classify_llm_errors(mock_llm)
+
+        with caplog.at_level("ERROR", logger="daemon.llm_error_classifier"):
+            with pytest.raises(IndexError):
+                classified.invoke([])
+
+        # Find the error log record tagged with the malformed-response marker.
+        error_records = [
+            r for r in caplog.records
+            if r.levelname == "ERROR"
+            and "Malformed LLM response" in r.getMessage()
+            and "IndexError" in r.getMessage()
+        ]
+        assert error_records, (
+            f"Expected an ERROR-level 'Malformed LLM response' log entry; "
+            f"got: {[r.getMessage() for r in caplog.records]}"
+        )
+        # The log must also indicate non-retry intent.
+        assert any("will not retry" in r.getMessage() for r in error_records)
+
+    def test_index_error_does_not_pollute_validation(self):
+        """IndexError must short-circuit before validate_llm_response() runs.
+        A malformed response should never reach downstream validation."""
+        mock_llm = MagicMock()
+        mock_llm.invoke.side_effect = IndexError("list index out of range")
+
+        with patch(
+            "daemon.llm_error_classifier.validate_llm_response"
+        ) as mock_validate:
+            classified = classify_llm_errors(mock_llm)
+
+            with pytest.raises(IndexError):
+                classified.invoke([])
+
+            mock_validate.assert_not_called()
+
+    def test_index_error_not_in_transient_exceptions(self):
+        """IndexError is treated as NON-retryable. It must NOT appear in
+        TRANSIENT_EXCEPTIONS — otherwise tenacity's with_retry would loop
+        on the same malformed payload."""
+        assert IndexError not in TRANSIENT_EXCEPTIONS
+
+    def test_retry_strategy_skips_index_error(self):
+        """_make_llm_retry_strategy must return False for IndexError — the
+        malformed-response error class must not be retried."""
+        from daemon.llm_error_classifier import _make_llm_retry_strategy
+
+        strategy = _make_llm_retry_strategy(transient_max=5, timeout_max=5)
+        retry_state = MagicMock()
+        retry_state.outcome.exception.return_value = IndexError("list index out of range")
+        retry_state.attempt_number = 1
+
+        assert strategy(retry_state) is False
+
+    def test_empty_choices_indexerror_simulation(self):
+        """Simulate the production incident exactly: LangChain's chat_models
+        raises 'list index out of range' when choices is empty. The
+        classifier must propagate and log."""
+        # Build the exact IndexError shape that langchain_core raises.
+        langchain_index_error = IndexError("list index out of range")
+
+        mock_llm = MagicMock()
+        mock_llm.invoke.side_effect = langchain_index_error
+
+        with patch(
+            "daemon.llm_error_classifier.validate_llm_response"
+        ):
+            classified = classify_llm_errors(mock_llm)
+
+            # The classify_llm_errors Runnable must NOT swallow the error.
+            with pytest.raises(IndexError) as exc_info:
+                classified.invoke([])
+
+        # The exact exception class and message must propagate.
+        assert exc_info.type is IndexError
+        assert "list index out of range" in str(exc_info.value)

@@ -220,13 +220,21 @@ async def handle_message_processing_error(
     if task_id:
         error_data["task_id"] = task_id
 
-    logger.error(
-        f"handle_message_processing_error: instance={instance_id[:8]}... "
-        f"job_id={job_id[:8] if job_id else 'none'}... "
-        f"task_id={task_id[:8] if task_id else 'none'}... "
-        f"error_type={error_type} error={error_msg}",
-        exc_info=True,
-    )
+    try:
+        logger.error(
+            f"handle_message_processing_error: instance={instance_id[:8]}... "
+            f"job_id={str(job_id)[:8] if job_id else 'none'}... "
+            f"task_id={str(task_id)[:8] if task_id else 'none'}... "
+            f"error_type={error_type} error={error_msg}",
+            exc_info=True,
+        )
+    except (TypeError, AttributeError):
+        logger.error(
+            f"handle_message_processing_error: instance={instance_id}... "
+            f"job_id={job_id} task_id={task_id} "
+            f"error_type={error_type} error={error_msg}",
+            exc_info=True,
+        )
 
     # 1. Error event in DB
     if getattr(instance_manager, "_event_bus", None):
@@ -315,5 +323,5 @@ async def handle_message_processing_error(
             except Exception as complete_err:
                 logger.warning(
                     f"handle_message_processing_error: failed to complete job "
-                    f"{job_id[:8]}... as FAILED: {complete_err}"
+                    f"{str(job_id)[:8]}... as FAILED: {complete_err}"
                 )

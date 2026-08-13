@@ -347,7 +347,7 @@ class MessageProcessingPipeline:
             error_handler_id: Optional dict passed to
                 :func:`handle_message_processing_error` as kwargs.
                 Populate with the appropriate key for the calling
-                path: ``{"task_id": task.id}`` for WorkerPool,
+                path: ``{"task_id": str(task.id)}`` for WorkerPool,
                 ``{"job_id": job.job_id}`` for JobQueue. When ``None``,
                 the error helper runs without a task/job ID (e.g. for
                 ad-hoc tests).
