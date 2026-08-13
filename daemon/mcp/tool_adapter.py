@@ -174,6 +174,7 @@ def adapt_mcp_tools(
     server_name: str,
     tools: list[BaseTool],
     tool_call_timeout: int = 120,
+    tool_name_prefix: str | None = None,
 ) -> list[BaseTool]:
     """
     Adapt MCP tools by prefixing their names and updating descriptions.
@@ -181,11 +182,26 @@ def adapt_mcp_tools(
     Prefixes each tool name with 'mcp_{slugified_server_name}_' and
     adds '[MCP:server_name]' to the tool description.
 
+    When ``tool_name_prefix`` is provided (e.g. ``"plane"``), the
+    ``mcp_{server}_`` prefix is replaced with ``{prefix}_`` — for
+    built-in servers whose tools should feel native to specific
+    agents. The description suffix is preserved regardless, so
+    ``[MCP:plane]`` still tags the tool as MCP-backed.
+
+    The MCP dispatch is unaffected: this function only mutates
+    ``StructuredTool.name`` and ``description``. The underlying
+    coroutine is unchanged and still calls
+    ``session.call_tool(<original name>, kwargs)``.
+
     Args:
         server_name: Name of the MCP server
         tools: List of MCP tools to adapt
         tool_call_timeout: Per-tool call timeout in seconds. Set to 0
             to disable timeout wrapping. Defaults to 120s.
+        tool_name_prefix: Optional override for the tool name
+            prefix. When ``None`` (default), uses
+            ``mcp_{slugified_server_name}_``. When set, uses
+            ``{tool_name_prefix}_`` instead.
 
     Returns:
         List of adapted tools with prefixed names, updated descriptions,
@@ -194,8 +210,11 @@ def adapt_mcp_tools(
     if not tools:
         return tools
 
-    slugified_server = _slugify(server_name)
-    prefix = f"mcp_{slugified_server}_"
+    if tool_name_prefix is not None:
+        prefix = f"{tool_name_prefix}_"
+    else:
+        slugified_server = _slugify(server_name)
+        prefix = f"mcp_{slugified_server}_"
     description_suffix = f"[MCP:{server_name}]"
 
     adapted_tools: list[BaseTool] = []
@@ -266,6 +285,7 @@ def create_lazy_mcp_tools(
     shared_session_cache: dict[str, Any],
     shared_session_lock: asyncio.Lock,
     tool_call_timeout: int = 120,
+    tool_name_prefix: str | None = None,
 ) -> list[BaseTool]:
     """Create lazy MCP tools that defer connection until first call.
 
@@ -275,6 +295,22 @@ def create_lazy_mcp_tools(
     ``shared_session_lock`` are passed in by the caller and **shared
     across all tools for the same instance+server** — so N tools
     produce N lazy wrappers but only one underlying session.
+
+    When ``tool_name_prefix`` is provided (e.g. ``"plane"``), tools
+    are exposed as ``{prefix}_{tool_name}`` (e.g. ``plane_list_issues``)
+    instead of the standard ``mcp_{server}_{tool_name}``. This is for
+    essential built-in servers whose tools should feel native to
+    specific agents. The description suffix
+    ``[MCP:{server_name}]`` is preserved for consistency.
+
+    Dispatch safety: the lazy coroutine built by
+    ``_build_lazy_coroutine`` closes over the ORIGINAL
+    ``original_tool_name`` (the name as the MCP server knows it, e.g.
+    ``list_issues``) and calls ``session.call_tool(original_tool_name,
+    kwargs)``. The exposed ``adapted_name`` (e.g. ``plane_list_issues``)
+    is only used for ``StructuredTool(name=...)`` — it does NOT reach
+    the MCP server. The prefix override therefore only renames the
+    tool surface; it does NOT break dispatch.
 
     Args:
         server_name: MCP server name (used to build the tool name
@@ -291,6 +327,10 @@ def create_lazy_mcp_tools(
             instance+server; used for double-check locking.
         tool_call_timeout: Per-call timeout in seconds. ``0`` disables
             timeout wrapping. Default ``120``.
+        tool_name_prefix: Optional override for the tool name
+            prefix. When ``None`` (default), uses
+            ``mcp_{slugified_server_name}_``. When set (e.g.
+            ``"plane"``), uses ``{tool_name_prefix}_`` instead.
 
     Returns:
         List of ``StructuredTool`` instances. Empty list if
@@ -299,8 +339,11 @@ def create_lazy_mcp_tools(
     if not schemas:
         return []
 
-    slugified_server = _slugify(server_name)
-    prefix = f"mcp_{slugified_server}_"
+    if tool_name_prefix is not None:
+        prefix = f"{tool_name_prefix}_"
+    else:
+        slugified_server = _slugify(server_name)
+        prefix = f"mcp_{slugified_server}_"
     description_suffix = f"[MCP:{server_name}]"
 
     lazy_tools: list[BaseTool] = []

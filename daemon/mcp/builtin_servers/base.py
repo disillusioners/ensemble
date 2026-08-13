@@ -59,6 +59,23 @@ class BuiltinServerDefinition(ABC):
         """
         return None
 
+    @property
+    def tool_name_prefix(self) -> str | None:
+        """Override the tool name prefix for this server's tools.
+
+        When ``None`` (default), tools use the standard
+        ``mcp_{server_name}_`` prefix (e.g. ``mcp_context7_get_docs``).
+        When set (e.g. ``"plane"``), tools use ``{prefix}_`` instead —
+        e.g. ``plane_list_issues`` instead of ``mcp_plane_list_issues``.
+
+        This is for essential built-in servers whose tools should feel
+        native to specific agents rather than appearing as add-on MCP
+        tools. The MCP dispatch is unaffected: the lazy coroutine always
+        closes over the original MCP tool name; only the EXPOSED name
+        changes.
+        """
+        return None
+
     @classmethod
     def is_available(cls) -> bool:
         """Check if this builtin's external dependencies are installed.

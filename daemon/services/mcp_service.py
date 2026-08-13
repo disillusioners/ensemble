@@ -494,6 +494,15 @@ class McpService:
                     else tool_call_timeout
                 )
 
+                # Per-server tool-name prefix override: essential
+                # built-ins (e.g. Plane) declare ``tool_name_prefix``
+                # so their tools are exposed as ``plane_*`` (native)
+                # instead of ``mcp_plane_*`` (an add-on MCP tool).
+                # This only changes the EXPOSED ``StructuredTool.name``
+                # — the lazy coroutine's ``original_tool_name`` closure
+                # is unaffected, so MCP dispatch keeps working.
+                server_prefix = self._get_tool_name_prefix(server.name)
+
                 lazy_tools = create_lazy_mcp_tools(
                     server_name=server.name,
                     schemas=schema_dicts,
@@ -505,6 +514,7 @@ class McpService:
                         server.name
                     ]["lock"],
                     tool_call_timeout=effective_timeout,
+                    tool_name_prefix=server_prefix,
                 )
                 all_tools.extend(lazy_tools)
 
@@ -596,6 +606,42 @@ class McpService:
         # ``getattr`` is defensive against future subclasses that might
         # not override the property.
         return getattr(definition, "tool_call_timeout", None)
+
+    def _get_tool_name_prefix(self, server_name: str) -> str | None:
+        """Return a builtin server's ``tool_name_prefix`` override, if any.
+
+        Looks up the ``BuiltinServerDefinition`` in the global registry
+        and reads its ``tool_name_prefix`` property. Returns ``None``
+        when the server is not a builtin, or when the builtin's
+        definition returns ``None`` (the base-class default — the
+        standard ``mcp_{server}_`` prefix is used by ``tool_adapter``).
+
+        Currently the only override is ``PlaneServerDefinition``
+        (``tool_name_prefix = "plane"``), which makes Plane's tools
+        appear as ``plane_*`` (native) instead of ``mcp_plane_*`` (an
+        add-on MCP tool that would be caught by ``tools.deny: ["mcp"]``).
+
+        Args:
+            server_name: The MCP server's name (matches
+                ``McpServer.name`` and ``BuiltinServerDefinition.name``).
+
+        Returns:
+            The prefix override (e.g. ``"plane"``) or ``None`` to use
+            the standard ``mcp_{server}_`` prefix.
+        """
+        # Function-local import mirrors ``_get_per_server_timeout`` —
+        # keeps the coupling narrow and avoids loading the builtin
+        # registry module if this helper is never called.
+        from daemon.mcp.builtin_servers import get_registry
+
+        definition = get_registry().get_by_name(server_name)
+        if definition is None:
+            return None
+        # ``tool_name_prefix`` is a property on the abstract base class
+        # (returns None by default) and may be overridden by subclasses.
+        # ``getattr`` is defensive against future subclasses that might
+        # not override the property.
+        return getattr(definition, "tool_name_prefix", None)
 
     def get_mcp_tools(self, instance_id: str) -> list[BaseTool]:
         """Get cached MCP tools for an instance (sync).

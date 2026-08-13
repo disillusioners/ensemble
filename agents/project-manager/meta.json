@@ -25,7 +25,8 @@
       "filesystem",
       "todo_view",
       "chart",
-      "image"
+      "image",
+      "plane"
     ],
     "deny": [
       "experience",
