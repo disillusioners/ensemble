@@ -21,6 +21,12 @@
     </div>
     
     <div class="header-right">
+      <!-- Unified overlay hide button — visible when any overlay is active -->
+      @if (anyOverlayVisible()) {
+        <button mat-icon-button (click)="hideActiveOverlay()" class="overlay-hide-btn" aria-label="Hide overlay">
+          <mat-icon>visibility_off</mat-icon>
+        </button>
+      }
       <app-job-queue-indicator></app-job-queue-indicator>
       <app-notification-bell></app-notification-bell>
       <button mat-icon-button [matMenuTriggerFor]="settingsMenu" class="gear-button" aria-label="Settings menu">
@@ -53,35 +59,33 @@
     </div>
   </header>
 
-  <!-- Main content -->
+  <!-- Main content — containing block for absolute-positioned overlays -->
   <main class="app-main">
     <router-outlet></router-outlet>
+
+    <!-- Plane iframe — always mounted, display-toggled for caching.
+         Stays alive across route changes so iframe state is preserved. -->
+    @if (planeEnabled()) {
+      <div
+        class="plane-overlay"
+        [style.display]="isPlanRoute() ? 'flex' : 'none'"
+      >
+        <app-plane-viewer [url]="planeUrl()"></app-plane-viewer>
+      </div>
+    }
+
+    <!-- Global workspace overlay. Always mounted, display-toggled for
+         caching. The `[visible]` input lets the workspace component
+         disconnect SSE and skip keyboard handling while hidden; the
+         `[style.display]` binding controls actual layout. The element
+         is rendered inside `.app-main` so it sits below the header
+         and the editor cache survives navigation. -->
+    <app-workspace
+      [projectId]="workspaceOverlayService.workspaceProjectId() || ''"
+      [visible]="workspaceOverlayService.showWorkspace()"
+      [style.display]="workspaceOverlayService.showWorkspace() ? 'flex' : 'none'"
+      (hide)="workspaceOverlayService.hide()"
+    ></app-workspace>
   </main>
-
-  <!-- Plane iframe — always mounted, display-toggled for caching.
-       Stays alive across route changes so iframe state is preserved. -->
-  @if (planeEnabled()) {
-    <div
-      class="plane-overlay"
-      [style.display]="isPlanRoute() ? 'flex' : 'none'"
-    >
-      <button class="plane-overlay-close" mat-icon-button (click)="closePlan()">
-        <mat-icon>close</mat-icon>
-      </button>
-      <app-plane-viewer [url]="planeUrl()"></app-plane-viewer>
-    </div>
-  }
-
-  <!-- Global workspace overlay. Always mounted, display-toggled for
-       caching. The `[visible]` input lets the workspace component
-       disconnect SSE and skip keyboard handling while hidden; the
-       `[style.display]` binding controls actual layout. The element
-       is rendered at the App root so the Alt+` hotkey works from any
-       route and the editor cache survives navigation. -->
-  <app-workspace
-    [projectId]="(workspaceOverlayService.showWorkspace() ? workspaceOverlayService.workspaceProjectId() : null) || ''"
-    [visible]="workspaceOverlayService.showWorkspace()"
-    [style.display]="workspaceOverlayService.showWorkspace() ? 'flex' : 'none'"
-    (hide)="workspaceOverlayService.hide()"
-  ></app-workspace>
+</div>
 </div>

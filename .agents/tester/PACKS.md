@@ -660,7 +660,7 @@ S (31/31, feature/llm-model-load-balance) |
 | Pack | Location | Scope | Timeout | Last Run | Status |
 |------|----------|-------|---------|----------|--------|
 | agent_switcher_unit_test | `cd frontend && npx jest --testPathPatterns=agent-switcher --no-coverage` | AgentSwitcherComponent: Recent agents section (localStorage persistence, move-to-front dedup, max 5 trimming, stale ID filtering, search filter, edge cases). 37 tests. | 2 min | 2026-08-12 | ✅ PASS (37/37 in 1.3s, feature/recent-agents-switcher) |
-| frontend_jest_regression | `cd frontend && npx jest --no-coverage` | Full frontend Jest suite — all Angular specs. Smoke regression to catch cross-component breakage. 1,931 tests, 53 suites. | 5 min | 2026-08-12 | ✅ PASS (1931/1931 in 7.9s, feature/editor-toggle-hotkey @ d09160af) |
+| frontend_jest_regression | `cd frontend && npx jest --no-coverage` | Full frontend Jest suite — all Angular specs. Smoke regression to catch cross-component breakage. 1,935 tests, 54 suites (−3 vscode-overlay-hide removed +7 app.component.spec.ts added). | 5 min | 2026-08-13 | ✅ PASS (1935/1935 in 9.2s, feature/plane-iframe @ 8ba4eb9c+a75dd0af, test commit 471b6fff, 0 failures) |
 
 ## Plane Iframe Feature Packs
 

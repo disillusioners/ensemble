@@ -1,4 +1,4 @@
-import { Component, signal, inject, OnInit, HostListener, DestroyRef } from '@angular/core';
+import { Component, signal, computed, inject, OnInit, HostListener, DestroyRef } from '@angular/core';
 import { Router, RouterOutlet, RouterLink, RouterLinkActive, NavigationEnd } from '@angular/router';
 import { CommonModule } from '@angular/common';
 import { HttpClient } from '@angular/common/http';
@@ -90,6 +90,30 @@ export class App implements OnInit {
    * iframe survives route changes and keeps its internal state.
    */
   readonly isPlanRoute = signal(false);
+
+  /**
+   * True when any overlay (workspace or plane) is currently visible.
+   * Drives the unified hide button in the app header so a single
+   * affordance can dismiss whichever overlay is on screen.
+   */
+  readonly anyOverlayVisible = computed(() => {
+    return this.workspaceOverlayService.showWorkspace() || this.isPlanRoute();
+  });
+
+  /**
+   * Hide whichever overlay is currently visible. If the workspace
+   * overlay is up, dismiss it via the overlay service; if the plan
+   * route is active, navigate back to /instances. Both checks are
+   * independent so an unusual state with both visible is handled.
+   */
+  hideActiveOverlay(): void {
+    if (this.workspaceOverlayService.showWorkspace()) {
+      this.workspaceOverlayService.hide();
+    }
+    if (this.isPlanRoute()) {
+      this.router.navigate(['/instances']);
+    }
+  }
 
   readonly settingsMenuItems = signal<SettingsMenuItem[]>([
     { label: 'Blueprints', icon: 'architecture', route: '/projects/all/blueprints' },
@@ -189,9 +213,5 @@ export class App implements OnInit {
         // Plane not configured; feature stays hidden.
       }
     });
-  }
-
-  closePlan(): void {
-    this.router.navigate(['/instances']);
   }
 }

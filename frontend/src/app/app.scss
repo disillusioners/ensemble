@@ -102,6 +102,10 @@
   }
 }
 
+.overlay-hide-btn {
+  color: #f1f5f9;
+}
+
 .health-status {
   display: flex;
   align-items: center;
@@ -159,43 +163,28 @@
 .app-main {
   flex: 1;
   display: flex;
+  position: relative;     /* containing block for absolute overlays */
   overflow: hidden;
   width: 100%;
 }
 
 .plane-overlay {
-  position: fixed;
-  top: 3.5rem;       // sits below .app-header (height: 3.5rem) so nav stays visible
-  left: 0;
-  right: 0;
-  bottom: 0;
+  position: absolute;     /* inside .app-main, below the header */
+  inset: 0;               /* fills the available space */
   z-index: 1000;
   background: #fff;
   display: flex;
   flex-direction: column;
 }
 
-.plane-overlay-close {
-  position: absolute;
-  top: 8px;
-  right: 8px;
-  z-index: 1001;
-  background: #fff;
-}
-
-// Global workspace overlay — mounted at the App root so the Alt+` hotkey
-// works from any route. Fixed to the viewport below the app header so
-// the header stays interactive (operator can still reach nav, settings,
-// the health/streaming indicators while the overlay is open). The
+// Global workspace overlay — mounted inside .app-main so it sits below
+// the header and the Alt+` hotkey works from any route. The
 // `[style.display]` binding on the element toggles flex/none; this CSS
 // provides the static layout when visible.
 app-workspace {
-  position: fixed;
-  top: 3.5rem;        // matches .app-header height
-  left: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 100;       // below the plane overlay (1000) so plane wins
+  position: absolute;     /* fills .app-main below the header */
+  inset: 0;
+  z-index: 100;           /* below the plane overlay (1000) so plane wins */
   background: var(--bg-primary, #0f172a);
   display: flex;
   flex-direction: column;
