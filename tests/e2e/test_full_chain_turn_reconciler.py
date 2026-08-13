@@ -660,12 +660,11 @@ def test_full_chain_no_deadlock_at_each_phase(
     running the full chain with a strict timeout.
 
     Note: after ResumeTurn consumes the answer handle, the task
-    transitions PAUSED → CANCELLED. The completion of the
-    *resumed* turn happens on a fresh work_id (the orchestrator
-    mints a new task for the resumed turn). The terminal assertion
-    below accepts either CANCELLED (the awaiting turn) or
-    COMPLETED (a fresh minted turn that completed normally) —
-    both are valid end-states for this test's purpose.
+    transitions PAUSED → PENDING (Phase 4b/4c migration 2026-08-12;
+    was PAUSED → CANCELLED pre-migration). The same work_id stays
+    live awaiting WorkerPool re-claim; this test does NOT drive
+    the task to a terminal state — it just verifies the cascade
+    helpers all return without deadlock and the handle is cleared.
     """
     iid = f"inst-{uuid.uuid4().hex[:8]}"
     work_id = f"work-{uuid.uuid4().hex[:12]}"
@@ -703,15 +702,16 @@ def test_full_chain_no_deadlock_at_each_phase(
         ResumeTurn(work_id=work_id).run(s)
         s.commit()
 
-    # Terminal state reached — either CANCELLED (the awaited task
-    # was consumed) or COMPLETED (a fresh resumed turn ran to
-    # completion). Both are valid end-states for this smoke test.
+    # Post-ResumeTurn state: the task is live as PENDING (Phase
+    # 4b/4c migration 2026-08-12). The handle is consumed
+    # (suspension_reason=None, resume_target_turn_id=None). This
+    # smoke test does not drive to terminal — the cascade helpers
+    # just need to return without deadlock and leave the handle
+    # cleared. WorkerPool would next claim the PENDING task.
     final = _read_handle(engine, work_id)
-    assert final[0] in (
-        TaskStatus.CANCELLED.value,
-        TaskStatus.COMPLETED.value,
-    ), (
-        f"Full chain must reach a terminal state; got {final[0]!r}"
+    assert final[0] == TaskStatus.PENDING.value, (
+        f"Full chain must reach PENDING (live, handle cleared) "
+        f"post-ResumeTurn; got {final[0]!r}"
     )
     assert final[1] is None
     assert final[2] is None
@@ -745,10 +745,12 @@ def test_answer_delivered_exactly_once(
     answer produces no second transition.
 
     We model the structural invariant by counting how many times
-    ResumeTurn actually flips status PAUSED → CANCELLED on the
-    awaiting task. The count is 1 even if ResumeTurn is called N
-    times — the second call's status-guarded UPDATE matches zero
-    rows and is a silent no-op.
+    ResumeTurn actually flips status PAUSED → PENDING on the
+    awaiting task (Phase 4b/4c migration 2026-08-12; was
+    PAUSED → CANCELLED pre-migration). The count is 1 even if
+    ResumeTurn is called N times — the second call's
+    status-guarded UPDATE matches zero rows (status is already
+    PENDING) and is a silent no-op.
     """
     iid = f"inst-{uuid.uuid4().hex[:8]}"
     work_id = f"work-{uuid.uuid4().hex[:12]}"
@@ -786,8 +788,8 @@ def test_answer_delivered_exactly_once(
 
     # Second resume (simulating a duplicate answer or a retry of
     # the resume path). The status-guarded UPDATE matches zero
-    # rows (status is already CANCELLED), so the handle stays
-    # cleared and no fresh transition fires.
+    # rows (status is already PENDING per Phase 4b/4c migration),
+    # so the handle stays cleared and no fresh transition fires.
     with Session(engine) as s:
         ResumeTurn(work_id=work_id).run(s)
         s.commit()
@@ -798,7 +800,11 @@ def test_answer_delivered_exactly_once(
         s.commit()
 
     final = _read_handle(engine, work_id)
-    assert final[0] == TaskStatus.CANCELLED.value
+    assert final[0] == TaskStatus.PENDING.value, (
+        f"After ResumeTurn the task is PENDING (live, awaiting "
+        f"WorkerPool re-claim) per Phase 4b/4c migration; got "
+        f"{final[0]!r}"
+    )
     assert final[1] is None
     assert final[2] is None
 
