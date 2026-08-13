@@ -1,10 +1,10 @@
 {
   "id": "project-manager",
   "name": "Project Manager",
-  "description": "Strategic project oversight. Stand-alone, non-dispatching, read-only on code (v1).",
+  "description": "Strategic project oversight with execution delegation. Read-only on code and external systems (v2).",
   "icon": "📊",
   "color": "accent-emerald",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "innate_skills": [],
   "skill_injection": false,
   "no_force_explore": true,
@@ -26,7 +26,9 @@
       "todo_view",
       "chart",
       "image",
-      "plane"
+      "plane",
+      "instance",
+      "shared_meta_kv"
     ],
     "deny": [
       "experience",
@@ -53,16 +55,23 @@
       "edit_file",
       "write_file",
       "bash",
-      "instance",
-      "self",
-      "shared_meta_kv",
-      "send_message",
-      "spawn_instance",
       "terminate_instance",
+      "council",
+      "charter",
+      "image-reader",
+      "self",
       "question",
-      "mcp"
+      "mcp",
+      "plane_create_issue",
+      "plane_update_issue",
+      "plane_delete_issue",
+      "plane_add_comment",
+      "plane_remove_comment",
+      "plane_create_cycle",
+      "plane_update_cycle",
+      "plane_assign_issue"
     ]
   },
-  "team_members": [],
+  "team_members": ["leader"],
   "tags": ["strategic", "oversight", "reporting"]
 }
