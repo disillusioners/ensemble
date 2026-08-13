@@ -3380,7 +3380,7 @@ def create_question_pause_node(manager: Any):
 # stable value without parsing the meta file at runtime.
 WATCHOVER_MAX_DENIALS_DEFAULT = 3
 WATCHOVER_DELTA_MAX_MESSAGES_DEFAULT = 20
-WATCHOVER_TIMEOUT_SECONDS_DEFAULT = 10
+WATCHOVER_TIMEOUT_SECONDS_DEFAULT = 90
 
 # System prompt cache: read ``agents/watcher/soul.md`` ONCE at module
 # load time. ``WatchoverEvaluator`` is created per-instance but re-reads
