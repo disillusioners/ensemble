@@ -686,23 +686,58 @@ async def resume_instance(
 
     message_text = (body.message.strip() if body and body.message else None) or "resume"
 
-    # Cascade resume (sets PAUSED→RUNNING for target + children)
+    # Resolve the target's resume handle FIRST (while its task is still
+    # PAUSED), THEN cascade-resume. Same ordering invariant as the
+    # answer / dismiss endpoints above: ``resume_processing_job`` calls
+    # ``find_paused_or_cancellable_turn`` (which filters on PAUSED /
+    # RUNNING). ``resume_instance_cascade`` transitions tasks
+    # PAUSED → PENDING first, so calling it before the handle lookup
+    # would return None and the manual user message would never be
+    # injected.
+    try:
+        job_result = await manager.resume_processing_job(
+            instance_id,
+            message=message_text,
+            silent=False,
+        )
+    except Exception as e:
+        logger.warning(
+            f"resume_instance: resume_processing_job failed for "
+            f"{instance_id[:8]}...: {e}"
+        )
+        job_result = {"status": "error", "error": str(e)}
+    if job_result is None:
+        logger.debug(
+            f"resume_instance: resume_processing_job returned None "
+            f"for {instance_id[:8]}... (was IDLE/WAITING_CHILDREN)"
+        )
+        job_result = {"status": "no_active_job"}
+
+    # Cascade resume (sets PAUSED→RUNNING for target + children). The
+    # background resume task scheduled above survives this — the cascade
+    # does NOT touch _graph_tasks or cancel in-flight tasks.
     result = await manager.resume_instance_cascade(instance_id)
     target_id = result.get("target_id", instance_id)
 
-    # Resume processing jobs for all resumed instances (including children)
-    # Target instance gets the user message; children resume silently from checkpoint
-    resume_results = {}
+    # Resume processing jobs for non-target children (target was handled
+    # above). Children resume silently from checkpoint — they were paused
+    # as a side effect of the target's pause and don't need a new message.
+    resume_results = {instance_id: job_result}
     for rid in result["resumed_ids"]:
-        is_target = rid == target_id
-        job_result = await manager.resume_processing_job(
+        if rid == target_id:
+            continue  # already handled above
+        child_result = await manager.resume_processing_job(
             rid,
-            message=message_text if is_target else "resume",
-            silent=not is_target,
+            message="resume",
+            silent=True,
         )
-        if job_result is None:
-            logger.debug(f"No active PROCESSING job for instance {rid[:8]}... (was IDLE/WAITING_CHILDREN)")
-        resume_results[rid] = job_result if job_result is not None else {"status": "no_active_job"}
+        if child_result is None:
+            logger.debug(
+                f"No active PROCESSING job for instance {rid[:8]}... "
+                f"(was IDLE/WAITING_CHILDREN)"
+            )
+            child_result = {"status": "no_active_job"}
+        resume_results[rid] = child_result
 
     return {
         "resumed": True,
@@ -965,11 +1000,50 @@ async def answer_questions(
         answer_lines.append("")
     answer_msg = "\n".join(answer_lines)
 
-    # 5. Mirror the PAUSED-branch fan-out from messages.py:198-249 (F10).
-    #    ``pause_instance_cascade`` cascades to children, so the resume
-    #    must too. Target gets the answer HumanMessage; children resume
-    #    silently from their checkpoint — they were paused as a side
-    #    effect of the parent's question and don't need a new message.
+    # 5. Resolve the answer handle FIRST (while the task is still PAUSED),
+    #    THEN cascade-resume. This ordering is critical:
+    #    ``resume_processing_job`` calls ``find_suspended_turn_for_answer``,
+    #    which requires ``Task.status == 'paused'``.
+    #    ``resume_instance_cascade`` transitions tasks PAUSED → PENDING, so
+    #    calling it first would leave the handle unresolvable and the
+    #    answer would never be injected into the checkpoint.
+    #
+    #    ``_schedule_explicit_handle_resume`` only injects the message and
+    #    schedules ``_resume_processing_background`` via asyncio.create_task
+    #    (manager.py:6494) — it does NOT touch instance status. The
+    #    scheduled background task survives ``resume_instance_cascade``
+    #    because that cascade does NOT cancel ``_graph_tasks`` or any
+    #    in-flight tasks (unlike ``pause_instance_cascade``).
+    try:
+        job_result = await manager.resume_processing_job(
+            instance_id,
+            message=answer_msg,
+            silent=False,
+        )
+    except Exception as e:
+        logger.warning(
+            f"answer_questions: resume_processing_job failed for "
+            f"{instance_id[:8]}...: {e}"
+        )
+        job_result = {"status": "error", "error": str(e)}
+    if job_result is None:
+        # No suspended turn matched the awaiting_answer handle. The
+        # cascade still proceeds so children get unblocked, but the
+        # target resumes WITHOUT the answer message — it transitions
+        # to RUNNING via the cascade, the WorkerPool re-drives the
+        # checkpoint, and the LLM turn re-executes without seeing the
+        # user's answer. This is a degraded state (answer lost); the
+        # warning log below surfaces it for operators.
+        logger.warning(
+            f"answer_questions: resume_processing_job returned None for "
+            f"{instance_id[:8]}... — no suspended turn found"
+        )
+        job_result = {"status": "no_active_job"}
+
+    # Cascade-resume the instance tree (transitions PAUSED → RUNNING for
+    # instances, PAUSED → PENDING for tasks). The background resume task
+    # scheduled above survives this — resume_instance_cascade does NOT
+    # touch _graph_tasks or cancel existing tasks.
     try:
         resume_result = await manager.resume_instance_cascade(instance_id)
     except Exception as e:
@@ -983,32 +1057,44 @@ async def answer_questions(
 
     target_id = resume_result.get("target_id", instance_id)
 
-    resume_results: dict = {}
+    # Children resume silently from their checkpoint — they were paused
+    # as a side effect of the parent's question. The target's resume was
+    # already scheduled above; here we only handle non-target children.
+    resume_results: dict = {instance_id: job_result}
     for resumed_id in resume_result["resumed_ids"]:
-        is_target = resumed_id == target_id
+        if resumed_id == target_id:
+            continue  # already handled above
         try:
-            job_result = await manager.resume_processing_job(
+            child_result = await manager.resume_processing_job(
                 resumed_id,
-                message=answer_msg if is_target else "resume",
-                silent=not is_target,
+                message="resume",
+                silent=True,
             )
         except Exception as e:
             logger.warning(
                 f"Failed to resume processing for "
                 f"{resumed_id[:8]}...: {e}"
             )
-            job_result = {"status": "error", "error": str(e)}
-        if job_result is None:
+            child_result = {"status": "error", "error": str(e)}
+        if child_result is None:
             logger.debug(
                 f"No active PROCESSING job for instance "
                 f"{resumed_id[:8]}... (was IDLE/WAITING_CHILDREN)"
             )
-        resume_results[resumed_id] = (
-            job_result if job_result is not None else {"status": "no_active_job"}
-        )
+            child_result = {"status": "no_active_job"}
+        resume_results[resumed_id] = child_result
+
+    # W1: Surface a degraded status when the answer couldn't be routed.
+    # The cascade still ran (children unblocked), but the target's
+    # answer was lost — return a distinct status so the caller knows.
+    answer_status = (
+        "answered"
+        if job_result.get("status") != "no_active_job"
+        else "no_active_job"
+    )
 
     return {
-        "status": "answered",
+        "status": answer_status,
         "instance_id": instance_id,
         "question_pack": pack_to_dict(pack),
         "resume_info": {
@@ -1185,11 +1271,35 @@ async def dismiss_question(
                 f"instance {instance_id}: {e}"
             )
 
-    # 5. Mirror the PAUSED-branch resume fan-out from messages.py (F10)
-    #    and the answer endpoint above. Target gets the dismissal
-    #    HumanMessage; children resume silently from their checkpoint —
-    #    they were paused as a side effect of the parent's question and
-    #    don't need a new message.
+    # 5. Resolve the dismissal handle FIRST (while the task is still
+    #    PAUSED), THEN cascade-resume. Same ordering invariant as
+    #    ``answer_questions``: ``resume_processing_job`` calls
+    #    ``find_suspended_turn_for_answer`` which requires
+    #    ``Task.status == 'paused'``. ``resume_instance_cascade`` would
+    #    flip that to PENDING first, leaving the dismissal message unable
+    #    to route. ``_schedule_explicit_handle_resume`` only injects and
+    #    schedules a background task — the cascade below does not cancel
+    #    it.
+    dismiss_msg = "[User dismissed the question without answering.]"
+    try:
+        job_result = await manager.resume_processing_job(
+            instance_id,
+            message=dismiss_msg,
+            silent=False,
+        )
+    except Exception as e:
+        logger.warning(
+            f"dismiss_question: resume_processing_job failed for "
+            f"{instance_id[:8]}...: {e}"
+        )
+        job_result = {"status": "error", "error": str(e)}
+    if job_result is None:
+        logger.warning(
+            f"dismiss_question: resume_processing_job returned None "
+            f"for {instance_id[:8]}... — no suspended turn found"
+        )
+        job_result = {"status": "no_active_job"}
+
     try:
         resume_result = await manager.resume_instance_cascade(instance_id)
     except Exception as e:
@@ -1202,34 +1312,46 @@ async def dismiss_question(
         )
 
     target_id = resume_result.get("target_id", instance_id)
-    dismiss_msg = "[User dismissed the question without answering.]"
 
-    resume_results: dict = {}
+    # Children resume silently from their checkpoint — they were paused
+    # as a side effect of the parent's question. The target's resume was
+    # already scheduled above; here we only handle non-target children.
+    resume_results: dict = {instance_id: job_result}
     for resumed_id in resume_result["resumed_ids"]:
-        is_target = resumed_id == target_id
+        if resumed_id == target_id:
+            continue  # already handled above
         try:
-            job_result = await manager.resume_processing_job(
+            child_result = await manager.resume_processing_job(
                 resumed_id,
-                message=dismiss_msg if is_target else "resume",
-                silent=not is_target,
+                message="resume",
+                silent=True,
             )
         except Exception as e:
             logger.warning(
                 f"Failed to resume processing for "
                 f"{resumed_id[:8]}...: {e}"
             )
-            job_result = {"status": "error", "error": str(e)}
-        if job_result is None:
+            child_result = {"status": "error", "error": str(e)}
+        if child_result is None:
             logger.debug(
                 f"No active PROCESSING job for instance "
                 f"{resumed_id[:8]}... (was IDLE/WAITING_CHILDREN)"
             )
-        resume_results[resumed_id] = (
-            job_result if job_result is not None else {"status": "no_active_job"}
-        )
+            child_result = {"status": "no_active_job"}
+        resume_results[resumed_id] = child_result
+
+    # W1: Surface a degraded status when the dismissal couldn't be routed.
+    # The cascade still ran (children unblocked), but the target's
+    # dismissal message was lost — return a distinct status so the
+    # caller knows.
+    dismiss_status = (
+        "dismissed"
+        if job_result.get("status") != "no_active_job"
+        else "no_active_job"
+    )
 
     return {
-        "status": "dismissed",
+        "status": dismiss_status,
         "instance_id": instance_id,
         "resume_info": {
             "resumed": True,

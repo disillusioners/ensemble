@@ -20,7 +20,7 @@ from ..persistence import get_instance_messages
 from ..repositories.event.models import Event, EventKind
 from ..repositories.instance.models import Instance, InstanceStatus
 from ..repositories.message_queue.models import MessageQueue, MessageStatus, MessageType
-from ..repositories.task.models import Task, TaskType, TaskStatus
+from ..repositories.task.models import SuspensionReason, Task, TaskStatus, TaskType
 from ..utils import parse_think_tags, serialize_message
 from ..write_pause_guard import WriteGuardSession
 from .cancellation import CancellationService
@@ -1090,7 +1090,10 @@ class InstanceMessagingService:
             if self._manager.has_deferred_question_pause(instance_id):
                 try:
                     await asyncio.shield(
-                        self._manager.pause_instance_cascade(instance_id)
+                        self._manager.pause_instance_cascade(
+                            instance_id,
+                            suspension_reason=SuspensionReason.AWAITING_ANSWER.value,
+                        )
                     )
                 except Exception as pause_err:
                     logger.warning(
@@ -3710,7 +3713,10 @@ class InstanceMessagingService:
             if self._manager.has_deferred_question_pause(instance_id):
                 try:
                     await asyncio.shield(
-                        self._manager.pause_instance_cascade(instance_id)
+                        self._manager.pause_instance_cascade(
+                            instance_id,
+                            suspension_reason=SuspensionReason.AWAITING_ANSWER.value,
+                        )
                     )
                 except Exception as pause_err:
                     logger.warning(

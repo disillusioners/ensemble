@@ -705,18 +705,31 @@ async def test_resume_instance_already_running_no_message_enqueued(client, mock_
         "resumed_ids": [],
         "skipped_ids": ["test-instance-id"]
     })
+    # resume_processing_job is awaited BEFORE the cascade (per the
+    # resume-ordering invariant). The instance is already running, so
+    # no active job exists — the realistic return value is None,
+    # which the endpoint records as ``{"status": "no_active_job"}``.
+    mock_manager.resume_processing_job = AsyncMock(return_value=None)
 
     response = await client.post("/instances/test-instance-id/resume")
-    
+
     assert response.status_code == 200
     data = response.json()
     assert data["resumed"] is True
     assert data["resumed_ids"] == []
     assert data["skipped_ids"] == ["test-instance-id"]
-    assert data["resume_results"] == {}  # No jobs resumed since none were paused
-    
-    # Verify resume_processing_job was NOT called
-    mock_manager.resume_processing_job.assert_not_called()
+    # resume_processing_job IS called for the target (before cascade),
+    # but returns None for a non-paused instance. The endpoint records
+    # the target's "no_active_job" entry even when resumed_ids is empty.
+    assert "test-instance-id" in data["resume_results"]
+
+    # Verify resume_processing_job WAS called (for the target), with
+    # the default message and silent=False.
+    mock_manager.resume_processing_job.assert_called_once_with(
+        "test-instance-id",
+        message="resume",
+        silent=False,
+    )
 
 
 @pytest.mark.asyncio

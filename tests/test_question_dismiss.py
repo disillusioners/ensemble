@@ -240,18 +240,36 @@ class TestDismissEndpointHappyPath:
         pack = QuestionPack(instance_id="inst-dismiss", questions=[])
 
         client, state = client_and_state_for_dismiss
-        state["manager"] = _make_manager_for_dismiss_endpoint(
+        manager = _make_manager_for_dismiss_endpoint(
             instance_exists=True,
             question_pack=pack,
         )
+        state["manager"] = manager
         state["live_hub"] = _make_live_hub()
 
         client.post("/instances/inst-dismiss/question/dismiss")
 
-        state["manager"].resume_instance_cascade.assert_awaited_once_with(
+        manager.resume_instance_cascade.assert_awaited_once_with(
             "inst-dismiss",
         )
-        state["manager"].resume_processing_job.assert_awaited_once()
+        manager.resume_processing_job.assert_awaited_once()
+
+        # W2: Verify call ORDER — resume_processing_job MUST be called
+        # before resume_instance_cascade (the handle must resolve
+        # while the task is still PAUSED, not after the cascade has
+        # flipped it to PENDING). A future refactor that reverts the
+        # order would silently break the resume routing — this
+        # assertion locks in the invariant.
+        call_names = [
+            call[0] for call in manager.mock_calls
+            if call[0] in ("resume_processing_job", "resume_instance_cascade")
+        ]
+        assert call_names == [
+            "resume_processing_job", "resume_instance_cascade",
+        ], (
+            f"Expected resume_processing_job before resume_instance_cascade, "
+            f"got {call_names}"
+        )
 
 
 # ============================================================================
@@ -720,7 +738,10 @@ class TestDismissCascadeFailure:
         # SSE was emitted BEFORE the cascade failure — F3 timing invariant.
         hub.stream_question_pack.assert_awaited_once()
         manager.resume_instance_cascade.assert_awaited_once_with("inst-dismiss")
-        manager.resume_processing_job.assert_not_awaited()
+        # resume_processing_job is called BEFORE the cascade now.
+        # The cascade raises, but resume_processing_job already ran
+        # (the target's resume handle was resolved before the cascade).
+        manager.resume_processing_job.assert_awaited_once()
 
 
 # ============================================================================
@@ -731,15 +752,16 @@ class TestDismissCascadeFailure:
 class TestDismissEmptyResumeList:
     """Empty ``resumed_ids`` returns 200 with no per-instance resume job spawned."""
 
-    def test_empty_resumed_ids_returns_200_and_no_resume_processing_calls(
+    def test_empty_resumed_ids_returns_200_and_target_resume_runs(
         self, client_and_state_for_dismiss,
     ):
-        """A no-op cascade (``resumed_ids == []``) returns 200 with no jobs.
+        """A no-op cascade (``resumed_ids == []``) returns 200 with target resume only.
 
         When the cascade reports nothing to resume, the per-instance
         fan-out loop does not execute, so ``resume_processing_job`` is
-        never awaited. The endpoint still returns 200 — the dismiss
-        itself succeeded; the cascade simply had no work to do.
+        only awaited once — for the target, BEFORE the cascade runs.
+        The endpoint still returns 200 — the dismiss itself succeeded;
+        the cascade simply had no work to do.
 
         Asserts:
             * status 200
@@ -747,8 +769,10 @@ class TestDismissEmptyResumeList:
               value (currently hardcoded ``True``; the important
               contract is that the response is well-formed and the
               frontend gets a clean 200, not a 5xx)
-            * ``resume_info.resume_results`` is an empty dict
-            * ``resume_processing_job`` was NOT awaited
+            * ``resume_info.resume_results`` carries the target's
+              resume entry (no children when ``resumed_ids == []``)
+            * ``resume_processing_job`` was awaited exactly once
+              (target's resume before the cascade)
         """
         from daemon.services.question_manager import QuestionPack
 
@@ -781,7 +805,9 @@ class TestDismissEmptyResumeList:
         assert resume_info["resumed"] is True  # Matches the answer endpoint.
         assert resume_info["resumed_ids"] == []
         assert resume_info["skipped_ids"] == ["inst-dismiss"]
-        # Empty resume_results — the per-instance loop never executed.
-        assert resume_info["resume_results"] == {}
-        # No graph re-entry was kicked off.
-        manager.resume_processing_job.assert_not_awaited()
+        # The target's resume_processing_job ran (before the cascade),
+        # so resume_results carries the target entry even with empty
+        # resumed_ids.
+        assert "inst-dismiss" in resume_info["resume_results"]
+        # resume_processing_job was called exactly once — for the target.
+        manager.resume_processing_job.assert_awaited_once()
