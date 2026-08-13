@@ -267,11 +267,11 @@ class TestMetaJsonSchema:
             f"version should look like semver (X.Y.Z...), got {version!r}"
         )
 
-    def test_team_members_is_empty(self) -> None:
-        """team_members must be [] — project-manager does NOT dispatch."""
+    def test_team_members_is_leader(self) -> None:
+        """team_members must be ['leader'] — v2 delegates to leader."""
         meta = _load_meta()
-        assert meta["team_members"] == [], (
-            f"project-manager must NOT have team_members (non-dispatching). "
+        assert meta["team_members"] == ["leader"], (
+            f"project-manager must have team_members=['leader'] (v2 delegation). "
             f"Got: {meta['team_members']}"
         )
 
@@ -351,7 +351,6 @@ class TestToolAllowanceSecurity:
         "write_file",
         "bash",
         # Work dispatch / instance control
-        "instance",
         "self",
         "spawn_instance",
         "terminate_instance",
@@ -378,10 +377,9 @@ class TestToolAllowanceSecurity:
         "project_unlink",
         "project_add_directory",
         "project_remove_directory",
-        # System-internal mechanisms we deny by default in v1
+        # System-internal mechanisms we deny by default in v2
         "mcp",
         "question",
-        "shared_meta_kv",
     })
 
     def test_no_write_tool_in_allow(self) -> None:
@@ -402,13 +400,9 @@ class TestToolAllowanceSecurity:
             "edit_file",
             "write_file",
             "bash",
-            "spawn_instance",
-            "send_message",
             "terminate_instance",
             "experience",
-            "instance",
             "self",
-            "shared_meta_kv",
             "mcp",
             "question",
         }
@@ -567,9 +561,9 @@ class TestAgentDiscovery:
         assert md is not None, "registry.get('project-manager') returned None"
         assert md.id == "project-manager", f"id mismatch: {md.id}"
         assert md.name == "Project Manager", f"name mismatch: {md.name!r}"
-        assert md.version == "1.0.0", f"version mismatch: {md.version!r}"
-        assert md.team_members == [], (
-            f"team_members must be empty (non-dispatching). Got: {md.team_members}"
+        assert md.version == "2.0.0", f"version mismatch: {md.version!r}"
+        assert md.team_members == ["leader"], (
+            f"team_members must be ['leader'] (v2 delegation). Got: {md.team_members}"
         )
 
     def test_meta_conforms_to_agent_metadata_model(self) -> None:
@@ -583,7 +577,7 @@ class TestAgentDiscovery:
         md = AgentMetadata.model_validate(meta)  # must not raise
         assert md.id == "project-manager"
         assert md.name == "Project Manager"
-        assert md.team_members == []
+        assert md.team_members == ["leader"]
 
 
 # =============================================================================
