@@ -20,7 +20,35 @@ from typing import TYPE_CHECKING, Any, Callable, Protocol, runtime_checkable
 
 from langchain_core.tools import BaseTool, StructuredTool, ToolException
 
+if TYPE_CHECKING:
+    from daemon.mcp.resilience import ResilienceManager
+
 logger = logging.getLogger(__name__)
+
+
+def _fallback_content(fallback_message: str) -> tuple[list[dict], None]:
+    """Wrap a fallback JSON string in the ``(content, artifact)`` shape.
+
+    The legacy path returns ``(content, artifact)`` from
+    ``_convert_call_tool_result`` — a list of content blocks + an
+    optional artifact. The resilience path needs to match that shape
+    so callers can ``return _convert_call_tool_result(...)`` or
+    ``return _fallback_content(...)`` interchangeably.
+
+    ``StructuredTool`` with ``response_format="content_and_artifact"``
+    expects this exact shape; wrapping the JSON string in a single
+    text content block keeps the agent's downstream parsing uniform
+    whether the result came from the live server or the fallback.
+
+    Args:
+        fallback_message: A JSON string (typically pre-serialized via
+            ``json.dumps`` in ``PlaneServerDefinition.resilience_config``).
+
+    Returns:
+        ``([{"type": "text", "text": <fallback>}], None)`` — same shape
+        as ``_convert_call_tool_result`` on the happy path.
+    """
+    return [{"type": "text", "text": fallback_message}], None
 
 
 # ---------------------------------------------------------------------------
@@ -286,6 +314,7 @@ def create_lazy_mcp_tools(
     shared_session_lock: asyncio.Lock,
     tool_call_timeout: int = 120,
     tool_name_prefix: str | None = None,
+    resilience_manager: "ResilienceManager | None" = None,
 ) -> list[BaseTool]:
     """Create lazy MCP tools that defer connection until first call.
 
@@ -312,6 +341,16 @@ def create_lazy_mcp_tools(
     the MCP server. The prefix override therefore only renames the
     tool surface; it does NOT break dispatch.
 
+    Resilience opt-in (Phase 4): when ``resilience_manager`` is
+    provided AND the manager has a config registered for
+    ``server_name``, the lazy coroutine runs the full resilience flow
+    (cache → circuit breaker → retry → fallback). When either is
+    missing (``resilience_manager=None`` or no config registered),
+    the lazy coroutine behaves EXACTLY as before — single attempt,
+    timeout, surface exception as ``ToolException``. This preserves
+    zero-regression for context7, webfetch, and any other MCP server
+    that hasn't opted in.
+
     Args:
         server_name: MCP server name (used to build the tool name
             prefix and the description suffix).
@@ -331,6 +370,11 @@ def create_lazy_mcp_tools(
             prefix. When ``None`` (default), uses
             ``mcp_{slugified_server_name}_``. When set (e.g.
             ``"plane"``), uses ``{tool_name_prefix}_`` instead.
+        resilience_manager: Optional ``ResilienceManager`` wired by
+            ``McpService.preload_mcp_tools`` for servers that opt
+            into retry / caching / circuit breaking. ``None`` (or no
+            config registered for ``server_name``) preserves the
+            legacy no-resilience path.
 
     Returns:
         List of ``StructuredTool`` instances. Empty list if
@@ -356,10 +400,12 @@ def create_lazy_mcp_tools(
         coroutine = _build_lazy_coroutine(
             server_name=server_name,
             original_tool_name=tool_name,
+            adapted_tool_name=adapted_name,
             session_provider=session_provider,
             shared_session_cache=shared_session_cache,
             shared_session_lock=shared_session_lock,
             timeout_seconds=tool_call_timeout if tool_call_timeout > 0 else None,
+            resilience_manager=resilience_manager,
         )
 
         tool = StructuredTool(
@@ -381,6 +427,8 @@ def _build_lazy_coroutine(
     shared_session_cache: dict[str, Any],
     shared_session_lock: asyncio.Lock,
     timeout_seconds: float | None,
+    adapted_tool_name: str | None = None,
+    resilience_manager: "ResilienceManager | None" = None,
 ) -> Callable:
     """Build a coroutine that lazily creates an MCP session on first call.
 
@@ -397,6 +445,14 @@ def _build_lazy_coroutine(
     all tools for the same instance+server, which is what guarantees
     N tools → 1 session.
 
+    Resilience opt-in (Phase 4): when ``resilience_manager`` is
+    provided AND has a config registered for ``server_name``, the
+    returned coroutine runs the full resilience flow (cache →
+    circuit breaker → retry → fallback). Otherwise it falls back to
+    the legacy single-attempt path — same behavior as before this
+    feature, so existing tests / non-resilient servers keep working
+    untouched.
+
     Args:
         server_name: MCP server name (used by the provider).
         original_tool_name: Un-prefixed tool name as the MCP server
@@ -406,6 +462,15 @@ def _build_lazy_coroutine(
         shared_session_lock: See above.
         timeout_seconds: Per-call timeout in seconds, or ``None`` to
             disable.
+        adapted_tool_name: The full prefixed name (e.g.
+            ``plane_list_issues``). Used by the resilience layer
+            for cache-key construction and read/write tool
+            classification. ``None`` disables resilience regardless
+            of whether ``resilience_manager`` is set — the legacy
+            path is then identical to the pre-resilience behavior.
+        resilience_manager: Optional ``ResilienceManager``. When set
+            AND ``server_name`` has a registered config, the coroutine
+            runs through cache / circuit breaker / retry / fallback.
 
     Returns:
         Async coroutine suitable for ``StructuredTool(coroutine=...)``.
@@ -443,35 +508,375 @@ def _build_lazy_coroutine(
             shared_session_cache[server_name] = session
             return session
 
+    # ------------------------------------------------------------------
+    # Resolve resilience config ONCE at coroutine-build time. This is
+    # cheap (dict lookup) and avoids re-resolving on every call. The
+    # legacy no-resilience path stays branch-free inside the hot loop.
+    # ------------------------------------------------------------------
+    _resilience_config = (
+        resilience_manager.get_config(server_name)
+        if resilience_manager is not None and adapted_tool_name is not None
+        else None
+    )
+    _use_resilience = _resilience_config is not None
+
     async def _lazy_coroutine(**kwargs):
-        """Lazy MCP tool coroutine — connects on first call."""
-        try:
-            session = await _get_session()
+        """Lazy MCP tool coroutine — connects on first call.
 
-            # LangGraph may inject a `runtime` kwarg via InjectedToolArg;
-            # the MCP server doesn't know about it, so strip it.
-            kwargs.pop("runtime", None)
+        Two paths:
 
-            if timeout_seconds is not None:
-                async with asyncio.timeout(timeout_seconds):
+        1. **Legacy (no resilience)** — single ``session.call_tool``
+           under the configured timeout, surface any failure as a
+           ``ToolException``. Identical to the pre-Phase-4 behavior.
+        2. **Resilience (Plane)** — cache hit short-circuit → circuit
+           breaker check → retry-wrapped ``session.call_tool`` →
+           exception classification → cache + circuit state update →
+           fallback JSON on degradation.
+        """
+        # ----- Legacy / no-resilience path ---------------------------
+        if not _use_resilience:
+            try:
+                session = await _get_session()
+
+                # LangGraph may inject a `runtime` kwarg via InjectedToolArg;
+                # the MCP server doesn't know about it, so strip it.
+                kwargs.pop("runtime", None)
+
+                if timeout_seconds is not None:
+                    async with asyncio.timeout(timeout_seconds):
+                        result = await session.call_tool(
+                            original_tool_name, kwargs
+                        )
+                else:
                     result = await session.call_tool(original_tool_name, kwargs)
-            else:
-                result = await session.call_tool(original_tool_name, kwargs)
 
-            return _convert_call_tool_result(result)
+                return _convert_call_tool_result(result)
 
-        except asyncio.TimeoutError:
-            raise ToolException(
-                f"Tool '{original_tool_name}' on server '{server_name}' "
-                f"timed out after {timeout_seconds}s. The MCP server may "
-                f"be unresponsive."
+            except asyncio.TimeoutError:
+                raise ToolException(
+                    f"Tool '{original_tool_name}' on server '{server_name}' "
+                    f"timed out after {timeout_seconds}s. The MCP server may "
+                    f"be unresponsive."
+                )
+            except ToolException:
+                raise  # Re-raise our own ToolExceptions unchanged.
+            except Exception as e:
+                raise ToolException(
+                    f"MCP tool call failed for '{original_tool_name}' on "
+                    f"'{server_name}': {e}"
+                )
+
+        # ----- Resilience path ---------------------------------------
+        # Local imports: avoid pulling the resilience module (which
+        # imports CircuitBreaker) into the import graph of callers
+        # that don't opt in. Cheap enough for per-call work.
+        from daemon.mcp.errors import (
+            McpAuthError,
+            McpTransientError,
+            McpError,
+        )
+        from daemon.mcp.resilience import is_read_tool
+
+        # Re-bind for the inner closures — keeps the names short
+        # and the logic readable. Guaranteed non-None by the
+        # ``_use_resilience`` gate above.
+        config = _resilience_config
+        assert config is not None  # for type checkers
+
+        # Tool classification: read vs write (drives caching +
+        # invalidation). Stripped-name matching handles both
+        # ``plane_list_issues`` and bare ``list_issues``.
+        is_read = is_read_tool(adapted_tool_name, config)  # type: ignore[arg-type]
+
+        # Strip the LangGraph runtime injection regardless of path
+        # — the resilience flow also doesn't want it forwarded.
+        kwargs.pop("runtime", None)
+
+        cache = resilience_manager.get_cache(server_name)
+        cb = resilience_manager.get_circuit_breaker(server_name)
+
+        # ---- 1. Cache check (read tools only) ----------------------
+        if is_read and cache is not None:
+            cached, hit = await cache.get(server_name, adapted_tool_name, kwargs)  # type: ignore[arg-type]
+            if hit:
+                logger.debug(
+                    f"MCP cache HIT: {server_name}/{adapted_tool_name}"
+                )
+                return cached
+
+        # ---- 2. Circuit breaker check ------------------------------
+        # ``can_execute`` is the on-demand probe: when the circuit is
+        # OPEN and ``recovery_timeout`` has elapsed, it transitions
+        # to HALF_OPEN and returns True — the call below is the
+        # probe. No background task needed.
+        if cb is not None:
+            can_call = await cb.can_execute()
+            if not can_call:
+                logger.warning(
+                    f"MCP circuit OPEN for {server_name}, "
+                    f"returning fallback"
+                )
+                if config.fallback_message:
+                    # Return as (content, artifact) tuple to match
+                    # the ``_convert_call_tool_result`` shape that
+                    # ``StructuredTool(response_format='content_and_artifact')``
+                    # expects. The string content lets the agent
+                    # surface the JSON to the user directly.
+                    return _fallback_content(config.fallback_message)
+                # No fallback configured → propagate as ToolException
+                # so the caller still gets a structured error.
+                raise ToolException(
+                    f"MCP server '{server_name}' is currently "
+                    f"unavailable (circuit breaker open)."
+                )
+            # can_execute True: either CLOSED (normal) or HALF_OPEN
+            # (this call IS the probe). The probe path uses the
+            # shorter probe_timeout when in HALF_OPEN — see
+            # _do_call_with_retry below.
+
+        # ---- 3. Execute (with retry) -------------------------------
+        try:
+            result, used_probe_timeout = await _do_call_with_retry(
+                original_tool_name=original_tool_name,
+                kwargs=kwargs,
+                timeout_seconds=timeout_seconds,
+                probe_timeout=config.probe_timeout,
+                cb=cb,
+                retry_policy=config.retry_policy,
+                is_read=is_read,
             )
-        except ToolException:
-            raise  # Re-raise our own ToolExceptions unchanged.
+
+        except McpAuthError:
+            # Auth errors: do NOT record a circuit-breaker failure
+            # (a bad API key isn't a server outage), do NOT cache,
+            # do NOT return fallback (the operator needs to know).
+            # Raise ToolException so LangGraph's ToolNode routes it
+            # to the agent as a structured error.
+            raise ToolException(
+                f"Authentication failed for MCP server "
+                f"'{server_name}' — check the configured "
+                f"credentials."
+            )
+        except (McpTransientError, asyncio.TimeoutError):
+            # All retries exhausted (or single attempt failed for
+            # non-retry policy). Record a circuit-breaker failure
+            # and degrade gracefully.
+            if cb is not None:
+                await cb.record_failure()
+            logger.warning(
+                f"MCP transient failure for "
+                f"{server_name}/{adapted_tool_name} after retries"
+            )
+            if config.fallback_message:
+                return _fallback_content(config.fallback_message)
+            raise ToolException(
+                f"MCP server '{server_name}' tool "
+                f"'{original_tool_name}' is currently unavailable."
+            )
+        except McpError as e:
+            # Non-retryable McpError subclasses (McpToolError, etc.)
+            # — don't trip the circuit (the server is healthy, the
+            # tool just reported an error). Surface the message.
+            raise ToolException(
+                f"MCP tool '{original_tool_name}' on "
+                f"'{server_name}' failed: {e}"
+            ) from e
         except Exception as e:
-            raise ToolException(
-                f"MCP tool call failed for '{original_tool_name}' on "
-                f"'{server_name}': {e}"
+            # Truly unexpected — classify for telemetry, then degrade
+            # when a fallback is configured. Never silently swallow.
+            from daemon.mcp.resilience import classify_exception
+
+            classified = classify_exception(e)
+            logger.warning(
+                f"MCP unexpected error for "
+                f"{server_name}/{adapted_tool_name}: "
+                f"{type(e).__name__}: {e} (classified as "
+                f"{type(classified).__name__})"
             )
+            if isinstance(classified, McpTransientError) and cb is not None:
+                await cb.record_failure()
+            if config.fallback_message:
+                return _fallback_content(config.fallback_message)
+            raise ToolException(
+                f"MCP tool '{original_tool_name}' on "
+                f"'{server_name}' failed: {e}"
+            )
+
+        # ---- 4. Success: record + cache/invalidate ----------------
+        if cb is not None:
+            await cb.record_success()
+        resilience_manager.record_success(server_name)
+
+        if is_read and cache is not None:
+            await cache.set(
+                server_name,
+                adapted_tool_name,  # type: ignore[arg-type]
+                kwargs,
+                result,
+                config.cache_ttl,
+            )
+        elif not is_read and cache is not None:
+            # Write tool success → entire server cache is now stale.
+            # Simple, safe, avoids reasoning about which specific
+            # resources the write affected.
+            await cache.invalidate_server(server_name)
+
+        return result
+
+    async def _do_call_with_retry(
+        original_tool_name: str,
+        kwargs: dict,
+        timeout_seconds: float | None,
+        probe_timeout: float,
+        cb: Any | None,
+        retry_policy: Any | None,
+        is_read: bool = True,
+    ) -> tuple[Any, bool]:
+        """Single MCP call wrapped in ``RetryPolicy.execute`` if configured.
+
+        Returns ``(result, used_probe_timeout)`` — the boolean is
+        ``True`` when this call used the shorter ``probe_timeout``
+        (because the circuit is HALF_OPEN), ``False`` when it used
+        the regular ``timeout_seconds``. The flag is reserved for
+        future telemetry; today it has no behavioral effect.
+
+        Raises ``McpAuthError`` / ``McpToolError`` immediately on
+        non-retryable errors. Re-raises ``McpTransientError`` after
+        exhausting retries.
+
+        Implementation note: the probe timeout logic is inlined in
+        the retry loop because the choice of timeout can change
+        between attempts (HALF_OPEN → CLOSED via success). The
+        loop uses ``cb.get_state()`` to pick the right timeout per
+        attempt.
+
+        CR-6: when ``is_read=False`` and the caller's
+        ``retry_policy.retry_writes`` is ``False`` (the default),
+        the retry policy is dropped to a single attempt — writes
+        that would retry on a transient error can create duplicate
+        side effects (e.g. duplicate issue creation). The write
+        never consumes more than one attempt slot.
+
+        T-1: when a classified exception is being re-raised after
+        exhausting retries, ``raise classified from e`` preserves
+        the original cause while propagating the classified
+        ``McpTransientError`` so the outer handler records a
+        circuit-breaker failure correctly. The previous bare
+        ``raise`` re-raised ``e`` directly, which could be a raw
+        transport exception that the outer ``except`` clause
+        didn't recognize.
+
+        Tidier-1: the per-attempt delay math is delegated to
+        ``retry_policy._compute_delay(attempt)`` so the two retry
+        paths (``RetryPolicy.execute`` and this inlined loop)
+        cannot drift on the exponential-backoff / jitter formula.
+        """
+        from daemon.mcp.errors import (
+            McpAuthError,
+            McpTransientError,
+        )
+        from daemon.mcp.resilience import classify_exception
+
+        session = await _get_session()
+
+        # No retry policy → single attempt, configured timeout.
+        if retry_policy is None:
+            to = timeout_seconds if timeout_seconds is not None else 120
+            async with asyncio.timeout(to):
+                raw = await session.call_tool(original_tool_name, kwargs)
+            return _convert_call_tool_result(raw), False
+
+        # CR-6: writes never retry by default. A transient blip on a
+        # create_/update_/delete_ call could create duplicate issues
+        # or double-assign. We drop the retry policy so the loop
+        # below runs exactly once.
+        if not is_read and not getattr(retry_policy, "retry_writes", False):
+            effective_policy = None
+        else:
+            effective_policy = retry_policy
+
+        # With retry: classify each attempt's exception, retry only
+        # transient ones, propagate auth/tool errors immediately.
+        last_exc: Exception | None = None
+        max_attempts = (
+            effective_policy.max_attempts if effective_policy is not None else 1
+        )
+        for attempt in range(1, max_attempts + 1):
+            # Pick timeout per attempt: probe when HALF_OPEN, otherwise
+            # the configured timeout. ``cb`` may be None when the
+            # server didn't opt into circuit breaking.
+            use_probe = False
+            if cb is not None:
+                try:
+                    use_probe = cb.get_state() == "half_open"
+                except Exception:
+                    use_probe = False
+            if use_probe:
+                to = probe_timeout
+            elif timeout_seconds is not None:
+                to = timeout_seconds
+            else:
+                to = 120
+
+            try:
+                async with asyncio.timeout(to):
+                    raw = await session.call_tool(original_tool_name, kwargs)
+                return _convert_call_tool_result(raw), use_probe
+            except (asyncio.TimeoutError, McpTransientError) as e:
+                last_exc = e
+                if attempt >= max_attempts:
+                    # Out of retries — re-raise so the outer handler
+                    # can record a circuit failure + degrade.
+                    raise
+                # Tidier-1: reuse the same delay math as
+                # ``RetryPolicy.execute`` so the two paths can't
+                # diverge.
+                delay = effective_policy._compute_delay(attempt)
+                logger.debug(
+                    f"MCP retry {attempt}/{max_attempts} "
+                    f"for {adapted_tool_name} after {delay:.2f}s "
+                    f"({type(e).__name__})"
+                )
+                await asyncio.sleep(delay)
+            except McpAuthError:
+                raise  # Non-retryable — bubble to outer handler.
+            except Exception as e:
+                # Classify the unknown exception. If it's transient,
+                # we treat it like one (re-raise as transient to
+                # consume a retry slot). Otherwise raise as-is.
+                classified = classify_exception(e)
+                if isinstance(classified, McpAuthError):
+                    raise McpAuthError(str(e)) from e
+                if isinstance(classified, McpTransientError):
+                    last_exc = classified
+                    if attempt >= max_attempts:
+                        # T-1: raise the classified exception with
+                        # ``from e`` so the original cause is
+                        # preserved AND the outer handler sees the
+                        # classified ``McpTransientError`` /
+                        # ``McpError`` and records a circuit
+                        # failure correctly. The bare ``raise``
+                        # here used to re-raise ``e`` (the raw
+                        # transport exception), which the outer
+                        # ``except (McpTransientError,
+                        # asyncio.TimeoutError)`` clause could
+                        # miss.
+                        raise classified from e
+                    # Tidier-1: same delay helper.
+                    delay = effective_policy._compute_delay(attempt)
+                    await asyncio.sleep(delay)
+                    continue
+                # Non-retryable McpError (tool error, etc.) or
+                # anything else → propagate immediately.
+                raise classified from e
+
+        # Defensive: loop exited without return/raise. Should never
+        # happen because max_attempts >= 1 always runs at least one
+        # attempt, but the type checker wants an explicit raise.
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError(
+            "_do_call_with_retry exited without result"
+        )
 
     return _lazy_coroutine

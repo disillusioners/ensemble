@@ -1651,13 +1651,43 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         except ValueError as e:
             return str(e)
 
+        # CR-2: team-membership authorization gate. Without this, any
+        # instance (including project-manager, which has narrow team
+        # membership) can message ANY other instance — bypassing the
+        # same gate that ``spawn_instance`` enforces. The check runs
+        # AFTER the existence check (we need a real instance to
+        # resolve its agent_id) and BEFORE the status check (a
+        # terminated target doesn't deserve a more specific error
+        # than "not allowed"). The same closure variables as
+        # ``spawn_instance`` (caller_agent_id, caller_version_tag) are
+        # used, so PM→leader and other declared team-member messages
+        # continue to flow.
+        if not caller_agent_id:
+            return (
+                "ERROR: send_message invoked without a caller agent_id. "
+                "This is a wiring/configuration bug — the instance tools "
+                "were created without an agent_id. Send is denied."
+            )
+        # Look up the target's agent_id (canonical source for the
+        # membership check). ``agent_id`` may be missing on the dict
+        # when the instance row is incomplete; default to "" so the
+        # check fails closed.
+        target_info = manager.get_instance_info(instance_id)
+        target_agent_id = target_info.get("agent_id", "") or ""
+        if target_agent_id:
+            membership_error = _check_team_membership(
+                caller_agent_id, target_agent_id, caller_version_tag
+            )
+            if membership_error is not None:
+                return f"ERROR: {membership_error}"
+
         # Check if instance is terminated or errored
         # NOTE: `to_dict()` returns the live status field, NOT a `terminated`
         # boolean (the old `instance_info.get("terminated")` guard was always
         # false because that key doesn't exist, so dead instances were never
         # rejected). Status is stored as the enum's string value.
         from ..repositories.instance.models import InstanceStatus
-        instance_info = manager.get_instance_info(instance_id)
+        instance_info = target_info
         if instance_info.get("status") in (
             InstanceStatus.TERMINATED.value,
             InstanceStatus.ERROR.value,

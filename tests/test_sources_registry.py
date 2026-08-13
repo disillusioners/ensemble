@@ -446,6 +446,7 @@ async def test_handle_message_uses_agent_dir_from_metadata(conn, mock_manager):
             agent_id="/custom/agents",
             force_new=False,
             extra_mapping_metadata=None,
+            source_type=None,
         )
 
 
@@ -478,9 +479,9 @@ async def test_handle_message_uses_default_agent_dir(conn, mock_manager):
         mock_mapper_instance = MagicMock()
         mock_mapper_instance.get_or_create_instance = AsyncMock(return_value="instance-123")
         MockInstanceMapper.return_value = mock_mapper_instance
-        
+
         await registry._handle_message("test-source", msg)
-        
+
         # Verify get_or_create_instance was called with the default "ari" agent
         # under the configured base agents directory (not the bare base dir).
         mock_mapper_instance.get_or_create_instance.assert_called_once_with(
@@ -489,6 +490,7 @@ async def test_handle_message_uses_default_agent_dir(conn, mock_manager):
             agent_id="/default/agents/ari",
             force_new=False,
             extra_mapping_metadata=None,
+            source_type=None,
         )
 
 

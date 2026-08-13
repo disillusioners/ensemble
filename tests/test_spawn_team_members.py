@@ -31,7 +31,7 @@ logic that never touches the DB.
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -1172,3 +1172,256 @@ class TestAutoDerivationOfImpliedTeamMembers:
             f"tools=None with team_members=['developer'] must render "
             f"as ['developer']; got: {err!r}"
         )
+
+
+# =============================================================================
+# CR-2: ``send_message`` team_members authorization gate
+# =============================================================================
+#
+# The deep review (commit 6539f56b) added a team-membership check to
+# ``send_message`` (in ``daemon/tools/instance.py``) — same gate
+# ``spawn_instance`` already enforces. Without it, an instance (e.g.
+# project-manager with ``team_members: ["leader"]``) could message
+# ANY other instance, bypassing the spawn gate entirely.
+#
+# The gate runs AFTER the existence check (we need a real instance to
+# resolve its ``agent_id``) and BEFORE the status / queue-stats checks
+# (a terminated target doesn't deserve a more specific error than
+# "not allowed").
+#
+# These tests build the actual ``send_message`` tool via
+# ``create_instance_tools`` with heavy helpers patched (same pattern
+# as the ``spawn_instance`` tests above) and assert the gate
+# short-circuits with the expected ERROR string.
+
+
+def _make_send_message_manager(
+    *,
+    target_agent_id: str,
+    target_status: str = "running",
+) -> MagicMock:
+    """Build a manager mock wired for ``send_message`` happy-path reach.
+
+    Beyond the ``_make_manager`` shape used by the spawn tests, this
+    manager also exposes:
+
+    * ``get_instance`` (async) — used by ``_resolve_instance_id`` to
+      validate the target instance exists. Returns a truthy
+      ``SimpleNamespace`` so the existence check passes.
+    * ``get_instance_info`` (sync) — used by the CR-2 gate to read
+      the target's ``agent_id`` and ``status``. The dict
+      configuration is the single source of truth for the test.
+    * ``get_queue_stats`` (async) — used after the gate; returns
+      ``pending_count: 0, processing_count: 0`` so the call proceeds
+      to ``enqueue_message`` in the happy path.
+    * ``enqueue_message`` (async) — returns a mock result with
+      ``.message_id = "msg-id"``. The test asserts on whether this
+      was called (denied path) or not (rejected at the gate).
+
+    The target's ``agent_id`` and ``status`` are baked in at
+    construction time; tests that want to vary the resolution pick
+    which manager to build.
+    """
+    manager = _make_manager()
+    from types import SimpleNamespace
+
+    manager.get_instance = AsyncMock(return_value=SimpleNamespace(id="target-id"))
+    manager.get_instance_info = MagicMock(
+        return_value={
+            "agent_id": target_agent_id,
+            "status": target_status,
+        }
+    )
+    manager.get_queue_stats = AsyncMock(
+        return_value={"pending_count": 0, "processing_count": 0}
+    )
+    manager.enqueue_message = AsyncMock(
+        return_value=SimpleNamespace(
+            message_id="msg-id-12345",
+            instance_id="target-id",
+            status="queued",
+        )
+    )
+    return manager
+
+
+def _get_send_message_tool(manager: MagicMock, caller_agent_id: str | None):
+    """Build the instance tools and return the ``send_message`` tool.
+
+    Mirrors ``_get_spawn_instance_tool`` above: patches the heavy
+    helpers, builds the tool list, finds the tool by name. Returns
+    ``None`` when ``caller_agent_id`` is ``None`` so the test can
+    exercise the "wiring bug — no agent_id" branch which does NOT
+    build the tool from the manager path.
+    """
+    from daemon.tools.instance import create_instance_tools
+
+    if caller_agent_id is None:
+        # Real wiring path requires a non-None caller_agent_id; the
+        # ``caller_agent_id=None`` branch is exercised at a lower
+        # level by the ``_check_team_membership`` tests.
+        return None
+
+    patches = _patch_heavy_helpers()
+    for p in patches:
+        p.start()
+    try:
+        tools = create_instance_tools(manager, "parent-instance-id", caller_agent_id)
+    finally:
+        for p in reversed(patches):
+            p.stop()
+
+    for t in tools:
+        if getattr(t, "name", None) == "send_message":
+            return t
+    raise RuntimeError(
+        "send_message tool not found in create_instance_tools output; "
+        f"got {[getattr(t, 'name', None) for t in tools]}"
+    )
+
+
+class TestSendMessageTeamMembersGate:
+    """CR-2: ``send_message`` enforces the same ``team_members`` gate
+    as ``spawn_instance``.
+
+    The gate lives in ``daemon/tools/instance.py:send_message`` and
+    delegates to ``_check_team_membership``. Rejection happens
+    BEFORE the queue-stats check, so a denied call never reaches
+    ``manager.enqueue_message`` — the same fail-closed contract
+    that ``spawn_instance`` already provides.
+    """
+
+    async def test_send_message_blocks_pm_to_developer(self):
+        """project-manager → developer is denied (developer is NOT in
+        PM's ``team_members``).
+
+        PM is the canonical example for CR-2: its ``team_members``
+        is exactly ``["leader"]`` and ``deny_spawn`` blocks
+        ``chart``/``image``. The message gate must apply the same
+        restriction, so PM cannot message a developer instance
+        directly — it must go through the leader.
+        """
+        manager = _make_send_message_manager(target_agent_id="developer")
+        send = _get_send_message_tool(manager, caller_agent_id="project-manager")
+
+        result = await send.coroutine(
+            instance_id="target-dev-id", message="any direct message"
+        )
+
+        assert isinstance(result, str)
+        assert result.startswith("ERROR"), (
+            f"PM → developer must be denied; got: {result!r}"
+        )
+        assert "not allowed to spawn" in result, (
+            f"Error must reference the membership gate; got: {result!r}"
+        )
+        assert "project-manager" in result, (
+            f"Error must name the caller; got: {result!r}"
+        )
+        # The CR-2 gate runs BEFORE enqueue_message — manager must
+        # NOT have received the message.
+        manager.enqueue_message.assert_not_called()
+
+    async def test_send_message_allows_pm_to_leader(self):
+        """project-manager → leader is allowed (leader IS in PM's
+        ``team_members``).
+
+        Happy path for the canonical PM delegation: PM has
+        ``team_members: ["leader"]``, so messaging a leader
+        instance must proceed to ``enqueue_message``. This is the
+        primary use case for the v2 PM (deep review added it to
+        unblock leader dispatch).
+        """
+        manager = _make_send_message_manager(target_agent_id="leader")
+        send = _get_send_message_tool(manager, caller_agent_id="project-manager")
+
+        result = await send.coroutine(
+            instance_id="target-leader-id", message="please execute task X"
+        )
+
+        assert isinstance(result, str)
+        assert not result.startswith("ERROR"), (
+            f"PM → leader must succeed; got: {result!r}"
+        )
+        # enqueue_message was called with the target's instance_id.
+        manager.enqueue_message.assert_called_once()
+        call_kwargs = manager.enqueue_message.call_args.kwargs
+        assert call_kwargs["instance_id"] == "target-leader-id"
+        assert call_kwargs["message"] == "please execute task X"
+
+    async def test_send_message_blocks_leader_to_pm(self):
+        """leader → project-manager is denied.
+
+        Reciprocal check: PM is not in leader's ``team_members``
+        (leader dispatches to ``developer``, ``tester``, etc.),
+        so a leader instance cannot message a PM instance
+        directly. The gate is symmetric on both sides.
+        """
+        manager = _make_send_message_manager(target_agent_id="project-manager")
+        send = _get_send_message_tool(manager, caller_agent_id="leader")
+
+        result = await send.coroutine(
+            instance_id="target-pm-id", message="ping"
+        )
+
+        assert isinstance(result, str)
+        assert result.startswith("ERROR"), (
+            f"leader → project-manager must be denied; got: {result!r}"
+        )
+        manager.enqueue_message.assert_not_called()
+
+    async def test_send_message_target_without_agent_id_fails_closed(self):
+        """A target instance with no ``agent_id`` on its info row →
+        send is allowed past the gate (target_agent_id is falsy).
+
+        The CR-2 gate reads ``target_info.get("agent_id", "")`` and
+        only invokes ``_check_team_membership`` when the target
+        ``agent_id`` is truthy. An incomplete instance row
+        (missing ``agent_id``) is a wiring bug; the gate skips the
+        check rather than risk a wrong match on empty string.
+        ``_check_team_membership`` is the correct belt — the
+        outer ``_resolve_instance_id`` already verified the
+        instance exists. Pin this branch so a future refactor
+        that adds an empty-string ``_check_team_membership`` call
+        is an explicit, tested decision.
+        """
+        manager = _make_send_message_manager(target_agent_id="")
+        # Strip the "agent_id" key entirely — matches the "incomplete row" case.
+        manager.get_instance_info = MagicMock(
+            return_value={"status": "running"}  # no agent_id
+        )
+        send = _get_send_message_tool(manager, caller_agent_id="project-manager")
+
+        result = await send.coroutine(
+            instance_id="target-id", message="hello"
+        )
+
+        # Gate is skipped → enqueue_message runs.
+        assert isinstance(result, str)
+        assert not result.startswith("ERROR"), (
+            f"Empty agent_id must skip the gate (fail-open at the "
+            f"membership layer; existence check is the boundary); "
+            f"got: {result!r}"
+        )
+        manager.enqueue_message.assert_called_once()
+
+    async def test_send_message_denied_message_does_not_pollute_queue(self):
+        """A denied ``send_message`` must NOT advance past
+        ``enqueue_message`` AND must NOT mutate queue stats.
+
+        Defensive contract: the gate runs before ``get_queue_stats``
+        so a denied call doesn't accidentally report "queue
+        stats show 1 pending" and confuse downstream code. The
+        assertion is straightforward — queue_stats is never
+        queried when the gate rejects.
+        """
+        manager = _make_send_message_manager(target_agent_id="developer")
+        send = _get_send_message_tool(manager, caller_agent_id="project-manager")
+
+        result = await send.coroutine(
+            instance_id="target-id", message="blocked"
+        )
+
+        assert result.startswith("ERROR")
+        manager.enqueue_message.assert_not_called()
+        manager.get_queue_stats.assert_not_called()

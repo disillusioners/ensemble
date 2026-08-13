@@ -30,6 +30,7 @@ from daemon.mcp.tool_adapter import (
     McpSessionProvider,
     create_lazy_mcp_tools,
 )
+from daemon.mcp.resilience import ResilienceManager
 
 if TYPE_CHECKING:
     from langchain_core.tools import BaseTool
@@ -179,6 +180,13 @@ class McpService:
         # rewritten preload_mcp_tools (Task 5); declared here so the schema
         # cache work doesn't need to revisit this file's state shape.
         self._session_caches: dict[str, dict[str, dict]] = {}
+        # Resilience (Phase 4): single shared ``ResilienceManager`` for
+        # all servers that opt in via ``BuiltinServerDefinition.resilience_config``.
+        # The manager owns per-server circuit breakers + result caches
+        # (both in-process, in-memory). Lazy tools receive the manager
+        # in ``create_lazy_mcp_tools`` and look up state by server_name
+        # on each call — see ``_lazy_coroutine`` in tool_adapter.py.
+        self._resilience = ResilienceManager()
 
     def set_warmup_pool(self, pool: "McpWarmupPool") -> None:
         """Inject the warm-up pool (called after initialization)."""
@@ -503,6 +511,86 @@ class McpService:
                 # is unaffected, so MCP dispatch keeps working.
                 server_prefix = self._get_tool_name_prefix(server.name)
 
+                # Phase 4 resilience: look up the builtin server's
+                # resilience config (Plane: retry + cache + circuit
+                # breaker + fallback; context7 / webfetch: ``None``).
+                # We always pass the manager — ``create_lazy_mcp_tools``
+                # itself only opts in when the manager has a config
+                # registered for this server. When the config is
+                # ``None`` (the common case), the legacy no-resilience
+                # path runs unchanged.
+                #
+                # T-2: guard the call. ``_get_resilience_config`` parses
+                # env vars (e.g. ``PLANE_RETRY_MAX_ATTEMPTS``) and
+                # builds a ``ResilienceConfig`` dataclass — a bad env
+                # var (e.g. ``PLANE_RETRY_MAX_ATTEMPTS=abc``) used to
+                # raise ``ValueError`` from ``int(...)`` and crash
+                # ``preload_mcp_tools`` for the entire instance, so
+                # every MCP server for that instance failed to load.
+                # We now log a warning and fall through with
+                # ``resilience_config = None`` so the rest of the
+                # preload (and the other servers on the instance)
+                # still works — the failing server simply runs
+                # without resilience. Operators see the warning and
+                # can fix the env var.
+                try:
+                    resilience_config = self._get_resilience_config(
+                        server.name
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to register resilience for "
+                        f"'{server.name}': {e}. Server will use legacy "
+                        f"(no-resilience) path."
+                    )
+                    resilience_config = None
+
+                # CR-3: read-only tool filtering. When the builtin
+                # declares ``read_only_tools = True`` (Plane today),
+                # drop write tools from the schema list BEFORE
+                # ``create_lazy_mcp_tools`` sees them. The agent's
+                # tool list never contains writes — the LLM can't
+                # call them. Pattern-matching uses the resilience
+                # config's ``read_tool_patterns`` /
+                # ``write_tool_patterns`` so the two classifiers
+                # (read/write detection here, read vs write in the
+                # resilience cache logic) can't disagree.
+                #
+                # The check is gated on ``resilience_config`` being
+                # non-None: a server that hasn't opted into
+                # resilience doesn't have patterns, so we can't
+                # classify — and the CR-3 fix is a hardening on
+                # opted-in servers, not a forced opt-in.
+                if (
+                    resilience_config is not None
+                    and self._get_read_only_tools(server.name)
+                ):
+                    # Local import: keep ``is_read_tool`` out of the
+                    # module-level import graph when the server
+                    # doesn't trigger this branch.
+                    from daemon.mcp.resilience import is_read_tool
+
+                    # Build the adapted prefix used by ``create_lazy_mcp_tools``
+                    # so the schema name matches the ``is_read_tool`` input
+                    # contract (adapted, not bare — see the docstring on
+                    # ``is_read_tool``). The prefix mirrors the call
+                    # below to ``create_lazy_mcp_tools``.
+                    effective_prefix = (
+                        f"{server_prefix}_" if server_prefix is not None
+                        else f"mcp_{server.name}_"
+                    )
+                    schema_dicts = [
+                        s for s in schema_dicts
+                        if is_read_tool(
+                            f"{effective_prefix}{s['name']}",
+                            resilience_config,
+                        )
+                    ]
+                    logger.info(
+                        f"CR-3: filtered {server.name} schemas to "
+                        f"{len(schema_dicts)} read-only tool(s)"
+                    )
+
                 lazy_tools = create_lazy_mcp_tools(
                     server_name=server.name,
                     schemas=schema_dicts,
@@ -515,6 +603,7 @@ class McpService:
                     ]["lock"],
                     tool_call_timeout=effective_timeout,
                     tool_name_prefix=server_prefix,
+                    resilience_manager=self._resilience,
                 )
                 all_tools.extend(lazy_tools)
 
@@ -642,6 +731,81 @@ class McpService:
         # ``getattr`` is defensive against future subclasses that might
         # not override the property.
         return getattr(definition, "tool_name_prefix", None)
+
+    def _get_read_only_tools(self, server_name: str) -> bool:
+        """Return a builtin server's ``read_only_tools`` flag.
+
+        CR-3: looks up the ``BuiltinServerDefinition`` in the global
+        registry and reads its ``read_only_tools`` property. Returns
+        ``False`` (the base-class default) for servers that haven't
+        opted in — the legacy "all tools exposed, deny at the agent
+        layer" path is preserved.
+
+        When the flag is ``True`` (Plane today), ``preload_mcp_tools``
+        filters the schema list to read tools only BEFORE
+        ``create_lazy_mcp_tools`` wraps them, so the agent's tool
+        list never contains writes.
+
+        Args:
+            server_name: The MCP server's name (matches
+                ``McpServer.name`` and ``BuiltinServerDefinition.name``).
+
+        Returns:
+            ``True`` iff the builtin declares itself read-only.
+        """
+        # Function-local import mirrors the other ``_get_*`` helpers —
+        # keeps the coupling narrow.
+        from daemon.mcp.builtin_servers import get_registry
+
+        definition = get_registry().get_by_name(server_name)
+        if definition is None:
+            return False
+        # ``read_only_tools`` is a property added in CR-3; it returns
+        # ``False`` by default (preserves legacy behavior).
+        # ``getattr`` is defensive against future subclasses that might
+        # not override the property.
+        return bool(getattr(definition, "read_only_tools", False))
+
+    def _get_resilience_config(self, server_name: str):
+        """Return a builtin server's ``resilience_config``, or ``None``.
+
+        Mirrors the pattern of ``_get_per_server_timeout`` and
+        ``_get_tool_name_prefix`` — looks up the builtin registry, reads
+        the optional ``resilience_config`` property. ``None`` means
+        "no resilience" (the legacy path stays unchanged). For Plane,
+        returns the ``ResilienceConfig`` built from env vars.
+
+        The returned config is registered with the shared
+        ``ResilienceManager`` so ``_lazy_coroutine`` can look it up by
+        ``server_name``. Idempotent — re-registering with an equal
+        config is a no-op (the manager overwrites, which is safe).
+
+        Args:
+            server_name: The MCP server's name.
+
+        Returns:
+            The ``ResilienceConfig`` (already registered), or ``None``
+            if the server is not a builtin or hasn't opted in.
+        """
+        # Function-local import: same coupling-narrow pattern as the
+        # other ``_get_*`` helpers.
+        from daemon.mcp.builtin_servers import get_registry
+
+        definition = get_registry().get_by_name(server_name)
+        if definition is None:
+            return None
+        # ``resilience_config`` is a property added in Phase 4; it
+        # returns ``None`` by default (preserving the no-resilience
+        # path). ``getattr`` is defensive in case a future subclass
+        # forgets to override it.
+        config = getattr(definition, "resilience_config", None)
+        if config is None:
+            return None
+        # Register with the shared manager. Plane's config is rebuilt
+        # on every call (env vars can change at runtime via tests);
+        # the manager overwrites cleanly.
+        self._resilience.register(server_name, config)
+        return config
 
     def get_mcp_tools(self, instance_id: str) -> list[BaseTool]:
         """Get cached MCP tools for an instance (sync).

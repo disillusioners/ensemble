@@ -310,6 +310,13 @@ def mock_config():
     config.skill_evolution = MagicMock(spec=SkillEvolutionConfig)
     config.language = MagicMock()
 
+    # Phase 1 G4 fix: InstanceManager reads config.blueprint.embedding_model
+    # in __init__ (daemon/manager.py:824). Default to None so embedding
+    # wiring is skipped (same behavior as the real BlueprintConfig default).
+    from daemon.config import BlueprintConfig
+    config.blueprint = MagicMock(spec=BlueprintConfig)
+    config.blueprint.embedding_model = None
+
     return config
 
 
@@ -1783,9 +1790,12 @@ class TestWarmupPoolSkipsDisabled:
 
         pool = McpWarmupPool()
 
-        with patch("daemon.manager.is_builtin_disabled", return_value=False):
+        with patch("daemon.manager.is_builtin_disabled", return_value=False) as mock_disabled:
             for definition in get_registry().get_all():
-                if manager_is_disabled(definition.name):
+                # Use the patched mock directly — module-level alias
+                # `manager_is_disabled` is bound at import time and does
+                # NOT pick up the `patch()` replacement.
+                if mock_disabled(definition.name):
                     continue
                 config_dict = definition.get_base_config()
                 if config_dict.get("transport") != "stdio":

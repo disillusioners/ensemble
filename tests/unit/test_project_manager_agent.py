@@ -267,11 +267,11 @@ class TestMetaJsonSchema:
             f"version should look like semver (X.Y.Z...), got {version!r}"
         )
 
-    def test_team_members_is_empty(self) -> None:
-        """team_members must be [] — project-manager does NOT dispatch."""
+    def test_team_members_is_leader(self) -> None:
+        """team_members must be ['leader'] — v2 delegates to leader."""
         meta = _load_meta()
-        assert meta["team_members"] == [], (
-            f"project-manager must NOT have team_members (non-dispatching). "
+        assert meta["team_members"] == ["leader"], (
+            f"project-manager must have team_members=['leader'] (v2 delegation). "
             f"Got: {meta['team_members']}"
         )
 
@@ -351,7 +351,6 @@ class TestToolAllowanceSecurity:
         "write_file",
         "bash",
         # Work dispatch / instance control
-        "instance",
         "self",
         "spawn_instance",
         "terminate_instance",
@@ -378,10 +377,9 @@ class TestToolAllowanceSecurity:
         "project_unlink",
         "project_add_directory",
         "project_remove_directory",
-        # System-internal mechanisms we deny by default in v1
+        # System-internal mechanisms we deny by default in v2
         "mcp",
         "question",
-        "shared_meta_kv",
     })
 
     def test_no_write_tool_in_allow(self) -> None:
@@ -402,13 +400,9 @@ class TestToolAllowanceSecurity:
             "edit_file",
             "write_file",
             "bash",
-            "spawn_instance",
-            "send_message",
             "terminate_instance",
             "experience",
-            "instance",
             "self",
-            "shared_meta_kv",
             "mcp",
             "question",
         }
@@ -512,6 +506,120 @@ class TestToolAllowanceSecurity:
             f"{sorted(CATEGORY_MODULES.keys())}"
         )
 
+    # -----------------------------------------------------------------
+    # CR-1: deny_spawn field — blocks charter/image-reader spawn but
+    # keeps chart/image tool access.
+    #
+    # The contract: ``tools.deny_spawn`` strips the category's backing
+    # agent(s) from the spawn-authorization allow-set (driven by
+    # ``_check_team_membership`` in ``daemon/tools/_auth.py``) without
+    # removing the category from the agent's callable tools. PM uses
+    # this so it can call ``chart``/``image`` (which spawn
+    # ``charter``/``image-reader`` internally via
+    # ``invoke_agent_and_wait``) but cannot spawn them directly via
+    # ``spawn_instance``.
+    # -----------------------------------------------------------------
+
+    def test_deny_spawn_field_present_in_meta_json(self) -> None:
+        """``tools.deny_spawn`` must exist in meta.json as a list.
+
+        Without the field, ``ToolFilter.deny_spawn`` defaults to
+        ``None`` and the spawn-gate silently behaves as if the agent
+        had no spawn restriction — exactly the v1 behavior CR-1 fixed.
+        """
+        meta = _load_meta()
+        deny_spawn = meta.get("tools", {}).get("deny_spawn")
+        assert isinstance(deny_spawn, list), (
+            f"meta.json must declare tools.deny_spawn as a list; "
+            f"got: {type(deny_spawn).__name__} value={deny_spawn!r}"
+        )
+
+    def test_deny_spawn_contains_chart_and_image(self) -> None:
+        """``tools.deny_spawn`` must list ``chart`` and ``image``.
+
+        These are the two agent-backed categories PM must NOT
+        auto-spawn directly: ``chart`` → ``charter``,
+        ``image`` → ``image-reader``. The list is the source of
+        truth for the spawn-block contract.
+        """
+        meta = _load_meta()
+        deny_spawn = set(meta.get("tools", {}).get("deny_spawn", []))
+        assert {"chart", "image"}.issubset(deny_spawn), (
+            f"deny_spawn must include 'chart' and 'image' to block "
+            f"charter/image-reader auto-spawn. Got: {sorted(deny_spawn)}"
+        )
+
+    def test_deny_spawn_keeps_chart_and_image_in_allow(self) -> None:
+        """``chart`` and ``image`` must remain in ``tools.allow``.
+
+        The whole point of ``deny_spawn`` (vs. plain ``deny``) is to
+        block the SPAWN while preserving TOOL ACCESS. If PM loses
+        ``chart``/``image`` from ``allow``, it can no longer render
+        any chart or image — which is a regression. The deny list is
+        the agent's job; ``deny_spawn`` is the spawn gate's job.
+        """
+        meta = _load_meta()
+        allow = set(meta.get("tools", {}).get("allow", []))
+        assert "chart" in allow, (
+            f"'chart' must remain in tools.allow — deny_spawn must "
+            f"NOT remove the tool. Got allow: {sorted(allow)}"
+        )
+        assert "image" in allow, (
+            f"'image' must remain in tools.allow — deny_spawn must "
+            f"NOT remove the tool. Got allow: {sorted(allow)}"
+        )
+
+    def test_deny_spawn_distinct_from_deny(self) -> None:
+        """``deny_spawn`` and ``deny`` must be disjoint.
+
+        Same category in both lists is a no-op for the spawn gate
+        (``deny`` already strips the agent), so duplicating the entry
+        in ``deny_spawn`` is misleading. ``deny_spawn`` is reserved
+        for the "block spawn only" cases; everything else belongs in
+        ``deny``.
+        """
+        meta = _load_meta()
+        deny = set(meta.get("tools", {}).get("deny", []))
+        deny_spawn = set(meta.get("tools", {}).get("deny_spawn", []))
+        overlap = deny & deny_spawn
+        assert not overlap, (
+            f"deny_spawn and deny must be disjoint. Overlap "
+            f"(deny already covers this; remove from deny_spawn): "
+            f"{sorted(overlap)}"
+        )
+
+    def test_toolfilter_model_accepts_deny_spawn(self) -> None:
+        """Pydantic ``ToolFilter`` must accept ``deny_spawn`` and
+        preserve it on round-trip (registry schema contract).
+
+        This pins the model contract: a ``ToolFilter`` loaded from
+        the project's meta.json keeps the field. Without this, a
+        future Pydantic migration or a schema rename would silently
+        drop the field and the spawn-gate would behave as if PM had
+        no ``deny_spawn`` at all — re-introducing the v1 spawn bypass.
+        """
+        from daemon.registry import ToolFilter  # noqa: WPS433
+
+        meta = _load_meta()
+        deny_spawn_raw = meta.get("tools", {}).get("deny_spawn")
+        if deny_spawn_raw is None:
+            pytest.fail(
+                "meta.json must declare tools.deny_spawn before this "
+                "model-roundtrip test can run; earlier test should "
+                "have caught this."
+            )
+
+        tools_obj = meta.get("tools", {})
+        tf = ToolFilter(
+            allow=tools_obj.get("allow"),
+            deny=tools_obj.get("deny"),
+            deny_spawn=deny_spawn_raw,
+        )
+        assert tf.deny_spawn == list(deny_spawn_raw), (
+            f"ToolFilter.deny_spawn must preserve the input list. "
+            f"Got: {tf.deny_spawn!r} (expected {list(deny_spawn_raw)!r})"
+        )
+
 
 # =============================================================================
 # 3. Agent discovery + registry
@@ -567,9 +675,9 @@ class TestAgentDiscovery:
         assert md is not None, "registry.get('project-manager') returned None"
         assert md.id == "project-manager", f"id mismatch: {md.id}"
         assert md.name == "Project Manager", f"name mismatch: {md.name!r}"
-        assert md.version == "1.0.0", f"version mismatch: {md.version!r}"
-        assert md.team_members == [], (
-            f"team_members must be empty (non-dispatching). Got: {md.team_members}"
+        assert md.version == "2.0.0", f"version mismatch: {md.version!r}"
+        assert md.team_members == ["leader"], (
+            f"team_members must be ['leader'] (v2 delegation). Got: {md.team_members}"
         )
 
     def test_meta_conforms_to_agent_metadata_model(self) -> None:
@@ -583,7 +691,7 @@ class TestAgentDiscovery:
         md = AgentMetadata.model_validate(meta)  # must not raise
         assert md.id == "project-manager"
         assert md.name == "Project Manager"
-        assert md.team_members == []
+        assert md.team_members == ["leader"]
 
 
 # =============================================================================

@@ -495,3 +495,423 @@ class TestToolNamePrefixResolution:
         defn = Context7ServerDefinition()
         config = defn.get_base_config()
         assert config["transport"] == "stdio"
+
+
+# ---------------------------------------------------------------------------
+# Class 10: TestPlaneResilienceConfig (Phase 4)
+# ---------------------------------------------------------------------------
+
+class TestPlaneResilienceConfig:
+    """Plane-specific resilience tuning via ``resilience_config``.
+
+    Verifies the Plane builtin opts into the hybrid resilience layer
+    with the documented defaults + env var overrides. The function
+    is called once per ``create_lazy_mcp_tools`` invocation, so the
+    values must be stable for a given env state.
+    """
+
+    def test_resilience_config_defaults(self, monkeypatch):
+        """No env vars → defaults: TTL=300, retries=3, threshold=5, etc."""
+        # Clear all PLANE_* env vars that could affect defaults.
+        for var in (
+            "PLANE_RETRY_MAX_ATTEMPTS",
+            "PLANE_RETRY_BASE_DELAY",
+            "PLANE_CACHE_TTL_SECONDS",
+            "PLANE_CIRCUIT_FAILURE_THRESHOLD",
+            "PLANE_CIRCUIT_RECOVERY_TIMEOUT",
+            "PLANE_PROBE_TIMEOUT",
+        ):
+            monkeypatch.delenv(var, raising=False)
+
+        defn = PlaneServerDefinition()
+        cfg = defn.resilience_config
+
+        # Cache defaults
+        assert cfg.cache_ttl == 300.0
+        assert cfg.cache_max_entries == 1000
+        # Retry defaults
+        assert cfg.retry_policy is not None
+        assert cfg.retry_policy.max_attempts == 3
+        assert cfg.retry_policy.base_delay == 1.0
+        # Circuit defaults
+        assert cfg.circuit_failure_threshold == 5
+        assert cfg.circuit_recovery_timeout == 60.0
+        assert cfg.probe_timeout == 5.0
+        # Staleness default
+        assert cfg.stale_threshold == 300.0
+
+    def test_resilience_config_env_override(self, monkeypatch):
+        """All env vars override their respective defaults."""
+        monkeypatch.setenv("PLANE_RETRY_MAX_ATTEMPTS", "7")
+        monkeypatch.setenv("PLANE_RETRY_BASE_DELAY", "2.5")
+        monkeypatch.setenv("PLANE_CACHE_TTL_SECONDS", "120")
+        monkeypatch.setenv("PLANE_CIRCUIT_FAILURE_THRESHOLD", "10")
+        monkeypatch.setenv("PLANE_CIRCUIT_RECOVERY_TIMEOUT", "180")
+        monkeypatch.setenv("PLANE_PROBE_TIMEOUT", "15")
+
+        defn = PlaneServerDefinition()
+        cfg = defn.resilience_config
+
+        assert cfg.cache_ttl == 120.0
+        assert cfg.retry_policy.max_attempts == 7
+        assert cfg.retry_policy.base_delay == 2.5
+        assert cfg.circuit_failure_threshold == 10
+        assert cfg.circuit_recovery_timeout == 180.0
+        assert cfg.probe_timeout == 15.0
+
+    def test_resilience_config_is_not_none(self):
+        """Plane opts in (returns a config, not None)."""
+        defn = PlaneServerDefinition()
+        # Even with no env overrides, Plane returns a real config —
+        # the resilience layer is opt-in via returning non-None.
+        cfg = defn.resilience_config
+        assert cfg is not None
+
+    def test_other_builtins_resilience_is_none(self):
+        """context7 and webfetch don't opt into resilience."""
+        from daemon.mcp.builtin_servers.context7 import Context7ServerDefinition
+        from daemon.mcp.builtin_servers.webfetch import WebFetchServerDefinition
+
+        assert Context7ServerDefinition().resilience_config is None
+        assert WebFetchServerDefinition().resilience_config is None
+
+    def test_read_tool_patterns(self):
+        """Plane's read patterns: list_, get_, search_."""
+        defn = PlaneServerDefinition()
+        cfg = defn.resilience_config
+        assert "list_" in cfg.read_tool_patterns
+        assert "get_" in cfg.read_tool_patterns
+        assert "search_" in cfg.read_tool_patterns
+
+    def test_write_tool_patterns(self):
+        """Plane's write patterns include create/update/delete + Plane verbs."""
+        defn = PlaneServerDefinition()
+        cfg = defn.resilience_config
+        # Required per the spec.
+        for p in ("create_", "update_", "delete_", "add_", "remove_"):
+            assert p in cfg.write_tool_patterns, f"Missing write pattern: {p}"
+        # Plane-specific verbs.
+        for p in ("set_", "edit_", "assign_"):
+            assert p in cfg.write_tool_patterns, f"Missing write pattern: {p}"
+
+    def test_fallback_message_structure(self):
+        """Fallback is a valid JSON with status=unavailable + source=plane."""
+        import json
+        defn = PlaneServerDefinition()
+        cfg = defn.resilience_config
+        assert cfg.fallback_message is not None
+        # Must be valid JSON.
+        parsed = json.loads(cfg.fallback_message)
+        assert parsed["status"] == "unavailable"
+        assert parsed["source"] == "plane"
+        # Message must be human-readable.
+        assert "Plane" in parsed["message"]
+        assert "unreachable" in parsed["message"].lower() or "unavailable" in parsed["message"].lower()
+
+    def test_fallback_message_consistent_with_module_constant(self):
+        """``cfg.fallback_message`` equals the module-level constant."""
+        from daemon.mcp.builtin_servers.plane import _DEFAULT_PLANE_FALLBACK
+        defn = PlaneServerDefinition()
+        cfg = defn.resilience_config
+        assert cfg.fallback_message == _DEFAULT_PLANE_FALLBACK
+
+    def test_resilience_config_does_not_break_when_url_missing(self, monkeypatch):
+        """``resilience_config`` reads ONLY resilience env vars, not URL/key.
+
+        Even with PLANE_MCP_URL + PLANE_MCP_API_KEY unset (which would
+        make ``is_available()`` return False), the resilience config
+        still builds cleanly. This matters because ``preload_mcp_tools``
+        could in principle query both — though in practice it gates on
+        ``is_available()`` first. The decoupling is intentional so the
+        resilience plumbing doesn't accidentally depend on env state.
+        """
+        monkeypatch.delenv("PLANE_MCP_URL", raising=False)
+        monkeypatch.delenv("PLANE_MCP_API_KEY", raising=False)
+        defn = PlaneServerDefinition()
+        cfg = defn.resilience_config
+        assert cfg is not None
+        assert cfg.cache_ttl == 300.0
+
+
+# ---------------------------------------------------------------------------
+# Class 11: TestPlaneReadToolClassification (Phase 4)
+# ---------------------------------------------------------------------------
+
+class TestPlaneReadToolClassification:
+    """Verify Plane's ``is_read_tool`` works for actual Plane tool names.
+
+    Uses the real ``PlaneServerDefinition.resilience_config`` patterns
+    to classify tool names — proves the Plane tuning is internally
+    consistent (read + write patterns are exclusive at the start of
+    the stripped tool name).
+    """
+
+    def _is_read(self, tool_name: str) -> bool:
+        from daemon.mcp.resilience import is_read_tool
+        defn = PlaneServerDefinition()
+        return is_read_tool(tool_name, defn.resilience_config)
+
+    def test_plane_list_issues_is_read(self):
+        """``plane_list_issues`` is a read tool."""
+        assert self._is_read("plane_list_issues") is True
+
+    def test_plane_get_project_is_read(self):
+        """``plane_get_project`` is a read tool."""
+        assert self._is_read("plane_get_project") is True
+
+    def test_plane_search_issues_is_read(self):
+        """``plane_search_issues`` is a read tool."""
+        assert self._is_read("plane_search_issues") is True
+
+    def test_plane_create_issue_is_write(self):
+        """``plane_create_issue`` is a write tool."""
+        assert self._is_read("plane_create_issue") is False
+
+    def test_plane_update_issue_is_write(self):
+        """``plane_update_issue`` is a write tool."""
+        assert self._is_read("plane_update_issue") is False
+
+    def test_plane_delete_issue_is_write(self):
+        """``plane_delete_issue`` is a write tool."""
+        assert self._is_read("plane_delete_issue") is False
+
+    def test_plane_set_priority_is_write(self):
+        """Plane-specific verb: ``plane_set_issue_priority`` is write."""
+        assert self._is_read("plane_set_issue_priority") is False
+
+    def test_plane_assign_issue_is_write(self):
+        """Plane-specific verb: ``plane_assign_issue`` is write."""
+        assert self._is_read("plane_assign_issue") is False
+
+    def test_plane_edit_issue_is_write(self):
+        """Plane-specific verb: ``plane_edit_issue`` is write."""
+        assert self._is_read("plane_edit_issue") is False
+
+    def test_plane_add_comment_is_write(self):
+        """``plane_add_comment`` is a write tool."""
+        assert self._is_read("plane_add_comment") is False
+
+    def test_plane_remove_label_is_write(self):
+        """``plane_remove_label`` is a write tool."""
+        assert self._is_read("plane_remove_label") is False
+
+
+# ---------------------------------------------------------------------------
+# Class 12: TestPlaneReadOnlyFilter (CR-3)
+# ---------------------------------------------------------------------------
+#
+# CR-3 added the ``read_only_tools`` property on Plane's builtin
+# definition. When True, ``McpService`` filters the schema list at
+# discovery time using ``is_read_tool(name, resilience_config)`` so the
+# LLM never sees write tools in its tool list. The deny-list in
+# meta.json is belt-and-suspenders, not the primary enforcement.
+#
+# These tests pin three independent layers:
+#
+#   1. The property itself: ``PlaneServerDefinition.read_only_tools``
+#      is True; other builtins default to False.
+#   2. The filter invariant: when a mixed list of read + write
+#      schemas passes through ``is_read_tool`` with Plane's
+#      ``resilience_config``, only the read schemas survive.
+#   3. The end-to-end list-shape: the surviving schemas are exactly
+#      the ones an LLM would see if the filter were applied to a
+#      realistic Plane tool surface.
+
+
+class TestPlaneReadOnlyFilter:
+    """CR-3: ``PlaneServerDefinition.read_only_tools`` and the schema
+    filter it gates inside ``McpService``.
+
+    The filter is the only thing keeping new write verbs (added by
+    future Plane MCP server releases) out of the LLM's tool list.
+    Without it, the deny-list in ``project-manager/meta.json``
+    could fall behind the server surface and silently expose a
+    write verb the agent was never supposed to see.
+    """
+
+    def test_plane_read_only_tools_property_is_true(self):
+        """``PlaneServerDefinition().read_only_tools`` is True.
+
+        Pins the declaration: the Plane builtin opts into the
+        read-only filter at definition time. If a future refactor
+        drops the override, this test fails immediately and the
+        CR-3 contract is preserved as an explicit decision.
+        """
+        defn = PlaneServerDefinition()
+        assert defn.read_only_tools is True, (
+            "PlaneServerDefinition.read_only_tools must be True — "
+            "CR-3 requires the read-only filter at discovery time."
+        )
+
+    def test_other_builtins_default_read_only_false(self):
+        """Other builtins default ``read_only_tools=False``.
+
+        Only Plane opts into the filter today. Context7 and
+        WebFetch default to the legacy "expose all tools, let
+        meta.json deny-list filter" behavior. Pin the default
+        here so a future addition of another read-only server
+        (or accidental flip of the base class) is an explicit,
+        tested decision.
+        """
+        from daemon.mcp.builtin_servers.context7 import (
+            Context7ServerDefinition,
+        )
+        from daemon.mcp.builtin_servers.webfetch import (
+            WebFetchServerDefinition,
+        )
+
+        assert Context7ServerDefinition().read_only_tools is False, (
+            "Context7 must NOT default to read_only_tools=True — "
+            "its tool surface is small + stable and the agent "
+            "needs both reads and writes."
+        )
+        assert WebFetchServerDefinition().read_only_tools is False, (
+            "WebFetch must NOT default to read_only_tools=True — "
+            "same reasoning as Context7."
+        )
+
+    def test_read_only_filter_drops_write_tools_from_schema_list(self):
+        """The McpService filter applied to a realistic Plane tool
+        surface drops every write verb.
+
+        Simulates the CR-3 contract end-to-end: take a mixed
+        list of read + write schemas (using the exact
+        ``is_read_tool(name, PlaneServerDefinition.resilience_config)``
+        classifier the McpService filter uses), keep only the
+        reads, and assert the surviving set is exactly the read
+        verbs. If the Plane patterns ever drift (e.g. a new
+        write pattern is added without ``write_tool_patterns``
+        being updated), this test fails.
+        """
+        from daemon.mcp.resilience import is_read_tool
+
+        defn = PlaneServerDefinition()
+        cfg = defn.resilience_config
+
+        # Realistic Plane tool surface — covers every read/write
+        # verb in the documented schema. Names are unprefixed;
+        # ``is_read_tool`` strips the prefix before matching.
+        mixed_schemas = [
+            {"name": "list_issues"},
+            {"name": "list_projects"},
+            {"name": "list_cycles"},
+            {"name": "get_issue"},
+            {"name": "get_project"},
+            {"name": "get_cycle"},
+            {"name": "search_issues"},
+            # Write verbs — every one of these MUST be dropped.
+            {"name": "create_issue"},
+            {"name": "update_issue"},
+            {"name": "delete_issue"},
+            {"name": "create_project"},
+            {"name": "add_comment"},
+            {"name": "remove_comment"},
+            {"name": "add_label"},
+            {"name": "remove_label"},
+            {"name": "set_priority"},
+            {"name": "edit_issue"},
+            {"name": "assign_issue"},
+            {"name": "create_cycle"},
+            {"name": "update_cycle"},
+        ]
+
+        # Apply the same filter the McpService applies: build the
+        # adapted prefix (``plane_``) and let ``is_read_tool``
+        # classify each name. The prefix is added so the function
+        # sees the canonical Plane naming convention.
+        effective_prefix = "plane_"
+        surviving = [
+            s for s in mixed_schemas
+            if is_read_tool(f"{effective_prefix}{s['name']}", cfg)
+        ]
+        surviving_names = sorted(s["name"] for s in surviving)
+
+        expected_reads = sorted([
+            "list_issues", "list_projects", "list_cycles",
+            "get_issue", "get_project", "get_cycle",
+            "search_issues",
+        ])
+        assert surviving_names == expected_reads, (
+            f"CR-3 filter must keep ONLY read verbs. "
+            f"Survived: {surviving_names}; expected: {expected_reads}"
+        )
+
+        # Spot-check: no write verb survived. This is the core
+        # CR-3 guarantee — the LLM can never call any of these.
+        write_verbs = {
+            "create_issue", "update_issue", "delete_issue",
+            "create_project", "add_comment", "remove_comment",
+            "add_label", "remove_label", "set_priority",
+            "edit_issue", "assign_issue", "create_cycle",
+            "update_cycle",
+        }
+        leaked = set(surviving_names) & write_verbs
+        assert not leaked, (
+            f"CR-3 must drop every write verb from the schema list. "
+            f"Leaked: {sorted(leaked)}"
+        )
+
+    def test_read_only_filter_keeps_read_tools_with_new_verbs(self):
+        """A read verb not in the test list still survives the filter.
+
+        Forward-compat guard: the filter is pattern-based, so
+        any new ``list_*`` / ``get_*`` / ``search_*`` tool added
+        to Plane's server (a future ``list_milestones`` for
+        example) automatically passes the filter without a
+        meta.json change. This is the value CR-3 adds over a
+        pure deny-list.
+        """
+        from daemon.mcp.resilience import is_read_tool
+
+        defn = PlaneServerDefinition()
+        cfg = defn.resilience_config
+
+        # A new verb that didn't exist when the deny-list was
+        # written. ``is_read_tool`` must classify it correctly
+        # because the read patterns (``list_``, ``get_``,
+        # ``search_``) are pattern-based.
+        assert is_read_tool("plane_list_milestones", cfg) is True, (
+            "Read patterns must be pattern-based so future read "
+            "verbs (e.g. list_milestones) survive the filter "
+            "without a meta.json change."
+        )
+        assert is_read_tool("plane_get_release", cfg) is True
+        assert is_read_tool("plane_search_users", cfg) is True
+
+        # A future write verb also works without a meta.json
+        # change — the write patterns catch it. The deny-list
+        # is the second line of defense; the read-only filter
+        # is the first.
+        assert is_read_tool("plane_export_data", cfg) is False, (
+            "Write patterns must be pattern-based so future "
+            "write verbs (e.g. export_data) are dropped "
+            "automatically — deny-list falls behind if it "
+            "isn't kept in sync."
+        )
+
+    def test_builtin_base_class_default_is_false(self):
+        """The base ``BuiltinServerDefinition.read_only_tools`` default
+        is False (preserves legacy behavior for non-Plane builtins).
+
+        Pins the abstract default so a refactor of the base
+        class can't silently turn the read-only filter on for
+        every builtin. The CR-3 fix is opt-in per server, not
+        a forced opt-in.
+        """
+        from daemon.mcp.builtin_servers.base import (
+            BuiltinServerDefinition,
+        )
+
+        # Direct instance — but the base is ABC; check via a
+        # concrete subclass that doesn't override the property.
+        # We use Plane here but temporarily monkey-patch the
+        # override to verify the BASE class default is False.
+        defn = PlaneServerDefinition()
+
+        # Temporarily shadow Plane's override with the base default.
+        base_default = BuiltinServerDefinition.read_only_tools.fget(defn)
+        assert base_default is False, (
+            "BuiltinServerDefinition.read_only_tools base default "
+            "must be False — CR-3 is opt-in per server, not a "
+            "forced opt-in across all builtins."
+        )
