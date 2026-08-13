@@ -21,6 +21,12 @@
     </div>
     
     <div class="header-right">
+      <!-- Unified overlay hide button — visible when any overlay is active -->
+      @if (anyOverlayVisible()) {
+        <button mat-icon-button (click)="hideActiveOverlay()" class="overlay-hide-btn" aria-label="Hide overlay">
+          <mat-icon>visibility_off</mat-icon>
+        </button>
+      }
       <app-job-queue-indicator></app-job-queue-indicator>
       <app-notification-bell></app-notification-bell>
       <button mat-icon-button [matMenuTriggerFor]="settingsMenu" class="gear-button" aria-label="Settings menu">
@@ -64,9 +70,6 @@
         class="plane-overlay"
         [style.display]="isPlanRoute() ? 'flex' : 'none'"
       >
-        <button class="plane-overlay-close" mat-icon-button (click)="closePlan()">
-          <mat-icon>close</mat-icon>
-        </button>
         <app-plane-viewer [url]="planeUrl()"></app-plane-viewer>
       </div>
     }

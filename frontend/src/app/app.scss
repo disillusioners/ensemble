@@ -102,6 +102,10 @@
   }
 }
 
+.overlay-hide-btn {
+  color: #f1f5f9;
+}
+
 .health-status {
   display: flex;
   align-items: center;
@@ -171,14 +175,6 @@
   background: #fff;
   display: flex;
   flex-direction: column;
-}
-
-.plane-overlay-close {
-  position: absolute;
-  top: 8px;
-  right: 8px;
-  z-index: 1001;
-  background: #fff;
 }
 
 // Global workspace overlay — mounted inside .app-main so it sits below

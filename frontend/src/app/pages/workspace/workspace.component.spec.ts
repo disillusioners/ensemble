@@ -1988,39 +1988,6 @@ describe('WorkspaceComponent', () => {
       ).toBeNull();
     });
 
-    it('renders the overlay hide button in vscode mode with the 50%-opacity class', () => {
-      renderWithEditorMode('vscode');
-
-      const hideButton = fixture.debugElement.query(
-        By.css('[data-testid="vscode-overlay-hide"]')
-      );
-      expect(hideButton).not.toBeNull();
-      expect(hideButton.nativeElement.classList).toContain('vscode-overlay-hide');
-    });
-
-    it('does not render the overlay hide button in builtin mode', () => {
-      renderWithEditorMode('builtin');
-
-      expect(
-        fixture.debugElement.query(By.css('[data-testid="vscode-overlay-hide"]'))
-      ).toBeNull();
-    });
-
-    it('calls onHide and emits hide when the overlay hide button is clicked', () => {
-      renderWithEditorMode('vscode');
-      const onHideSpy = jest.spyOn(component, 'onHide');
-      const hideEmitSpy = jest.spyOn(component.hide, 'emit');
-      const hideButton = fixture.debugElement.query(
-        By.css('[data-testid="vscode-overlay-hide"]')
-      );
-
-      hideButton.nativeElement.click();
-      fixture.detectChanges();
-
-      expect(onHideSpy).toHaveBeenCalledTimes(1);
-      expect(hideEmitSpy).toHaveBeenCalledTimes(1);
-    });
-
     it('Ctrl+S is inert in vscode mode (no save, no preventDefault)', () => {
       // Set up VS Code mode. renderWithEditorMode drains the boot
       // requests but does NOT select a file or mark it dirty — that is

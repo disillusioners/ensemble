@@ -210,31 +210,6 @@ mat-button-toggle mat-icon {
   height: 100%;
 }
 
-.vscode-overlay-hide {
-  position: absolute;
-  top: 4px;
-  left: 4px;
-  z-index: 1000;
-  opacity: 0.5;
-  transition: opacity 0.2s ease;
-  background: rgba(0, 0, 0, 0.3);
-  color: #fff;
-  width: 28px;
-  height: 28px;
-  line-height: 28px;
-
-  &:hover,
-  &:focus {
-    opacity: 1;
-  }
-}
-
-.vscode-overlay-hide mat-icon {
-  font-size: 18px;
-  width: 18px;
-  height: 18px;
-}
-
 .empty-state {
   display: flex;
   flex-direction: column;

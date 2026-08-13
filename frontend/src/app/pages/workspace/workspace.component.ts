@@ -187,17 +187,6 @@ import {
               }
               @case ('vscode') {
                 <div class="vscode-overlay-container">
-                  <button
-                    class="vscode-overlay-hide"
-                    mat-icon-button
-                    type="button"
-                    (click)="onHide()"
-                    matTooltip="Hide workspace"
-                    aria-label="Hide workspace"
-                    data-testid="vscode-overlay-hide"
-                  >
-                    <mat-icon>visibility_off</mat-icon>
-                  </button>
                   <app-vscode-editor-cache
                     [projectId]="projectId"
                     [workdir]="validatedWorkdir()"
