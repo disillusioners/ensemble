@@ -75,22 +75,28 @@ async def test_transitions_to_half_open_after_recovery_timeout():
 
 @pytest.mark.asyncio
 async def test_half_open_allows_execution():
-    """HALF_OPEN should allow one test call."""
+    """HALF_OPEN allows one probe call at a time (CR-4 contract).
+
+    The first caller after recovery_timeout transitions OPEN→HALF_OPEN and
+    claims the probe slot — that caller is allowed to execute. Concurrent
+    callers in HALF_OPEN see the probe in flight and are blocked, preventing
+    the thundering-herd that would re-trip the failing server.
+    """
     cb = CircuitBreaker(failure_threshold=1, recovery_timeout=0.01)
-    
+
     # Open the circuit
     await cb.record_failure()
     assert cb.state == CircuitState.OPEN
-    
+
     # Wait for timeout
     await asyncio.sleep(0.02)
-    
-    # Transition to HALF_OPEN
-    await cb.can_execute()
-    assert cb.state == CircuitState.HALF_OPEN
-    
-    # Should allow execution in HALF_OPEN
+
+    # First call after timeout: OPEN→HALF_OPEN, probe claimed, allowed
     assert await cb.can_execute() is True
+    assert cb.state == CircuitState.HALF_OPEN
+
+    # Second concurrent call: probe still in flight → blocked (CR-4)
+    assert await cb.can_execute() is False
 
 
 @pytest.mark.asyncio
