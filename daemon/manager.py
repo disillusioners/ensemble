@@ -1289,11 +1289,19 @@ class InstanceManager:
                 # builtin, the disable path above already deactivated it; we
                 # just need to NOT create a fresh record.
                 if not definition.is_available():
-                    logger.info(
-                        f"Builtin '{definition.name}' skipped — package "
-                        f"'{definition.required_package}' not installed "
-                        f"(pip install {definition.required_package})"
-                    )
+                    pkg = definition.required_package
+                    if pkg is not None:
+                        logger.info(
+                            f"Builtin '{definition.name}' skipped — package "
+                            f"'{pkg}' not installed "
+                            f"(pip install {pkg})"
+                        )
+                    else:
+                        logger.info(
+                            f"Builtin '{definition.name}' skipped — "
+                            f"missing environment configuration "
+                            f"(see server definition docs)"
+                        )
                     continue
 
                 default_config = definition.build_config({})

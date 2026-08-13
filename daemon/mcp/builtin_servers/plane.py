@@ -19,8 +19,10 @@ without restarting with a different env:
 - ``PLANE_MCP_WORKSPACE_SLUG`` — workspace identifier sent as the
   ``x-workspace-slug`` header.
 
-Disable via ``MCP_DISABLE_BUILT_IN_PLANE=true`` (standard builtin
-disable convention, handled by the registry bootstrap path).
+Availability is gated entirely by ``PLANE_MCP_URL`` + ``PLANE_MCP_API_KEY``:
+when both are set the server registers; when either is absent the daemon
+silently skips it (no DB record, no connection). There is no separate
+disable toggle — absence of the required env vars IS the disable mechanism.
 """
 
 from __future__ import annotations
@@ -75,17 +77,19 @@ class PlaneServerDefinition(BuiltinServerDefinition):
 
     @classmethod
     def is_available(cls) -> bool:
-        """Plane is available only when ``PLANE_MCP_URL`` is set.
+        """Plane is available only when BOTH URL and API key are set.
 
-        The other env vars (``PLANE_MCP_API_KEY``,
-        ``PLANE_MCP_WORKSPACE_SLUG``) are read inside
-        ``get_base_config`` and their absence will surface as a
-        runtime error when an agent actually tries to use Plane —
-        a missing URL alone should not silently create a broken
-        DB record.
+        The workspace slug is read inside ``get_base_config`` and its
+        absence surfaces as a runtime header error — but a missing URL
+        or API key means the server cannot function at all, so we refuse
+        to register it (no DB record, no tool discovery).
+
+        There is intentionally NO disable toggle for this server:
+        absence of the required env vars IS the disable mechanism.
         """
         url = os.environ.get("PLANE_MCP_URL", "").strip()
-        return bool(url)
+        api_key = os.environ.get("PLANE_MCP_API_KEY", "").strip()
+        return bool(url) and bool(api_key)
 
     def get_base_config(self) -> dict[str, Any]:
         """Return base configuration for the Plane streamable-http MCP.
