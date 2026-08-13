@@ -408,7 +408,9 @@ def test_full_chain_claim_process_pause_resume_answer_complete(
          QUEUED JobItem, JobWatcher, instance).
       2. CLAIM_TURN: PENDING → RUNNING (atomic UPDATE).
       3. Pause cascade: RUNNING → PAUSED with handle via SuspendTurn.
-      4. Resume cascade: PAUSED → CANCELLED via ResumeTurn.
+      4. Resume cascade: PAUSED → PENDING via ResumeTurn
+         (Phase 4b/4c migration 2026-08-12; was PAUSED → CANCELLED
+         pre-migration).
       5. ask_questions: New task seeded with awaiting_answer handle.
       6. Answer arrives: ResumeTurn consumes the answer handle.
       7. CompleteTurn: terminalizes the answer task.
@@ -490,33 +492,48 @@ def test_full_chain_claim_process_pause_resume_answer_complete(
     )
     assert iid in resume_result.updated_ids
 
-    # Handle consumed by ResumeTurn; status PAUSED → CANCELLED.
+    # Handle consumed by ResumeTurn; status PAUSED → PENDING
+    # (Phase 4b/4c migration 2026-08-12; was PAUSED → CANCELLED
+    # pre-migration). The same Task stays live under the same
+    # work_id so the WorkerPool re-claim path picks it up.
     handle_after_resume = _read_handle(engine, work_id)
-    assert handle_after_resume[0] == TaskStatus.CANCELLED.value
+    assert handle_after_resume[0] == TaskStatus.PENDING.value
     assert handle_after_resume[1] is None
     assert handle_after_resume[2] is None
-    # After ResumeTurn consumes the handle, the selector returns the
-    # CANCELLED task (Phase 3 W2: CANCELLED is the resume cascade's
-    # "resumed" marker so the next routing pass can mint a fresh
-    # driver turn). §11.4.1 idempotency: exactly one matching row.
+    # After ResumeTurn consumes the handle, the pause-cascade
+    # selector ``find_paused_or_cancellable_turn`` returns None —
+    # PENDING is the resume cascade's "live again" marker, not a
+    # pause-cascade target (selector filters status IN
+    # ('paused', 'running')). The WorkerPool re-claim path
+    # (``has_inflight_task`` — PENDING + RUNNING) is the
+    # post-resume routing entry (§11.4.1 idempotency: the
+    # handle is consumed exactly once).
     post_resume_turn = task_repo.find_paused_or_cancellable_turn(iid)
-    assert post_resume_turn is not None, (
-        "After ResumeTurn, the pause-cascade selector MUST return the "
-        "CANCELLED task (Phase 3 W2 marker) — §11.4.1 idempotency."
+    assert post_resume_turn is None, (
+        "After ResumeTurn, the pause-cascade selector MUST return "
+        "None — the Task is PENDING (live, awaiting WorkerPool "
+        "re-claim), not paused/cancellable. §11.4.1 idempotency."
     )
-    assert post_resume_turn.work_id == work_id
-    assert post_resume_turn.status == TaskStatus.CANCELLED.value
+    # Verify the same Task row (by primary key) is now PENDING —
+    # the resume kept the work_id alive (no cascade_resume
+    # fallback, no fresh Task minted).
+    with Session(engine) as s:
+        live_task = s.get(Task, task_pk)
+    assert live_task is not None
+    assert live_task.status == TaskStatus.PENDING.value
+    assert live_task.work_id == work_id
     _mirror_invariants_hold(engine, work_id=work_id, message_id=mid)
 
     # ─── Step 4: Worker mid-resume emits ask_questions ───────────
     # The worker calls SuspendTurn(reason='awaiting_answer',
-    # resume_target_turn_id=<work_id>) on the SAME resumed task
-    # to declare an answer-gate suspension. We model this by
-    # driving SuspendTurn directly on the task (which is now in
-    # some post-resume state — but since ResumeTurn set
-    # status='cancelled', we need a fresh RUNNING task for the
-    # ask_questions path. The production cascade mints a fresh
-    # task via the orchestrator; we model the same shape here).
+    # resume_target_turn_id=<work_id>) to declare an answer-gate
+    # suspension. We model this by seeding a fresh RUNNING task
+    # for the ask_questions turn (since Task 1 is now PENDING —
+    # live and awaiting WorkerPool re-claim — and the test
+    # exercises the SuspendTurn/ResumeTurn primitives on a
+    # dedicated row). The production orchestrator re-uses the
+    # resumed task; both shapes exist in practice; the §11.4.1
+    # contract is on the suspend handle, not the task origin.
     ask_wid = f"work-{uuid.uuid4().hex[:12]}"
     now = datetime.now(timezone.utc)
     with Session(engine) as s:
@@ -562,13 +579,13 @@ def test_full_chain_claim_process_pause_resume_answer_complete(
     # ─── Step 5: User answer arrives ─────────────────────────────
     # The manager routes via the answer selector (already
     # verified), calls ResumeTurn on the awaiting task. The handle
-    # is consumed; status PAUSED → CANCELLED.
+    # is consumed; status PAUSED → PENDING (Phase 4b/4c migration).
     with Session(engine) as s:
         ResumeTurn(work_id=ask_wid).run(s)
         s.commit()
 
     post_answer = _read_handle(engine, ask_wid)
-    assert post_answer[0] == TaskStatus.CANCELLED.value
+    assert post_answer[0] == TaskStatus.PENDING.value
     assert post_answer[1] is None, (
         f"§11.4.1 step 5: ResumeTurn MUST consume the handle; "
         f"got suspension_reason={post_answer[1]!r}"
@@ -580,10 +597,11 @@ def test_full_chain_claim_process_pause_resume_answer_complete(
     assert task_repo.find_suspended_turn_for_answer(iid) is None
 
     # ─── Step 6: Worker completes the resumed turn ───────────────
-    # Production would mint a fresh RUNNING task for the resumed
-    # turn (the resume cascade transitioned the old task to
-    # CANCELLED — same as step 3). Model that here: fresh task +
-    # CompleteTurn.
+    # Production keeps the resumed task live (PAUSED → PENDING
+    # in step 5) and WorkerPool drives it to COMPLETED in place.
+    # The test models the CompleteTurn primitive on a fresh task
+    # to assert the terminal transition shape; the production
+    # lifecycle would run CompleteTurn on ``ask_wid`` directly.
     complete_wid = f"work-{uuid.uuid4().hex[:12]}"
     with Session(engine) as s:
         s.add(
