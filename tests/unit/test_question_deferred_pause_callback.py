@@ -190,7 +190,9 @@ class TestSendMessageDeferredPauseCallback:
 
         # The cascade ran — and crucially it ran from the finally block
         # (NOT from inside the graph task, which is the C2 bug).
-        manager.pause_instance_cascade.assert_awaited_once_with(instance_id)
+        manager.pause_instance_cascade.assert_awaited_once_with(
+            instance_id, suspension_reason="awaiting_answer"
+        )
 
         # The deferred marker was popped (atomic check-and-remove on
         # the real backing set).
@@ -260,7 +262,9 @@ class TestSendMessageDeferredPauseCallback:
         # send_message does NOT raise — the inner try/except swallows.
         result = await service.send_message(instance_id, "hi")
 
-        manager.pause_instance_cascade.assert_awaited_once_with(instance_id)
+        manager.pause_instance_cascade.assert_awaited_once_with(
+            instance_id, suspension_reason="awaiting_answer"
+        )
         # Even though the cascade failed, the marker was popped and the
         # task was popped — the next graph completion for this instance
         # will start from a clean state, not re-fire the cascade.
@@ -307,7 +311,9 @@ class TestSendMessageDeferredPauseCallback:
         # arrive, so we record completion here for post-await assertion.
         cascade_completed = False
 
-        async def _cascade_that_records_completion(_iid: str) -> dict:
+        async def _cascade_that_records_completion(
+            _iid: str, suspension_reason: str | None = None
+        ) -> dict:
             nonlocal cascade_completed
             # Real await — yields control so any pending outer cancel
             # has a chance to be delivered. If the AREA 3 shield is
@@ -331,7 +337,9 @@ class TestSendMessageDeferredPauseCallback:
         # The cascade was awaited exactly once with the right instance_id
         # — the marker pop in the finally block observed the deferred
         # pause and routed to the cascade.
-        manager.pause_instance_cascade.assert_awaited_once_with(instance_id)
+        manager.pause_instance_cascade.assert_awaited_once_with(
+            instance_id, suspension_reason="awaiting_answer"
+        )
 
         # The cascade inner coroutine ran to completion. This is the
         # decisive AREA 3 + AREA 4 safety property: the cascade is no
@@ -428,7 +436,9 @@ class TestSendMessageDeferredPauseConcurrencyFixes:
         # (the pre-pop replaced the entry), the ``if`` body was skipped,
         # the marker leaked, and ``pause_instance_cascade`` was NEVER
         # called for this question pause.
-        manager.pause_instance_cascade.assert_awaited_once_with(instance_id)
+        manager.pause_instance_cascade.assert_awaited_once_with(
+            instance_id, suspension_reason="awaiting_answer"
+        )
 
         # The marker was consumed — not leaked. Re-popping must return
         # False because the entry is gone from the backing set.
@@ -483,7 +493,9 @@ class TestSendMessageDeferredPauseConcurrencyFixes:
         # shielded inner coroutine actually ran to completion.
         cascade_db_write_done = asyncio.Event()
 
-        async def _slow_cascade(_iid: str) -> dict:
+        async def _slow_cascade(
+            _iid: str, suspension_reason: str | None = None
+        ) -> dict:
             cascade_log.append("cascade_entered")
             # Real await — yields control. A second cancel scheduled
             # during this sleep would normally propagate into the
@@ -579,4 +591,6 @@ class TestSendMessageDeferredPauseConcurrencyFixes:
             "never reached its post-await DB-write marker after the "
             "second cancel. cascade_log=%r" % (cascade_log,)
         )
-        manager.pause_instance_cascade.assert_awaited_once_with(instance_id)
+        manager.pause_instance_cascade.assert_awaited_once_with(
+            instance_id, suspension_reason="awaiting_answer"
+        )
