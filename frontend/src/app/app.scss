@@ -165,7 +165,7 @@
 
 .plane-overlay {
   position: fixed;
-  top: 0;
+  top: 3.5rem;       // sits below .app-header (height: 3.5rem) so nav stays visible
   left: 0;
   right: 0;
   bottom: 0;
