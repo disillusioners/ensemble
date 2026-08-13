@@ -76,6 +76,28 @@ class BuiltinServerDefinition(ABC):
         """
         return None
 
+    @property
+    def resilience_config(self) -> "ResilienceConfig | None":
+        """Per-server resilience configuration. ``None`` = no resilience.
+
+        Subclasses override to opt into retry, caching, circuit breaking,
+        and graceful degradation. Default ``None`` preserves current
+        behavior for servers that haven't opted in (context7, webfetch,
+        any future default-resilience servers).
+
+        The returned ``ResilienceConfig`` is consumed by
+        ``daemon.mcp.tool_adapter._lazy_coroutine`` via
+        ``ResilienceManager`` — when this returns ``None``, the lazy
+        coroutine falls back to the no-resilience path (the existing
+        behavior, unchanged). When it returns a config, the manager
+        creates a circuit breaker + (optional) cache for the server and
+        every tool call runs through the full resilience flow.
+
+        Currently the only override is ``PlaneServerDefinition``. See
+        ``daemon/mcp/resilience.py`` for the config schema.
+        """
+        return None
+
     @classmethod
     def is_available(cls) -> bool:
         """Check if this builtin's external dependencies are installed.

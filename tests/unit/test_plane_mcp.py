@@ -495,3 +495,202 @@ class TestToolNamePrefixResolution:
         defn = Context7ServerDefinition()
         config = defn.get_base_config()
         assert config["transport"] == "stdio"
+
+
+# ---------------------------------------------------------------------------
+# Class 10: TestPlaneResilienceConfig (Phase 4)
+# ---------------------------------------------------------------------------
+
+class TestPlaneResilienceConfig:
+    """Plane-specific resilience tuning via ``resilience_config``.
+
+    Verifies the Plane builtin opts into the hybrid resilience layer
+    with the documented defaults + env var overrides. The function
+    is called once per ``create_lazy_mcp_tools`` invocation, so the
+    values must be stable for a given env state.
+    """
+
+    def test_resilience_config_defaults(self, monkeypatch):
+        """No env vars → defaults: TTL=300, retries=3, threshold=5, etc."""
+        # Clear all PLANE_* env vars that could affect defaults.
+        for var in (
+            "PLANE_RETRY_MAX_ATTEMPTS",
+            "PLANE_RETRY_BASE_DELAY",
+            "PLANE_CACHE_TTL_SECONDS",
+            "PLANE_CIRCUIT_FAILURE_THRESHOLD",
+            "PLANE_CIRCUIT_RECOVERY_TIMEOUT",
+            "PLANE_PROBE_TIMEOUT",
+        ):
+            monkeypatch.delenv(var, raising=False)
+
+        defn = PlaneServerDefinition()
+        cfg = defn.resilience_config
+
+        # Cache defaults
+        assert cfg.cache_ttl == 300.0
+        assert cfg.cache_max_entries == 1000
+        # Retry defaults
+        assert cfg.retry_policy is not None
+        assert cfg.retry_policy.max_attempts == 3
+        assert cfg.retry_policy.base_delay == 1.0
+        # Circuit defaults
+        assert cfg.circuit_failure_threshold == 5
+        assert cfg.circuit_recovery_timeout == 60.0
+        assert cfg.probe_timeout == 5.0
+        # Staleness default
+        assert cfg.stale_threshold == 300.0
+
+    def test_resilience_config_env_override(self, monkeypatch):
+        """All env vars override their respective defaults."""
+        monkeypatch.setenv("PLANE_RETRY_MAX_ATTEMPTS", "7")
+        monkeypatch.setenv("PLANE_RETRY_BASE_DELAY", "2.5")
+        monkeypatch.setenv("PLANE_CACHE_TTL_SECONDS", "120")
+        monkeypatch.setenv("PLANE_CIRCUIT_FAILURE_THRESHOLD", "10")
+        monkeypatch.setenv("PLANE_CIRCUIT_RECOVERY_TIMEOUT", "180")
+        monkeypatch.setenv("PLANE_PROBE_TIMEOUT", "15")
+
+        defn = PlaneServerDefinition()
+        cfg = defn.resilience_config
+
+        assert cfg.cache_ttl == 120.0
+        assert cfg.retry_policy.max_attempts == 7
+        assert cfg.retry_policy.base_delay == 2.5
+        assert cfg.circuit_failure_threshold == 10
+        assert cfg.circuit_recovery_timeout == 180.0
+        assert cfg.probe_timeout == 15.0
+
+    def test_resilience_config_is_not_none(self):
+        """Plane opts in (returns a config, not None)."""
+        defn = PlaneServerDefinition()
+        # Even with no env overrides, Plane returns a real config —
+        # the resilience layer is opt-in via returning non-None.
+        cfg = defn.resilience_config
+        assert cfg is not None
+
+    def test_other_builtins_resilience_is_none(self):
+        """context7 and webfetch don't opt into resilience."""
+        from daemon.mcp.builtin_servers.context7 import Context7ServerDefinition
+        from daemon.mcp.builtin_servers.webfetch import WebFetchServerDefinition
+
+        assert Context7ServerDefinition().resilience_config is None
+        assert WebFetchServerDefinition().resilience_config is None
+
+    def test_read_tool_patterns(self):
+        """Plane's read patterns: list_, get_, search_."""
+        defn = PlaneServerDefinition()
+        cfg = defn.resilience_config
+        assert "list_" in cfg.read_tool_patterns
+        assert "get_" in cfg.read_tool_patterns
+        assert "search_" in cfg.read_tool_patterns
+
+    def test_write_tool_patterns(self):
+        """Plane's write patterns include create/update/delete + Plane verbs."""
+        defn = PlaneServerDefinition()
+        cfg = defn.resilience_config
+        # Required per the spec.
+        for p in ("create_", "update_", "delete_", "add_", "remove_"):
+            assert p in cfg.write_tool_patterns, f"Missing write pattern: {p}"
+        # Plane-specific verbs.
+        for p in ("set_", "edit_", "assign_"):
+            assert p in cfg.write_tool_patterns, f"Missing write pattern: {p}"
+
+    def test_fallback_message_structure(self):
+        """Fallback is a valid JSON with status=unavailable + source=plane."""
+        import json
+        defn = PlaneServerDefinition()
+        cfg = defn.resilience_config
+        assert cfg.fallback_message is not None
+        # Must be valid JSON.
+        parsed = json.loads(cfg.fallback_message)
+        assert parsed["status"] == "unavailable"
+        assert parsed["source"] == "plane"
+        # Message must be human-readable.
+        assert "Plane" in parsed["message"]
+        assert "unreachable" in parsed["message"].lower() or "unavailable" in parsed["message"].lower()
+
+    def test_fallback_message_consistent_with_module_constant(self):
+        """``cfg.fallback_message`` equals the module-level constant."""
+        from daemon.mcp.builtin_servers.plane import _DEFAULT_PLANE_FALLBACK
+        defn = PlaneServerDefinition()
+        cfg = defn.resilience_config
+        assert cfg.fallback_message == _DEFAULT_PLANE_FALLBACK
+
+    def test_resilience_config_does_not_break_when_url_missing(self, monkeypatch):
+        """``resilience_config`` reads ONLY resilience env vars, not URL/key.
+
+        Even with PLANE_MCP_URL + PLANE_MCP_API_KEY unset (which would
+        make ``is_available()`` return False), the resilience config
+        still builds cleanly. This matters because ``preload_mcp_tools``
+        could in principle query both — though in practice it gates on
+        ``is_available()`` first. The decoupling is intentional so the
+        resilience plumbing doesn't accidentally depend on env state.
+        """
+        monkeypatch.delenv("PLANE_MCP_URL", raising=False)
+        monkeypatch.delenv("PLANE_MCP_API_KEY", raising=False)
+        defn = PlaneServerDefinition()
+        cfg = defn.resilience_config
+        assert cfg is not None
+        assert cfg.cache_ttl == 300.0
+
+
+# ---------------------------------------------------------------------------
+# Class 11: TestPlaneReadToolClassification (Phase 4)
+# ---------------------------------------------------------------------------
+
+class TestPlaneReadToolClassification:
+    """Verify Plane's ``is_read_tool`` works for actual Plane tool names.
+
+    Uses the real ``PlaneServerDefinition.resilience_config`` patterns
+    to classify tool names — proves the Plane tuning is internally
+    consistent (read + write patterns are exclusive at the start of
+    the stripped tool name).
+    """
+
+    def _is_read(self, tool_name: str) -> bool:
+        from daemon.mcp.resilience import is_read_tool
+        defn = PlaneServerDefinition()
+        return is_read_tool(tool_name, defn.resilience_config)
+
+    def test_plane_list_issues_is_read(self):
+        """``plane_list_issues`` is a read tool."""
+        assert self._is_read("plane_list_issues") is True
+
+    def test_plane_get_project_is_read(self):
+        """``plane_get_project`` is a read tool."""
+        assert self._is_read("plane_get_project") is True
+
+    def test_plane_search_issues_is_read(self):
+        """``plane_search_issues`` is a read tool."""
+        assert self._is_read("plane_search_issues") is True
+
+    def test_plane_create_issue_is_write(self):
+        """``plane_create_issue`` is a write tool."""
+        assert self._is_read("plane_create_issue") is False
+
+    def test_plane_update_issue_is_write(self):
+        """``plane_update_issue`` is a write tool."""
+        assert self._is_read("plane_update_issue") is False
+
+    def test_plane_delete_issue_is_write(self):
+        """``plane_delete_issue`` is a write tool."""
+        assert self._is_read("plane_delete_issue") is False
+
+    def test_plane_set_priority_is_write(self):
+        """Plane-specific verb: ``plane_set_issue_priority`` is write."""
+        assert self._is_read("plane_set_issue_priority") is False
+
+    def test_plane_assign_issue_is_write(self):
+        """Plane-specific verb: ``plane_assign_issue`` is write."""
+        assert self._is_read("plane_assign_issue") is False
+
+    def test_plane_edit_issue_is_write(self):
+        """Plane-specific verb: ``plane_edit_issue`` is write."""
+        assert self._is_read("plane_edit_issue") is False
+
+    def test_plane_add_comment_is_write(self):
+        """``plane_add_comment`` is a write tool."""
+        assert self._is_read("plane_add_comment") is False
+
+    def test_plane_remove_label_is_write(self):
+        """``plane_remove_label`` is a write tool."""
+        assert self._is_read("plane_remove_label") is False

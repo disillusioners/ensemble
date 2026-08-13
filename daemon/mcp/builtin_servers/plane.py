@@ -23,14 +23,58 @@ Availability is gated entirely by ``PLANE_MCP_URL`` + ``PLANE_MCP_API_KEY``:
 when both are set the server registers; when either is absent the daemon
 silently skips it (no DB record, no connection). There is no separate
 disable toggle — absence of the required env vars IS the disable mechanism.
+
+Resilience (Phase 4)
+--------------------
+Plane opts into the hybrid resilience layer via ``resilience_config``:
+
+- **Retry** — transient failures (5xx, timeouts, connection resets) get
+  retried with exponential backoff (1s/2s/4s + jitter, max 3 attempts).
+  Auth and tool errors propagate immediately.
+- **Result caching** — read tools (``list_*``, ``get_*``, ``search_*``)
+  cache results for 5 min (avoids hammering Plane on repeated lookups).
+- **Circuit breaker** — 5 consecutive failures opens the circuit for 60s
+  before the next call probes recovery (5s timeout on the probe).
+- **Graceful degradation** — when the circuit is OPEN or all retries
+  fail, the agent receives a structured JSON fallback instead of a
+  hard ``ToolException``. McpAuthError is the exception (raises so the
+  operator notices the bad key).
+- **Write invalidation** — write tools (``create_*``, ``update_*``,
+  ``delete_*``, ...) invalidate the entire server cache on success.
+
+Tunable via env vars (overrides the defaults below):
+
+- ``PLANE_RETRY_MAX_ATTEMPTS`` (default 3)
+- ``PLANE_RETRY_BASE_DELAY`` (default 1.0)
+- ``PLANE_CACHE_TTL_SECONDS`` (default 300)
+- ``PLANE_CIRCUIT_FAILURE_THRESHOLD`` (default 5)
+- ``PLANE_CIRCUIT_RECOVERY_TIMEOUT`` (default 60)
+- ``PLANE_PROBE_TIMEOUT`` (default 5)
 """
 
 from __future__ import annotations
 
+import json
 import os
 from typing import Any
 
 from daemon.mcp.builtin_servers.base import BuiltinServerDefinition
+
+
+# Default Plane fallback message (returned as a JSON string to the agent
+# when the circuit is OPEN or all retries are exhausted). Kept as a
+# module-level constant so tests can assert against the canonical
+# payload without rebuilding it from env vars.
+_DEFAULT_PLANE_FALLBACK: str = json.dumps(
+    {
+        "status": "unavailable",
+        "source": "plane",
+        "message": (
+            "Plane MCP is currently unreachable. Using local project "
+            "history only."
+        ),
+    }
+)
 
 
 class PlaneServerDefinition(BuiltinServerDefinition):
@@ -74,6 +118,72 @@ class PlaneServerDefinition(BuiltinServerDefinition):
         only the EXPOSED ``StructuredTool.name`` changes.
         """
         return "plane"
+
+    @property
+    def resilience_config(self):  # type: ignore[override]
+        """Plane-specific resilience tuning.
+
+        See module docstring for the behavior summary. All values
+        are env-overridable so operators can tighten/loosen
+        behavior without code changes.
+
+        Function-local imports: keep ``daemon.mcp.resilience`` out of
+        the module-level import graph so the builtin registry can be
+        loaded without pulling in the resilience machinery (which
+        itself imports ``daemon.sources.circuit_breaker``).
+        """
+        # Function-local import: keeps the coupling narrow and avoids
+        # loading the resilience module for builtins that don't opt in.
+        from daemon.mcp.resilience import ResilienceConfig, RetryPolicy
+
+        return ResilienceConfig(
+            retry_policy=RetryPolicy(
+                max_attempts=int(
+                    os.environ.get("PLANE_RETRY_MAX_ATTEMPTS", "3")
+                ),
+                base_delay=float(
+                    os.environ.get("PLANE_RETRY_BASE_DELAY", "1.0")
+                ),
+            ),
+            cache_ttl=float(
+                os.environ.get("PLANE_CACHE_TTL_SECONDS", "300")
+            ),
+            circuit_failure_threshold=int(
+                os.environ.get("PLANE_CIRCUIT_FAILURE_THRESHOLD", "5")
+            ),
+            circuit_recovery_timeout=float(
+                os.environ.get("PLANE_CIRCUIT_RECOVERY_TIMEOUT", "60")
+            ),
+            probe_timeout=float(
+                os.environ.get("PLANE_PROBE_TIMEOUT", "5")
+            ),
+            # Always use the canonical fallback — we deliberately don't
+            # expose a per-server override here, since the message
+            # identifies the source ("plane") which is meaningless if
+            # overridable.
+            fallback_message=_DEFAULT_PLANE_FALLBACK,
+            # 5 min — avoids hitting Plane API on every tool call when
+            # the agent polls the same view repeatedly within a turn.
+            stale_threshold=300.0,
+            read_tool_patterns=(
+                "list_",
+                "get_",
+                "search_",
+            ),
+            # ``set_`` and ``edit_`` are Plane-specific verb variants
+            # (e.g. ``plane_set_issue_priority``). ``assign_`` covers
+            # the assignee-update tools.
+            write_tool_patterns=(
+                "create_",
+                "update_",
+                "delete_",
+                "add_",
+                "remove_",
+                "set_",
+                "edit_",
+                "assign_",
+            ),
+        )
 
     @classmethod
     def is_available(cls) -> bool:

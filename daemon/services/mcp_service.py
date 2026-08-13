@@ -30,6 +30,7 @@ from daemon.mcp.tool_adapter import (
     McpSessionProvider,
     create_lazy_mcp_tools,
 )
+from daemon.mcp.resilience import ResilienceManager
 
 if TYPE_CHECKING:
     from langchain_core.tools import BaseTool
@@ -179,6 +180,13 @@ class McpService:
         # rewritten preload_mcp_tools (Task 5); declared here so the schema
         # cache work doesn't need to revisit this file's state shape.
         self._session_caches: dict[str, dict[str, dict]] = {}
+        # Resilience (Phase 4): single shared ``ResilienceManager`` for
+        # all servers that opt in via ``BuiltinServerDefinition.resilience_config``.
+        # The manager owns per-server circuit breakers + result caches
+        # (both in-process, in-memory). Lazy tools receive the manager
+        # in ``create_lazy_mcp_tools`` and look up state by server_name
+        # on each call — see ``_lazy_coroutine`` in tool_adapter.py.
+        self._resilience = ResilienceManager()
 
     def set_warmup_pool(self, pool: "McpWarmupPool") -> None:
         """Inject the warm-up pool (called after initialization)."""
@@ -503,6 +511,16 @@ class McpService:
                 # is unaffected, so MCP dispatch keeps working.
                 server_prefix = self._get_tool_name_prefix(server.name)
 
+                # Phase 4 resilience: look up the builtin server's
+                # resilience config (Plane: retry + cache + circuit
+                # breaker + fallback; context7 / webfetch: ``None``).
+                # We always pass the manager — ``create_lazy_mcp_tools``
+                # itself only opts in when the manager has a config
+                # registered for this server. When the config is
+                # ``None`` (the common case), the legacy no-resilience
+                # path runs unchanged.
+                self._get_resilience_config(server.name)
+
                 lazy_tools = create_lazy_mcp_tools(
                     server_name=server.name,
                     schemas=schema_dicts,
@@ -515,6 +533,7 @@ class McpService:
                     ]["lock"],
                     tool_call_timeout=effective_timeout,
                     tool_name_prefix=server_prefix,
+                    resilience_manager=self._resilience,
                 )
                 all_tools.extend(lazy_tools)
 
@@ -642,6 +661,47 @@ class McpService:
         # ``getattr`` is defensive against future subclasses that might
         # not override the property.
         return getattr(definition, "tool_name_prefix", None)
+
+    def _get_resilience_config(self, server_name: str):
+        """Return a builtin server's ``resilience_config``, or ``None``.
+
+        Mirrors the pattern of ``_get_per_server_timeout`` and
+        ``_get_tool_name_prefix`` — looks up the builtin registry, reads
+        the optional ``resilience_config`` property. ``None`` means
+        "no resilience" (the legacy path stays unchanged). For Plane,
+        returns the ``ResilienceConfig`` built from env vars.
+
+        The returned config is registered with the shared
+        ``ResilienceManager`` so ``_lazy_coroutine`` can look it up by
+        ``server_name``. Idempotent — re-registering with an equal
+        config is a no-op (the manager overwrites, which is safe).
+
+        Args:
+            server_name: The MCP server's name.
+
+        Returns:
+            The ``ResilienceConfig`` (already registered), or ``None``
+            if the server is not a builtin or hasn't opted in.
+        """
+        # Function-local import: same coupling-narrow pattern as the
+        # other ``_get_*`` helpers.
+        from daemon.mcp.builtin_servers import get_registry
+
+        definition = get_registry().get_by_name(server_name)
+        if definition is None:
+            return None
+        # ``resilience_config`` is a property added in Phase 4; it
+        # returns ``None`` by default (preserving the no-resilience
+        # path). ``getattr`` is defensive in case a future subclass
+        # forgets to override it.
+        config = getattr(definition, "resilience_config", None)
+        if config is None:
+            return None
+        # Register with the shared manager. Plane's config is rebuilt
+        # on every call (env vars can change at runtime via tests);
+        # the manager overwrites cleanly.
+        self._resilience.register(server_name, config)
+        return config
 
     def get_mcp_tools(self, instance_id: str) -> list[BaseTool]:
         """Get cached MCP tools for an instance (sync).
