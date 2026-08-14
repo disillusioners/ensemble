@@ -253,20 +253,19 @@ async def create_project(
     )
 
     # Auto-sync to Plane (fire-and-forget). Mirrors the queue-provisioning
-    # pattern; sync is best-effort and never blocks the response.
-    async def _sync_to_plane():
-        try:
-            from ..services.plane_sync_service import PlaneSyncService
+    # pattern; sync is best-effort and never blocks the response. Uses
+    # the shared ``trigger_sync_fire_and_forget`` helper (W3) to ensure
+    # consistent fire-and-forget semantics across the three sync hooks.
+    try:
+        from ..services.plane_sync_service import trigger_sync_fire_and_forget
 
-            if PlaneSyncService.is_available():
-                service = PlaneSyncService(repo)
-                await service.sync_project(project.project_id)
-        except Exception as e:
-            logger.warning(
-                f"Plane sync failed for project {project.project_id}: {e}"
-            )
-
-    background_tasks.add_task(_sync_to_plane)
+        trigger_sync_fire_and_forget(project.project_id, repo)
+    except Exception as exc:
+        logger.warning(
+            "Plane sync dispatch error for project %s: %s",
+            project.project_id,
+            exc,
+        )
 
     recent_history = _get_recent_history_safe(repo, project.project_id)
     critical_notes = _get_critical_notes_safe(repo, project.project_id)

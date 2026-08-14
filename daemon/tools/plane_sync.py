@@ -26,8 +26,8 @@ with the same ``asyncio.get_event_loop()`` /
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
 import logging
+import threading
 import time
 from typing import TYPE_CHECKING
 
@@ -46,7 +46,13 @@ logger = logging.getLogger(__name__)
 # ── Cooldown tracking (CR-4) ────────────────────────────────────────────────
 # Keyed by project_id. Value is ``time.monotonic()`` of the most recent
 # sync invocation (regardless of success). ``force=True`` bypasses.
+#
+# W4: guarded by ``_last_sync_lock`` so concurrent calls from different
+# agent threads don't race on the read-modify-write of the timestamp.
+# The lock is intentionally narrow: it covers only the dict's critical
+# sections (cooldown check + cooldown write), not the I/O work.
 _last_sync: dict[str, float] = {}
+_last_sync_lock = threading.Lock()
 
 
 CATEGORY_NAME = "Project Management"
@@ -56,7 +62,7 @@ Sync Ensemble projects to Plane (plane.so) for cross-tool visibility.
 **Tool**: `plane_sync_project` — mirror an Ensemble project to Plane as a
 flat project. Auto-runs on project creation; manually callable when you
 need to re-sync after a Plane outage or to pick up changes that the v1
-auto-sync layer doesn't cover (status, name, description).
+auto-sync layer doesn't cover (name, description).
 
 Requires `PLANE_BASE_URL`, `PLANE_MCP_API_KEY`, `PLANE_MCP_WORKSPACE_SLUG`
 env vars. When unset, the tool returns ``{"status": "disabled"}``.
@@ -67,13 +73,14 @@ env vars. When unset, the tool returns ``{"status": "disabled"}``.
 _FULL_DOC_PLANE_SYNC_PROJECT = """\
 Sync an Ensemble project to Plane.
 
-Mirrors the project's name and description to a Plane project. Status
-mapping follows the v1 best-effort table (active→active, paused→hold,
-archived→cancelled, completed→completed).
+Mirrors the project's name and description to a Plane project. Core
+project info (name, description) is synced to Plane. Status mapping
+is computed for logging but not pushed to Plane in v1.
 
 The tool is auto-invoked on project creation. Call it manually to:
 - Recover after a Plane outage (records ``error`` state until the next sync).
-- Re-sync after editing status/name/description on either side.
+- Re-sync after editing name or description on either side. (Status is
+  logged only at v1 — see Notes.)
 - Adopt an existing Plane project (matched by name) after a metadata loss.
 
 Args:
@@ -92,8 +99,10 @@ Returns:
         rate-limit notice)
 
 Notes:
-    - v1 limitation: status and name changes on the Ensemble side are
+    - v1 limitation: name changes on the Ensemble side are
       NOT auto-synced. Call this tool explicitly to push them.
+      (Status changes are not pushed at all in v1 — they are only
+      computed for observability in the sync log.)
     - Sync is best-effort and never raises. Errors are recorded in the
       project's ``plane_sync_state`` metadata.
 """
@@ -103,35 +112,50 @@ def _check_cooldown(project_id: str, force: bool) -> dict | None:
     """Return a rate-limit result dict if the cooldown is active, else None.
 
     Separated from the main tool function so the cooldown contract is
-    testable in isolation. Reads/writes the module-level ``_last_sync``.
+    testable in isolation. Reads the module-level ``_last_sync`` under
+    ``_last_sync_lock`` (W4) so concurrent threads observe a consistent
+    timestamp.
     """
     if force:
         return None
-    now = time.monotonic()
-    last = _last_sync.get(project_id)
-    if last is None:
+    with _last_sync_lock:
+        now = time.monotonic()
+        last = _last_sync.get(project_id)
+        if last is None:
+            return None
+        elapsed = now - last
+        if elapsed < PLANE_SYNC_COOLDOWN_S:
+            return {
+                "status": "rate_limited",
+                "message": (
+                    "Sync already triggered recently. "
+                    "Use force=True to override."
+                ),
+                "last_sync_seconds_ago": round(elapsed, 2),
+                "cooldown_seconds": PLANE_SYNC_COOLDOWN_S,
+            }
         return None
-    elapsed = now - last
-    if elapsed < PLANE_SYNC_COOLDOWN_S:
-        return {
-            "status": "rate_limited",
-            "message": (
-                "Sync already triggered recently. "
-                "Use force=True to override."
-            ),
-            "last_sync_seconds_ago": round(elapsed, 2),
-            "cooldown_seconds": PLANE_SYNC_COOLDOWN_S,
-        }
-    return None
 
 
 def _drive_async(coro) -> dict:
-    """Run an awaitable from a sync context, mirroring the queue-provisioning pattern.
+    """Run an awaitable from a sync context, returning its result.
 
-    Tries ``asyncio.get_event_loop()`` first (works when there is a
-    running loop). Falls back to ``asyncio.run`` in a worker thread when
-    no loop is bound (e.g. when LangChain invokes the tool directly
-    from a thread that has no event loop).
+    Mirrors the queue-provisioning pattern (asyncio.get_event_loop /
+    ThreadPoolExecutor + asyncio.run). Two cases:
+
+    1. No event loop bound → ``loop.run_until_complete`` directly.
+    2. Event loop is running → cannot ``run_until_complete`` inside
+       a running loop (would raise ``RuntimeError: This event loop is
+       already running``) and cannot ``ensure_future`` + ``wait`` (the
+       earlier C2 bug — this branch was always dead code because
+       ``run_until_complete`` is illegal from a running loop). Instead
+       we go straight to the thread-pool fallback.
+
+    On the thread-pool path, the shared ``_plane_sync_executor`` from
+    :mod:`daemon.services.plane_sync_service` is used so we don't
+    create a new executor per call (W3). The tool is synchronous —
+    it calls ``future.result()`` to block until the coroutine returns
+    so the agent sees the sync result.
 
     Returns the awaited result, or a synthesized error dict on exception.
     Never raises.
@@ -139,17 +163,23 @@ def _drive_async(coro) -> dict:
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
-            # The caller is inside a running loop — schedule and wait.
-            # In practice this branch is rare for sync tools; we still
-            # handle it defensively.
-            future = asyncio.ensure_future(coro)
-            return loop.run_until_complete(future)
+            # C2: the old code did ``ensure_future(coro)`` + ``run_until_complete(future)``
+            # here, which ALWAYS raised ``RuntimeError`` and leaked the
+            # orphan Task. Going straight to the thread fallback is the
+            # correct behavior — a running loop cannot host our coroutine
+            # directly from this sync context.
+            raise RuntimeError(
+                "Event loop already running — use thread fallback"
+            )
         return loop.run_until_complete(coro)
     except RuntimeError:
-        # No event loop bound — run in a fresh thread.
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(asyncio.run, coro)
-            return future.result()
+        # No event loop bound, or the running-loop case above — submit
+        # to the shared executor (W3) so we don't allocate a new
+        # ThreadPoolExecutor per call.
+        from ..services.plane_sync_service import _plane_sync_executor
+
+        future = _plane_sync_executor.submit(asyncio.run, coro)
+        return future.result()
     except Exception as exc:  # noqa: BLE001
         logger.warning("Plane sync tool: unhandled error: %s", exc)
         return {
@@ -183,8 +213,11 @@ def create_plane_sync_tools(
             return rate_limited
 
         # Mark the attempt BEFORE we do the work, so even a failing sync
-        # resets the cooldown (the cost was paid).
-        _last_sync[project_id] = time.monotonic()
+        # resets the cooldown (the cost was paid). Write under the lock
+        # (W4) so concurrent calls from different threads see a
+        # consistent timestamp.
+        with _last_sync_lock:
+            _last_sync[project_id] = time.monotonic()
 
         if not PlaneSyncService.is_available():
             return {

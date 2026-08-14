@@ -39,6 +39,8 @@ limitation for v1; a future hook layer can close the loop.
 
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import logging
 from datetime import datetime, timezone
 from typing import Any
@@ -89,6 +91,90 @@ def _read_metadata_value(
         if getattr(record, "meta_key", None) == key:
             return getattr(record, "meta_value", None)
     return None
+
+
+# Module-level reusable executor (W3).
+#
+# Avoids the two hazard patterns observed in the duplicated sync hooks:
+#   (W1) ``with ThreadPoolExecutor() as executor: executor.submit(...)`` —
+#        the ``with`` __exit__ calls ``shutdown(wait=True)``, which blocks
+#        the caller until the background work finishes (defeats the
+#        fire-and-forget intent).
+#   (C2) bare ``asyncio.ensure_future`` + ``loop.run_until_complete`` —
+#        raises ``RuntimeError: This event loop is already running`` and
+#        leaks the orphan Task.
+#
+# A single module-level executor lets the fire-and-forget path submit and
+# return immediately. ``max_workers=2`` caps concurrent syncs to two
+# projects in flight at once (Plane API rate limits + DB pool safety).
+_plane_sync_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+
+
+def trigger_sync_fire_and_forget(
+    project_id: str,
+    project_repo: "SQLModelProjectRepository",
+) -> None:
+    """Fire-and-forget Plane sync — non-blocking, best-effort.
+
+    Consolidates the async-driving pattern that was duplicated across
+    ``daemon.tools.project``, ``daemon.routers.projects``, and
+    ``daemon.tools.plane_sync`` (W3). Designed for the auto-sync hooks
+    that run on project creation, where the caller must return quickly
+    and must not be coupled to Plane's response.
+
+    Handles three cases:
+
+    1. No event loop bound → run directly via ``asyncio.run``.
+    2. Event loop running → submit to the shared module-level
+       ``_plane_sync_executor`` (a fresh thread with its own event loop).
+    3. Any error during dispatch → log and swallow. The caller is never
+       blocked and never sees an exception from Plane sync.
+
+    This function is fire-and-forget: it returns as soon as the work is
+    *submitted* (or run directly when no loop is bound). It does NOT
+    call ``.result()`` on the executor's future — the agent tool
+    ``plane_sync_project`` does that because the agent expects the
+    result, but the auto-sync hooks do not.
+
+    Args:
+        project_id: The ensemble project UUID to sync.
+        project_repo: Project repository for the sync service.
+    """
+    if not PlaneSyncService.is_available():
+        return
+
+    sync_service = PlaneSyncService(project_repo)
+
+    async def _do_sync() -> None:
+        try:
+            result = await sync_service.sync_project(project_id)
+            logger.info(
+                "Plane sync completed for project %s: %s",
+                project_id,
+                result.get("status"),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Plane sync failed for project %s: %s", project_id, exc
+            )
+
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # Caller is inside a running loop — we cannot await from a
+            # sync context. Submit to the shared executor (fresh thread,
+            # fresh loop, runs asyncio.run internally).
+            _plane_sync_executor.submit(asyncio.run, _do_sync())
+        else:
+            loop.run_until_complete(_do_sync())
+    except RuntimeError:
+        # No event loop bound at all — same fallback as the running-loop
+        # path. Use the shared executor to keep pool usage consistent.
+        _plane_sync_executor.submit(asyncio.run, _do_sync())
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Plane sync dispatch error for project %s: %s", project_id, exc
+        )
 
 
 class PlaneSyncService:
@@ -142,17 +228,27 @@ class PlaneSyncService:
 
     # ── Internal helpers ────────────────────────────────────────────────
 
-    def _set_metadata(self, project_id: str, key: str, value: Any) -> None:
+    def _set_metadata(self, project_id: str, key: str, value: Any) -> bool:
         """Persist a single metadata record (best-effort).
 
         Uses ``set_metadata_record`` directly — not ``set_metadata`` — so
         we don't churn ``Project.updated_at`` on every sync attempt
         (CR-6).
+
+        Returns:
+            ``True`` on successful write, ``False`` when the write failed
+            and the exception was caught. The caller is responsible for
+            deciding whether the failure is critical (e.g. the
+            ``plane_project_id`` handle — losing this would cause the next
+            sync to create a duplicate Plane project) or merely advisory
+            (e.g. ``synced_at`` timestamp — losing this only delays
+            observability).
         """
         try:
             with Session(self._repo.engine) as session:
                 self._repo.set_metadata_record(session, project_id, key, value)
                 session.commit()
+            return True
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "Plane sync: failed to persist metadata %s for project %s: %s",
@@ -160,6 +256,7 @@ class PlaneSyncService:
                 project_id,
                 exc,
             )
+            return False
 
     def _mark_error(self, project_id: str) -> None:
         """Record an ``error`` sync state — best-effort, never raises."""
@@ -285,11 +382,46 @@ class PlaneSyncService:
                 "message": f"Unexpected error: {exc}",
             }
 
-        # Persist success metadata.
+        # Persist success metadata. The plane_project_id handle is the
+        # critical key — if its write fails, we must NOT report "synced",
+        # because the next sync would treat this project as fresh and
+        # create a duplicate on Plane. The other two keys are advisory
+        # (state for observability, timestamp for the UI) — we log and
+        # continue if they fail.
         now = _now_iso()
-        self._set_metadata(project_id, PLANE_PROJECT_ID_METADATA_KEY, plane_id)
-        self._set_metadata(project_id, PLANE_SYNC_STATE_METADATA_KEY, "synced")
-        self._set_metadata(project_id, PLANE_SYNCED_AT_METADATA_KEY, now)
+        id_ok = self._set_metadata(
+            project_id, PLANE_PROJECT_ID_METADATA_KEY, plane_id
+        )
+        if not id_ok:
+            self._set_metadata(
+                project_id, PLANE_SYNC_STATE_METADATA_KEY, "error"
+            )
+            self._set_metadata(
+                project_id, PLANE_SYNCED_AT_METADATA_KEY, now
+            )
+            return {
+                "status": "error",
+                "action": action,
+                "plane_project_id": plane_id,
+                "message": (
+                    "Plane project created but metadata write failed. "
+                    "Manual reconciliation needed."
+                ),
+            }
+        if not self._set_metadata(
+            project_id, PLANE_SYNC_STATE_METADATA_KEY, "synced"
+        ):
+            logger.warning(
+                "Plane sync: sync_state metadata write failed for %s",
+                project_id,
+            )
+        if not self._set_metadata(
+            project_id, PLANE_SYNCED_AT_METADATA_KEY, now
+        ):
+            logger.warning(
+                "Plane sync: synced_at metadata write failed for %s",
+                project_id,
+            )
 
         return {
             "status": "synced",
@@ -312,17 +444,17 @@ class PlaneSyncService:
         deleted out-of-band on Plane (404), falls back to CREATE so the
         mapping recovers.
         """
+        # v1: state computed for observability only, not pushed to Plane API.
+        # Plane has no stable project-level "state" field — the mapping is
+        # purely informational and only surfaces in our log line below.
+        # ``network`` and other Plane fields are deliberately omitted from
+        # the v1 surface.
         plane_state = _project_state_for_plane(project.status)
         try:
             await client.update_project(
                 plane_id,
                 name=project.name,
                 description=project.description,
-                # v1 limitation: we do NOT push state to Plane — see module
-                # docstring. Plane has no stable "state" field at the
-                # project level; the mapping is purely informational.
-                # ``network`` and other Plane fields are deliberately
-                # omitted from the v1 surface.
             )
             logger.debug(
                 "Plane sync: updated project %s -> Plane %s (state=%s)",

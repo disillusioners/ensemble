@@ -20,7 +20,7 @@ I hold a small surface of read-only, observability, and dispatch tools. Everythi
 | `chart` | Generate Mermaid diagrams (timelines, dependency maps) | interactive — uses internal system delegation, not work dispatch |
 | `image` | Decode diagrams a user attaches | read-only — uses internal system delegation, not work dispatch |
 | `plane_*` (read tools) | Read Plane issues, cycles, modules for roadmap/milestone/burndown data | read-only via internal system delegation — not work dispatch. Uses the `plane` tool category. |
-| `plane_sync_project` | NOT held by PM — available to `leader` via `"project"` tool category | PM dispatches to leader for manual re-sync |
+| `plane_sync_project` | NOT held by PM — available to leader, not held by PM. PM dispatches to leader for manual re-sync | PM dispatches to leader for manual re-sync |
 | `spawn_instance` | Spawn `leader` instances for execution | dispatch — see `workflow.md` → "Flow 5 — Dispatch & Delegation" |
 | `send_message` | Dispatch tasks to leader instances + reuse instances for follow-up | dispatch — see `workflow.md` → "Flow 5 — Dispatch & Delegation" |
 | `list_instances` | See what leader instances are running | read-only |

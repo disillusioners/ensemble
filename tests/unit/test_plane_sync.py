@@ -20,11 +20,9 @@ Notes
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import threading
 import time
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -59,6 +57,7 @@ from daemon.sources.circuit_breaker import CircuitBreaker, CircuitState
 from daemon.tools.plane_sync import (
     _check_cooldown,
     _last_sync,
+    _last_sync_lock,
     create_plane_sync_tools,
 )
 
@@ -1700,9 +1699,20 @@ class TestEdgeCaseConcurrentSync:
 
         # Both calls must complete without crashing.
         assert len(results) == 2
-        # Both should succeed (mock returns valid response).
-        assert all(r["status"] == "synced" for r in results), (
-            f"Both syncs should succeed, got {results}"
+        # Under the SQLAlchemy StaticPool, the two concurrent metadata
+        # writes race — one wins, the other gets a "tuple index out of
+        # range" / API-misuse error from SQLite. With C1 fixed, that
+        # error is now correctly surfaced as status="error" (the old
+        # code silently swallowed it and reported "synced", which is
+        # exactly the C1 bug). So the valid post-fix outcomes are:
+        #   - both "synced"  (timing happened to serialize the writes)
+        #   - one "synced" + one "error"  (the realistic race outcome)
+        # What we MUST NOT see: any crash, exception propagation, or
+        # both "error" (the service is at-least-once correct under
+        # contention — at least one of the calls must succeed).
+        statuses = sorted(r["status"] for r in results)
+        assert statuses in (["synced", "synced"], ["error", "synced"]), (
+            f"Expected [synced,synced] or [error,synced], got {statuses}"
         )
 
     def test_tool_concurrent_calls_after_cooldown_expired_both_succeed(
@@ -1875,3 +1885,223 @@ class TestEdgeCaseMetadataUpdateWithNameChange:
         parsed = datetime.fromisoformat(meta[PLANE_SYNCED_AT_METADATA_KEY])
         assert parsed.timestamp() > 0
         assert time.monotonic() - before_sync < 60  # ran recently
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Class 20: TestC1MetadataWriteFailure
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# C1: When the ``plane_project_id`` metadata write fails after a successful
+# Plane API create, ``sync_project`` must return ``status="error"`` (not
+# ``"synced"``). Otherwise the next sync sees no ``plane_project_id`` handle,
+# treats the project as fresh, and creates a duplicate on Plane.
+#
+# The non-critical keys (``plane_sync_state``, ``plane_synced_at``) are
+# advisory — losing them only hurts observability, not correctness, so their
+# write failures must NOT block the ``synced`` status.
+
+
+class TestC1MetadataWriteFailure:
+    """C1: Metadata write failure must not produce false 'synced'.
+
+    If the plane_project_id metadata write fails after a successful
+    Plane API create, sync_project must return status='error' (not
+    'synced'), otherwise the next sync creates a duplicate.
+    """
+
+    def test_plane_id_write_failure_returns_error(self, repo, mock_plane_env):
+        """Critical C1 test — the plane_project_id handle write fails.
+
+        Without C1, sync would return ``status='synced'`` even though
+        the handle was lost — the next sync would treat the project as
+        fresh and create a duplicate on Plane.
+        """
+        project = repo.create(name="C1CriticalFail")
+
+        mock = MagicMock()
+        mock.create_project = AsyncMock(
+            return_value={"id": "plane-123", "name": "C1CriticalFail"}
+        )
+        mock.list_projects = AsyncMock(return_value=[])
+
+        svc = PlaneSyncService(repo, http_client=mock)
+
+        # Patch ``_set_metadata`` to selectively fail on the critical key.
+        call_log: list[str] = []
+
+        def selective_set(project_id, key, value):  # noqa: ARG001
+            call_log.append(key)
+            if key == PLANE_PROJECT_ID_METADATA_KEY:
+                return False  # Simulate failure on the critical handle.
+            return True
+
+        svc._set_metadata = selective_set
+
+        result = asyncio.run(svc.sync_project(project.project_id))
+
+        # Status must be ``"error"``, NOT ``"synced"`` — that was the C1 bug.
+        assert result["status"] == "error"
+        # Message should mention metadata write failure or manual reconciliation.
+        assert (
+            "metadata write failed" in result["message"].lower()
+            or "manual reconciliation" in result["message"].lower()
+        ), f"Expected descriptive error message, got: {result['message']!r}"
+        # The caller must still know what was created on Plane so a human
+        # can reconcile.
+        assert result["plane_project_id"] == "plane-123"
+        # The critical key was attempted (and the advisory ones too,
+        # so the error metadata is also written).
+        assert PLANE_PROJECT_ID_METADATA_KEY in call_log
+
+    def test_non_critical_metadata_failure_still_synced(self, repo, mock_plane_env):
+        """Non-critical key failures (state/timestamp) don't block success.
+
+        Only the ``plane_project_id`` handle is critical — losing
+        ``plane_sync_state`` or ``plane_synced_at`` is purely advisory
+        and should not flip status away from ``"synced"``.
+        """
+        project = repo.create(name="C1NonCriticalFail")
+
+        mock = MagicMock()
+        mock.create_project = AsyncMock(
+            return_value={"id": "plane-456", "name": "C1NonCriticalFail"}
+        )
+        mock.list_projects = AsyncMock(return_value=[])
+
+        svc = PlaneSyncService(repo, http_client=mock)
+
+        def selective_set(project_id, key, value):  # noqa: ARG001
+            # Critical key succeeds; the two advisory keys fail.
+            if key == PLANE_PROJECT_ID_METADATA_KEY:
+                return True
+            return False
+
+        svc._set_metadata = selective_set
+
+        result = asyncio.run(svc.sync_project(project.project_id))
+
+        # Non-critical failures must NOT block success.
+        assert result["status"] == "synced"
+        assert result["plane_project_id"] == "plane-456"
+        assert result["action"] == "created"
+
+    def test_all_metadata_writes_succeed_returns_synced(self, repo, mock_plane_env):
+        """Happy path regression — all metadata writes succeed → ``"synced"``.
+
+        Uses the real ``_set_metadata`` (no override) so this also
+        exercises the real DB write path end-to-end.
+        """
+        project = repo.create(name="C1AllSuccess")
+
+        mock = MagicMock()
+        mock.create_project = AsyncMock(
+            return_value={"id": "plane-789", "name": "C1AllSuccess"}
+        )
+        mock.list_projects = AsyncMock(return_value=[])
+
+        svc = PlaneSyncService(repo, http_client=mock)
+        # Default ``_set_metadata`` writes succeed (it has real DB access).
+
+        result = asyncio.run(svc.sync_project(project.project_id))
+
+        assert result["status"] == "synced"
+        assert result["action"] == "created"
+        assert result["plane_project_id"] == "plane-789"
+
+        # Sanity: metadata actually persisted to the repo.
+        with Session(repo.engine) as session:
+            records = repo.list_metadata_records(session, project.project_id)
+        meta = {r.meta_key: r.meta_value for r in records}
+        assert meta[PLANE_PROJECT_ID_METADATA_KEY] == "plane-789"
+        assert meta[PLANE_SYNC_STATE_METADATA_KEY] == "synced"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Class 21: TestW4CooldownThreadSafety
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# W4: ``_last_sync`` is now guarded by ``_last_sync_lock`` (``threading.Lock``)
+# around the read-modify-write in ``_check_cooldown`` and the tool function.
+# These tests verify the lock exists, concurrent writes don't corrupt, and
+# the cooldown check is consistent across threads.
+
+
+class TestW4CooldownThreadSafety:
+    """W4: _last_sync cooldown dict must be thread-safe.
+
+    Concurrent calls from different threads must not corrupt the dict
+    or cause race conditions.
+    """
+
+    def test_cooldown_lock_exists(self):
+        """Verify the lock is a real ``threading.Lock`` instance.
+
+        ``type(threading.Lock())`` is ``_thread.lock`` — the underlying
+        type returned by the ``threading.Lock`` factory. The assertion
+        holds because the source code constructs the lock with
+        ``threading.Lock()`` (same factory).
+        """
+        assert isinstance(_last_sync_lock, type(threading.Lock()))
+
+    def test_concurrent_cooldown_no_corruption(self, clear_cooldown):
+        """20 threads write to ``_last_sync`` + check cooldown — no exceptions.
+
+        Each thread writes its own project key under the lock, then
+        calls ``_check_cooldown`` (which itself takes the lock
+        internally). With W4 in place, neither path can race or
+        raise — the goal is simply "no exception fires".
+        """
+        errors: list[Exception] = []
+
+        def worker(pid: str) -> None:
+            try:
+                with _last_sync_lock:
+                    _last_sync[pid] = time.monotonic()
+                # ``_check_cooldown`` also takes the lock; should not raise.
+                _check_cooldown(pid, force=False)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=worker, args=(f"proj-{i}",))
+            for i in range(20)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert errors == [], f"Threads crashed: {errors}"
+        # All 20 keys were written.
+        assert len(_last_sync) == 20
+
+    def test_concurrent_same_project_cooldown_race(self, clear_cooldown):
+        """10 threads check cooldown for the same project — all rate_limited.
+
+        Because ``_check_cooldown`` now holds ``_last_sync_lock`` around
+        the read-modify-write (W4), all 10 threads observe the same
+        timestamp and thus all 10 see ``"rate_limited"``. Without the
+        lock, a thread could race and miss the cooldown entry.
+        """
+        # ``clear_cooldown`` fixture has already emptied ``_last_sync``;
+        # set an entry that is well within the 30s window.
+        _last_sync["same-proj"] = time.monotonic()
+
+        results: list[str] = []
+
+        def checker() -> None:
+            r = _check_cooldown("same-proj", force=False)
+            if r:
+                results.append(r["status"])
+
+        threads = [threading.Thread(target=checker) for _ in range(10)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        # All 10 threads must have observed the cooldown entry.
+        assert len(results) == 10
+        assert all(r == "rate_limited" for r in results), (
+            f"Expected all rate_limited, got {results}"
+        )

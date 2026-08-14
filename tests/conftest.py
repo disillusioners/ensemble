@@ -3,7 +3,6 @@
 import os
 import sys
 import pytest
-from pathlib import Path
 from datetime import datetime
 from types import ModuleType
 from unittest.mock import MagicMock, AsyncMock
@@ -769,3 +768,43 @@ def make_config(source_id: str, config: dict):
         credentials={},
         enabled=True,
     )
+
+
+# ==================== Plane Sync Test Isolation ====================
+
+
+@pytest.fixture(autouse=True)
+def _disable_plane_sync_in_tests(request, monkeypatch):
+    """Unset Plane env vars for the test session so ``PlaneSyncService.is_available()``
+    returns False unless the test explicitly opts in (e.g. via
+    ``mock_plane_env``).
+
+    Why this exists: the auto-sync hooks in
+    ``daemon.tools.project.project_create`` and
+    ``daemon.routers.projects.create_project`` call
+    ``trigger_sync_fire_and_forget``, which submits work to a module-level
+    ``ThreadPoolExecutor``. Before the W1 fix, the surrounding
+    ``with ThreadPoolExecutor`` block waited for the work to finish
+    (which suppressed the in-process thread) — so tests with the dev
+    environment's ``PLANE_BASE_URL`` set ran the sync inline and
+    never saw a stray thread. The W1 fix made the dispatch non-blocking
+    to honor the fire-and-forget contract, which exposes this fragility:
+    a slow HTTP call in the executor thread races with the test fixture's
+    ``engine.dispose()`` and can segfault or log spurious errors.
+
+    Tests that exercise the Plane sync flow (e.g.
+    ``tests/unit/test_plane_sync.py``) opt back in via the
+    ``mock_plane_env`` fixture, which sets the env vars explicitly and
+    shadows this autouse.
+    """
+    # Only act when no opt-in fixture is present on this test.
+    opt_in_fixtures = {"mock_plane_env"}
+    fixture_names = {f for f in request.fixturenames}
+    if opt_in_fixtures & fixture_names:
+        # Test explicitly opts in — leave env vars alone.
+        yield
+        return
+
+    for var in ("PLANE_BASE_URL", "PLANE_MCP_API_KEY", "PLANE_MCP_WORKSPACE_SLUG"):
+        monkeypatch.delenv(var, raising=False)
+    yield
