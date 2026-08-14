@@ -61,6 +61,14 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
 })
 
 
+# Tool name prefixes that are dynamically discovered at runtime (e.g. via MCP
+# servers) and therefore cannot be statically registered. Validation must skip
+# these — the tool names are only known after the MCP server responds.
+DYNAMIC_TOOL_PREFIXES: frozenset[str] = frozenset({
+    "plane_",
+})
+
+
 def register_tool_category(category: str):
     """Decorator to mark a tool with its category.
     
@@ -183,6 +191,79 @@ def list_tools_by_category() -> dict[str, list[str]]:
             categories[cat] = []
         categories[cat].append(tool_name)
     return categories
+
+
+def discover_all_tool_names() -> set[str]:
+    """Statically discover all @tool-decorated function names across CATEGORY_MODULES.
+
+    Many tools are created inside factory functions (e.g. ``create_project_tools``)
+    and use ``@tool`` inside the factory body, so they never register in
+    ``_tool_metadata`` at import time. This function AST-scans the source of every
+    category module to find ``@tool``-decorated functions at ANY nesting depth.
+
+    Returns:
+        Set of tool names discoverable from static source analysis.
+    """
+    import ast
+    from pathlib import Path
+
+    tool_names: set[str] = set()
+
+    for category_key, module_path_str in CATEGORY_MODULES.items():
+        paths = module_path_str if isinstance(module_path_str, list) else [module_path_str]
+        for mod_path in paths:
+            # Resolve module path to file path
+            # e.g. "daemon.tools.project" -> daemon/tools/project.py
+            parts = mod_path.split(".")
+            # Skip the "daemon" prefix to find the package root
+            # Try relative path from this file's location
+            try:
+                # Walk up from this file (daemon/tools/_tool_registry.py) to find the file
+                # daemon/tools/_tool_registry.py -> parent is daemon/tools/
+                base_dir = Path(__file__).parent  # daemon/tools/
+                # mod_path like "daemon.tools.project" -> parts ["daemon", "tools", "project"]
+                # We need the relative path from the daemon package root
+                # daemon/tools/ corresponds to "daemon.tools"
+                file_path = base_dir
+                for part in parts[2:]:  # skip "daemon", "tools"
+                    file_path = file_path / part
+                file_path = file_path.with_suffix(".py")
+
+                if not file_path.exists():
+                    continue
+
+                source = file_path.read_text()
+                tree = ast.parse(source)
+
+                # Walk the ENTIRE tree (not just top-level) to catch tools
+                # defined inside factory functions
+                for node in ast.walk(tree):
+                    if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        continue
+                    # Check if any decorator is @tool (bare or called: @tool or @tool(...))
+                    has_tool_decorator = False
+                    for dec in node.decorator_list:
+                        dec_name = ""
+                        if isinstance(dec, ast.Name):
+                            dec_name = dec.id
+                        elif isinstance(dec, ast.Attribute):
+                            dec_name = dec.attr
+                        elif isinstance(dec, ast.Call):
+                            if isinstance(dec.func, ast.Name):
+                                dec_name = dec.func.id
+                            elif isinstance(dec.func, ast.Attribute):
+                                dec_name = dec.func.attr
+                        if dec_name == "tool":
+                            has_tool_decorator = True
+                            break
+
+                    if has_tool_decorator:
+                        tool_names.add(node.name)
+
+            except (OSError, SyntaxError, Exception):
+                continue
+
+    return tool_names
 
 
 def clear_registry() -> None:

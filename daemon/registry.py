@@ -971,6 +971,8 @@ class AgentRegistry:
             _tool_metadata,
             CATEGORY_MODULES,
             DYNAMIC_TOOL_NAMES,
+            DYNAMIC_TOOL_PREFIXES,
+            discover_all_tool_names,
         )
         from daemon.tools.instance import resolve_tool_filter
         
@@ -997,6 +999,10 @@ class AgentRegistry:
         for tools in available_categories.values():
             all_tool_names.update(tools)
         all_tool_names.update(DYNAMIC_TOOL_NAMES)
+        # Statically discover all @tool function names across category modules.
+        # Factory-created tools (e.g. create_project_tools) use @tool inside the
+        # factory body, so they never register in _tool_metadata at import time.
+        all_tool_names.update(discover_all_tool_names())
         
         # Known categories come from CATEGORY_MODULES (includes categories that may not have
         # tools registered yet, e.g., dynamically created tools)
@@ -1019,7 +1025,11 @@ class AgentRegistry:
                 # Check allow entries (entry is valid if it's a known category or tool name)
                 if tools_filter.allow:
                     for entry in tools_filter.allow:
-                        if entry not in known_categories and entry not in all_tool_names:
+                        if (
+                            entry not in known_categories
+                            and entry not in all_tool_names
+                            and not any(entry.startswith(prefix) for prefix in DYNAMIC_TOOL_PREFIXES)
+                        ):
                             warnings.append(
                                 f"Agent '{display_id}': allow entry '{entry}' is neither a known category nor a known tool"
                             )
@@ -1027,7 +1037,11 @@ class AgentRegistry:
                 # Check deny entries
                 if tools_filter.deny:
                     for entry in tools_filter.deny:
-                        if entry not in known_categories and entry not in all_tool_names:
+                        if (
+                            entry not in known_categories
+                            and entry not in all_tool_names
+                            and not any(entry.startswith(prefix) for prefix in DYNAMIC_TOOL_PREFIXES)
+                        ):
                             warnings.append(
                                 f"Agent '{display_id}': deny entry '{entry}' is neither a known category nor a known tool"
                             )
