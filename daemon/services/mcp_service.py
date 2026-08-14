@@ -389,7 +389,13 @@ class McpService:
         )
         return primed
 
-    async def preload_mcp_tools(self, instance_id: str) -> None:
+    async def preload_mcp_tools(
+        self,
+        instance_id: str,
+        *,
+        agent_id: str | None = None,
+        version_tag: str | None = None,
+    ) -> None:
         """Build lazy MCP tool wrappers for an instance — no connections.
 
         Replaces the eager pre-connect path: this method now only reads
@@ -402,6 +408,18 @@ class McpService:
         Non-fatal: logs errors and caches an empty list on failure.
         Per-instance locking prevents concurrent preload races.
         The same instance_id short-circuits on the second call.
+
+        Args:
+            instance_id: The instance being preloaded.
+            agent_id: Optional base agent identifier. When supplied,
+                the matching ``AgentMetadata`` is resolved (via the
+                versioned-agent convention ``get_version`` then
+                ``get_resolved``) and threaded into the CR-3
+                read-only filter so ``mcp_full_access`` opt-outs are
+                honored. ``None`` disables the opt-out — every server
+                applies its built-in ``read_only_tools`` declaration.
+            version_tag: Optional agent version tag. ``None`` selects
+                the base agent (matches ``get_version`` semantics).
         """
         async with self._preload_lock:
             if instance_id not in self._preload_locks:
@@ -413,6 +431,47 @@ class McpService:
             # instance is a no-op.
             if instance_id in self._tools_cache:
                 return
+
+            # CR-3 opt-out (Approach B): resolve the agent's metadata
+            # exactly ONCE for the entire server loop so the per-server
+            # ``_get_read_only_tools`` calls share a single resolved
+            # object. Fail closed: any lookup failure → ``agent_meta``
+            # is ``None`` and the CR-3 strip applies as declared by the
+            # built-in. The agent boots read-only rather than
+            # write-open if identity cannot be resolved. Logging a
+            # WARNING (not DEBUG) makes silent identity failures visible
+            # at the operational level without spamming debug streams
+            # when ``agent_id`` was intentionally not provided.
+            agent_meta: Any = None
+            if agent_id is not None:
+                try:
+                    from ..registry import get_registry as _get_agent_registry
+                    _agent_registry = _get_agent_registry()
+                    agent_meta = _agent_registry.get_version(
+                        agent_id, version_tag
+                    )
+                    if agent_meta is None:
+                        # Fallback to alias-resolved base meta. With
+                        # ``AGENT_ID_ALIASES`` empty this is equivalent
+                        # to ``get(agent_id)``; it's retained for
+                        # future-proofing (renames can populate the
+                        # alias map without touching this site).
+                        agent_meta = _agent_registry.get_resolved(agent_id)
+                    if agent_meta is None:
+                        logger.warning(
+                            f"preload_mcp_tools: agent_id={agent_id!r} "
+                            f"version_tag={version_tag!r} could not be "
+                            f"resolved; CR-3 read-only filter applies "
+                            f"with no per-agent opt-out"
+                        )
+                except Exception as _resolve_err:
+                    logger.warning(
+                        f"preload_mcp_tools: registry lookup failed for "
+                        f"agent_id={agent_id!r}: {_resolve_err}; "
+                        f"CR-3 read-only filter applies with no "
+                        f"per-agent opt-out"
+                    )
+                    agent_meta = None
 
             try:
                 servers = self._manager._mcp_server_repository.list_mcp_servers(
@@ -561,9 +620,15 @@ class McpService:
                 # resilience doesn't have patterns, so we can't
                 # classify — and the CR-3 fix is a hardening on
                 # opted-in servers, not a forced opt-in.
+                #
+                # Per-agent opt-out (Approach B): when ``agent_meta``
+                # is not None and ``server.name`` is in
+                # ``agent_meta.mcp_full_access``, ``_get_read_only_tools``
+                # returns False — the strip is skipped and the full
+                # schema list is passed to ``create_lazy_mcp_tools``.
                 if (
                     resilience_config is not None
-                    and self._get_read_only_tools(server.name)
+                    and self._get_read_only_tools(server.name, agent_meta)
                 ):
                     # Local import: keep ``is_read_tool`` out of the
                     # module-level import graph when the server
@@ -732,7 +797,11 @@ class McpService:
         # not override the property.
         return getattr(definition, "tool_name_prefix", None)
 
-    def _get_read_only_tools(self, server_name: str) -> bool:
+    def _get_read_only_tools(
+        self,
+        server_name: str,
+        agent_meta: Any = None,
+    ) -> bool:
         """Return a builtin server's ``read_only_tools`` flag.
 
         CR-3: looks up the ``BuiltinServerDefinition`` in the global
@@ -746,12 +815,26 @@ class McpService:
         ``create_lazy_mcp_tools`` wraps them, so the agent's tool
         list never contains writes.
 
+        Per-agent opt-out (Approach B): when ``agent_meta`` is provided
+        AND ``server_name`` appears in ``agent_meta.mcp_full_access``,
+        the read-only strip is SKIPPED — the agent receives the FULL
+        tool surface for that server. ``agent_meta`` may be ``None``
+        (the caller's lookup failed, or the identity was never
+        supplied) — in that case we always return the builtin's
+        declared value, never the opt-out. Fail closed: an empty /
+        unset ``mcp_full_access`` list also falls through to the
+        builtin's value.
+
         Args:
             server_name: The MCP server's name (matches
                 ``McpServer.name`` and ``BuiltinServerDefinition.name``).
+            agent_meta: Optional ``AgentMetadata`` for the calling
+                instance. When provided, ``agent_meta.mcp_full_access``
+                is consulted for the opt-out.
 
         Returns:
-            ``True`` iff the builtin declares itself read-only.
+            ``True`` iff the read-only strip should apply to this
+            (agent, server) pair. ``False`` means "expose all tools".
         """
         # Function-local import mirrors the other ``_get_*`` helpers —
         # keeps the coupling narrow.
@@ -764,7 +847,27 @@ class McpService:
         # ``False`` by default (preserves legacy behavior).
         # ``getattr`` is defensive against future subclasses that might
         # not override the property.
-        return bool(getattr(definition, "read_only_tools", False))
+        definition_read_only = bool(
+            getattr(definition, "read_only_tools", False)
+        )
+        # No opt-out flag set: defer entirely to the builtin's default.
+        if not definition_read_only:
+            # A server that didn't opt into CR-3 strips nothing regardless
+            # of any opt-out — preserves legacy behavior. Returning the
+            # declaration value (False) is intentional, NOT an early
+            # exit: callers expect ``False`` to mean "don't filter".
+            return False
+        if agent_meta is None:
+            return True
+        # Per-agent opt-out: the agent's ``mcp_full_access`` list names
+        # the servers for which it receives the full surface. We check
+        # membership AFTER confirming the server actually wants the
+        # filter — never let an opt-out disable the safety on a server
+        # that didn't ask for it in the first place.
+        full_access = getattr(agent_meta, "mcp_full_access", None) or []
+        if server_name in full_access:
+            return False
+        return True
 
     def _get_resilience_config(self, server_name: str):
         """Return a builtin server's ``resilience_config``, or ``None``.

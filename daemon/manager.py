@@ -5187,7 +5187,13 @@ class InstanceManager:
             source_type=source_type,
         )
 
-    async def ensure_mcp_preloaded(self, instance_id: str) -> None:
+    async def ensure_mcp_preloaded(
+        self,
+        instance_id: str,
+        *,
+        agent_id: str | None = None,
+        version_tag: str | None = None,
+    ) -> None:
         """Ensure MCP tools are preloaded for an instance.
 
         Preloads if the instance is not in memory OR if it's in memory but lacks
@@ -5198,6 +5204,19 @@ class InstanceManager:
 
         Args:
             instance_id: The instance to preload MCP tools for.
+            agent_id: Optional base agent identifier. When provided,
+                the matching ``AgentMetadata`` is resolved at preload
+                time so per-agent ``mcp_full_access`` opt-outs are
+                honored. ``None`` is allowed: ``ensure_mcp_preloaded``
+                runs on the cold-restore path (``instance_lifecycle.get_instance``)
+                BEFORE ``spawn_instance_with_mcp`` has fired, so the
+                instance row's ``agent_id`` / ``agent_tag`` columns are
+                the only identity hint available. The best-effort
+                fallback below reads them from the repo and forwards
+                to ``preload_mcp_tools``. Any failure leaves
+                ``agent_id=None`` → strip stays applied (fail closed).
+            version_tag: Optional agent version tag. Forwarded to
+                ``preload_mcp_tools``; ``None`` selects base.
         """
         # Skip if instance already loaded with MCP tools cached — no need to preload
         if instance_id in self.instances:
@@ -5212,8 +5231,32 @@ class InstanceManager:
         if not hasattr(self, '_mcp_service') or not self._mcp_service:
             return
 
+        # Best-effort identity fallback for the cold-restore path. The
+        # caller (typically ``get_instance``) supplies only
+        # ``instance_id``, so ``agent_id`` may be None here. Reading
+        # the instance row yields the canonical ``agent_id`` /
+        # ``agent_tag`` already chosen at spawn time, which is the
+        # right input for ``mcp_full_access`` resolution. A repo read
+        # failure leaves ``agent_id=None`` → strip stays applied.
+        if agent_id is None and getattr(self, "_instance_repository", None):
+            try:
+                row = self._instance_repository.get(instance_id)
+                if row is not None:
+                    agent_id = getattr(row, "agent_id", None)
+                    if version_tag is None:
+                        version_tag = getattr(row, "agent_tag", None)
+            except Exception as _e:
+                logger.debug(
+                    f"ensure_mcp_preloaded: instance repo lookup "
+                    f"failed for {instance_id[:8]}: {_e}"
+                )
+
         try:
-            await self._mcp_service.preload_mcp_tools(instance_id)
+            await self._mcp_service.preload_mcp_tools(
+                instance_id,
+                agent_id=agent_id,
+                version_tag=version_tag,
+            )
         except Exception as e:
             logger.warning(f"MCP preload failed for {instance_id[:8]}: {e}")
 
@@ -5222,6 +5265,7 @@ class InstanceManager:
         *,
         instance_id: str,
         version_tag: str | None = None,
+        agent_id: str | None = None,
         **kwargs,
     ) -> str:
         """Async spawn with MCP preload and cleanup on failure.
@@ -5233,7 +5277,16 @@ class InstanceManager:
         Args:
             instance_id: The pre-generated instance ID.
             version_tag: Optional agent version tag. ``None`` selects the base agent.
-            **kwargs: Passed to spawn_instance().
+            agent_id: Optional base agent identifier. When provided it
+                is forwarded to ``ensure_mcp_preloaded`` so the
+                ``mcp_full_access`` opt-out is honored BEFORE the
+                instance row exists in the DB. Keyword-only binding
+                means ``agent_id`` always lands on this param — it
+                never actually arrives inside ``**kwargs``; the
+                in-code kwargs fallback is a defensive no-op.
+            **kwargs: Passed to spawn_instance(). Existing call sites
+                pass ``agent_id`` here as a kwarg — both forms are
+                honored.
 
         Returns:
             The instance_id.
@@ -5241,7 +5294,20 @@ class InstanceManager:
         Raises:
             Whatever spawn_instance() raises.
         """
-        await self.ensure_mcp_preloaded(instance_id)
+        # ``agent_id`` may arrive via the explicit param OR via
+        # ``**kwargs`` (legacy callers like job_processor.py pass it
+        # as a kwarg to ``spawn_instance``). The explicit param wins;
+        # fall back to kwargs for backward compatibility. Once bound
+        # to the explicit param, Python does NOT carry ``agent_id``
+        # into ``**kwargs``, so we re-inject it into the
+        # ``spawn_instance`` call below to preserve the legacy
+        # behavior every existing caller depends on.
+        effective_agent_id = agent_id if agent_id is not None else kwargs.get("agent_id")
+        await self.ensure_mcp_preloaded(
+            instance_id,
+            agent_id=effective_agent_id,
+            version_tag=version_tag,
+        )
 
         try:
             # Unpack the (instance_id, validated_model_override) tuple —
@@ -5252,6 +5318,7 @@ class InstanceManager:
             instance_id, _validated_model_override = self.spawn_instance(
                 instance_id=instance_id,
                 version_tag=version_tag,
+                agent_id=effective_agent_id,
                 **kwargs,
             )
             return instance_id

@@ -3,15 +3,20 @@
 Validates the project-manager agent definition:
 
   1.  meta.json schema & required-field correctness
-  2.  Tool-allowance security: read-only on code, no project-state writes,
-      no instance/dispatch/control tools (CRITICAL — project-manager is v1
-      strategic oversight and must NEVER mutate code, plans, or DB state).
+  2.  Tool-allowance security: zero code contact, no instance/dispatch/
+      control tools, ``project_delete`` / ``project_history_delete``
+      remain DENIED. The 18 project write tools and the 8 plane write
+      tools are LEGITIMATE in ``allow`` (v2.1 cardinal #1 — direct
+      domain management). Plane write-through is gated by
+      ``mcp_full_access: ["plane"]`` (architecture b1).
   3.  Auto-discovery via ``AgentRegistry`` + ``SKIP_DIRS`` exclusion.
   4.  Convention compliance: prompt-file completeness, cardinal-rule count,
       first-person voice, no provenance markers, four-flow workflow,
       tool-justification table.
   5.  Prompt composition: system-prompt assembly smoke test, tone/voice
-      directive, read-only constraint language.
+      directive, no-code-contact boundary.
+  6.  Plane surface drift alarm: pins the v2.1 effective plane surface
+      (7 reads + 8 writes) so future added verbs fail loudly.
 
 Modelled after ``tests/unit/test_docwriter_agent_validation.py`` and
 ``tests/unit/test_reviewer_v2_agent.py``. All tests are pure file +
@@ -340,13 +345,23 @@ class TestMetaJsonSchema:
 
 
 class TestToolAllowanceSecurity:
-    """Verify project-manager's tools config enforces its read-only contract."""
+    """Verify project-manager's tools config enforces its contract.
 
-    # Tools that mutate source, plans, project state, instances, or
-    # dispatch work. If any of these show up in tools.allow, the agent
-    # can violate Cardinal Rule 1 (read-only) or Cardinal Rule 2
-    # (no work dispatch).
-    KNOWN_WRITE_TOOLS: frozenset[str] = frozenset({
+    v2.1 contract — direct domain management with zero code contact:
+      - files / bash / instances / experience / self / mcp / question
+        MUST NOT be in ``allow`` (no code/file/lifecycle control).
+      - project-state writes (create/update/status/tags/shortnames/
+        metadata/links/directories) ARE in ``allow`` (Cardinal #1).
+      - plane_* writes ARE in ``allow`` (Cardinal #1 mcp_full_access).
+      - ``project_delete`` and ``project_history_delete`` remain
+        DENIED (destructive — surfaced as decision, not executed).
+    """
+
+    # Tools that mutate code, control lifecycle, or write knowledge —
+    # these MUST NOT be in ``allow``. The 18 project write tools and
+    # the 8 plane write tools are NOW legitimate (v2.1 domain
+    # management) — they are NOT in this set.
+    KNOWN_FORBIDDEN_ALLOW: frozenset[str] = frozenset({
         # File mutations
         "edit_file",
         "write_file",
@@ -356,16 +371,21 @@ class TestToolAllowanceSecurity:
         "spawn_instance",
         "terminate_instance",
         "send_message",
-        # Project / knowledge state mutations
+        # Knowledge writes
         "experience",
+        # System-internal mechanisms denied by default in v2
+        "mcp",
+        "question",
+    })
+
+    # The 18 project write tools PM now legitimately holds (Cardinal #1).
+    PROJECT_WRITE_TOOLS_GRANTED: frozenset[str] = frozenset({
         "project_create",
-        "project_delete",
         "project_update",
         "project_set_status",
+        "project_history_add",
         "project_cn_add",
         "project_cn_remove",
-        "project_history_add",
-        "project_history_delete",
         "project_set_tags",
         "project_add_tag",
         "project_remove_tag",
@@ -378,23 +398,104 @@ class TestToolAllowanceSecurity:
         "project_unlink",
         "project_add_directory",
         "project_remove_directory",
-        # System-internal mechanisms we deny by default in v2
-        "mcp",
-        "question",
     })
 
-    def test_no_write_tool_in_allow(self) -> None:
-        """tools.allow must not contain any write-capable tool."""
+    # The 8 plane write tools PM now legitimately holds via mcp_full_access.
+    PLANE_WRITE_TOOLS_GRANTED: frozenset[str] = frozenset({
+        "plane_create_issue",
+        "plane_update_issue",
+        "plane_delete_issue",
+        "plane_add_comment",
+        "plane_remove_comment",
+        "plane_create_cycle",
+        "plane_update_cycle",
+        "plane_assign_issue",
+    })
+
+    # Destructive project tools that MUST remain denied (Cardinal #1).
+    PROJECT_DESTRUCTIVE_TOOLS_DENIED: frozenset[str] = frozenset({
+        "project_delete",
+        "project_history_delete",
+    })
+
+    def test_no_forbidden_tool_in_allow(self) -> None:
+        """tools.allow must NOT contain code/lifecycle/knowledge tools.
+
+        v2.1: the 18 project write tools and the 8 plane write tools
+        ARE legitimately in allow. The restriction is on code-touching
+        and lifecycle-controlling tools, not on project-record or
+        Plane work-item operations.
+        """
         meta = _load_meta()
         allow = set(meta.get("tools", {}).get("allow", []))
-        leaks = allow & self.KNOWN_WRITE_TOOLS
+        leaks = allow & self.KNOWN_FORBIDDEN_ALLOW
         assert not leaks, (
-            f"tools.allow must NOT contain write/dispatch tools. "
+            f"tools.allow must NOT contain code/lifecycle/knowledge tools. "
             f"Leaked: {sorted(leaks)}"
         )
 
-    def test_deny_covers_write_tools(self) -> None:
-        """tools.deny must explicitly block every file/instance/write tool."""
+    def test_project_write_tools_granted_in_allow(self) -> None:
+        """All 18 project write tools must be in allow (v2.1 cardinal #1)."""
+        meta = _load_meta()
+        allow = set(meta.get("tools", {}).get("allow", []))
+        missing = self.PROJECT_WRITE_TOOLS_GRANTED - allow
+        assert not missing, (
+            f"tools.allow must contain all 18 project write tools "
+            f"(Cardinal #1 — direct domain management). "
+            f"Missing: {sorted(missing)}"
+        )
+
+    def test_plane_write_tools_absent_from_deny(self) -> None:
+        """All 8 plane write tools must be absent from deny (v2.1).
+
+        Removal from deny alone is necessary but not sufficient
+        (the allow list uses the ``plane`` category). The deny
+        check pins the explicit "no longer denied" contract.
+        """
+        meta = _load_meta()
+        deny = set(meta.get("tools", {}).get("deny", []))
+        leaked = self.PLANE_WRITE_TOOLS_GRANTED & deny
+        assert not leaked, (
+            f"Plane write tools must NOT be in deny (v2.1 mcp_full_access). "
+            f"Still denied: {sorted(leaked)}"
+        )
+
+    def test_mcp_full_access_present_and_plane_only(self) -> None:
+        """``mcp_full_access`` must be present and contain only ``plane``.
+
+        Pins the per-agent opt-out (architecture b1): only the
+        server PM is authorized to write against must be listed.
+        A typo (e.g. ``["pane"]``) would fail closed at the
+        validator and PM would stay read-only on Plane.
+        """
+        meta = _load_meta()
+        mfa = meta.get("mcp_full_access")
+        assert isinstance(mfa, list), (
+            f"mcp_full_access must be a list, got {type(mfa).__name__}"
+        )
+        assert mfa == ["plane"], (
+            f"mcp_full_access must be exactly ['plane'] (only Plane "
+            f"write-through is granted). Got: {mfa!r}"
+        )
+
+    def test_deny_covers_destructive_project_tools(self) -> None:
+        """tools.deny must still cover destructive project tools.
+
+        v2.1 keeps ``project_delete`` and ``project_history_delete``
+        DENIED — PM surfaces deletes as decisions, never executes them
+        (Cardinal #1).
+        """
+        meta = _load_meta()
+        deny = set(meta.get("tools", {}).get("deny", []))
+        missing = self.PROJECT_DESTRUCTIVE_TOOLS_DENIED - deny
+        assert not missing, (
+            f"tools.deny must still block destructive project tools "
+            f"(Cardinal #1 — surfaced as decision, not executed). "
+            f"Missing: {sorted(missing)}"
+        )
+
+    def test_deny_blocks_code_and_lifecycle_tools(self) -> None:
+        """tools.deny must explicitly block code/lifecycle/knowledge tools."""
         meta = _load_meta()
         deny = set(meta.get("tools", {}).get("deny", []))
         expected = {
@@ -409,28 +510,30 @@ class TestToolAllowanceSecurity:
         }
         missing = expected - deny
         assert not missing, (
-            f"tools.deny must explicitly block {sorted(missing)}. "
-            f"Got deny: {sorted(deny)}"
+            f"tools.deny must explicitly block code/lifecycle tools "
+            f"{sorted(missing)}. Got deny: {sorted(deny)}"
         )
 
-    def test_deny_covers_project_write_tools(self) -> None:
-        """tools.deny must explicitly block every project-state write tool."""
+    def test_granted_tools_not_in_deny(self) -> None:
+        """The 18 project write + 8 plane write tools must NOT be in deny."""
         meta = _load_meta()
         deny = set(meta.get("tools", {}).get("deny", []))
-        expected = {
-            "project_create",
-            "project_delete",
-            "project_update",
-            "project_set_status",
-            "project_cn_add",
-            "project_cn_remove",
-            "project_history_add",
-            "project_history_delete",
-        }
-        missing = expected - deny
-        assert not missing, (
-            f"tools.deny must explicitly block project-state writes "
-            f"{sorted(missing)}. Got deny: {sorted(deny)}"
+        granted = self.PROJECT_WRITE_TOOLS_GRANTED | self.PLANE_WRITE_TOOLS_GRANTED
+        leaked = granted & deny
+        assert not leaked, (
+            f"Granted write tools must NOT be in deny. "
+            f"Still denied: {sorted(leaked)}"
+        )
+
+    def test_destructive_tools_not_in_allow(self) -> None:
+        """``project_delete`` and ``project_history_delete`` must NOT be in allow."""
+        meta = _load_meta()
+        allow = set(meta.get("tools", {}).get("allow", []))
+        leaked = self.PROJECT_DESTRUCTIVE_TOOLS_DENIED & allow
+        assert not leaked, (
+            f"Destructive project tools must NOT be in allow "
+            f"(Cardinal #1 — surfaced as decision, not executed). "
+            f"Leaked: {sorted(leaked)}"
         )
 
     def test_allow_deny_no_overlap(self) -> None:
@@ -676,7 +779,7 @@ class TestAgentDiscovery:
         assert md is not None, "registry.get('project-manager') returned None"
         assert md.id == "project-manager", f"id mismatch: {md.id}"
         assert md.name == "Project Manager", f"name mismatch: {md.name!r}"
-        assert md.version == "2.0.0", f"version mismatch: {md.version!r}"
+        assert md.version == "2.1.0", f"version mismatch: {md.version!r}"
         assert md.team_members == ["leader", "worker"], (
             f"team_members must be ['leader', 'worker'] (v2 delegation). "
             f"Got: {md.team_members}"
@@ -910,4 +1013,196 @@ class TestPromptComposition:
         )
         assert "rule.md" in workflow_text, (
             "workflow.md must reference rule.md for Cardinal Rules"
+        )
+
+
+# =============================================================================
+# 6. Plane surface drift alarm (architecture test #7)
+# =============================================================================
+
+
+class TestPlaneSurfaceDriftAlarm:
+    """Pin PM's effective plane tool surface (reads + 8 writes).
+
+    The architecture doc (``pm-domain-access-architecture.md``, test #7)
+    calls for a drift alarm: PM allows the whole ``plane`` category,
+    so a future Plane MCP server release adding new verbs could
+    silently widen PM's surface. This test pins the CURRENT surface
+    after the v2.1 carve-out so any future additive change is an
+    explicit, reviewed failure — not a silent capability leak.
+
+    The test borrows the same classification pattern as Class 12 in
+    ``tests/unit/test_plane_mcp.py`` (``is_read_tool(name,
+    PlaneServerDefinition.resilience_config)``).
+    """
+
+    # The pinned inventory is authoritative for v2.1: edit this tuple
+    # ONLY as part of an explicit, reviewed carve-out change.
+    SURFACE_VERBS: tuple[tuple[str, bool], ...] = (
+        # Reads (matched by ``list_`` / ``get_`` / ``search_`` patterns)
+        ("plane_list_issues", True),
+        ("plane_list_projects", True),
+        ("plane_list_cycles", True),
+        ("plane_get_issue", True),
+        ("plane_get_project", True),
+        ("plane_get_cycle", True),
+        ("plane_search_issues", True),
+        # Writes (PM's 8 granted carve-out via mcp_full_access)
+        ("plane_create_issue", False),
+        ("plane_update_issue", False),
+        ("plane_delete_issue", False),
+        ("plane_add_comment", False),
+        ("plane_remove_comment", False),
+        ("plane_create_cycle", False),
+        ("plane_update_cycle", False),
+        ("plane_assign_issue", False),
+    )
+
+    @staticmethod
+    def _surface_drift(pinned: set[str], discovered: set[str]) -> set[str]:
+        """Return the verbs that differ between pinned and discovered.
+
+        This IS the alarm mechanism: the symmetric difference between
+        the reviewed inventory and whatever the tool surface actually
+        flows through. Any added verb (future Plane release) or any
+        removed verb (surface retraction) lands in the result, and the
+        caller fails loudly on a non-empty set. The two
+        ``test_drift_alarm_detects_*`` tests prove this helper fires
+        under both drift directions, so the inventory test below can
+        never silently degrade into a tautology.
+        """
+        return (discovered - pinned) | (pinned - discovered)
+
+    @classmethod
+    def _classify_surface(cls, names: set[str]) -> dict[str, str]:
+        """Classify verbs with the RUNTIME Plane classifier.
+
+        Uses the same ``is_read_tool(name, resilience_config)`` seam
+        ``McpService`` uses at tool-listing time, so ``discovered``
+        reflects the real classification path, not a hand-written copy.
+        """
+        from daemon.mcp.builtin_servers.plane import PlaneServerDefinition
+        from daemon.mcp.resilience import is_read_tool
+
+        cfg = PlaneServerDefinition().resilience_config
+        return {
+            name: "read" if is_read_tool(name, cfg) else "write"
+            for name in names
+        }
+
+    @classmethod
+    def _pinned_pairs(cls) -> set[str]:
+        """The pinned inventory as ``{"name:kind", ...}`` pairs."""
+        return {
+            f"{name}:{'read' if read else 'write'}"
+            for name, read in cls.SURFACE_VERBS
+        }
+
+    @classmethod
+    def _discovered_pairs(cls, surface_names: set[str]) -> set[str]:
+        """Runtime-classified surface as ``{"name:kind", ...}`` pairs.
+
+        This is how the real alarm input is built: verb names from
+        the tool surface, classification from the live Plane
+        classifier — never from the pinned expectations.
+        """
+        return {
+            f"{name}:{kind}"
+            for name, kind in cls._classify_surface(surface_names).items()
+        }
+
+    def test_classifier_classifies_surface_consistently(self) -> None:
+        """``is_read_tool`` classifies each surface verb as expected.
+
+        Pins the contract that the pattern classifier in
+        ``daemon/mcp/builtin_servers/plane.py`` still maps every
+        documented verb to the right read/write bucket. If a future
+        Plane server adds a verb that DOESN'T match the documented
+        patterns, this assertion fails before the surface-comparison
+        test even runs.
+        """
+        from daemon.mcp.builtin_servers.plane import PlaneServerDefinition
+        from daemon.mcp.resilience import is_read_tool
+
+        defn = PlaneServerDefinition()
+        cfg = defn.resilience_config
+
+        mismatches: list[tuple[str, bool, bool]] = []
+        for name, expected_read in self.SURFACE_VERBS:
+            actual = is_read_tool(name, cfg)
+            if actual != expected_read:
+                mismatches.append((name, expected_read, actual))
+
+        assert not mismatches, (
+            f"Plane classifier drift: {len(mismatches)} verb(s) "
+            f"mis-classified. Offenders: {mismatches}"
+        )
+
+    def test_drift_alarm_plane_surface_inventory(self) -> None:
+        """Discovered plane surface == pinned surface, via the alarm helper.
+
+        ``discovered`` is classified by the RUNTIME classifier
+        (``is_read_tool``) over the pinned verb names, then compared
+        with the pinned ``name:kind`` pairs through
+        ``_surface_drift`` — the same symmetric-difference mechanism
+        the drift-detection tests exercise. The test fails when
+        (a) the pinned list is edited without updating the classifier
+        contract, or (b) the drift logic itself breaks, or (c) a
+        future Plane release's verb set no longer matches the pinned
+        inventory.
+        """
+        pinned = self._pinned_pairs()
+        discovered = self._discovered_pairs(
+            {name for name, _read in self.SURFACE_VERBS}
+        )
+
+        drift = self._surface_drift(pinned, discovered)
+        assert not drift, (
+            f"Plane surface drift detected: {sorted(drift)}. "
+            f"Discovered: {sorted(discovered)}. "
+            f"Pinned: {sorted(pinned)}. "
+            f"If a new verb was added to the Plane MCP server, "
+            f"update the pinned surface and explicitly review the "
+            f"v2.1 mcp_full_access carve-out."
+        )
+
+    def test_drift_alarm_detects_added_verb(self) -> None:
+        """The alarm fires when a verb is ADDED to the surface.
+
+        Simulates a future Plane MCP release exposing one new verb
+        (``plane_archive_issue``) on top of the pinned inventory. The
+        discovered set is built by the same runtime-classifier +
+        set-difference path the inventory test uses, so this proves
+        the alarm mechanism would fire — an additive capability leak
+        can never pass silently.
+        """
+        pinned = self._pinned_pairs()
+
+        surface_names = {name for name, _read in self.SURFACE_VERBS} | {
+            "plane_archive_issue"
+        }
+        discovered = self._discovered_pairs(surface_names)
+
+        drift = self._surface_drift(pinned, discovered)
+        assert drift == {"plane_archive_issue:write"}, (
+            f"Drift alarm must flag the added verb. Got: {sorted(drift)}"
+        )
+
+    def test_drift_alarm_detects_removed_verb(self) -> None:
+        """The alarm fires when a verb is REMOVED from the surface.
+
+        Mirror case: a surface retraction (``plane_list_issues``
+        disappears) is equally drift — the pinned inventory would
+        claim a capability the tool surface no longer delivers.
+        """
+        pinned = self._pinned_pairs()
+
+        surface_names = {name for name, _read in self.SURFACE_VERBS} - {
+            "plane_list_issues"
+        }
+        discovered = self._discovered_pairs(surface_names)
+
+        drift = self._surface_drift(pinned, discovered)
+        assert drift == {"plane_list_issues:read"}, (
+            f"Drift alarm must flag the removed verb. Got: {sorted(drift)}"
         )

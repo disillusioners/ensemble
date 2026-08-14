@@ -341,6 +341,23 @@ class AgentMetadata(BaseModel):
             "configured per event. Example: {\"on_complete\": [\"add_to_shared_context_md_files\"]}"
         ),
     )
+    mcp_full_access: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Per-agent opt-out from the built-in MCP server read-only "
+            "filter (CR-3). Names the built-in MCP servers (e.g. "
+            "'plane') for which THIS agent receives the FULL tool "
+            "surface — write tools are NOT stripped. Empty list "
+            "(default) = no opt-out, read-only strip applies as the "
+            "global fail-closed default. Entries are validated against "
+            "the built-in server registry in ``validate_tool_configs``; "
+            "unknown entries emit a WARNING and the strip stays applied "
+            "(fail closed). Resolved at pre-load time via "
+            "``get_version`` then ``get_resolved`` — any identity "
+            "lookup failure falls back to \"no opt-out\" so the agent "
+            "boots read-only rather than write-open."
+        ),
+    )
     inject_allowed_models: bool = Field(
         default=False,
         description="When true, inject the allowed-models list into this agent's system prompt at spawn time.",
@@ -582,6 +599,12 @@ class AgentRegistry:
                     ),
                     recursion_limit_multiplier=meta.get("recursion_limit_multiplier", 1.0),
                     recursion_limit=meta.get("recursion_limit"),
+                    # ``mcp_full_access`` (Approach B): per-agent opt-out
+                    # from the CR-3 read-only strip. Missing/None means
+                    # no opt-out (empty list); unknown entries are
+                    # validated in ``validate_tool_configs`` with a
+                    # fail-closed WARN.
+                    mcp_full_access=meta.get("mcp_full_access", []) or [],
                 )
             except ValidationError as e:
                 # C6 / LLM-models pattern: don't crash discovery. Any
@@ -629,6 +652,7 @@ class AgentRegistry:
                         ),
                         recursion_limit_multiplier=meta.get("recursion_limit_multiplier", 1.0),
                         recursion_limit=meta.get("recursion_limit"),
+                        mcp_full_access=meta.get("mcp_full_access", []) or [],
                     )
                 except Exception as e2:
                     logger.warning(
@@ -1056,6 +1080,46 @@ class AgentRegistry:
                     warnings.append(
                         f"Agent '{display_id}': tool config results in ZERO available tools"
                     )
+
+                # ``mcp_full_access`` opt-out validation (Approach B).
+                # Each entry must reference a KNOWN built-in MCP server;
+                # unknown entries are a fail-closed WARN — the strip
+                # stays applied at preload time, so a typo never grants
+                # unintended write access (the global read-only default
+                # is preserved). Import is function-local with a guard:
+                # the built-in registry may import before the daemon's
+                # module graph is fully wired (cold-start ordering is
+                # an open question), so an ImportError here must NOT
+                # crash registry construction — skip the validation
+                # with a debug log and let the runtime log the failure
+                # again at preload time.
+                if agent_meta.mcp_full_access:
+                    try:
+                        from daemon.mcp.builtin_servers import (
+                            get_registry as _get_mcp_registry,
+                        )
+                        _mcp_registry = _get_mcp_registry()
+                    except Exception as _mcp_import_err:
+                        logger.debug(
+                            f"validate_tool_configs: cannot import "
+                            f"built-in MCP registry to validate "
+                            f"mcp_full_access for '{display_id}': "
+                            f"{_mcp_import_err}"
+                        )
+                    else:
+                        for entry in agent_meta.mcp_full_access:
+                            if not isinstance(entry, str) or not entry:
+                                warnings.append(
+                                    f"Agent '{display_id}': mcp_full_access "
+                                    f"entry {entry!r} is not a non-empty string"
+                                )
+                                continue
+                            if _mcp_registry.get_by_name(entry) is None:
+                                warnings.append(
+                                    f"Agent '{display_id}': mcp_full_access "
+                                    f"entry '{entry}' is not a known built-in "
+                                    f"MCP server"
+                                )
 
         return warnings
 

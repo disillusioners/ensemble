@@ -139,6 +139,18 @@ class PlaneServerDefinition(BuiltinServerDefinition):
         ``read_tool_patterns`` / ``write_tool_patterns`` tuple that
         drives caching also drives filtering — no chance for the
         two classifiers to disagree on what counts as a write.
+
+        Per-agent opt-out (Approach B): an agent's ``meta.json`` may
+        declare ``mcp_full_access: ["plane"]`` to receive the FULL
+        tool surface for Plane — the read-only filter is skipped at
+        ``McpService._get_read_only_tools`` time, and write verbs
+        are exposed to the agent as if this declaration returned
+        ``False``. The opt-out is meta-side; this property remains
+        ``True`` as the global fail-closed default for every agent
+        that does NOT list ``plane`` in ``mcp_full_access``. Unknown
+        or typo entries (``mcp_full_access: ["pane"]``) are validated
+        in ``AgentRegistry.validate_tool_configs`` and produce a
+        WARNING; the strip stays applied so a typo fails closed.
         """
         return True
 
