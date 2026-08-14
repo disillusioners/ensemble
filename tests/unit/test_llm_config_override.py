@@ -30,11 +30,13 @@ def create_mock_config(
     temperature: float = 0.7,
     request_timeout: int = 610,
     model_vision: str | None = None,
+    base_url_backup: str | None = None,
 ) -> Config:
     """Create a mock Config with customizable LLM settings."""
     mock_llm = MagicMock(spec=LLMConfig)
     mock_llm.model = model
     mock_llm.base_url = base_url
+    mock_llm.base_url_backup = base_url_backup
     mock_llm.api_key = api_key
     mock_llm.temperature = temperature
     mock_llm.request_timeout = request_timeout

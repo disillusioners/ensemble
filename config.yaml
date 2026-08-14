@@ -4,6 +4,14 @@
 # LLM Configuration
 llm:
   base_url: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+  # Optional HA fallback endpoint — same proxy backend in a different
+  # datacenter (same API key, model names, API surface). When unset
+  # (default), behavior is identical to the pre-HA system: only
+  # ``base_url`` is used. When set, transient / timeout / empty-choices
+  # failures on the primary trigger a one-shot swap to this URL within
+  # the same invoke cycle (non-sticky — next invoke starts back on
+  # primary). Override via OPENAI_BASE_URL_BACKUP env var.
+  base_url_backup: ${OPENAI_BASE_URL_BACKUP:-}
   api_key: ${OPENAI_API_KEY}
   model: ${OPENAI_MODEL:-gpt-4}
   model_title: ${OPENAI_MODEL_TITLE:-}  # Optional separate model for title generation

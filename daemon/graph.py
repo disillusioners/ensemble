@@ -3082,12 +3082,12 @@ def build_instance_llms(
     # Filter model_vision from config to avoid noisy LangChain warnings
     standard_config = clean_llm_config(llm_config_with_headers)
     standard_config["model"] = model_standard
-    llm_standard = ThinkingChatOpenAI(**standard_config)
+    llm_standard_chat = ThinkingChatOpenAI(**standard_config)
 
     # Always bind tools to llm_standard, regardless of vision configuration
     if llm_with_tools is None:
-        llm_with_tools = llm_standard.bind_tools(tools)
-    llm_standard = llm_standard.bind_tools(tools)
+        llm_with_tools = llm_standard_chat.bind_tools(tools)
+    llm_standard = llm_standard_chat.bind_tools(tools)
 
     # Wrap with error classification and retry if config provided
     if retry_config:
@@ -3096,18 +3096,76 @@ def build_instance_llms(
         if llm_standard is not llm_with_tools:
             llm_standard = classify_llm_errors(llm_standard)
 
-        from daemon.llm_error_classifier import _make_llm_retry_strategy
+        from daemon.llm_error_classifier import (
+            FailoverController,
+            PRIMARY_TIMEOUT_MAX,
+            PRIMARY_TRANSIENT_MAX,
+            _make_llm_retry_strategy,
+        )
 
         transient_attempts = retry_config.get("transient_attempts", 8)
         timeout_attempts = retry_config.get("timeout_attempts", 3)
 
+        # HA-failover wiring: build one FailoverController per underlying
+        # ChatOpenAI instance. The controller mutates the openai client's
+        # ``base_url`` so the *next* request targets the backup URL.
+        #
+        # We capture the raw ChatOpenAI instance (``llm_standard_chat``)
+        # BEFORE ``bind_tools`` / ``classify_llm_errors`` wrap it — the
+        # bound runnable still exposes ``root_client`` (verified in
+        # langchain_openai >= 0.2), but mutating via the original instance
+        # avoids any future surprise if a LangChain refactor drops the
+        # attribute on the binding wrapper.
+        #
+        # No backup configured → controllers are still constructed but
+        # ``is_configured`` is False and they are not passed to the
+        # strategy; this keeps the rest of the code shape uniform.
+        # ``is_configured`` is the SINGLE decision point for "backup
+        # active" (truthy AND different from primary) — no parallel
+        # truth in graph.py.
+        primary_url = llm_config_with_headers.get("base_url", "")
+        backup_url = llm_config_with_headers.get("base_url_backup")
+
+        # Always build a controller for the standard client. This covers
+        # both the vision case (where ``llm_with_tools`` is the bound
+        # vision ChatOpenAI and shares the openai client config with
+        # standard) and the standard case (where ``llm_with_tools`` IS
+        # the bound standard). Both ``llm_with_tools`` and ``llm_standard``
+        # wrap the same underlying ChatOpenAI via ``llm_standard_chat``
+        # (verified above), so one controller covers both. A separate
+        # vision-only controller is documented as a follow-up — vision
+        # failover would only matter if the vision endpoint itself fails,
+        # which is out of scope for v1.
+        standard_failover = FailoverController(
+            chat_client=llm_standard_chat,
+            primary_url=primary_url,
+            backup_url=backup_url,
+        )
+        backup_configured = standard_failover.is_configured
+
         retry_predicate = _make_llm_retry_strategy(
             transient_max=transient_attempts,
             timeout_max=timeout_attempts,
+            failover_controller=standard_failover if backup_configured else None,
         )
 
-        # Use max() as hard safety ceiling; the predicate controls per-category limits
-        max_attempts = max(transient_attempts, timeout_attempts)
+        # HA budget-split extends the total attempts ceiling. Worst case
+        # the primary consumes its full slice for one category (transient
+        # OR timeout), then the backup runs the FULL original budget for
+        # that same category after the swap resets the counters:
+        #   ceiling = max(transient_max, timeout_max)            # backup leg
+        #           + max(primary_transient_max, primary_timeout_max)  # primary leg
+        # The two primary caps are the module constants exported by
+        # ``llm_error_classifier`` (defaults of
+        # ``_make_llm_retry_strategy``) so the strategy and this ceiling
+        # derivation cannot drift apart. Without a backup, the ceiling
+        # stays at the pre-HA value.
+        if backup_configured:
+            max_attempts = max(transient_attempts, timeout_attempts) + max(
+                PRIMARY_TRANSIENT_MAX, PRIMARY_TIMEOUT_MAX
+            )
+        else:
+            max_attempts = max(transient_attempts, timeout_attempts)
 
         # Use tenacity directly since LangChain's with_retry() no longer supports
         # custom retry predicates (the 'retry=' parameter was removed)
@@ -3135,6 +3193,13 @@ def build_instance_llms(
                 return retrying(classified_standard.invoke, input_value)
             llm_standard = RunnableLambda(_run_standard_with_retry)
 
+        if backup_configured:
+            logger.info(
+                f"[LLM-HA] Failover enabled: primary={primary_url} "
+                f"backup={backup_url} "
+                f"(primary slice: 2 transient / 1 timeout, "
+                f"backup gets full {transient_attempts}/{timeout_attempts})"
+            )
         logger.debug(
             f"LLM configured with {transient_attempts} transient retries, "
             f"{timeout_attempts} timeout retries"

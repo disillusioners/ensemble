@@ -83,9 +83,15 @@ class TitleGenerationService:
 
             # Create LLM client for title generation
             # Use dedicated title model (falls back to main model if not configured)
-            # Filter model_vision from config to avoid noisy LangChain warnings
+            # Filter model_vision from config to avoid noisy LangChain warnings.
+            # ``base_url_backup`` is threaded through for HA-failover coverage of
+            # this secondary LLM invocation; the actual failover wiring here is
+            # documented as a follow-up (see FailoverController note in
+            # daemon/llm_error_classifier.py). The primary retry path lives in
+            # ``build_instance_llms`` (daemon/graph.py) and is fully wired.
             llm_config = {
                 "base_url": self._config.llm.base_url,
+                "base_url_backup": self._config.llm.base_url_backup,
                 "api_key": self._config.llm.api_key,
                 "model": self._config.llm.model_title,
                 "temperature": 0.3,  # Lower temperature for more focused titles

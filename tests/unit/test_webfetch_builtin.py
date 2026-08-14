@@ -492,6 +492,7 @@ class TestWebFetchBootstrapIntegration:
         config = MagicMock(spec=Config)
         config.llm = MagicMock(spec=LLMConfig)
         config.llm.base_url = "https://api.openai.com/v1"
+        config.llm.base_url_backup = None
         config.llm.api_key = "test-key"
         config.llm.model = "gpt-4"
         config.llm.model_vision = None

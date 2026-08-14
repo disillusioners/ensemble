@@ -570,9 +570,15 @@ class ChildReportsService:
         conversation = "\n".join(conversation_text)
         
         # Create LLM client for summarization using the same config pattern
-        # Filter model_vision from config to avoid noisy LangChain warnings
+        # Filter model_vision from config to avoid noisy LangChain warnings.
+        # ``base_url_backup`` threaded through for HA-failover coverage of
+        # this secondary LLM invocation; the actual failover wiring here is
+        # a follow-up (see FailoverController note in
+        # daemon/llm_error_classifier.py). The primary retry path lives in
+        # ``build_instance_llms`` (daemon/graph.py) and is fully wired.
         llm_config = {
             "base_url": self._config.llm.base_url,
+            "base_url_backup": self._config.llm.base_url_backup,
             "api_key": self._config.llm.api_key,
             "model": self._config.llm.model,
             "temperature": 0.3,  # Lower temperature for more focused summaries
@@ -1163,8 +1169,11 @@ Provide a concise summary:"""
             # Mirror the existing LLM-call pattern in this module
             # (child_reports.py:549-561): build a manual dict, clean it,
             # and construct via ThinkingChatOpenAI.
+            # ``base_url_backup`` threaded through for HA-failover coverage;
+            # the actual failover wiring here is a follow-up.
             llm_config = {
                 "base_url": self._config.llm.base_url,
+                "base_url_backup": self._config.llm.base_url_backup,
                 "api_key": self._config.llm.api_key,
                 "model": self._config.llm.model,
                 "temperature": 0.3,

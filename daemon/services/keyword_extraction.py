@@ -359,6 +359,7 @@ async def extract_keywords(
 
         llm_config = {
             "base_url": config.llm.base_url,
+            "base_url_backup": config.llm.base_url_backup,
             "api_key": config.llm.api_key,
             "model": model,
             "temperature": 0.0,

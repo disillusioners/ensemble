@@ -80,6 +80,23 @@ class LLMConfig(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="OPENAI_")
 
     base_url: str = Field(default="https://api.openai.com/v1")
+    # Optional HA fallback endpoint — same proxy backend in another datacenter.
+    # Same API key / model names / API surface, just a different physical
+    # endpoint. When unset (None), the system uses ONLY ``base_url`` and the
+    # retry classifier behaves exactly as before (no failover). When set,
+    # transient / timeout / IndexError failures on the primary trigger a
+    # one-shot swap to this URL within the same invoke cycle (non-sticky:
+    # next invoke starts back on primary).
+    # Wired via OPENAI_BASE_URL_BACKUP (env_prefix="OPENAI_").
+    base_url_backup: str | None = Field(
+        default=None,
+        description=(
+            "Optional HA fallback base URL. When set, transient / timeout / "
+            "IndexError failures on the primary trigger a swap to this URL "
+            "within the same invoke cycle. None = primary-only (zero "
+            "behavior change)."
+        ),
+    )
     api_key: str = Field(default="")
     model: str = Field(default="gpt-4")
     model_title: str | None = Field(default=None, description="Model for title generation (falls back to model)")
@@ -116,16 +133,29 @@ class LLMConfig(BaseSettings):
     @classmethod
     def _parse_reasoning_echo_models(cls, value: Any) -> Any:
         """Accept comma-separated strings (and JSON arrays) from env / YAML.
-
-        Delegates to ``_parse_csv_or_json_list`` for the shared parsing logic.
-        The ``NoDecode`` annotation prevents pydantic-settings from
-        auto-parsing env values, so we handle both forms here:
-          - ``"deepseek,glm"`` → ``["deepseek", "glm"]``
-          - ``'["deepseek", "glm"]'`` → ``["deepseek", "glm"]``
-          - ``["deepseek", "glm"]`` → unchanged (passthrough)
-          - ``""`` or whitespace → ``[]``
+        ...
         """
         return _parse_csv_or_json_list(value)
+
+    @field_validator("base_url_backup", mode="before")
+    @classmethod
+    def _coerce_base_url_backup_empty_to_none(cls, value: Any) -> Any:
+        """Coerce an empty-string ``base_url_backup`` to ``None``.
+
+        ``config.yaml`` uses the substitution pattern
+        ``base_url_backup: ${OPENAI_BASE_URL_BACKUP:-}`` which yields an
+        empty string when the env var is unset. Pydantic-settings would
+        otherwise store ``""`` as a valid ``str`` and the failover logic
+        in :mod:`daemon.llm_error_classifier` would mistake it for a
+        configured backup. Convert any whitespace-only value to ``None``
+        so the "no backup configured" branch is taken (zero behavior
+        change from the pre-HA system).
+        """
+        if value is None:
+            return None
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
     # Models allowed as instance model overrides at spawn time. Exact match
     # (case-insensitive) is performed against the override model name;

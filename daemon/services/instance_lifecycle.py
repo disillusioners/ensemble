@@ -721,9 +721,12 @@ class InstanceLifecycleService:
 
         Returns:
             The LLM config dict with the resolved ``model`` key.
+            Includes ``base_url_backup`` (may be ``None``) so the graph
+            builder can wire the HA failover controller when present.
         """
         llm_config = {
             "base_url": self._config.llm.base_url,
+            "base_url_backup": self._config.llm.base_url_backup,
             "api_key": self._config.llm.api_key,
             "model": self._config.llm.model,
             "model_vision": self._config.llm.model_vision,

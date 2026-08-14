@@ -56,6 +56,7 @@ def create_mock_config(
     mock_llm = MagicMock(spec=LLMConfig)
     mock_llm.model = model
     mock_llm.base_url = "https://api.openai.com/v1"
+    mock_llm.base_url_backup = None
     mock_llm.api_key = "test-key"
     mock_llm.temperature = 0.7
     mock_llm.request_timeout = 610
