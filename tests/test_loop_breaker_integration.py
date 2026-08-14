@@ -398,12 +398,8 @@ class TestGIICoexistence:
             loop_repairer=repairer,
             loop_breaker_config=cfg,
             throttle_slot=throttle,
-            # ``graph_ref`` must point at a real-ish object because
-            # ``LoopRepairer.repair`` calls ``context.graph.aupdate_state``
-            # / ``aget_state`` after the summarization step. Without a
-            # stub graph the new graph_ref-empty guard in ``agent_node``
-            # (Fix 2) skips the repair at WARNING, masking the coexistence
-            # behavior this test is meant to exercise.
+            # ``graph_ref`` must be non-None to pass the _maybe_repair_loop
+            # guard; the repairer itself no longer uses the graph object.
             graph_ref=[_StubGraph()],
         )
 
@@ -717,12 +713,8 @@ class TestMaxRepairs:
             loop_breaker_slot=slot,
             loop_repairer=repairer,
             loop_breaker_config=cfg,
-            # ``graph_ref`` must point at a real-ish object because
-            # ``LoopRepairer.repair`` calls ``context.graph.aupdate_state``
-            # / ``aget_state`` after the summarization step. Without a
-            # stub graph the new graph_ref-empty guard in ``agent_node``
-            # (Fix 2) skips the repair at WARNING, masking the single-repair
-            # behavior this test is meant to exercise.
+            # ``graph_ref`` must be non-None to pass the _maybe_repair_loop
+            # guard; the repairer itself no longer uses the graph object.
             graph_ref=[_StubGraph()],
         )
 
@@ -951,12 +943,8 @@ class TestFallbackOnLLMError:
 
         with patch.object(dg, "ThinkingChatOpenAI", return_value=_BoomLLM()):
             cfg = LoopBreakerConfig(enabled=True, threshold=3, max_repairs=3)
-            # ``graph_ref`` must point at a real-ish object because
-            # ``LoopRepairer.repair`` calls ``context.graph.aupdate_state``
-            # / ``aget_state`` after the summarization step. Without a
-            # stub graph the repair aborts with ``AttributeError`` and
-            # ``slot.record_calls`` stays empty — masking the fallback
-            # behavior the test is meant to exercise.
+            # ``graph_ref`` must be non-None to pass the _maybe_repair_loop
+            # guard; the repairer itself no longer uses the graph object.
             graph_ref = [_StubGraph()]
             agent_node, llm = _make_agent(
                 loop_breaker_slot=slot,
@@ -1177,12 +1165,8 @@ class TestSummarizationTimeout:
             summarization_timeout_seconds=1,
         )
         with patch.object(dg.asyncio, "to_thread", side_effect=_never_resolves):
-            # ``graph_ref`` must point at a real-ish object because
-            # ``LoopRepairer.repair`` calls ``context.graph.aupdate_state``
-            # / ``aget_state`` after the summarization step. Without a
-            # stub graph the repair aborts with ``AttributeError`` and
-            # ``slot.record_calls`` stays empty — masking the fallback
-            # behavior the test is meant to exercise.
+            # ``graph_ref`` must be non-None to pass the _maybe_repair_loop
+            # guard; the repairer itself no longer uses the graph object.
             graph_ref = [_StubGraph()]
             agent_node, llm = _make_agent(
                 loop_breaker_slot=slot,
@@ -1203,3 +1187,335 @@ class TestSummarizationTimeout:
         assert iid == "iid-1"
         assert "bash" in summary
         assert "without progress" in summary
+
+# ---------------------------------------------------------------------------
+# 12. Cross-turn integration tests (fix-loop-repairer-checkpoint-ns)
+# ---------------------------------------------------------------------------
+# The repair path now operates ENTIRELY IN-MEMORY — removed messages are NOT
+# persisted to the checkpoint. On the NEXT turn (when LangGraph re-reads the
+# checkpoint), the original loop messages REAPPEAR. This is safe by design
+# (see ``daemon/graph.py:LoopRepairer`` docstring, items a-d) but the safety
+# net was UNTESTED until these scenarios were added.
+#
+# The cross-turn matrix below pins the four safety invariants:
+#
+#   (a) The LLM retry uses the in-memory list (works for the current turn).
+#   (b) If the LLM changes approach, the next-turn detector returns None
+#       and the consecutive chain is broken — repair is NOT re-invoked.
+#       (Test 12A — success path.)
+#   (c) If the LLM does NOT change approach, the detector RE-FIRES on the
+#       next turn and ``max_repairs`` eventually halts further repairs.
+#       (Test 12B — failure path with bounded retry budget.)
+#   (d) An end-to-end test with a REAL ``LoopRepairer`` exercises the
+#       full in-memory pipeline: detection -> filter -> summarize ->
+#       build repair msg -> in-memory rebuild -> LLM call.
+#       (Test 12C — e2e pipeline.)
+
+
+class TestCrossTurnSuccess:
+    """After repair, if the LLM changes approach, the detector MUST NOT
+    re-fire on the next turn (safety invariant (b)).
+
+    Simulates the checkpoint-merge boundary by feeding the agent_node's
+    ``{'messages': [response]}`` return value back as the next turn's
+    input — mirroring what LangGraph does when it applies the
+    ``add_messages`` reducer. The repaired messages are NOT in the
+    checkpoint, so on the next turn the original 6 loop messages reappear.
+    But because the LLM returned a no-tool-call ``AIMessage`` (the
+    "different approach" signal), the detector walks backward and hits a
+    non-tool ``AIMessage`` immediately — chain breaks, ``scan`` returns
+    None, repair is NOT invoked, slot count is cleared.
+    """
+
+    @pytest.mark.asyncio
+    async def test_llm_changes_approach_no_re_repair_on_next_turn(self):
+        from daemon.graph import LoopBreakerConfig
+
+        slot = _StubLoopBreakerSlot()
+
+        # Mock repairer: returns ctx.messages unchanged (no-op filter) +
+        # a repair message prepended. Mirrors the minimum contract a
+        # well-behaved repairer must satisfy for the cross-turn success
+        # path to be testable in isolation.
+        async def fake_repair(ctx):
+            return RepairResult(
+                success=True,
+                repaired_messages=ctx.messages,
+                summary="loop broken",
+                repair_message_id="repair-1",
+            )
+
+        repairer = MagicMock()
+        repairer.repair = AsyncMock(side_effect=fake_repair)
+
+        # Main LLM returns a no-tool-call AIMessage — the "different
+        # approach" signal that breaks the consecutive chain on the next
+        # turn.
+        llm = _StubLLM(response=AIMessage(content="I'll try a different approach"))
+
+        cfg = LoopBreakerConfig(enabled=True, threshold=3, max_repairs=3)
+        agent_node, _ = _make_agent(
+            loop_breaker_slot=slot,
+            loop_repairer=repairer,
+            loop_breaker_config=cfg,
+            graph_ref=[_StubGraph()],
+            llm=llm,
+        )
+
+        # ── Turn 1 ────────────────────────────────────────────────────
+        messages = _sequential_loop_messages("bash", {"cmd": "ls"}, count=3)
+        result1 = await agent_node(
+            {"messages": messages},
+            config={"configurable": {"thread_id": "iid-1"}},
+        )
+
+        # Repair fired ONCE on the first turn.
+        repairer.repair.assert_awaited_once()
+        assert slot.record_calls == [("iid-1", "loop broken")]
+        assert slot.get_repair_count("iid-1") == 1
+        # LLM was called once (post-repair) with the full message list.
+        assert len(llm.calls) == 1
+
+        # ── Turn 2 (simulated checkpoint merge) ───────────────────────
+        # LangGraph applies the ``add_messages`` reducer, which appends
+        # the agent_node return value to the checkpoint state. Here we
+        # mirror that on the in-memory ``messages`` list. The repaired
+        # messages are NOT persisted (they were in-memory only) — so the
+        # original 6 loop messages reappear, plus the LLM response.
+        next_turn_messages = list(messages) + result1["messages"]
+
+        # Reset call counters BEFORE the second turn so we can assert
+        # the second turn's behavior cleanly.
+        repairer.repair.reset_mock()
+        llm.calls.clear()
+
+        result2 = await agent_node(
+            {"messages": next_turn_messages},
+            config={"configurable": {"thread_id": "iid-1"}},
+        )
+
+        # Repair was NOT re-invoked on the second turn — the LLM's
+        # no-tool-call response breaks the consecutive chain.
+        repairer.repair.assert_not_awaited()
+        # The slot was CLEARED after the no-detection scan (safety net:
+        # the prior repair count must not pollute the next genuine loop).
+        assert slot.get_repair_count("iid-1") == 0
+        # LLM was still called on the second turn (regular path with
+        # original messages + new AIMessage).
+        assert len(llm.calls) == 1
+        # Total LLM calls across both turns = 2 (one per turn).
+        # (Note: this is a property of llm.calls — after the reset_mock
+        # + clear above, only the second turn's call remains.)
+        assert len(result2["messages"]) == 1
+
+
+class TestCrossTurnFailure:
+    """When the LLM repeats the same loop after repair, the detector
+    RE-FIRES on the next turn, and ``max_repairs`` eventually halts
+    further repairs (safety invariant (c)).
+
+    The test runs 5 turns with ``max_repairs=2`` and asserts that:
+      * the repairer is invoked exactly ``max_repairs`` times,
+      * the slot count stops incrementing once ``max_repairs`` is hit,
+      * the LLM is still invoked on every turn (the agent never wedges —
+        the no-repair path continues with the original messages).
+
+    The cross-turn failure mode is the only scenario where the
+    in-memory fix could regress the system: the in-memory removal
+    evaporates between turns, so the loop pattern re-emerges and the
+    detector MUST see it again. ``max_repairs`` is the safety net that
+    prevents runaway repair cycles.
+    """
+
+    @pytest.mark.asyncio
+    async def test_max_repairs_halts_re_repair_when_loop_persists(self):
+        from daemon.graph import LoopBreakerConfig
+
+        slot = _StubLoopBreakerSlot()
+
+        # Mock repairer: returns ctx.messages unchanged. We are not
+        # testing the in-memory filter here — only the cross-turn
+        # detection+max_repairs contract.
+        async def fake_repair(ctx):
+            return RepairResult(
+                success=True,
+                repaired_messages=ctx.messages,
+                summary="s",
+                repair_message_id="rep",
+            )
+
+        repairer = MagicMock()
+        repairer.repair = AsyncMock(side_effect=fake_repair)
+
+        # Main LLM returns AIMessage WITH the same bash tool call —
+        # simulating the LLM not changing approach (the loop persists).
+        llm = _StubLLM(response=AIMessage(
+            content="",
+            tool_calls=[{"id": "tc-loop", "name": "bash", "args": {"cmd": "ls"}}],
+        ))
+
+        cfg = LoopBreakerConfig(enabled=True, threshold=3, max_repairs=2)
+        agent_node, _ = _make_agent(
+            loop_breaker_slot=slot,
+            loop_repairer=repairer,
+            loop_breaker_config=cfg,
+            graph_ref=[_StubGraph()],
+            llm=llm,
+        )
+
+        messages = _sequential_loop_messages("bash", {"cmd": "ls"}, count=3)
+
+        # Run 5 turns. On each turn:
+        #   * detector sees the accumulating loop pattern (re-fires every
+        #     turn because the in-memory removal evaporates between turns),
+        #   * repair fires on turns 1 and 2 (count 0->1, 1->2),
+        #   * repair is SKIPPED on turns 3, 4, 5 (count >= max_repairs=2).
+        for turn in range(5):
+            result = await agent_node(
+                {"messages": messages},
+                config={"configurable": {"thread_id": "iid-1"}},
+            )
+            # Simulate the LangGraph add_messages reducer: append the
+            # LLM response to the in-memory list (LangGraph would do the
+            # same against the checkpoint).
+            messages = list(messages) + result["messages"]
+
+        # Repair was invoked exactly max_repairs=2 times. After that the
+        # slot count blocks further repairs (guard at graph.py:~1658).
+        assert repairer.repair.await_count == 2, (
+            f"Expected exactly max_repairs (2) repair calls, got "
+            f"{repairer.repair.await_count}"
+        )
+        # Slot count is exactly max_repairs (not more).
+        assert slot.get_repair_count("iid-1") == 2
+        # slot recorded exactly 2 repair events.
+        assert len(slot.record_calls) == 2
+        # LLM was called on every turn — the agent never wedges even
+        # when repair is skipped (the no-repair path continues with
+        # original messages and the LLM still gets called).
+        assert len(llm.calls) == 5
+
+
+class TestEndToEndRealRepairer:
+    """End-to-end test with the REAL ``LoopRepairer`` — exercises the
+    full in-memory pipeline: detection -> filter -> summarize ->
+    build repair msg -> in-memory rebuild -> LLM call (safety invariant d).
+
+    The repairer is no longer mocked. To make the test deterministic:
+
+      * ``daemon.graph.ThinkingChatOpenAI`` is patched to a stub whose
+        ``.invoke`` returns a known summary string — this patches the
+        SUMMARIZATION LLM inside ``_summarize_loop``. The MAIN agent
+        LLM is patched separately via ``_StubLLM``.
+      * The main ``_StubLLM`` returns a no-tool-call ``AIMessage`` so
+        the post-repair LLM call succeeds without needing a real
+        provider.
+      * ``LoopBreakerConfig`` has ``max_repairs=3`` so the test does
+        not hit the cap.
+
+    Assertions verify the WHOLE pipeline ran end-to-end:
+
+      1. ``slot.record_calls`` has exactly one entry — the repair fired
+         and was recorded.
+      2. ``llm.calls`` has exactly one entry — the LLM was invoked
+         exactly once (the post-repair retry path).
+      3. The list sent to the LLM contains a repair ``SystemMessage``
+         whose ID starts with ``LOOP_BREAKER_REPAIR_PREFIX``.
+      4. At least two of the original six loop messages are MISSING
+         from the LLM input — proves the in-memory filter actually
+         removed them (no checkpoint round-trip is needed).
+      5. The repair message content includes the summary text
+         produced by the stub summarization LLM — proves the
+         LLM-summarize -> repair-msg build pipeline.
+    """
+
+    @pytest.mark.asyncio
+    async def test_full_in_memory_pipeline_with_real_repairer(self):
+        from daemon.graph import LoopBreakerConfig
+        import daemon.graph as dg
+
+        # Stub for the SUMMARIZATION LLM inside _summarize_loop.
+        # Patch via dg.ThinkingChatOpenAI so the constructor inside
+        # _summarize_loop returns this stub.
+        class _StubSummaryLLM:
+            def invoke(self, messages):
+                return AIMessage(
+                    content="The agent was stuck calling bash repeatedly."
+                )
+
+        slot = _StubLoopBreakerSlot()
+
+        # Main LLM returns a no-tool-call AIMessage — the "different
+        # approach" signal. Patched via _StubLLM.
+        llm = _StubLLM(response=AIMessage(content="Different approach now"))
+
+        cfg = LoopBreakerConfig(enabled=True, threshold=3, max_repairs=3)
+        with patch.object(dg, "ThinkingChatOpenAI", return_value=_StubSummaryLLM()):
+            agent_node, _ = _make_agent(
+                loop_breaker_slot=slot,
+                loop_repairer=LoopRepairer(),
+                loop_breaker_config=cfg,
+                graph_ref=[_StubGraph()],
+                llm=llm,
+            )
+
+            messages = _sequential_loop_messages("bash", {"cmd": "ls"}, count=3)
+            result = await agent_node(
+                {"messages": messages},
+                config={"configurable": {"thread_id": "iid-1"}},
+            )
+
+        # 1. Repair was recorded exactly once.
+        assert len(slot.record_calls) == 1
+        iid, summary = slot.record_calls[0]
+        assert iid == "iid-1"
+        # The slot's recorded summary comes from the stub summarization
+        # LLM — proves the LLM-call path inside _summarize_loop ran.
+        assert "bash" in summary
+        assert "stuck" in summary.lower() or "repeatedly" in summary.lower()
+
+        # 2. LLM was called exactly once (the post-repair retry).
+        assert len(llm.calls) == 1
+        sent = llm.calls[0]
+
+        # 3. A repair SystemMessage is in the list the LLM saw.
+        repair_msgs = [
+            m for m in sent
+            if isinstance(m, SystemMessage)
+            and (getattr(m, "id", None) or "").startswith(LOOP_BREAKER_REPAIR_PREFIX)
+        ]
+        assert len(repair_msgs) == 1, (
+            f"Expected exactly one repair SystemMessage in LLM input, "
+            f"got {len(repair_msgs)}"
+        )
+
+        # 4. At least two of the original six loop message IDs are NOT
+        # present in the LLM input — proves the in-memory filter ran.
+        original_ids = (
+            {f"ai-{i}" for i in range(3)}
+            | {f"tm-{i}" for i in range(3)}
+        )
+        sent_ids = {getattr(m, "id", None) for m in sent}
+        removed = original_ids - sent_ids
+        assert len(removed) >= 2, (
+            f"Expected at least 2 of the 6 original loop message IDs to "
+            f"be missing from the LLM input (in-memory filter ran), but "
+            f"only {len(removed)} were removed. "
+            f"original_ids={original_ids}, sent_ids={sent_ids}, "
+            f"removed={removed}"
+        )
+
+        # 5. The repair message content embeds the summary text — proves
+        # the LLM-summarize -> _build_repair_message pipeline.
+        repair_content = repair_msgs[0].content
+        assert "stuck" in repair_content.lower() or "repetitive" in repair_content.lower(), (
+            f"Repair message content missing summary markers. "
+            f"Got: {repair_content!r}"
+        )
+
+        # Cross-check: the agent_node return value is the regular shape.
+        assert "messages" in result
+        assert len(result["messages"]) == 1
+        # The post-repair LLM response (no tool calls) is what gets returned.
+        assert isinstance(result["messages"][0], AIMessage)
+        assert result["messages"][0].content == "Different approach now"

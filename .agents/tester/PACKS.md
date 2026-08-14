@@ -45,6 +45,8 @@
 
 - Plane Iframe Feature: 2026-08-12 on `feature/plane-iframe` @ `1c6922fd` + test commit `bbed5f7c` — 2,148 test assertions across 4 packs + 1 build check, ALL PASS. 4 NEW plane endpoint tests PASS (env unset, valid URL, XSS scheme rejection, empty string). api_unit_test regression 213/8skip/0 fail. Frontend tsc --noEmit 0 errors. Frontend jest 1931/1931 in 7.7s. No production bugs found — implementation correct on first run. ensure.md 2/2 in-scope Core PASS (no regressions in changed packs, dev.sh check). See `RESULTS/2026-08-12-plane-iframe-feature-test.md`
 
+- LoopRepairer In-Memory Repair Fix: 2026-08-14 on `fix/loop-repairer-checkpoint-ns` @ `ad5577d3` — 385 test assertions across 7 packs (6 unit/regression + 1 E2E Release Gate), ALL PASS. 11 NEW regression tests in `test_loop_repairer_regression.py` cover original bug scenario (no aget_state calls, >2 messages, HumanMessage present), 4 edge cases (few messages, max_repairs, LLM timeout, Option C safety-net). E2E MANDATORY per critical note (graph.py core infra) — 4/4 PASS (252s). 1 quick fix (test assertion, index 1 not -1). ensure.md Core 4/4 + Release Gate 4/4 PASS. See `RESULTS/2026-08-14-loop-repairer-checkpoint-ns-fix-test.md`
+
 ## Unit Test Packs
 
 | Pack | Location | Scope | Timeout | Last Run | Status |

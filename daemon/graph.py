@@ -1091,20 +1091,23 @@ class RepairResult:
 class LoopRepairer:
     """Repairs the message history when a hallucination loop is detected.
 
-    Mirrors the reactive compaction pattern at
-    :func:`daemon.graph.create_agent_node` (the C3 fix): remove the
-    repetitive messages via ``RemoveMessage`` sentinels, summarize what the
-    agent was doing, inject a fresh ``SystemMessage`` that nudges the LLM
-    toward a different approach, and apply the change via
-    ``graph.aupdate_state(as_node='agent')``. The injected user message (if
-    any) is re-appended after the state re-read so the LLM retry does not
-    silently lose it.
+    The repair is a TRANSIENT in-memory intervention — repetitive messages
+    are removed from the in-memory ``state['messages']`` list and a fresh
+    ``SystemMessage`` nudge is prepended so the LLM retry sees different
+    context. Repetitive messages are NOT persisted as removed to the
+    checkpoint. This is safe because: (a) the LLM retry uses the in-memory
+    list directly, (b) if the LLM changes approach the loop is permanently
+    broken for the turn, (c) if it doesn't, ``max_repairs`` catches it after
+    bounded turns, (d) a new ``HumanMessage`` on the next turn breaks the
+    consecutive detection chain.
 
     The repairer is intentionally simple: no I/O of its own (the LLM call is
-    synchronous via ``asyncio.to_thread``), no DB writes (the
-    ``graph.aupdate_state`` call handles persistence), no callback wiring.
-    Phase 3 will thread it into ``agent_node`` and ``LoopBreakerSlot`` will
-    record the repair via ``record_repair``.
+    synchronous via ``asyncio.to_thread``), no DB writes, no callback
+    wiring. The ``RepairContext.graph`` / ``RepairContext.thread_config``
+    fields are retained for backward compatibility but are NOT used by the
+    repair path (the historical ``aupdate_state``/``aget_state`` calls were
+    removed when the checkpoint_ns mismatch was discovered — see
+    :meth:`_filter_removals_against_in_memory_state`).
     """
 
     def __init__(self, timeout_seconds: int = LOOP_BREAKER_SUMMARIZATION_TIMEOUT_SECONDS):
@@ -1122,34 +1125,37 @@ class LoopRepairer:
 
             1. Build ``RemoveMessage`` sentinels from ``detection.loop_messages``
                (evidence IDs are excluded — see :meth:`_build_removal_list`).
-            1b. Pre-validate the removal IDs against the LIVE checkpoint state
-                (see :meth:`_filter_removals_against_live_state`). Compaction
-                (``daemon/compaction.py:696-699``) renames IDs from
-                ``lc_run--...`` to ``truncated-<uuid>``, so any ID built from
-                the in-memory ``state['messages']`` list may already be
-                stale. ``aupdate_state`` re-reads the checkpoint independently
-                and raises ``ValueError`` on missing IDs — pre-filtering avoids
-                that exception in the common case.
+            1b. Filter the removal IDs against the IN-MEMORY message list
+               (see :meth:`_filter_removals_against_in_memory_state`).
+               Historically this re-read the live checkpoint, but the
+               in-node ``thread_config`` carries ``checkpoint_ns='agent:<task_id>'``
+               which LangGraph interprets as a subgraph namespace lookup and
+               returns EMPTY state — making ``live_ids`` always empty and
+               ALL removals filtered out. The in-memory ``context.messages``
+               is authoritative: both ``detection.loop_messages`` and
+               ``context.messages`` come from the same snapshot in
+               ``create_agent_node``, so their IDs match exactly.
             2. Call LLM summarization with timeout fallback (see
                :meth:`_summarize_loop`). A hung LLM call never freezes
                ``agent_node`` because of the ``asyncio.wait_for`` guard.
             3. Build the repair ``SystemMessage`` with a FRESH UUID
                (``f"{LOOP_BREAKER_REPAIR_PREFIX}{uuid4()}"``) so the
                ``add_messages`` reducer appends rather than replaces.
-            4. ``graph.aupdate_state(thread_config, {'messages': replacement},
-               as_node='agent')`` — sentinels first, repair message last.
-               The call is wrapped in a ``try/except ValueError`` (Layer 2
-               safety net) to handle the rare race between Layer 1's
-               ``aget_state`` and the actual ``aupdate_state`` — another
-               compaction could rename IDs between the two reads. On
-               ``ValueError`` we retry the update with the repair message
-               ONLY (no removals) so the LLM retry still gets the fresh
-               ``SystemMessage`` nudge.
-            5. Re-read state via ``graph.aget_state`` and extract the
-               updated ``messages`` list.
+            4. Build ``repaired_messages`` directly from the in-memory list:
+               filter out messages whose ID is in ``removal_ids``, then
+               prepend the repair ``SystemMessage`` so the LLM sees the
+               directive before the conversation history. No checkpoint
+               round-trip is needed — the in-memory list IS authoritative.
+            5. Safety-net (Option C): if the ORIGINAL removal list had IDs
+               but the in-memory filter dropped them all (every ID missing
+               from ``context.messages``), log a WARNING and fall back to
+               ``[repair_msg] + context.messages`` (prepend, mirroring Option B
+               semantics). This guarantees a structurally valid payload
+               even if ``detection.loop_messages`` somehow diverged from
+               ``context.messages`` IDs.
             6. Re-append ``context.injected_msg`` if present (C3 pattern —
-               the injection lives only in the local closure until the LLM
-               call returns, so a checkpoint re-read would lose it).
+               the injection lives only in the local closure, so it must be
+               preserved on the LLM retry list).
 
         Args:
             context: Fully populated :class:`RepairContext`.
@@ -1161,15 +1167,20 @@ class LoopRepairer:
             exception string when ``success`` is False.
         """
         try:
-            # Step 1: Build removal list.
+            # Step 1: Build removal list. Track the ORIGINAL count before
+            # the in-memory filter — Option C uses it to detect the
+            # all-IDs-missing case (filter dropped every removal).
             removals = self._build_removal_list(context.detection)
+            original_removal_count = len(removals)
 
-            # Step 1b: Pre-validate removal IDs against the LIVE checkpoint.
-            # See :meth:`_filter_removals_against_live_state` for the full
-            # rationale. Failures here MUST NOT block the repair — Layer 2
-            # still catches the resulting ValueError — so any exception is
-            # logged and the unfiltered list is used.
-            removals = await self._filter_removals_against_live_state(
+            # Step 1b: Filter removal IDs against the IN-MEMORY message list.
+            # The in-memory IDs are the AUTHORITATIVE, CURRENT IDs because
+            # both ``detection.loop_messages`` and ``context.messages`` come
+            # from the same snapshot taken in ``create_agent_node``. See
+            # :meth:`_filter_removals_against_in_memory_state` for the full
+            # rationale (and why the historical live-checkpoint pre-validation
+            # was a no-op due to the ``checkpoint_ns`` namespace mismatch).
+            removals = self._filter_removals_against_in_memory_state(
                 removals, context
             )
 
@@ -1199,64 +1210,41 @@ class LoopRepairer:
             # Step 3: Build repair message with fresh UUID.
             repair_msg = self._build_repair_message(context.detection, summary)
 
-            # Step 4: Apply state update. Order matters — RemoveMessage
-            # sentinels must come BEFORE the repair message so the
-            # ``add_messages`` reducer processes removals before appending
-            # the summary (LangGraph processes the list left-to-right).
-            #
-            # Layer 2 safety net: ``aupdate_state`` re-reads the checkpoint
-            # independently and raises ``ValueError`` when a removal ID no
-            # longer exists. This can happen if another compaction runs
-            # between our pre-validation ``aget_state`` and this write.
-            # On ``ValueError`` we strip all removals and retry with the
-            # repair message alone — the LLM retry still receives the
-            # fresh ``SystemMessage`` nudge, so the loop is still broken.
-            replacement = list(removals) + [repair_msg]
-            try:
-                await context.graph.aupdate_state(
-                    context.thread_config,
-                    {'messages': replacement},
-                    as_node='agent',
-                )
-                logger.info(
-                    f"[LoopRepairer] State updated, repair message "
-                    f"{repair_msg.id[:16] if repair_msg.id else '<no-id>'}... injected"
-                )
-            except ValueError as ve:
-                # Layer 2: race between pre-validation and aupdate_state.
-                # The ValueError message itself contains the bad ID (e.g.
-                # ``Attempting to delete a message with an ID that doesn't
-                # exist ('lc_run--...'``). Log the attempted list and the
-                # full error for diagnostics, then retry without removals.
-                attempted_ids = [r.id for r in removals if r.id]
-                logger.warning(
-                    f"[LoopRepairer] aupdate_state raised ValueError on "
-                    f"removal step: {ve}. "
-                    f"Attempted removal IDs: {attempted_ids}. "
-                    f"Retrying without removals — repair message will still "
-                    f"be injected to break the loop."
-                )
-                await context.graph.aupdate_state(
-                    context.thread_config,
-                    {'messages': [repair_msg]},
-                    as_node='agent',
-                )
-                logger.info(
-                    f"[LoopRepairer] State updated (removal skipped due to "
-                    f"stale IDs), repair message "
-                    f"{repair_msg.id[:16] if repair_msg.id else '<no-id>'}... injected"
-                )
+            # Step 4: Build repaired_messages directly from the in-memory
+            # list. No checkpoint round-trip — the in-memory state is
+            # authoritative during graph node execution.
+            removal_ids = {r.id for r in removals if r.id}
+            repaired_messages = [
+                m for m in context.messages
+                if getattr(m, "id", None) not in removal_ids
+            ]
 
-            # Step 5: Re-read state via the checkpoint (matches the
-            # reactive compaction pattern at lines 1201-1202).
-            updated_state = await context.graph.aget_state(context.thread_config)
-            repaired_messages = list(updated_state.values.get('messages', []))
+            if original_removal_count > 0 and len(removals) == 0:
+                # Step 5: Option C safety-net. The ORIGINAL removal list
+                # was non-empty but the in-memory filter dropped every
+                # ID — every removal ID failed to match a message in
+                # ``context.messages``. This should be rare (detection
+                # IDs come from the same snapshot) but if it happens,
+                # fall back to the ORIGINAL messages with the repair
+                # message PREPENDED so the LLM still sees the fresh
+                # nudge before the full conversation history (matches
+                # Option B's prepend semantics).
+                logger.warning(
+                    f"[LoopRepairer] Safety-net: all {original_removal_count} "
+                    f"removal IDs failed to match in-memory messages. "
+                    f"Returning original messages + repair summary prepended."
+                )
+                repaired_messages = [repair_msg] + list(context.messages)
+            else:
+                # Normal Option B path: prepend the repair message so the
+                # LLM sees the directive before the conversation history.
+                repaired_messages = [repair_msg] + repaired_messages
 
             # Step 6: C3 re-append — the injected user messages live only
-            # in the closure, NOT in the checkpoint, so the re-read above
-            # loses them. Re-append to ``repaired_messages`` so the LLM
-            # retry sees every user's intent (Phase 3: there can be more
-            # than one pending message).
+            # in the closure, NOT in the in-memory ``context.messages`` the
+            # way the agent node sees them at detection time, so re-append
+            # to ``repaired_messages`` so the LLM retry sees every user's
+            # intent (Phase 3: there can be more than one pending message).
             if context.injected_msg:
                 repaired_messages = list(repaired_messages) + list(context.injected_msg)
 
@@ -1268,11 +1256,12 @@ class LoopRepairer:
             )
 
         except Exception as e:
-            # Any failure (LLM, state update, re-read) — fall back to the
-            # ORIGINAL message list so the graph continues rather than
-            # wedging. ``recursion_limit`` still protects against runaway
-            # loops if the LLM keeps hallucinating after the failed repair.
-            logger.error(
+            # Any failure (LLM, in-memory filter, message construction) —
+            # fall back to the ORIGINAL message list so the graph continues
+            # rather than wedging. ``recursion_limit`` still protects
+            # against runaway loops if the LLM keeps hallucinating after
+            # the failed repair.
+            logger.warning(
                 f"[LoopRepairer] Repair failed: {type(e).__name__}: {e}",
                 exc_info=True,
             )
@@ -1312,34 +1301,39 @@ class LoopRepairer:
         return removals
 
     @staticmethod
-    async def _filter_removals_against_live_state(
+    def _filter_removals_against_in_memory_state(
         removals: list[RemoveMessage],
         context: RepairContext,
     ) -> list[RemoveMessage]:
-        """Layer 1: filter ``RemoveMessage`` sentinels against the live checkpoint.
+        """Filter ``RemoveMessage`` sentinels against the in-memory state.
 
-        ``repair()`` builds its removal list from the in-memory
-        ``state['messages']`` snapshot, but ``aupdate_state`` re-reads the
-        checkpoint from disk independently. When ``ContextCompactor`` has
-        renamed message IDs (see ``daemon/compaction.py:696-699`` —
-        ``truncated_msg.id = f"truncated-{uuid.uuid4()}"``) the original
-        IDs are no longer in the checkpoint, and ``aupdate_state`` raises::
+        ``repair()`` builds its removal list from
+        ``detection.loop_messages``, whose IDs come from the same in-memory
+        snapshot as ``context.messages`` (both are read in
+        ``create_agent_node``). The IDs SHOULD always match. We filter here
+        as a defensive guard against any unforeseen divergence (e.g. a
+        future detection path that re-reads the checkpoint independently,
+        or a caller that mutates ``context.messages`` between detection
+        and repair).
 
-            ValueError: Attempting to delete a message with an ID that
-            doesn't exist ('lc_run--...')
+        Historically this helper called ``context.graph.aget_state`` to
+        filter against the LIVE checkpoint, but the in-node
+        ``thread_config`` carries ``checkpoint_ns='agent:<task_id>'`` which
+        LangGraph interprets as a subgraph namespace lookup and returns
+        EMPTY state — making ``live_ids`` always empty and ALL removals
+        filtered out. The fix-loop-repairer-checkpoint-ns branch replaces
+        that round-trip with this in-memory filter.
 
-        This helper re-reads the live checkpoint and filters the removal
-        list to ONLY include IDs that still exist there. Edge cases:
+        Edge cases:
 
-        * All removal IDs were renamed by compaction → returns ``[]`` so
-          the caller skips the removal step entirely (the fresh
-          ``SystemMessage`` is still appended to break the loop).
-        * ``aget_state`` itself fails (e.g. transient DB error) → returns
-          the UNFILTERED list. Layer 2 (the ``try/except ValueError`` in
-          ``repair()``) is the safety net; we do NOT want to fail the
-          repair on a pre-validation read error.
-        * ``removals`` is empty → returns ``[]`` immediately (no need to
-          call ``aget_state``).
+        * ``removals`` is empty → returns ``[]`` immediately.
+        * All removal IDs are present in ``context.messages`` (the common
+          case) → silent success; the unfiltered list passes through.
+        * Some (or all) IDs are missing → log a WARNING and return the
+          survivors. The caller (``repair()``) detects the
+          all-missing-but-non-empty case and triggers the Option C
+          safety-net (returns the original messages with the repair
+          message prepended, mirroring Option B).
 
         Args:
             removals: Initial removal list from :meth:`_build_removal_list`.
@@ -1347,64 +1341,43 @@ class LoopRepairer:
 
         Returns:
             Filtered list of ``RemoveMessage`` sentinels. May be empty
-            when ALL IDs were renamed by compaction. Equals ``removals``
-            on any pre-validation read failure.
+            when ALL IDs were missing from ``context.messages``. Equals
+            ``removals`` when all IDs match (the common case).
         """
         # Fast path: nothing to filter.
         if not removals:
             return removals
 
-        # Lazy import to avoid circular import (same reason as the
-        # ``RepairContext`` module-level comment).
-        from langchain_core.messages import BaseMessage
-
-        try:
-            live_state = await context.graph.aget_state(context.thread_config)
-            live_messages = live_state.values.get("messages", [])
-            live_ids: set = {
-                getattr(m, "id", None)
-                for m in live_messages
-                if isinstance(m, BaseMessage) and getattr(m, "id", None) is not None
-            }
-        except Exception as live_err:  # noqa: BLE001
-            # Pre-validation read failure MUST NOT block the repair.
-            # Layer 2 still catches the resulting ValueError, so the
-            # worst-case outcome is a log warning + a fallback path.
-            logger.warning(
-                f"[LoopRepairer] Layer 1 aget_state pre-validation failed: "
-                f"{type(live_err).__name__}: {live_err}. "
-                f"Proceeding with unfiltered removals (Layer 2 will catch "
-                f"any remaining ValueError)."
-            )
-            return removals
+        in_memory_ids: set = {
+            getattr(m, "id", None)
+            for m in context.messages
+            if isinstance(m, BaseMessage) and getattr(m, "id", None) is not None
+        }
 
         original_count = len(removals)
-        filtered = [r for r in removals if r.id in live_ids]
+        filtered = [r for r in removals if r.id in in_memory_ids]
         filtered_count = original_count - len(filtered)
 
         if filtered_count == 0:
-            # All IDs exist in the live checkpoint — silent success.
+            # All IDs exist in the in-memory state — silent success.
             return filtered
 
-        # Some (or all) IDs were renamed by compaction. Log enough detail
-        # to diagnose the source of the rename without spamming the log.
-        missing_ids = [r.id for r in removals if r.id not in live_ids]
+        # Some (or all) IDs were missing. Log enough detail to diagnose
+        # the divergence without spamming the log. The Option C safety
+        # net in ``repair()`` handles the all-missing case at a higher
+        # level; here we just return whatever survived the filter.
+        missing_ids = [r.id for r in removals if r.id not in in_memory_ids]
         if filtered:
             logger.warning(
-                f"[LoopRepairer] Layer 1: filtered {filtered_count}/"
-                f"{original_count} removal IDs not present in live "
-                f"checkpoint (likely renamed by compaction to "
-                f"'truncated-<uuid>'): {missing_ids}"
+                f"[LoopRepairer] In-memory filter dropped {filtered_count}/"
+                f"{original_count} removal IDs not present in "
+                f"context.messages: {missing_ids}"
             )
         else:
-            # Edge case from the docstring: ALL IDs renamed. Skip the
-            # removal step but still allow the LLM summary + fresh
-            # SystemMessage steps to run.
             logger.warning(
-                f"[LoopRepairer] Layer 1: ALL {original_count} removal "
-                f"IDs missing from live checkpoint (renamed by "
-                f"compaction). Skipping removal step; repair will "
-                f"continue with summary + fresh SystemMessage only. "
+                f"[LoopRepairer] In-memory filter: ALL {original_count} "
+                f"removal IDs missing from context.messages. Option C "
+                f"safety-net will fire in repair(). "
                 f"Missing IDs: {missing_ids}"
             )
         return filtered
