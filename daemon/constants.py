@@ -131,3 +131,30 @@ EDITOR_OPTIONS = ["builtin", "vscode"]         # valid editor values
 # Default Agent Versions
 # ---------------------------------------------------------------------------
 DEFAULT_AGENT_VERSIONS_METADATA_KEY = "default_agent_versions"  # metadata key in project_metadata_records
+
+# ---------------------------------------------------------------------------
+# Plane Project Sync
+# ---------------------------------------------------------------------------
+# Metadata keys for the Plane project sync subsystem. Each Ensemble project
+# that has been mirrored to Plane stores:
+#   - plane_project_id: Plane's internal UUID — the primary mapping handle
+#   - plane_sync_state: "synced" | "error" | "pending"
+#   - plane_synced_at:   ISO8601 timestamp of the most recent sync attempt
+PLANE_PROJECT_ID_METADATA_KEY = "plane_project_id"
+PLANE_SYNC_STATE_METADATA_KEY = "plane_sync_state"
+PLANE_SYNCED_AT_METADATA_KEY = "plane_synced_at"
+
+# Per-project cooldown (seconds) for the ``plane_sync_project`` agent tool.
+# Prevents a tight LLM loop from hammering the Plane API. ``force=True``
+# bypasses this gate.
+PLANE_SYNC_COOLDOWN_S: float = 30.0
+
+# Mapping from Ensemble ``ProjectStatus`` → Plane project state. Best-effort
+# — Plane's state vocabulary differs from ours and we default to "active"
+# for unknown values.
+PLANE_STATUS_MAP: dict[str, str] = {
+    "active": "active",
+    "paused": "hold",
+    "archived": "cancelled",
+    "completed": "completed",
+}

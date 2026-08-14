@@ -419,6 +419,39 @@ def create_project_tools(
                     import concurrent.futures
                     with concurrent.futures.ThreadPoolExecutor() as executor:
                         executor.submit(asyncio.run, _provision_queues())
+
+            # Auto-sync to Plane (fire-and-forget, mirrors queue provisioning
+            # pattern above). Best-effort — never blocks project creation.
+            try:
+                from ..services.plane_sync_service import PlaneSyncService
+
+                if PlaneSyncService.is_available():
+                    sync_service = PlaneSyncService(store)
+                    project_id = project.project_id
+
+                    async def _sync_to_plane():
+                        try:
+                            await sync_service.sync_project(project_id)
+                            logger.info(f"Plane sync completed for project {project_id}")
+                        except Exception as e:
+                            logger.warning(
+                                f"Plane sync failed for project {project_id}: {e}"
+                            )
+
+                    try:
+                        loop = asyncio.get_event_loop()
+                        if loop.is_running():
+                            asyncio.ensure_future(_sync_to_plane())
+                        else:
+                            loop.run_until_complete(_sync_to_plane())
+                    except RuntimeError:
+                        # No event loop running, use threading
+                        import concurrent.futures
+                        with concurrent.futures.ThreadPoolExecutor() as executor:
+                            executor.submit(asyncio.run, _sync_to_plane())
+            except Exception:
+                # Plane sync is best-effort; never block project creation.
+                pass
             
             return project.to_dict()
         except ValueError as e:

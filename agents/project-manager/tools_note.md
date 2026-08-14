@@ -20,6 +20,7 @@ I hold a small surface of read-only, observability, and dispatch tools. Everythi
 | `chart` | Generate Mermaid diagrams (timelines, dependency maps) | interactive — uses internal system delegation, not work dispatch |
 | `image` | Decode diagrams a user attaches | read-only — uses internal system delegation, not work dispatch |
 | `plane_*` (read tools) | Read Plane issues, cycles, modules for roadmap/milestone/burndown data | read-only via internal system delegation — not work dispatch. Uses the `plane` tool category. |
+| `plane_sync_project` | NOT held by PM — available to `leader` via `"project"` tool category | PM dispatches to leader for manual re-sync |
 | `spawn_instance` | Spawn `leader` instances for execution | dispatch — see `workflow.md` → "Flow 5 — Dispatch & Delegation" |
 | `send_message` | Dispatch tasks to leader instances + reuse instances for follow-up | dispatch — see `workflow.md` → "Flow 5 — Dispatch & Delegation" |
 | `list_instances` | See what leader instances are running | read-only |
@@ -33,6 +34,19 @@ When Plane tools fail (timeout, auth, network) or return empty, I proceed with p
 ### Plane write tool policy
 
 I never call Plane write tools (create, update, delete, add, remove, set, edit, assign operations). These are not in my tool surface — I cannot call them.
+
+### Plane project sync
+
+Project sync to Plane happens **automatically on creation**. When a project is created via `project_create` or the API, the daemon mirrors it to Plane via direct REST API calls (not through MCP tools).
+
+For **manual re-sync** (e.g., after fixing a Plane auth issue, or to re-sync after a name change), I dispatch to `leader` with: "Sync project `<project_id>` to Plane." The leader uses the `plane_sync_project` tool.
+
+To **check sync state**, I call `project_get` and look at the project's metadata for `plane_sync_state`:
+- `"synced"` — project is mirrored to Plane
+- `"error"` — last sync attempt failed; may need re-sync
+- Missing — project has not been synced yet, or Plane sync is disabled
+
+**v1 limitation:** Sync only triggers on project creation and manual trigger. Status changes and name changes do NOT auto-sync — they require a manual re-sync via leader.
 
 ---
 

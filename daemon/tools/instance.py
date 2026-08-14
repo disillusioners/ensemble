@@ -1844,6 +1844,13 @@ Returns:
         agent_id,
         job_queue_mgmt_service=queue_mgmt_service,
     )
+
+    # Plane sync tool — registered in the "project" category so the
+    # leader agent (and any agent with tools.allow: ["project"]) can
+    # invoke ``plane_sync_project`` directly. Wraps PlaneSyncService
+    # behind a 30s per-project cooldown.
+    from .plane_sync import create_plane_sync_tools
+    plane_sync_tools = create_plane_sync_tools(manager.project_store)
     
     # Create workdir-aware wrappers for filesystem tools
     # These auto-populate workdir from project's main_directory when not provided
@@ -1886,6 +1893,10 @@ Returns:
     
     # Add project management tools (available in all instances)
     tools.extend(project_tools)
+
+    # Add Plane sync tool (project category — auto-attached with the
+    # other project tools; ``tools.allow: ["project"]`` picks it up).
+    tools.extend(plane_sync_tools)
 
     # ── Background process tools (proc_*, always available — same base
     # layer as bash). Created without workdir auto-injection because

@@ -251,7 +251,23 @@ async def create_project(
         queue_mgmt.auto_provision_system_queues,
         project.project_id
     )
-    
+
+    # Auto-sync to Plane (fire-and-forget). Mirrors the queue-provisioning
+    # pattern; sync is best-effort and never blocks the response.
+    async def _sync_to_plane():
+        try:
+            from ..services.plane_sync_service import PlaneSyncService
+
+            if PlaneSyncService.is_available():
+                service = PlaneSyncService(repo)
+                await service.sync_project(project.project_id)
+        except Exception as e:
+            logger.warning(
+                f"Plane sync failed for project {project.project_id}: {e}"
+            )
+
+    background_tasks.add_task(_sync_to_plane)
+
     recent_history = _get_recent_history_safe(repo, project.project_id)
     critical_notes = _get_critical_notes_safe(repo, project.project_id)
     return _project_to_response(project, recent_history=recent_history, critical_notes=critical_notes)
