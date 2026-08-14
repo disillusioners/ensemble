@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
 import time
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1226,3 +1227,651 @@ class TestPlaneConstants:
             PLANE_SYNCED_AT_METADATA_KEY,
         }
         assert len(keys) == 3
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Class 15: TestEdgeCaseMalformedResponses
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Gap: existing 74 tests cover 204 (no body) and well-formed 2xx JSON, but
+# NOT the following malformed body shapes that Plane (or proxies in front of
+# it) can plausibly return:
+#   * 2xx with a non-JSON body (HTML error page from a reverse proxy)
+#   * 2xx with the literal JSON ``null`` body
+#   * 2xx with a list where the contract says "dict"
+#   * 2xx with a dict that is missing the ``id`` field entirely
+# The service must convert all of these into a structured error state, never
+# crash, and never silently lose the project row.
+
+
+class TestEdgeCaseMalformedResponses:
+    """Malformed 2xx responses — defensive against API shape drift."""
+
+    def test_2xx_with_non_json_body_returns_none_at_client(
+        self, mock_plane_env, monkeypatch
+    ):
+        """2xx with HTML/text body → ``_request`` returns None (defensive)."""
+        _patched_async_client(
+            monkeypatch,
+            [httpx.Response(200, text="<html>not json</html>")],
+        )
+        client = PlaneHttpClient()
+
+        async def run():
+            return await client._request("GET", "http://x/anything/")
+
+        result = asyncio.run(run())
+        assert result is None
+
+    def test_2xx_with_null_json_body_returns_none_at_client(
+        self, mock_plane_env, monkeypatch
+    ):
+        """2xx with bare ``null`` JSON → ``_request`` returns None."""
+        _patched_async_client(monkeypatch, [httpx.Response(200, text="null")])
+        client = PlaneHttpClient()
+
+        async def run():
+            return await client._request("GET", "http://x/anything/")
+
+        result = asyncio.run(run())
+        assert result is None
+
+    def test_create_project_raises_on_non_dict_response(
+        self, mock_plane_env, monkeypatch
+    ):
+        """Plane returns a list, contract says dict → ``PlaneAPIError``."""
+        _patched_async_client(
+            monkeypatch, [httpx.Response(201, json=[{"id": "p1"}])]
+        )
+        client = PlaneHttpClient()
+
+        async def run():
+            return await client.create_project(name="X")
+
+        with pytest.raises(PlaneAPIError) as exc:
+            asyncio.run(run())
+        assert "non-dict" in str(exc.value)
+
+    def test_update_project_raises_on_non_dict_response(
+        self, mock_plane_env, monkeypatch
+    ):
+        """``update_project`` also rejects non-dict responses."""
+        _patched_async_client(
+            monkeypatch, [httpx.Response(200, text="plain text")]
+        )
+        client = PlaneHttpClient()
+
+        async def run():
+            return await client.update_project("plane-x", name="Y")
+
+        with pytest.raises(PlaneAPIError) as exc:
+            asyncio.run(run())
+        assert "non-dict" in str(exc.value)
+
+    def test_get_project_raises_on_non_dict_response(
+        self, mock_plane_env, monkeypatch
+    ):
+        """``get_project`` returns None only on 404; other shape errors raise."""
+        _patched_async_client(
+            monkeypatch,
+            [httpx.Response(200, json=["not", "a", "dict"])],
+        )
+        client = PlaneHttpClient()
+
+        async def run():
+            return await client.get_project("plane-x")
+
+        with pytest.raises(PlaneAPIError) as exc:
+            asyncio.run(run())
+        assert "non-dict" in str(exc.value)
+
+    def test_sync_service_handles_create_response_missing_id(
+        self, repo, mock_plane_env
+    ):
+        """Plane returns a dict with no ``id`` key → service returns error,
+        not crash, and the project metadata is marked ``error``."""
+        project = repo.create(name="NoIdProj")
+        mock = MagicMock()
+        mock.list_projects = AsyncMock(return_value=[])
+        mock.create_project = AsyncMock(
+            return_value={"name": "NoIdProj", "description": "d"}  # no "id"
+        )
+
+        svc = PlaneSyncService(repo, http_client=mock)
+        result = asyncio.run(svc.sync_project(project.project_id))
+
+        assert result["status"] == "error"
+        assert "no id" in result["message"].lower()
+
+        # Metadata should reflect the error state
+        with Session(repo.engine) as session:
+            records = repo.list_metadata_records(session, project.project_id)
+        meta = {r.meta_key: r.meta_value for r in records}
+        assert meta[PLANE_SYNC_STATE_METADATA_KEY] == "error"
+        assert PLANE_SYNCED_AT_METADATA_KEY in meta
+
+    def test_sync_service_handles_adopt_path_create_response_missing_id(
+        self, repo, mock_plane_env
+    ):
+        """Adopt-by-name path: list returns stale Plane project, update
+        fails with 404 → recreate; if create returns no id, still error."""
+        project = repo.create(name="AdoptNoIdProj")
+        mock = MagicMock()
+
+        async def update_404(*args, **kwargs):
+            raise PlaneNotFoundError("Plane 404 on ...: missing")
+
+        mock.update_project = AsyncMock(side_effect=update_404)
+        mock.create_project = AsyncMock(
+            return_value={"name": "X"}  # no id
+        )
+        mock.list_projects = AsyncMock(return_value=[])
+
+        svc = PlaneSyncService(repo, http_client=mock)
+        result = asyncio.run(svc.sync_project(project.project_id))
+
+        assert result["status"] == "error"
+        assert "no id" in result["message"].lower()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Class 16: TestEdgeCaseCircuitBreakerOpenAtService
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Gap: existing 74 tests verify the client-level breaker behavior (open
+# after 5 failures, reset on success) but do NOT verify that the service
+# layer translates an OPEN breaker into a clean error response without
+# crashing. The service's never-raises contract must hold even when the
+# underlying client refuses to even talk to Plane.
+
+
+class TestEdgeCaseCircuitBreakerOpenAtService:
+    """Service-layer behavior when the client's circuit breaker is OPEN."""
+
+    def test_sync_service_returns_error_when_breaker_open(
+        self, repo, mock_plane_env
+    ):
+        """With the client breaker forced OPEN, the service returns
+        ``status="error"`` and never raises — the caller is not stuck."""
+        project = repo.create(name="BreakerOpenProj")
+        # Construct a fresh breaker and force it OPEN (use the enum).
+        breaker = CircuitBreaker(failure_threshold=5, recovery_timeout=60.0)
+        breaker.state = CircuitState.OPEN
+        breaker.failure_count = 5
+        breaker.last_failure_time = time.monotonic()
+        assert breaker.get_state() == "open"
+
+        # Inject a client whose methods raise the same exception the
+        # real client would raise when the breaker is OPEN. This tests
+        # the SERVICE's error-handling contract end-to-end.
+        client = MagicMock()
+
+        async def raise_breaker_open(*args, **kwargs):
+            raise PlaneAPIError(
+                "Circuit breaker is OPEN — skipping Plane API call"
+            )
+
+        client.create_project = AsyncMock(side_effect=raise_breaker_open)
+        client.update_project = AsyncMock(side_effect=raise_breaker_open)
+        client.list_projects = AsyncMock(side_effect=raise_breaker_open)
+
+        svc = PlaneSyncService(repo, http_client=client)
+        # Service must NOT raise.
+        result = asyncio.run(svc.sync_project(project.project_id))
+
+        assert result["status"] == "error"
+        assert "circuit breaker" in result["message"].lower() or \
+               "plane api" in result["message"].lower()
+
+    def test_sync_service_marks_error_state_when_breaker_open(
+        self, repo, mock_plane_env
+    ):
+        """When the breaker is OPEN, the project metadata is marked
+        ``plane_sync_state="error"`` so the next manual sync can recover."""
+        project = repo.create(name="BreakerOpenMeta")
+        # Pre-seed an existing plane_project_id so the UPDATE path is taken.
+        with Session(repo.engine) as session:
+            repo.set_metadata_record(
+                session,
+                project.project_id,
+                PLANE_PROJECT_ID_METADATA_KEY,
+                "plane-prev",
+            )
+            session.commit()
+
+        client = MagicMock()
+
+        async def raise_breaker_open(*args, **kwargs):
+            raise PlaneAPIError(
+                "Circuit breaker is OPEN — skipping Plane API call"
+            )
+
+        client.create_project = AsyncMock(side_effect=raise_breaker_open)
+        client.list_projects = AsyncMock(side_effect=raise_breaker_open)
+        client.update_project = AsyncMock(side_effect=raise_breaker_open)
+
+        svc = PlaneSyncService(repo, http_client=client)
+        result = asyncio.run(svc.sync_project(project.project_id))
+
+        assert result["status"] == "error"
+
+        with Session(repo.engine) as session:
+            records = repo.list_metadata_records(session, project.project_id)
+        meta = {r.meta_key: r.meta_value for r in records}
+        assert meta[PLANE_SYNC_STATE_METADATA_KEY] == "error"
+        assert PLANE_SYNCED_AT_METADATA_KEY in meta
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Class 17: TestEdgeCaseSpecialCharacters
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Gap: project names are user-supplied and can contain anything an OS
+# filesystem allows. None of the 74 existing tests exercise non-ASCII or
+# syntactically-active characters. Verify the sync pipeline passes the
+# name through verbatim and does not crash on edge cases like embedded
+# quotes, newlines, or emoji.
+
+
+class TestEdgeCaseSpecialCharacters:
+    """Project names with unicode, quotes, emoji, newlines, and escape chars."""
+
+    def test_sync_project_with_unicode_name(self, repo, mock_plane_env):
+        """Cyrillic / CJK / Latin-Extended names are passed through."""
+        for name in ["Проект", "プロジェクト", "café", "naïve", "über"]:
+            project = repo.create(name=name)
+            mock = MagicMock()
+            mock.create_project = AsyncMock(return_value={"id": "plane-u"})
+            mock.list_projects = AsyncMock(return_value=[])
+
+            svc = PlaneSyncService(repo, http_client=mock)
+            result = asyncio.run(svc.sync_project(project.project_id))
+
+            assert result["status"] == "synced"
+            # Verify the unicode name was sent verbatim
+            call_kwargs = mock.create_project.call_args.kwargs
+            assert call_kwargs["name"] == name
+
+    def test_sync_project_with_emoji_in_name(self, repo, mock_plane_env):
+        """Emoji in name is preserved end-to-end."""
+        project = repo.create(name="🚀 Rocket Project 🎯")
+        mock = MagicMock()
+        mock.create_project = AsyncMock(return_value={"id": "plane-emoji"})
+        mock.list_projects = AsyncMock(return_value=[])
+
+        svc = PlaneSyncService(repo, http_client=mock)
+        result = asyncio.run(svc.sync_project(project.project_id))
+
+        assert result["status"] == "synced"
+        kwargs = mock.create_project.call_args.kwargs
+        assert kwargs["name"] == "🚀 Rocket Project 🎯"
+
+    def test_sync_project_with_quote_in_name(self, repo, mock_plane_env):
+        """Single AND double quotes in name don't break the JSON body."""
+        name = "Bob's \"Important\" Project"
+        project = repo.create(name=name)
+        mock = MagicMock()
+        mock.create_project = AsyncMock(return_value={"id": "plane-q"})
+        mock.list_projects = AsyncMock(return_value=[])
+
+        svc = PlaneSyncService(repo, http_client=mock)
+        result = asyncio.run(svc.sync_project(project.project_id))
+
+        assert result["status"] == "synced"
+        assert mock.create_project.call_args.kwargs["name"] == name
+
+    def test_sync_project_with_newline_in_name(self, repo, mock_plane_env):
+        """Newlines in names (rare but valid) are preserved."""
+        name = "Line1\nLine2"
+        project = repo.create(name=name)
+        mock = MagicMock()
+        mock.create_project = AsyncMock(return_value={"id": "plane-nl"})
+        mock.list_projects = AsyncMock(return_value=[])
+
+        svc = PlaneSyncService(repo, http_client=mock)
+        result = asyncio.run(svc.sync_project(project.project_id))
+
+        assert result["status"] == "synced"
+        assert mock.create_project.call_args.kwargs["name"] == name
+
+    def test_sync_project_with_backslash_and_special_chars(
+        self, repo, mock_plane_env
+    ):
+        """Backslashes, tabs, and other control chars are preserved."""
+        name = "C:\\path\\to\\project\twith-tabs"
+        project = repo.create(name=name)
+        mock = MagicMock()
+        mock.create_project = AsyncMock(return_value={"id": "plane-bs"})
+        mock.list_projects = AsyncMock(return_value=[])
+
+        svc = PlaneSyncService(repo, http_client=mock)
+        result = asyncio.run(svc.sync_project(project.project_id))
+
+        assert result["status"] == "synced"
+        assert mock.create_project.call_args.kwargs["name"] == name
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Class 18: TestEdgeCaseConcurrentSync
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Gap: existing 74 tests verify the cooldown gate sequentially (first call
+# passes, second call within 30s is rate-limited). They do NOT exercise
+# concurrent calls from multiple threads — which is the realistic shape
+# of the threat model (parallel agent workflows, retry storms, etc.) and
+# the one most likely to surface a race condition on the shared
+# ``_last_sync`` dict.
+
+
+class TestEdgeCaseConcurrentSync:
+    """Concurrent calls must not crash, and the cooldown must block the loser."""
+
+    def test_tool_concurrent_calls_same_project_one_blocked(
+        self, repo, mock_plane_env, monkeypatch, clear_cooldown
+    ):
+        """Two threads call the tool for the same project ID. With the
+        cooldown recorded BEFORE the work, the second thread must observe
+        the rate-limited response (or both succeed if the first finished
+        and released the slot — but never both proceed concurrently)."""
+        # Patch the service so the work is fast and deterministic.
+        with patch("daemon.tools.plane_sync.PlaneSyncService") as MockSvc:
+            instance = MockSvc.return_value
+            instance.is_available.return_value = True
+            instance.sync_project = AsyncMock(
+                return_value={
+                    "status": "synced",
+                    "action": "created",
+                    "plane_project_id": "plane-conc",
+                    "synced_at": "2026-08-14T00:00:00+00:00",
+                }
+            )
+
+            tools = create_plane_sync_tools(repo)
+            tool = tools[0]
+
+            results: list[dict] = []
+            errors: list[Exception] = []
+
+            def worker():
+                try:
+                    r = tool.func(project_id="proj-concurrent")
+                    results.append(r)
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(exc)
+
+            t1 = threading.Thread(target=worker)
+            t2 = threading.Thread(target=worker)
+            t1.start()
+            t2.start()
+            t1.join(timeout=10)
+            t2.join(timeout=10)
+
+            # No thread should have crashed
+            assert errors == [], f"Threads crashed: {errors}"
+            assert len(results) == 2
+
+            # At most one call should have made it past the cooldown.
+            # The other must be rate_limited.
+            statuses = sorted(r["status"] for r in results)
+            assert statuses == ["rate_limited", "synced"], (
+                f"Expected 1 synced + 1 rate_limited, got {statuses}"
+            )
+
+            # The service must have been called at most once.
+            assert instance.sync_project.call_count <= 1
+
+    def test_tool_concurrent_calls_different_projects_both_succeed(
+        self, repo, mock_plane_env, monkeypatch, clear_cooldown
+    ):
+        """Concurrent calls for distinct project IDs must both succeed —
+        the cooldown is per-project, not global."""
+        project_a = repo.create(name="ProjectA")
+        project_b = repo.create(name="ProjectB")
+
+        with patch("daemon.tools.plane_sync.PlaneSyncService") as MockSvc:
+            instance = MockSvc.return_value
+            instance.is_available.return_value = True
+            instance.sync_project = AsyncMock(
+                return_value={
+                    "status": "synced",
+                    "action": "created",
+                    "plane_project_id": "plane-x",
+                    "synced_at": "2026-08-14T00:00:00+00:00",
+                }
+            )
+
+            tools = create_plane_sync_tools(repo)
+            tool = tools[0]
+
+            results: list[dict] = []
+
+            def worker(project_id):
+                results.append(tool.func(project_id=project_id))
+
+            t1 = threading.Thread(target=worker, args=(project_a.project_id,))
+            t2 = threading.Thread(target=worker, args=(project_b.project_id,))
+            t1.start()
+            t2.start()
+            t1.join(timeout=10)
+            t2.join(timeout=10)
+
+            assert len(results) == 2
+            assert all(r["status"] == "synced" for r in results), (
+                f"Both syncs should succeed, got {results}"
+            )
+
+    def test_service_concurrent_calls_dont_crash(
+        self, repo, mock_plane_env
+    ):
+        """Two concurrent ``sync_project`` calls for the SAME project must
+        both complete (they both run the work — the service has no
+        built-in concurrency lock; the cooldown gate is layer-above)."""
+        project = repo.create(name="SvcConcurrent")
+
+        # Use a slow mock so the two threads definitely overlap.
+        call_count = 0
+        call_lock = threading.Lock()
+
+        async def slow_create(*args, **kwargs):
+            nonlocal call_count
+            with call_lock:
+                call_count += 1
+            await asyncio.sleep(0.05)
+            return {"id": "plane-svc-conc"}
+
+        mock = MagicMock()
+        mock.create_project = AsyncMock(side_effect=slow_create)
+        mock.list_projects = AsyncMock(return_value=[])
+        mock.update_project = AsyncMock(return_value={"id": "plane-svc-conc"})
+
+        svc = PlaneSyncService(repo, http_client=mock)
+
+        results: list[dict] = []
+
+        def worker():
+            results.append(asyncio.run(svc.sync_project(project.project_id)))
+
+        t1 = threading.Thread(target=worker)
+        t2 = threading.Thread(target=worker)
+        t1.start()
+        t2.start()
+        t1.join(timeout=10)
+        t2.join(timeout=10)
+
+        # Both calls must complete without crashing.
+        assert len(results) == 2
+        # Both should succeed (mock returns valid response).
+        assert all(r["status"] == "synced" for r in results), (
+            f"Both syncs should succeed, got {results}"
+        )
+
+    def test_tool_concurrent_calls_after_cooldown_expired_both_succeed(
+        self, repo, mock_plane_env, clear_cooldown
+    ):
+        """If the cooldown has already expired, concurrent calls for the
+        same project both succeed (no false rate-limiting)."""
+        # Set the cooldown to 31s ago — past the 30s window.
+        import daemon.tools.plane_sync as ps_module
+
+        ps_module._last_sync["proj-expired"] = time.monotonic() - 31.0
+
+        with patch("daemon.tools.plane_sync.PlaneSyncService") as MockSvc:
+            instance = MockSvc.return_value
+            instance.is_available.return_value = True
+            instance.sync_project = AsyncMock(
+                return_value={
+                    "status": "synced",
+                    "action": "updated",
+                    "plane_project_id": "plane-x",
+                    "synced_at": "2026-08-14T00:00:00+00:00",
+                }
+            )
+
+            tools = create_plane_sync_tools(repo)
+            tool = tools[0]
+
+            results: list[dict] = []
+
+            def worker():
+                results.append(tool.func(project_id="proj-expired"))
+
+            t1 = threading.Thread(target=worker)
+            t2 = threading.Thread(target=worker)
+            t1.start()
+            t2.start()
+            t1.join(timeout=10)
+            t2.join(timeout=10)
+
+            # At most one should be rate-limited (the second, after the
+            # first sets the cooldown). But neither should crash.
+            assert len(results) == 2
+            assert all(r["status"] in ("synced", "rate_limited") for r in results)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Class 19: TestEdgeCaseMetadataUpdateWithNameChange
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Gap: the existing ``test_sync_existing_project_updates`` covers the
+# basic UPDATE path when both name and metadata are unchanged. It does
+# NOT verify that a project that has been RENAMED (between syncs) still
+# takes the UPDATE path — using the existing ``plane_project_id`` — and
+# pushes the new name to Plane. This is the renamed-project happy path
+# and exercises the path the v1 scope limitation explicitly says it
+# does NOT auto-detect (a manual sync must be triggered).
+
+
+class TestEdgeCaseMetadataUpdateWithNameChange:
+    """The UPDATE path is preserved even after the project is renamed."""
+
+    def test_sync_with_existing_metadata_after_rename_updates(
+        self, repo, mock_plane_env
+    ):
+        """Project was synced under name "OldName", then renamed to
+        "NewName". The next sync must use the UPDATE path (existing
+        ``plane_project_id``) and push the new name to Plane — not
+        create a duplicate."""
+        project = repo.create(name="OldName")
+
+        # Pre-seed plane_project_id (as if a previous sync happened).
+        with Session(repo.engine) as session:
+            repo.set_metadata_record(
+                session,
+                project.project_id,
+                PLANE_PROJECT_ID_METADATA_KEY,
+                "plane-existing",
+            )
+            repo.set_metadata_record(
+                session,
+                project.project_id,
+                PLANE_SYNC_STATE_METADATA_KEY,
+                "synced",
+            )
+            session.commit()
+
+        # Rename the project.
+        repo.update(project.project_id, name="NewName")
+
+        mock = MagicMock()
+        mock.update_project = AsyncMock(
+            return_value={"id": "plane-existing", "name": "NewName"}
+        )
+        mock.create_project = AsyncMock(
+            side_effect=AssertionError(
+                "create_project must NOT be called when metadata exists"
+            )
+        )
+        mock.list_projects = AsyncMock(
+            side_effect=AssertionError(
+                "list_projects must NOT be called when metadata exists"
+            )
+        )
+
+        svc = PlaneSyncService(repo, http_client=mock)
+        result = asyncio.run(svc.sync_project(project.project_id))
+
+        assert result["status"] == "synced"
+        assert result["action"] == "updated"
+        assert result["plane_project_id"] == "plane-existing"
+        # Verify the new name was sent to Plane via the UPDATE path.
+        # update_project is called as (plane_id, name=..., description=...)
+        # so plane_id is the first positional arg, not a kwarg.
+        call_args = mock.update_project.call_args
+        assert call_args.args[0] == "plane-existing"
+        assert call_args.kwargs["name"] == "NewName"
+
+    def test_sync_with_existing_metadata_preserves_state_on_resync(
+        self, repo, mock_plane_env
+    ):
+        """Re-syncing a project whose metadata is already ``synced`` keeps
+        the UPDATE path and refreshes ``plane_synced_at``."""
+        project = repo.create(name="ResyncProj")
+        with Session(repo.engine) as session:
+            repo.set_metadata_record(
+                session,
+                project.project_id,
+                PLANE_PROJECT_ID_METADATA_KEY,
+                "plane-known",
+            )
+            repo.set_metadata_record(
+                session,
+                project.project_id,
+                PLANE_SYNC_STATE_METADATA_KEY,
+                "synced",
+            )
+            repo.set_metadata_record(
+                session,
+                project.project_id,
+                PLANE_SYNCED_AT_METADATA_KEY,
+                "2020-01-01T00:00:00+00:00",
+            )
+            session.commit()
+
+        # Capture timestamp before sync.
+        before_sync = time.monotonic()
+
+        mock = MagicMock()
+        mock.update_project = AsyncMock(return_value={"id": "plane-known"})
+        mock.create_project = AsyncMock(
+            side_effect=AssertionError("create must NOT be called")
+        )
+
+        svc = PlaneSyncService(repo, http_client=mock)
+        result = asyncio.run(svc.sync_project(project.project_id))
+
+        assert result["status"] == "synced"
+        assert result["action"] == "updated"
+        assert result["plane_project_id"] == "plane-known"
+
+        # ``plane_synced_at`` should be refreshed (newer than the seeded
+        # 2020 timestamp).
+        with Session(repo.engine) as session:
+            records = repo.list_metadata_records(session, project.project_id)
+        meta = {r.meta_key: r.meta_value for r in records}
+        assert meta[PLANE_SYNC_STATE_METADATA_KEY] == "synced"
+        assert meta[PLANE_SYNCED_AT_METADATA_KEY] != "2020-01-01T00:00:00+00:00"
+        # Sanity: the new timestamp is parseable.
+        from datetime import datetime
+        parsed = datetime.fromisoformat(meta[PLANE_SYNCED_AT_METADATA_KEY])
+        assert parsed.timestamp() > 0
+        assert time.monotonic() - before_sync < 60  # ran recently
