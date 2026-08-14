@@ -1845,10 +1845,10 @@ Returns:
         job_queue_mgmt_service=queue_mgmt_service,
     )
 
-    # Plane sync tool — registered in the "project" category so the
-    # leader agent (and any agent with tools.allow: ["project"]) can
-    # invoke ``plane_sync_project`` directly. Wraps PlaneSyncService
-    # behind a 30s per-project cooldown.
+    # Plane sync tool — registered in the "plane_sync" category so the
+    # worker agent (with tools.allow: ["plane_sync"]) can invoke
+    # ``plane_sync_project`` directly. PM dispatches sync tasks to
+    # worker. Wraps PlaneSyncService behind a 30s per-project cooldown.
     from .plane_sync import create_plane_sync_tools
     plane_sync_tools = create_plane_sync_tools(manager.project_store)
     
@@ -1894,8 +1894,8 @@ Returns:
     # Add project management tools (available in all instances)
     tools.extend(project_tools)
 
-    # Add Plane sync tool (project category — auto-attached with the
-    # other project tools; ``tools.allow: ["project"]`` picks it up).
+    # Add Plane sync tool (plane_sync category auto-attached; the
+    # worker agent picks it up via ``tools.allow: ["plane_sync"]``).
     tools.extend(plane_sync_tools)
 
     # ── Background process tools (proc_*, always available — same base

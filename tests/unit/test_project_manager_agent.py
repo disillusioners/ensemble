@@ -267,11 +267,12 @@ class TestMetaJsonSchema:
             f"version should look like semver (X.Y.Z...), got {version!r}"
         )
 
-    def test_team_members_is_leader(self) -> None:
-        """team_members must be ['leader'] — v2 delegates to leader."""
+    def test_team_members_is_leader_and_worker(self) -> None:
+        """team_members must be ['leader', 'worker'] — v2 delegates to leader + worker."""
         meta = _load_meta()
-        assert meta["team_members"] == ["leader"], (
-            f"project-manager must have team_members=['leader'] (v2 delegation). "
+        assert meta["team_members"] == ["leader", "worker"], (
+            f"project-manager must have team_members=['leader', 'worker'] "
+            f"(v2 delegation: leader for software, worker for sync). "
             f"Got: {meta['team_members']}"
         )
 
@@ -676,8 +677,9 @@ class TestAgentDiscovery:
         assert md.id == "project-manager", f"id mismatch: {md.id}"
         assert md.name == "Project Manager", f"name mismatch: {md.name!r}"
         assert md.version == "2.0.0", f"version mismatch: {md.version!r}"
-        assert md.team_members == ["leader"], (
-            f"team_members must be ['leader'] (v2 delegation). Got: {md.team_members}"
+        assert md.team_members == ["leader", "worker"], (
+            f"team_members must be ['leader', 'worker'] (v2 delegation). "
+            f"Got: {md.team_members}"
         )
 
     def test_meta_conforms_to_agent_metadata_model(self) -> None:
@@ -691,7 +693,7 @@ class TestAgentDiscovery:
         md = AgentMetadata.model_validate(meta)  # must not raise
         assert md.id == "project-manager"
         assert md.name == "Project Manager"
-        assert md.team_members == ["leader"]
+        assert md.team_members == ["leader", "worker"]
 
 
 # =============================================================================

@@ -1,10 +1,12 @@
-"""Plane sync tool category — leader-facing agent tool.
+"""Plane sync tool category — worker-facing agent tool.
 
 Exposes a single ``plane_sync_project`` tool that drives
 :class:`daemon.services.plane_sync_service.PlaneSyncService` to mirror an
-Ensemble project to Plane. The tool is registered in the ``"project"``
-category so any agent with ``tools.allow: ["project"]`` (notably the
-leader agent) can invoke it.
+Ensemble project to Plane. The tool is registered in the ``"plane_sync"``
+category so the worker agent (spawned by project-manager for operational
+sync, has ``tools.allow: ["plane_sync"]``) can invoke it. The leader
+agent keeps the broader ``"project"`` category for project management
+operations — sync is intentionally NOT routed through leader.
 
 CR-4: Per-project cooldown
 --------------------------
@@ -194,8 +196,8 @@ def create_plane_sync_tools(
 ) -> list:
     """Create the ``plane_sync_project`` tool factory.
 
-    Registered in the ``"project"`` category so the leader agent (which
-    has ``tools.allow: ["project"]``) can invoke it.
+    Registered in the ``"plane_sync"`` category so the worker agent
+    (has ``tools.allow: ["plane_sync"]``) can invoke it.
 
     Args:
         store: SQLModelProjectRepository used by the sync service.
@@ -203,7 +205,7 @@ def create_plane_sync_tools(
     Returns:
         List containing the ``plane_sync_project`` tool.
     """
-    @register_tool_category("project")
+    @register_tool_category("plane_sync")
     @tool
     def plane_sync_project(project_id: str, force: bool = False) -> dict:
         """Sync an Ensemble project to Plane. Use tool_help("plane_sync_project") for details."""

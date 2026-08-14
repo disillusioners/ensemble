@@ -1171,12 +1171,14 @@ class TestPlaneSyncProjectToolIntegration:
 class TestPlaneSyncToolRegistration:
     """Tool registration / metadata."""
 
-    def test_tool_registered_in_project_category(self, repo):
-        """``plane_sync_project._tool_category == "project"`` so the leader
-        agent (which has ``tools.allow: ["project"]``) can invoke it."""
+    def test_tool_registered_in_plane_sync_category(self, repo):
+        """``plane_sync_project._tool_category == "plane_sync"`` so the
+        worker agent (which has ``tools.allow: ["plane_sync"]``) can
+        invoke it; NOT in the "project" category (leader must not
+        execute sync)."""
         tools = create_plane_sync_tools(repo)
         tool = tools[0]
-        assert getattr(tool, "_tool_category", None) == "project"
+        assert getattr(tool, "_tool_category", None) == "plane_sync"
 
     def test_tool_has_first_party_marker(self, repo):
         """``_tool_category_first_party`` is set so spoofed categories are

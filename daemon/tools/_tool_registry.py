@@ -364,6 +364,7 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     "blueprint": "daemon.tools.blueprint",
     "system-log": "daemon.tools.system_log_tools",
     "plane": "daemon.tools.plane_tools",
+    "plane_sync": "daemon.tools.plane_sync",
 }
 
 

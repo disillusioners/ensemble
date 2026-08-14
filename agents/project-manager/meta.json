@@ -74,6 +74,6 @@
       "image"
     ]
   },
-  "team_members": ["leader"],
+  "team_members": ["leader", "worker"],
   "tags": ["strategic", "oversight", "reporting"]
 }
