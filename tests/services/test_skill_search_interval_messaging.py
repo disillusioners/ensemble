@@ -622,6 +622,7 @@ class TestW1ExplicitLoadCleanup:
         ):
             setattr(mgr, attr, {})
         mgr._deferred_question_pause = set()
+        mgr._deferred_watchover_terminate = set()
         mgr._question_manager = MagicMock()
         mgr._question_pause_requested = {}
         mgr._explicit_skill_loaded = set()
@@ -741,6 +742,7 @@ class TestCounterCleanupOnInstanceCleanup:
         mgr._original_timestamps = {}
         mgr._last_context_usage = {}
         mgr._deferred_question_pause = set()
+        mgr._deferred_watchover_terminate = set()
         mgr._question_manager = MagicMock()
         mgr._question_pause_requested = {}
 
