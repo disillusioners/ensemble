@@ -2049,10 +2049,33 @@ class ThinkingChatOpenAI(ChatOpenAI):
 def clean_llm_config(cfg: dict) -> dict:
     """Strip non-kwarg keys before passing to ThinkingChatOpenAI(**cfg).
 
-    model_vision is used for vision routing decisions but is not a valid
-    LangChain/ChatOpenAI parameter and must be removed before LLM construction.
+    Two daemon-internal keys are removed:
+
+    - ``model_vision`` — used for vision routing decisions but not a valid
+      LangChain/ChatOpenAI parameter.
+    - ``base_url_backup`` — the HA-failover backup endpoint. It is consumed
+      by ``build_instance_llms`` (which reads it from the ORIGINAL config
+      dict before this function strips it) to wire the FailoverController,
+      but it must NEVER reach the ChatOpenAI constructor: on
+      langchain-openai >= 1.x, ``BaseChatOpenAI.__init__`` transfers
+      unknown kwargs into ``model_kwargs``, and ``model_kwargs`` entries
+      are forwarded verbatim to ``Completions.create()`` — so a leaked
+      ``base_url_backup`` crashes EVERY invoke with
+      ``TypeError: Completions.create() got an unexpected keyword argument
+      'base_url_backup'`` (including when the backup is unset, as long as
+      the key is present with a None value the same transfer applies to
+      None-valued entries — and with a set value it is guaranteed).
+
+      This is the single choke point for all ThinkingChatOpenAI(**cfg)
+      construction sites (graph.py vision/standard/watcher/loop-repair,
+      compaction, title_generation, keyword_extraction, child_reports,
+      watcher_context_builder) — every site must route through here.
     """
-    return {k: v for k, v in cfg.items() if k != "model_vision"}
+    return {
+        k: v
+        for k, v in cfg.items()
+        if k not in ("model_vision", "base_url_backup")
+    }
 
 
 class SessionState(MessagesState):
@@ -3068,13 +3091,21 @@ def build_instance_llms(
     """
     llm_standard = None
     llm_with_tools = None
+    llm_vision_chat = None
 
     if model_vision:
         logger.info(f"[Graph] Vision model configured: {model_vision}")
         # Filter model_vision from config to avoid passing it to the API
+        # (``clean_llm_config`` also strips ``base_url_backup`` — the HA
+        # wiring below reads it from the ORIGINAL
+        # ``llm_config_with_headers`` dict before this point.)
         vision_config = clean_llm_config(llm_config_with_headers)
         vision_config["model"] = model_vision
-        llm_with_tools = ThinkingChatOpenAI(**vision_config).bind_tools(tools)
+        # Keep the raw ChatOpenAI reference (pre-bind_tools) so the HA
+        # failover controller can mutate its underlying openai client
+        # (W3: vision gets its OWN controller, see retry wiring below).
+        llm_vision_chat = ThinkingChatOpenAI(**vision_config)
+        llm_with_tools = llm_vision_chat.bind_tools(tools)
     else:
         logger.info("[Graph] No vision model configured, using standard model for all calls")
 
@@ -3106,16 +3137,17 @@ def build_instance_llms(
         transient_attempts = retry_config.get("transient_attempts", 8)
         timeout_attempts = retry_config.get("timeout_attempts", 3)
 
-        # HA-failover wiring: build one FailoverController per underlying
-        # ChatOpenAI instance. The controller mutates the openai client's
-        # ``base_url`` so the *next* request targets the backup URL.
+        # HA-failover wiring: ONE FailoverController per underlying
+        # ChatOpenAI instance (W3). Each controller mutates that client's
+        # openai ``base_url`` so the *next* request from THAT client
+        # targets the backup URL.
         #
-        # We capture the raw ChatOpenAI instance (``llm_standard_chat``)
-        # BEFORE ``bind_tools`` / ``classify_llm_errors`` wrap it — the
-        # bound runnable still exposes ``root_client`` (verified in
-        # langchain_openai >= 0.2), but mutating via the original instance
-        # avoids any future surprise if a LangChain refactor drops the
-        # attribute on the binding wrapper.
+        # We capture the raw ChatOpenAI instances (``llm_standard_chat``
+        # and, when configured, ``llm_vision_chat``) BEFORE
+        # ``bind_tools`` / ``classify_llm_errors`` wrap them — the bound
+        # runnables still expose ``root_client``, but mutating via the
+        # original instance avoids any future surprise if a LangChain
+        # refactor drops the attribute on the binding wrapper.
         #
         # No backup configured → controllers are still constructed but
         # ``is_configured`` is False and they are not passed to the
@@ -3126,16 +3158,6 @@ def build_instance_llms(
         primary_url = llm_config_with_headers.get("base_url", "")
         backup_url = llm_config_with_headers.get("base_url_backup")
 
-        # Always build a controller for the standard client. This covers
-        # both the vision case (where ``llm_with_tools`` is the bound
-        # vision ChatOpenAI and shares the openai client config with
-        # standard) and the standard case (where ``llm_with_tools`` IS
-        # the bound standard). Both ``llm_with_tools`` and ``llm_standard``
-        # wrap the same underlying ChatOpenAI via ``llm_standard_chat``
-        # (verified above), so one controller covers both. A separate
-        # vision-only controller is documented as a follow-up — vision
-        # failover would only matter if the vision endpoint itself fails,
-        # which is out of scope for v1.
         standard_failover = FailoverController(
             chat_client=llm_standard_chat,
             primary_url=primary_url,
@@ -3143,15 +3165,28 @@ def build_instance_llms(
         )
         backup_configured = standard_failover.is_configured
 
-        retry_predicate = _make_llm_retry_strategy(
-            transient_max=transient_attempts,
-            timeout_max=timeout_attempts,
-            failover_controller=standard_failover if backup_configured else None,
-        )
+        # W3: when vision is configured, ``llm_with_tools`` is a SEPARATE
+        # underlying ChatOpenAI from ``llm_standard_chat``. A single
+        # shared retry predicate/controller would swap the standard
+        # client's URL while vision keeps hitting the primary (and vice
+        # versa) — an asymmetric entanglement. Vision therefore gets its
+        # own controller and its own retry strategy, wired with the same
+        # pattern as the standard client. When vision is not configured,
+        # ``llm_with_tools`` IS the bound standard client and the two
+        # wrappers below deliberately share the same controller so the
+        # swap covers both.
+        vision_failover = None
+        if model_vision and llm_vision_chat is not None:
+            vision_failover = FailoverController(
+                chat_client=llm_vision_chat,
+                primary_url=primary_url,
+                backup_url=backup_url,
+            )
 
-        # HA budget-split extends the total attempts ceiling. Worst case
-        # the primary consumes its full slice for one category (transient
-        # OR timeout), then the backup runs the FULL original budget for
+        # Shared ceiling derivation for both strategies — the HA
+        # budget-split extends the total attempts ceiling. Worst case the
+        # primary consumes its full slice for one category (transient OR
+        # timeout), then the backup runs the FULL original budget for
         # that same category after the swap resets the counters:
         #   ceiling = max(transient_max, timeout_max)            # backup leg
         #           + max(primary_transient_max, primary_timeout_max)  # primary leg
@@ -3159,7 +3194,9 @@ def build_instance_llms(
         # ``llm_error_classifier`` (defaults of
         # ``_make_llm_retry_strategy``) so the strategy and this ceiling
         # derivation cannot drift apart. Without a backup, the ceiling
-        # stays at the pre-HA value.
+        # stays at the pre-HA value. (Note the W2 clamp: the primary
+        # slice inside the strategy never exceeds the operator budget,
+        # so the ceiling remains an upper bound, never a grant.)
         if backup_configured:
             max_attempts = max(transient_attempts, timeout_attempts) + max(
                 PRIMARY_TRANSIENT_MAX, PRIMARY_TIMEOUT_MAX
@@ -3167,14 +3204,37 @@ def build_instance_llms(
         else:
             max_attempts = max(transient_attempts, timeout_attempts)
 
-        # Use tenacity directly since LangChain's with_retry() no longer supports
-        # custom retry predicates (the 'retry=' parameter was removed)
-        retrying = Retrying(
-            stop=stop_after_attempt(max_attempts),
-            wait=wait_exponential_jitter(),
-            retry=retry_predicate,
-            reraise=True,
-        )
+        def _build_retrying(controller):
+            """Build one Retrying wrapper bound to one failover controller."""
+            predicate = _make_llm_retry_strategy(
+                transient_max=transient_attempts,
+                timeout_max=timeout_attempts,
+                failover_controller=(
+                    controller if (controller is not None and controller.is_configured)
+                    else None
+                ),
+            )
+            return Retrying(
+                stop=stop_after_attempt(max_attempts),
+                wait=wait_exponential_jitter(),
+                retry=predicate,
+                reraise=True,
+            )
+
+        # Strategy for llm_with_tools: the vision controller when vision
+        # is configured, otherwise the standard controller (llm_with_tools
+        # IS the bound standard client in that case).
+        #
+        # No-vision case: both wrappers drive the SAME underlying client,
+        # so they deliberately share ONE Retrying (pre-HA behavior — one
+        # predicate, one set of counters, one controller). Only the
+        # dual-LLM (vision) case builds a second, independent strategy.
+        if vision_failover is not None:
+            retrying = _build_retrying(vision_failover)
+            standard_retrying = _build_retrying(standard_failover)
+        else:
+            retrying = _build_retrying(standard_failover)
+            standard_retrying = retrying
 
         # Capture the classified LLMs for retry wrapper
         classified_llm = llm_with_tools
@@ -3184,20 +3244,25 @@ def build_instance_llms(
 
         llm_with_tools = RunnableLambda(_run_with_retry)
 
-        # Also wrap standard LLM with Retrying if it's different from llm_with_tools.
-        # This handles the dual-LLM architecture case where both vision and standard
-        # models need their own retry wrappers.
+        # Also wrap standard LLM with its own Retrying when it is different
+        # from llm_with_tools. This handles the dual-LLM architecture case:
+        # vision drives ``llm_with_tools`` via the vision controller while
+        # ``llm_standard`` has its own controller (W3) — each wrapper's
+        # swap decisions stay bound to its own underlying client.
         if llm_standard is not llm_with_tools:
             classified_standard = llm_standard
             def _run_standard_with_retry(input_value):
-                return retrying(classified_standard.invoke, input_value)
+                return standard_retrying(classified_standard.invoke, input_value)
             llm_standard = RunnableLambda(_run_standard_with_retry)
 
         if backup_configured:
+            controller_count = 2 if vision_failover is not None else 1
             logger.info(
                 f"[LLM-HA] Failover enabled: primary={primary_url} "
                 f"backup={backup_url} "
-                f"(primary slice: 2 transient / 1 timeout, "
+                f"({controller_count} controller(s): standard"
+                f"{'+vision' if vision_failover is not None else ''}; "
+                f"primary slice: 2 transient / 1 timeout, "
                 f"backup gets full {transient_attempts}/{timeout_attempts})"
             )
         logger.debug(

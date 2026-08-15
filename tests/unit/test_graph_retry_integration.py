@@ -412,18 +412,23 @@ class TestErrorClassifierIntegration:
         )
 
     def test_retry_uses_retry_predicate(self):
-        """with_retry should use retry=retry_predicate for per-category limits."""
+        """Retrying should use the _make_llm_retry_strategy predicate for
+        per-category limits (W3: built per failover controller inside
+        ``_build_retrying`` rather than a single module-level binding)."""
         import inspect
         from daemon.graph import build_instance_llms
-        
+
         source = inspect.getsource(build_instance_llms)
-        
+
         # Verify _make_llm_retry_strategy is used instead of TRANSIENT_EXCEPTIONS
         assert "_make_llm_retry_strategy" in source, (
             "_make_llm_retry_strategy should be used in retry configuration"
         )
-        assert "retry=retry_predicate" in source, (
-            "with_retry should use retry=retry_predicate for per-category limits"
+        # W3: the predicate is built per-controller inside ``_build_retrying``
+        # and passed as the ``retry=`` argument of Retrying.
+        assert "retry=predicate" in source, (
+            "Retrying should use retry=predicate (from _build_retrying) "
+            "for per-category limits"
         )
         assert "TRANSIENT_EXCEPTIONS" not in source, (
             "TRANSIENT_EXCEPTIONS should not be imported in graph.py anymore"
@@ -530,7 +535,11 @@ class TestBuildInstanceGraphIntegration:
                             # because bind_tools returns different objects, they are different
                             assert mock_classify.call_count == 2
                             
-                            # Verify Retrying was called once (same Retrying instance wraps both LLMs)
+                            # Verify Retrying was called exactly once in the
+                            # no-vision case: both wrappers share the same
+                            # underlying client and therefore the same
+                            # Retrying (pre-HA behavior preserved; W3 only
+                            # splits the dual-LLM vision case).
                             assert mock_retrying.call_count == 1
                             
                             # Verify Retrying was called with correct parameters

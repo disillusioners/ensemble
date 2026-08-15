@@ -109,6 +109,15 @@ TIMEOUT_EXCEPTIONS: tuple[type[Exception], ...] = (
 # adds ``max(PRIMARY_TRANSIENT_MAX, PRIMARY_TIMEOUT_MAX)`` to the slice
 # caps when computing the total attempts ceiling. If these defaults
 # change, graph.py picks the new values up automatically.
+#
+# NOTE on def-time binding: ``_make_llm_retry_strategy`` declares these
+# constants as DEFAULT PARAMETER VALUES, which Python binds once at
+# function-definition time. Monkeypatching ``llm_error_classifier.PRIMARY_*``
+# at runtime therefore changes graph.py's ceiling derivation (it
+# re-imports the names at call time) but NOT the strategy's slice caps —
+# the two silently drift apart. To change the slice caps at runtime,
+# pass ``primary_transient_max`` / ``primary_timeout_max`` explicitly; to
+# change them permanently, edit these definitions (both consumers follow).
 PRIMARY_TRANSIENT_MAX = 3  # primary tolerates 2 transient retries before swap
 PRIMARY_TIMEOUT_MAX = 2  # primary tolerates 1 timeout retry before swap
 
@@ -127,11 +136,39 @@ class FailoverController:
         *next* request goes to the backup. The langchain layer (``self.client =
         self.root_client.chat.completions``) reads ``self.root_client`` at
         request time, so the next call sees the new URL with no further work.
-      - ``reset_to_primary()`` rewrites it back. Called at the start of every
-        new invoke cycle so behavior is non-sticky across invokes.
+      - ``reset_to_primary()`` rewrites it back. It is called ONLY from
+        the retry predicate's ``attempt_number == 1`` branch — i.e. after
+        the first attempt of a new invoke cycle completes (tenacity
+        evaluates the predicate after every attempt, successful or not).
+        The *first request* of that cycle went out before the reset, so
+        a cycle following a successful failover starts on backup and
+        returns to primary from its second attempt onward. See
+        "Sticky-on-success" below for why this asymmetry is intentional.
       - Idempotent: ``swap_to_backup()`` when already on backup is a no-op,
         matching the predicate's "swapped" flag. This avoids redundant log
         lines when the swap is re-asserted.
+
+    Sticky-on-success (leader-adjudicated semantic, 2026-08-14 review W1):
+      After a cycle that failed over to backup and SUCCEEDED there, the
+      client URL intentionally REMAINS on backup, so the NEXT invoke's
+      first request hits the backup directly — no probe of the dead
+      primary. The reset-to-primary is not tied to invoke boundaries but
+      to predicate evaluation: tenacity evaluates the predicate after
+      EVERY attempt (successful ones included), and the predicate's
+      ``attempt_number == 1`` branch calls ``reset_to_primary()`` — so
+      once the next invoke's first attempt completes (success OR failure
+      on backup), the client returns to primary for the attempts after
+      it. Net effect during a primary outage: invocations alternate —
+      one invoke served wholly by backup, the next probes primary once,
+      fails over again if it is still down.
+
+      This is deliberate: a strict non-sticky policy (an eager reset
+      BEFORE the first request of every invoke) would tax EVERY invoke
+      with dead-primary probe latency, while both endpoints serve the
+      same backend — lingering on the backup after a successful failover
+      is harmless and self-heals as soon as the client is returned to
+      primary by the next predicate evaluation. Do not add an
+      invoke-start reset; the adjudication is final unless re-reviewed.
 
     Non-goals:
       - This controller does NOT handle credentials, request signing, or model
@@ -178,9 +215,11 @@ class FailoverController:
     def reset_to_primary(self) -> None:
         """Point the underlying openai client back at the primary URL.
 
-        Called at the start of each new invoke cycle to enforce the
-        non-sticky contract (next invoke starts on primary regardless of
-        where the previous one ended).
+        Called from the retry predicate's ``attempt_number == 1`` branch
+        (NOT eagerly before the first request of an invoke — see the
+        "Sticky-on-success" section of the class docstring). The first
+        request of the cycle already went out on the lingering URL; this
+        reset governs the attempts AFTER it.
         """
         if not self._on_backup:
             return
@@ -219,7 +258,13 @@ class FailoverController:
         'raw_path'`` — the first failover attempt would never reach the
         backup. The setter's normalisation is exactly what makes the
         swap work.
+
+        If BOTH mutation attempts fail (sync AND async), the failover is
+        dead while a backup is configured — one WARNING is emitted so the
+        operator can see it in normal log levels (the per-attempt detail
+        stays at DEBUG with the traceback).
         """
+        failed: list[str] = []
         for client_attr in ("root_client", "root_async_client"):
             client = getattr(self._chat_client, client_attr, None)
             if client is None:
@@ -227,11 +272,23 @@ class FailoverController:
             try:
                 client.base_url = new_url
             except Exception:
+                failed.append(client_attr)
                 logger.debug(
                     f"[LLM-HA] Could not set base_url on {client_attr} "
                     f"({type(client).__name__}); failover may be a no-op.",
                     exc_info=True,
                 )
+        if len(failed) == 2:
+            # W5: both sync and async mutation attempts raised — the swap
+            # silently did nothing even though a backup is configured.
+            # Emit exactly one WARNING per controller per swap attempt
+            # (bounded: swap_to_backup/reset_to_primary early-return when
+            # already in the target state, so this cannot loop).
+            logger.warning(
+                f"[LLM-HA] base_url mutation FAILED on both root_client "
+                f"and root_async_client; failover to {new_url} is a NO-OP "
+                f"(targeting {new_url}). Check the client object shape."
+            )
 
 
 def _make_llm_retry_strategy(
@@ -257,12 +314,19 @@ def _make_llm_retry_strategy(
             ``tests/unit/test_llm_error_classifier.py::TestRetryByCategory::test_transient_errors_limited_to_transient_max``.)
         timeout_max: Max counter value for timeout errors, same
             ``count < timeout_max`` convention.
-        failover_controller: Optional ``FailoverController``. When supplied,
-            the predicate performs a one-shot swap to the backup ``base_url``
-            after the primary phase exhausts its small slice, then resets
-            counters and grants the FULL ``transient_max``/``timeout_max``
-            budget to the backup. When ``None`` the predicate behaves
-            identically to the pre-HA system (zero behavior change).
+        failover_controller: Optional ``FailoverController``. When supplied
+            AND ``is_configured`` is True, the predicate performs a one-shot
+            swap to the backup ``base_url`` after the primary phase exhausts
+            its small slice, then resets counters and grants the FULL
+            ``transient_max``/``timeout_max`` budget to the backup. When
+            ``None`` (or unconfigured) the predicate behaves identically to
+            the pre-HA system (zero behavior change).
+
+            Cross-invoke semantics: sticky-on-success (leader-adjudicated).
+            A cycle that swaps and succeeds on backup leaves the client on
+            backup; the next cycle's first request hits backup directly and
+            only flips back to primary after a FAILURE on backup (see the
+            ``FailoverController`` docstring for the rationale).
         primary_transient_max: Counter threshold on primary above which
             the swap-to-backup fires for transient errors. Same
             ``count < primary_transient_max`` convention as
@@ -285,9 +349,18 @@ def _make_llm_retry_strategy(
         """Retry predicate that tracks per-category attempt counts."""
 
         def __call__(self, retry_state) -> bool:
-            # Reset counters at the start of each new invoke cycle.
-            # tenacity creates fresh RetryCallState per cycle but reuses the predicate.
-            # attempt_number == 1 means first failure of a new cycle.
+            # Reset counters + controller URL after the first attempt of
+            # each new invoke cycle. tenacity creates fresh RetryCallState
+            # per cycle but reuses the predicate; attempt_number == 1
+            # means the first attempt of a new cycle just completed —
+            # with a failure (retry decision follows below) or a success
+            # (``exception is None`` returns False right after; the reset
+            # has already run, which is harmless — idempotent).
+            #
+            # Sticky-on-success note: the reset happens AFTER that first
+            # request went out on whatever URL the previous cycle ended
+            # on. See the FailoverController docstring for why this is
+            # the adjudicated semantic.
             if retry_state.attempt_number == 1:
                 counts["transient"] = 0
                 counts["timeout"] = 0
@@ -316,7 +389,13 @@ def _make_llm_retry_strategy(
                 # non-retryable — re-raised by the classifier and short-circuits
                 # to the upstream error pipeline). See daemon/llm_error_classifier.py
                 # comment block on TRANSIENT_EXCEPTIONS for the rationale.
+                #
+                # ``is_configured`` (not just ``is not None``) guards this:
+                # a controller built without a usable backup (None or equal
+                # to primary) must not make IndexError retryable — retrying
+                # against the same broken endpoint just burns budget.
                 failover_controller is not None
+                and failover_controller.is_configured
                 and isinstance(exception, IndexError)
             ):
                 counts["transient"] += 1
@@ -349,17 +428,35 @@ def _make_llm_retry_strategy(
                 # Already on backup — full budget applies.
                 return current < full_budget
 
-            if current >= primary_cap:
+            # W2 clamp: the operator-configured budget (``full_budget``) is
+            # a CEILING — the primary slice can never exceed it. When the
+            # custom budget is smaller than the default primary cap (e.g.
+            # ``transient_max=2 < PRIMARY_TRANSIENT_MAX=3``), the swap
+            # triggers at the budget boundary instead of never firing
+            # (which would silently strand the configured backup unused).
+            effective_cap = min(primary_cap, full_budget)
+
+            if current >= effective_cap:
                 # Primary exhausted for this category — swap and reset.
                 failover_controller.swap_to_backup()
                 counts["swapped"] = True
-                counts[category] = 0
+                # W4 cross-category reset: BOTH counters are zeroed, not
+                # just the triggering category's. Failures interleave in
+                # practice (transient, transient, timeout, ...); resetting
+                # only one category would carry the other's primary-phase
+                # count into the backup phase and silently shortchange the
+                # backup's full budget.
+                counts["transient"] = 0
+                counts["timeout"] = 0
                 logger.warning(
                     f"[LLM-HA] {failover_controller.failover_summary()}"
                 )
                 return True  # immediate retry on backup
 
-            # Still on primary, within slice — continue.
+            # Still on primary, within slice — continue. Note the predicate
+            # is bounded by the operator ceiling even on primary
+            # (``current < full_budget``) — the swap path above never
+            # grants backup budget beyond what the operator configured.
             return current < full_budget
 
     return RetryByCategory()
@@ -421,12 +518,17 @@ def classify_llm_errors(llm_with_tools: Any) -> RunnableLambda:
         except IndexError as e:
             # Malformed LLM response (e.g., empty choices array). LangChain's
             # .invoke() crashes on choices[0] when the provider returns
-            # choices: []. This is non-retryable — retrying typically hits the
-            # same malformed payload, so we re-raise to let the upstream
-            # error pipeline handle it (instance_messaging / task_processor).
+            # choices: []. With no backup configured this is non-retryable —
+            # retrying typically hits the same malformed payload, so we
+            # re-raise to let the upstream error pipeline handle it
+            # (instance_messaging / task_processor). When a backup IS
+            # configured the retry predicate treats IndexError as transient
+            # and fails over (see RetryByCategory), so the wording below
+            # stays condition-neutral: the classifier itself never retries,
+            # it only classifies.
             logger.error(
                 f"[LLM] Malformed LLM response (IndexError, likely empty "
-                f"choices array, will not retry): {_truncate_error(e)}"
+                f"choices array): {_truncate_error(e)}"
             )
             raise
         except Exception as e:

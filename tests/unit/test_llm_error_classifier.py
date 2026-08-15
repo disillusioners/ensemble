@@ -927,8 +927,15 @@ class TestIndexErrorHandler:
 
     def test_index_error_logs_at_error_level(self, caplog):
         """The handler must log the IndexError at ERROR level with the
-        'Malformed LLM response' / 'will not retry' tag so production
-        log-scrapers can identify this crash signature."""
+        'Malformed LLM response' / IndexError tag so production
+        log-scrapers can identify this crash signature.
+
+        Wording note (review round 2, suggestion 3): the message is
+        deliberately condition-neutral — the classifier itself never
+        retries, it only classifies. Whether a retry happens is decided
+        by the retry predicate (IndexError is retryable-with-failover
+        only when a backup is configured), so the log must NOT claim
+        "will not retry"."""
         original = IndexError("list index out of range")
 
         mock_llm = self._create_mock_llm_raising(original)
@@ -949,8 +956,9 @@ class TestIndexErrorHandler:
             f"Expected an ERROR-level 'Malformed LLM response' log entry; "
             f"got: {[r.getMessage() for r in caplog.records]}"
         )
-        # The log must also indicate non-retry intent.
-        assert any("will not retry" in r.getMessage() for r in error_records)
+        # The log must NOT claim retry intent in either direction —
+        # retryability is the predicate's decision, not the classifier's.
+        assert not any("will not retry" in r.getMessage() for r in error_records)
 
     def test_index_error_does_not_pollute_validation(self):
         """IndexError must short-circuit before validate_llm_response() runs.

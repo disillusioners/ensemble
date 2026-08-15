@@ -359,6 +359,10 @@ async def extract_keywords(
 
         llm_config = {
             "base_url": config.llm.base_url,
+            # Threaded for config-surface uniformity; NOT consumed here
+            # (``clean_llm_config`` strips it — no FailoverController on
+            # secondary clients in v1; see build_instance_llms in
+            # daemon/graph.py for the fully-wired primary path).
             "base_url_backup": config.llm.base_url_backup,
             "api_key": config.llm.api_key,
             "model": model,

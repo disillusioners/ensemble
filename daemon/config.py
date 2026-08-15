@@ -85,15 +85,19 @@ class LLMConfig(BaseSettings):
     # endpoint. When unset (None), the system uses ONLY ``base_url`` and the
     # retry classifier behaves exactly as before (no failover). When set,
     # transient / timeout / IndexError failures on the primary trigger a
-    # one-shot swap to this URL within the same invoke cycle (non-sticky:
-    # next invoke starts back on primary).
-    # Wired via OPENAI_BASE_URL_BACKUP (env_prefix="OPENAI_").
+    # one-shot swap to this URL within the same invoke cycle. The swap is
+    # sticky-on-success: after a cycle fails over and succeeds on backup,
+    # the client stays on backup (both endpoints serve the same backend, so
+    # lingering is harmless); it flips back to primary on the next failed
+    # attempt. Wired via OPENAI_BASE_URL_BACKUP (env_prefix="OPENAI_").
     base_url_backup: str | None = Field(
         default=None,
         description=(
             "Optional HA fallback base URL. When set, transient / timeout / "
             "IndexError failures on the primary trigger a swap to this URL "
-            "within the same invoke cycle. None = primary-only (zero "
+            "within the same invoke cycle. Sticky-on-success: the client "
+            "remains on backup after a successful failover and returns to "
+            "primary on the next failure there. None = primary-only (zero "
             "behavior change)."
         ),
     )
@@ -140,22 +144,41 @@ class LLMConfig(BaseSettings):
     @field_validator("base_url_backup", mode="before")
     @classmethod
     def _coerce_base_url_backup_empty_to_none(cls, value: Any) -> Any:
-        """Coerce an empty-string ``base_url_backup`` to ``None``.
+        """Normalize and validate ``base_url_backup`` input.
 
-        ``config.yaml`` uses the substitution pattern
-        ``base_url_backup: ${OPENAI_BASE_URL_BACKUP:-}`` which yields an
-        empty string when the env var is unset. Pydantic-settings would
-        otherwise store ``""`` as a valid ``str`` and the failover logic
-        in :mod:`daemon.llm_error_classifier` would mistake it for a
-        configured backup. Convert any whitespace-only value to ``None``
-        so the "no backup configured" branch is taken (zero behavior
-        change from the pre-HA system).
+        Two rules:
+
+        1. Coerce an empty-string ``base_url_backup`` to ``None``.
+           ``config.yaml`` uses the substitution pattern
+           ``base_url_backup: ${OPENAI_BASE_URL_BACKUP:-}`` which yields an
+           empty string when the env var is unset. Pydantic-settings would
+           otherwise store ``""`` as a valid ``str`` and the failover logic
+           in :mod:`daemon.llm_error_classifier` would mistake it for a
+           configured backup. Convert any whitespace-only value to ``None``
+           so the "no backup configured" branch is taken (zero behavior
+           change from the pre-HA system).
+
+        2. Reject non-string values (YAML ``true`` / ``false`` / numbers).
+           Pydantic's core ``str | None`` validation would reject them
+           anyway, but raising HERE with a targeted message makes the
+           operator's mistake legible: YAML booleans are the realistic
+           footgun (``base_url_backup: true`` — the author meant to enable
+           it, but there is no "enabled" boolean; the value IS the URL, and
+           a bare ``true`` would otherwise be coerced by the env-var path
+           into the literal string ``"true"`` — truthy enough to pass
+           ``FailoverController.is_configured`` and point HTTP at an
+           unresolvable host).
         """
         if value is None:
             return None
-        if isinstance(value, str) and not value.strip():
-            return None
-        return value
+        if isinstance(value, str):
+            return None if not value.strip() else value
+        raise ValueError(
+            f"base_url_backup must be a URL string or null/empty "
+            f"(got {type(value).__name__}: {value!r}). There is no boolean "
+            f"form — unset or empty means 'no backup', a URL string enables "
+            f"the backup endpoint."
+        )
 
     # Models allowed as instance model overrides at spawn time. Exact match
     # (case-insensitive) is performed against the override model name;

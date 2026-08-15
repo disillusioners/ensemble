@@ -9,8 +9,10 @@ llm:
   # (default), behavior is identical to the pre-HA system: only
   # ``base_url`` is used. When set, transient / timeout / empty-choices
   # failures on the primary trigger a one-shot swap to this URL within
-  # the same invoke cycle (non-sticky — next invoke starts back on
-  # primary). Override via OPENAI_BASE_URL_BACKUP env var.
+  # the same invoke cycle. Sticky-on-success — after a successful
+  # failover the client stays on backup (both endpoints serve the same
+  # backend) and returns to primary on the next failure there.
+  # Override via OPENAI_BASE_URL_BACKUP env var.
   base_url_backup: ${OPENAI_BASE_URL_BACKUP:-}
   api_key: ${OPENAI_API_KEY}
   model: ${OPENAI_MODEL:-gpt-4}
