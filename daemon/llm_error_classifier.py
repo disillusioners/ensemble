@@ -74,6 +74,36 @@ class ContextLengthExceededError(Exception):
         )
 
 
+class MalformedLLMResponseError(Exception):
+    """Raised when the LLM provider returns a response body of an unexpected type.
+
+    Incident (2026-08-15, instance f10b7694): a provider under stress
+    returned a bare JSON string body instead of a ChatCompletion object.
+    The OpenAI SDK's ``construct_type()`` passthrough returned the ``str``
+    as-is, and LangChain's ``BaseChatOpenAI._create_chat_result`` called
+    ``.model_dump()`` on it — surfacing as ``AttributeError: 'str' object
+    has no attribute 'model_dump'`` from deep inside LangChain. The error
+    classifier classified that AttributeError as NON-retryable, so tenacity
+    never retried, the instance died, and the parent closed as COMPLETED.
+
+    ``ThinkingChatOpenAI._create_chat_result`` (daemon/graph.py) now
+    type-guards the response and raises THIS exception before the
+    ``super()._create_chat_result`` call, converting the
+    malformed-response path into a retryable signal: a member of
+    TRANSIENT_EXCEPTIONS with an explicit classifier handler. Generic
+    ``AttributeError`` classification is deliberately left untouched
+    (still non-retryable) — only this exception, raised by the guard,
+    is retryable.
+    """
+
+    def __init__(self, response: Any):
+        self.response = response
+        super().__init__(
+            "expected dict or object with model_dump(), got "
+            f"{type(response).__name__}"
+        )
+
+
 # Exceptions that with_retry should catch and retry — server/connection errors
 TRANSIENT_EXCEPTIONS: tuple[type[Exception], ...] = (
     # Wrapper exception from classifier for retryable status codes
@@ -86,6 +116,13 @@ TRANSIENT_EXCEPTIONS: tuple[type[Exception], ...] = (
     openai.APIConnectionError,
     # Response validation failure from Phase 1
     LLMResponseValidationError,
+    # Malformed LLM response body (bare str/list/None from a stressed
+    # provider) — raised by the ThinkingChatOpenAI._create_chat_result
+    # type-guard (daemon/graph.py) so the retryable signal surfaces as a
+    # dedicated exception instead of a generic AttributeError from inside
+    # LangChain. Generic AttributeError stays NON-retryable; only this
+    # exception is in the retry set.
+    MalformedLLMResponseError,
     # Proxy returning non-JSON response (e.g., HTML error page)
     openai.APIResponseValidationError,
     # NOTE: IndexError is intentionally NOT in TRANSIENT_EXCEPTIONS —
@@ -539,6 +576,16 @@ def classify_llm_errors(llm_with_tools: Any) -> RunnableLambda:
         except openai.APIResponseValidationError as e:
             # Proxy returned non-JSON (HTML error page) — transient
             logger.warning(f"[LLM] Response validation error (proxy issue), will retry: {_truncate_error(e)}")
+            raise
+        except MalformedLLMResponseError as e:
+            # Provider returned a response body of an unexpected type
+            # (e.g. a bare JSON string instead of a ChatCompletion
+            # object). Raised by the ThinkingChatOpenAI._create_chat_result
+            # type-guard (daemon/graph.py) BEFORE super() so the
+            # AttributeError never surfaces from inside LangChain. A member
+            # of TRANSIENT_EXCEPTIONS — the retry predicate treats it as
+            # transient (RetryByCategory), so tenacity retries it.
+            logger.warning(f"[LLM] Malformed response (retryable): {_truncate_error(e)}")
             raise
         except IndexError as e:
             # Malformed LLM response (e.g., empty choices array). LangChain's

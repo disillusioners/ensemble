@@ -99,6 +99,7 @@ Be specific and actionable."""
 from .llm_error_classifier import (
     classify_llm_errors,
     ContextLengthExceededError,
+    MalformedLLMResponseError,
     TIMEOUT_EXCEPTIONS,
     TRANSIENT_EXCEPTIONS,
     TransientAPIError,
@@ -1809,6 +1810,21 @@ class ThinkingChatOpenAI(ChatOpenAI):
         message dict. Without this override, the non-streaming path silently
         drops the model's thinking, and the web UI cannot render it.
         """
+        # Malformed-response guard (child-error-resilience, 2026-08-15):
+        # a stressed provider can return a bare JSON string body instead
+        # of a ChatCompletion object. The OpenAI SDK's construct_type()
+        # passthrough returns the str as-is, and LangChain's
+        # BaseChatOpenAI._create_chat_result crashes with
+        # AttributeError: 'str' object has no attribute 'model_dump'.
+        # That generic AttributeError classifies NON-retryable and kills
+        # the instance — so type-guard BEFORE calling super() and raise
+        # the dedicated retryable MalformedLLMResponseError instead (a
+        # member of TRANSIENT_EXCEPTIONS, see daemon/llm_error_classifier).
+        # Valid: a dict, or any object exposing model_dump() (pydantic
+        # BaseModel / SDK response objects).
+        if not isinstance(response, dict) and not hasattr(response, "model_dump"):
+            raise MalformedLLMResponseError(response)
+
         result = super()._create_chat_result(response, generation_info)
 
         try:
@@ -3026,7 +3042,7 @@ def create_agent_node(
                 lambda: current_llm.invoke(compact_messages)
             )
         except (openai.APITimeoutError, openai.APIConnectionError, ConnectionResetError,
-                BrokenPipeError, ConnectionAbortedError, TransientAPIError, LLMResponseValidationError, IndexError) as e:
+                BrokenPipeError, ConnectionAbortedError, TransientAPIError, LLMResponseValidationError, MalformedLLMResponseError, IndexError) as e:
             transient = retry_config.get('transient_attempts', 'N/A') if retry_config else 'N/A'
             timeout = retry_config.get('timeout_attempts', 'N/A') if retry_config else 'N/A'
             category = 'timeout' if isinstance(e, TIMEOUT_EXCEPTIONS) else 'transient' if isinstance(e, TRANSIENT_EXCEPTIONS) else 'non-retryable'

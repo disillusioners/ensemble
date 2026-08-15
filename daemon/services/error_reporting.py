@@ -24,7 +24,28 @@ logger = logging.getLogger(__name__)
 
 # Error report severity classification
 CRITICAL_ERROR_TYPES = frozenset({"max_retries_exceeded", "circuit_breaker_open"})
+# "Recoverable" here means RESUME semantics (an operator/automation can still
+# revive the instance) — NOT the same vocabulary as RECOVERY_GUIDANCE_HINT's
+# "cannot be recovered by waiting", which is about autonomous self-healing.
 RECOVERABLE_ERROR_TYPES = frozenset({"watchdog_timeout", "circuit_breaker_open"})
+
+# Recovery guidance appended to every error report sent to a parent instance.
+#
+# WHY: in the verified prod incident f10b7694 (2026-08-15) the parent LLM
+# received the child error report and chose "wait and see" — but ERROR is a
+# TERMINAL status, so the failed instance never resumes on its own and the
+# completion gate closed the parent as COMPLETED while the child work was
+# silently lost. The gate and terminal statuses are deliberately untouched
+# (final design decision); instead this hint tells the parent LLM, in-band,
+# that waiting cannot work and what the valid recovery options are.
+RECOVERY_GUIDANCE_HINT = """\
+[RECOVERY GUIDANCE]
+This error cannot be recovered by waiting — the instance will not resume on its own.
+Recovery options:
+1. Try revive: send a "continue" message to the failed instance. This revives it from its last checkpoint. Do this AT MOST ONCE.
+2. If revive fails or the instance errors again: spawn a new child instance to check the state and continue the task.
+3. If a replacement also fails the same way: stop retrying and report the situation upward instead of spawning again.
+Do not wait for the failed instance to recover by itself."""
 
 
 class _ErrorReportDbResult(NamedTuple):
@@ -715,6 +736,7 @@ class ErrorReportingService:
                 f"**Error Type:** {error_type}\n"
                 f"**Severity:** {severity}\n"
                 f"**Details:** {truncated_error}"
+                f"\n\n{RECOVERY_GUIDANCE_HINT}"
             )
 
             result = await self._manager.enqueue_message(
