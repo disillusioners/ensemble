@@ -10,11 +10,14 @@ import daemon.services.mcp_service as mcp_service_module
 from langchain_core.tools import ToolException
 
 from daemon.mcp.models import McpToolSchema
+from daemon.mcp.resilience import ResilienceConfig
 from daemon.services.mcp_service import (
     EMPTY_DISCOVERY_RETRY_THROTTLE_S,
+    SCHEMA_DISCOVERY_CONNECT_RETRY_DELAY_S,
     McpService,
     _McpSessionProviderImpl,
 )
+from daemon.sources.circuit_breaker import CircuitState
 
 
 # ---------------------------------------------------------------------------
@@ -725,6 +728,75 @@ class TestSchemaNegativeCache:
         # Fresh empty window recorded after invalidation.
         assert "test-server" in service._last_empty_discovery
 
+    @pytest.mark.asyncio
+    async def test_invalidate_clears_throttle_marker_specific_server(self, service):
+        """GAP 6b — CRUD invalidation is the admin escape hatch.
+
+        A server sitting INSIDE the empty-discovery throttle window
+        (a prior discovery returned []) gets its throttle marker
+        dropped by ``invalidate_schema_cache(name)``. The next
+        ``get_schemas_for_server`` call must re-attempt discovery
+        IMMEDIATELY — not wait out the 30s window. Operators change
+        the server config via CRUD; the invalidate call is the signal
+        that the old (empty) verdict is stale.
+        """
+        server = _make_server(name="fixed-server", is_builtin=False)
+        good_schemas = [_make_schema("t1", "fixed-server")]
+        discover = AsyncMock(return_value=good_schemas)
+        service._discover_schemas_cold = discover
+
+        # Seed a throttle marker as if a prior discovery returned []
+        # moments ago (well INSIDE the window — a fresh timestamp is
+        # the worst case for the escape hatch).
+        service._last_empty_discovery["fixed-server"] = time.monotonic()
+        assert "fixed-server" in service._last_empty_discovery  # seeded
+
+        service.invalidate_schema_cache("fixed-server")
+
+        # (i) the marker is gone
+        assert "fixed-server" not in service._last_empty_discovery
+        # (ii) the next call re-attempts discovery immediately and
+        # succeeds instead of returning a throttled [].
+        result = await service.get_schemas_for_server(server)
+        assert result is good_schemas
+        discover.assert_awaited_once_with(server)
+
+    @pytest.mark.asyncio
+    async def test_invalidate_clears_throttle_marker_all(self, service):
+        """GAP 6b (all-clear path) — ``invalidate_schema_cache(None)``
+        drops every server's throttle marker, not just one.
+
+        Two servers mid-window; the None invalidation clears both and
+        the next lookup for either re-attempts discovery immediately.
+        """
+        s1 = _make_server(name="srv-one", is_builtin=False)
+        s2 = _make_server(name="srv-two", is_builtin=False)
+        schemas1 = [_make_schema("t1", "srv-one")]
+        schemas2 = [_make_schema("t2", "srv-two")]
+
+        async def _discover(server):
+            return schemas1 if server.name == "srv-one" else schemas2
+
+        discover = AsyncMock(side_effect=_discover)
+        service._discover_schemas_cold = discover
+
+        now = time.monotonic()
+        service._last_empty_discovery["srv-one"] = now
+        service._last_empty_discovery["srv-two"] = now
+
+        service.invalidate_schema_cache(None)
+
+        # Both markers gone — the whole negative-cache window cleared.
+        assert service._last_empty_discovery == {}
+
+        result1 = await service.get_schemas_for_server(s1)
+        result2 = await service.get_schemas_for_server(s2)
+        assert result1 is schemas1
+        assert result2 is schemas2
+        # Both servers re-discovered immediately — no throttled []
+        # returns despite the freshly-seeded markers.
+        assert discover.await_count == 2
+
 
 # ---------------------------------------------------------------------------
 # TestSchemaDiscoveryRetry — Fix 2: one bounded retry on session acquisition
@@ -869,6 +941,207 @@ class TestSchemaDiscoveryRetry:
             "timeout",
         ):
             assert not McpService._is_auth_failure(RuntimeError(msg)), msg
+
+
+# ---------------------------------------------------------------------------
+# TestDiscoveryResilienceIndependence — GAP 6e: discovery layer and
+# tool-call resilience layer (CircuitBreaker/RetryPolicy) do not
+# cross-talk.
+# ---------------------------------------------------------------------------
+
+class TestDiscoveryResilienceIndependence:
+    """GAP 6e — the two retry/failure domains are independent.
+
+    Domain A (discovery): ``get_schemas_for_server`` →
+    ``_discover_schemas_cold`` → ``_acquire_discovery_session`` — its
+    single bounded retry lives in the service itself.
+
+    Domain B (tool-call): ``ResilienceManager`` / ``CircuitBreaker`` /
+    ``RetryPolicy`` — consulted ONLY by ``_lazy_coroutine`` in
+    ``tool_adapter.py`` on ``session.call_tool``.
+
+    Form used: BEHAVIORAL assertion with REAL objects (no stubs on the
+    resilience layer). A real ``CircuitBreaker`` is registered via
+    ``ResilienceManager.register`` and forced OPEN, and the real cold
+    path (mocked at the connection-manager boundary only, per the
+    suite's convention) runs against it. The assertions prove both
+    directions of independence in one flow each:
+
+        1. OPEN breaker does NOT block a fresh discovery attempt
+           (discovery never consults the breaker).
+        2. A failed (empty) discovery does NOT trip / mutate the
+           breaker (discovery failures never reach the breaker).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _fast_retry_delay(self, monkeypatch):
+        """Shrink the 1.5s retry delay to zero for tests."""
+        monkeypatch.setattr(
+            mcp_service_module,
+            "SCHEMA_DISCOVERY_CONNECT_RETRY_DELAY_S",
+            0.0,
+        )
+
+    @staticmethod
+    def _register_open_breaker(service, server_name):
+        """Register a real resilience config and force its circuit OPEN.
+
+        Returns the (real) ``CircuitBreaker`` instance held by the
+        service's ``ResilienceManager`` — the same object
+        ``_lazy_coroutine`` would consult on a tool call.
+        """
+        service._resilience.register(
+            server_name,
+            ResilienceConfig(
+                retry_policy=None,
+                cache_ttl=300.0,
+                circuit_failure_threshold=5,
+                circuit_recovery_timeout=60.0,
+            ),
+        )
+        cb = service._resilience.get_circuit_breaker(server_name)
+        assert cb is not None, "register must allocate a circuit breaker"
+        # Force OPEN without burning threshold failures: state is a
+        # plain dataclass field, and a future tool call would be
+        # rejected while OPEN (verified below).
+        cb.state = CircuitState.OPEN
+        cb.failure_count = cb.failure_threshold
+        cb.last_failure_time = time.monotonic()
+        return cb
+
+    @pytest.mark.asyncio
+    async def test_open_breaker_does_not_block_discovery(self, service):
+        """Direction 1: an OPEN tool-call circuit breaker must not
+        prevent schema discovery.
+
+        Production shape: plane's tool circuit tripped OPEN after a
+        run of call failures, the schema cache was invalidated, and
+        the next preload needs to re-discover schemas. If the
+        discovery layer consulted the breaker, discovery would be
+        rejected until the 60s recovery window elapsed — a dead-lock
+        between the two layers. Discovery must proceed regardless.
+        """
+        server_name = "plane"
+        server = _make_server(name=server_name, is_builtin=False)
+        cb = self._register_open_breaker(service, server_name)
+        # Sanity: while OPEN and inside the recovery window, a tool
+        # call WOULD be blocked by this breaker.
+        assert await cb.can_execute() is False
+
+        good_schemas = [_make_schema("t1", server_name)]
+        discover = AsyncMock(return_value=good_schemas)
+        service._discover_schemas_cold = discover
+        # Throttle window elapsed (re-discovery is permitted); schema
+        # cache empty (fresh discovery required).
+        service._last_empty_discovery[server_name] = (
+            time.monotonic() - EMPTY_DISCOVERY_RETRY_THROTTLE_S - 1.0
+        )
+
+        result = await service.get_schemas_for_server(server)
+
+        # Discovery was attempted (not blocked by the OPEN breaker) and
+        # succeeded.
+        assert result is good_schemas
+        discover.assert_awaited_once_with(server)
+        # Structural independence confirmed: the breaker is still OPEN
+        # and untouched — the successful discovery did NOT close it
+        # (only a successful *tool call* may do that).
+        assert cb.state is CircuitState.OPEN
+        assert cb.failure_count == cb.failure_threshold
+
+    @pytest.mark.asyncio
+    async def test_failed_discovery_does_not_trip_breaker(self, service):
+        """Direction 2: a failed (empty) discovery must not trip or
+        otherwise mutate the tool-call circuit breaker.
+
+        Production shape: schema discovery fails transiently at boot
+        (the incident df40ba3a fixed). The discovery layer records a
+        throttle marker and returns [] — a domain-A failure. Domain B
+        (the breaker guarding tool calls) must see NO failure: if
+        discovery failures fed the breaker, a flaky boot could OPEN
+        the tool circuit and degrade every tool call for 60s without
+        a single tool call having failed.
+        """
+        server_name = "plane"
+        server = _make_server(name=server_name, is_builtin=False)
+        cb = self._register_open_breaker(service, server_name)
+        # Reset to a pristine CLOSED breaker so ANY mutation is
+        # observable (OPEN seed only proves direction 1).
+        cb.state = CircuitState.CLOSED
+        cb.failure_count = 0
+        cb.last_failure_time = 0.0
+
+        # Real cold-discovery path, mocked at the connection-manager
+        # boundary (suite convention): persistent connect failure →
+        # empty discovery after the bounded retry.
+        mock_conn_mgr = MagicMock()
+        mock_conn_mgr.connect_instance = AsyncMock(
+            side_effect=RuntimeError("Connection refused")
+        )
+        mock_conn_mgr.close_instance = AsyncMock()
+
+        with patch(
+            "daemon.services.mcp_service.get_mcp_connection_manager",
+            return_value=mock_conn_mgr,
+        ):
+            result = await service.get_schemas_for_server(server)
+
+        # Discovery failed (empty) and recorded its own domain-A state.
+        assert result == []
+        assert server_name in service._last_empty_discovery
+        assert mock_conn_mgr.connect_instance.await_count == 2
+        # Domain B untouched: breaker still CLOSED, zero failures —
+        # the discovery failure never reached the tool-call layer.
+        assert cb.state is CircuitState.CLOSED
+        assert cb.failure_count == 0
+        assert cb.get_state() == "closed"
+
+
+# ---------------------------------------------------------------------------
+# TestDiscoveryTimingContract — minor gap: pin the documented timing
+# constants so an accidental change fails loudly.
+# ---------------------------------------------------------------------------
+
+class TestDiscoveryTimingContract:
+    """Pin the module-level timing constants of the discovery fix.
+
+    These values are the documented contract of df40ba3a (retry delay
+    between the two cold-connect attempts; negative-cache window for
+    empty discoveries). The constants are imported — NOT re-derived —
+    so a change to the source value breaks this pin instead of being
+    silently mirrored by a duplicated literal.
+
+    Note: other tests shrink these constants via monkeypatch for
+    speed; this pin asserts the pristine module values. Fixture
+    ordering guarantees the monkeypatch is unwound before this test
+    runs, but we re-read the live module attributes to be explicit.
+    """
+
+    def test_retry_delay_constant_pinned(self):
+        """SCHEMA_DISCOVERY_CONNECT_RETRY_DELAY_S is 1.5s — the
+        documented single-retry delay for transient connect failures."""
+        assert (
+            mcp_service_module.SCHEMA_DISCOVERY_CONNECT_RETRY_DELAY_S == 1.5
+        )
+
+    def test_throttle_window_constant_pinned(self):
+        """EMPTY_DISCOVERY_RETRY_THROTTLE_S is 30.0s — the documented
+        negative-cache window bounding re-discovery of a dead server."""
+        assert mcp_service_module.EMPTY_DISCOVERY_RETRY_THROTTLE_S == 30.0
+
+    def test_imported_names_match_module_attributes(self):
+        """The from-import bindings used across the suite stay in sync
+        with the live module constants (guards against a future
+        ``from ... import`` removal silently changing which object
+        tests patch/assert against)."""
+        assert (
+            SCHEMA_DISCOVERY_CONNECT_RETRY_DELAY_S
+            is mcp_service_module.SCHEMA_DISCOVERY_CONNECT_RETRY_DELAY_S
+        )
+        assert (
+            EMPTY_DISCOVERY_RETRY_THROTTLE_S
+            is mcp_service_module.EMPTY_DISCOVERY_RETRY_THROTTLE_S
+        )
 
 
 # ---------------------------------------------------------------------------
