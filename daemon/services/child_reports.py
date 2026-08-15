@@ -571,12 +571,9 @@ class ChildReportsService:
         
         # Create LLM client for summarization using the same config pattern
         # Filter model_vision from config to avoid noisy LangChain warnings.
-        # ``base_url_backup`` is threaded through so the config surface
-        # stays uniform; it is NOT consumed here (no FailoverController
-        # is attached to secondary LLM clients in v1 — ``clean_llm_config``
-        # strips it before construction). Failover wiring for secondary
-        # sites is future work; the primary retry path lives in
-        # ``build_instance_llms`` (daemon/graph.py) and is fully wired.
+        # ``base_url_backup`` threaded through for config-surface uniformity;
+        # NOT consumed here. See ``LLMConfig.base_url_backup`` in
+        # ``daemon/config.py`` for the full rationale.
         llm_config = {
             "base_url": self._config.llm.base_url,
             "base_url_backup": self._config.llm.base_url_backup,
@@ -1167,12 +1164,11 @@ Provide a concise summary:"""
 
         timeout = config.timeout_seconds
         try:
-            # Mirror the existing LLM-call pattern in this module
-            # (child_reports.py:549-561): build a manual dict, clean it,
-            # and construct via ThinkingChatOpenAI.
-            # ``base_url_backup`` threaded through for config-surface
-            # uniformity; NOT consumed here (``clean_llm_config`` strips
-            # it — no FailoverController on secondary clients in v1).
+            # Mirror the ``_summarize_instance`` pattern above in this
+            # module: build a manual dict, clean it, and construct via
+            # ThinkingChatOpenAI. ``base_url_backup`` threaded through for
+            # config-surface uniformity; NOT consumed here. See
+            # ``LLMConfig.base_url_backup`` in ``daemon/config.py``.
             llm_config = {
                 "base_url": self._config.llm.base_url,
                 "base_url_backup": self._config.llm.base_url_backup,

@@ -1,5 +1,11 @@
 """Configuration loading with YAML, environment variable substitution, and Pydantic validation."""
 
+# Why a single config module? LLM, job, instance, retry, blueprint, and
+# skill-evolution settings all live here so operators have ONE surface to
+# tune and ONE migration path (env override + YAML) per setting. Splitting
+# by domain (e.g. ``llm_config.py`` / ``retry_config.py``) trades that
+# clarity for marginal modularity; the file crossed 1000 lines in the HA
+# fallback round and the trade-off still holds — keep centralized.
 import json
 import os
 import re
@@ -88,17 +94,21 @@ class LLMConfig(BaseSettings):
     # one-shot swap to this URL within the same invoke cycle. The swap is
     # sticky-on-success: after a cycle fails over and succeeds on backup,
     # the client stays on backup (both endpoints serve the same backend, so
-    # lingering is harmless); it flips back to primary on the next failed
-    # attempt. Wired via OPENAI_BASE_URL_BACKUP (env_prefix="OPENAI_").
+    # lingering is harmless); the controller returns to primary after the
+    # NEXT invoke's first attempt completes, regardless of whether that
+    # attempt succeeds or fails on backup (see ``FailoverController``
+    # docstring — "Sticky-on-success" — for the rationale). Wired via
+    # OPENAI_BASE_URL_BACKUP (env_prefix="OPENAI_").
     base_url_backup: str | None = Field(
         default=None,
         description=(
             "Optional HA fallback base URL. When set, transient / timeout / "
             "IndexError failures on the primary trigger a swap to this URL "
             "within the same invoke cycle. Sticky-on-success: the client "
-            "remains on backup after a successful failover and returns to "
-            "primary on the next failure there. None = primary-only (zero "
-            "behavior change)."
+            "remains on backup after a successful failover; the controller "
+            "returns to primary after the next invoke's first attempt "
+            "completes, regardless of outcome (success or failure on "
+            "backup). None = primary-only (zero behavior change)."
         ),
     )
     api_key: str = Field(default="")
@@ -137,7 +147,18 @@ class LLMConfig(BaseSettings):
     @classmethod
     def _parse_reasoning_echo_models(cls, value: Any) -> Any:
         """Accept comma-separated strings (and JSON arrays) from env / YAML.
-        ...
+
+        Delegates to ``_parse_csv_or_json_list`` for the shared parsing logic.
+        The ``NoDecode`` annotation prevents pydantic-settings from
+        auto-parsing env values, so we handle both forms here:
+          - ``"deepseek,glm,zai"`` → ``["deepseek", "glm", "zai"]``
+          - ``'["deepseek","glm","zai"]'`` → ``["deepseek", "glm", "zai"]``
+          - ``["deepseek", "glm", "zai"]`` → unchanged (passthrough)
+          - ``""`` or whitespace → ``[]``
+
+        Env format example::
+
+            OPENAI_REASONING_ECHO_MODELS="deepseek,glm,zai"
         """
         return _parse_csv_or_json_list(value)
 

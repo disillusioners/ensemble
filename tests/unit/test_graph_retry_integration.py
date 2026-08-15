@@ -416,9 +416,9 @@ class TestErrorClassifierIntegration:
         per-category limits (W3: built per failover controller inside
         ``_build_retrying`` rather than a single module-level binding)."""
         import inspect
-        from daemon.graph import build_instance_llms
+        from daemon.graph import _wire_retry_and_failover
 
-        source = inspect.getsource(build_instance_llms)
+        source = inspect.getsource(_wire_retry_and_failover)
 
         # Verify _make_llm_retry_strategy is used instead of TRANSIENT_EXCEPTIONS
         assert "_make_llm_retry_strategy" in source, (

@@ -297,7 +297,7 @@ def _make_llm_retry_strategy(
     failover_controller: "FailoverController | None" = None,
     primary_transient_max: int = PRIMARY_TRANSIENT_MAX,
     primary_timeout_max: int = PRIMARY_TIMEOUT_MAX,
-):
+) -> "RetryByCategory":
     """Create a retry strategy with separate per-category attempt limits.
 
     Uses a closure with mutable counters so that transient and timeout
@@ -325,8 +325,10 @@ def _make_llm_retry_strategy(
             Cross-invoke semantics: sticky-on-success (leader-adjudicated).
             A cycle that swaps and succeeds on backup leaves the client on
             backup; the next cycle's first request hits backup directly and
-            only flips back to primary after a FAILURE on backup (see the
-            ``FailoverController`` docstring for the rationale).
+            returns to primary after the NEXT invoke's first attempt
+            completes, regardless of whether that attempt succeeds or
+            fails on backup (see the ``FailoverController`` docstring for
+            the rationale).
         primary_transient_max: Counter threshold on primary above which
             the swap-to-backup fires for transient errors. Same
             ``count < primary_transient_max`` convention as
@@ -348,7 +350,7 @@ def _make_llm_retry_strategy(
     class RetryByCategory:
         """Retry predicate that tracks per-category attempt counts."""
 
-        def __call__(self, retry_state) -> bool:
+        def __call__(self, retry_state: "RetryCallState") -> bool:
             # Reset counters + controller URL after the first attempt of
             # each new invoke cycle. tenacity creates fresh RetryCallState
             # per cycle but reuses the predicate; attempt_number == 1

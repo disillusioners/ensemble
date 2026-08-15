@@ -17,6 +17,7 @@ code under test).
 
 import json
 import logging
+from contextlib import ExitStack, contextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -706,97 +707,119 @@ class TestBuildInstanceLLMSFailoverWiring:
         chat.root_async_client = async_c
         return chat
 
+    @contextmanager
+    def _build_with_patches(
+        self,
+        backup_url: str | None = None,
+        retry_config: dict | None = None,
+        *,
+        patch_primary_caps: tuple[int, int] | None = None,
+    ):
+        """Scaffold the wiring surface and run ``build_instance_llms``.
+
+        Patches ``ThinkingChatOpenAI`` / ``classify_llm_errors`` /
+        ``_make_llm_retry_strategy`` / ``Retrying`` / ``stop_after_attempt``
+        uniformly so each test reads as a one-paragraph inspection of the
+        captured call args. When ``patch_primary_caps`` is given, also
+        patches ``PRIMARY_TRANSIENT_MAX`` / ``PRIMARY_TIMEOUT_MAX`` for the
+        duration of the call (used by the constant-drift test).
+
+        Yields:
+            ``dict[str, MagicMock]`` with ``mock_strategy``,
+            ``mock_retrying``, ``mock_stop`` populated. Tests inspect
+            only the keys they need; the other keys are populated but
+            unused.
+        """
+        from daemon.graph import build_instance_llms
+
+        retry_config = retry_config or {"transient_attempts": 8, "timeout_attempts": 3}
+        mocks: dict[str, MagicMock] = {}
+
+        with ExitStack() as stack:
+            mock_llm_class = stack.enter_context(
+                patch("daemon.graph.ThinkingChatOpenAI")
+            )
+            mock_chat = self._make_mock_chat_openai("https://primary/v1")
+            bound_a, bound_b = MagicMock(), MagicMock()
+            mock_chat.bind_tools.side_effect = [bound_a, bound_b]
+            mock_llm_class.return_value = mock_chat
+
+            mock_classify = stack.enter_context(
+                patch("daemon.graph.classify_llm_errors")
+            )
+            # classify_llm_errors is identity in this test (we do not
+            # exercise the runtime exception path here).
+            mock_classify.side_effect = lambda x: x
+
+            # _make_llm_retry_strategy is imported INSIDE
+            # _wire_retry_and_failover (lazy import to avoid the
+            # graph ↔ services cycle), so patch it on its source module.
+            mocks["mock_strategy"] = stack.enter_context(
+                patch("daemon.llm_error_classifier._make_llm_retry_strategy")
+            )
+            mocks["mock_retrying"] = stack.enter_context(
+                patch("daemon.graph.Retrying")
+            )
+            mocks["mock_stop"] = stack.enter_context(
+                patch("daemon.graph.stop_after_attempt")
+            )
+
+            if patch_primary_caps is not None:
+                stack.enter_context(
+                    patch(
+                        "daemon.llm_error_classifier.PRIMARY_TRANSIENT_MAX",
+                        patch_primary_caps[0],
+                    )
+                )
+                stack.enter_context(
+                    patch(
+                        "daemon.llm_error_classifier.PRIMARY_TIMEOUT_MAX",
+                        patch_primary_caps[1],
+                    )
+                )
+
+            mocks["mock_strategy"].return_value = MagicMock()
+            mocks["mock_retrying"].return_value = MagicMock()
+            mocks["mock_stop"].return_value = MagicMock()
+
+            build_instance_llms(
+                llm_config_with_headers={
+                    "base_url": "https://primary/v1",
+                    "base_url_backup": backup_url,
+                    "api_key": "test",
+                    "model": "gpt-4",
+                    "model_vision": None,
+                    "default_headers": {},
+                },
+                model_standard="gpt-4",
+                model_vision=None,
+                tools=[],
+                retry_config=retry_config,
+            )
+
+            yield mocks
+
     def test_no_backup_does_not_invoke_failover_controller(self):
         """When ``base_url_backup`` is None, ``build_instance_llms`` must
         pass ``failover_controller=None`` to ``_make_llm_retry_strategy``.
 
         We assert by patching ``_make_llm_retry_strategy`` (imported
-        locally inside ``build_instance_llms`` from
+        locally inside ``_wire_retry_and_failover`` from
         ``daemon.llm_error_classifier``) and checking the
         ``failover_controller`` kwarg.
         """
-        from unittest.mock import MagicMock, patch
-        from daemon.graph import build_instance_llms
-
-        with patch("daemon.graph.ThinkingChatOpenAI") as mock_llm_class:
-            # Each call to ThinkingChatOpenAI returns a fresh mock with a
-            # bind_tools that yields a separate bound runnable.
-            mock_chat = self._make_mock_chat_openai("https://primary/v1")
-            bound_a = MagicMock()
-            bound_b = MagicMock()
-            mock_chat.bind_tools.side_effect = [bound_a, bound_b]
-            mock_llm_class.return_value = mock_chat
-
-            with patch("daemon.graph.classify_llm_errors") as mock_classify:
-                # classify_llm_errors is identity in this test (we do not
-                # exercise the runtime exception path here).
-                mock_classify.side_effect = lambda x: x
-                # _make_llm_retry_strategy is imported INSIDE
-                # build_instance_llms (local import to avoid the graph ↔
-                # services cycle), so patch it on its source module.
-                with patch("daemon.llm_error_classifier._make_llm_retry_strategy") as mock_strategy, \
-                     patch("daemon.graph.Retrying"):
-                    mock_strategy.return_value = MagicMock()
-
-                    build_instance_llms(
-                        llm_config_with_headers={
-                            "base_url": "https://primary/v1",
-                            "base_url_backup": None,
-                            "api_key": "test",
-                            "model": "gpt-4",
-                            "model_vision": None,
-                            "default_headers": {},
-                        },
-                        model_standard="gpt-4",
-                        model_vision=None,
-                        tools=[],
-                        retry_config={"transient_attempts": 8, "timeout_attempts": 3},
-                    )
-
-                    # failover_controller must be None (no backup).
-                    kwargs = mock_strategy.call_args.kwargs
-                    assert kwargs["failover_controller"] is None
+        with self._build_with_patches(backup_url=None) as mocks:
+            kwargs = mocks["mock_strategy"].call_args.kwargs
+            assert kwargs["failover_controller"] is None
 
     def test_with_backup_invokes_failover_controller(self):
         """When ``base_url_backup`` is set, ``build_instance_llms`` must
         pass a real FailoverController to ``_make_llm_retry_strategy``."""
-        from unittest.mock import MagicMock, patch
-        from daemon.llm_error_classifier import FailoverController
-        from daemon.graph import build_instance_llms
-
-        with patch("daemon.graph.ThinkingChatOpenAI") as mock_llm_class:
-            mock_chat = self._make_mock_chat_openai("https://primary/v1")
-            bound_a = MagicMock()
-            bound_b = MagicMock()
-            mock_chat.bind_tools.side_effect = [bound_a, bound_b]
-            mock_llm_class.return_value = mock_chat
-
-            with patch("daemon.graph.classify_llm_errors") as mock_classify:
-                mock_classify.side_effect = lambda x: x
-                with patch("daemon.llm_error_classifier._make_llm_retry_strategy") as mock_strategy, \
-                     patch("daemon.graph.Retrying"):
-                    mock_strategy.return_value = MagicMock()
-
-                    build_instance_llms(
-                        llm_config_with_headers={
-                            "base_url": "https://primary/v1",
-                            "base_url_backup": "https://backup/v1",
-                            "api_key": "test",
-                            "model": "gpt-4",
-                            "model_vision": None,
-                            "default_headers": {},
-                        },
-                        model_standard="gpt-4",
-                        model_vision=None,
-                        tools=[],
-                        retry_config={"transient_attempts": 8, "timeout_attempts": 3},
-                    )
-
-                    # failover_controller must be a FailoverController.
-                    kwargs = mock_strategy.call_args.kwargs
-                    ctl = kwargs["failover_controller"]
-                    assert ctl is not None
-                    assert isinstance(ctl, FailoverController)
+        with self._build_with_patches(backup_url="https://backup/v1") as mocks:
+            kwargs = mocks["mock_strategy"].call_args.kwargs
+            ctl = kwargs["failover_controller"]
+            assert ctl is not None
+            assert isinstance(ctl, FailoverController)
 
     def test_with_backup_extends_max_attempts(self):
         """When ``base_url_backup`` is set, ``build_instance_llms`` must
@@ -807,54 +830,16 @@ class TestBuildInstanceLLMSFailoverWiring:
         ``transient=8, timeout=3`` and primary caps 3/2, the ceiling is
         ``max(8, 3) + max(3, 2) = 11``.
         """
-        from unittest.mock import MagicMock, patch
-        from daemon.llm_error_classifier import (
-            PRIMARY_TIMEOUT_MAX,
-            PRIMARY_TRANSIENT_MAX,
-        )
-        from daemon.graph import build_instance_llms
-
-        with patch("daemon.graph.ThinkingChatOpenAI") as mock_llm_class:
-            mock_chat = self._make_mock_chat_openai("https://primary/v1")
-            bound_a = MagicMock()
-            bound_b = MagicMock()
-            mock_chat.bind_tools.side_effect = [bound_a, bound_b]
-            mock_llm_class.return_value = mock_chat
-
-            with patch("daemon.graph.classify_llm_errors") as mock_classify:
-                mock_classify.side_effect = lambda x: x
-                with patch("daemon.llm_error_classifier._make_llm_retry_strategy") as mock_strategy, \
-                     patch("daemon.graph.Retrying") as mock_retrying, \
-                     patch("daemon.graph.stop_after_attempt") as mock_stop:
-                    mock_stop.return_value = MagicMock()
-                    mock_strategy.return_value = MagicMock()
-                    mock_retrying.return_value = MagicMock()
-
-                    build_instance_llms(
-                        llm_config_with_headers={
-                            "base_url": "https://primary/v1",
-                            "base_url_backup": "https://backup/v1",
-                            "api_key": "test",
-                            "model": "gpt-4",
-                            "model_vision": None,
-                            "default_headers": {},
-                        },
-                        model_standard="gpt-4",
-                        model_vision=None,
-                        tools=[],
-                        retry_config={"transient_attempts": 8, "timeout_attempts": 3},
-                    )
-
-                    # stop_after_attempt(N): N must be exactly
-                    # max(transient, timeout) + max(primary caps) — large
-                    # enough to cover primary slice + full backup budget,
-                    # small enough to not over-retry.
-                    stop_call = mock_stop.call_args
-                    n = stop_call.args[0]
-                    expected = max(8, 3) + max(PRIMARY_TRANSIENT_MAX, PRIMARY_TIMEOUT_MAX)
-                    assert n == expected, (
-                        f"max_attempts must be exactly {expected}; got {n}"
-                    )
+        with self._build_with_patches(backup_url="https://backup/v1") as mocks:
+            stop_call = mocks["mock_stop"].call_args
+            n = stop_call.args[0]
+            # max(transient, timeout) + max(primary caps) — large enough
+            # to cover primary slice + full backup budget, small enough to
+            # not over-retry.
+            expected = max(8, 3) + max(PRIMARY_TRANSIENT_MAX, PRIMARY_TIMEOUT_MAX)
+            assert n == expected, (
+                f"max_attempts must be exactly {expected}; got {n}"
+            )
 
     def test_custom_retry_config_ceiling_is_derived_not_hardcoded(self):
         """The ceiling must be DERIVED from the slice caps, not a magic
@@ -867,96 +852,32 @@ class TestBuildInstanceLLMSFailoverWiring:
         exported constants (as any future tuning would) and require the
         ceiling to follow. A hardcoded ``+3`` fails here.
         """
-        from unittest.mock import MagicMock, patch
-        from daemon.graph import build_instance_llms
-
-        with patch("daemon.graph.ThinkingChatOpenAI") as mock_llm_class:
-            mock_chat = self._make_mock_chat_openai("https://primary/v1")
-            bound_a = MagicMock()
-            bound_b = MagicMock()
-            mock_chat.bind_tools.side_effect = [bound_a, bound_b]
-            mock_llm_class.return_value = mock_chat
-
-            with patch("daemon.graph.classify_llm_errors") as mock_classify:
-                mock_classify.side_effect = lambda x: x
-                with patch("daemon.llm_error_classifier._make_llm_retry_strategy") as mock_strategy, \
-                     patch("daemon.graph.Retrying") as mock_retrying, \
-                     patch("daemon.graph.stop_after_attempt") as mock_stop, \
-                     patch("daemon.llm_error_classifier.PRIMARY_TRANSIENT_MAX", 5), \
-                     patch("daemon.llm_error_classifier.PRIMARY_TIMEOUT_MAX", 3):
-                    mock_stop.return_value = MagicMock()
-                    mock_strategy.return_value = MagicMock()
-                    mock_retrying.return_value = MagicMock()
-
-                    build_instance_llms(
-                        llm_config_with_headers={
-                            "base_url": "https://primary/v1",
-                            "base_url_backup": "https://backup/v1",
-                            "api_key": "test",
-                            "model": "gpt-4",
-                            "model_vision": None,
-                            "default_headers": {},
-                        },
-                        model_standard="gpt-4",
-                        model_vision=None,
-                        tools=[],
-                        retry_config={"transient_attempts": 3, "timeout_attempts": 2},
-                    )
-
-                    stop_call = mock_stop.call_args
-                    n = stop_call.args[0]
-                    # max(3, 2) + max(5, 3) = 3 + 5 = 8. The patched
-                    # constants must flow into the ceiling; a hardcoded
-                    # ``+ 3`` would yield 6 and truncate the backup budget.
-                    assert n == 8, (
-                        f"max_attempts must follow the PRIMARY_* constants "
-                        f"(expected 8 = max(3,2) + max(5,3)); got {n} — "
-                        f"a hardcoded +3 would truncate the backup budget"
-                    )
+        with self._build_with_patches(
+            backup_url="https://backup/v1",
+            retry_config={"transient_attempts": 3, "timeout_attempts": 2},
+            patch_primary_caps=(5, 3),
+        ) as mocks:
+            stop_call = mocks["mock_stop"].call_args
+            n = stop_call.args[0]
+            # max(3, 2) + max(5, 3) = 3 + 5 = 8. The patched
+            # constants must flow into the ceiling; a hardcoded
+            # ``+ 3`` would yield 6 and truncate the backup budget.
+            assert n == 8, (
+                f"max_attempts must follow the PRIMARY_* constants "
+                f"(expected 8 = max(3,2) + max(5,3)); got {n} — "
+                f"a hardcoded +3 would truncate the backup budget"
+            )
 
     def test_no_backup_keeps_max_attempts_at_pre_ha_value(self):
         """Without ``base_url_backup``, the ceiling must stay at the
         pre-HA value ``max(transient, timeout)`` — no HA extension."""
-        from unittest.mock import MagicMock, patch
-        from daemon.graph import build_instance_llms
-
-        with patch("daemon.graph.ThinkingChatOpenAI") as mock_llm_class:
-            mock_chat = self._make_mock_chat_openai("https://primary/v1")
-            bound_a = MagicMock()
-            bound_b = MagicMock()
-            mock_chat.bind_tools.side_effect = [bound_a, bound_b]
-            mock_llm_class.return_value = mock_chat
-
-            with patch("daemon.graph.classify_llm_errors") as mock_classify:
-                mock_classify.side_effect = lambda x: x
-                with patch("daemon.llm_error_classifier._make_llm_retry_strategy") as mock_strategy, \
-                     patch("daemon.graph.Retrying") as mock_retrying, \
-                     patch("daemon.graph.stop_after_attempt") as mock_stop:
-                    mock_stop.return_value = MagicMock()
-                    mock_strategy.return_value = MagicMock()
-                    mock_retrying.return_value = MagicMock()
-
-                    build_instance_llms(
-                        llm_config_with_headers={
-                            "base_url": "https://primary/v1",
-                            "base_url_backup": None,
-                            "api_key": "test",
-                            "model": "gpt-4",
-                            "model_vision": None,
-                            "default_headers": {},
-                        },
-                        model_standard="gpt-4",
-                        model_vision=None,
-                        tools=[],
-                        retry_config={"transient_attempts": 8, "timeout_attempts": 3},
-                    )
-
-                    stop_call = mock_stop.call_args
-                    n = stop_call.args[0]
-                    assert n == 8, (
-                        f"max_attempts without backup must be exactly 8 "
-                        f"(max(8, 3)); got {n}"
-                    )
+        with self._build_with_patches(backup_url=None) as mocks:
+            stop_call = mocks["mock_stop"].call_args
+            n = stop_call.args[0]
+            assert n == 8, (
+                f"max_attempts without backup must be exactly 8 "
+                f"(max(8, 3)); got {n}"
+            )
 
 
 
@@ -1471,9 +1392,7 @@ class TestPrimarySliceClampedToBudget:
         assert chat.root_client.base_url == "https://backup/v1/"
 
         # Backup gets the full budget of 2: attempts 3 (count 1) and 4
-        # (count 2) are retried... wait — count < full_budget means
-        # attempt 3 (count=1 < 2) → True; attempt 4 (count=2 < 2) →
-        # False. So exactly one more retry on backup, then stop.
+        # (count 2) — exactly one more retry on backup, then stop.
         assert strategy(_make_mock_retry_state(e, attempt_number=3)) is True
         assert strategy(_make_mock_retry_state(e, attempt_number=4)) is False
 
@@ -1584,28 +1503,30 @@ class TestDeadSwapPathWarning:
     at DEBUG with traceback).
     """
 
+    class _BrokenBaseUrl:
+        """Stand-in openai client whose ``base_url`` raises on assignment.
+
+        Real OpenAI clients type ``base_url`` as ``httpx.URL``; a property
+        that raises on set simulates an incompatible / future-SDK client
+        shape where the controller's mutation cannot land.
+        """
+
+        @property
+        def base_url(self):
+            return None
+
+        @base_url.setter
+        def base_url(self, value):
+            raise RuntimeError("incompatible client shape")
+
     def _broken_chat_client(self):
         """A chat client whose root_client/root_async_client raise on
         base_url assignment (simulates a stripped-down or future-SDK
         client shape)."""
-        class BrokenBaseUrl:
-            def __init__(self):
-                # real OpenAI clients type base_url as httpx.URL; a
-                # property that raises simulates an incompatible SDK.
-                pass
-
-            @property
-            def base_url(self):
-                return None
-
-            @base_url.setter
-            def base_url(self, value):
-                raise RuntimeError("incompatible client shape")
-
         from types import SimpleNamespace
         return SimpleNamespace(
-            root_client=BrokenBaseUrl(),
-            root_async_client=BrokenBaseUrl(),
+            root_client=self._BrokenBaseUrl(),
+            root_async_client=self._BrokenBaseUrl(),
         )
 
     def test_both_attempts_failing_emits_warning(self, caplog):
@@ -1631,18 +1552,9 @@ class TestDeadSwapPathWarning:
         sync path (the one the daemon actually uses) still works."""
         from types import SimpleNamespace
 
-        class BrokenBaseUrl:
-            @property
-            def base_url(self):
-                return None
-
-            @base_url.setter
-            def base_url(self, value):
-                raise RuntimeError("broken")
-
         chat = SimpleNamespace(
             root_client=openai.OpenAI(api_key="k", base_url="https://primary/v1"),
-            root_async_client=BrokenBaseUrl(),
+            root_async_client=self._BrokenBaseUrl(),
         )
         ctl = FailoverController(chat, "https://primary/v1", "https://backup/v1")
 

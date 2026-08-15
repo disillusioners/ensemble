@@ -372,12 +372,9 @@ class InstanceManager:
 
         # Initialize context compactor
         if self.config.compaction.enabled:
-            # ``base_url_backup`` is threaded through so the config surface
-            # stays uniform; it is NOT consumed here (no FailoverController
-            # is attached to secondary LLM clients in v1 — ``clean_llm_config``
-            # strips it before construction). Failover wiring for secondary
-            # sites is future work; the primary retry path lives in
-            # ``build_instance_llms`` (daemon/graph.py) and is fully wired.
+            # ``base_url_backup`` threaded through for config-surface
+            # uniformity; NOT consumed here. See ``LLMConfig.base_url_backup``
+            # in ``daemon/config.py`` for the full rationale.
             self._compactor = ContextCompactor(
                 config=self.config.compaction,
                 llm_config={
@@ -834,12 +831,9 @@ class InstanceManager:
             self._blueprint_embedding_repo = create_blueprint_embedding_repository(
                 engine=self._engine, create_tables=False,
             )
-            # ``base_url_backup`` is threaded through so the config surface
-            # stays uniform; it is NOT consumed here (the embedding service
-            # reads only ``base_url`` / ``api_key`` / ``model`` from this
-            # dict). Failover wiring for secondary sites is future work;
-            # the primary retry path lives in ``build_instance_llms``
-            # (daemon/graph.py) and is fully wired.
+            # ``base_url_backup`` threaded through for config-surface
+            # uniformity; NOT consumed here. See ``LLMConfig.base_url_backup``
+            # in ``daemon/config.py`` for the full rationale.
             blueprint_llm_config: dict[str, Any] = {
                 "base_url": self.config.llm.base_url,
                 "base_url_backup": self.config.llm.base_url_backup,
@@ -1000,12 +994,9 @@ class InstanceManager:
 
         # Skill Evolution services (Phase 2 — wire through to manager facade)
         if self.config.skill_evolution is not None:
-            # ``base_url_backup`` is threaded through so the config surface
-            # stays uniform; it is NOT consumed here (the embedding service
-            # reads only ``base_url`` / ``api_key`` / ``model`` from this
-            # dict). Failover wiring for secondary sites is future work;
-            # the primary retry path lives in ``build_instance_llms``
-            # (daemon/graph.py) and is fully wired.
+            # ``base_url_backup`` threaded through for config-surface
+            # uniformity; NOT consumed here. See ``LLMConfig.base_url_backup``
+            # in ``daemon/config.py`` for the full rationale.
             skill_llm_config: dict[str, Any] = {
                 "base_url": self.config.llm.base_url,
                 "base_url_backup": self.config.llm.base_url_backup,

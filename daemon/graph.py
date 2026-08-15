@@ -3073,6 +3073,144 @@ def create_agent_node(
     return agent_node
 
 
+def _wire_retry_and_failover(
+    *,
+    llm_standard_chat: Any,
+    llm_vision_chat: Any | None,
+    primary_url: str,
+    backup_url: str | None,
+    model_vision: str | None,
+    transient_attempts: int,
+    timeout_attempts: int,
+) -> tuple[Retrying, Retrying, bool]:
+    """Wire the HA-failover retry strategies for the standard and vision clients.
+
+    Constructed from ``build_instance_llms`` to keep the wiring block a
+    coherent unit: ONE ``FailoverController`` per underlying ChatOpenAI
+    instance (W3). Each controller mutates that client's openai
+    ``base_url`` so the *next* request from THAT client targets the
+    backup URL. The raw ChatOpenAI instances are passed in (NOT the
+    bound / classified wrappers) — the bound runnables still expose
+    ``root_client``, but mutating via the original instance avoids any
+    future surprise if a LangChain refactor drops the attribute on the
+    binding wrapper.
+
+    When no backup is configured, controllers are still constructed but
+    ``is_configured`` is False and they are not passed to the strategy;
+    this keeps the rest of the code shape uniform. ``is_configured`` is
+    the SINGLE decision point for "backup active" (truthy AND different
+    from primary) — no parallel truth in graph.py.
+
+    W3 (vision dual-controller): when vision is configured,
+    ``llm_with_tools`` is a SEPARATE underlying ChatOpenAI from
+    ``llm_standard_chat``. A single shared retry predicate / controller
+    would swap the standard client's URL while vision keeps hitting the
+    primary (and vice versa) — an asymmetric entanglement. Vision
+    therefore gets its own controller and its own retry strategy, wired
+    with the same pattern as the standard client. When vision is not
+    configured, ``llm_with_tools`` IS the bound standard client and the
+    two returned wrappers deliberately share the same ``Retrying`` so
+    the swap covers both (pre-HA behavior — one predicate, one set of
+    counters, one controller).
+
+    Ceiling derivation: the HA budget-split extends the total attempts
+    ceiling. Worst case the primary consumes its full slice for one
+    category (transient OR timeout), then the backup runs the FULL
+    original budget for that same category after the swap resets the
+    counters:
+      ceiling = max(transient_max, timeout_max)            # backup leg
+              + max(primary_transient_max, primary_timeout_max)  # primary leg
+    The two primary caps are the module constants exported by
+    ``llm_error_classifier`` (defaults of ``_make_llm_retry_strategy``)
+    so the strategy and this ceiling derivation cannot drift apart.
+    Without a backup, the ceiling stays at the pre-HA value. (Note the
+    W2 clamp: the primary slice inside the strategy never exceeds the
+    operator budget, so the ceiling remains an upper bound, never a
+    grant.)
+
+    Args:
+        llm_standard_chat: Raw (pre-bind_tools) standard ChatOpenAI.
+        llm_vision_chat: Raw (pre-bind_tools) vision ChatOpenAI, or None.
+        primary_url: Primary endpoint URL.
+        backup_url: Backup endpoint URL, or None when no HA is configured.
+        model_vision: Vision model name, or None.
+        transient_attempts: Operator transient-retry budget.
+        timeout_attempts: Operator timeout-retry budget.
+
+    Returns:
+        ``(retrying, standard_retrying, failover_enabled)`` — ``retrying``
+        drives ``llm_with_tools`` (vision controller when vision is
+        configured, otherwise the standard controller); ``standard_retrying``
+        drives ``llm_standard`` (own controller in the dual-LLM case,
+        else aliased to ``retrying``); ``failover_enabled`` is True iff a
+        backup URL was configured.
+    """
+    # Lazy import to avoid the graph.py ↔ llm_error_classifier cycle
+    # (graph is imported by services that llm_error_classifier may
+    # transitively touch during cold-start).
+    from daemon.llm_error_classifier import (
+        FailoverController,
+        PRIMARY_TIMEOUT_MAX,
+        PRIMARY_TRANSIENT_MAX,
+        _make_llm_retry_strategy,
+    )
+
+    primary_url = primary_url or ""
+    standard_failover = FailoverController(
+        chat_client=llm_standard_chat,
+        primary_url=primary_url,
+        backup_url=backup_url,
+    )
+    failover_enabled = standard_failover.is_configured
+
+    vision_failover = None
+    if model_vision and llm_vision_chat is not None:
+        vision_failover = FailoverController(
+            chat_client=llm_vision_chat,
+            primary_url=primary_url,
+            backup_url=backup_url,
+        )
+
+    if failover_enabled:
+        max_attempts = max(transient_attempts, timeout_attempts) + max(
+            PRIMARY_TRANSIENT_MAX, PRIMARY_TIMEOUT_MAX
+        )
+    else:
+        max_attempts = max(transient_attempts, timeout_attempts)
+
+    def _build_retrying(controller: FailoverController | None) -> Retrying:
+        """Build one ``Retrying`` wrapper bound to one failover controller."""
+        predicate = _make_llm_retry_strategy(
+            transient_max=transient_attempts,
+            timeout_max=timeout_attempts,
+            failover_controller=(
+                controller if (controller is not None and controller.is_configured)
+                else None
+            ),
+        )
+        return Retrying(
+            stop=stop_after_attempt(max_attempts),
+            wait=wait_exponential_jitter(),
+            retry=predicate,
+            reraise=True,
+        )
+
+    # Strategy for llm_with_tools: vision controller when vision is
+    # configured, otherwise the standard controller. No-vision case:
+    # both wrappers drive the SAME underlying client, so they share ONE
+    # Retrying (pre-HA behavior — one predicate, one set of counters,
+    # one controller). Only the dual-LLM (vision) case builds a second,
+    # independent strategy.
+    if vision_failover is not None:
+        retrying = _build_retrying(vision_failover)
+        standard_retrying = _build_retrying(standard_failover)
+    else:
+        retrying = _build_retrying(standard_failover)
+        standard_retrying = retrying
+
+    return retrying, standard_retrying, failover_enabled
+
+
 def build_instance_llms(
     llm_config_with_headers: dict,
     model_standard: str,
@@ -3127,116 +3265,21 @@ def build_instance_llms(
         if llm_standard is not llm_with_tools:
             llm_standard = classify_llm_errors(llm_standard)
 
-        from daemon.llm_error_classifier import (
-            FailoverController,
-            PRIMARY_TIMEOUT_MAX,
-            PRIMARY_TRANSIENT_MAX,
-            _make_llm_retry_strategy,
-        )
-
         transient_attempts = retry_config.get("transient_attempts", 8)
         timeout_attempts = retry_config.get("timeout_attempts", 3)
-
-        # HA-failover wiring: ONE FailoverController per underlying
-        # ChatOpenAI instance (W3). Each controller mutates that client's
-        # openai ``base_url`` so the *next* request from THAT client
-        # targets the backup URL.
-        #
-        # We capture the raw ChatOpenAI instances (``llm_standard_chat``
-        # and, when configured, ``llm_vision_chat``) BEFORE
-        # ``bind_tools`` / ``classify_llm_errors`` wrap them — the bound
-        # runnables still expose ``root_client``, but mutating via the
-        # original instance avoids any future surprise if a LangChain
-        # refactor drops the attribute on the binding wrapper.
-        #
-        # No backup configured → controllers are still constructed but
-        # ``is_configured`` is False and they are not passed to the
-        # strategy; this keeps the rest of the code shape uniform.
-        # ``is_configured`` is the SINGLE decision point for "backup
-        # active" (truthy AND different from primary) — no parallel
-        # truth in graph.py.
         primary_url = llm_config_with_headers.get("base_url", "")
         backup_url = llm_config_with_headers.get("base_url_backup")
 
-        standard_failover = FailoverController(
-            chat_client=llm_standard_chat,
+        retrying, standard_retrying, failover_enabled = _wire_retry_and_failover(
+            llm_standard_chat=llm_standard_chat,
+            llm_vision_chat=llm_vision_chat,
             primary_url=primary_url,
             backup_url=backup_url,
+            model_vision=model_vision,
+            transient_attempts=transient_attempts,
+            timeout_attempts=timeout_attempts,
         )
-        backup_configured = standard_failover.is_configured
 
-        # W3: when vision is configured, ``llm_with_tools`` is a SEPARATE
-        # underlying ChatOpenAI from ``llm_standard_chat``. A single
-        # shared retry predicate/controller would swap the standard
-        # client's URL while vision keeps hitting the primary (and vice
-        # versa) — an asymmetric entanglement. Vision therefore gets its
-        # own controller and its own retry strategy, wired with the same
-        # pattern as the standard client. When vision is not configured,
-        # ``llm_with_tools`` IS the bound standard client and the two
-        # wrappers below deliberately share the same controller so the
-        # swap covers both.
-        vision_failover = None
-        if model_vision and llm_vision_chat is not None:
-            vision_failover = FailoverController(
-                chat_client=llm_vision_chat,
-                primary_url=primary_url,
-                backup_url=backup_url,
-            )
-
-        # Shared ceiling derivation for both strategies — the HA
-        # budget-split extends the total attempts ceiling. Worst case the
-        # primary consumes its full slice for one category (transient OR
-        # timeout), then the backup runs the FULL original budget for
-        # that same category after the swap resets the counters:
-        #   ceiling = max(transient_max, timeout_max)            # backup leg
-        #           + max(primary_transient_max, primary_timeout_max)  # primary leg
-        # The two primary caps are the module constants exported by
-        # ``llm_error_classifier`` (defaults of
-        # ``_make_llm_retry_strategy``) so the strategy and this ceiling
-        # derivation cannot drift apart. Without a backup, the ceiling
-        # stays at the pre-HA value. (Note the W2 clamp: the primary
-        # slice inside the strategy never exceeds the operator budget,
-        # so the ceiling remains an upper bound, never a grant.)
-        if backup_configured:
-            max_attempts = max(transient_attempts, timeout_attempts) + max(
-                PRIMARY_TRANSIENT_MAX, PRIMARY_TIMEOUT_MAX
-            )
-        else:
-            max_attempts = max(transient_attempts, timeout_attempts)
-
-        def _build_retrying(controller):
-            """Build one Retrying wrapper bound to one failover controller."""
-            predicate = _make_llm_retry_strategy(
-                transient_max=transient_attempts,
-                timeout_max=timeout_attempts,
-                failover_controller=(
-                    controller if (controller is not None and controller.is_configured)
-                    else None
-                ),
-            )
-            return Retrying(
-                stop=stop_after_attempt(max_attempts),
-                wait=wait_exponential_jitter(),
-                retry=predicate,
-                reraise=True,
-            )
-
-        # Strategy for llm_with_tools: the vision controller when vision
-        # is configured, otherwise the standard controller (llm_with_tools
-        # IS the bound standard client in that case).
-        #
-        # No-vision case: both wrappers drive the SAME underlying client,
-        # so they deliberately share ONE Retrying (pre-HA behavior — one
-        # predicate, one set of counters, one controller). Only the
-        # dual-LLM (vision) case builds a second, independent strategy.
-        if vision_failover is not None:
-            retrying = _build_retrying(vision_failover)
-            standard_retrying = _build_retrying(standard_failover)
-        else:
-            retrying = _build_retrying(standard_failover)
-            standard_retrying = retrying
-
-        # Capture the classified LLMs for retry wrapper
         classified_llm = llm_with_tools
 
         def _run_with_retry(input_value):
@@ -3255,14 +3298,30 @@ def build_instance_llms(
                 return standard_retrying(classified_standard.invoke, input_value)
             llm_standard = RunnableLambda(_run_standard_with_retry)
 
-        if backup_configured:
-            controller_count = 2 if vision_failover is not None else 1
+        if failover_enabled:
+            controller_count = 2 if model_vision and llm_vision_chat is not None else 1
+            # F3: interpolate the post-W2-clamp primary caps so the log
+            # cannot lie under custom budgets. The W2 clamp caps the
+            # primary slice at the operator budget
+            # (``min(PRIMARY_*, operator_budget)``), and the retry
+            # convention is ``count < cap`` — so the primary tolerates
+            # ``cap - 1`` retries before the swap fires. The slice
+            # value reported here is the retry count, NOT the threshold
+            # (matches the pre-extraction "2 transient / 1 timeout"
+            # wording under the defaults 8/3 + PRIMARY_*=3/2).
+            from daemon.llm_error_classifier import (
+                PRIMARY_TIMEOUT_MAX,
+                PRIMARY_TRANSIENT_MAX,
+            )
+            eff_primary_transient = min(PRIMARY_TRANSIENT_MAX, transient_attempts) - 1
+            eff_primary_timeout = min(PRIMARY_TIMEOUT_MAX, timeout_attempts) - 1
             logger.info(
                 f"[LLM-HA] Failover enabled: primary={primary_url} "
                 f"backup={backup_url} "
                 f"({controller_count} controller(s): standard"
-                f"{'+vision' if vision_failover is not None else ''}; "
-                f"primary slice: 2 transient / 1 timeout, "
+                f"{'+vision' if model_vision and llm_vision_chat is not None else ''}; "
+                f"primary slice: {eff_primary_transient} transient / "
+                f"{eff_primary_timeout} timeout, "
                 f"backup gets full {transient_attempts}/{timeout_attempts})"
             )
         logger.debug(
