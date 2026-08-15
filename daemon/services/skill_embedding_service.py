@@ -57,12 +57,57 @@ import logging
 import math
 import re
 from typing import Any
+from urllib.parse import urlsplit
 
 import openai
 
 from .llm_failover import current_failover_url, invoke_raw_with_failover
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_endpoint_url(url: str | None) -> str:
+    """Normalize an endpoint URL for equivalence comparison.
+
+    Strips cosmetic differences that do NOT change the endpoint —
+    trailing slash and scheme/host case — so the embedding guard
+    compares apples to apples:
+
+    * ``"https://x/v1"``    ≡ ``"https://x/v1/"``
+    * ``"https://X/v1"``    ≡ ``"https://x/v1"``
+    * ``"HTTPS://x:443/v1"`` ≡ ``"https://x:443/v1"`` (scheme case)
+
+    The path itself is compared case-SENSITIVELY (paths can be
+    case-sensitive on real servers). Port is preserved; userinfo
+    is dropped (treated as equivalent). Empty / ``None`` inputs
+    normalize to ``""``.
+
+    Used ONLY for comparison — the original URL string is still
+    passed to the client untouched.
+    """
+    if not url:
+        return ""
+    try:
+        parts = urlsplit(url.strip())
+    except ValueError:
+        # Malformed URL — fall back to raw string comparison so the
+        # guard stays conservative (treats unparseable as different).
+        return url.strip()
+    scheme = (parts.scheme or "").lower()
+    host = (parts.hostname or "").lower()
+    # Note: ``parts.hostname`` is ALREADY lowercased by urlsplit, and
+    # it strips brackets from IPv6 literals; the ``.lower()`` is
+    # belt-and-braces for exotic inputs.
+    netloc = host
+    if parts.port is not None:
+        netloc = f"{host}:{parts.port}"
+    path = parts.path.rstrip("/")
+    # Query/fragment are dropped — they don't identify the endpoint.
+    if scheme and netloc:
+        return f"{scheme}://{netloc}{path}"
+    # No scheme/host (e.g. a bare path or relative URL) — compare the
+    # trimmed original so ``"x"`` != ``"/x"`` still holds.
+    return f"{netloc}{path}" if netloc else path
 
 
 def _do_chat_call(
@@ -354,10 +399,17 @@ class SkillEmbeddingService:
             # different model. Short-circuit: drop the backup so
             # the facade skips failover entirely on this path (the
             # call retries on the embedding endpoint only).
+            # BOTH sides are normalized (trailing slash, scheme/host
+            # case) before comparing so equivalent spellings of the
+            # SAME endpoint ("https://x/v1" vs "https://x/v1/")
+            # don't silently disable failover. The failure direction
+            # stays conservative: a GENUINELY different endpoint
+            # still drops the backup.
             embedding_override = getattr(self.config, "embedding_base_url", None)
             if (
                 embedding_override
-                and embedding_override != self.llm_config.get("base_url")
+                and _normalize_endpoint_url(embedding_override)
+                != _normalize_endpoint_url(self.llm_config.get("base_url"))
             ):
                 embed_backup = None
             embed_failover_config = {

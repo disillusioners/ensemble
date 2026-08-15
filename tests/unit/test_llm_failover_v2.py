@@ -361,6 +361,54 @@ class TestWrapLangchainFailoverEndToEnd:
         # Exactly ONE request (no retry on non-retryable).
         assert request_count == 1
 
+    def test_langchain_facade_does_not_mutate_shared_config(self):
+        """v2 review Fix 3(a): a SHARED config dict passed to
+        ``wrap_langchain_failover`` must be byte-identical after
+        ``invoke`` — the facade's ``clean_llm_config(dict(llm_config))``
+        internal-copy invariant must never leak a mutation back to
+        the caller. Regression pin: a future "optimization" that
+        cleans the dict in-place would strip ``base_url_backup``
+        from the caller's config and silently kill downstream HA
+        wiring."""
+        import copy
+
+        from langchain_core.messages import HumanMessage
+        from langchain_openai import ChatOpenAI
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=_completion_body("ok"))
+
+        llm = ChatOpenAI(
+            api_key="test",
+            base_url=PRIMARY,
+            model="gpt-test",
+            max_retries=0,
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+
+        shared = {
+            "base_url": PRIMARY,
+            "base_url_backup": BACKUP,
+            "api_key": "test",
+            "model": "gpt-test",
+        }
+        before = copy.deepcopy(shared)
+
+        binding = wrap_langchain_failover(llm, shared)
+        result = binding.invoke([HumanMessage(content="hi")])
+        assert result.content == "ok"
+
+        assert shared == before, (
+            f"facade must not mutate the caller's llm_config dict; "
+            f"before={before!r} after={shared!r}"
+        )
+        assert list(shared.keys()) == list(before.keys()), (
+            "key order / key set must be untouched as well"
+        )
+        assert shared.get("base_url_backup") == BACKUP, (
+            "base_url_backup must still be present in the caller's dict"
+        )
+
 
 # ===========================================================================
 # invoke_raw_with_failover — direct unit tests
@@ -420,6 +468,65 @@ class TestInvokeRawWithFailoverSemantics:
         # we don't pin to None — but the fallback path is the same
         # (factory treats None as "use llm_config['base_url']").
         assert url is None or isinstance(url, str)
+
+
+class TestInvokeRawWithFailoverNonRetryable:
+    """v2 review Fix 5: non-retryable exceptions must propagate from
+    the raw-SDK facade UNWRAPPED and with ZERO retries fired.
+
+    Pins the 401/403/404/422 classification against regression: an
+    auth-class error means the SAME failure would occur on the backup
+    endpoint, so retrying or swapping is pure latency with no chance
+    of recovery — the facade must short-circuit on attempt 1.
+    """
+
+    def test_authentication_error_propagates_unwrapped_no_retries(self):
+        """Factory raises ``openai.AuthenticationError`` (401) → the
+        ORIGINAL exception object propagates to the caller:
+        * NOT re-wrapped in ``TransientAPIError``
+        * factory entered exactly ONCE (no retry attempts)
+        * no failover swap (every attempt would fail identically —
+          same key on both endpoints)
+        """
+        original_error = openai.AuthenticationError(
+            message="Invalid API key",
+            response=MagicMock(),
+            body=None,
+        )
+
+        attempts: list[str | None] = []
+
+        def _factory():
+            attempts.append(current_failover_url())
+            raise original_error
+
+        llm_config = {
+            "base_url": PRIMARY,
+            "base_url_backup": BACKUP,  # HA configured — must NOT matter
+            "api_key": "test",
+        }
+
+        with pytest.raises(openai.AuthenticationError) as exc_info:
+            invoke_raw_with_failover(_factory, llm_config)
+
+        # UNWRAPPED: the caller sees the ORIGINAL exception object,
+        # not a TransientAPIError wrapper.
+        assert exc_info.value is original_error, (
+            "the ORIGINAL AuthenticationError must propagate unwrapped — "
+            f"got {type(exc_info.value).__name__} instead"
+        )
+        assert not isinstance(exc_info.value, TransientAPIError)
+
+        # Zero retries: the factory ran exactly once.
+        assert len(attempts) == 1, (
+            f"non-retryable error must fire exactly ONE attempt (no "
+            f"retries, no failover swap); factory ran {len(attempts)} "
+            f"times against URLs {attempts}"
+        )
+        # The single attempt targeted primary — no swap happened.
+        assert attempts[0] in (PRIMARY, None), (
+            f"attempt 1 must target the primary URL; got {attempts[0]!r}"
+        )
 
 
 class TestInvokeRawWithFailoverRetryBudget:
@@ -521,6 +628,52 @@ class TestInvokeRawWithFailoverRetryBudget:
         assert len(captured) == 3, (
             f"expected 3 primary attempts (transient_max=3); got "
             f"{len(captured)}: {[u.host for u in captured]}"
+        )
+
+    def test_raw_facade_does_not_mutate_shared_config(self):
+        """v2 review Fix 3(b): a SHARED config dict passed to
+        ``invoke_raw_with_failover`` must be byte-identical after the
+        call. Pins the same internal-copy invariant as the LangChain
+        flavor — neither facade may clean/strip keys in the caller's
+        dict."""
+        import copy
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=_completion_body("ok"))
+
+        http_client = httpx.Client(transport=httpx.MockTransport(handler))
+        shared = {
+            "base_url": PRIMARY,
+            "base_url_backup": BACKUP,
+            "api_key": "test",
+            "model": "gpt-test",
+        }
+        before = copy.deepcopy(shared)
+
+        def _call() -> object:
+            url = current_failover_url() or PRIMARY
+            client = openai.OpenAI(
+                api_key="test",
+                base_url=url or None,
+                http_client=http_client,
+                max_retries=0,
+            )
+            return client.chat.completions.create(
+                model="gpt-test", messages=[{"role": "user", "content": "hi"}]
+            )
+
+        r = invoke_raw_with_failover(_call, shared)
+        assert r.choices[0].message.content == "ok"
+
+        assert shared == before, (
+            f"raw facade must not mutate the caller's llm_config dict; "
+            f"before={before!r} after={shared!r}"
+        )
+        assert list(shared.keys()) == list(before.keys()), (
+            "key order / key set must be untouched as well"
+        )
+        assert shared.get("base_url_backup") == BACKUP, (
+            "base_url_backup must still be present in the caller's dict"
         )
 
     def test_thread_local_cleanup_after_call(self, monkeypatch):
@@ -746,6 +899,89 @@ class TestEmbeddingEndpointGuardEndToEnd:
         assert hosts.count("backup.test") == 1, (
             f"chat-endpoint-identical embedding call must swap to backup; "
             f"got hosts={hosts}"
+        )
+
+    def test_trailing_slash_equivalent_urls_do_not_disable_failover(self):
+        """v2 review Fix 2: an explicit ``embedding_base_url`` that is
+        the SAME endpoint as the chat ``base_url`` modulo a trailing
+        slash must NOT trip the different-endpoint guard — failover
+        stays armed. Raw-string ``!=`` compared "https://x/v1" vs
+        "https://x/v1/" as different and silently disabled HA for
+        identical endpoints."""
+        import daemon.services.skill_embedding_service as ses
+
+        captured: list[httpx.URL] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured.append(request.url)
+            if request.url.host == "backup.test":
+                return httpx.Response(200, json=_embedding_body("hello"))
+            return httpx.Response(
+                500, json={"error": {"message": "primary down"}}
+            )
+
+        http_client = httpx.Client(transport=httpx.MockTransport(handler))
+
+        # Same endpoint as the chat base_url (PRIMARY =
+        # "https://primary.test/v1") but spelled with a trailing
+        # slash — equivalent, guard must NOT drop the backup.
+        svc = self._make_service(embedding_base_url="https://primary.test/v1/")
+
+        original_openai = openai.OpenAI
+
+        def _patched_openai(**kwargs):
+            kwargs["http_client"] = http_client
+            kwargs["max_retries"] = 0
+            return original_openai(**kwargs)
+
+        with patch.object(ses.openai, "OpenAI", side_effect=_patched_openai):
+            vec = asyncio.run(svc.embed_text("hello"))
+
+        assert len(vec) == 8
+        hosts = [u.host for u in captured]
+        assert hosts.count("backup.test") == 1, (
+            f"trailing-slash-equivalent embedding endpoint must still "
+            f"fail over to the chat backup; got hosts={hosts}"
+        )
+
+    def test_host_case_equivalent_urls_do_not_disable_failover(self):
+        """v2 review Fix 2 (host-case variant): scheme/host-case
+        differences ("HTTPS://PRIMARY.test/v1" vs
+        "https://primary.test/v1") name the SAME endpoint — the guard
+        must not disable failover."""
+        import daemon.services.skill_embedding_service as ses
+
+        captured: list[httpx.URL] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured.append(request.url)
+            if request.url.host == "backup.test":
+                return httpx.Response(200, json=_embedding_body("hello"))
+            return httpx.Response(
+                500, json={"error": {"message": "primary down"}}
+            )
+
+        http_client = httpx.Client(transport=httpx.MockTransport(handler))
+
+        svc = self._make_service(
+            embedding_base_url="HTTPS://PRIMARY.test/v1"
+        )
+
+        original_openai = openai.OpenAI
+
+        def _patched_openai(**kwargs):
+            kwargs["http_client"] = http_client
+            kwargs["max_retries"] = 0
+            return original_openai(**kwargs)
+
+        with patch.object(ses.openai, "OpenAI", side_effect=_patched_openai):
+            vec = asyncio.run(svc.embed_text("hello"))
+
+        assert len(vec) == 8
+        hosts = [u.host for u in captured]
+        assert hosts.count("backup.test") == 1, (
+            f"host-case-equivalent embedding endpoint must still "
+            f"fail over to the chat backup; got hosts={hosts}"
         )
 
 

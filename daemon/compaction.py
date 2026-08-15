@@ -1007,15 +1007,28 @@ class ContextCompactor:
         # the same shape v1 uses — zero behavior change.
         llm_wrapper = wrap_langchain_failover(llm, self.llm_config_with_headers)
 
-        response = await asyncio.to_thread(
-            llm_wrapper.invoke,
-            [
-                SystemMessage(
-                    content="You are a helpful assistant that summarizes conversations "
-                    "concisely while preserving all important details."
-                ),
-                HumanMessage(content=prompt),
-            ],
+        # v2 review Fix 4: cap the wall-clock time of this invoke.
+        # Reactive compaction runs in-turn inside agent_node — an
+        # uncapped HA retry ladder (bounded retry × request_timeout,
+        # no outer cap) would stall the agent's turn for 20+ min.
+        # 30s matches the sibling sites (title_generation: 30.0,
+        # ReportRepairConfig.timeout_seconds default: 30). The
+        # ``asyncio.TimeoutError`` propagates to the caller's
+        # ``except Exception`` blocks (e.g. ``compact_messages``'s
+        # summarization-failed → truncation fallback at the :741
+        # handler), preserving graceful degradation.
+        response = await asyncio.wait_for(
+            asyncio.to_thread(
+                llm_wrapper.invoke,
+                [
+                    SystemMessage(
+                        content="You are a helpful assistant that summarizes conversations "
+                        "concisely while preserving all important details."
+                    ),
+                    HumanMessage(content=prompt),
+                ],
+            ),
+            timeout=30.0,
         )
         
         content = response.content

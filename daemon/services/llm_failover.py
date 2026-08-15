@@ -36,6 +36,28 @@ Two flavors of facade
    URL via :func:`current_failover_url` (a thread-local updated
    per attempt).
 
+Restricted ``ChatFailoverBinding`` surface
+------------------------------------------
+The LangChain binding carries HA for ``invoke`` ONLY. The following
+``ChatOpenAI`` capabilities are NOT carried by the wrapper — calling
+them must go through the UNDERLYING client (``binding.client``) and
+therefore BYPASSES retry+failover entirely:
+
+* ``bind_tools`` — not proxied; tool-binding is a construction-time
+  concern, do it on the raw client BEFORE wrapping.
+* ``batch`` — not proxied; no HA.
+* ``stream`` — not proxied; no HA.
+* ``ainvoke`` — deliberately REMOVED (v2 review Fix 1). A sync
+  ``tenacity.Retrying`` around a coroutine function returns the
+  un-awaited coroutine — mechanically inert HA. If a future site
+  needs async, it must fail loudly on the missing attribute instead
+  of silently skipping retry+failover, and a genuinely async retry
+  (``AsyncRetrying``) must be wired first.
+
+A future tool-using or async site MUST NOT assume ``wrapper.<method>``
+exists. Anything beyond ``invoke`` (and the ``is_failover_active``
+property) is outside the facade's contract.
+
 Stateless per-call semantic (raw SDK only)
 ------------------------------------------
 Secondary sites construct fresh clients per call — there is no
@@ -184,18 +206,26 @@ def _classify_raw_sdk_exceptions(fn: Callable[[], T]) -> Callable[[], T]:
         try:
             return fn()
         except openai.APIStatusError as e:
-            # ``APIStatusError`` is the umbrella for any non-2xx HTTP
-            # status. Must come AFTER ``BadRequestError`` branch (which
-            # doesn't apply for raw SDK — see below).
+            # ``APIStatusError`` is the umbrella for ANY non-2xx HTTP
+            # status the SDK raises as an exception. This wrapper has a
+            # SINGLE branch: retryable-status → TransientAPIError,
+            # everything else re-raises. (No BadRequestError-first
+            # ordering here — that ordering rule belongs to
+            # ``classify_llm_errors``, which has a dedicated
+            # context-length branch; this raw-SDK wrapper does not.)
             if e.status_code in RETRYABLE_STATUS_CODES:
                 raise TransientAPIError(e) from e
             raise  # Non-retryable status — pass through.
-        # openai.BadRequestError (400) is not in RETRYABLE_STATUS_CODES,
-        # so it falls through the re-raise above. Same for AuthenticationError,
-        # PermissionDeniedError, NotFoundError, UnprocessableEntityError,
-        # RateLimitError on non-listed 429 (already in the set), etc.
-        # Connection / timeout errors already match TRANSIENT_EXCEPTIONS
-        # / TIMEOUT_EXCEPTIONS — pass through.
+        # All non-``APIStatusError`` exceptions propagate untouched:
+        # 400 BadRequestError / 401 AuthenticationError /
+        # 403 PermissionDeniedError / 404 NotFoundError / 422
+        # UnprocessableEntityError ARE ``APIStatusError`` subclasses —
+        # they take the non-retryable re-raise above (none of those
+        # statuses are in RETRYABLE_STATUS_CODES). Connection /
+        # timeout errors (``APIConnectionError`` / ``APITimeoutError``)
+        # are NOT APIStatusError subclasses — they pass straight
+        # through here and are matched by the predicate's
+        # TRANSIENT_EXCEPTIONS / TIMEOUT_EXCEPTIONS sets directly.
     return _wrapped
 
 
@@ -359,8 +389,9 @@ class ChatFailoverBinding:
     """Result of :func:`wrap_langchain_failover`.
 
     Holds the retry strategy + classification wrapper for a single
-    LangChain ChatOpenAI client. The caller invokes ``invoke`` /
-    ``ainvoke`` instead of the raw client's. Failure modes:
+    LangChain ChatOpenAI client. The caller invokes ``invoke``
+    (sync only — see module docstring "Restricted surface") instead
+    of the raw client's. Failure modes:
 
     * Transient / timeout / ``IndexError`` (when backup configured) →
       tenacity predicate retries with HA budget-split.
@@ -439,25 +470,24 @@ class ChatFailoverBinding:
         (v1 ``build_instance_llms``): ``Retrying(classify(invoke))``.
         Sites that today call ``llm.invoke(messages)`` swap to
         ``wrapper.invoke(messages)``.
+
+        Note: there is deliberately NO ``ainvoke`` on this binding —
+        the tenacity ``Retrying`` is synchronous and would return the
+        un-awaited coroutine, silently bypassing retry+failover (see
+        the module docstring "Restricted surface"). Async callers
+        must fail loudly at ``AttributeError`` rather than silently
+        skip HA.
         """
         return self._retrying(self._classified.invoke, *args, **kwargs)
 
-    def ainvoke(self, *args: Any, **kwargs: Any) -> Any:
-        """Async variant of :meth:`invoke`.
-
-        Uses the SAME classified wrapper and retry strategy as
-        ``invoke`` — the predicate's URL swap mutates the same
-        underlying ``openai.AsyncOpenAI`` client (via
-        ``root_async_client``), so an async failover is consistent
-        with a sync one in the same process.
-
-        Note: secondary sites in this daemon all use sync ``invoke``
-        behind ``asyncio.to_thread``. This is here for future-proofing
-        and symmetry — see the comment block on
-        ``classify_llm_errors`` for the upstream limitation that
-        currently makes this path untested in production.
-        """
-        return self._retrying(self._classified.ainvoke, *args, **kwargs)
+    # v2 review Fix 1: the former ``ainvoke`` method was REMOVED. It
+    # wrapped ``self._classified.ainvoke`` (an async callable) inside a
+    # SYNCHRONOUS ``tenacity.Retrying``: ``Retrying.__call__`` returns
+    # whatever the wrapped callable returns, which for a coroutine
+    # function is the un-awaited coroutine object — zero retries, zero
+    # failover, zero logging during exactly the outage the method
+    # existed for. A future async caller must wire a genuinely async
+    # retry (e.g. ``AsyncRetrying``) rather than resurrect this trap.
 
 
 def wrap_langchain_failover(
@@ -467,14 +497,14 @@ def wrap_langchain_failover(
     transient_max: int = 3,
     timeout_max: int = 2,
 ) -> ChatFailoverBinding:
-    """Wrap a LangChain ``ChatOpenAI`` with HA failover for ``invoke`` / ``ainvoke``.
+    """Wrap a LangChain ``ChatOpenAI`` with HA failover for ``invoke``.
 
     Reuses :class:`daemon.llm_error_classifier.FailoverController` to
     mutate the client's underlying ``openai.OpenAI`` ``base_url`` on
     swap, and the v1 retry predicate to share the budget across
-    primary and backup. The wrapper's ``invoke`` /
-    ``ainvoke`` return what the underlying ``chat_client.invoke`` /
-    ``chat_client.ainvoke`` returns.
+    primary and backup. The wrapper's ``invoke`` returns what the
+    underlying ``chat_client.invoke`` returns. ``ainvoke`` is NOT
+    wrapped (see module docstring "Restricted surface").
 
     Args:
         chat_client: An already-constructed LangChain
@@ -497,8 +527,8 @@ def wrap_langchain_failover(
             (default 2). Same default as the agent-chat hot path.
 
     Returns:
-        :class:`ChatFailoverBinding` whose ``invoke`` /
-        ``ainvoke`` carry HA retry+failover.
+        :class:`ChatFailoverBinding` whose ``invoke`` carries
+        HA retry+failover.
 
     Retry is added even when ``base_url_backup`` is None or equal to
     primary: sites that had NO retry pre-v2 now get bounded retry

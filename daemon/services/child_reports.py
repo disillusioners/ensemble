@@ -604,10 +604,21 @@ Agent conversation:
 Provide a concise summary:"""
 
         try:
-            response = await asyncio.to_thread(
-                llm_wrapper.invoke,
-                [SystemMessage(content="You are a helpful assistant that summarizes agent conversations concisely."),
-                 HumanMessage(content=summarization_prompt)]
+            # v2 review Fix 4: cap the wall-clock time of this invoke.
+            # The HA facade adds bounded retry (up to 5 attempts ×
+            # request_timeout) with no outer cap — worst case 20+ min
+            # for a summarization that is a nice-to-have. 30s matches
+            # the sibling sites (title_generation: 30.0,
+            # ReportRepairConfig.timeout_seconds default: 30).
+            # ``asyncio.TimeoutError`` lands in the ``except Exception``
+            # below, preserving the graceful count-fallback semantics.
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    llm_wrapper.invoke,
+                    [SystemMessage(content="You are a helpful assistant that summarizes agent conversations concisely."),
+                     HumanMessage(content=summarization_prompt)]
+                ),
+                timeout=30.0,
             )
             # Handle both string and list content types
             content = response.content
