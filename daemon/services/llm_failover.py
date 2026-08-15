@@ -14,7 +14,7 @@ gap by exposing ONE shared facade that both flavors (LangChain
 ``openai.AsyncOpenAI``) consume.
 
 Reuse, not duplicate. The v1 machinery (``FailoverController``,
-``_make_llm_retry_strategy``, ``classify_llm_errors``, ``PRIMARY_*``
+``make_llm_retry_strategy``, ``classify_llm_errors``, ``PRIMARY_*``
 constants) lives in :mod:`daemon.llm_error_classifier`. The facade
 imports and reuses it; nothing here duplicates HA logic. If reuse
 forces awkward coupling, refactor the shared parts UP into
@@ -125,7 +125,7 @@ delta of this facade. Everything else matches pre-v2 exactly.
 IndexError retry (HA-only)
 --------------------------
 The v1 IndexError-gated-on-backup semantic carries through unchanged:
-``_make_llm_retry_strategy`` only treats IndexError as transient when
+``make_llm_retry_strategy`` only treats IndexError as transient when
 ``failover_controller.is_configured`` is True. With no backup, an
 empty-choices response re-raises to the caller's normal except-block
 graceful fallback (which is what every secondary site already has).
@@ -206,7 +206,6 @@ from __future__ import annotations
 
 import logging
 import threading
-import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional, TypeVar
 
@@ -220,13 +219,12 @@ from tenacity import (
 )
 
 from ..llm_error_classifier import (
-    PRIMARY_TIMEOUT_MAX,
-    PRIMARY_TRANSIENT_MAX,
-    RETRYABLE_STATUS_CODES,
     FailoverController,
     TransientAPIError,
-    _make_llm_retry_strategy,
     classify_llm_errors,
+    derive_ha_attempt_ceiling,
+    is_retryable_status_code,
+    make_llm_retry_strategy,
 )
 from ..graph import clean_llm_config
 
@@ -279,7 +277,7 @@ def _classify_raw_sdk_exceptions(fn: Callable[[], T]) -> Callable[[], T]:
             # ordering here — that ordering rule belongs to
             # ``classify_llm_errors``, which has a dedicated
             # context-length branch; this raw-SDK wrapper does not.)
-            if e.status_code in RETRYABLE_STATUS_CODES:
+            if is_retryable_status_code(e.status_code):
                 raise TransientAPIError(e) from e
             raise  # Non-retryable status — pass through.
     return _wrapped
@@ -459,7 +457,7 @@ class ChatFailoverBinding:
     next cycle's first attempt completes (and the predicate's
     ``attempt_number == 1`` reset flips it back). The retry
     predicate implementation is reused unchanged — see
-    :func:`daemon.llm_error_classifier._make_llm_retry_strategy`.
+    :func:`daemon.llm_error_classifier.make_llm_retry_strategy`.
 
     Wall-clock cap
     --------------
@@ -494,16 +492,15 @@ class ChatFailoverBinding:
         )
         self._is_failover_active = self._controller.is_configured
 
-        if self._is_failover_active:
-            # Worst case: primary exhausts its slice for one category,
-            # then backup runs the FULL ``max(transient, timeout)``.
-            max_attempts = max(self.transient_max, self.timeout_max) + max(
-                PRIMARY_TRANSIENT_MAX, PRIMARY_TIMEOUT_MAX
-            )
-        else:
-            max_attempts = max(self.transient_max, self.timeout_max)
+        # Worst case: primary exhausts its slice for one category,
+        # then backup runs the FULL ``max(transient, timeout)``.
+        max_attempts = derive_ha_attempt_ceiling(
+            self.transient_max,
+            self.timeout_max,
+            failover_active=self._is_failover_active,
+        )
 
-        predicate = _make_llm_retry_strategy(
+        predicate = make_llm_retry_strategy(
             transient_max=self.transient_max,
             timeout_max=self.timeout_max,
             failover_controller=(
@@ -668,7 +665,7 @@ def invoke_raw_with_failover(
     :func:`current_failover_url` and constructs the client against
     that URL.
 
-    Reuses :func:`daemon.llm_error_classifier._make_llm_retry_strategy`
+    Reuses :func:`daemon.llm_error_classifier.make_llm_retry_strategy`
     with a :class:`_RawFailoverShim` adapter, so the predicate
     behavior (budget split, IndexError-on-backup gate, transient /
     timeout classification) is identical to the LangChain facade.
@@ -773,17 +770,16 @@ def invoke_raw_with_failover(
     # thread (see the F1-style hygiene note in the module docstring).
     _set_current_url(primary_url)
     try:
-        predicate = _make_llm_retry_strategy(
+        predicate = make_llm_retry_strategy(
             transient_max=transient_max,
             timeout_max=timeout_max,
             failover_controller=(shim if shim.is_configured else None),
         )
-        if shim.is_configured:
-            max_attempts = max(transient_max, timeout_max) + max(
-                PRIMARY_TRANSIENT_MAX, PRIMARY_TIMEOUT_MAX
-            )
-        else:
-            max_attempts = max(transient_max, timeout_max)
+        max_attempts = derive_ha_attempt_ceiling(
+            transient_max,
+            timeout_max,
+            failover_active=shim.is_configured,
+        )
 
         def _attempt() -> T:
             # Defensive: re-affirm the current URL in case the predicate

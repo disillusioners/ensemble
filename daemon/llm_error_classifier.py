@@ -19,6 +19,12 @@ logger = logging.getLogger(__name__)
 # without retrying it the system fails on the first attempt.
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504, 520, 521, 522, 523, 524}
 
+
+def is_retryable_status_code(status_code: int) -> bool:
+    """Return whether an API status code is eligible for HA retry handling."""
+    return status_code in RETRYABLE_STATUS_CODES
+
+
 # Max length for error messages in logs (prevents HTML flooding)
 MAX_ERROR_LEN = 300
 
@@ -87,7 +93,7 @@ TRANSIENT_EXCEPTIONS: tuple[type[Exception], ...] = (
     # choices[0] when the LLM returns choices: [], which is a malformed
     # response. Its retryability is now CONDITIONAL on controller
     # presence: when a FailoverController (backup URL) is supplied to
-    # _make_llm_retry_strategy, the predicate treats IndexError as
+    # make_llm_retry_strategy, the predicate treats IndexError as
     # transient and fails over to the backup; without a controller the
     # pre-HA behavior (non-retryable, re-raised by the classifier) is
     # preserved. See _run_with_classification's except IndexError
@@ -103,14 +109,14 @@ TIMEOUT_EXCEPTIONS: tuple[type[Exception], ...] = (
 )
 
 # Primary-phase retry caps for the HA budget-split (see
-# ``_make_llm_retry_strategy``). Exported as module constants so the
+# ``make_llm_retry_strategy``). Exported as module constants so the
 # strategy defaults and ``daemon.graph.build_instance_llms``'s
 # ``stop_after_attempt`` ceiling derivation stay in lock-step — graph.py
 # adds ``max(PRIMARY_TRANSIENT_MAX, PRIMARY_TIMEOUT_MAX)`` to the slice
 # caps when computing the total attempts ceiling. If these defaults
 # change, graph.py picks the new values up automatically.
 #
-# NOTE on def-time binding: ``_make_llm_retry_strategy`` declares these
+# NOTE on def-time binding: ``make_llm_retry_strategy`` declares these
 # constants as DEFAULT PARAMETER VALUES, which Python binds once at
 # function-definition time. Monkeypatching ``llm_error_classifier.PRIMARY_*``
 # at runtime therefore changes graph.py's ceiling derivation (it
@@ -120,6 +126,23 @@ TIMEOUT_EXCEPTIONS: tuple[type[Exception], ...] = (
 # change them permanently, edit these definitions (both consumers follow).
 PRIMARY_TRANSIENT_MAX = 3  # primary tolerates 2 transient retries before swap
 PRIMARY_TIMEOUT_MAX = 2  # primary tolerates 1 timeout retry before swap
+
+
+def derive_ha_attempt_ceiling(
+    transient_max: int,
+    timeout_max: int,
+    failover_active: bool = False,
+) -> int:
+    """Return the total attempt ceiling for the primary/backup retry cycle.
+
+    When HA is active, the primary phase reserves the maximum primary slice
+    in addition to the full operator budget used on the backup phase. Without
+    HA, only the operator budget is needed.
+    """
+    budget = max(transient_max, timeout_max)
+    if failover_active:
+        return budget + max(PRIMARY_TRANSIENT_MAX, PRIMARY_TIMEOUT_MAX)
+    return budget
 
 
 class FailoverController:
@@ -291,14 +314,14 @@ class FailoverController:
             )
 
 
-def _make_llm_retry_strategy(
+def make_llm_retry_strategy(
     transient_max: int,
     timeout_max: int,
     failover_controller: "FailoverController | None" = None,
     primary_transient_max: int = PRIMARY_TRANSIENT_MAX,
     primary_timeout_max: int = PRIMARY_TIMEOUT_MAX,
 ) -> "RetryByCategory":
-    """Create a retry strategy with separate per-category attempt limits.
+    """Build the public retry strategy with per-category attempt limits.
 
     Uses a closure with mutable counters so that transient and timeout
     retries are tracked independently. Timeout exceptions are checked
@@ -496,7 +519,7 @@ def classify_llm_errors(llm_with_tools: Any) -> RunnableLambda:
             logger.error(f"[LLM] BadRequestError (non-retryable): {_truncate_error(e)}")
             raise  # Other BadRequestErrors (genuine bugs) — pass through
         except openai.APIStatusError as e:
-            if e.status_code in RETRYABLE_STATUS_CODES:
+            if is_retryable_status_code(e.status_code):
                 logger.warning(f"[LLM] Transient API error (status={e.status_code}), will retry: {_truncate_error(e)}")
                 raise TransientAPIError(e) from e
             logger.error(f"[LLM] Non-retryable API error (status={e.status_code}): {_truncate_error(e)}")

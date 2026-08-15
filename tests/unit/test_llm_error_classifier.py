@@ -731,7 +731,7 @@ class TestClassifyLLErrors:
 
 
 class TestRetryByCategory:
-    """Tests for _make_llm_retry_strategy per-category retry limits."""
+    """Tests for make_llm_retry_strategy per-category retry limits."""
 
     def _make_mock_retry_state(self, exception, attempt_number=1):
         """Create a mock RetryCallState with the given exception and attempt number."""
@@ -749,12 +749,12 @@ class TestRetryByCategory:
 
     def test_transient_errors_limited_to_transient_max(self):
         """Transient errors should be retried up to transient_max times."""
-        from daemon.llm_error_classifier import _make_llm_retry_strategy
+        from daemon.llm_error_classifier import make_llm_retry_strategy
 
         # Create a transient error using openai.APIConnectionError
         error = openai.APIConnectionError(message="Connection failed", request=MagicMock())
 
-        strategy = _make_llm_retry_strategy(transient_max=3, timeout_max=2)
+        strategy = make_llm_retry_strategy(transient_max=3, timeout_max=2)
 
         state = self._make_mock_retry_state(error, attempt_number=1)
         assert strategy(state) is True   # count=1, 1<3
@@ -767,9 +767,9 @@ class TestRetryByCategory:
 
     def test_timeout_errors_limited_to_timeout_max(self):
         """Timeout errors should be retried up to timeout_max times."""
-        from daemon.llm_error_classifier import _make_llm_retry_strategy
+        from daemon.llm_error_classifier import make_llm_retry_strategy
 
-        strategy = _make_llm_retry_strategy(transient_max=3, timeout_max=2)
+        strategy = make_llm_retry_strategy(transient_max=3, timeout_max=2)
 
         error = openai.APITimeoutError(request=MagicMock())
         state = self._make_mock_retry_state(error, attempt_number=1)
@@ -782,10 +782,10 @@ class TestRetryByCategory:
     def test_api_timeout_error_counted_as_timeout_not_transient(self):
         """APITimeoutError inherits from APIConnectionError (in TRANSIENT_EXCEPTIONS).
         It must be counted as a timeout error, not transient."""
-        from daemon.llm_error_classifier import _make_llm_retry_strategy
+        from daemon.llm_error_classifier import make_llm_retry_strategy
 
         # Allow many transient retries but only 1 timeout retry
-        strategy = _make_llm_retry_strategy(transient_max=10, timeout_max=1)
+        strategy = make_llm_retry_strategy(transient_max=10, timeout_max=1)
 
         error = openai.APITimeoutError(request=MagicMock())
         state = self._make_mock_retry_state(error, attempt_number=2)
@@ -801,9 +801,9 @@ class TestRetryByCategory:
         - Timeout: 2 retry attempts allowed
         - They are tracked in separate counters.
         """
-        from daemon.llm_error_classifier import _make_llm_retry_strategy
+        from daemon.llm_error_classifier import make_llm_retry_strategy
 
-        strategy = _make_llm_retry_strategy(transient_max=2, timeout_max=2)
+        strategy = make_llm_retry_strategy(transient_max=2, timeout_max=2)
 
         # 1st transient error: count=1, returns True (1 < 2)
         t_error = openai.APIConnectionError(message="Connection failed", request=MagicMock())
@@ -833,9 +833,9 @@ class TestRetryByCategory:
 
     def test_non_retryable_error_returns_false(self):
         """Non-retryable errors (401, 403, 400) should never retry."""
-        from daemon.llm_error_classifier import _make_llm_retry_strategy
+        from daemon.llm_error_classifier import make_llm_retry_strategy
 
-        strategy = _make_llm_retry_strategy(transient_max=10, timeout_max=10)
+        strategy = make_llm_retry_strategy(transient_max=10, timeout_max=10)
 
         # 401 AuthenticationError
         error = openai.AuthenticationError(
@@ -848,18 +848,18 @@ class TestRetryByCategory:
 
     def test_no_exception_returns_false(self):
         """If there's no exception, should not retry."""
-        from daemon.llm_error_classifier import _make_llm_retry_strategy
+        from daemon.llm_error_classifier import make_llm_retry_strategy
 
-        strategy = _make_llm_retry_strategy(transient_max=3, timeout_max=3)
+        strategy = make_llm_retry_strategy(transient_max=3, timeout_max=3)
 
         state = self._make_mock_retry_state(None)
         assert strategy(state) is False
 
     def test_counters_reset_between_invoke_cycles(self):
         """Verify retry counters reset between invoke cycles."""
-        from daemon.llm_error_classifier import _make_llm_retry_strategy
+        from daemon.llm_error_classifier import make_llm_retry_strategy
 
-        strategy = _make_llm_retry_strategy(transient_max=3, timeout_max=2)
+        strategy = make_llm_retry_strategy(transient_max=3, timeout_max=2)
 
         # Cycle 1: exhaust timeout retries
         error = openai.APITimeoutError(request=MagicMock())
@@ -983,11 +983,11 @@ class TestIndexErrorHandler:
         assert IndexError not in TRANSIENT_EXCEPTIONS
 
     def test_retry_strategy_skips_index_error(self):
-        """_make_llm_retry_strategy must return False for IndexError — the
+        """make_llm_retry_strategy must return False for IndexError — the
         malformed-response error class must not be retried."""
-        from daemon.llm_error_classifier import _make_llm_retry_strategy
+        from daemon.llm_error_classifier import make_llm_retry_strategy
 
-        strategy = _make_llm_retry_strategy(transient_max=5, timeout_max=5)
+        strategy = make_llm_retry_strategy(transient_max=5, timeout_max=5)
         retry_state = MagicMock()
         retry_state.outcome.exception.return_value = IndexError("list index out of range")
         retry_state.attempt_number = 1

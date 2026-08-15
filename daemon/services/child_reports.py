@@ -570,9 +570,8 @@ class ChildReportsService:
         
         conversation = "\n".join(conversation_text)
         
-        # ``base_url_backup`` threaded through for config-surface
-        # uniformity; the HA facade reads it from the raw dict. See
-        # ``daemon/services/llm_failover.py``.
+        # ``base_url_backup`` is consumed by the HA facade from the raw
+        # config dict. See ``daemon/services/llm_failover.py``.
         llm_config = {
             "base_url": self._config.llm.base_url,
             "base_url_backup": self._config.llm.base_url_backup,
@@ -1182,7 +1181,7 @@ Provide a concise summary:"""
         try:
             # Mirror ``_summarize_instance`` (above) — manual dict
             # + ``clean_llm_config`` at the constructor only; the
-            # facade reads ``base_url_backup`` from the raw dict.
+            # HA facade consumes ``base_url_backup`` from the raw dict.
             # See ``daemon.services.llm_failover`` (F1 kwarg hygiene).
             llm_config = {
                 "base_url": self._config.llm.base_url,

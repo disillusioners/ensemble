@@ -84,10 +84,8 @@ class TitleGenerationService:
 
             # LLM client for title generation. Uses the dedicated
             # ``model_title`` (falls back to main model if not
-            # configured). ``base_url_backup`` is threaded through for
-            # config-surface uniformity; the HA facade
-            # (``wrap_langchain_failover`` below) re-reads it from
-            # the raw dict to wire the FailoverController. See
+            # ``base_url_backup`` is consumed by the HA facade from the raw
+            # config dict when wiring ``wrap_langchain_failover``. See
             # ``daemon/services/llm_failover.py``.
             llm_config = {
                 "base_url": self._config.llm.base_url,

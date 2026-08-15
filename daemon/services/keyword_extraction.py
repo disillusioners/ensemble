@@ -358,9 +358,8 @@ async def extract_keywords(
         from ..graph import ThinkingChatOpenAI, clean_llm_config
         from .llm_failover import wrap_langchain_failover
 
-        # ``base_url_backup`` threaded through for config-surface
-        # uniformity; the HA facade reads it from the raw dict. See
-        # ``daemon/services/llm_failover.py``.
+        # ``base_url_backup`` is consumed by the HA facade from the raw
+        # config dict. See ``daemon/services/llm_failover.py``.
         llm_config = {
             "base_url": config.llm.base_url,
             "base_url_backup": config.llm.base_url_backup,

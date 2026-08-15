@@ -807,12 +807,12 @@ class TestInvokeRawWithFailoverRetryBudget:
     def test_retry_predicate_unaffected_by_predicate_construction(self):
         """Building the predicate with backup unset must NOT crash and
         must produce an equivalent retry budget to v1's pre-HA predicate
-        (the same ``_make_llm_retry_strategy(transient_max, timeout_max)``
+        (the same ``make_llm_retry_strategy(transient_max, timeout_max)``
         line used by the agent-chat hot path's no-controller branch)."""
-        from daemon.llm_error_classifier import _make_llm_retry_strategy
+        from daemon.llm_error_classifier import make_llm_retry_strategy
 
         # No controller — should not raise.
-        pred = _make_llm_retry_strategy(
+        pred = make_llm_retry_strategy(
             transient_max=3, timeout_max=2, failover_controller=None
         )
         # Try a transient error — predicate returns True on first attempts.
@@ -2126,7 +2126,7 @@ class TestZeroBehaviorChangeGuarantee:
 
     def test_default_retry_budget_matches_v1(self):
         """The facade's default transient/timeout budgets match the v1
-        ones from ``_make_llm_retry_strategy``'s parameter defaults —
+        ones from ``make_llm_retry_strategy``'s parameter defaults —
         pinning that secondary sites get the same retry budget as the
         agent-chat hot path."""
         assert PRIMARY_TRANSIENT_MAX == 3

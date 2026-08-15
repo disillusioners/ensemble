@@ -120,7 +120,7 @@ None — 0 failures across all 5 packs.
 - ✅ Logged at ERROR level with "Malformed LLM response" + "will not retry" tags
 - ✅ IndexError does NOT pollute downstream validation (`validate_llm_response` never called)
 - ✅ IndexError NOT in TRANSIENT_EXCEPTIONS (non-retryable)
-- ✅ Retry strategy returns False for IndexError (`_make_llm_retry_strategy`)
+- ✅ Retry strategy returns False for IndexError (`make_llm_retry_strategy`)
 - ✅ Production incident simulation: LangChain's exact IndexError shape propagates + logs
 
 ### Bug 2 (TypeError — int subscripted as string):

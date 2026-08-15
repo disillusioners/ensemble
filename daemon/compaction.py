@@ -991,11 +991,8 @@ class ContextCompactor:
         else:
             llm_config = self.llm_config_with_headers
 
-        # F1: clean at constructor only — facade needs the RAW dict.
-        # See ``daemon.services.llm_failover`` (F1 kwarg hygiene).
-        # ``clean_llm_config(dict(...))`` returns a NEW dict, so
-        # the local ``llm_config`` (with backup) survives for the
-        # facade call below.
+        # ``base_url_backup`` is consumed by the HA facade from the raw
+        # config dict; clean it only at the constructor.
         llm = ThinkingChatOpenAI(**clean_llm_config(dict(llm_config)))
         # v2 HA: route through the shared facade. See
         # ``daemon.services.llm_failover``.

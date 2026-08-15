@@ -3117,11 +3117,9 @@ def _wire_retry_and_failover(
     ceiling. Worst case the primary consumes its full slice for one
     category (transient OR timeout), then the backup runs the FULL
     original budget for that same category after the swap resets the
-    counters:
-      ceiling = max(transient_max, timeout_max)            # backup leg
-              + max(primary_transient_max, primary_timeout_max)  # primary leg
-    The two primary caps are the module constants exported by
-    ``llm_error_classifier`` (defaults of ``_make_llm_retry_strategy``)
+    counters. ``derive_ha_attempt_ceiling`` encapsulates that
+    calculation; the two primary caps are the module constants exported
+    by ``llm_error_classifier`` (defaults of ``make_llm_retry_strategy``)
     so the strategy and this ceiling derivation cannot drift apart.
     Without a backup, the ceiling stays at the pre-HA value. (Note the
     W2 clamp: the primary slice inside the strategy never exceeds the
@@ -3150,9 +3148,8 @@ def _wire_retry_and_failover(
     # transitively touch during cold-start).
     from daemon.llm_error_classifier import (
         FailoverController,
-        PRIMARY_TIMEOUT_MAX,
-        PRIMARY_TRANSIENT_MAX,
-        _make_llm_retry_strategy,
+        derive_ha_attempt_ceiling,
+        make_llm_retry_strategy,
     )
 
     primary_url = primary_url or ""
@@ -3171,16 +3168,15 @@ def _wire_retry_and_failover(
             backup_url=backup_url,
         )
 
-    if failover_enabled:
-        max_attempts = max(transient_attempts, timeout_attempts) + max(
-            PRIMARY_TRANSIENT_MAX, PRIMARY_TIMEOUT_MAX
-        )
-    else:
-        max_attempts = max(transient_attempts, timeout_attempts)
+    max_attempts = derive_ha_attempt_ceiling(
+        transient_attempts,
+        timeout_attempts,
+        failover_active=failover_enabled,
+    )
 
     def _build_retrying(controller: FailoverController | None) -> Retrying:
         """Build one ``Retrying`` wrapper bound to one failover controller."""
-        predicate = _make_llm_retry_strategy(
+        predicate = make_llm_retry_strategy(
             transient_max=transient_attempts,
             timeout_max=timeout_attempts,
             failover_controller=(

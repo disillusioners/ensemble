@@ -36,7 +36,7 @@ from daemon.llm_error_classifier import (
     PRIMARY_TIMEOUT_MAX,
     PRIMARY_TRANSIENT_MAX,
     FailoverController,
-    _make_llm_retry_strategy,
+    make_llm_retry_strategy,
     classify_llm_errors,
 )
 
@@ -124,7 +124,7 @@ class TestAdversarial1ZeroBehaviorChangeBackupUnset:
         is pinned by ``TestRetryByCategory::test_transient_errors_limited_to_transient_max``
         — re-pin here as an adversarial check.
         """
-        strategy = _make_llm_retry_strategy(transient_max=10, timeout_max=5)
+        strategy = make_llm_retry_strategy(transient_max=10, timeout_max=5)
         e = _transient_error()
         results = [
             strategy(_make_mock_retry_state(e, attempt_number=n))
@@ -150,7 +150,7 @@ class TestAdversarial1ZeroBehaviorChangeBackupUnset:
         controller (catches any future change that accidentally adds
         IndexError to the always-retry path).
         """
-        strategy = _make_llm_retry_strategy(transient_max=20, timeout_max=20)
+        strategy = make_llm_retry_strategy(transient_max=20, timeout_max=20)
         e = _index_error()
         for n in range(1, 1001):
             assert strategy(_make_mock_retry_state(e, attempt_number=n)) is False
@@ -172,7 +172,7 @@ class TestAdversarial1ZeroBehaviorChangeBackupUnset:
         # ``is_configured`` semantics by leaving backup=None.
         ctl = FailoverController(chat, "https://primary/v1", None)
         assert ctl.is_configured is False
-        strategy = _make_llm_retry_strategy(
+        strategy = make_llm_retry_strategy(
             transient_max=10, timeout_max=5, failover_controller=ctl
         )
         e = _transient_error()
@@ -213,7 +213,7 @@ class TestAdversarial2BudgetSplitBoundaries:
         ctl = FailoverController(
             chat, "https://primary/v1", "https://backup/v1"
         )
-        strategy = _make_llm_retry_strategy(
+        strategy = make_llm_retry_strategy(
             transient_max=transient_max,
             timeout_max=timeout_max,
             failover_controller=ctl,
@@ -503,7 +503,7 @@ class TestAdversarial4FailoverEndToEnd:
             http_client=httpx.Client(transport=httpx.MockTransport(handler)),
         )
         ctl = FailoverController(llm, self.PRIMARY, self.BACKUP)
-        strategy = _make_llm_retry_strategy(
+        strategy = make_llm_retry_strategy(
             transient_max=5, timeout_max=2, failover_controller=ctl
         )
         ceiling = max(5, 2) + max(PRIMARY_TRANSIENT_MAX, PRIMARY_TIMEOUT_MAX)
@@ -556,7 +556,7 @@ class TestAdversarial4FailoverEndToEnd:
             http_client=httpx.Client(transport=httpx.MockTransport(handler)),
         )
         ctl = FailoverController(llm, self.PRIMARY, self.BACKUP)
-        strategy = _make_llm_retry_strategy(
+        strategy = make_llm_retry_strategy(
             transient_max=3, timeout_max=1, failover_controller=ctl
         )
         ceiling = max(3, 1) + max(PRIMARY_TRANSIENT_MAX, PRIMARY_TIMEOUT_MAX)
@@ -598,7 +598,7 @@ class TestAdversarial4FailoverEndToEnd:
             http_client=httpx.Client(transport=httpx.MockTransport(handler)),
         )
         # No FailoverController → identical to pre-HA behavior.
-        strategy = _make_llm_retry_strategy(transient_max=3, timeout_max=1)
+        strategy = make_llm_retry_strategy(transient_max=3, timeout_max=1)
         ceiling = max(3, 1)
         retrying = Retrying(
             stop=stop_after_attempt(ceiling),
@@ -699,7 +699,7 @@ class TestAdversarial5StickyOnSuccessBackupFails:
         )
         ctl = FailoverController(llm, self.PRIMARY, self.BACKUP)
         # Tight budgets so the test runs in O(few) requests.
-        strategy = _make_llm_retry_strategy(
+        strategy = make_llm_retry_strategy(
             transient_max=3, timeout_max=1, failover_controller=ctl
         )
         ceiling = max(3, 1) + max(PRIMARY_TRANSIENT_MAX, PRIMARY_TIMEOUT_MAX)
@@ -753,7 +753,7 @@ class TestAdversarial5StickyOnSuccessBackupFails:
         """
         chat = _make_fake_chat_client("https://primary/v1")
         ctl = FailoverController(chat, "https://primary/v1", "https://backup/v1")
-        strategy = _make_llm_retry_strategy(
+        strategy = make_llm_retry_strategy(
             transient_max=4, timeout_max=3, failover_controller=ctl,
             primary_transient_max=3, primary_timeout_max=2,
         )

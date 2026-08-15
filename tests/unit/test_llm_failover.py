@@ -3,7 +3,7 @@
 Covers:
   - ``FailoverController`` swap / reset mechanics (sticky-on-success,
     W1 adjudication — see class docstrings)
-  - ``_make_llm_retry_strategy`` budget-split between primary and backup
+  - ``make_llm_retry_strategy`` budget-split between primary and backup
   - Zero behavior change when no backup is configured
   - Sticky-on-success cross-invoke semantics (W1 adjudication)
   - IndexError retry-with-failover path
@@ -30,7 +30,7 @@ from daemon.llm_error_classifier import (
     FailoverController,
     PRIMARY_TIMEOUT_MAX,
     PRIMARY_TRANSIENT_MAX,
-    _make_llm_retry_strategy,
+    make_llm_retry_strategy,
 )
 
 
@@ -182,7 +182,7 @@ class TestFailoverControllerBasics:
 
 
 # ---------------------------------------------------------------------------
-# _make_llm_retry_strategy — without controller (zero behavior change)
+# make_llm_retry_strategy — without controller (zero behavior change)
 # ---------------------------------------------------------------------------
 
 
@@ -197,7 +197,7 @@ class TestNoBackupUnchangedBehavior:
 
     def test_transient_counted_against_full_budget(self):
         """Transient errors: count up to ``transient_max`` (full budget)."""
-        strategy = _make_llm_retry_strategy(transient_max=3, timeout_max=2)
+        strategy = make_llm_retry_strategy(transient_max=3, timeout_max=2)
         e = _transient_error()
 
         # attempts 1,2 → True; attempt 3 → False
@@ -209,7 +209,7 @@ class TestNoBackupUnchangedBehavior:
 
     def test_timeout_counted_against_full_budget(self):
         """Timeout errors: count up to ``timeout_max`` (full budget)."""
-        strategy = _make_llm_retry_strategy(transient_max=10, timeout_max=2)
+        strategy = make_llm_retry_strategy(transient_max=10, timeout_max=2)
         e = _timeout_error()
 
         for attempt, expected in [(1, True), (2, False), (3, False)]:
@@ -225,14 +225,14 @@ class TestNoBackupUnchangedBehavior:
         ONLY when a backup is configured. With no backup the original
         behavior (short-circuit to upstream error pipeline) is preserved.
         """
-        strategy = _make_llm_retry_strategy(transient_max=5, timeout_max=5)
+        strategy = make_llm_retry_strategy(transient_max=5, timeout_max=5)
         state = _make_mock_retry_state(_index_error(), attempt_number=1)
         assert strategy(state) is False
 
     def test_auth_error_not_retried(self):
         """AuthenticationError (401) must NOT retry — same key on both
         endpoints means it would fail identically."""
-        strategy = _make_llm_retry_strategy(transient_max=10, timeout_max=10)
+        strategy = make_llm_retry_strategy(transient_max=10, timeout_max=10)
         e = openai.AuthenticationError(
             message="Invalid API key",
             response=MagicMock(),
@@ -243,7 +243,7 @@ class TestNoBackupUnchangedBehavior:
 
     def test_non_retryable_status_not_retried(self):
         """A 400 BadRequestError (non-context-length) is non-retryable."""
-        strategy = _make_llm_retry_strategy(transient_max=10, timeout_max=10)
+        strategy = make_llm_retry_strategy(transient_max=10, timeout_max=10)
         e = openai.BadRequestError(
             message="Bad request",
             response=MagicMock(),
@@ -255,7 +255,7 @@ class TestNoBackupUnchangedBehavior:
     def test_counters_reset_between_cycles(self):
         """The pre-HA reset semantics must survive — attempt_number=1
         clears both counters."""
-        strategy = _make_llm_retry_strategy(transient_max=3, timeout_max=2)
+        strategy = make_llm_retry_strategy(transient_max=3, timeout_max=2)
 
         # Exhaust transient retries
         e = _transient_error()
@@ -269,7 +269,7 @@ class TestNoBackupUnchangedBehavior:
 
 
 # ---------------------------------------------------------------------------
-# _make_llm_retry_strategy — WITH controller (HA budget-split)
+# make_llm_retry_strategy — WITH controller (HA budget-split)
 # ---------------------------------------------------------------------------
 
 
@@ -283,7 +283,7 @@ class TestFailoverBudgetSplit:
         ctl = FailoverController(
             chat, "https://primary/v1", "https://backup/v1"
         )
-        strategy = _make_llm_retry_strategy(
+        strategy = make_llm_retry_strategy(
             transient_max=transient_max,
             timeout_max=timeout_max,
             failover_controller=ctl,
@@ -380,7 +380,7 @@ class TestFailoverBudgetSplit:
         Already covered in TestNoBackupUnchangedBehavior but reaffirmed
         here in the failover-aware section.
         """
-        strategy = _make_llm_retry_strategy(transient_max=5, timeout_max=5)
+        strategy = make_llm_retry_strategy(transient_max=5, timeout_max=5)
         state = _make_mock_retry_state(_index_error(), attempt_number=1)
         assert strategy(state) is False
 
@@ -483,7 +483,7 @@ class TestStickyOnSuccessResetOnFailure:
         to primary."""
         chat = _make_fake_chat_client("https://primary/v1")
         ctl = FailoverController(chat, "https://primary/v1", "https://backup/v1")
-        strategy = _make_llm_retry_strategy(
+        strategy = make_llm_retry_strategy(
             transient_max=8, timeout_max=3, failover_controller=ctl,
             primary_transient_max=3, primary_timeout_max=2,
         )
@@ -503,7 +503,7 @@ class TestStickyOnSuccessResetOnFailure:
     def test_reset_to_primary_not_called_when_no_failover(self):
         """When no controller is supplied, the reset path is a no-op and
         the predicate must not AttributeError."""
-        strategy = _make_llm_retry_strategy(transient_max=3, timeout_max=2)
+        strategy = make_llm_retry_strategy(transient_max=3, timeout_max=2)
         # Should not raise.
         e = _transient_error()
         for n in (1, 2, 3, 4):
@@ -525,7 +525,7 @@ class TestStickyOnSuccessResetOnFailure:
         chat = _make_fake_chat_client("https://primary/v1")
         ctl = FailoverController(chat, "https://primary/v1", "https://backup/v1")
         # primary_transient_max=3 → 2 retries on primary; full budget 4
-        strategy = _make_llm_retry_strategy(
+        strategy = make_llm_retry_strategy(
             transient_max=4, timeout_max=2, failover_controller=ctl,
             primary_transient_max=3, primary_timeout_max=2,
         )
@@ -566,7 +566,7 @@ class TestCountersResetAfterSwap:
         chat = _make_fake_chat_client("https://primary/v1")
         ctl = FailoverController(chat, "https://primary/v1", "https://backup/v1")
         # Full budget = 5 transient; primary slice = primary_transient_max=3.
-        strategy = _make_llm_retry_strategy(
+        strategy = make_llm_retry_strategy(
             transient_max=5, timeout_max=3, failover_controller=ctl,
             primary_transient_max=3, primary_timeout_max=2,
         )
@@ -591,7 +591,7 @@ class TestCountersResetAfterSwap:
         backup must NOT trigger another swap. (Swapped flag is sticky.)"""
         chat = _make_fake_chat_client("https://primary/v1")
         ctl = FailoverController(chat, "https://primary/v1", "https://backup/v1")
-        strategy = _make_llm_retry_strategy(
+        strategy = make_llm_retry_strategy(
             transient_max=8, timeout_max=3, failover_controller=ctl,
             primary_transient_max=3, primary_timeout_max=2,
         )
@@ -718,7 +718,7 @@ class TestBuildInstanceLLMSFailoverWiring:
         """Scaffold the wiring surface and run ``build_instance_llms``.
 
         Patches ``ThinkingChatOpenAI`` / ``classify_llm_errors`` /
-        ``_make_llm_retry_strategy`` / ``Retrying`` / ``stop_after_attempt``
+        ``make_llm_retry_strategy`` / ``Retrying`` / ``stop_after_attempt``
         uniformly so each test reads as a one-paragraph inspection of the
         captured call args. When ``patch_primary_caps`` is given, also
         patches ``PRIMARY_TRANSIENT_MAX`` / ``PRIMARY_TIMEOUT_MAX`` for the
@@ -751,11 +751,11 @@ class TestBuildInstanceLLMSFailoverWiring:
             # exercise the runtime exception path here).
             mock_classify.side_effect = lambda x: x
 
-            # _make_llm_retry_strategy is imported INSIDE
+            # make_llm_retry_strategy is imported INSIDE
             # _wire_retry_and_failover (lazy import to avoid the
             # graph ↔ services cycle), so patch it on its source module.
             mocks["mock_strategy"] = stack.enter_context(
-                patch("daemon.llm_error_classifier._make_llm_retry_strategy")
+                patch("daemon.llm_error_classifier.make_llm_retry_strategy")
             )
             mocks["mock_retrying"] = stack.enter_context(
                 patch("daemon.graph.Retrying")
@@ -801,9 +801,9 @@ class TestBuildInstanceLLMSFailoverWiring:
 
     def test_no_backup_does_not_invoke_failover_controller(self):
         """When ``base_url_backup`` is None, ``build_instance_llms`` must
-        pass ``failover_controller=None`` to ``_make_llm_retry_strategy``.
+        pass ``failover_controller=None`` to ``make_llm_retry_strategy``.
 
-        We assert by patching ``_make_llm_retry_strategy`` (imported
+        We assert by patching ``make_llm_retry_strategy`` (imported
         locally inside ``_wire_retry_and_failover`` from
         ``daemon.llm_error_classifier``) and checking the
         ``failover_controller`` kwarg.
@@ -814,7 +814,7 @@ class TestBuildInstanceLLMSFailoverWiring:
 
     def test_with_backup_invokes_failover_controller(self):
         """When ``base_url_backup`` is set, ``build_instance_llms`` must
-        pass a real FailoverController to ``_make_llm_retry_strategy``."""
+        pass a real FailoverController to ``make_llm_retry_strategy``."""
         with self._build_with_patches(backup_url="https://backup/v1") as mocks:
             kwargs = mocks["mock_strategy"].call_args.kwargs
             ctl = kwargs["failover_controller"]
@@ -957,7 +957,7 @@ class TestEndToEndFailoverWithMockTransport:
 
         transient_max, timeout_max = 5, 2
         ctl = FailoverController(llm, self.PRIMARY, self.BACKUP)
-        strategy = _make_llm_retry_strategy(
+        strategy = make_llm_retry_strategy(
             transient_max=transient_max,
             timeout_max=timeout_max,
             failover_controller=ctl,
@@ -1094,7 +1094,7 @@ class TestStickyOnSuccessEndToEnd:
 
         transient_max, timeout_max = 5, 2
         ctl = FailoverController(llm, self.PRIMARY, self.BACKUP)
-        strategy = _make_llm_retry_strategy(
+        strategy = make_llm_retry_strategy(
             transient_max=transient_max,
             timeout_max=timeout_max,
             failover_controller=ctl,
@@ -1343,7 +1343,7 @@ class TestPrimarySliceClampedToBudget:
                primary_timeout_max=2):
         chat = _make_fake_chat_client("https://primary/v1")
         ctl = FailoverController(chat, "https://primary/v1", "https://backup/v1")
-        strategy = _make_llm_retry_strategy(
+        strategy = make_llm_retry_strategy(
             transient_max=transient_max,
             timeout_max=timeout_max,
             failover_controller=ctl,
@@ -1425,7 +1425,7 @@ class TestCrossCategoryCounterReset:
     def _build(self):
         chat = _make_fake_chat_client("https://primary/v1")
         ctl = FailoverController(chat, "https://primary/v1", "https://backup/v1")
-        strategy = _make_llm_retry_strategy(
+        strategy = make_llm_retry_strategy(
             transient_max=8, timeout_max=3, failover_controller=ctl,
             primary_transient_max=3, primary_timeout_max=2,
         )
@@ -1581,7 +1581,7 @@ class TestDeadSwapPathWarning:
         logs once, not once per predicate evaluation."""
         chat = self._broken_chat_client()
         ctl = FailoverController(chat, "https://primary/v1", "https://backup/v1")
-        strategy = _make_llm_retry_strategy(
+        strategy = make_llm_retry_strategy(
             transient_max=8, timeout_max=3, failover_controller=ctl,
             primary_transient_max=3, primary_timeout_max=2,
         )
@@ -1631,7 +1631,7 @@ class TestMissingRootClientNoOp:
         ctl = FailoverController(chat, "https://primary/v1", "https://backup/v1")
         assert ctl.is_configured is True  # backup URL set → configured
 
-        strategy = _make_llm_retry_strategy(
+        strategy = make_llm_retry_strategy(
             transient_max=8, timeout_max=3, failover_controller=ctl,
             primary_transient_max=3, primary_timeout_max=2,
         )

@@ -412,7 +412,7 @@ class TestErrorClassifierIntegration:
         )
 
     def test_retry_uses_retry_predicate(self):
-        """Retrying should use the _make_llm_retry_strategy predicate for
+        """Retrying should use the make_llm_retry_strategy predicate for
         per-category limits (W3: built per failover controller inside
         ``_build_retrying`` rather than a single module-level binding)."""
         import inspect
@@ -420,9 +420,12 @@ class TestErrorClassifierIntegration:
 
         source = inspect.getsource(_wire_retry_and_failover)
 
-        # Verify _make_llm_retry_strategy is used instead of TRANSIENT_EXCEPTIONS
-        assert "_make_llm_retry_strategy" in source, (
-            "_make_llm_retry_strategy should be used in retry configuration"
+        # Verify make_llm_retry_strategy is used instead of TRANSIENT_EXCEPTIONS.
+        # Both-ways pin: the public name is a substring-superset of the private
+        # ``_make_llm_retry_strategy``, so presence alone cannot detect a
+        # regression to the private name — assert it is absent too.
+        assert "make_llm_retry_strategy" in source and "_make_llm_retry_strategy" not in source, (
+            "make_llm_retry_strategy should be used in retry configuration"
         )
         # W3: the predicate is built per-controller inside ``_build_retrying``
         # and passed as the ``retry=`` argument of Retrying.
