@@ -82,14 +82,13 @@ class TitleGenerationService:
 
             from langchain_core.messages import HumanMessage, SystemMessage
 
-            # Create LLM client for title generation
-            # Use dedicated title model (falls back to main model if not configured)
-            # Filter model_vision from config to avoid noisy LangChain warnings.
-            # ``base_url_backup`` threaded through for config-surface uniformity;
-            # consumed by the HA facade (``wrap_langchain_failover`` below).
-            # See ``LLMConfig.base_url_backup`` in ``daemon/config.py`` for the
-            # full rationale, and ``daemon/services/llm_failover.py`` for the
-            # shared retry+failover machinery.
+            # LLM client for title generation. Uses the dedicated
+            # ``model_title`` (falls back to main model if not
+            # configured). ``base_url_backup`` is threaded through for
+            # config-surface uniformity; the HA facade
+            # (``wrap_langchain_failover`` below) re-reads it from
+            # the raw dict to wire the FailoverController. See
+            # ``daemon/services/llm_failover.py``.
             llm_config = {
                 "base_url": self._config.llm.base_url,
                 "base_url_backup": self._config.llm.base_url_backup,
@@ -98,22 +97,11 @@ class TitleGenerationService:
                 "temperature": 0.3,  # Lower temperature for more focused titles
                 "default_headers": {"x-proxy-app": "ensemble"},
             }
-            # F1 kwarg hygiene: ``clean_llm_config`` strips
-            # ``model_vision`` + ``base_url_backup``. Clean at the
-            # CONSTRUCTOR call only — this site passes the RAW dict
-            # to ``wrap_langchain_failover`` below, which re-reads
-            # ``base_url_backup`` from the original dict to wire the
-            # FailoverController. (Pre-cleaning ``llm_config`` would
-            # strip the backup BEFORE the facade sees it and
-            # silently kill failover — same convention as
-            # compaction.py / child_reports._summarize_instance.)
+            # F1: clean at constructor only — facade needs the RAW dict.
+            # See ``daemon.services.llm_failover`` (F1 kwarg hygiene).
             llm = ThinkingChatOpenAI(**clean_llm_config(dict(llm_config)))
-            # v2 HA: wrap invoke/ainvoke with FailoverController + tenacity
-            # retry-with-failover. Reuses v1 ``FailoverController`` from
-            # ``daemon.llm_error_classifier`` via
-            # ``daemon.services.llm_failover.wrap_langchain_failover``.
-            # When ``base_url_backup`` is unset, the wrapper is a no-op
-            # over the same shape v1 hot path uses — zero behavior change.
+            # v2 HA: route through the shared facade. See
+            # ``daemon.services.llm_failover``.
             llm_wrapper = wrap_langchain_failover(llm, llm_config)
 
             # The completion safety-net path (daemon/services/child_reports.py:
@@ -134,9 +122,16 @@ User message:
 Title:"""
 
             try:
-                # One-shot with 30s timeout - title generation is not critical.
-                # ``llm_wrapper.invoke`` carries the v2 HA retry+failover
-                # machinery from ``daemon.services.llm_failover``.
+                # Belt-and-braces: the 30s ``asyncio.wait_for`` is a
+                # backstop that cancels the inner task on timeout.
+                # The REAL cap home is the facade's
+                # ``wall_clock_cap_s`` (tenacity ``stop_after_delay``
+                # inside the retry loop) — see
+                # ``daemon.services.llm_failover`` docstring "Wall-clock
+                # cap". Belt-and-braces decision: keep the site-level
+                # cap so a future site bypass of the facade still gets
+                # cancellation; the facade cap is the primary line of
+                # defense.
                 response = await asyncio.wait_for(
                     asyncio.to_thread(
                         llm_wrapper.invoke,

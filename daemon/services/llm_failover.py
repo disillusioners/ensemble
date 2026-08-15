@@ -130,6 +130,60 @@ The v1 IndexError-gated-on-backup semantic carries through unchanged:
 empty-choices response re-raises to the caller's normal except-block
 graceful fallback (which is what every secondary site already has).
 
+Wall-clock cap
+--------------
+Both facade entry points (``wrap_langchain_failover`` and
+``invoke_raw_with_failover``) accept a ``wall_clock_cap_s`` parameter
+(default 45.0s). The retry layer adds a second stop condition via
+``stop_after_attempt(N) | stop_after_delay(wall_clock_cap_s)`` —
+retries abort when EITHER the attempt budget is exhausted OR total
+wall-clock time (since the first attempt) exceeds the cap.
+
+Backoff interaction: under active failover the retry layer runs
+``max_attempts = transient_max + timeout_max + 1`` (= 6 with the
+canonical defaults ``transient_max=3`` / ``timeout_max=2``), and the
+wait policy is ``wait_exponential_jitter(initial=1, exp_base=2,
+jitter=1)``. That schedule accumulates 5 inter-attempt waits before
+the 6th attempt: ``1 + 2 + 4 + 8 + 16 = 31`` seconds minimum, with
+jitter this expands to roughly ``[31, 36)`` seconds. The wall-clock
+cap therefore MUST exceed the minimum-backoff sum, or the cap
+truncates the final attempt in a full-failover storm — converting a
+would-succeed failover into ``RetryError``. The 45.0s default leaves
+~9s of slack above the jittered minimum; callers anticipating storm
+exposure (multiple failover swaps on a degraded primary) can pass a
+larger ``wall_clock_cap_s`` to keep the budget wider than the
+backoff.
+
+Why centralize: pre-v2 raw-SDK sites had unbounded retry (bounded
+attempts × request_timeout ≈ 20 min worst case) — the openai
+SDK's default request timeout is the only ceiling, and a slow
+primary can stall a turn for 20+ minutes. LangChain sites got
+``asyncio.wait_for(..., timeout=30)`` at the call site, but every
+new site had to remember to add it. The facade's ``wall_clock_cap_s``
+is the single home for the cap; a future site that forgets an
+outer ``asyncio.wait_for`` still gets bounded latency.
+
+Sync-compatible: ``stop_after_delay`` runs inside tenacity's retry
+loop — pure time check, no ``asyncio`` needed. The raw-SDK path
+runs inside ``asyncio.to_thread`` worker threads where
+``asyncio.wait_for`` is NOT usable, so the cap MUST live in sync
+code. The LangChain path has it too for symmetry (and so a
+future site that bypasses the ``asyncio.wait_for`` still gets
+the cap).
+
+Caveat: ``stop_after_delay`` fires BETWEEN attempts, not mid-call.
+A single request that hangs longer than the cap will still hang
+until the openai client's per-request timeout (or some other
+external interrupt) fires. The cap bounds the retry-storm
+amplification, not the individual request. For a true mid-call
+cap, the factory should set a per-request ``timeout=`` on the
+``openai.OpenAI`` / LangChain client — that's a per-site
+concern, not the facade's contract. Site-level
+``asyncio.wait_for(..., timeout=30)`` caps at the 5 secondary
+sites are DELIBERATE and untouched by this facade default — they
+are per-call latency caps, the facade cap is the retry-storm
+amplification bound; both layers coexist.
+
 F1 lesson: kwarg hygiene
 ------------------------
 Every ``ChatOpenAI(**cfg)`` construction site MUST strip
@@ -152,6 +206,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional, TypeVar
 
@@ -160,6 +215,7 @@ import openai
 from tenacity import (
     Retrying,
     stop_after_attempt,
+    stop_after_delay,
     wait_exponential_jitter,
 )
 
@@ -203,6 +259,16 @@ def _classify_raw_sdk_exceptions(fn: Callable[[], T]) -> Callable[[], T]:
     via the existing ``except`` graceful-fallback block.
     """
     def _wrapped() -> T:
+        # All non-``APIStatusError`` exceptions propagate untouched:
+        # 400 BadRequestError / 401 AuthenticationError /
+        # 403 PermissionDeniedError / 404 NotFoundError / 422
+        # UnprocessableEntityError ARE ``APIStatusError`` subclasses —
+        # they take the non-retryable re-raise above (none of those
+        # statuses are in RETRYABLE_STATUS_CODES). Connection /
+        # timeout errors (``APIConnectionError`` / ``APITimeoutError``)
+        # are NOT APIStatusError subclasses — they pass straight
+        # through here and are matched by the predicate's
+        # TRANSIENT_EXCEPTIONS / TIMEOUT_EXCEPTIONS sets directly.
         try:
             return fn()
         except openai.APIStatusError as e:
@@ -216,16 +282,6 @@ def _classify_raw_sdk_exceptions(fn: Callable[[], T]) -> Callable[[], T]:
             if e.status_code in RETRYABLE_STATUS_CODES:
                 raise TransientAPIError(e) from e
             raise  # Non-retryable status — pass through.
-        # All non-``APIStatusError`` exceptions propagate untouched:
-        # 400 BadRequestError / 401 AuthenticationError /
-        # 403 PermissionDeniedError / 404 NotFoundError / 422
-        # UnprocessableEntityError ARE ``APIStatusError`` subclasses —
-        # they take the non-retryable re-raise above (none of those
-        # statuses are in RETRYABLE_STATUS_CODES). Connection /
-        # timeout errors (``APIConnectionError`` / ``APITimeoutError``)
-        # are NOT APIStatusError subclasses — they pass straight
-        # through here and are matched by the predicate's
-        # TRANSIENT_EXCEPTIONS / TIMEOUT_EXCEPTIONS sets directly.
     return _wrapped
 
 
@@ -404,6 +460,19 @@ class ChatFailoverBinding:
     ``attempt_number == 1`` reset flips it back). The retry
     predicate implementation is reused unchanged — see
     :func:`daemon.llm_error_classifier._make_llm_retry_strategy`.
+
+    Wall-clock cap
+    --------------
+    The binding applies a SECOND stop condition via
+    ``stop_after_attempt | stop_after_delay(wall_clock_cap_s)`` —
+    retries are aborted when EITHER the attempt count is exhausted
+    OR total wall-clock time (since the first attempt) exceeds the
+    cap. This is the central policy for retry-storm protection; a
+    future site that forgets an outer ``asyncio.wait_for`` still
+    gets bounded latency. The cap is sync-compatible (tenacity's
+    ``stop_after_delay`` runs inside the retry loop, no
+    ``asyncio`` needed). See :func:`wrap_langchain_failover` and
+    the module docstring "Wall-clock cap" for the full design.
     """
 
     client: Any
@@ -411,6 +480,7 @@ class ChatFailoverBinding:
     backup_url: Optional[str]
     transient_max: int = 3
     timeout_max: int = 2
+    wall_clock_cap_s: float = 45.0
     _controller: FailoverController = field(init=False, repr=False)
     _retrying: Retrying = field(init=False, repr=False)
     _classified: Any = field(init=False, repr=False)
@@ -440,8 +510,17 @@ class ChatFailoverBinding:
                 self._controller if self._is_failover_active else None
             ),
         )
+        # Wall-clock cap: retries stop when EITHER ``max_attempts``
+        # attempts have fired OR ``wall_clock_cap_s`` seconds have
+        # elapsed since the first attempt. This is the central
+        # policy for retry-storm protection; sites that forget an
+        # outer ``asyncio.wait_for`` still get bounded latency. The
+        # cap is sync-compatible (``stop_after_delay`` lives inside
+        # tenacity's retry loop — no asyncio needed). See module
+        # docstring "Wall-clock cap" for the design rationale and
+        # the per-request-timeout caveat.
         self._retrying = Retrying(
-            stop=stop_after_attempt(max_attempts),
+            stop=stop_after_attempt(max_attempts) | stop_after_delay(self.wall_clock_cap_s),
             wait=wait_exponential_jitter(),
             retry=predicate,
             reraise=True,
@@ -492,10 +571,11 @@ class ChatFailoverBinding:
 
 def wrap_langchain_failover(
     chat_client: Any,
-    llm_config: dict,
+    llm_config: dict[str, Any],
     *,
     transient_max: int = 3,
     timeout_max: int = 2,
+    wall_clock_cap_s: float = 45.0,
 ) -> ChatFailoverBinding:
     """Wrap a LangChain ``ChatOpenAI`` with HA failover for ``invoke``.
 
@@ -525,6 +605,18 @@ def wrap_langchain_failover(
             hot path — secondary sites match it for uniformity.
         timeout_max: Operator-configured timeout-retry budget
             (default 2). Same default as the agent-chat hot path.
+        wall_clock_cap_s: Total wall-clock cap for the entire
+            ``invoke`` cycle, in seconds. The retry loop stops
+            when EITHER ``max_attempts`` is exhausted OR this many
+            seconds have elapsed since the first attempt. Default
+            45.0s — the canonical cap every secondary site
+            inherits (calibrated above the
+            ``wait_exponential_jitter`` minimum-backoff sum of
+            ~31s for 6 attempts; see module docstring "Wall-clock
+            cap" "Backoff interaction"). Pass
+            ``config.timeout_seconds`` from ``ReportRepairConfig``
+            (etc.) for per-site tunability. See module docstring
+            "Wall-clock cap" for the design.
 
     Returns:
         :class:`ChatFailoverBinding` whose ``invoke`` carries
@@ -551,6 +643,7 @@ def wrap_langchain_failover(
         backup_url=base_url_backup,
         transient_max=transient_max,
         timeout_max=timeout_max,
+        wall_clock_cap_s=wall_clock_cap_s,
     )
 
 
@@ -561,10 +654,11 @@ def wrap_langchain_failover(
 
 def invoke_raw_with_failover(
     factory: Callable[[], T],
-    llm_config: dict,
+    llm_config: dict[str, Any],
     *,
     transient_max: int = 3,
     timeout_max: int = 2,
+    wall_clock_cap_s: float = 45.0,
 ) -> T:
     """Run a raw OpenAI-SDK call factory with HA failover retry+swap.
 
@@ -606,6 +700,23 @@ def invoke_raw_with_failover(
             matches the agent-chat hot path's ``retry_config`` default
             ``transient_attempts``).
         timeout_max: Per-call timeout retry budget (default 2).
+        wall_clock_cap_s: Total wall-clock cap for the entire
+            factory cycle, in seconds. The retry loop stops when
+            EITHER the attempt budget is exhausted OR this many
+            seconds have elapsed since the first attempt. Default
+            45.0s — the canonical cap every raw-SDK site
+            inherits (calibrated above the
+            ``wait_exponential_jitter`` minimum-backoff sum of
+            ~31s for 6 attempts; see module docstring "Wall-clock
+            cap" "Backoff interaction"). This is the central
+            policy for retry-storm protection; a future site that
+            forgets an outer ``asyncio.wait_for`` still gets
+            bounded latency. The cap is sync-compatible —
+            ``stop_after_delay`` lives inside tenacity's retry
+            loop, no ``asyncio`` needed (raw-SDK sites run inside
+            ``asyncio.to_thread`` worker threads where
+            ``asyncio.wait_for`` is not usable). See module
+            docstring "Wall-clock cap" for the design.
 
     Returns:
         The factory's return value (e.g. ``openai.types.chat.ChatCompletion``
@@ -681,8 +792,22 @@ def invoke_raw_with_failover(
             _set_current_url(shim.current_target_url)
             return _classify_raw_sdk_exceptions(factory)()
 
+        # Wall-clock cap: retries stop when EITHER ``max_attempts``
+        # is exhausted OR ``wall_clock_cap_s`` seconds have elapsed
+        # since the first attempt. This is the central policy for
+        # retry-storm protection; raw-SDK sites run inside
+        # ``asyncio.to_thread`` worker threads where
+        # ``asyncio.wait_for`` is not usable, so the cap MUST live
+        # in sync code. ``stop_after_delay`` lives inside
+        # tenacity's retry loop — pure time check, no asyncio.
+        # See module docstring "Wall-clock cap" for the design and
+        # the per-request-timeout caveat (cap fires between
+        # attempts; a single hanging request still needs a
+        # per-request timeout on the openai client to interrupt
+        # mid-call — that's the factory's responsibility, not
+        # the facade's).
         retrying = Retrying(
-            stop=stop_after_attempt(max_attempts),
+            stop=stop_after_attempt(max_attempts) | stop_after_delay(wall_clock_cap_s),
             wait=wait_exponential_jitter(),
             retry=predicate,
             reraise=True,

@@ -3,40 +3,73 @@
 Companion module: ``daemon.services.llm_failover`` (the production
 code under test).
 
-Covers:
+Section map (18 classes / 6 sections)
+------------------------------------
 
-* ``wrap_langchain_failover`` — invoke wired with FailoverController
-  reuse + retry-with-failover predicate. End-to-end via
-  ``httpx.MockTransport`` to confirm request URLs really swap.
+1. ``wrap_langchain_failover`` — direct unit tests + end-to-end
+   (TestWrapLangchainFailoverBinding, TestWrapLangchainFailoverEndToEnd,
+    TestZeroBehaviorChangeGuarantee)
 
-* ``invoke_raw_with_failover`` — factory-rebuild pattern. End-to-end
-  via ``httpx.MockTransport`` to confirm raw-SDK request URLs
-  really swap across retries (callable-rebuild semantics).
+2. ``invoke_raw_with_failover`` — semantics, non-retryable, retry
+   budget, end-to-end embeddings
+   (TestInvokeRawWithFailoverSemantics, TestInvokeRawWithFailoverNonRetryable,
+    TestInvokeRawWithFailoverRetryBudget,
+    TestInvokeRawWithFailoverEndToEndEmbeddings)
 
-* Per-site wiring smoke tests — each of the secondary sites
-  (title_generation, keyword_extraction, child_reports summarization
-  + repair, compaction, skill_embedding chat + embeddings,
-  skill_evolution chat, skill_search chat) routes its call through
-  the facade. Verified by patching the facade calls and asserting
-  they fire.
+3. ``Embedding endpoint guard`` — wiring + comparator + URL-equivalence
+   (TestEmbeddingEndpointGuardEndToEnd)
 
-* Zero-behavior-change invariants — backup unset preserves pre-v2
-  shape (raw-SDK sites get a retry layer added, but the retry
-  predicate is a no-op when no controller is configured).
+4. ``Per-site wiring`` — every secondary site must route through the
+   facade. Behavior-driven pins (patch the facade, drive the call,
+   assert call count) + import-line pins (static).
+   (TestTitleGenerationIsFailoverWired, TestKeywordExtractionIsFailoverWired,
+    TestChildReportsIsFailoverWired, TestSkillEmbeddingServiceIsFailoverWired,
+    TestSkillEvolutionServiceIsFailoverWired,
+    TestSkillSearchServiceIsFailoverWired, TestCompactionIsFailoverWired)
+
+5. ``Regression pins`` — pre-clean rebind hazard (fixed pre-branch),
+   keep alive to prevent recurrence.
+   (TestPreCleanRebindRegressionPin)
+
+6. ``Real-path MockTransport E2E`` — drives the actual site function
+   through httpx.MockTransport to confirm request URLs really swap
+   across retries.
+   (TestTitleGenerationRealPathWithMockTransport,
+    TestSkillSearchRealPathWithMockTransport)
+
+Per-site wiring details
+-----------------------
+* TitleGenerationService → ``wrap_langchain_failover`` (LangChain)
+* extract_keywords → ``wrap_langchain_failover`` (LangChain)
+* ChildReportsService._summarize_instance → ``wrap_langchain_failover``
+* ChildReportsService._repair_report_with_llm → ``wrap_langchain_failover``
+* ContextCompactor._call_summarization_llm → ``wrap_langchain_failover``
+* SkillEmbeddingService.generate_trigger_queries → ``invoke_raw_with_failover``
+* SkillEmbeddingService.embed_text → ``invoke_raw_with_failover``
+* SkillEvolutionService._call_llm → ``invoke_raw_with_failover``
+* SkillSearchService._llm_select → ``invoke_raw_with_failover``
+
+Zero-behavior-change invariants
+-------------------------------
+* Backup unset preserves pre-v2 shape (raw-SDK sites gain a retry
+  layer, but the predicate is a no-op when no controller is
+  configured).
+* Site-level ``asyncio.wait_for(..., timeout=...)`` is a
+  belt-and-braces backstop; the real cap home is the facade's
+  ``wall_clock_cap_s`` (``tenacity.stop_after_delay`` inside the
+  retry loop) — see ``daemon.services.llm_failover`` docstring
+  "Wall-clock cap".
 """
 
 import asyncio
-import json
-import logging
 import os
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import httpx
 import openai
 import pytest
-from tenacity import Retrying, stop_after_attempt, wait_fixed
 
 from daemon.llm_error_classifier import (
     PRIMARY_TIMEOUT_MAX,
@@ -94,6 +127,60 @@ def _embedding_body(text: str) -> dict:
         "model": "text-embedding-test",
         "usage": {"prompt_tokens": 1, "total_tokens": 1},
     }
+
+
+def _patched_openai_with_transport(http_client: httpx.Client):
+    """Build a ``side_effect`` callable for ``patch.object(openai, "OpenAI", ...)``
+    that injects ``http_client`` and disables SDK-level retries.
+
+    Transport-injection only — the real ``openai.OpenAI`` constructor
+    still runs with production kwargs. ``max_retries=0`` prevents
+    the SDK from masking our retry budget by retrying internally.
+    """
+    original_openai = openai.OpenAI
+
+    def _patched_openai(**kwargs):
+        kwargs["http_client"] = http_client
+        kwargs["max_retries"] = 0
+        return original_openai(**kwargs)
+
+    return _patched_openai
+
+
+class _FakeMeta:
+    """Empty ``InstanceMetadata`` for the title-generation site."""
+
+    instance_metadata: dict = {}
+
+
+class _FakeRepo:
+    """Repository stub for title-generation: no prior title, no-op
+    update. The service reads the instance metadata first (to skip
+    generation if a title exists) and writes the generated title at
+    the end."""
+
+    def get(self, iid: str):
+        return _FakeMeta()
+
+    def update_title(self, iid: str, title: str) -> None:
+        return None
+
+
+class _FakeManager:
+    """Manager stub configured with ``base_url_backup`` — the
+    service reads ``self._manager.config.llm.{base_url,base_url_backup,
+    api_key,model_title}`` to build the cfg passed to the facade."""
+
+    config = SimpleNamespace(
+        llm=SimpleNamespace(
+            base_url=PRIMARY,
+            base_url_backup=BACKUP,
+            api_key="test",
+            model_title="gpt-test",
+        )
+    )
+    _instance_repository = _FakeRepo()
+    _logger = MagicMock()
 
 
 # ===========================================================================
@@ -832,16 +919,9 @@ class TestEmbeddingEndpointGuardEndToEnd:
 
         svc = self._make_service(embedding_base_url="https://embed.test/v1")
 
-        original_openai = openai.OpenAI
-
-        def _patched_openai(**kwargs):
-            # Transport injection only: the REAL openai.OpenAI
-            # constructor still executes with production kwargs.
-            kwargs["http_client"] = http_client
-            kwargs["max_retries"] = 0
-            return original_openai(**kwargs)
-
-        with patch.object(ses.openai, "OpenAI", side_effect=_patched_openai):
+        with patch.object(
+            ses.openai, "OpenAI", side_effect=_patched_openai_with_transport(http_client)
+        ):
             with pytest.raises(RuntimeError, match="Embedding API call failed"):
                 asyncio.run(svc.embed_text("hello"))
 
@@ -879,16 +959,9 @@ class TestEmbeddingEndpointGuardEndToEnd:
 
         svc = self._make_service(embedding_base_url=None)
 
-        original_openai = openai.OpenAI
-
-        def _patched_openai(**kwargs):
-            # Transport injection only: the REAL openai.OpenAI
-            # constructor still executes with production kwargs.
-            kwargs["http_client"] = http_client
-            kwargs["max_retries"] = 0
-            return original_openai(**kwargs)
-
-        with patch.object(ses.openai, "OpenAI", side_effect=_patched_openai):
+        with patch.object(
+            ses.openai, "OpenAI", side_effect=_patched_openai_with_transport(http_client)
+        ):
             vec = asyncio.run(svc.embed_text("hello"))
 
         assert len(vec) == 8
@@ -901,13 +974,27 @@ class TestEmbeddingEndpointGuardEndToEnd:
             f"got hosts={hosts}"
         )
 
-    def test_trailing_slash_equivalent_urls_do_not_disable_failover(self):
-        """v2 review Fix 2: an explicit ``embedding_base_url`` that is
-        the SAME endpoint as the chat ``base_url`` modulo a trailing
-        slash must NOT trip the different-endpoint guard — failover
-        stays armed. Raw-string ``!=`` compared "https://x/v1" vs
-        "https://x/v1/" as different and silently disabled HA for
-        identical endpoints."""
+    @pytest.mark.parametrize(
+        "embedding_base_url",
+        [
+            # Trailing-slash variant — "https://x/v1/" vs chat's
+            # "https://x/v1" name the SAME endpoint.
+            "https://primary.test/v1/",
+            # Scheme + host-case variant — "HTTPS://PRIMARY.test/v1"
+            # vs chat's "https://primary.test/v1" name the SAME
+            # endpoint.
+            "HTTPS://PRIMARY.test/v1",
+        ],
+        ids=["trailing_slash", "host_case"],
+    )
+    def test_equivalent_urls_do_not_disable_failover(self, embedding_base_url):
+        """v2 review Fix 2: an explicit ``embedding_base_url`` that
+        names the SAME endpoint as the chat ``base_url`` modulo
+        trailing slash or host case must NOT trip the
+        different-endpoint guard — failover stays armed. Raw-string
+        ``!=`` compared "https://x/v1" vs "https://x/v1/" as
+        different and silently disabled HA for identical endpoints.
+        """
         import daemon.services.skill_embedding_service as ses
 
         captured: list[httpx.URL] = []
@@ -921,67 +1008,19 @@ class TestEmbeddingEndpointGuardEndToEnd:
             )
 
         http_client = httpx.Client(transport=httpx.MockTransport(handler))
+        svc = self._make_service(embedding_base_url=embedding_base_url)
 
-        # Same endpoint as the chat base_url (PRIMARY =
-        # "https://primary.test/v1") but spelled with a trailing
-        # slash — equivalent, guard must NOT drop the backup.
-        svc = self._make_service(embedding_base_url="https://primary.test/v1/")
-
-        original_openai = openai.OpenAI
-
-        def _patched_openai(**kwargs):
-            kwargs["http_client"] = http_client
-            kwargs["max_retries"] = 0
-            return original_openai(**kwargs)
-
-        with patch.object(ses.openai, "OpenAI", side_effect=_patched_openai):
+        with patch.object(
+            ses.openai, "OpenAI", side_effect=_patched_openai_with_transport(http_client)
+        ):
             vec = asyncio.run(svc.embed_text("hello"))
 
         assert len(vec) == 8
         hosts = [u.host for u in captured]
         assert hosts.count("backup.test") == 1, (
-            f"trailing-slash-equivalent embedding endpoint must still "
-            f"fail over to the chat backup; got hosts={hosts}"
-        )
-
-    def test_host_case_equivalent_urls_do_not_disable_failover(self):
-        """v2 review Fix 2 (host-case variant): scheme/host-case
-        differences ("HTTPS://PRIMARY.test/v1" vs
-        "https://primary.test/v1") name the SAME endpoint — the guard
-        must not disable failover."""
-        import daemon.services.skill_embedding_service as ses
-
-        captured: list[httpx.URL] = []
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            captured.append(request.url)
-            if request.url.host == "backup.test":
-                return httpx.Response(200, json=_embedding_body("hello"))
-            return httpx.Response(
-                500, json={"error": {"message": "primary down"}}
-            )
-
-        http_client = httpx.Client(transport=httpx.MockTransport(handler))
-
-        svc = self._make_service(
-            embedding_base_url="HTTPS://PRIMARY.test/v1"
-        )
-
-        original_openai = openai.OpenAI
-
-        def _patched_openai(**kwargs):
-            kwargs["http_client"] = http_client
-            kwargs["max_retries"] = 0
-            return original_openai(**kwargs)
-
-        with patch.object(ses.openai, "OpenAI", side_effect=_patched_openai):
-            vec = asyncio.run(svc.embed_text("hello"))
-
-        assert len(vec) == 8
-        hosts = [u.host for u in captured]
-        assert hosts.count("backup.test") == 1, (
-            f"host-case-equivalent embedding endpoint must still "
-            f"fail over to the chat backup; got hosts={hosts}"
+            f"URL-equivalent embedding endpoint must still fail over "
+            f"to the chat backup (variant: {embedding_base_url!r}); "
+            f"got hosts={hosts}"
         )
 
 
@@ -1053,57 +1092,17 @@ class TestTitleGenerationIsFailoverWired:
                     tg, "wrap_langchain_failover", side_effect=_fake_wrap
                 )
             )
-            from langchain_core.messages import HumanMessage
-
-            # Don't exercise the broader service (which depends on the
-            # manager + repository); instead directly exercise the
-            # LLM-build chunk by patching the parts that touch external
-            # state.
-            # We just verify that when the function runs, wrap_langchain_failover
-            # is called exactly once per generation.
-
-            # Patch the repository read to return no prior title, so we hit
-            # the LLM branch.
-            class _FakeMeta:
-                instance_metadata = {}
-
-            class _FakeRepo:
-                def get(self, iid):
-                    return _FakeMeta()
-
-                def update_title(self, iid, title):
-                    return None
-
-            class _FakeManager:
-                config = SimpleNamespace(
-                    llm=SimpleNamespace(
-                        base_url=PRIMARY,
-                        base_url_backup=BACKUP,
-                        api_key="test",
-                        model_title="gpt-test",
-                    )
-                )
-                _instance_repository = _FakeRepo()
-                _logger = MagicMock()
 
             from daemon.services.title_generation import TitleGenerationService
 
+            # Use the shared _FakeManager / _FakeRepo / _FakeMeta
+            # trio (defined at module level) so the wiring pin
+            # doesn't redefine the same fixture.
             svc = TitleGenerationService(manager=_FakeManager())
 
-            # Replace ``update_title`` with an async-stub to avoid touching
-            # the DB layer.
-            with patch.object(
-                svc,
-                "_generate_and_broadcast_title",
-                wraps=svc._generate_and_broadcast_title,
-            ) as wrapped_method:
-                # Build a partial wrapper around the inner LLM build:
-                # Easier to just call the function and inspect wrap count.
-                import asyncio
-
-                asyncio.run(
-                    svc._generate_and_broadcast_title("inst-1", "Hello world")
-                )
+            asyncio.run(
+                svc._generate_and_broadcast_title("inst-1", "Hello world")
+            )
 
         assert calls["wrap"] == 1, (
             f"title_generation must route through wrap_langchain_failover "
@@ -1340,60 +1339,113 @@ class TestChildReportsIsFailoverWired:
 
 class TestSkillEmbeddingServiceIsFailoverWired:
     """``SkillEmbeddingService.generate_trigger_queries`` and
-    ``embed_text`` must each route through ``invoke_raw_with_failover``."""
+    ``embed_text`` must each route through ``invoke_raw_with_failover``.
+    Behavior-driven: patch the facade symbol on the target module,
+    drive the real call path, assert the recording was called.
+    """
 
     def test_chat_call_uses_invoke_raw_with_failover(self):
+        """``generate_trigger_queries`` (chat-completion path) must
+        route through the facade. Drive a real call against a
+        minimal ``SkillEmbeddingService`` and assert the facade was
+        entered exactly once.
+        """
         from daemon.services import skill_embedding_service as ses
 
         calls = {"invoke": 0}
-        original_invoke = invoke_raw_with_failover
 
         def _fake_invoke(factory, cfg, **kw):
             calls["invoke"] += 1
-            return original_invoke(factory, cfg, **kw)
-
-        with patch.object(ses, "invoke_raw_with_failover", side_effect=_fake_invoke):
-            # We don't drive the full pipeline (it requires an
-            # embedding repo + skill object). Just verify the wiring
-            # import is in place.
-            import inspect
-            source = inspect.getsource(ses)
-            assert "invoke_raw_with_failover" in source, (
-                "skill_embedding_service must call invoke_raw_with_failover for "
-                "both chat and embeddings paths"
+            # Don't drive the real facade (it would need httpx
+            # transport). Return a canned chat-completion shape so
+            # ``_extract_chat_content`` downstream can parse it.
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content='["q1","q2","q3"]'))]
             )
 
-        # Confirm the module imports the facade.
-        assert hasattr(ses, "invoke_raw_with_failover"), (
-            "skill_embedding_service must import invoke_raw_with_failover"
+        cfg = SimpleNamespace(
+            embedding_model="text-embedding-test",
+            embedding_base_url=None,
+            embedding_api_key=None,
+        )
+        svc = ses.SkillEmbeddingService(
+            config=cfg,
+            embedding_repo=SimpleNamespace(),
+            llm_config={
+                "base_url": PRIMARY,
+                "base_url_backup": BACKUP,
+                "api_key": "test",
+                "model": "gpt-test",
+            },
         )
 
-    def test_embedding_call_uses_invoke_raw_with_failover(self):
-        from daemon.services import skill_embedding_service as ses
+        skill = SimpleNamespace(id="skill-1", name="test-skill", description="desc")
 
-        # Look at the module source to confirm both chat-completion
-        # AND embeddings paths route through the facade (without
-        # driving real network calls). We confirm:
-        # (a) the symbol is imported,
-        # (b) the symbol appears in MULTIPLE call contexts
-        # (at minimum: the chat-completion trigger_queries path AND
-        # the embed_text path; module docstring / comments are also
-        # legitimate occurrences but the import + 2 call contexts
-        # give at least 3 occurrences as the simplest lower bound).
+        with patch.object(ses, "invoke_raw_with_failover", side_effect=_fake_invoke):
+            result = asyncio.run(svc.generate_trigger_queries(skill))
+
+        assert calls["invoke"] == 1, (
+            f"skill_embedding_service.generate_trigger_queries must route "
+            f"through invoke_raw_with_failover exactly once; got {calls['invoke']}"
+        )
+        # Sanity: the fake returned a parseable JSON list.
+        assert isinstance(result, list)
+
+        # Import-line pin (a future careless refactor that removes
+        # the import while leaving a comment reference would pass
+        # the call-count check above, so we double-pin statically).
         import inspect
         source = inspect.getsource(ses)
-        occurrences = source.count("invoke_raw_with_failover")
-        # 1 import + 2 call sites (chat + embed) + at least 2 docstring
-        # references = >= 4.
-        assert occurrences >= 4, (
-            f"skill_embedding_service must import invoke_raw_with_failover "
-            f"and call it in both chat-completion and embedding paths; "
-            f"found {occurrences} total occurrences in module source"
+        assert (
+            "from .llm_failover import current_failover_url, invoke_raw_with_failover"
+            in source
+        ), "skill_embedding_service must import invoke_raw_with_failover"
+
+    def test_embedding_call_uses_invoke_raw_with_failover(self):
+        """``embed_text`` (embeddings path) must route through the
+        facade. Drive a real call and assert the facade was entered
+        exactly once.
+        """
+        from daemon.services import skill_embedding_service as ses
+
+        calls = {"invoke": 0}
+
+        def _fake_invoke(factory, cfg, **kw):
+            calls["invoke"] += 1
+            # Return a minimal valid embeddings shape.
+            return SimpleNamespace(
+                data=[SimpleNamespace(embedding=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8])]
+            )
+
+        cfg = SimpleNamespace(
+            embedding_model="text-embedding-test",
+            embedding_base_url=None,
+            embedding_api_key=None,
+        )
+        svc = ses.SkillEmbeddingService(
+            config=cfg,
+            embedding_repo=SimpleNamespace(),
+            llm_config={
+                "base_url": PRIMARY,
+                "base_url_backup": BACKUP,
+                "api_key": "test",
+                "model": "gpt-test",
+            },
         )
 
-        # Also pin the import line explicitly — a future careless
-        # refactor that removes the import while leaving a comment
-        # reference would not change the count above, so we double-pin.
+        with patch.object(ses, "invoke_raw_with_failover", side_effect=_fake_invoke):
+            vec = asyncio.run(svc.embed_text("hello"))
+
+        assert calls["invoke"] == 1, (
+            f"skill_embedding_service.embed_text must route through "
+            f"invoke_raw_with_failover exactly once; got {calls['invoke']}"
+        )
+        assert len(vec) == 8
+
+        # Import-line pin (kept per task: keep import-line pins,
+        # drop docstring-count assertion).
+        import inspect
+        source = inspect.getsource(ses)
         assert (
             "from .llm_failover import current_failover_url, invoke_raw_with_failover"
             in source
@@ -1402,67 +1454,144 @@ class TestSkillEmbeddingServiceIsFailoverWired:
 
 class TestSkillEvolutionServiceIsFailoverWired:
     """``SkillEvolutionService._call_llm`` must route through
-    ``invoke_raw_with_failover``."""
+    ``invoke_raw_with_failover``. Behavior-driven: drive a real
+    call against a minimal service stub and assert the facade was
+    entered exactly once.
+    """
 
     def test_skill_evolution_uses_facade(self):
         from daemon.services import skill_evolution_service as ses
 
-        assert hasattr(ses, "invoke_raw_with_failover")
+        calls = {"invoke": 0}
+
+        def _fake_invoke(factory, cfg, **kw):
+            calls["invoke"] += 1
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="analyzed"))]
+            )
+
+        # Bypass ``__init__`` and set the minimum attributes the
+        # production ``_call_llm`` body reads:
+        # - ``_config``: read by ``_resolve_analysis_model``
+        # - ``_llm_config``: passed to the facade as the failover cfg
+        svc = ses.SkillEvolutionService.__new__(ses.SkillEvolutionService)
+        svc._config = SimpleNamespace(
+            analysis_model="gpt-test", evolution_model="gpt-test"
+        )
+        svc._llm_config = {
+            "base_url": PRIMARY,
+            "base_url_backup": BACKUP,
+            "api_key": "test",
+            "model": "gpt-test",
+        }
+
+        with patch.object(ses, "invoke_raw_with_failover", side_effect=_fake_invoke):
+            result = asyncio.run(svc._call_llm("Test prompt"))
+
+        assert calls["invoke"] == 1, (
+            f"skill_evolution_service._call_llm must route through "
+            f"invoke_raw_with_failover exactly once; got {calls['invoke']}"
+        )
+        # Sanity: the fake returned a parseable string.
+        assert result == "analyzed"
+
+        # Import-line pin.
         import inspect
         source = inspect.getsource(ses)
         assert "invoke_raw_with_failover" in source, (
-            "skill_evolution_service._call_llm must call invoke_raw_with_failover"
+            "skill_evolution_service must import invoke_raw_with_failover"
         )
 
 
 class TestSkillSearchServiceIsFailoverWired:
     """``SkillSearchService._llm_select`` must route through
     ``invoke_raw_with_failover`` for the production path (test-injected
-    ``client`` arg bypasses the facade)."""
+    ``client`` arg bypasses the facade). Behavior-driven: drive a
+    real call with ``client=None`` and assert the facade was entered
+    exactly once.
+    """
 
     def test_skill_search_uses_facade(self):
         from daemon.services import skill_search_service as sss
 
-        assert hasattr(sss, "invoke_raw_with_failover")
+        calls = {"invoke": 0}
+
+        def _fake_invoke(factory, cfg, **kw):
+            calls["invoke"] += 1
+            # The LLM returns a JSON selection. ``_parse_llm_selection``
+            # is tolerant of markdown fences and surrounding prose.
+            return SimpleNamespace(
+                choices=[SimpleNamespace(
+                    message=SimpleNamespace(
+                        content='{"selected": [{"name": "test_skill", "score": 0.9}], '
+                                '"low_match": []}'
+                    )
+                )]
+            )
+
+        # Bypass ``__init__`` and set the minimum attributes the
+        # production ``_llm_select`` body reads.
+        svc = sss.SkillSearchService.__new__(sss.SkillSearchService)
+        svc._llm_config = {
+            "base_url": PRIMARY,
+            "base_url_backup": BACKUP,
+            "api_key": "test",
+            "model": "gpt-test",
+        }
+
+        # Minimal candidate tuples ``(skill, score)`` for the LLM stage.
+        candidate_skill = SimpleNamespace(
+            name="test_skill", id="skill-1", description="desc"
+        )
+        candidates = [(candidate_skill, 0.9)]
+
+        with patch.object(sss, "invoke_raw_with_failover", side_effect=_fake_invoke):
+            result = asyncio.run(
+                svc._llm_select(
+                    query="test query",
+                    candidates=candidates,
+                    client=None,  # production path
+                )
+            )
+
+        assert calls["invoke"] == 1, (
+            f"skill_search_service._llm_select (production path) must route "
+            f"through invoke_raw_with_failover exactly once; got {calls['invoke']}"
+        )
+        # Sanity: the LLM selected the candidate → result is non-empty.
+        assert "injected" in result
+        assert len(result["injected"]) == 1
+        assert result["injected"][0]["skill"].name == "test_skill"
+
+        # Import-line pin.
         import inspect
         source = inspect.getsource(sss)
         assert "invoke_raw_with_failover" in source, (
-            "skill_search_service._llm_select must call invoke_raw_with_failover"
+            "skill_search_service must import invoke_raw_with_failover"
         )
 
 
 class TestCompactionIsFailoverWired:
     """``ContextCompactor._call_summarization_llm`` must route through
-    ``wrap_langchain_failover`` with the FULL backup-bearing config."""
+    ``wrap_langchain_failover`` with the FULL backup-bearing config.
+    Behavior-driven: drive a real ``_call_summarization_llm`` and
+    assert the facade was entered exactly once with the backup-bearing
+    config. Pinned statically: lazy import line (compaction imports
+    the facade at function scope, not module scope).
+    """
 
     def test_compaction_uses_facade(self):
         """Drive ``_call_summarization_llm`` with a real ``ContextCompactor``
         and assert the facade receives the backup-bearing config. The
-        compaction site already cleans ``llm_config`` in-place for the
-        ChatOpenAI constructor, but passes ``self.llm_config_with_headers``
-        (the original, pre-clean dict) to the facade — a pre-clean
-        rebind would strip ``base_url_backup`` before the facade sees
-        it, silently killing failover.
-
-        Also pins the source-level import path (lazy import inside
-        ``_call_summarization_llm``) so the facade linkage cannot be
-        silently removed by a careless refactor.
+        compaction site now uses the canonical ``clean_llm_config`` inline
+        form (``ThinkingChatOpenAI(**clean_llm_config(dict(llm_config)))``)
+        and passes the LOCAL ``llm_config`` (with backup) to the facade —
+        a pre-clean rebind would strip ``base_url_backup`` before the
+        facade sees it, silently killing failover.
         """
         from daemon import compaction as cmp
         from daemon.services import llm_failover as lf_module
         from langchain_core.messages import HumanMessage
-
-        # ---- Source-level pin: lazy import + call site ----
-        import inspect
-        source = inspect.getsource(cmp)
-        assert "wrap_langchain_failover" in source, (
-            "ContextCompactor._call_summarization_llm must call "
-            "wrap_langchain_failover"
-        )
-        assert (
-            "from .services.llm_failover import wrap_langchain_failover"
-            in source
-        ), "compaction module must import wrap_langchain_failover"
 
         # ---- Fake-facade exact-match on backup-bearing config ----
         captured = {"wrap": 0, "cfg": None}
@@ -1494,8 +1623,8 @@ class TestCompactionIsFailoverWired:
 
         compactor = cmp.ContextCompactor(config=config, llm_config=llm_config)
 
-        # Source-level pin (lazy import) — patch at the source module so
-        # the lazy import picks up our stub.
+        # Patch at the source module so the lazy import picks up
+        # our stub.
         with patch.object(
             lf_module, "wrap_langchain_failover", side_effect=_fake_wrap
         ), patch("daemon.graph.ThinkingChatOpenAI", return_value=MagicMock()):
@@ -1580,30 +1709,11 @@ class TestPreCleanRebindRegressionPin:
 
         from daemon import graph as graph_mod
 
-        class _FakeMeta:
-            instance_metadata = {}
-
-        class _FakeRepo:
-            def get(self, iid):
-                return _FakeMeta()
-
-            def update_title(self, iid, title):
-                return None
-
-        class _FakeManager:
-            config = SimpleNamespace(
-                llm=SimpleNamespace(
-                    base_url=PRIMARY,
-                    base_url_backup=BACKUP,
-                    api_key="test",
-                    model_title="gpt-test",
-                )
-            )
-            _instance_repository = _FakeRepo()
-            _logger = MagicMock()
-
         from daemon.services.title_generation import TitleGenerationService
 
+        # Use the shared _FakeManager / _FakeRepo / _FakeMeta trio
+        # (defined at module level) so the regression pin doesn't
+        # redefine the same fixture.
         svc = TitleGenerationService(manager=_FakeManager())
 
         with ExitStack() as stack:
@@ -1660,6 +1770,310 @@ class TestPreCleanRebindRegressionPin:
         )
         # Re-running the stripped cfg through the facade (the bug pattern)
         # would fail the pin above — documenting the hazard.
+
+    def test_child_reports_repair_does_not_strip_backup_before_facade(self):
+        """Drive ``ChildReportsService._repair_report_with_llm`` (the
+        child_reports REPAIR path) end-to-end and assert the facade
+        receives the backup-bearing config. If a future change rebinds
+        ``llm_config`` before the facade call (e.g. re-introduces the
+        missing ``dict()`` defensive wrap at the ``clean_llm_config``
+        call site), this test fails with a clear message.
+
+        Sibling to ``test_site_does_not_strip_backup_before_facade_regression_pin``
+        (which covers ``_generate_and_broadcast_title``); together they
+        pin the facade contract at the LangChain secondary sites most
+        prone to silent failover inactivation.
+        """
+        from daemon.services import child_reports as cr
+        from daemon.config import ReportRepairConfig
+        from daemon import graph as graph_mod
+
+        captured = {"wrap": 0, "cfg": None}
+
+        def _fake_wrap(client, cfg, **kw):
+            captured["wrap"] += 1
+            captured["cfg"] = cfg
+            return SimpleNamespace(
+                invoke=lambda messages: SimpleNamespace(content="Repaired")
+            )
+
+        class _FakeLLM:
+            pass
+
+        fake_llm_instance = _FakeLLM()
+
+        class _FakeCheckpointerAdapter:
+            raw_saver = MagicMock()
+
+        class _FakeManager:
+            config = SimpleNamespace(
+                llm=SimpleNamespace(
+                    base_url=PRIMARY,
+                    base_url_backup=BACKUP,
+                    api_key="test",
+                    model="gpt-test",
+                )
+            )
+            _checkpointer = _FakeCheckpointerAdapter()
+
+        svc = cr.ChildReportsService(manager=_FakeManager())
+        repair_config = ReportRepairConfig()
+        messages = [
+            {"role": "assistant", "content": "Long content " * 20},
+            {"role": "assistant", "content": "More content " * 20},
+        ]
+
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch.object(
+                    graph_mod,
+                    "ThinkingChatOpenAI",
+                    return_value=fake_llm_instance,
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    cr, "wrap_langchain_failover", side_effect=_fake_wrap
+                )
+            )
+            asyncio.run(
+                svc._repair_report_with_llm(
+                    messages, repair_config, instance_id="inst-1"
+                )
+            )
+
+        assert captured["wrap"] == 1, (
+            f"child_reports repair must route through wrap_langchain_failover "
+            f"exactly once; got {captured['wrap']}"
+        )
+        # The pin: the facade MUST receive the backup, not the cleaned dict.
+        # A pre-clean rebind (or a missing ``dict()`` wrap that lets a
+        # future in-place mutator strip the key before the facade sees it)
+        # would set ``base_url_backup`` to ``None`` here, silently killing
+        # failover while every weaker assertion would still pass.
+        assert captured["cfg"] is not None, (
+            "facade must receive a config dict"
+        )
+        assert captured["cfg"].get("base_url_backup") is not None, (
+            f"REGRESSION: pre-clean rebind stripped base_url_backup before "
+            f"the facade saw it (child_reports REPAIR path). Got "
+            f"{captured['cfg'].get('base_url_backup')!r}. The site must "
+            f"pass the RAW dict (with backup) to wrap_langchain_failover, "
+            f"with the canonical ``clean_llm_config(dict(llm_config))`` "
+            f"defensive wrap at the constructor — see "
+            f"daemon/services/child_reports.py:_repair_report_with_llm."
+        )
+        assert captured["cfg"].get("base_url_backup") == BACKUP, (
+            f"child_reports REPAIR facade must receive the configured "
+            f"base_url_backup; got {captured['cfg'].get('base_url_backup')!r}, "
+            f"expected {BACKUP!r}"
+        )
+
+
+# ===========================================================================
+# Facade wall-clock cap (item 1)
+# ===========================================================================
+#
+# The cap is implemented as ``stop_after_attempt | stop_after_delay`` in
+# the facade's tenacity.Retrying construction. This class verifies the
+# cap is wired AND that it fires under retry-storm conditions. The
+# resilient-hang test (uses time.monotonic + factory that sleeps past
+# the cap) confirms the deadline fires BETWEEN attempts, before the
+# retry budget would have exhausted.
+
+
+class TestFacadeCap:
+    """Verify ``wall_clock_cap_s`` lives in the facade (the single
+    home) and fires under retry-storm conditions.
+
+    Two-pronged approach:
+
+    * **Structural** — the facade's tenacity ``Retrying`` uses
+      ``stop_after_attempt | stop_after_delay(wall_clock_cap_s)``.
+    * **Functional** — drive a hanging factory with a tiny cap and
+      verify the call returns within the cap window, with bounded
+      attempts (no retry-storm amplification).
+    """
+
+    def test_invoke_raw_facade_uses_wall_clock_cap(self):
+        """``invoke_raw_with_failover`` must wire
+        ``stop_after_delay`` into the Retrying's stop conditions.
+        Source-level pin (introspection of the actual ``Retrying``
+        object built by the facade)."""
+        from daemon.services.llm_failover import invoke_raw_with_failover
+        from tenacity import Retrying
+
+        # Build a real Retrying by calling the facade with a
+        # hanging factory (the cap will fire before the cap
+        # timeout elapses if we go through the real call). We
+        # don't need the call to actually succeed; we just need
+        # to inspect the Retrying object.
+
+        # Use a tiny cap so the call fails fast. The factory
+        # always fails so the retry budget is the only cap that
+        # could matter (transient_max attempts → 3). The cap
+        # also stops the loop when wall-clock exceeds 0.05s.
+        call_count = {"n": 0}
+
+        def _always_fails():
+            call_count["n"] += 1
+            raise ValueError("fail")
+
+        # Patch the Retrying class itself to capture the
+        # constructed instance.
+        captured_retrying = {}
+
+        original_retrying = Retrying
+
+        class _CapturingRetrying(Retrying):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                captured_retrying["instance"] = self
+
+        with patch(
+            "daemon.services.llm_failover.Retrying", _CapturingRetrying
+        ):
+            try:
+                invoke_raw_with_failover(
+                    _always_fails,
+                    {"base_url": PRIMARY, "api_key": "test"},
+                    transient_max=3,
+                    timeout_max=2,
+                    wall_clock_cap_s=0.05,
+                )
+            except (ValueError, Exception):
+                pass  # expected — the cap fires
+
+        assert "instance" in captured_retrying, (
+            "facade must construct a tenacity.Retrying"
+        )
+        retrying = captured_retrying["instance"]
+        # Inspect the stop attribute — must be a stop_any
+        # (combination of stop_after_attempt | stop_after_delay).
+        from tenacity.stop import stop_any
+        assert isinstance(retrying.stop, stop_any), (
+            f"facade's Retrying.stop must be stop_any "
+            f"(attempt | delay); got {type(retrying.stop).__name__}"
+        )
+
+    def test_invoke_raw_cap_fires_under_retry_storm(self):
+        """Drive a failing factory with a tiny wall_clock_cap_s and
+        verify the call returns within the cap window. The cap must
+        abort the retry loop before the retry budget would have
+        exhausted (so attempts stay bounded).
+
+        Uses a fixed wait (patched in) so the test is deterministic
+        — production uses ``wait_exponential_jitter`` which has
+        ~1.3s waits at attempt 1, far above the cap; that would
+        hang the test for many minutes if the cap is missing.
+        """
+        import time
+
+        import httpx
+        import openai
+        from daemon.services.llm_failover import invoke_raw_with_failover
+        from tenacity import wait_fixed
+
+        # Cap = 0.05s. Transient_max = 100, timeout_max = 100
+        # (way over what the cap should permit). The cap should
+        # fire first. Raise a real openai.APIStatusError so the
+        # facade's ``_classify_raw_sdk_exceptions`` wrapper catches
+        # it and re-raises as TransientAPIError (in
+        # RETRYABLE_STATUS_CODES), which the retry predicate
+        # actually retries.
+        call_count = {"n": 0}
+
+        def _make_status_error(code: int) -> openai.APIStatusError:
+            return openai.APIStatusError(
+                message="server_error",
+                response=httpx.Response(
+                    status_code=code,
+                    request=httpx.Request("POST", "https://primary.test/v1"),
+                ),
+                body=None,
+            )
+
+        def _always_fails():
+            call_count["n"] += 1
+            raise _make_status_error(500)
+
+        def _patched_retrying(*args, **kwargs):
+            """Capture the Retrying then build a real one with a
+            fixed wait so the test is deterministic."""
+            from tenacity import Retrying
+            kwargs["wait"] = wait_fixed(0.001)  # 1ms — no real delay
+            return Retrying(*args, **kwargs)
+
+        t0 = time.monotonic()
+        try:
+            with patch(
+                "daemon.services.llm_failover.Retrying", _patched_retrying
+            ):
+                invoke_raw_with_failover(
+                    _always_fails,
+                    {"base_url": PRIMARY, "api_key": "test"},
+                    transient_max=100,
+                    timeout_max=100,
+                    wall_clock_cap_s=0.05,
+                )
+        except (openai.APIStatusError, Exception):
+            pass  # expected — the cap fires
+        elapsed = time.monotonic() - t0
+
+        # Cap fired: total elapsed < ~0.5s (cap + some slack).
+        # If the cap were missing, all 100 attempts would fire
+        # (each fail + 1ms wait ≈ 100ms total, still <0.5s — so
+        # we also assert attempt-count bounded to be sure the
+        # cap is what stopped the loop, not the retry budget).
+        assert elapsed < 0.5, (
+            f"wall_clock_cap_s=0.05 must fire under retry storm; "
+            f"got elapsed={elapsed:.2f}s (cap not working?)"
+        )
+        # Sanity: the cap bounded attempts. With 1ms waits the
+        # budget would let all 100 attempts run in ~100ms; with
+        # cap=0.05s only a handful of attempts can fit before
+        # the cap fires. Assert attempts stayed well under 100.
+        assert call_count["n"] < 100, (
+            f"wall_clock_cap_s=0.05 must bound attempts; "
+            f"got attempts={call_count['n']} (cap not working?)"
+        )
+
+    def test_wrap_langchain_facade_uses_wall_clock_cap(self):
+        """``wrap_langchain_failover`` must wire ``stop_after_delay``
+        into the LangChain facade's Retrying."""
+        from langchain_openai import ChatOpenAI
+        from tenacity import Retrying
+        from tenacity.stop import stop_any
+
+        llm = ChatOpenAI(
+            api_key="test", base_url=PRIMARY, model="g", max_retries=0
+        )
+
+        captured_retrying = {}
+
+        class _CapturingRetrying(Retrying):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                captured_retrying["instance"] = self
+
+        # Patch Retrying at the import site in the facade module.
+        with patch(
+            "daemon.services.llm_failover.Retrying", _CapturingRetrying
+        ):
+            binding = wrap_langchain_failover(
+                llm,
+                {"base_url": PRIMARY, "api_key": "test", "model": "g"},
+                wall_clock_cap_s=0.05,
+            )
+
+        assert "instance" in captured_retrying, (
+            "wrap_langchain_failover must construct a tenacity.Retrying"
+        )
+        retrying = captured_retrying["instance"]
+        assert isinstance(retrying.stop, stop_any), (
+            f"wrap_langchain_failover's Retrying.stop must be stop_any "
+            f"(attempt | delay); got {type(retrying.stop).__name__}"
+        )
 
 
 # ===========================================================================
@@ -1884,16 +2298,10 @@ class TestSkillSearchRealPathWithMockTransport:
         # unmodified. This is transport injection, not a constructor
         # shape patch — the real construction path still runs.
         import daemon.services.skill_search_service as sss_mod
-        import openai as openai_mod
 
-        original_openai = openai_mod.OpenAI
-
-        def _patched_openai(**kwargs):
-            kwargs["http_client"] = http_client
-            kwargs["max_retries"] = 0
-            return original_openai(**kwargs)
-
-        with patch.object(sss_mod.openai, "OpenAI", side_effect=_patched_openai):
+        with patch.object(
+            sss_mod.openai, "OpenAI", side_effect=_patched_openai_with_transport(http_client)
+        ):
             import asyncio
             result = asyncio.run(_drive())
 

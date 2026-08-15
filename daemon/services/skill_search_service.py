@@ -95,6 +95,43 @@ logger = logging.getLogger(__name__)
 # ============================================================
 
 
+def _do_chat_call(
+    model: str,
+    base_url: str | None,
+    api_key: str | None,
+    system_prompt: str,
+    user_prompt: str,
+    temperature: float,
+) -> Any:
+    """Construct a fresh ``openai.OpenAI`` client and run a chat-completion.
+
+    Module-level helper (NOT a nested closure) so the HA facade can
+    re-enter it on every retry attempt — the closure-pattern with
+    late-bound defaults would risk capturing the wrong URL across
+    retries. The URL is read at call time from
+    :func:`current_failover_url` (a thread-local the facade
+    updates per attempt) so each retry constructs the client
+    against the correct endpoint.
+
+    When failover is inactive, ``current_failover_url()`` returns
+    ``None`` and we fall back to ``base_url`` (the chat
+    endpoint) — same behavior as pre-v2 (zero behavior change).
+    """
+    url = current_failover_url() or base_url
+    client = openai.OpenAI(
+        api_key=api_key or "",
+        base_url=url or None,
+    )
+    return client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=temperature,
+    )
+
+
 def _tokenize(text: str) -> list[str]:
     """Lowercase ``text`` and split on non-alphanumeric boundaries.
 
@@ -725,14 +762,8 @@ class SkillSearchService:
         model = self._llm_config.get("model") or "gpt-4o-mini"
 
         if client is None:
-            # v2 HA: wrap the openai.OpenAI call in the shared raw-SDK
-            # facade. The factory is re-entered on every retry attempt;
-            # each entry reads the current target URL via
-            # ``current_failover_url()`` so a swap is observable as a
-            # change in the URL passed to ``openai.OpenAI(...)``. When
-            # ``base_url_backup`` is unset the facade is a no-op over
-            # the same shape the LangChain facade uses — zero behavior
-            # change.
+            # v2 HA: route through the shared raw-SDK facade. See
+            # ``daemon.services.llm_failover``.
             primary_url = self._llm_config.get("base_url")
             backup_url = self._llm_config.get("base_url_backup")
             failover_config = {
@@ -741,26 +772,16 @@ class SkillSearchService:
                 "api_key": self._llm_config.get("api_key"),
             }
 
-            def _do_call() -> Any:
-                # Read the URL per-attempt so the failover swap is
-                # observable across retries.
-                url = current_failover_url() or primary_url
-                c = openai.OpenAI(
-                    api_key=self._llm_config.get("api_key") or "",
-                    base_url=url or None,
-                )
-                return c.chat.completions.create(
-                    model=model,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    temperature=0.2,
-                )
-
             response = await asyncio.to_thread(
                 invoke_raw_with_failover,
-                _do_call,
+                lambda: _do_chat_call(
+                    model=model,
+                    base_url=primary_url,
+                    api_key=self._llm_config.get("api_key"),
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    temperature=0.2,
+                ),
                 failover_config,
             )
         else:

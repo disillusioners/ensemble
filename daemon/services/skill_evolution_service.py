@@ -53,6 +53,39 @@ from .llm_failover import current_failover_url, invoke_raw_with_failover
 logger = logging.getLogger(__name__)
 
 
+def _do_chat_call(
+    model: str,
+    base_url: str | None,
+    api_key: str | None,
+    messages: list[dict[str, str]],
+    temperature: float,
+) -> Any:
+    """Construct a fresh ``openai.OpenAI`` client and run a chat-completion.
+
+    Module-level helper (NOT a nested closure) so the HA facade can
+    re-enter it on every retry attempt — the closure-pattern with
+    late-bound defaults would risk capturing the wrong URL across
+    retries. The URL is read at call time from
+    :func:`current_failover_url` (a thread-local the facade
+    updates per attempt) so each retry constructs the client
+    against the correct endpoint.
+
+    When failover is inactive, ``current_failover_url()`` returns
+    ``None`` and we fall back to ``base_url`` (the chat
+    endpoint) — same behavior as pre-v2 (zero behavior change).
+    """
+    url = current_failover_url() or base_url
+    client = openai.OpenAI(
+        api_key=api_key or "",
+        base_url=url or None,
+    )
+    return client.chat.completions.create(
+        model=model,
+        messages=messages,  # type: ignore[arg-type]
+        temperature=temperature,
+    )
+
+
 # ============================================================
 # Module-level helpers & regexes
 # ============================================================
@@ -1484,32 +1517,12 @@ class SkillEvolutionService:
 
         messages = [{"role": "user", "content": prompt}]
 
-        def _call_chat() -> Any:
-            # v2 HA: read the current target URL via
-            # :func:`current_failover_url`. On attempt 1 this is the
-            # chat endpoint's primary URL; after a swap-to-backup
-            # fires, it's the backup URL. Falls back to ``base_url``
-            # (the chat endpoint) when failover is inactive — zero
-            # behavior change.
-            url = current_failover_url() or base_url
-            client = openai.OpenAI(
-                api_key=api_key or "",
-                base_url=url or None,
-            )
-            # The OpenAI Python SDK accepts plain ``{"role": ..., "content": ...}``
-            # dicts at runtime; the strict ``ChatCompletionMessageParam`` type
-            # alias isn't expressible as a dict literal without ``cast``.
-            return client.chat.completions.create(
-                model=resolved_model,
-                messages=messages,  # type: ignore[arg-type]
-                temperature=0.7,
-            )
-
         try:
-            # v2 HA: wrap in the shared raw-SDK facade. The
+            # v2 HA: route through the shared raw-SDK facade. The
             # ``base_url_backup`` plumbed through ``_llm_config`` by
             # ``daemon/manager.py`` participates in the same
             # HA budget-split predicate as the LangChain sites.
+            # See ``daemon.services.llm_failover``.
             failover_config = {
                 "base_url": base_url,
                 "base_url_backup": self._llm_config.get("base_url_backup"),
@@ -1517,7 +1530,13 @@ class SkillEvolutionService:
             }
             response = await asyncio.to_thread(
                 invoke_raw_with_failover,
-                _call_chat,
+                lambda: _do_chat_call(
+                    model=resolved_model,
+                    base_url=base_url,
+                    api_key=api_key,
+                    messages=messages,
+                    temperature=0.7,
+                ),
                 failover_config,
             )
         except Exception as e:

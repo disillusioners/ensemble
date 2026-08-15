@@ -570,13 +570,9 @@ class ChildReportsService:
         
         conversation = "\n".join(conversation_text)
         
-        # Create LLM client for summarization using the same config pattern
-        # Filter model_vision from config to avoid noisy LangChain warnings.
-        # ``base_url_backup`` threaded through for config-surface uniformity;
-        # consumed by the HA facade (``wrap_langchain_failover`` below).
-        # See ``LLMConfig.base_url_backup`` in ``daemon/config.py`` for the
-        # full rationale, and ``daemon/services/llm_failover.py`` for the
-        # shared retry+failover machinery.
+        # ``base_url_backup`` threaded through for config-surface
+        # uniformity; the HA facade reads it from the raw dict. See
+        # ``daemon/services/llm_failover.py``.
         llm_config = {
             "base_url": self._config.llm.base_url,
             "base_url_backup": self._config.llm.base_url_backup,
@@ -585,15 +581,11 @@ class ChildReportsService:
             "temperature": 0.3,  # Lower temperature for more focused summaries
             "default_headers": {"x-proxy-app": "ensemble"},
         }
-        # F1 kwarg hygiene: clean INSIDE the constructor call only —
-        # the facade needs the RAW dict to read ``base_url_backup``.
-        # (Pre-cleaning ``llm_config`` here would strip the backup
-        # before the facade sees it and silently kill failover.)
+        # F1: clean at constructor only — facade needs the RAW dict.
+        # See ``daemon.services.llm_failover`` (F1 kwarg hygiene).
         llm = ThinkingChatOpenAI(**clean_llm_config(dict(llm_config)))
-        # v2 HA: wrap invoke with FailoverController + tenacity
-        # retry-with-failover via the shared facade. When
-        # ``base_url_backup`` is unset the wrapper is a no-op over
-        # the same shape v1 uses — zero behavior change.
+        # v2 HA: route through the shared facade. See
+        # ``daemon.services.llm_failover``.
         llm_wrapper = wrap_langchain_failover(llm, llm_config)
 
         summarization_prompt = f"""Summarize what this agent accomplished in 2-3 sentences. Focus on the outcomes and key actions taken, not the process.
@@ -604,14 +596,18 @@ Agent conversation:
 Provide a concise summary:"""
 
         try:
-            # v2 review Fix 4: cap the wall-clock time of this invoke.
-            # The HA facade adds bounded retry (up to 5 attempts ×
-            # request_timeout) with no outer cap — worst case 20+ min
-            # for a summarization that is a nice-to-have. 30s matches
-            # the sibling sites (title_generation: 30.0,
-            # ReportRepairConfig.timeout_seconds default: 30).
-            # ``asyncio.TimeoutError`` lands in the ``except Exception``
-            # below, preserving the graceful count-fallback semantics.
+            # Belt-and-braces: the 30s ``asyncio.wait_for`` is a
+            # backstop that cancels the inner task on timeout.
+            # The REAL cap home is the facade's
+            # ``wall_clock_cap_s`` (tenacity ``stop_after_delay``
+            # inside the retry loop) — see
+            # ``daemon.services.llm_failover`` docstring "Wall-clock
+            # cap". Belt-and-braces decision: keep the site-level
+            # cap so a future site bypass of the facade still gets
+            # cancellation; the facade cap is the primary line of
+            # defense. ``asyncio.TimeoutError`` lands in the
+            # ``except Exception`` below, preserving the graceful
+            # count-fallback semantics.
             response = await asyncio.wait_for(
                 asyncio.to_thread(
                     llm_wrapper.invoke,
@@ -1184,14 +1180,10 @@ Provide a concise summary:"""
 
         timeout = config.timeout_seconds
         try:
-            # Mirror the ``_summarize_instance`` pattern above in this
-            # module: build a manual dict, clean it, and construct via
-            # ThinkingChatOpenAI. ``base_url_backup`` threaded through
-            # for config-surface uniformity; consumed by the HA facade
-            # (``wrap_langchain_failover`` below). See
-            # ``LLMConfig.base_url_backup`` in ``daemon/config.py`` and
-            # ``daemon/services/llm_failover.py`` for the shared
-            # retry+failover machinery.
+            # Mirror ``_summarize_instance`` (above) — manual dict
+            # + ``clean_llm_config`` at the constructor only; the
+            # facade reads ``base_url_backup`` from the raw dict.
+            # See ``daemon.services.llm_failover`` (F1 kwarg hygiene).
             llm_config = {
                 "base_url": self._config.llm.base_url,
                 "base_url_backup": self._config.llm.base_url_backup,
@@ -1200,13 +1192,22 @@ Provide a concise summary:"""
                 "temperature": 0.3,
                 "default_headers": {"x-proxy-app": "ensemble"},
             }
-            cleaned = clean_llm_config(llm_config)
-            llm = ThinkingChatOpenAI(**cleaned)
-            # v2 HA: wrap invoke with FailoverController + tenacity
-            # retry-with-failover via the shared facade. When
-            # ``base_url_backup`` is unset the wrapper is a no-op over
-            # the same shape v1 uses — zero behavior change.
-            llm_wrapper = wrap_langchain_failover(llm, llm_config)
+            # Defensive ``dict()`` wrap matches the 4 sibling sites
+            # (``_summarize_instance``, ``_generate_and_broadcast_title``,
+            # ``extract_keywords``, ``_call_summarization_llm``) — the
+            # local ``llm_config`` name invariantly refers to the
+            # raw (backup-bearing) dict even if a future
+            # ``clean_llm_config`` implementation mutates in place.
+            llm = ThinkingChatOpenAI(**clean_llm_config(dict(llm_config)))
+            # v2 HA: route through the shared facade. See
+            # ``daemon.services.llm_failover``. ``wall_clock_cap_s``
+            # is the operator-tunable knob from
+            # ``ReportRepairConfig``; the site-level wait_for below
+            # is a belt-and-braces backstop (cancels the inner
+            # task on timeout) — the real cap is the facade.
+            llm_wrapper = wrap_langchain_failover(
+                llm, llm_config, wall_clock_cap_s=timeout,
+            )
 
             response = await asyncio.wait_for(
                 asyncio.to_thread(

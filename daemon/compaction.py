@@ -991,32 +991,30 @@ class ContextCompactor:
         else:
             llm_config = self.llm_config_with_headers
 
-        # Strip model_vision — compaction summarization is text-only,
-        # vision model is irrelevant. Also strip ``base_url_backup`` —
-        # threaded through ``llm_config_with_headers`` from the manager
-        # but MUST NOT reach ``ChatOpenAI(**cfg)`` (F1 lesson, see
-        # ``daemon.graph.clean_llm_config``). The facade re-reads
-        # ``base_url_backup`` from the original ``llm_config_with_headers``
-        # below to wire the FailoverController.
-        llm_config = clean_llm_config(llm_config)
+        # F1: clean at constructor only — facade needs the RAW dict.
+        # See ``daemon.services.llm_failover`` (F1 kwarg hygiene).
+        # ``clean_llm_config(dict(...))`` returns a NEW dict, so
+        # the local ``llm_config`` (with backup) survives for the
+        # facade call below.
+        llm = ThinkingChatOpenAI(**clean_llm_config(dict(llm_config)))
+        # v2 HA: route through the shared facade. See
+        # ``daemon.services.llm_failover``.
+        llm_wrapper = wrap_langchain_failover(llm, llm_config)
 
-        llm = ThinkingChatOpenAI(**llm_config)
-        # v2 HA: wrap invoke with FailoverController + tenacity
-        # retry-with-failover via the shared facade. When
-        # ``base_url_backup`` is unset the wrapper is a no-op over
-        # the same shape v1 uses — zero behavior change.
-        llm_wrapper = wrap_langchain_failover(llm, self.llm_config_with_headers)
-
-        # v2 review Fix 4: cap the wall-clock time of this invoke.
-        # Reactive compaction runs in-turn inside agent_node — an
-        # uncapped HA retry ladder (bounded retry × request_timeout,
-        # no outer cap) would stall the agent's turn for 20+ min.
-        # 30s matches the sibling sites (title_generation: 30.0,
-        # ReportRepairConfig.timeout_seconds default: 30). The
-        # ``asyncio.TimeoutError`` propagates to the caller's
-        # ``except Exception`` blocks (e.g. ``compact_messages``'s
-        # summarization-failed → truncation fallback at the :741
-        # handler), preserving graceful degradation.
+        # Belt-and-braces: the 30s ``asyncio.wait_for`` is a
+        # backstop that cancels the inner task on timeout.
+        # The REAL cap home is the facade's
+        # ``wall_clock_cap_s`` (tenacity ``stop_after_delay``
+        # inside the retry loop) — see
+        # ``daemon.services.llm_failover`` docstring "Wall-clock
+        # cap". Belt-and-braces decision: keep the site-level
+        # cap so a future site bypass of the facade still gets
+        # cancellation; the facade cap is the primary line of
+        # defense. The ``asyncio.TimeoutError`` propagates to
+        # the caller's ``except Exception`` blocks (e.g.
+        # ``compact_messages``'s summarization-failed →
+        # truncation fallback at the :741 handler),
+        # preserving graceful degradation.
         response = await asyncio.wait_for(
             asyncio.to_thread(
                 llm_wrapper.invoke,

@@ -358,28 +358,23 @@ async def extract_keywords(
         from ..graph import ThinkingChatOpenAI, clean_llm_config
         from .llm_failover import wrap_langchain_failover
 
+        # ``base_url_backup`` threaded through for config-surface
+        # uniformity; the HA facade reads it from the raw dict. See
+        # ``daemon/services/llm_failover.py``.
         llm_config = {
             "base_url": config.llm.base_url,
-            # Threaded for config-surface uniformity; consumed by
-            # ``wrap_langchain_failover`` (HA-failover facade) below.
-            # See ``LLMConfig.base_url_backup`` in ``daemon/config.py``
-            # and ``daemon/services/llm_failover.py``.
             "base_url_backup": config.llm.base_url_backup,
             "api_key": config.llm.api_key,
             "model": model,
             "temperature": 0.0,
             "default_headers": {"x-proxy-app": "ensemble"},
         }
-        # F1 kwarg hygiene: clean INSIDE the constructor call only —
-        # the facade needs the RAW dict to read ``base_url_backup``.
-        # (Pre-cleaning ``llm_config`` here would strip the backup
-        # before the facade sees it and silently kill failover.)
+        # F1: clean at constructor only — facade needs the RAW dict.
+        # See ``daemon.services.llm_failover`` (F1 kwarg hygiene).
         llm = ThinkingChatOpenAI(**clean_llm_config(dict(llm_config)))
-        # v2 HA: wrap invoke with FailoverController + tenacity
-        # retry-with-failover via the shared facade. When
-        # ``base_url_backup`` is unset the wrapper is a no-op over
-        # the same shape v1 uses — zero behavior change.
-        llm_wrapper = wrap_langchain_failover(llm, llm_config)
+        # v2 HA: route through the shared facade. See
+        # ``daemon.services.llm_failover``.
+        llm_wrapper = wrap_langchain_failover(llm, llm_config, wall_clock_cap_s=timeout_s)
 
         messages = [
             SystemMessage(content=_LLM_PROMPT_SYSTEM),
@@ -388,6 +383,15 @@ async def extract_keywords(
             )),
         ]
 
+        # Belt-and-braces: the ``asyncio.wait_for`` is a backstop
+        # that cancels the inner task on timeout. The REAL cap
+        # home is the facade's ``wall_clock_cap_s`` (tenacity
+        # ``stop_after_delay`` inside the retry loop) — see
+        # ``daemon.services.llm_failover`` docstring "Wall-clock
+        # cap". Belt-and-braces decision: keep the site-level cap
+        # so a future site bypass of the facade still gets
+        # cancellation; the facade cap is the primary line of
+        # defense.
         response = await asyncio.wait_for(
             asyncio.to_thread(llm_wrapper.invoke, messages),
             timeout=timeout_s,
