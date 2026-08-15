@@ -980,7 +980,8 @@ class ContextCompactor:
             LLM response content as string.
         """
         from .graph import ThinkingChatOpenAI, clean_llm_config
-        
+        from .services.llm_failover import wrap_langchain_failover
+
         # Use summarization model override if set, otherwise use session model
         if context.config.summarization_model:
             llm_config = {
@@ -990,13 +991,24 @@ class ContextCompactor:
         else:
             llm_config = self.llm_config_with_headers
 
-        # Strip model_vision — compaction summarization is text-only, vision model is irrelevant
+        # Strip model_vision — compaction summarization is text-only,
+        # vision model is irrelevant. Also strip ``base_url_backup`` —
+        # threaded through ``llm_config_with_headers`` from the manager
+        # but MUST NOT reach ``ChatOpenAI(**cfg)`` (F1 lesson, see
+        # ``daemon.graph.clean_llm_config``). The facade re-reads
+        # ``base_url_backup`` from the original ``llm_config_with_headers``
+        # below to wire the FailoverController.
         llm_config = clean_llm_config(llm_config)
 
         llm = ThinkingChatOpenAI(**llm_config)
-        
+        # v2 HA: wrap invoke with FailoverController + tenacity
+        # retry-with-failover via the shared facade. When
+        # ``base_url_backup`` is unset the wrapper is a no-op over
+        # the same shape v1 uses — zero behavior change.
+        llm_wrapper = wrap_langchain_failover(llm, self.llm_config_with_headers)
+
         response = await asyncio.to_thread(
-            llm.invoke,
+            llm_wrapper.invoke,
             [
                 SystemMessage(
                     content="You are a helpful assistant that summarizes conversations "

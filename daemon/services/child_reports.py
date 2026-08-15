@@ -23,6 +23,7 @@ from ..registry import get_registry
 from ..write_pause_guard import WriteGuardSession
 from .context_messages import _resolve_tree_root_id
 from .lifecycle_hooks import LifecycleHookContext, dispatch_lifecycle_hooks
+from .llm_failover import wrap_langchain_failover
 from .job_queue_service import TERMINAL_STATUSES
 from .main_loop_bridge import MainLoopBridge
 
@@ -572,8 +573,10 @@ class ChildReportsService:
         # Create LLM client for summarization using the same config pattern
         # Filter model_vision from config to avoid noisy LangChain warnings.
         # ``base_url_backup`` threaded through for config-surface uniformity;
-        # NOT consumed here. See ``LLMConfig.base_url_backup`` in
-        # ``daemon/config.py`` for the full rationale.
+        # consumed by the HA facade (``wrap_langchain_failover`` below).
+        # See ``LLMConfig.base_url_backup`` in ``daemon/config.py`` for the
+        # full rationale, and ``daemon/services/llm_failover.py`` for the
+        # shared retry+failover machinery.
         llm_config = {
             "base_url": self._config.llm.base_url,
             "base_url_backup": self._config.llm.base_url_backup,
@@ -582,11 +585,17 @@ class ChildReportsService:
             "temperature": 0.3,  # Lower temperature for more focused summaries
             "default_headers": {"x-proxy-app": "ensemble"},
         }
-        # Remove model_vision if present (summarization doesn't need vision)
-        llm_config = clean_llm_config(llm_config)
-        
-        llm = ThinkingChatOpenAI(**llm_config)
-        
+        # F1 kwarg hygiene: clean INSIDE the constructor call only —
+        # the facade needs the RAW dict to read ``base_url_backup``.
+        # (Pre-cleaning ``llm_config`` here would strip the backup
+        # before the facade sees it and silently kill failover.)
+        llm = ThinkingChatOpenAI(**clean_llm_config(dict(llm_config)))
+        # v2 HA: wrap invoke with FailoverController + tenacity
+        # retry-with-failover via the shared facade. When
+        # ``base_url_backup`` is unset the wrapper is a no-op over
+        # the same shape v1 uses — zero behavior change.
+        llm_wrapper = wrap_langchain_failover(llm, llm_config)
+
         summarization_prompt = f"""Summarize what this agent accomplished in 2-3 sentences. Focus on the outcomes and key actions taken, not the process.
 
 Agent conversation:
@@ -596,7 +605,7 @@ Provide a concise summary:"""
 
         try:
             response = await asyncio.to_thread(
-                llm.invoke,
+                llm_wrapper.invoke,
                 [SystemMessage(content="You are a helpful assistant that summarizes agent conversations concisely."),
                  HumanMessage(content=summarization_prompt)]
             )
@@ -1166,9 +1175,12 @@ Provide a concise summary:"""
         try:
             # Mirror the ``_summarize_instance`` pattern above in this
             # module: build a manual dict, clean it, and construct via
-            # ThinkingChatOpenAI. ``base_url_backup`` threaded through for
-            # config-surface uniformity; NOT consumed here. See
-            # ``LLMConfig.base_url_backup`` in ``daemon/config.py``.
+            # ThinkingChatOpenAI. ``base_url_backup`` threaded through
+            # for config-surface uniformity; consumed by the HA facade
+            # (``wrap_langchain_failover`` below). See
+            # ``LLMConfig.base_url_backup`` in ``daemon/config.py`` and
+            # ``daemon/services/llm_failover.py`` for the shared
+            # retry+failover machinery.
             llm_config = {
                 "base_url": self._config.llm.base_url,
                 "base_url_backup": self._config.llm.base_url_backup,
@@ -1179,10 +1191,15 @@ Provide a concise summary:"""
             }
             cleaned = clean_llm_config(llm_config)
             llm = ThinkingChatOpenAI(**cleaned)
+            # v2 HA: wrap invoke with FailoverController + tenacity
+            # retry-with-failover via the shared facade. When
+            # ``base_url_backup`` is unset the wrapper is a no-op over
+            # the same shape v1 uses — zero behavior change.
+            llm_wrapper = wrap_langchain_failover(llm, llm_config)
 
             response = await asyncio.wait_for(
                 asyncio.to_thread(
-                    llm.invoke,
+                    llm_wrapper.invoke,
                     [
                         SystemMessage(
                             content="You are a report summarizer. Compose the single best report message from the given child agent messages."

@@ -60,7 +60,71 @@ from typing import Any
 
 import openai
 
+from .llm_failover import current_failover_url, invoke_raw_with_failover
+
 logger = logging.getLogger(__name__)
+
+
+def _do_chat_call(
+    chat_model: str,
+    chat_base_url: str | None,
+    chat_api_key: str | None,
+    system_prompt: str,
+    user_prompt: str,
+) -> Any:
+    """Construct a fresh ``openai.OpenAI`` client and run a chat-completion.
+
+    Module-level helper (NOT a nested closure) so the HA facade can
+    re-enter it on every retry attempt — the closure-pattern with
+    late-bound defaults would risk capturing the wrong URL across
+    retries. The URL is read at call time from
+    :func:`current_failover_url` (a thread-local the facade
+    updates per attempt) so each retry constructs the client
+    against the correct endpoint.
+
+    When failover is inactive, ``current_failover_url()`` returns
+    ``None`` and we fall back to ``chat_base_url`` (the chat
+    endpoint) — same behavior as pre-v2 (zero behavior change).
+    """
+    url = current_failover_url() or chat_base_url
+    client = openai.OpenAI(
+        api_key=chat_api_key or "",
+        base_url=url or None,
+    )
+    return client.chat.completions.create(
+        model=chat_model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0.7,
+    )
+
+
+def _do_embed_call(
+    embed_model: str,
+    embed_base_url: str | None,
+    embed_api_key: str | None,
+    text: str,
+) -> Any:
+    """Construct a fresh ``openai.OpenAI`` client and run an embedding call.
+
+    Module-level helper for the embeddings path. Mirror of
+    :func:`_do_chat_call`; same per-attempt URL re-read pattern via
+    :func:`current_failover_url`. See the embedding-endpoint guard in
+    ``daemon.services.llm_failover.invoke_raw_with_failover``:
+    embedding failover is only correct when ``embed_base_url`` is the
+    chat endpoint (i.e. ``config.embedding_base_url`` is unset and
+    the chat ``base_url`` is used). Sites configure this via
+    ``llm_config["base_url_backup"]`` plumbed through from
+    ``daemon/manager.py``.
+    """
+    url = current_failover_url() or embed_base_url
+    client = openai.OpenAI(
+        api_key=embed_api_key or "",
+        base_url=url or None,
+    )
+    return client.embeddings.create(model=embed_model, input=text)
 
 
 # Min/max trigger queries per skill. The LLM is asked to produce
@@ -190,21 +254,33 @@ class SkillEmbeddingService:
             chat_base_url = self._resolve_chat_base_url()
             chat_api_key = self._resolve_chat_api_key()
 
-            def _call_chat() -> Any:
-                client = openai.OpenAI(
-                    api_key=chat_api_key or "",
-                    base_url=chat_base_url or None,
-                )
-                return client.chat.completions.create(
-                    model=chat_model,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    temperature=0.7,
-                )
-
-            response = await asyncio.to_thread(_call_chat)
+            # v2 HA: wrap the raw ``openai.OpenAI`` SDK call in the
+            # shared HA facade. ``invoke_raw_with_failover`` builds a
+            # tenacity retry pipeline with the v1 budget-split
+            # predicate (transient + timeout + IndexError-gated-on-backup).
+            # When ``base_url_backup`` is unset the facade is a no-op over
+            # the same shape the LangChain facade uses — zero behavior
+            # change. The factory is re-entered on every retry attempt;
+            # each entry reads the current target URL via
+            # ``current_failover_url()`` so a swap is observable as a
+            # change in the URL passed to ``openai.OpenAI(...)``.
+            chat_failover_config = {
+                "base_url": chat_base_url,
+                "base_url_backup": self.llm_config.get("base_url_backup"),
+                "api_key": chat_api_key,
+            }
+            chat_callable = lambda: _do_chat_call(
+                chat_model=chat_model,
+                chat_base_url=chat_base_url,
+                chat_api_key=chat_api_key,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+            )
+            response = await asyncio.to_thread(
+                invoke_raw_with_failover,
+                chat_callable,
+                chat_failover_config,
+            )
             raw_text = self._extract_chat_content(response)
             queries = self._parse_trigger_queries(raw_text)
             return self._clamp_queries(queries)
@@ -257,14 +333,44 @@ class SkillEmbeddingService:
             raise ValueError("Cannot embed empty text")
 
         def _call_embed() -> Any:
-            client = openai.OpenAI(
-                api_key=api_key or "",
-                base_url=base_url or None,
+            return _do_embed_call(
+                embed_model=model,
+                embed_base_url=base_url,
+                embed_api_key=api_key,
+                text=text,
             )
-            return client.embeddings.create(model=model, input=text)
 
         try:
-            response = await asyncio.to_thread(_call_embed)
+            # v2 HA: wrap in the shared raw-SDK facade. Embedding
+            # failover is correct ONLY when ``embed_base_url`` is the
+            # chat endpoint (see :func:`_do_embed_call` docstring and
+            # ``daemon.services.llm_failover.invoke_raw_with_failover``).
+            embed_backup = self.llm_config.get("base_url_backup")
+            # Embedding-endpoint guard: an explicit
+            # ``embedding_base_url`` that DIFFERS from the chat
+            # ``base_url`` means the chat backup is the wrong
+            # endpoint for embedding calls — a swap would hit a
+            # different API with different creds and possibly a
+            # different model. Short-circuit: drop the backup so
+            # the facade skips failover entirely on this path (the
+            # call retries on the embedding endpoint only).
+            embedding_override = getattr(self.config, "embedding_base_url", None)
+            if (
+                embedding_override
+                and embedding_override != self.llm_config.get("base_url")
+            ):
+                embed_backup = None
+            embed_failover_config = {
+                "base_url": base_url,
+                "base_url_backup": embed_backup,
+                "api_key": api_key,
+            }
+            embed_callable = lambda: _call_embed()
+            response = await asyncio.to_thread(
+                invoke_raw_with_failover,
+                embed_callable,
+                embed_failover_config,
+            )
         except Exception as e:
             raise RuntimeError(
                 f"Embedding API call failed: {e}"

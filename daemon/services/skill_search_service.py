@@ -85,6 +85,8 @@ from typing import Any
 
 import openai
 
+from .llm_failover import current_failover_url, invoke_raw_with_failover
+
 logger = logging.getLogger(__name__)
 
 
@@ -720,22 +722,60 @@ class SkillSearchService:
             f"Candidate skills:\n" + "\n".join(candidate_lines)
         )
 
-        if client is None:
-            client = openai.OpenAI(
-                api_key=self._llm_config.get("api_key") or "",
-                base_url=self._llm_config.get("base_url") or None,
-            )
         model = self._llm_config.get("model") or "gpt-4o-mini"
 
-        response = await asyncio.to_thread(
-            client.chat.completions.create,
-            model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.2,
-        )
+        if client is None:
+            # v2 HA: wrap the openai.OpenAI call in the shared raw-SDK
+            # facade. The factory is re-entered on every retry attempt;
+            # each entry reads the current target URL via
+            # ``current_failover_url()`` so a swap is observable as a
+            # change in the URL passed to ``openai.OpenAI(...)``. When
+            # ``base_url_backup`` is unset the facade is a no-op over
+            # the same shape the LangChain facade uses — zero behavior
+            # change.
+            primary_url = self._llm_config.get("base_url")
+            backup_url = self._llm_config.get("base_url_backup")
+            failover_config = {
+                "base_url": primary_url,
+                "base_url_backup": backup_url,
+                "api_key": self._llm_config.get("api_key"),
+            }
+
+            def _do_call() -> Any:
+                # Read the URL per-attempt so the failover swap is
+                # observable across retries.
+                url = current_failover_url() or primary_url
+                c = openai.OpenAI(
+                    api_key=self._llm_config.get("api_key") or "",
+                    base_url=url or None,
+                )
+                return c.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    temperature=0.2,
+                )
+
+            response = await asyncio.to_thread(
+                invoke_raw_with_failover,
+                _do_call,
+                failover_config,
+            )
+        else:
+            # Test path: a ``MagicMock`` client was injected — bypass
+            # the facade entirely. The injection pattern is preserved
+            # for unit tests that patch ``openai.OpenAI``.
+            response = await asyncio.to_thread(
+                client.chat.completions.create,
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.2,
+            )
 
         raw_text = self._extract_chat_content(response)
         parsed = self._parse_llm_selection(raw_text)

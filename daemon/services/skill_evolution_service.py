@@ -48,6 +48,8 @@ from typing import Any, Optional
 
 import openai
 
+from .llm_failover import current_failover_url, invoke_raw_with_failover
+
 logger = logging.getLogger(__name__)
 
 
@@ -1483,9 +1485,16 @@ class SkillEvolutionService:
         messages = [{"role": "user", "content": prompt}]
 
         def _call_chat() -> Any:
+            # v2 HA: read the current target URL via
+            # :func:`current_failover_url`. On attempt 1 this is the
+            # chat endpoint's primary URL; after a swap-to-backup
+            # fires, it's the backup URL. Falls back to ``base_url``
+            # (the chat endpoint) when failover is inactive — zero
+            # behavior change.
+            url = current_failover_url() or base_url
             client = openai.OpenAI(
                 api_key=api_key or "",
-                base_url=base_url or None,
+                base_url=url or None,
             )
             # The OpenAI Python SDK accepts plain ``{"role": ..., "content": ...}``
             # dicts at runtime; the strict ``ChatCompletionMessageParam`` type
@@ -1497,7 +1506,20 @@ class SkillEvolutionService:
             )
 
         try:
-            response = await asyncio.to_thread(_call_chat)
+            # v2 HA: wrap in the shared raw-SDK facade. The
+            # ``base_url_backup`` plumbed through ``_llm_config`` by
+            # ``daemon/manager.py`` participates in the same
+            # HA budget-split predicate as the LangChain sites.
+            failover_config = {
+                "base_url": base_url,
+                "base_url_backup": self._llm_config.get("base_url_backup"),
+                "api_key": api_key,
+            }
+            response = await asyncio.to_thread(
+                invoke_raw_with_failover,
+                _call_chat,
+                failover_config,
+            )
         except Exception as e:
             logger.warning(
                 f"[SkillEvolution] LLM call failed: {e!s}"

@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..graph import ThinkingChatOpenAI, clean_llm_config
 from ..utils import parse_think_tags
+from .llm_failover import wrap_langchain_failover
 
 if TYPE_CHECKING:
     from ..config import Config
@@ -85,8 +86,10 @@ class TitleGenerationService:
             # Use dedicated title model (falls back to main model if not configured)
             # Filter model_vision from config to avoid noisy LangChain warnings.
             # ``base_url_backup`` threaded through for config-surface uniformity;
-            # NOT consumed here. See ``LLMConfig.base_url_backup`` in
-            # ``daemon/config.py`` for the full rationale.
+            # consumed by the HA facade (``wrap_langchain_failover`` below).
+            # See ``LLMConfig.base_url_backup`` in ``daemon/config.py`` for the
+            # full rationale, and ``daemon/services/llm_failover.py`` for the
+            # shared retry+failover machinery.
             llm_config = {
                 "base_url": self._config.llm.base_url,
                 "base_url_backup": self._config.llm.base_url_backup,
@@ -95,10 +98,23 @@ class TitleGenerationService:
                 "temperature": 0.3,  # Lower temperature for more focused titles
                 "default_headers": {"x-proxy-app": "ensemble"},
             }
-            # Remove model_vision if present (title generation doesn't need vision)
-            llm_config = clean_llm_config(llm_config)
-
-            llm = ThinkingChatOpenAI(**llm_config)
+            # F1 kwarg hygiene: ``clean_llm_config`` strips
+            # ``model_vision`` + ``base_url_backup``. Clean at the
+            # CONSTRUCTOR call only — this site passes the RAW dict
+            # to ``wrap_langchain_failover`` below, which re-reads
+            # ``base_url_backup`` from the original dict to wire the
+            # FailoverController. (Pre-cleaning ``llm_config`` would
+            # strip the backup BEFORE the facade sees it and
+            # silently kill failover — same convention as
+            # compaction.py / child_reports._summarize_instance.)
+            llm = ThinkingChatOpenAI(**clean_llm_config(dict(llm_config)))
+            # v2 HA: wrap invoke/ainvoke with FailoverController + tenacity
+            # retry-with-failover. Reuses v1 ``FailoverController`` from
+            # ``daemon.llm_error_classifier`` via
+            # ``daemon.services.llm_failover.wrap_langchain_failover``.
+            # When ``base_url_backup`` is unset, the wrapper is a no-op
+            # over the same shape v1 hot path uses — zero behavior change.
+            llm_wrapper = wrap_langchain_failover(llm, llm_config)
 
             # The completion safety-net path (daemon/services/child_reports.py:
             # _trigger_title_generation) fires when Path 1 (first message) failed,
@@ -118,10 +134,12 @@ User message:
 Title:"""
 
             try:
-                # One-shot with 30s timeout - title generation is not critical
+                # One-shot with 30s timeout - title generation is not critical.
+                # ``llm_wrapper.invoke`` carries the v2 HA retry+failover
+                # machinery from ``daemon.services.llm_failover``.
                 response = await asyncio.wait_for(
                     asyncio.to_thread(
-                        llm.invoke,
+                        llm_wrapper.invoke,
                         [SystemMessage(content="You are a helpful assistant that generates concise instance titles."),
                          HumanMessage(content=title_prompt)]
                     ),

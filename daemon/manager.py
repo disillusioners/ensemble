@@ -372,9 +372,14 @@ class InstanceManager:
 
         # Initialize context compactor
         if self.config.compaction.enabled:
-            # ``base_url_backup`` threaded through for config-surface
-            # uniformity; NOT consumed here. See ``LLMConfig.base_url_backup``
-            # in ``daemon/config.py`` for the full rationale.
+            # ``base_url_backup`` threaded through to the
+            # ``ContextCompactor`` config; consumed by the
+            # v2 HA facade (``wrap_langchain_failover``) at
+            # summarize-call time. See
+            # ``LLMConfig.base_url_backup`` in ``daemon/config.py``
+            # for the full rationale, and
+            # ``daemon/services/llm_failover.py`` for the shared
+            # retry+failover machinery.
             self._compactor = ContextCompactor(
                 config=self.config.compaction,
                 llm_config={
@@ -831,9 +836,13 @@ class InstanceManager:
             self._blueprint_embedding_repo = create_blueprint_embedding_repository(
                 engine=self._engine, create_tables=False,
             )
-            # ``base_url_backup`` threaded through for config-surface
-            # uniformity; NOT consumed here. See ``LLMConfig.base_url_backup``
-            # in ``daemon/config.py`` for the full rationale.
+            # ``base_url_backup`` threaded through to the
+            # ``SkillEmbeddingService`` config for blueprint embeddings;
+            # consumed by the v2 HA facade at chat/embed-call time.
+            # See ``LLMConfig.base_url_backup`` in ``daemon/config.py``
+            # for the full rationale, and
+            # ``daemon/services/llm_failover.py`` for the shared
+            # retry+failover machinery.
             blueprint_llm_config: dict[str, Any] = {
                 "base_url": self.config.llm.base_url,
                 "base_url_backup": self.config.llm.base_url_backup,
@@ -994,9 +1003,13 @@ class InstanceManager:
 
         # Skill Evolution services (Phase 2 — wire through to manager facade)
         if self.config.skill_evolution is not None:
-            # ``base_url_backup`` threaded through for config-surface
-            # uniformity; NOT consumed here. See ``LLMConfig.base_url_backup``
-            # in ``daemon/config.py`` for the full rationale.
+            # ``base_url_backup`` threaded through to the
+            # ``SkillEmbeddingService`` + ``SkillSearchService``
+            # configs; consumed by the v2 HA facade at chat-call
+            # time. See ``LLMConfig.base_url_backup`` in
+            # ``daemon/config.py`` for the full rationale, and
+            # ``daemon/services/llm_failover.py`` for the shared
+            # retry+failover machinery.
             skill_llm_config: dict[str, Any] = {
                 "base_url": self.config.llm.base_url,
                 "base_url_backup": self.config.llm.base_url_backup,
