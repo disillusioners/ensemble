@@ -842,7 +842,7 @@ class TestFacadeDelegationPattern:
             assert result["paused_ids"] == ["instance-123", "child-1"]
             assert result["skipped_ids"] == ["child-2"]
             manager._lifecycle_service.pause_instance_cascade.assert_called_once_with(
-                "instance-123"
+                "instance-123", suspension_reason=None
             )
 
         import asyncio
