@@ -1,13 +1,20 @@
 """Unit tests for MCP service — lazy preload + session provider."""
 
 import asyncio
+import logging
+import time
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import daemon.services.mcp_service as mcp_service_module
 from langchain_core.tools import ToolException
 
 from daemon.mcp.models import McpToolSchema
-from daemon.services.mcp_service import McpService, _McpSessionProviderImpl
+from daemon.services.mcp_service import (
+    EMPTY_DISCOVERY_RETRY_THROTTLE_S,
+    McpService,
+    _McpSessionProviderImpl,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -52,6 +59,28 @@ def _make_schema(
         input_schema=input_schema or {"type": "object", "properties": {}},
         server_name=server_name,
     )
+
+
+def _make_discovery_session(tool_names: list[str]):
+    """Create a mock MCP session for cold-discovery tests.
+
+    ``_discover_schemas_cold`` calls ``await session.list_tools()`` and
+    reads ``.tools`` off the result — each tool exposing ``name``,
+    ``description`` and ``inputSchema``. Note: ``name`` is assigned as
+    an attribute AFTER construction — passing ``name=`` to the
+    MagicMock constructor sets the mock's repr name, not a ``.name``
+    attribute.
+    """
+    tools = []
+    for n in tool_names:
+        t = MagicMock()
+        t.name = n
+        t.description = f"Tool {n}"
+        t.inputSchema = {"type": "object", "properties": {}}
+        tools.append(t)
+    session = MagicMock()
+    session.list_tools = AsyncMock(return_value=MagicMock(tools=tools))
+    return session
 
 
 # ---------------------------------------------------------------------------
@@ -512,8 +541,23 @@ class TestSchemaCache:
         assert service._schema_cache["test-server"] is cold_schemas
 
     @pytest.mark.asyncio
-    async def test_cold_discovery_failure_returns_empty_list(self, service):
-        """Cold discovery failure (connect raises) returns [] — not raised."""
+    async def test_cold_discovery_failure_returns_empty_list(
+        self, service, monkeypatch
+    ):
+        """Cold discovery failure (connect raises) returns [] — not raised.
+
+        Fix 1: the empty result must NOT be cached (negative-cache
+        poisoning) — only the throttle timestamp is recorded.
+        """
+        # Zero the retry delay: this test sits outside
+        # TestSchemaDiscoveryRetry (whose autouse _fast_retry_delay
+        # fixture applies there), and 'Connection refused' is non-auth,
+        # so without this the single retry would take a real 1.5s sleep.
+        monkeypatch.setattr(
+            mcp_service_module,
+            "SCHEMA_DISCOVERY_CONNECT_RETRY_DELAY_S",
+            0,
+        )
         server = _make_server(name="test-server", is_builtin=False)
 
         mock_conn_mgr = MagicMock()
@@ -527,7 +571,10 @@ class TestSchemaCache:
             result = await service.get_schemas_for_server(server)
 
         assert result == []
-        assert service._schema_cache["test-server"] == []
+        # Empty discovery is never cached...
+        assert "test-server" not in service._schema_cache
+        # ...but the attempt IS remembered for the retry throttle.
+        assert "test-server" in service._last_empty_discovery
 
     @pytest.mark.asyncio
     async def test_invalidate_schema_cache_specific_server(self, service):
@@ -574,6 +621,327 @@ class TestSchemaCache:
         assert len(results) == 2
         assert all(len(r) == 1 for r in results)
         assert call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# TestSchemaNegativeCache — Fix 1: empty discovery results are never cached
+# ---------------------------------------------------------------------------
+
+class TestSchemaNegativeCache:
+    """Fix 1 regression tests — negative-cache poisoning.
+
+    A transient cold-discovery failure previously wrote [] into
+    ``_schema_cache`` permanently, making ``preload_mcp_tools`` skip
+    the server (``if not schemas: continue``) for the daemon's
+    lifetime. Empty results must never be cached; only a
+    seconds-scale throttle timestamp is kept.
+    """
+
+    @pytest.mark.asyncio
+    async def test_empty_discovery_not_cached_second_call_re_discovers(self, service):
+        """Discovery returning [] once must NOT poison the cache.
+
+        First call discovers [] (not cached); after the throttle
+        window elapses, the SECOND call must re-attempt discovery and
+        succeed. Simulates production: transient 'Connection closed'
+        at boot, server healthy moments later.
+        """
+        server = _make_server(name="test-server", is_builtin=False)
+        good_schemas = [_make_schema("t1", "test-server")]
+        discover = AsyncMock(side_effect=[[], good_schemas])
+        service._discover_schemas_cold = discover
+
+        # First call: empty discovery, nothing cached.
+        result1 = await service.get_schemas_for_server(server)
+        assert result1 == []
+        assert "test-server" not in service._schema_cache
+
+        # Simulate the throttle window elapsing (Fix 1 throttle is
+        # seconds-scale; tests must not sleep 30s).
+        service._last_empty_discovery["test-server"] = (
+            time.monotonic() - EMPTY_DISCOVERY_RETRY_THROTTLE_S - 1.0
+        )
+
+        # Second call: re-attempts discovery, gets the good schemas,
+        # and caches them.
+        result2 = await service.get_schemas_for_server(server)
+        assert result2 == good_schemas
+        assert discover.await_count == 2
+        assert service._schema_cache["test-server"] is good_schemas
+
+    @pytest.mark.asyncio
+    async def test_nonempty_discovery_cached_no_rediscovery(self, service):
+        """Success path: non-empty discovery result is cached; a second
+        call is served from cache without re-discovering."""
+        server = _make_server(name="test-server", is_builtin=False)
+        good_schemas = [_make_schema("t1", "test-server")]
+        discover = AsyncMock(return_value=good_schemas)
+        service._discover_schemas_cold = discover
+
+        result1 = await service.get_schemas_for_server(server)
+        result2 = await service.get_schemas_for_server(server)
+
+        assert result1 is good_schemas
+        assert result2 is good_schemas
+        discover.assert_awaited_once_with(server)
+        assert service._schema_cache["test-server"] is good_schemas
+
+    @pytest.mark.asyncio
+    async def test_throttle_blocks_immediate_rediscovery(self, service):
+        """Second call inside the throttle window returns [] without
+        re-attempting discovery — no hot-looping a dead server."""
+        server = _make_server(name="dead-server", is_builtin=False)
+        discover = AsyncMock(return_value=[])
+        service._discover_schemas_cold = discover
+
+        result1 = await service.get_schemas_for_server(server)
+        result2 = await service.get_schemas_for_server(server)
+
+        assert result1 == []
+        assert result2 == []
+        # Only ONE discovery attempt — the second call was throttled.
+        discover.assert_awaited_once_with(server)
+
+    @pytest.mark.asyncio
+    async def test_throttle_cleared_after_success(self, service):
+        """A successful discovery clears the throttle marker — a later
+        empty result (after invalidation) starts a fresh window."""
+        server = _make_server(name="test-server", is_builtin=False)
+        discover = AsyncMock(
+            side_effect=[
+                [_make_schema("t1", "test-server")],
+                [],
+            ]
+        )
+        service._discover_schemas_cold = discover
+
+        await service.get_schemas_for_server(server)
+        assert "test-server" not in service._last_empty_discovery
+
+        service.invalidate_schema_cache("test-server")
+
+        result = await service.get_schemas_for_server(server)
+        assert result == []
+        # Fresh empty window recorded after invalidation.
+        assert "test-server" in service._last_empty_discovery
+
+
+# ---------------------------------------------------------------------------
+# TestSchemaDiscoveryRetry — Fix 2: one bounded retry on session acquisition
+# ---------------------------------------------------------------------------
+
+class TestSchemaDiscoveryRetry:
+    """Fix 2 tests — cold-discovery session acquisition retry.
+
+    The retry lives in ``_acquire_discovery_session``, mocked at the
+    connection-manager layer (never at the live-session / API layer).
+    The retry delay is patched to 0 to keep tests fast.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _fast_retry_delay(self, monkeypatch):
+        """Shrink the 1.5s retry delay to zero for tests."""
+        monkeypatch.setattr(
+            mcp_service_module,
+            "SCHEMA_DISCOVERY_CONNECT_RETRY_DELAY_S",
+            0.0,
+        )
+
+    @pytest.mark.asyncio
+    async def test_transient_connect_failure_retries_once_then_succeeds(self, service):
+        """Fix 2 retry-success: first session acquisition fails once,
+        retry succeeds → schemas discovered."""
+        server = _make_server(name="flaky-server", is_builtin=False)
+        session = _make_discovery_session(tool_names=["echo", "ping"])
+
+        mock_conn_mgr = MagicMock()
+        mock_conn_mgr.connect_instance = AsyncMock(
+            side_effect=[RuntimeError("Connection closed"), None]
+        )
+        mock_conn_mgr.get_session = MagicMock(return_value=session)
+        mock_conn_mgr.close_instance = AsyncMock()
+
+        with patch(
+            "daemon.services.mcp_service.get_mcp_connection_manager",
+            return_value=mock_conn_mgr,
+        ):
+            schemas = await service.get_schemas_for_server(server)
+
+        # Retry succeeded — schemas discovered and cached.
+        assert [s.name for s in schemas] == ["echo", "ping"]
+        assert mock_conn_mgr.connect_instance.await_count == 2
+        assert service._schema_cache["flaky-server"] is schemas
+        # The failed attempt's throwaway connection was torn down
+        # before the retry (clean-state reconnect).
+        mock_conn_mgr.close_instance.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_persistent_connect_failure_no_excess_retry(self, service):
+        """A persistently dead server attempts exactly twice (initial +
+        one retry) — bounded, never a hot loop."""
+        server = _make_server(name="dead-server", is_builtin=False)
+
+        mock_conn_mgr = MagicMock()
+        mock_conn_mgr.connect_instance = AsyncMock(
+            side_effect=RuntimeError("Connection refused")
+        )
+        mock_conn_mgr.close_instance = AsyncMock()
+
+        with patch(
+            "daemon.services.mcp_service.get_mcp_connection_manager",
+            return_value=mock_conn_mgr,
+        ):
+            schemas = await service.get_schemas_for_server(server)
+
+        assert schemas == []
+        assert mock_conn_mgr.connect_instance.await_count == 2
+        assert "dead-server" not in service._schema_cache
+
+    @pytest.mark.asyncio
+    async def test_auth_failure_fails_fast_no_retry(self, service):
+        """Fix 2 no-retry-on-auth: a 401-style error fails fast with a
+        single attempt — retrying credentials is pointless."""
+        server = _make_server(name="locked-server", is_builtin=False)
+
+        mock_conn_mgr = MagicMock()
+        mock_conn_mgr.connect_instance = AsyncMock(
+            side_effect=RuntimeError("HTTP 401 Unauthorized")
+        )
+        mock_conn_mgr.close_instance = AsyncMock()
+
+        with patch(
+            "daemon.services.mcp_service.get_mcp_connection_manager",
+            return_value=mock_conn_mgr,
+        ):
+            schemas = await service.get_schemas_for_server(server)
+
+        assert schemas == []
+        # Exactly ONE attempt — auth failures never retry.
+        assert mock_conn_mgr.connect_instance.await_count == 1
+        assert "locked-server" not in service._schema_cache
+
+    @pytest.mark.asyncio
+    async def test_session_none_retries_once_then_succeeds(self, service):
+        """The production signature: connect_instance returns OK but no
+        session is tracked (swallowed 'Connection closed') — retry
+        yields a session on the second attempt."""
+        server = _make_server(name="ghost-server", is_builtin=False)
+        session = _make_discovery_session(tool_names=["probe"])
+
+        mock_conn_mgr = MagicMock()
+        mock_conn_mgr.connect_instance = AsyncMock(return_value=None)
+
+        def _get_session(instance_id, server_name):
+            calls.append(1)
+            if len(calls) >= 2:
+                return session
+            return None
+
+        calls: list[int] = []
+        mock_conn_mgr.get_session = MagicMock(side_effect=_get_session)
+        mock_conn_mgr.close_instance = AsyncMock()
+
+        with patch(
+            "daemon.services.mcp_service.get_mcp_connection_manager",
+            return_value=mock_conn_mgr,
+        ):
+            schemas = await service.get_schemas_for_server(server)
+
+        assert [s.name for s in schemas] == ["probe"]
+        assert mock_conn_mgr.connect_instance.await_count == 2
+        mock_conn_mgr.close_instance.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_auth_classifier(self, service):
+        """Classifier unit check: 401/403/unauthorized/forbidden/
+        authentication markers match; connection errors do not."""
+        for msg in (
+            "HTTP 401 Unauthorized",
+            "403 Forbidden",
+            "Unauthorized",
+            "forbidden",
+            "Authentication required",
+        ):
+            assert McpService._is_auth_failure(RuntimeError(msg)), msg
+        for msg in (
+            "Connection closed",
+            "Connection refused",
+            "timeout",
+        ):
+            assert not McpService._is_auth_failure(RuntimeError(msg)), msg
+
+
+# ---------------------------------------------------------------------------
+# TestEagerWarmSchemas — Fix 3: honest primed counting
+# ---------------------------------------------------------------------------
+
+class TestEagerWarmSchemas:
+    """Fix 3 tests — empty schema sets must not count as primed."""
+
+    @pytest.mark.asyncio
+    async def test_empty_set_not_counted_as_primed(self, service, manager, caplog):
+        """A server with an empty schema set is NOT primed; the failed
+        server is visible by name with '0 tools' in the log."""
+        good = _make_server(name="good-server", is_builtin=False)
+        bad = _make_server(name="plane", is_builtin=False)
+        manager._mcp_server_repository.list_mcp_servers.return_value = [good, bad]
+
+        async def _lookup(server):
+            if server.name == "good-server":
+                return [_make_schema("t1", server.name)]
+            return []
+
+        service.get_schemas_for_server = AsyncMock(side_effect=_lookup)
+
+        with caplog.at_level(logging.INFO, logger="daemon.services.mcp_service"):
+            primed = await service.eager_warm_schemas()
+
+        assert primed == 1
+        assert any(
+            "plane: 0 tools" in rec.message for rec in caplog.records
+        )
+
+    @pytest.mark.asyncio
+    async def test_all_empty_returns_zero(self, service, manager, caplog):
+        """All-empty is the production incident shape: honest 0/N, never
+        a silent 'primed N/N'."""
+        dead1 = _make_server(name="plane", is_builtin=False)
+        dead2 = _make_server(name="other", is_builtin=False)
+        manager._mcp_server_repository.list_mcp_servers.return_value = [dead1, dead2]
+
+        service.get_schemas_for_server = AsyncMock(return_value=[])
+
+        with caplog.at_level(logging.INFO, logger="daemon.services.mcp_service"):
+            primed = await service.eager_warm_schemas()
+
+        assert primed == 0
+        assert any(
+            "primed 0/2" in rec.message for rec in caplog.records
+        )
+
+    @pytest.mark.asyncio
+    async def test_all_good_counts_per_server_tools(self, service, manager, caplog):
+        """Happy path: per-server tool counts are visible in the log."""
+        s1 = _make_server(name="alpha", is_builtin=False)
+        s2 = _make_server(name="beta", is_builtin=False)
+        manager._mcp_server_repository.list_mcp_servers.return_value = [s1, s2]
+
+        async def _lookup(server):
+            if server.name == "alpha":
+                return [
+                    _make_schema("a1", server.name),
+                    _make_schema("a2", server.name),
+                ]
+            return [_make_schema("b1", server.name)]
+
+        service.get_schemas_for_server = AsyncMock(side_effect=_lookup)
+
+        with caplog.at_level(logging.INFO, logger="daemon.services.mcp_service"):
+            primed = await service.eager_warm_schemas()
+
+        assert primed == 2
+        assert any("alpha: 2 tool(s)" in rec.message for rec in caplog.records)
+        assert any("beta: 1 tool(s)" in rec.message for rec in caplog.records)
 
 
 # ---------------------------------------------------------------------------

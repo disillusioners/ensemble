@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import TYPE_CHECKING, Any
 
 from langchain_core.tools import ToolException
@@ -39,6 +40,17 @@ if TYPE_CHECKING:
     from daemon.repositories.mcp_server.models import McpServer
 
 logger = logging.getLogger(__name__)
+
+# Cold-discovery retry delay (Fix 2): seconds to wait before the single
+# retry of a transient first-connect failure during schema discovery.
+# Module-level so tests can shrink it to zero instead of sleeping.
+SCHEMA_DISCOVERY_CONNECT_RETRY_DELAY_S = 1.5
+# Negative-cache throttle (Fix 1): minimum seconds between two cold
+# discoveries of a server whose previous discovery came back empty.
+# Empty results are never cached; this bounds re-discovery of a dead
+# server to one attempt per window instead of once per spawn.
+# Seconds-scale only — never a daemon-lifetime negative cache.
+EMPTY_DISCOVERY_RETRY_THROTTLE_S = 30.0
 
 
 class _McpSessionProviderImpl:
@@ -173,6 +185,13 @@ class McpService:
         # Guards _schema_cache reads/writes so concurrent first-time
         # discoveries for the same server don't both cold-start.
         self._schema_cache_lock = asyncio.Lock()
+        # Negative-cache throttle (Fix 1): monotonic timestamp of the
+        # last discovery attempt that returned []. Keyed by server.name.
+        # An empty discovery is NOT cached (that poisoned the cache
+        # daemon-lifetime in production); this map only rate-limits
+        # re-discovery of a dead server to one attempt per
+        # EMPTY_DISCOVERY_RETRY_THROTTLE_S window.
+        self._last_empty_discovery: dict[str, float] = {}
         # Per-instance session state for lazy resolution. Keyed first by
         # instance_id, then by server_name. Each entry holds a shared
         # "cache" dict (server_name -> session) and a lock used for
@@ -249,16 +268,160 @@ class McpService:
                     return cached_schemas
 
             # Cold start: one-time connection just to discover schemas.
+            # Fix 1 (negative-cache poisoning): an EMPTY result is never
+            # written to _schema_cache. A transient first-connect failure
+            # ('Connection closed' / session None) previously produced a
+            # permanent [] entry, which made preload_mcp_tools skip the
+            # server forever. Instead, remember only WHEN the empty
+            # attempt happened so the throttle below can rate-limit
+            # re-discovery; the next call after the window retries.
+            last_empty = self._last_empty_discovery.get(cache_key)
+            if (
+                last_empty is not None
+                and time.monotonic() - last_empty
+                < EMPTY_DISCOVERY_RETRY_THROTTLE_S
+            ):
+                logger.debug(
+                    f"Schema discovery throttled for '{server.name}': "
+                    f"empty discovery <{EMPTY_DISCOVERY_RETRY_THROTTLE_S:.0f}s "
+                    f"ago, returning [] without re-attempting"
+                )
+                return []
+
             schemas = await self._discover_schemas_cold(server)
-            self._schema_cache[cache_key] = schemas
-            return schemas
+            if schemas:
+                self._schema_cache[cache_key] = schemas
+                self._last_empty_discovery.pop(cache_key, None)
+                return schemas
+
+            self._last_empty_discovery[cache_key] = time.monotonic()
+            logger.warning(
+                f"Schema discovery returned no tools for MCP server "
+                f"'{server.name}' — result NOT cached; next lookup will "
+                f"retry discovery"
+            )
+            return []
+
+    @staticmethod
+    def _is_auth_failure(exc: BaseException) -> bool:
+        """Classify an exception as an auth failure (fail-fast, no retry).
+
+        Auth errors (HTTP 401/403, bad credentials) cannot be fixed by
+        retrying, so the cold-discovery retry must skip them. The MCP
+        client stack raises plain exceptions without a stable typed
+        hierarchy across transports, so classification is by
+        status-code / message text on the exception that actually
+        reaches this layer (``connect_instance``'s outer raise — the
+        per-server exceptions it gathers are swallowed and logged
+        inside the connection manager).
+
+        Args:
+            exc: The exception to classify.
+
+        Returns:
+            True if the exception looks like an auth failure.
+        """
+        text = f"{type(exc).__name__}: {exc}".lower()
+        return any(
+            marker in text
+            for marker in (
+                "401",
+                "403",
+                "unauthorized",
+                "forbidden",
+                "authentication",
+            )
+        )
+
+    async def _acquire_discovery_session(
+        self,
+        conn_mgr: Any,
+        discovery_id: str,
+        server: "McpServer",
+    ) -> Any:
+        """Acquire a cold-discovery session with ONE bounded retry (Fix 2).
+
+        Session-acquisition failures during cold discovery reach this
+        layer in two shapes:
+
+        - ``connect_instance`` raising (its outer guard only) — checked
+          against ``_is_auth_failure`` first: auth failures fail fast
+          with no retry.
+        - a returned call with no tracked session afterwards —
+          ``get_session`` returns ``None``. This is the production
+          failure signature (a swallowed 'Connection closed' from the
+          first streamable-http connect). At this layer auth vs
+          transient is indistinguishable for this shape, so it gets
+          the single retry like any other connection failure; the
+          retry is bounded to one attempt with a short delay, so a
+          genuinely misconfigured server costs at most one extra
+          connect.
+
+        Args:
+            conn_mgr: The connection manager to acquire through.
+            discovery_id: Synthetic per-server instance id.
+            server: The MCP server config to connect to.
+
+        Returns:
+            A usable session, or ``None`` if acquisition failed.
+        """
+        max_attempts = 2  # initial attempt + single retry
+        for attempt in range(1, max_attempts + 1):
+            try:
+                await conn_mgr.connect_instance(
+                    discovery_id, [server], per_server_timeout=15.0
+                )
+            except Exception as e:
+                if self._is_auth_failure(e):
+                    logger.warning(
+                        f"Schema discovery auth failure for "
+                        f"{server.name}: {e} — not retrying"
+                    )
+                    return None
+                if attempt >= max_attempts:
+                    logger.warning(
+                        f"Schema discovery connect failed for "
+                        f"{server.name} after {attempt} attempt(s): {e}"
+                    )
+                    return None
+                logger.warning(
+                    f"Schema discovery connect failed for {server.name}: "
+                    f"{e} — retrying once"
+                )
+            else:
+                session = conn_mgr.get_session(discovery_id, server.name)
+                if session is not None:
+                    return session
+                if attempt >= max_attempts:
+                    logger.warning(
+                        f"Schema discovery: no session for MCP server "
+                        f"'{server.name}' after {attempt} attempt(s)"
+                    )
+                    return None
+                logger.warning(
+                    f"Schema discovery: no session for MCP server "
+                    f"'{server.name}' on attempt {attempt} — retrying once"
+                )
+            # Tear down the failed attempt's throwaway connection
+            # before retrying so the reconnect starts from clean state.
+            try:
+                await conn_mgr.close_instance(discovery_id)
+            except Exception as e:
+                logger.debug(
+                    f"Error closing schema discovery connection for "
+                    f"{server.name} between attempts: {e}"
+                )
+            await asyncio.sleep(SCHEMA_DISCOVERY_CONNECT_RETRY_DELAY_S)
+        return None
 
     async def _discover_schemas_cold(self, server: McpServer) -> list[McpToolSchema]:
         """One-time schema discovery for non-pooled servers.
 
         Opens a temporary connection via ``McpConnectionManager``,
-        calls ``list_tools``, and tears the connection down. Failures
-        are logged and result in an empty list — never raises.
+        calls ``list_tools``, and tears the connection down. Session
+        acquisition gets one bounded retry on connection-type failures
+        (auth failures fail fast). Failures are logged and result in
+        an empty list — never raises.
 
         Args:
             server: The MCP server config to connect to.
@@ -283,15 +446,14 @@ class McpService:
         # a server after a UUID.
         discovery_id = f"_schema_discovery:{server.name}"
         try:
-            await conn_mgr.connect_instance(
-                discovery_id, [server], per_server_timeout=15.0
+            # Fix 2: session acquisition goes through the retry helper
+            # (one bounded retry on connection-type failures; auth
+            # failures fail fast). Cold path only — the warmup pool
+            # and pooled-server paths are untouched.
+            session = await self._acquire_discovery_session(
+                conn_mgr, discovery_id, server
             )
-            session = conn_mgr.get_session(discovery_id, server.name)
             if session is None:
-                logger.warning(
-                    f"Schema discovery: no session for MCP server "
-                    f"'{server.name}'"
-                )
                 return []
             mcp_tools = await session.list_tools()
             return [
@@ -336,8 +498,13 @@ class McpService:
         """
         if server_name is not None:
             self._schema_cache.pop(server_name, None)
+            # Also drop the negative-cache throttle marker so an explicit
+            # CRUD invalidation re-discovers immediately instead of
+            # waiting out the empty-discovery window.
+            self._last_empty_discovery.pop(server_name, None)
         else:
             self._schema_cache.clear()
+            self._last_empty_discovery.clear()
 
     async def eager_warm_schemas(self) -> int:
         """Prime the in-memory schema cache for every active MCP server.
@@ -376,16 +543,29 @@ class McpService:
             *(self.get_schemas_for_server(s) for s in servers),
             return_exceptions=True,
         )
+        # Fix 3 (honest counting): a server whose schema set is EMPTY
+        # was not primed — it either failed discovery or genuinely
+        # advertises zero tools. Either way it must not silently count
+        # toward the primed total, which previously masked a dead
+        # server as "primed 5/5". Record per-server tool counts so a
+        # failed/empty server is visible by name ("plane: 0 tools").
+        per_server_counts: list[str] = []
         for server, res in zip(servers, results, strict=False):
             if isinstance(res, Exception):
                 logger.debug(
                     f"eager_warm_schemas: {server.name} failed: {res}"
                 )
+                per_server_counts.append(f"{server.name}: error")
+                continue
+            if not res:
+                per_server_counts.append(f"{server.name}: 0 tools")
                 continue
             primed += 1
+            per_server_counts.append(f"{server.name}: {len(res)} tool(s)")
 
         logger.info(
-            f"eager_warm_schemas: primed {primed}/{len(servers)} MCP server schema(s)"
+            f"eager_warm_schemas: primed {primed}/{len(servers)} MCP "
+            f"server schema(s) ({', '.join(per_server_counts)})"
         )
         return primed
 
