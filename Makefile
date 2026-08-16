@@ -2,16 +2,26 @@
 # Build and install production version alongside dev
 
 # Installation settings
+# PROD_PORT was retired per ADR-014 (D1 FINAL): prod port comes from
+# .env.prod staged to INSTALL_DIR/.env (PORT=9797 canonical); the broken
+# config.yaml sed is gone (see install target). Operator-facing stop/start
+# echo+kill paths use PROD_PORT_FALLBACK (defined below, AFTER ENV_PROD_FILE
+# so the := shell expansion actually sees the file name), sourced from .env.prod.
 INSTALL_DIR ?= $(HOME)/agents-ensemble
-PROD_PORT ?= 9797
 
 # Project structure
 BACKEND_DIRS = daemon agents data
 CONFIG_FILE = config.yaml
-ENV_FILE = .env
 ENV_PROD_FILE = .env.prod
 FRONTEND_DIR = frontend
 FRONTEND_DIST = frontend/dist/frontend/browser
+
+# Port actually in use by the installed prod daemon: read from .env.prod
+# (PORT=…) — the real port source per ADR-014. Defined AFTER ENV_PROD_FILE on
+# purpose: := expands immediately, so the ordering is load-bearing. Empty-safe
+# (fresh clone, no .env.prod yet → falls back to the canonical 9797).
+PROD_PORT_FALLBACK := $(shell sed -n 's/^PORT=//p' $(ENV_PROD_FILE) 2>/dev/null | head -1)
+PROD_PORT_FALLBACK := $(if $(PROD_PORT_FALLBACK),$(PROD_PORT_FALLBACK),9797)
 
 # PyInstaller settings
 PYINSTALLER_SPEC = ensemble.spec
@@ -26,13 +36,14 @@ YELLOW := \033[1;33m
 RED := \033[0;31m
 NC := \033[0m
 
-.PHONY: build install install-deps clean uninstall help sync stop start dev pyinstaller pyinstaller-clean ensure-latest
+.PHONY: build install install-deps clean uninstall help sync stop start dev pyinstaller pyinstaller-clean ensure-latest plist-install
 
 help:
 	@echo "Available targets:"
 	@echo "  make build           - Build the frontend"
 	@echo "  make pyinstaller     - Build binary (dist/ensemble-prod, clears dist first)"
 	@echo "  make install         - Build and install to $(INSTALL_DIR) (backs up existing binary)"
+	@echo "  make plist-install   - Copy staged plist to ~/Library/LaunchAgents (prints launchctl hint)"
 	@echo "  make install-deps    - Install Python dependencies in $(INSTALL_DIR)"
 	@echo "  make sync            - Install dependencies with uv sync"
 	@echo "  make start           - Start the daemon (kills existing process first)"
@@ -44,7 +55,7 @@ help:
 	@echo ""
 	@echo "Variables:"
 	@echo "  INSTALL_DIR=$(INSTALL_DIR)"
-	@echo "  PROD_PORT=$(PROD_PORT)"
+	@echo "  PROD_PORT_FALLBACK=$(PROD_PORT_FALLBACK) (read from $(ENV_PROD_FILE); real port source is .env.prod per ADR-014)"
 
 # Sync dependencies with uv
 sync:
@@ -53,11 +64,13 @@ sync:
 	@echo "$(GREEN)Dependencies synced!$(NC)"
 
 # Stop the daemon
+# Port comes from .env.prod (real source per ADR-014); PROD_PORT_FALLBACK
+# is an operator-facing convenience only.
 stop:
-	@echo "$(YELLOW)Stopping daemon on port $(PROD_PORT)...$(NC)"
-	@PID=$$(lsof -ti:$(PROD_PORT) 2>/dev/null) && { \
+	@echo "$(YELLOW)Stopping daemon on port $(PROD_PORT_FALLBACK)...$(NC)"
+	@PID=$$(lsof -ti:$(PROD_PORT_FALLBACK) 2>/dev/null) && { \
 		kill $$PID 2>/dev/null && echo "$(GREEN)Stopped process $$PID$(NC)" || true; \
-	} || echo "$(GREEN)No process found on port $(PROD_PORT)$(NC)"
+	} || echo "$(GREEN)No process found on port $(PROD_PORT_FALLBACK)$(NC)"
 
 # Start the daemon
 start: stop
@@ -99,13 +112,24 @@ install-deps:
 install: pyinstaller
 	@echo "$(GREEN)Installing to $(INSTALL_DIR)...$(NC)"
 	
-	# Stop any process using the production port
-	@echo "$(YELLOW)Checking for processes on port $(PROD_PORT)...$(NC)"
-	@PID=$$(lsof -ti:$(PROD_PORT) 2>/dev/null) && { \
-		echo "$(YELLOW)Stopping process $$PID on port $(PROD_PORT)...$(NC)"; \
-		kill -9 $$PID 2>/dev/null || true; \
-		sleep 1; \
-	} || echo "$(GREEN)Port $(PROD_PORT) is available.$(NC)"
+	# Stop any process using the production port (SIGTERM + bounded wait,
+	# then SIGKILL last resort — replaces the old kill -9; bounded-stop
+	# hygiene per ADR-009. Port read from .env.prod, the real source.)
+	@echo "$(YELLOW)Checking for processes on port $(PROD_PORT_FALLBACK)...$(NC)"
+	@PID=$$(lsof -ti:$(PROD_PORT_FALLBACK) 2>/dev/null) && { \
+		echo "$(YELLOW)Stopping process $$PID on port $(PROD_PORT_FALLBACK) (SIGTERM)...$(NC)"; \
+		kill $$PID 2>/dev/null || true; \
+		i=0; \
+		while kill -0 $$PID 2>/dev/null && [ $$i -lt 10 ]; do \
+			sleep 1; \
+			i=$$((i+1)); \
+		done; \
+		if kill -0 $$PID 2>/dev/null; then \
+			echo "$(YELLOW)still alive after 10s — SIGKILL last resort$(NC)"; \
+			kill -9 $$PID 2>/dev/null || true; \
+			sleep 1; \
+		fi; \
+	} || echo "$(GREEN)Port $(PROD_PORT_FALLBACK) is available.$(NC)"
 	
 	# Clean up old backups (keep only 2 most recent)
 	@echo "$(YELLOW)Cleaning up old backups...$(NC)"; \
@@ -176,15 +200,36 @@ install: pyinstaller
 	rm -rf $(INSTALL_DIR)/agents
 	cp -r $(CURDIR)/agents $(INSTALL_DIR)/agents
 	
-	# Copy and modify config.yaml with production port
-	@echo "$(YELLOW)Configuring port $(PROD_PORT)...$(NC)"
-	sed 's/port: \$${PORT:-8079}/port: \$${PORT:-$(PROD_PORT)}/' $(CONFIG_FILE) > $(INSTALL_DIR)/$(CONFIG_FILE)
+	# Copy config.yaml AS-IS (no port munging — the old sed targeting
+	# 'port: ${PORT:-8079}' never matched the actual 'port: ${PORT:-8088}'
+	# default and is retired per ADR-014: the prod port comes from .env.prod
+	# staged to INSTALL_DIR/.env, which config.yaml's ${PORT:-…} interpolation
+	# resolves from the exported environment)
+	@echo "$(YELLOW)Copying config.yaml (unmodified)...$(NC)"
+	cp $(CONFIG_FILE) $(INSTALL_DIR)/$(CONFIG_FILE)
 	
-	# Copy .env.prod file (or .env as fallback)
-	@echo "$(YELLOW)Copying environment...$(NC)"
-	cp $(ENV_PROD_FILE) $(INSTALL_DIR)/.env 2>/dev/null || \
-		cp $(ENV_FILE) $(INSTALL_DIR)/.env 2>/dev/null || \
-		cp .env.example $(INSTALL_DIR)/.env 2>/dev/null || true
+	# Stage env: repo .env.prod → INSTALL_DIR/.env — the single canonical
+	# prod env source (ADR-014). No .env / .env.example fallback anymore:
+	# staging a dev env into prod silently was a misconfiguration risk;
+	# prod requires explicit intent. Override knob: ENV_PROD_FILE.
+	@echo "$(YELLOW)Staging $(ENV_PROD_FILE) → $(INSTALL_DIR)/.env...$(NC)"
+	@if [ ! -f "$(ENV_PROD_FILE)" ]; then \
+		echo "$(RED)Error: $(ENV_PROD_FILE) not found in repo root.$(NC)"; \
+		echo "$(RED)Prod install requires an explicit prod env file (ADR-014).$(NC)"; \
+		echo "$(RED)Create it from the tracked template:  cp .env.prod.example .env.prod$(NC)"; \
+		echo "$(RED)then set PORT=9797 (canonical prod port) and your prod values.$(NC)"; \
+		exit 1; \
+	fi
+	cp $(ENV_PROD_FILE) $(INSTALL_DIR)/.env
+	
+	# Stage the launchd plist with the real install path sed'd in
+	# (template lives in scripts/ensemble-prod.plist with placeholders)
+	@echo "$(YELLOW)Staging launcher + plist...$(NC)"
+	cp $(CURDIR)/launcher.sh $(INSTALL_DIR)/launcher.sh
+	chmod +x $(INSTALL_DIR)/launcher.sh
+	mkdir -p $(INSTALL_DIR)/data
+	sed 's|INSTALL_DIR_PLACEHOLDER|$(INSTALL_DIR)|g' scripts/ensemble-prod.plist \
+		> $(INSTALL_DIR)/data/ensemble-prod.plist
 	
 	# Copy frontend build (preserve frontend/dist/frontend/browser structure)
 	@echo "$(YELLOW)Copying frontend...$(NC)"
@@ -196,11 +241,13 @@ install: pyinstaller
 	@echo ""
 	@echo "Production version installed to: $(INSTALL_DIR)"
 	@echo "Binary: ensemble-prod"
-	@echo "Port: $(PROD_PORT)"
+	@echo "Port: $(PROD_PORT_FALLBACK) (from $(ENV_PROD_FILE) → $(INSTALL_DIR)/.env, ADR-014)"
 	@echo ""
-	@echo "To start: cd $(INSTALL_DIR) && ./ensemble-prod"
-	@echo "API Docs: http://localhost:$(PROD_PORT)/docs"
-	@echo "UI:       http://localhost:$(PROD_PORT)"
+	@echo "To start (launchd):  make plist-install   # then bootstrap per its hint"
+	@echo "To start (manual):   cd $(INSTALL_DIR) && ./launcher.sh"
+	@echo "API Docs: http://localhost:$(PROD_PORT_FALLBACK)/docs"
+	@echo "UI:       http://localhost:$(PROD_PORT_FALLBACK)"
+	@echo "Health:   http://localhost:$(PROD_PORT_FALLBACK)/livez and /readyz"
 	@echo ""
 	@echo "Required files in working directory:"
 	@echo "  - config.yaml"
@@ -208,6 +255,26 @@ install: pyinstaller
 	@echo "  - agents/"
 	@echo "  - frontend/dist/"
 	@echo "  - data/"
+
+# Copy the staged plist (INSTALL_DIR/data/ensemble-prod.plist, path already
+# sed'd by `make install`) into ~/Library/LaunchAgents and print the
+# bootstrap hint. Convenience only — the operator runs launchctl by hand.
+plist-install:
+	@if [ ! -f "$(INSTALL_DIR)/data/ensemble-prod.plist" ]; then \
+		echo "$(RED)Error: $(INSTALL_DIR)/data/ensemble-prod.plist not found — run 'make install' first.$(NC)"; \
+		exit 1; \
+	fi
+	mkdir -p $(HOME)/Library/LaunchAgents
+	cp $(INSTALL_DIR)/data/ensemble-prod.plist $(HOME)/Library/LaunchAgents/ensemble-prod.plist
+	@echo "$(GREEN)Plist installed: $(HOME)/Library/LaunchAgents/ensemble-prod.plist$(NC)"
+	@echo ""
+	@echo "To load it (macOS launchd):"
+	@echo "  launchctl bootstrap gui/$$(id -u) $(HOME)/Library/LaunchAgents/ensemble-prod.plist"
+	@echo ""
+	@echo "To unload:"
+	@echo "  launchctl bootout gui/$$(id -u)/com.ensemble.prod"
+	@echo ""
+	@echo "Logs: $(INSTALL_DIR)/data/launcher.log (stdout) + launcher.err.log (stderr)"
 
 # Clean build artifacts
 clean:
