@@ -286,6 +286,31 @@ The Angular dev server runs on port 4199 with proxy to the backend API.
 
 ## Production Deployment
 
+### Three-Environment Topology
+
+Production work on a single host uses three coexisting environments with always-distinct ports and databases:
+
+| Environment | Purpose | Port | Database | Directory |
+|-------------|---------|------|----------|-----------|
+| **dev** | Repo working tree (never a deploy target) | 8079 | `ensemble_dev` | the repo itself |
+| **demo** | Production-shaped rehearsal — auto-restart/upgrade testing | 7979 | `ensemble_demo` | `~/agents-ensemble-demo` |
+| **live** | The real running daemon (read-only; requires explicit confirmation) | 9797 | `ensemble_prod` | `~/agents-ensemble` |
+
+Deploying uses `scripts/deploy.sh` (build if needed → stage → ownership-scoped stop → start via `launcher.sh` → `/livez` + `/readyz` health gate):
+
+```bash
+make deploy-demo          # deploy to demo (default target)
+make stage-demo           # stage demo without starting it
+ENSEMBLE_DEPLOY_LIVE=1 make deploy-live   # live requires explicit operator confirmation
+scripts/deploy.sh demo --dry-run          # print the plan, no side effects
+```
+
+Useful flags: `--dry-run`, `--build` (force PyInstaller rebuild), `--skip-build`, `--no-start`, `--create-db` (demo-only; the live DB is never created/dropped by tooling).
+
+The demo env file (`.env.prod.demo`) is generated on demand from `.env.prod` with `PORT=7979` and `POSTGRES_DB=ensemble_demo` overridden — it contains real keys, is gitignored, and is never committed. When auto-restart work is done, switching rehearsal from demo → live is config-only (`deploy.sh live`) — the future self-restart path lands on the same script.
+
+Exit codes: `0` ok · `78` config refusal (missing env/binary/target, unconfirmed live) · `75` health gate could not reach the daemon after start · `1` generic failure.
+
 ### Standard Installation
 
 ```bash
