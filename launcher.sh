@@ -265,8 +265,14 @@ classify_exit() {
 # next_backoff <prev_backoff_s> <code> → echoes next backoff (seconds).
 # Crash track (exit 1/other):  base 10s, ×2, cap 300s  → 10→20→40→…→300.
 # Tempfail track (exit 75):    start 5s, ×2, cap 60s   → 5→10→20→40→60 (ADR-011).
-# prev ≤ 0 (or track switch) restarts at the family base. Both tracks share
-# one shape so the mapping is fully determined by (prev, code).
+# prev ≤ 0 restarts at the family base. Both tracks share one shape so the
+# mapping is fully determined by (prev, code).
+#
+# prev is FAMILY-SCOPED: callers must pass the persisted backoff only when
+# the previous cycle's verdict family matches the current one — see
+# effective_prev_backoff() below (review m3). Raw cross-family doubling
+# would turn a 75-track prev of 60 into a 120s first crash backoff (12× the
+# 10s spec base).
 next_backoff() {
     local prev="$1" code="$2" base cap next
     if [ "$code" = "75" ]; then
@@ -285,6 +291,26 @@ next_backoff() {
         next=$cap
     fi
     echo "$next"
+}
+
+# effective_prev_backoff <prev_exit> <current_code> <persisted_backoff>
+#   → echoes the persisted backoff if the previous cycle's verdict family
+#     (classify_exit of prev_exit) matches the current one, else 0.
+# Track-switch reset (review m3): STATE_LAST_BACKOFF persists across verdict
+# families, but the two backoff ladders are independent — a 75-track prev of
+# 60 must NOT seed a crash restart at 120s, and a crash prev of 300 must not
+# start the 75 track at its 60s cap (the crash→75 direction is masked by the
+# cap but equally wrong). Families come from the same classify_exit() that
+# drives the run-loop verdicts, so a previous clean (0) or refuse (78) exit
+# also resets: those verdicts exit the loop, making any persisted backoff
+# stale by definition.
+effective_prev_backoff() {
+    local prev_exit="$1" code="$2" persisted="$3"
+    if [ "$(classify_exit "$prev_exit")" = "$(classify_exit "$code")" ]; then
+        printf '%s\n' "$persisted"
+    else
+        printf '%s\n' 0
+    fi
 }
 
 # budget_tick <crash_count> <window_start> <uptime_s> <code> [now_epoch]
@@ -395,7 +421,7 @@ _sleep_interruptible() {
 run_loop() {
     local bin="$1"
     local child_exit=0 started_at=0 uptime=0 verdict="" tick_out="" action=""
-    local new_count=0 new_window=0 backoff=0 reaped=0
+    local new_count=0 new_window=0 backoff=0 reaped=0 prev=0 prev_exit=""
 
     trap '_handle_signal TERM' TERM
     trap '_handle_signal INT' INT
@@ -439,6 +465,9 @@ run_loop() {
         fi
         CHILD_PID=0
 
+        # Capture the PREVIOUS cycle's exit BEFORE overwriting it — the
+        # family-scoped backoff reset below needs it (review m3).
+        prev_exit="${STATE_LAST_EXIT:-}"
         STATE_LAST_EXIT="$child_exit"
         write_state
 
@@ -458,7 +487,10 @@ run_loop() {
                         "boot-time temporary failure (PG unreachable?) — retrying with capped backoff (cap ${TEMPFAIL_BACKOFF_CAP_S}s), burst budget untouched (ADR-011)"
                     STATE_NOTIFIED_75=1
                 fi
-                backoff="$(next_backoff "${STATE_LAST_BACKOFF:-0}" 75)"
+                # Family-scoped prev (review m3): a crash-track backoff must
+                # not seed the 75 ladder (and vice versa).
+                prev="$(effective_prev_backoff "$prev_exit" 75 "${STATE_LAST_BACKOFF:-0}")"
+                backoff="$(next_backoff "$prev" 75)"
                 STATE_LAST_BACKOFF="$backoff"
                 write_state
                 _log "child exited 75 (boot tempfail, uptime ${uptime}s) — retrying in ${backoff}s (75-track, cap ${TEMPFAIL_BACKOFF_CAP_S}s)"
@@ -492,7 +524,13 @@ run_loop() {
                     STATE_NOTIFIED_75=0
                 fi
 
-                backoff="$(next_backoff "${STATE_LAST_BACKOFF:-0}" "$child_exit")"
+                # Family-scoped prev (review m3): a 75-track backoff must not
+                # seed the crash ladder (and vice versa). Uses prev_exit —
+                # captured BEFORE STATE_LAST_EXIT was overwritten — NOT
+                # STATE_LAST_EXIT, which already holds THIS cycle's exit and
+                # would make the family comparison a tautology.
+                prev="$(effective_prev_backoff "$prev_exit" "$child_exit" "${STATE_LAST_BACKOFF:-0}")"
+                backoff="$(next_backoff "$prev" "$child_exit")"
                 STATE_LAST_BACKOFF="$backoff"
                 write_state
                 _log "child exited $child_exit (crash #${new_count}, uptime ${uptime}s, action=$action) — restarting in ${backoff}s"

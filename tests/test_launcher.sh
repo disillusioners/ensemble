@@ -82,6 +82,7 @@ else
 fi
 if declare -F classify_exit >/dev/null 2>&1 \
     && declare -F next_backoff >/dev/null 2>&1 \
+    && declare -F effective_prev_backoff >/dev/null 2>&1 \
     && declare -F budget_tick >/dev/null 2>&1 \
     && declare -F load_env_file >/dev/null 2>&1 \
     && declare -F read_state >/dev/null 2>&1 \
@@ -124,6 +125,65 @@ assert_eq "75 backoff 20→40"         "40" "$(next_backoff 20 75)"
 assert_eq "75 backoff 40→60(cap)"    "60" "$(next_backoff 40 75)"
 assert_eq "75 backoff 60→60 (capped)" "60" "$(next_backoff 60 75)"
 assert_eq "75 backoff 300→60 (cross-track cap applies)" "60" "$(next_backoff 300 75)"
+
+# ─── 4b. track-switch backoff reset (review m3) ────────────────────────────
+section "next_backoff track-switch reset (effective_prev_backoff)"
+# STATE_LAST_BACKOFF persists across verdict families, but the crash and
+# tempfail-75 ladders are independent: switching family must reset the
+# persisted backoff to 0 BEFORE next_backoff computes, else a 75-track prev
+# of 60 yields a 120s first crash backoff (12× the 10s base).
+
+# direct unit: family comparison gates the persisted value
+assert_eq "prev 75 → crash discards persisted 60"   "0" "$(effective_prev_backoff 75 1 60)"
+assert_eq "prev crash → 75 discards persisted 300"  "0" "$(effective_prev_backoff 1 75 300)"
+assert_eq "prev 75 → 75 keeps persisted 40"         "40" "$(effective_prev_backoff 75 75 40)"
+assert_eq "any crash code = same family (1→143)"    "20" "$(effective_prev_backoff 1 143 20)"
+assert_eq "any crash code = same family (143→2)"    "80" "$(effective_prev_backoff 143 2 80)"
+assert_eq "no previous cycle (empty) → reset"       "0" "$(effective_prev_backoff "" 75 40)"
+assert_eq "previous clean stop (0) → stale backoff discarded" "0" "$(effective_prev_backoff 0 1 40)"
+assert_eq "previous refuse (78) → stale backoff discarded"   "0" "$(effective_prev_backoff 78 1 40)"
+
+# sequence simulation: evolve (STATE_LAST_EXIT, STATE_LAST_BACKOFF) exactly
+# as run_loop does — prev captured BEFORE STATE_LAST_EXIT is overwritten.
+sim_backoff_seq() {
+    STATE_LAST_EXIT=""
+    STATE_LAST_BACKOFF=0
+    local code prev
+    for code in "$@"; do
+        prev="$(effective_prev_backoff "${STATE_LAST_EXIT:-}" "$code" "${STATE_LAST_BACKOFF:-0}")"
+        STATE_LAST_BACKOFF="$(next_backoff "$prev" "$code")"
+        STATE_LAST_EXIT="$code"
+    done
+    printf '%s\n' "$STATE_LAST_BACKOFF"
+}
+assert_eq "75×3 then crash → first crash backoff 10 (not 60/120)" \
+    "10" "$(sim_backoff_seq 75 75 75 1)"
+assert_eq "crash×3 then 75 → first 75 backoff 5 (not 40/60)" \
+    "5" "$(sim_backoff_seq 1 1 1 75)"
+assert_eq "75×5 same-family growth unchanged (→60 cap)" \
+    "60" "$(sim_backoff_seq 75 75 75 75 75)"
+assert_eq "crash×4 same-family growth unchanged (10→20→40→80)" \
+    "80" "$(sim_backoff_seq 1 1 1 1)"
+assert_eq "75 then crash×2 → 10 then 20 (growth resumes at base)" \
+    "20" "$(sim_backoff_seq 75 1 1)"
+assert_eq "crash then 75×2 → 5 then 10 (growth resumes at base)" \
+    "10" "$(sim_backoff_seq 1 75 75)"
+
+# Structural pin (incident follow-up): sim_backoff_seq models the INTENDED
+# order (prev captured before STATE_LAST_EXIT is overwritten). The run_loop
+# itself must follow that order in BOTH branches — the crash branch
+# originally passed ${STATE_LAST_EXIT:-} AFTER it had been overwritten with
+# the current exit, making the family comparison always-equal (tautology)
+# and the reset a no-op, while the sequence simulation above kept passing.
+# Grep the run_loop body so a regression back to the tautology fails here.
+run_loop_body="$(sed -n '/^run_loop()/,/^}/p' "$LAUNCHER")"
+crash_calls="$(printf '%s\n' "$run_loop_body" | grep -c 'effective_prev_backoff "\$prev_exit"')"
+assert_eq "run_loop: both branches gate on prev_exit (not overwritten STATE_LAST_EXIT)" \
+    "2" "$crash_calls"
+assert_eq "run_loop: no branch passes overwritten STATE_LAST_EXIT to the gate" \
+    "0" "$(printf '%s\n' "$run_loop_body" | grep -c 'effective_prev_backoff "\${STATE_LAST_EXIT:-}"')"
+assert_eq "run_loop: prev_exit captured before STATE_LAST_EXIT overwrite" \
+    "1" "$(printf '%s\n' "$run_loop_body" | grep -c 'prev_exit="\${STATE_LAST_EXIT:-}"')"
 
 # ─── 5. budget_tick ─────────────────────────────────────────────────────────
 section "budget_tick"
