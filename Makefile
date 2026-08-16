@@ -20,7 +20,10 @@ FRONTEND_DIST = frontend/dist/frontend/browser
 # (PORT=…) — the real port source per ADR-014. Defined AFTER ENV_PROD_FILE on
 # purpose: := expands immediately, so the ordering is load-bearing. Empty-safe
 # (fresh clone, no .env.prod yet → falls back to the canonical 9797).
-PROD_PORT_FALLBACK := $(shell sed -n 's/^PORT=//p' $(ENV_PROD_FILE) 2>/dev/null | head -1)
+# `tr -d '\r'` — .env.prod written on Windows/editors with CRLF leaves a
+# trailing \r on the PORT= line; sed `s/^PORT=//p` keeps it and the \r then
+# breaks lsof (`lsof -ti:9797\r`) and every echoed URL (review m7).
+PROD_PORT_FALLBACK := $(shell sed -n 's/^PORT=//p' $(ENV_PROD_FILE) 2>/dev/null | tr -d '\r' | head -1)
 PROD_PORT_FALLBACK := $(if $(PROD_PORT_FALLBACK),$(PROD_PORT_FALLBACK),9797)
 
 # PyInstaller settings
@@ -36,7 +39,7 @@ YELLOW := \033[1;33m
 RED := \033[0;31m
 NC := \033[0m
 
-.PHONY: build install install-deps clean uninstall help sync stop start dev pyinstaller pyinstaller-clean ensure-latest plist-install
+.PHONY: build install install-deps clean uninstall help sync stop stop-by-port start dev pyinstaller pyinstaller-clean ensure-latest plist-install
 
 help:
 	@echo "Available targets:"
@@ -46,8 +49,9 @@ help:
 	@echo "  make plist-install   - Copy staged plist to ~/Library/LaunchAgents (prints launchctl hint)"
 	@echo "  make install-deps    - Install Python dependencies in $(INSTALL_DIR)"
 	@echo "  make sync            - Install dependencies with uv sync"
-	@echo "  make start           - Start the daemon (kills existing process first)"
-	@echo "  make stop            - Stop the daemon"
+	@echo "  make start           - Start the daemon (dev flow: stop + start.sh)"
+	@echo "  make stop            - Stop ONLY processes owned by $(INSTALL_DIR) (ownership-scoped; never port-based)"
+	@echo "  make stop-by-port    - OPT-IN legacy port kill (unsafe on coexistence hosts)"
 	@echo "  make dev             - stop + sync + start"
 	@echo "  make clean           - Remove build artifacts"
 	@echo "  make pyinstaller-clean - Remove PyInstaller build files"
@@ -63,14 +67,32 @@ sync:
 	uv sync --extra dev
 	@echo "$(GREEN)Dependencies synced!$(NC)"
 
-# Stop the daemon
-# Port comes from .env.prod (real source per ADR-014); PROD_PORT_FALLBACK
-# is an operator-facing convenience only.
+# Stop the daemon — OWNERSHIP-SCOPED (incident fix, 2026-08-16).
+# `make stop` used to SIGTERM whatever listened on the prod port; on this
+# dev+prod coexistence host that is structurally unsafe (it killed the real
+# prod — the port is even shared with unrelated clients like Chrome's
+# network service). Now ALL stopping is delegated to
+# scripts/stop-ensemble.sh, which only ever signals processes OWNED by
+# $(INSTALL_DIR):
+#   * anchored <INSTALL_DIR>/launcher.sh / ensemble-prod /
+#     current/ensemble-prod command-line paths, or
+#   * an ensemble-shaped process whose cwd IS the install dir (the
+#     relative `./ensemble-prod` start form).
+# Port lookups are reporting hints only. Legacy port-kill remains behind
+# an explicit opt-in (STOP_BY_PORT=1 make stop) with a loud warning.
+# The ownership script also prefers stopping the LAUNCHER first — a
+# supervisor that receives SIGTERM forwards it to the daemon child and
+# exits with its real exit code, so a stop is never classified as a
+# crash and nothing bounces back up (review m5, ownership-redesigned).
+STOP_SCRIPT = scripts/stop-ensemble.sh
 stop:
-	@echo "$(YELLOW)Stopping daemon on port $(PROD_PORT_FALLBACK)...$(NC)"
-	@PID=$$(lsof -ti:$(PROD_PORT_FALLBACK) 2>/dev/null) && { \
-		kill $$PID 2>/dev/null && echo "$(GREEN)Stopped process $$PID$(NC)" || true; \
-	} || echo "$(GREEN)No process found on port $(PROD_PORT_FALLBACK)$(NC)"
+	@bash $(STOP_SCRIPT) $(INSTALL_DIR) $(PROD_PORT_FALLBACK)
+
+.PHONY: stop-by-port
+stop-by-port:
+	@echo "$(RED)STOP_BY_PORT: killing by port $(PROD_PORT_FALLBACK) can terminate UNRELATED listeners$(NC)"
+	@echo "$(RED)(dev+prod coexistence hosts share ports with clients — e.g. browsers). You opted in.$(NC)"
+	STOP_BY_PORT=1 bash $(STOP_SCRIPT) $(INSTALL_DIR) $(PROD_PORT_FALLBACK)
 
 # Start the daemon
 start: stop
@@ -112,24 +134,11 @@ install-deps:
 install: pyinstaller
 	@echo "$(GREEN)Installing to $(INSTALL_DIR)...$(NC)"
 	
-	# Stop any process using the production port (SIGTERM + bounded wait,
-	# then SIGKILL last resort — replaces the old kill -9; bounded-stop
-	# hygiene per ADR-009. Port read from .env.prod, the real source.)
-	@echo "$(YELLOW)Checking for processes on port $(PROD_PORT_FALLBACK)...$(NC)"
-	@PID=$$(lsof -ti:$(PROD_PORT_FALLBACK) 2>/dev/null) && { \
-		echo "$(YELLOW)Stopping process $$PID on port $(PROD_PORT_FALLBACK) (SIGTERM)...$(NC)"; \
-		kill $$PID 2>/dev/null || true; \
-		i=0; \
-		while kill -0 $$PID 2>/dev/null && [ $$i -lt 10 ]; do \
-			sleep 1; \
-			i=$$((i+1)); \
-		done; \
-		if kill -0 $$PID 2>/dev/null; then \
-			echo "$(YELLOW)still alive after 10s — SIGKILL last resort$(NC)"; \
-			kill -9 $$PID 2>/dev/null || true; \
-			sleep 1; \
-		fi; \
-	} || echo "$(GREEN)Port $(PROD_PORT_FALLBACK) is available.$(NC)"
+	# Stop only what THIS install owns — ownership-scoped, never port-based
+	# (incident fix 2026-08-16; see scripts/stop-ensemble.sh). A foreign
+	# daemon on the same port (dev+prod coexistence) is reported, not killed.
+	@echo "$(YELLOW)Stopping processes owned by $(INSTALL_DIR) (ownership-scoped)...$(NC)"
+	@bash $(STOP_SCRIPT) $(INSTALL_DIR) $(PROD_PORT_FALLBACK) || true
 	
 	# Clean up old backups (keep only 2 most recent)
 	@echo "$(YELLOW)Cleaning up old backups...$(NC)"; \
@@ -222,14 +231,21 @@ install: pyinstaller
 	fi
 	cp $(ENV_PROD_FILE) $(INSTALL_DIR)/.env
 	
-	# Stage the launchd plist with the real install path sed'd in
-	# (template lives in scripts/ensemble-prod.plist with placeholders)
+	# Stage the launchd plist with the real install path substituted
+	# (template lives in scripts/ensemble-prod.plist with placeholders).
+	# Literal substitution (review m8): the old `sed 's|…|$(INSTALL_DIR)|g'`
+	# — and equally an `awk -v rep=…` + gsub form — deliberately NOT used —
+	# reinterprets `&` (expands to the matched placeholder) and `\` in
+	# INSTALL_DIR. This awk uses ENVIRON (no -v unescaping) + index/substr
+	# splicing, which is byte-literal. Proven with INSTALL_DIR='/tmp/a&b\|c'
+	# → placeholder replaced by exactly that string. The redirect is quoted
+	# for the same reason (shell split/glob safety).
 	@echo "$(YELLOW)Staging launcher + plist...$(NC)"
 	cp $(CURDIR)/launcher.sh $(INSTALL_DIR)/launcher.sh
 	chmod +x $(INSTALL_DIR)/launcher.sh
 	mkdir -p $(INSTALL_DIR)/data
-	sed 's|INSTALL_DIR_PLACEHOLDER|$(INSTALL_DIR)|g' scripts/ensemble-prod.plist \
-		> $(INSTALL_DIR)/data/ensemble-prod.plist
+	INSTALL_DIR='$(INSTALL_DIR)' awk 'BEGIN { rep = ENVIRON["INSTALL_DIR"]; p = "INSTALL_DIR_PLACEHOLDER"; lp = length(p) } { while ((i = index($$0, p)) > 0) $$0 = substr($$0, 1, i - 1) rep substr($$0, i + lp); print }' scripts/ensemble-prod.plist \
+		> "$(INSTALL_DIR)/data/ensemble-prod.plist"
 	
 	# Copy frontend build (preserve frontend/dist/frontend/browser structure)
 	@echo "$(YELLOW)Copying frontend...$(NC)"
