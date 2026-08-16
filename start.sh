@@ -99,8 +99,14 @@ echo ""
 # uvicorn.run("daemon.api:app", host="$HOST", port=$PORT)
 # '
 
+# Dev-flow shutdown bound (review M1, 2026-08-16): 10s task-drain budget on
+# SIGTERM — dev teardown is lighter than prod (no staged .env / launcher), so
+# 10s suits it. SCOPE: uvicorn's timeout_graceful_shutdown bounds only
+# _wait_tasks_to_complete(); the lifespan teardown after it is unbounded
+# here (dev has no launcher SIGKILL) — acceptable for a dev flow, mirrors
+# the honest-scope comments in daemon/__main__.py + daemon/config.py.
 exec -a ensemble-prod $PYTHON -c "
 import uvicorn
 import os
-uvicorn.run('daemon.api:app', host=os.environ['HOST'], port=int(os.environ['PORT']), access_log=False)
+uvicorn.run('daemon.api:app', host=os.environ['HOST'], port=int(os.environ['PORT']), access_log=False, timeout_graceful_shutdown=10)
 "

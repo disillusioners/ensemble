@@ -252,13 +252,21 @@ class DaemonConfig(BaseSettings):
     graceful_shutdown_timeout_seconds: int = Field(
         default=60,
         description=(
-            "Uvicorn timeout_graceful_shutdown: how long SIGTERM shutdown "
-            "waits for in-flight requests and the FastAPI lifespan teardown "
-            "before force-closing connections. Raises bound shutdown latency "
-            "to drain completeness — increase to let long SSE streams and "
-            "checkpoint flushes finish, decrease to restart faster. "
-            "Supersedes the dead SHUTDOWN_TIMEOUT_S constants ceiling "
-            "(daemon/constants.py) by giving it a real, configurable consumer."
+            "Uvicorn timeout_graceful_shutdown — SCOPE IS NARROWER THAN THE "
+            "NAME SUGGESTS (uvicorn 0.41.0): it bounds ONLY "
+            "_wait_tasks_to_complete(), i.e. the drain of in-flight "
+            "connections/requests after SIGTERM. The FastAPI lifespan "
+            "shutdown that follows (all 9 steps of manager.shutdown()) is "
+            "NOT bounded by this value. The real hard bound on total "
+            "shutdown time is the launcher's SIGKILL (launcher.sh "
+            "CHILD_STOP_WAIT_S / scripts/stop-ensemble.sh WAIT_S, default "
+            "70s = this value + 10s margin; stop-ensemble.sh reads "
+            "DAEMON_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS from the staged "
+            "INSTALL_DIR/.env to derive its budget — single source of "
+            "truth). Per-step asyncio.wait_for budgets inside "
+            "manager.shutdown() are deferred hardening (pre-Phase-3). "
+            "Within its scope: increase to let long SSE streams and "
+            "checkpoint flushes finish, decrease to restart faster."
         ),
     )
 

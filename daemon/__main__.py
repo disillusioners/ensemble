@@ -242,11 +242,18 @@ def main():
     # Run server (access_log=False: custom SelectiveAccessLogMiddleware handles selective logging)
     #
     # timeout_graceful_shutdown (Auto-Restart Phase 1, fixes C1): bounds
-    # SIGTERM shutdown so a hung lifespan teardown can no longer hang
-    # forever. The dead SHUTDOWN_TIMEOUT_S constants ceiling (300s) is
-    # superseded by this configurable field (default 60s; env
-    # DAEMON_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS). Raising it trades
-    # shutdown latency for drain completeness.
+    # the TASK-DRAIN phase of SIGTERM shutdown only. SCOPE (uvicorn
+    # 0.41.0): Server._serve() wraps timeout_graceful_shutdown around
+    # _wait_tasks_to_complete() — i.e. in-flight connections/requests.
+    # The lifespan shutdown (lifespan.shutdown(), all 9 steps of
+    # manager.shutdown() in daemon/api.py) is invoked AFTER that and is
+    # NOT bounded by this value. The real hard bound on TOTAL shutdown
+    # time is therefore the launcher's SIGKILL (launcher.sh
+    # CHILD_STOP_WAIT_S, default 70s = 60s graceful + 10s margin;
+    # scripts/stop-ensemble.sh WAIT_S mirrors it). Per-step
+    # asyncio.wait_for budgets inside manager.shutdown() are deferred
+    # hardening (pre-Phase-3). Raising the value trades task-drain
+    # latency for drain completeness.
     uvicorn.run(
         "daemon.api:app",
         host=config.daemon.host,

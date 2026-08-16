@@ -30,8 +30,24 @@
 # with a loud warning that it can kill unrelated listeners on coexistence
 # hosts.
 #
-# Signal hygiene (ADR-009): SIGTERM first, bounded wait (default 10s,
-# WAIT_S override), SIGKILL last resort.
+# Signal hygiene (ADR-009): SIGTERM first, bounded wait, SIGKILL last resort.
+#
+# SINGLE-TERM CONTRACT (review M2, 2026-08-16): when a launcher owns the
+# daemon, ONLY the launcher is TERMed. The launcher trap forwards SIGTERM
+# to its child exactly once, waits bounded, and exits with the child's
+# exit code — so uvicorn receives exactly ONE SIGTERM and runs its full
+# graceful lifespan teardown. A second TERM to the daemon pid would trip
+# uvicorn's force_exit and skip manager.shutdown() entirely (crash-
+# equivalent). Direct-TERM of daemon pids happens ONLY in the no-launcher
+# pass (plain installs, or a launcher that died without reaping).
+#
+# WAIT budget (review M3): the daemon's graceful drain is ~60s by default
+# (DaemonConfig.graceful_shutdown_timeout_seconds, env
+# DAEMON_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS). WAIT_S defaults to
+# graceful+10 (70) and prefers the value parsed from the TARGET's staged
+# INSTALL_DIR/.env so the budget stays single-source; explicit WAIT_S
+# always wins. Clamp 10..600 — malformed env can never produce garbage
+# sleeps or 0s kills.
 #
 # Usage:
 #   bash scripts/stop-ensemble.sh [INSTALL_DIR]     (default ~/agents-ensemble)
@@ -44,7 +60,15 @@
 
 set -u
 
-WAIT_S="${WAIT_S:-10}"
+# WAIT_S resolution (M3), in precedence order:
+#   1. explicit WAIT_S (CLI `WAIT_S=... bash ...` or exported env) — wins
+#   2. DAEMON_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS from INSTALL_DIR/.env + 10
+#      (parsed below once INSTALL_DIR is resolved; clamped)
+#   3. default 70 (60s graceful + 10s margin)
+DEFAULT_WAIT_S=70
+WAIT_S_FLOOR=10
+WAIT_S_CAP=600
+WAIT_S_EXPLICIT="${WAIT_S:-}"
 DRY_RUN="${DRY_RUN:-0}"
 SELF_PID=$$
 
@@ -61,6 +85,53 @@ INSTALL_DIR="$(cd "$INSTALL_DIR" 2>/dev/null && pwd)" || _die "cannot resolve IN
 # path. Ownership checks accept either form.
 PHYS_DIR="$(cd -P "$INSTALL_DIR" 2>/dev/null && pwd)"
 [ -n "$PHYS_DIR" ] || PHYS_DIR="$INSTALL_DIR"
+
+# ── WAIT_S resolution (review M3) ────────────────────────────────────────────
+# Single-source-of-truth: the SAME staged INSTALL_DIR/.env the launcher
+# exports (ADR-014) also carries DAEMON_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS.
+# We read it directly from the file (not the environment): deploy.sh and
+# the Makefile invoke this script WITHOUT exporting the daemon's env
+# first (verified), so the staged file is the only reliable source.
+# Budget = graceful timeout + 10s margin (launcher's CHILD_STOP_WAIT_S
+# uses the same formula). Digits-only validation; clamp to floor/cap.
+_resolve_wait_s() {
+    # $1 = env file path (may not exist)
+    local env_file="$1" raw="" val=""
+    raw="$(sed -n 's/^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}DAEMON_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS[[:space:]]*=[[:space:]]*//p' "$env_file" 2>/dev/null | head -1)"
+    raw="${raw%$'\r'}"
+    # strip optional surrounding quotes
+    case "$raw" in
+        \"*\") raw="${raw#\"}"; raw="${raw%\"}" ;;
+        \'*\') raw="${raw#\'}"; raw="${raw%\'}" ;;
+    esac
+    printf '%s' "$raw" | grep -Eq '^[0-9]+$' || raw=""
+    if [ -z "$raw" ]; then
+        printf '%s\n' "$DEFAULT_WAIT_S"
+        return 0
+    fi
+    val=$((raw + 10))
+    if [ "$val" -lt "$WAIT_S_FLOOR" ]; then val="$WAIT_S_FLOOR"; fi
+    if [ "$val" -gt "$WAIT_S_CAP" ]; then val="$WAIT_S_CAP"; fi
+    printf '%s\n' "$val"
+}
+
+WAIT_SOURCE="default (70 = 60s graceful + 10s margin)"
+if [ -n "$WAIT_S_EXPLICIT" ]; then
+    if printf '%s' "$WAIT_S_EXPLICIT" | grep -Eq '^[0-9]+$'; then
+        WAIT_S="$WAIT_S_EXPLICIT"
+        WAIT_SOURCE="explicit WAIT_S=$WAIT_S_EXPLICIT (override wins)"
+    else
+        WAIT_S="$DEFAULT_WAIT_S"
+        WAIT_SOURCE="malformed WAIT_S='$WAIT_S_EXPLICIT' — fell back to $DEFAULT_WAIT_S"
+    fi
+else
+    WAIT_S="$(_resolve_wait_s "$INSTALL_DIR/.env")"
+    if [ "$WAIT_S" = "$DEFAULT_WAIT_S" ]; then
+        WAIT_SOURCE="default (70 = 60s graceful + 10s margin)"
+    else
+        WAIT_SOURCE="derived from $INSTALL_DIR/.env (graceful + 10s, clamped ${WAIT_S_FLOOR}..${WAIT_S_CAP})"
+    fi
+fi
 
 # ── ERE-escape the install dir for pgrep patterns ──────────────────────────
 _ere_escape() {
@@ -124,13 +195,21 @@ _classify() {
     fi
 
     # Tier 1b: ensemble-shaped + cwd is the install dir (logical OR
-    # physical form — lsof reports physical paths).
+    # physical form — lsof reports physical paths). Launcher-shaped
+    # processes get their own kind: deploy starts the launcher as
+    # `./launcher.sh` (relative argv — Tier 1a's absolute anchor cannot
+    # match it), and the launcher must still stop LAUNCHER-FIRST so the
+    # daemon gets its single TERM via the trap forward (review M2).
     if printf '%s\n' "$args" | grep -Eq '(ensemble-prod)( |$)' \
         || printf '%s\n' "$comm" | grep -Eq 'ensemble-prod' \
         || printf '%s\n' "$args" | grep -Eq '(^| )([^ ]*/)?launcher\.sh( |$)'; then
         cwd="$(_cwd_of "$pid")"
         if [ "$cwd" = "$INSTALL_DIR" ] || [ "$cwd" = "$PHYS_DIR" ]; then
-            echo "cwd"
+            if printf '%s\n' "$args" | grep -Eq '(^| )([^ ]*/)?launcher\.sh( |$)'; then
+                echo "cwd-launcher"
+            else
+                echo "cwd"
+            fi
             return 0
         fi
     fi
@@ -216,28 +295,100 @@ for pid in $raw; do
     [ "$pid" = "$SELF_PID" ] && continue
     [ "$pid" = "$PPID" ] && continue
     kind="$(_classify "$pid")" || continue
-    if [ "$kind" = "launcher-path" ]; then
-        owned_launchers="$owned_launchers $pid"
-    else
-        owned_rest="$owned_rest $pid"
-    fi
+    case "$kind" in
+        launcher-path|cwd-launcher) owned_launchers="$owned_launchers $pid" ;;
+        *) owned_rest="$owned_rest $pid" ;;
+    esac
 done
+
+_log "WAIT_S resolved to ${WAIT_S}s — ${WAIT_SOURCE}"
 
 if [ -z "$(printf '%s' "$owned_launchers$owned_rest" | tr -d ' ')" ]; then
     _log "no processes owned by $INSTALL_DIR — nothing to stop"
     exit 0
 fi
 
-# Stop launchers FIRST: a running launcher forwards SIGTERM to its daemon
-# child, waits (bounded), and exits with the child's real exit code — the
-# stop is never classified as a crash and nothing bounces back up.
+# SINGLE-TERM STOP (review M2): when launchers are present, TERM ONLY the
+# launcher(s). The launcher trap (launcher.sh run_loop) forwards SIGTERM
+# to its daemon child exactly once, waits bounded (CHILD_STOP_WAIT_S),
+# and exits with the child's real exit code — uvicorn gets exactly ONE
+# TERM and runs its full graceful lifespan teardown (manager.shutdown()).
+# TERMs in this same pass as well would be the SECOND TERM from uvicorn's
+# point of view → force_exit → teardown skipped → every stop of a healthy
+# daemon becomes crash-equivalent. The daemon pids are therefore deferred
+# to the straggler pass below, which runs only for what is STILL alive
+# after the launcher(s) finished (launcher died without reaping, or plain
+# no-launcher installs where owned_rest IS the daemon set).
 if [ -n "$(printf '%s' "$owned_launchers" | tr -d ' ')" ]; then
-    _log "stopping owned launcher(s):$owned_launchers"
+    _log "launcher-owned stop: TERMinG launcher(s) ONLY (single TERM, forwarded to daemon):$owned_launchers"
     _stop_pids $owned_launchers
 fi
+
+# Straggler / no-launcher pass — direct daemon TERM. Descendants of a
+# launcher we just stopped were TERMed via the trap's forward (the
+# launcher's bounded reap waits for its direct child; PyInstaller's
+# bootloader waits for ITS child in turn, so the tree drains through
+# the launcher). They get a short grace re-check here instead of an
+# immediate second TERM; only what is STILL alive after that (launcher
+# died without reaping → orphan) or was never under a launcher (plain
+# install) gets the direct TERM→wait→KILL.
+_descendants_of() {
+    # $@ = root pids → prints all live descendants (recursive), one/line
+    # Single ps snapshot (pid+ppid from the SAME line) so the two columns
+    # can never misalign across separate ps calls.
+    local roots="$*" out=" $* " changed=1 line pid ppid
+    while [ "$changed" = "1" ]; do
+        changed=0
+        while read -r line; do
+            pid="${line%% *}"; ppid="${line##* }"
+            case " $out " in *" $ppid "*) ;; *) continue ;; esac
+            case " $out " in *" $pid "*) continue ;; esac
+            out="$out $pid "
+            changed=1
+        done < <(ps -axo pid=,ppid= 2>/dev/null | sed 's/  */ /g; s/^ //')
+    done
+    for pid in $out; do
+        [ "$pid" = "$SELF_PID" ] && continue
+        _alive "$pid" && printf '%s\n' "$pid"
+    done
+    return 0
+}
+
 if [ -n "$(printf '%s' "$owned_rest" | tr -d ' ')" ]; then
-    _log "stopping owned daemon process(es):$owned_rest"
-    _stop_pids $owned_rest
+    LAUNCHER_DESC=""
+    if [ -n "$(printf '%s' "$owned_launchers" | tr -d ' ')" ]; then
+        LAUNCHER_DESC="$(_descendants_of $owned_launchers | tr '\n' ' ')"
+    fi
+    STRAGGLERS=""
+    for pid in $owned_rest; do
+        _alive "$pid" || continue
+        case " $LAUNCHER_DESC " in
+            *" $pid "*)
+                if [ "$DRY_RUN" = "1" ]; then
+                    _log "DRY_RUN: $pid (launcher descendant) would be grace-checked post-launcher — no second TERM while draining"
+                    continue
+                fi
+                # was TERMed via the launcher's forward — brief grace
+                # re-check before any second TERM (never double-TERM a
+                # daemon still inside its graceful teardown)
+                DRAINED=0
+                for _ in 1 2 3; do
+                    _alive "$pid" || { DRAINED=1; break; }
+                    sleep 1
+                done
+                if [ "$DRAINED" = "1" ]; then
+                    _log "$pid drained via launcher forward — no second TERM"
+                    continue
+                fi
+                _log "$pid still alive after launcher stopped + grace (orphan) — direct TERM"
+                ;;
+        esac
+        STRAGGLERS="$STRAGGLERS $pid"
+    done
+    if [ -n "$(printf '%s' "$STRAGGLERS" | tr -d ' ')" ]; then
+        _log "stopping owned daemon process(es) directly (no live launcher):$STRAGGLERS"
+        _stop_pids $STRAGGLERS
+    fi
 fi
 
 _log "done — $INSTALL_DIR is stopped"
