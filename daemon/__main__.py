@@ -28,16 +28,77 @@ from .config import load_config
 #         launcher retries with capped backoff WITHOUT decrementing the
 #         burst budget (ADR-011) — a PG outage never permanently downs
 #         the daemon. LIVE as of Phase 1 (see _boot_db_preflight).
-#   78  = configuration/schema refusal: boot found the database newer
-#         than the binary can safely run, or fatal config. The
-#         supervisor must NOT loop on 78. DEFERRED to Phase 5
-#         (migration guard + daemon_meta) — deliberately NOT live yet.
+#   78  = configuration refusal: credentials rejected by PostgreSQL
+#         (SQLSTATE 28P01/28000/28P02 — bad POSTGRES_PASSWORD, wrong
+#         user, or pg_hba rejection) or, in Phase 5, database newer
+#         than the binary can safely run. The supervisor must NOT
+#         loop on 78. The auth-refusal half is LIVE as of Phase 1
+#         (see _boot_db_preflight); the schema/version guard remains
+#         DEFERRED to Phase 5 (migration guard + daemon_meta).
 #   1   = crash (unhandled exception). Restart with backoff. The
 #         default crash path; no explicit code needed.
 # ───────────────────────────────────────────────────────────────────────────
 
 # Exit code for boot-time PG unreachability (EX_TEMPFAIL — see block above).
 _EXIT_BOOT_DB_TEMPFAIL = 75
+
+# Exit code for boot-time PG auth refusal (EX_CONFIG — see block above):
+# wrong credentials can never be fixed by retrying, so the launcher
+# must stop instead of looping on the budget-exempt 75 track.
+_EXIT_BOOT_DB_AUTH_REFUSED = 78
+
+# libpq SQLSTATE codes for permanent authentication/authorization
+# failure. 28P01 = invalid_password, 28000 =
+# invalid_authorization_specification (role missing / pg_hba reject).
+# 28P02 is included defensively per code review — not a stock
+# PostgreSQL code, but harmless to treat as permanent if a proxy or
+# gateway emits it.
+_AUTH_FAILURE_SQLSTATES = frozenset({"28P01", "28000", "28P02"})
+
+
+def _preflight_pg_url(ensemble_config) -> str:
+    """Build the boot-preflight engine URL.
+
+    Mirrors the URL construction inside
+    ``daemon/repositories/factory.py::create_postgres_engine``
+    (``POSTGRES_*`` env overrides over ``ensemble.json`` values) so
+    the probe targets EXACTLY the database the daemon would use.
+    Duplicated here because the preflight engine needs a
+    ``connect_timeout`` the shared factory deliberately does not
+    set — keep the two in sync if the factory's URL construction
+    changes.
+    """
+    import os
+
+    pg = ensemble_config.postgres
+    host = os.environ.get("POSTGRES_HOST", pg.host)
+    port = os.environ.get("POSTGRES_PORT", str(pg.port))
+    db = os.environ.get("POSTGRES_DB", pg.db)
+    user = os.environ.get("POSTGRES_USER", pg.user)
+    password = os.environ.get("POSTGRES_PASSWORD", pg.password)
+    return f"postgresql+psycopg://{user}:{password}@{host}:{port}/{db}"
+
+
+def _pg_sqlstate(exc: BaseException) -> "str | None":
+    """Best-effort SQLSTATE extraction from a SQLAlchemy-wrapped DBAPI error.
+
+    SQLAlchemy wraps the driver error as ``exc.orig``; psycopg exposes
+    the SQLSTATE as ``orig.sqlstate`` (with ``orig.diag.sqlstate`` as
+    an alternate layout). Drivers disagree, so every access is
+    defensive — a missing/non-string code returns None, which callers
+    classify as transient (fail toward the retryable track).
+    """
+    orig = getattr(exc, "orig", None)
+    if orig is None:
+        return None
+    code = getattr(orig, "sqlstate", None)
+    if isinstance(code, str):
+        return code
+    diag = getattr(orig, "diag", None)
+    code = getattr(diag, "sqlstate", None)
+    if isinstance(code, str):
+        return code
+    return None
 
 
 def _boot_db_preflight() -> None:
@@ -47,17 +108,25 @@ def _boot_db_preflight() -> None:
     (ENSEMBLE_DATA_DIR > DATA_DIR > ./data precedence — see
     ``daemon/api.py`` lifespan) to decide the database backend BEFORE
     uvicorn starts. When the resolved backend is PostgreSQL, runs
-    ``SELECT 1`` with a ``BOOT_DB_TIMEOUT_S`` budget:
+    ``SELECT 1`` on a LOCALLY constructed engine whose libpq
+    ``connect_timeout`` is pinned to ``BOOT_DB_TIMEOUT_S`` — the
+    shared factory engine carries no driver timeout and would hang
+    ~75-130s on a firewall-DROP host:
 
-    * Connectivity failure → log an operator-facing message and
-      ``sys.exit(75)``. The launcher retries with capped backoff
-      without consuming the burst budget. No in-process retry loop
-      (plan m5) — one check, one verdict.
+    * Auth refusal (SQLSTATE 28P01/28000/28P02) → log an
+      operator-facing credential hint and ``sys.exit(78)``:
+      retrying cannot fix wrong credentials, so the launcher must
+      stop rather than burn the budget-exempt 75 track forever.
+    * Other definite unreachability (refused/timeout/unreachable,
+      including a raw ``ConnectionError`` escaping SQLAlchemy's
+      wrapper) → ``sys.exit(75)``. The launcher retries with capped
+      backoff without consuming the burst budget. No in-process
+      retry loop (plan m5) — one check, one verdict.
     * SQLite backend → check skipped entirely.
     * Any UNEXPECTED exception during the check itself (config read
       failure, import error, …) → fail-open: log and proceed. Only
-      definite PG unreachability blocks boot (fail-closed); a broken
-      check must not take the daemon down.
+      definite PG unreachability/auth refusal blocks boot
+      (fail-closed); a broken check must not take the daemon down.
     """
     try:
         from .ensemble_config import EnsembleConfig
@@ -72,15 +141,27 @@ def _boot_db_preflight() -> None:
             logger.debug("Boot preflight: SQLite backend — PG check skipped")
             return
 
-        from .repositories.factory import create_postgres_engine
         from .constants import BOOT_DB_TIMEOUT_S
-        from sqlalchemy import text
+        from sqlalchemy import create_engine, text
 
         logger.info(
             f"Boot preflight: PostgreSQL backend selected — probing "
             f"connectivity (timeout {BOOT_DB_TIMEOUT_S}s)"
         )
-        engine = create_postgres_engine(ensemble_config)
+        # The preflight engine is constructed LOCALLY (not via the
+        # shared create_postgres_engine factory) for exactly one
+        # reason: it carries a libpq ``connect_timeout`` so a
+        # firewall-DROP host fails inside the BOOT_DB_TIMEOUT_S
+        # budget instead of at the OS TCP timeout (~75-130s). The
+        # driver bound is the real enforcement — an asyncio.wait_for
+        # wrapper CANNOT bound a sync connect (measured on Py3.13:
+        # the executor shutdown joins the hung worker thread, so the
+        # timeout surfaces only after the thread finally completes).
+        # One-shot probe: no pool tuning, dispose immediately after.
+        engine = create_engine(
+            _preflight_pg_url(ensemble_config),
+            connect_args={"connect_timeout": BOOT_DB_TIMEOUT_S},
+        )
         try:
             with engine.connect() as conn:
                 conn.execute(text("SELECT 1"))
@@ -90,14 +171,29 @@ def _boot_db_preflight() -> None:
     except SystemExit:
         raise
     except Exception as exc:
-        # Fail-closed ONLY on definite PG unreachability. SQLAlchemy
-        # wraps connection refusals/timeouts in OperationalError /
-        # DBAPIError — anything else here means the check itself is
-        # broken (bad config file, import failure) and must not block
-        # boot: log and proceed.
+        # Fail-closed ONLY on definite PG unreachability or auth
+        # refusal. SQLAlchemy wraps connection refusals/timeouts in
+        # OperationalError / DBAPIError (a raw ConnectionError gets
+        # the same verdict) — anything else here means the check
+        # itself is broken (bad config file, import failure) and must
+        # not block boot: log and proceed.
         from sqlalchemy.exc import OperationalError, DBAPIError
 
-        if isinstance(exc, (OperationalError, DBAPIError)):
+        if isinstance(exc, (OperationalError, DBAPIError, ConnectionError)):
+            sqlstate = _pg_sqlstate(exc)
+            if sqlstate in _AUTH_FAILURE_SQLSTATES:
+                logger.error(
+                    "PostgreSQL authentication refused at boot "
+                    "(SQLSTATE %s): %s\n"
+                    "  → permanent auth failure — check POSTGRES_* "
+                    "credentials (POSTGRES_USER / POSTGRES_PASSWORD / "
+                    "POSTGRES_DB / pg_hba.conf)\n"
+                    "  → exiting 78; launcher must NOT retry — "
+                    "retrying cannot fix credentials",
+                    sqlstate,
+                    exc,
+                )
+                sys.exit(_EXIT_BOOT_DB_AUTH_REFUSED)
             logger.error(
                 "PostgreSQL unreachable at boot (timeout/conn refused): %s\n"
                 "  → exiting 75 EX_TEMPFAIL; launcher will retry with "

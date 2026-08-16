@@ -262,6 +262,121 @@ async def test_refresh_db_probe_timeout_degrades():
 
 
 @pytest.mark.asyncio
+async def test_refresh_queue_probe_timeout_degrades_freshness():
+    """A timed-out QUEUE probe is NOT the empty-set default (review m4).
+
+    "No answer" must not read as "no RUNNING tasks" (None age = fresh).
+    The composite degrades with an explicit timeout reason and reports
+    the age as None (unknown), never as a fabricated fresh number.
+    """
+    import time
+
+    def very_slow_queue_probe():
+        time.sleep(2.6)  # > QUEUE_PROBE_TIMEOUT_S (2.0s)
+        return 999.0
+
+    composite = await refresh_readiness_composite(
+        db_probe=Mock(return_value=True),
+        queue_probe=very_slow_queue_probe,
+        services_ok=True,
+        queue_freshness_threshold_seconds=120,
+    )
+
+    assert composite.queue_freshness is False
+    assert composite.ready is False
+    assert composite.queue_max_age_seconds is None  # unknown, not fabricated
+    assert any("timed out" in r for r in composite.reasons)
+    # The DB component must be unaffected by a queue-probe timeout.
+    assert composite.database is True
+
+
+@pytest.mark.asyncio
+async def test_refresh_queue_probe_timeout_distinguished_from_empty_set():
+    """Timeout vs empty-set produce DIFFERENT composites (m4 regression pin).
+
+    Empty set → fresh, no timeout reason. Timeout → degraded with the
+    timeout reason. Guards against a regression to the pre-m4 behavior
+    (timeout silently mapped to the empty-set default).
+    """
+
+    def empty_set_probe():
+        return None
+
+    def hanging_probe():
+        import time
+
+        time.sleep(2.6)  # > QUEUE_PROBE_TIMEOUT_S
+        return 5.0
+
+    fresh_composite = await refresh_readiness_composite(
+        db_probe=Mock(return_value=True),
+        queue_probe=empty_set_probe,
+        services_ok=True,
+        queue_freshness_threshold_seconds=120,
+    )
+    timed_out_composite = await refresh_readiness_composite(
+        db_probe=Mock(return_value=True),
+        queue_probe=hanging_probe,
+        services_ok=True,
+        queue_freshness_threshold_seconds=120,
+    )
+
+    assert fresh_composite.queue_freshness is True
+    assert timed_out_composite.queue_freshness is False
+    assert fresh_composite.reasons == []
+    assert any("timed out" in r for r in timed_out_composite.reasons)
+
+
+@pytest.mark.asyncio
+async def test_refresh_db_timeout_does_not_leak_into_database_ok():
+    """A timed-out DB probe must degrade database — never read as truthy.
+
+    Pins the m4 design: the guard returns an out-of-band timeout flag;
+    a sentinel-VALUE design would have let the marker leak into
+    ``database_ok`` and fail OPEN.
+    """
+
+    def hanging_db_probe():
+        import time
+
+        time.sleep(0.8)  # > DB_PROBE_TIMEOUT_S (0.5s)
+        return True
+
+    composite = await refresh_readiness_composite(
+        db_probe=hanging_db_probe,
+        queue_probe=Mock(return_value=None),
+        services_ok=True,
+        queue_freshness_threshold_seconds=120,
+    )
+
+    assert composite.database is False  # exactly False — not any truthy marker
+    assert composite.ready is False
+    assert composite.database is not True
+
+
+@pytest.mark.asyncio
+async def test_refresh_queue_probe_exception_keeps_empty_set_default():
+    """A queue probe that RAISES still follows the empty-set default.
+
+    Exceptions ≠ timeouts (m4): an unreachable database already
+    degrades the ``database`` component; queue_freshness must not
+    double-report.
+    """
+    composite = await refresh_readiness_composite(
+        db_probe=Mock(side_effect=RuntimeError("db gone")),
+        queue_probe=Mock(side_effect=RuntimeError("db gone")),
+        services_ok=True,
+        queue_freshness_threshold_seconds=120,
+    )
+
+    assert composite.database is False
+    assert composite.queue_freshness is True  # empty-set default on exception
+    # No QUEUE-timeout reason (the DB reason string legitimately says
+    # "failed or timed out" — that is the database component, not ours).
+    assert not any("queue probe timed out" in r for r in composite.reasons)
+
+
+@pytest.mark.asyncio
 async def test_refresh_services_component_degrades():
     composite = await refresh_readiness_composite(
         db_probe=Mock(return_value=True),

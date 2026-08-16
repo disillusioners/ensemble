@@ -1036,9 +1036,14 @@ async def _periodic_readiness_refresh_loop(
     ``daemon/services/readiness.py``):
 
     * database — SELECT 1 against the manager engine with a hard
-      500ms budget (to_thread + wait_for).
+      500ms budget (to_thread + wait_for). A timeout degrades the
+      component (fail-closed).
     * queue_freshness — MAX(last_heartbeat_at) over RUNNING tasks;
-      empty set = fresh.
+      empty set = fresh. A PROBE TIMEOUT is NOT the empty set — it
+      degrades the component with an explicit "queue probe timed
+      out" reason (age unknown, reported as None); an unreachable
+      database already reports through ``database`` and does not
+      double-report here (review m4).
     * services — job_processor + live_hub bound on ``app_state``.
 
     Unlike the drift reconciler, the first tick fires immediately

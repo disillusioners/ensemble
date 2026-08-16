@@ -45,6 +45,17 @@ QUEUE_PROBE_TIMEOUT_S: float = 2.0
 # dependency-free.
 TASK_STATUS_RUNNING = "running"
 
+# Probe-timeout marker for ``_guarded``: the helper returns a
+# ``(timed_out, value)`` tuple so a timeout is distinguishable from
+# the component's own default at the call site. This matters because
+# the two components treat a timeout DIFFERENTLY: a timed-out DB
+# probe degrades ``database`` (fail-closed), while a timed-out queue
+# probe degrades ``queue_freshness`` (a timeout must NOT read as the
+# empty-set default — "no answer" is not "no RUNNING tasks"). A
+# sentinel VALUE returned from the shared helper cannot express that
+# split (a truthy sentinel leaking into ``database_ok`` would
+# fail-OPEN), so the flag travels out-of-band.
+
 # Queue-freshness aggregate, computed SQL-side per dialect.
 #
 # Why SQL-side (plan deviation, recorded in the Phase-1 report): the
@@ -193,38 +204,75 @@ async def refresh_readiness_composite(
 
     Probes are injected sync callables (see :func:`make_db_probe` /
     :func:`make_queue_probe`); they run in worker threads so a hung
-    database never blocks the event loop. A probe that is ``None`` or
-    raises is a failed component — readiness fails closed. A timed-out
-    queue probe returns the empty-set default (None age = fresh) while
-    the ``database`` component carries the degradation: a DB hung
-    enough to miss the aggregate budget cannot serve SELECT 1 either,
-    and the freshness component must not double-report.
+    database never blocks the event loop. A probe that is ``None``
+    or raises is a failed component — readiness fails closed.
+
+    Timeout semantics differ per component. A timed-out DATABASE
+    probe degrades ``database`` (false). A timed-out QUEUE probe
+    degrades ``queue_freshness`` with the reason "queue probe timed
+    out" — it must NOT read as the empty-set default (None age =
+    fresh): no answer is not "no running tasks". The age stays None
+    because no honest number exists. Exceptions from the queue probe
+    still follow the historical empty-set default (None probe /
+    raised error → fresh) — an unreachable database already reports
+    through the ``database`` component and must not double-report
+    here.
     """
     checked_at = (now or (lambda: datetime.now(timezone.utc)))()
 
     async def _guarded(probe, timeout_s, default):
+        """Run one probe; return ``(timed_out, value)``.
+
+        ``value`` is the probe result, the component default when the
+        probe is ``None``/raises, or ``None`` on timeout; ``timed_out``
+        disambiguates a timeout from a legitimate ``None`` default so
+        each component can apply its own timeout semantics.
+        """
         if probe is None:
-            return default
+            return False, default
         try:
-            return await asyncio.wait_for(asyncio.to_thread(probe), timeout=timeout_s)
+            return False, await asyncio.wait_for(
+                asyncio.to_thread(probe), timeout=timeout_s
+            )
         except asyncio.CancelledError:
             raise
+        except TimeoutError:
+            return True, None
         except Exception as exc:
             logger.warning("Readiness probe failed: %s", exc)
-            return default
+            return False, default
 
-    database_ok = await _guarded(db_probe, DB_PROBE_TIMEOUT_S, False)
-    queue_max_age_seconds = await _guarded(queue_probe, QUEUE_PROBE_TIMEOUT_S, None)
-    fresh, age = evaluate_queue_freshness(
-        queue_max_age_seconds,
-        threshold_seconds=queue_freshness_threshold_seconds,
+    db_timed_out, database_ok = await _guarded(db_probe, DB_PROBE_TIMEOUT_S, False)
+    # A DB-probe timeout MUST degrade ``database`` — the guard returns
+    # None as the value, but the flag is authoritative (m4: a truthy
+    # sentinel leaking into database_ok would fail OPEN).
+    if db_timed_out:
+        database_ok = False
+    queue_timed_out, queue_result = await _guarded(
+        queue_probe, QUEUE_PROBE_TIMEOUT_S, None
     )
+
+    extra_reasons: list[str] = []
+    if queue_timed_out:
+        # Distinguish "no RUNNING tasks" (None → fresh) from "never
+        # got an answer" (timeout → degraded, age unknown).
+        queue_max_age_seconds = None
+        fresh = False
+        extra_reasons.append("queue_freshness: queue probe timed out")
+    else:
+        queue_max_age_seconds = queue_result
+        fresh, age = evaluate_queue_freshness(
+            queue_max_age_seconds,
+            threshold_seconds=queue_freshness_threshold_seconds,
+        )
+        queue_max_age_seconds = age
     return compute_readiness_composite(
         database_ok=database_ok,
         queue_fresh_ok=fresh,
         services_ok=services_ok,
-        queue_max_age_seconds=age,
+        queue_max_age_seconds=queue_max_age_seconds,
         checked_at=checked_at,
+        extra_reasons=extra_reasons,
     )
 
 
