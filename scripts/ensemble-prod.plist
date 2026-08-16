@@ -12,6 +12,20 @@
   copies the staged plist to ~/Library/LaunchAgents and prints the
   launchctl bootstrap command.
 
+  DEMO USAGE (3-env topology — dev 8079 / demo 7979 / live 9797): the same
+  shape works for the demo rehearsal env with three edits —
+    Label              com.ensemble.demo        (must differ from prod's)
+    port in your head  7979 comes from ~/agents-ensemble-demo/.env staged
+                       by scripts/deploy.sh (PORT=7979) — nothing to edit
+                       in the plist itself (ADR-014: env, not plist, is
+                       the port source)
+    INSTALL_DIR        ~/agents-ensemble-demo   (the placeholder you
+                       substitute; logs land in its data/launcher.log)
+  Phase 1 ships this ONE template — `make install`'s sed-in path stays
+  LIVE-ONLY for now; when demo moves under launchd, duplicate this file
+  with the three edits above (a make plist-demo generator is trivial but
+  deferred until a launchd-managed demo is actually wanted).
+
   Division of labor (plan §4.1):
     launchd  = start at boot, SIGTERM stop, fixed 10s throttle, re-engage
                only if the LAUNCHER itself dies.

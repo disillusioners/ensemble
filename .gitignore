@@ -73,3 +73,7 @@ e2e-shots/
 
 # Sandbox second-prod env (real keys copied from .env.prod — never commit)
 .env.prod.sandbox
+
+# Demo env (auto-generated from .env.prod with PORT/POSTGRES_DB overridden —
+# real keys, never commit; scripts/deploy.sh generates it on demand)
+.env.prod.demo

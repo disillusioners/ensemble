@@ -39,7 +39,7 @@ YELLOW := \033[1;33m
 RED := \033[0;31m
 NC := \033[0m
 
-.PHONY: build install install-deps clean uninstall help sync stop stop-by-port start dev pyinstaller pyinstaller-clean ensure-latest plist-install sandbox-env
+.PHONY: build install install-deps clean uninstall help sync stop stop-by-port start dev pyinstaller pyinstaller-clean ensure-latest plist-install sandbox-env deploy-demo deploy-live stage-demo
 
 help:
 	@echo "Available targets:"
@@ -52,7 +52,10 @@ help:
 	@echo "  make start           - Start the daemon (dev flow: stop + start.sh)"
 	@echo "  make stop            - Stop ONLY processes owned by $(INSTALL_DIR) (ownership-scoped; never port-based)"
 	@echo "  make stop-by-port    - OPT-IN legacy port kill (unsafe on coexistence hosts)"
-	@echo "  make sandbox-env     - Generate .env.prod.sandbox (second-prod test env; gitignored)"
+	@echo "  make deploy-demo     - Deploy to the DEMO env (~/agents-ensemble-demo, :7979, ensemble_demo)"
+	@echo "  make deploy-live     - Deploy to LIVE (~/agents-ensemble, :9797) — needs ENSEMBLE_DEPLOY_LIVE=1"
+	@echo "  make stage-demo      - Deploy to demo WITHOUT starting it (stage only)"
+	@echo "  make sandbox-env     - Generate .env.prod.sandbox (LEGACY — superseded by the demo env; removal pending)"
 	@echo "  make dev             - stop + sync + start"
 	@echo "  make clean           - Remove build artifacts"
 	@echo "  make pyinstaller-clean - Remove PyInstaller build files"
@@ -292,6 +295,22 @@ plist-install:
 	@echo "  launchctl bootout gui/$$(id -u)/com.ensemble.prod"
 	@echo ""
 	@echo "Logs: $(INSTALL_DIR)/data/launcher.log (stdout) + launcher.err.log (stderr)"
+
+# Deploy targets (Auto-Restart Phase 1, 3-env topology: dev 8079 / demo 7979 /
+# live 9797). Thin wrappers over scripts/deploy.sh — all logic (config table,
+# guards, ownership-scoped stop, health gate, live-PID assertion) lives there.
+# deploy-live additionally demands ENSEMBLE_DEPLOY_LIVE=1 (deploy.sh refuses
+# otherwise — live is the running orchestrator, read-only until the feature
+# is done). Extra flags pass through, e.g.: make deploy-demo ARGS="--build".
+DEPLOY_SCRIPT = scripts/deploy.sh
+deploy-demo:
+	bash $(DEPLOY_SCRIPT) demo $(ARGS)
+
+deploy-live:
+	bash $(DEPLOY_SCRIPT) live $(ARGS)
+
+stage-demo:
+	bash $(DEPLOY_SCRIPT) demo --no-start $(ARGS)
 
 # Sandbox second-prod env generator (incident follow-up, 2026-08-16).
 # Derives .env.prod.sandbox from the repo .env.prod with PORT and
