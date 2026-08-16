@@ -39,7 +39,7 @@ YELLOW := \033[1;33m
 RED := \033[0;31m
 NC := \033[0m
 
-.PHONY: build install install-deps clean uninstall help sync stop stop-by-port start dev pyinstaller pyinstaller-clean ensure-latest plist-install
+.PHONY: build install install-deps clean uninstall help sync stop stop-by-port start dev pyinstaller pyinstaller-clean ensure-latest plist-install sandbox-env
 
 help:
 	@echo "Available targets:"
@@ -52,6 +52,7 @@ help:
 	@echo "  make start           - Start the daemon (dev flow: stop + start.sh)"
 	@echo "  make stop            - Stop ONLY processes owned by $(INSTALL_DIR) (ownership-scoped; never port-based)"
 	@echo "  make stop-by-port    - OPT-IN legacy port kill (unsafe on coexistence hosts)"
+	@echo "  make sandbox-env     - Generate .env.prod.sandbox (second-prod test env; gitignored)"
 	@echo "  make dev             - stop + sync + start"
 	@echo "  make clean           - Remove build artifacts"
 	@echo "  make pyinstaller-clean - Remove PyInstaller build files"
@@ -291,6 +292,30 @@ plist-install:
 	@echo "  launchctl bootout gui/$$(id -u)/com.ensemble.prod"
 	@echo ""
 	@echo "Logs: $(INSTALL_DIR)/data/launcher.log (stdout) + launcher.err.log (stderr)"
+
+# Sandbox second-prod env generator (incident follow-up, 2026-08-16).
+# Derives .env.prod.sandbox from the repo .env.prod with PORT and
+# POSTGRES_DB overridden — for proving install/boot/stop against a
+# SECOND prod install while the real one stays live. The generated
+# file contains REAL API keys (copied) and is gitignored — never commit.
+SANDBOX_PORT ?= 9979
+SANDBOX_DB ?= ensemble_prod_sandbox
+sandbox-env:
+	@if [ ! -f "$(ENV_PROD_FILE)" ]; then \
+		echo "$(RED)Error: $(ENV_PROD_FILE) not found — create it first (see .env.prod.example).$(NC)"; \
+		exit 1; \
+	fi
+	sed -e 's/^PORT=.*/PORT=$(SANDBOX_PORT)/' \
+		-e 's/^POSTGRES_DB=.*/POSTGRES_DB=$(SANDBOX_DB)/' \
+		"$(ENV_PROD_FILE)" > .env.prod.sandbox
+	@echo "$(GREEN)Wrote .env.prod.sandbox (PORT=$(SANDBOX_PORT), POSTGRES_DB=$(SANDBOX_DB))$(NC)"
+	@echo "It contains real API keys — gitignored; never commit it."
+	@echo "Create the DB first if needed:"
+	@echo "  psql -h \$\$POSTGRES_HOST -U \$\$POSTGRES_USER -d postgres -c 'CREATE DATABASE $(SANDBOX_DB);'"
+	@echo "Then install + run the sandbox:"
+	@echo "  make install INSTALL_DIR=$$HOME/agents-ensemble-sandbox ENV_PROD_FILE=.env.prod.sandbox"
+	@echo "  bash $$HOME/agents-ensemble-sandbox/launcher.sh"
+	@echo "  make stop INSTALL_DIR=$$HOME/agents-ensemble-sandbox ENV_PROD_FILE=.env.prod.sandbox  # ownership-scoped; real prod untouched"
 
 # Clean build artifacts
 clean:

@@ -70,3 +70,6 @@ test-screenshots/*
 # E2E test screenshots (binary artifacts)
 frontend/tests/e2e-shots/
 e2e-shots/
+
+# Sandbox second-prod env (real keys copied from .env.prod — never commit)
+.env.prod.sandbox
