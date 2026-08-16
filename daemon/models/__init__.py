@@ -12,6 +12,8 @@ __all__ = [
     "ErrorCodes",
     "ErrorResponse",
     "DeleteResponse",
+    "LivezResponse",
+    "ReadyzResponse",
     # instance
     "InstanceStatus",
     "InstanceCreate",

@@ -123,11 +123,17 @@ from daemon.utils import validate_agent_id as validate_agent_id  # noqa: F401
 from daemon.routers.messages import send_message as send_message  # noqa: F401
 
 from daemon import __version__
-from daemon.models import ErrorCodes, ErrorResponse, HealthResponse
+from daemon.models import ErrorCodes, ErrorResponse, HealthResponse, LivezResponse, ReadyzResponse
 from daemon.ensemble_config import EnsembleConfig
 from daemon.services.live_event_hub import LiveEventHub
 from daemon.services.notification_broadcaster import get_notification_broadcaster
 from daemon.services.editor_utils import get_editor_preference
+from daemon.services.readiness import (
+    ReadinessComposite,
+    make_db_probe,
+    make_queue_probe,
+    refresh_readiness_composite,
+)
 from daemon.constants import SSE_TIMEOUT_S, SSE_PING_INTERVAL, SSE_QUEUE_MAXSIZE
 from daemon.repositories.instance.models import InstanceStatus
 from daemon import constants
@@ -616,9 +622,35 @@ async def lifespan(app: FastAPI):
     app.state.job_queue_mgmt_service = job_queue_mgmt_service
     app.state.retry_scheduler = retry_scheduler
     app.state.dispatch_event_bus = dispatch_event_bus
-    
+
     # Store job feedback observer for cleanup
     app.state._job_feedback_observer = job_feedback_observer
+
+    # ─────────────────────────────────────────────────────────────
+    # Readiness composite refresher (Auto-Restart Phase 1, ADR-003).
+    # /readyz serves an O(1) memory read of the last composite; this
+    # background task is the ONLY database toucher for readiness
+    # (default every 10s). Mirrors the drift-reconciler task pattern
+    # above: asyncio.create_task stored on app.state, cancelled and
+    # awaited in the shutdown sequence.
+    # ─────────────────────────────────────────────────────────────
+    readiness_task = asyncio.create_task(
+        _periodic_readiness_refresh_loop(
+            manager=manager,
+            app_state=app.state,
+            interval_seconds=config.services.readiness_refresh_interval_seconds,
+            queue_freshness_threshold_seconds=(
+                config.services.readiness_queue_freshness_threshold_seconds
+            ),
+        ),
+        name="readiness-refresher",
+    )
+    app.state.readiness_refresher_task = readiness_task
+    app.state.readiness_composite = None  # populated by the first tick
+    daemon_logger.info(
+        f"[Readiness] Refresher started: interval={config.services.readiness_refresh_interval_seconds}s, "
+        f"queue_freshness_threshold={config.services.readiness_queue_freshness_threshold_seconds}s"
+    )
 
     # --- VS Code Server Manager (Phase 3: editor integration) ---
     # Construct AFTER manager.initialize() but BEFORE router DI so
@@ -829,7 +861,24 @@ async def lifespan(app: FastAPI):
     # Shutdown NotificationBroadcaster
     if notification_broadcaster is not None:
         await notification_broadcaster.shutdown()
-    
+
+    # Stop the readiness composite refresher (Auto-Restart Phase 1).
+    # Cheap to stop and first in line: once shutdown begins the
+    # composite is stale by definition, so no point refreshing it
+    # while heavier services below drain. Cancel + await with the
+    # same pattern the drift reconciler uses below.
+    if hasattr(app.state, "readiness_refresher_task"):
+        readiness_task = app.state.readiness_refresher_task
+        if readiness_task is not None and not readiness_task.done():
+            readiness_task.cancel()
+            try:
+                await readiness_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logger.warning(f"Readiness refresher shutdown error: {e}")
+        app.state.readiness_refresher_task = None
+
     # Stop the periodic drift reconciler (Phase 3 F5/F10). The
     # task is fire-and-forget under the lifespan; cancel and await
     # so the event loop drains cleanly. Mirrors the cancel/await
@@ -965,6 +1014,66 @@ async def _periodic_drift_reconcile_loop(
                 f"Drift reconciler cycle failed: {e}",
                 exc_info=True,
             )
+
+        try:
+            await asyncio.sleep(interval_seconds)
+        except asyncio.CancelledError:
+            return
+
+
+async def _periodic_readiness_refresh_loop(
+    *,
+    manager,
+    app_state,
+    interval_seconds: int,
+    queue_freshness_threshold_seconds: int,
+) -> None:
+    """Periodic asyncio loop refreshing the /readyz cached composite.
+
+    Auto-Restart Phase 1 (ADR-003): the /readyz handler performs zero
+    database access — it reads ``app_state.readiness_composite``, which
+    only this loop writes. Components (see
+    ``daemon/services/readiness.py``):
+
+    * database — SELECT 1 against the manager engine with a hard
+      500ms budget (to_thread + wait_for).
+    * queue_freshness — MAX(last_heartbeat_at) over RUNNING tasks;
+      empty set = fresh.
+    * services — job_processor + live_hub bound on ``app_state``.
+
+    Unlike the drift reconciler, the first tick fires immediately
+    (t=0): a booting daemon should be able to report readiness as
+    soon as the lifespan reaches this point, not one interval later.
+
+    Cancellation contract mirrors ``_periodic_drift_reconcile_loop``:
+    ``asyncio.CancelledError`` is the shutdown signal and propagates;
+    any other per-cycle failure is logged and retried on the next tick
+    (the previously cached composite keeps being served in the
+    meantime, so a transient DB blip degrades rather than crashes).
+    """
+    while True:
+        try:
+            services_ok = bool(
+                getattr(app_state, "job_processor", None)
+                and getattr(app_state, "live_hub", None)
+            )
+            composite = await refresh_readiness_composite(
+                db_probe=make_db_probe(manager.engine),
+                queue_probe=make_queue_probe(manager.engine),
+                services_ok=services_ok,
+                queue_freshness_threshold_seconds=queue_freshness_threshold_seconds,
+            )
+            app_state.readiness_composite = composite
+            if not composite.ready:
+                logger.warning(
+                    "[Readiness] degraded: %s (queue_max_age=%ss)",
+                    "; ".join(composite.reasons) or "unknown",
+                    composite.queue_max_age_seconds,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"[Readiness] refresh cycle failed: {e}", exc_info=True)
 
         try:
             await asyncio.sleep(interval_seconds)
@@ -1389,6 +1498,8 @@ def create_app() -> FastAPI:
         # Exact paths to HIDE (exclude from logging)
         HIDE_PATTERNS = [
             "/api/instances",
+            "/livez",
+            "/readyz",
         ]
 
         # Exact (method, path) pairs to HIDE (exclude from logging)
@@ -1575,6 +1686,75 @@ def create_app() -> FastAPI:
         return JSONResponse(
             status_code=404,
             content={"error": "UI not built. Run 'npm run build' in frontend directory."}
+        )
+
+    # ─────────────────────────────────────────────────────────────
+    # Health probes (Auto-Restart Phase 1, ADR-002/003). Mounted at
+    # the app root — NOT under /api — so supervisor/launcher probes
+    # hit http://host:PORT/livez and /readyz directly. Registered
+    # BEFORE the SPA catch-all below so the path router resolves
+    # them instead of falling through to index.html.
+    # ─────────────────────────────────────────────────────────────
+    @app.get("/livez", response_model=LivezResponse)
+    async def liveness_probe(request: Request):
+        """Liveness probe: does the event loop answer?
+
+        Trivial process-alive check — zero database access, zero
+        component checks. Restart policy input ONLY (ADR-002):
+        restart on liveness failure; readiness failures never
+        restart.
+        """
+        start_time = getattr(request.app.state, 'start_time', None)
+        return LivezResponse(
+            status="alive",
+            uptime_seconds=time.time() - start_time if start_time else 0,
+            version=__version__,
+        )
+
+    @app.get("/readyz", response_model=ReadyzResponse)
+    async def readiness_probe(request: Request):
+        """Readiness probe: serve the cached composite.
+
+        O(1) memory read of ``app.state.readiness_composite`` — zero
+        database access per request; the background refresher
+        (``_periodic_readiness_refresh_loop``) is the sole DB toucher.
+        200 when ready, 503 + Retry-After when degraded. ``draining``
+        is a reserved Phase-4 drain-controller field (always false in
+        Phase 1).
+        """
+        composite: ReadinessComposite | None = getattr(
+            request.app.state, "readiness_composite", None
+        )
+        if composite is None:
+            # No composite yet (lifespan refresher hasn't ticked, or
+            # this app runs without the full lifespan — e.g. probe
+            # tests with a mocked manager). Fail closed: not ready
+            # until a computed composite exists.
+            return JSONResponse(
+                status_code=503,
+                content=ReadyzResponse(
+                    status="degraded",
+                    components={
+                        "database": False,
+                        "queue_freshness": False,
+                        "services": False,
+                    },
+                    detail={
+                        "reasons": ["readiness composite not yet computed"],
+                        "queue_max_age_seconds": None,
+                        "checked_at": None,
+                    },
+                    draining=False,
+                ).model_dump(),
+                headers={"Retry-After": "5"},
+            )
+        payload = composite.to_payload(draining=False)
+        if composite.ready:
+            return JSONResponse(status_code=200, content=payload)
+        return JSONResponse(
+            status_code=503,
+            content=payload,
+            headers={"Retry-After": "5"},
         )
 
     @app.get("/{path:path}")

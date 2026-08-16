@@ -249,6 +249,18 @@ class DaemonConfig(BaseSettings):
 
     host: str = Field(default="0.0.0.0")
     port: int = Field(default=8079)
+    graceful_shutdown_timeout_seconds: int = Field(
+        default=60,
+        description=(
+            "Uvicorn timeout_graceful_shutdown: how long SIGTERM shutdown "
+            "waits for in-flight requests and the FastAPI lifespan teardown "
+            "before force-closing connections. Raises bound shutdown latency "
+            "to drain completeness — increase to let long SSE streams and "
+            "checkpoint flushes finish, decrease to restart faster. "
+            "Supersedes the dead SHUTDOWN_TIMEOUT_S constants ceiling "
+            "(daemon/constants.py) by giving it a real, configurable consumer."
+        ),
+    )
 
 
 class LimitsConfig(BaseSettings):
@@ -468,6 +480,27 @@ class ServicesConfig(BaseSettings):
             "5-10x smaller than DEFAULT_STALE_LEASE_SECONDS (300 s) "
             "so a few missed beats don't false-positive flag a live "
             "lease as stale."
+        ),
+    )
+    readiness_refresh_interval_seconds: int = Field(
+        default=10,
+        description=(
+            "How often the /readyz background refresher recomputes the "
+            "readiness composite (database SELECT 1, queue heartbeat "
+            "freshness, critical service presence). The HTTP handler "
+            "itself is an O(1) memory read — this interval is the ONLY "
+            "thing that touches the database for readiness."
+        ),
+    )
+    readiness_queue_freshness_threshold_seconds: int = Field(
+        default=120,
+        description=(
+            "Max allowed age of the newest Task.last_heartbeat_at among "
+            "RUNNING tasks before the queue_freshness readiness component "
+            "flips to degraded. Heartbeat cadence is 30s "
+            "(task_heartbeat_interval_seconds), so 120s = 3 missed "
+            "intervals + one interval of margin. An empty RUNNING set "
+            "counts as fresh."
         ),
     )
     graph_timeout_minutes: float = Field(
