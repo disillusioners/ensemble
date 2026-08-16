@@ -1,6 +1,6 @@
 # Auto-Restart / Auto-Upgrade System — Plan Overview
 
-- **Date:** 2026-08-15 · **Amended:** 2026-08-15 (post-review APPROVE-WITH-NOTES, 0 critical / 8 major / 7 minor — findings M1–M8, m1–m8 incorporated; see `decisions.md` ADR-011…013)
+- **Date:** 2026-08-15 · **Amended:** 2026-08-15 (post-review APPROVE-WITH-NOTES, 0 critical / 8 major / 7 minor — findings M1–M8, m1–m8 incorporated; see `decisions.md` ADR-011…013) · **Amended 2026-08-16 — OQ1 resolved via `.env.prod` (ADR-014); Decisions 2+3 remain PENDING**
 - **Status:** PLANNING ONLY — no implementation. Review verdict: APPROVE-WITH-NOTES; all codebase claims independently CONFIRMED by the reviewer.
 - **Method:** Architect council (2 councilors: `agentic` + `coding`, skill: `resilience-design`), verified against the tree at v0.10.4 (`005610fe`) and the live prod install dir. Governor: `dde006dc-9438-423a-8480-429d2672412c`.
 - **Companion docs:** `decisions.md` (ADR log), `architecture-recommendation.md` (5-axis comparison + recommendation)
@@ -20,7 +20,7 @@ Give the daemon production-grade crash recovery and safe self-upgrades:
 
 **Hard requirement:** no LLM in the critical recovery path. Recovery is a deterministic, pure-code control loop. LLM appears only as an off-path, post-hoc observer (§4.6).
 
-**Environment:** single-host, single-binary deployment. macOS prod host today (launchd available), potential Linux deploy (systemd). No k8s. Dev flow (`./dev.sh`, `ensemble_dev`) must not break.
+**Environment:** single-host, single-binary deployment. macOS prod host today (launchd available), potential Linux deploy (systemd). No k8s. Dev flow (`./dev.sh`, `ensemble_dev`) must not break. **Dev + prod coexist simultaneously — first-class requirement of the install flow** (e2e tests run against dev while prod stays live; ports always distinct: dev = 8079, prod = 8088 — ADR-014).
 
 ---
 
@@ -89,7 +89,7 @@ flowchart TD
     end
 
     %% ===== External data store =====
-    PG[("PostgreSQL (ensemble_prod — confirmed via installed ensemble.json)")]
+    PG[("PostgreSQL (ensemble_prod — confirmed via installed ensemble.json; ensemble_dev for dev — both live simultaneously)")]
 
     %% ===== Cross-boundary contracts =====
     Supervisor -. "polls /livez ONLY — restart on liveness failure; /readyz failures never restart, they degrade" .-> Livez
@@ -109,7 +109,7 @@ flowchart TD
 | Component | Maps onto (real files/services) | New? |
 |---|---|---|
 | Supervisor | launchd plist / systemd unit (new artifacts); wraps existing binary launch | New config, no code |
-| Launcher (`launcher.sh`) | replaces `start.sh` role for prod; reads `.env` (works around `run_app.py:14,31` env-from-binary-dir subtlety); performs the M2 journal sweep before resolving `current` | New script |
+| Launcher (`launcher.sh`) | replaces `start.sh` role for prod; reads `INSTALL_DIR/.env` (staged from repo `.env.prod` by `make install`/`make stage` — ADR-014) and exports it (takes precedence over the frozen binary's own `.env` load, `run_app.py:29-31`); performs the M2 journal sweep before resolving `current` | New script |
 | Health checker | new `/livez` + `/readyz` routes beside existing `/health` (`daemon/api.py:1486-1524`); background composite-refresher task pattern mirrors existing periodic tasks (`daemon/api.py:440`); queue-freshness = max-age over `Task.last_heartbeat_at` (`daemon/repositories/task/models.py:214`) | New routes, small |
 | Release manager | Makefile targets + repo-side scripts; journal at `INSTALL_DIR/releases/state.json`; per-release `manifest.json` staged from Phase 2 (ADR-004); reuses `make pyinstaller` unchanged | New targets |
 | Drain controller | wraps `job_queue_mgmt_service.py:495-528` (pause/resume) + `routers/projects.py` master-pause endpoints; draining middleware mirrors the existing `WritePauseGuard` router pattern (15 router files); census via `repositories/job_queue/repository.py:528` (`count_active_jobs_by_project`) + `task/repository.py:523` (`has_instance_busy`) against a **pre-drain work-ID snapshot** (ADR-013) | New service, thin |
@@ -138,9 +138,9 @@ flowchart TD
 
 **Supervisor-agnostic portability:** the *contract* is (a) the launcher script, (b) `/livez` + `/readyz` semantics, (c) the exit-code table. Swapping launchd→systemd is a config-file change; a future k8s migration maps the same endpoints onto liveness/readiness probes 1:1.
 
-**Env subtlety (verified):** `run_app.py:14` loads `.env` from the *binary's* directory, and `run_app.py:31` only sets *unset* vars. The launcher must `cd INSTALL_DIR` and export `.env` itself so `config.yaml`, `.env`, and `data/` (which stay **outside** `releases/`) resolve correctly regardless of which release the symlink points at. **Invariant (m6):** a release directory must **never** contain an `.env` — a stale per-release `.env` would silently shadow the canonical one because `run_app.py:14` loads from the binary's dir. `make stage` explicitly excludes it. launchd also has no shell/TTY — all paths in the plist must be absolute.
+**Env + port configuration (verified; m6 reconciled by ADR-014):** the frozen binary's wrapper (`run_app.py:17-31`) loads `.env` from the **executable's** directory, but **only sets vars not already present in the environment** — explicitly exported env vars take precedence (`run_app.py:29-31`). The prod configuration mechanism is therefore: repo `.env.prod` → `make install`/`make stage` copies it to **`INSTALL_DIR/.env`** (outside `releases/` — this copy already exists at `Makefile:183-186`) → the launcher `cd INSTALL_DIR`, reads `INSTALL_DIR/.env`, and exports the vars before exec'ing the binary. Launcher exports win over anything else; `config.yaml`'s `port: ${PORT:-…}` interpolation resolves from the exported environment. **Invariant (m6, restated precisely):** release directories contain **no `.env`** — `INSTALL_DIR/.env` (staged from `.env.prod`) is the single canonical prod env source; the launcher-export precedence is the braces, the never-in-a-release-dir rule is the belt. launchd also has no shell/TTY — all paths in the plist must be absolute.
 
-**Canonical port (M6):** the Makefile's existing port sed is **already silently broken** — `Makefile:181` seds `${PORT:-8079}` but `daemon/config.yaml:50` defaults to **8088**, and prod actually runs **8088** (the sed no-ops against the real default). Phase 1 folds the fix in: launcher + plist pin the canonical health URL to **8088**, the broken sed is fixed or removed. **8088 is treated as canonical pending user confirmation** — OQ1 remains open, with this evidence strengthening the 8088 case.
+**Canonical ports (M6 → ADR-014, user-decided):** **prod = 8088, dev = 8079 — always distinct, always coexisting.** Simultaneous dev+prod is a first-class requirement of the install flow (e2e tests run against dev while prod stays live), not a side effect. Port comes from **`.env.prod` staged as `INSTALL_DIR/.env`** — NOT from a Makefile sed. The Makefile's `PROD_PORT ?= 9797` (`Makefile:6`) and the broken `Makefile:181` sed (targets `${PORT:-8079}` while `config.yaml:50` defaults 8088 — it never matched and prod runs 8088) are **legacy artifacts to be retired/replaced by the `.env.prod` mechanism, not fixed**. Phase 1: launcher + plist read the port from `INSTALL_DIR/.env`; the sed line is removed as part of `make stage` work.
 
 ### 4.2 Health Checker
 
@@ -167,12 +167,12 @@ The readiness cache pattern is what keeps probes cheap (constraint: no DB-heavy 
 ```
 INSTALL_DIR/
 ├── releases/
-│   ├── v0.10.5/            # binary + agents/ + frontend/dist/ + manifest.json  (~55 MB)
+│   ├── v0.10.5/            # binary + agents/ + frontend/dist/ + manifest.json  (~55 MB) — NO .env ever
 │   ├── v0.10.4/
 │   ├── state.json           # upgrade journal (atomic write)
 │   └── rollback.lock        # serialize rollback vs. promote (owner PID + heartbeat; stale-breakable)
 ├── current -> releases/v0.10.5   # symlink; flipped via rename(2) — atomic on macOS+Linux
-├── config.yaml, .env, data/      # OUTSIDE releases/ — survive every flip; NEVER inside a release dir (m6)
+├── config.yaml, .env, data/      # OUTSIDE releases/ — survive every flip; .env staged from repo .env.prod (ADR-014)
 └── launcher.sh, ensemble.plist
 ```
 
@@ -230,11 +230,11 @@ Root-cause hypothesis (councilor `agentic`, **unverified at the exact spawn-time
 
 ## 5. `make install` Integration
 
-**Decision (ADR-009):** the Makefile gains `stage` / `promote` / `rollback`; `install` becomes an alias for `stage` + `promote` (back-compat for muscle memory).
+**Decision (ADR-009 + ADR-014):** the Makefile gains `stage` / `promote` / `rollback`; `install` becomes an alias for `stage` + `promote` (back-compat for muscle memory).
 
 ```
 make pyinstaller                          # unchanged
-make stage  VERSION=x                     # copy trio + manifest.json into releases/x/, run --version smoke test, NO flip
+make stage  VERSION=x                     # copy trio + manifest.json into releases/x/, stage .env.prod → INSTALL_DIR/.env, run --version smoke test, NO flip
 make promote VERSION=x                    # the gated upgrade (below)
 make rollback                             # manual repoint + restart (seconds)
 ```
@@ -250,11 +250,11 @@ make rollback                             # manual repoint + restart (seconds)
 
 **Phase note (M3):** the drain step (2) ships in **Phase 4**; **Phase 3 promotes drain-free** — bounded SIGTERM stop only, with in-flight work resuming from node-boundary checkpoints (safe under the courtesy framing). No ordering contradiction: the flip/gate/rollback machinery never *depends* on drain.
 
-**`ensure-latest` decoupling:** `make build` keeps `ensure-latest` for interactive dev; release staging installs **what was built** — `stage` takes an explicit `VERSION` and fails if not at that tag.
+**`ensure-latest` decoupling:** `make build` keeps `ensure-latest` for interactive dev; release staging installs **what was built** — `stage` takes an explicit `VERSION` and fails if not at that tag. *(PENDING user decision — OQ8/Decision 3.)*
 
-**Port fix (M6):** folded into Phase 1 — the Makefile's broken sed (`Makefile:181` targets `${PORT:-8079}` while `config.yaml:50` defaults 8088 and prod runs 8088) is fixed or removed; launcher + plist pin **8088** as canonical pending user confirmation (OQ1).
+**Port + env configuration (M6, superseded by ADR-014):** prod port comes from **`.env.prod` staged as `INSTALL_DIR/.env`** by `make install`/`make stage` — the pre-existing copy at `Makefile:183-186` is the intended mechanism, confirmed by the user. The broken `Makefile:181` sed and the `PROD_PORT ?= 9797` variable (`Makefile:6`) are **retired as legacy artifacts**, not fixed. Phase 1 launcher + plist read the port from `INSTALL_DIR/.env`.
 
-**Dev flow untouched:** `./dev.sh` (port 8079, `ensemble_dev`, runs from source) never touches `releases/` or the launcher — releases + launcher are prod-only.
+**Dev flow untouched — and coexisting by design:** `./dev.sh` (port 8079, `ensemble_dev`, runs from source) never touches `releases/` or the launcher — releases + launcher are prod-only. **Dev and prod run simultaneously as a first-class requirement** (e2e tests against dev while prod stays live); the always-distinct port pair (8079/8088) is what makes this safe, and the `.env`-per-install-dir mechanism is what makes it structural: the dev repo's `.env` and the prod install's `.env` (from `.env.prod`) are separate files in separate directories, each resolving its own `PORT` and DB.
 
 ---
 
@@ -277,15 +277,17 @@ make rollback                             # manual repoint + restart (seconds)
 | **Auto-rollback's own failure (m7)** | Previous release evicted (should be impossible — eviction pins `previous`) or stale `rollback.lock` | Lock stale >5 min → safe break; previous missing → **halt-for-human + notify** | Manual `make rollback` or restore-from-snapshot path with clear message | Explicit "cannot auto-rollback safely" notification — never a blind flip |
 | **Shutdown hang** | `timeout_graceful_shutdown` bound (new in Phase 1) | Bounded exit; SIGKILL last resort | Equivalent-to-crash recovery (checkpoints) | One restart cycle, never an infinite hang |
 
+*(The port mechanism (ADR-014) changes nothing in this matrix — probes and gates target whatever port the launcher resolves from `INSTALL_DIR/.env`.)*
+
 ---
 
 ## 7. Phased Implementation Plan
 
-Each phase is independently shippable. **Phase 1 = "never stays down"** (crash → auto-restart in seconds, loop-safe incl. the DB-down-at-boot case, bounded shutdown, real probes, canonical port fixed).
+Each phase is independently shippable. **Phase 1 = "never stays down"** (crash → auto-restart in seconds, loop-safe incl. the DB-down-at-boot case, bounded shutdown, real probes, `.env.prod`-based prod config).
 
 | Phase | Contents | Effort | Standalone value |
 |---|---|---|---|
-| **1. Never stays down** | `/livez` + `/readyz` (cached composite; queue-freshness via `Task.last_heartbeat_at`, verify cadence — M7); bounded SIGTERM shutdown (`timeout_graceful_shutdown` — fixes C1); `launcher.sh` w/ backoff + burst abort + exit-code mapping **0/75/78/1 (ADR-011)**; launchd plist; **port fix: pin 8088, fix/remove broken Makefile sed (M6)**; watchdog-watcher agent (m3) | ~2–3 days | Crash → auto-restart in seconds, loop-safe, PG-outage-safe; hung shutdown impossible |
+| **1. Never stays down** | `/livez` + `/readyz` (cached composite; queue-freshness via `Task.last_heartbeat_at`, verify cadence — M7); bounded SIGTERM shutdown (`timeout_graceful_shutdown` — fixes C1); `launcher.sh` w/ backoff + burst abort + exit-code mapping **0/75/78/1 (ADR-011)**; launchd plist; **prod config via `.env.prod` staged to `INSTALL_DIR/.env`; launcher + plist read port from it; retire broken `Makefile:181` sed + `PROD_PORT` legacy (ADR-014)**; watchdog-watcher agent (m3) | ~2–3 days | Crash → auto-restart in seconds, loop-safe, PG-outage-safe; hung shutdown impossible |
 | **2. Release layout** | `releases/<ver>/` trios + `manifest.json` per release (**M5** — from this phase on) + `current` symlink + `state.json` journal + `rollback.lock` (PID+heartbeat, stale-breakable); `make stage` / `make rollback` (manual); retention with `previous`-pinned eviction; retire `.bak` scheme; **staging never writes `.env` into a release dir (m6)** | ~2 days | Real, seconds-fast manual rollback of a coherent payload |
 | **3. Health-gated flip (drain-free — M3)** | `make promote` (preflight → **SIGTERM bounded → flip → gate → commit/rollback**; drain step deferred to Phase 4); auto-rollback + quarantine + cooldown + counters; **rollback gated on previous manifest `rollback_safe` (M5)**; launcher journal sweep (M2/ADR-012); notify | ~3–4 days | One-command safe upgrades with automatic rollback |
 | **4. Drain controller + contract-phase gate** | In-daemon draining flag + 503 middleware; master-pause orchestration + **snapshot census (ADR-013)** + adapter best-effort intake pause; stuck-marker release; **move destructive drops behind health-gated contract phase (R1)**; drain steps slot into `make promote` | ~2–3 days | Zero-work-loss upgrades; rollback becomes safe across drop-releases |
@@ -300,26 +302,26 @@ Each phase is independently shippable. **Phase 1 = "never stays down"** (crash �
 
 - 🔴 **R1 — Destructive boot-time drops break rollback today** (`manager.py:478-500`, correction C4). Resolution: contract-phase gate (Phase 4) + manifest `rollback_safe` block (Phase 2/3). Load-bearing, not cosmetic.
 - 🔴 **R2 — `pause_writes` reuse hazard**: `WriteGuardSession` consults the write-pause guard for internal sessions (`daemon/manager.py:368-371`). Mitigation: dedicated `draining` flag (ADR-006). Verify `WriteGuardSession` internal-session semantics before Phase 4.
-- 🟡 **R3 — launchd environment differences**: no shell/TTY; absolute paths; `.env` handling per §4.1 + never-in-release-dir invariant (m6).
+- 🟡 **R3 — launchd environment differences**: no shell/TTY; absolute paths; `.env` handling per §4.1/ADR-014 (canonical source = `INSTALL_DIR/.env` staged from `.env.prod`; never inside a release dir).
 - 🟡 **R4 — Drain × Task↔JobItem reconciliation gap** (known project issue): automated drain avoids per-instance cascades entirely.
 - 🟡 **R5 — `pg_dump` cost** on large DBs: own timeout + skip option; retention 2.
 - 🟡 **R9 (M4) — External adapters bypass drain middleware**: mitigated by snapshot census (ADR-013); residual risk = post-snapshot arrivals are interrupted (recoverable, but not drained) — accepted under courtesy framing.
 - 🟢 **R6 — macOS quarantine xattr** on staged binaries: clear in staging script.
-- 🟢 **R7 — `ensure-latest` reproducibility**: solved by explicit-VERSION staging; needs user sign-off.
+- 🟢 **R7 — `ensure-latest` reproducibility**: solved by explicit-VERSION staging; needs user sign-off *(PENDING — Decision 3/OQ8)*.
 - 🟢 **R8 — Single-host shared fate**: host outage out of scope — this design protects against *process* death, not host death.
 
 ---
 
 ## 9. Open Questions (for the user)
 
-1. **Canonical prod port** — evidence now **strongly favors 8088** (config default + actual prod runtime agree; only the broken sed disagrees — M6). Confirm 8088 so launcher/plist health URLs can be finalized (Phase 1).
+1. ~~**Canonical prod port**~~ — **RESOLVED (ADR-014, user decision): prod = 8088, dev = 8079 — always distinct, both running simultaneously (first-class requirement). Port config via `.env.prod` staged as `INSTALL_DIR/.env`.** Makefile `PROD_PORT ?= 9797` (`Makefile:6`) and the `Makefile:181` sed are legacy artifacts to be retired, not fixed.
 2. **Rollback soak window X** — council recommends ~10 min; semantic bugs (PM-style) may not surface in *any* boot-time soak — the capability smoke test (Phase 5) is the actual mitigation.
 3. **Notify channel** for rollback/halt events — reuse `NotificationBroadcaster` (SSE, daemon-must-be-up) vs. add an external webhook (works when daemon is down)?
 4. **Capability-probe failure policy** — boot-refuse (hard, fail-closed) vs. degraded-banner (soft)? Council leans hard for gate-time, soft for steady-state.
-5. **Max auto-rollbacks** — 3/24h (council default) vs. 1-then-halt (more conservative)?
+5. **Max auto-rollbacks** — **PENDING (Decision 2):** 3/24h (council default) vs. 1-then-halt (more conservative)?
 6. ~~Confirm prod DB backend~~ — **RESOLVED (m4):** installed `ensemble.json` selects PostgreSQL; pg_dump form settled.
 7. **Retire `ensemble-prod-recover`?** The journal's previous-release pointer subsumes it.
-8. **`ensure-latest` demotion sign-off** — release builds install what was built; interactive dev keeps the current behavior.
+8. **`ensure-latest` demotion sign-off** — **PENDING (Decision 3):** release builds install what was built; interactive dev keeps the current behavior.
 
 ---
 

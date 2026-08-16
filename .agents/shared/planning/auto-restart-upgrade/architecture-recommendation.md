@@ -1,15 +1,15 @@
 # Auto-Restart / Auto-Upgrade — Architecture Recommendation
 
-- **Date:** 2026-08-15 · **Amended:** 2026-08-15 (post-review APPROVE-WITH-NOTES: findings M1–M8, m1–m8 incorporated; Gaps ledger corrected — m8)
+- **Date:** 2026-08-15 · **Amended:** 2026-08-15 (post-review APPROVE-WITH-NOTES: findings M1–M8, m1–m8 incorporated; Gaps ledger corrected — m8) · **Amended 2026-08-16 — OQ1 resolved via `.env.prod` (ADR-014): prod=8088/dev=8079, always distinct + simultaneous; Makefile sed retired, not fixed. Decisions 2+3 remain PENDING.**
 - **Method:** Council mode (2-of-4 trigger: cross-system impact + multiple viable approaches; partial high blast radius). Governor `dde006dc-9438-423a-8480-429d2672412c`; 2 councilors (`agentic`, `coding`), skill `resilience-design`; verified against tree at v0.10.4 (`005610fe`) + live prod install dir. Review pass: independent confirmation of all codebase claims; trio size corrected to ~55 MB.
-- **Status:** COMPLETE — council 2/2, no refinement round; amendment pass landed all 8 majors + 7 minors.
-- **Companions:** `plan-overview.md` (full architecture, failure matrix, phases), `decisions.md` (ADR-001…013)
+- **Status:** COMPLETE — council 2/2, no refinement round; amendment passes landed all 8 majors + 7 minors + OQ1 user decision.
+- **Companions:** `plan-overview.md` (full architecture, failure matrix, phases), `decisions.md` (ADR-001…014)
 
 ---
 
 ## Recommendation (one paragraph)
 
-Adopt a **supervisor-agnostic watchdog architecture**: launchd (macOS) wrapping a single **launcher script** that owns exponential backoff, burst abort, exit-code mapping (**0/75/78/1** — ADR-010/011), and the **orphaned-transaction journal sweep** (ADR-012); **`/livez` + `/readyz`** probes with readiness as a cached composite (liveness-only restarts; readiness never restarts; boot-time PG outage exits 75 with budget-exempt capped backoff); **full-payload release trios (~55 MB each)** under `releases/` with per-release **`manifest.json`**, an atomic `current` symlink flip, and a JSON upgrade journal; **health-gated `make promote`** with a 10-minute rollback window, 300s soak, 10-min cooldown, max 3 rollbacks/24h — **rollback gated on the previous release's manifest `rollback_safe`**, halting for a human rather than blind-flipping; **drain** via a dedicated API-surface `draining` flag (503 on public entry points) + project master pause + **pre-drain work-ID snapshot census** (ADR-013 — external adapters enqueue in-process and bypass HTTP middleware) bounded at 120s, no per-instance cascades; **migration guard** via a new `daemon_meta` table, exit-78 refusal on unsafe downgrade, and health-gated contract phases for destructive drops; and a **strictly post-hoc LLM observer** on `system_background_queue` that doubles as the watchdog-watcher. Net effect: the daemon never stays down after a crash (including through a PG outage at boot), upgrades are one command with manifest-gated automatic rollback in seconds, and rollback is safe by construction for additive releases. Total effort ~2–3 engineer-weeks across 6 independently shippable phases, Phase 3 shipping drain-free.
+Adopt a **supervisor-agnostic watchdog architecture**: launchd (macOS) wrapping a single **launcher script** that owns exponential backoff, burst abort, exit-code mapping (**0/75/78/1** — ADR-010/011), the **orphaned-transaction journal sweep** (ADR-012), and **`.env.prod`-based prod config** (ADR-014 — launcher exports `INSTALL_DIR/.env` staged from repo `.env.prod`, prod=8088/dev=8079 always distinct and simultaneously live); **`/livez` + `/readyz`** probes with readiness as a cached composite (liveness-only restarts; readiness never restarts; boot-time PG outage exits 75 with budget-exempt capped backoff); **full-payload release trios (~55 MB each)** under `releases/` with per-release **`manifest.json`**, an atomic `current` symlink flip, and a JSON upgrade journal; **health-gated `make promote`** with a 10-minute rollback window, 300s soak, 10-min cooldown, max 3 rollbacks/24h *(pending D2)* — **rollback gated on the previous release's manifest `rollback_safe`**, halting for a human rather than blind-flipping; **drain** via a dedicated API-surface `draining` flag (503 on public entry points) + project master pause + **pre-drain work-ID snapshot census** (ADR-013 — external adapters enqueue in-process and bypass HTTP middleware) bounded at 120s, no per-instance cascades; **migration guard** via a new `daemon_meta` table, exit-78 refusal on unsafe downgrade, and health-gated contract phases for destructive drops; and a **strictly post-hoc LLM observer** on `system_background_queue` that doubles as the watchdog-watcher. Net effect: the daemon never stays down after a crash (including through a PG outage at boot), upgrades are one command with manifest-gated automatic rollback in seconds, rollback is safe by construction for additive releases, and dev+prod coexist structurally for live e2e. Total effort ~2–3 engineer-weeks across 6 independently shippable phases, Phase 3 shipping drain-free.
 
 ---
 
@@ -37,7 +37,7 @@ The contested axes, compared. Risk is inverted in scoring direction (Low risk = 
 
 | Approach | Complexity | Maintainability | Risk | Cost | Recommendation |
 |---|---|---|---|---|---|
-| **A: full-payload trios + manifest + symlink + journal** | Med (staging script + journal discipline) | High (journal replaces `.bak` guesswork) | Low (rollback = coherent, manifest-gated payload) | ~165 MB disk (3 × ~55 MB) | ✅ **Adopted (ADR-004, amended M5/m7)** |
+| **A: full-payload trios + manifest + symlink + journal** | Med (staging script + journal discipline) | High (journal replaces `.bak` guesswork) | Low (rollback = coherent, manifest-gated payload) | ~165 MB disk (3 × ~55 MB) | ✅ **Adopted (ADR-004, amended M5/m7/ADR-014)** |
 | B: bare binaries + pointer | Low | Med | High (rollback = version skew — today's bug class, C3) | Low disk | Rejected — operator already hand-compensates |
 
 ### Axis 4 — Drain mechanism
@@ -56,6 +56,14 @@ The contested axes, compared. Risk is inverted in scoring direction (Low risk = 
 | B: extend `schema_migrations` | Low | Low (describes a no-op path on PG — C2) | High (marker doesn't reflect real schema) | Rejected |
 | C: journal-only (no DB marker) | Low | Med | High (rolled-back binary can't see DB state; no Phase-3 rollback gate without manifest) | Rejected |
 
+### Axis 6 — Prod config / port mechanism (ADR-014)
+
+| Approach | Complexity | Maintainability | Risk | Recommendation |
+|---|---|---|---|---|
+| **A: `.env.prod` → `INSTALL_DIR/.env`, launcher exports** | Low (pre-existing `Makefile:183-186` copy + launcher export) | High (one canonical prod env source; env precedence verified at `run_app.py:29-31`) | Low (structural dev/prod separation; separate dirs + env files) | ✅ **Adopted (ADR-014, user decision)** |
+| B: fix the Makefile config.yaml sed | Low | Med (sed couples install to config-format details — already silently broken once) | Med (format drift breaks it silently again) | Rejected — superseded |
+| C: per-install `config.yaml` edit | Med | Low (drifts from repo config; merge pain) | Med | Rejected |
+
 ---
 
 ## Trade-offs that drove the recommendation
@@ -66,17 +74,18 @@ The contested axes, compared. Risk is inverted in scoring direction (Low risk = 
 4. **Exit-75 budget exemption + uptime reset (ADR-011)** — closes the one true liveness hole (M1): transient PG outage at boot can no longer cascade into permanent-down.
 5. **Launcher journal sweep (ADR-012)** — closes the second true safety gap (M2): every orphaned promote converges within one rollback window, at a layer below the daemon.
 6. **Contract-phase gating (R1) is load-bearing** — without it, auto-rollback across a column-dropping release points a binary at a schema it cannot run; manifest + `daemon_meta` enforce refusal in two layers.
+7. **`.env.prod` over sed (ADR-014)** — the user-confirmed pre-existing mechanism; config separation becomes topological (separate dirs/env files/ports) rather than procedural, making simultaneous dev+prod e2e structural.
 
 ## Risks
 
 - 🔴 **R1** — Destructive boot-time drops (`manager.py:478-500`) make rollback unsafe across drop-releases **today**. Resolution: manifest `rollback_safe` block (Phase 2/3) + contract-phase gate (Phase 4).
 - 🔴 **R2** — `pause_writes` reuse would starve internal-session writes (`manager.py:368-371`). Resolution: dedicated `draining` flag; verify `WriteGuardSession` semantics before Phase 4.
-- 🟡 R3 launchd env (absolute paths, no TTY, `.env` never inside a release dir) · R4 drain × Task↔JobItem gap (no cascades) · R5 `pg_dump` cost (timeout + skip) · **R9 external-adapter arrivals post-snapshot are interrupted, not drained** (accepted under courtesy framing).
-- 🟢 R6 macOS quarantine xattr · R7 `ensure-latest` reproducibility (explicit VERSION) · R8 single-host shared fate (out of scope, stated).
+- 🟡 R3 launchd env (absolute paths, no TTY, canonical env = `INSTALL_DIR/.env` from `.env.prod`, never inside a release dir) · R4 drain × Task↔JobItem gap (no cascades) · R5 `pg_dump` cost (timeout + skip) · **R9 external-adapter arrivals post-snapshot are interrupted, not drained** (accepted under courtesy framing).
+- 🟢 R6 macOS quarantine xattr · R7 `ensure-latest` reproducibility (explicit VERSION; **PENDING D3**) · R8 single-host shared fate (out of scope, stated).
 
 ## Confidence
 
-**High, post-review.** Council produced two independent ground-truth corrections to four stated facts (C1–C4); the reviewer independently **confirmed all codebase claims** (trio size corrected ~55 MB) and validated requirements coverage as complete. The amendment pass landed both "true safety gap" fixes (M1 boot burst-abort, M2 orphaned txn) plus six more majors. The recommendation flips if: (a) the user overrides the canonical port away from 8088 (config-level change only), or (b) Linux deploy lands before Phase 2 (supervisor configs swap; no architecture change).
+**High, post-review + user decision.** Council produced two independent ground-truth corrections to four stated facts (C1–C4); the reviewer independently **confirmed all codebase claims** (trio size corrected ~55 MB) and validated requirements coverage as complete; the amendment passes landed both "true safety gap" fixes (M1, M2) plus six more majors; OQ1 is now a settled user decision (ADR-014) with the mechanism verified against `run_app.py`/`Makefile`. The recommendation flips only if: (a) D2/D3 land against the current defaults (parameter changes, not architecture changes), or (b) Linux deploy lands before Phase 2 (supervisor configs swap; no architecture change).
 
 ## Gaps (corrected ledger — m8)
 
@@ -87,7 +96,7 @@ The original "Gaps: None" was an **over-claim**: the review found 8 major gaps i
 - **M3** — phase-ordering contradiction → **closed** (Phase 3 ships drain-free; §5 note).
 - **M4** — adapter drain bypass → **closed** (ADR-013: snapshot census + R9 accepted residual).
 - **M5** — unimplementable rollback-refusal rule → **closed** (release manifest from Phase 2).
-- **M6** — broken port sed → **folded into Phase 1** (8088 canonical pending OQ1).
+- **M6** — broken port sed → **closed via ADR-014** (supersedes the sed-fix approach: `.env.prod` is the mechanism; sed + `PROD_PORT` retired as legacy).
 - **M7** — nonexistent heartbeat signal → **closed** (`Task.last_heartbeat_at` max-age + Phase-1 fallback flagged in §10).
 - **M8** — req #3 mapping unstated → **stated** (§4.2: `/livez` → backoff+burst; `/readyz` → degrade/rollback, never restart).
 
@@ -95,4 +104,8 @@ The original "Gaps: None" was an **over-claim**: the review found 8 major gaps i
 
 ## Decisions Pending (user)
 
-Port authority (**8088 confirmed by evidence** — config default + runtime agree; OQ1 remains formal confirmation), rollback cap 3/24h vs 1-then-halt (OQ5), notify channel (OQ3), capability-probe failure policy hard/soft (OQ4), `ensure-latest` demotion sign-off (OQ8), retire `ensemble-prod-recover` (OQ7). **Resolved:** OQ6 (prod = PostgreSQL).
+- **D2 (OQ5) — max auto-rollbacks: 3/24h (council default) vs 1-then-halt. PENDING.**
+- **D3 (OQ8) — `ensure-latest` demotion sign-off (release builds install what was built). PENDING.**
+- Also open but lower-stakes: notify channel (OQ3), capability-probe failure policy (OQ4), retire `ensemble-prod-recover` (OQ7).
+
+**Resolved:** OQ1 (**prod=8088 / dev=8079 via `.env.prod`, simultaneous — ADR-014, user decision**), OQ6 (prod = PostgreSQL), OQ2 (10-min window adopted; semantic bugs covered by Phase-5 smoke test rather than longer soak).

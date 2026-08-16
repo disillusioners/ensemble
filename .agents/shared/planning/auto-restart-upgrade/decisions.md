@@ -1,6 +1,6 @@
 # Auto-Restart / Auto-Upgrade — Decision Log (ADR-style)
 
-- **Date:** 2026-08-15 · **Amended:** 2026-08-15 (post-review pass: ADR-011/012/013 added; ADR-004/005/006/010 amended — findings M1–M8, m1–m8)
+- **Date:** 2026-08-15 · **Amended:** 2026-08-15 (post-review pass: ADR-011/012/013 added; ADR-004/005/006/010 amended — findings M1–M8, m1–m8) · **Amended 2026-08-16 — OQ1 resolved via `.env.prod` (ADR-014 added; ADR-004/009 amended; ADR-014 supersedes the ADR-009 M6 amendment). Decisions 2+3 remain PENDING.**
 - **Method:** Architect council (`agentic` + `coding` councilors, skill `resilience-design`), governor `dde006dc-9438-423a-8480-429d2672412c`. Where councilors diverged, both positions are recorded verbatim-adjacent and the synthesis ruling is stated. Review: APPROVE-WITH-NOTES (0 critical / 8 major / 7 minor) — all majors incorporated.
 - **Companion:** `plan-overview.md` (full architecture), `architecture-recommendation.md` (5-axis comparison)
 
@@ -53,7 +53,7 @@ Format: **Context → Options → Decision → Consequence**.
 
 **Options.** (a) Bare-binary generations + pointer; (b) full-payload trios per version; (c) keep current `.bak` scheme + pointer.
 
-**Decision (consensus, amended).** **(b)** — `releases/<ver>/{binary, agents/, frontend/dist/, manifest.json}` with `config.yaml`, `.env`, `data/` **outside** `releases/`. Flip = `rename(2)` on the `current` symlink (atomic). Journal `releases/state.json` (current/previous/in-flight txn + started-at/rollback counters/quarantine), atomic write; `rollback.lock` (owner PID + heartbeat, stale-breakable >5 min — m7). Retention 3 releases (**~165 MB**), eviction pins `previous` so the rollback target can never be evicted. **(M5 amendment)** every staged release carries `manifest.json` — `binary_version`, `known_schema_gen`, `contains_contract_phase`, `rollback_safe`, trio checksums — **from Phase 2 onward**, so rollback gating is implementable before `daemon_meta` (Phase 5). **(m6 amendment)** staging never writes `.env` into a release dir; `run_app.py:14` loads env from the binary's dir, and a stale per-release `.env` would silently shadow the canonical one.
+**Decision (consensus, amended).** **(b)** — `releases/<ver>/{binary, agents/, frontend/dist/, manifest.json}` with `config.yaml`, `.env`, `data/` **outside** `releases/`. Flip = `rename(2)` on the `current` symlink (atomic). Journal `releases/state.json` (current/previous/in-flight txn + started-at/rollback counters/quarantine), atomic write; `rollback.lock` (owner PID + heartbeat, stale-breakable >5 min — m7). Retention 3 releases (**~165 MB**), eviction pins `previous` so the rollback target can never be evicted. **(M5 amendment)** every staged release carries `manifest.json` — `binary_version`, `known_schema_gen`, `contains_contract_phase`, `rollback_safe`, trio checksums — **from Phase 2 onward**. **(m6 amendment, restated per ADR-014)** the env invariant is now two-part: release directories contain **no `.env` of any kind**, and the canonical prod env source is `INSTALL_DIR/.env` (outside `releases/`, staged from repo `.env.prod` by `make install`/`make stage`) — which the launcher exports before exec, taking precedence over the frozen binary's own `.env` load (`run_app.py:29-31` env precedence).
 
 **Consequence.** Rollback restores a coherent payload in seconds, gated on manifest safety. Journal replaces `.bak` guesswork and subsumes `ensemble-prod-recover`. Cost: ~165 MB disk for 3 generations — accepted.
 
@@ -67,7 +67,7 @@ Format: **Context → Options → Decision → Consequence**.
 
 **Decision (consensus, parameterized).** **Hybrid, window-dominated.** Gate = `/livez` ≤60s, `/readyz` green ≤120–180s, version verify, **300s soak**; **X = 10 min post-promote** outer window. Anti-flapping: **cooldown 10 min**, **max 3 auto-rollbacks/24h** then halt-for-human; quarantined versions skipped by future promotes. **(M5 amendment)** the rollback action is **gated on the previous release's manifest `rollback_safe: true`** — if unsafe (drop-release) or previous evicted, **halt-for-human + notify** instead of a blind flip (m7).
 
-**Consequence.** Rollback fires only on evidence, never on a single slow probe, and never into an unsafe target. The 3/24h cap remains an open question (OQ5: 1-then-halt alternative).
+**Consequence.** Rollback fires only on evidence, never on a single slow probe, and never into an unsafe target. **The 3/24h cap remains PENDING (Decision 2/OQ5):** 1-then-halt is the conservative alternative awaiting user confirmation.
 
 ---
 
@@ -122,13 +122,13 @@ Format: **Context → Options → Decision → Consequence**.
 
 ## ADR-009: Makefile integration — `stage` / `promote` / `rollback`; `install` = alias; SIGTERM replaces `kill -9`
 
-**Context.** Verified: `kill -9` at `Makefile:106` bypasses graceful shutdown; `make build` runs `ensure-latest` first; **the Makefile port sed is already silently broken** (`Makefile:181` targets `${PORT:-8079}` while `config.yaml:50` defaults 8088 and prod runs 8088 — M6).
+**Context.** Verified: `kill -9` at `Makefile:106` bypasses graceful shutdown; `make build` runs `ensure-latest` first; the Makefile port sed (`Makefile:181`) is already silently broken (targets `${PORT:-8079}` while `config.yaml:50` defaults 8088 and prod runs 8088).
 
 **Options.** (a) Keep single `install` target, flip logic inline; (b) decompose into `stage`/`promote`/`rollback` with `install` as alias; (c) external orchestrator tool.
 
-**Decision (consensus, amended).** **(b).** `stage VERSION=x` (copy trio + manifest, version smoke, no flip) → `promote VERSION=x` (pg_dump preflight → [drain, Phase 4] → SIGTERM bounded → atomic flip → restart → health gate → commit | manifest-gated auto-rollback). `kill -9` → **SIGTERM + bounded wait** (`timeout_graceful_shutdown` gives dead `SHUTDOWN_TIMEOUT_S` its first consumer). `ensure-latest` stays on interactive `make build`; staging installs what was built. **(M6 amendment)** Phase 1 folds the port fix in: launcher + plist pin **8088** (canonical pending user confirmation, OQ1), broken sed fixed or removed. **(M3 amendment)** Phase 3 promotes **drain-free**; drain slots in at Phase 4.
+**Decision (consensus, amended).** **(b).** `stage VERSION=x` (copy trio + manifest, stage `.env.prod` → `INSTALL_DIR/.env`, version smoke, no flip) → `promote VERSION=x` (pg_dump preflight → [drain, Phase 4] → SIGTERM bounded → atomic flip → restart → health gate → commit | manifest-gated auto-rollback). `kill -9` → **SIGTERM + bounded wait** (`timeout_graceful_shutdown` gives dead `SHUTDOWN_TIMEOUT_S` its first consumer). `ensure-latest` stays on interactive `make build`; staging installs what was built. **(M3 amendment)** Phase 3 promotes **drain-free**; drain slots in at Phase 4. **(M6 amendment — SUPERSEDED by ADR-014)** the earlier "fold the port-sed fix into Phase 1" approach is replaced: port config comes from **`.env.prod` staged as `INSTALL_DIR/.env`** (the pre-existing `Makefile:183-186` copy, user-confirmed as the intended mechanism); the broken `Makefile:181` sed and `PROD_PORT ?= 9797` (`Makefile:6`) are **retired as legacy artifacts, not fixed**. Phase 1 launcher + plist read the port from `INSTALL_DIR/.env`.
 
-**Consequence.** `kill -9` eliminated from the upgrade path; muscle-memory `make install` keeps working; dev flow untouched; no phase-ordering contradiction between `promote`'s end-state description and the phased rollout.
+**Consequence.** `kill -9` eliminated from the upgrade path; muscle-memory `make install` keeps working; dev flow untouched; no phase-ordering contradiction. `ensure-latest` demotion remains **PENDING user sign-off (Decision 3/OQ8)**.
 
 ---
 
@@ -183,6 +183,18 @@ Format: **Context → Options → Decision → Consequence**.
 
 ---
 
+## ADR-014 (OQ1/user decision): Prod/dev port separation via `.env.prod` — simultaneous coexistence
+
+**Context (user decision, 2026-08-16).** The whole point of the separate install flow is that **e2e tests can run against dev while prod stays live** — dev and prod must run **simultaneously** on distinct ports. This is a first-class requirement of the install flow, not a side effect. Verified mechanism: the frozen binary's wrapper (`run_app.py:17-31`) loads `.env` from the **executable's** directory and only sets vars not already present — so explicitly exported env wins; `make install` already stages repo `.env.prod` → `INSTALL_DIR/.env` (`Makefile:183-186`, with `.env` fallback); `config.yaml`'s `port: ${PORT:-…}` resolves from the exported environment. Legacy artifacts: `PROD_PORT ?= 9797` (`Makefile:6`) and the broken sed at `Makefile:181` (targets `${PORT:-8079}` while `config.yaml:50` defaults 8088 — never matched; prod runs 8088).
+
+**Options.** (a) Fix/repair the Makefile config.yaml sed (M6's original amendment — superseded); (b) `.env.prod` staged to `INSTALL_DIR/.env` as the prod config source (pre-existing mechanism, user-confirmed intent); (c) edit `config.yaml` directly per install.
+
+**Decision (user).** **(b).** **Prod port = 8088, dev port = 8079 — always distinct, both live simultaneously.** Port config comes from **`.env.prod` staged as `INSTALL_DIR/.env`** by `make install`/`make stage`. The launcher `cd INSTALL_DIR`, reads `INSTALL_DIR/.env`, exports it, then execs the `current` binary — launcher exports take precedence over the frozen binary's own `.env` load (`run_app.py:29-31`). The Makefile's `PROD_PORT` variable and the `Makefile:181` sed are **retired as legacy artifacts** (removed during Phase 1/2 Makefile work), not repaired. The m6 env invariant is restated precisely: **no `.env` of any kind inside release directories; `INSTALL_DIR/.env` (from `.env.prod`) is the single canonical prod env source** — separation from dev is structural because dev's `.env` lives in the dev repo dir and prod's in `INSTALL_DIR`.
+
+**Consequence.** Dev + prod coexistence becomes structural (separate dirs, separate env files, always-distinct ports) — e2e-against-dev-while-prod-live is now guaranteed by configuration topology rather than operator discipline. Phase 1 launcher + plist read the port from `INSTALL_DIR/.env`. Supersedes ADR-009's M6 amendment (sed fix); OQ1 marked resolved. **Decisions 2 (rollback cap) and 3 (`ensure-latest` demotion) remain PENDING** — this ADR does not touch them.
+
+---
+
 ## Decision Index
 
 | ADR | Topic | Decision (one line) |
@@ -191,12 +203,15 @@ Format: **Context → Options → Decision → Consequence**.
 | 002 | Restart policy | Liveness-only restarts; readiness never restarts |
 | 003 | Health endpoints | Add `/livez` + `/readyz` (cached composite); `/health` stays human-facing |
 | 004 | Release layout | Full-payload trios + `manifest.json` + atomic `current` symlink + journal |
-| 005 | Auto-rollback | Hybrid gate: 10-min window, 300s soak, cooldown, max 3/24h — **manifest-gated target** |
+| 005 | Auto-rollback | Hybrid gate: 10-min window, 300s soak, cooldown, max 3/24h **(PENDING D2)** — manifest-gated target |
 | 006 | Drain | API draining flag (503) + master pause + census, bounded 120s; no auto cascades |
 | 007 | Migration guard | `daemon_meta` + exit 78 on unsafe downgrade + health-gated contract phases + pg_dump |
 | 008 | LLM observer | Post-hoc only, `system_background_queue`, never on-path; doubles as watchdog-watcher |
-| 009 | Makefile | `stage`/`promote`/`rollback`; `install` alias; SIGTERM replaces `kill -9`; **port fix in Phase 1** |
+| 009 | Makefile | `stage`/`promote`/`rollback`; `install` alias; SIGTERM replaces `kill -9`; **port via `.env.prod` (ADR-014)** |
 | 010 | Exit codes | 0 clean / 78 refuse-no-loop / 1 crash-restart |
 | 011 *(M1)* | Boot DB outage | Exit 75 + budget-exempt capped backoff + uptime-based budget reset |
 | 012 *(M2)* | Orphaned txn | Launcher-start journal sweep executes/clears aged in-flight transactions |
 | 013 *(M4)* | Adapter drain bypass | Pre-drain work-ID snapshot census (primary) + best-effort adapter intake pause |
+| 014 *(OQ1)* | Prod/dev ports | `.env.prod` → `INSTALL_DIR/.env`; prod=8088/dev=8079 always distinct + simultaneous; Makefile sed/`PROD_PORT` retired |
+
+**Pending user decisions:** D2 (max auto-rollbacks: 3/24h vs 1-then-halt — OQ5) · D3 (`ensure-latest` demotion sign-off — OQ8).
