@@ -1,8 +1,8 @@
 # Approver Active State
 
-Plan: PM System Improvement (project-manager-agent)
-Slug: project-manager-agent
-Iteration: 002
+Plan: Auto-Restart / Auto-Upgrade System Architecture (auto-restart-upgrade)
+Slug: auto-restart-upgrade
+Iteration: 001
 Status: APPROVED
-Started: 2026-08-12T20:18:16Z
-Last Verdict: APPROVED (iteration 002)
+Started: 2026-08-15T21:40:44Z
+Last Verdict: APPROVED (iteration 001)
