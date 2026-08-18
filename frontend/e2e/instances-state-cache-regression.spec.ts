@@ -167,12 +167,14 @@ test.describe('Instances Detail Overlay - Regression', () => {
     // Wait for the sidebar instance list (inside the chat subtree is rendered
     // when we open detail; for the list page it's the standalone instance list).
     // For R2 we open detail and inspect the chat sidebar.
-    // Hermetic: pick a card in our OWN 2-instance project (r5Project) so the
-    // "multiple instances" assertion is exercised regardless of dev-DB state.
-    // A random first card can land in a 1-instance project, making the
-    // sidebar count 1 → bogus skip (the sidebar is project-scoped).
+    // Hermetic: pick a card for an instance in our OWN fixture project
+    // (r5Instances[0]) so the test doesn't depend on dev-DB content. NOTE:
+    // select by INSTANCE ID, not owning-project path — instance-list.html
+    // builds hrefs as ['/projects', getProjectContext(), 'instances', id]
+    // and getProjectContext() returns 'all' on the All tab, so project-path
+    // matching never hits.
     const card = page
-      .locator(`a.instance-item[href*="/projects/${r5Project.project_id}/instances/"]`)
+      .locator(`a.instance-item[href*="/instances/${r5Instances[0]}"]`)
       .first();
     await expect(card).toBeVisible({ timeout: 15000 });
     await card.click();
