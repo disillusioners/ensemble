@@ -51,7 +51,12 @@ test.describe('Instances Detail Overlay - Regression', () => {
     page = await browser.newPage();
 
     page.on('console', (msg: ConsoleMessage) => {
-      if (msg.type() === 'error') consoleErrors.push(`[${msg.type()}] ${msg.text()}`);
+      if (msg.type() === 'error') {
+        // Include the originating resource URL when available so tests can
+        // distinguish fixture-induced backend noise from app breakage.
+        const loc = msg.location();
+        consoleErrors.push(`[${msg.type()}] ${msg.text()}${loc.url ? ` (${loc.url})` : ''}`);
+      }
     });
     page.on('pageerror', (err: Error) => pageErrors.push(err.message));
 
@@ -180,9 +185,17 @@ test.describe('Instances Detail Overlay - Regression', () => {
     await card.click();
     await page.waitForURL(/\/projects\/[^/?]+\/instances\/[^/?]+$/, { timeout: 10000 });
 
-    // Wait for the chat sidebar to render its instance list.
+    // Wait for the chat sidebar to render its instance list — AND for it
+    // to be populated. The sidebar list loads async (project-scoped); the
+    // skip guard previously fired on an EMPTY list, not a real count.
     const sidebar = page.locator('app-chat .instance-sidebar app-instance-list');
     await expect(sidebar).toBeVisible({ timeout: 15000 });
+    await expect(async () => {
+      const n = await page.evaluate(() =>
+        document.querySelectorAll('app-chat .instance-sidebar a.instance-item').length,
+      );
+      expect(n).toBeGreaterThanOrEqual(2);
+    }).toPass({ timeout: 10000 });
 
     const countBefore = await page.evaluate(() => {
       const root = document.querySelector('app-chat .instance-sidebar');
@@ -364,7 +377,19 @@ test.describe('Instances Detail Overlay - Regression', () => {
     );
     expect(markerStillThere).toBe(true);
 
-    expect(consoleErrors, `console errors: ${consoleErrors.join('\n')}`).toEqual([]);
+    // Console-error criterion (R5): app-level breakage on menu switches —
+    // JS exceptions, chat/SSE faults — must fail. HANDLED backend errors
+    // from the workspace overlay are filtered ONLY for /api/workspace/
+    // resource loads: this test's fixture project is synthetic (API-created)
+    // and has no workspace files on disk, so the overlay's tree/file/diff
+    // GETs legitimately return 404/400 and the app handles them by design
+    // (error banner, workspace.component.html:164). Dispatcher
+    // classification 2026-08-18: fixture gap, not feature bug. Every other
+    // console error or pageerror still fails this assert.
+    const filteredConsoleErrors = consoleErrors.filter(
+      (e) => !(e.includes('Failed to load resource') && e.includes('/api/workspace/')),
+    );
+    expect(filteredConsoleErrors, `console errors: ${filteredConsoleErrors.join('\n')}`).toEqual([]);
     expect(pageErrors, `page errors: ${pageErrors.join('\n')}`).toEqual([]);
   });
 
