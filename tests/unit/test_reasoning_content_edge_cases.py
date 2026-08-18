@@ -19,7 +19,8 @@ def enable_test_model_echo():
     """These tests use model="test-model" which should trigger echo.
 
     The default echo list is ["deepseek"], so we add "test-model" so the
-    pre-existing test assertions (which expect echo to happen) still hold.
+    model-name gate alone never suppresses echo here; any no-echo outcome in
+    these tests is attributable solely to the tool-call gate (3949b8a7).
     """
     original = list(ThinkingChatOpenAI.reasoning_echo_models)
     ThinkingChatOpenAI.reasoning_echo_models = list(
@@ -35,8 +36,9 @@ class TestReasoningContentEdgeCases:
     def test_system_message_in_mixed_conversation(self):
         """SystemMessage + HumanMessage + AIMessage(reasoning) + HumanMessage works correctly.
 
-        The fix should only inject reasoning_content into assistant messages,
-        leaving SystemMessage and HumanMessage unaffected.
+        reasoning_content is NOT injected: this plain conversational turn has
+        no tool calls (tool-call gate, 3949b8a7). SystemMessage and
+        HumanMessage remain unaffected.
         """
         llm = ThinkingChatOpenAI(model="test-model", api_key="test-key")
 
@@ -61,7 +63,9 @@ class TestReasoningContentEdgeCases:
         assert payload["messages"][1]["role"] == "user"
         assert payload["messages"][1]["content"] == "Hello!"
         assert payload["messages"][2]["role"] == "assistant"
-        assert payload["messages"][2].get("reasoning_content") == "Greeting the user"
+        # tool-call gate (3949b8a7): echo only on tool-call rounds — this
+        # plain greeting turn must NOT carry reasoning_content
+        assert payload["messages"][2].get("reasoning_content") is None
         assert payload["messages"][3]["role"] == "user"
         assert payload["messages"][3]["content"] == "Can you explain reasoning?"
 
@@ -94,8 +98,9 @@ class TestReasoningContentEdgeCases:
     def test_multi_turn_with_human_message_after_assistant(self):
         """SystemMessage + HumanMessage + AIMessage(reasoning) + HumanMessage(follow-up) + AIMessage(reasoning_2).
 
-        Both reasoning contents should be correctly injected into their respective
-        assistant messages, regardless of interleaved HumanMessages.
+        Neither assistant turn carries reasoning_content in the payload:
+        both are plain answers with no tool calls (tool-call gate, 3949b8a7),
+        regardless of interleaved HumanMessages.
         """
         llm = ThinkingChatOpenAI(model="test-model", api_key="test-key")
 
@@ -122,13 +127,13 @@ class TestReasoningContentEdgeCases:
         assistant_messages = [m for m in payload["messages"] if m.get("role") == "assistant"]
         assert len(assistant_messages) == 2
 
-        # Verify first assistant message has its reasoning_content
+        # tool-call gate (3949b8a7): echo only on tool-call rounds — these
+        # plain answer turns must NOT carry reasoning_content
         assert assistant_messages[0]["content"] == "Python is a programming language."
-        assert assistant_messages[0].get("reasoning_content") == "Explaining Python basics"
+        assert assistant_messages[0].get("reasoning_content") is None
 
-        # Verify second assistant message has its reasoning_content
         assert assistant_messages[1]["content"] == "JavaScript is also a programming language, mainly for web."
-        assert assistant_messages[1].get("reasoning_content") == "Explaining JavaScript basics"
+        assert assistant_messages[1].get("reasoning_content") is None
 
         # Verify human messages are unchanged
         human_messages = [m for m in payload["messages"] if m.get("role") == "user"]
@@ -215,8 +220,9 @@ class TestReasoningContentEdgeCases:
         assert payload["messages"][1]["role"] == "system"
         assert payload["messages"][1]["content"] == "Be concise."
 
-        # Verify assistant messages have reasoning_content
+        # tool-call gate (3949b8a7): echo only on tool-call rounds — these
+        # plain conversational turns must NOT carry reasoning_content
         assistant_messages = [m for m in payload["messages"] if m.get("role") == "assistant"]
         assert len(assistant_messages) == 2
-        assert assistant_messages[0].get("reasoning_content") == "Greeting"
-        assert assistant_messages[1].get("reasoning_content") == "Responding to how are you"
+        assert assistant_messages[0].get("reasoning_content") is None
+        assert assistant_messages[1].get("reasoning_content") is None
