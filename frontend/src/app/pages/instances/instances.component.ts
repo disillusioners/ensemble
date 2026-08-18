@@ -7,6 +7,7 @@ import { ApiService } from '../../services/api.service';
 import { TabStateService } from '../../services/tab-state.service';
 import { InstanceService } from '../../services/instance.service';
 import { ProjectService } from '../../services/project.service';
+import { InstancesViewStateService } from '../../services/instances-view-state.service';
 import { InstanceListComponent } from '../../components/instance-list/instance-list.component';
 import { ProjectTabBarComponent } from '../../components/project-tab-bar/project-tab-bar.component';
 import type { Agent } from '../../models';
@@ -31,6 +32,14 @@ export class InstancesComponent implements OnInit, OnDestroy {
   protected readonly instanceService = inject(InstanceService);
   private readonly tabStateService = inject(TabStateService);
   private readonly projectService = inject(ProjectService);
+  /**
+   * View-state singleton for the root-mounted detail overlay. The
+   * instances list page is a termination surface too — when the user
+   * terminates an instance from here we must also drop the cached id
+   * from the view-state service so a subsequent "Instances" nav link
+   * click does not restore a dead instance (W1).
+   */
+  private readonly viewState = inject(InstancesViewStateService);
 
   readonly agents = signal<Agent[]>([]);
   readonly selectedAgent = signal<Agent | null>(null);
@@ -114,6 +123,11 @@ export class InstancesComponent implements OnInit, OnDestroy {
   protected onTerminateInstance(instanceId: string): void {
     this.api.deleteInstance(instanceId).subscribe({
       next: () => {
+        // W1: drop the cached id from the view-state service so the
+        // "Instances" nav link never restores a dead instance. The
+        // service is a no-op when the terminated id doesn't match the
+        // current cache, so calling it for unrelated rows is safe.
+        this.viewState.clearInstance(instanceId);
         // Instance is removed from instanceService via its polling
       },
       error: (err) => console.error('Failed to terminate instance:', err)

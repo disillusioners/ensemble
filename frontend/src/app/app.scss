@@ -177,6 +177,29 @@
   flex-direction: column;
 }
 
+// ─── Overlay z-index ladder (single source of truth) ───────────────────────
+//
+// All overlays sit inside .app-main. To avoid z-index ties (R5) the
+// layering must be strictly ordered, with documented gaps so a future
+// overlay can be inserted at a known slot:
+//
+//   z-index  90  app-chat          (instance detail — root-mounted chat)
+//   z-index 100  app-workspace     (VS Code iframe cache viewer)
+//   z-index 1000 .plane-overlay    (Plane project-management iframe)
+//
+// Why chat is BELOW workspace: the workspace is the more "deep" overlay
+// (it embeds an interactive editor), while the chat is the more
+// frequently toggled companion. With this ladder, opening the workspace
+// from the chat header (or via the global Alt+` hotkey) reliably brings
+// the workspace on top — DOM order alone is unreliable once both are
+// mounted and display-toggled independently.
+//
+// If a new overlay is added, pick a slot in this comment, then assign
+// the corresponding z-index below. Do NOT reuse an existing number —
+// ties between active overlays will recreate the R5 regression where
+// neither visible overlay is reachable.
+// ──────────────────────────────────────────────────────────────────────────
+
 // Global workspace overlay — mounted inside .app-main so it sits below
 // the header and the Alt+` hotkey works from any route. The
 // `[style.display]` binding on the element toggles flex/none; this CSS
@@ -184,8 +207,13 @@
 app-workspace {
   position: absolute;     /* fills .app-main below the header */
   inset: 0;
-  z-index: 100;           /* below the plane overlay (1000) so plane wins */
+  z-index: 100;           /* above chat (90), below plane (1000) */
   background: var(--bg-primary, #0f172a);
   display: flex;
   flex-direction: column;
 }
+
+// The instance-detail host is created dynamically by App.createComponent,
+// so it does not inherit App's component-scoping attribute. Its rule lives
+// in the global stylesheet instead; the ladder documentation remains in
+// app.scss above.
