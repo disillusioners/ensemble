@@ -435,6 +435,18 @@ test.describe('Instances Detail Overlay - Regression', () => {
     await expect(terminateBtn).toBeVisible({ timeout: 10000 });
     await terminateBtn.click();
 
+    // The terminate flow is a TWO-STEP confirm dialog: the card button opens
+    // InstanceDeleteDialogComponent which owns the API call itself
+    // (instance-list.component.ts:284-292); the old single-click emit path
+    // is only a defensive fallback. Confirm via the dialog's Terminate
+    // option (instance-delete-dialog.html:15-32) → handleTerminate() →
+    // api.deleteInstance + viewState.clearInstance.
+    const dialogTerminate = page
+      .locator('mat-dialog-container button', { hasText: 'Terminate' })
+      .first();
+    await expect(dialogTerminate).toBeVisible({ timeout: 10000 });
+    await dialogTerminate.click();
+
     // The chat's onTerminateInstance calls api.deleteInstance → 200 → the
     // component subscribes to instanceService polling, which removes the
     // row. The view-state service's clearInstance() is called from the
