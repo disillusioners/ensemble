@@ -31,18 +31,15 @@ llm:
   # tool-calling turns — see https://api-docs.deepseek.com/guides/thinking_mode
   # Override via OPENAI_REASONING_ECHO_MODELS env var (comma-separated or
   # JSON array). Default: ["deepseek"].
-  reasoning_echo_models:
-    - deepseek
+  reasoning_echo_models: ${OPENAI_REASONING_ECHO_MODELS:-deepseek}
 
   # Models allowed as instance model overrides at spawn time. Case-insensitive
   # exact match against the override model name; a match against ANY entry
   # is sufficient. Empty list = all models allowed (no restriction).
-  # Override via OPENAI_ALLOWED_MODELS env var (comma-separated or JSON array).
-  # Default: common OpenAI models. Set to empty list to disable restriction.
+  # Override via OPENAI_ALLOWED_MODELS env var (comma-separated or
+  # JSON array). Default: ["agentic", "coding"].
   # Exact model names only — this is NOT a prefix or substring match.
-  allowed_models:
-    - agentic
-    - coding
+  allowed_models: ${OPENAI_ALLOWED_MODELS:-agentic,coding}
 
 # Server Configuration  
 daemon:
