@@ -132,10 +132,15 @@ test.describe('Instances Detail Overlay - Regression', () => {
     await page.goto('/');
     await page.waitForLoadState('domcontentloaded'); // networkidle unreachable: permanent notifications SSE stream
 
-    const chatDisplay = await page.locator('app-chat').evaluate(
-      (el) => getComputedStyle(el).display,
-    );
-    expect(chatDisplay).toBe('none');
+    // Lazy-mount drift (post-fix): app-chat is created on FIRST
+    // detailVisible=true and kept alive thereafter. On a cold boot at '/'
+    // with no detail opened yet, the element is legitimately ABSENT —
+    // which also means hidden. Accept absent OR display:none.
+    const chatHidden = await page.evaluate(() => {
+      const el = document.querySelector('app-chat');
+      return !el || getComputedStyle(el).display === 'none';
+    });
+    expect(chatHidden).toBe(true);
 
     // BUT the Instances nav link should still point at the cached detail
     // (lastDetailRoute computes from activeInstanceId which restoreState
