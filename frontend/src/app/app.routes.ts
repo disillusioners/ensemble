@@ -5,8 +5,13 @@ export const routes: Routes = [
   { path: 'instances', loadComponent: () => import('./pages/instances/instances.component').then(m => m.InstancesComponent) },
   // Backward compatibility: redirect old /instances/:instanceId to /projects/all/instances/:instanceId
   { path: 'instances/:instanceId', redirectTo: 'projects/all/instances/:instanceId', pathMatch: 'full' },
-  // New project-aware route
-  { path: 'projects/:projectId/instances/:instanceId', loadComponent: () => import('./pages/chat/chat.component').then(m => m.ChatComponent) },
+  // Project-aware instance detail route. The detail view (ChatComponent)
+  // is mounted once at the App root inside .app-main and display-toggled,
+  // so this route renders an invisible stub that forwards the route
+  // params into InstancesViewStateService for deep-link support. The
+  // overlay covers the routed content visually when the view-state is
+  // visible.
+  { path: 'projects/:projectId/instances/:instanceId', loadComponent: () => import('./pages/instance-detail/instance-detail.component').then(m => m.InstanceDetailComponent) },
   { path: 'projects/:projectId/workspace', loadComponent: () => import('./pages/workspace/workspace.component').then(m => m.WorkspaceComponent), title: 'Workspace Viewer' },
   // Project Blueprint management (Phase 5) — lazy-loaded page
   // scoped by :projectId; the component reads the project id from

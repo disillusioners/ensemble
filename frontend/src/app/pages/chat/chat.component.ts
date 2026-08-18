@@ -1,17 +1,17 @@
-import { Component, signal, computed, inject, OnInit, OnDestroy, effect, ViewChild, Signal } from '@angular/core';
+import { Component, signal, computed, inject, OnInit, OnDestroy, effect, ViewChild, Signal, input } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { ActivatedRoute, Router } from '@angular/router';
+import { Router } from '@angular/router';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatDialog, MatDialogModule } from '@angular/material/dialog';
-import { Subscription } from 'rxjs';
 import { ApiService } from '../../services/api.service';
 import { SseService } from '../../services/sse.service';
 import { TabStateService } from '../../services/tab-state.service';
 import { WorkspaceOverlayService } from '../../services/workspace-overlay.service';
+import { InstancesViewStateService } from '../../services/instances-view-state.service';
 import { InstanceService, sortByCreatedAtDesc } from '../../services/instance.service';
 import { ProjectService } from '../../services/project.service';
 import { InstanceListComponent } from '../../components/instance-list/instance-list.component';
@@ -50,7 +50,6 @@ const NEXT_AGENT_STORAGE_KEY = 'ensemble-next-instance-agent';
   styleUrl: './chat.scss'
 })
 export class ChatComponent implements OnInit, OnDestroy {
-  private readonly route = inject(ActivatedRoute);
   private readonly router = inject(Router);
   private readonly api = inject(ApiService);
   private readonly sseService = inject(SseService);
@@ -67,7 +66,49 @@ export class ChatComponent implements OnInit, OnDestroy {
    * class can bind directly to the service's signals.
    */
   protected readonly workspaceOverlayService = inject(WorkspaceOverlayService);
-  private routeSubscription: Subscription | null = null;
+  /**
+   * Root-provided singleton owning the active instance id, project
+   * context, and visibility of the detail overlay. The host element
+   * (mounted at App root) writes ``visible``; the chat component reads
+   * ``activeInstanceId`` as the authoritative source of the current
+   * instance id — replacing the previous ``ActivatedRoute.params``
+   * subscription, which only worked when the component was reached
+   * via the router. When the instance id changes (deep-link, instance
+   * switch from the sidebar, cached restore), the service signals
+   * drive the same load logic the route subscription used to.
+   */
+  private readonly viewState = inject(InstancesViewStateService);
+  /**
+   * Visibility flag bound by the App root host. Hidden =>
+   * disconnect SSE + clearEvents + stop polling so the cached overlay
+   * consumes no resources while the user is on another route. Visible
+   * => reconnect SSE + REST catch-up refetch so the chat resumes from
+   * the latest server state. Component-local state (scroll position,
+   * input drafts, expanded todo nodes) survives hide/show cycles
+   * because the rendered subtree is keyed off ``renderedInstance``
+   * (the capture-and-hold signal), which is deliberately NOT
+   * reactive to this ``visible`` input — only explicit teardown
+   * paths (id clear, confirmed 404, id switch) release the hold.
+   */
+  readonly visible = input<boolean>(true);
+
+  /**
+   * Tracks whether the overlay is currently hidden. Synchronized via
+   * the visibility effect — true while hidden, false while visible.
+   * Used to distinguish the hidden->visible transition (which must
+   * reconnect SSE + REST refetch) from a steady visible state.
+   */
+  private isHiddenNow = false;
+
+  /**
+   * Last instance id the chat component actually loaded via
+   * ``handleInstanceIdChange``. Used by the visibility+active-id
+   * effect to decide whether the current tick needs to load (new
+   * instance) or catch-up refetch (same instance, re-emerging from
+   * hidden). The cache lives only on the component instance — when
+   * the component is destroyed, the tracker is reset.
+   */
+  private lastLoadedInstanceId: string | null = null;
 
   protected get projectId(): string {
     return this.tabStateService.activeProjectId() ?? 'all';
@@ -97,6 +138,31 @@ export class ChatComponent implements OnInit, OnDestroy {
   });
   readonly messages = signal<Message[]>([]);
   readonly selectedAgent = signal<Agent | null>(null);
+  /**
+   * Capture-and-hold of the last-known ``InstanceInfo`` used for
+   * RENDERING the chat subtree (BUG 1/2 fix).
+   *
+   * ``currentInstance`` is a computed over ``instanceService.instances()``
+   * and transiently nulls whenever that list is wiped — most notably on
+   * every re-show (the visibility effect restarts polling, and
+   * ``startPolling`` clears the list before the refetch lands) and on
+   * project-scope switches. Keying the template's ``@if`` guards on the
+   * computed destroyed ``app-chat-interface`` / ``app-message-input`` for
+   * that window, killing their component-local state (scroll position,
+   * the in-progress draft, expanded todo nodes) — the Plan↔Instances
+   * round-trip draft/scroll reset.
+   *
+   * Hold semantics (enforced by the constructor effect below):
+   *   - live instance resolvable → capture/refresh the hold;
+   *   - transiently unresolvable for the SAME id → KEEP the hold
+   *     (list wipe mid-refetch — the subtree must survive);
+   *   - id moved A→B but B not resolvable yet → release the hold
+   *     (never render A's subtree under B's header while B loads);
+   *   - id cleared (terminate / new-instance) or confirmed 404
+   *     (``instanceNotFound`` set) → release the hold so the
+   *     not-found panel / empty state renders.
+   */
+  readonly renderedInstance = signal<InstanceInfo | null>(null);
   /** Phase 3: tag picked in the AgentSwitcher dropdown. Persisted across
    *  navigation in the page session so the next createInstance can
    *  forward it. Reset when the user picks a different agent. */
@@ -147,9 +213,48 @@ export class ChatComponent implements OnInit, OnDestroy {
     return `${tokens} / ${window} tokens (${model})`;
   }
 
+  /**
+   * Resolve the canonical polling project scope used by BOTH
+   * ``tabEffect`` and the visibility+active-id effect (R2 / S2). The
+   * previous setup read ``tabStateService.activeProjectId()`` in one
+   * place and ``viewState.activeProjectId()`` in another — those two
+   * could disagree (tab = null, viewState = cached project), so the
+   * two effects raced over ``InstanceService.startPolling`` with
+   * last-writer-wins. The canonical resolution lives here so any
+   * caller asking "what should polling be scoped to?" gets the same
+   * answer.
+   *
+   * Rule:
+   *   - Real project ids (anything except ``null`` and the ``'all'``
+   *     pseudo-project) are returned as-is.
+   *   - ``'all'`` and ``null`` both resolve to ``undefined`` so the
+   *     backend sees a missing filter and returns every instance.
+   *     The old routed chat code used the same ``?? undefined``
+   *     translation; we keep that contract so swapping the project
+   *     tab to "All" doesn't wipe the sidebar by sending a literal
+   *     ``'all'`` to the API (which matches nothing).
+   */
+  protected pollingScope(): string | undefined {
+    const pid = this.tabStateService.activeProjectId();
+    if (pid && pid !== 'all') return pid;
+    return undefined;
+  }
+
+  // The tab→polling sync. Gated on `visible` (R1) so hidden-overlay
+  // states (default boot, hide→show transitions, notification-bell
+  // clicks while hidden) never start a 60s polling ticker. The
+  // visibility effect below already restarts polling on the
+  // hidden→visible transition, so this gate is the only place that
+  // must NOT drive polling on its own.
+  //
+  // CRITICAL: `this.visible()` MUST be read unconditionally at the
+  // top (not inside the bail) so Angular's reactive graph keeps it
+  // as a dependency — otherwise a hide→show cycle would not retrigger
+  // the effect to start polling.
   private tabEffect = effect(() => {
-    const projectId = this.tabStateService.activeProjectId();
-    this.instanceService.startPolling(projectId ?? undefined);
+    const visible = this.visible();   // always read → always tracked
+    if (!visible) return;
+    this.instanceService.startPolling(this.pollingScope());
   });
 
   /**
@@ -209,7 +314,7 @@ export class ChatComponent implements OnInit, OnDestroy {
 
   // Auto-sync watchover state from instance data (polling refreshes).
   private watchoverSyncEffect = effect(() => {
-    const instance = this.currentInstance();
+    const instance = this.renderedInstance();
     if (!instance) return;
     this.syncWatchoverState(instance);
   }, { allowSignalWrites: true });
@@ -221,7 +326,11 @@ export class ChatComponent implements OnInit, OnDestroy {
 
   // Computed instance agent
   readonly instanceAgent = computed(() => {
-    const instance = this.currentInstance();
+    // Derives from the RENDER hold, not the raw ``currentInstance``
+    // computed: during a re-show the polled list transiently wipes,
+    // and the agent chip / [agent] inputs must not flicker to null
+    // alongside it (BUG 1/2 — same capture-and-hold rationale).
+    const instance = this.renderedInstance();
     if (!instance) return null;
     return this.agents().find(a => instance.agent_id.includes(a.id)) || null;
   });
@@ -246,14 +355,26 @@ export class ChatComponent implements OnInit, OnDestroy {
     // so in-place mutations (e.g. tool_result patching a tool_calls[i].output)
     // are reflected in the UI. The merge is idempotent (upsert by message_id),
     // so duplicate SSE deliveries (e.g. replay on reconnect) collapse naturally.
+    //
+    // W2 staleness guard: only merge messages that belong to the active
+    // instance. SSE messages carry an ``instance_id``; if it disagrees
+    // with the currently-open instance (race: user switched tabs while
+    // an SSE channel was still resolving) drop the message so it cannot
+    // bleed into the new instance's UI.
     effect(() => {
       const sseMessages = this.sseService.messages();
       if (sseMessages.length === 0) return;
+      const activeInstanceId = this.viewState.activeInstanceId();
+      if (!activeInstanceId) return;
+      const filtered = sseMessages.filter(
+        m => !m.instance_id || m.instance_id === activeInstanceId,
+      );
+      if (filtered.length === 0) return;
 
       // Merge: upsert SSE messages into existing list.
       this.messages.update(existing => {
         const result = [...existing];
-        for (const msg of sseMessages) {
+        for (const msg of filtered) {
           const idx = result.findIndex(m => m.message_id === msg.message_id);
           if (idx >= 0) {
             // Shallow merge: top-level fields from SSE win, but any local-only
@@ -354,6 +475,162 @@ export class ChatComponent implements OnInit, OnDestroy {
       const lastEvent = events[events.length - 1];
       if (lastEvent?.type === 'tool_call' || lastEvent?.type === 'tool_result') {
         this.handleWatchoverDenial(lastEvent.data['message']);
+      }
+    }, { allowSignalWrites: true });
+
+    // R6 lazy dead-id validation (companion to clearInstance on
+    // termination): a cached ``activeInstanceId`` may point at an
+    // instance that was deleted server-side (another tab, backend
+    // cleanup, crash). When a FULL instances list loads and does not
+    // contain the cached id, drop the cache so the next "Instances"
+    // nav-link click never restores a dead id. The service docblock
+    // already documents this contract — this effect is the missing
+    // implementation.
+    //
+    // CRITICAL: only validate against FULL lists. When polling is
+    // project-scoped (``pollingScope()`` returns a real project id)
+    // the list is a subset, and an id from another project is
+    // legitimately absent — clearing it would wipe a valid cache.
+    // An empty list is also skipped: a transient fetch failure or a
+    // scope with no instances yet must not be read as "id is dead".
+    //
+    // TOCTOU guard (N1 fix): a freshly created / deep-linked instance
+    // is NOT in the polled list until ``handleInstanceIdChange``'s
+    // getInstance fallback resolves and adds it (chat.component.ts adds
+    // the row on success). Clearing on mere absence would kill the
+    // just-opened detail view mid-load. The authoritative gate is the
+    // API's own 404 confirmation (``instanceNotFound() === cachedId``)
+    // — transient errors (500/503/network) intentionally do NOT set
+    // ``instanceNotFound`` (N1b), so a flaky network during restore
+    // can't wipe a valid cache. The previous "component already moved
+    // off" clause (currentInstanceId() !== cachedId) is removed: it
+    // raced the visibility effect on activeInstanceId.set(B), firing
+    // first with a stale currentInstanceId and wiping a freshly
+    // opened instance before any load started.
+    //
+    // Signal-read discipline (mirrors tabEffect): ``visible()`` and
+    // ``activeInstanceId()`` are read unconditionally at the top so
+    // they stay tracked even on the bail paths.
+    effect(() => {
+      const visible = this.visible();                          // always read → always tracked
+      const cachedId = this.viewState.activeInstanceId();      // always read → always tracked
+      const instances = this.instanceService.instances();
+
+      if (!visible || !cachedId) return;
+      if (this.pollingScope() !== undefined) return;  // scoped list — cannot validate
+      if (instances.length === 0) return;             // no data yet — nothing to prove
+
+      const stillExists = instances.some(i => i.instance_id === cachedId);
+      if (stillExists) return;
+      // N1: confirmed-dead gate is the API's own 404 only. Transient
+      // errors must NOT clear (see N1b in the getInstance error path).
+      if (this.instanceNotFound() === cachedId) {
+        this.viewState.clearInstance(cachedId);
+      }
+    }, { allowSignalWrites: true });
+
+    // Visibility + active-id watcher. The chat component is mounted at
+    // the App root and stays alive across route changes, so it has to
+    // react to BOTH:
+    //   - the active instance id (deep-link, sidebar click, restored cache)
+    //   - the visibility flag (visible=true ⇒ show, visible=false ⇒ hide)
+    //
+    // Behavior matrix:
+    //   visible→false: disconnect SSE + clearEvents + stop polling.
+    //     Repeat hides are no-ops (track via `isHiddenNow`).
+    //   visible→true, new instance id (`activeId !== lastLoadedId`):
+    //     REST refetch + SSE reconnect. `handleInstanceIdChange` runs
+    //     and seeds the message list, the SSE channel, and the watchover
+    //     state.
+    //   visible→true, same instance id, was-hidden (re-show after hide):
+    //     REST catch-up refetch + SSE reconnect. The component-local
+    //     state (scroll, draft input, expanded todo nodes) is preserved
+    //     because the component is never recreated AND the rendered
+    //     subtree is keyed off ``renderedInstance`` — the capture-and-
+    //     hold signal that bridges the transient ``currentInstance()``
+    //     nulls caused by this very refetch (``startPolling`` wipes the
+    //     list before the fresh rows land).
+    //   visible→true, same instance, not from hidden: no-op.
+    //
+    // The effect intentionally reads both signals so Angular's reactive
+    // graph keeps them as dependencies: a hide-then-show cycle with the
+    // same instance id must still fire the catch-up refetch, even
+    // though `activeInstanceId` did not change.
+    effect(() => {
+      const visible = this.visible();
+      const activeId = this.viewState.activeInstanceId();
+      const wasHidden = this.isHiddenNow;
+
+      if (!visible) {
+        if (!wasHidden) {
+          this.isHiddenNow = true;
+          this.sseService.disconnect();
+          this.sseService.clearEvents();
+          this.instanceService.stopPolling();
+        }
+        return;
+      }
+
+      this.isHiddenNow = false;
+
+      const idChanged = activeId !== this.lastLoadedInstanceId;
+      if (activeId && (idChanged || wasHidden)) {
+        this.lastLoadedInstanceId = activeId;
+        // Always restart polling on (re)load — startPolling stops any
+        // existing ticker first, so this is safe even when polling is
+        // already running. ``pollingScope()`` is the canonical
+        // resolver shared with ``tabEffect`` (R2 / S2) — both effects
+        // must agree on the polling scope.
+        this.instanceService.startPolling(this.pollingScope());
+        this.handleInstanceIdChange(activeId);
+      }
+    });
+
+    // BUG 1/2 fix — maintain the render hold. ``currentInstance`` is
+    // a computed over the polled instances list, so it transiently
+    // nulls during every re-show (``startPolling`` wipes the list
+    // before the refetch lands) and every project-scope switch. The
+    // template's ``@if`` guards read ``renderedInstance`` instead, so
+    // the chat-interface / message-input / todo subtrees survive those
+    // transient windows and their component-local state (scroll,
+    // draft, expanded nodes) is never destroyed.
+    //
+    // CRITICAL: ``renderedInstance`` deliberately does NOT react to
+    // ``visible()`` — a hide/show cycle must not touch it. It is
+    // released only by the explicit teardown paths encoded here:
+    // id cleared, confirmed 404, or a genuine id switch (A→B).
+    effect(() => {
+      const id = this.currentInstanceId();
+      const live = this.currentInstance();
+      const notFound = this.instanceNotFound();
+
+      // Confirmed-dead id (the API's own 404) always tears the hold
+      // down so the not-found panel renders instead of a stale chat.
+      if (notFound) {
+        this.renderedInstance.set(null);
+        return;
+      }
+
+      // Id explicitly cleared (terminate / new-instance reset) — the
+      // previous instance's subtree must not linger.
+      if (!id) {
+        this.renderedInstance.set(null);
+        return;
+      }
+
+      if (live) {
+        // Live row available — refresh the hold (status/name updates
+        // flow through; the object identity changes each poll).
+        this.renderedInstance.set(live);
+        return;
+      }
+
+      // Transient window: the id is set but no row resolves. Keep the
+      // hold ONLY while it still belongs to this id — a switch A→B
+      // releases it so B's loading state replaces A's subtree.
+      const held = this.renderedInstance();
+      if (held && held.instance_id !== id) {
+        this.renderedInstance.set(null);
       }
     }, { allowSignalWrites: true });
   }
@@ -520,40 +797,57 @@ export class ChatComponent implements OnInit, OnDestroy {
   }
 
   ngOnDestroy(): void {
-    this.instanceService.stopPolling();
+    // The chat component is now mounted at the App root and survives
+    // route changes, so most of the original cleanup was relocated to
+    // the visibility watcher (visible->false) which disconnects SSE,
+    // clears events, and stops polling. On full component destruction
+    // we still disconnect SSE and clear events to free the EventSource
+    // and prevent stale state from leaking into the next session.
     this.sseService.clearEvents();
     this.sseService.disconnect();
     this.messages.set([]);
     this.currentInstanceId.set(null);
-    if (this.routeSubscription) {
-      this.routeSubscription.unsubscribe();
-    }
   }
 
   ngOnInit(): void {
+    // Skip starting polling when the overlay mounts hidden — the
+    // visibility effect remains the canonical handler and will
+    // start polling on the hidden→visible transition. Avoids a
+    // wasted start/stop round-trip on boot when the overlay is
+    // hidden by default. REST loads stay unconditional so tab
+    // state and agent defaults hydrate regardless of visibility.
+    const visibleAtInit = this.visible();
     // Load projects first, then restore tab state with valid project IDs
     this.projectService.listProjects().subscribe({
       next: (response) => {
         const projectIds = response.projects.map(p => p.project_id);
         this.tabStateService.restoreState(projectIds);
-        
+
         // Continue with normal initialization after tab state is restored
-        this.instanceService.startPolling(this.tabStateService.activeProjectId() ?? undefined);
+        if (visibleAtInit) {
+          // F3: use the canonical pollingScope() resolver (R2 / S2) —
+          // never the raw activeProjectId() — so the 'all' pseudo-id
+          // can't leak into the API filter from ANY startPolling path.
+          this.instanceService.startPolling(this.pollingScope());
+        }
         this.loadInitialData();
       },
       error: (err) => {
         console.error('[Chat] Failed to load projects:', err);
-        // Still start polling even if project load fails
-        this.instanceService.startPolling(this.tabStateService.activeProjectId() ?? undefined);
+        // Still start polling even if project load fails — but only if the
+        // overlay is currently visible (see visibility gate above).
+        if (visibleAtInit) {
+          this.instanceService.startPolling(this.pollingScope());
+        }
         this.loadInitialData();
       }
     });
-    
-    // Subscribe to route parameter changes
-    this.routeSubscription = this.route.params.subscribe(params => {
-      const instanceId = params['instanceId'];
-      this.handleInstanceIdChange(instanceId);
-    });
+
+    // The active instance id now comes from InstancesViewStateService
+    // (set up in the constructor's effect). The previous
+    // ``route.params`` subscription was removed because the App root
+    // host does not receive route params — the view-state service is
+    // the authoritative source for both deep links and restored caches.
   }
 
   private loadInitialData(): void {
@@ -590,6 +884,10 @@ export class ChatComponent implements OnInit, OnDestroy {
   }
 
   private handleInstanceIdChange(instanceId: string | undefined): void {
+    // Clear the stale not-found panel before every instance change: a stale
+    // panel is gated from the chat UI, so switching to an in-list instance
+    // must not inherit the previous id's 404 state.
+    this.instanceNotFound.set(null);
     console.log('[Chat] handleInstanceIdChange called with:', instanceId);
     // Reset sending state when switching instances to prevent input lock
     this.isSending.set(false);
@@ -640,6 +938,14 @@ export class ChatComponent implements OnInit, OnDestroy {
       console.log('[Chat] Instance not in list, fetching from API');
       this.api.getInstance(instanceId).subscribe({
         next: (instanceData) => {
+          // R3 / W2: bail when the user hid the overlay or switched to a
+          // different instance while this request was in-flight. Without
+          // this guard ``loadInstanceMessages`` would connect an SSE
+          // channel for the old id while hidden, leaking an EventSource
+          // and writing the wrong messages into the (now-stale) signal.
+          if (!this.visible() || this.viewState.activeInstanceId() !== instanceId) {
+            return;
+          }
           console.log('[Chat] Got instance from API, connecting SSE');
           this.syncWatchoverState(instanceData);
           // Add to instanceService list so currentInstance computed can find it
@@ -653,12 +959,33 @@ export class ChatComponent implements OnInit, OnDestroy {
           this.loadInstanceMessages(instanceId);
         },
         error: (err) => {
-          console.warn('[Chat] Instance not found:', instanceId, 'error:', err);
-          this.instanceNotFound.set(instanceId);
-          this.currentInstanceId.set(null);
-          this.messages.set([]);
-          this.sseService.disconnect();
-          this.sseService.clearEvents();
+          // Same staleness guard for the error path so we don't flash
+          // the "instance not found" panel for an instance the user
+          // has already navigated away from.
+          if (!this.visible() || this.viewState.activeInstanceId() !== instanceId) {
+            return;
+          }
+          // N1b: only a confirmed 404 marks the cached id as dead and
+          // surfaces the not-found panel. Transient failures
+          // (500/503/network blip) must NOT clear the cache or flash
+          // the not-found panel — the user can retry, and the cache
+          // survives so a refresh doesn't wipe a freshly opened
+          // instance. Logging is sufficient; the user stays on the
+          // existing view (a real 404 will set instanceNotFound and
+          // re-render the not-found panel).
+          if (err?.status === 404) {
+            console.warn('[Chat] Instance not found (404):', instanceId);
+            // Drop the dead id from the navigation cache, but keep the
+            // not-found UI state for the current render.
+            this.viewState.clearInstance(instanceId);
+            this.instanceNotFound.set(instanceId);
+            this.currentInstanceId.set(null);
+            this.messages.set([]);
+            this.sseService.disconnect();
+            this.sseService.clearEvents();
+          } else {
+            console.warn('[Chat] Transient getInstance error, leaving cache intact:', instanceId, 'error:', err);
+          }
         }
       });
     }
@@ -674,15 +1001,33 @@ export class ChatComponent implements OnInit, OnDestroy {
   private loadInstanceMessages(instanceId: string): void {
     this.api.getMessages(instanceId).subscribe({
       next: (messages) => {
+        // R3 / W2: bail when the user hid the overlay or switched
+        // instances mid-load. Writing into ``messages`` for an
+        // instance we no longer care about would overwrite the
+        // current instance's UI on the next tick.
+        if (!this.visible() || this.viewState.activeInstanceId() !== instanceId) {
+          return;
+        }
         console.log('[Chat] Loaded', messages.length, 'messages from API');
         const viewModels = messages.map(m => this.toViewModel(m));
         this.messages.set(viewModels);
       },
       error: (err) => {
+        // Same staleness guard for the error path.
+        if (!this.visible() || this.viewState.activeInstanceId() !== instanceId) {
+          return;
+        }
         console.warn('[Chat] Failed to load messages:', err);
         this.messages.set([]);
       },
       complete: () => {
+        // R3 / W2: the SSE channel is the most consequential side
+        // effect — a connect() that lands while the overlay is hidden
+        // opens an EventSource that's never closed. Same guard as
+        // getMessages' ``next`` handler.
+        if (!this.visible() || this.viewState.activeInstanceId() !== instanceId) {
+          return;
+        }
         // Connect SSE after API messages are loaded
         this.sseService.connect(instanceId);
         // Reconcile both transient pending states on every instance load.
@@ -700,11 +1045,13 @@ export class ChatComponent implements OnInit, OnDestroy {
       next: (data) => {
         // Staleness guard: if the user has switched instances since this
         // request was issued, drop the response so it doesn't overwrite the
-        // newer instance's todos.
-        if (this.currentInstanceId() !== instanceId) return;
+        // newer instance's todos. Also guards against hidden-overlay
+        // writes (R3) — a connect-then-hide leaves this REST in-flight.
+        if (!this.visible() || this.viewState.activeInstanceId() !== instanceId) return;
         this.sseService.todos.set(data ?? []);
       },
       error: (err) => {
+        if (!this.visible() || this.viewState.activeInstanceId() !== instanceId) return;
         console.warn('[Chat] Failed to load todos:', err);
         // Clear stale todos on REST failure so the previous instance's data
         // doesn't linger indefinitely.
@@ -716,6 +1063,12 @@ export class ChatComponent implements OnInit, OnDestroy {
   protected onTerminateInstance(instanceId: string): void {
     this.api.deleteInstance(instanceId).subscribe({
       next: () => {
+        // Drop the cached id from the view-state service so a dead
+        // instance is never restored on the next nav-link click. The
+        // service is a no-op when the terminated id doesn't match the
+        // current cache, so calling it for unrelated rows is safe.
+        this.viewState.clearInstance(instanceId);
+
         // Instance is removed from instanceService via its polling
         if (this.currentInstanceId() === instanceId) {
           this.currentInstanceId.set(null);
@@ -766,7 +1119,13 @@ export class ChatComponent implements OnInit, OnDestroy {
   }
 
   protected onSendMessage(payload: MessagePayload): void {
-    const instance = this.currentInstance();
+    // BUG 1/2 companion: resolve the target through the RENDER hold.
+    // ``currentInstance()`` transiently nulls during a re-show (the
+    // polling restart wipes the list before the refetch lands), and
+    // the send button is clickable during that window — bailing on
+    // null here would silently drop the user's click.
+    // The click→switch race is a single microtask: Angular batches signal updates within it, so the hold-bail finishes before the next paint and is not user-perceptible.
+    const instance = this.renderedInstance();
     if (!instance) return;
 
     // Cooldown guard: block consecutive sends within SEND_COOLDOWN_MS to
@@ -824,7 +1183,10 @@ export class ChatComponent implements OnInit, OnDestroy {
   }
 
   protected onToggleWatchover(): void {
-    const instance = this.currentInstance();
+    // BUG 1/2 companion: same rationale as onSendMessage — the toggle
+    // is clickable during the transient re-show window where
+    // ``currentInstance()`` is null.
+    const instance = this.renderedInstance();
     if (!instance) return;
 
     if (this.watchoverEnabled()) {

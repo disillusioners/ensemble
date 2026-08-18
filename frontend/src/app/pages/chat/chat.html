@@ -8,7 +8,7 @@
       <app-instance-list
         [agents]="agents()"
         [instances]="instanceService.instances()"
-        [currentInstanceId]="currentInstance()?.instance_id || null"
+        [currentInstanceId]="renderedInstance()?.instance_id || null"
         [selectedAgent]="selectedAgent()"
         [hasMore]="instanceService.hasMoreInstances()"
         [isLoadingMore]="instanceService.isLoadingMore()"
@@ -37,7 +37,7 @@
           </button>
 
           <!-- Instance info -->
-          @if (currentInstance()) {
+          @if (renderedInstance()) {
             <div class="instance-info">
               <span class="agent-icon">{{ instanceAgent()?.icon || '🤖' }}</span>
               <span class="agent-name">{{ instanceAgent()?.name || 'Agent' }}</span>
@@ -111,9 +111,9 @@
               </span>
             }
           </div>
-          @if (currentInstance()) {
+          @if (renderedInstance()) {
             <span class="instance-id">
-              {{ currentInstance()!.instance_id.slice(0, 8) }}...
+              {{ renderedInstance()!.instance_id.slice(0, 8) }}...
             </span>
           }
         </div>
@@ -147,27 +147,27 @@
       }
 
       <!-- Chat interface (only show when instance is loaded) -->
-      @if (currentInstance() && !instanceNotFound()) {
+      @if (renderedInstance() && !instanceNotFound()) {
         <app-chat-interface
           [messages]="messages()"
           [isLoading]="isSending() && messages().length === 0"
           [agent]="instanceAgent()"
-          [instanceId]="currentInstance()?.instance_id || null"
+          [instanceId]="renderedInstance()?.instance_id || null"
           [showThinking]="showThinking()"
           [showToolCalls]="showToolCalls()"
           [showSystemPrompt]="showSystemPrompt()"
         ></app-chat-interface>
       }
 
-      @if (currentInstance() && !instanceNotFound()) {
-        <app-todo-list [instanceId]="currentInstance()?.instance_id ?? ''" />
+      @if (renderedInstance() && !instanceNotFound()) {
+        <app-todo-list [instanceId]="renderedInstance()?.instance_id ?? ''" />
       }
 
-      @if (currentInstance() && !instanceNotFound()) {
-        <app-question-wizard [instanceId]="currentInstance()?.instance_id ?? ''" />
+      @if (renderedInstance() && !instanceNotFound()) {
+        <app-question-wizard [instanceId]="renderedInstance()?.instance_id ?? ''" />
       }
 
-      @if (currentInstance() && !instanceNotFound()) {
+      @if (renderedInstance() && !instanceNotFound()) {
         <!-- Subtle inline indicator shown when the backend accepted a
              message but did not dispatch it to the running agent. The
              signal is cleared by the SSE effects in ChatComponent as
@@ -183,7 +183,7 @@
           (sendMessage)="onSendMessage($event)"
           [disabled]="isSending()"
           [agentColor]="instanceAgent()?.id || 'developer'"
-          [instanceStatus]="currentInstance()?.status ?? null"
+          [instanceStatus]="renderedInstance()?.status ?? null"
           [projectId]="projectId"
           (pauseInstance)="onPauseInstance()"
           (resumeInstance)="onResumeInstance($event)"

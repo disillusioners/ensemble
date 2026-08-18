@@ -10,6 +10,14 @@ test.describe.configure({ mode: 'serial' });
 /**
  * E2E tests for the project tab bar feature on the /instances page.
  * These tests verify the tab bar functionality specifically on the instances page.
+ *
+ * Selector scoping: the instance-detail (chat) overlay is root-mounted
+ * and carries its OWN app-project-tab-bar copy once a detail view has
+ * been opened in the session. Tab-bar selectors are therefore scoped
+ * to `app-instances` (the routed, visible page) so Playwright strict
+ * mode never sees the overlay's hidden duplicate. `.project-menu` is
+ * intentionally NOT scoped: mat-menu panels render in the CDK overlay
+ * container at body level, so only the menu opened by a click exists.
  */
 
 test.describe('Instances Page - Project Tabs', () => {
@@ -22,7 +30,7 @@ test.describe('Instances Page - Project Tabs', () => {
 
     // Navigate to the instances page
     await page.goto('/instances');
-    await page.waitForSelector('app-project-tab-bar', { timeout: 10000 });
+    await page.waitForSelector('app-instances app-project-tab-bar', { timeout: 10000 });
   });
 
   test.afterAll(async () => {
@@ -35,7 +43,7 @@ test.describe('Instances Page - Project Tabs', () => {
     await page.evaluate(() => localStorage.removeItem('ensemble-project-tabs'));
     // Refresh to ensure clean state
     await page.reload();
-    await page.waitForSelector('app-project-tab-bar', { timeout: 10000 });
+    await page.waitForSelector('app-instances app-project-tab-bar', { timeout: 10000 });
   });
 
   // ==========================================================================
@@ -43,14 +51,14 @@ test.describe('Instances Page - Project Tabs', () => {
   // ==========================================================================
   test('Tab bar is visible on /instances page', async () => {
     // Verify the project tab bar element is present
-    const tabBar = page.locator('app-project-tab-bar');
+    const tabBar = page.locator('app-instances app-project-tab-bar');
     await expect(tabBar).toBeVisible();
 
     // Verify the tab bar internal element is visible
-    await expect(page.locator('.tab-bar')).toBeVisible();
+    await expect(page.locator('app-instances .tab-bar')).toBeVisible();
 
     // Verify "All" tab is present and active by default
-    const allTab = page.locator('.tab').first();
+    const allTab = page.locator('app-instances .tab').first();
     await expect(allTab).toBeVisible();
     await expect(allTab).toHaveClass(/active/);
     await expect(allTab.locator('.tab-name')).toHaveText('All');
@@ -70,11 +78,11 @@ test.describe('Instances Page - Project Tabs', () => {
 
     // Refresh to pick up the new project
     await page.reload();
-    await page.waitForSelector('.tab-bar', { timeout: 10000 });
+    await page.waitForSelector('app-instances .tab-bar', { timeout: 10000 });
     await page.waitForResponse(resp => resp.url().includes('/api/instances'));
 
     // Add the project tab via + menu
-    const addButton = page.locator('.tab-add');
+    const addButton = page.locator('app-instances .tab-add');
     await expect(addButton).toBeVisible();
     await addButton.click();
 
@@ -91,7 +99,7 @@ test.describe('Instances Page - Project Tabs', () => {
     await page.waitForResponse(resp => resp.url().includes('/api/instances'));
 
     // Verify the project tab appears and becomes active
-    const projectTab = page.locator('.tab', { hasText: project.name });
+    const projectTab = page.locator('app-instances .tab', { hasText: project.name });
     await expect(projectTab).toBeVisible();
     await expect(projectTab).toHaveClass(/active/);
 
@@ -100,7 +108,7 @@ test.describe('Instances Page - Project Tabs', () => {
     await expect(instanceLink).toBeVisible();
 
     // Click "All" tab
-    const allTab = page.locator('.tab').first();
+    const allTab = page.locator('app-instances .tab').first();
     await allTab.click();
 
     // Wait for the API response
@@ -124,13 +132,13 @@ test.describe('Instances Page - Project Tabs', () => {
 
     // Refresh and add the project tab
     await page.reload();
-    await page.waitForSelector('.tab-bar', { timeout: 10000 });
+    await page.waitForSelector('app-instances .tab-bar', { timeout: 10000 });
 
-    await page.locator('.tab-add').click();
+    await page.locator('app-instances .tab-add').click();
     await page.locator('.project-menu button[mat-menu-item]', { hasText: project.name }).click();
 
     // Verify the project tab is active
-    const projectTab = page.locator('.tab', { hasText: project.name });
+    const projectTab = page.locator('app-instances .tab', { hasText: project.name });
     await expect(projectTab).toHaveClass(/active/);
 
     // Navigate away to chat page
@@ -142,14 +150,14 @@ test.describe('Instances Page - Project Tabs', () => {
 
     // Navigate back to /instances
     await page.goto('/instances');
-    await page.waitForSelector('.tab-bar', { timeout: 10000 });
+    await page.waitForSelector('app-instances .tab-bar', { timeout: 10000 });
 
     // Verify the previously selected tab is still active
-    await expect(page.locator('.tab', { hasText: project.name })).toBeVisible();
-    await expect(page.locator('.tab', { hasText: project.name })).toHaveClass(/active/);
+    await expect(page.locator('app-instances .tab', { hasText: project.name })).toBeVisible();
+    await expect(page.locator('app-instances .tab', { hasText: project.name })).toHaveClass(/active/);
 
     // Verify "All" tab is no longer active
-    const allTab = page.locator('.tab').first();
+    const allTab = page.locator('app-instances .tab').first();
     await expect(allTab).not.toHaveClass(/active/);
   });
 
@@ -172,11 +180,11 @@ test.describe('Instances Page - Project Tabs', () => {
 
     // Refresh to pick up the new projects and instances
     await page.reload();
-    await page.waitForSelector('.tab-bar', { timeout: 10000 });
+    await page.waitForSelector('app-instances .tab-bar', { timeout: 10000 });
     await page.waitForResponse(resp => resp.url().includes('/api/instances'));
 
     // Add project 1 tab
-    await page.locator('.tab-add').click();
+    await page.locator('app-instances .tab-add').click();
     await page.locator('.project-menu button[mat-menu-item]', { hasText: project1.name }).click();
     await page.waitForResponse(resp => resp.url().includes('/api/instances'));
 
@@ -187,12 +195,12 @@ test.describe('Instances Page - Project Tabs', () => {
     await expect(instance2Link).not.toBeVisible();
 
     // Add project 2 tab via + menu
-    await page.locator('.tab-add').click();
+    await page.locator('app-instances .tab-add').click();
     await page.locator('.project-menu button[mat-menu-item]', { hasText: project2.name }).click();
     await page.waitForResponse(resp => resp.url().includes('/api/instances'));
 
     // Verify project 2 tab is visible
-    const project2Tab = page.locator('.tab', { hasText: project2.name });
+    const project2Tab = page.locator('app-instances .tab', { hasText: project2.name });
     await expect(project2Tab).toBeVisible();
 
     // Verify only project 2's instance is visible
@@ -200,7 +208,7 @@ test.describe('Instances Page - Project Tabs', () => {
     await expect(instance1Link).not.toBeVisible();
 
     // Switch back to "All" tab
-    const allTab = page.locator('.tab').first();
+    const allTab = page.locator('app-instances .tab').first();
     await allTab.click();
     await page.waitForResponse(resp => resp.url().includes('/api/instances'));
 
@@ -223,14 +231,14 @@ test.describe('Instances Page - Project Tabs', () => {
 
     // Refresh to pick up the new project
     await page.reload();
-    await page.waitForSelector('.tab-bar', { timeout: 10000 });
+    await page.waitForSelector('app-instances .tab-bar', { timeout: 10000 });
 
     // Open the empty project tab
-    await page.locator('.tab-add').click();
+    await page.locator('app-instances .tab-add').click();
     await page.locator('.project-menu button[mat-menu-item]', { hasText: emptyProject.name }).click();
 
     // Verify the project tab is active
-    const emptyTab = page.locator('.tab', { hasText: emptyProject.name });
+    const emptyTab = page.locator('app-instances .tab', { hasText: emptyProject.name });
     await expect(emptyTab).toHaveClass(/active/);
 
     // Wait for the instance list to update

@@ -11,6 +11,23 @@ describe('App Routes', () => {
       expect(projectRoute?.path).toBe('projects/:projectId/instances/:instanceId');
     });
 
+    it('should route the detail URL to the InstanceDetailComponent stub', () => {
+      // Phase: root-mounted chat overlay. The real ChatComponent lives
+      // at the App root; the routed component is a thin stub that
+      // forwards route params into InstancesViewStateService for deep
+      // links.
+      const projectRoute = routes.find(
+        route => route.path === 'projects/:projectId/instances/:instanceId'
+      );
+
+      expect(projectRoute).toBeDefined();
+      // The lazy-loader must reference the stub component, not the
+      // chat component. The import path is the canonical signal.
+      const loaderSource = String(projectRoute?.loadComponent);
+      expect(loaderSource).toContain('instance-detail');
+      expect(loaderSource).toContain('InstanceDetailComponent');
+    });
+
     it('should have backward compatibility redirect for old /instances/:instanceId', () => {
       const legacyRoute = routes.find(
         route => route.path === 'instances/:instanceId'

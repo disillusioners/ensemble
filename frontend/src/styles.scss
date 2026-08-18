@@ -55,3 +55,16 @@ body {
 .watchover-dialog-backdrop {
   background: rgba(0, 0, 0, 0.5);
 }
+
+// Instance detail overlay — root-mounted dynamically by App.createComponent.
+// Keep this selector global: the created host does not inherit App's
+// component-scoping attribute. The chat/workspace/plane ladder is documented
+// in app.scss and enforced here with the chat z-index of 90.
+app-chat {
+  position: absolute;
+  inset: 0;
+  z-index: 90;
+  background: var(--bg-primary, #0f172a);
+  display: flex;
+  flex-direction: column;
+}
