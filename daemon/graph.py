@@ -1910,15 +1910,23 @@ class ThinkingChatOpenAI(ChatOpenAI):
         Only injects ``reasoning_content`` for models listed in
         ``reasoning_echo_models`` (default: ``["deepseek"]``).
 
-        Why this is gated by model name:
-          - DeepSeek thinking mode requires reasoning_content in the assistant
-            history whenever the prior turn included a tool call, or the model
-            loses its chain-of-thought context. See:
+        Why this is gated by model name AND tool-call presence:
+          - DeepSeek thinking mode requires ``reasoning_content`` in the
+            assistant history **only for turns that included a tool call**.
+            Echoing it on plain final-answer turns can cause 400 errors on
+            strict endpoints, so we skip those. See:
             https://api-docs.deepseek.com/guides/thinking_mode
           - Other providers (e.g. raw OpenAI) reject unknown fields like
             reasoning_content with a 400 error, so we must skip echo for them.
           - Some proxies ignore unknown fields silently, in which case echo is
             harmless but wastes a few hundred bytes of payload per turn.
+
+        Injection requires ALL THREE:
+          1. The model name matches ``reasoning_echo_models`` (fast path below).
+          2. The original AIMessage has ``tool_calls`` (or
+             ``tool_call_chunks`` for chunked variants).
+          3. ``additional_kwargs['reasoning_content']`` is set on the original
+             (the existing presence gate).
 
         The parent class's ``_convert_message_to_dict()`` strips
         ``reasoning_content`` from additional_kwargs, so we re-inject it after
@@ -1948,6 +1956,8 @@ class ThinkingChatOpenAI(ChatOpenAI):
         # - The N-th assistant payload dict corresponds to the N-th original AIMessage.
         # - This relies on _convert_message_to_dict preserving message order (it does).
         # - We filter to assistant-only messages for matching since that's all we need to patch.
+        # Per DeepSeek thinking-mode spec we only echo reasoning_content for
+        # tool-call rounds; plain final-answer turns must NOT carry the field.
         assistant_idx = 0
         original_assistants = [m for m in original_messages if isinstance(m, AIMessage)]
 
@@ -1955,10 +1965,20 @@ class ThinkingChatOpenAI(ChatOpenAI):
             if msg.get("role") == "assistant":
                 if assistant_idx < len(original_assistants):
                     original = original_assistants[assistant_idx]
+                    # Tool-call presence gate (DeepSeek thinking-mode spec):
+                    # only echo reasoning_content when the original turn issued
+                    # at least one tool call. ``tool_call_chunks`` is the
+                    # streaming-chunk equivalent on AIMessageChunk.
+                    has_tool_calls = bool(
+                        getattr(original, "tool_calls", None)
+                        or getattr(original, "tool_call_chunks", None)
+                    )
                     reasoning = original.additional_kwargs.get('reasoning_content')
-                    if reasoning is not None:
+                    if reasoning is not None and has_tool_calls:
                         msg["reasoning_content"] = reasoning
-                        logger.debug(f"[LLM] Injected reasoning_content for assistant message {assistant_idx}")
+                        logger.debug(
+                            f"[LLM] Injected reasoning_content for tool-call assistant message {assistant_idx}"
+                        )
                     assistant_idx += 1
 
         return payload

@@ -1,7 +1,21 @@
 """Tests for reasoning_content roundtrip in ThinkingChatOpenAI._get_request_payload.
 
-These tests verify that the reasoning_content field from AIMessage.additional_kwargs
-is preserved when converting messages to the API request payload.
+These tests verify the spec-compliant echo behavior for ``reasoning_content``
+in multi-turn assistant messages. Per DeepSeek thinking-mode
+(https://api-docs.deepseek.com/guides/thinking_mode) ``reasoning_content``
+MUST only be echoed on assistant turns that included at least one tool call.
+Echoing it on plain final-answer turns can cause 400 errors on strict
+endpoints, so the daemon's ``_get_request_payload`` gates injection on
+tool-call presence in addition to the model-name match.
+
+The tests below split into two groups:
+
+  * ``TestGetRequestPayloadPreservesReasoningContent`` — happy-path
+    coverage: when conditions are met (matching model + tool-call turn +
+    stored ``reasoning_content``), the field is preserved.
+  * ``TestReasoningEchoToolCallGate`` — gating coverage: the tool-call
+    requirement, mixed-history behavior, and the non-matching-model /
+    no-reasoning-stored regression pins.
 """
 
 import pytest
@@ -10,6 +24,10 @@ from unittest.mock import MagicMock
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from daemon.graph import ThinkingChatOpenAI
+
+
+# A reusable tool-call spec for AIMessages we want the echo gate to pass.
+_TOOL_CALL = {"id": "call_1", "name": "bash", "args": {"command": "ls"}}
 
 
 @pytest.fixture(autouse=True)
@@ -28,18 +46,24 @@ def enable_test_model_echo():
 
 
 class TestGetRequestPayloadPreservesReasoningContent:
-    """Tests for _get_request_payload preserving reasoning_content."""
+    """Tests for _get_request_payload preserving reasoning_content.
+
+    Per DeepSeek thinking-mode spec, ``reasoning_content`` is echoed ONLY
+    when the original assistant turn issued a tool call, so each AIMessage
+    below carries ``tool_calls=[...]`` to satisfy the gate.
+    """
 
     def test_single_message_with_reasoning_content_preserved(self):
-        """AIMessage with reasoning_content in additional_kwargs is preserved in payload."""
+        """AIMessage with reasoning_content + tool_calls is preserved in payload."""
         # Create instance with minimal config (we won't make actual API calls)
         llm = ThinkingChatOpenAI(model="test-model", api_key="test-key")
 
-        # Create message with reasoning_content
+        # Create message with reasoning_content AND tool_calls (spec requirement)
         messages = [
             AIMessage(
                 content="Answer here.",
-                additional_kwargs={"reasoning_content": "I thought about this..."}
+                additional_kwargs={"reasoning_content": "I thought about this..."},
+                tool_calls=[_TOOL_CALL],
             )
         ]
 
@@ -55,21 +79,24 @@ class TestGetRequestPayloadPreservesReasoningContent:
         assert assistant_msg.get("reasoning_content") == "I thought about this..."
 
     def test_multiple_assistant_messages_with_reasoning_content(self):
-        """Multiple AIMessages with reasoning_content are all preserved in order."""
+        """Multiple AIMessages with reasoning_content + tool_calls are all preserved."""
         llm = ThinkingChatOpenAI(model="test-model", api_key="test-key")
 
         messages = [
             AIMessage(
                 content="First answer.",
-                additional_kwargs={"reasoning_content": "First reasoning..."}
+                additional_kwargs={"reasoning_content": "First reasoning..."},
+                tool_calls=[_TOOL_CALL],
             ),
             AIMessage(
                 content="Second answer.",
-                additional_kwargs={"reasoning_content": "Second reasoning..."}
+                additional_kwargs={"reasoning_content": "Second reasoning..."},
+                tool_calls=[_TOOL_CALL],
             ),
             AIMessage(
                 content="Third answer.",
-                additional_kwargs={"reasoning_content": "Third reasoning..."}
+                additional_kwargs={"reasoning_content": "Third reasoning..."},
+                tool_calls=[_TOOL_CALL],
             ),
         ]
 
@@ -86,7 +113,7 @@ class TestGetRequestPayloadPreservesReasoningContent:
         llm = ThinkingChatOpenAI(model="test-model", api_key="test-key")
 
         messages = [
-            AIMessage(content="Plain answer without reasoning.")
+            AIMessage(content="Plain answer without reasoning.", tool_calls=[_TOOL_CALL])
         ]
 
         payload = llm._get_request_payload(messages)
@@ -102,12 +129,15 @@ class TestGetRequestPayloadPreservesReasoningContent:
             HumanMessage(content="Hello, how are you?"),
             AIMessage(
                 content="I'm doing well, thanks!",
-                additional_kwargs={"reasoning_content": "Greeting response"}
+                additional_kwargs={"reasoning_content": "Greeting response"},
+                tool_calls=[_TOOL_CALL],
             ),
-            AIMessage(content="Just a plain response."),  # No reasoning
+            # Plain assistant (no reasoning, no tool_calls) — must NOT gain a field
+            AIMessage(content="Just a plain response."),
             AIMessage(
                 content="Here is the info you requested.",
-                additional_kwargs={"reasoning_content": "Providing information"}
+                additional_kwargs={"reasoning_content": "Providing information"},
+                tool_calls=[_TOOL_CALL],
             ),
         ]
 
@@ -122,7 +152,12 @@ class TestGetRequestPayloadPreservesReasoningContent:
         assert assistant_messages[2].get("reasoning_content") == "Providing information"
 
     def test_conversation_with_tool_messages(self):
-        """ToolMessages are handled correctly in mixed conversation."""
+        """ToolMessages are handled correctly in mixed conversation.
+
+        The first assistant turn carries tool_calls and is echoed; the final
+        answer turn does NOT carry tool_calls and is therefore NOT echoed
+        (per DeepSeek thinking-mode spec).
+        """
         llm = ThinkingChatOpenAI(model="test-model", api_key="test-key")
 
         messages = [
@@ -135,9 +170,10 @@ class TestGetRequestPayloadPreservesReasoningContent:
                 ]
             ),
             ToolMessage(content="file1.txt\nfile2.txt", tool_call_id="call_1"),
+            # Final-answer turn — no tool_calls → reasoning_content must NOT echo.
             AIMessage(
                 content="Here are the files: file1.txt and file2.txt",
-                additional_kwargs={"reasoning_content": "Presenting ls results"}
+                additional_kwargs={"reasoning_content": "Presenting ls results"},
             ),
         ]
 
@@ -146,7 +182,7 @@ class TestGetRequestPayloadPreservesReasoningContent:
         assistant_messages = [m for m in payload["messages"] if m.get("role") == "assistant"]
         assert len(assistant_messages) == 2
         assert assistant_messages[0].get("reasoning_content") == "User wants to run ls"
-        assert assistant_messages[1].get("reasoning_content") == "Presenting ls results"
+        assert assistant_messages[1].get("reasoning_content") is None
 
     def test_empty_message_list(self):
         """Empty message list is handled without error."""
@@ -163,7 +199,11 @@ class TestGetRequestPayloadPreservesReasoningContent:
 
         messages = [
             HumanMessage(content="Stop at a certain point"),
-            AIMessage(content="Response", additional_kwargs={"reasoning_content": "Thinking"})
+            AIMessage(
+                content="Response",
+                additional_kwargs={"reasoning_content": "Thinking"},
+                tool_calls=[_TOOL_CALL],
+            ),
         ]
 
         payload = llm._get_request_payload(messages, stop=["END"])
@@ -178,7 +218,8 @@ class TestGetRequestPayloadPreservesReasoningContent:
         messages = [
             AIMessage(
                 content="Answer.",
-                additional_kwargs={"reasoning_content": ""}
+                additional_kwargs={"reasoning_content": ""},
+                tool_calls=[_TOOL_CALL],
             )
         ]
 
@@ -187,6 +228,112 @@ class TestGetRequestPayloadPreservesReasoningContent:
         assistant_msg = payload["messages"][0]
         assert assistant_msg["role"] == "assistant"
         assert assistant_msg.get("reasoning_content") == ""
+
+
+class TestReasoningEchoToolCallGate:
+    """Tests for the tool-call gate on ``reasoning_content`` echo.
+
+    Per DeepSeek thinking-mode spec, ``reasoning_content`` is echoed ONLY for
+    assistant turns that included a tool call. The gate lives in
+    ``ThinkingChatOpenAI._get_request_payload`` and is additive to the
+    existing presence gate (the field must be set on
+    ``additional_kwargs``).
+    """
+
+    def test_tool_call_assistant_echoes_reasoning_content(self):
+        """Assistant with tool_calls + reasoning_content → echoed."""
+        llm = ThinkingChatOpenAI(model="test-model", api_key="test-key")
+        messages = [
+            AIMessage(
+                content="",
+                additional_kwargs={"reasoning_content": "thinking-then-call"},
+                tool_calls=[_TOOL_CALL],
+            )
+        ]
+        payload = llm._get_request_payload(messages)
+        assistant_msg = payload["messages"][0]
+        assert assistant_msg.get("reasoning_content") == "thinking-then-call"
+
+    def test_plain_assistant_without_tool_calls_does_not_echo(self):
+        """Assistant WITHOUT tool_calls + reasoning_content → NOT echoed.
+
+        Regression for the spec violation: previously the loop re-injected
+        ``reasoning_content`` into every assistant payload dict whose
+        original AIMessage had the field stored, which can cause 400s on
+        strict endpoints.
+        """
+        llm = ThinkingChatOpenAI(model="test-model", api_key="test-key")
+        messages = [
+            AIMessage(
+                content="Final answer.",
+                additional_kwargs={"reasoning_content": "thoughts"},
+            )
+        ]
+        payload = llm._get_request_payload(messages)
+        assistant_msg = payload["messages"][0]
+        assert "reasoning_content" not in assistant_msg
+
+    def test_mixed_history_only_tool_call_turn_echoes(self):
+        """Mixed history: tool-call assistant + plain assistant → only the
+        tool-call turn carries ``reasoning_content``."""
+        llm = ThinkingChatOpenAI(model="test-model", api_key="test-key")
+        messages = [
+            HumanMessage(content="Run ls"),
+            AIMessage(
+                content="",
+                additional_kwargs={"reasoning_content": "tool-call reasoning"},
+                tool_calls=[_TOOL_CALL],
+            ),
+            ToolMessage(content="file1\nfile2", tool_call_id="call_1"),
+            AIMessage(
+                content="Done.",
+                additional_kwargs={"reasoning_content": "final-answer reasoning"},
+            ),
+        ]
+        payload = llm._get_request_payload(messages)
+        assistant_messages = [m for m in payload["messages"] if m.get("role") == "assistant"]
+        assert len(assistant_messages) == 2
+        assert assistant_messages[0].get("reasoning_content") == "tool-call reasoning"
+        assert assistant_messages[1].get("reasoning_content") is None
+
+    def test_non_matching_model_does_not_echo_even_with_tool_calls(self):
+        """Non-matching model name (e.g. gpt-4o) → nothing echoed regardless.
+
+        Regression-pin: the model-name fast path in ``_should_echo_reasoning``
+        must short-circuit before the tool-call gate runs.
+        """
+        # "gpt-4o" is NOT in the default ["deepseek"] list and not added by
+        # the autouse fixture (which adds only "test-model").
+        llm = ThinkingChatOpenAI(model="gpt-4o", api_key="test-key")
+        messages = [
+            AIMessage(
+                content="",
+                additional_kwargs={"reasoning_content": "should be skipped"},
+                tool_calls=[_TOOL_CALL],
+            )
+        ]
+        payload = llm._get_request_payload(messages)
+        assistant_msg = payload["messages"][0]
+        assert "reasoning_content" not in assistant_msg
+
+    def test_tool_call_assistant_without_reasoning_content_does_not_echo(self):
+        """Tool-call assistant with NO stored reasoning_content → not echoed.
+
+        Regression-pin: the existing presence gate (the field must be set
+        on ``additional_kwargs``) is preserved. Adding the tool-call gate
+        does not weaken the original guard.
+        """
+        llm = ThinkingChatOpenAI(model="test-model", api_key="test-key")
+        messages = [
+            AIMessage(
+                content="",
+                tool_calls=[_TOOL_CALL],
+                # No reasoning_content in additional_kwargs
+            )
+        ]
+        payload = llm._get_request_payload(messages)
+        assistant_msg = payload["messages"][0]
+        assert "reasoning_content" not in assistant_msg
 
 
 
