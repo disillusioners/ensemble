@@ -258,11 +258,15 @@ test('404 nonexistent instance: not-found UI, no crash, nav link sane', async ({
     expect(found).toBe(true);
   }).toPass({ timeout: 15000 });
 
-  // Nav link must not crash the app — click through to /instances.
+  // Nav link must not crash the app — click through to the instances list.
+  // NOTE: strict match — `/instances` EXACTLY (the list), not any detail
+  // route. If the dead-id cache is stale, the nav href points back at the
+  // nonexistent detail; that lands on the not-found UI, NOT the list, and
+  // this waitForURL would time out — which is the observable form of the
+  // gap this test probes.
   await page.locator('a.nav-link', { hasText: /^Instances$/ }).first().click();
-  await page.waitForURL(/\/instances(\/|$)/, { timeout: 10000 });
+  await page.waitForURL(/^\/instances\/?$/, { timeout: 10000 });
   await expect(page.locator('app-instances .instances-container')).toBeVisible({ timeout: 10000 });
-
   // No page errors; console errors filtered only for the authorized
   // fixture-noise classes (+ any 404 resource load for the nonexistent id).
   const filtered = consoleErrors.filter(
