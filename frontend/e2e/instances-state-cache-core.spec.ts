@@ -228,16 +228,25 @@ test.describe('Instances Detail Overlay - Core Caching', () => {
     // Type a draft string.
     await textarea.fill('e2e-draft-PERSIST');
 
-    // Scroll the messages list. We use messages-scroll — the inner scrollable
-    // pane — so the parent .messages-container's overflow:hidden doesn't
-    // shadow our scrollTop assignment.
+    // Scroll the messages list. Fixture instances have ZERO messages, so the
+    // scroller has no overflow and a scrollTop assignment clamps to 0 —
+    // unmeasurable, not unpreserved. Inject inert filler rows to guarantee
+    // overflow, set scrollTop, and verify it took (fixture-readiness check);
+    // preservation is asserted in the draft/scroll test.
     const scrollOk = await page.evaluate(() => {
       const scroller = document.querySelector('app-chat .messages-scroll') as HTMLElement | null;
       if (!scroller) return false;
+      for (let i = 0; i < 30; i++) {
+        const row = document.createElement('div');
+        row.className = 'e2e-scroll-filler';
+        row.style.height = '40px';
+        row.textContent = `e2e filler ${i}`;
+        scroller.appendChild(row);
+      }
       scroller.scrollTop = 100;
-      return true;
+      return scroller.scrollTop >= 90;
     });
-    expect(scrollOk).toBe(true);
+    expect(scrollOk, 'overflow fixture: filler rows must make scrollTop stick').toBe(true);
 
     // Snapshot the localStorage payload so subsequent tests can assert it
     // persists (it is set by InstancesViewStateService.openDetail on click).
@@ -372,8 +381,8 @@ test.describe('Instances Detail Overlay - Core Caching', () => {
     });
     expect(scrollTop).toBeGreaterThanOrEqual(90);
 
-    // Draft text preserved in the textarea. (KNOWN BUG — intentionally kept
-    // as the failing terminal assert of this test.)
+    // Draft text preserved in the textarea. (Acceptance verdict for BUG1 —
+    // renderedInstance hold must keep the subtree alive across the cycle.)
     const textarea = page.locator('textarea.input-textarea');
     await expect(textarea).toBeVisible({ timeout: 10000 });
     const draftValue = await textarea.inputValue();
