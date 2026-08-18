@@ -379,15 +379,20 @@ test.describe('Instances Detail Overlay - Regression', () => {
 
     // Console-error criterion (R5): app-level breakage on menu switches —
     // JS exceptions, chat/SSE faults — must fail. HANDLED backend errors
-    // from the workspace overlay are filtered ONLY for /api/workspace/
-    // resource loads: this test's fixture project is synthetic (API-created)
-    // and has no workspace files on disk, so the overlay's tree/file/diff
-    // GETs legitimately return 404/400 and the app handles them by design
-    // (error banner, workspace.component.html:164). Dispatcher
-    // classification 2026-08-18: fixture gap, not feature bug. Every other
+    // from the workspace overlay are filtered ONLY for two documented
+    // fixture-gap patterns: (1) /api/workspace/ resource loads, and (2) 404s
+    // on /api/projects/{id}/vscode-folder. This test's fixture project is
+    // synthetic (API-created) with no workspace files or VS Code folder on
+    // disk, so the overlay's tree/file/diff/vscode-folder GETs legitimately
+    // fail and the app handles them by design (error banner,
+    // workspace.component.html:164). Dispatcher classification 2026-08-18
+    // (extended same day): fixture gap, not feature bug. Every other
     // console error or pageerror still fails this assert.
     const filteredConsoleErrors = consoleErrors.filter(
-      (e) => !(e.includes('Failed to load resource') && e.includes('/api/workspace/')),
+      (e) => !(
+        e.includes('Failed to load resource') &&
+        (e.includes('/api/workspace/') || e.includes('/vscode-folder'))
+      ),
     );
     expect(filteredConsoleErrors, `console errors: ${filteredConsoleErrors.join('\n')}`).toEqual([]);
     expect(pageErrors, `page errors: ${pageErrors.join('\n')}`).toEqual([]);
