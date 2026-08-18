@@ -307,7 +307,25 @@ test.describe('Instances Detail Overlay - Core Caching', () => {
   });
 
   // ==========================================================================
-  // Test 3: Click "Instances" nav → cached detail restored, same node,
+  // Test 3 (moved before the draft/scroll test): localStorage payload still
+  // contains the instance id. Runs BEFORE the known-bug test so serial-mode
+  // abort cannot suppress this evidence — localStorage only needs the cache
+  // written by test 1 and surviving the Plan switch of test 2.
+  // ==========================================================================
+  test('localStorage persists the cached instance id', async () => {
+    const stored = await page.evaluate(() =>
+      localStorage.getItem('ensemble-instances-view-state'),
+    );
+    expect(stored).toBeTruthy();
+    const parsed = JSON.parse(stored as string);
+    expect(typeof parsed.activeInstanceId).toBe('string');
+    expect(parsed.activeInstanceId.length).toBeGreaterThan(0);
+    expect(typeof parsed.activeProjectId).toBe('string');
+    expect(parsed.activeProjectId.length).toBeGreaterThan(0);
+  });
+
+  // ==========================================================================
+  // Test 4: Click "Instances" nav → cached detail restored, same node,
   //         draft + scroll preserved, no console errors.
   // ==========================================================================
   test('Click Instances nav → same node restored, draft + scroll preserved', async () => {
@@ -344,19 +362,22 @@ test.describe('Instances Detail Overlay - Core Caching', () => {
     );
     expect(markerExists).toBe(true);
 
-    // Draft text preserved in the textarea.
-    const textarea = page.locator('textarea.input-textarea');
-    await expect(textarea).toBeVisible({ timeout: 10000 });
-    const draftValue = await textarea.inputValue();
-    expect(draftValue).toBe('e2e-draft-PERSIST');
-
     // Scroll position preserved. We allow a small tolerance because the
     // re-mount tick can nudge scrollTop by a few pixels due to a re-layout.
+    // (Ordered BEFORE the draft assert: draft loss is a KNOWN feature bug;
+    // this ordering harvests scroll evidence before the failing assert.)
     const scrollTop = await page.evaluate(() => {
       const scroller = document.querySelector('app-chat .messages-scroll') as HTMLElement | null;
       return scroller ? scroller.scrollTop : -1;
     });
     expect(scrollTop).toBeGreaterThanOrEqual(90);
+
+    // Draft text preserved in the textarea. (KNOWN BUG — intentionally kept
+    // as the failing terminal assert of this test.)
+    const textarea = page.locator('textarea.input-textarea');
+    await expect(textarea).toBeVisible({ timeout: 10000 });
+    const draftValue = await textarea.inputValue();
+    expect(draftValue).toBe('e2e-draft-PERSIST');
 
     // SSE should be open again (chat reconnected on visibility=true).
     // Chat-scoped: app-wide net is inflated by the never-closed
@@ -369,20 +390,5 @@ test.describe('Instances Detail Overlay - Core Caching', () => {
     // No console / page errors from the reopen.
     expect(consoleErrors, `console errors: ${consoleErrors.join('\n')}`).toEqual([]);
     expect(pageErrors, `page errors: ${pageErrors.join('\n')}`).toEqual([]);
-  });
-
-  // ==========================================================================
-  // Test 4: localStorage payload still contains the instance id.
-  // ==========================================================================
-  test('localStorage persists the cached instance id', async () => {
-    const stored = await page.evaluate(() =>
-      localStorage.getItem('ensemble-instances-view-state'),
-    );
-    expect(stored).toBeTruthy();
-    const parsed = JSON.parse(stored as string);
-    expect(typeof parsed.activeInstanceId).toBe('string');
-    expect(parsed.activeInstanceId.length).toBeGreaterThan(0);
-    expect(typeof parsed.activeProjectId).toBe('string');
-    expect(parsed.activeProjectId.length).toBeGreaterThan(0);
   });
 });
