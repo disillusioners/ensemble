@@ -167,7 +167,13 @@ test.describe('Instances Detail Overlay - Regression', () => {
     // Wait for the sidebar instance list (inside the chat subtree is rendered
     // when we open detail; for the list page it's the standalone instance list).
     // For R2 we open detail and inspect the chat sidebar.
-    const card = page.locator('a.instance-item').first();
+    // Hermetic: pick a card in our OWN 2-instance project (r5Project) so the
+    // "multiple instances" assertion is exercised regardless of dev-DB state.
+    // A random first card can land in a 1-instance project, making the
+    // sidebar count 1 → bogus skip (the sidebar is project-scoped).
+    const card = page
+      .locator(`a.instance-item[href*="/projects/${r5Project.project_id}/instances/"]`)
+      .first();
     await expect(card).toBeVisible({ timeout: 15000 });
     await card.click();
     await page.waitForURL(/\/projects\/[^/?]+\/instances\/[^/?]+$/, { timeout: 10000 });
@@ -331,10 +337,13 @@ test.describe('Instances Detail Overlay - Regression', () => {
     }
 
     // Close workspace. Chat must still exist with the marker intact.
-    // The workspace emits (hide) → workspaceOverlayService.hide(). We can
-    // trigger via the Escape key (workspace binds @HostListener escape)
-    // OR by clicking the workspace button again to toggle off.
-    await workspaceBtn.click();
+    // The workspace emits (hide) → workspaceOverlayService.hide(). NOTE: we
+    // CANNOT click the workspace button here — this very test proves the
+    // workspace overlay (z-index 100) covers the chat header (z-index 90),
+    // so the button is pointer-intercepted by the overlay's error banner.
+    // Escape is the correct dismissal path (workspace.component.ts binds
+    // @HostListener('window:keydown.escape')).
+    await page.keyboard.press('Escape');
 
     await expect(async () => {
       const display = await workspace.evaluate((el) => getComputedStyle(el).display);
