@@ -265,7 +265,9 @@ test('404 nonexistent instance: not-found UI, no crash, nav link sane', async ({
   // this waitForURL would time out — which is the observable form of the
   // gap this test probes.
   await page.locator('a.nav-link', { hasText: /^Instances$/ }).first().click();
-  await page.waitForURL(/^\/instances\/?$/, { timeout: 10000 });
+  // Match on PATHNAME — waitForURL(regex) tests the FULL URL string, so an
+  // anchored /^\/instances/ would never match http://localhost:4199/instances.
+  await page.waitForURL((url) => /^\/instances\/?$/.test(url.pathname), { timeout: 10000 });
   await expect(page.locator('app-instances .instances-container')).toBeVisible({ timeout: 10000 });
   // No page errors; console errors filtered only for the authorized
   // fixture-noise classes (+ any 404 resource load for the nonexistent id).
