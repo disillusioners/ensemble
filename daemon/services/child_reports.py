@@ -15,12 +15,16 @@ from ..persistence import get_instance_messages
 from ..repositories.instance.models import Instance, InstanceStatus
 from ..repositories.message_queue.models import MessageQueue, MessageStatus, MessageType
 from ..repositories.job_queue.models import JobItem
+from ..repositories.report_injection.repository import (
+    ReportInjectionRepository,
+)
 from ..repositories.task.models import Task, TaskType, TaskStatus
 from ..repositories.event.models import Event, EventKind
 from ..repositories.dependency_bus.models import DependencyWatcher, DependencyWatcherState
 from ..repositories.report_injection.models import ReportInjection, ReportInjectionState
 from ..registry import get_registry
 from ..write_pause_guard import WriteGuardSession
+from ..constants import DEFERRED_REASON_IDEMPOTENCY_SKIP, DEFERRED_REASON_PENDING_MESSAGES
 from .context_messages import _resolve_tree_root_id
 from .lifecycle_hooks import LifecycleHookContext, dispatch_lifecycle_hooks
 from .llm_failover import wrap_langchain_failover
@@ -78,7 +82,18 @@ class _ChildCompletionDbResult(NamedTuple):
             commit + SSE ``waiting_children``.
         ``"root_completed"`` — root completed cleanly, commit + SSE
             ``completed`` + CompletionRegistry + lifecycle event + title gen.
-        ``"idempotency_skip"`` — already reported, nothing to do.
+        ``"idempotency_skip"`` — already reported (terminal
+            COMPLETED/ERROR state), nothing to do. Phase 1: no marker
+            for terminal-failed delivery.
+        ``"deferred_pause"`` — Phase 1 (pause-report-recovery Variant B
+            fix 2): CHILD is PAUSED at completion. The helper persists
+            a DEFERRED marker on ``report_injections`` so the parent's
+            delivery obligation can be recovered by the Phase 2
+            router/sweep. Outcome is an ``_ChildCompletionDbResult``
+            label only — NOT a ``message_queue.terminal_reason``;
+            no MIRROR_SET implication. C5 scope: this outcome ONLY
+            fires for child-PAUSED; child-COMPLETED/parent-PAUSED
+            uses the Site-1 pipeline lane (1.4) instead.
         ``"tool_invocation_completed"`` — tool-invocation child, commit
             + SSE ``completed`` + CompletionRegistry + lifecycle event +
             title gen.
@@ -643,6 +658,17 @@ Provide a concise summary:"""
         
         The idempotency key includes the message_id so each message completion
         generates a unique report (allowing multiple completions from the same child).
+        
+        DEPRECATION NOTE (pause-report-recovery Phase 1, 2026-08-19):
+        This helper is superseded by the inlined check at
+        ``_process_child_completion_db_sync`` around line ~2106 (the live
+        reachable production guard). The inlined check is the
+        authoritative parent-completion guard after Phase 2's B2
+        reachability audit; this helper is dead code in production
+        (only tests exercise it). It is kept verbatim (no deletion, no
+        edits to the logic) so the existing test surface remains
+        green. Do NOT extend this helper — add the production change to
+        the inlined check instead.
         
         Args:
             session: Database session.
@@ -1620,21 +1646,82 @@ Provide a concise summary:"""
             # ``completed_message_id`` (or with None) where the row has
             # already been finalized. The status check is the
             # coarser-grained safety net that supersedes both.
-            # PAUSED is also excluded: a paused question() instance must not
-            # be overwritten by a stale completion report while the user is
-            # editing/inspecting it (resume() owns the terminal transition).
+            #
+            # Phase 1 (pause-report-recovery Variant B fix 2 + C5 SCOPE
+            # NOTE): the guard fires in TWO shapes now:
+            #
+            # * ``status in (COMPLETED, ERROR)`` — unchanged
+            #   ``idempotency_skip`` outcome, no marker. Delivery has
+            #   already happened (or is terminal-failed); no obligation
+            #   to recover.
+            #
+            # * ``status == PAUSED`` — new outcome ``deferred_pause``
+            #   on ``_ChildCompletionDbResult`` (NOT a terminal_reason;
+            #   no MIRROR_SET implication) + ``ensure_deferred`` marker
+            #   on the obligation triple. The child was paused while
+            #   completing (typically the question() tool's pause
+            #   cascade); without the marker, the parent's delivery
+            #   obligation would be silently lost. The marker is
+            #   recoverable in Phase 2's router/sweep.
+            #
+            # C5 SCOPE NOTE: this guard fires ONLY when the CHILD
+            # instance is PAUSED. The canonical Site-1 shape (child
+            # COMPLETED, parent PAUSED) NEVER reaches this branch —
+            # that is 1.4's pipeline lane
+            # (``message_processing_pipeline.py``: the pause-check
+            # there observes the child's status, not the parent's).
+            # The 3.2(d) test pins this scope separation.
+            #
+            # The PAUSED branch performs the marker write on the SAME
+            # session/transaction as the status read (atomic with the
+            # existing ``message_queue`` / ReportInjection row state);
+            # ``ensure_deferred`` is best-effort (W6 IntegrityError
+            # absorption for concurrent duplicates).
             if instance.status in (
                 InstanceStatus.COMPLETED.value,
                 InstanceStatus.ERROR.value,
-                InstanceStatus.PAUSED.value,
             ):
                 logger.info(
                     f"Instance {instance_id[:8]}... already in terminal "
-                    f"or paused state ({instance.status}), skipping "
+                    f"state ({instance.status}), skipping "
                     f"_process_child_completion_db_sync (idempotency)"
                 )
                 return _ChildCompletionDbResult(
                     outcome="idempotency_skip",
+                    instance_id=instance_id,
+                    agent_id=instance.agent_id,
+                    parent_id=instance.parent_id,
+                )
+            if instance.status == InstanceStatus.PAUSED.value:
+                # Variant B fix 2 — CHILD-PAUSED shape: persist a
+                # DEFERRED marker so the parent's delivery obligation
+                # survives the pause. Same session/transaction as the
+                # status read.
+                logger.info(
+                    f"Instance {instance_id[:8]}... is PAUSED at "
+                    f"completion, persisting DEFERRED marker for parent "
+                    f"{instance.parent_id[:8] if instance.parent_id else 'None'}..."
+                )
+                if instance.parent_id is not None:
+                    try:
+                        ReportInjectionRepository(
+                            self._manager.engine
+                        ).ensure_deferred(
+                            parent_instance_id=instance.parent_id,
+                            child_instance_id=instance_id,
+                            child_message_id=(
+                                completed_message_id or ""
+                            ),
+                            deferred_reason=DEFERRED_REASON_IDEMPOTENCY_SKIP,
+                        )
+                    except Exception as marker_err:
+                        logger.warning(
+                            f"Instance {instance_id[:8]}... DEFERRED "
+                            f"marker write failed for paused-state "
+                            f"idempotency_skip (non-fatal): {marker_err}"
+                        )
+                return _ChildCompletionDbResult(
+                    outcome="deferred_pause",
                     instance_id=instance_id,
                     agent_id=instance.agent_id,
                     parent_id=instance.parent_id,
@@ -2080,6 +2167,27 @@ Provide a concise summary:"""
             
             # Idempotency checks — inlined from _should_send_completion_report
             # (no await needed; runs on worker thread inside WriteGuardSession).
+            #
+            # Phase 1 (pause-report-recovery Variant B fix 1): the live
+            # ``pending_messages_exist`` skip path now persists a DEFERRED
+            # marker on ``report_injections`` so the parent's eventual
+            # delivery obligation survives pause/cancel/recovery. The
+            # marker write happens on the same ``session``/transaction as
+            # the skip decision (atomic with the existing
+            # ``message_queue`` / ``ReportInjection`` row state). The
+            # inline check is the live reachable production guard — the
+            # 665-695 helper is dead (tests only) and kept convergent via
+            # a deprecation comment.
+            #
+            # N1 (cycle-2 patch): load ``inst_check`` BEFORE the if/else
+            # split (single load, used by both branches). The W5 root
+            # guard (``parent_id is None`` → return) is BEFORE
+            # ``ensure_deferred`` (not else-only) so a root instance
+            # cannot crash the marker writer. ID orientation:
+            # ``parent_instance_id = inst_check.parent_id``,
+            # ``child_instance_id = instance_id``,
+            # ``child_message_id = completed_message_id``,
+            # ``reason = DEFERRED_REASON_PENDING_MESSAGES``.
             if completed_message_id is None:
                 pending_count = session.exec(
                     select(func.count())
@@ -2103,11 +2211,44 @@ Provide a concise summary:"""
                         MessageStatus.RETRYING.value,
                     ]))
                 ).scalar_one()
+                # N1 (cycle-2 patch): load ``inst_check`` BEFORE the
+                # if/else so both branches share a single load.
+                inst_check = session.get(Instance, instance_id)
                 if pending_count > 0:
                     should_send = False
                     skip_reason = "pending_messages_exist"
+                    # Variant B fix 1 (live site): persist a DEFERRED
+                    # marker so the parent's delivery obligation
+                    # survives the skip. The sibling completion is
+                    # the natural re-entry (no inline re-queue here).
+                    # ROOT GUARD (W5): skip the marker for root
+                    # instances (parent_id is None) — they have no
+                    # parent and therefore no delivery obligation.
+                    if (
+                        inst_check is not None
+                        and inst_check.parent_id is not None
+                    ):
+                        try:
+                            ReportInjectionRepository(
+                                self._manager.engine
+                            ).ensure_deferred(
+                                parent_instance_id=inst_check.parent_id,
+                                child_instance_id=instance_id,
+                                child_message_id=completed_message_id,
+                                deferred_reason=DEFERRED_REASON_PENDING_MESSAGES,
+                            )
+                        except Exception as marker_err:
+                            # Marker write is best-effort: the natural
+                            # sibling completion is the re-entry path;
+                            # a failure here is logged but does not
+                            # block the existing skip decision.
+                            logger.warning(
+                                f"Instance {instance_id[:8]}... DEFERRED "
+                                f"marker write failed for "
+                                f"pending_messages_exist skip "
+                                f"(non-fatal): {marker_err}"
+                            )
                 else:
-                    inst_check = session.get(Instance, instance_id)
                     if inst_check is None:
                         should_send = False
                         skip_reason = "instance_not_found"
@@ -2785,8 +2926,23 @@ Provide a concise summary:"""
             self._trigger_title_generation(instance_id, completed_message_id)
             return
 
-        # Idempotency skip: nothing to do
+        # Idempotency skip: nothing to do (terminal COMPLETED/ERROR — delivery has happened or terminal-failed; no obligation to recover).
         if outcome == "idempotency_skip":
+            return
+
+        # Phase 1 (pause-report-recovery Variant B fix 2): the
+        # ``deferred_pause`` outcome means a DEFERRED marker has
+        # already been persisted on ``report_injections`` by the sync
+        # helper (same session/transaction as the status read). The
+        # async dispatcher has no additional side effects to fire —
+        # the Phase 2 router/sweep will recover the marker when the
+        # parent resumes. Side-effect-free return.
+        if outcome == "deferred_pause":
+            logger.info(
+                f"ChildReportsService: deferred_pause outcome for "
+                f"{instance_id[:8]}... — DEFERRED marker persisted by "
+                f"sync helper; Phase 2 recovery will pick up"
+            )
             return
 
         # Tool invocation completed: commit + SSE + CompletionRegistry + lifecycle + title
