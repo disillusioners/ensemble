@@ -668,3 +668,238 @@ class TestReconciliationSubshapes:
             ).first()
             assert existing_msg is not None
             # No DB write needed for sub-shape (c).
+
+
+# =============================================================================
+# Reviewer-finding regression tests — Bug #1 (await-on-sync) + Bug #2
+# (loop-thread self-blocking re-entry)
+# =============================================================================
+
+
+class TestReviewerFindingRegressions:
+    """Regression tests for the two correctness bugs the reviewer
+    flagged on diff 4167d6b1..HEAD.
+
+    Both bugs were masked by the existing test scaffolding:
+
+    * Finding #1 — ``await self._is_parent_terminal(...)`` was
+      awaiting a sync method; production raises
+      ``TypeError: object bool can't be used in 'await' expression``
+      the first time a DEFERRED row exists. The existing tests
+      replaced ``_is_parent_terminal`` with ``MagicMock(return_value=True)``
+      so the await path was never exercised.
+    * Finding #2 — the sync ``_handle_recover_deferred_report``
+      scheduled the re-entry via
+      ``asyncio.run_coroutine_threadsafe(...).result(timeout=30)``
+      and was called from the router path which runs ON the event
+      loop, so ``.result()`` blocked the loop that must run the
+      scheduled coroutine → guaranteed 30s timeout.
+
+    These tests exercise the REAL production methods (no
+    MagicMock for the bug targets) to pin both contracts.
+    """
+
+    @pytest.mark.asyncio
+    async def test_real_is_parent_terminal_is_awaitable(
+        self, engine: Engine
+    ) -> None:
+        """Finding #1 regression: ``_is_parent_terminal`` is now
+        ``async def`` — direct ``await`` returns the correct bool /
+        None and never raises ``TypeError: object bool can't be
+        used in 'await' expression``.
+
+        Uses a minimal stand-in object that wires a real
+        ``_instance_repository.get`` (in-memory SQLite-backed)
+        and calls the REAL ``_is_parent_terminal`` method bound
+        to it via ``types.MethodType`` (no InstanceManager
+        construction needed — the helper is pure repo-then-check).
+        """
+        from types import MethodType
+
+        from daemon.manager import InstanceManager
+        from daemon.repositories.instance.repository import (
+            SQLModelInstanceRepository,
+        )
+
+        repo = SQLModelInstanceRepository(engine=engine)
+
+        # Bind the real method to a minimal holder — the
+        # method only touches ``self._instance_repository.get``
+        # and ``InstanceStatus``, so a plain object suffices.
+        holder = MagicMock(name="MinimalManager")
+        holder._instance_repository = repo
+        real_method = InstanceManager._is_parent_terminal
+        bound = MethodType(real_method, holder)
+
+        # Case 1: missing parent → ``None``.
+        assert await bound("does-not-exist") is None
+
+        # Case 2: RUNNING parent → ``True`` (non-terminal).
+        running_parent = _seed_instance(
+            engine, status=InstanceStatus.RUNNING.value
+        )
+        assert await bound(running_parent) is True
+
+        # Case 3: COMPLETED parent → ``False`` (terminal).
+        completed_parent = _seed_instance(
+            engine, status=InstanceStatus.COMPLETED.value
+        )
+        assert await bound(completed_parent) is False
+
+        # Case 4: ERROR parent → ``False``.
+        error_parent = _seed_instance(
+            engine, status=InstanceStatus.ERROR.value
+        )
+        assert await bound(error_parent) is False
+
+        # Case 5: TERMINATED parent → ``False``.
+        terminated_parent = _seed_instance(
+            engine, status=InstanceStatus.TERMINATED.value
+        )
+        assert await bound(terminated_parent) is False
+
+        # Case 6: FAILED parent → ``False``.
+        failed_parent = _seed_instance(
+            engine, status=InstanceStatus.FAILED.value
+        )
+        assert await bound(failed_parent) is False
+
+        # Case 7: PAUSED parent → ``True`` (non-terminal, the
+        # natural completion path can drain the report when the
+        # turn resumes).
+        paused_parent = _seed_instance(
+            engine, status=InstanceStatus.PAUSED.value
+        )
+        assert await bound(paused_parent) is True
+
+    @pytest.mark.asyncio
+    async def test_router_reentry_does_not_block_loop_thread(
+        self, engine: Engine
+    ) -> None:
+        """Finding #2 regression: ``_handle_recover_deferred_report_async``
+        (the router-side re-entry) completes on the running loop
+        without a 30s timeout. The previous sync method used
+        ``run_coroutine_threadsafe(...).result(timeout=30)`` on
+        the loop thread and blocked the loop that must run the
+        scheduled coroutine.
+
+        We mock only the deep completion coroutine
+        (``_process_child_completion_and_notify_parent``) so we
+        can assert it was awaited ON the loop; everything else
+        is real (reconcile is short-circuited by returning a
+        non-None dict so we skip sub-shape (a) — sub-shape (a)'s
+        internal ``run_coroutine_threadsafe(...).result(...)`` is
+        pre-existing and out of scope).
+        """
+        from types import MethodType as _MT
+
+        from daemon.manager import InstanceManager
+
+        # Build a minimal manager-like object. We bind the REAL
+        # ``_handle_recover_deferred_report_async`` +
+        # ``_reenter_completion_async`` so the router's re-entry
+        # path is exactly what production runs; only the deep
+        # completion coroutine + the (sync) reconcile helper
+        # are stubbed.
+        holder = MagicMock(name="MinimalManager")
+
+        # Stub the (sync) reconcile helper to short-circuit to
+        # the re-entry step (skip sub-shape (a) so we don't hit
+        # the pre-existing inner ``run_coroutine_threadsafe(...).
+        # result(...)`` which is out of scope).
+        def _fake_reconcile(
+            *, child_instance_id, child_message_id, injection_id, source
+        ):
+            return {"shape": "delivery_only"}
+
+        holder._reconcile_deferred_report = _fake_reconcile
+
+        # The deep completion coroutine — what the router's
+        # re-entry ultimately awaits on the loop.
+        holder._process_child_completion_and_notify_parent = AsyncMock(
+            return_value=None
+        )
+
+        # Bind the REAL production methods via MethodType so the
+        # ``self`` chain resolves correctly. Both must be bound
+        # because ``_handle_recover_deferred_report_async`` calls
+        # ``self._reenter_completion_async(...)`` (which itself
+        # calls ``self._process_child_completion_and_notify_parent``).
+        holder._reenter_completion_async = _MT(
+            InstanceManager._reenter_completion_async, holder
+        )
+        bound_handler = _MT(
+            InstanceManager._handle_recover_deferred_report_async, holder
+        )
+
+        # Drive the router re-entry with a 5s wall-clock budget.
+        # If Finding #2 were unfixed, this would block the loop
+        # for 30s and the asyncio.wait_for would time out.
+        start = asyncio.get_event_loop().time()
+        await asyncio.wait_for(
+            bound_handler(
+                child_instance_id="child-x",
+                child_message_id="msg-x",
+                injection_id="inj-x",
+                source="router",
+            ),
+            timeout=5.0,
+        )
+        elapsed = asyncio.get_event_loop().time() - start
+
+        # Sanity: completion coroutine was awaited ON the loop
+        # with the right args (passes child id + message id only —
+        # the helper ignores the other kwargs).
+        holder._process_child_completion_and_notify_parent.assert_awaited_once_with(
+            "child-x", "msg-x"
+        )
+        # Sanity: no 30s timeout — must complete near-instantly.
+        assert elapsed < 1.0, (
+            f"router re-entry took {elapsed:.2f}s — "
+            f"likely blocking the loop thread "
+            f"(run_coroutine_threadsafe(...).result leak)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_router_reentry_propagates_completion_exception(
+        self, engine: Engine
+    ) -> None:
+        """Finding #2 supplementary: when the deep completion
+        coroutine raises, ``_handle_recover_deferred_report_async``
+        propagates the exception (the router's per-row except
+        block at ``resume_processing_job`` L7228 catches and logs).
+        The sync sweep-side ``_handle_recover_deferred_report``
+        MUST also propagate — both paths surface failures
+        identically (no logic drift between the two entry
+        points per the shared reconcile contract).
+        """
+        from types import MethodType as _MT
+
+        from daemon.manager import InstanceManager
+
+        holder = MagicMock(name="MinimalManager")
+
+        def _fake_reconcile(
+            *, child_instance_id, child_message_id, injection_id, source
+        ):
+            return {"shape": "delivery_only"}
+
+        holder._reconcile_deferred_report = _fake_reconcile
+        holder._process_child_completion_and_notify_parent = AsyncMock(
+            side_effect=RuntimeError("simulated completion failure")
+        )
+        holder._reenter_completion_async = _MT(
+            InstanceManager._reenter_completion_async, holder
+        )
+
+        bound_handler = _MT(
+            InstanceManager._handle_recover_deferred_report_async, holder
+        )
+
+        with pytest.raises(RuntimeError, match="simulated completion failure"):
+            await bound_handler(
+                child_instance_id="child-y",
+                child_message_id="msg-y",
+                injection_id="inj-y",
+                source="router",
+            )

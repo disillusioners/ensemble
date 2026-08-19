@@ -418,13 +418,20 @@ class InstanceManager:
             "DEFERRED",
         )
 
-    def _is_parent_terminal(self, parent_id: str) -> bool | None:
+    async def _is_parent_terminal(self, parent_id: str) -> bool | None:
         """Return ``True`` if parent is NON-terminal, ``False`` if terminal, ``None`` if missing.
 
         Phase 2 (pause-report-recovery task 2.1) helper for the
         router's deferred-recovery step. Used to decide whether the
         terminal-parent revival path is needed before re-entering
         child completion.
+
+        This is an ``async def`` because the router awaits the
+        result (``await self._is_parent_terminal(...)`` at
+        ``resume_processing_job``). The repository lookup is a
+        blocking sync call, so it runs in a worker thread via
+        ``asyncio.to_thread`` — calling ``self._instance_repository.get``
+        directly on the loop would block the event loop.
 
         Args:
             parent_id: The parent instance ID to inspect.
@@ -438,7 +445,9 @@ class InstanceManager:
             recovery).
         """
         try:
-            inst = self._instance_repository.get(parent_id)
+            inst = await asyncio.to_thread(
+                self._instance_repository.get, parent_id
+            )
         except Exception as exc:
             logger.warning(
                 f"_is_parent_terminal: lookup failed "
@@ -6097,6 +6106,128 @@ class InstanceManager:
             )
             return False
 
+    async def _reenter_completion_async(
+        self,
+        *,
+        child_instance_id: str,
+        child_message_id: str,
+        source: str,
+    ) -> None:
+        """Re-enter the natural completion path on the running loop.
+
+        Phase 2 (pause-report-recovery) helper for the
+        :meth:`_handle_recover_deferred_report_async` router-side
+        re-entry. The pre-re-entry reconciliation is shared with the
+        sweep path (:meth:`_handle_recover_deferred_report`) via
+        :meth:`_reconcile_deferred_report`; ONLY the re-entry
+        dispatch differs — the router runs on the manager's event
+        loop, so it can ``await`` directly. The sweep runs on a
+        daemon thread and must use
+        ``asyncio.run_coroutine_threadsafe(...).result(...)`` to
+        cross the thread boundary.
+
+        Awaiting directly on the loop is critical — calling
+        ``run_coroutine_threadsafe(...).result(timeout=30)`` from
+        the loop thread blocks the loop that must run the
+        scheduled coroutine, producing a guaranteed 30s timeout
+        (Reviewer finding #2 for diff 4167d6b1..HEAD).
+
+        Args:
+            child_instance_id: The child whose completion report
+                is owed.
+            child_message_id: The child's completed
+                ``message_id`` (the obligation-triple member).
+            source: ``"router"`` for the router-side re-entry;
+                passed through to the structured log so the two
+                paths remain distinguishable in production logs.
+
+        Raises:
+            Whatever ``_process_child_completion_and_notify_parent``
+            raises; the caller (router's per-row except block)
+            catches and bumps ``recovery_count`` only on success.
+        """
+        await self._process_child_completion_and_notify_parent(
+            child_instance_id, child_message_id
+        )
+
+    async def _handle_recover_deferred_report_async(
+        self,
+        *,
+        child_instance_id: str,
+        child_message_id: str,
+        injection_id: str,
+        source: str,
+    ) -> None:
+        """Router-side reconcile + re-entry — runs on the event loop.
+
+        Phase 2 (pause-report-recovery task 2.1 + 2.2) async
+        variant for the ROUTER path. Splits the threading model
+        per call site: the router already runs on the manager's
+        event loop (inside ``resume_processing_job``), so the
+        re-entry can ``await`` directly. The SWEEP path
+        (:meth:`_handle_recover_deferred_report`) keeps the
+        cross-thread bridge via
+        ``asyncio.run_coroutine_threadsafe(...).result(...)``
+        because the sweep runs on a plain ``threading.Thread``.
+
+        The pre-re-entry reconciliation is the SAME shared code
+        path the sweep uses — :meth:`_reconcile_deferred_report`.
+        Logic cannot drift between the two entry points.
+
+        Args:
+            child_instance_id: The child whose completion report
+                is owed.
+            child_message_id: The child's completed
+                ``message_id`` (the obligation-triple member).
+            injection_id: The ``ReportInjection.injection_id``
+                this call OWNS (the router/sweep's transition /
+                lane claim already won the race).
+            source: ``"router"`` — for structured logging.
+
+        Raises:
+            Whatever the reconcile / re-entry raises; the router's
+            per-row except block catches and logs.
+        """
+        # Step 1: shared pre-re-entry reconciliation.
+        try:
+            reconciled = self._reconcile_deferred_report(
+                child_instance_id=child_instance_id,
+                child_message_id=child_message_id,
+                injection_id=injection_id,
+                source=source,
+            )
+        except Exception as exc:
+            logger.warning(
+                f"[{source}] reconcile_deferred_report failed "
+                f"child={child_instance_id[:8]}..., "
+                f"msg={child_message_id[:8]}..., "
+                f"injection_id={injection_id[:8]}...: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            raise
+        if reconciled is None:
+            # Reconciliation decided the row needs no further
+            # work (e.g. parent is busy — skipped). The injection
+            # row stays PENDING; lanes 3/4 will retry.
+            return
+
+        # Step 2: re-enter on the running loop (await directly —
+        # see ``_reenter_completion_async`` docstring).
+        try:
+            await self._reenter_completion_async(
+                child_instance_id=child_instance_id,
+                child_message_id=child_message_id,
+                source=source,
+            )
+        except Exception as exc:
+            logger.warning(
+                f"[{source}] re-enter completion failed "
+                f"child={child_instance_id[:8]}..., "
+                f"msg={child_message_id[:8]}...: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            raise
+
     def _handle_recover_deferred_report(
         self,
         *,
@@ -6107,9 +6238,15 @@ class InstanceManager:
     ) -> None:
         """Reconcile a single DEFERRED/PENDING row and re-enter completion.
 
-        Phase 2 (tasks 2.1 + 2.2). The router (2.1) and the sweep
-        (2.4) both call this method after their per-row guard /
-        transition steps. The contract is identical:
+        Phase 2 (tasks 2.1 + 2.2). **Sweep-side entry point.**
+        The router (2.1) calls the async variant
+        :meth:`_handle_recover_deferred_report_async` directly
+        (since it already runs on the event loop). The sweep (2.4)
+        calls this sync method from a ``threading.Thread``; the
+        re-entry schedules the async coroutine on the manager's
+        loop via :func:`asyncio.run_coroutine_threadsafe`.
+
+        The contract is identical for both entry points:
 
         1. **Reconcile (task 2.2)** — partial-artifact
            reconciliation keyed on the injection row. The
@@ -6131,12 +6268,8 @@ class InstanceManager:
            report (either via the live agent-node drain or via
            the fallback PROCESS_REPORT task).
 
-        This is a sync method that schedules the async re-entry
-        on the manager's event loop via
-        :func:`asyncio.run_coroutine_threadsafe` (the sweep
-        thread is a plain ``threading.Thread`` and cannot await
-        directly). Failures are surfaced via structured logging
-        so the sweep's per-row error count is bumped.
+        Failures are surfaced via structured logging so the
+        sweep's per-row error count is bumped.
 
         Args:
             child_instance_id: The child whose completion report
@@ -6151,7 +6284,8 @@ class InstanceManager:
                 / ``"sweep_recovery_retry"`` — for structured
                 logging.
         """
-        # Step 1: partial-artifact reconciliation.
+        # Step 1: partial-artifact reconciliation (shared with the
+        # router path via ``_handle_recover_deferred_report_async``).
         try:
             reconciled = self._reconcile_deferred_report(
                 child_instance_id=child_instance_id,
@@ -6175,16 +6309,19 @@ class InstanceManager:
             return
 
         # Step 2: re-enter the natural completion path. The
-        # completion_report message + PROCESS_REPORT task +
-        # report_injection row now exist; the natural path drains
-        # the report either via the live agent-node
-        # (``claim_for_injection``) or via the fallback task
-        # (``claim_for_task_delivery``).
+        # sweep runs on a daemon thread, so we bridge via
+        # ``run_coroutine_threadsafe(...).result(timeout=...)``.
+        # The router path uses ``_handle_recover_deferred_report_async``
+        # instead and awaits directly — calling ``.result()`` from
+        # the loop thread would block the loop that must run the
+        # scheduled coroutine.
         try:
             loop = self._get_event_loop()
             future = asyncio.run_coroutine_threadsafe(
-                self._process_child_completion_and_notify_parent(
-                    child_instance_id, child_message_id
+                self._reenter_completion_async(
+                    child_instance_id=child_instance_id,
+                    child_message_id=child_message_id,
+                    source=source,
                 ),
                 loop,
             )
@@ -7081,7 +7218,17 @@ class InstanceManager:
                         continue
 
                     # Step 3: reconcile + re-enter (task 2.1+2.2).
-                    self._handle_recover_deferred_report(
+                    # Async variant: this router path runs ON the
+                    # event loop, so we await directly. Calling the
+                    # sync ``_handle_recover_deferred_report`` here
+                    # would invoke ``run_coroutine_threadsafe(...).
+                    # result(timeout=30)`` on the loop thread,
+                    # blocking the loop that must run the
+                    # scheduled coroutine → guaranteed 30s timeout.
+                    # The sweep path keeps the sync variant + the
+                    # cross-thread bridge (it runs on a daemon
+                    # thread and cannot await directly).
+                    await self._handle_recover_deferred_report_async(
                         child_instance_id=deferred_row.child_instance_id,
                         child_message_id=deferred_row.child_message_id,
                         injection_id=deferred_row.injection_id,
