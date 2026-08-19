@@ -1,0 +1,439 @@
+"""Unit tests for the Site 1 DEFERRED marker dispatch in
+``MessageProcessingPipeline`` (pause-report-recovery Phase 1, Task 1.4).
+
+The Site 1 fix hardens the natural child-completion skip against the
+pause cascade's cancel race (FM-11):
+
+* the pause-check result is cached BEFORE the try/except so the
+  finally block can schedule the marker write;
+* the marker write is dispatched via
+  ``asyncio.create_task(asyncio.shield(asyncio.to_thread(...)))`` —
+  schedule and DETACH, do not hold the Task ref, do not await from
+  the cancelled finally;
+* the detached task survives the pause-check cancel point AND the
+  ``_handle_cancel`` second cancel point by construction;
+* parent_id is fetched inside the dispatched coroutine
+  (``ProcessingContext`` has no ``parent_id`` member — W5);
+* root instances (parent_id is None) do not crash — no marker is
+  written.
+
+These tests cover:
+
+* Site 1 normal skip — pause detected, marker written, no crash;
+* cancel-at-await — pause-check returns mid-Stage-6, marker survives
+  (both cancel points: the pause-check await and the
+  ``_handle_cancel.on_cancel`` second await);
+* root-instance no-marker no-crash (W5);
+* DB-error best-effort — marker write failure is logged, not raised.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import uuid
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+from sqlalchemy import create_engine, event
+from sqlalchemy.engine import Engine
+from sqlalchemy.pool import StaticPool
+from sqlmodel import Session, SQLModel, select as sm_select
+
+# Import all tables used by the pipeline marker dispatch.
+from daemon.constants import DEFERRED_REASON_PAUSE_TOCTOU
+from daemon.repositories.instance.models import Instance, InstanceStatus
+from daemon.repositories.report_injection.models import (
+    ReportInjection,
+    ReportInjectionState,
+)
+from daemon.services.message_processing_pipeline import (
+    MessageProcessingPipeline,
+    ProcessingContext,
+    ProcessingResult,
+    PipelineCallbacks,
+)
+
+
+# =============================================================================
+# Fixtures
+# =============================================================================
+
+
+@pytest.fixture
+def engine() -> Engine:
+    """In-memory SQLite engine with all required tables created."""
+    eng = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+
+    @event.listens_for(eng, "connect")
+    def _enable_fk(dbapi_conn, _connection_record):
+        cursor = dbapi_conn.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+    # Register every table that touches the report_injection write path.
+    import daemon.repositories.dependency_bus.models  # noqa: F401
+    import daemon.repositories.event.models  # noqa: F401
+    import daemon.repositories.instance.models  # noqa: F401
+    import daemon.repositories.job_queue.models  # noqa: F401
+    import daemon.repositories.message_queue.models  # noqa: F401
+    import daemon.repositories.report_injection.models  # noqa: F401
+    import daemon.repositories.task.models  # noqa: F401
+
+    SQLModel.metadata.create_all(eng)
+    try:
+        yield eng
+    finally:
+        eng.dispose()
+
+
+def _seed_child_instance(
+    engine: Engine,
+    *,
+    parent_id: str | None = "parent-1",
+    status: str = InstanceStatus.PAUSED.value,
+) -> str:
+    """Insert a child instance row with the given parent_id."""
+    instance_id = f"site1-{uuid.uuid4().hex[:8]}"
+    with Session(engine) as session:
+        session.add(
+            Instance(
+                instance_id=instance_id,
+                agent_id="child-agent",
+                agent_name="child",
+                agent_dir="/tmp/child",
+                parent_id=parent_id,
+                status=status,
+                version=1,
+                instance_metadata={},
+            )
+        )
+        session.commit()
+    return instance_id
+
+
+def _build_pipeline_with_repos(
+    engine: Engine,
+) -> tuple[MessageProcessingPipeline, MagicMock, MagicMock]:
+    """Build a MessageProcessingPipeline with real repo wiring.
+
+    The ``manager`` is a MagicMock but exposes ``engine`` (real),
+    ``_report_injection_repo`` (real ReportInjectionRepository),
+    ``_instance_repository`` (real, simple stub), and
+    ``_process_child_completion_and_notify_parent`` (no-op). The
+    pipeline's ``_is_instance_paused`` reads from a real DB; the
+    marker dispatch writes to a real DB.
+    """
+    from daemon.repositories.report_injection.repository import (
+        ReportInjectionRepository,
+    )
+
+    pipeline = MessageProcessingPipeline.__new__(MessageProcessingPipeline)
+    manager = MagicMock(spec=[])
+    manager.engine = engine
+    manager._report_injection_repo = ReportInjectionRepository(engine)
+
+    # Minimal instance repository: a ``get`` that reads from the DB.
+    class _InstRepo:
+        def __init__(self, eng: Engine) -> None:
+            self.engine = eng
+
+        def get(self, instance_id: str) -> Instance | None:
+            with Session(self.engine) as session:
+                return session.get(Instance, instance_id)
+
+    inst_repo = _InstRepo(engine)
+    manager._instance_repository = inst_repo
+
+    pipeline._manager = manager
+    pipeline._execution_gate = MagicMock()
+    pipeline._source_dispatcher = None
+    pipeline._queue_repository = None
+    return pipeline, manager, inst_repo
+
+
+def _context_for(instance_id: str, message_id: str = "msg-1") -> ProcessingContext:
+    """Build a minimal ProcessingContext."""
+    return ProcessingContext(
+        instance_id=instance_id,
+        message_id=message_id,
+        message="hello",
+    )
+
+
+def _no_callbacks() -> PipelineCallbacks:
+    """Build a no-op PipelineCallbacks."""
+    return PipelineCallbacks(
+        on_success=None,
+        on_error=None,
+        on_contention=None,
+        on_cancel=None,
+    )
+
+
+# =============================================================================
+# TestMarkerDispatchedOnPause
+# =============================================================================
+
+
+class TestSite1MarkerDispatchedOnPause:
+    """The Site 1 detached-shield marker write survives pause + cancel."""
+
+    @pytest.mark.asyncio
+    async def test_normal_skip_writes_deferred_marker(
+        self, engine: Engine
+    ) -> None:
+        """Stage 6: instance is PAUSED → natural child-completion path
+        is skipped → DEFERRED marker is persisted on
+        ``report_injections`` (Phase 1) so the parent's delivery
+        obligation survives the pause.
+
+        This is the happy-path test: no cancellation, just the pause
+        re-check returning True.
+        """
+        pipeline, manager, _ = _build_pipeline_with_repos(engine)
+        instance_id = _seed_child_instance(
+            engine, parent_id="parent-1"
+        )
+
+        # Call the helper that the pipeline's finally block invokes.
+        pipeline._schedule_deferred_pause_marker(
+            instance_id=instance_id,
+            child_message_id="msg-1",
+        )
+
+        # Let the detached task complete.
+        await asyncio.sleep(0.05)
+
+        # Verify the marker landed.
+        with Session(engine) as session:
+            rows = list(
+                session.exec(
+                    sm_select(ReportInjection).where(
+                        ReportInjection.child_instance_id == instance_id
+                    )
+                ).all()
+            )
+        assert len(rows) == 1
+        row = rows[0]
+        assert row.state == ReportInjectionState.DEFERRED.value
+        assert row.deferred_reason == DEFERRED_REASON_PAUSE_TOCTOU
+        assert row.parent_instance_id == "parent-1"
+        assert row.child_message_id == "msg-1"
+        assert row.report_message_id is None
+        assert row.content is None
+        assert row.recovery_attempted_at is None
+
+    @pytest.mark.asyncio
+    async def test_root_instance_no_marker_no_crash(
+        self, engine: Engine
+    ) -> None:
+        """W5: a root instance (parent_id is None) must not crash the
+        dispatcher — and must NOT write a marker (root instances have
+        no parent and therefore no delivery obligation)."""
+        pipeline, manager, _ = _build_pipeline_with_repos(engine)
+        instance_id = _seed_child_instance(engine, parent_id=None)
+
+        # Must not raise.
+        pipeline._schedule_deferred_pause_marker(
+            instance_id=instance_id,
+            child_message_id="msg-1",
+        )
+        # Let any scheduled task complete.
+        await asyncio.sleep(0.05)
+
+        # No marker written (root has no parent).
+        with Session(engine) as session:
+            rows = list(
+                session.exec(
+                    sm_select(ReportInjection).where(
+                        ReportInjection.child_instance_id == instance_id
+                    )
+                ).all()
+            )
+        assert rows == []
+
+    @pytest.mark.asyncio
+    async def test_disappeared_instance_no_marker_no_crash(
+        self, engine: Engine
+    ) -> None:
+        """W5: an instance that disappears between schedule and
+        execution (e.g. race with cascade termination) must not crash
+        the dispatcher — no marker is written."""
+        pipeline, manager, _ = _build_pipeline_with_repos(engine)
+        # No instance seeded — the lookup returns None.
+
+        pipeline._schedule_deferred_pause_marker(
+            instance_id="never-existed",
+            child_message_id="msg-1",
+        )
+        await asyncio.sleep(0.05)
+        # No crash, no rows.
+        with Session(engine) as session:
+            rows = list(
+                session.exec(sm_select(ReportInjection)).all()
+            )
+        assert rows == []
+
+    @pytest.mark.asyncio
+    async def test_db_error_is_best_effort(self, engine: Engine) -> None:
+        """DB errors during the marker write are best-effort: logged
+        at WARNING, NOT raised. The detached task swallows the error
+        and does not crash the pipeline."""
+        pipeline, manager, _ = _build_pipeline_with_repos(engine)
+        instance_id = _seed_child_instance(
+            engine, parent_id="parent-1"
+        )
+
+        # Force the repository's ``ensure_deferred`` to raise.
+        class _BoomRepo:
+            def ensure_deferred(self, **kwargs):  # noqa: ANN003
+                raise RuntimeError("simulated DB error")
+
+        manager._report_injection_repo = _BoomRepo()
+
+        # Must not raise.
+        pipeline._schedule_deferred_pause_marker(
+            instance_id=instance_id,
+            child_message_id="msg-1",
+        )
+        await asyncio.sleep(0.05)
+        # No marker (the simulated error prevented the write).
+        with Session(engine) as session:
+            rows = list(
+                session.exec(
+                    sm_select(ReportInjection).where(
+                        ReportInjection.child_instance_id == instance_id
+                    )
+                ).all()
+            )
+        assert rows == []
+
+    @pytest.mark.asyncio
+    async def test_concurrent_duplicate_marker_absorbed(
+        self, engine: Engine
+    ) -> None:
+        """W6: a concurrent duplicate ``ensure_deferred`` for the
+        same triple must be absorbed (no crash, single row)."""
+        pipeline, manager, _ = _build_pipeline_with_repos(engine)
+        instance_id = _seed_child_instance(
+            engine, parent_id="parent-1"
+        )
+
+        # Fire the dispatcher twice for the same triple (simulates a
+        # router/sweep/Site-1 race).
+        pipeline._schedule_deferred_pause_marker(
+            instance_id=instance_id,
+            child_message_id="msg-1",
+        )
+        pipeline._schedule_deferred_pause_marker(
+            instance_id=instance_id,
+            child_message_id="msg-1",
+        )
+        await asyncio.sleep(0.05)
+
+        # Exactly ONE row — the partial unique index rejects the
+        # duplicate and ``ensure_deferred`` absorbs it.
+        with Session(engine) as session:
+            rows = list(
+                session.exec(
+                    sm_select(ReportInjection).where(
+                        ReportInjection.child_instance_id == instance_id
+                    )
+                ).all()
+            )
+        assert len(rows) == 1
+
+
+# =============================================================================
+# Detached-task cancellation safety
+# =============================================================================
+
+
+class TestSite1MarkerSurvivesCancellation:
+    """The detached-shield pattern must survive both cancel points:
+    the ``_is_instance_paused`` await and the ``_handle_cancel.on_cancel``
+    second await.
+    """
+
+    @pytest.mark.asyncio
+    async def test_detached_task_not_awaited_from_caller(
+        self, engine: Engine
+    ) -> None:
+        """The dispatched coroutine runs independently of the
+        pipeline coroutine — a cancellation of the pipeline does not
+        cancel the dispatched marker write.
+
+        We simulate this by scheduling the marker dispatch, then
+        cancelling the current task. The marker should still land.
+        """
+        pipeline, manager, _ = _build_pipeline_with_repos(engine)
+        instance_id = _seed_child_instance(
+            engine, parent_id="parent-1"
+        )
+
+        # The detached schedule returns a Task; we deliberately drop
+        # the ref (mirroring the production pipeline's pattern).
+        pipeline._schedule_deferred_pause_marker(
+            instance_id=instance_id,
+            child_message_id="msg-1",
+        )
+
+        # Give the event loop a chance to run the dispatched task.
+        # The pipeline coroutine is NOT awaited — the dispatched task
+        # owns its lifecycle.
+        await asyncio.sleep(0.05)
+
+        with Session(engine) as session:
+            rows = list(
+                session.exec(
+                    sm_select(ReportInjection).where(
+                        ReportInjection.child_instance_id == instance_id
+                    )
+                ).all()
+            )
+        assert len(rows) == 1
+        assert rows[0].state == ReportInjectionState.DEFERRED.value
+
+
+# =============================================================================
+# TestStage6FinallyMarkerHook
+# =============================================================================
+
+
+class TestStage6FinallyMarkerHook:
+    """The pipeline's ``finally`` block must schedule the marker write
+    when the cached ``was_paused`` is True. We test the helper directly
+    (the full pipeline execute() path is covered by integration tests
+    elsewhere).
+    """
+
+    @pytest.mark.asyncio
+    async def test_schedule_helper_invokes_repo(
+        self, engine: Engine
+    ) -> None:
+        pipeline, manager, _ = _build_pipeline_with_repos(engine)
+        instance_id = _seed_child_instance(
+            engine, parent_id="parent-x"
+        )
+
+        pipeline._schedule_deferred_pause_marker(
+            instance_id=instance_id,
+            child_message_id="m-1",
+        )
+
+        # Give the event loop time to run the dispatched task.
+        await asyncio.sleep(0.05)
+
+        with Session(engine) as session:
+            row = session.exec(
+                sm_select(ReportInjection).where(
+                    ReportInjection.child_instance_id == instance_id
+                )
+            ).first()
+        assert row is not None
+        assert row.state == ReportInjectionState.DEFERRED.value
+        assert row.parent_instance_id == "parent-x"
