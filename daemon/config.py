@@ -436,6 +436,86 @@ class ServicesConfig(BaseSettings):
             "so a slower cadence keeps the logs quiet."
         ),
     )
+    # Phase 2 (pause-report-recovery, task 2.6): the periodic
+    # ``ReportDeliveryRecoveryService`` sweep. S-e defaults —
+    # tunable per-lane kill-switches; disabled → zero behavior
+    # change.
+    report_delivery_recovery_enabled: bool = Field(
+        default=True,
+        description=(
+            "Master kill-switch for the periodic "
+            "ReportDeliveryRecoveryService. When False the service "
+            "is not constructed and the crash-recovery endpoint is "
+            "unavailable. Defaults to True (S-e)."
+        ),
+    )
+    report_delivery_recovery_interval_seconds: int = Field(
+        default=300,
+        description=(
+            "Periodic sweep interval (seconds) for the "
+            "ReportDeliveryRecoveryService. Default 300s (5min). "
+            "S-e recommended default; tunable via env."
+        ),
+    )
+    report_delivery_recovery_age_bound_minutes: int = Field(
+        default=10,
+        description=(
+            "Minimum age before a DEFERRED / PENDING row is eligible "
+            "for recovery (Lanes 1, 3, 4). Default 10 minutes."
+        ),
+    )
+    report_delivery_recovery_batch_cap: int = Field(
+        default=100,
+        description=(
+            "Maximum rows per lane per run (batch cap — MVP growth "
+            "rule). Remainder logged and re-claimed next cycle."
+        ),
+    )
+    report_delivery_recovery_retry_minutes: int = Field(
+        default=1,
+        description=(
+            "Lane 4 retry interval (rows stamped "
+            "recovery_attempted_at younger than this are skipped). "
+            "S-e proposed default; flagged as proposed default."
+        ),
+    )
+    report_delivery_recovery_lane_deferred: bool = Field(
+        default=True,
+        description=(
+            "Lane 1 (DEFERRED rows past the age guard) per-lane "
+            "kill-switch. Defaults to True."
+        ),
+    )
+    report_delivery_recovery_lane_no_row_backstop: bool = Field(
+        default=True,
+        description=(
+            "Lane 2 (no-row backstop, C3 designed query) per-lane "
+            "kill-switch. Defaults to True (the ONLY net under "
+            "FM-11)."
+        ),
+    )
+    report_delivery_recovery_lane_pending_age: bool = Field(
+        default=True,
+        description=(
+            "Lane 3 (age-bounded PENDING, permanent W9) per-lane "
+            "kill-switch. Defaults to True."
+        ),
+    )
+    report_delivery_recovery_lane_recovery_retry: bool = Field(
+        default=True,
+        description=(
+            "Lane 4 (recovery_attempted_at retry, permanent "
+            "W9/FM-13) per-lane kill-switch. Defaults to True."
+        ),
+    )
+    report_delivery_recovery_lane_orphan: bool = Field(
+        default=True,
+        description=(
+            "Lane 5 (ORPHAN — terminal parents, W1) per-lane "
+            "kill-switch. Defaults to True (NEVER silent — terminal-"
+            "parent rows always reach a structured disposition)."
+        ),
+    )
     drift_reconcile_min_pending_age_seconds: int = Field(
         default=300,
         description=(

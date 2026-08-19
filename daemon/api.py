@@ -105,6 +105,7 @@ from daemon.routers import (
     settings_router,       # /api/settings (Phase 1: user language preference)
     skill_bank_router,        # /api/skill-bank (Skill Bank CRUD)
     blueprints_router,        # /api/projects/{project_id}/blueprints (Project Blueprints CRUD)
+    recovery_router,          # /api/recovery (Phase 2: pause-report-recovery crash-recovery endpoint)
 )
 from daemon.routers.workspace import router as workspace_router
 
@@ -1555,6 +1556,7 @@ def create_app() -> FastAPI:
     api_router.include_router(skill_bank_router)        # /api/skill-bank (Skill Bank CRUD)
     api_router.include_router(blueprints_router)        # /api/projects/{project_id}/blueprints (Project Blueprints CRUD)
     api_router.include_router(workspace_router)         # /api/workspace (Phase 1: workspace viewer)
+    api_router.include_router(recovery_router)          # /api/recovery (Phase 2: pause-report-recovery crash-recovery endpoint)
 
     app.include_router(api_router)
 
