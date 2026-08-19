@@ -1,6 +1,8 @@
 import { signal, computed, WritableSignal } from '@angular/core';
 import { Router, NavigationEnd } from '@angular/router';
 import { Subject } from 'rxjs';
+import * as fs from 'fs';
+import * as path from 'path';
 // Importing the real App class is a compile-time safety net — if the class
 // is ever renamed or its file location changes this spec fails fast. The
 // behavioural tests below use a logic-mirror (see class doc below) so we
@@ -114,7 +116,16 @@ class MockInstancesViewStateService {
  * detail's project context). Tracks openTabs so the F3 cold-reload
  * deep-link branch (addTab vs setActiveTab) is exercised by the
  * spec.
+ *
+ * Also mirrors the production ``saveState()`` side effect so the
+ * regression test for the "tabs not remembered on reload" bug can
+ * observe the localStorage writes the real service makes. The
+ * saved-state key is the same as the production service
+ * (``ensemble-project-tabs``); tests use this storage to pin
+ * the bug-and-fix behavior end-to-end.
  */
+const REGRESSION_STORAGE_KEY = 'ensemble-project-tabs';
+
 class MockTabStateService {
   readonly activeProjectId: WritableSignal<string | null> = signal(null);
   readonly openTabs: WritableSignal<Array<{ id: string; name: string; type: string }>> = signal([
@@ -122,6 +133,13 @@ class MockTabStateService {
   ]);
   setActiveTabCalls: string[] = [];
   addTabCalls: Array<{ project_id: string; name: string }> = [];
+  /**
+   * Mirrors the production ``restoreState()`` call. Clears
+   * ``addTabCalls`` / ``setActiveTabCalls`` so regression tests can
+   * count calls across the App constructor flow without picking up
+   * pre-seed activity.
+   */
+  restoreStateCalls = 0;
 
   setActiveTab(tabId: string): void {
     this.setActiveTabCalls.push(tabId);
@@ -132,6 +150,7 @@ class MockTabStateService {
     const tab = this.openTabs().find(t => t.id === tabId);
     if (tab) {
       this.activeProjectId.set(tabId);
+      this.saveState();
     }
   }
 
@@ -140,16 +159,61 @@ class MockTabStateService {
    * switches to it; no-op switch if already present. The mock
    * mirrors both branches so syncDetailVisibility can be tested
    * for the cold-reload deep-link case.
+   *
+   * Saves to localStorage on the create-branch (mirrors production
+   * ``saveState()``). The pre-existing-tab branch delegates to
+   * ``setActiveTab`` which also saves.
    */
   addTab(project: { project_id: string; name: string }): void {
     this.addTabCalls.push(project);
     const existing = this.openTabs().find(t => t.id === project.project_id);
     if (existing) {
       this.activeProjectId.set(project.project_id);
+      this.saveState();
       return;
     }
     this.openTabs.update(tabs => [...tabs, { id: project.project_id, name: project.name, type: 'project' }]);
     this.activeProjectId.set(project.project_id);
+    this.saveState();
+  }
+
+  /**
+   * Mirror of the production ``TabStateService.restoreState()``
+   * (no projectIds — async validation lives in
+   * InstancesComponent.ngOnInit). Reads the persisted state from
+   * localStorage and hydrates the signals; missing key is a no-op.
+   */
+  restoreState(): void {
+    this.restoreStateCalls++;
+    const raw = localStorage.getItem(REGRESSION_STORAGE_KEY);
+    if (!raw) return;
+    try {
+      const state = JSON.parse(raw) as {
+        openTabs: Array<{ id: string; name: string; type: string }>;
+        activeTabId: string;
+      };
+      const validTabs: Array<{ id: string; name: string; type: string }> = [
+        { id: 'all', name: 'All', type: 'all' },
+      ];
+      for (const tab of state.openTabs) {
+        if (tab.type === 'project') validTabs.push(tab);
+      }
+      this.openTabs.set(validTabs);
+      const activeTab = validTabs.find(t => t.id === state.activeTabId);
+      this.activeProjectId.set(activeTab ? activeTab.id : null);
+    } catch {
+      // Bad JSON — drop the key, matching the production contract.
+      localStorage.removeItem(REGRESSION_STORAGE_KEY);
+    }
+  }
+
+  /** Mirror of the production ``saveState()`` private method. */
+  private saveState(): void {
+    const state = {
+      openTabs: this.openTabs(),
+      activeTabId: this.activeProjectId() ?? 'all',
+    };
+    localStorage.setItem(REGRESSION_STORAGE_KEY, JSON.stringify(state));
   }
 }
 
@@ -232,6 +296,20 @@ class TestableApp {
     // Mirror: R6 boot wire-up — restoreState seeds the cached nav-link
     // route before syncDetailVisibility runs.
     this.instancesViewState.restoreState();
+    // Mirror: tab-state restore (regression fix) — hydrate the
+    // persisted project tabs BEFORE syncDetailVisibility so the F3
+    // cold-reload deep-link branch (``addTab`` for a project whose
+    // tab isn't open yet) does NOT clobber the saved state with a
+    // single-tab payload. Without this restore, a reload on
+    // ``/projects/projA/instances/instA`` runs ``addTab('projA')``
+    // while the in-memory openTabs signal is still the default
+    // ``[ALL_TAB]``; ``addTab`` then writes
+    // ``saveState()`` → localStorage gets ``[All, projA]`` and the
+    // user's other tabs are silently lost on the next ``/instances``
+    // visit. Restoring here makes the F3 ``tabExists`` check find
+    // projA in the restored list and fall through to
+    // ``setActiveTab('projA')``, which writes back the same state.
+    this.tabStateService.restoreState();
     // Mirror: constructor seeds isPlanRoute from router.url.
     this.isPlanRoute = signal(this.computeIsPlanRoute());
     // Mirror: sync detail visibility from URL on first paint.
@@ -365,6 +443,22 @@ describe('App class import', () => {
     // TestableApp mirror.
     void (0 as unknown as App);
   });
+});
+
+// Clear localStorage between every test. The MockTabStateService now
+// mirrors the production saveState() side effect (it writes to
+// ``ensemble-project-tabs``), so a test that constructs an App on a
+// detail URL will leave a stale entry behind in the same domain the
+// next test's TabStateService.restoreState() reads. Without the wipe,
+// the F3 ``tabExists`` short-circuit fires from a previous test's
+// residue and the assertion ``setActiveTabCalls === ['proj-a']``
+// fails (the F3 branch is a no-op because restoreState already
+// hydrated ``activeProjectId`` to ``'proj-a'``).
+beforeEach(() => {
+  localStorage.removeItem(REGRESSION_STORAGE_KEY);
+});
+afterEach(() => {
+  localStorage.removeItem(REGRESSION_STORAGE_KEY);
 });
 
 // ---------------------------------------------------------------------------
@@ -773,5 +867,264 @@ describe('App lazy chat-host mount — BUG 3 (initial bundle budget)', () => {
     expect(app.mountCalls).toEqual(['import+createComponent']);
     expect(app.hostVisibleState).toBe(true);
     expect(app.hostDisplay).toBe('flex');
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// Regression: tabs not remembered on reload (cold-reload deep-link
+// CLOBBER bug).
+//
+// User report: "opened tabs/projects are not remembered when I reload
+// the page. Before it was remembered."
+//
+// Repro: the user has projA, projB, projC tabs open on
+// /projects/projA/instances/instA, then reloads. The App constructor
+// runs syncDetailVisibility(url). The F3 ``addTab`` branch runs
+// because the in-memory openTabs signal is still the default
+// [ALL_TAB] (no prior hydrate from localStorage). ``addTab`` triggers
+// ``saveState()`` which OVERWRITES the persisted
+// [All, projA, projB, projC] with [All, projA] — projB and projC are
+// silently lost on the next /instances visit.
+//
+// Fix: App constructor eagerly calls tabStateService.restoreState()
+// BEFORE syncDetailVisibility, so the F3 ``tabExists`` check finds
+// the restored tab and falls through to ``setActiveTab('projA')``,
+// which writes back the same state (no clobber).
+//
+// These tests exercise the regression directly: the persisted tab
+// state survives the cold-reload boot flow with the fix, and the
+// ``MockTabStateService`` mirrors the production ``saveState()``
+// side effect so the localStorage writes are visible to the
+// assertions.
+// ────────────────────────────────────────────────────────────────────────────
+describe('App constructor — regression: tabs not remembered on reload (cold-reload deep-link clobber)', () => {
+  // Helper: pre-seed localStorage with the saved tabs (simulating a
+  // previous session's state) and construct a TestableApp. Mirrors
+  // the production App constructor flow including the fix.
+  function bootAppWithSavedTabs(opts: {
+    url: string;
+    savedTabs: Array<{ id: string; name: string; type: 'project' }>;
+    activeTabId: string;
+  }): {
+    app: TestableApp;
+    router: MockRouter;
+    viewState: MockInstancesViewStateService;
+    tabState: MockTabStateService;
+  } {
+    // Pre-seed localStorage with the saved state from a previous session.
+    localStorage.setItem(REGRESSION_STORAGE_KEY, JSON.stringify({
+      openTabs: [{ id: 'all', name: 'All', type: 'all' }, ...opts.savedTabs],
+      activeTabId: opts.activeTabId,
+    }));
+    const overlay = new MockWorkspaceOverlayService();
+    const router = new MockRouter();
+    const viewState = new MockInstancesViewStateService();
+    const tabState = new MockTabStateService();
+    router.url = opts.url;
+    const app = new TestableApp(overlay, router, viewState, tabState);
+    return { app, router, viewState, tabState };
+  }
+
+  // The fix: the persisted tab state is preserved across the
+  // cold-reload deep-link boot flow. The user has projB as active
+  // and reloads on /projects/proj-a/instances/inst-1 — the F3
+  // branch fires setActiveTab (the tab is in the restored list) and
+  // the saved state is preserved.
+  it('FIX: persisted tabs survive a cold-reload on /projects/proj-a/instances/inst-1', () => {
+    const { tabState } = bootAppWithSavedTabs({
+      url: '/projects/proj-a/instances/inst-1',
+      savedTabs: [
+        { id: 'proj-a', name: 'Project A', type: 'project' },
+        { id: 'proj-b', name: 'Project B', type: 'project' },
+        { id: 'proj-c', name: 'Project C', type: 'project' },
+      ],
+      activeTabId: 'proj-b',  // proj-b is active in the previous session
+    });
+
+    // The F3 fix falls through to setActiveTab (NOT addTab) because
+    // the eager restoreState() hydrated proj-a into openTabs. The
+    // activeProjectId mismatch ('proj-a' vs 'proj-b') makes the F3
+    // branch take the setActiveTab path — the canary that verifies
+    // the saved state was hydrated INSIDE the constructor.
+    expect(tabState.addTabCalls).toEqual([]);
+    expect(tabState.setActiveTabCalls).toEqual(['proj-a']);
+
+    // The persisted state still has all four tabs after the boot flow.
+    const persisted = JSON.parse(localStorage.getItem(REGRESSION_STORAGE_KEY)!);
+    const persistedTabIds = persisted.openTabs.map((t: { id: string }) => t.id);
+    expect(persistedTabIds).toEqual(['all', 'proj-a', 'proj-b', 'proj-c']);
+    // Active tab is now proj-a (it followed the URL).
+    expect(persisted.activeTabId).toBe('proj-a');
+
+    // The in-memory signal also has all four tabs.
+    expect(tabState.openTabs().map(t => t.id)).toEqual([
+      'all', 'proj-a', 'proj-b', 'proj-c',
+    ]);
+  });
+
+  // The same scenario, but with the URL project already matching the
+  // active tab (the F3 fix's no-op short-circuit). The persisted
+  // state is preserved as-is.
+  it('FIX: cold-reload with active tab already aligned to URL — no-op short-circuit preserves saved state', () => {
+    const { tabState } = bootAppWithSavedTabs({
+      url: '/projects/proj-a/instances/inst-1',
+      savedTabs: [
+        { id: 'proj-a', name: 'Project A', type: 'project' },
+        { id: 'proj-b', name: 'Project B', type: 'project' },
+        { id: 'proj-c', name: 'Project C', type: 'project' },
+      ],
+      activeTabId: 'proj-a',  // proj-a is already active
+    });
+
+    // The F3 guard ``projectId !== activeProjectId()`` short-circuits
+    // — no addTab, no setActiveTab. The saved state is preserved
+    // untouched.
+    expect(tabState.addTabCalls).toEqual([]);
+    expect(tabState.setActiveTabCalls).toEqual([]);
+
+    // Persisted state preserved as-is.
+    const persisted = JSON.parse(localStorage.getItem(REGRESSION_STORAGE_KEY)!);
+    const persistedTabIds = persisted.openTabs.map((t: { id: string }) => t.id);
+    expect(persistedTabIds).toEqual(['all', 'proj-a', 'proj-b', 'proj-c']);
+    expect(persisted.activeTabId).toBe('proj-a');
+  });
+
+  // Negative control: the bug. Without the fix, the F3 addTab
+  // clobbers the saved state with [All, proj-a] only. This test
+  // demonstrates the bug by skipping the eager restoreState() and
+  // verifying the clobber — a regression test that pins the
+  // behavior the fix prevents.
+  it('CONTROL: without the eager restore, F3 addTab clobbers the saved state', () => {
+    // Pre-seed localStorage with projA, projB, projC.
+    localStorage.setItem(REGRESSION_STORAGE_KEY, JSON.stringify({
+      openTabs: [
+        { id: 'all', name: 'All', type: 'all' },
+        { id: 'proj-a', name: 'Project A', type: 'project' },
+        { id: 'proj-b', name: 'Project B', type: 'project' },
+        { id: 'proj-c', name: 'Project C', type: 'project' },
+      ],
+      activeTabId: 'proj-a',
+    }));
+
+    // Manually simulate the BROKEN path (no eager restoreState).
+    const tabState = new MockTabStateService();
+    // No restoreState() — tabState.openTabs is still [ALL_TAB].
+    expect(tabState.openTabs().map(t => t.id)).toEqual(['all']);
+    // F3 fires addTab (the bug).
+    tabState.addTab({ project_id: 'proj-a', name: 'proj-a' });
+
+    // The saved state IS clobbered. projB and projC are LOST.
+    const persisted = JSON.parse(localStorage.getItem(REGRESSION_STORAGE_KEY)!);
+    const persistedTabIds = persisted.openTabs.map((t: { id: string }) => t.id);
+    expect(persistedTabIds).toEqual(['all', 'proj-a']);  // projB, projC GONE
+  });
+
+  // The fix handles the cold-reload deep-link to a NEW project the
+  // user has never visited. addTab is still called (the tab is
+  // genuinely missing) and adds the new tab alongside the saved
+  // tabs.
+  it('FIX: cold-reload deep-link to a NEW project appends alongside the saved tabs', () => {
+    const { tabState } = bootAppWithSavedTabs({
+      url: '/projects/proj-new/instances/inst-new',
+      savedTabs: [
+        { id: 'proj-b', name: 'Project B', type: 'project' },
+      ],
+      activeTabId: 'proj-b',
+    });
+
+    // F3: tabExists(proj-new) is false → addTab creates the new tab.
+    expect(tabState.addTabCalls).toEqual([
+      { project_id: 'proj-new', name: 'proj-new' },
+    ]);
+
+    // The persisted state preserves projB AND adds proj-new.
+    const persisted = JSON.parse(localStorage.getItem(REGRESSION_STORAGE_KEY)!);
+    const persistedTabIds = persisted.openTabs.map((t: { id: string }) => t.id);
+    expect(persistedTabIds).toEqual(['all', 'proj-b', 'proj-new']);
+    expect(persisted.activeTabId).toBe('proj-new');
+  });
+
+  // The fix is a no-op when there's no persisted state (cold boot
+  // with no prior session). The F3 branch still creates the tab for
+  // the URL's project.
+  it('FIX: empty saved state — the first addTab still creates the tab', () => {
+    localStorage.removeItem(REGRESSION_STORAGE_KEY);
+    const overlay = new MockWorkspaceOverlayService();
+    const router = new MockRouter();
+    const viewState = new MockInstancesViewStateService();
+    const tabState = new MockTabStateService();
+    router.url = '/projects/proj-a/instances/inst-1';
+    const app = new TestableApp(overlay, router, viewState, tabState);
+
+    // restoreState() is a no-op (localStorage empty).
+    expect(tabState.restoreStateCalls).toBe(1);
+    // F3: tabExists(proj-a) is false → addTab creates the new tab.
+    expect(tabState.addTabCalls).toEqual([
+      { project_id: 'proj-a', name: 'proj-a' },
+    ]);
+
+    const persisted = JSON.parse(localStorage.getItem(REGRESSION_STORAGE_KEY)!);
+    expect(persisted.openTabs.map((t: { id: string }) => t.id))
+      .toEqual(['all', 'proj-a']);
+    expect(persisted.activeTabId).toBe('proj-a');
+  });
+
+  // The fix only adds ONE restoreState call: the constructor's
+  // eager restore. The NavigationEnd subscriber does not call
+  // restoreState again (it's a one-shot boot operation).
+  it('FIX: only one restoreState() call per App construction (no double-restore)', () => {
+    const { tabState, router } = bootAppWithSavedTabs({
+      url: '/projects/proj-a/instances/inst-1',
+      savedTabs: [{ id: 'proj-a', name: 'Project A', type: 'project' }],
+      activeTabId: 'proj-a',
+    });
+
+    // Exactly one restoreState call (the constructor).
+    expect(tabState.restoreStateCalls).toBe(1);
+
+    // Drive a NavigationEnd to a different URL — no extra restore.
+    router.events.next(new NavigationEnd(
+      1, '/instances', '/instances',
+    ));
+    expect(tabState.restoreStateCalls).toBe(1);
+  });
+
+  // Static check: the PRODUCTION App constructor must call
+  // ``tabStateService.restoreState()`` BEFORE
+  // ``syncDetailVisibility()``. This is the canary that guards
+  // against the mirror diverging from the real source — the
+  // behavioural tests above use a TestableApp mirror, so a regression
+  // that fixes the mirror but breaks the production code (or vice
+  // versa) would pass the behavioural tests but fail this static one.
+  //
+  // The check is intentionally narrow: it only verifies the
+  // constructor's call ordering, not the full F3 logic. Anything
+  // broader would intersect with the mirror's own assertions.
+  it('FIX: production app.ts constructor calls restoreState() BEFORE syncDetailVisibility()', () => {
+    const appTsPath = path.resolve(__dirname, 'app.ts');
+    const source = fs.readFileSync(appTsPath, 'utf8');
+
+    // Locate the constructor body. The mirror below reduces the
+    // search to the first constructor — only one in the file.
+    const constructorMatch = source.match(/constructor\s*\(\s*\)\s*\{/);
+    expect(constructorMatch).not.toBeNull();
+    const constructorStart = constructorMatch!.index! + constructorMatch![0].length;
+    const constructorBody = source.slice(constructorStart);
+
+    // Find the two calls. Read the first 4 KB of the body — the
+    // App constructor is short enough that this is well over the
+    // signal.
+    const restoreIdx = constructorBody.indexOf('tabStateService.restoreState()');
+    const syncIdx = constructorBody.indexOf('syncDetailVisibility(this.router.url)');
+
+    // Both must be present in the constructor.
+    expect(restoreIdx).toBeGreaterThan(-1);
+    expect(syncIdx).toBeGreaterThan(-1);
+
+    // restoreState() must come BEFORE syncDetailVisibility — the
+    // ordering is the whole point. Without the eager restore, the F3
+    // branch fires ``addTab`` on a cold-reload deep-link and
+    // ``saveState`` clobbers every other tab the user had open.
+    expect(restoreIdx).toBeLessThan(syncIdx);
   });
 });

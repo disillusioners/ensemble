@@ -285,6 +285,21 @@ export class App implements OnInit {
     // the URL is the source of truth for actually opening the overlay,
     // a cold reload must never auto-show a stale detail view.
     this.instancesViewState.restoreState();
+    // Boot: hydrate the persisted project tabs BEFORE syncDetailVisibility
+    // so the F3 cold-reload deep-link branch (``addTab`` for a project
+    // whose tab isn't open yet) does NOT clobber the saved state with a
+    // single-tab payload. Without this restore, a reload on
+    // ``/projects/projA/instances/instA`` runs ``addTab({ project_id:
+    // 'projA', name: 'projA' })`` while the in-memory openTabs signal is
+    // still the default ``[ALL_TAB]``; ``addTab`` then calls
+    // ``saveState()`` which overwrites the persisted
+    // ``[All, projA, projB, projC]`` with ``[All, projA]`` and the
+    // user's other tabs are silently lost on the next ``/instances``
+    // visit. Restoring here (no projectIds — async validation still runs
+    // in ``InstancesComponent.ngOnInit``) makes the F3 ``tabExists`` check
+    // find projA in the restored list and fall through to
+    // ``setActiveTab('projA')``, which writes back the same state.
+    this.tabStateService.restoreState();
     // Initialize synchronously so a deep-link to /plan shows the overlay
     // on the very first paint, before the first NavigationEnd fires.
     this.isPlanRoute.set(this.router.url === '/plan' || this.router.url.startsWith('/plan/'));
