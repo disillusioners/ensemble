@@ -929,9 +929,17 @@ class MessageProcessingPipeline:
         # coroutine. The dispatched coroutine never raises to the
         # caller (all errors are caught inside ``_dispatch_marker``).
         try:
-            task = asyncio.create_task(
-                asyncio.shield(_dispatch_marker())
-            )
+            # W4 canonical pattern: ``asyncio.create_task(
+            # asyncio.shield(asyncio.to_thread(...)))`` — schedule
+            # and DETACH. Wrapped in an outer ``async def`` so the
+            # ``create_task`` API accepts a coroutine (Python 3.14
+            # ``create_task`` rejects the ``Future`` that
+            # ``asyncio.shield`` returns when invoked outside a
+            # coroutine; the outer coroutine bridges the gap).
+            async def _shielded_marker() -> None:
+                await asyncio.shield(_dispatch_marker())
+
+            task = asyncio.create_task(_shielded_marker())
             # Attach a no-op done callback so a warning is logged if
             # the Task is unexpectedly cancelled mid-flight (e.g. an
             # event-loop shutdown). We do not retain the Task ref —
