@@ -94,11 +94,6 @@ _DEFERRED_STATE: str = ReportInjectionState.DEFERRED.value
 _INJECTED_STATE: str = ReportInjectionState.INJECTED.value
 _TASK_DELIVERED_STATE: str = ReportInjectionState.TASK_DELIVERED.value
 _MSG_COMPLETED: str = MessageStatus.COMPLETED.value
-# C1 case-lockstep: the obligation-triple index predicate literals
-# (uppercase). The exact string MUST match the storage enum and the
-# DDL emitted by ``_ensure_postgres_columns`` + the SQLite companion
-# migration.
-_OBLIGATION_TRIPLE_PREDICATE: str = "state IN ('PENDING','DEFERRED')"
 
 
 class TaskDeliveryClaim(NamedTuple):

@@ -23,6 +23,10 @@ These tests cover:
 * cancel-at-await — pause-check returns mid-Stage-6, marker survives
   (both cancel points: the pause-check await and the
   ``_handle_cancel.on_cancel`` second await);
+* pre-try hoist window — the pause cascade's cancel lands DURING the
+  hoisted ``_is_instance_paused`` await (before try-entry): the
+  CancelledError escapes ``execute()`` cleanly with NO marker — the
+  plan-assigned escape lane (Phase 2 no-row backstop);
 * root-instance no-marker no-crash (W5);
 * DB-error best-effort — marker write failure is logged, not raised.
 """
@@ -397,6 +401,101 @@ class TestSite1MarkerSurvivesCancellation:
             )
         assert len(rows) == 1
         assert rows[0].state == ReportInjectionState.DEFERRED.value
+
+
+# =============================================================================
+# Pre-try hoist window (FM-11 plan-assigned escape lane)
+# =============================================================================
+
+
+class TestCancelDuringHoistedPauseCheckAwait:
+    """Cancel lands DURING the hoisted ``_is_instance_paused`` await.
+
+    The pause check ``was_paused = await self._is_instance_paused(...)``
+    is hoisted BEFORE the try/finally (plan 1.4(a)). If the pause
+    cascade's ``graph_task.cancel()`` fires while that await is in
+    flight, ``CancelledError`` propagates out of ``execute()`` without
+    the try body ever being entered — so the ``finally`` marker block
+    never runs and no marker is written.
+
+    This is the plan-assigned escape lane — cancel before try-entry is
+    NOT marker-covered in Phase 1; the Phase 2 no-row backstop
+    (task 2.4) is the designed net for this shape (FM-11). Test pins
+    the CURRENT contract: clean cancel, no marker, no crash.
+    """
+
+    @pytest.mark.asyncio
+    async def test_cancel_during_hoisted_pause_check_await_no_marker_but_clean_cancel(
+        self, engine: Engine
+    ) -> None:
+        """Simulate the pause cascade's cancel landing mid-await, BEFORE
+        try-entry: (a) ``CancelledError`` propagates out of
+        ``execute()`` (clean cancel, no swallow); (b) no marker write
+        is attempted — ``was_paused`` was never cached so the ``finally``
+        block never runs; (c) nothing other than ``CancelledError``
+        escapes."""
+        pipeline, manager, _ = _build_pipeline_with_repos(engine)
+        instance_id = _seed_child_instance(
+            engine, parent_id="parent-1"
+        )
+
+        # The pause-check await raises CancelledError — the cascade's
+        # graph_task.cancel() landing mid-``_is_instance_paused``.
+        async def _pause_then_cancel(instance_id_arg: str) -> bool:
+            raise asyncio.CancelledError()
+
+        pipeline._is_instance_paused = _pause_then_cancel
+
+        # Marker dispatch must NEVER be invoked on this path: spy on the
+        # scheduler AND make any actual write loudly fail the test.
+        marker_calls: list[dict] = []
+
+        def _spy_schedule(**kwargs):  # noqa: ANN003
+            marker_calls.append(kwargs)
+            raise AssertionError(
+                "_schedule_deferred_pause_marker must not run when the "
+                "cancel lands during the hoisted pause-check await "
+                "(pre-try entry, no finally)"
+            )
+
+        pipeline._schedule_deferred_pause_marker = _spy_schedule
+
+        # The gate stages before the pause check must still run; the
+        # AsyncMock makes ``await gate.run(...)`` awaitable and returns
+        # a MessageResult-shaped object.
+        pipeline._execution_gate = MagicMock()
+        pipeline._execution_gate.run = AsyncMock(
+            return_value=MagicMock(content="done")
+        )
+
+        escaped: BaseException | None = None
+        try:
+            await pipeline.execute(
+                context=_context_for(instance_id),
+                holder_id="test:hoist-window",
+                holder_kind="task",
+                callbacks=_no_callbacks(),
+            )
+        except BaseException as e:  # noqa: BLE001 — capture, then assert
+            escaped = e
+
+        # (a) Clean cancel: CancelledError propagates out of execute().
+        assert isinstance(escaped, asyncio.CancelledError), (
+            f"expected asyncio.CancelledError to propagate out of "
+            f"pipeline.execute(), got {escaped!r}"
+        )
+        # (c) Nothing other than CancelledError escapes: the spy would
+        # have raised AssertionError through the finally had it run, and
+        # any other exception type is captured in ``escaped`` above.
+        assert type(escaped) is asyncio.CancelledError
+
+        # (b) No marker: the spy was never invoked AND no row landed.
+        assert marker_calls == []
+        with Session(engine) as session:
+            rows = list(
+                session.exec(sm_select(ReportInjection)).all()
+            )
+        assert rows == []
 
 
 # =============================================================================

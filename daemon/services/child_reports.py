@@ -1672,11 +1672,14 @@ Provide a concise summary:"""
             # there observes the child's status, not the parent's).
             # The 3.2(d) test pins this scope separation.
             #
-            # The PAUSED branch performs the marker write on the SAME
-            # session/transaction as the status read (atomic with the
-            # existing ``message_queue`` / ReportInjection row state);
-            # ``ensure_deferred`` is best-effort (W6 IntegrityError
-            # absorption for concurrent duplicates).
+            # The PAUSED branch performs the marker write on a
+            # DEDICATED repository session over the same engine as the
+            # status read (``ReportInjectionRepository(engine)`` opens
+            # its own session; the enclosing WriteGuardSession is NOT
+            # shared) — not the same transaction. Correctness rests on
+            # the W6 IntegrityError absorption (write-once obligation
+            # triple index) + best-effort error handling below, not
+            # shared-transaction atomicity.
             if instance.status in (
                 InstanceStatus.COMPLETED.value,
                 InstanceStatus.ERROR.value,
@@ -1695,8 +1698,9 @@ Provide a concise summary:"""
             if instance.status == InstanceStatus.PAUSED.value:
                 # Variant B fix 2 — CHILD-PAUSED shape: persist a
                 # DEFERRED marker so the parent's delivery obligation
-                # survives the pause. Same session/transaction as the
-                # status read.
+                # survives the pause. Dedicated repository session on
+                # the same engine as the status read (not the same
+                # transaction — see the comment above).
                 logger.info(
                     f"Instance {instance_id[:8]}... is PAUSED at "
                     f"completion, persisting DEFERRED marker for parent "
@@ -2172,9 +2176,14 @@ Provide a concise summary:"""
             # ``pending_messages_exist`` skip path now persists a DEFERRED
             # marker on ``report_injections`` so the parent's eventual
             # delivery obligation survives pause/cancel/recovery. The
-            # marker write happens on the same ``session``/transaction as
-            # the skip decision (atomic with the existing
-            # ``message_queue`` / ``ReportInjection`` row state). The
+            # marker write commits on a DEDICATED repository session
+            # over the same engine as the skip decision
+            # (``ReportInjectionRepository(engine)`` opens its own
+            # session; the enclosing WriteGuardSession is NOT shared)
+            # — not the same transaction. Correctness rests on the W6
+            # IntegrityError absorption (write-once obligation triple
+            # index) + best-effort error handling, not
+            # shared-transaction atomicity. The
             # inline check is the live reachable production guard — the
             # 665-695 helper is dead (tests only) and kept convergent via
             # a deprecation comment.
@@ -2933,7 +2942,8 @@ Provide a concise summary:"""
         # Phase 1 (pause-report-recovery Variant B fix 2): the
         # ``deferred_pause`` outcome means a DEFERRED marker has
         # already been persisted on ``report_injections`` by the sync
-        # helper (same session/transaction as the status read). The
+        # helper (dedicated repository session over the same engine
+        # as the status read — not the same transaction). The
         # async dispatcher has no additional side effects to fire —
         # the Phase 2 router/sweep will recover the marker when the
         # parent resumes. Side-effect-free return.
