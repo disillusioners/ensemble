@@ -30,6 +30,44 @@ The repository is intentionally sync; callers bridge to async via
 agent-node drain runs inside the graph task on the event loop and
 wraps the claim in ``asyncio.to_thread`` so the DB write does not
 block the loop.
+
+Phase 1 (pause-report-recovery) marker lifecycle
+------------------------------------------------
+
+The ``report_injections`` table is the home for the
+DEFERRED delivery-obligation marker. State machine (mirrors the
+model docstring):
+
+* ``enqueue`` — creates a PENDING row WITH an artifact
+  (``report_message_id`` set). Used by the regular completion path.
+* :meth:`ensure_deferred` — creates a DEFERRED marker WITHOUT an
+  artifact (``report_message_id`` NULL). The pause drop-site writers
+  (Site 1, Variant B live site, Variant B idempotency guard) call
+  this so a paused/cancelled obligation can be recovered later. The
+  partial unique index ``uq_report_injections_oblig_triple`` (state
+  IN ('PENDING','DEFERRED')) is the write-once gate: a concurrent
+  duplicate ``ensure_deferred`` for the same triple raises
+  ``sqlalchemy.exc.IntegrityError`` and this method absorbs it (W6).
+* :meth:`find_deferred_for_parent` — Phase 2/3 recovery path lists
+  the DEFERRED markers awaiting recovery for a parent.
+* :meth:`transition_deferred_to_pending` — guarded ``UPDATE ...
+  WHERE state='DEFERRED'`` plus a ``recovery_attempted_at`` stamp.
+  rowcount=0 means another actor already recovered → returns False.
+
+Contract: ``enqueue`` and ``ensure_deferred`` are the ONLY row-creation
+paths on this table. Every non-terminal obligation is gated by the
+triple unique index; every DEFERRED → INJECTED/TASK_DELIVERED
+transition is forbidden by the ``state='PENDING'`` claim guards.
+
+The recovery_attempted_at column is partial-indexed over PENDING rows
+so the Phase 2 recovery sweep (``state='PENDING' AND
+recovery_attempted_at IS NOT NULL``) stays cheap as the table grows.
+
+Case-lockstep contract (C1): storage literals ('PENDING','DEFERRED',
+reason values from ``daemon.constants``) and the app-layer constants
+are UPPERCASE and must never drift in case. Any new state/reason value
+is added to the storage enum / DDL AND the app constants in the same
+change. The partial-index predicate uses the storage literals verbatim.
 """
 
 from __future__ import annotations
@@ -40,6 +78,7 @@ from typing import Any, NamedTuple
 
 from sqlalchemy import update as sa_update
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from ..message_queue.models import MessageQueue, MessageStatus
@@ -51,9 +90,15 @@ logger = logging.getLogger(__name__)
 # Module-level literals captured once to avoid re-evaluating the enums
 # on every claim call.
 _PENDING_STATE: str = ReportInjectionState.PENDING.value
+_DEFERRED_STATE: str = ReportInjectionState.DEFERRED.value
 _INJECTED_STATE: str = ReportInjectionState.INJECTED.value
 _TASK_DELIVERED_STATE: str = ReportInjectionState.TASK_DELIVERED.value
 _MSG_COMPLETED: str = MessageStatus.COMPLETED.value
+# C1 case-lockstep: the obligation-triple index predicate literals
+# (uppercase). The exact string MUST match the storage enum and the
+# DDL emitted by ``_ensure_postgres_columns`` + the SQLite companion
+# migration.
+_OBLIGATION_TRIPLE_PREDICATE: str = "state IN ('PENDING','DEFERRED')"
 
 
 class TaskDeliveryClaim(NamedTuple):
@@ -120,7 +165,7 @@ class ReportInjectionRepository:
         report_message_id: str,
         content: str,
     ) -> ReportInjection:
-        """Insert a new PENDING report-injection row.
+        """Insert a new PENDING report-injection row (WITH artifact).
 
         Production enqueue happens INLINE in
         ``child_reports._process_child_completion_db_sync`` (same
@@ -128,6 +173,14 @@ class ReportInjectionRepository:
         row + ``PROCESS_REPORT`` task) for crash-consistency. This
         method exists for tests and for any caller that does not
         already hold a session.
+
+        Phase 1 (pause-report-recovery): this is one of the ONLY two
+        row-creation paths on this table (the other is
+        :meth:`ensure_deferred`). The regular completion path uses
+        ``enqueue`` because it has a real artifact
+        (``report_message_id`` set, ``content`` non-null). Pause
+        drop-site writers use ``ensure_deferred`` (no artifact yet —
+        Phase 2 reconciliation fills it in).
 
         Args:
             parent_instance_id: The parent that should receive the
@@ -154,6 +207,228 @@ class ReportInjectionRepository:
             session.commit()
             session.refresh(row)
         return row
+
+    # --------------------------------------------------------
+    # PHASE 1 — DEFERRED marker lifecycle
+    # --------------------------------------------------------
+
+    def ensure_deferred(
+        self,
+        parent_instance_id: str,
+        child_instance_id: str,
+        child_message_id: str,
+        deferred_reason: str,
+    ) -> ReportInjection | None:
+        """Write-once insert (or in-place update) of a DEFERRED marker.
+
+        Pause drop-site writers (Site 1 at
+        ``message_processing_pipeline.py``, Variant B live site at
+        ``child_reports.py:2106``, Variant B idempotency guard at
+        ``child_reports.py:1626``) call this to record a
+        delivery-obligation marker when the natural completion path
+        is blocked. Phase 2's router/sweep will recover the marker
+        back to PENDING via
+        :meth:`transition_deferred_to_pending` and then complete the
+        delivery.
+
+        The partial unique index ``uq_report_injections_oblig_triple``
+        (``WHERE state IN ('PENDING','DEFERRED')``) is the write-once
+        gate. Two outcomes:
+
+        * **No existing non-terminal row**: insert a fresh DEFERRED
+          row with ``report_message_id=None``, ``content=None``.
+        * **Concurrent duplicate** (e.g. router vs sweep vs Site 1
+          racing the same triple): the partial unique index rejects
+          the second INSERT with ``sqlalchemy.exc.IntegrityError``;
+          this method absorbs the error (W6 — the child-keyed bus
+          lock does NOT serialize the three actors, so the index is
+          the only cross-actor gate) and returns ``None`` (no-op).
+        * **Existing DEFERRED/PENDING row for the same triple**:
+          re-fetch and (only if the ``deferred_reason`` differs) UPDATE
+          the reason in-place. Never duplicates; never escalates the
+          state.
+
+        Args:
+            parent_instance_id: The parent that should eventually
+                receive the report.
+            child_instance_id: The child that produced the report.
+            child_message_id: The child's completed ``message_id``.
+            deferred_reason: One of the ``DEFERRED_REASON_*``
+                constants in ``daemon.constants`` (UPPERCASE;
+                C1 case-lockstep contract — the value written here
+                matches the storage enum literal verbatim).
+
+        Returns:
+            The persisted :class:`ReportInjection` row when this call
+            inserted or updated; ``None`` when the call was a
+            no-op (concurrent duplicate absorbed by W6).
+
+        Raises:
+            Any non-integrity DB error propagates. ``IntegrityError``
+            on the obligation-triple index is the ONLY error caught
+            here.
+        """
+        with Session(self.engine) as session:
+            try:
+                row = ReportInjection(
+                    parent_instance_id=parent_instance_id,
+                    child_instance_id=child_instance_id,
+                    child_message_id=child_message_id,
+                    report_message_id=None,
+                    content=None,
+                    state=_DEFERRED_STATE,
+                    deferred_reason=deferred_reason,
+                    delivered_at=None,
+                    recovery_attempted_at=None,
+                )
+                session.add(row)
+                session.commit()
+                session.refresh(row)
+                logger.info(
+                    f"[ReportInjection] DEFERRED marker written: "
+                    f"parent={parent_instance_id[:8]}..., "
+                    f"child={child_instance_id[:8]}..., "
+                    f"msg={child_message_id[:8]}..., "
+                    f"reason={deferred_reason}"
+                )
+                return row
+            except IntegrityError:
+                # W6: concurrent duplicate (router/sweep/Site 1 races
+                # the same triple). The child-keyed bus lock does
+                # NOT serialize the three actors — this is the only
+                # cross-actor gate. Roll back, then update the
+                # existing non-terminal row's reason if it differs.
+                session.rollback()
+                existing = session.exec(
+                    select(ReportInjection)
+                    .where(
+                        ReportInjection.parent_instance_id
+                        == parent_instance_id
+                    )
+                    .where(
+                        ReportInjection.child_instance_id
+                        == child_instance_id
+                    )
+                    .where(
+                        ReportInjection.child_message_id
+                        == child_message_id
+                    )
+                    .where(
+                        ReportInjection.state.in_([
+                            _PENDING_STATE,
+                            _DEFERRED_STATE,
+                        ])
+                    )
+                ).first()
+                if existing is None:
+                    # Should not happen: the IntegrityError fired but
+                    # the SELECT (post-rollback) finds no non-terminal
+                    # row. The terminal rows exist (the index
+                    # predicate excludes them), so a race escalated
+                    # to terminal between the rolled-back INSERT and
+                    # this SELECT. No-op — delivery has happened.
+                    logger.info(
+                        f"[ReportInjection] ensure_deferred no-op: "
+                        f"concurrent terminal race for "
+                        f"parent={parent_instance_id[:8]}..., "
+                        f"child={child_instance_id[:8]}..., "
+                        f"msg={child_message_id[:8]}... "
+                        f"(original reason={deferred_reason})"
+                    )
+                    return None
+                if existing.deferred_reason != deferred_reason:
+                    logger.info(
+                        f"[ReportInjection] ensure_deferred updating "
+                        f"reason for existing row "
+                        f"injection_id={existing.injection_id[:8]}... "
+                        f"{existing.deferred_reason} -> {deferred_reason}"
+                    )
+                    existing.deferred_reason = deferred_reason
+                    session.add(existing)
+                    session.commit()
+                    session.refresh(existing)
+                    return existing
+                logger.debug(
+                    f"[ReportInjection] ensure_deferred absorbed "
+                    f"duplicate for "
+                    f"parent={parent_instance_id[:8]}..., "
+                    f"child={child_instance_id[:8]}..., "
+                    f"msg={child_message_id[:8]}... "
+                    f"(reason={deferred_reason})"
+                )
+                return None
+
+    def find_deferred_for_parent(
+        self, parent_instance_id: str
+    ) -> list[ReportInjection]:
+        """Return all DEFERRED markers awaiting recovery for a parent.
+
+        Phase 2/3 recovery path: router/sweep lists DEFERRED markers
+        for a parent and transitions them back to PENDING via
+        :meth:`transition_deferred_to_pending`. Ordered by
+        ``created_at`` ascending (oldest first) — matches the drain
+        order so the recovery sweep is stable across concurrent
+        recovery actors.
+
+        Diagnostic / non-hot-path. Used by the Phase 2 router re-entry
+        and the Phase 2/3 sweep service.
+
+        Args:
+            parent_instance_id: The parent whose DEFERRED markers
+                should be listed.
+
+        Returns:
+            List of :class:`ReportInjection` rows with
+            ``state='DEFERRED'`` for the parent, oldest first. Empty
+            list when none.
+        """
+        with Session(self.engine) as session:
+            stmt = (
+                select(ReportInjection)
+                .where(ReportInjection.parent_instance_id == parent_instance_id)
+                .where(ReportInjection.state == _DEFERRED_STATE)
+                .order_by(ReportInjection.created_at.asc())
+            )
+            return list(session.exec(stmt).all())
+
+    def transition_deferred_to_pending(
+        self, injection_id: str
+    ) -> bool:
+        """Atomically transition DEFERRED → PENDING (guarded UPDATE).
+
+        Recovery actor entry point. Stamps ``recovery_attempted_at``
+        so the Phase 2 sweep can re-process mid-sweep-crash rows
+        (FM-13). Exactly one of the concurrent recovery actors (router
+        / sweep / FM-1-guarded path) wins the race; losers see
+        ``rowcount=0`` and skip.
+
+        Args:
+            injection_id: The :class:`ReportInjection` to recover.
+
+        Returns:
+            ``True`` when this call atomically transitioned the row
+            from DEFERRED to PENDING (caller OWNS the recovery —
+            proceed to the full enqueue). ``False`` when rowcount=0 —
+            another actor already recovered the row, or the row was
+            never DEFERRED (terminal / missing). The caller MUST skip
+            in that case.
+        """
+        now_iso = self._now_iso()
+        with Session(self.engine) as session:
+            result = session.execute(
+                sa_update(ReportInjection)
+                .where(ReportInjection.injection_id == injection_id)
+                .where(ReportInjection.state == _DEFERRED_STATE)
+                .values(
+                    state=_PENDING_STATE,
+                    recovery_attempted_at=now_iso,
+                )
+            )
+            if result.rowcount == 0:
+                session.rollback()
+                return False
+            session.commit()
+            return True
 
     # --------------------------------------------------------
     # CLAIM — agent-node drain (live parent turn)
@@ -349,7 +624,14 @@ class ReportInjectionRepository:
     # --------------------------------------------------------
 
     def count_pending_for_parent(self, parent_instance_id: str) -> int:
-        """Return the number of PENDING reports for a parent.
+        """Return the number of delivery-owed reports for a parent.
+
+        Phase 1 (pause-report-recovery): the count is broadened from
+        ``PENDING`` only to ``PENDING ∪ DEFERRED`` — a DEFERRED marker
+        is an outstanding delivery obligation (the recovery sweep
+        will turn it back to PENDING). Counting only PENDING would
+        understate the delivery backlog and could mislead
+        observability / idle-gate decisions.
 
         Diagnostic helper (observability / tests). Not used on the
         hot path.
@@ -358,7 +640,8 @@ class ReportInjectionRepository:
             parent_instance_id: The parent to query.
 
         Returns:
-            Non-negative count of PENDING report-injection rows.
+            Non-negative count of PENDING ∪ DEFERRED report-injection
+            rows for the parent.
         """
         from sqlalchemy import func
 
@@ -367,6 +650,11 @@ class ReportInjectionRepository:
                 select(func.count())
                 .select_from(ReportInjection)
                 .where(ReportInjection.parent_instance_id == parent_instance_id)
-                .where(ReportInjection.state == _PENDING_STATE)
+                .where(
+                    ReportInjection.state.in_([
+                        _PENDING_STATE,
+                        _DEFERRED_STATE,
+                    ])
+                )
             )
             return int(session.exec(stmt).one() or 0)

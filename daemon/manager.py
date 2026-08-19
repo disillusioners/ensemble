@@ -3892,6 +3892,21 @@ class InstanceManager:
           ``Column(JSON)`` columns that were retyped to
           ``JSONBType`` at the model level. See the DO block
           comment for the rewrite-cost and invalid-JSON warnings.
+        - report_injections DEFERRED marker schema (pause-report-recovery
+          Phase 1, 2026-08-19): adds ``deferred_reason`` (TEXT),
+          ``recovery_attempted_at`` (TEXT), and ``DROP NOT NULL`` on
+          ``report_message_id``; partial unique index
+          ``uq_report_injections_oblig_triple`` on the obligation
+          triple ``WHERE state IN ('PENDING','DEFERRED')``; partial
+          index ``ix_report_injections_recovery_attempted`` on
+          ``recovery_attempted_at`` ``WHERE state = 'PENDING'``. W3
+          pre-check detects and resolves any pre-existing duplicate
+          non-terminal rows (oldest wins, terminal disposition) before
+          the index build. Index name MUST match the SQLite
+          companion migration at
+          ``daemon/migrations/versions/20260819_000001_report_injections_deferred_marker.sql``.
+          See C1 case-lockstep contract in
+          ``daemon/repositories/report_injection/models.py``.
 
         When a new column needs this treatment: add the IF NOT EXISTS
         ALTER + (optional) CREATE INDEX here. Do NOT add raw
@@ -4029,6 +4044,138 @@ class InstanceManager:
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_job_idempotency "
                 "ON job_queue_items(idempotency_key) "
                 "WHERE idempotency_key IS NOT NULL AND deleted_at IS NULL"
+            ),
+            # ── pause-report-recovery Phase 1 (2026-08-19) ─────────────────────
+            # Adds the DEFERRED marker schema on ``report_injections``:
+            #   * ``deferred_reason TEXT`` — open-ended rationale (one of the
+            #     ``DEFERRED_REASON_*`` constants in ``daemon/constants.py``).
+            #   * ``recovery_attempted_at TEXT`` — ISO-8601 stamp on
+            #     ``DEFERRED → PENDING`` for the Phase 2 recovery sweep.
+            #   * ``report_message_id`` → nullable (C4): NULL = pre-artifact
+            #     Site-1 marker shape; the Phase 2 reconciliation handles
+            #     ``report_message_id IS NULL`` explicitly.
+            #   * Partial unique index on the obligation triple
+            #     ``WHERE state IN ('PENDING','DEFERRED')`` — write-once gate
+            #     for concurrent recovery actors (router / sweep / Site 1).
+            #   * Partial index on ``recovery_attempted_at`` for the recovery
+            #     sweep predicate ``state='PENDING' AND recovery_attempted_at
+            #     IS NOT NULL``.
+            #
+            # C1 CASE-LOCKSTEP CONTRACT: the partial-index predicate literals
+            # ``('PENDING','DEFERRED')`` MUST stay uppercase and verbatim
+            # across: the ``ReportInjectionState`` enum in
+            # ``daemon/repositories/report_injection/models.py``, the
+            # SQLAlchemy ``postgresql_where`` / ``sqlite_where`` expression,
+            # the PG DDL emitted here, and the SQLite companion migration
+            # at ``daemon/migrations/versions/20260819_000001_report_injections_deferred_marker.sql``.
+            #
+            # Index NAME must be byte-identical across both DDL paths
+            # (``uq_report_injections_oblig_triple``). Precedent:
+            # ``idx_job_idempotency`` at job_queue/models.py:292-298.
+            #
+            # W3 PRE-CHECK: before creating the partial unique index, detect
+            # and resolve any pre-existing duplicate non-terminal rows
+            # (the PG build would otherwise fail). Query
+            # ``report_injections WHERE state IN ('PENDING','DEFERRED')``
+            # grouped by the obligation triple with ``HAVING COUNT(*) > 1``;
+            # for each duplicate group, keep the oldest row (MIN
+            # injection_id) and transition the rest to ``TASK_DELIVERED``
+            # with a sentinel ``delivered_at``. The PG build sees only one
+            # non-terminal row per triple.
+            #
+            # W8 ROLLBACK RUNBOOK: reverse order = DROP the partial unique
+            # index FIRST, then DROP the partial recovery index, then DROP
+            # the new columns. Reverting columns with the partial unique
+            # index still present is blocked (PG rejects) or leaves the
+            # index orphaned (SQLite).
+            # ── Columns (idempotent via IF NOT EXISTS) ──
+            "ALTER TABLE report_injections ADD COLUMN IF NOT EXISTS deferred_reason TEXT",
+            "ALTER TABLE report_injections ADD COLUMN IF NOT EXISTS recovery_attempted_at TEXT",
+            # Drop NOT NULL on ``report_message_id`` — idempotent via
+            # ``IS NOT NULL`` guard. Safe to re-run on databases that
+            # already have it nullable.
+            (
+                "DO $$\n"
+                "BEGIN\n"
+                "    IF EXISTS (\n"
+                "        SELECT 1 FROM information_schema.columns\n"
+                "        WHERE table_schema = 'public'\n"
+                "          AND table_name = 'report_injections'\n"
+                "          AND column_name = 'report_message_id'\n"
+                "          AND is_nullable = 'NO'\n"
+                "    ) THEN\n"
+                "        ALTER TABLE report_injections "
+                "ALTER COLUMN report_message_id DROP NOT NULL;\n"
+                "    END IF;\n"
+                "END $$\n"
+            ),
+            # ── W3 PRE-CHECK + RESOLUTION ──
+            # Detect duplicates BEFORE the index build. Log each duplicate
+            # group at WARNING so operators can audit, then transition
+            # duplicates (oldest row wins) to ``TASK_DELIVERED`` with a
+            # sentinel ``delivered_at`` so the PG index build sees a clean
+            # table. The oldest row of each group is preserved (the
+            # delivery obligation survives; only the duplicates are
+            # resolved).
+            (
+                "DO $$\n"
+                "DECLARE\n"
+                "    dup_count INTEGER;\n"
+                "BEGIN\n"
+                "    SELECT COUNT(*) INTO dup_count\n"
+                "      FROM (\n"
+                "        SELECT parent_instance_id, child_instance_id, "
+                "               child_message_id\n"
+                "          FROM report_injections\n"
+                "         WHERE state IN ('PENDING', 'DEFERRED')\n"
+                "         GROUP BY parent_instance_id, child_instance_id, "
+                "                  child_message_id\n"
+                "        HAVING COUNT(*) > 1\n"
+                "      ) dups;\n"
+                "    IF dup_count > 0 THEN\n"
+                "        RAISE WARNING 'pause-report-recovery: % duplicate "
+                "non-terminal obligation triple(s) detected on "
+                "report_injections — resolving (oldest wins)', dup_count;\n"
+                "        UPDATE report_injections ri\n"
+                "           SET state = 'TASK_DELIVERED',\n"
+                "               delivered_at = COALESCE(ri.delivered_at, "
+                "                                       ri.created_at)\n"
+                "         WHERE ri.state IN ('PENDING', 'DEFERRED')\n"
+                "           AND EXISTS (\n"
+                "               SELECT 1\n"
+                "                 FROM report_injections newer\n"
+                "                WHERE newer.parent_instance_id = "
+                "                      ri.parent_instance_id\n"
+                "                  AND newer.child_instance_id = "
+                "                      ri.child_instance_id\n"
+                "                  AND newer.child_message_id = "
+                "                      ri.child_message_id\n"
+                "                  AND newer.state IN ('PENDING', "
+                "                                       'DEFERRED')\n"
+                "                  AND newer.injection_id < "
+                "                      ri.injection_id\n"
+                "           );\n"
+                "    END IF;\n"
+                "END $$\n"
+            ),
+            # ── Partial unique index on the obligation triple ──
+            # The exact DDL MUST match the SQLAlchemy ``postgresql_where``
+            # expression and the SQLite companion migration. Predicate
+            # case is the C1 case-lockstep contract — UPPERCASE only.
+            (
+                "CREATE UNIQUE INDEX IF NOT EXISTS "
+                "uq_report_injections_oblig_triple "
+                "ON report_injections(parent_instance_id, "
+                "                     child_instance_id, "
+                "                     child_message_id) "
+                "WHERE state IN ('PENDING','DEFERRED')"
+            ),
+            # ── Partial index for the recovery-sweep predicate ──
+            (
+                "CREATE INDEX IF NOT EXISTS "
+                "ix_report_injections_recovery_attempted "
+                "ON report_injections(recovery_attempted_at) "
+                "WHERE state = 'PENDING'"
             ),
             # ── JSON → JSONB column migration (Phase 1, 2026-06-20) ─────────
             # NOTE: create_all() runs FIRST (creating jsonb columns on fresh
