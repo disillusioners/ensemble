@@ -125,9 +125,20 @@ CREATE INDEX IF NOT EXISTS ix_report_injections_recovery_attempted
     ON report_injections (recovery_attempted_at)
     WHERE state = 'PENDING';
 
+-- Phase 2 (C3 no-row backstop): non-unique
+-- ``(child_instance_id, child_message_id)`` index. The
+-- ``find_completed_children_without_delivery`` LEFT JOIN keys on
+-- the child columns WITHOUT ``parent_instance_id`` in the leading
+-- position; the unique triple index above cannot serve this
+-- lookup cheaply. Name MUST match the SQLAlchemy model
+-- definition and the PG DDL in ``_ensure_postgres_columns``.
+CREATE INDEX IF NOT EXISTS ix_report_injections_child_msg
+    ON report_injections (child_instance_id, child_message_id);
+
 -- DOWN
 -- Reverse order: DROP indexes FIRST, then columns. See W8 rollback
 -- runbook in the comment block above.
+DROP INDEX IF EXISTS ix_report_injections_child_msg;
 DROP INDEX IF EXISTS ix_report_injections_recovery_attempted;
 DROP INDEX IF EXISTS uq_report_injections_oblig_triple;
 -- Drop the new columns. SQLite <3.35 cannot drop columns; on those

@@ -68,20 +68,65 @@ reason values from ``daemon.constants``) and the app-layer constants
 are UPPERCASE and must never drift in case. Any new state/reason value
 is added to the storage enum / DDL AND the app constants in the same
 change. The partial-index predicate uses the storage literals verbatim.
+
+C4 NULL-keyed ``report_message_id`` grep-audit checklist
+-------------------------------------------------------
+
+``report_message_id`` is nullable (Phase 1 C4). NULL arises ONLY from
+marker-first writes (``ensure_deferred`` — DEFERRED rows with no
+artifact yet). Every consumer of the column MUST handle-or-exclude
+NULL so a NULL-keyed row never silently mis-claims.
+
+* :meth:`claim_for_injection` — guarded by ``state='PENDING'`` (not
+  on ``report_message_id``); the ``RETURNING`` set only includes
+  non-terminal rows. DEFERRED rows have NULL ``report_message_id``
+  but are excluded by the state predicate. PASS (handles).
+* :meth:`claim_for_task_delivery` — keyed on
+  ``report_message_id`` via a SELECT-FIRST / UPDATE-SECOND pattern;
+  the ``SELECT `` returns ``missing`` when the row is NULL-keyed
+  (Phase 2 C4 acceptance — the natural ``enqueue`` path's tri-state
+  is unchanged at the consumer; recovery reconciliation handles the
+  NULL branch via the 2.2 reconciliation path).
+* :meth:`ensure_deferred` — writes ``report_message_id=None``; the
+  partial unique index absorbs concurrent duplicates (W6).
+* :meth:`enqueue` — production path requires a non-NULL
+  ``report_message_id`` (the artifact exists); the parameter type
+  is non-optional. PASS (excludes).
+* :meth:`transition_deferred_to_pending` — keyed on
+  ``injection_id``, not on ``report_message_id``. PASS (excludes).
+* :meth:`count_pending_for_parent` — counts by state, not by
+  ``report_message_id``. PASS (excludes).
+* :meth:`find_deferred_for_parent` and
+  :meth:`find_deferred_for_parent_all` — keyed on state, not on
+  ``report_message_id``. PASS (excludes).
+* :meth:`find_completed_children_without_delivery` (Lane 2) — keyed
+  on ``child_instance_id`` / ``child_message_id``, NOT on
+  ``report_message_id``. PASS (excludes).
+* :meth:`find_pending_past_age` (Lane 3+4) — keyed on state +
+  timestamps, NOT on ``report_message_id``. PASS (excludes).
+* The reconciliation path in
+  :func:`InstanceManager._recover_deferred_report`
+  (manager.py 2.1+2.2) explicitly handles the ``report_message_id IS
+  NULL`` branch — full artifact creation when NULL, UPDATE-in-place
+  when non-NULL.
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, NamedTuple
 
-from sqlalchemy import update as sa_update
+from sqlalchemy import literal, text as sa_text, update as sa_update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import aliased
 from sqlmodel import Session, select
 
+from ..dependency_bus.models import DependencyWatcher
+from ..instance.models import Instance, InstanceStatus
 from ..message_queue.models import MessageQueue, MessageStatus
+from ..task.models import Task
 from .models import ReportInjection, ReportInjectionState
 
 logger = logging.getLogger(__name__)
@@ -94,6 +139,26 @@ _DEFERRED_STATE: str = ReportInjectionState.DEFERRED.value
 _INJECTED_STATE: str = ReportInjectionState.INJECTED.value
 _TASK_DELIVERED_STATE: str = ReportInjectionState.TASK_DELIVERED.value
 _MSG_COMPLETED: str = MessageStatus.COMPLETED.value
+
+# Phase 2 (pause-report-recovery) sweep: the parent terminal set is
+# the same set the pause-cascade selectors use
+# (``InstanceStatus.is_valid`` terminal set + FAILED for task-level
+# failures). Mirrored verbatim from
+# ``daemon/services/job_queue_service.py:TERMINAL_STATUSES``.
+_PARENT_TERMINAL_STATUSES: frozenset[str] = frozenset(
+    {
+        InstanceStatus.COMPLETED.value,
+        InstanceStatus.ERROR.value,
+        InstanceStatus.TERMINATED.value,
+        InstanceStatus.FAILED.value,
+    }
+)
+
+# Same set as ``dependency_watchers.state`` (PENDING / FIRED /
+# CANCELLED). The sweep's FIRED-exclusion subquery only matches
+# PENDING+FIRED rows; the watcher table's ``state`` is its own TEXT
+# enum and is NOT the same as ``ReportInjectionState``.
+_WATCHER_FIRED: str = "FIRED"
 
 
 class TaskDeliveryClaim(NamedTuple):
@@ -353,6 +418,35 @@ class ReportInjectionRepository:
                 )
                 return None
 
+    def find_row_by_report_message_id(
+        self, report_message_id: str | None
+    ) -> ReportInjection | None:
+        """Return the ``ReportInjection`` row for ``report_message_id``.
+
+        Phase 2 (pause-report-recovery task 2.3) helper for the FM-1
+        type-aware guard's exemption predicate. Returns ``None``
+        for NULL-keyed rows (C4 — the Site-1 marker shape, handled
+        by the recovery sweep / router before the FM-1 loop).
+
+        Args:
+            report_message_id: The ``message_id`` to look up; ``None``
+                returns ``None`` (C4 — NULL-keyed rows are
+                pre-artifact markers, not deliverable PROCESS_REPORT
+                tasks).
+
+        Returns:
+            The :class:`ReportInjection` row, or ``None`` when no
+            row exists for ``report_message_id``.
+        """
+        if report_message_id is None:
+            return None
+        with Session(self.engine) as session:
+            return session.exec(
+                select(ReportInjection).where(
+                    ReportInjection.report_message_id == report_message_id
+                )
+            ).first()
+
     def find_deferred_for_parent(
         self, parent_instance_id: str
     ) -> list[ReportInjection]:
@@ -424,6 +518,297 @@ class ReportInjectionRepository:
                 return False
             session.commit()
             return True
+
+    # --------------------------------------------------------
+    # PHASE 2 — recovery sweep (5 lanes)
+    # --------------------------------------------------------
+
+    def find_deferred_for_parent_all(
+        self,
+        *,
+        parent_not_terminal: bool,
+        limit: int = 100,
+    ) -> list[ReportInjection]:
+        """Find DEFERRED rows for the periodic sweep (Lane 1 + Lane 5).
+
+        Phase 2 (pause-report-recovery, W1). Periodic sweep Lane 1
+        (DEFERRED rows past the age guard) and Lane 5 (ORPHAN — DEFERRED
+        rows whose parent is TERMINAL) share the same SELECT shape,
+        parameterized by ``parent_not_terminal``:
+
+        * ``parent_not_terminal=True`` — terminal parents EXCLUDED
+          (the periodic sweep's Lane 1 + Lane 2 contract; Lane 5 owns
+          terminal-parent rows).
+        * ``parent_not_terminal=False`` — all parents (the ORPHAN lane
+          and diagnostic/manual callers).
+
+        Args:
+            parent_not_terminal: ``True`` → filter to non-terminal
+                parents; ``False`` → include terminal parents too.
+            limit: Cap the number of rows returned (MVP growth rule —
+                batch cap 100/run, remainder logged and picked up on
+                the next cycle).
+
+        Returns:
+            List of :class:`ReportInjection` rows in DEFERRED state,
+            oldest first. Empty list when none.
+        """
+        with Session(self.engine) as session:
+            stmt = (
+                select(ReportInjection, Instance.parent_id)
+                .join(
+                    Instance,
+                    Instance.instance_id == ReportInjection.parent_instance_id,
+                )
+                .where(ReportInjection.state == _DEFERRED_STATE)
+            )
+            if parent_not_terminal:
+                stmt = stmt.where(
+                    ~Instance.status.in_(_PARENT_TERMINAL_STATUSES)
+                )
+            stmt = (
+                stmt.order_by(ReportInjection.created_at.asc())
+                .limit(limit)
+            )
+            rows = list(session.exec(stmt).all())
+            # Returning just the ReportInjection rows — the JOIN is
+            # for filtering only.
+            return [row for row, _parent_id in rows]
+
+    def find_completed_children_without_delivery(
+        self,
+        *,
+        parent_not_terminal: bool,
+        limit: int = 100,
+    ) -> list[dict[str, str]]:
+        """Find children with no delivery row, message, or watcher (C3 Lane 2).
+
+        Phase 2 (pause-report-recovery, C3). The designed-from-scratch
+        no-row backstop query — replaces the v2 placeholder name. The
+        periodic sweep runs this query as **Lane 2**: every row it
+        returns is a candidate recovery obligation that no other
+        marker wrote (FM-11 escape / cancel-mid-shield / crash
+        without a marker / no-row drop). The 5-case false-positive
+        matrix (C3) is enforced by the LEFT-JOINs below — every
+        false-positive shape (existing message / existing injection
+        row / existing FIRED watcher) is excluded.
+
+        Join keys (verified, driver-neutral):
+
+        * ``instances.parent_id = c.parent_id`` — the parent is the
+          ``c`` row's parent.
+        * ``message_queue.source = 'internal_report:' || c.instance_id
+          || ':' || m.message_id`` — string concat is driver-neutral
+          (TEXT columns; PG supports ``||``, SQLite supports ``||``).
+        * ``dependency_watchers.source_task_id = child's TASK id`` and
+          ``dependency_watchers.target_instance_id = parent`` — join
+          via ``tasks`` table to keep the join driver-neutral (the
+          ``watcher_metadata`` JSONB holds the child id but is
+          driver-dependent to query per the design review).
+
+        Args:
+            parent_not_terminal: ``True`` → exclude terminal parents
+                (the periodic sweep's contract — terminal-parent
+                obligations are the ORPHAN lane's territory via their
+                DEFERRED rows). ``False`` → include terminal parents
+                (diagnostic / manual callers; the periodic sweep
+                never passes ``False`` — the ORPHAN lane is the
+                terminal-parent entry path).
+            limit: Batch cap.
+
+        Returns:
+            List of ``{"child_id", "child_msg_id", "parent_id"}``
+            dicts. Empty list when none.
+        """
+        # String concat via SQL ``||`` (driver-neutral on TEXT
+        # columns; both SQLite and PostgreSQL support it).
+        source_predicate = (
+            literal("internal_report:")
+            + Instance.instance_id
+            + literal(":")
+            + MessageQueue.message_id
+        )
+        # Cast to text so the LEFT JOIN's ON predicate compares the
+        # computed expression to ``message_queue.source`` (a String
+        # column). SQLAlchemy resolves the cast automatically when the
+        # column type is String — we keep the literal() expression
+        # opaque to avoid driver-specific string concat differences.
+        # The placeholder SELECT below is removed — the real query
+        # uses explicit ``aliased`` table instances to keep the join
+        # keys driver-neutral (no raw-table aliases that depend on
+        # SQLAlchemy internals).
+
+        # NOT EXISTS — driver-neutral FIRED-watcher exclusion.
+        # Use SQLAlchemy's ``exists()`` with a ``select()``
+        # subquery so the predicate is a ColumnElement (raw
+        # ``text()`` is not — see SQLAlchemy 1.4+
+        # ``expect(ExpressionElementRole)`` assertion). The
+        # join keys (verified, driver-neutral):
+        #   * ``tasks.id = dependency_watchers.source_task_id``
+        #     (the child's Task id, stored as String for
+        #     portability — CAST ensures driver neutrality)
+        #   * ``tasks.instance_id = c.instance_id``
+        #     (the child instance)
+        #   * ``dependency_watchers.target_instance_id = p.instance_id``
+        #     (the parent instance)
+        #   * ``dependency_watchers.state = 'FIRED'``
+        # The ``watcher_metadata`` JSONB alternative is
+        # driver-dependent per the design review; the JOIN
+        # on ``tasks`` is the canonical driver-neutral path.
+        from sqlalchemy import Integer, cast as sa_cast, exists
+
+        with Session(self.engine) as session:
+            parent_inst = aliased(Instance, name="p")
+            child_inst = aliased(Instance, name="c")
+            child_msg = aliased(MessageQueue, name="m")
+            # source_match = 'internal_report:' || c.instance_id || ':' || m.message_id
+            source_expr = (
+                literal("internal_report:")
+                + child_inst.instance_id
+                + literal(":")
+                + child_msg.message_id
+            )
+            stmt = (
+                select(
+                    child_inst.instance_id.label("child_id"),
+                    child_msg.message_id.label("child_msg_id"),
+                    parent_inst.instance_id.label("parent_id"),
+                )
+                .select_from(child_inst)
+                .join(
+                    child_msg,
+                    (child_msg.instance_id == child_inst.instance_id)
+                    & (child_msg.status == _MSG_COMPLETED),
+                )
+                .join(
+                    parent_inst,
+                    parent_inst.instance_id == child_inst.parent_id,
+                )
+                # LEFT JOIN report_queue (existence of a queued
+                # report message → no recovery needed)
+                .outerjoin(
+                    MessageQueue,
+                    (MessageQueue.instance_id == parent_inst.instance_id)
+                    & (MessageQueue.source == source_expr),
+                )
+                # LEFT JOIN report_injections (existence of any
+                # non-terminal injection row → no recovery needed)
+                .outerjoin(
+                    ReportInjection,
+                    (ReportInjection.child_instance_id == child_inst.instance_id)
+                    & (ReportInjection.child_message_id == child_msg.message_id)
+                    & (ReportInjection.state.in_([
+                        _PENDING_STATE,
+                        _DEFERRED_STATE,
+                    ])),
+                )
+            )
+            dw = aliased(DependencyWatcher, name="dw")
+            task_tt = aliased(Task, name="tt")
+            not_exists_predicate = ~exists(
+                select(DependencyWatcher.watch_id)
+                .join(
+                    task_tt,
+                    task_tt.id == sa_cast(dw.source_task_id, Integer),
+                )
+                .where(task_tt.instance_id == child_inst.instance_id)
+                .where(dw.target_instance_id == parent_inst.instance_id)
+                .where(dw.state == "FIRED")
+            )
+            # Append the remaining ``where`` / ``order_by`` /
+            # ``limit`` clauses to the chained ``stmt``.
+            stmt = (
+                stmt
+                .where(not_exists_predicate)
+                # Only COMPLETED child instances.
+                .where(child_inst.status == InstanceStatus.COMPLETED.value)
+                # Periodic-sweep contract: terminal parents excluded.
+                # Diagnostic/manual callers pass ``False`` and get
+                # the full view incl. terminal parents.
+                .where(
+                    ~parent_inst.status.in_(_PARENT_TERMINAL_STATUSES)
+                    if parent_not_terminal
+                    else sa_text("1=1")
+                )
+                # NULL on the LEFT JOINs = no matching row exists
+                # = the row IS a candidate recovery obligation.
+                .where(MessageQueue.message_id.is_(None))
+                .where(ReportInjection.injection_id.is_(None))
+                .order_by(child_inst.last_activity_at.asc().nullslast())
+                .limit(limit)
+            )
+            rows = list(session.exec(stmt).all())
+        return [
+            {
+                "child_id": row.child_id,
+                "child_msg_id": row.child_msg_id,
+                "parent_id": row.parent_id,
+            }
+            for row in rows
+        ]
+
+    def find_pending_past_age(
+        self,
+        *,
+        age_bound: timedelta,
+        recovery_retry_minutes: int,
+        limit: int = 100,
+    ) -> list[ReportInjection]:
+        """Find stranded PENDING rows past the age guard (Lane 3 + 4).
+
+        Phase 2 (pause-report-recovery, W9/FM-13). Two lanes read the
+        same query shape — Lane 3 covers stranded PENDING rows that
+        were never stamped (FM-1 escape / FM-3 missing corrective
+        path); Lane 4 re-processes stamped-stale rows whose
+        ``recovery_attempted_at`` is past the retry interval (the
+        mid-sweep-crash gap). The predicate is the union of both:
+
+        ``state='PENDING' AND created_at < now - age_bound AND (
+        recovery_attempted_at IS NULL OR recovery_attempted_at <
+        now - retry_minutes )``
+
+        Args:
+            age_bound: Minimum age (``created_at < now - age_bound``).
+                Skips very recent PENDING rows that might be in
+                flight.
+            recovery_retry_minutes: Stamps younger than this are
+                skipped (Lane 4 retry guard — avoid re-processing a
+                row the previous sweep just claimed). Rows with
+                ``recovery_attempted_at IS NULL`` are always eligible
+                (Lane 3).
+            limit: Batch cap.
+
+        Returns:
+            List of :class:`ReportInjection` rows in PENDING state
+            past the age guard and past the retry interval. Oldest
+            first.
+        """
+        now = datetime.now(timezone.utc)
+        cutoff_age = (now - age_bound).isoformat()
+        cutoff_retry = (
+            now - timedelta(minutes=recovery_retry_minutes)
+        ).isoformat()
+        with Session(self.engine) as session:
+            stmt = (
+                select(ReportInjection)
+                .where(ReportInjection.state == _PENDING_STATE)
+                .where(ReportInjection.created_at < cutoff_age)
+                .where(
+                    # IS NULL OR < cutoff — unified Lane 3 + Lane 4
+                    # predicate; the partial index
+                    # ``ix_report_injections_recovery_attempted``
+                    # keeps the lookup cheap for the stamped-stale
+                    # case.
+                    (
+                        ReportInjection.recovery_attempted_at.is_(None)
+                    ) | (
+                        ReportInjection.recovery_attempted_at < cutoff_retry
+                    )
+                )
+                .order_by(ReportInjection.created_at.asc())
+                .limit(limit)
+            )
+            return list(session.exec(stmt).all())
 
     # --------------------------------------------------------
     # CLAIM — agent-node drain (live parent turn)

@@ -234,6 +234,28 @@ class ReportInjection(SQLModel, table=True):
             sqlite_where=text("state = 'PENDING'"),
             postgresql_where=text("state = 'PENDING'"),
         ),
+        # Phase 2 (C3 no-row backstop): non-unique
+        # ``(child_instance_id, child_message_id)`` index. The
+        # LEFT JOIN on ``ReportInjection`` in
+        # :meth:`ReportInjectionRepository.find_completed_children_without_delivery`
+        # keys on the child columns WITHOUT ``parent_instance_id``
+        # in the leading position — the unique triple index
+        # ``uq_report_injections_oblig_triple`` is
+        # ``(parent_instance_id, child_instance_id, child_message_id)``
+        # so the leading parent column would force a full scan over
+        # the non-terminal prefix. A non-unique index on the child
+        # pair keeps the LEFT JOIN cheap as the table grows.
+        #
+        # The literal case (no ``state`` suffix) covers ALL rows
+        # regardless of state — the LEFT JOIN predicate includes the
+        # state filter, but a state-suffixed index would force a
+        # scan over the non-terminal prefix anyway. The bare index
+        # gives PG/SQLite the freedom to choose the cheaper plan.
+        Index(
+            "ix_report_injections_child_msg",
+            "child_instance_id",
+            "child_message_id",
+        ),
     )
 
     injection_id: str = Field(
