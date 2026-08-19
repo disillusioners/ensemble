@@ -34,6 +34,13 @@ from daemon.repositories.report_injection.models import (
 )
 
 
+# Module-level path to the SQLite companion migration.
+_REPORT_INJECTIONS_DEFERRED_MIGRATION_PATH = (
+    "daemon/migrations/versions/"
+    "20260819_000001_report_injections_deferred_marker.sql"
+)
+
+
 # =============================================================================
 # Case-lockstep: enum + reason constants
 # =============================================================================
@@ -173,6 +180,69 @@ class TestPartialIndexPredicateParity:
         )
         assert str(sqlite_where).upper() == str(pg_where).upper()
 
+    def test_model_predicate_matches_pg_and_sqlite_ddl(self) -> None:
+        """The exact WHERE clause emitted by both DDL paths MUST
+        match the SQLAlchemy ``postgresql_where`` / ``sqlite_where``
+        expression byte-for-byte (after normalizing for whitespace).
+
+        This is the impl-time verification required by the approver
+        residual note for task 1.3: the SQLAlchemy expression and
+        the DDL must use the same predicate semantics and the same
+        literals.
+        """
+        idx = self._obligation_triple_index()
+        # Normalize the SQLAlchemy expression (strip whitespace inside
+        # the SQL string for comparison).
+        sql_alchemy_predicate = (
+            str(idx.dialect_options["postgresql"]["where"])
+            .replace(" ", "")
+            .replace("\n", "")
+            .replace("\t", "")
+        )
+        # Compare against the PG DDL WHERE clause.
+        pg_src = (
+            TestPostgresDDLParity._ensure_postgres_columns_statements_source()
+        )
+        pg_joined = re.sub(r'"\s+"', "", pg_src)
+        # Capture ONLY the predicate body (state IN (...)).
+        pg_match = re.search(
+            r"state\s+IN\s*\(\s*'PENDING',\s*'DEFERRED'\s*\)",
+            pg_joined,
+            re.IGNORECASE | re.DOTALL,
+        )
+        assert pg_match is not None
+        pg_predicate = (
+            pg_match.group(0)
+            .replace(" ", "")
+            .replace("\n", "")
+            .replace("\t", "")
+        )
+        # Compare against the SQLite migration WHERE clause.
+        migration_sql = (
+            TestSQLiteMigrationParity()._migration_sql()
+        )
+        sqlite_match = re.search(
+            r"state\s+IN\s*\(\s*'PENDING',\s*'DEFERRED'\s*\)",
+            migration_sql,
+            re.IGNORECASE | re.DOTALL,
+        )
+        assert sqlite_match is not None
+        sqlite_predicate = (
+            sqlite_match.group(0)
+            .replace(" ", "")
+            .replace("\n", "")
+            .replace("\t", "")
+        )
+        # Byte-for-byte match across all three (C1 contract).
+        assert sql_alchemy_predicate == pg_predicate, (
+            f"SQLAlchemy predicate {sql_alchemy_predicate!r} "
+            f"!= PG DDL predicate {pg_predicate!r}"
+        )
+        assert sql_alchemy_predicate == sqlite_predicate, (
+            f"SQLAlchemy predicate {sql_alchemy_predicate!r} "
+            f"!= SQLite migration predicate {sqlite_predicate!r}"
+        )
+
 
 # =============================================================================
 # SQLite companion migration parity
@@ -185,10 +255,7 @@ class TestSQLiteMigrationParity:
     MUST emit DDL with the same index name + predicate literal as the
     SQLAlchemy model — case-lockstep contract."""
 
-    MIGRATION_PATH = (
-        "daemon/migrations/versions/"
-        "20260819_000001_report_injections_deferred_marker.sql"
-    )
+    MIGRATION_PATH = _REPORT_INJECTIONS_DEFERRED_MIGRATION_PATH
 
     def _migration_sql(self) -> str:
         import os

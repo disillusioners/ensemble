@@ -117,7 +117,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_report_injections_oblig_triple
         child_instance_id,
         child_message_id
     )
-    WHERE state IN ('PENDING', 'DEFERRED');
+    WHERE state IN ('PENDING','DEFERRED');
 
 -- Partial index for the Phase 2 recovery-sweep predicate.
 -- ``state = 'PENDING'`` keeps the index sparse (only stamps survive).
