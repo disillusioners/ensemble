@@ -6380,6 +6380,18 @@ class InstanceManager:
         # instead and awaits directly — calling ``.result()`` from
         # the loop thread would block the loop that must run the
         # scheduled coroutine.
+        #
+        # POST-DEEP-REVIEW (W3, 2026-08-20): per-row timeout
+        # aligned with the sweep ``stop()`` thread-join budget.
+        # ``stop()`` uses ``thread.join(timeout=10.0)``; the prior
+        # 30s per-row timeout could orphan the daemon thread on
+        # shutdown (the join would expire mid-.result()).
+        # 8s leaves a 2s headroom for the join to complete cleanly;
+        # a row that cannot complete within 8s is bumped to
+        # ``out.errors`` by the per-row except handler and the
+        # sweep continues to the next row (idempotency handles the
+        # retry next cycle — this is the safer-for-shutdown
+        # choice).
         try:
             loop = self._get_event_loop()
             future = asyncio.run_coroutine_threadsafe(
@@ -6390,7 +6402,7 @@ class InstanceManager:
                 ),
                 loop,
             )
-            future.result(timeout=30.0)
+            future.result(timeout=8.0)
         except Exception as exc:
             logger.warning(
                 f"[{source}] re-enter completion failed "
@@ -6610,7 +6622,7 @@ class InstanceManager:
         Used by :meth:`_reconcile_deferred_report` (the SWEEP-side
         reconcile). The sweep runs on a non-loop
         ``threading.Thread``, so the cross-thread bridge
-        ``asyncio.run_coroutine_threadsafe(...).result(timeout=15.0)``
+        ``asyncio.run_coroutine_threadsafe(...).result(timeout=8.0)``
         is correct: the calling thread is NOT the loop thread,
         so the loop can run the scheduled coroutine while we
         block on ``.result()``.
@@ -6620,6 +6632,14 @@ class InstanceManager:
         ``bcc02b92``). The router path uses
         :meth:`_fetch_subshape_a_content_async` instead, which
         ``await``s directly on the loop.
+
+        POST-DEEP-REVIEW (W3, 2026-08-20): timeout aligned with
+        the sweep ``stop()`` thread-join budget. The prior 15s
+        timeout could orphan the daemon thread on shutdown — the
+        join would expire mid-.result(). 8s leaves a 2s headroom
+        for the join; a content fetch that exceeds the budget
+        falls back to ``"[No response content]"`` and the row
+        is re-tried next cycle.
 
         Returns:
             The child's last assistant content, or
@@ -6643,7 +6663,7 @@ class InstanceManager:
                         child_row.agent_id or "agent",
                     ),
                     loop,
-                ).result(timeout=15.0) or "[No response content]"
+                ).result(timeout=8.0) or "[No response content]"
         except Exception as exc:
             logger.warning(
                 f"reconcile: content fetch failed "

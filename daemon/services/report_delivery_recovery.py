@@ -425,11 +425,31 @@ class ReportDeliveryRecoveryService:
         return result
 
     # --------------------------------------------------------
-    # Lane 1 — DEFERRED rows past the age guard
+    # Lane 1 — DEFERRED rows for non-terminal parents
     # --------------------------------------------------------
+    # POST-DEEP-REVIEW (W1, 2026-08-20): the prior comment
+    # ("past the age guard") was misleading. ``find_deferred_for_
+    # parent_all`` has NO ``age_bound`` predicate — age filtering
+    # lives on Lane 3 + Lane 4 (PENDING-age + retry) via
+    # ``find_pending_past_age``. Lane 1's actual gate is the
+    # ``has_instance_busy(parent_id)`` per-row check (steps 1+2 in
+    # ``_recover_one_deferred_row``). The real predicate is:
+    #   state='DEFERRED' AND parent NOT IN terminal states
+    # AND per-row has_instance_busy(parent_id) is False.
+    # Lane 5 (ORPHAN) shares the same query with
+    # ``parent_not_terminal=False``.
 
     def _run_deferred_lane(self) -> LaneResult:
-        """Process DEFERRED rows whose parent is non-terminal."""
+        """Process DEFERRED rows whose parent is non-terminal.
+
+        Returns:
+            Per-row outcomes: ``recovered`` (transition + reconcile
+            + re-enter succeeded), ``skipped_busy`` (parent had an
+            active task/job — natural path owns delivery), or
+            ``already_recovered`` (rowcount=0 on
+            ``transition_deferred_to_pending`` — a concurrent actor
+            already transitioned the row).
+        """
         return self._process_deferred_rows(parent_not_terminal=True)
 
     # --------------------------------------------------------
@@ -602,6 +622,15 @@ class ReportDeliveryRecoveryService:
 
         Returns ``True`` on successful revival, ``False`` on
         failure (the caller treats False as orphan_disposition).
+
+        POST-DEEP-REVIEW (W3, 2026-08-20): per-row timeout aligned
+        with the sweep ``stop()`` thread-join budget. The prior
+        10s timeout matched ``stop()``'s 10s budget exactly —
+        the join could expire mid-.result() and orphan the thread.
+        8s leaves a 2s headroom for the join; a revival that
+        exceeds the budget falls back to ``orphan_disposition``
+        (the lane's structured logging handles the
+        non-silent-required-by-W1 disposition).
         """
         try:
             # The instance-messaging path is the canonical revival;
@@ -616,7 +645,7 @@ class ReportDeliveryRecoveryService:
                 asyncio.run_coroutine_threadsafe(
                     self._manager._revive_terminal_instance(parent_id),
                     self._get_event_loop(),
-                ).result(timeout=10.0)
+                ).result(timeout=8.0)
             )
         except Exception as exc:
             logger.warning(
@@ -633,10 +662,30 @@ class ReportDeliveryRecoveryService:
         loop. The manager exposes ``self._loop``; we fall back to
         :func:`asyncio.get_event_loop` for older test doubles that
         do not set it.
+
+        POST-DEEP-REVIEW (W2, 2026-08-20): hardened against the
+        closed/stale loop case — if the manager's ``_loop`` is set
+        but ``is_closed()`` (shutdown / crash-recovery replay path),
+        we re-resolve via ``asyncio.get_event_loop()`` which is the
+        loop the manager's recovery flow should target. If neither
+        path yields a live loop (rare — manager construction error),
+        fall back to ``asyncio.new_event_loop()`` with a clear log;
+        the caller (``run_coroutine_threadsafe``) will surface the
+        clearer error.
         """
         loop = getattr(self._manager, "_loop", None)
         if loop is not None:
-            return loop
+            if not loop.is_closed():
+                return loop
+            # Manager's stored loop is closed (shutdown path /
+            # restart replay). Fall through to the live-resolution
+            # branch below — the recovery flow should target the
+            # live loop, not the closed one.
+            logger.warning(
+                "ReportDeliveryRecoveryService._get_event_loop: "
+                "manager._loop is closed — falling back to "
+                "asyncio.get_event_loop()"
+            )
         try:
             return asyncio.get_event_loop()
         except RuntimeError:
@@ -645,6 +694,13 @@ class ReportDeliveryRecoveryService:
             # covers the production path. The fallback is for the
             # rare case where the loop is unreachable (the caller
             # will surface a clearer error).
+            logger.warning(
+                "ReportDeliveryRecoveryService._get_event_loop: "
+                "no live loop available — returning a fresh "
+                "asyncio.new_event_loop(); callers (e.g. "
+                "run_coroutine_threadsafe) will surface a clearer "
+                "error if the loop is not the manager's canonical one"
+            )
             return asyncio.new_event_loop()
 
     # --------------------------------------------------------
