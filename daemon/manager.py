@@ -5430,8 +5430,50 @@ class InstanceManager:
             # Fire-and-forget boot sweep (binding order S-c:
             # ``_ensure_postgres_columns`` is in ``initialize()``,
             # BEFORE this method runs).
+            #
+            # DEEP-REVIEW FIX (2026-08-20, C2): the boot sweep MUST
+            # NOT execute lane bodies on the loop thread. The chain
+            # ``api.py:241 lifespan → setup_worker_pool (here) →
+            # recover_on_startup → _run_all_lanes_sync`` runs ON the
+            # event-loop thread, and ``_handle_recover_deferred_report``
+            # (manager.py:6343-6351) calls
+            # ``run_coroutine_threadsafe(...).result(timeout=30.0)``
+            # per row → self-blocks the loop. Worst case ~30s × 100
+            # rows ≈ 50 min blocked startup, HTTP down. This was the
+            # THIRD occurrence of the loop-thread-blocking bug class
+            # (bcc02b92, 5fe135e3 fixed router/reconcile paths; boot
+            # was missed).
+            #
+            # The fix: schedule the sweep via
+            # ``asyncio.to_thread`` + ``loop.create_task``, which
+            # moves the lane execution OFF the loop thread. The sweep
+            # body is unchanged — it still uses
+            # ``run_coroutine_threadsafe(...).result(...)`` to bridge
+            # to the loop, but now those bridges are coming FROM a
+            # worker thread (correct: the worker thread blocks on
+            # ``.result()`` while the loop continues serving HTTP).
             try:
-                self._report_recovery.recover_on_startup()
+                if self._loop is not None and not self._loop.is_closed():
+                    # Fire-and-forget: the loop schedules the work
+                    # on a thread-pool worker (asyncio.to_thread).
+                    # The boot call returns immediately; the sweep
+                    # runs concurrently on a worker thread.
+                    self._loop.create_task(
+                        asyncio.to_thread(
+                            self._report_recovery.recover_on_startup
+                        )
+                    )
+                else:
+                    # Loop unavailable — fall back to running
+                    # synchronously. This path is for unusual
+                    # lifecycle states (e.g. tests that didn't wire
+                    # a loop); the production path always has a
+                    # loop set.
+                    logger.info(
+                        "ReportDeliveryRecoveryService boot sweep "
+                        "running synchronously (no loop available)"
+                    )
+                    self._report_recovery.recover_on_startup()
             except Exception as exc:
                 logger.warning(
                     f"ReportDeliveryRecoveryService startup sweep "

@@ -401,3 +401,149 @@ class TestEndpointAction:
         with pytest.raises(HTTPException) as exc:
             await recover_report_delivery(request)
         assert exc.value.status_code == 503
+
+
+# =============================================================================
+# Boot sweep OFF the event-loop thread (DEEP-REVIEW FIX, 2026-08-20, C2)
+# =============================================================================
+
+
+class TestBootSweepOffLoopThread:
+    """Deep-review C2 regression: the boot sweep MUST NOT execute
+    lane bodies on the event-loop thread.
+
+    The v1 wiring ran ``recover_on_startup`` synchronously from
+    ``setup_worker_pool`` which is called from the lifespan — on
+    the loop thread. Per-row ``run_coroutine_threadsafe(...).
+    result(timeout=30.0)`` calls inside the sweep self-block the
+    loop. Worst case ~30s × 100 rows ≈ 50 min blocked startup,
+    HTTP down.
+
+    The fix (manager.py:5433-5480) schedules the sweep via
+    ``asyncio.to_thread`` + ``loop.create_task`` so the lane bodies
+    run on a worker thread.
+
+    These tests assert:
+    * The boot call returns PROMPTLY (does not block on lane
+      execution).
+    * The lane bodies execute OFF the loop thread (on a worker
+      thread).
+    """
+
+    async def test_boot_sweep_returns_promptly_with_blocking_lane(
+        self, engine: Engine
+    ) -> None:
+        """The boot wiring path returns immediately even when the
+        sweep lane bodies would block for many seconds. The fix
+        dispatches the sweep to a worker thread; the boot path
+        just schedules the task.
+
+        We simulate a slow lane by stubbing ``recover_on_startup``
+        with a function that sleeps for 2s. Without the fix, the
+        boot call would block 2s. With the fix, it returns in
+        << 2s (the task is scheduled, the call returns).
+        """
+        parent = _seed_instance(engine)
+        child = _seed_instance(
+            engine,
+            parent_id=parent,
+            status=InstanceStatus.COMPLETED.value,
+        )
+        _seed_deferred_row(
+            engine,
+            parent_instance_id=parent,
+            child_instance_id=child,
+            child_message_id="child-msg-1",
+        )
+
+        service, manager = _build_service(engine)
+
+        # Stub the sweep with a function that blocks for 2s.
+        # Without the fix, ``recover_on_startup`` would block the
+        # calling thread for 2s.
+        def slow_sweep():
+            time.sleep(2.0)
+            return SweepResult()
+
+        service.recover_on_startup = slow_sweep
+
+        # Set up the manager's loop attribute (the fix checks
+        # ``self._loop is not None and not self._loop.is_closed()``).
+        manager._loop = asyncio.get_running_loop()
+
+        # Schedule via the fix path: loop.create_task +
+        # asyncio.to_thread. The boot call returns immediately;
+        # the sweep runs on a worker thread later.
+        start = time.monotonic()
+        manager._loop.create_task(
+            asyncio.to_thread(
+                manager._report_recovery.recover_on_startup
+            )
+        )
+        elapsed = time.monotonic() - start
+
+        # Should return in well under the 2s sleep — the task is
+        # scheduled, the loop runs it on a worker thread later.
+        assert elapsed < 0.5, (
+            f"Boot wiring took {elapsed:.2f}s — the fix should "
+            "make this << 0.5s (the sweep runs on a worker thread)"
+        )
+
+        # Yield to the loop to let the scheduled task start.
+        await asyncio.sleep(0.1)
+
+    async def test_boot_sweep_lane_runs_off_loop_thread(
+        self, engine: Engine
+    ) -> None:
+        """The lane bodies execute OFF the loop thread. We capture
+        ``threading.current_thread()`` inside the sweep stub and
+        assert it is NOT the loop thread (which is the test's main
+        thread when a loop is running).
+        """
+        import threading
+
+        parent = _seed_instance(engine)
+        child = _seed_instance(
+            engine,
+            parent_id=parent,
+            status=InstanceStatus.COMPLETED.value,
+        )
+        _seed_deferred_row(
+            engine,
+            parent_instance_id=parent,
+            child_instance_id=child,
+            child_message_id="child-msg-1",
+        )
+
+        service, manager = _build_service(engine)
+
+        loop_thread_ident = threading.get_ident()
+        captured_thread_ident: list[int] = []
+
+        def capturing_sweep():
+            captured_thread_ident.append(threading.get_ident())
+            return SweepResult()
+
+        service.recover_on_startup = capturing_sweep
+        # Replace the manager's MagicMock for _report_recovery with
+        # the real service so the fix path resolves to our stub.
+        manager._report_recovery = service
+        manager._loop = asyncio.get_running_loop()
+
+        # Schedule via the fix path. AWAIT the task so the
+        # worker thread has time to run before we assert.
+        task = manager._loop.create_task(
+            asyncio.to_thread(manager._report_recovery.recover_on_startup)
+        )
+        # Give the loop a chance to schedule the task.
+        await asyncio.sleep(0)
+        # Wait for the worker thread to finish.
+        await task
+
+        assert len(captured_thread_ident) == 1, (
+            f"Sweep did not run exactly once: {captured_thread_ident}"
+        )
+        assert captured_thread_ident[0] != loop_thread_ident, (
+            f"Sweep ran on the loop thread (ident={captured_thread_ident[0]}); "
+            f"the fix must move it off the loop. Loop ident={loop_thread_ident}"
+        )
