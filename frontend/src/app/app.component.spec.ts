@@ -18,19 +18,66 @@ import type { App } from './app';
 /**
  * Mock WorkspaceOverlayService. Mirrors the subset of the real service
  * that `anyOverlayVisible` / `hideActiveOverlay` read or write:
- * `showWorkspace` (signal) and `hide()` (method). Both are exercised by
- * the methods under test.
+ * `showWorkspace` (signal), `workspaceProjectId` (signal),
+ * `hide()` / `show()` / `toggle()` (methods). All are exercised by
+ * the methods under test — the new workspace-recoverable branch in
+ * `hideActiveOverlay` calls `show(workspaceProjectId)` so the mock
+ * must mirror both the signal AND the show() method (the previous
+ * mock only had `hide()`).
  */
 class MockWorkspaceOverlayService {
   /** Mirrors the public WritableSignal<boolean>. */
   readonly showWorkspace: WritableSignal<boolean> = signal(false);
 
+  /** Mirrors the bound project id — drives isWorkspaceRecoverable and
+   *  the workspace-recoverable branch of hideActiveOverlay. Production
+   *  clears it only via explicit service actions, never on hide — the
+   *  mirror keeps the same persistence semantics so the recoverable
+   *  predicate reads true after a hide (until the test calls
+   *  ``resetProjectId()`` or constructs a fresh mock). */
+  readonly workspaceProjectId: WritableSignal<string | null> = signal(null);
+
   /** Tracks calls; setters exposed for tests that need to flip state. */
   hideCalls = 0;
+  showCalls: Array<{ projectId: string }> = [];
+  toggleCalls: Array<{ projectId?: string }> = [];
 
   hide(): void {
     this.hideCalls++;
     this.showWorkspace.set(false);
+  }
+
+  /** Mirror of the production ``show(projectId)``. Sets the bound id
+   *  AND flips visibility true. Idempotent on the bound id. */
+  show(projectId: string): void {
+    this.showCalls.push({ projectId });
+    this.workspaceProjectId.set(projectId);
+    this.showWorkspace.set(true);
+  }
+
+  /** Mirror of the production ``toggle(projectId?)``. Same project
+   *  + visible → hide. Same project + hidden → show. Different
+   *  project → switch to new project (set id + show). No project +
+   *  hidden → no-op (no id to bind). */
+  toggle(projectId?: string): void {
+    this.toggleCalls.push({ projectId });
+    const currentId = this.workspaceProjectId();
+    const targetId = projectId ?? currentId;
+    if (!targetId) return;
+    if (this.showWorkspace() && currentId === targetId) {
+      this.showWorkspace.set(false);
+      return;
+    }
+    this.workspaceProjectId.set(targetId);
+    this.showWorkspace.set(true);
+  }
+
+  /** Test helper — clear the bound project id (simulates a session
+   *  that has NEVER opened the workspace editor). The real service
+   *  has no such helper; tests that need the cold-boot state
+   *  (workspaceProjectId=null) use this to avoid a fresh mock. */
+  resetProjectId(): void {
+    this.workspaceProjectId.set(null);
   }
 }
 
@@ -305,17 +352,21 @@ class TestableApp {
   readonly isOnDetailRoute: WritableSignal<boolean> = signal(false);
 
   /** Mirrors the unified-overlay-visibility computed. The 4th term
-   *  is now expressed via ``isHiddenButRecoverable`` (production
-   *  change — see app.ts docblock for the boolean-equivalence
-   *  derivation). The previous expanded form
+   *  (chat-recoverable) is expressed via ``isHiddenButRecoverable``
+   *  and the 5th term (workspace-recoverable) is expressed via
+   *  ``isWorkspaceRecoverable`` — see app.ts docblock for the
+   *  boolean-equivalence derivation. The previous expanded form
    *  ``(activeInstanceId !== null && isInstancesRoute)`` is encoded
    *  verbatim inside ``isHiddenButRecoverable``, so the change is
-   *  observationally a no-op but keeps the two signals from drifting. */
+   *  observationally a no-op for the existing 4 terms but adds the
+   *  new workspace-recoverable term (no route gate — see
+   *  ``isWorkspaceRecoverable`` docblock for the reasoning). */
   readonly anyOverlayVisible = computed(
     () => this.workspaceOverlayService.showWorkspace()
       || this.isPlanRoute()
       || this.instancesViewState.detailVisible()
       || this.isHiddenButRecoverable()
+      || this.isWorkspaceRecoverable()
   );
 
   /** Mirrors ``isHiddenButRecoverable``: chat is hidden but cached
@@ -329,15 +380,62 @@ class TestableApp {
       && this.isInstancesRoute()
   );
 
-  /** Hide-button icon: ``visibility`` when recoverable, ``visibility_off`` otherwise. */
-  readonly hideOverlayIcon = computed(
-    () => this.isHiddenButRecoverable() ? 'visibility' : 'visibility_off'
+  /** Mirrors ``isWorkspaceRecoverable``: workspace editor is hidden
+   *  BUT still bound to a project (workspaceProjectId !== null).
+   *  Drives the hide button's icon/label flip AND the 5th term of
+   *  ``anyOverlayVisible`` so the button stays rendered while the
+   *  editor is recoverable. No route gate — the workspace overlay is
+   *  route-agnostic and the cached projectId is the only honest
+   *  signal (mirrors the production ``isWorkspaceRecoverable``
+   *  docblock). */
+  readonly isWorkspaceRecoverable = computed(
+    () => !this.workspaceOverlayService.showWorkspace()
+      && this.workspaceOverlayService.workspaceProjectId() !== null
   );
 
-  /** Hide-button aria-label: ``Show overlay`` when recoverable, ``Hide overlay`` otherwise. */
-  readonly hideOverlayAriaLabel = computed(
-    () => this.isHiddenButRecoverable() ? 'Show overlay' : 'Hide overlay'
+  /** Mirrors ``showTierActive`` (production drift-proofing): the
+   *  show-tier gate delegating to the same predicates — no plan
+   *  route, no visible chat, and at least one recoverable overlay.
+   *  Single source of truth for the icon / aria-label / handler
+   *  branch-2 mirrors below so they can never drift from each
+   *  other (or from the production computed). */
+  readonly showTierActive = computed(
+    () => !this.isPlanRoute()
+      && !this.instancesViewState.detailVisible()
+      && (this.isWorkspaceRecoverable() || this.isHiddenButRecoverable())
   );
+
+  /** Hide-button icon — mirrors production precedence rule:
+   *    - workspace visible → visibility_off (HIDE), even if chat
+   *      recoverable (N3 minimize-surprise);
+   *    - workspace hidden + no visible surface competing (not on
+   *      /plan, chat not visible) + (workspace recoverable OR chat
+   *      recoverable) → visibility (SHOW). The B1/W3 gates keep the
+   *      icon telegraphing the real action: on /plan the click
+   *      navigates (plan branch), with chat up the click hides the
+   *      chat (detail branch);
+   *    - default → visibility_off (button hidden by anyOverlayVisible
+   *      anyway). */
+  readonly hideOverlayIcon = computed(() => {
+    const workspaceVisible = this.workspaceOverlayService.showWorkspace();
+    const showTier = this.showTierActive();
+    if (workspaceVisible) return 'visibility_off';
+    // B1 + W3 mirror: drift-proofed via showTierActive — single
+    // source of truth shared with the aria-label and the handler's
+    // branch-2 mirrors (same shape as production).
+    if (showTier) return 'visibility';
+    return 'visibility_off';
+  });
+
+  /** Hide-button aria-label — mirrors the icon flip; the precedence
+   *  rule and B1/W3 gates are identical to ``hideOverlayIcon``. */
+  readonly hideOverlayAriaLabel = computed(() => {
+    const workspaceVisible = this.workspaceOverlayService.showWorkspace();
+    const showTier = this.showTierActive();
+    if (workspaceVisible) return 'Hide overlay';
+    if (showTier) return 'Show overlay';
+    return 'Hide overlay';
+  });
 
   constructor(
     protected readonly workspaceOverlayService: MockWorkspaceOverlayService,
@@ -463,6 +561,18 @@ class TestableApp {
    * the workspace and does NOT pop the chat open underneath
    * (minimize-surprise: "hide" means "hide", not "switch overlays").
    * The early ``return`` after the workspace-hide branch pins this.
+   *
+   * Workspace-recoverable — when the workspace editor is hidden but
+   * still bound to a project (workspaceProjectId !== null), chat is
+   * NOT visible, NOT on /plan, AND chat is NOT also recoverable, the
+   * click re-shows the workspace via
+   * ``workspaceOverlayService.show(workspaceProjectId())``. The
+   * ``!isPlanRoute`` (B1), ``!detailVisible`` (W3) and
+   * ``!isHiddenButRecoverable`` gates keep the visible surfaces
+   * (plane iframe, open chat) owning the click and preserve the N3
+   * sequence — when both are recoverable, the chat-recoverable
+   * branch wins (the chat was hidden longer ago, more likely what
+   * the user wanted back).
    */
   hideActiveOverlay(): void {
     if (this.workspaceOverlayService.showWorkspace()) {
@@ -470,6 +580,20 @@ class TestableApp {
       // N3: workspace is now hidden — stop here so a recoverable
       // chat does NOT pop open underneath. The next click (with
       // workspace already hidden) takes the pure-toggle branch.
+      return;
+    }
+    // Workspace-recoverable + no visible competitor + chat NOT
+    // recoverable → re-show the workspace via the same button.
+    // Mirrors the production handler (production docblock: "match
+    // the tab-bar semantics") including the B1 (!isPlanRoute) and
+    // W3 (!detailVisible) gates — drift-proofed via showTierActive.
+    if (this.showTierActive()
+      && this.isWorkspaceRecoverable()
+      && !this.isHiddenButRecoverable()) {
+      const boundProjectId = this.workspaceOverlayService.workspaceProjectId();
+      if (boundProjectId !== null) {
+        this.workspaceOverlayService.show(boundProjectId);
+      }
       return;
     }
     if (this.isPlanRoute()) {
@@ -547,7 +671,12 @@ class TestableApp {
 // Factory: build a TestableApp with the given initial URL and overlay state.
 // ---------------------------------------------------------------------------
 
-function makeApp(initial: { url?: string; showWorkspace?: boolean; detailVisible?: boolean } = {}): {
+function makeApp(initial: {
+  url?: string;
+  showWorkspace?: boolean;
+  detailVisible?: boolean;
+  workspaceProjectId?: string;
+} = {}): {
   app: TestableApp;
   overlay: MockWorkspaceOverlayService;
   router: MockRouter;
@@ -557,6 +686,16 @@ function makeApp(initial: { url?: string; showWorkspace?: boolean; detailVisible
   const router = new MockRouter();
   const viewState = new MockInstancesViewStateService();
   router.url = initial.url ?? '/';
+  if (initial.workspaceProjectId !== undefined) {
+    // Set the bound id first so show=true below preserves it. The
+    // production contract is: projectId binds via ``show()`` /
+    // ``toggle()``; if a test sets showWorkspace=true directly
+    // without setting projectId, the editor is in the
+    // "visible-but-unbound" state (the recoverable predicate is
+    // false), which mirrors the same state in production if a
+    // caller manually flips ``showWorkspace.set(true)``.
+    overlay.workspaceProjectId.set(initial.workspaceProjectId);
+  }
   if (initial.showWorkspace) {
     overlay.showWorkspace.set(true);
   }
@@ -1236,6 +1375,238 @@ describe('App.hideActiveOverlay — N3 combined workspace + chat-hidden', () => 
     expect(viewState.detailVisible()).toBe(true);
     expect(viewState.activeInstanceId()).toBe('inst-1');
     expect(overlay.hideCalls).toBe(1); // still 1 — no extra workspace hide
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Workspace-recoverable — the editor is hidden but still bound to a
+// project. The header hide button must flip to UNHIDE affordance
+// (visibility / "Show overlay") and a click re-shows the editor at
+// the same project. The 5th term of anyOverlayVisible keeps the button
+// rendered while the recoverable state is active.
+//
+// These tests pin the behavior the user-reported follow-up bug
+// demanded: the prior fix flipped the icon for the chat recoverable
+// state but never for the workspace editor — the button kept
+// rendering as HIDE while the editor was already hidden, and there
+// was no way to re-show the editor from the header.
+// ---------------------------------------------------------------------------
+
+describe('App hide-button affordance — workspace-recoverable icon/label flip', () => {
+  // MERGED COVERAGE (review W4): tests formerly split as (a) and (c)
+  // were duplicates — identical setup (workspace visible + chat
+  // recoverable via detailVisible.set(false) on a detail URL) and
+  // identical assertions (icon/label hide-precedence + click hides
+  // workspace + chat stays hidden + no navigation). One test now
+  // pins all three facets of the workspace-VISIBLE precedence rule:
+  // the icon/label tier-1 (visibility_off / "Hide overlay"), the
+  // handler's N3 early-return (workspace hides, chat does NOT pop
+  // open underneath), and the no-navigation guarantee.
+  it('(a) workspace visible + chat recoverable → icon visibility_off (hide precedence); click hides workspace, chat stays hidden, no nav', () => {
+    // Reach the combined state: chat recoverable (cached id set +
+    // detailVisible false, set directly so the hideActiveOverlay
+    // call below targets the workspace), then workspace visible.
+    // The icon MUST be visibility_off because workspace visible
+    // takes precedence over chat recoverable (N3 minimize-surprise:
+    // action = HIDE).
+    const { app, overlay, router, viewState } = makeApp({
+      url: '/projects/all/instances/inst-1',
+      workspaceProjectId: 'proj-a',
+      showWorkspace: true,
+    });
+    // Manually enter the chat-recoverable state (skip the toggle
+    // call — it would hit the workspace-visible branch first and
+    // hide the editor before this test can assert N3).
+    viewState.detailVisible.set(false);
+    expect(viewState.activeInstanceId()).toBe('inst-1');
+    expect(app.isHiddenButRecoverable()).toBe(true);
+    expect(app.isWorkspaceRecoverable()).toBe(false); // workspace is visible
+
+    // Workspace visible wins over chat recoverable — icon stays at
+    // visibility_off (action = HIDE).
+    expect(app.hideOverlayIcon()).toBe('visibility_off');
+    expect(app.hideOverlayAriaLabel()).toBe('Hide overlay');
+
+    // Click — workspace hides; chat stays hidden (N3 early return).
+    app.hideActiveOverlay();
+    expect(overlay.hideCalls).toBe(1);
+    expect(overlay.showWorkspace()).toBe(false);
+    expect(viewState.detailVisible()).toBe(false); // no pop-under
+    expect(router.navigateCalls).toEqual([]); // no nav side-effects
+  });
+
+  it('(b) workspace hidden + projectId bound → icon visibility, aria "Show overlay", click → showWorkspace true with SAME projectId', () => {
+    // The user-reported bug: editor is hidden but the button kept
+    // rendering as HIDE — no UNHIDE affordance. The fix: icon
+    // flips to visibility and aria to "Show overlay" while the
+    // editor is recoverable (workspaceProjectId !== null).
+    const { app, overlay } = makeApp({
+      url: '/',
+      workspaceProjectId: 'proj-a',
+      // showWorkspace deliberately omitted — hidden but bound.
+    });
+    expect(overlay.showWorkspace()).toBe(false);
+    expect(overlay.workspaceProjectId()).toBe('proj-a');
+    expect(app.isWorkspaceRecoverable()).toBe(true);
+
+    // Icon + aria MUST reflect the unhide affordance.
+    expect(app.hideOverlayIcon()).toBe('visibility');
+    expect(app.hideOverlayAriaLabel()).toBe('Show overlay');
+
+    // Click — the editor re-shows with the SAME projectId. The
+    // cached binding is the source of truth (no active tab / no
+    // URL coupling for the workspace overlay — see
+    // isWorkspaceRecoverable docblock).
+    app.hideActiveOverlay();
+    expect(overlay.showWorkspace()).toBe(true);
+    expect(overlay.workspaceProjectId()).toBe('proj-a'); // SAME id
+    // hide() must NOT have been called — the click is a pure re-show.
+    expect(overlay.hideCalls).toBe(0);
+    // show() was called with the cached id.
+    expect(overlay.showCalls).toEqual([{ projectId: 'proj-a' }]);
+    // The "SAME id" assertion pins the id at the SERVICE-CALL boundary
+    // (re-show() re-binds it verbatim); tabWorkspaceEffect may rebind the
+    // bound id later once the chat host is mounted (follow-up only).
+  });
+
+  // (former test (c) removed — review W4 dedup: it duplicated (a)'s
+  //  setup and assertions; the merged (a) above covers workspace-
+  //  visible precedence + N3 early-return + chat-stays-hidden.)
+
+  it('(d) anyOverlayVisible true while workspace recoverable, false when never opened (projectId null)', () => {
+    // Case 1: workspace hidden but projectId bound → anyOverlayVisible
+    // MUST be true so the button stays rendered (otherwise the user
+    // has no UNHIDE affordance).
+    const recoverable = makeApp({
+      url: '/',
+      workspaceProjectId: 'proj-a',
+    });
+    expect(recoverable.app.isWorkspaceRecoverable()).toBe(true);
+    expect(recoverable.app.anyOverlayVisible()).toBe(true);
+
+    // Case 2: cold boot — workspace never opened (projectId null),
+    // chat never opened either. anyOverlayVisible MUST be false
+    // (the button should NOT render — there is no overlay or
+    // recoverable state to act on).
+    const coldBoot = makeApp({ url: '/' });
+    expect(coldBoot.overlay.workspaceProjectId()).toBeNull();
+    expect(coldBoot.app.isWorkspaceRecoverable()).toBe(false);
+    expect(coldBoot.app.anyOverlayVisible()).toBe(false);
+  });
+
+  it('workspace-recoverable + chat recoverable: click re-shows CHAT (N3 sequence preserved)', () => {
+    // After N3 first click (workspace visible + chat recoverable →
+    // workspace hides, chat stays hidden), the second click must
+    // re-show CHAT, not the workspace. The workspace-recoverable
+    // branch is guarded by ``!isHiddenButRecoverable`` so the
+    // chat-recoverable branch wins when both are recoverable.
+    const { app, overlay, viewState } = makeApp({
+      url: '/projects/all/instances/inst-1',
+      workspaceProjectId: 'proj-a',
+      showWorkspace: true,
+    });
+    // Enter the chat-recoverable state directly (skip the toggle
+    // call — it would hit the workspace-visible branch first and
+    // hide the editor before this test can assert the N3 first
+    // click). After this line: workspace VISIBLE + chat recoverable.
+    viewState.detailVisible.set(false);
+    expect(viewState.activeInstanceId()).toBe('inst-1');
+    expect(app.isHiddenButRecoverable()).toBe(true);
+
+    // First click (N3): hide workspace (early return). Chat
+    // stays hidden (no pop-under).
+    app.hideActiveOverlay();
+    expect(overlay.hideCalls).toBe(1);
+    expect(overlay.showWorkspace()).toBe(false);
+
+    // Now BOTH are recoverable — workspace hidden-but-bound, chat
+    // hidden-but-cached. The icon must still flip to "show".
+    expect(app.isWorkspaceRecoverable()).toBe(true);
+    expect(app.isHiddenButRecoverable()).toBe(true);
+    expect(app.hideOverlayIcon()).toBe('visibility');
+
+    // Second click — chat re-shows (N3 preserves the "user wanted
+    // chat back" sequence). Workspace does NOT re-show.
+    app.hideActiveOverlay();
+    expect(viewState.detailVisible()).toBe(true);
+    expect(overlay.showWorkspace()).toBe(false); // workspace stays hidden
+    expect(overlay.showCalls).toEqual([]); // show() was NOT called
+  });
+
+  it('(B1) /plan + workspace hidden-but-bound → icon visibility_off, click navigates to /instances (plan branch owns the click)', () => {
+    // The review blocker: on /plan with the workspace hidden-but-
+    // bound, the OLD branch 2 pre-empted the plan branch and re-
+    // showed the workspace — which renders at z-100 UNDER the plane
+    // iframe (z-1000): a dead click wearing a "Show overlay" icon.
+    // The fix gates branch 2 (and the icon/label show-tier) on
+    // ``!isPlanRoute()`` so the button keeps its pre-existing plan
+    // semantics: visibility_off + navigate to /instances.
+    const { app, overlay, router } = makeApp({
+      url: '/plan',
+      workspaceProjectId: 'proj-a',
+      // showWorkspace deliberately omitted — hidden but bound.
+    });
+    expect(app.isPlanRoute()).toBe(true);
+    expect(app.isWorkspaceRecoverable()).toBe(true); // the tempting state
+    expect(overlay.showWorkspace()).toBe(false);
+
+    // The icon/label show-tier MUST be gated on /plan — the click's
+    // real action is "navigate", not "show", so the affordance must
+    // read visibility_off / "Hide overlay" (pre-existing plan
+    // semantics, pinned by the old test (e) in App.hideActiveOverlay).
+    expect(app.hideOverlayIcon()).toBe('visibility_off');
+    expect(app.hideOverlayAriaLabel()).toBe('Hide overlay');
+
+    // Click — the plan branch fires: navigate to /instances. The
+    // workspace must NOT re-show (it would be invisible under the
+    // iframe) and the bound id must survive untouched.
+    app.hideActiveOverlay();
+    expect(router.navigateCalls).toEqual([['/instances']]);
+    expect(overlay.showWorkspace()).toBe(false); // NOT set true
+    expect(overlay.showCalls).toEqual([]); // show() never called
+    expect(overlay.workspaceProjectId()).toBe('proj-a'); // unchanged
+
+    // No state lost: after leaving /plan the recoverable state is
+    // still armed (the affordance picks back up on the next route).
+    expect(app.isWorkspaceRecoverable()).toBe(true);
+  });
+
+  it('(W3) chat visible + workspace recoverable → icon visibility_off, click hides the CHAT (visible overlays take precedence)', () => {
+    // The review gate: state cell #4 — chat visibly open +
+    // workspace hidden-but-bound on a non-plan route. Branch 2 used
+    // to pre-empt hiding the open chat. The fix gates branch 2 (and
+    // the icon/label show-tier) on ``!detailVisible()`` so the click
+    // hides the chat (the detail branch), exactly as it did before
+    // the workspace-recoverable feature existed. Rationale: visible
+    // overlays take precedence for the hide affordance (N3
+    // minimize-surprise lineage) — recoverable-workspace re-show
+    // only surfaces when nothing is visibly competing.
+    const { app, overlay, viewState } = makeApp({
+      // Real detail URL so syncDetailVisibility keeps the overlay
+      // open (the constructor would close it on a non-detail URL).
+      url: '/projects/all/instances/inst-1',
+      workspaceProjectId: 'proj-a',
+      detailVisible: true,
+      // showWorkspace deliberately omitted — hidden but bound.
+    });
+    expect(viewState.detailVisible()).toBe(true); // chat IS visible
+    expect(app.isWorkspaceRecoverable()).toBe(true); // and competing
+
+    // The affordance must telegraph HIDE (chat is on screen), not
+    // SHOW — the tier-2 gate excludes the chat-visible state.
+    expect(app.hideOverlayIcon()).toBe('visibility_off');
+    expect(app.hideOverlayAriaLabel()).toBe('Hide overlay');
+
+    // Click — the detail branch fires: chat hides. The workspace
+    // must NOT re-show underneath.
+    app.hideActiveOverlay();
+    expect(viewState.detailVisible()).toBe(false); // chat hidden
+    expect(overlay.showWorkspace()).toBe(false); // NOT set true
+    expect(overlay.showCalls).toEqual([]); // show() never called
+
+    // And the workspace is STILL recoverable for the next click —
+    // nothing was lost, the affordance just deferred.
+    expect(app.isWorkspaceRecoverable()).toBe(true);
   });
 });
 
