@@ -40,7 +40,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
-from sqlalchemy.pool import StaticPool
+from sqlalchemy.pool import NullPool, StaticPool
 from sqlmodel import Session, SQLModel, select as sm_select
 
 # Import all tables used by the pipeline marker dispatch.
@@ -321,35 +321,132 @@ class TestSite1MarkerDispatchedOnPause:
         self, engine: Engine
     ) -> None:
         """W6: a concurrent duplicate ``ensure_deferred`` for the
-        same triple must be absorbed (no crash, single row)."""
-        pipeline, manager, _ = _build_pipeline_with_repos(engine)
-        instance_id = _seed_child_instance(
-            engine, parent_id="parent-1"
+        same triple must be absorbed (no crash, single row).
+
+        D-1 de-flake (2026-08-20): the original test waited a fixed
+        ``asyncio.sleep(0.05)`` for two detached ``shield(to_thread(...))``
+        hops — empirically too tight under load (observed ~37% flake
+        standalone). Worse, the shared ``StaticPool`` SQLite engine
+        caused SQLAlchemy ``InvalidRequestError: Could not refresh
+        instance`` when the two threadpool writers reused the same
+        underlying connection's identity map (each ``ensure_deferred``
+        does ``session.refresh(row)``; the second writer's refresh
+        raced with the first writer's commit/refresh on the same
+        connection). The dispatcher's broad ``except Exception``
+        swallowed both errors and zero rows landed — which is the
+        *production* mitigation path (Phase 2 no-row backstop), but
+        not the contract this test pins.
+
+        Test-only fix (two changes, no production code touched):
+
+        * **Deterministic rendezvous (option a)**: wrap
+          ``asyncio.create_task`` with a tracker that retains every
+          dispatched Task, then ``await asyncio.gather(*tasks)`` before
+          asserting. The rendezvous is exact: every detached write is
+          finished (either committed or absorbed) before the test
+          reads the DB.
+        * **No shared connection (option b secondary)**: build a
+          per-test ``NullPool`` engine for the two concurrent writers
+          so each threadpool worker gets its OWN SQLite connection
+          and identity map. The shared ``StaticPool`` fixture stays
+          in place — every other test in this file uses a SINGLE
+          writer and never observed the refresh race.
+        """
+        import daemon.services.message_processing_pipeline as _mpp_mod
+
+        # Per-test engine: file-backed SQLite with NullPool so each
+        # threadpool writer gets its OWN connection (no StaticPool
+        # identity-map contention) AND the schema persists across
+        # connections (a NullPool ``:memory:`` SQLite opens a fresh
+        # empty DB per connection — useless). The tmp file is cleaned
+        # up in the ``finally`` below.
+        import tempfile
+
+        _tmp_db = tempfile.NamedTemporaryFile(
+            prefix="site1-concurrent-", suffix=".sqlite", delete=False
+        )
+        _tmp_db.close()
+        _isolated_db_path = _tmp_db.name
+
+        isolated_engine = create_engine(
+            f"sqlite:///{_isolated_db_path}",
+            connect_args={"check_same_thread": False},
+            poolclass=NullPool,
         )
 
-        # Fire the dispatcher twice for the same triple (simulates a
-        # router/sweep/Site-1 race).
-        pipeline._schedule_deferred_pause_marker(
-            instance_id=instance_id,
-            child_message_id="msg-1",
-        )
-        pipeline._schedule_deferred_pause_marker(
-            instance_id=instance_id,
-            child_message_id="msg-1",
-        )
-        await asyncio.sleep(0.05)
+        @event.listens_for(isolated_engine, "connect")
+        def _enable_fk(dbapi_conn, _connection_record):
+            cursor = dbapi_conn.cursor()
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.close()
 
-        # Exactly ONE row — the partial unique index rejects the
-        # duplicate and ``ensure_deferred`` absorbs it.
-        with Session(engine) as session:
-            rows = list(
-                session.exec(
-                    sm_select(ReportInjection).where(
-                        ReportInjection.child_instance_id == instance_id
-                    )
-                ).all()
+        SQLModel.metadata.create_all(isolated_engine)
+        try:
+            pipeline, manager, _ = _build_pipeline_with_repos(
+                isolated_engine
             )
-        assert len(rows) == 1
+            instance_id = _seed_child_instance(
+                isolated_engine, parent_id="parent-1"
+            )
+
+            # Capture dispatched Tasks deterministically. We wrap
+            # ``asyncio.create_task`` so the test can ``await`` both
+            # detached writes to completion before reading the DB.
+            # Production code is untouched — the wrapper lives only
+            # inside this test.
+            captured_tasks: list[asyncio.Task] = []
+            original_create_task = _mpp_mod.asyncio.create_task
+
+            def _tracking_create_task(coro, *, name=None):  # noqa: ANN001
+                t = original_create_task(coro, name=name)
+                captured_tasks.append(t)
+                return t
+
+            _mpp_mod.asyncio.create_task = _tracking_create_task
+            try:
+                # Fire the dispatcher twice for the same triple
+                # (simulates a router/sweep/Site-1 race).
+                pipeline._schedule_deferred_pause_marker(
+                    instance_id=instance_id,
+                    child_message_id="msg-1",
+                )
+                pipeline._schedule_deferred_pause_marker(
+                    instance_id=instance_id,
+                    child_message_id="msg-1",
+                )
+                assert len(captured_tasks) == 2, (
+                    f"expected both schedule calls to dispatch a Task, "
+                    f"got {len(captured_tasks)}"
+                )
+                # Deterministic rendezvous: wait for both detached
+                # writes to settle (each completes with the dispatcher
+                # swallowing its own errors; gather never re-raises
+                # because the dispatched coroutine catches them).
+                await asyncio.gather(
+                    *captured_tasks, return_exceptions=True
+                )
+            finally:
+                _mpp_mod.asyncio.create_task = original_create_task
+
+            # Exactly ONE row — the partial unique index rejects the
+            # duplicate and ``ensure_deferred`` absorbs it.
+            with Session(isolated_engine) as session:
+                rows = list(
+                    session.exec(
+                        sm_select(ReportInjection).where(
+                            ReportInjection.child_instance_id
+                            == instance_id
+                        )
+                    ).all()
+                )
+            assert len(rows) == 1
+        finally:
+            isolated_engine.dispose()
+            import os
+            try:
+                os.unlink(_isolated_db_path)
+            except FileNotFoundError:
+                pass
 
 
 # =============================================================================
