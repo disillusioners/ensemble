@@ -175,6 +175,15 @@ class TestBootOrder:
     """Wiring-order test: ``report_recovery`` is wired AFTER
     ``stale_recovery`` in the manager's setup.
 
+    INTENTIONALLY BRITTLE wiring-order guard (Rec-2, 2026-08-20):
+    this test source-scans ``manager.py`` text rather than driving
+    boot behaviorally, so it WILL need touching whenever the wiring
+    moves or is renamed. That is deliberate — the S-c binding
+    order (Phase 1 columns + indexes exist BEFORE the sweep queries
+    the table) is a structural contract best pinned by a
+    source-order assertion; a behavioral conversion is explicitly
+    DEFERRED to the follow-up register.
+
     The wiring lives in ``manager.setup_worker_pool`` (the binding
     order matches ``StaleTaskRecovery.start()`` immediately
     followed by the report-recovery block). Verified by reading

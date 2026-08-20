@@ -463,14 +463,15 @@ class ReportDeliveryRecoveryService:
         # uses the configured retry interval.
         if self._lane_pending_age:
             result.lanes["pending_age"] = self._run_pending_age_lane(
-                recovery_retry_minutes=0
+                lane_name="pending_age", recovery_retry_minutes=0
             )
             if self._stop_event.is_set():
                 self._finalize_sweep_result(result)
                 return result
         if self._lane_recovery_retry:
             result.lanes["recovery_retry"] = self._run_pending_age_lane(
-                recovery_retry_minutes=self._recovery_retry_minutes
+                lane_name="recovery_retry",
+                recovery_retry_minutes=self._recovery_retry_minutes,
             )
             if self._stop_event.is_set():
                 self._finalize_sweep_result(result)
@@ -546,6 +547,7 @@ class ReportDeliveryRecoveryService:
                 sweep — terminal parents excluded); ``False`` for
                 Lane 5 (ORPHAN — terminal parents only).
         """
+        lane = "deferred" if parent_not_terminal else "orphan"
         out = LaneResult()
         # The repo query joins ``Instance`` to filter on parent
         # status. Caller-supplied parameter picks the lane.
@@ -579,12 +581,49 @@ class ReportDeliveryRecoveryService:
                 # Either shape is recoverable next cycle (lanes 3/4
                 # cover PENDING; Lane 1 covers DEFERRED).
                 logger.warning(
-                    f"sweep lane error child={row.child_instance_id[:8]}..., "
+                    f"sweep {lane} row error "
+                    f"child={row.child_instance_id[:8]}..., "
                     f"msg={row.child_message_id[:8]}..., "
-                    f"reason={row.deferred_reason}: {type(exc).__name__}: {exc}"
+                    f"injection_id={row.injection_id[:8]}...: "
+                    f"{type(exc).__name__}: {exc}"
                 )
                 out.errors += 1
         return out
+
+    def _check_parent_busy(
+        self, parent_id: str, result: LaneResult, *, lane: str
+    ) -> bool:
+        """Shared per-row busy-check gate (Rec-2, 2026-08-20).
+
+        One uniform implementation of the "skip if the parent has a
+        live task/job" invariant that every lane open-coded 3×.
+        ``True`` means BUSY — the caller MUST skip the row (the
+        natural path owns delivery when the parent's turn resumes).
+        ``False`` means idle — proceed with the lane's recovery
+        steps.
+
+        A busy-check EXCEPTION also returns ``True`` (safe default):
+        a transient ``has_instance_busy`` failure must not let the
+        sweep race a live parent turn.
+        """
+        try:
+            busy = self._task_repo.has_instance_busy(parent_id)
+        except Exception as exc:
+            # TOCTOU re-check failure: default to busy (safe — the
+            # natural path will recover when its turn resumes).
+            logger.warning(
+                f"sweep {lane} busy-check failed "
+                f"parent={parent_id[:8]}...: "
+                f"{type(exc).__name__}: {exc} — defaulting to busy"
+            )
+            return True
+        if busy:
+            result.skipped_busy += 1
+            logger.info(
+                f"sweep {lane} skipped busy parent={parent_id[:8]}..."
+            )
+            return True
+        return False
 
     def _recover_one_deferred_row(
         self,
@@ -612,25 +651,12 @@ class ReportDeliveryRecoveryService:
         parent_id = row.parent_instance_id
         child_id = row.child_instance_id
         child_msg_id = row.child_message_id
+        lane = "deferred" if parent_not_terminal else "orphan"
 
         # Step 1: busy-check (widened PENDING + RUNNING + PAUSED via
-        # ``has_instance_busy``).
-        try:
-            busy = self._task_repo.has_instance_busy(parent_id)
-        except Exception as exc:
-            # TOCTOU re-check failure: default to busy (safe — the
-            # natural path will recover when its turn resumes).
-            logger.warning(
-                f"sweep busy-check failed parent={parent_id[:8]}...: "
-                f"{type(exc).__name__}: {exc} — defaulting to busy"
-            )
-            busy = True
-        if busy:
-            result.skipped_busy += 1
-            logger.debug(
-                f"sweep skipped busy parent={parent_id[:8]}..., "
-                f"child={child_id[:8]}..."
-            )
+        # ``has_instance_busy``). Uniform helper — busy-skip logged
+        # at INFO for every lane (Rec-2, 2026-08-20).
+        if self._check_parent_busy(parent_id, result, lane=lane):
             return
 
         # Step 2 (ORPHAN lane only): try revival first.
@@ -668,6 +694,16 @@ class ReportDeliveryRecoveryService:
         # path. The router (task 2.1) calls the same code path —
         # we delegate to ``_handle_recover_deferred_report`` on the
         # manager so the reconciliation logic is single-sourced.
+        #
+        # Propagation style (Rec-2, 2026-08-20): catch + LOG + RAISE
+        # — the uniform style across ALL per-row handlers in this
+        # service. Rationale: a failed row leaves its DEFERRED /
+        # PENDING row UNTOUCHED (pre-transition failure) or
+        # committed-but-recoverable (post-transition reconcile /
+        # re-enter failure → the row is PENDING with a fresh
+        # ``recovery_attempted_at``, retried by lanes 3/4 next
+        # cycle), so re-raising lets the lane's outer per-row
+        # except bump ``errors`` in ONE place.
         try:
             self._manager._handle_recover_deferred_report(
                 child_instance_id=child_id,
@@ -679,8 +715,9 @@ class ReportDeliveryRecoveryService:
             # Per-row fail-safe (caught by the caller's outer
             # ``except``); re-raise so the caller's count is bumped.
             logger.warning(
-                f"sweep reconcile+re-enter failed "
-                f"child={child_id[:8]}..., msg={child_msg_id[:8]}...: "
+                f"sweep {lane} reconcile+re-enter failed "
+                f"child={child_id[:8]}..., msg={child_msg_id[:8]}..., "
+                f"injection_id={row.injection_id[:8]}...: "
                 f"{type(exc).__name__}: {exc}"
             )
             raise
@@ -829,8 +866,10 @@ class ReportDeliveryRecoveryService:
                 )
             except Exception as exc:
                 logger.warning(
-                    f"sweep no_row lane error child={child_id[:8]}..., "
-                    f"msg={child_msg_id[:8]}...: "
+                    f"sweep no_row_backstop row error "
+                    f"child={child_id[:8]}..., "
+                    f"msg={child_msg_id[:8]}..., "
+                    f"parent={parent_id[:8]}...: "
                     f"{type(exc).__name__}: {exc}"
                 )
                 out.errors += 1
@@ -855,17 +894,9 @@ class ReportDeliveryRecoveryService:
            duplicate).
         3. Hand off to the manager's reconcile + re-enter path.
         """
-        # Step 1: busy-check.
-        try:
-            busy = self._task_repo.has_instance_busy(parent_id)
-        except Exception as exc:
-            busy = True
-            logger.warning(
-                f"sweep no_row busy-check failed parent={parent_id[:8]}...: "
-                f"{type(exc).__name__}: {exc} — defaulting to busy"
-            )
-        if busy:
-            result.skipped_busy += 1
+        # Step 1: busy-check — uniform helper (Lanes 2/3/4 busy-skips
+        # are now logged at INFO like Lane 1/5, Rec-2 2026-08-20).
+        if self._check_parent_busy(parent_id, result, lane="no_row_backstop"):
             return
 
         # Step 2: ensure_deferred. W6: IntegrityError is absorbed by
@@ -874,6 +905,18 @@ class ReportDeliveryRecoveryService:
         # DEFERRED row for the same triple). We proceed regardless
         # of the return value because the router/sweep NEVER see
         # raw IntegrityError.
+        #
+        # Propagation style (Rec-2, 2026-08-20): catch + LOG + RAISE
+        # — the SAME style as every other per-row handler in this
+        # service. Rationale: a failed row leaves its DEFERRED /
+        # PENDING row UNTOUCHED (``ensure_deferred`` failed before
+        # any state change, or the reconcile/re-enter failed after a
+        # committed-but-recoverable transition), so re-raising lets
+        # the lane's outer per-row except bump ``errors`` in ONE
+        # place and the row is retried next sweep cycle. The
+        # catch+count+return style previously used ONLY here hid the
+        # double-counting risk and split the error-accounting logic
+        # across two layers for no behavioral gain.
         try:
             row = self._report_injection_repo.ensure_deferred(
                 parent_instance_id=parent_id,
@@ -883,12 +926,12 @@ class ReportDeliveryRecoveryService:
             )
         except Exception as exc:
             logger.warning(
-                f"sweep ensure_deferred failed "
-                f"child={child_id[:8]}..., msg={child_msg_id[:8]}...: "
+                f"sweep no_row_backstop ensure_deferred failed "
+                f"child={child_id[:8]}..., msg={child_msg_id[:8]}..., "
+                f"parent={parent_id[:8]}...: "
                 f"{type(exc).__name__}: {exc}"
             )
-            result.errors += 1
-            return
+            raise
 
         # ``row is None`` means a concurrent duplicate was absorbed
         # (W6) — the OTHER actor (Site 1 / another sweep cycle) has
@@ -910,8 +953,9 @@ class ReportDeliveryRecoveryService:
             )
         except Exception as exc:
             logger.warning(
-                f"sweep no_row reconcile+re-enter failed "
-                f"child={child_id[:8]}..., msg={child_msg_id[:8]}...: "
+                f"sweep no_row_backstop reconcile+re-enter failed "
+                f"child={child_id[:8]}..., msg={child_msg_id[:8]}..., "
+                f"injection_id={row.injection_id[:8]}...: "
                 f"{type(exc).__name__}: {exc}"
             )
             raise
@@ -922,11 +966,16 @@ class ReportDeliveryRecoveryService:
     # --------------------------------------------------------
 
     def _run_pending_age_lane(
-        self, *, recovery_retry_minutes: int
+        self, *, lane_name: str, recovery_retry_minutes: int
     ) -> LaneResult:
         """Process stranded PENDING rows past the age guard.
 
         Args:
+            lane_name: ``"pending_age"`` (Lane 3) or
+                ``"recovery_retry"`` (Lane 4) — threaded into every
+                per-row log so the two lanes are distinguishable in
+                production logs (Rec-2, 2026-08-20: both lanes
+                previously logged as "pending_age").
             recovery_retry_minutes: ``0`` for Lane 3 (covers never-
                 stamped rows); configured value for Lane 4 (covers
                 stamped-stale rows whose ``recovery_attempted_at``
@@ -949,10 +998,14 @@ class ReportDeliveryRecoveryService:
                 )
                 break
             try:
-                self._recover_one_pending_row(row, result=out)
+                self._recover_one_pending_row(
+                    row, result=out, lane_name=lane_name
+                )
             except Exception as exc:
                 logger.warning(
-                    f"sweep pending_age lane error "
+                    f"sweep {lane_name} row error "
+                    f"child={row.child_instance_id[:8]}..., "
+                    f"msg={row.child_message_id[:8]}..., "
                     f"injection_id={row.injection_id[:8]}...: "
                     f"{type(exc).__name__}: {exc}"
                 )
@@ -960,7 +1013,7 @@ class ReportDeliveryRecoveryService:
         return out
 
     def _recover_one_pending_row(
-        self, row: Any, *, result: LaneResult
+        self, row: Any, *, result: LaneResult, lane_name: str
     ) -> None:
         """Recover one stranded PENDING row.
 
@@ -978,37 +1031,34 @@ class ReportDeliveryRecoveryService:
         child_id = row.child_instance_id
         child_msg_id = row.child_message_id
 
-        # Step 1: busy-check.
-        try:
-            busy = self._task_repo.has_instance_busy(parent_id)
-        except Exception as exc:
-            busy = True
-            logger.warning(
-                f"sweep pending_age busy-check failed "
-                f"parent={parent_id[:8]}...: "
-                f"{type(exc).__name__}: {exc} — defaulting to busy"
-            )
-        if busy:
-            result.skipped_busy += 1
+        # Step 1: busy-check — uniform helper (Rec-2, 2026-08-20).
+        if self._check_parent_busy(parent_id, result, lane=lane_name):
             return
 
         # Step 2: hand off. No transition (the row is already
-        # PENDING) — just reconcile + re-enter.
+        # PENDING) — just reconcile + re-enter. The ``source``
+        # branch keys off the per-call ``lane_name`` (Rec-2,
+        # 2026-08-20: it previously keyed off the service-level
+        # ``_recovery_retry_minutes`` config value, which
+        # mislabeled Lane 3 rows whenever the operator configured
+        # a retry interval of 0).
+        source = (
+            "sweep_pending_age"
+            if lane_name == "pending_age"
+            else "sweep_recovery_retry"
+        )
         try:
             self._manager._handle_recover_deferred_report(
                 child_instance_id=child_id,
                 child_message_id=child_msg_id,
                 injection_id=row.injection_id,
-                source=(
-                    "sweep_pending_age"
-                    if self._recovery_retry_minutes == 0
-                    else "sweep_recovery_retry"
-                ),
+                source=source,
             )
         except Exception as exc:
             logger.warning(
-                f"sweep pending_age reconcile+re-enter failed "
-                f"child={child_id[:8]}..., msg={child_msg_id[:8]}...: "
+                f"sweep {lane_name} reconcile+re-enter failed "
+                f"child={child_id[:8]}..., msg={child_msg_id[:8]}..., "
+                f"injection_id={row.injection_id[:8]}...: "
                 f"{type(exc).__name__}: {exc}"
             )
             raise
