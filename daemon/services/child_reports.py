@@ -63,6 +63,76 @@ Return ONLY the report text, no preamble."""
 MAX_COMBINED_REPORT_CHARS = 10_000
 
 
+# Obligation-triple partial unique index identifier (Phase 1
+# write-once gate). Same name on SQLite and PG — verified by
+# ``tests/repositories/test_report_injection_migration_parity.py``.
+_OBLIGATION_TRIPLE_INDEX_NAME = "uq_report_injections_oblig_triple"
+
+# Columns covered by the obligation-triple index — used as the
+# SQLite fallback discriminator when the index name is absent from
+# the error message.
+_OBLIGATION_TRIPLE_COLUMNS = (
+    "parent_instance_id",
+    "child_instance_id",
+    "child_message_id",
+)
+
+
+def _is_obligation_triple_integrity_error(exc: IntegrityError) -> bool:
+    """Return ``True`` iff ``exc`` was raised by the obligation-triple
+    partial unique index ``uq_report_injections_oblig_triple``.
+
+    Dialect-aware discrimination:
+
+    * **PostgreSQL** — the constraint NAME is embedded in
+      ``str(exc.orig)`` (driver renders it as
+      ``"duplicate key value violates unique constraint
+      \"uq_report_injections_oblig_triple\""``). A SQLSTATE ``23505``
+      (unique_violation) is also a hint, but other unique constraints
+      on ``report_injections`` could yield the same code — the
+      constraint-NAME match is the discriminator.
+    * **SQLite** — the index NAME is NOT in the error message.
+      Instead, the columns covered by the index appear:
+      ``"UNIQUE constraint failed: report_injections.parent_instance_id,
+      report_injections.child_instance_id, report_injections.child_message_id"``.
+      The simultaneous presence of all three column names is the
+      SQLite discriminator. This is sound because no OTHER UNIQUE
+      constraint on ``report_injections`` covers all three columns
+      (the PK is on ``injection_id``; the other indexes are
+      non-unique).
+
+    POST-DEEP-REVIEW (Y2, 2026-08-20): a broad ``except IntegrityError``
+    on the obligation-triple INSERT would mis-treat a foreign-key or
+    other constraint violation as ``idempotency_skip`` and silently
+    swallow a real bug. This helper narrows the catch.
+
+    Args:
+        exc: The :class:`sqlalchemy.exc.IntegrityError` raised by
+            ``session.flush()`` on the obligation-triple INSERT.
+
+    Returns:
+        ``True`` iff the error is from the obligation-triple index.
+        Any other IntegrityError (FK violation, NOT NULL violation,
+        a different UNIQUE) returns ``False`` and the caller MUST
+        re-raise so the bug is surfaced.
+    """
+    orig = getattr(exc, "orig", None)
+    msg = str(orig) if orig is not None else str(exc)
+
+    # Constraint-name match (PG; SQLite future-proof if the driver
+    # ever starts emitting the index name).
+    if _OBLIGATION_TRIPLE_INDEX_NAME in msg:
+        return True
+
+    # Column-set match (SQLite). All three obligation-triple columns
+    # must appear together — a UNIQUE on a strict subset (none
+    # exist on ``report_injections`` today) would not match all
+    # three, and a multi-column UNIQUE that includes all three
+    # alongside an extra column would still match — which is
+    # acceptable (the obligation triple is still violated).
+    return all(col in msg for col in _OBLIGATION_TRIPLE_COLUMNS)
+
+
 class _ChildCompletionDbResult(NamedTuple):
     """Result of the sync DB half of ``_process_child_completion_and_notify_parent``.
 
@@ -2643,6 +2713,34 @@ Provide a concise summary:"""
                 # discard on this branch anyway.
                 session.flush()
             except IntegrityError as oblig_err:
+                # POST-DEEP-REVIEW (Y2, 2026-08-20): narrow the catch
+                # to ONLY the obligation-triple partial unique index
+                # (``uq_report_injections_oblig_triple``). A foreign-key
+                # or other constraint violation would otherwise be
+                # mis-treated as ``idempotency_skip`` and silently
+                # swallowed. Discrimination rule
+                # (see ``_is_obligation_triple_integrity_error``):
+                #   * PG — constraint name in ``str(exc.orig)``.
+                #   * SQLite — index name is absent; match all three
+                #     column names
+                #     (``parent_instance_id``,
+                #     ``child_instance_id``,
+                #     ``child_message_id``) in the error message.
+                # Any IntegrityError that does NOT match is re-raised
+                # (no new exception type — bare ``raise``) so the
+                # bug surfaces in the existing error-reporting path.
+                if not _is_obligation_triple_integrity_error(oblig_err):
+                    logger.warning(
+                        f"child_reports: unexpected IntegrityError on "
+                        f"ReportInjection INSERT (not obligation-triple "
+                        f"— FK / NOT NULL / other UNIQUE?). Surfacing "
+                        f"instead of swallowing. parent="
+                        f"{instance.parent_id[:8]}..., child="
+                        f"{instance.instance_id[:8]}..., msg="
+                        f"{completed_message_id[:8]}...: "
+                        f"{type(oblig_err).__name__}: {oblig_err.orig}"
+                    )
+                    raise
                 # Natural × recovered PENDING race: the recovered
                 # row's worker_pool / claim_for_task_delivery owns
                 # delivery. Return idempotency_skip and let the

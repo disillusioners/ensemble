@@ -5454,15 +5454,53 @@ class InstanceManager:
             # ``.result()`` while the loop continues serving HTTP).
             try:
                 if self._loop is not None and not self._loop.is_closed():
+                    # POST-DEEP-REVIEW (Y1, 2026-08-20): attach a
+                    # done-callback so a sweep-body exception is
+                    # logged instead of being silently dropped into a
+                    # garbage-collected task (which would surface only
+                    # as "Task exception was never retrieved"). Boot
+                    # MUST stay non-blocking — the callback fires
+                    # when the worker-thread sweep finishes, the boot
+                    # caller does not await the task.
+                    def _log_boot_sweep_done(
+                        t: asyncio.Task,
+                        *,
+                        _mgr: "InstanceManager" = self,
+                    ) -> None:
+                        # Teardown guard: ``stop()`` may have nulled
+                        # ``_report_recovery`` before the callback
+                        # fires; ``logger`` itself is module-level and
+                        # always safe. We only suppress the noise —
+                        # the exception is always retrievable.
+                        if t.cancelled():
+                            return
+                        exc = t.exception()
+                        if exc is None:
+                            return
+                        if getattr(_mgr, "_report_recovery", None) is None:
+                            logger.debug(
+                                "ReportDeliveryRecoveryService boot "
+                                "sweep task failed after manager "
+                                f"teardown (suppressed): "
+                                f"{type(exc).__name__}: {exc}"
+                            )
+                            return
+                        logger.warning(
+                            "ReportDeliveryRecoveryService boot sweep "
+                            f"task failed (non-fatal): "
+                            f"{type(exc).__name__}: {exc}"
+                        )
+
                     # Fire-and-forget: the loop schedules the work
                     # on a thread-pool worker (asyncio.to_thread).
                     # The boot call returns immediately; the sweep
                     # runs concurrently on a worker thread.
-                    self._loop.create_task(
+                    boot_sweep_task = self._loop.create_task(
                         asyncio.to_thread(
                             self._report_recovery.recover_on_startup
                         )
                     )
+                    boot_sweep_task.add_done_callback(_log_boot_sweep_done)
                 else:
                     # Loop unavailable — fall back to running
                     # synchronously. This path is for unusual

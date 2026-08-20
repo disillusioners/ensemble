@@ -736,3 +736,80 @@ class TestPendingAgeLanes:
             + result.lanes["recovery_retry"].recovered
         ) >= 1
         manager._handle_recover_deferred_report.assert_called()
+
+
+# =============================================================================
+# Y3 — _get_event_loop closed-loop terminal branch (POST-DEEP-REVIEW)
+# =============================================================================
+
+
+class TestGetEventLoopClosedLoop:
+    """POST-DEEP-REVIEW (Y3, 2026-08-20): when the manager's stored
+    loop is closed AND ``asyncio.get_event_loop()`` raises
+    ``RuntimeError``, the helper MUST raise ``RuntimeError`` (not
+    silently fall back to a brand-new ``asyncio.new_event_loop()``).
+    A fresh loop is NOT the manager's canonical loop — scheduling
+    onto it while blocking on ``.result()`` is a confusing failure
+    mode that masks stale-loop state. The per-row caller catches
+    the raised error, counts the row as an error, and the row is
+    retried on the next sweep cycle.
+    """
+
+    def test_no_live_loop_raises_runtime_error(
+        self, engine: Engine, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Both ``manager._loop`` is None AND ``asyncio.get_event_loop()``
+        raises ``RuntimeError`` → ``_get_event_loop`` raises
+        ``RuntimeError`` with a clear message; WARNING logged.
+        """
+        import asyncio
+        import logging
+
+        service, manager = _build_service(engine)
+
+        # Force the manager's loop attribute to None — first branch
+        # (``loop is not None``) is skipped.
+        manager._loop = None
+
+        # Patch ``asyncio.get_event_loop`` to raise — second branch
+        # (``return asyncio.get_event_loop()``) raises, control
+        # passes to the ``except RuntimeError`` terminal branch.
+        original_get_event_loop = asyncio.get_event_loop
+        call_count = {"n": 0}
+
+        def _raise_get_event_loop(*_args: Any, **_kwargs: Any):
+            call_count["n"] += 1
+            raise RuntimeError(
+                "There is no current event loop in thread 'X'."
+            )
+
+        asyncio.get_event_loop = _raise_get_event_loop
+        try:
+            caplog.set_level(
+                logging.WARNING, logger="daemon.services.report_delivery_recovery"
+            )
+            with pytest.raises(RuntimeError) as exc_info:
+                service._get_event_loop()
+            assert "no live event loop" in str(exc_info.value).lower(), (
+                f"RuntimeError message MUST mention 'no live event loop' "
+                f"(the operator-actionable hint); got {exc_info.value!r}"
+            )
+            assert call_count["n"] == 1, (
+                "asyncio.get_event_loop MUST be invoked exactly once "
+                "before the terminal branch is hit"
+            )
+            # WARNING log emitted — operator visibility.
+            warnings = [
+                r for r in caplog.records
+                if r.levelno == logging.WARNING
+            ]
+            assert any(
+                "no live event loop" in r.getMessage().lower()
+                for r in warnings
+            ), (
+                "WARNING log MUST mention 'no live event loop' for "
+                "operator visibility; got "
+                f"{[r.getMessage() for r in warnings]}"
+            )
+        finally:
+            asyncio.get_event_loop = original_get_event_loop

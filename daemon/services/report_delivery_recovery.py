@@ -667,11 +667,18 @@ class ReportDeliveryRecoveryService:
         closed/stale loop case — if the manager's ``_loop`` is set
         but ``is_closed()`` (shutdown / crash-recovery replay path),
         we re-resolve via ``asyncio.get_event_loop()`` which is the
-        loop the manager's recovery flow should target. If neither
-        path yields a live loop (rare — manager construction error),
-        fall back to ``asyncio.new_event_loop()`` with a clear log;
-        the caller (``run_coroutine_threadsafe``) will surface the
-        clearer error.
+        loop the manager's recovery flow should target.
+
+        POST-DEEP-REVIEW (Y3, 2026-08-20): removed the previous
+        ``asyncio.new_event_loop()`` fallback on the terminal
+        branch. A brand-new loop is NOT the manager's canonical
+        loop — scheduling onto it while blocking on ``.result()``
+        is a confusing failure mode that masks stale-loop state
+        with a fresh, never-running loop. Instead, log at WARNING
+        and raise a clear ``RuntimeError``; the per-row caller
+        (which already wraps ``run_coroutine_threadsafe(...).result()``
+        in ``except Exception``) catches it, counts the row as an
+        error, and the row is retried next sweep cycle.
         """
         loop = getattr(self._manager, "_loop", None)
         if loop is not None:
@@ -689,19 +696,21 @@ class ReportDeliveryRecoveryService:
         try:
             return asyncio.get_event_loop()
         except RuntimeError:
-            # No running loop in this thread — the manager owns the
-            # canonical loop, and direct attribute access above
-            # covers the production path. The fallback is for the
-            # rare case where the loop is unreachable (the caller
-            # will surface a clearer error).
+            # Terminal branch: no live loop available. The row
+            # MUST be retried next sweep cycle — DO NOT create a
+            # fresh loop (it is not the manager's canonical loop,
+            # and scheduling onto it while blocking on ``.result()``
+            # would surface a confusing failure mode).
             logger.warning(
                 "ReportDeliveryRecoveryService._get_event_loop: "
-                "no live loop available — returning a fresh "
-                "asyncio.new_event_loop(); callers (e.g. "
-                "run_coroutine_threadsafe) will surface a clearer "
-                "error if the loop is not the manager's canonical one"
+                "no live event loop available (manager loop closed, "
+                "no running loop in this thread); the row will be "
+                "retried on the next sweep cycle"
             )
-            return asyncio.new_event_loop()
+            raise RuntimeError(
+                "report-delivery recovery: no live event loop "
+                "available (manager loop closed)"
+            ) from None
 
     # --------------------------------------------------------
     # Lane 2 — NO-ROW BACKSTOP (C3)

@@ -904,3 +904,103 @@ class TestNaturalCompletionRacingRecoveredMarker:
                 "recovered PENDING row MUST remain PENDING — the "
                 "natural path no-ops via idempotency_skip"
             )
+
+    def test_unrelated_integrity_error_propagates(
+        self, engine: Engine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """POST-DEEP-REVIEW (Y2, 2026-08-20): an unrelated
+        ``IntegrityError`` on the obligation-triple INSERT (e.g. an
+        FK violation or a non-triple UNIQUE) MUST NOT be mis-treated
+        as ``idempotency_skip`` — it must propagate so the bug is
+        visible. The discrimination rule
+        (``_is_obligation_triple_integrity_error``) checks the
+        constraint name (PG) or column set (SQLite) and re-raises
+        otherwise.
+
+        We simulate an unrelated error by stubbing
+        ``ReportInjection.flush`` (no — we patch ``Session.flush``
+        on the live service's session). The stub raises a synthetic
+        ``IntegrityError`` whose ``.orig`` renders a message that
+        does NOT contain all three obligation-triple column names —
+        modeling a hypothetical FK violation against
+        ``report_injections.parent_instance_id`` referencing a
+        non-existent parent.
+        """
+        from sqlalchemy.exc import IntegrityError as SAIntegrityError
+
+        service = _build_child_reports_service(engine)
+        parent_id = _seed_root_instance(engine)
+        child_id = _seed_child_instance_full(
+            engine,
+            parent_id=parent_id,
+            status=InstanceStatus.COMPLETED.value,
+        )
+
+        # Build a synthetic FK-violation-style error. SQLite renders
+        # FK violations as ``FOREIGN KEY constraint failed`` — this
+        # message contains NO obligation-triple column names, so the
+        # discriminator MUST return False and the caller MUST
+        # re-raise.
+        fk_orig = RuntimeError(
+            "FOREIGN KEY constraint failed: report_injections.parent_instance_id"
+        )
+        # ``IntegrityError`` constructor requires (stmt, params, orig).
+        synthetic_err = SAIntegrityError(
+            "INSERT INTO report_injections (...)",
+            params={},
+            orig=fk_orig,
+        )
+
+        # Patch ``Session.flush`` so the natural INSERT raises the
+        # synthetic error instead of hitting the obligation-triple
+        # index. ``_process_child_completion_db_sync`` enters its
+        # own ``WriteGuardSession`` internally, so we patch
+        # ``Session.flush`` at the class level for the duration of
+        # the call.
+        from sqlmodel import Session as SQLModelSession
+
+        original_flush = SQLModelSession.flush
+        call_count = {"n": 0}
+
+        def _raise_unrelated_flush(self, *_args, **_kwargs):
+            call_count["n"] += 1
+            raise synthetic_err
+
+        monkeypatch.setattr(SQLModelSession, "flush", _raise_unrelated_flush)
+        # Keep the original available for any helper session that
+        # the service may open (e.g. the bus / repo paths).
+        _ = original_flush
+
+        # The natural completion path MUST surface the unrelated
+        # IntegrityError — NOT swallow it as ``idempotency_skip``.
+        with pytest.raises(SAIntegrityError) as exc_info:
+            service._process_child_completion_db_sync(
+                instance_id=child_id,
+                completed_message_id="msg-unrelated-integrity",
+                last_content="... (would race if it could)",
+            )
+
+        # The propagated error is the SAME synthetic error we
+        # injected (no wrapping into a new exception type — bare
+        # ``raise``).
+        assert exc_info.value is synthetic_err, (
+            "unrelated IntegrityError MUST be re-raised as-is (bare "
+            "``raise``); wrapping would hide the original exception"
+        )
+        assert call_count["n"] >= 1, (
+            "the patched Session.flush MUST have been invoked at "
+            "least once before the error propagated"
+        )
+
+        # Discrimination rule sanity check: the synthetic FK error
+        # does NOT match the obligation-triple pattern. Belt and
+        # braces — the re-raise already proves the caller's logic.
+        from daemon.services.child_reports import (
+            _is_obligation_triple_integrity_error,
+        )
+
+        assert _is_obligation_triple_integrity_error(synthetic_err) is False, (
+            "the synthetic FK error MUST NOT be mis-classified as "
+            "obligation-triple (it does not contain all three "
+            "obligation-triple column names)"
+        )
