@@ -1698,4 +1698,361 @@ test.describe('Hide Button - Original Bug Symptom E2E', () => {
     expect(filtered, `console errors: ${filtered.join('\n')}`).toEqual([]);
     expect(pageErrors, `page errors: ${pageErrors.join('\n')}`).toEqual([]);
   });
+
+  // ==========================================================================
+  // S5b: BRANCH-2 HEADER WORKSPACE RE-SHOW — verified in its TRUE
+  // firing state (workspace hidden-but-recoverable, chat NOT
+  // recoverable, nothing visible). The dispatcher's task description
+  // identifies this as the one acceptance cell not yet live-verified
+  // by S1–S7: handler branch 2 (`workspaceOverlayService.show(
+  // workspaceProjectId())` per app.ts:567-571) composes correctly at
+  // runtime when isHiddenButRecoverable() is false AND
+  // isWorkspaceRecoverable() is true AND showTierActive is true.
+  //
+  // The single precondition that distinguishes branch 2 from
+  // S7's branch 5 (chat-wins) is:
+  //
+  //   isHiddenButRecoverable() == false
+  //   ⇔ detailVisible == true OR activeInstanceId == null OR isInstancesRoute == false
+  //
+  // S7 reached branch 5 by leaving !detailVisible() AND
+  // !isPlanRoute() AND activeInstanceId==set AND isInstancesRoute==true
+  // — the chat recoverable state. To get branch 2, the test must
+  // violate the recoverable predicate while still keeping
+  // workspace-recoverable and showTierActive.
+  //
+  // Setup chosen: navigate away from the instances route AFTER
+  // setting up the workspace-recoverable state. syncDetailVisibility
+  // L741-794 sets isInstancesRoute=false when the URL doesn't match
+  // /^\/projects\/[^/?]+\/instances\/[^/?]+$/ AND !== '/instances'.
+  // /projects/{pid}/blueprints fits that profile and (importantly)
+  // keeps the project tab active so tabWorkspaceEffect doesn't
+  // clear workspaceProjectId. With localStorage.cached
+  // activeInstanceId present but isInstancesRoute=false,
+  // isHiddenButRecoverable resolves to false → branch 2 fires.
+  //
+  // Workspace reachability: project tab bar isn't rendered on
+  // /blueprints, so Alt+` (the global hotkey, gated on
+  // activeProjectId !== 'all' && !== null per app.ts:818-823) is the
+  // only path that opens the workspace from that page. Alt+` calls
+  // workspaceOverlayService.toggle(activeProjectId) which sets
+  // showWorkspace=true (equivalent to .show(projectId)). The open
+  // step in this test uses that path.
+  // ==========================================================================
+  test('S5b: branch-2 header-button workspace re-show (no recoverable chat, nothing visible)', async ({
+    page,
+  }) => {
+    const consoleErrors: string[] = [];
+    const pageErrors: string[] = [];
+    page.on('console', (msg: ConsoleMessage) => {
+      if (msg.type() === 'error') {
+        const location = msg.location();
+        const loc = location && location.url ? ` @ ${location.url}` : '';
+        consoleErrors.push(`[${msg.type()}] ${msg.text()}${loc}`);
+      }
+    });
+    page.on('pageerror', (err: Error) => pageErrors.push(err.message));
+
+    const S5B_INSTANCE = S5_INSTANCE_IDS[0];
+    const projectId = s5ProjectId;
+
+    // ── Fresh context: wipe any localStorage state left over from
+    // S1–S7 (each prior test wrote a cached activeInstanceId, and we
+    // need a clean baseline so the precondition guard's assertion is
+    // honest). Navigate to '/' first so localStorage.clear() runs in
+    // the document origin, then reload so Angular's restoreState reads
+    // the cleared localStorage (instances-view-state.service.ts
+    // restoreState L139-211 only runs once at App boot).
+    await page.goto('/');
+    await page.evaluate(() => localStorage.clear());
+    await page.reload();
+    await expect(async () => {
+      const stored = await page.evaluate(() =>
+        localStorage.getItem('ensemble-instances-view-state'),
+      );
+      expect(stored).toBeNull();
+    }).toPass({ timeout: 5000 });
+
+    // Navigate to a fresh detail URL — Angular re-runs restoreState
+    // (still empty), the URL regex matches, syncDetailVisibility
+    // adds the project tab via app.ts:786-788 and calls
+    // openDetail(projectId, instanceId) which writes a fresh
+    // activeInstanceId to localStorage.
+    await page.goto(
+      `/projects/${projectId}/instances/${S5B_INSTANCE}`,
+    );
+
+    // Chat mount + activation gate.
+    await expect(async () => {
+      const d = await page.locator('app-chat').evaluate(
+        (el) => getComputedStyle(el).display,
+      );
+      expect(d).not.toBe('none');
+    }).toPass({ timeout: 15000 });
+
+    // localStorage now cached the activeInstanceId (openDetail
+    // -> instancesViewState.openDetail -> activeInstanceId.set ->
+    // saveState at service L97-105). We will NAVIGATE AWAY before
+    // the second header click — that's what makes
+    // isHiddenButRecoverable false (the URL gate). Recording the
+    // baseline value for the precondition assertion below.
+    const baselineStored = await page.evaluate(() =>
+      localStorage.getItem('ensemble-instances-view-state'),
+    );
+    expect(baselineStored).toBeTruthy();
+    const baselineActiveId = JSON.parse(baselineStored!).activeInstanceId;
+    expect(baselineActiveId).toBe(S5B_INSTANCE);
+
+    // Capture the project id baseline (activeProjectId via the
+    // project tab bar — `.tab.active .tab-name` reflects the
+    // projectId even though DOM text mirrors the projectId, see
+    // syncDetailVisibility L787 which passes `name: projectId`).
+    const baselineProjectSnapshot = await readWorkspaceSnapshot(page);
+    expect(baselineProjectSnapshot.activeProjectTabName).toBe(projectId);
+
+    await page.screenshot({
+      path: 'test-results/s5b-01-chat-visible-fresh.png',
+      fullPage: true,
+    });
+
+    // ── Open the workspace via the project tab's "View workspace"
+    // button. The project tab bar is in the chat subtree
+    // (chat.html:3) and only renders on detail routes (or the bare
+    // /instances page), so we open while the chat is up. The
+    // workspace z=100 sits on top of the chat z=90; both are
+    // display:flex until we hide them.
+    const wsBtn = workspaceBtnForActiveTab(page);
+    await expect(wsBtn).toBeVisible({ timeout: 10000 });
+    await wsBtn.click();
+
+    await expect(async () => {
+      const snap = await readWorkspaceSnapshot(page);
+      expect(snap.workspaceDisplay).toBe('flex');
+    }).toPass({ timeout: 5000 });
+
+    await page.screenshot({
+      path: 'test-results/s5b-02-workspace-visible.png',
+      fullPage: true,
+    });
+
+    // ── Header click #1: hide workspace (handler branch 1 fires
+    // because workspace is visible — N3 minimize-surprise: workspace
+    // hides via workspaceOverlayService.hide() and the function
+    // early-returns without touching chat state).
+    const hideBtn = page.locator('.overlay-hide-btn');
+    await expect(hideBtn).toBeVisible({ timeout: 5000 });
+    await hideBtn.click();
+
+    await expect(async () => {
+      const snap = await readWorkspaceSnapshot(page);
+      expect(snap.workspaceDisplay).toBe('none');
+    }).toPass({ timeout: 5000 });
+
+    // Chat is still visible (branch 1 returned without touching
+    // chat; we never explicitly hid it via the chat-side branch).
+    await expect(async () => {
+      const d = await page.locator('app-chat').evaluate(
+        (el) => getComputedStyle(el).display,
+      );
+      expect(d).not.toBe('none');
+    }).toPass({ timeout: 5000 });
+
+    // ── Header click #2: hide chat (handler branch 4 fires —
+    // detailVisible=true and !workspaceVisible, so detailVisible
+    // is set to false). Now: workspace hidden-recoverable, chat
+    // hidden-recoverable, detailVisible=false. We're still on the
+    // detail URL though — branch 5 would still win if we clicked
+    // header again. We MUST leave the detail URL before the
+    // branch-2 click.
+    await hideBtn.click();
+
+    await expect(async () => {
+      const d = await page.locator('app-chat').evaluate(
+        (el) => getComputedStyle(el).display,
+      );
+      expect(d).toBe('none');
+    }).toPass({ timeout: 5000 });
+
+    await expect(async () => {
+      const snap = await readWorkspaceSnapshot(page);
+      expect(snap.workspaceDisplay).toBe('none');
+    }).toPass({ timeout: 5000 });
+
+    // ── Navigate to a non-/instances route via in-app SPA navigation
+    // (NOT page.goto — a full URL load would reset the singleton
+    // WorkspaceOverlayService state including workspaceProjectId,
+    // nulling out the recoverable predicate). Click the "Sources"
+    // nav link in app.html — `routerLink="/sources"` triggers Angular
+    // router navigation (pushState) which preserves the service's
+    // in-memory state. On /sources:
+    //   - syncDetailVisibility L741-794 sees no match → isInstancesRoute(false)
+    //   - closeDetail() at L791 sets detailVisible=false (already false)
+    //   - WorkspaceOverlayService.workspaceProjectId stays set
+    //     (workspaceProjectId mutation only happens in chat.component.ts:
+    //     tabWorkspaceEffect, only when activeProjectId becomes null;
+    //     the active tab is still our projectId per localStorage).
+    //
+    // This is the URL gate that makes isHiddenButRecoverable false:
+    // the predicate needs isInstancesRoute=true (bare /instances OR
+    // a project-scoped detail). /sources fails that conjunct — chat
+    // cache cannot be re-shown via the header button — so branch 2's
+    // `!isHiddenButRecoverable()` gate opens and the show(boundId)
+    // re-show path fires.
+    const sourcesNav = page.locator('a.nav-link', { hasText: /^Sources$/ }).first();
+    await expect(sourcesNav).toBeVisible({ timeout: 10000 });
+    await sourcesNav.click();
+    await page.waitForURL(/\/sources\/?$/, { timeout: 10000 });
+
+    // ── Precondition guard (the cell that distinguishes branch 2
+    // from S7's branch 5).
+    //
+    // (a) app-workspace is display:none (workspace hidden).
+    // (b) app-chat is display:none (chat hidden too — its
+    //     detailVisible is false on a non-detail URL).
+    // (c) URL is /projects/{pid}/blueprints — the regex
+    //     /^\/projects\/[^/?]+\/instances\/[^/?]+$/ does NOT match
+    //     AND /^\/instances\/?$/ does NOT match either, so
+    //     syncDetailVisibility's L754 set isInstancesRoute(false).
+    //     ⇒ isHiddenButRecoverable = false (the third conjunct
+    //     fails).
+    // (d) Header button affordance = show-tier (workspace is the
+    //     sole recoverable, !plan, !detailVisible, AND
+    //     isWorkspaceRecoverable).
+    //
+    // localStorage still has the activeInstanceId from the earlier
+    // openDetail — that is honest and documents WHY branch 2 needs
+    // the route gate. Without (c), isHiddenButRecoverable would
+    // still resolve true (cached id + !detailVisible +
+    // isInstancesRoute=true on a detail URL), branch 5 would win,
+    // and we'd verify S7's scenario instead of S5b's. The test is
+    // honest about that localStorage state.
+    // ── Click the Sources nav link — Angular SPA navigation
+    // (routerLink via app.html L18 → router.navigateByUrl, in-app
+    // pushState). Preserves the singleton WorkspaceOverlayService
+    // state (workspaceProjectId stays set), unlike page.goto which
+    // triggers a full reload resetting all singletons.
+
+    await expect(async () => {
+      const snap = await readWorkspaceSnapshot(page);
+      const chatCount = await page.locator('app-chat').count();
+      const chatD = chatCount > 0
+        ? await page.locator('app-chat').evaluate(
+            (el) => getComputedStyle(el).display,
+          )
+        : 'absent';
+      expect(snap.workspaceDisplay).toBe('none');
+      // Chat may be display:none (host preserved, just hidden by
+      // app.ts:412-413) OR absent (unmounted on /sources). Either
+      // is fine — the critical precondition is chat NOT being in
+      // the recoverable state.
+      expect(chatD === 'none' || chatD === 'absent').toBe(true);
+      // Header button is still rendered (workspace recoverable is
+      // enough to drive anyOverlayVisible=true).
+      expect(snap.hideBtnAria).toBe('Show overlay');
+      expect(snap.hideBtnIcon).toBe('visibility');
+      // URL excludes the detail-instance regex AND is not bare
+      // /instances — syncDetailVisibility sets isInstancesRoute=false.
+      const path = new URL(page.url()).pathname;
+      expect(path).toBe('/sources');
+      expect(path).not.toMatch(
+        /^\/projects\/[^/?]+\/instances\/[^/?]+$/,
+      );
+      expect(path).not.toMatch(/^\/instances\/?$/);
+    }).toPass({ timeout: 5000 });
+
+    // The localStorage activeInstanceId IS still present — that's
+    // the diagnostic: it confirms why the route gate matters.
+    const storedBeforeClick = await page.evaluate(() =>
+      localStorage.getItem('ensemble-instances-view-state'),
+    );
+    expect(storedBeforeClick).toBeTruthy();
+    const chatCachedId = JSON.parse(storedBeforeClick!).activeInstanceId;
+    expect(chatCachedId).toBe(S5B_INSTANCE);
+    // But the recoverable predicate fails because we're not on
+    // /instances — verified above.
+
+    await page.screenshot({
+      path: 'test-results/s5b-03-show-tier-both-hidden-not-on-detail.png',
+      fullPage: true,
+    });
+
+    // ── Header click #3: branch 2 fires
+    // (workspaceOverlayService.show(workspaceProjectId()) per
+    // app.ts:567-571). Workspace RE-SHOWN for the SAME project.
+    await hideBtn.click();
+
+    // Workspace visible (display:flex).
+    await expect(async () => {
+      const snap = await readWorkspaceSnapshot(page);
+      expect(snap.workspaceDisplay).toBe('flex');
+    }).toPass({ timeout: 5000 });
+
+    // Chat overlay stays hidden — branch 2 is a pure workspace
+    // service mutation, it does NOT touch chat state.
+    await expect(async () => {
+      const d = await page.locator('app-chat').evaluate(
+        (el) => getComputedStyle(el).display,
+      );
+      expect(d).toBe('none');
+    }).toPass({ timeout: 5000 });
+
+    // Header affordance flips back to HIDE (workspace visible
+    // branch in hideOverlayIcon L292-296 — the dominant signal).
+    const ariaReshown = await hideBtn.getAttribute('aria-label');
+    const iconReshown = (
+      await page.locator('.overlay-hide-btn mat-icon').first().textContent()
+    )?.trim();
+    expect(ariaReshown).toBe('Hide overlay');
+    expect(iconReshown).toBe('visibility_off');
+
+    // SAME project identity: workspaceProjectId was set by branch
+    // 2 via show(boundProjectId) — the bound id is the same one
+    // the user originally opened. The active project tab is still
+    // `projectId` (we never switched tabs; only changed URL via
+    // SPA navigation). The project tab bar isn't rendered on
+    // /sources, so DOM `.tab.active` reflection isn't available
+    // here — instead we assert via localStorage.projectTabs which
+    // records the active tab state. The openTabs payload +
+    // activeTabId pair is the persistence identity witness for
+    // this branch.
+    const urlAfter = page.url();
+    expect(urlAfter).toBe('http://localhost:4199/sources');
+    const projectTabsAfter = await page.evaluate(() =>
+      localStorage.getItem('ensemble-project-tabs'),
+    );
+    expect(projectTabsAfter).toBeTruthy();
+    const parsedTabs = JSON.parse(projectTabsAfter!);
+    expect(parsedTabs.activeTabId).toBe(projectId);
+
+    await page.screenshot({
+      path: 'test-results/s5b-04-workspace-reshown-same-project.png',
+      fullPage: true,
+    });
+
+    console.log(
+      '[S5b-BRANCH2]',
+      JSON.stringify({
+        projectId,
+        branch2FiringPreconditions: {
+          workspaceHidden: true,
+          chatOverlayHidden: true,
+          isInstancesRoute: false,
+          showTier: { aria: 'Show overlay', icon: 'visibility' },
+          cachedChatIdPresent: chatCachedId,
+        },
+        branch2ObservedEffects: {
+          workspaceReshown: true,
+          chatStillHidden: true,
+          urlUnchanged: urlAfter,
+          showTierAfter: { aria: ariaReshown, icon: iconReshown },
+        },
+      }),
+    );
+
+    // Console hygiene: workspace API 404s + plane CSP are noise;
+    // nothing else may leak.
+    const filtered = consoleErrors.filter((e) => !isFilteredNoise(e));
+    expect(filtered, `console errors: ${filtered.join('\n')}`).toEqual([]);
+    expect(pageErrors, `page errors: ${pageErrors.join('\n')}`).toEqual([]);
+  });
 });
