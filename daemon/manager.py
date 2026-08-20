@@ -472,23 +472,99 @@ class InstanceManager:
         loop to schedule async coroutines via
         ``asyncio.run_coroutine_threadsafe``).
 
+        F5 (2026-08-20): loop-fallback hardening — ported from
+        the recovery service's hardened copy
+        (``daemon/services/report_delivery_recovery.py`` Y3, also
+        same day). Both copies now share the same contract: when
+        the manager's stored loop is unset / closed AND
+        ``asyncio.get_event_loop()`` raises ``RuntimeError``,
+        this helper logs a WARNING and raises ``RuntimeError``
+        (NOT ``asyncio.new_event_loop()``).
+
+        Why drop the ``new_event_loop`` fallback: a brand-new
+        loop is NOT the manager's canonical loop. Scheduling
+        onto it from a worker thread while blocking on
+        ``.result(timeout=8.0)`` is a confusing failure mode —
+        a fresh, never-running loop would just hang the worker
+        on ``.result()`` until the 8s budget expires, masking
+        the real problem (the daemon loop is closed / absent).
+        A caller that genuinely needs a loop MUST wire one —
+        silent fallback hides the misconfiguration.
+
         Returns:
             The manager's loop (``self._loop``, set during
-            ``initialize()``). Falls back to the caller's running
-            loop when ``self._loop`` is unset (test doubles that
-            don't set it).
+            ``initialize()``) when it is non-None and not
+            closed. Otherwise the live ``asyncio.get_event_loop()``
+            if one is set on this thread. Otherwise raises
+            ``RuntimeError`` (caller is expected to absorb the
+            error in its per-row ``except Exception`` and retry
+            next sweep cycle).
+
+        Caller audit (F5, 2026-08-20) — every production caller
+        already wraps ``.result(timeout=8.0)`` in
+        ``except Exception``, so the new ``RuntimeError`` is
+        absorbed naturally and the row is bumped to
+        ``out.errors``:
+
+        * ``daemon/manager.py`` ``_reenter_completion_via_loop``
+          (~line 6434) — ``try / except Exception`` absorbs
+          the new RuntimeError.
+        * ``daemon/manager.py`` ``_fetch_subshape_a_content_sync``
+          (~line 6696) — ``try / except Exception`` absorbs
+          the new RuntimeError.
+
+        Caller test bindings:
+
+        * ``tests/unit/test_resume_router_deferred_recovery.py``
+          line 1230 sets ``holder._loop`` to
+          ``asyncio.get_running_loop()`` (the test's live loop),
+          so the ``loop is not None and not loop.is_closed()``
+          branch returns immediately. No regression.
+        * ``tests/unit/test_resume_router_deferred_recovery.py``
+          line 491 sets ``manager._loop = None`` but does NOT
+          actually invoke ``_get_event_loop`` (the test path
+          uses ``manager._session_scope()`` directly), so the
+          hardening branch is not exercised.
+        * ``tests/unit/test_report_delivery_recovery_service.py``
+          exercises the recovery service's OWN hardened copy
+          (``service._get_event_loop``), not the manager's —
+          independent path, no regression.
         """
         loop = getattr(self, "_loop", None)
         if loop is not None:
-            return loop
+            if not loop.is_closed():
+                return loop
+            # Manager's stored loop is closed (shutdown /
+            # restart-replay path). Fall through to
+            # ``asyncio.get_event_loop()`` and accept that
+            # the closed-loop branch is now observable — if
+            # the live-resolution path also fails, the
+            # terminal branch raises.
+            logger.warning(
+                "InstanceManager._get_event_loop: manager._loop "
+                "is closed — falling back to "
+                "asyncio.get_event_loop()"
+            )
         try:
             return asyncio.get_event_loop()
         except RuntimeError:
-            # No running loop in this thread — production always has
-            # ``self._loop`` set. Return a fresh loop as a last
-            # resort (the sweep's recovery call will surface a
-            # clearer error if the destination is wrong).
-            return asyncio.new_event_loop()
+            # Terminal branch: no live loop available. The
+            # caller MUST retry on the next cycle — DO NOT
+            # create a fresh loop (Y3: a fresh loop masks the
+            # closed-loop state behind a confusing dead-lock
+            # on ``.result()``). Log a WARNING for operator
+            # visibility and raise ``RuntimeError``.
+            logger.warning(
+                "InstanceManager._get_event_loop: no live event "
+                "loop available (manager._loop closed or unset, "
+                "no running loop in this thread); the caller "
+                "will retry on the next sweep cycle"
+            )
+            raise RuntimeError(
+                "report-delivery recovery: no live event loop "
+                "available (manager._loop closed and no running "
+                "loop in caller thread)"
+            ) from None
 
     @contextlib.contextmanager
     def _session_scope(self):
@@ -5503,10 +5579,28 @@ class InstanceManager:
                     boot_sweep_task.add_done_callback(_log_boot_sweep_done)
                 else:
                     # Loop unavailable — fall back to running
-                    # synchronously. This path is for unusual
-                    # lifecycle states (e.g. tests that didn't wire
-                    # a loop); the production path always has a
-                    # loop set.
+                    # synchronously. F7 (2026-08-20): this
+                    # sync-fallback path exists ONLY for tests /
+                    # contexts that did NOT wire an event loop
+                    # (``manager._loop is None or closed``).
+                    # The production boot path always has a live
+                    # loop (set in ``InstanceManager.initialize()``
+                    # via the application startup sequence) and
+                    # takes the ``loop.create_task(asyncio.to_thread
+                    # (...))`` off-loop dispatch above — the boot
+                    # caller returns immediately and the sweep
+                    # runs concurrently on a worker thread.
+                    #
+                    # Keeping this sync branch is DELIBERATE:
+                    # removing it would break every test that
+                    # builds a service without wiring a loop
+                    # (see ``tests/integration/test_boot_report_
+                    # recovery.py`` and friends). The branch is
+                    # safe because ``recover_on_startup()`` is
+                    # sync + idempotent and the boot caller
+                    # already tolerates a blocking initial sweep
+                    # (the boot sequence itself is the gate, not
+                    # the sweep timing).
                     logger.info(
                         "ReportDeliveryRecoveryService boot sweep "
                         "running synchronously (no loop available)"
@@ -7950,16 +8044,33 @@ class InstanceManager:
                         # CANCELLED tasks at line 6320-6363).
                         #
                         # ─── FM-1 guard (Phase 2 task 2.3) ────────────────
-                        # EXEMPT the cancel+complete when the task is a
-                        # PROCESS_REPORT AND the message is a READY
-                        # ``completion_report`` row AND a non-terminal
-                        # injection row exists (DEFERRED or PENDING).
-                        # Without this guard the unmodified FM-1 loop
-                        # would kill the PROCESS_REPORT task that the
-                        # Phase 2 recovery sweep just created — the
-                        # report obligation would land on a fresh
-                        # PENDING PROCESS_REPORT task that the loop
-                        # then cancels, stranding the report.
+                        # EXEMPT the cancel+complete when ALL of:
+                        #   (1) ``task.type == PROCESS_REPORT``,
+                        #   (2) the linked message is a
+                        #       ``COMPLETION_REPORT``-typed row
+                        #       (NOT ``msg.status == READY`` — see
+                        #       corrected-predicate comment below),
+                        #   (3) a non-terminal injection row
+                        #       exists for the message
+                        #       (DEFERRED or PENDING).
+                        #
+                        # The enclosing loop
+                        # (manager.py:~7737-7744) already filters
+                        # messages to ``PENDING|PROCESSING|RETRYING``
+                        # — so the ORIGINAL predicate's
+                        # ``msg.status == READY`` term was DEAD
+                        # CODE (READY messages never reach the
+                        # inner branch) and is dropped from the
+                        # corrected predicate below. The deep-
+                        # review REJECT verdict confirmed it.
+                        #
+                        # Without this guard the unmodified FM-1
+                        # loop would kill the PROCESS_REPORT task
+                        # that the Phase 2 recovery sweep just
+                        # created — the report obligation would
+                        # land on a fresh PENDING PROCESS_REPORT
+                        # task that the loop then cancels,
+                        # stranding the report.
                         #
                         # The exemption predicate covers BOTH the
                         # PENDING shape (task row PENDING) and the

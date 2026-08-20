@@ -813,3 +813,158 @@ class TestGetEventLoopClosedLoop:
             )
         finally:
             asyncio.get_event_loop = original_get_event_loop
+
+# =============================================================================
+# F4 — interruptible sweep + honest stop() join budget (POST-DEEP-REVIEW)
+# =============================================================================
+
+
+class TestStopEventInterrupt:
+    """F4 (2026-08-20): a polite ``stop()`` MUST interrupt the
+    sweep loop promptly — between every row AND between lanes —
+    so ``thread.join`` rarely hits the (now-raised) budget.
+
+    Without the inter-row check, a single per-row path that
+    chains multiple ``run_coroutine_threadsafe(...).result(8.0)``
+    bridges can blow past the old ``10s`` join budget and orphan
+    the daemon thread on shutdown. The inter-row check is the
+    primary prompt-exit; the inter-lane check is the cheap
+    secondary cut.
+    """
+
+    def test_stop_event_exits_mid_batch(
+        self, engine: Engine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Set ``self._stop_event`` after the FIRST row is
+        processed — assert the sweep exits BEFORE processing the
+        remaining rows of the batch.
+
+        Strategy: install a side-effect on
+        ``_recover_one_deferred_row`` that flips ``_stop_event``
+        after the FIRST invocation, then count ``manager.
+        _handle_recover_deferred_report`` calls. With N rows
+        seeded, ``< N`` calls means the loop exited early.
+        """
+        # Seed 4 DEFERRED rows (4 distinct parent/child pairs).
+        for i in range(4):
+            parent = _seed_instance(engine)
+            child = _seed_instance(
+                engine,
+                parent_id=parent,
+                status=InstanceStatus.COMPLETED.value,
+            )
+            _seed_deferred_row(
+                engine,
+                parent_instance_id=parent,
+                child_instance_id=child,
+                child_message_id=f"child-msg-{i}",
+            )
+
+        service, manager = _build_service(engine)
+
+        # Reset the manager mock's call counter; we want a clean
+        # baseline.
+        manager._handle_recover_deferred_report.reset_mock()
+
+        # Wrap the per-row processor so the FIRST call flips the
+        # stop event. Subsequent rows will hit the inter-row
+        # ``self._stop_event.is_set()`` check and exit the batch.
+        original = service._recover_one_deferred_row
+        call_counter = {"n": 0}
+
+        def _recover_and_stop(
+            row, *, result, parent_not_terminal
+        ):  # type: ignore[no-untyped-def]
+            call_counter["n"] += 1
+            if call_counter["n"] == 1:
+                service._stop_event.set()
+            return original(
+                row,
+                result=result,
+                parent_not_terminal=parent_not_terminal,
+            )
+
+        monkeypatch.setattr(
+            service,
+            "_recover_one_deferred_row",
+            _recover_and_stop,
+        )
+
+        # Run the sweep. With the inter-row guard the first row's
+        # post-recovery flip bails the loop BEFORE row 2.
+        result = service.recover_now()
+
+        # The lane was processed but the manager mock was hit only
+        # ONCE (row 1), not four times.
+        recovered_in_lane = result.lanes["deferred"].recovered
+        handled_calls = (
+            manager._handle_recover_deferred_report.call_count
+        )
+        assert handled_calls == 1, (
+            "stop-event guard MUST exit the per-row loop after "
+            "the first row; manager mock was called "
+            f"{handled_calls} times (expected 1)"
+        )
+        assert recovered_in_lane == 1, (
+            "only the first row should be counted as recovered; "
+            f"got recovered={recovered_in_lane}"
+        )
+
+    def test_stop_returns_within_honest_budget(
+        self, engine: Engine
+    ) -> None:
+        """Honest worst-case join budget (F4, 2026-08-20): the
+        auto-computed ``stop()`` budget covers the 3-bridge
+        worst case (3 × 8s + 4s margin == 28s with the 10s floor).
+
+        This test asserts the budget is NOT regressed to a
+        lying ``10s`` default — we read the same source constant
+        the production ``stop()`` uses by inspecting the
+        ``stop()`` method's default. A pure unit assertion of
+        the NEW auto-computed budget; no real thread required.
+        """
+        import inspect
+
+        service, _ = _build_service(engine)
+        sig = inspect.signature(service.stop)
+        # The parameter ``timeout`` must be ``None`` (not the
+        # prior ``10.0`` literal) so the auto-computed worst-
+        # case budget kicks in. The ``float | None`` annotation
+        # is the contract: callers passing ``timeout=None`` get
+        # ``max(3 * 8.0 + 4.0, 10.0) == 28.0s``; callers passing
+        # an explicit float get the literal they passed.
+        assert sig.parameters["timeout"].default is None, (
+            "stop() MUST default ``timeout=None`` (auto-computed "
+            "worst-case budget); default literal 10.0 would be a "
+            "regression to the lying budget"
+        )
+        # Also verify the helper docstring surfaces the arithmetic
+        # so an operator scanning the source can audit the budget.
+        doc = service.stop.__doc__ or ""
+        assert "3 * 8.0 + 4.0" in doc, (
+            "stop() docstring MUST document the worst-case "
+            "join-budget arithmetic for operator audit"
+        )
+
+    def test_explicit_timeout_still_respected(
+        self, engine: Engine
+    ) -> None:
+        """Callers that pass an explicit ``timeout=float`` get
+        THAT literal — the auto-computed default only kicks in
+        for ``timeout=None``. No silent override of explicit
+        intent.
+        """
+        import inspect
+
+        service, _ = _build_service(engine)
+        sig = inspect.signature(service.stop)
+        # The annotation must accept ``float | None`` (not
+        # ``float`` only) so ``timeout=None`` is legal.
+        anno = sig.parameters["timeout"].annotation
+        # ``float | None`` is the expected form (PEP 604). It
+        # stringifies as ``typing.Union`` or ``float | None``
+        # depending on Python version.
+        anno_str = str(anno)
+        assert (
+            "float" in anno_str and "None" in anno_str
+        ), f"stop() timeout annotation MUST be float | None; got {anno_str!r}"

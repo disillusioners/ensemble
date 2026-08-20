@@ -319,11 +319,54 @@ class ReportDeliveryRecoveryService:
             f"orphan={self._lane_orphan}]"
         )
 
-    def stop(self, timeout: float = 10.0) -> None:
-        """Stop the periodic background thread."""
+    def stop(self, timeout: float | None = None) -> None:
+        """Stop the periodic background thread.
+
+        Honest worst-case join budget (F4, 2026-08-20):
+
+        W3 aligned every per-step ``.result(timeout=8.0)`` in the
+        sweep to 8s (2s headroom under the prior 10s ``stop()``
+        budget). A single per-row path (ORPHAN lane → revival →
+        re-enter) chains THREE ``run_coroutine_threadsafe(...).result``
+        bridges at 8s each — worst-case 24s. The previous default
+        ``timeout=10.0`` was therefore a LIE: ``thread.join`` could
+        expire mid-.result() and orphan the daemon thread on
+        shutdown.
+
+        Default ``timeout`` is now computed as
+        ``max(3 * 8.0 + 4.0, 10.0) == 28.0s`` — covers the
+        worst-case chain (3 bridges × 8s = 24s + 4s for the
+        inter-bridge DB / TOCTOU work) with margin, AND floors at
+        the prior 10s budget so callers passing ``timeout=None``
+        never join-faster than the original.
+
+        The per-row loop is ALSO interruptible (F4, 2026-08-20):
+        between every row the worker checks ``self._stop_event``
+        and exits the batch promptly — ``stop()`` returns without
+        needing the full join budget on a polite shutdown.
+
+        Args:
+            timeout: ``None`` (use the auto-computed worst-case
+                budget) or an explicit float in seconds. The
+                ``timeout=10.0`` default from the prior revision
+                is REPLACED — callers that depended on the literal
+                ``10.0`` should pass ``timeout=10.0`` explicitly.
+        """
         self._stop_event.set()
         if self._thread is not None:
-            self._thread.join(timeout=timeout)
+            join_timeout = (
+                timeout
+                if timeout is not None
+                else max(3 * 8.0 + 4.0, 10.0)
+            )
+            self._thread.join(timeout=join_timeout)
+            if self._thread.is_alive():
+                logger.warning(
+                    "ReportDeliveryRecoveryService.stop: thread did "
+                    "not exit within %.1fs join budget — daemon thread "
+                    "left running (shutdown will reap on process exit)",
+                    join_timeout,
+                )
             self._thread = None
         logger.info("ReportDeliveryRecoveryService stopped")
 
@@ -398,12 +441,27 @@ class ReportDeliveryRecoveryService:
         The ORPHAN lane is intentionally LAST — the design review
         verified that a terminal parent's obligation is observable
         (logged + metric) but never silent.
+
+        F4 (2026-08-20): a single ``self._stop_event.is_set()`` check
+        between lanes (cheap; two extra ``is_set()`` calls per
+        sweep) — the per-row check inside each lane is the primary
+        prompt-exit, but if a lane returns with a large batch held
+        in memory the inter-lane check cuts the next lane's DB
+        query + results-processing early.
         """
         result = SweepResult()
         if self._lane_deferred:
             result.lanes["deferred"] = self._run_deferred_lane()
+            if self._stop_event.is_set():
+                self._finalize_sweep_result(result)
+                return result
         if self._lane_no_row_backstop:
-            result.lanes["no_row_backstop"] = self._run_no_row_backstop_lane()
+            result.lanes["no_row_backstop"] = (
+                self._run_no_row_backstop_lane()
+            )
+            if self._stop_event.is_set():
+                self._finalize_sweep_result(result)
+                return result
         # Lanes 3 + 4 share the same query (Lane 3 covers never-
         # stamped rows; Lane 4 covers stamped-stale rows). We run
         # them with distinct ``recovery_retry_minutes`` arguments —
@@ -413,16 +471,32 @@ class ReportDeliveryRecoveryService:
             result.lanes["pending_age"] = self._run_pending_age_lane(
                 recovery_retry_minutes=0
             )
+            if self._stop_event.is_set():
+                self._finalize_sweep_result(result)
+                return result
         if self._lane_recovery_retry:
             result.lanes["recovery_retry"] = self._run_pending_age_lane(
                 recovery_retry_minutes=self._recovery_retry_minutes
             )
+            if self._stop_event.is_set():
+                self._finalize_sweep_result(result)
+                return result
         if self._lane_orphan:
             result.lanes["orphan"] = self._run_orphan_lane()
+        self._finalize_sweep_result(result)
+        return result
+
+    @staticmethod
+    def _finalize_sweep_result(result: SweepResult) -> None:
+        """Aggregate ``total_recovered`` for a partial-or-full sweep.
+
+        F4 (2026-08-20) helper — pulled out so the inter-lane
+        stop-exit branches can share the same aggregation without
+        repeating the ``sum(...)`` literal.
+        """
         result.total_recovered = sum(
             lane.recovered for lane in result.lanes.values()
         )
-        return result
 
     # --------------------------------------------------------
     # Lane 1 — DEFERRED rows for non-terminal parents
@@ -486,6 +560,16 @@ class ReportDeliveryRecoveryService:
             limit=self._batch_cap,
         )
         for row in rows:
+            # F4 (2026-08-20): stop-event check between rows — a
+            # polite ``stop()`` exits the batch promptly without
+            # waiting on the join budget. Cheap (one Event.is_set).
+            if self._stop_event.is_set():
+                logger.info(
+                    "ReportDeliveryRecoveryService._process_deferred_rows: "
+                    "stop requested mid-batch — exiting loop "
+                    "(remaining rows deferred to next sweep cycle)"
+                )
+                break
             try:
                 self._recover_one_deferred_row(
                     row,
@@ -730,6 +814,15 @@ class ReportDeliveryRecoveryService:
             limit=self._batch_cap,
         )
         for row in rows:
+            # F4 (2026-08-20): stop-event check between rows — a
+            # polite ``stop()`` exits the batch promptly without
+            # waiting on the join budget. Cheap (one Event.is_set).
+            if self._stop_event.is_set():
+                logger.info(
+                    "ReportDeliveryRecoveryService._run_no_row_backstop_lane: "
+                    "stop requested mid-batch — exiting loop"
+                )
+                break
             child_id = row["child_id"]
             child_msg_id = row["child_msg_id"]
             parent_id = row["parent_id"]
@@ -852,6 +945,15 @@ class ReportDeliveryRecoveryService:
             limit=self._batch_cap,
         )
         for row in rows:
+            # F4 (2026-08-20): stop-event check between rows — a
+            # polite ``stop()`` exits the batch promptly without
+            # waiting on the join budget. Cheap (one Event.is_set).
+            if self._stop_event.is_set():
+                logger.info(
+                    "ReportDeliveryRecoveryService._run_pending_age_lane: "
+                    "stop requested mid-batch — exiting loop"
+                )
+                break
             try:
                 self._recover_one_pending_row(row, result=out)
             except Exception as exc:
