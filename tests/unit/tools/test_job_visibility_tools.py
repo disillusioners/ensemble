@@ -1086,6 +1086,311 @@ class TestJobInjectTool:
         assert "SECRET INTERNAL ERROR" not in str(result)
 
 
+# ─────────────────────────────────────────────────────────────────────────────────
+# TestSystemDefaultProjectCrossProjectAccess
+# ─────────────────────────────────────────────────────────────────────────────────
+
+
+class TestSystemDefaultProjectCrossProjectAccess:
+    """System-default (no-project) callers are global operators.
+
+    When the caller's instance lives in the system-default project
+    (``constants.SYSTEM_DEFAULT_PROJECT_ID``), the four job-visibility
+    tools must grant cross-project access — chat-facing agents such as
+    Ari/Jober run in the system-default project and need to manage
+    jobs in any user project. Regression: the existing
+    ``*_project_id_mismatch`` tests above cover the deny path; this
+    class covers the allow path that was previously blocked by the
+    strict ``caller.project_id == record.project_id`` check.
+    """
+
+    @pytest.mark.asyncio
+    async def test_job_messages_system_default_caller_allowed(
+        self, mock_services, mock_manager,
+    ):
+        """System-default caller + project-X job → ``job_messages`` allowed."""
+        job_service, _, _ = mock_services
+
+        root_id = "sys-root-1"
+        # Job lives in a regular project (not system-default).
+        record = _make_work_record(
+            "sys-job-1", instance_id=root_id, project_id="proj-X", agent_id="developer",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+
+        # Caller lives in the system-default project (the "global operator" tier).
+        caller = _make_instance("caller-id", project_id=TEST_SYSTEM_PROJECT_ID)
+        root = _make_instance(root_id)
+
+        def get_side_effect(iid):
+            if iid == "caller-id":
+                return caller
+            if iid == root_id:
+                return root
+            return None
+
+        mock_manager._instance_repository.get = MagicMock(side_effect=get_side_effect)
+        mock_manager._instance_repository.get_tree_ids = MagicMock(return_value=[root_id])
+        mock_manager.get_messages = AsyncMock(return_value=[
+            _make_msg("user", "hi"),
+            _make_msg("assistant", "hello back"),
+        ])
+
+        _, queue_mgmt, dlq = mock_services
+        tools = create_job_tools(
+            job_service, queue_mgmt, dlq,
+            manager=mock_manager,
+            current_instance_id="caller-id",
+        )
+        job_messages_tool = tools[13]
+
+        result = await job_messages_tool.ainvoke({"job_id": "sys-job-1"})
+
+        # No access-denied error — the cross-project call succeeded.
+        assert "error" not in result
+        assert result["job_id"] == "sys-job-1"
+        assert result["total_messages"] == 2
+
+    @pytest.mark.asyncio
+    async def test_job_tree_system_default_caller_allowed(
+        self, mock_services, mock_manager,
+    ):
+        """System-default caller + project-X job → ``job_tree`` allowed."""
+        job_service, _, _ = mock_services
+
+        root_id = "sys-root-2"
+        record = _make_work_record(
+            "sys-job-2", instance_id=root_id, project_id="proj-X", agent_id="developer",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+
+        caller = _make_instance("caller-id", project_id=TEST_SYSTEM_PROJECT_ID)
+        root = _make_instance(root_id, status="running")
+
+        def get_side_effect(iid):
+            if iid == "caller-id":
+                return caller
+            if iid == root_id:
+                return root
+            return None
+
+        mock_manager._instance_repository.get = MagicMock(side_effect=get_side_effect)
+        mock_manager._instance_repository.get_tree_ids = MagicMock(return_value=[root_id])
+
+        _, queue_mgmt, dlq = mock_services
+        tools = create_job_tools(
+            job_service, queue_mgmt, dlq,
+            manager=mock_manager,
+            current_instance_id="caller-id",
+        )
+        job_tree_tool = tools[14]
+
+        result = await job_tree_tool.ainvoke({"job_id": "sys-job-2"})
+
+        assert "error" not in result
+        assert result["job_id"] == "sys-job-2"
+        assert result["total_instances"] == 1
+        assert result["active_instances"] == 1
+
+    @pytest.mark.asyncio
+    async def test_job_progress_system_default_caller_allowed(
+        self, mock_services, mock_manager,
+    ):
+        """System-default caller + project-X job → ``job_progress`` allowed."""
+        job_service, _, _ = mock_services
+
+        root_id = "sys-root-3"
+        record = _make_work_record(
+            "sys-job-3", instance_id=root_id, project_id="proj-X", agent_id="developer",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+
+        caller = _make_instance("caller-id", project_id=TEST_SYSTEM_PROJECT_ID)
+        root = _make_instance(root_id, status="running", created_at="2025-01-01T00:00:00+00:00")
+
+        def get_side_effect(iid):
+            if iid == "caller-id":
+                return caller
+            if iid == root_id:
+                return root
+            return None
+
+        mock_manager._instance_repository.get = MagicMock(side_effect=get_side_effect)
+        mock_manager._instance_repository.get_tree_ids = MagicMock(return_value=[root_id])
+        mock_manager.get_messages = AsyncMock(return_value=[
+            _make_msg("assistant", "Working on it"),
+        ])
+
+        _, queue_mgmt, dlq = mock_services
+        tools = create_job_tools(
+            job_service, queue_mgmt, dlq,
+            manager=mock_manager,
+            current_instance_id="caller-id",
+        )
+        job_progress_tool = tools[15]
+
+        result = await job_progress_tool.ainvoke({"job_id": "sys-job-3"})
+
+        assert "error" not in result
+        assert result["job_id"] == "sys-job-3"
+        assert result["status"] == "running"
+        assert result["last_assistant_message"] is not None
+        assert result["last_assistant_message"]["content_snippet"] == "Working on it"
+
+    @pytest.mark.asyncio
+    async def test_job_inject_system_default_caller_allowed(
+        self, mock_services, mock_manager,
+    ):
+        """System-default caller + project-X job → ``job_inject`` allowed."""
+        job_service, _, _ = mock_services
+
+        root_id = "sys-root-4"
+        record = _make_work_record(
+            "sys-job-4", instance_id=root_id, project_id="proj-X", agent_id="developer",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+
+        caller = _make_instance("caller-id", project_id=TEST_SYSTEM_PROJECT_ID)
+        root = _make_instance(root_id, status="running")
+
+        def get_side_effect(iid):
+            if iid == "caller-id":
+                return caller
+            if iid == root_id:
+                return root
+            return None
+
+        mock_manager._instance_repository.get = MagicMock(side_effect=get_side_effect)
+
+        expected_entry = {"content": "injected", "timestamp": "2025-01-01T00:00:00+00:00"}
+        mock_manager.set_injection = MagicMock(return_value=expected_entry)
+        mock_manager.get_injection_count = MagicMock(return_value=1)
+
+        _, queue_mgmt, dlq = mock_services
+        tools = create_job_tools(
+            job_service, queue_mgmt, dlq,
+            manager=mock_manager,
+            current_instance_id="caller-id",
+        )
+        job_inject_tool = tools[16]
+
+        result = await job_inject_tool.ainvoke({
+            "job_id": "sys-job-4",
+            "message": "injected",
+        })
+
+        # No access-denied error — set_injection was called.
+        assert "error" not in result
+        assert result["status"] == "injected"
+        assert result["content"] == "injected"
+        mock_manager.set_injection.assert_called_once_with(root_id, "injected")
+
+    @pytest.mark.asyncio
+    async def test_job_messages_system_default_caller_same_project_allowed(
+        self, mock_services, mock_manager,
+    ):
+        """Trivial case: system-default caller + system-default job → allowed.
+
+        Same project on both sides, so this would have worked under the
+        legacy strict-match check too. Included for completeness so a
+        future refactor can't silently break the trivial case while
+        chasing the carve-out.
+        """
+        job_service, _, _ = mock_services
+
+        root_id = "sys-root-5"
+        record = _make_work_record(
+            "sys-job-5", instance_id=root_id,
+            project_id=TEST_SYSTEM_PROJECT_ID, agent_id="developer",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+
+        caller = _make_instance("caller-id", project_id=TEST_SYSTEM_PROJECT_ID)
+        root = _make_instance(root_id)
+
+        def get_side_effect(iid):
+            if iid == "caller-id":
+                return caller
+            if iid == root_id:
+                return root
+            return None
+
+        mock_manager._instance_repository.get = MagicMock(side_effect=get_side_effect)
+        mock_manager._instance_repository.get_tree_ids = MagicMock(return_value=[root_id])
+        mock_manager.get_messages = AsyncMock(return_value=[
+            _make_msg("user", "hi"),
+        ])
+
+        _, queue_mgmt, dlq = mock_services
+        tools = create_job_tools(
+            job_service, queue_mgmt, dlq,
+            manager=mock_manager,
+            current_instance_id="caller-id",
+        )
+        job_messages_tool = tools[13]
+
+        result = await job_messages_tool.ainvoke({"job_id": "sys-job-5"})
+
+        assert "error" not in result
+        assert result["job_id"] == "sys-job-5"
+        assert result["total_messages"] == 1
+
+    @pytest.mark.asyncio
+    async def test_job_messages_system_default_constant_none_denies_cross_project(
+        self, mock_services, mock_manager, monkeypatch,
+    ):
+        """Pre-bootstrap guard: ``SYSTEM_DEFAULT_PROJECT_ID is None`` → deny.
+
+        The autouse ``setup_system_default_project`` fixture sets the constant
+        to ``TEST_SYSTEM_PROJECT_ID`` for every test in this module. This test
+        overrides it back to ``None`` via ``monkeypatch`` to simulate the
+        pre-bootstrap state (``ensure_system_default_project`` has not yet
+        run) and verifies the helper falls back to strict-mismatch behaviour:
+        a system-default-ish caller (``project_id == TEST_SYSTEM_PROJECT_ID``)
+        requesting a foreign-project job must be denied rather than silently
+        granted global-operator access.
+        """
+        # Override the autouse fixture's value for the duration of this test.
+        monkeypatch.setattr(constants, "SYSTEM_DEFAULT_PROJECT_ID", None)
+
+        job_service, _, _ = mock_services
+
+        root_id = "sys-root-6"
+        # Job lives in a regular project (not system-default).
+        record = _make_work_record(
+            "sys-job-6", instance_id=root_id, project_id="proj-X", agent_id="developer",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+
+        # Caller's project_id equals the (now-None) system-default constant;
+        # under the allow path this would resolve to "global operator", but
+        # with the constant None the strict-mismatch branch fires.
+        caller = _make_instance("caller-id", project_id=TEST_SYSTEM_PROJECT_ID)
+        root = _make_instance(root_id)
+
+        def get_side_effect(iid):
+            if iid == "caller-id":
+                return caller
+            if iid == root_id:
+                return root
+            return None
+
+        mock_manager._instance_repository.get = MagicMock(side_effect=get_side_effect)
+
+        _, queue_mgmt, dlq = mock_services
+        tools = create_job_tools(
+            job_service, queue_mgmt, dlq,
+            manager=mock_manager,
+            current_instance_id="caller-id",
+        )
+        job_messages_tool = tools[13]
+
+        result = await job_messages_tool.ainvoke({"job_id": "sys-job-6"})
+
+        # Strict-mismatch denial — mirrors ``*_project_id_mismatch`` style.
+        assert result == {"error": "Access denied: job does not belong to caller's project"}
+
+
 class TestJobVisibilityToolsRegistration:
     """Smoke / import / registration tests for the two new tools."""
 
