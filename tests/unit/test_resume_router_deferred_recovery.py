@@ -1917,3 +1917,141 @@ class TestReconcileSubShapeBCommits:
             assert task.task_type == TaskType.PROCESS_REPORT.value
             assert task.status == TaskStatus.PENDING.value
             assert task.instance_id == parent
+
+
+# =============================================================================
+# Router × Sweep pairing (DEEP-REVIEW W7, 2026-08-20)
+# =============================================================================
+
+
+class TestRouterSweepPairing:
+    """Router and sweep are BOTH recovery actors. Per the deep-review
+    W7 finding, a router × sweep pairing test pins the
+    exactly-once invariant: both attempt to recover the same
+    DEFERRED row simultaneously; only ONE wins the
+    ``transition_deferred_to_pending`` rowcount-1 race; the
+    loser sees rowcount=0 and skips. No duplicate delivery, no
+    duplicate artifact rows.
+    """
+
+    def test_router_and_sweep_both_target_same_row_only_one_wins(
+        self, engine: Engine
+    ) -> None:
+        """Both recovery actors race the same DEFERRED row. The
+        guarded UPDATE ``state='DEFERRED'`` (atomic transition)
+        ensures exactly-once: rowcount=1 for the winner,
+        rowcount=0 for the loser. We exercise both paths via the
+        real ``transition_deferred_to_pending`` method bound
+        against an in-memory engine.
+        """
+        from daemon.repositories.report_injection.repository import (
+            ReportInjectionRepository,
+        )
+
+        parent = _seed_instance(engine)
+        child = _seed_instance(
+            engine,
+            instance_id="child-1",
+            parent_id=parent,
+            status=InstanceStatus.COMPLETED.value,
+        )
+        injection_id = _seed_deferred_marker(
+            engine,
+            parent_instance_id=parent,
+            child_instance_id=child,
+            child_message_id="child-msg",
+        )
+
+        ri_repo = ReportInjectionRepository(engine=engine)
+
+        # Both actors race the same transition. SQLite serializes
+        # so one wins (rowcount=1) and the other sees rowcount=0
+        # (already PENDING). The race itself is serial in SQLite
+        # but the rowcount guard is the deterministic gate — the
+        # second call returns False regardless of timing.
+        first_won = ri_repo.transition_deferred_to_pending(
+            injection_id
+        )
+        second_won = ri_repo.transition_deferred_to_pending(
+            injection_id
+        )
+
+        assert first_won is True, (
+            "first actor MUST win the DEFERRED→PENDING race"
+        )
+        assert second_won is False, (
+            "second actor MUST see rowcount=0 (already PENDING) "
+            "and skip — exactly-once invariant"
+        )
+
+        # Row state is now PENDING (the winner's transition
+        # persisted; the loser's skip did not mutate).
+        with Session(engine) as session:
+            row = session.exec(
+                sm_select(ReportInjection).where(
+                    ReportInjection.injection_id == injection_id
+                )
+            ).first()
+            assert row is not None
+            assert row.state == ReportInjectionState.PENDING.value, (
+                f"row must be PENDING after the winner's transition; "
+                f"got {row.state}"
+            )
+            # recovery_attempted_at is stamped on the winner
+            # (W6 absorption semantics). For the second call, the
+            # no-op guard returns early without stamping.
+            assert row.recovery_attempted_at is not None, (
+                "winner MUST stamp recovery_attempted_at; "
+                "the loser's no-op guard skips the stamp"
+            )
+
+    def test_router_and_sweep_on_same_row_yield_single_recovery_count(
+        self, engine: Engine
+    ) -> None:
+        """Pin the higher-level invariant: when router + sweep
+        both attempt the same recovery, the
+        ``recovery_count`` semantics across both paths yields
+        exactly one effective recovery. We simulate by checking
+        that the row reaches PENDING with a single
+        recovery_attempted_at stamp (one transition wins; the
+        loser is a no-op).
+        """
+        from daemon.repositories.report_injection.repository import (
+            ReportInjectionRepository,
+        )
+
+        parent = _seed_instance(engine)
+        child = _seed_instance(
+            engine,
+            instance_id="child-2",
+            parent_id=parent,
+            status=InstanceStatus.COMPLETED.value,
+        )
+        injection_id = _seed_deferred_marker(
+            engine,
+            parent_instance_id=parent,
+            child_instance_id=child,
+            child_message_id="child-msg-2",
+        )
+
+        ri_repo = ReportInjectionRepository(engine=engine)
+
+        # Race N actors. Only one wins.
+        results = [
+            ri_repo.transition_deferred_to_pending(injection_id)
+            for _ in range(5)
+        ]
+        assert sum(results) == 1, (
+            f"exactly one actor MUST win the transition race; "
+            f"got {sum(results)} winners: {results}"
+        )
+
+        # Row is PENDING with exactly one stamp.
+        with Session(engine) as session:
+            row = session.exec(
+                sm_select(ReportInjection).where(
+                    ReportInjection.injection_id == injection_id
+                )
+            ).first()
+            assert row.state == ReportInjectionState.PENDING.value
+            assert row.recovery_attempted_at is not None

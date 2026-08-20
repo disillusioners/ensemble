@@ -117,7 +117,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, NamedTuple
 
-from sqlalchemy import literal, text as sa_text, update as sa_update
+from sqlalchemy import literal, text as sa_text, true, update as sa_update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import aliased
@@ -724,11 +724,14 @@ class ReportInjectionRepository:
                 .where(child_inst.status == InstanceStatus.COMPLETED.value)
                 # Periodic-sweep contract: terminal parents excluded.
                 # Diagnostic/manual callers pass ``False`` and get
-                # the full view incl. terminal parents.
+                # the full view incl. terminal parents. Uses
+                # ``sqlalchemy.true()`` (cross-driver literal) instead
+                # of the SQLite-only ``"1=1"`` (cheap-suggestion
+                # 2026-08-20).
                 .where(
                     ~parent_inst.status.in_(_PARENT_TERMINAL_STATUSES)
                     if parent_not_terminal
-                    else sa_text("1=1")
+                    else true()
                 )
                 # NULL on the LEFT JOINs = no matching row exists
                 # = the row IS a candidate recovery obligation.

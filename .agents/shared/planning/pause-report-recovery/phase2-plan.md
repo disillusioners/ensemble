@@ -37,6 +37,17 @@ Close the recovery loop: the resume router detects a persisted DEFERRED marker a
 | **Shared 2.3↔2.4**: partial landing | High | Same-PR mandate both specs + PR checklist; CI runs both task groups together; reviewer verifies the pair |
 | No-row backstop false positive → spurious recovery | High | C3 false-positive matrix (5 exclusions) each with a dedicated unit case; age guard; dry-run mode option during rollout (log-only first cycle, config flag); busy-guard + TOCTOU re-check |
 | No-row backstop query cost / driver divergence | Medium | Composite-index dependencies enumerated; string concat `\|\|` works on both drivers (verified convention: TEXT columns); batch cap; per-lane kill-switch; one-time operational script fallback |
+
+**W6 known blind spot — pre-deploy historical no-marker rows (post-review, 2026-08-20)**:
+
+Lane 2 (NO-ROW BACKSTOP, C3) excludes rows where the ``dependency_watchers`` row is already FIRED but no ``report_injections`` marker was ever written. The exclusion predicate (`NOT EXISTS (... dw.state = 'FIRED')`) intentionally hides these rows from the no-row backstop — they are excluded because a FIRED watcher implies the parent already saw the child's completion signal in its graph history, so a missing marker does NOT mean a missing delivery.
+
+This excludes a small bounded set of pre-deploy historical rows: dependency_watchers that were FIRED before Phase 1's marker write (the Site-1 / 1.4 pipeline writes unconditionally on every drop). POST-DEPLOY, every drop writes a marker (1.4 Site-1 writes are unconditional), so the blind spot does not recur.
+
+If a customer reports missing historical reports, the diagnostic endpoint `POST /api/recovery/diagnose_no_row_lane` lists the affected rows without recovering them — manual review and a one-shot operational script (kill-switch-able via `lane_no_row_backstop=False` config) can address them out-of-band. **Acceptable in practice** because:
+1. The blind spot is bounded (pre-deploy only).
+2. The excluded rows are *not* undelivered in the strict sense — the parent saw the FIRED signal and acted on it via the natural graph path.
+3. Post-deploy, every drop carries a marker.
 | Actor race surfaces as IntegrityError crash | Medium | Absorbed at `ensure_deferred` (W6); tri-state preserved at natural lanes; Phase 3 pairings |
 | Transition/reconciliation ordering violated | High | Binding order in 2.1; Phase 3 ordering assertion |
 | FM-1 guard re-opens ANTIPHANTOM-RACE-FIX | High | Guard only EXEMPTS; RUNNING-skip untouched; regression tests both directions |
@@ -44,6 +55,17 @@ Close the recovery loop: the resume router detects a persisted DEFERRED marker a
 | Boot ordering violated | Medium | Binding wiring order + S-c wiring-order test |
 | FM-12 non-terminal paused parents | Medium | Documented assumption (W2 latency contract + p99 metric); ORPHAN lane covers the terminal-parent subset |
 | Terminal-parent revival side effects | Medium | Reuses instance_messaging revival verbatim; ORPHAN disposition observable; test 3.6 sub-case |
+
+**W5 caller contract — router deferred-recovery returns WITHOUT re-resuming the parent's own paused turn (post-review amendment, 2026-08-20)**:
+
+The router's deferred-recovery step (`resume_processing_job` step 2.5, manager.py:7581-7663) returns ``{"status": "deferred_report_recovery", "recovery_count": N}`` after transitioning DEFERRED→PENDING, reconciling artifacts, and re-entering child completion via ``_handle_recover_deferred_report_async``. **The parent's own paused turn is NOT re-resumed by this path** — the re-entry creates the completion_report ``MessageQueue`` + ``PROCESS_REPORT`` ``Task``, and delivery happens via one of:
+1. The parent's live turn (if RUNNING): ``ReportInjectionSlot`` drains the PENDING row into a ``HumanMessage`` right before the next LLM call (graph.py:2566-2590). No additional resume needed.
+2. The PROCESS_REPORT fallback task (if no live turn): ``claim_for_task_delivery`` atomically claims the PENDING row and processes the message.
+
+**Caller contract**:
+* The router deferred-recovery step fires ONLY when step 1 (answer-gate handle) and step 2 (paused-turn selector) BOTH miss. If the parent is paused, step 2 wins and the deferred path is bypassed — the parent's paused turn is resumed normally, the live drain picks up the recovered rows on the next LLM call.
+* If the router deferred-recovery fires (parent is NOT paused), the parent is in some RUNNING state and the live drain / fallback task handles delivery. **The caller does NOT need to re-dispatch a resume** after ``deferred_report_recovery`` — the re-entry's child-completion path enqueues the completion_report and the natural delivery flow takes over.
+* This is INTENTIONAL behavior, not a bug. A double-resume (router recovery + a separate resume call) would race the same checkpoint. The single-resume contract is enforced by the ``already_resuming`` dedup guard in ``_schedule_explicit_handle_resume`` (manager.py:7715-7725).
 
 ## Exit Criterion
 
