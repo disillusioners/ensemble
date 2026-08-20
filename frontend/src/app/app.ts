@@ -122,22 +122,47 @@ export class App implements OnInit {
    *
    * Drives the unified hide button in the app header so a single
    * affordance can dismiss whichever overlay is on screen, AND so the
-   * button is also shown when the chat overlay is hidden-but-recoverable
+   * button is also shown when either overlay is hidden-but-recoverable
    * (the user re-shows via the same button — pure toggle, mirroring
    * the Alt+` workspace hotkey).
    *
-   * The 4th term is GATED to ``isInstancesRoute()`` on purpose: without
-   * the gate, localStorage's cached id (seeded by ``restoreState`` at
-   * boot) would force the hide button to render on EVERY route — /,
-   * /sources, /jobs, … — even though the chat overlay itself only
-   * shows on a detail URL. ``isInstancesRoute`` stays true through the
-   * hidden state (``syncDetailVisibility`` writes it on NavigationEnd),
-   * so re-show from the detail route is preserved while non-instances
-   * routes stop showing the button.
+   * The 4th term (chat-recoverable) is GATED to ``isInstancesRoute()``
+   * on purpose: without the gate, localStorage's cached id (seeded by
+   * ``restoreState`` at boot) would force the hide button to render on
+   * EVERY route — /, /sources, /jobs, … — even though the chat overlay
+   * itself only shows on a detail URL. ``isInstancesRoute`` stays true
+   * through the hidden state (``syncDetailVisibility`` writes it on
+   * NavigationEnd), so re-show from the detail route is preserved
+   * while non-instances routes stop showing the button.
+   *
+   * The 5th term (workspace-recoverable) is NOT route-gated: the
+   * workspace overlay is route-agnostic — Alt+` opens it from any
+   * route, the workspace overlay's own Hide button dismisses it from
+   * any route, and the cached ``workspaceProjectId`` is the only
+   * honest signal that the editor is bound to a project. The bound
+   * projectId may correspond to a tab that is no longer active (the
+   * user could have switched tabs after opening the workspace);
+   * gating on ``activeProjectId`` would deny the unhide affordance
+   * in that common case. The N2 route-gate lesson for the chat does
+   * not apply here because the workspace has no URL-coupled presence
+   * — the persisted id in the service is the only state. It is NOT
+   * immortal, however: chat.component.ts ``tabWorkspaceEffect``
+   * clears it (``workspaceProjectId.set(null)`` + ``hide()`` when
+   * open) when the active project tab switches back to ``All`` — so
+   * the unhide affordance correctly disappears once the user leaves
+   * the project context entirely. That clear path only exists once
+   * ChatComponent has mounted at least once (the effect is a field
+   * initializer on the lazily-mounted chat host); before the first
+   * chat open the id does persist for the session, matching the
+   * editor's "always mounted, display-toggled" caching contract.
    *
    * The 4th term is expressed via ``isHiddenButRecoverable()`` (which
    * already encodes ``!detailVisible() && id !== null && isInstancesRoute()``)
    * so the two signals can never drift on the recoverable predicate.
+   * The 5th term is expressed via ``isWorkspaceRecoverable()`` (which
+   * encodes ``!showWorkspace() && workspaceProjectId() !== null``) so
+   * it cannot drift from the icon/label flip that reads the same
+   * predicate.
    * Boolean equivalence to the previous expanded form
    * ``(activeInstanceId() !== null && isInstancesRoute())`` holds because:
    *   - when ``detailVisible()`` is true, term 3 is already true (the
@@ -147,13 +172,16 @@ export class App implements OnInit {
    *     identity factor and the two terms collapse to the same
    *     ``id && isInst`` truth value.
    * Net: anyOverlayVisible == showWorkspace || isPlanRoute || detailVisible
-   * || isHiddenButRecoverable, with no change in observable behavior.
+   * || isHiddenButRecoverable || isWorkspaceRecoverable, with no change
+   * in observable behavior for the existing four terms and the new term
+   * adding only the previously-dark workspace-recoverable state.
    */
   readonly anyOverlayVisible = computed(() => {
     return this.workspaceOverlayService.showWorkspace()
       || this.isPlanRoute()
       || this.instancesViewState.detailVisible()
-      || this.isHiddenButRecoverable();
+      || this.isHiddenButRecoverable()
+      || this.isWorkspaceRecoverable();
   });
 
   /**
@@ -174,22 +202,118 @@ export class App implements OnInit {
   });
 
   /**
+   * True when the workspace editor is hidden but still bound to a
+   * project — i.e. the editor cache is alive (the overlay element is
+   * always mounted, ``[style.display]="none"``, but its file tree,
+   * open buffers, and Monaco state survive) and can be re-shown by
+   * the same hide button that hides the overlays. Mirrors the chat's
+   * ``isHiddenButRecoverable`` shape but WITHOUT the route gate — see
+   * ``anyOverlayVisible`` for the reasoning (the workspace overlay is
+   * route-agnostic; only the bound ``workspaceProjectId`` is the
+   * honest signal).
+   *
+   * Used by:
+   *   - ``anyOverlayVisible`` — so the hide button stays rendered
+   *     while the workspace is hidden-but-recoverable (otherwise the
+   *     user has no affordance to re-show the editor — the workspace
+   *     overlay's own Hide button only DOCKS, there is no overlay-side
+   *     "show" button).
+   *   - ``hideOverlayIcon`` / ``hideOverlayAriaLabel`` — so the icon
+   *     flips to ``visibility`` / "Show overlay" while the editor is
+   *     recoverable (pure-toggle affordance, matching the "View
+   *     workspace" button on the project tab item).
+   *   - ``hideActiveOverlay`` workspace branch — so the same button
+   *     re-shows the workspace when hidden-but-recoverable.
+   */
+  readonly isWorkspaceRecoverable = computed(() => {
+    return !this.workspaceOverlayService.showWorkspace()
+      && this.workspaceOverlayService.workspaceProjectId() !== null;
+  });
+
+  /**
+   * The show-tier gate: a recoverable overlay (workspace OR chat)
+   * may claim the SHOW affordance only when no visible surface
+   * competes. Single source of truth for the three consumers that
+   * previously hand-duplicated this predicate — the icon, the
+   * aria-label, and ``hideActiveOverlay`` branch 2 — so they can
+   * never drift. Branch 2 narrows it further with
+   * ``isWorkspaceRecoverable() && !isHiddenButRecoverable()`` (the
+   * chat-recoverable subset is handled by the later branch, N3).
+   */
+  readonly showTierActive = computed(() => !this.isPlanRoute()
+    && !this.instancesViewState.detailVisible()
+    && (this.isWorkspaceRecoverable() || this.isHiddenButRecoverable()));
+
+  /**
    * The hide button's mat-icon — flips between ``visibility_off``
-   * (overlay visible) and ``visibility`` (hidden-but-recoverable).
-   * The single affordance visually telegraphs whether clicking it
-   * hides the current overlay or re-shows the cached one.
+   * (overlay visible → action is HIDE) and ``visibility`` (something
+   * is hidden-but-recoverable → action is SHOW). The single
+   * affordance visually telegraphs whether clicking it hides the
+   * current overlay or re-shows a cached one.
+   *
+   * Precedence rule (mirrors the handler's branch order):
+   *   - Workspace visible → ``visibility_off`` (HIDE), even if the
+   *     chat is also recoverable. The handler hides the workspace
+   *     and early-returns so chat does not pop underneath (N3
+   *     minimize-surprise: "hide" means "hide", not "switch overlays").
+   *     The next click (with workspace already hidden) takes the
+   *     pure-toggle branch.
+   *   - Workspace hidden + (workspace recoverable OR chat
+   *     recoverable) → ``visibility`` (SHOW), but ONLY when nothing
+   *     is visibly competing — the tier is gated on
+   *     ``!isPlanRoute() && !detailVisible()``:
+   *       - On /plan with the workspace hidden-but-bound, the plane
+   *         iframe is the visible surface (z-1000 over the workspace
+   *         z-100). A ``visibility``/"Show overlay" icon would lie:
+   *         the click would re-show the workspace UNDER the iframe
+   *         (dead click + lying affordance). The plan branch's
+   *         pre-existing action (navigate to /instances) owns the
+   *         affordance instead (B1).
+   *       - With the chat visible (detailVisible=true) and the
+   *         workspace recoverable, the visible overlay takes
+   *         precedence for the hide affordance: the click hides the
+   *         chat (the detail branch), exactly as it did before the
+   *         workspace-recoverable feature existed. Recoverable-
+   *         workspace re-show only surfaces when nothing visible is
+   *         competing (W3, N3 minimize-surprise lineage).
+   *     If BOTH are recoverable, the handler's chat-recoverable branch wins
+   *     (preserves N3: hiding workspace → next click re-shows chat,
+   *     which is the more-stale recoverable state the user most
+   *     likely wanted back).
+   *   - Nothing visible and nothing recoverable → ``visibility_off``
+   *     (HIDE), but the button is hidden via ``anyOverlayVisible``
+   *     anyway — this branch is just the default.
    */
   readonly hideOverlayIcon = computed(() => {
-    return this.isHiddenButRecoverable() ? 'visibility' : 'visibility_off';
+    // Both source signals read unconditionally so the reactive
+    // graph tracks the full dependency set regardless of branch.
+    const workspaceVisible = this.workspaceOverlayService.showWorkspace();
+    const showTier = this.showTierActive();
+    if (workspaceVisible) return 'visibility_off';
+    // B1 + W3: drift-proofed via showTierActive — single source of
+    // truth shared with the aria-label and the handler's branch 2.
+    if (showTier) return 'visibility';
+    return 'visibility_off';
   });
 
   /**
    * Accessible label for the unified hide button. Mirrors the icon
-   * flip so screen readers announce the action the button is about to
-   * take ("Hide overlay" vs "Show overlay").
+   * flip so screen readers announce the action the button is about
+   * to take ("Hide overlay" vs "Show overlay"). The precedence rule
+   * is identical to ``hideOverlayIcon`` — see that field's docblock
+   * for the B1 (/plan) and W3 (chat-visible) gate rationale.
    */
   readonly hideOverlayAriaLabel = computed(() => {
-    return this.isHiddenButRecoverable() ? 'Show overlay' : 'Hide overlay';
+    // Both source signals read unconditionally — same tracking
+    // discipline as hideOverlayIcon; the label must always announce
+    // what the click will actually do.
+    const workspaceVisible = this.workspaceOverlayService.showWorkspace();
+    const showTier = this.showTierActive();
+    if (workspaceVisible) return 'Hide overlay';
+    // B1 + W3: drift-proofed via showTierActive — single source of
+    // truth shared with the icon and the handler's branch 2.
+    if (showTier) return 'Show overlay';
+    return 'Hide overlay';
   });
 
   /**
@@ -332,24 +456,47 @@ export class App implements OnInit {
    * Hide whichever overlay is currently visible — the branches run in
    * the order they appear in the code below.
    *
-   * 1. **Workspace branch** (early-return). When the workspace overlay
-   *    is up, dismiss it via the overlay service and stop. N3 (the
-   *    combined workspace + chat-hidden state): when the workspace is
-   *    visible AND the chat is hidden-but-recoverable, the click hides
-   *    the workspace and does NOT pop the chat open underneath — the
-   *    user clicked "hide", not "switch overlays". An early ``return``
-   *    after the workspace-hide branch makes the intent explicit and
-   *    matches the minimize-surprise reading. The next click (with
-   *    workspace already hidden) takes the pure-toggle branch.
+   * 1. **Workspace-visible branch** (early-return). When the workspace
+   *    overlay is up, dismiss it via the overlay service and stop.
+   *    N3 (the combined workspace + chat-hidden state): when the
+   *    workspace is visible AND the chat is hidden-but-recoverable, the
+   *    click hides the workspace and does NOT pop the chat open
+   *    underneath — the user clicked "hide", not "switch overlays". An
+   *    early ``return`` after the workspace-hide branch makes the
+   *    intent explicit and matches the minimize-surprise reading. The
+   *    next click (with workspace already hidden) takes the pure-toggle
+   *    branch.
    *
-   * 2. **Plan-routable branch** (early-return). When the plan route is
+   * 2. **Workspace-recoverable branch** (early-return). When the
+   *    workspace editor is hidden but still bound to a project, re-show
+   *    it via ``workspaceOverlayService.show(workspaceProjectId())``.
+   *    Mirrors the project-tab-bar "View workspace" button's
+   *    semantics. Gated by ``!isPlanRoute()`` (B1: on /plan the plane
+   *    iframe z-1000 stacks over the workspace z-100 — a workspace
+   *    re-show would be an invisible dead click; the plan branch
+   *    below owns the click instead, preserving pre-existing plan
+   *    semantics) AND ``!detailVisible()`` (W3: a visibly-open chat
+   *    takes precedence for the hide affordance — the click hides
+   *    the chat, as it did before this feature; the re-show tier
+   *    only surfaces when nothing visible competes) AND
+   *    ``!isHiddenButRecoverable()`` so the combined
+   *    workspace-hidden + chat-recoverable state still
+   *    takes the chat-recoverable branch — preserves the N3
+   *    sequence ("hide workspace → next click re-shows chat": the
+   *    chat was hidden longer ago and is the likelier intent). The
+   *    icon/label show-tier is gated identically so the affordance
+   *    always telegraphs the action.
+   *
+   * 3. **Plan-routable branch** (early-return). When the plan route is
    *    active, navigate back to ``/instances``. The plan route is a
    *    real URL with no cached state to toggle — there's no
    *    "hidden-but-recoverable" equivalent on /plan — so the branch
    *    does the only productive thing: take the user to a
-   *    sensible default and leave.
+   *    sensible default and leave. (B1 note: this branch now fires
+   *    even when the workspace is hidden-but-recoverable — see
+   *    branch 2's gate.)
    *
-   * 3. **Detail-visible branch** (early-return). When the instance
+   * 4. **Detail-visible branch** (early-return). When the instance
    *    detail is up, toggle ``detailVisible`` straight to false — a
    *    pure signal flip, mirroring the Alt+` workspace hotkey. The URL
    *    stays on ``/projects/<pid>/instances/<iid>`` with the chat
@@ -358,14 +505,18 @@ export class App implements OnInit {
    *    via the same hide button (which is still visible because the
    *    cached id is set), so the URL-stuck trap is bypassed — they
    *    never try to re-click the Instances nav link, which would
-   *    no-op against the same URL.
+   *    no-op against the same URL. (W3 note: this branch is reachable
+   *    even when the workspace is hidden-but-recoverable — branch 2's
+   *    ``!detailVisible()`` gate defers to the visible chat, so the
+   *    click hides the chat exactly as it did pre-feature. The
+   *    workspace stays recoverable for the next click.)
    *
-   * 4. **Hidden-but-recoverable branch** (no early-return). When the
+   * 5. **Hidden-but-recoverable branch** (no early-return). When the
    *    detail is hidden but a cached id is bound to the current
    *    instances route (the "hidden-but-recoverable" state), re-show
    *    the overlay via a pure ``detailVisible.set(true)`` so the URL
    *    stays on the detail route. The plan route was handled above
-   *    (case 2) so this branch only fires on instances routes; on a
+   *    (case 3) so this branch only fires on instances routes; on a
    *    bare /instances URL the cached id is still set, so re-show
    *    snaps the overlay over the list with the cached detail.
    */
@@ -375,6 +526,48 @@ export class App implements OnInit {
       // N3: workspace is now hidden. Stop here so a recoverable chat
       // does NOT pop open underneath. The next click (with
       // workspace already hidden) takes the pure-toggle branch.
+      return;
+    }
+    // Workspace hidden but still bound to a project — re-show the
+    // editor via the same button. The toggle path mirrors the
+    // project-tab-bar's "View workspace" button (tab-bar calls
+    // ``workspaceOverlayService.toggle(projectId)``, which on a
+    // hidden-but-bound editor sets show=true — per the service's
+    // toggle(), sameId-from-HIDDEN SHOWS; it is not a no-op). We use
+    // ``.show()`` explicitly because the outcome is equivalent and
+    // the test can assert the cached ``workspaceProjectId`` is
+    // preserved (show() re-binds the same id — the cached id is
+    // already correct).
+    //
+    // B1: gated on ``!isPlanRoute()`` — on /plan the plane iframe is
+    // the visible surface (z-1000, stacked over the workspace's
+    // z-100); re-showing the workspace here would render it UNDER
+    // the iframe: a dead click wearing a "Show overlay" icon. The
+    // plan branch below (navigate to /instances) owns the click
+    // instead, so the button keeps its pre-existing plan semantics.
+    // No state is lost: the workspace stays hidden-but-recoverable,
+    // so after leaving /plan the affordance picks back up.
+    //
+    // W3: additionally gated on ``!detailVisible()`` — when the chat
+    // overlay is visibly up, it takes precedence for the hide
+    // affordance and the click hides the chat (the detail branch
+    // below), exactly as it did before this feature existed. The
+    // recoverable-workspace re-show only surfaces when nothing
+    // visible is competing (N3 minimize-surprise lineage: the button
+    // must telegraph HIDE while something is on screen).
+    //
+    // Also guarded by ``!isHiddenButRecoverable()`` so the combined
+    // workspace-hidden + chat-recoverable state still takes the
+    // chat-recoverable branch — preserves the N3 sequence ("hide
+    // workspace → next click re-shows chat": the chat was hidden
+    // longer ago and is the likelier intent).
+    if (this.showTierActive()
+      && this.isWorkspaceRecoverable()
+      && !this.isHiddenButRecoverable()) {
+      const boundProjectId = this.workspaceOverlayService.workspaceProjectId();
+      if (boundProjectId !== null) {
+        this.workspaceOverlayService.show(boundProjectId);
+      }
       return;
     }
     if (this.isPlanRoute()) {
