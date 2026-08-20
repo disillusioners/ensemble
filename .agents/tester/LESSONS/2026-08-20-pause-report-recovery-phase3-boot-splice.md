@@ -30,3 +30,12 @@ Branch `feature/pause-report-recovery`. SHAs: base `6bb99d5f`, old HEAD `73bfe0e
 - BUG-A legacy-SQLite migration column-swap collision (NOT NULL forever + silent APPLIED).
 - BUG-1/BUG-2 `claim_for_task_delivery(None)` contract violations.
 - 4 known pre-existing job_processor status-guard failures (legacy message-orphan path removed by ancestor 4a872c35).
+
+
+## 5. Post-ship condition fixes (2026-08-20, review APPROVE-WITH-CONDITIONS)
+
+- Bug-#1 (Lane-2 alias bug) fixed by developer in `012b0f57` (`select(dw.watch_id)`) — canary un-xfailed, passes.
+- B-1: `TestBootSweepDispatchShape::test_setup_worker_pool_dispatches_boot_sweep_off_loop` added (source-scan, anchor `boot_sweep_task = self._loop.create_task(`) — red/green proven against a temporary sync-call revert. Third occurrence of the loop-blocking bug class now has a production-bound regression (commit 43f55744).
+- G/C: dead xfail removed from `TestC4NullConsumerAudit::test_find_completed_children_excludes_existing_null_keyed_row` (commit b3f25846).
+- D-1: marker concurrency test de-flaked (deterministic rendezvous) + un-quarantined.
+- D-2: 3 stale e2e asserts resolved (see QUARANTINE.md entries for the chosen resolution).
