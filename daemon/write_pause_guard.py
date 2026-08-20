@@ -184,6 +184,77 @@ class WritePauseGuard:
                 # Last writer released — wake up any pausing thread.
                 self._drain_event.set()
 
+    # ── context-manager protocol ────────────────────────────────────────────
+    #
+    # Production usage at ``daemon/manager.py`` (sites
+    # ``_revive_terminal_instance``,
+    # ``_reconcile_deferred_report``, and
+    # ``_reconcile_deferred_report_async``) does e.g.
+    # ``with self._write_guard:`` / ``async with self._write_guard:``
+    # inside outer methods that bracket the session-scope lifetime.
+    # Without these dunders the first real exercise would raise
+    # ``TypeError: 'WritePauseGuard' object does not support the
+    # context manager protocol`` and the Site-1 / ORPHAN recovery
+    # would silently never run.
+    #
+    # The primitives are ``threading.Lock`` / ``threading.Event``,
+    # so the async dunders simply delegate to the sync ones — there
+    # is no native coroutine to await. (*Don't* wrap sync enter /
+    # exit in a coroutine that yields to the loop: that would break
+    # callers running on a non-loop ``threading.Thread``.)
+    #
+    # Exception semantics match :class:`WriteGuardSession`: an
+    # exception inside the ``with`` block must still release the
+    # slot (otherwise an unexpected error would leave
+    # ``_active_writes`` inflated and deadlock ``pause_writes``).
+    # We do NOT swallow the exception — ``__exit__`` returns
+    # ``None``/falsy so the interpreter propagates normally.
+
+    def __enter__(self) -> "WritePauseGuard":
+        """Enter the write region and return ``self``.
+
+        Delegates to :meth:`write_enter`.
+        """
+        self.write_enter()
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        """Exit the write region, releasing the slot.
+
+        Delegates to :meth:`write_exit`. Always releases (even on
+        exception) so a failure inside the region cannot pin
+        ``_active_writes`` above zero and deadlock ``pause_writes``.
+        """
+        self.write_exit()
+
+    async def __aenter__(self) -> "WritePauseGuard":
+        """Async equivalent of :meth:`__enter__`.
+
+        The guard primitives are ``threading``-based (non-loop-safe
+        sync primitives), so the async delegate calls the sync
+        ``__enter__`` directly. There is no coroutine to await.
+        """
+        self.write_enter()
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        """Async equivalent of :meth:`__exit__``.
+
+        Same caveat as ``__aenter__``: delegates directly to the
+        sync ``write_exit`` (no ``await`` involved).
+        """
+        self.write_exit()
+
 
 class WriteGuardSession:
     """Context-manager proxy that registers a ``Session`` with a guard.

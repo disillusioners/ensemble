@@ -6093,6 +6093,13 @@ class InstanceManager:
                     inst_row.version = (inst_row.version or 1) + 1
                     inst_row.updated_at = datetime.now(timezone.utc).isoformat()
                     session.add(inst_row)
+                    # Explicit commit — ``_session_scope`` closes
+                    # the session on exit and that close() rolls
+                    # back any uncommitted rows. Without this
+                    # every ORPHAN / terminal-parent revival
+                    # silently rolls back and the parent stays
+                    # terminal forever.
+                    session.commit()
                 logger.info(
                     f"_revive_terminal_instance: revived terminal parent "
                     f"{instance_id[:8]}... {inst.status} → RUNNING"
@@ -6501,6 +6508,12 @@ class InstanceManager:
                         f"parent={inj.parent_instance_id[:8]}..., "
                         f"child={child_instance_id[:8]}..."
                     )
+                    # Explicit commit — ``_session_scope`` rolls
+                    # back uncommitted rows on close. Without this
+                    # the recreated message + task vanish the moment
+                    # the session-scope exits and the parent's
+                    # processor never sees the report.
+                    session.commit()
                     return {
                         "shape": "message_only_recreate",
                         "report_message_id": report_message_id,
@@ -6523,6 +6536,9 @@ class InstanceManager:
                         f"parent={inj.parent_instance_id[:8]}..., "
                         f"child={child_instance_id[:8]}..."
                     )
+                    # Same explicit-commit requirement as the
+                    # message-only branch above.
+                    session.commit()
                     return {
                         "shape": "task_only_create",
                         "report_message_id": report_message_id,
@@ -6869,6 +6885,12 @@ class InstanceManager:
                         f"parent={inj.parent_instance_id[:8]}..., "
                         f"child={child_instance_id[:8]}..."
                     )
+                    # Explicit commit — mirror of the sync sibling
+                    # above. ``_session_scope`` rolls back on close
+                    # so without the commit the recreated rows
+                    # disappear and the router's re-entry finds no
+                    # deliverable artefact.
+                    session.commit()
                     return {
                         "shape": "message_only_recreate",
                         "report_message_id": report_message_id,
@@ -6891,6 +6913,9 @@ class InstanceManager:
                         f"parent={inj.parent_instance_id[:8]}..., "
                         f"child={child_instance_id[:8]}..."
                     )
+                    # Same explicit-commit requirement as the
+                    # message-only branch above.
+                    session.commit()
                     return {
                         "shape": "task_only_create",
                         "report_message_id": report_message_id,

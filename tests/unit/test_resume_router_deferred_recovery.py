@@ -82,47 +82,6 @@ from daemon.repositories.task.models import Task, TaskStatus, TaskType
 # =============================================================================
 
 
-class _GuardWrapper:
-    """Test-side wrapper that gives ``WritePauseGuard`` a
-    context-manager surface.
-
-    The real ``WritePauseGuard`` (daemon/write_pause_guard.py)
-    exposes ``write_enter()`` / ``write_exit()`` but does NOT
-    implement ``__enter__`` / ``__exit__``. Production code at
-    ``daemon/manager.py`` does ``with self._write_guard:`` in
-    several spots (introduced in commit ``1d5144f4``) which
-    would crash with
-    ``TypeError: ... object does not support the context
-    manager protocol (missed __exit__ method)``.
-
-    The inner ``_session_scope`` already wraps the session in
-    ``WriteGuardSession`` which calls ``write_enter()`` /
-    ``write_exit()``, so the outer ``with self._write_guard:``
-    is redundant — we just need it to not crash.
-
-    Tracked as a separate follow-up; this wrapper exists so the
-    new tests can exercise the reconcile end-to-end without
-    triggering that pre-existing latent crash.
-    """
-
-    def __init__(self, guard: "WritePauseGuard") -> None:
-        self._guard = guard
-
-    def write_enter(self) -> None:
-        self._guard.write_enter()
-
-    def write_exit(self) -> None:
-        self._guard.write_exit()
-
-    def __enter__(self) -> "_GuardWrapper":
-        self._guard.write_enter()
-        return self
-
-    def __exit__(self, exc_type, exc, tb) -> bool:
-        self._guard.write_exit()
-        return False
-
-
 @pytest.fixture
 def engine() -> Engine:
     """Real in-memory SQLite engine with all tables created."""
@@ -1057,19 +1016,15 @@ class TestReconcileSubshapeARouterThreadingRegression:
         # in-memory engine.
         holder = MagicMock(name="MinimalManager")
         holder._engine = engine
-        # ``WritePauseGuard`` is NOT a context manager — but
-        # the reconcile helper does ``with self._write_guard:``
-        # (pre-existing latent bug from Phase 2.1+2.2; tracked
-        # as a follow-up). The real ``_session_scope`` already
-        # wraps the session in ``WriteGuardSession`` which
-        # registers the write via ``write_enter``/``write_exit``,
-        # so the outer ``with self._write_guard:`` is redundant
-        # — we just need it to not crash. ``_GuardWrapper``
-        # gives the holder a no-op-ish context-manager surface
-        # around the real guard so the test exercises the
-        # reconcile end-to-end.
+        # ``WritePauseGuard`` IS a context manager (sync + async)
+        # — site ``_reconcile_deferred_report_async`` does
+        # ``with self._write_guard:`` directly. Use the real
+        # guard; the inner ``_session_scope`` also wraps in
+        # ``WriteGuardSession`` which calls ``write_enter`` /
+        # ``write_exit`` — the outer ``with`` is a deliberate
+        # redundant gate that mirrors the production intent.
         real_guard = WritePauseGuard()
-        holder._write_guard = _GuardWrapper(real_guard)
+        holder._write_guard = real_guard
 
         @contextmanager
         def _session_scope():
@@ -1258,10 +1213,11 @@ class TestReconcileSubshapeARouterThreadingRegression:
         # Build a holder with REAL session infrastructure.
         holder = MagicMock(name="MinimalManager")
         holder._engine = engine
-        # See router test for rationale on ``_GuardWrapper``
-        # (latent ``WritePauseGuard`` is-not-a-CM bug).
+        # ``WritePauseGuard`` is now a real context manager — the
+        # reconcile helper's ``with self._write_guard:`` exercises
+        # the production protocol directly.
         real_guard = WritePauseGuard()
-        holder._write_guard = _GuardWrapper(real_guard)
+        holder._write_guard = real_guard
         # The sweep's ``_get_event_loop`` falls back to
         # ``asyncio.get_event_loop()`` — in the
         # ``asyncio.to_thread`` worker thread, this may return
@@ -1365,4 +1321,599 @@ class TestReconcileSubshapeARouterThreadingRegression:
             ).first()
             assert task is not None
             assert task.task_type == TaskType.PROCESS_REPORT.value
+            assert task.instance_id == parent
+
+
+# =============================================================================
+# WritePauseGuard context-manager protocol
+# =============================================================================
+
+
+class TestWritePauseGuardContextManager:
+    """Verifies :class:`WritePauseGuard` supports ``with`` / ``async with``.
+
+    Phase 2 (pause-report-recovery) closeout. The guard was
+    previously a plain class with ``write_enter`` / ``write_exit``
+    but NOT ``__enter__`` / ``__exit__`` ``__aenter__`` / ``__aexit__``;
+    production code introduced in ``1d5144f4`` does
+    ``with self._write_guard:`` / ``async with self._write_guard:``
+    in three revive / reconcile sites. Without this protocol the
+    first real Site-1 / ORPHAN recovery would raise
+    ``TypeError: ... object does not support the context manager
+    protocol`` and the row would silently never be handled.
+
+    These tests pin the contract on the production class itself
+    (no test-side wrapper) — the existing test file used a
+    ``_GuardWrapper`` band-aid while the underlying class was
+    incomplete; the band-aid has been removed and these tests
+    take its place.
+    """
+
+    def test_sync_with_enter_exit_increments_and_decrements(self) -> None:
+        """``with guard:`` enters and exits cleanly."""
+        from daemon.write_pause_guard import WritePauseGuard
+
+        guard = WritePauseGuard()
+        assert guard.active_writes == 0
+        with guard:
+            assert guard.active_writes == 1
+        assert guard.active_writes == 0
+
+    def test_sync_with_exception_still_releases(self) -> None:
+        """``__exit__`` always releases the slot, even on exception.
+
+        Matches :class:`WriteGuardSession` semantics: a failure
+        inside the ``with`` block must not pin ``_active_writes``
+        above zero or every subsequent ``pause_writes`` would
+        deadlock.
+        """
+        from daemon.write_pause_guard import WritePauseGuard
+
+        guard = WritePauseGuard()
+        with pytest.raises(RuntimeError, match="boom"):
+            with guard:
+                assert guard.active_writes == 1
+                raise RuntimeError("boom")
+        assert guard.active_writes == 0
+
+    @pytest.mark.asyncio
+    async def test_async_with_enter_exit_increments_and_decrements(self) -> None:
+        """``async with guard:`` enters and exits cleanly.
+
+        The guard primitives are ``threading``-based (no real
+        coroutine to await) — the async delegates call the sync
+        ``write_enter`` / ``write_exit`` directly. This is the
+        contract :meth:`InstanceManager._revive_terminal_instance`
+        relies on inside its ``async with self._write_guard:``
+        block.
+        """
+        from daemon.write_pause_guard import WritePauseGuard
+
+        guard = WritePauseGuard()
+        async with guard:
+            assert guard.active_writes == 1
+        assert guard.active_writes == 0
+
+    def test_paused_guard_raises_on_enter(self) -> None:
+        """``with guard:`` while paused raises ``RuntimeError``.
+
+        Mirrors the existing ``write_enter`` contract — the
+        context-manager protocol must NOT bypass the pause gate.
+        """
+        from daemon.write_pause_guard import WritePauseGuard
+
+        guard = WritePauseGuard()
+        guard.pause_writes()
+        try:
+            with pytest.raises(RuntimeError, match="paused"):
+                with guard:
+                    pass
+        finally:
+            guard.resume_writes()
+
+
+# =============================================================================
+# Bug 2 — _revive_terminal_instance persists via session.commit()
+# =============================================================================
+
+
+class TestReviveTerminalInstancePersists:
+    """Bug 2 regression: revival must commit, not roll back.
+
+    ``_revive_terminal_instance`` opens a session via
+    ``_session_scope`` (which closes on exit → rolls back). The
+    pre-fix code did ``session.add(...)`` without an explicit
+    commit, so the popped-from-terminal revival silently rolled
+    back and the parent stayed terminal forever. Every ORPHAN
+    Site-1 sweep row depended on this path.
+
+    The regression test reads the row from a FRESH session (not
+    the in-flight session-scope) so it can only see what was
+    actually committed to the engine.
+    """
+
+    @pytest.fixture
+    def revival_holder(self, engine: Engine) -> MagicMock:
+        """Build a minimal holder that exercises the real revival path."""
+        from contextlib import contextmanager
+        from types import MethodType
+
+        from daemon.manager import InstanceManager
+        from daemon.write_pause_guard import (
+            WriteGuardSession,
+            WritePauseGuard,
+        )
+        from sqlmodel import Session as SQLModelSession
+
+        holder = MagicMock(name="ReviveHolder")
+        holder._engine = engine
+        # ``WritePauseGuard`` is now a real context manager — the
+        # ``async with self._write_guard:`` inside the production
+        # method exercises the production protocol directly.
+        holder._write_guard = WritePauseGuard()
+
+        @contextmanager
+        def _session_scope():
+            session = SQLModelSession(engine)
+            try:
+                with WriteGuardSession(
+                    session, holder._write_guard
+                ) as guarded:
+                    yield guarded
+            finally:
+                session.close()
+
+        holder._session_scope = _session_scope
+        # The early-``return`` "instance_repository absent" check
+        # is gated by ``hasattr(self, '_instance_repository')`` on
+        # a MagicMock holder. We don't want that branch to fire —
+        # the revival path requires the ``_instance_repository.get``
+        # pre-check to confirm the row exists. Wire a real-looking
+        # repository that returns the seeded row.
+        repo = MagicMock(name="InstanceRepository")
+        holder._instance_repository = repo
+
+        # Bind the real revive method so the ``self`` chain
+        # resolves and the production code runs verbatim.
+        holder._revive_terminal_instance = MethodType(
+            InstanceManager._revive_terminal_instance, holder,
+        )
+        return holder
+
+    @pytest.mark.asyncio
+    async def test_revive_terminal_persists_status_running(
+        self, engine: Engine, revival_holder: MagicMock,
+    ) -> None:
+        """COMPLETED parent → ``_revive_terminal_instance`` → row is RUNNING.
+
+        Pre-fix: the row would stay COMPLETED (the ``session.add``
+        write was rolled back on ``_session_scope`` close). The
+        production path needs the persistence to be visible to
+        every subsequent caller that reads the row in a fresh
+        session.
+        """
+        # Seed a terminal parent.
+        parent = _seed_instance(
+            engine,
+            agent_id="test",
+            status=InstanceStatus.COMPLETED.value,
+        )
+        # The production method calls ``self._instance_repository.get``
+        # first (pre-check) — return the seeded row from the
+        # in-memory engine so the ``inst is None`` and
+        # ``not terminal`` guards fall through.
+        seeded = Session(engine).get(Instance, parent)
+        revival_holder._instance_repository.get.return_value = seeded
+
+        result = await revival_holder._revive_terminal_instance(parent)
+
+        assert result is True, "revival should return True on success"
+
+        # Fresh session read — only observes committed rows.
+        with Session(engine) as session:
+            row = session.get(Instance, parent)
+            assert row is not None
+            assert row.status == InstanceStatus.RUNNING.value, (
+                "terminal parent was not persisted to RUNNING — "
+                "Bug 2 regression: session.commit() missing"
+            )
+            assert row.version == 2, (
+                "version was not bumped (pre-fix would rollback "
+                "the bump entirely)"
+            )
+
+    @pytest.mark.asyncio
+    async def test_revive_error_parent_persists_status_running(
+        self, engine: Engine, revival_holder: MagicMock,
+    ) -> None:
+        """ERROR parent also pins the commit — the same gap hit every terminal status."""
+        parent = _seed_instance(
+            engine,
+            agent_id="test",
+            status=InstanceStatus.ERROR.value,
+        )
+        seeded = Session(engine).get(Instance, parent)
+        revival_holder._instance_repository.get.return_value = seeded
+
+        result = await revival_holder._revive_terminal_instance(parent)
+
+        assert result is True
+        with Session(engine) as session:
+            row = session.get(Instance, parent)
+            assert row.status == InstanceStatus.RUNNING.value
+
+    @pytest.mark.asyncio
+    async def test_revive_already_running_returns_true_without_writing(
+        self, engine: Engine, revival_holder: MagicMock,
+    ) -> None:
+        """A non-terminal parent short-circuits and does NOT mutate the row.
+
+        This is the "already RUNNING" branch — vital to pin so
+        the fix doesn't accidentally force a version-bump on
+        every sweep tick.
+        """
+        parent = _seed_instance(
+            engine,
+            agent_id="test",
+            status=InstanceStatus.RUNNING.value,
+        )
+        seeded = Session(engine).get(Instance, parent)
+        original_version = seeded.version
+        revival_holder._instance_repository.get.return_value = seeded
+
+        result = await revival_holder._revive_terminal_instance(parent)
+
+        assert result is True
+        with Session(engine) as session:
+            row = session.get(Instance, parent)
+            assert row.status == InstanceStatus.RUNNING.value
+            assert row.version == original_version, (
+                "already-RUNNING parent was incorrectly bumped"
+            )
+
+
+# =============================================================================
+# Bug 3 — sub-shape (b) commits in sync + async _reconcile_deferred_report
+# =============================================================================
+
+
+class TestReconcileSubShapeBCommits:
+    """Bug 3 regression: sub-shape (b) writes must commit.
+
+    ``_reconcile_deferred_report`` and its async sibling
+    ``_reconcile_deferred_report_async`` add rows in sub-shape (b)
+    (message-only recreate + task-only create) without an
+    explicit ``session.commit()``. ``_session_scope`` rolls back
+    on close, so the recreated rows vanished and the parent's
+    processor never saw the report.
+
+    Each test reads via a FRESH session — only committed rows are
+    visible — and the regression would fail with a
+    ``session.get(...) is None`` because the rows rolled back.
+    """
+
+    @pytest.fixture
+    def sync_holder(self, engine: Engine) -> MagicMock:
+        """Holder wired for the sync ``_reconcile_deferred_report``."""
+        from contextlib import contextmanager
+        from types import MethodType
+
+        from daemon.manager import InstanceManager
+        from daemon.write_pause_guard import (
+            WriteGuardSession,
+            WritePauseGuard,
+        )
+        from sqlmodel import Session as SQLModelSession
+
+        holder = MagicMock(name="SyncReconcileHolder")
+        holder._engine = engine
+        # Bug 1 fix: use the real guard (now a context manager).
+        holder._write_guard = WritePauseGuard()
+
+        @contextmanager
+        def _session_scope():
+            session = SQLModelSession(engine)
+            try:
+                with WriteGuardSession(
+                    session, holder._write_guard
+                ) as guarded:
+                    yield guarded
+            finally:
+                session.close()
+
+        holder._session_scope = _session_scope
+        holder._reconcile_deferred_report = MethodType(
+            InstanceManager._reconcile_deferred_report, holder,
+        )
+        return holder
+
+    @pytest.fixture
+    def async_holder(self, engine: Engine) -> MagicMock:
+        """Holder wired for the async ``_reconcile_deferred_report_async``."""
+        from contextlib import contextmanager
+        from types import MethodType
+
+        from daemon.manager import InstanceManager
+        from daemon.write_pause_guard import (
+            WriteGuardSession,
+            WritePauseGuard,
+        )
+        from sqlmodel import Session as SQLModelSession
+
+        holder = MagicMock(name="AsyncReconcileHolder")
+        holder._engine = engine
+        holder._write_guard = WritePauseGuard()
+
+        @contextmanager
+        def _session_scope():
+            session = SQLModelSession(engine)
+            try:
+                with WriteGuardSession(
+                    session, holder._write_guard
+                ) as guarded:
+                    yield guarded
+            finally:
+                session.close()
+
+        holder._session_scope = _session_scope
+        holder._reconcile_deferred_report_async = MethodType(
+            InstanceManager._reconcile_deferred_report_async, holder,
+        )
+        return holder
+
+    def _seed_subshape_b_payload(
+        self,
+        engine: Engine,
+        *,
+        with_existing_message: bool,
+    ) -> tuple[str, str, str]:
+        """Seed parent + child + a marker row whose ``report_message_id`` is set.
+
+        Returns ``(parent_id, child_id, report_message_id)``. When
+        ``with_existing_message`` is False, the message row is
+        intentionally absent (triggers the message-only recreate
+        branch). When True, the message row exists and only the
+        task is missing (triggers the task-only create branch).
+        """
+        parent = _seed_instance(
+            engine, agent_id="test", status=InstanceStatus.RUNNING.value,
+        )
+        child = _seed_instance(
+            engine,
+            parent_id=parent,
+            agent_id="test",
+            status=InstanceStatus.COMPLETED.value,
+        )
+        report_message_id = str(uuid.uuid4())
+        # Pre-existing message (task-only branch) — the message
+        # row is needed so the reconcile skips the message-only
+        # recreate. Blocked on the next guard:
+        # ``select(Task).where(message_id=...)`` → no task yet.
+        if with_existing_message:
+            with Session(engine) as session:
+                session.add(
+                    MessageQueue(
+                        message_id=report_message_id,
+                        instance_id=parent,
+                        content="pre-existing message",
+                        source="internal_report:child:msg",
+                        type=MessageType.COMPLETION_REPORT.value,
+                        status=MessageStatus.READY.value,
+                        priority=0,
+                        enqueued_at=datetime.now(timezone.utc),
+                    )
+                )
+                session.commit()
+        # Injection row carries the artifact handle so the
+        # reconcile takes the (b)/(c) branch instead of (a).
+        with Session(engine) as session:
+            session.add(
+                ReportInjection(
+                    injection_id=str(uuid.uuid4()),
+                    parent_instance_id=parent,
+                    child_instance_id=child,
+                    child_message_id="child-msg-b",
+                    report_message_id=report_message_id,
+                    content="report content",
+                    state=ReportInjectionState.DEFERRED.value,
+                    deferred_reason=DEFERRED_REASON_PAUSE_TOCTOU,
+                    recovery_attempted_at=None,
+                    created_at=datetime.now(timezone.utc).isoformat(),
+                )
+            )
+            session.commit()
+        return parent, child, report_message_id
+
+    def test_sync_subshape_b_message_only_recreate_persists(
+        self, engine: Engine, sync_holder: MagicMock,
+    ) -> None:
+        """Sync path: message-only recreate creates BOTH message + task rows.
+
+        Pre-fix: both rows were added but never committed; the
+        fresh-session read would see neither.
+        """
+        parent, child, report_message_id = self._seed_subshape_b_payload(
+            engine, with_existing_message=False,
+        )
+
+        # Find the injection_id we just seeded.
+        with Session(engine) as session:
+            inj = session.exec(
+                sm_select(ReportInjection).where(
+                    ReportInjection.child_instance_id == child
+                )
+            ).first()
+            assert inj is not None
+            injection_id = inj.injection_id
+
+        result = sync_holder._reconcile_deferred_report(
+            child_instance_id=child,
+            child_message_id="child-msg-b",
+            injection_id=injection_id,
+            source="sweep",
+        )
+        assert result is not None
+        assert result["shape"] == "message_only_recreate"
+        assert result["report_message_id"] == report_message_id
+
+        # Fresh-session read — only committed rows survive.
+        with Session(engine) as session:
+            msg = session.get(MessageQueue, report_message_id)
+            assert msg is not None, (
+                "Bug 3 regression: message row was rolled back — "
+                "sync sub-shape (b) message-only recreate missing commit"
+            )
+            assert msg.instance_id == parent
+            assert msg.type == MessageType.COMPLETION_REPORT.value
+            assert msg.status == MessageStatus.READY.value
+
+            task = session.exec(
+                sm_select(Task).where(Task.message_id == report_message_id)
+            ).first()
+            assert task is not None, (
+                "Bug 3 regression: task row was rolled back — "
+                "sync sub-shape (b) message-only recreate missing commit"
+            )
+            assert task.task_type == TaskType.PROCESS_REPORT.value
+            assert task.status == TaskStatus.PENDING.value
+            assert task.instance_id == parent
+
+    def test_sync_subshape_b_task_only_create_persists(
+        self, engine: Engine, sync_holder: MagicMock,
+    ) -> None:
+        """Sync path: task-only create writes the PROCESS_REPORT task.
+
+        Pre-fix: the task row was added but never committed; the
+        fresh-session read would see no task.
+        """
+        parent, child, report_message_id = self._seed_subshape_b_payload(
+            engine, with_existing_message=True,
+        )
+
+        with Session(engine) as session:
+            inj = session.exec(
+                sm_select(ReportInjection).where(
+                    ReportInjection.child_instance_id == child
+                )
+            ).first()
+            assert inj is not None
+            injection_id = inj.injection_id
+
+        result = sync_holder._reconcile_deferred_report(
+            child_instance_id=child,
+            child_message_id="child-msg-b",
+            injection_id=injection_id,
+            source="sweep",
+        )
+        assert result is not None
+        assert result["shape"] == "task_only_create"
+        assert result["report_message_id"] == report_message_id
+
+        # The pre-existing message must still be there.
+        with Session(engine) as session:
+            msg = session.get(MessageQueue, report_message_id)
+            assert msg is not None
+            assert msg.content == "pre-existing message"
+
+            # The newly-created task must be persisted.
+            task = session.exec(
+                sm_select(Task).where(Task.message_id == report_message_id)
+            ).first()
+            assert task is not None, (
+                "Bug 3 regression: task row was rolled back — "
+                "sync sub-shape (b) task-only create missing commit"
+            )
+            assert task.task_type == TaskType.PROCESS_REPORT.value
+            assert task.status == TaskStatus.PENDING.value
+            assert task.instance_id == parent
+
+    @pytest.mark.asyncio
+    async def test_async_subshape_b_message_only_recreate_persists(
+        self, engine: Engine, async_holder: MagicMock,
+    ) -> None:
+        """Async path: bug 3 mirrors the sync gap — same commit required.
+
+        The async / sync split was authored as "logic-identical"
+        per the 5fe135e3 commit message; both branches must
+        commit. Pre-fix: the async path also rolled back the
+        recreated rows.
+        """
+        parent, child, report_message_id = self._seed_subshape_b_payload(
+            engine, with_existing_message=False,
+        )
+
+        with Session(engine) as session:
+            inj = session.exec(
+                sm_select(ReportInjection).where(
+                    ReportInjection.child_instance_id == child
+                )
+            ).first()
+            assert inj is not None
+            injection_id = inj.injection_id
+
+        result = await async_holder._reconcile_deferred_report_async(
+            child_instance_id=child,
+            child_message_id="child-msg-b",
+            injection_id=injection_id,
+            source="router",
+        )
+        assert result is not None
+        assert result["shape"] == "message_only_recreate"
+        assert result["report_message_id"] == report_message_id
+
+        with Session(engine) as session:
+            msg = session.get(MessageQueue, report_message_id)
+            assert msg is not None, (
+                "Bug 3 regression: async sub-shape (b) message-only "
+                "recreate missing commit"
+            )
+            assert msg.instance_id == parent
+
+            task = session.exec(
+                sm_select(Task).where(Task.message_id == report_message_id)
+            ).first()
+            assert task is not None, (
+                "Bug 3 regression: async sub-shape (b) message-only "
+                "recreate missing commit"
+            )
+            assert task.task_type == TaskType.PROCESS_REPORT.value
+
+    @pytest.mark.asyncio
+    async def test_async_subshape_b_task_only_create_persists(
+        self, engine: Engine, async_holder: MagicMock,
+    ) -> None:
+        """Async path: task-only create writes the PROCESS_REPORT task."""
+        parent, child, report_message_id = self._seed_subshape_b_payload(
+            engine, with_existing_message=True,
+        )
+
+        with Session(engine) as session:
+            inj = session.exec(
+                sm_select(ReportInjection).where(
+                    ReportInjection.child_instance_id == child
+                )
+            ).first()
+            assert inj is not None
+            injection_id = inj.injection_id
+
+        result = await async_holder._reconcile_deferred_report_async(
+            child_instance_id=child,
+            child_message_id="child-msg-b",
+            injection_id=injection_id,
+            source="router",
+        )
+        assert result is not None
+        assert result["shape"] == "task_only_create"
+        assert result["report_message_id"] == report_message_id
+
+        with Session(engine) as session:
+            task = session.exec(
+                sm_select(Task).where(Task.message_id == report_message_id)
+            ).first()
+            assert task is not None, (
+                "Bug 3 regression: async sub-shape (b) task-only "
+                "create missing commit"
+            )
+            assert task.task_type == TaskType.PROCESS_REPORT.value
+            assert task.status == TaskStatus.PENDING.value
             assert task.instance_id == parent
