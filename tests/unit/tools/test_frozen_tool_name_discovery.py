@@ -37,6 +37,7 @@ from daemon.tools._tool_registry import (
     CATEGORY_MODULES,
     KNOWN_TOOL_NAMES,
     discover_all_tool_names,
+    discover_source_only_tool_names,
 )
 
 
@@ -81,7 +82,12 @@ FLAGGED_NAMES: list[str] = [
 def test_known_tool_names_is_superset_of_flagged_entries() -> None:
     """All 30 incident names must be present in BOTH the static fallback
     universe AND the source-discovered set (so source mode and frozen mode
-    agree, and the static list covers the prod incident)."""
+    agree, and the static list covers the prod incident).
+
+    Equality between the two sets is owned by
+    ``test_known_tool_names_matches_source_exactly_no_drift`` below; this test
+    stays focused on FLAGGED_NAMES coverage — the incident pin.
+    """
     static_set = set(KNOWN_TOOL_NAMES)
     source_set = discover_all_tool_names()
 
@@ -94,8 +100,6 @@ def test_known_tool_names_is_superset_of_flagged_entries() -> None:
     assert missing_source == [], (
         f"discover_all_tool_names() is missing flagged names: {missing_source}"
     )
-    assert len(KNOWN_TOOL_NAMES) >= len(FLAGGED_NAMES)
-    assert len(source_set) >= len(FLAGGED_NAMES)
 
 
 def test_discover_falls_back_when_no_source_files(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -214,3 +218,41 @@ def test_registry_validation_zero_warnings_for_project_manager_frozen_mode(
         f"Expected ZERO project-manager warnings in frozen mode, got "
         f"{len(project_manager_warnings)}: {project_manager_warnings}"
     )
+
+
+def test_known_tool_names_matches_source_exactly_no_drift() -> None:
+    """Bidirectional drift detector: ``KNOWN_TOOL_NAMES`` must equal the
+    source-discovered set exactly.
+
+    The merge in ``discover_all_tool_names()`` (``source ∪ KNOWN_TOOL_NAMES``)
+    only catches ADDITIONS to source — a tool removed/renamed in source but
+    still listed in ``KNOWN_TOOL_NAMES`` would let a stale agent-config entry
+    silently pass validation (false negative). This test closes that seam by
+    comparing the static set against the pure source-only universe, and
+    surfaces BOTH diff directions in the failure message so the next
+    maintainer can act on it without re-running anything.
+    """
+    static_set = set(KNOWN_TOOL_NAMES)
+    source_set = discover_source_only_tool_names()
+
+    assert static_set == source_set, (
+        "KNOWN_TOOL_NAMES drift vs source: "
+        f"only_in_static={sorted(static_set - source_set)} "
+        f"only_in_source={sorted(source_set - static_set)}"
+    )
+
+
+def test_source_only_raises_in_frozen_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``discover_source_only_tool_names()`` must fail loudly with
+    ``RuntimeError`` when zero source files are readable — frozen-binary
+    drift detection is not meaningful and must NOT silently fall back to the
+    static universe.
+    """
+    fake_modules = {
+        "fake_alpha": "daemon.tools.does_not_exist_xyz_alpha_123",
+        "fake_beta": "daemon.tools.does_not_exist_xyz_beta_456",
+    }
+    monkeypatch.setattr(reg, "CATEGORY_MODULES", fake_modules)
+
+    with pytest.raises(RuntimeError, match="no CATEGORY_MODULES source files readable"):
+        discover_source_only_tool_names()

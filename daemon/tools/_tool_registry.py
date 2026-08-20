@@ -196,25 +196,18 @@ def list_tools_by_category() -> dict[str, list[str]]:
     return categories
 
 
-def discover_all_tool_names() -> set[str]:
-    """Statically discover all @tool-decorated function names across CATEGORY_MODULES.
+def _scan_category_module_sources() -> tuple[set[str], bool]:
+    """AST-scan every CATEGORY_MODULES source file for ``@tool``-decorated names.
 
-    Many tools are created inside factory functions (e.g. ``create_project_tools``)
-    and use ``@tool`` inside the factory body, so they never register in
-    ``_tool_metadata`` at import time. This function AST-scans the source of every
-    category module to find ``@tool``-decorated functions at ANY nesting depth.
-
-    Frozen-binary safe: in PyInstaller-frozen builds the ``daemon/`` package ships
-    as bytecode only and ``file_path.exists()`` is False for every category
-    module. In that case the static fallback universe ``KNOWN_TOOL_NAMES`` is
-    returned (and a single debug log is emitted). When some source files are
-    readable but others are not, the result merges source-discovered names with
-    ``KNOWN_TOOL_NAMES`` so source stays canonical where present and the static
-    list covers the rest.
+    Shared by ``discover_all_tool_names()`` (which then merges with the static
+    ``KNOWN_TOOL_NAMES`` fallback) and ``discover_source_only_tool_names()``
+    (which raises on zero-source — the frozen-binary case).
 
     Returns:
-        Set of tool names discoverable from static source analysis, augmented
-        with the static ``KNOWN_TOOL_NAMES`` fallback.
+        (tool_names, any_source_read) — ``any_source_read`` is True iff at least
+        one category-module source file was actually read from disk. The AST
+        walker descends into every nested scope so factory-internal ``@tool``
+        decorations are caught (they never register at import time).
     """
     import ast
     from pathlib import Path
@@ -222,8 +215,7 @@ def discover_all_tool_names() -> set[str]:
     tool_names: set[str] = set()
     # Tracks whether ANY source file was actually read on this call. When the
     # whole daemon/ tree is bytecode-only (frozen binary), this stays False and
-    # we fall back to KNOWN_TOOL_NAMES. When only some files are missing, we
-    # still merge KNOWN_TOOL_NAMES with whatever source contributed.
+    # the caller decides what to do (fallback vs raise).
     any_source_read = False
 
     for category_key, module_path_str in CATEGORY_MODULES.items():
@@ -280,6 +272,68 @@ def discover_all_tool_names() -> set[str]:
 
             except (OSError, SyntaxError, Exception):
                 continue
+
+    return tool_names, any_source_read
+
+
+def discover_source_only_tool_names() -> set[str]:
+    """Pure source discovery — NO merge with ``KNOWN_TOOL_NAMES``, NO frozen fallback.
+
+    This function is the regen source of truth for the ``KNOWN_TOOL_NAMES``
+    static fallback and the canonical basis for bidirectional drift detection
+    between source and the static universe. It MUST return only what the
+    on-disk ``daemon/tools/`` source contains; it never augments with the
+    static list.
+
+    Frozen-binary contract: when ZERO ``CATEGORY_MODULES`` source files are
+    readable (typical PyInstaller frozen build where ``daemon/`` ships as
+    bytecode only), this function raises ``RuntimeError`` rather than
+    silently returning the static universe. Drift detection in a frozen
+    environment is not meaningful — callers that need the frozen-safe
+    merged result should use ``discover_all_tool_names()`` instead.
+
+    Returns:
+        Set of ``@tool``-decorated function names discovered by AST-scanning
+        every CATEGORY_MODULES source file on disk.
+
+    Raises:
+        RuntimeError: if ZERO ``CATEGORY_MODULES`` source files are readable
+            (frozen binary, or path resolution failed for every category).
+    """
+    tool_names, any_source_read = _scan_category_module_sources()
+    if not any_source_read:
+        raise RuntimeError(
+            "discover_source_only_tool_names(): no CATEGORY_MODULES source files "
+            "readable (frozen binary?) — source-only discovery is unavailable; "
+            "use discover_all_tool_names() for the frozen-safe universe"
+        )
+    return tool_names
+
+
+def discover_all_tool_names() -> set[str]:
+    """Statically discover all @tool-decorated function names across CATEGORY_MODULES.
+
+    Many tools are created inside factory functions (e.g. ``create_project_tools``)
+    and use ``@tool`` inside the factory body, so they never register in
+    ``_tool_metadata`` at import time. This function AST-scans the source of every
+    category module to find ``@tool``-decorated functions at ANY nesting depth.
+
+    Frozen-binary safe: in PyInstaller-frozen builds the ``daemon/`` package ships
+    as bytecode only and ``file_path.exists()`` is False for every category
+    module. In that case the static fallback universe ``KNOWN_TOOL_NAMES`` is
+    returned (and a single debug log is emitted). When some source files are
+    readable but others are not, the result merges source-discovered names with
+    ``KNOWN_TOOL_NAMES`` so source stays canonical where present and the static
+    list covers the rest.
+
+    For pure source-of-truth discovery (drift detection, regenerating
+    ``KNOWN_TOOL_NAMES``), use ``discover_source_only_tool_names()`` instead.
+
+    Returns:
+        Set of tool names discoverable from static source analysis, augmented
+        with the static ``KNOWN_TOOL_NAMES`` fallback.
+    """
+    tool_names, any_source_read = _scan_category_module_sources()
 
     if not any_source_read:
         # No CATEGORY_MODULES source files readable — typically a PyInstaller
@@ -422,14 +476,16 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
 # Maintenance: when you add a new @tool-decorated function to a CATEGORY_MODULES
 # module, regenerate this set by running:
 #
-#     uv run python -c "from daemon.tools._tool_registry import discover_all_tool_names; print(sorted(discover_all_tool_names()))"
+#     uv run python -c "from daemon.tools._tool_registry import discover_source_only_tool_names; print(sorted(discover_source_only_tool_names()))"
 #
-# Note: the command above prints the post-fix merged output; to detect drift
-# between source and KNOWN_TOOL_NAMES, temporarily comment out the
-# `tool_names |= KNOWN_TOOL_NAMES` merge line in `discover_all_tool_names()`
-# before running it.
+# The output is the unambiguous source-only universe (no merge with this
+# constant, no frozen fallback). In a frozen-binary environment this command
+# fails loudly with RuntimeError instead of producing a false-OK output —
+# drift detection only makes sense from source. Bidirectional drift between
+# source and KNOWN_TOOL_NAMES is caught by the test
+# tests/unit/tools/test_frozen_tool_name_discovery.py::test_known_tool_names_matches_source_exactly_no_drift.
 #
-# and paste the printed (sorted) names into the frozenset below. Keep this
+# Paste the printed (sorted) names into the frozenset below. Keep this
 # constant adjacent to CATEGORY_MODULES so a maintainer adding a new tool module
 # is looking at exactly this area.
 KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
