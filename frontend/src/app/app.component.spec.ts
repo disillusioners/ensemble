@@ -72,7 +72,8 @@ class MockRouter {
  * `activeInstanceId`, `activeProjectId`, `openDetail()`,
  * `clearInstance()`. Tests pass it explicitly to exercise the new
  * detail branch of `hideActiveOverlay` (R4) and the URL→service flow
- * (W5 / R6).
+ * (W5 / R6). The `lastDetailRoute`` computed is also mirrored so the
+ * reopen-path test (R7) can assert the cache contract end-to-end.
  */
 class MockInstancesViewStateService {
   /** Mirrors the public WritableSignal<boolean>. */
@@ -81,6 +82,20 @@ class MockInstancesViewStateService {
   /** Mirrors the cached instance id and project context. */
   readonly activeInstanceId: WritableSignal<string | null> = signal(null);
   readonly activeProjectId: WritableSignal<string> = signal('all');
+
+  /**
+   * Mirrors the real service's ``lastDetailRoute`` computed. The
+   * Instances nav link's routerLink binds to this so the link
+   * toggles between the bare ``/instances`` list and the cached
+   * detail route (e.g. ``/projects/all/instances/inst-1``). The
+   * reopen-path regression (R7) needs to read this exact value to
+   * assert the cache is preserved across the hide→reopen cycle.
+   */
+  readonly lastDetailRoute: Signal<string[] | null> = computed(() => {
+    const id = this.activeInstanceId();
+    if (!id) return null;
+    return ['/projects', this.activeProjectId(), 'instances', id];
+  });
 
   /** Recorded calls for the tests to assert. */
   openDetailCalls: Array<{ projectId: string; instanceId: string }> = [];
@@ -280,11 +295,48 @@ class TestableApp {
   readonly isPlanRoute: WritableSignal<boolean>;
   readonly isInstancesRoute: WritableSignal<boolean> = signal(false);
 
-  /** Mirrors the unified-overlay-visibility computed. */
+  /**
+   * Mirrors the production ``isOnDetailRoute`` signal — strict subset
+   * of ``isInstancesRoute`` that excludes the bare ``/instances`` list.
+   * Updated by ``syncDetailVisibility`` from the same regex match that
+   * drives the openDetail/closeDetail branch (production wiring is
+   * also in ``syncDetailVisibility``).
+   */
+  readonly isOnDetailRoute: WritableSignal<boolean> = signal(false);
+
+  /** Mirrors the unified-overlay-visibility computed. The 4th term
+   *  is now expressed via ``isHiddenButRecoverable`` (production
+   *  change — see app.ts docblock for the boolean-equivalence
+   *  derivation). The previous expanded form
+   *  ``(activeInstanceId !== null && isInstancesRoute)`` is encoded
+   *  verbatim inside ``isHiddenButRecoverable``, so the change is
+   *  observationally a no-op but keeps the two signals from drifting. */
   readonly anyOverlayVisible = computed(
     () => this.workspaceOverlayService.showWorkspace()
       || this.isPlanRoute()
       || this.instancesViewState.detailVisible()
+      || this.isHiddenButRecoverable()
+  );
+
+  /** Mirrors ``isHiddenButRecoverable``: chat is hidden but cached
+   *  id is set and the URL is on an instances route. Drives the hide
+   *  button's icon/label flip and the Instances nav-link dead-click
+   *  guard. Now also feeds ``anyOverlayVisible``'s 4th term (the
+   *  same predicate was inlined there before). */
+  readonly isHiddenButRecoverable = computed(
+    () => !this.instancesViewState.detailVisible()
+      && this.instancesViewState.activeInstanceId() !== null
+      && this.isInstancesRoute()
+  );
+
+  /** Hide-button icon: ``visibility`` when recoverable, ``visibility_off`` otherwise. */
+  readonly hideOverlayIcon = computed(
+    () => this.isHiddenButRecoverable() ? 'visibility' : 'visibility_off'
+  );
+
+  /** Hide-button aria-label: ``Show overlay`` when recoverable, ``Hide overlay`` otherwise. */
+  readonly hideOverlayAriaLabel = computed(
+    () => this.isHiddenButRecoverable() ? 'Show overlay' : 'Hide overlay'
   );
 
   constructor(
@@ -372,6 +424,10 @@ class TestableApp {
   syncDetailVisibility(url: string): void {
     const match = url.match(/^\/projects\/([^/?]+)\/instances\/([^/?]+)$/);
     this.isInstancesRoute.set(url === '/instances' || match !== null);
+    // Mirrors the production ``isOnDetailRoute.set(match !== null)``
+    // call (app.ts syncDetailVisibility). Strict subset of
+    // isInstancesRoute — bare /instances is excluded.
+    this.isOnDetailRoute.set(match !== null);
     if (match) {
       const projectId = match[1];
       if (projectId !== this.tabStateService.activeProjectId()) {
@@ -394,14 +450,96 @@ class TestableApp {
     }
   }
 
-  /** Mirror of the public hideActiveOverlay method. */
+  /**
+   * Mirror of the public hideActiveOverlay method. Pure toggle for
+   * the detail branch (no navigation) — the cached id is preserved,
+   * the URL stays on the detail route, and the user re-shows via
+   * the same hide button (which remains visible because the cached
+   * id is set). The plan-routable branch still navigates to
+   * /instances (the plan route has no cached state to toggle).
+   *
+   * N3 — combined workspace + chat-hidden: when the workspace is
+   * visible AND the chat is hidden-but-recoverable, the click hides
+   * the workspace and does NOT pop the chat open underneath
+   * (minimize-surprise: "hide" means "hide", not "switch overlays").
+   * The early ``return`` after the workspace-hide branch pins this.
+   */
   hideActiveOverlay(): void {
     if (this.workspaceOverlayService.showWorkspace()) {
       this.workspaceOverlayService.hide();
+      // N3: workspace is now hidden — stop here so a recoverable
+      // chat does NOT pop open underneath. The next click (with
+      // workspace already hidden) takes the pure-toggle branch.
+      return;
     }
-    if (this.isPlanRoute() || this.instancesViewState.detailVisible()) {
+    if (this.isPlanRoute()) {
       this.router.navigate(['/instances']);
+      return;
     }
+    if (this.instancesViewState.detailVisible()) {
+      this.instancesViewState.detailVisible.set(false);
+      return;
+    }
+    if (this.instancesViewState.activeInstanceId() !== null) {
+      this.instancesViewState.detailVisible.set(true);
+    }
+  }
+
+  /**
+   * Mirror of the public ``onInstancesNavClick`` dead-click guard
+   * (N1). When the chat overlay is hidden-but-recoverable AND the
+   * current URL is a DETAIL route AND the click is a plain left-click
+   * without modifiers, ``preventDefault`` is called and the overlay
+   * is re-shown via a direct ``detailVisible.set``. Otherwise the
+   * guard is a no-op and the routerLink drives the navigation as
+   * usual.
+   *
+   * Takes the minimum surface the production method touches: a
+   * ``preventDefault``-able event with the standard MouseEvent
+   * modifier flags (``button``, ``ctrlKey``, ``metaKey``, ``shiftKey``,
+   * ``altKey``) and recorded-call counters so the tests can assert
+   * the dead-click path didn't fire on a given input.
+   */
+  onInstancesNavClickCalls = 0;
+  onInstancesNavClickReveals = 0;
+
+  onInstancesNavClick(event: {
+    preventDefaultCalls: number[];
+    preventDefault: () => void;
+    button: number;
+    ctrlKey: boolean;
+    metaKey: boolean;
+    shiftKey: boolean;
+    altKey: boolean;
+  }): void {
+    this.onInstancesNavClickCalls++;
+    if (!this.isHiddenButRecoverable()) {
+      // Outside the recoverable state — let the routerLink drive the
+      // navigation. Tests verify ``preventDefault`` was NOT called.
+      return;
+    }
+    // Bare-/instances exclusion (Warning #3): on /instances the URL
+    // and the cached target diverge — the link must navigate so the
+    // router delivers the user to the cached detail route. Mirrors
+    // the production ``!isOnDetailRoute()`` early-return.
+    if (!this.isOnDetailRoute()) {
+      return;
+    }
+    // Modifier-click fall-through (Warning #1): only intercept a
+    // plain left-click. ctrl/cmd/shift/alt-click and middle/right-click
+    // bypass the guard so the browser can handle "open in new tab"
+    // etc. normally. ``button === 0`` is the left mouse button per
+    // the W3C UI Events spec.
+    if (event.button !== 0
+      || event.ctrlKey || event.metaKey
+      || event.shiftKey || event.altKey) {
+      return;
+    }
+    // Recoverable state + plain left-click on a detail URL: prevent
+    // the no-op navigation and re-show.
+    event.preventDefault();
+    this.instancesViewState.detailVisible.set(true);
+    this.onInstancesNavClickReveals++;
   }
 }
 
@@ -507,6 +645,30 @@ describe('App.anyOverlayVisible', () => {
     });
     expect(app.anyOverlayVisible()).toBe(false);
   });
+
+  // R7 — anyOverlayVisible hidden-but-recoverable branch.
+  //
+  // The hide button must stay visible after the user hides the chat
+  // overlay, so the same button can re-show the cached instance
+  // (the pure-toggle R4 contract). ``anyOverlayVisible`` returns
+  // true when the view-state service has a cached ``activeInstanceId``
+  // even though ``detailVisible`` is false.
+  it('(R7) returns true when activeInstanceId is set but detailVisible is false (hidden-but-recoverable)', () => {
+    // Boot on a detail URL — the constructor's syncDetailVisibility
+    // seeds the cached id via openDetail, then the user toggles the
+    // overlay closed via hideActiveOverlay. The hide button must
+    // remain visible so the user can re-show the same instance.
+    const { app, viewState } = makeApp({
+      url: '/projects/all/instances/inst-1',
+      showWorkspace: false,
+    });
+    expect(viewState.activeInstanceId()).toBe('inst-1');
+    // First hide — pure toggle closes the overlay but keeps the id.
+    app.hideActiveOverlay();
+    expect(viewState.detailVisible()).toBe(false);
+    // The hide button is still rendered (visible id → anyOverlayVisible).
+    expect(app.anyOverlayVisible()).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -541,13 +703,14 @@ describe('App.hideActiveOverlay', () => {
     expect(overlay.hideCalls).toBe(0);
   });
 
-  it('(f) handles both overlays visible simultaneously — both branches execute (workspace first, then navigate)', () => {
-    // The production implementation uses two independent `if` blocks (not
-    // `else if`), so when both overlays happen to be active at once both
-    // hide() AND router.navigate(['/instances']) are called. Workspace
-    // hide() runs first (it appears earlier in the method body), then
-    // the navigation. Pin that order so a future refactor to `else if`
-    // (which would skip the navigate) is caught.
+  it('(f) handles both overlays visible simultaneously — workspace hide runs and PLAN navigation is skipped (N3)', () => {
+    // Production ``hideActiveOverlay`` early-returns after the
+    // workspace hide branch (N3: "hide" means "hide", not "switch
+    // overlays"). The OLD behavior also fired ``router.navigate`` to
+    // /instances when the plan route was active, but with the early
+    // return the plan navigation is suppressed while the workspace
+    // is up — the user's next click (with workspace already hidden)
+    // takes the plan navigation branch. This pins the N3 intent.
     const { app, overlay, router } = makeApp({
       url: '/plan',
       showWorkspace: true,
@@ -557,69 +720,522 @@ describe('App.hideActiveOverlay', () => {
 
     expect(overlay.hideCalls).toBe(1);
     expect(overlay.showWorkspace()).toBe(false);
-    expect(router.navigateCalls).toEqual([['/instances']]);
+    // No navigation — the early return suppressed it.
+    expect(router.navigateCalls).toEqual([]);
   });
 
-  // R4 — Hide button detail branch: navigate to /instances
+  // R4 — Hide button detail branch: pure signal flip (toggle).
   //
-  // The detail branch of hideActiveOverlay used to call only
-  // closeDetail(), which left the URL on the invisible stub route
-  // (blank screen). The Instances nav link then pointed at the same
-  // URL — same-URL navigation was suppressed by the router, so
-  // NavigationEnd never fired and the visibility stayed stuck.
+  // The previous behaviour navigated to /instances on hide. The user
+  // reported "the selection is lost" when re-showing the chat overlay
+  // via the Instances nav link — the URL change was unnecessary, and
+  // the navigate side-effect caused a confusing UX hop to the list
+  // page while the chat state was still alive (the cached id and
+  // log entries survive, but the user has to re-click the nav link
+  // to restore the overlay).
   //
-  // The fix: detail branch navigates to /instances, mirroring the
-  // plan branch. syncDetailVisibility then reconciles the service
-  // from the new URL.
-  it('(R4) navigates to /instances when the detail overlay is visible (workspace AND plan both false)', () => {
+  // The fix: detail branch is a PURE toggle. ``detailVisible``
+  // flips directly to false, no navigation. The URL stays on the
+  // detail route; the user re-shows via the SAME hide button (which
+  // remains visible because the cached id is set, see
+  // ``anyOverlayVisible``). Cached id, project, and chat overlay
+  // state all survive the toggle.
+  //
+  // Previously (R4 v1) this branch navigated to /instances to avoid
+  // the URL-stuck trap (re-clicking the Instances nav link matched
+  // the same URL and the router suppressed the no-op navigation).
+  // That trap is sidestepped now because the user re-shows via the
+  // hide button itself, not the nav link.
+  it('(R4) detail branch is a pure toggle — detailVisible flips, no navigation, id preserved', () => {
     const { app, overlay, router, viewState } = makeApp({
       url: '/projects/all/instances/inst-1',
       showWorkspace: false,
       detailVisible: true,
     });
 
+    // Boot seeded the detail via syncDetailVisibility on the initial
+    // URL — openDetail was called with the right ids.
+    expect(viewState.activeInstanceId()).toBe('inst-1');
+    expect(viewState.detailVisible()).toBe(true);
+
     app.hideActiveOverlay();
 
-    expect(router.navigateCalls).toEqual([['/instances']]);
-    // closeDetail() runs implicitly via the NavigationEnd handler's
-    // syncDetailVisibility call once /instances is reached. The
-    // hideActiveOverlay method itself only navigates — closing the
-    // overlay is the NavigationEnd handler's job, matching the
-    // production implementation.
-    expect(viewState.closeDetailCalls).toBe(0);
+    // CRITICAL: the hide button does NOT navigate. The URL stays on
+    // the detail route, the cached id is preserved, and the user
+    // re-shows via the same hide button. The detailVisible flag
+    // flips directly (no need to round-trip through syncDetailVisibility
+    // because the URL is already on the detail route).
+    expect(router.navigateCalls).toEqual([]);
+    expect(viewState.detailVisible()).toBe(false);
+    expect(viewState.activeInstanceId()).toBe('inst-1'); // preserved
+    expect(viewState.activeProjectId()).toBe('all');    // preserved
     expect(overlay.hideCalls).toBe(0);
+    // anyOverlayVisible is still true because the cached id is set
+    // — the hide button remains visible, ready to re-show.
+    expect(app.anyOverlayVisible()).toBe(true);
   });
 
-  it('(R4) detail branch does NOT call closeDetail directly (the URL is the source of truth)', () => {
-    // The fix moved detail-hiding out of hideActiveOverlay — the
-    // NavigationEnd subscriber (syncDetailVisibility) is the single
-    // place that drives detailVisible from the URL. Pin this contract
-    // so a future refactor that re-adds closeDetail() here doesn't
-    // double-write and re-introduce the stuck-URL bug.
+  it('(R4) hidden-but-recoverable: re-click on the hide button re-shows the same overlay', () => {
+    // Initial state: boot on the detail URL — the constructor's
+    // syncDetailVisibility seeded the cached id AND flipped the
+    // overlay open. The user clicks hide (pure toggle) which closes
+    // the overlay but keeps the cached id. The hide button is still
+    // visible. The user clicks hide again — the toggle re-shows.
     const { app, viewState } = makeApp({
       url: '/projects/all/instances/inst-1',
       showWorkspace: false,
-      detailVisible: true,
     });
+    // Pre-condition: detailVisible is true (constructor opened it).
+    expect(viewState.activeInstanceId()).toBe('inst-1');
+    expect(viewState.detailVisible()).toBe(true);
 
+    // First click — hide.
     app.hideActiveOverlay();
+    expect(viewState.detailVisible()).toBe(false);
+    expect(viewState.activeInstanceId()).toBe('inst-1'); // preserved
+    expect(app.anyOverlayVisible()).toBe(true); // button still visible
 
-    expect(viewState.closeDetailCalls).toBe(0);
+    // Second click — re-show.
+    app.hideActiveOverlay();
+    expect(viewState.detailVisible()).toBe(true);
+    expect(viewState.activeInstanceId()).toBe('inst-1');
+    expect(viewState.activeProjectId()).toBe('all');
   });
 
-  it('(R4) detail+workspace combined: workspace hide runs AND detail navigates to /instances', () => {
-    // Both branches fire independently (workspace first, then
-    // navigate). This combines the (f) and (R4) cases.
-    const { app, overlay, router } = makeApp({
+  it('(R4) detail+workspace combined: workspace hides, detail stays visible (N3 minimize-surprise)', () => {
+    // N3: when the workspace is visible AND the chat overlay is
+    // hidden-but-recoverable, one click hides the workspace and
+    // does NOT pop the chat open underneath. The intent is
+    // "hide" not "switch overlays" — minimize-surprise. The
+    // early ``return`` after the workspace-hide branch pins this.
+    // After the click, the user clicks hide again (workspace
+    // already hidden) and the pure-toggle branch flips the chat
+    // open. This combines (f) and (R4) into one scenario.
+    const { app, overlay, router, viewState } = makeApp({
       url: '/projects/foo/instances/bar',
       showWorkspace: true,
-      detailVisible: true,
     });
 
     app.hideActiveOverlay();
 
     expect(overlay.hideCalls).toBe(1);
-    expect(router.navigateCalls).toEqual([['/instances']]);
+    // Pure-toggle detail branch never ran — workspace hide returned
+    // early. detailVisible stays true (the chat overlay was visible
+    // before the click; the workspace overlay layered above it).
+    expect(router.navigateCalls).toEqual([]);
+    expect(viewState.detailVisible()).toBe(true);
+    expect(viewState.activeInstanceId()).toBe('bar');  // preserved
+  });
+
+  it('(R4) no cached id + no overlay visible = hide button is inert (no-op)', () => {
+    // The pure-toggle path requires either ``detailVisible`` or
+    // ``activeInstanceId`` to be set; otherwise the hide button is
+    // inert (matches the production behaviour — the hide button
+    // itself is only rendered when ``anyOverlayVisible`` is true,
+    // so this case is defensive coverage).
+    const { app, router, viewState } = makeApp({
+      url: '/',
+      showWorkspace: false,
+    });
+    expect(viewState.activeInstanceId()).toBeNull();
+    expect(viewState.detailVisible()).toBe(false);
+    expect(app.anyOverlayVisible()).toBe(false);
+
+    app.hideActiveOverlay();
+
+    expect(router.navigateCalls).toEqual([]);
+    expect(viewState.detailVisible()).toBe(false);
+    expect(viewState.activeInstanceId()).toBeNull();
+  });
+
+  // R7 — Hide button: full hide→reopen roundtrip preserves the
+  // selection (the canonical state-preservation contract).
+  //
+  // The bug report: clicking the hide button while the detail overlay
+  // is up made the selection "lost" when the user re-opened the
+  // overlay. The fix is the pure toggle (R4) — the user re-shows
+  // via the SAME hide button. The cached id + project + chat overlay
+  // state all survive the roundtrip.
+  //
+  // This walks the same surface the live app uses (the view-state
+  // service signals + the unified computed) so the assertion is
+  // end-to-end, not just a unit-level check on a single method.
+  it('(R7) hide→re-show roundtrip preserves activeInstanceId + project + state + lastDetailRoute', () => {
+    const { app, router, viewState } = makeApp({
+      url: '/projects/all/instances/inst-1',
+      showWorkspace: false,
+      detailVisible: true,
+    });
+
+    // Boot seeded the detail via syncDetailVisibility on the initial
+    // URL — openDetail was called with the right ids.
+    expect(viewState.activeInstanceId()).toBe('inst-1');
+    expect(viewState.activeProjectId()).toBe('all');
+    expect(viewState.detailVisible()).toBe(true);
+    // N6 — exercise the lastDetailRoute mirror end-to-end so the
+    // Instances nav link's routerLink binding is asserted to
+    // resolve to the same detail URL across the roundtrip. Without
+    // this, a future refactor that drops the computed (or breaks
+    // its reactive wiring) would silently regress the cache
+    // contract the nav link depends on.
+    expect(viewState.lastDetailRoute()).toEqual([
+      '/projects', 'all', 'instances', 'inst-1',
+    ]);
+
+    // First click — hides the overlay (pure toggle, no navigation).
+    app.hideActiveOverlay();
+    expect(router.navigateCalls).toEqual([]);
+    expect(viewState.detailVisible()).toBe(false);
+    expect(viewState.activeInstanceId()).toBe('inst-1'); // preserved
+    expect(viewState.activeProjectId()).toBe('all');    // preserved
+    // The hide button stays visible — anyOverlayVisible is still
+    // true via the cached-id branch (gated by isInstancesRoute,
+    // see N2 test below).
+    expect(app.anyOverlayVisible()).toBe(true);
+    // The cached lastDetailRoute survives the toggle — the nav
+    // link still resolves to the same detail URL (which is
+    // exactly the dead-click trap N1 guards against).
+    expect(viewState.lastDetailRoute()).toEqual([
+      '/projects', 'all', 'instances', 'inst-1',
+    ]);
+
+    // Second click — re-shows the overlay (toggle back to true).
+    // The URL is still ``/projects/all/instances/inst-1``; the
+    // chat overlay opens with the same instance + messages.
+    app.hideActiveOverlay();
+    expect(viewState.detailVisible()).toBe(true);
+    expect(viewState.activeInstanceId()).toBe('inst-1');
+    expect(viewState.activeProjectId()).toBe('all');
+    expect(router.navigateCalls).toEqual([]); // still no navigation
+    expect(viewState.lastDetailRoute()).toEqual([
+      '/projects', 'all', 'instances', 'inst-1',
+    ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// N2 — anyOverlayVisible 4th-term gate (cached id is only relevant on
+// instances routes). Without the gate, the hide button would render on
+// every route whenever localStorage had a cached id.
+// ---------------------------------------------------------------------------
+describe('App.anyOverlayVisible — N2 gate to isInstancesRoute', () => {
+  it('(N2-b) cached id + non-instances route (e.g. /sources) → anyOverlayVisible is false', () => {
+    // N2: the 4th term of ``anyOverlayVisible`` is gated to
+    // ``isInstancesRoute``. Without the gate, ``restoreState``'s
+    // localStorage-cached id (seeded at boot) would force the hide
+    // button to render on every route — /, /sources, /jobs, … —
+    // even though the chat overlay itself only shows on a detail
+    // URL. The pre-seed below mirrors the cold-reload-on-/sources
+    // case: the cached id is in localStorage, the URL is not a
+    // detail URL.
+    const { app, viewState } = makeApp({ url: '/sources', showWorkspace: false });
+    // Simulate localStorage restore: activeInstanceId set, URL not
+    // matching the detail pattern. ``syncDetailVisibility`` ran
+    // closeDetail (detailVisible=false) without touching the id.
+    viewState.activeInstanceId.set('inst-1');
+    expect(app.isInstancesRoute()).toBe(false);
+    expect(viewState.detailVisible()).toBe(false);
+
+    // The hide button must NOT render — cached id alone is not
+    // enough; the URL must also be on an instances route.
+    expect(app.anyOverlayVisible()).toBe(false);
+    // The recoverable state is also false (gated off), so the
+    // Instances nav-link dead-click guard does not fire either.
+    expect(app.isHiddenButRecoverable()).toBe(false);
+  });
+
+  it('(N2-a) cached id + instances route + hidden → anyOverlayVisible is true (re-showable)', () => {
+    // The (R7) hidden-but-recoverable test already exercises a
+    // detail URL; this variant exercises the bare /instances list
+    // (which also satisfies isInstancesRoute — the gate accepts
+    // either /instances or a detail URL).
+    const { app, viewState } = makeApp({
+      url: '/projects/all/instances/inst-1',
+      showWorkspace: false,
+    });
+    app.hideActiveOverlay();
+    expect(viewState.detailVisible()).toBe(false);
+    expect(viewState.activeInstanceId()).toBe('inst-1');
+    expect(app.isInstancesRoute()).toBe(true);
+    expect(app.anyOverlayVisible()).toBe(true);
+    expect(app.isHiddenButRecoverable()).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// N1 — hide button affordance flip (icon + aria-label) and the
+// Instances nav-link dead-click guard.
+// ---------------------------------------------------------------------------
+describe('App hide-button affordance — N1 icon/label flip', () => {
+  it('visibility_off / "Hide overlay" when overlay is visible (chat open)', () => {
+    // Default boot on a detail URL — the chat overlay is visible.
+    const { app } = makeApp({
+      url: '/projects/all/instances/inst-1',
+      showWorkspace: false,
+    });
+    expect(app.isHiddenButRecoverable()).toBe(false);
+    expect(app.hideOverlayIcon()).toBe('visibility_off');
+    expect(app.hideOverlayAriaLabel()).toBe('Hide overlay');
+  });
+
+  it('visibility / "Show overlay" when overlay is hidden-but-recoverable', () => {
+    // First click — hide the chat. The cached id is preserved, the
+    // URL is on a detail route, so the recoverable state is true.
+    const { app, viewState } = makeApp({
+      url: '/projects/all/instances/inst-1',
+      showWorkspace: false,
+    });
+    app.hideActiveOverlay();
+    expect(viewState.detailVisible()).toBe(false);
+    expect(app.isHiddenButRecoverable()).toBe(true);
+    expect(app.hideOverlayIcon()).toBe('visibility');
+    expect(app.hideOverlayAriaLabel()).toBe('Show overlay');
+  });
+});
+
+describe('App.onInstancesNavClick — N1 dead-click guard', () => {
+  /**
+   * Mock MouseEvent with the minimum surface the production handler
+   * touches: ``preventDefault`` (counted so tests can assert the
+   * dead-click path didn't fire) plus the standard modifier flags
+   * (``button``, ``ctrlKey``, ``metaKey``, ``shiftKey``, ``altKey``)
+   * used by the modifier-click fall-through guard. Defaults emulate
+   * a plain left-click without modifiers — exactly the case the
+   * dead-click guard should intercept.
+   */
+  function makeEvent(overrides: {
+    button?: number;
+    ctrlKey?: boolean;
+    metaKey?: boolean;
+    shiftKey?: boolean;
+    altKey?: boolean;
+  } = {}): {
+    preventDefaultCalls: number;
+    preventDefault: () => void;
+    button: number;
+    ctrlKey: boolean;
+    metaKey: boolean;
+    shiftKey: boolean;
+    altKey: boolean;
+  } {
+    return {
+      preventDefaultCalls: 0,
+      preventDefault() { this.preventDefaultCalls++; },
+      button: overrides.button ?? 0,
+      ctrlKey: overrides.ctrlKey ?? false,
+      metaKey: overrides.metaKey ?? false,
+      shiftKey: overrides.shiftKey ?? false,
+      altKey: overrides.altKey ?? false,
+    };
+  }
+
+  it('(N1) re-shows the overlay when hidden-but-recoverable (router.navigate is NOT called)', () => {
+    // Set up the recoverable state: boot on a detail URL, then
+    // first click hides the chat (pure toggle — cached id preserved).
+    const { app, router, viewState } = makeApp({
+      url: '/projects/all/instances/inst-1',
+      showWorkspace: false,
+    });
+    app.hideActiveOverlay();
+    expect(viewState.detailVisible()).toBe(false);
+    expect(viewState.activeInstanceId()).toBe('inst-1');
+    expect(app.isHiddenButRecoverable()).toBe(true);
+
+    // Simulate the Instances nav-link click.
+    const event = makeEvent();
+    app.onInstancesNavClick(event);
+
+    // preventDefault fired (suppresses the no-op router navigation).
+    expect(event.preventDefaultCalls).toBe(1);
+    // The overlay re-shows directly via a pure signal flip.
+    expect(viewState.detailVisible()).toBe(true);
+    // The cached id is preserved.
+    expect(viewState.activeInstanceId()).toBe('inst-1');
+    // Router was NOT consulted — the dead-click trap is bypassed.
+    expect(router.navigateCalls).toEqual([]);
+    expect(app.onInstancesNavClickReveals).toBe(1);
+  });
+
+  it('(N1) is a no-op when the chat is already visible (routerLink proceeds normally)', () => {
+    // When the chat is visible, the Instances nav link should
+    // navigate as usual (the routerLink resolves to the same
+    // detail URL only on the hidden state — when visible, the
+    // user is already on it and the link acts like a no-op or a
+    // fresh navigation depending on router config, but the
+    // dead-click guard must NOT interfere).
+    const { app, viewState } = makeApp({
+      url: '/projects/all/instances/inst-1',
+      showWorkspace: false,
+      detailVisible: true,
+    });
+    expect(viewState.detailVisible()).toBe(true);
+    expect(app.isHiddenButRecoverable()).toBe(false);
+
+    const event = makeEvent();
+    app.onInstancesNavClick(event);
+    expect(event.preventDefaultCalls).toBe(0);
+    expect(viewState.detailVisible()).toBe(true); // untouched
+    expect(app.onInstancesNavClickReveals).toBe(0); // no reveal
+  });
+
+  it('(N1) is a no-op on /sources with cached id (N2 gate keeps recoverable state false)', () => {
+    // Even though there's a cached id (localStorage restore), when
+    // the user is on a non-instances route the recoverable state
+    // is false (N2 gate — isInstancesRoute must be true). The
+    // nav-link falls back to plain /instances and a click
+    // navigates normally — the dead-click guard must NOT fire
+    // because the link IS productive (it goes to /instances, a
+    // different URL).
+    const { app, viewState } = makeApp({ url: '/sources', showWorkspace: false });
+    viewState.activeInstanceId.set('inst-1');
+    expect(app.isInstancesRoute()).toBe(false);
+    expect(app.isHiddenButRecoverable()).toBe(false);
+
+    const event = makeEvent();
+    app.onInstancesNavClick(event);
+    expect(event.preventDefaultCalls).toBe(0);
+    expect(viewState.detailVisible()).toBe(false); // untouched
+    expect(app.onInstancesNavClickReveals).toBe(0);
+  });
+
+  // (N1) Modifier-click fall-through (Warning #1): the dead-click
+  // guard must NOT intercept ctrl-click / cmd-click / shift-click /
+  // alt-click / middle-click. Those are the browser's "open in new
+  // tab" / "open in new window" shortcuts and the user expects them
+  // to work normally — silently swallowing them would be a serious
+  // UX regression. Each flag is exercised in its own assertion so a
+  // future refactor that drops one of the gates fails fast.
+  it('(N1) does NOT intercept ctrl-click (browser "open in new tab" must work)', () => {
+    // Set up the recoverable state: boot on a detail URL, then
+    // first click hides the chat (pure toggle — cached id preserved).
+    // The recoverable state is on, the URL is on a detail route —
+    // everything is primed for the dead-click guard to fire EXCEPT
+    // the modifier flag, which the test pins.
+    const { app, viewState } = makeApp({
+      url: '/projects/all/instances/inst-1',
+      showWorkspace: false,
+    });
+    app.hideActiveOverlay();
+    expect(app.isHiddenButRecoverable()).toBe(true);
+    expect(app.isOnDetailRoute()).toBe(true);
+
+    // ctrl-click (cmd on macOS is metaKey; same guard for both).
+    const event = makeEvent({ ctrlKey: true });
+    app.onInstancesNavClick(event);
+
+    // preventDefault must NOT fire — the browser should handle the
+    // click natively so the user gets a new tab.
+    expect(event.preventDefaultCalls).toBe(0);
+    // The overlay must NOT pop open via the guard — the click went
+    // through to the browser's default handling.
+    expect(viewState.detailVisible()).toBe(false);
+    expect(app.onInstancesNavClickReveals).toBe(0);
+  });
+
+  it('(N1) does NOT intercept middle-click (button !== 0)', () => {
+    // Middle-click is the browser's "open in new tab" trigger in
+    // many configurations; ``button === 1`` per the W3C UI Events
+    // spec. The guard must NOT swallow it.
+    const { app, viewState } = makeApp({
+      url: '/projects/all/instances/inst-1',
+      showWorkspace: false,
+    });
+    app.hideActiveOverlay();
+    expect(app.isHiddenButRecoverable()).toBe(true);
+
+    const event = makeEvent({ button: 1 });
+    app.onInstancesNavClick(event);
+
+    expect(event.preventDefaultCalls).toBe(0);
+    expect(viewState.detailVisible()).toBe(false);
+    expect(app.onInstancesNavClickReveals).toBe(0);
+  });
+
+  // (N1) Bare-/instances exclusion (Warning #3): the dead-click
+  // guard must NOT fire when the current URL is the bare
+  // ``/instances`` list with a cached id. On the list, the URL and
+  // the cached target diverge — the link must navigate normally so
+  // the router delivers the user to the cached detail route. The
+  // pre-fix behavior preventDefaulted a genuinely useful navigation
+  // (the F3 cold-reload deep-link path skipped its openDetail
+  // write).
+  it('(N1) does NOT intercept on bare /instances URL with cached id (let routerLink navigate to the cached detail)', () => {
+    // Boot on /instances with a cached id (the cold-reload
+    // scenario the F3 path handles). ``syncDetailVisibility`` ran
+    // closeDetail, so ``detailVisible`` is false but the cached
+    // id survives. ``isInstancesRoute`` is true (the gate accepts
+    // the list) so ``isHiddenButRecoverable`` is also true —
+    // ``isOnDetailRoute`` is the ONLY signal that distinguishes
+    // this case from the recoverable-on-detail-URL case.
+    const { app, router, viewState } = makeApp({ url: '/instances', showWorkspace: false });
+    viewState.activeInstanceId.set('inst-1');
+    // Boot wrote closeDetail — the cached id survives.
+    expect(viewState.detailVisible()).toBe(false);
+    expect(viewState.activeInstanceId()).toBe('inst-1');
+    expect(app.isInstancesRoute()).toBe(true);
+    expect(app.isHiddenButRecoverable()).toBe(true);
+    expect(app.isOnDetailRoute()).toBe(false); // <-- the disambiguator
+
+    const event = makeEvent();
+    app.onInstancesNavClick(event);
+
+    // The guard must NOT intercept — the link is productive (it
+    // routes to the cached detail route via routerLink, not the
+    // same URL). preventDefault must NOT fire; the routerLink
+    // takes the user to the cached detail.
+    expect(event.preventDefaultCalls).toBe(0);
+    // The overlay does NOT pop open via the guard.
+    expect(viewState.detailVisible()).toBe(false);
+    expect(app.onInstancesNavClickReveals).toBe(0);
+    // The routerLink binding still drives the navigation — the
+    // mock records it via the routerService the routerLink binds
+    // to (out of scope for this unit test, but the absence of
+    // preventDefault is the key observable).
+  });
+});
+
+// ---------------------------------------------------------------------------
+// N3 — combined workspace visible + chat hidden-but-recoverable:
+// the click hides the workspace and does NOT pop the chat open
+// underneath (minimize-surprise: "hide" means "hide").
+// ---------------------------------------------------------------------------
+describe('App.hideActiveOverlay — N3 combined workspace + chat-hidden', () => {
+  it('(N3) workspace visible + chat hidden-but-recoverable → one click hides workspace, chat stays hidden, no navigation', () => {
+    // Reach the recoverable state via boot → first click (chat
+    // hides, cached id preserved). Then show the workspace
+    // overlay (simulates the user opening it while the chat is
+    // hidden). One click on hide — workspace should hide and the
+    // chat should NOT pop open underneath.
+    const { app, overlay, router, viewState } = makeApp({
+      url: '/projects/all/instances/inst-1',
+      showWorkspace: false,
+    });
+    // First click — hide the chat (pure toggle — recoverable state).
+    app.hideActiveOverlay();
+    expect(viewState.detailVisible()).toBe(false);
+    expect(viewState.activeInstanceId()).toBe('inst-1');
+    expect(app.isHiddenButRecoverable()).toBe(true);
+
+    // Now show the workspace overlay.
+    overlay.showWorkspace.set(true);
+    expect(app.anyOverlayVisible()).toBe(true);
+
+    // One click — workspace hides, chat stays hidden (N3 minimize-surprise).
+    app.hideActiveOverlay();
+    expect(overlay.hideCalls).toBe(1);
+    expect(overlay.showWorkspace()).toBe(false);
+    expect(router.navigateCalls).toEqual([]);
+    // Chat stays hidden — no pop-under.
+    expect(viewState.detailVisible()).toBe(false);
+    expect(viewState.activeInstanceId()).toBe('inst-1'); // preserved
+
+    // Sanity: now in workspace-hidden + chat-hidden-but-recoverable,
+    // another click would re-show the chat (the pure-toggle path
+    // runs after the workspace-hide early return).
+    app.hideActiveOverlay();
+    expect(viewState.detailVisible()).toBe(true);
+    expect(viewState.activeInstanceId()).toBe('inst-1');
+    expect(overlay.hideCalls).toBe(1); // still 1 — no extra workspace hide
   });
 });
 
