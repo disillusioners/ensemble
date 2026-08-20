@@ -824,24 +824,66 @@ class TestNaturalCompletionRacingRecoveredMarker:
     """
 
     def test_natural_completion_races_recovered_pending_marker(
-        self, engine: Engine
+        self, engine: Engine, monkeypatch: pytest.MonkeyPatch
     ):
         """Seed a non-terminal ReportInjection row with the same
         obligation triple; trigger the child's natural completion;
         assert ``idempotency_skip`` outcome (no crash, no duplicate
         row).
+
+        F1 FIX (2026-08-20, de-vacuous): the previous test seeded
+        the child with ``status=COMPLETED`` so the head guard at
+        ``child_reports.py:1754-1768`` short-circuited with its
+        OWN ``idempotency_skip`` outcome — the C-DiD INSERT was
+        never reached, the discriminator was never called, and
+        deleting the entire ``try/except`` left the suite green.
+        Reviewer instrumentation measured discriminator reach-count
+        = 0. Fix by seeding the child as ``RUNNING`` so the head
+        guard falls through, AND asserting discriminator reach
+        explicitly (count >= 1) — the test now FAILS if the C-DiD
+        branch is removed.
+
+        F3 REGRESSION (2026-08-20): the production code path MUST
+        also leave the child COMPLETED transition intact (the
+        pre-fix ``session.rollback()`` discarded the COMPLETED
+        UPDATE; the F3 SAVEPOINT-scoped rollback preserves it).
+        Assert ``status=COMPLETED`` on a fresh-session read.
         """
         from daemon.repositories.report_injection.models import (
             ReportInjection,
             ReportInjectionState,
         )
+        from daemon.services.child_reports import (
+            _is_obligation_triple_integrity_error as real_discriminator,
+        )
+
+        # Reach instrumentation — wrap the discriminator with a
+        # counting shim. The C-DiD ``except`` block MUST invoke the
+        # discriminator; if the try/except is removed the count
+        # stays at 0 and the test fails. The shim delegates to the
+        # real function so discrimination behaviour is preserved.
+        discriminator_calls = {"n": 0}
+
+        def counting_discriminator(exc):
+            discriminator_calls["n"] += 1
+            return real_discriminator(exc)
+
+        monkeypatch.setattr(
+            "daemon.services.child_reports._is_obligation_triple_integrity_error",
+            counting_discriminator,
+        )
 
         service = _build_child_reports_service(engine)
         parent_id = _seed_root_instance(engine)
+        # F1 FIX: seed child as RUNNING so the head guard at
+        # ``child_reports.py:1754-1768`` falls through and the
+        # natural completion path reaches the C-DiD INSERT. Was
+        # ``COMPLETED`` — short-circuited the head guard and made
+        # the test vacuous.
         child_id = _seed_child_instance_full(
             engine,
             parent_id=parent_id,
-            status=InstanceStatus.COMPLETED.value,
+            status=InstanceStatus.RUNNING.value,
         )
 
         # Seed a non-terminal ReportInjection row with the SAME
@@ -877,6 +919,20 @@ class TestNaturalCompletionRacingRecoveredMarker:
             last_content="... (natural enqueue, racing recovered row)",
         )
 
+        # Reach assertion (F1 FIX): the discriminator MUST have
+        # been called — the C-DiD ``except`` block was entered and
+        # consulted ``_is_obligation_triple_integrity_error``. If
+        # the try/except is removed, this count stays at 0 and the
+        # test fails. The previous test only asserted the outcome,
+        # which the head guard also emits, so it could not
+        # distinguish head-guard short-circuit from C-DiD reach.
+        assert discriminator_calls["n"] >= 1, (
+            "the C-DiD IntegrityError catch was NOT entered — the "
+            "discriminator was never consulted. Either the head "
+            "guard short-circuited (vacuous test) or the try/except "
+            "was removed. The branch must be exercised."
+        )
+
         assert result.outcome == "idempotency_skip", (
             "natural completion × recovered PENDING race MUST return "
             "idempotency_skip (DiD defense — the recovered row owns "
@@ -905,6 +961,25 @@ class TestNaturalCompletionRacingRecoveredMarker:
                 "natural path no-ops via idempotency_skip"
             )
 
+        # F3 REGRESSION (2026-08-20): the SAVEPOINT-scoped
+        # rollback must preserve the child's ``status=COMPLETED``
+        # UPDATE made earlier in the same transaction. The pre-fix
+        # ``session.rollback()`` discarded the COMPLETED transition
+        # along with the injection INSERT — the child was wedged
+        # non-terminal forever, the parent deferral was permanent,
+        # and the sweep re-hit the same error every cycle.
+        # Fresh-session read confirms the COMPLETED transition
+        # survived the SAVEPOINT-scoped rollback.
+        with Session(engine) as session:
+            child_row = session.get(Instance, child_id)
+            assert child_row.status == InstanceStatus.COMPLETED.value, (
+                "F3 REGRESSION: child instance must transition to "
+                "COMPLETED even when the C-DiD race fires "
+                f"(SAVEPOINT preserves the outer transaction — "
+                f"only the injection INSERT was rolled back). Got "
+                f"status={child_row.status!r}."
+            )
+
     def test_unrelated_integrity_error_propagates(
         self, engine: Engine, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -917,23 +992,64 @@ class TestNaturalCompletionRacingRecoveredMarker:
         constraint name (PG) or column set (SQLite) and re-raises
         otherwise.
 
-        We simulate an unrelated error by stubbing
-        ``ReportInjection.flush`` (no — we patch ``Session.flush``
-        on the live service's session). The stub raises a synthetic
-        ``IntegrityError`` whose ``.orig`` renders a message that
-        does NOT contain all three obligation-triple column names —
-        modeling a hypothetical FK violation against
-        ``report_injections.parent_instance_id`` referencing a
-        non-existent parent.
+        We simulate an unrelated error by patching ``Session.flush``
+        SELECTIVELY — only raises the synthetic ``IntegrityError``
+        when a ``ReportInjection`` is in the pending-new set (the
+        C-DiD INSERT site). Earlier flushes (head-guard autoflush,
+        F3 outer flush for ``message_queue`` / ``task``) pass through
+        unchanged so the function can reach the C-DiD branch.
+
+        F2 FIX (2026-08-20, de-vacuous): the previous test patched
+        ``Session.flush`` to raise on EVERY call. With a
+        ``COMPLETED`` child, the head guard short-circuited with
+        its own ``idempotency_skip`` outcome and no flush ran;
+        BUT — autoflush on ``session.get`` (head-guard read at
+        ``child_reports.py:1692``) fired the patched flush and the
+        synthetic error propagated from there, not from the C-DiD
+        INSERT. The try/except at the C-DiD INSERT was NEVER
+        entered; the discriminator was NEVER called. Fix by:
+
+        1. Seeding the child as ``RUNNING`` so the head guard
+           falls through and execution reaches the C-DiD INSERT.
+        2. Using a selective flush that inspects ``session.new``
+           and only raises when a ``ReportInjection`` is staged
+           (the C-DiD INSERT site). The F3 outer flush (no
+           ``ReportInjection`` pending) and any autoflush pass
+           through.
+        3. Adding a reach assertion (discriminator called ≥ 1) so
+           the test FAILS if the C-DiD ``try/except`` is removed.
         """
         from sqlalchemy.exc import IntegrityError as SAIntegrityError
+        from daemon.repositories.report_injection.models import ReportInjection
+        from daemon.services.child_reports import (
+            _is_obligation_triple_integrity_error as real_discriminator,
+        )
+
+        # Reach instrumentation — wrap the discriminator with a
+        # counting shim. The C-DiD ``except`` block MUST invoke
+        # the discriminator; if the try/except is removed the
+        # count stays at 0 and the test fails.
+        discriminator_calls = {"n": 0}
+
+        def counting_discriminator(exc):
+            discriminator_calls["n"] += 1
+            return real_discriminator(exc)
+
+        monkeypatch.setattr(
+            "daemon.services.child_reports._is_obligation_triple_integrity_error",
+            counting_discriminator,
+        )
 
         service = _build_child_reports_service(engine)
         parent_id = _seed_root_instance(engine)
+        # F2 FIX: seed child as RUNNING so the head guard at
+        # ``child_reports.py:1754-1768`` falls through and the
+        # natural completion path reaches the C-DiD INSERT. Was
+        # ``COMPLETED`` — short-circuited the head guard.
         child_id = _seed_child_instance_full(
             engine,
             parent_id=parent_id,
-            status=InstanceStatus.COMPLETED.value,
+            status=InstanceStatus.RUNNING.value,
         )
 
         # Build a synthetic FK-violation-style error. SQLite renders
@@ -951,22 +1067,32 @@ class TestNaturalCompletionRacingRecoveredMarker:
             orig=fk_orig,
         )
 
-        # Patch ``Session.flush`` so the natural INSERT raises the
-        # synthetic error instead of hitting the obligation-triple
-        # index. ``_process_child_completion_db_sync`` enters its
-        # own ``WriteGuardSession`` internally, so we patch
-        # ``Session.flush`` at the class level for the duration of
-        # the call.
+        # F2 FIX (selective flush): patch ``Session.flush`` so it
+        # only raises the synthetic error when a ``ReportInjection``
+        # is in the pending-new set (the C-DiD INSERT site). Earlier
+        # flushes (head-guard autoflush, F3 outer flush for
+        # ``message_queue`` / ``task`` INSERTs) pass through to the
+        # real flush so execution can reach the C-DiD INSERT. The
+        # ``session.new`` set contains ORM-mapped objects that have
+        # been ``session.add``-ed but not yet flushed — this is the
+        # canonical SQLAlchemy hook for inspecting what a flush
+        # would emit.
         from sqlmodel import Session as SQLModelSession
 
         original_flush = SQLModelSession.flush
-        call_count = {"n": 0}
+        flush_calls = {"n": 0}
 
-        def _raise_unrelated_flush(self, *_args, **_kwargs):
-            call_count["n"] += 1
-            raise synthetic_err
+        def _selective_flush(self, *args, **kwargs):
+            flush_calls["n"] += 1
+            # Inspect pending-new objects. If any is a
+            # ``ReportInjection``, this is the C-DiD INSERT site —
+            # raise the synthetic FK-style error.
+            new_objs = list(getattr(self, "new", set()) or set())
+            if any(isinstance(obj, ReportInjection) for obj in new_objs):
+                raise synthetic_err
+            return original_flush(self, *args, **kwargs)
 
-        monkeypatch.setattr(SQLModelSession, "flush", _raise_unrelated_flush)
+        monkeypatch.setattr(SQLModelSession, "flush", _selective_flush)
         # Keep the original available for any helper session that
         # the service may open (e.g. the bus / repo paths).
         _ = original_flush
@@ -980,6 +1106,19 @@ class TestNaturalCompletionRacingRecoveredMarker:
                 last_content="... (would race if it could)",
             )
 
+        # Reach assertion (F2 FIX): the discriminator MUST have
+        # been called — the C-DiD ``except`` block was entered and
+        # consulted ``_is_obligation_triple_integrity_error``. If
+        # the try/except is removed, the synthetic error would
+        # still propagate from the (patched) flush, but the
+        # discriminator count stays at 0 and the test fails.
+        assert discriminator_calls["n"] >= 1, (
+            "the C-DiD IntegrityError catch was NOT entered — the "
+            "discriminator was never consulted. Either the head "
+            "guard short-circuited (vacuous test) or the try/except "
+            "was removed. The branch must be exercised."
+        )
+
         # The propagated error is the SAME synthetic error we
         # injected (no wrapping into a new exception type — bare
         # ``raise``).
@@ -987,19 +1126,17 @@ class TestNaturalCompletionRacingRecoveredMarker:
             "unrelated IntegrityError MUST be re-raised as-is (bare "
             "``raise``); wrapping would hide the original exception"
         )
-        assert call_count["n"] >= 1, (
+        assert flush_calls["n"] >= 1, (
             "the patched Session.flush MUST have been invoked at "
-            "least once before the error propagated"
+            "least once before the error propagated (the selective "
+            "flush only raises on ReportInjection in session.new; "
+            "this confirms the outer F3 flush ran first)"
         )
 
         # Discrimination rule sanity check: the synthetic FK error
         # does NOT match the obligation-triple pattern. Belt and
         # braces — the re-raise already proves the caller's logic.
-        from daemon.services.child_reports import (
-            _is_obligation_triple_integrity_error,
-        )
-
-        assert _is_obligation_triple_integrity_error(synthetic_err) is False, (
+        assert real_discriminator(synthetic_err) is False, (
             "the synthetic FK error MUST NOT be mis-classified as "
             "obligation-triple (it does not contain all three "
             "obligation-triple column names)"
