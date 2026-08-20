@@ -1428,22 +1428,6 @@ class TestC4NullConsumerAudit:
         )
         assert [r.injection_id for r in aged] == ["n-old-pen"]
 
-    @pytest.mark.xfail(
-        strict=False,
-        reason=(
-            "KNOWN PG-ONLY PRODUCTION BUG (BUG-3, already reported by "
-            "the sibling 3.6 worker in "
-            "tests/postgres/test_report_delivery_recovery_pg.py — see "
-            "its _LANE2_PG_BUG_NOTE): "
-            "find_completed_children_without_delivery emits malformed "
-            "SQL referencing alias 'dw' before declaration in the NOT "
-            "EXISTS subquery → psycopg.errors.UndefinedTable on PG. "
-            "SQLite's parser accepts it, so the C4 consumer IS "
-            "handle-or-exclude correct in its predicate semantics; the "
-            "malformed SQL is the blocker. Remove this xfail when the "
-            "1-line fix (select(dw.watch_id)) lands."
-        ),
-    )
     def test_find_completed_children_excludes_existing_null_keyed_row(
         self, baseline_shape: Any
     ) -> None:
