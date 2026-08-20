@@ -482,8 +482,10 @@ class ServicesConfig(BaseSettings):
     report_delivery_recovery_lane_deferred: bool = Field(
         default=True,
         description=(
-            "Lane 1 (DEFERRED rows past the age guard) per-lane "
-            "kill-switch. Defaults to True."
+            "Lane 1 (DEFERRED rows for non-terminal parents) "
+            "per-lane kill-switch. Gated by "
+            "has_instance_busy(parent_id), no age bound — age "
+            "filtering lives on Lanes 3+4. Defaults to True."
         ),
     )
     report_delivery_recovery_lane_no_row_backstop: bool = Field(

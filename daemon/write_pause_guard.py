@@ -34,6 +34,17 @@ And from the migration entry point::
     manager.pause_writes()    # blocks until _active_writes == 0
     # ...perform migration...
     manager.resume_writes()
+
+Version-coupling note: ``WriteGuardSession.__init__`` performs an
+``isinstance`` check against ``contextlib._GeneratorContextManager``
+— an underscore-private stdlib implementation detail. That type is
+the concrete class produced by every ``@contextmanager``-decorated
+factory across CPython 3.8+ (it has been stable for a decade; the
+``AsyncExitStack`` refactor of 3.11 did not move it), so the check
+is reliable on all supported interpreters, but it IS a private-API
+dependency: if a future CPython ever renames or re-homes that
+class, this isinstance will raise ``AttributeError`` at import
+time (loud, not silent) and the check must be updated in step.
 """
 
 from __future__ import annotations
@@ -229,6 +240,13 @@ class WritePauseGuard:
         Delegates to :meth:`write_exit`. Always releases (even on
         exception) so a failure inside the region cannot pin
         ``_active_writes`` above zero and deadlock ``pause_writes``.
+
+        No-suppression contract: this method returns ``None``
+        (falsy) unconditionally, so the ``with`` statement NEVER
+        suppresses an exception raised inside the region — the
+        interpreter propagates it normally after the slot is
+        released. Returning ``True`` here would silently swallow
+        production errors; the guard's only job is bookkeeping.
         """
         self.write_exit()
 

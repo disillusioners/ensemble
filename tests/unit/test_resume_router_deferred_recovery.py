@@ -189,7 +189,6 @@ def _build_minimal_manager(engine: Engine) -> MagicMock:
 
     manager = MagicMock(name="InstanceManager")
     manager.engine = engine
-    manager.write_guard = MagicMock(name="WritePauseGuard")
     # Real write_guard (not mock) so WriteGuardSession works.
     from daemon.write_pause_guard import WritePauseGuard
     manager.write_guard = WritePauseGuard()

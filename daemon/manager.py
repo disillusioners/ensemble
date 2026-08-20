@@ -398,13 +398,17 @@ class InstanceManager:
             the NULL-keyed shape and the terminal INJECTED /
             TASK_DELIVERED shape).
         """
+        from .repositories.report_injection.models import (
+            ReportInjectionState,
+        )
+
         if report_message_id is None:
             return False
         try:
             row = self._report_injection_repo.find_row_by_report_message_id(
                 report_message_id
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — FM-1 exemption predicate
             logger.warning(
                 f"_has_non_terminal_injection_for: lookup failed "
                 f"message_id={report_message_id[:8]}...: "
@@ -414,8 +418,8 @@ class InstanceManager:
         if row is None:
             return False
         return row.state in (
-            "PENDING",
-            "DEFERRED",
+            ReportInjectionState.PENDING.value,
+            ReportInjectionState.DEFERRED.value,
         )
 
     async def _is_parent_terminal(self, parent_id: str) -> bool | None:
@@ -448,7 +452,7 @@ class InstanceManager:
             inst = await asyncio.to_thread(
                 self._instance_repository.get, parent_id
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — lookup-fail → None (caller skips)
             logger.warning(
                 f"_is_parent_terminal: lookup failed "
                 f"parent={parent_id[:8]}...: "
@@ -6416,7 +6420,7 @@ class InstanceManager:
                 child_message_id=child_message_id,
                 source=source,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — per-row fail-safe, re-raised
             logger.warning(
                 f"[{source}] re-enter completion failed "
                 f"child={child_instance_id[:8]}..., "
@@ -6490,7 +6494,7 @@ class InstanceManager:
                 injection_id=injection_id,
                 source=source,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — per-row fail-safe, re-raised
             logger.warning(
                 f"[{source}] reconcile_deferred_report failed "
                 f"child={child_instance_id[:8]}..., "
@@ -6535,7 +6539,7 @@ class InstanceManager:
                 loop,
             )
             future.result(timeout=8.0)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — per-row fail-safe, re-raised
             logger.warning(
                 f"[{source}] re-enter completion failed "
                 f"child={child_instance_id[:8]}..., "
@@ -6796,7 +6800,7 @@ class InstanceManager:
                     ),
                     loop,
                 ).result(timeout=8.0) or "[No response content]"
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — best-effort content fetch
             logger.warning(
                 f"reconcile: content fetch failed "
                 f"child={child_instance_id[:8]}...: "

@@ -11,8 +11,9 @@ Mirrors the existing ``POST /api/jobs/cleanup`` pattern
 structured response) so the operator UX stays uniform across the
 cleanup / recovery surfaces.
 
-Bound to ``manager.app`` via :func:`register_recovery_routes` — the
-lifespan calls this once after the manager is wired.
+Bound to the app in ``daemon/api.py:create_app`` via
+``api_router.include_router(recovery_router)`` (mounted under the
+``/api`` prefix with the other modular routers — see api.py:1559).
 """
 
 from __future__ import annotations

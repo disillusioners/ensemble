@@ -98,7 +98,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 
 from daemon.cancellation import OperationCancelledError
 from daemon.constants import DEFERRED_REASON_PAUSE_TOCTOU
-from daemon.repositories.instance.models import Instance, InstanceStatus
+from daemon.repositories.instance.models import InstanceStatus
 from daemon.services.dependency_bus import get_dependency_bus
 from daemon.services.message_processing_errors import (
     handle_message_processing_error,

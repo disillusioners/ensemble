@@ -88,7 +88,7 @@ Crash-recovery endpoint (task 2.5):
 
     {
       "lanes": {
-        "deferred": {"recovered": N, "skipped_busy": N, "skipped_recent": N, "already_recovered": N, "errors": N},
+        "deferred": {"recovered": N, "skipped_busy": N, "already_recovered": N, "errors": N},
         "no_row_backstop": {...},
         "pending_age": {...},
         "recovery_retry": {...},
@@ -107,7 +107,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-import time
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
@@ -116,15 +115,12 @@ from daemon.constants import (
     DEFERRED_REASON_RESUME_ROUTER,
 )
 from daemon.repositories.instance.models import InstanceStatus
-from daemon.repositories.report_injection.repository import (
-    ReportInjectionRepository,
-)
-from daemon.repositories.report_injection.models import (
-    ReportInjectionState,
-)
 
 if TYPE_CHECKING:
     from daemon.manager import InstanceManager
+    from daemon.repositories.report_injection.repository import (
+        ReportInjectionRepository,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -164,7 +160,6 @@ class LaneResult:
 
     recovered: int = 0
     skipped_busy: int = 0
-    skipped_recent: int = 0
     already_recovered: int = 0
     orphan_disposition: int = 0
     errors: int = 0
@@ -173,7 +168,6 @@ class LaneResult:
         return {
             "recovered": self.recovered,
             "skipped_busy": self.skipped_busy,
-            "skipped_recent": self.skipped_recent,
             "already_recovered": self.already_recovered,
             "orphan_disposition": self.orphan_disposition,
             "errors": self.errors,

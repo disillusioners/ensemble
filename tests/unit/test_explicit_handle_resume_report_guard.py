@@ -30,7 +30,11 @@ PROCESS_MESSAGE tasks keep the existing cancel+complete behavior
 
 ANTIPHANTOM-RACE-FIX regression must remain intact — the
 RUNNING-task skip and the no-task skip above are untouched. This
-guard ONLY EXEMPTS — it does NOT re-open the cancel path.
+guard ONLY EXEMPTS — it does NOT re-open the cancel path. The
+RUNNING-task skip branch is a refactor-guarded branch verified by
+the manager.py inline comments (the canonical contract), not by a
+dedicated unit test (T-H1, 2026-08-20 — the vacuous ``assert True``
+pin was deleted; real coverage lives in ``TestFM1GuardRealLoop``).
 
 These tests run against a real in-memory SQLite database so the
 write-side and read-side semantics are observable.
@@ -455,36 +459,6 @@ class TestFM1GuardNullKeyed:
             "no-such-message-id"
         )
         assert result is False
-
-
-# =============================================================================
-# ANTIPHANTOM-RACE-FIX regression intact
-# =============================================================================
-
-
-class TestAntiphantomRaceFixIntact:
-    """The RUNNING-task skip and the no-task skip above are
-    UNTOUCHED by the FM-1 guard. This test pins the regression
-    by reading the relevant inline comments in manager.py.
-    """
-
-    def test_running_task_skip_preserved(self, engine: Engine) -> None:
-        """The RUNNING-task skip branch is intact (the FM-1 guard
-        only EXEMPTS PENDING tasks with a deliverable
-        PROCESS_REPORT shape).
-        """
-        # This is a documentation-style test — the FM-1 guard's
-        # scope is verified by reading the inline guard code in
-        # ``manager.py``. If a refactor accidentally moves the
-        # guard above the RUNNING-skip branch, the test runner
-        # would not catch it; but the inline comments are the
-        # canonical contract. The Phase 3 test pack adds an
-        # integration test for the full FM-1 loop.
-        assert True, (
-            "ANTIPHANTOM-RACE-FIX RUNNING-skip is a refactor-"
-            "guarded branch — verified by manager.py inline "
-            "comments, not by this unit test."
-        )
 
 
 # =============================================================================

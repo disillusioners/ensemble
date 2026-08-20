@@ -117,13 +117,13 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, NamedTuple
 
-from sqlalchemy import literal, text as sa_text, true, update as sa_update
+from sqlalchemy import literal, true, update as sa_update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import aliased
 from sqlmodel import Session, select
 
-from ..dependency_bus.models import DependencyWatcher
+from ..dependency_bus.models import DependencyWatcher, DependencyWatcherState
 from ..instance.models import Instance, InstanceStatus
 from ..message_queue.models import MessageQueue, MessageStatus
 from ..task.models import Task
@@ -154,11 +154,11 @@ _PARENT_TERMINAL_STATUSES: frozenset[str] = frozenset(
     }
 )
 
-# Same set as ``dependency_watchers.state`` (PENDING / FIRED /
-# CANCELLED). The sweep's FIRED-exclusion subquery only matches
-# PENDING+FIRED rows; the watcher table's ``state`` is its own TEXT
-# enum and is NOT the same as ``ReportInjectionState``.
-_WATCHER_FIRED: str = "FIRED"
+# ``dependency_watchers.state`` note (PENDING / FIRED / CANCELLED):
+# the watcher table's ``state`` is its own TEXT enum
+# (:class:`DependencyWatcherState`) and is NOT the same as
+# ``ReportInjectionState``. The FIRED-exclusion subquery below
+# references ``DependencyWatcherState.FIRED.value`` directly.
 
 
 class TaskDeliveryClaim(NamedTuple):
@@ -532,9 +532,12 @@ class ReportInjectionRepository:
         """Find DEFERRED rows for the periodic sweep (Lane 1 + Lane 5).
 
         Phase 2 (pause-report-recovery, W1). Periodic sweep Lane 1
-        (DEFERRED rows past the age guard) and Lane 5 (ORPHAN — DEFERRED
-        rows whose parent is TERMINAL) share the same SELECT shape,
-        parameterized by ``parent_not_terminal``:
+        (DEFERRED rows for non-terminal parents — gated by
+        ``has_instance_busy(parent_id)``, no age bound; age
+        filtering lives on Lanes 3+4 via ``find_pending_past_age``)
+        and Lane 5 (ORPHAN — DEFERRED rows whose parent is TERMINAL)
+        share the same SELECT shape, parameterized by
+        ``parent_not_terminal``:
 
         * ``parent_not_terminal=True`` — terminal parents EXCLUDED
           (the periodic sweep's Lane 1 + Lane 2 contract; Lane 5 owns
@@ -713,7 +716,9 @@ class ReportInjectionRepository:
                 )
                 .where(task_tt.instance_id == child_inst.instance_id)
                 .where(dw.target_instance_id == parent_inst.instance_id)
-                .where(dw.state == "FIRED")
+                .where(
+                    dw.state == DependencyWatcherState.FIRED.value
+                )
             )
             # Append the remaining ``where`` / ``order_by`` /
             # ``limit`` clauses to the chained ``stmt``.
