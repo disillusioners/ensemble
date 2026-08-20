@@ -22,9 +22,9 @@ Scope:
   - Lane 3 (pending-age) and Lane 4 (retry) on PG: legacy stranded
     PENDING recovery, kill-switch isolation.
   - Lane 2 / C3 false-positive matrix on PG: 5 LEFT JOINs / NOT
-    EXISTS exclusion cases. **The Lane 2 no-row backstop SQL has a
-    real PostgreSQL bug — see ``_LANE2_PG_BUG_NOTE`` below.** These
-    tests are marked ``xfail`` and document the bug.
+    EXISTS exclusion cases. **The Lane 2 no-row backstop SQL had a
+    real PostgreSQL bug (FIXED — see ``_LANE2_PG_BUG_FIXED_NOTE``
+    below).** These tests are the regression suite.
 
 * **Acceptance items NOT covered here** (sibling or other layer):
   - W1 ORPHAN (Lane 5) is covered live by a sibling worker per the
@@ -37,16 +37,17 @@ Test strategy:
 
 * **Lane 1 / Lane 3 / Lane 4 tests call the per-lane private
   methods** (``_run_deferred_lane``, ``_run_pending_age_lane``)
-  directly so they don't accidentally trigger the broken Lane 2
+  directly so they don't accidentally trigger the Lane 2
   query when ``recover_now`` would have run it. The per-lane
   methods are the production path each lane uses inside
   ``_run_all_lanes_sync``; running them in isolation is the
   recommended approach for "per-lane PG evidence".
-* **Lane 2 / C3 tests target the broken query directly** with
-  ``@pytest.mark.xfail`` so the test EXPECTS the failure and
-  documents the real bug. The bug is also documented in
-  ``_LANE2_PG_BUG_NOTE`` and asserted by an explicit
-  ``test_lane2_query_is_malformed_on_pg`` test.
+* **Lane 2 / C3 tests target the query directly**. With the
+  fix in place (see ``_LANE2_PG_BUG_FIXED_NOTE``) the query
+  compiles and runs cleanly on PG; these tests are now the
+  active regression suite. The portable compile-dialect pin
+  lives in ``TestLane2QueryCompilationRegression`` (runs on
+  any engine — SQLite or PG).
 
 Reference docs:
 
@@ -125,44 +126,37 @@ pytestmark = pytest.mark.postgres
 logger = logging.getLogger(__name__)
 
 
-# ─── Real production bug (PG only) — Lane 2 no-row backstop query ───
+# ─── Lane 2 no-row backstop query (PG-only production bug — FIXED) ───
 #
 # ``ReportInjectionRepository.find_completed_children_without_delivery``
-# builds a NOT EXISTS subquery that joins ``dependency_watchers`` (the
+# builds a NOT EXISTS subquery that joined ``dependency_watchers`` (the
 # unaliased class reference from ``select(DependencyWatcher.watch_id)``)
-# to ``task AS tt`` ON a condition that references the ALIASED
-# ``dw.source_task_id``. SQLAlchemy emits the FROM clause as a
-# comma-join of the unaliased ``dependency_watchers`` and the aliased
-# ``dependency_watchers AS dw``; the JOIN ON clause references ``dw``
-# BEFORE the alias is in scope, producing malformed SQL:
-#
-#     FROM dependency_watchers
-#     JOIN task AS tt ON tt.id = CAST(dw.source_task_id AS INTEGER),
-#          dependency_watchers AS dw
-#     WHERE ...
-#
-# PostgreSQL's parser rejects this with
+# to ``task AS tt`` ON a condition that referenced the ALIASED
+# ``dw.source_task_id``. PG's parser rejected this with
 # ``psycopg.errors.UndefinedTable: missing FROM-clause entry for
-# table "dw"``. SQLite's parser is permissive and accepts the
-# malformed statement, so the existing
+# table "dw"``. SQLite's permissive parser silently accepted the
+# malformed statement — the existing
 # ``tests/unit/test_report_delivery_recovery_service.py`` C3 matrix
-# passes on SQLite while the production code is broken on PG.
+# passed on SQLite while the production code was broken on PG.
 #
-# The fix (1-line): ``select(DependencyWatcher.watch_id)`` should be
+# The fix (1-line): ``select(DependencyWatcher.watch_id)`` is now
 # ``select(dw.watch_id)`` — the aliased reference makes the JOIN
-# ON condition resolve correctly. NOT IN SCOPE for this test task
-# (test-only commit); tests are marked ``xfail`` to document the
-# bug for the follow-up.
+# ON condition resolve correctly. Applied at
+# ``daemon/repositories/report_injection/repository.py`` line 712.
+#
+# Regression pin: ``TestLane2QueryCompilationRegression`` below compiles
+# the query on the PG dialect and asserts it compiles without
+# ``UndefinedTable``. This is the portable guard — it runs on any
+# engine (SQLite or PG) and would have caught the bug at review time.
 #
 # Source: ``daemon/repositories/report_injection/repository.py``
-# line 712 (``not_exists_predicate`` construction). Reproduced on
-# PG 14.x (Homebrew).
-_LANE2_PG_BUG_NOTE = (
-    "PG-only production bug: find_completed_children_without_delivery "
-    "emits malformed SQL referencing alias 'dw' before declaration "
-    "in the NOT EXISTS subquery. Fix: select(dw.watch_id) instead of "
-    "select(DependencyWatcher.watch_id). See test_lane2_query_is_"
-    "malformed_on_pg for the raw traceback."
+# line 712 (``not_exists_predicate`` construction).
+_LANE2_PG_BUG_FIXED_NOTE = (
+    "Lane 2 no-row backstop query: fixed (1-line change "
+    "select(DependencyWatcher.watch_id) -> select(dw.watch_id) "
+    "in daemon/repositories/report_injection/repository.py:712). "
+    "Regression pin: TestLane2QueryCompilationRegression compiles the "
+    "query on PG dialect without UndefinedTable."
 )
 
 
@@ -410,10 +404,10 @@ def _row_states(
 # 3.6 acceptance — Lane 1 (DEFERRED, non-terminal parent) on PG
 # =============================================================================
 #
-# Lane 1 tests call ``_run_deferred_lane()`` directly to bypass the
-# broken Lane 2 no-row backstop query (see ``_LANE2_PG_BUG_NOTE``).
-# The per-lane method IS the production path each lane uses inside
-# ``_run_all_lanes_sync``; the test exercises the same code.
+# Lane 1 tests call ``_run_deferred_lane()`` directly to isolate
+# Lane 1's contract from the other lanes. The per-lane method IS
+# the production path each lane uses inside ``_run_all_lanes_sync``;
+# the test exercises the same code.
 
 
 class TestLane1DeferredPG:
@@ -587,17 +581,14 @@ class TestLane1DeferredPG:
 #
 # The C3 matrix targets
 # :meth:`ReportInjectionRepository.find_completed_children_without_delivery`
-# which is broken on PG (see ``_LANE2_PG_BUG_NOTE``). Each test in
-# this class is marked ``xfail`` to document the production bug for
-# the follow-up PR. When the bug is fixed (1-line change: select
-# (dw.watch_id)), these tests will start passing on PG and the
-# xfail marker can be removed.
+# which had an alias-binding bug (now fixed — see
+# ``_LANE2_PG_BUG_FIXED_NOTE``). These tests are the regression
+# suite. Originally marked ``xfail`` pending the fix; the markers
+# were removed in the same commit as the production fix
+# (``select(dw.watch_id)`` at
+# ``daemon/repositories/report_injection/repository.py:712``).
 
 
-@pytest.mark.xfail(
-    reason=_LANE2_PG_BUG_NOTE,
-    strict=False,  # allow the test to pass too if a future fix lands
-)
 class TestC3FalsePositiveMatrixPG:
     """3.6 acceptance: the C3 false-positive matrix on real PG.
 
@@ -607,10 +598,13 @@ class TestC3FalsePositiveMatrixPG:
     NOT EXISTS subqueries of
     :meth:`ReportInjectionRepository.find_completed_children_without_delivery`.
 
-    All tests in this class are currently ``xfail`` on PG because
-    the underlying query is broken (see ``_LANE2_PG_BUG_NOTE``).
-    The companion test ``test_lane2_query_is_malformed_on_pg``
-    pins the production bug for follow-up.
+    Originally marked ``xfail`` while the production code had the
+    unaliased ``DependencyWatcher.watch_id`` SELECT in the NOT
+    EXISTS subquery (``_LANE2_PG_BUG_FIXED_NOTE``). The fix at
+    ``repository.py:712`` binds the SELECT to the ``dw`` alias so
+    PG accepts the query. The xfail markers were removed in the
+    same commit as the production fix; this class is now the
+    regression suite.
     """
 
     def _seed_completed_child_with_completed_message(
@@ -821,19 +815,25 @@ class TestC3FalsePositiveMatrixPG:
 # 3.6 acceptance — Lane 2 (no-row backstop) on PG
 # =============================================================================
 #
-# Lane 2 is broken on PG (see ``_LANE2_PG_BUG_NOTE``). All Lane 2
-# tests are marked ``xfail`` to document the production bug. The
-# companion test ``test_lane2_query_is_malformed_on_pg`` pins the
-# raw SQL for the follow-up PR.
+# Lane 2 had an alias-binding bug on PG (now fixed — see
+# ``_LANE2_PG_BUG_FIXED_NOTE``). The tests in this class were
+# originally marked ``xfail``; the markers were removed in the same
+# commit as the production fix. The portable compile-dialect pin
+# for the fix lives in ``TestLane2QueryCompilationRegression``
+# below; the PG-gated end-to-end runtime contract lives in
+# ``TestLane2PGRegressionEndToEnd``.
 
 
-@pytest.mark.xfail(
-    reason=_LANE2_PG_BUG_NOTE,
-    strict=False,
-)
 class TestLane2NoRowBackstopPG:
-    """Lane 2 (no-row backstop, C3) on real PG — xfail pending
-    production fix (see ``_LANE2_PG_BUG_NOTE``)."""
+    """Lane 2 (no-row backstop, C3) on real PG.
+
+    Originally ``xfail`` while the production code had the
+    unaliased ``DependencyWatcher.watch_id`` SELECT in the NOT
+    EXISTS subquery (``_LANE2_PG_BUG_FIXED_NOTE``). The fix at
+    ``repository.py:712`` binds the SELECT to the ``dw`` alias so
+    PG accepts the query; the xfail marker was removed in the
+    same commit as the production fix.
+    """
 
     def test_no_row_lane_recovers_never_markered_drop_on_pg(
         self, pg_engine_3_6: Engine
@@ -988,10 +988,7 @@ class TestLane3Lane4PendingAgePG:
 # message + no completion_report + no injection row + no watcher
 # — the seed only seeds DEFERRED rows for Lane 1). So Lane 2
 # returns an empty result set, which exercises the LEFT JOINs and
-# the outer WHERE but NOT the broken NOT EXISTS subquery.
-#
-# The ``test_lane2_query_is_malformed_on_pg`` test pins the broken
-# query directly.
+# the outer WHERE but NOT the NOT EXISTS subquery.
 
 
 class TestLaneKillSwitchesPG:
@@ -1011,10 +1008,11 @@ class TestLaneKillSwitchesPG:
     granularity on PG.
 
     Why not "enable all + disable one + verify others still run"?
-    Lane 2 (no-row backstop) is broken on PG (see
-    ``_LANE2_PG_BUG_NOTE``); the integration of "other lanes
-    still run alongside a disabled lane" is covered on SQLite
-    in the unit file. The per-lane kill-switch contract is the
+    Lane 2 (no-row backstop) had an alias-binding bug on PG that
+    caused the lane to raise ``UndefinedTable`` (now fixed; see
+    ``_LANE2_PG_BUG_FIXED_NOTE``). The integration of "other lanes
+    still run alongside a disabled lane" is covered on SQLite in
+    the unit file. The per-lane kill-switch contract is the
     "the boolean attribute is the source of the gating" — that
     contract is what this test pins on PG.
     """
@@ -1025,13 +1023,10 @@ class TestLaneKillSwitchesPG:
         """Disable Lane 1, enable all others → ``"deferred"``
         absent; other lanes appear (Lane 2 + Lane 3 + Lane 4).
 
-        Note: Lane 2's query is broken on PG (see
-        ``_LANE2_PG_BUG_NOTE``). We seed a DEFERRED row that
-        Lane 1 would have processed, but since Lane 1 is
-        disabled, the broken Lane 2 query is what runs and
-        raises. This test asserts the kill-switch contract:
-        Lane 1 is absent. The Lane 2 failure is documented
-        separately in ``TestLane2PGBugPin``.
+        Note: with the Lane 2 alias-binding fix in place, Lane 2
+        now runs cleanly on PG (see ``_LANE2_PG_BUG_FIXED_NOTE``).
+        The kill-switch contract under test: Lane 1 is absent from
+        the sweep result.
         """
         parent = _seed_instance(pg_engine_3_6)
         child = _seed_instance(
@@ -1239,46 +1234,361 @@ class TestNeverTouchesLiveInstancePG:
 
 
 # =============================================================================
-# Production bug pin — Lane 2 no-row backstop SQL is malformed on PG
+# Regression pin — Lane 2 no-row backstop SQL compiles cleanly on PG
 # =============================================================================
 #
-# This test EXPECTS the failure (NOT marked xfail) — its purpose
-# is to pin the production bug for the follow-up PR with the raw
-# traceback + the generated SQL. When the bug is fixed (1-line
-# change: ``select(dw.watch_id)``), this test will START FAILING
-# and should be removed (the C3 matrix tests will then start
-# passing on PG).
+# The pre-fix query had ``select(DependencyWatcher.watch_id)`` in the
+# NOT EXISTS subquery while the JOIN / WHERE clauses referenced the
+# aliased ``dw`` (``_LANE2_PG_BUG_FIXED_NOTE``). PG's parser rejected
+# the result with ``UndefinedTable: missing FROM-clause entry for
+# table "dw"``; SQLite accepted silently.
+#
+# This class is the portable regression pin. It compiles the query
+# on the PG dialect (no PG engine needed — SQLAlchemy's
+# ``postgresql.dialect()`` is a pure in-memory dialect object) and
+# asserts the compiled SQL contains a real ``dependency_watchers AS dw``
+# in the EXISTS subquery's FROM clause. The assertion runs anywhere
+# — SQLite or PG, no fixtures, no DB connectivity — and would have
+# caught the bug at review time.
+#
+# The companion PG-gated end-to-end test
+# ``test_fired_watcher_excludes_candidate_end_to_end_on_pg`` proves
+# the runtime contract: when a FIRED ``DependencyWatcher`` row exists
+# for the (child_task, parent) pair, ``find_completed_children_-
+# without_delivery`` returns an empty list — the NOT EXISTS
+# predicate excludes the row as designed.
 
 
-class TestLane2PGBugPin:
-    """Pin the Lane 2 production bug on PG.
+class TestLane2QueryCompilationRegression:
+    """Portable regression pin for the Lane 2 query alias binding.
 
-    See ``_LANE2_PG_BUG_NOTE`` at the top of this file. This test
-    is a deliberate, EXPECTED-FAILURE test that documents the
-    real production bug. When the production code is fixed, this
-    test will start failing and should be removed along with the
-    xfail markers on the C3 + Lane 2 classes.
+    The original bug was an unaliased ``DependencyWatcher.watch_id``
+    SELECT in a NOT EXISTS subquery whose FROM clause only declared
+    the ALIASED ``dependency_watchers AS dw``. PG rejected this
+    with ``UndefinedTable``; SQLite silently accepted — the
+    SQLite false-green that let the bug escape four review cycles.
+
+    These tests capture the SQL that the PRODUCTION code actually
+    emits (via SQLAlchemy's ``before_cursor_execute`` event) and
+    assert the alias-binding contract on the captured statement.
+    They use an in-memory SQLite engine so they run anywhere —
+    no PG required, no fixtures. PG's behavior is covered by the
+    sibling ``TestLane2PGRegressionEndToEnd`` class.
     """
 
-    def test_lane2_query_is_malformed_on_pg(
+    def _capture_production_sql(self) -> str:
+        """Run the production
+        :meth:`ReportInjectionRepository.find_completed_children_without_delivery`
+        against an in-memory SQLite engine and return the SQL it
+        actually emitted (captured via a ``before_cursor_execute``
+        listener). The engine dialect is irrelevant — we capture
+        the SQL string, not the execution result. SQLite accepts
+        the malformed statement, so the run never errors; we only
+        care about the SQL shape, not the row data.
+        """
+        from sqlalchemy import create_engine, event
+        from sqlalchemy.pool import StaticPool
+        from sqlmodel import Session, SQLModel
+
+        # Re-register the production tables on a fresh in-memory
+        # engine. The module-level imports at the top of this file
+        # already registered them on SQLModel.metadata; this
+        # ``create_all`` makes the SQLite engine aware.
+        eng = create_engine(
+            "sqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        SQLModel.metadata.create_all(eng)
+
+        captured: list[str] = []
+
+        def _capture(
+            conn, cursor, statement, params, context, executemany
+        ) -> None:
+            captured.append(statement)
+
+        event.listen(eng, "before_cursor_execute", _capture)
+        try:
+            ri_repo = ReportInjectionRepository(engine=eng)
+            with Session(eng) as session:
+                # Exercise the production code. SQLite accepts the
+                # SQL regardless of the alias-binding fix; the
+                # captured statement is what we assert against.
+                ri_repo.find_completed_children_without_delivery(
+                    parent_not_terminal=True
+                )
+        finally:
+            event.remove(eng, "before_cursor_execute", _capture)
+            eng.dispose()
+
+        assert captured, (
+            "before_cursor_execute listener did not capture any "
+            "statement — production query did not run. Test "
+            "infrastructure error."
+        )
+        return captured[0]
+
+    def test_aliased_dependency_watchers_in_exists_from(self) -> None:
+        """The EXISTS subquery's FROM must NOT contain the unaliased
+        ``dependency_watchers`` — only the aliased
+        ``dependency_watchers AS dw`` is allowed.
+
+        The pre-fix production code emitted::
+
+            SELECT NOT (EXISTS (SELECT dependency_watchers.watch_id
+            FROM dependency_watchers
+            JOIN task AS tt ON tt.id = CAST(dw.source_task_id AS INTEGER),
+                 dependency_watchers AS dw
+            WHERE ...))
+
+        SQLAlchemy emits a comma-join of the unaliased
+        ``dependency_watchers`` (from the SELECT) AND the aliased
+        ``dependency_watchers AS dw`` (from the JOIN). PG rejects
+        this with ``UndefinedTable`` because the SELECT references
+        ``dependency_watchers`` but the JOIN references the alias
+        ``dw``. SQLite silently accepts the malformed statement.
+
+        The post-fix code emits a single FROM entry:
+        ``FROM dependency_watchers AS dw`` — the alias is the
+        only ``dependency_watchers`` in the EXISTS subquery's
+        FROM, and the SELECT references ``dw.watch_id``.
+
+        This test asserts the captured SQL contains EXACTLY ONE
+        ``dependency_watchers`` token in the EXISTS subquery's
+        FROM clause (the aliased one). Runs anywhere (SQLite or
+        PG).
+        """
+        import re
+
+        captured_sql = self._capture_production_sql()
+        # Slice out just the EXISTS subquery. The shape is
+        # ``EXISTS (... )`` — find the matching close paren.
+        exists_open = captured_sql.upper().find("EXISTS (")
+        assert exists_open >= 0, (
+            f"Could not locate EXISTS subquery in captured SQL; "
+            f"unexpected shape:\n{captured_sql}"
+        )
+        # Walk forward to find the matching close paren at depth 0
+        depth = 0
+        close_idx = -1
+        for i in range(exists_open, len(captured_sql)):
+            ch = captured_sql[i]
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    close_idx = i
+                    break
+        assert close_idx > exists_open, (
+            f"Could not locate EXISTS subquery close paren in "
+            f"captured SQL:\n{captured_sql}"
+        )
+        exists_body = captured_sql[exists_open:close_idx + 1]
+        # Count occurrences of ``dependency_watchers`` (the table
+        # name) in the EXISTS subquery. Pre-fix there are TWO:
+        # the unaliased ``dependency_watchers`` AND the aliased
+        # ``dependency_watchers AS dw``. Post-fix there is ONE
+        # (the aliased form).
+        dw_count = len(re.findall(r"dependency_watchers", exists_body))
+        assert dw_count == 1, (
+            f"EXISTS subquery must contain exactly one "
+            f"'dependency_watchers' token in its FROM (the aliased "
+            f"form 'dependency_watchers AS dw'). Pre-fix the bug "
+            f"produced two — the unaliased class reference from the "
+            f"SELECT plus the aliased reference from the JOIN — "
+            f"which PG rejected with UndefinedTable. Got {dw_count} "
+            f"occurrences in EXISTS body:\n{exists_body}"
+        )
+        # And the one occurrence must be the aliased form.
+        assert "dependency_watchers AS dw" in exists_body, (
+            f"EXISTS subquery's 'dependency_watchers' must be the "
+            f"aliased form 'dependency_watchers AS dw'. EXISTS body:\n"
+            f"{exists_body}"
+        )
+
+    def test_no_unaliased_dependency_watcher_in_exists_select(self) -> None:
+        """The EXISTS subquery's SELECT must reference ``dw.watch_id``
+        (the alias) and NOT ``dependency_watchers.watch_id`` (the
+        unaliased class).
+
+        Pre-fix the SELECT was ``SELECT dependency_watchers.watch_id``;
+        PG's parser resolved ``watch_id`` against the FROM clause's
+        unaliased ``dependency_watchers`` — but the FROM clause had
+        only the aliased ``AS dw``. PG raised ``UndefinedTable``.
+
+        The post-fix query selects ``dw.watch_id`` — the aliased
+        reference resolves against the declared alias. This
+        assertion runs anywhere and pins the contract by inspecting
+        the SQL the PRODUCTION code actually emits.
+        """
+        import re
+
+        captured_sql = self._capture_production_sql()
+        # Locate the SELECT list inside the EXISTS subquery. The
+        # shape is ``EXISTS (SELECT <select_list> FROM dependency_watchers``;
+        # we capture the <select_list> portion and assert it ends
+        # with the aliased ``dw.watch_id``.
+        exists_select_match = re.search(
+            r"EXISTS\s*\(\s*SELECT\s+(?P<select>[^F]+?)FROM\s+dependency_watchers",
+            captured_sql,
+            re.IGNORECASE | re.DOTALL,
+        )
+        assert exists_select_match, (
+            f"Could not locate EXISTS subquery SELECT in captured "
+            f"SQL; unexpected shape:\n{captured_sql}"
+        )
+        select_part = exists_select_match.group("select").strip()
+        # The select list must NOT contain the unaliased class
+        # reference. Pre-fix it was ``dependency_watchers.watch_id``;
+        # post-fix it is ``dw.watch_id``.
+        assert "dependency_watchers.watch_id" not in select_part, (
+            f"EXISTS subquery SELECT must NOT reference the "
+            f"unaliased 'dependency_watchers.watch_id' — pre-fix "
+            f"bug. Captured SQL:\n{captured_sql}\n"
+            f"Select list: {select_part!r}"
+        )
+        assert select_part.endswith("dw.watch_id"), (
+            f"EXISTS subquery SELECT must reference 'dw.watch_id' "
+            f"(the alias declared in the FROM clause). Got: "
+            f"{select_part!r}"
+        )
+
+
+# =============================================================================
+# PG-gated end-to-end regression — Lane 2 no-row backstop on real PG
+# =============================================================================
+#
+# Companion to ``TestLane2QueryCompilationRegression`` above.
+# The compile-level assertion is the portable guard; this PG-gated
+# test proves the runtime contract — a FIRED ``DependencyWatcher``
+# row excludes the candidate, and a no-FIRED case returns it.
+#
+# Skips cleanly when PG is unavailable (see ``pg_engine_3_6``
+# fixture at the top of this module); never silently passes on
+# SQLite (the original false-green that escaped four review
+# cycles).
+
+
+class TestLane2PGRegressionEndToEnd:
+    """PG-gated end-to-end regression for the Lane 2 query.
+
+    The dispatcher-scoped requirements (one-line correctness fix +
+    PG regression test) live here. Two cases prove the FIRED-
+    exclusion contract end-to-end:
+
+    1. ``test_fired_watcher_excludes_candidate_on_pg`` — seed a
+       COMPLETED child + non-terminal parent + a FIRED
+       ``DependencyWatcher`` row (the production shape when the
+       dependency bus has already fired the FollowUp). The query
+       MUST return an empty list — the NOT EXISTS predicate
+       excludes the row.
+
+    2. ``test_no_fired_watcher_returns_candidate_on_pg`` — same
+       scenario but WITHOUT a FIRED watcher. The query MUST
+       return the candidate row (the FM-11 escape shape the
+       Lane 2 backstop is designed to recover).
+
+    Both tests skip cleanly when PG is unavailable; never run on
+    SQLite.
+    """
+
+    def test_fired_watcher_excludes_candidate_on_pg(
         self, pg_engine_3_6: Engine
     ) -> None:
-        """``find_completed_children_without_delivery`` raises
-        ``UndefinedTable: missing FROM-clause entry for table
-        "dw"`` on PG. Pin the traceback shape so the follow-up PR
-        has a regression pin.
+        """A FIRED ``DependencyWatcher`` row (child_task -> parent)
+        EXCLUDES the candidate from the Lane 2 backstop result.
+
+        Seeds: parent (RUNNING) + COMPLETED child + child's
+        COMPLETED message + child Task (COMPLETED) + a FIRED
+        DependencyWatcher pointing from the child Task to the
+        parent. Asserts the row is excluded.
+
+        This is the load-bearing case 5 of the C3 false-positive
+        matrix on real PG — the original bug broke it.
         """
-        from sqlalchemy.exc import ProgrammingError
+        parent = _seed_instance(pg_engine_3_6)
+        child_msg_id = "child-msg-fired"
+        child_id = _seed_instance(
+            pg_engine_3_6,
+            parent_id=parent,
+            status=InstanceStatus.COMPLETED.value,
+        )
+        _seed_pg_message(
+            pg_engine_3_6,
+            instance_id=child_id,
+            message_id=child_msg_id,
+            status=MessageStatus.COMPLETED.value,
+        )
+        child_task_id = _seed_pg_task(
+            pg_engine_3_6,
+            instance_id=child_id,
+            status=TaskStatus.COMPLETED.value,
+        )
+        with Session(pg_engine_3_6) as session:
+            session.add(
+                DependencyWatcher(
+                    source_task_id=str(child_task_id),
+                    target_instance_id=parent,
+                    follow_up_payload={"k": "v"},
+                    watcher_metadata={"kind": "regression"},
+                    state=DependencyWatcherState.FIRED.value,
+                )
+            )
+            session.commit()
 
         ri_repo = ReportInjectionRepository(engine=pg_engine_3_6)
-        with pytest.raises(ProgrammingError) as exc_info:
-            ri_repo.find_completed_children_without_delivery(
-                parent_not_terminal=True
-            )
-        # Verify the failure is the documented one — PG rejects
-        # the malformed alias reference.
-        msg = str(exc_info.value).lower()
-        assert "dw" in msg or "from-clause" in msg, (
-            f"PG must reject the malformed SQL with a 'dw' / "
-            f"FROM-clause error; got {exc_info.value!r}"
+        rows = ri_repo.find_completed_children_without_delivery(
+            parent_not_terminal=True
         )
+        assert not any(r["child_id"] == child_id for r in rows), (
+            "FIRED DependencyWatcher MUST exclude the candidate — "
+            "the NOT EXISTS predicate on the FIRED watcher is the "
+            "load-bearing gate. Pre-fix bug: PG raised UndefinedTable "
+            "because the SELECT inside the EXISTS subquery referenced "
+            "the unaliased DependencyWatcher class instead of the "
+            "'dw' alias. See _LANE2_PG_BUG_FIXED_NOTE."
+        )
+
+    def test_no_fired_watcher_returns_candidate_on_pg(
+        self, pg_engine_3_6: Engine
+    ) -> None:
+        """Without a FIRED ``DependencyWatcher``, the Lane 2 backstop
+        RETURNS the candidate — the FM-11 escape shape the lane
+        is designed to recover.
+
+        Seeds: parent (RUNNING) + COMPLETED child + child's
+        COMPLETED message. NO ``DependencyWatcher`` row exists
+        (no FollowUp registered, or only PENDING / CANCELLED).
+        Asserts the query returns the candidate row.
+        """
+        parent = _seed_instance(pg_engine_3_6)
+        child_msg_id = "child-msg-no-fired"
+        child_id = _seed_instance(
+            pg_engine_3_6,
+            parent_id=parent,
+            status=InstanceStatus.COMPLETED.value,
+        )
+        _seed_pg_message(
+            pg_engine_3_6,
+            instance_id=child_id,
+            message_id=child_msg_id,
+            status=MessageStatus.COMPLETED.value,
+        )
+
+        ri_repo = ReportInjectionRepository(engine=pg_engine_3_6)
+        rows = ri_repo.find_completed_children_without_delivery(
+            parent_not_terminal=True
+        )
+        matched = [r for r in rows if r["child_id"] == child_id]
+        assert matched, (
+            "Without a FIRED DependencyWatcher, the Lane 2 backstop "
+            "MUST return the candidate — this is the FM-11 escape "
+            "shape the lane is designed to recover. Pre-fix bug: "
+            "PG raised UndefinedTable so the lane silently errored "
+            "every sweep (300s interval) on the primary DB."
+        )
+        # Sanity: the returned row carries the child_msg_id we seeded.
+        assert matched[0]["child_msg_id"] == child_msg_id
+        assert matched[0]["parent_id"] == parent

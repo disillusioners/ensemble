@@ -709,7 +709,7 @@ class ReportInjectionRepository:
             dw = aliased(DependencyWatcher, name="dw")
             task_tt = aliased(Task, name="tt")
             not_exists_predicate = ~exists(
-                select(DependencyWatcher.watch_id)
+                select(dw.watch_id)
                 .join(
                     task_tt,
                     task_tt.id == sa_cast(dw.source_task_id, Integer),
