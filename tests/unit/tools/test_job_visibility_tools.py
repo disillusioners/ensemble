@@ -32,20 +32,6 @@ from daemon.services import project_normalizer
 TEST_SYSTEM_PROJECT_ID = "71931ae0-0f25-5fbf-853b-2a78cc978d7e"
 
 
-# ── Autouse Fixtures ─────────────────────────────────────────────────────────────
-
-
-@pytest.fixture(autouse=True)
-def setup_system_default_project():
-    """Set SYSTEM_DEFAULT_PROJECT_ID for tests that call normalize_project_id()."""
-    original = constants.SYSTEM_DEFAULT_PROJECT_ID
-    constants.SYSTEM_DEFAULT_PROJECT_ID = TEST_SYSTEM_PROJECT_ID
-
-    yield
-
-    constants.SYSTEM_DEFAULT_PROJECT_ID = original
-
-
 # ── Helpers ──────────────────────────────────────────────────────────────────────
 
 
@@ -1092,7 +1078,7 @@ class TestJobInjectTool:
 
 
 class TestSystemDefaultProjectCrossProjectAccess:
-    """System-default (no-project) callers are global operators.
+    """System-default (unscoped-or-root) callers are global operators.
 
     When the caller's instance lives in the system-default project
     (``constants.SYSTEM_DEFAULT_PROJECT_ID``), the four job-visibility
@@ -1341,16 +1327,17 @@ class TestSystemDefaultProjectCrossProjectAccess:
     ):
         """Pre-bootstrap guard: ``SYSTEM_DEFAULT_PROJECT_ID is None`` → deny.
 
-        The autouse ``setup_system_default_project`` fixture sets the constant
-        to ``TEST_SYSTEM_PROJECT_ID`` for every test in this module. This test
-        overrides it back to ``None`` via ``monkeypatch`` to simulate the
-        pre-bootstrap state (``ensure_system_default_project`` has not yet
-        run) and verifies the helper falls back to strict-mismatch behaviour:
-        a system-default-ish caller (``project_id == TEST_SYSTEM_PROJECT_ID``)
-        requesting a foreign-project job must be denied rather than silently
-        granted global-operator access.
+        The repo-wide autouse ``_ensure_system_default_project_id`` fixture
+        (``tests/conftest.py:706-734``) sets the constant to the deterministic
+        uuid5 value for every test in the suite. This test overrides it back
+        to ``None`` via ``monkeypatch`` to simulate the pre-bootstrap state
+        (``ensure_system_default_project`` has not yet run) and verifies the
+        helper falls back to strict-mismatch behaviour: a system-default-ish
+        caller (``project_id == TEST_SYSTEM_PROJECT_ID``) requesting a
+        foreign-project job must be denied rather than silently granted
+        global-operator access.
         """
-        # Override the autouse fixture's value for the duration of this test.
+        # Override the repo-wide autouse fixture's value for the duration of this test.
         monkeypatch.setattr(constants, "SYSTEM_DEFAULT_PROJECT_ID", None)
 
         job_service, _, _ = mock_services
@@ -1389,6 +1376,182 @@ class TestSystemDefaultProjectCrossProjectAccess:
 
         # Strict-mismatch denial — mirrors ``*_project_id_mismatch`` style.
         assert result == {"error": "Access denied: job does not belong to caller's project"}
+
+    @pytest.mark.asyncio
+    async def test_job_messages_legacy_caller_none_project_id_allowed(
+        self, mock_services, mock_manager,
+    ):
+        """Pinning: legacy ``caller.project_id is None`` allows cross-project access.
+
+        Pre-helper rest-of-history behaviour: a caller row whose project_id
+        is NULL (legacy, pre-normalization instance) failed closed under the
+        strict-match check. The C2 carve-out flips this to fail-open so a
+        legacy instance with a stale ``project_id is None`` row is not
+        incorrectly denied against foreign-project jobs. This pins that
+        the ``caller.project_id is None`` branch (job_queue.py:415) returns
+        ``None`` (allow) rather than escalating to the project-equality
+        check below.
+        """
+        job_service, _, _ = mock_services
+
+        root_id = "legacy-root-1"
+        # Job lives in a regular project (not system-default).
+        record = _make_work_record(
+            "sys-job-7", instance_id=root_id, project_id="proj-X", agent_id="developer",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+
+        # Legacy caller: row exists, but project_id was never backfilled.
+        # This is the pre-API-lifespan-startup state — see W2 docstring note
+        # on the runtime backfill (``daemon/api.py:512-528``).
+        caller = _make_instance("caller-id", project_id=None)
+        root = _make_instance(root_id)
+
+        def get_side_effect(iid):
+            if iid == "caller-id":
+                return caller
+            if iid == root_id:
+                return root
+            return None
+
+        mock_manager._instance_repository.get = MagicMock(side_effect=get_side_effect)
+        mock_manager._instance_repository.get_tree_ids = MagicMock(return_value=[root_id])
+        mock_manager.get_messages = AsyncMock(return_value=[
+            _make_msg("user", "hi"),
+            _make_msg("assistant", "hello back"),
+        ])
+
+        _, queue_mgmt, dlq = mock_services
+        tools = create_job_tools(
+            job_service, queue_mgmt, dlq,
+            manager=mock_manager,
+            current_instance_id="caller-id",
+        )
+        job_messages_tool = tools[13]
+
+        result = await job_messages_tool.ainvoke({"job_id": "sys-job-7"})
+
+        # No access-denied error — the legacy ``project_id=None`` caller
+        # row is allow-listed via the helper's :415 fail-open branch.
+        assert "error" not in result
+        assert result["job_id"] == "sys-job-7"
+        assert result["total_messages"] == 2
+
+    @pytest.mark.asyncio
+    async def test_job_messages_same_project_allowed_even_when_constant_none(
+        self, mock_services, mock_manager, monkeypatch,
+    ):
+        """Pinning: pre-bootstrap (``constant is None``) does NOT over-deny same-project access.
+
+        The existing ``test_job_messages_system_default_constant_none_denies_cross_project``
+        test pins the deny side — when the constant is ``None``, a system-default-ish
+        caller requesting a foreign-project job is denied. This test pins the
+        complementary truth: same-project access (caller in ``proj-A``, job in
+        ``proj-A``) must STILL be allowed under the strict-match fallback
+        (``caller.project_id == record.project_id``). The whole point of the
+        pre-bootstrap fallback is "be strict", not "deny everything".
+        """
+        # Override the repo-wide autouse fixture's value for the duration of this test.
+        monkeypatch.setattr(constants, "SYSTEM_DEFAULT_PROJECT_ID", None)
+
+        job_service, _, _ = mock_services
+
+        root_id = "same-proj-root-1"
+        proj_a = "proj-A"
+        # Caller and job both live in proj-A.
+        record = _make_work_record(
+            "sys-job-8", instance_id=root_id, project_id=proj_a, agent_id="developer",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+
+        caller = _make_instance("caller-id", project_id=proj_a)
+        root = _make_instance(root_id)
+
+        def get_side_effect(iid):
+            if iid == "caller-id":
+                return caller
+            if iid == root_id:
+                return root
+            return None
+
+        mock_manager._instance_repository.get = MagicMock(side_effect=get_side_effect)
+        mock_manager._instance_repository.get_tree_ids = MagicMock(return_value=[root_id])
+        mock_manager.get_messages = AsyncMock(return_value=[
+            _make_msg("user", "hi"),
+        ])
+
+        _, queue_mgmt, dlq = mock_services
+        tools = create_job_tools(
+            job_service, queue_mgmt, dlq,
+            manager=mock_manager,
+            current_instance_id="caller-id",
+        )
+        job_messages_tool = tools[13]
+
+        result = await job_messages_tool.ainvoke({"job_id": "sys-job-8"})
+
+        # Same-project access succeeds under the strict-match fallback.
+        # No access-denied error — the cross-project call succeeded.
+        assert "error" not in result
+        assert result["job_id"] == "sys-job-8"
+        assert result["total_messages"] == 1
+
+    @pytest.mark.asyncio
+    async def test_job_messages_system_default_caller_unscoped_job_allowed(
+        self, mock_services, mock_manager,
+    ):
+        """Pinning: system-default caller + ``record.project_id is None`` → allowed.
+
+        Mirrors the legacy-row guard on the caller side. The
+        ``record.project_id is None`` branch (job_queue.py:408) returns
+        ``None`` (allow) so a legacy/unscoped job row is not invisible to
+        a system-default caller. Without this branch a system-default
+        caller would be denied against every legacy job, breaking the
+        operational workflow for chat-facing agents managing pre-migration
+        work. Pins that the guard at :408 is allow, not deny.
+        """
+        job_service, _, _ = mock_services
+
+        root_id = "unscoped-job-root-1"
+        # Legacy/unscoped job: project_id is None.
+        record = _make_work_record(
+            "sys-job-9", instance_id=root_id, project_id=None, agent_id="developer",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+
+        # System-default caller (the "global operator" tier).
+        caller = _make_instance("caller-id", project_id=TEST_SYSTEM_PROJECT_ID)
+        root = _make_instance(root_id)
+
+        def get_side_effect(iid):
+            if iid == "caller-id":
+                return caller
+            if iid == root_id:
+                return root
+            return None
+
+        mock_manager._instance_repository.get = MagicMock(side_effect=get_side_effect)
+        mock_manager._instance_repository.get_tree_ids = MagicMock(return_value=[root_id])
+        mock_manager.get_messages = AsyncMock(return_value=[
+            _make_msg("user", "hi"),
+            _make_msg("assistant", "ok"),
+        ])
+
+        _, queue_mgmt, dlq = mock_services
+        tools = create_job_tools(
+            job_service, queue_mgmt, dlq,
+            manager=mock_manager,
+            current_instance_id="caller-id",
+        )
+        job_messages_tool = tools[13]
+
+        result = await job_messages_tool.ainvoke({"job_id": "sys-job-9"})
+
+        # No access-denied error — the unscoped job is allow-listed via
+        # the helper's :408 fail-open branch.
+        assert "error" not in result
+        assert result["job_id"] == "sys-job-9"
+        assert result["total_messages"] == 2
 
 
 class TestJobVisibilityToolsRegistration:
