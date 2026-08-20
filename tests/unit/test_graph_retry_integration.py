@@ -644,24 +644,52 @@ class TestProxyHeaderInjection:
     """Test that proxy headers are injected in LLM config."""
 
     def test_proxy_header_injected(self):
-        """LLM config should include x-proxy-app header."""
+        """LLM config should include both x-proxy-app and x-proxy-interleaved-thinking headers."""
         with patch('daemon.graph.ThinkingChatOpenAI') as mock_llm_class:
             mock_llm_instance = MagicMock()
             mock_llm_instance.bind_tools.return_value = MagicMock()
             mock_llm_class.return_value = mock_llm_instance
-            
+
             with patch('daemon.graph.StateGraph'):
                 with patch('daemon.graph.ToolNode'):
                     from daemon.graph import build_instance_graph
-                    
+
                     build_instance_graph(
                         tools=[],
                         checkpointer=MagicMock(),
                         llm_config={"model": "gpt-4o", "api_key": "test"},
                         system_prompt="You are helpful.",
                     )
-                    
-                    # Verify ThinkingChatOpenAI was called with headers
+
+                    # Verify ThinkingChatOpenAI was called with both proxy headers
                     call_kwargs = mock_llm_class.call_args[1]
                     assert "default_headers" in call_kwargs
                     assert call_kwargs["default_headers"]["x-proxy-app"] == "ensemble"
+                    assert call_kwargs["default_headers"]["x-proxy-interleaved-thinking"] == "True"
+
+
+class TestProxyHeaderInjectionOtherSites:
+    """Coverage for proxy-header injection at non-graph LLM construction sites.
+
+    Only ``ContextCompactor`` is cheap to exercise here — it stores its
+    headers-augmented LLM config directly on ``self`` during ``__init__``.
+    The four remaining sites (``title_generation``, ``keyword_extraction``,
+    ``child_reports._summarize_instance``, ``child_reports._repair_report``)
+    build their ``default_headers`` dicts deep inside service methods that
+    also construct ``ThinkingChatOpenAI`` and route through the LLM HA
+    facade; reaching the dict literal there needs full mock plumbing and
+    adds little beyond what this file's graph-level test already proves.
+    """
+
+    def test_context_compactor_includes_both_proxy_headers(self):
+        """ContextCompactor.__init__ must stamp both proxy headers onto llm_config_with_headers."""
+        from daemon.compaction import ContextCompactor
+
+        compactor = ContextCompactor(
+            config=MagicMock(),
+            llm_config={"model": "gpt-4o", "api_key": "test"},
+        )
+
+        headers = compactor.llm_config_with_headers["default_headers"]
+        assert headers["x-proxy-app"] == "ensemble"
+        assert headers["x-proxy-interleaved-thinking"] == "True"

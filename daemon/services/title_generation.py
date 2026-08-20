@@ -93,7 +93,10 @@ class TitleGenerationService:
                 "api_key": self._config.llm.api_key,
                 "model": self._config.llm.model_title,
                 "temperature": 0.3,  # Lower temperature for more focused titles
-                "default_headers": {"x-proxy-app": "ensemble"},
+                "default_headers": {
+                    "x-proxy-app": "ensemble",
+                    "x-proxy-interleaved-thinking": "True",
+                },
             }
             # F1: clean at constructor only — facade needs the RAW dict.
             # See ``daemon.services.llm_failover`` (F1 kwarg hygiene).
