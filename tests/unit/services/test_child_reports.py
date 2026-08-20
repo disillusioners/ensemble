@@ -1141,3 +1141,191 @@ class TestNaturalCompletionRacingRecoveredMarker:
             "obligation-triple (it does not contain all three "
             "obligation-triple column names)"
         )
+    def test_non_integrity_error_rolls_back_savepoint_and_propagates(
+        self, engine: Engine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """F4 FIX (2026-08-20, SAVEPOINT exception-leak hardening): a
+        non-IntegrityError raised at the inner flush (e.g. an
+        ``OperationalError`` on DB disconnect, a ``RuntimeError`` from
+        a downstream invariant) MUST:
+
+        (a) roll back the SAVEPOINT (no orphaned ReportInjection row);
+        (b) propagate the exception with identity preserved (bare
+            ``raise`` — no wrapping into a new exception type);
+        (c) trigger coarse-rollback containment: the WHOLE outer
+            transaction is rolled back cleanly (no orphaned injection
+            row, no half-flushed message_queue / task rows, child
+            status stays non-terminal).
+
+        Without the F4 fix, the SAVEPOINT was left open and was
+        contained only by the outer ``WriteGuardSession`` close — which
+        rolls back the WHOLE transaction (data-safe but coarse, and the
+        leaked SAVEPOINT relied on close-time cleanup). The fix
+        broadens the catch from ``except IntegrityError`` to ``except
+        Exception`` so ``nested.rollback()`` fires for ANY exception
+        raised inside the inner try BEFORE the SAVEPOINT leaks.
+
+        Reach instrumentation: the C-DiD ``except Exception`` block
+        must be ENTERED, so we wrap ``logger.warning`` with a counting
+        shim keyed to the F4 log line. If the ``except Exception`` is
+        removed or the SAVEPOINT logic is restructured to swallow the
+        error, the count stays at 0 and the test fails.
+        """
+        from daemon.repositories.report_injection.models import ReportInjection
+        from daemon.repositories.message_queue.models import MessageQueue
+        from daemon.repositories.task.models import Task, TaskType
+        from sqlmodel import Session as SQLModelSession
+
+        # Reach instrumentation — count warning emissions from the C-DiD
+        # ``except Exception`` block. The fix emits a logger.warning
+        # with the prefix "non-IntegrityError raised during
+        # ReportInjection INSERT" whenever the broadened catch fires.
+        from daemon.services import child_reports as cr_module
+
+        non_ie_warning_calls = {"n": 0}
+        original_warning = cr_module.logger.warning
+
+        def counting_warning(msg, *args, **kwargs):
+            if "non-IntegrityError raised during ReportInjection INSERT" in str(msg):
+                non_ie_warning_calls["n"] += 1
+            return original_warning(msg, *args, **kwargs)
+
+        monkeypatch.setattr(cr_module.logger, "warning", counting_warning)
+
+        service = _build_child_reports_service(engine)
+        parent_id = _seed_root_instance(engine)
+        child_id = _seed_child_instance_full(
+            engine,
+            parent_id=parent_id,
+            status=InstanceStatus.RUNNING.value,
+        )
+
+        # Synthetic non-IntegrityError (RuntimeError is the simplest
+        # non-IE exception that models a downstream invariant failure).
+        # Identity-preservation is asserted below via ``is``.
+        synthetic_err = RuntimeError(
+            "synthetic transient failure on connection.execute"
+        )
+
+        # F4 selective flush: only raises the synthetic error when a
+        # ``ReportInjection`` is in session.new (the C-DiD INSERT
+        # site). Earlier flushes (head-guard autoflush, F3 outer
+        # flush for message_queue / task INSERTs) pass through to
+        # the real flush so execution can reach the C-DiD INSERT.
+        original_flush = SQLModelSession.flush
+        flush_calls = {"n": 0}
+
+        def _selective_flush(self, *args, **kwargs):
+            flush_calls["n"] += 1
+            new_objs = list(getattr(self, "new", set()) or set())
+            if any(isinstance(obj, ReportInjection) for obj in new_objs):
+                raise synthetic_err
+            return original_flush(self, *args, **kwargs)
+
+        monkeypatch.setattr(SQLModelSession, "flush", _selective_flush)
+
+        # The natural completion path MUST surface the non-IntegrityError
+        # — NOT swallow it. Bare ``raise`` preserves identity.
+        with pytest.raises(RuntimeError) as exc_info:
+            service._process_child_completion_db_sync(
+                instance_id=child_id,
+                completed_message_id="msg-non-ie-failure",
+                last_content="... (would fail at flush if it could)",
+            )
+
+        # (b) Exception identity preserved — bare ``raise``, no wrapping.
+        assert exc_info.value is synthetic_err, (
+            "non-IntegrityError MUST be re-raised as-is (bare ``raise``); "
+            "wrapping would hide the original exception and break the "
+            "error-reporting path."
+        )
+
+        # Reach assertion: the C-DiD ``except Exception`` block MUST
+        # have been entered — the broadened catch fired and emitted
+        # a warning. If the except is removed (or narrowed back to
+        # IntegrityError), the count stays at 0 and the test fails.
+        assert non_ie_warning_calls["n"] >= 1, (
+            "the C-DiD except-Exception was NOT entered — the "
+            "non-IntegrityError was never caught. The broadened catch "
+            "is required so nested.rollback() fires for ANY exception, "
+            "not just IntegrityError. If the except Exception was "
+            "removed or narrowed, the SAVEPOINT leak returns."
+        )
+
+        # Reach assertion: the patched flush MUST have been invoked at
+        # least once before the error propagated. The selective flush
+        # only raises on ReportInjection in session.new; this confirms
+        # the outer F3 flush ran first (no early leakage).
+        assert flush_calls["n"] >= 1, (
+            "the patched Session.flush MUST have been invoked at "
+            "least once before the error propagated (the selective "
+            "flush only raises on ReportInjection in session.new; "
+            "this confirms the outer F3 flush ran first)"
+        )
+
+        # (c) Coarse-rollback containment: the WHOLE outer transaction
+        # was rolled back by the WriteGuardSession close (no savepoint
+        # leak, and the exception propagated). Verifies:
+        #   1. No orphan ReportInjection row for the obligation triple.
+        #   2. No completion_report message_queue row appended.
+        #   3. No PROCESS_REPORT task row appended.
+        #   4. Child did NOT transition to COMPLETED.
+        # The coarse rollback is data-safe: no half-flushed state.
+        with Session(engine) as session:
+            # (1) No orphan ReportInjection row.
+            inj_rows = session.exec(
+                sm_select(ReportInjection).where(
+                    ReportInjection.parent_instance_id == parent_id
+                ).where(
+                    ReportInjection.child_instance_id == child_id
+                ).where(
+                    ReportInjection.child_message_id == "msg-non-ie-failure"
+                )
+            ).all()
+            assert len(inj_rows) == 0, (
+                "F4 REGRESSION: no ReportInjection row should exist "
+                "for the obligation triple (SAVEPOINT was rolled back). "
+                f"Got {len(inj_rows)} orphan row(s)."
+            )
+
+            # (2) No completion_report message_queue row.
+            # The completion_report message is keyed by source
+            # ``internal_report:{child_id}:{completed_message_id}``.
+            msg_rows = session.exec(
+                sm_select(MessageQueue).where(
+                    MessageQueue.instance_id == parent_id
+                ).where(
+                    MessageQueue.source.like(
+                        f"internal_report:{child_id}:msg-non-ie-failure"
+                    )
+                )
+            ).all()
+            assert len(msg_rows) == 0, (
+                "F4 REGRESSION: no completion_report message_queue "
+                "row should exist (outer tx rolled back). Got "
+                f"{len(msg_rows)} orphan row(s)."
+            )
+
+            # (3) No PROCESS_REPORT task row.
+            task_rows = session.exec(
+                sm_select(Task).where(
+                    Task.instance_id == parent_id
+                ).where(
+                    Task.task_type == TaskType.PROCESS_REPORT.value
+                )
+            ).all()
+            assert len(task_rows) == 0, (
+                "F4 REGRESSION: no PROCESS_REPORT task row should "
+                "exist (outer tx rolled back). Got "
+                f"{len(task_rows)} orphan row(s)."
+            )
+
+            # (4) Child did NOT transition to COMPLETED.
+            child_row = session.get(Instance, child_id)
+            assert child_row.status == InstanceStatus.RUNNING.value, (
+                "F4 REGRESSION: child must NOT transition to "
+                "COMPLETED on a non-IntegrityError (outer tx rolled "
+                f"back, COMPLETED transition lost). Got "
+                f"status={child_row.status!r}."
+            )
+

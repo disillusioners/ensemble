@@ -2752,46 +2752,70 @@ Provide a concise summary:"""
                 # the outer transaction from the pre-SAVEPOINT
                 # flush above, so they survive ``nested.rollback()``.
                 session.flush()
-            except IntegrityError as oblig_err:
-                # POST-DEEP-REVIEW (Y2, 2026-08-20): narrow the catch
-                # to ONLY the obligation-triple partial unique index
-                # (``uq_report_injections_oblig_triple``). A foreign-key
-                # or other constraint violation would otherwise be
-                # mis-treated as ``idempotency_skip`` and silently
-                # swallowed. Discrimination rule
-                # (see ``_is_obligation_triple_integrity_error``):
-                #   * PG — constraint name in ``str(exc.orig)``.
-                #   * SQLite — index name is absent; match all three
-                #     column names
-                #     (``parent_instance_id``,
-                #     ``child_instance_id``,
-                #     ``child_message_id``) in the error message.
-                # Any IntegrityError that does NOT match is re-raised
-                # (no new exception type — bare ``raise``) so the
-                # bug surfaces in the existing error-reporting path.
+            except Exception as err:
+                # F4 FIX (2026-08-20, SAVEPOINT exception-leak hardening):
+                # broad catch (was ``except IntegrityError``). A
+                # non-IntegrityError raised at the inner flush (e.g.
+                # ``OperationalError`` on a DB disconnect, downstream
+                # ``RuntimeError``) OR at the ``ReportInjection(...)``
+                # constructor (attribute error, type error) previously
+                # propagated WITHOUT ``nested.rollback()`` — the
+                # SAVEPOINT was left open and was contained only by the
+                # outer ``WriteGuardSession`` close, which rolls back
+                # the WHOLE transaction. That is data-safe but coarse,
+                # and the leaked SAVEPOINT relied on close-time cleanup.
                 #
-                # F3 FIX (2026-08-20): SAVEPOINT-scoped rollback.
-                # ``nested.rollback()`` discards ONLY the injection
-                # INSERT (the SAVEPOINT reverts to its pre-flush
-                # state); the outer transaction retains the
-                # COMPLETED transition + message + task INSERTs.
-                # Must call ``nested.rollback()`` explicitly —
-                # leaving the SessionTransaction to go out of scope
-                # without commit/rollback only RELEASES the
-                # SAVEPOINT (the injection would persist in the
-                # outer transaction).
+                # Constructor-failure window: the ``ReportInjection(...)``
+                # constructor call (lines 2741-2747) is INSIDE the
+                # ``try`` block, so the broadened ``except Exception``
+                # catches it and triggers ``nested.rollback()``. The
+                # window is closed.
+                #
+                # Y2 discriminator semantics preserved EXACTLY:
+                #   * obligation-triple IntegrityError → rollback savepoint
+                #     + commit outer + idempotency_skip (F3 savepoint
+                #     fence, COMPLETED transition preserved).
+                #   * unrelated IntegrityError → rollback savepoint + bare
+                #     raise (no swallowing, bug surfaces — Y2 semantics).
+                #   * non-IntegrityError → rollback savepoint + bare raise
+                #     (preserve original identity; new branch — was
+                #     previously silent on the SAVEPOINT leak).
+                #
+                # Always roll back the SAVEPOINT FIRST so any exception
+                # (IntegrityError OR non-IntegrityError) is contained.
+                # Must call ``nested.rollback()`` explicitly — leaving the
+                # SessionTransaction to go out of scope without
+                # commit/rollback only RELEASES the SAVEPOINT (the
+                # injection would persist in the outer transaction).
                 nested.rollback()
-                if not _is_obligation_triple_integrity_error(oblig_err):
-                    logger.warning(
-                        f"child_reports: unexpected IntegrityError on "
-                        f"ReportInjection INSERT (not obligation-triple "
-                        f"— FK / NOT NULL / other UNIQUE?). Surfacing "
-                        f"instead of swallowing. parent="
-                        f"{instance.parent_id[:8]}..., child="
-                        f"{instance.instance_id[:8]}..., msg="
-                        f"{completed_message_id[:8]}...: "
-                        f"{type(oblig_err).__name__}: {oblig_err.orig}"
-                    )
+                if not isinstance(err, IntegrityError) or not _is_obligation_triple_integrity_error(err):
+                    # Non-IntegrityError OR unrelated IntegrityError:
+                    # surface the bug. The log line discriminates the
+                    # two cases for operator visibility, but both
+                    # branches trigger bare ``raise`` — the original
+                    # exception identity is preserved (no wrapping).
+                    if isinstance(err, IntegrityError):
+                        logger.warning(
+                            f"child_reports: unexpected IntegrityError on "
+                            f"ReportInjection INSERT (not obligation-triple "
+                            f"— FK / NOT NULL / other UNIQUE?). Surfacing "
+                            f"instead of swallowing. parent="
+                            f"{instance.parent_id[:8]}..., child="
+                            f"{instance.instance_id[:8]}..., msg="
+                            f"{completed_message_id[:8]}...: "
+                            f"{type(err).__name__}: {err.orig}"
+                        )
+                    else:
+                        logger.warning(
+                            f"child_reports: non-IntegrityError raised "
+                            f"during ReportInjection INSERT (savepoint "
+                            f"rolled back, exception propagates). "
+                            f"Surfacing. parent="
+                            f"{instance.parent_id[:8]}..., child="
+                            f"{instance.instance_id[:8]}..., msg="
+                            f"{completed_message_id[:8]}...: "
+                            f"{type(err).__name__}: {err}"
+                        )
                     raise
                 # Natural × recovered PENDING race: the recovered
                 # row's worker_pool / claim_for_task_delivery owns
@@ -2811,7 +2835,7 @@ Provide a concise summary:"""
                     f"msg={completed_message_id[:8]}...; treating as "
                     f"already-delivered (idempotency_skip, savepoint "
                     f"rollback preserves COMPLETED transition): "
-                    f"{type(oblig_err).__name__}"
+                    f"{type(err).__name__}"
                 )
                 session.commit()
                 return _ChildCompletionDbResult(
