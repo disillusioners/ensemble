@@ -12,6 +12,7 @@
         <a
           [routerLink]="instancesViewState.lastDetailRoute() ?? ['/instances']"
           [class.active]="isInstancesRoute()"
+          (click)="onInstancesNavClick($event)"
           class="nav-link"
         >Instances</a>
         <a routerLink="/sources" routerLinkActive="active" class="nav-link">Sources</a>
@@ -23,12 +24,25 @@
         }
       </nav>
     </div>
-    
+
     <div class="header-right">
-      <!-- Unified overlay hide button — visible when any overlay is active -->
+      <!-- Unified overlay hide button — visible when any overlay is
+           active or the chat overlay is hidden-but-recoverable. The
+           icon + aria-label flip on the recoverable state so a single
+           affordance visually telegraphs whether clicking it hides
+           the current overlay (visibility_off / "Hide overlay") or
+           re-shows the cached one (visibility / "Show overlay"). The
+           N1 dead-click guard lives on the Instances nav link above,
+           not here — clicking the hide button while recoverable is
+           always productive. -->
       @if (anyOverlayVisible()) {
-        <button mat-icon-button (click)="hideActiveOverlay()" class="overlay-hide-btn" aria-label="Hide overlay">
-          <mat-icon>visibility_off</mat-icon>
+        <button
+          mat-icon-button
+          (click)="hideActiveOverlay()"
+          class="overlay-hide-btn"
+          [attr.aria-label]="hideOverlayAriaLabel()"
+        >
+          <mat-icon>{{ hideOverlayIcon() }}</mat-icon>
         </button>
       }
       <app-job-queue-indicator></app-job-queue-indicator>

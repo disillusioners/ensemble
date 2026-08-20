@@ -115,14 +115,81 @@ export class App implements OnInit {
   readonly isPlanRoute = signal(false);
 
   /**
-   * True when any overlay (workspace or plane or instance-detail) is currently visible.
+   * True when any overlay (workspace, plane, or instance-detail) is
+   * currently visible, OR the chat overlay is hidden but a cached
+   * instance id is bound to the current instances route and can be
+   * re-shown via the same hide button.
+   *
    * Drives the unified hide button in the app header so a single
-   * affordance can dismiss whichever overlay is on screen.
+   * affordance can dismiss whichever overlay is on screen, AND so the
+   * button is also shown when the chat overlay is hidden-but-recoverable
+   * (the user re-shows via the same button — pure toggle, mirroring
+   * the Alt+` workspace hotkey).
+   *
+   * The 4th term is GATED to ``isInstancesRoute()`` on purpose: without
+   * the gate, localStorage's cached id (seeded by ``restoreState`` at
+   * boot) would force the hide button to render on EVERY route — /,
+   * /sources, /jobs, … — even though the chat overlay itself only
+   * shows on a detail URL. ``isInstancesRoute`` stays true through the
+   * hidden state (``syncDetailVisibility`` writes it on NavigationEnd),
+   * so re-show from the detail route is preserved while non-instances
+   * routes stop showing the button.
+   *
+   * The 4th term is expressed via ``isHiddenButRecoverable()`` (which
+   * already encodes ``!detailVisible() && id !== null && isInstancesRoute()``)
+   * so the two signals can never drift on the recoverable predicate.
+   * Boolean equivalence to the previous expanded form
+   * ``(activeInstanceId() !== null && isInstancesRoute())`` holds because:
+   *   - when ``detailVisible()`` is true, term 3 is already true (the
+   *     difference between ``(id && isInst)`` and ``isHiddenButRecoverable``
+   *     doesn't matter — disjunction absorbs it);
+   *   - when ``detailVisible()`` is false, ``!detailVisible()`` is the
+   *     identity factor and the two terms collapse to the same
+   *     ``id && isInst`` truth value.
+   * Net: anyOverlayVisible == showWorkspace || isPlanRoute || detailVisible
+   * || isHiddenButRecoverable, with no change in observable behavior.
    */
   readonly anyOverlayVisible = computed(() => {
     return this.workspaceOverlayService.showWorkspace()
       || this.isPlanRoute()
-      || this.instancesViewState.detailVisible();
+      || this.instancesViewState.detailVisible()
+      || this.isHiddenButRecoverable();
+  });
+
+  /**
+   * True when the chat overlay is hidden but a cached instance id is
+   * bound to the current instances route (the pure-toggle recoverable
+   * state). Drives the hide button's icon / aria-label flip and the
+   * Instances nav-link dead-click guard (see ``onInstancesNavClick``).
+   *
+   * Now also USED as the 4th term of ``anyOverlayVisible`` so the two
+   * signals never disagree about whether the recoverable state is
+   * active (previously the 4th term inlined the same predicate; the
+   * explicit reference here prevents the two from drifting).
+   */
+  readonly isHiddenButRecoverable = computed(() => {
+    return !this.instancesViewState.detailVisible()
+      && this.instancesViewState.activeInstanceId() !== null
+      && this.isInstancesRoute();
+  });
+
+  /**
+   * The hide button's mat-icon — flips between ``visibility_off``
+   * (overlay visible) and ``visibility`` (hidden-but-recoverable).
+   * The single affordance visually telegraphs whether clicking it
+   * hides the current overlay or re-shows the cached one.
+   */
+  readonly hideOverlayIcon = computed(() => {
+    return this.isHiddenButRecoverable() ? 'visibility' : 'visibility_off';
+  });
+
+  /**
+   * Accessible label for the unified hide button. Mirrors the icon
+   * flip so screen readers announce the action the button is about to
+   * take ("Hide overlay" vs "Show overlay").
+   */
+  readonly hideOverlayAriaLabel = computed(() => {
+    return this.isHiddenButRecoverable() ? 'Show overlay' : 'Hide overlay';
   });
 
   /**
@@ -134,6 +201,21 @@ export class App implements OnInit {
    * detail route or the list (the routerLink itself is dynamic).
    */
   readonly isInstancesRoute = signal(false);
+
+  /**
+   * True when the current URL is a project-scoped INSTANCE DETAIL
+   * route — a STRICT SUBSET of ``isInstancesRoute`` that excludes the
+   * bare ``/instances`` list. Updated in ``syncDetailVisibility`` from
+   * the same regex match, alongside ``isInstancesRoute``.
+   *
+   * Drives the dead-click guard in ``onInstancesNavClick``: the guard
+   * must only intercept clicks on DETAIL routes. On the bare list
+   * (``/instances``) with a cached id, the URL and the cached target
+   * genuinely diverge — clicking the Instances link must navigate
+   * normally so the router delivers the user to the cached detail
+   * route (the F3 cold-reload deep-link path relies on this).
+   */
+  readonly isOnDetailRoute = signal(false);
 
   // ── Lazy root-mount of the instance-detail (chat) host ──────────────────
   //
@@ -247,27 +329,142 @@ export class App implements OnInit {
   }, { allowSignalWrites: true });
 
   /**
-   * Hide whichever overlay is currently visible. If the workspace
-   * overlay is up, dismiss it via the overlay service; if the plan
-   * route is active, navigate back to /instances; if the instance
-   * detail overlay is up, navigate to /instances AND close the
-   * overlay. The detail branch MUST navigate (not just close) so the
-   * URL leaves the inert detail stub — otherwise the router stays on
-   * ``/projects/:pid/instances/:iid`` with nothing visible, the
-   * Instances nav link matches that same URL on re-click, the router
-   * suppresses the no-op navigation, and the overlay is permanently
-   * stuck on a blank screen.
+   * Hide whichever overlay is currently visible — the branches run in
+   * the order they appear in the code below.
+   *
+   * 1. **Workspace branch** (early-return). When the workspace overlay
+   *    is up, dismiss it via the overlay service and stop. N3 (the
+   *    combined workspace + chat-hidden state): when the workspace is
+   *    visible AND the chat is hidden-but-recoverable, the click hides
+   *    the workspace and does NOT pop the chat open underneath — the
+   *    user clicked "hide", not "switch overlays". An early ``return``
+   *    after the workspace-hide branch makes the intent explicit and
+   *    matches the minimize-surprise reading. The next click (with
+   *    workspace already hidden) takes the pure-toggle branch.
+   *
+   * 2. **Plan-routable branch** (early-return). When the plan route is
+   *    active, navigate back to ``/instances``. The plan route is a
+   *    real URL with no cached state to toggle — there's no
+   *    "hidden-but-recoverable" equivalent on /plan — so the branch
+   *    does the only productive thing: take the user to a
+   *    sensible default and leave.
+   *
+   * 3. **Detail-visible branch** (early-return). When the instance
+   *    detail is up, toggle ``detailVisible`` straight to false — a
+   *    pure signal flip, mirroring the Alt+` workspace hotkey. The URL
+   *    stays on ``/projects/<pid>/instances/<iid>`` with the chat
+   *    overlay display:none, and the cached id/project/state survive
+   *    so the user can re-show via the same button. The user re-shows
+   *    via the same hide button (which is still visible because the
+   *    cached id is set), so the URL-stuck trap is bypassed — they
+   *    never try to re-click the Instances nav link, which would
+   *    no-op against the same URL.
+   *
+   * 4. **Hidden-but-recoverable branch** (no early-return). When the
+   *    detail is hidden but a cached id is bound to the current
+   *    instances route (the "hidden-but-recoverable" state), re-show
+   *    the overlay via a pure ``detailVisible.set(true)`` so the URL
+   *    stays on the detail route. The plan route was handled above
+   *    (case 2) so this branch only fires on instances routes; on a
+   *    bare /instances URL the cached id is still set, so re-show
+   *    snaps the overlay over the list with the cached detail.
    */
   hideActiveOverlay(): void {
     if (this.workspaceOverlayService.showWorkspace()) {
       this.workspaceOverlayService.hide();
+      // N3: workspace is now hidden. Stop here so a recoverable chat
+      // does NOT pop open underneath. The next click (with
+      // workspace already hidden) takes the pure-toggle branch.
+      return;
     }
-    if (this.isPlanRoute() || this.instancesViewState.detailVisible()) {
-      // The NavigationEnd handler will reconcile the detail service
-      // from the new /instances URL (syncDetailVisibility -> closeDetail),
-      // so we don't need a separate closeDetail() call here.
+    if (this.isPlanRoute()) {
       this.router.navigate(['/instances']);
+      return;
     }
+    // Detail branch: pure signal flip. No navigation — the URL
+    // intentionally stays on the detail route so the user can
+    // re-show via the same button (the cached id is preserved).
+    if (this.instancesViewState.detailVisible()) {
+      this.instancesViewState.detailVisible.set(false);
+      return;
+    }
+    if (this.instancesViewState.activeInstanceId() !== null) {
+      // Hidden-but-recoverable: re-show via the same hide button.
+      this.instancesViewState.detailVisible.set(true);
+    }
+  }
+
+  /**
+   * Click guard for the "Instances" nav link (N1).
+   *
+   * While the chat overlay is hidden-but-recoverable
+   * (``detailVisible``=false, cached id set, URL on a DETAIL route),
+   * the nav link's ``routerLink`` resolves to the SAME detail URL via
+   * ``lastDetailRoute()``. Angular's router suppresses no-op
+   * navigations by default (``onSameUrlNavigation === 'ignore'``), so
+   * clicking the link does nothing — the user stares at a blank
+   * ``.app-main`` with no NavigationEnd firing, and the overlay stays
+   * hidden.
+   *
+   * The guard detects that exact state and re-shows the overlay
+   * directly (a pure ``detailVisible.set(true)``), skipping the
+   * router round-trip entirely. Outside that state the guard is a
+   * no-op — the routerLink navigates as usual.
+   *
+   * Two refinements:
+   *
+   * - **Bare-/instances exclusion** (Warning #3): the dead-click
+   *   guard must NOT fire when the current URL is the bare
+   *   ``/instances`` list with a cached id. On the list, the URL and
+   *   the cached target genuinely diverge — clicking the Instances
+   *   link must navigate normally so the router delivers the user to
+   *   the cached detail route (the F3 cold-reload deep-link path
+   *   relies on this). The gate uses ``isOnDetailRoute()`` (a strict
+   *   subset of ``isInstancesRoute()`` excluding the bare list);
+   *   ``anyOverlayVisible`` still uses the broader ``isInstancesRoute()``
+   *   gate so the hide button keeps rendering on /instances.
+   *
+   * - **Modifier-click fall-through** (Warning #1): the guard must
+   *   only intercept plain left-click without modifiers. Ctrl-click,
+   *   cmd-click, middle-click, shift-click and alt-click fall through
+   *   to the browser's native "open in new tab" / "open in new window"
+   *   handling — preventing them breaks user expectations about
+   *   browser nav shortcuts and would also block middle-click which
+   *   users routinely use to open a tab. Modifier flags and ``button``
+   *   are the standard MouseEvent properties, no synthetic event
+   *   involved.
+   */
+  onInstancesNavClick(event: MouseEvent): void {
+    if (!this.isHiddenButRecoverable()) {
+      // Outside the recoverable state — let the routerLink drive the
+      // navigation. ``lastDetailRoute()`` may legitimately differ
+      // from the current URL here (e.g. user is on / and has a
+      // cached detail), so the router does the right thing.
+      return;
+    }
+    // Bare-/instances exclusion (Warning #3): on /instances the URL
+    // and the cached target diverge — the link must navigate so the
+    // router delivers the user to the cached detail route. Without
+    // this gate, we'd preventDefault a genuinely useful navigation
+    // and the URL/UI would desync (overlay re-shown while URL stays
+    // on /instances, blocking the F3 cold-reload deep-link path).
+    if (!this.isOnDetailRoute()) {
+      return;
+    }
+    // Modifier-click fall-through (Warning #1): only intercept a
+    // plain left-click. ctrl/cmd/shift/alt-click and middle/right-click
+    // bypass the guard so the browser can handle "open in new tab"
+    // etc. normally. ``button === 0`` is the left mouse button per
+    // the W3C UI Events spec.
+    if (event.button !== 0
+      || event.ctrlKey || event.metaKey
+      || event.shiftKey || event.altKey) {
+      return;
+    }
+    // Recoverable state + plain left-click on a detail URL: prevent
+    // the no-op navigation and re-show the overlay directly.
+    event.preventDefault();
+    this.instancesViewState.detailVisible.set(true);
   }
 
   readonly settingsMenuItems = signal<SettingsMenuItem[]>([
@@ -324,14 +521,29 @@ export class App implements OnInit {
    * route (home, sources, jobs, plan, settings, /instances list, …)
    * hides it.
    *
-   * This is the SINGLE writer for ``InstancesViewStateService`` (W5):
-   * the stub route no longer calls ``openDetail`` itself, so a deep-
-   * link to a detail URL is reconciled exactly once via the very first
+   * Writer scope (W5): this method is the single writer for the
+   * ``openDetail`` / ``closeDetail`` calls that bind the cached
+   * instance id + project context to the URL — the stub route no
+   * longer calls ``openDetail`` itself, so a deep-link to a detail
+   * URL is reconciled exactly once via the very first
    * ``syncDetailVisibility(this.router.url)`` call in the constructor.
-   * Centralizing avoids two writers racing to set ``detailVisible``.
+   * Centralizing avoids two writers racing to bind ids.
+   *
+   * ``detailVisible`` is NOT exclusively owned by this method: the
+   * pure-toggle hide branch (``hideActiveOverlay``) flips it directly
+   * while staying on the detail URL, and the Instances nav-link
+   * dead-click guard (``onInstancesNavClick``) re-shows it when the
+   * user clicks a same-URL link while the overlay is
+   * hidden-but-recoverable. Both branches are idempotent with respect
+   * to the URL — neither writes ``activeInstanceId`` or
+   * ``activeProjectId`` — so no id drift can occur.
    *
    * Side effect: updates ``isInstancesRoute`` so the Instances nav
-   * link stays highlighted across both the list and detail routes.
+   * link stays highlighted across both the list and detail routes,
+   * AND ``isOnDetailRoute`` so the dead-click guard in
+   * ``onInstancesNavClick`` can distinguish detail URLs from the bare
+   * ``/instances`` list (the bare list with a cached id is the case
+   * where the link must navigate normally — see that method's docs).
    */
   private syncDetailVisibility(url: string): void {
     // WHY the strict capture (W4):
@@ -347,6 +559,10 @@ export class App implements OnInit {
     //     ever introduced, extend the regex explicitly here.
     const match = url.match(/^\/projects\/([^/?]+)\/instances\/([^/?]+)$/);
     this.isInstancesRoute.set(url === '/instances' || match !== null);
+    // isOnDetailRoute is the strict subset — excludes bare /instances.
+    // True exactly when the regex matched, so the dead-click guard
+    // only intercepts clicks on detail URLs.
+    this.isOnDetailRoute.set(match !== null);
     if (match) {
       // S2: keep the project tab bar in sync with the detail view's
       // project context, so the tab highlight matches the open
