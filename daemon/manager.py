@@ -387,6 +387,11 @@ class InstanceManager:
         reconciled by the recovery sweep / router (task 2.1+2.2)
         before the FM-1 loop sees them.
 
+        Lookup-error default (D1, 2026-08-20): a repository
+        exception returns ``True`` (exempt/preserve) — a transient
+        DB error must not let FM-1 kill a PENDING PROCESS_REPORT
+        task. See the inline D1 comment for the rationale.
+
         Args:
             report_message_id: The ``message_id`` of the candidate
                 ``completion_report`` ``MessageQueue`` row.
@@ -394,9 +399,10 @@ class InstanceManager:
         Returns:
             ``True`` when a PENDING or DEFERRED
             ``report_injections`` row references this
-            ``report_message_id``; ``False`` otherwise (including
-            the NULL-keyed shape and the terminal INJECTED /
-            TASK_DELIVERED shape).
+            ``report_message_id``, OR when the lookup itself failed
+            (D1 safe default — preserve the task); ``False``
+            otherwise (including the NULL-keyed shape and the
+            terminal INJECTED / TASK_DELIVERED shape).
         """
         from .repositories.report_injection.models import (
             ReportInjectionState,
@@ -409,12 +415,21 @@ class InstanceManager:
                 report_message_id
             )
         except Exception as exc:  # noqa: BLE001 — FM-1 exemption predicate
+            # D1 (2026-08-20, leader-decided): lookup error → EXEMPT
+            # (return True). Passive+recoverable beats destructive+
+            # recoverable — the pre-D1 ``return False`` let the FM-1
+            # loop KILL the PENDING PROCESS_REPORT task on a
+            # transient DB error (recreating the incident variant
+            # (c) freeze). A false exemption merely leaves the task
+            # to the worker pool / claim lane, which is exactly
+            # where a healthy row would be delivered anyway.
             logger.warning(
                 f"_has_non_terminal_injection_for: lookup failed "
                 f"message_id={report_message_id[:8]}...: "
-                f"{type(exc).__name__}: {exc}"
+                f"{type(exc).__name__}: {exc} — defaulting to "
+                f"EXEMPT (True) so FM-1 preserves the task"
             )
-            return False
+            return True
         if row is None:
             return False
         return row.state in (

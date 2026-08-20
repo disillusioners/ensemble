@@ -30,6 +30,8 @@ Acceptance covered:
 * ORPHAN terminal-parent disposition (W1) — observable log.
 * Fail-safe — per-row errors do not abort the sweep.
 * Lane kill-switches — disabled lanes do not run.
+* D2 — no-row backstop end-state: the fresh row is transitioned to
+  PENDING (never left DEFERRED / half-recovered).
 
 Tests run against a real in-memory SQLite database; the service
 sync methods are exercised directly (no threading — the
@@ -47,7 +49,7 @@ import pytest
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel
+from sqlmodel import Session, SQLModel, select as sm_select
 
 # Register every table the helper touches before create_all().
 import daemon.repositories.dependency_bus.models  # noqa: F401
@@ -609,6 +611,63 @@ class TestNoRowBackstopFalsePositiveMatrix:
             parent_not_terminal=False
         )
         assert any(r["child_id"] == child_id for r in rows)
+
+    def test_no_row_lane_end_state_not_deferred(
+        self, engine: Engine
+    ) -> None:
+        """D2 (2026-08-20): after the no-row backstop lane runs,
+        the freshly-written row's END STATE must NOT be DEFERRED.
+
+        Pre-D2 the lane handed its fresh ``ensure_deferred`` row
+        straight to reconcile, leaving the row half-recovered
+        (state=DEFERRED with a backfilled artifact) — a shape that
+        re-triggered every cycle because both claim paths
+        (``claim_for_injection`` / ``claim_for_task_delivery``)
+        are guarded ``WHERE state='PENDING'`` and can NEVER claim a
+        DEFERRED row. D2 aligns the lane with Lanes 1/3/4:
+        ``transition_deferred_to_pending`` runs BEFORE the
+        reconcile hand-off, so the row ends the cycle PENDING (or
+        terminal via the manager hand-off) — never DEFERRED.
+
+        This test asserts the END STATE with a mocked manager
+        hand-off (the real reconcile/re-enter path is covered by
+        the sub-shape tests in test_resume_router_deferred_recovery).
+        """
+        parent = _seed_instance(engine)
+        child_id, child_msg_id = self._seed_completed_child_with_message(
+            engine, parent
+        )
+
+        service, manager = _build_service(engine)
+        result = service.recover_now()
+
+        # The lane recovered exactly one row.
+        assert result.lanes["no_row_backstop"].recovered == 1
+        manager._handle_recover_deferred_report.assert_called_once()
+
+        # D2 END-STATE assertion: the row exists and is NOT
+        # DEFERRED. With the mocked manager hand-off the row stays
+        # PENDING (the real hand-off escalates it to
+        # TASK_DELIVERED/INJECTED via claim paths); the
+        # half-recovered DEFERRED shape is GONE.
+        with Session(engine) as session:
+            row = session.exec(
+                sm_select(ReportInjection).where(
+                    ReportInjection.child_instance_id == child_id
+                )
+            ).first()
+        assert row is not None, (
+            "no_row_backstop lane must write the obligation row"
+        )
+        assert row.state == ReportInjectionState.PENDING.value, (
+            "D2: the no-row backstop lane must transition its fresh "
+            "row to PENDING before the hand-off (end-state aligned "
+            f"with Lanes 1/3/4); got state={row.state}"
+        )
+        assert row.recovery_attempted_at is not None, (
+            "D2: transition_deferred_to_pending stamps "
+            "recovery_attempted_at (lanes 3/4 retry visibility)"
+        )
 
 
 # =============================================================================

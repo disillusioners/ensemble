@@ -644,3 +644,115 @@ class TestFM1GuardRealLoop:
                 "cleanup; got "
                 f"msg.status={completed_msg.status}"
             )
+
+    @pytest.mark.asyncio
+    async def test_real_loop_lookup_error_preserves_task(
+        self, engine: Engine
+    ) -> None:
+        """D1 (2026-08-20): when the injection-row LOOKUP RAISES
+        (transient DB error), the FM-1 guard MUST exempt the
+        PROCESS_REPORT task — it is PRESERVED (still PENDING, its
+        message still PROCESSING), NOT cancelled+completed.
+
+        Pre-D1 the lookup-error default was ``False`` (not exempt)
+        → FM-1 killed the freshly-swept PENDING report task on a
+        transient error, recreating the incident variant (c)
+        freeze. D1 flips the default to True: passive+recoverable
+        beats destructive+recoverable — a false exemption just
+        leaves the task to the worker pool / claim lane.
+        """
+        from daemon.cancellation import CancellationTokenSource
+        from daemon.manager import InstanceManager
+        from daemon.repositories.message_queue.repository import (
+            SQLModelMessageQueueRepository,
+        )
+        from daemon.repositories.task.repository import TaskRepository
+
+        parent = _seed_instance(engine)
+
+        # The realistic freeze scenario: PROCESS_REPORT task PENDING
+        # on a PROCESSING completion_report message, plus a
+        # non-terminal injection row (seeded so the row EXISTS —
+        # the lookup-error path is forced below by raising).
+        report_msg_id, report_task_id = _seed_message_and_task(
+            engine,
+            instance_id=parent,
+            task_type=TaskType.PROCESS_REPORT.value,
+            msg_status=MessageStatus.PROCESSING.value,
+            msg_type=MessageType.COMPLETION_REPORT.value,
+        )
+        _seed_injection_row(
+            engine,
+            parent_instance_id=parent,
+            report_message_id=report_msg_id,
+            state=ReportInjectionState.PENDING.value,
+        )
+
+        manager = _build_minimal_manager(engine)
+        manager._queue_repository = SQLModelMessageQueueRepository(
+            engine=engine
+        )
+        manager._task_repo = TaskRepository(
+            engine=engine,
+            on_pending_task=lambda: None,
+        )
+        manager._schedule_explicit_handle_resume = (
+            InstanceManager._schedule_explicit_handle_resume.__get__(
+                manager
+            )
+        )
+
+        token_source = CancellationTokenSource()
+        manager._request_registry = MagicMock()
+        manager._request_registry.register = MagicMock(
+            return_value=token_source
+        )
+
+        async def _noop_bg(*args, **kwargs):
+            return None
+
+        manager._resume_processing_background = _noop_bg
+        manager._graph_tasks = {}
+
+        # FORCE the lookup error: the repo's find_row_by_report_
+        # message_id raises for every call — the helper's except
+        # branch (D1) fires.
+        def _raise_lookup(*_args: Any, **_kwargs: Any) -> None:
+            raise RuntimeError("simulated transient DB error")
+
+        manager._report_injection_repo.find_row_by_report_message_id = (
+            MagicMock(side_effect=_raise_lookup)
+        )
+
+        # Drive the REAL FM-1 cleanup loop.
+        result = await manager._schedule_explicit_handle_resume(
+            instance_id=parent,
+            message="resume trigger",
+            silent=True,
+            images=None,
+            target_work_id="work-test",
+            selected_suspension_reason="test",
+            handle_work_id="work-handle",
+            route_outcome="test_route",
+        )
+        assert result["status"] == "resuming"
+
+        # D1 assertion: the PROCESS_REPORT task is PRESERVED.
+        with Session(engine) as session:
+            sm_task = sm_select(Task).where(Task.id == report_task_id)
+            survived_task = session.exec(sm_task).first()
+            assert survived_task.status == TaskStatus.PENDING.value, (
+                "D1: lookup error MUST exempt (preserve) the PENDING "
+                "PROCESS_REPORT task; got "
+                f"task.status={survived_task.status}"
+            )
+
+            sm_msg = sm_select(MessageQueue).where(
+                MessageQueue.message_id == report_msg_id
+            )
+            survived_msg = session.exec(sm_msg).first()
+            assert survived_msg.status == MessageStatus.PROCESSING.value, (
+                "D1: lookup error MUST exempt the message from the "
+                "complete() call too; got "
+                f"msg.status={survived_msg.status}"
+            )

@@ -34,8 +34,8 @@ designed-in — C3, terminal-parent ORPHAN — W1):
    subqueries — see ``repository.py`` docstring for the false-positive
    matrix). Catches FM-11 escapes, cancel-mid-shield, and any future
    no-marker drop lane. For each row: ``ensure_deferred`` (W6 absorbs
-   duplicates), then the router's transition + reconcile + re-enter
-   path.
+   duplicates), then ``transition_deferred_to_pending`` + reconcile +
+   re-enter (D2 end-state alignment with Lanes 1/3/4).
 
 3. **Age-bounded PENDING lane (W9)** — ``find_pending_past_age``
    without a ``recovery_attempted_at`` predicate: stranded PENDING
@@ -892,7 +892,10 @@ class ReportDeliveryRecoveryService:
         2. ``ensure_deferred(parent, child, child_msg, RESUME_ROUTER)``
            — write-once gate (W6 absorbs IntegrityError on
            duplicate).
-        3. Hand off to the manager's reconcile + re-enter path.
+        3. ``transition_deferred_to_pending(row.injection_id)``
+           (D2 — end-state alignment with Lanes 1/3/4; see the
+           inline D2 comment). rowcount=0 → already_recovered.
+        4. Hand off to the manager's reconcile + re-enter path.
         """
         # Step 1: busy-check — uniform helper (Lanes 2/3/4 busy-skips
         # are now logged at INFO like Lane 1/5, Rec-2 2026-08-20).
@@ -942,7 +945,33 @@ class ReportDeliveryRecoveryService:
             result.already_recovered += 1
             return
 
-        # Step 3: hand off to the manager's reconcile + re-enter
+        # Step 3 (D2, 2026-08-20): guarded transition DEFERRED →
+        # PENDING — the SAME end-state alignment as Lanes 1/3/4.
+        # Pre-D2 this lane handed the fresh DEFERRED row straight
+        # to reconcile, leaving the row in a HALF-RECOVERED state
+        # (state=DEFERRED with a backfilled artifact) that
+        # re-triggered every cycle: both claim paths
+        # (``claim_for_injection`` / ``claim_for_task_delivery``)
+        # are guarded ``WHERE state='PENDING'``, so a DEFERRED row
+        # can NEVER be claimed — delivery only completed when the
+        # NEXT cycle's Lane 1 re-picked the row and transitioned
+        # it. Transitioning here means the row ends the cycle
+        # DELIVERED-or-terminal (or PENDING + claimed by the worker
+        # pool) — never a half-recovered shape.
+        transitioned = (
+            self._report_injection_repo.transition_deferred_to_pending(
+                row.injection_id
+            )
+        )
+        if not transitioned:
+            result.already_recovered += 1
+            logger.debug(
+                f"sweep no_row_backstop skipped already_recovered "
+                f"injection_id={row.injection_id[:8]}..."
+            )
+            return
+
+        # Step 4: hand off to the manager's reconcile + re-enter
         # path.
         try:
             self._manager._handle_recover_deferred_report(
