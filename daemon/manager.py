@@ -68,7 +68,7 @@ from .repositories.event.models import Event, EventKind
 from .repositories.db_connection.models import DbConnectionConfig
 from .repositories.shared_meta_kv.models import SharedMetaKV
 from sqlmodel import Session, select
-from sqlalchemy import text, select
+from sqlalchemy import text, select, update as sa_update
 from .tools import create_instance_tools
 from .sources import SourceRegistry, ResponseDispatcher, SourceCleanup
 from .services.live_event_hub import LiveEventHub
@@ -6171,7 +6171,13 @@ class InstanceManager:
         because the sweep runs on a plain ``threading.Thread``.
 
         The pre-re-entry reconciliation is the SAME shared code
-        path the sweep uses — :meth:`_reconcile_deferred_report`.
+        path the sweep uses — :meth:`_reconcile_deferred_report_async`
+        (sub-shapes ``(b)`` + ``(c)`` mirror the sync
+        :meth:`_reconcile_deferred_report` 1:1; sub-shape ``(a)``
+        shares the artifact-creation helper
+        :meth:`_create_subshape_a_artifacts` and only differs
+        in the content-fetch seam — see
+        :meth:`_fetch_subshape_a_content_async`).
         Logic cannot drift between the two entry points.
 
         Args:
@@ -6189,8 +6195,18 @@ class InstanceManager:
             per-row except block catches and logs.
         """
         # Step 1: shared pre-re-entry reconciliation.
+        #
+        # Async variant — the router runs ON the manager's
+        # event loop. Calling the sync
+        # ``_reconcile_deferred_report`` from here would, for
+        # sub-shape (a) (the canonical Site-1
+        # ``report_message_id IS NULL`` shape), invoke
+        # ``run_coroutine_threadsafe(...).result(...)`` on the
+        # loop thread → self-block → 15s hang → per-row except
+        # → Site-1 rows stranded (Reviewer finding #2
+        # follow-up at ``bcc02b92``).
         try:
-            reconciled = self._reconcile_deferred_report(
+            reconciled = await self._reconcile_deferred_report_async(
                 child_instance_id=child_instance_id,
                 child_message_id=child_message_id,
                 injection_id=injection_id,
@@ -6416,82 +6432,27 @@ class InstanceManager:
                     # Fetch the child's last assistant content
                     # (pre-Phase 2 C3 fix pattern: outside the
                     # transaction; best-effort).
-                    content = ""
-                    try:
-                        child_row = session.get(Instance, child_instance_id)
-                        if child_row is not None:
-                            from .services.child_reports import (
-                                ChildReportsService,
-                            )
-                            # Re-use the existing
-                            # ``_get_last_assistant_message`` async
-                            # helper via a one-shot asyncio hop.
-                            loop = self._get_event_loop()
-                            content = asyncio.run_coroutine_threadsafe(
-                                ChildReportsService._get_last_assistant_message(
-                                    self._child_reports_service,
-                                    child_instance_id,
-                                    child_row.agent_id or "agent",
-                                ),
-                                loop,
-                            ).result(timeout=15.0) or "[No response content]"
-                    except Exception as exc:
-                        logger.warning(
-                            f"[{source}] reconcile: content fetch failed "
-                            f"child={child_instance_id[:8]}...: "
-                            f"{type(exc).__name__}: {exc} — using empty"
-                        )
-                        content = "[No response content]"
-
-                    report_message_id = str(uuid.uuid4())
-                    # 1. completion_report MessageQueue row
-                    session.add(
-                        MessageQueue(
-                            message_id=report_message_id,
-                            instance_id=inj.parent_instance_id,
-                            content=content,
-                            source=(
-                                f"internal_report:"
-                                f"{child_instance_id}:{child_message_id}"
-                            ),
-                            type=MessageType.COMPLETION_REPORT.value,
-                            status=MessageStatus.READY.value,
-                            priority=0,
-                            enqueued_at=datetime.now(timezone.utc),
-                        )
+                    #
+                    # Sync content-fetch seam — correct for the
+                    # SWEEP path (caller runs on a non-loop
+                    # ``threading.Thread``). The router path uses
+                    # :meth:`_reconcile_deferred_report_async`
+                    # which ``await``s directly (no
+                    # ``run_coroutine_threadsafe(...).result(...)``
+                    # from the loop thread → no self-block).
+                    content = self._fetch_subshape_a_content_sync(
+                        child_instance_id=child_instance_id,
+                        session=session,
                     )
-                    # 2. PROCESS_REPORT Task row
-                    session.add(
-                        Task(
-                            task_type=TaskType.PROCESS_REPORT.value,
-                            instance_id=inj.parent_instance_id,
-                            message_id=report_message_id,
-                            status=TaskStatus.PENDING.value,
-                            created_at=datetime.now(timezone.utc),
-                        )
+                    return self._create_subshape_a_artifacts(
+                        session=session,
+                        inj=inj,
+                        child_instance_id=child_instance_id,
+                        child_message_id=child_message_id,
+                        injection_id=injection_id,
+                        source=source,
+                        content=content,
                     )
-                    # 3. UPDATE injection row IN-PLACE — backfill
-                    #    the artifact (NOT a fresh INSERT — that
-                    #    would violate the obligation-triple
-                    #    partial unique index).
-                    session.execute(
-                        sa_update(ReportInjection)
-                        .where(ReportInjection.injection_id == injection_id)
-                        .values(
-                            report_message_id=report_message_id,
-                            content=content,
-                        )
-                    )
-                    logger.info(
-                        f"[{source}] reconcile (sub-shape a, NULL): "
-                        f"created message+task+backfill injection "
-                        f"parent={inj.parent_instance_id[:8]}..., "
-                        f"child={child_instance_id[:8]}..."
-                    )
-                    return {
-                        "shape": "null_marker_first",
-                        "report_message_id": report_message_id,
-                    }
 
                 # Sub-shape (b) + (c): row already has an artifact.
                 report_message_id = inj.report_message_id
@@ -6509,6 +6470,374 @@ class InstanceManager:
                     # Sub-shape (b) — message is gone (very unusual;
                     # could happen after a manual DB cleanup). Re-
                     # create the message row + create the task.
+                    session.add(
+                        MessageQueue(
+                            message_id=report_message_id,
+                            instance_id=inj.parent_instance_id,
+                            content=inj.content or "[Reconstructed report]",
+                            source=(
+                                f"internal_report:"
+                                f"{child_instance_id}:{child_message_id}"
+                            ),
+                            type=MessageType.COMPLETION_REPORT.value,
+                            status=MessageStatus.READY.value,
+                            priority=0,
+                            enqueued_at=datetime.now(timezone.utc),
+                        )
+                    )
+                    if existing_task is None:
+                        session.add(
+                            Task(
+                                task_type=TaskType.PROCESS_REPORT.value,
+                                instance_id=inj.parent_instance_id,
+                                message_id=report_message_id,
+                                status=TaskStatus.PENDING.value,
+                                created_at=datetime.now(timezone.utc),
+                            )
+                        )
+                    logger.info(
+                        f"[{source}] reconcile (sub-shape b, message-only): "
+                        f"recreated message + task "
+                        f"parent={inj.parent_instance_id[:8]}..., "
+                        f"child={child_instance_id[:8]}..."
+                    )
+                    return {
+                        "shape": "message_only_recreate",
+                        "report_message_id": report_message_id,
+                    }
+
+                if existing_task is None:
+                    # Sub-shape (b) — message exists, task missing.
+                    session.add(
+                        Task(
+                            task_type=TaskType.PROCESS_REPORT.value,
+                            instance_id=inj.parent_instance_id,
+                            message_id=report_message_id,
+                            status=TaskStatus.PENDING.value,
+                            created_at=datetime.now(timezone.utc),
+                        )
+                    )
+                    logger.info(
+                        f"[{source}] reconcile (sub-shape b, task-only): "
+                        f"created task "
+                        f"parent={inj.parent_instance_id[:8]}..., "
+                        f"child={child_instance_id[:8]}..."
+                    )
+                    return {
+                        "shape": "task_only_create",
+                        "report_message_id": report_message_id,
+                    }
+
+                # Sub-shape (c) — both exist; the natural path
+                # delivers. No DB write needed.
+                logger.info(
+                    f"[{source}] reconcile (sub-shape c, both-exist): "
+                    f"delivery only "
+                    f"parent={inj.parent_instance_id[:8]}..., "
+                    f"child={child_instance_id[:8]}..."
+                )
+                return {
+                    "shape": "delivery_only",
+                    "report_message_id": report_message_id,
+                }
+
+    def _fetch_subshape_a_content_sync(
+        self,
+        *,
+        child_instance_id: str,
+        session,
+    ) -> str:
+        """Sync content-fetch seam for sub-shape (a) — sweep path.
+
+        Used by :meth:`_reconcile_deferred_report` (the SWEEP-side
+        reconcile). The sweep runs on a non-loop
+        ``threading.Thread``, so the cross-thread bridge
+        ``asyncio.run_coroutine_threadsafe(...).result(timeout=15.0)``
+        is correct: the calling thread is NOT the loop thread,
+        so the loop can run the scheduled coroutine while we
+        block on ``.result()``.
+
+        **Do NOT call this from the event loop thread** — it will
+        self-block (Reviewer finding #2 follow-up at
+        ``bcc02b92``). The router path uses
+        :meth:`_fetch_subshape_a_content_async` instead, which
+        ``await``s directly on the loop.
+
+        Returns:
+            The child's last assistant content, or
+            ``"[No response content]"`` on missing/empty/failure.
+        """
+        content = ""
+        try:
+            child_row = session.get(Instance, child_instance_id)
+            if child_row is not None:
+                from .services.child_reports import (
+                    ChildReportsService,
+                )
+                # Re-use the existing
+                # ``_get_last_assistant_message`` async helper
+                # via a one-shot asyncio hop.
+                loop = self._get_event_loop()
+                content = asyncio.run_coroutine_threadsafe(
+                    ChildReportsService._get_last_assistant_message(
+                        self._child_reports_service,
+                        child_instance_id,
+                        child_row.agent_id or "agent",
+                    ),
+                    loop,
+                ).result(timeout=15.0) or "[No response content]"
+        except Exception as exc:
+            logger.warning(
+                f"reconcile: content fetch failed "
+                f"child={child_instance_id[:8]}...: "
+                f"{type(exc).__name__}: {exc} — using empty"
+            )
+            content = "[No response content]"
+        return content
+
+    async def _fetch_subshape_a_content_async(
+        self,
+        *,
+        child_instance_id: str,
+        session,
+    ) -> str:
+        """Async content-fetch seam for sub-shape (a) — router path.
+
+        Used by :meth:`_reconcile_deferred_report_async` (the
+        ROUTER-side reconcile). The router runs on the manager's
+        event loop, so the content fetch is ``await``ed directly
+        on the loop — no ``run_coroutine_threadsafe(...).result(...)``
+        bridge, no self-block.
+
+        **Do NOT call this from a non-loop thread** — it will
+        raise ``RuntimeError: ... object asyncgen_hooks is
+        required``. Use
+        :meth:`_fetch_subshape_a_content_sync` from a worker /
+        daemon thread instead.
+
+        Returns:
+            The child's last assistant content, or
+            ``"[No response content]"`` on missing/empty/failure.
+        """
+        content = ""
+        try:
+            child_row = session.get(Instance, child_instance_id)
+            if child_row is not None:
+                from .services.child_reports import (
+                    ChildReportsService,
+                )
+                content = (
+                    await ChildReportsService._get_last_assistant_message(
+                        self._child_reports_service,
+                        child_instance_id,
+                        child_row.agent_id or "agent",
+                    )
+                ) or "[No response content]"
+        except Exception as exc:
+            logger.warning(
+                f"reconcile: content fetch failed "
+                f"child={child_instance_id[:8]}...: "
+                f"{type(exc).__name__}: {exc} — using empty"
+            )
+            content = "[No response content]"
+        return content
+
+    def _create_subshape_a_artifacts(
+        self,
+        *,
+        session,
+        inj: "ReportInjection",
+        child_instance_id: str,
+        child_message_id: str,
+        injection_id: str,
+        source: str,
+        content: str,
+    ) -> dict:
+        """Sub-shape (a) artifact creation — shared between router + sweep.
+
+        Threading-agnostic — runs inside the caller's open
+        ``session_scope`` + ``_write_guard``. Only the content
+        fetch seam differs between the two entry points (see
+        :meth:`_fetch_subshape_a_content_sync` /
+        :meth:`_fetch_subshape_a_content_async`); the
+        message+task+UPDATE step lives in ONE place so router and
+        sweep cannot drift.
+
+        Side effects (single transaction):
+        1. Insert ``completion_report`` ``MessageQueue`` row.
+        2. Insert ``PROCESS_REPORT`` ``Task`` row.
+        3. UPDATE the injection row IN-PLACE with the artifact
+           handle — a fresh INSERT would violate the
+           obligation-triple partial unique index.
+
+        Returns:
+            Summary dict with ``shape`` and ``report_message_id``
+            (the caller passes this through the structured log).
+        """
+        from .repositories.report_injection.models import ReportInjection
+
+        report_message_id = str(uuid.uuid4())
+        # 1. completion_report MessageQueue row
+        session.add(
+            MessageQueue(
+                message_id=report_message_id,
+                instance_id=inj.parent_instance_id,
+                content=content,
+                source=(
+                    f"internal_report:"
+                    f"{child_instance_id}:{child_message_id}"
+                ),
+                type=MessageType.COMPLETION_REPORT.value,
+                status=MessageStatus.READY.value,
+                priority=0,
+                enqueued_at=datetime.now(timezone.utc),
+            )
+        )
+        # 2. PROCESS_REPORT Task row
+        session.add(
+            Task(
+                task_type=TaskType.PROCESS_REPORT.value,
+                instance_id=inj.parent_instance_id,
+                message_id=report_message_id,
+                status=TaskStatus.PENDING.value,
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+        # 3. UPDATE injection row IN-PLACE — backfill the
+        #    artifact (NOT a fresh INSERT — that would violate
+        #    the obligation-triple partial unique index).
+        session.execute(
+            sa_update(ReportInjection)
+            .where(ReportInjection.injection_id == injection_id)
+            .values(
+                report_message_id=report_message_id,
+                content=content,
+            )
+        )
+        # The session_scope context manager rolls back on
+        # ``close()`` — without an explicit commit the
+        # message + task + UPDATE are all lost. Single commit
+        # covers all three writes atomically.
+        session.commit()
+        logger.info(
+            f"[{source}] reconcile (sub-shape a, NULL): "
+            f"created message+task+backfill injection "
+            f"parent={inj.parent_instance_id[:8]}..., "
+            f"child={child_instance_id[:8]}..."
+        )
+        return {
+            "shape": "null_marker_first",
+            "report_message_id": report_message_id,
+        }
+
+    async def _reconcile_deferred_report_async(
+        self,
+        *,
+        child_instance_id: str,
+        child_message_id: str,
+        injection_id: str,
+        source: str,
+    ) -> dict | None:
+        """Async variant of :meth:`_reconcile_deferred_report`.
+
+        Phase 2 (pause-report-recovery) follow-up to
+        ``bcc02b92`` — fixes the inner
+        ``run_coroutine_threadsafe(...).result(...)`` that
+        remained in sub-shape (a) of the sync reconcile. The
+        previous fix split the RE-ENTRY step
+        (:meth:`_handle_recover_deferred_report_async` +
+        :meth:`_reenter_completion_async`); the inner reconcile
+        was still sync and self-blocked the loop on the router
+        path for the highest-value Site-1 shape.
+
+        Used by the ROUTER path
+        (:meth:`_handle_recover_deferred_report_async`) which
+        runs ON the manager's event loop. Sub-shape (a) fetches
+        content via :meth:`_fetch_subshape_a_content_async`
+        (direct ``await``, no cross-thread bridge). Sub-shapes
+        (b) + (c) are unchanged from the sync variant — both
+        shapes only do synchronous DB writes, no async helpers.
+
+        Artifact creation is shared with the sync variant via
+        :meth:`_create_subshape_a_artifacts` so router and
+        sweep cannot drift.
+
+        Returns:
+            A summary dict with the shape of the reconciliation
+            (used by the structured log); ``None`` when the
+            caller should skip re-entry (parent is busy, or
+            the row no longer exists).
+        """
+        from .repositories.message_queue.models import (
+            MessageQueue,
+            MessageStatus,
+            MessageType,
+        )
+        from .repositories.report_injection.models import (
+            ReportInjection,
+            ReportInjectionState,
+        )
+        from .repositories.task.models import Task, TaskStatus, TaskType
+
+        with self._write_guard:
+            with self._session_scope() as session:
+                inj = session.get(ReportInjection, injection_id)
+                if inj is None:
+                    logger.info(
+                        f"[{source}] reconcile: injection row "
+                        f"{injection_id[:8]}... gone (concurrent delete?)"
+                    )
+                    return None
+
+                # Defensive: another actor escalated the row to
+                # terminal (INJECTED / TASK_DELIVERED) between the
+                # transition and this read. Skip — delivery has
+                # happened.
+                if inj.state in (
+                    ReportInjectionState.INJECTED.value,
+                    ReportInjectionState.TASK_DELIVERED.value,
+                ):
+                    logger.info(
+                        f"[{source}] reconcile: injection "
+                        f"{injection_id[:8]}... already terminal "
+                        f"({inj.state}); skipping"
+                    )
+                    return None
+
+                # Sub-shape (a): marker-first Site 1.
+                if inj.report_message_id is None:
+                    # Await directly — do NOT use
+                    # ``run_coroutine_threadsafe(...).result(...)``
+                    # from the loop thread (would self-block).
+                    content = await self._fetch_subshape_a_content_async(
+                        child_instance_id=child_instance_id,
+                        session=session,
+                    )
+                    return self._create_subshape_a_artifacts(
+                        session=session,
+                        inj=inj,
+                        child_instance_id=child_instance_id,
+                        child_message_id=child_message_id,
+                        injection_id=injection_id,
+                        source=source,
+                        content=content,
+                    )
+
+                # Sub-shape (b) + (c): row already has an artifact.
+                report_message_id = inj.report_message_id
+                existing_task = session.exec(
+                    select(Task)
+                    .where(Task.message_id == report_message_id)
+                ).first()
+                existing_message = session.exec(
+                    select(MessageQueue)
+                    .where(MessageQueue.message_id == report_message_id)
+                ).first()
+
+                if existing_message is None:
+                    # Sub-shape (b) — message is gone (very unusual;
+                    # could happen after a manual DB cleanup).
+                    # Re-create the message row + create the task.
                     session.add(
                         MessageQueue(
                             message_id=report_message_id,

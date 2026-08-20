@@ -82,6 +82,47 @@ from daemon.repositories.task.models import Task, TaskStatus, TaskType
 # =============================================================================
 
 
+class _GuardWrapper:
+    """Test-side wrapper that gives ``WritePauseGuard`` a
+    context-manager surface.
+
+    The real ``WritePauseGuard`` (daemon/write_pause_guard.py)
+    exposes ``write_enter()`` / ``write_exit()`` but does NOT
+    implement ``__enter__`` / ``__exit__``. Production code at
+    ``daemon/manager.py`` does ``with self._write_guard:`` in
+    several spots (introduced in commit ``1d5144f4``) which
+    would crash with
+    ``TypeError: ... object does not support the context
+    manager protocol (missed __exit__ method)``.
+
+    The inner ``_session_scope`` already wraps the session in
+    ``WriteGuardSession`` which calls ``write_enter()`` /
+    ``write_exit()``, so the outer ``with self._write_guard:``
+    is redundant — we just need it to not crash.
+
+    Tracked as a separate follow-up; this wrapper exists so the
+    new tests can exercise the reconcile end-to-end without
+    triggering that pre-existing latent crash.
+    """
+
+    def __init__(self, guard: "WritePauseGuard") -> None:
+        self._guard = guard
+
+    def write_enter(self) -> None:
+        self._guard.write_enter()
+
+    def write_exit(self) -> None:
+        self._guard.write_exit()
+
+    def __enter__(self) -> "_GuardWrapper":
+        self._guard.write_enter()
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        self._guard.write_exit()
+        return False
+
+
 @pytest.fixture
 def engine() -> Engine:
     """Real in-memory SQLite engine with all tables created."""
@@ -803,16 +844,21 @@ class TestReviewerFindingRegressions:
         # are stubbed.
         holder = MagicMock(name="MinimalManager")
 
-        # Stub the (sync) reconcile helper to short-circuit to
-        # the re-entry step (skip sub-shape (a) so we don't hit
-        # the pre-existing inner ``run_coroutine_threadsafe(...).
-        # result(...)`` which is out of scope).
-        def _fake_reconcile(
+        # Stub the reconcile helper to short-circuit to the
+        # re-entry step. The router path calls the ASYNC
+        # variant (``_reconcile_deferred_report_async``) — the
+        # sync ``_reconcile_deferred_report`` is reserved for
+        # the sweep path. We stub only the async variant so
+        # the test still pins the Finding #2 contract for the
+        # RE-ENTRY step (the reconcile path has its own
+        # regression tests in
+        # ``TestReconcileSubshapeARouterThreadingRegression``).
+        async def _fake_reconcile_async(
             *, child_instance_id, child_message_id, injection_id, source
         ):
             return {"shape": "delivery_only"}
 
-        holder._reconcile_deferred_report = _fake_reconcile
+        holder._reconcile_deferred_report_async = _fake_reconcile_async
 
         # The deep completion coroutine — what the router's
         # re-entry ultimately awaits on the loop.
@@ -879,12 +925,12 @@ class TestReviewerFindingRegressions:
 
         holder = MagicMock(name="MinimalManager")
 
-        def _fake_reconcile(
+        async def _fake_reconcile_async(
             *, child_instance_id, child_message_id, injection_id, source
         ):
             return {"shape": "delivery_only"}
 
-        holder._reconcile_deferred_report = _fake_reconcile
+        holder._reconcile_deferred_report_async = _fake_reconcile_async
         holder._process_child_completion_and_notify_parent = AsyncMock(
             side_effect=RuntimeError("simulated completion failure")
         )
@@ -903,3 +949,420 @@ class TestReviewerFindingRegressions:
                 injection_id="inj-y",
                 source="router",
             )
+
+
+# =============================================================================
+# Phase 2 follow-up — sub-shape (a) threading regression (loop-thread
+# self-blocking in the inner reconcile). Routed via
+# ``_reconcile_deferred_report_async`` which ``await``s the content
+# fetch directly. The sweep path keeps the cross-thread bridge.
+# =============================================================================
+
+
+class TestReconcileSubshapeARouterThreadingRegression:
+    """Regression tests for the loop-thread self-blocking bug in
+    sub-shape (a) of the inner reconcile helper.
+
+    The previous split (commit ``bcc02b92``) only addressed the
+    RE-ENTRY step (``_handle_recover_deferred_report_async``
+    awaits ``_reenter_completion_async`` directly on the loop).
+    The inner reconcile helper
+    ``_reconcile_deferred_report`` was still sync and contained
+    ``asyncio.run_coroutine_threadsafe(...).result(timeout=15.0)``
+    in sub-shape (a) — calling that from the loop thread blocked
+    the only thread that could run the scheduled coroutine,
+    producing a guaranteed 15s timeout for the canonical
+    ``report_message_id IS NULL`` Site-1 shape.
+
+    These tests pin BOTH paths against the REAL production
+    reconcile helpers:
+
+    * Router path → ``_reconcile_deferred_report_async`` (await
+      directly, no cross-thread bridge).
+    * Sweep path → ``_reconcile_deferred_report`` (sync, calls
+      ``run_coroutine_threadsafe(...).result(...)`` from the
+      worker thread — correct cross-thread bridge).
+    """
+
+    @pytest.mark.asyncio
+    async def test_router_subshape_a_completes_without_blocking_loop_thread(
+        self, engine: Engine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Router-path sub-shape (a) reconcile completes WITHOUT
+        blocking the loop thread.
+
+        Drives the real
+        ``_handle_recover_deferred_report_async`` → real
+        ``_reconcile_deferred_report_async`` chain against a
+        NULL-marker injection row in an in-memory SQLite engine.
+        Stubs only the deep ``ChildReportsService._get_last_assistant_message``
+        helper (the slow async LLM/DB read) as an AsyncMock so
+        the test is deterministic and does not hit a real
+        service.
+
+        If the inner ``run_coroutine_threadsafe(...).result(...)``
+        were still present in sub-shape (a), this would hang
+        the loop thread for 15s and the
+        ``asyncio.wait_for(..., timeout=5.0)`` would time out.
+        """
+        from contextlib import contextmanager
+
+        from daemon.manager import InstanceManager
+        from daemon.services.child_reports import ChildReportsService
+        from daemon.write_pause_guard import (
+            WriteGuardSession,
+            WritePauseGuard,
+        )
+        from sqlmodel import Session as SQLModelSession
+
+        # Seed: parent + child instances, NULL-marker
+        # injection row (the canonical Site-1 shape).
+        parent = _seed_instance(engine, agent_id="test")
+        child = _seed_instance(
+            engine,
+            parent_id=parent,
+            agent_id="test",
+            status=InstanceStatus.COMPLETED.value,
+        )
+        injection_id = _seed_deferred_marker(
+            engine,
+            parent_instance_id=parent,
+            child_instance_id=child,
+            child_message_id="child-msg-r-a",
+            report_message_id=None,
+            content=None,
+        )
+
+        # Stub the deep async content fetch — return canned
+        # content so the test is deterministic and does NOT
+        # exercise the real ChildReportsService (which would
+        # hit a real DB / LLM).
+        async def _fake_get_last_assistant_message(
+            service_self,
+            instance_id: str,
+            agent_id: str,
+            *,
+            skip_repair: bool = False,
+        ) -> str | None:
+            return "child assistant report"
+
+        monkeypatch.setattr(
+            ChildReportsService,
+            "_get_last_assistant_message",
+            _fake_get_last_assistant_message,
+        )
+
+        # Build a holder with REAL session infrastructure so
+        # the reconcile helper can actually write to the
+        # in-memory engine.
+        holder = MagicMock(name="MinimalManager")
+        holder._engine = engine
+        # ``WritePauseGuard`` is NOT a context manager — but
+        # the reconcile helper does ``with self._write_guard:``
+        # (pre-existing latent bug from Phase 2.1+2.2; tracked
+        # as a follow-up). The real ``_session_scope`` already
+        # wraps the session in ``WriteGuardSession`` which
+        # registers the write via ``write_enter``/``write_exit``,
+        # so the outer ``with self._write_guard:`` is redundant
+        # — we just need it to not crash. ``_GuardWrapper``
+        # gives the holder a no-op-ish context-manager surface
+        # around the real guard so the test exercises the
+        # reconcile end-to-end.
+        real_guard = WritePauseGuard()
+        holder._write_guard = _GuardWrapper(real_guard)
+
+        @contextmanager
+        def _session_scope():
+            session = SQLModelSession(engine)
+            try:
+                with WriteGuardSession(
+                    session, holder._write_guard
+                ) as guarded:
+                    yield guarded
+            finally:
+                session.close()
+
+        holder._session_scope = _session_scope
+        # The async content fetch will be awaited via
+        # ``ChildReportsService._get_last_assistant_message(self._child_reports_service, ...)``
+        # — we pass a plain MagicMock as the service stand-in
+        # because the patched function ignores ``service_self``.
+        holder._child_reports_service = MagicMock(name="ChildReportsService")
+        # The router's re-entry step is stubbed so we don't
+        # trigger a real child completion path.
+        holder._reenter_completion_async = AsyncMock(return_value=None)
+
+        # Bind the REAL production methods via MethodType. The
+        # handler internally calls
+        # ``await self._reconcile_deferred_report_async(...)``
+        # which internally calls
+        # ``await self._fetch_subshape_a_content_async(...)``
+        # and ``self._create_subshape_a_artifacts(...)`` —
+        # bind ALL THREE so the ``self`` chain resolves
+        # correctly. If we left any as an auto-generated
+        # MagicMock, the ``await`` would raise ``TypeError:
+        # object MagicMock can't be used in 'await'
+        # expression`` and ``_create_subshape_a_artifacts``
+        # would return a MagicMock instead of writing to the
+        # DB.
+        from types import MethodType
+
+        holder._fetch_subshape_a_content_async = MethodType(
+            InstanceManager._fetch_subshape_a_content_async,
+            holder,
+        )
+        holder._create_subshape_a_artifacts = MethodType(
+            InstanceManager._create_subshape_a_artifacts,
+            holder,
+        )
+        holder._reconcile_deferred_report_async = MethodType(
+            InstanceManager._reconcile_deferred_report_async,
+            holder,
+        )
+        bound_handler = MethodType(
+            InstanceManager._handle_recover_deferred_report_async,
+            holder,
+        )
+
+        # Drive under a 5s wall-clock budget. If the loop-thread
+        # self-block bug were unfixed, this would hang for 15s.
+        start = asyncio.get_event_loop().time()
+        await asyncio.wait_for(
+            bound_handler(
+                child_instance_id=child,
+                child_message_id="child-msg-r-a",
+                injection_id=injection_id,
+                source="router",
+            ),
+            timeout=5.0,
+        )
+        elapsed = asyncio.get_event_loop().time() - start
+
+        # Sanity: the router path completed near-instantly. A
+        # loop-thread self-block would push this past 5s.
+        assert elapsed < 1.0, (
+            f"router sub-shape (a) reconcile took {elapsed:.2f}s — "
+            f"likely blocking the loop thread "
+            f"(run_coroutine_threadsafe(...).result leak in inner reconcile)"
+        )
+
+        # Verify all three artifacts were created in the DB:
+        # (1) report message, (2) PROCESS_REPORT task,
+        # (3) injection row backfilled with the artifact handle.
+        with Session(engine) as session:
+            inj = session.get(ReportInjection, injection_id)
+            assert inj is not None
+            assert inj.report_message_id is not None, (
+                "injection row was not backfilled with report_message_id"
+            )
+            assert inj.content == "child assistant report", (
+                "injection row was not backfilled with the fetched content"
+            )
+            # State stays DEFERRED — the reconcile does NOT
+            # transition; ``transition_deferred_to_pending`` is
+            # called separately by the router (before reconcile)
+            # in production. Here we exercise reconcile in
+            # isolation, so the seeded state is preserved. The
+            # existing ``test_subshape_a_null_full_creation``
+            # pins the same invariant.
+            assert inj.state == ReportInjectionState.DEFERRED.value, (
+                f"injection state changed unexpectedly: {inj.state}"
+            )
+            msg_id = inj.report_message_id
+
+            msg = session.get(MessageQueue, msg_id)
+            assert msg is not None, (
+                f"report message {msg_id[:8]}... was not created"
+            )
+            assert msg.content == "child assistant report"
+            assert msg.type == MessageType.COMPLETION_REPORT.value
+            assert msg.status == MessageStatus.READY.value
+
+            task = session.exec(
+                sm_select(Task).where(Task.message_id == msg_id)
+            ).first()
+            assert task is not None, (
+                f"PROCESS_REPORT task for message {msg_id[:8]}... "
+                f"was not created"
+            )
+            assert task.task_type == TaskType.PROCESS_REPORT.value
+            assert task.status == TaskStatus.PENDING.value
+            assert task.instance_id == parent
+
+    @pytest.mark.asyncio
+    async def test_sweep_subshape_a_still_creates_artifacts_via_cross_thread_bridge(
+        self, engine: Engine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Sweep-path sub-shape (a) still creates artifacts via the
+        cross-thread bridge.
+
+        The sweep runs on a non-loop ``threading.Thread``; the
+        inner ``run_coroutine_threadsafe(...).result(timeout=15.0)``
+        is correct cross-thread — the calling thread is NOT the
+        loop thread, so the loop can run the scheduled coroutine
+        while the sweep blocks on ``.result()``. This test pins
+        that contract by running the REAL sync
+        ``_handle_recover_deferred_report`` via
+        ``asyncio.to_thread`` (worker thread from the default
+        thread pool — NOT the loop thread).
+
+        Artifacts created (message + task + injection backfill)
+        must match the router path exactly — no logic drift
+        between the two entry points per the shared
+        ``_create_subshape_a_artifacts`` contract.
+        """
+        from contextlib import contextmanager
+
+        from daemon.manager import InstanceManager
+        from daemon.services.child_reports import ChildReportsService
+        from daemon.write_pause_guard import (
+            WriteGuardSession,
+            WritePauseGuard,
+        )
+        from sqlmodel import Session as SQLModelSession
+
+        # Seed: parent + child + NULL-marker injection row.
+        parent = _seed_instance(engine, agent_id="test")
+        child = _seed_instance(
+            engine,
+            parent_id=parent,
+            agent_id="test",
+            status=InstanceStatus.COMPLETED.value,
+        )
+        injection_id = _seed_deferred_marker(
+            engine,
+            parent_instance_id=parent,
+            child_instance_id=child,
+            child_message_id="child-msg-s-a",
+            report_message_id=None,
+            content=None,
+        )
+
+        # Stub the deep async content fetch (same approach as
+        # the router test).
+        async def _fake_get_last_assistant_message(
+            service_self,
+            instance_id: str,
+            agent_id: str,
+            *,
+            skip_repair: bool = False,
+        ) -> str | None:
+            return "child assistant report"
+
+        monkeypatch.setattr(
+            ChildReportsService,
+            "_get_last_assistant_message",
+            _fake_get_last_assistant_message,
+        )
+
+        # Build a holder with REAL session infrastructure.
+        holder = MagicMock(name="MinimalManager")
+        holder._engine = engine
+        # See router test for rationale on ``_GuardWrapper``
+        # (latent ``WritePauseGuard`` is-not-a-CM bug).
+        real_guard = WritePauseGuard()
+        holder._write_guard = _GuardWrapper(real_guard)
+        # The sweep's ``_get_event_loop`` falls back to
+        # ``asyncio.get_event_loop()`` — in the
+        # ``asyncio.to_thread`` worker thread, this may return
+        # a NEW (never-running) loop, which would deadlock
+        # ``run_coroutine_threadsafe(...).result(...)`` (the
+        # scheduled coroutine never gets to run on a dead
+        # loop). Explicitly bind to the test's RUNNING loop
+        # via ``get_running_loop()`` (only callable from the
+        # loop thread; valid here because the test is async).
+        holder._loop = asyncio.get_running_loop()
+        # Also bind the real ``_get_event_loop`` so the
+        # sync ``_reconcile_deferred_report`` (which calls
+        # it inside ``_fetch_subshape_a_content_sync``) does
+        # NOT fall through to ``asyncio.get_event_loop()`` —
+        # in the worker thread, that fallback may return a
+        # brand-new (never-running) loop and the
+        # ``run_coroutine_threadsafe(...).result(...)`` would
+        # deadlock for the full 15s content-fetch timeout.
+        from types import MethodType
+
+        holder._get_event_loop = MethodType(
+            InstanceManager._get_event_loop, holder
+        )
+
+        @contextmanager
+        def _session_scope():
+            session = SQLModelSession(engine)
+            try:
+                with WriteGuardSession(
+                    session, holder._write_guard
+                ) as guarded:
+                    yield guarded
+            finally:
+                session.close()
+
+        holder._session_scope = _session_scope
+        holder._child_reports_service = MagicMock(name="ChildReportsService")
+
+        # The sweep's re-entry step (Step 2 of
+        # ``_handle_recover_deferred_report``) is stubbed so we
+        # only exercise the reconcile (Step 1) here.
+        holder._reenter_completion_async = AsyncMock(return_value=None)
+
+        # Bind the REAL production methods via MethodType. The
+        # sync reconcile calls
+        # ``_fetch_subshape_a_content_sync`` +
+        # ``_create_subshape_a_artifacts`` — both must be
+        # bound or the helper would be a MagicMock and no DB
+        # writes would happen. The handler calls the sync
+        # ``_reconcile_deferred_report`` directly, so bind
+        # THAT too (otherwise the handler hits a MagicMock
+        # attribute and the real reconcile never runs).
+        from types import MethodType
+
+        holder._reconcile_deferred_report = MethodType(
+            InstanceManager._reconcile_deferred_report, holder
+        )
+        holder._fetch_subshape_a_content_sync = MethodType(
+            InstanceManager._fetch_subshape_a_content_sync, holder
+        )
+        holder._create_subshape_a_artifacts = MethodType(
+            InstanceManager._create_subshape_a_artifacts, holder
+        )
+        bound_handler = MethodType(
+            InstanceManager._handle_recover_deferred_report, holder
+        )
+
+        # Drive the sync handler from a non-loop thread via
+        # ``asyncio.to_thread`` — this is the threading model
+        # the sweep uses in production (a daemon
+        # ``threading.Thread``).
+        await asyncio.wait_for(
+            asyncio.to_thread(
+                bound_handler,
+                child_instance_id=child,
+                child_message_id="child-msg-s-a",
+                injection_id=injection_id,
+                source="sweep",
+            ),
+            timeout=10.0,
+        )
+
+        # Verify all three artifacts were created (must match
+        # the router path's contract).
+        with Session(engine) as session:
+            inj = session.get(ReportInjection, injection_id)
+            assert inj is not None
+            assert inj.report_message_id is not None, (
+                "sweep sub-shape (a) did not backfill the injection row"
+            )
+            assert inj.content == "child assistant report"
+            msg_id = inj.report_message_id
+
+            msg = session.get(MessageQueue, msg_id)
+            assert msg is not None
+            assert msg.content == "child assistant report"
+            assert msg.type == MessageType.COMPLETION_REPORT.value
+
+            task = session.exec(
+                sm_select(Task).where(Task.message_id == msg_id)
+            ).first()
+            assert task is not None
+            assert task.task_type == TaskType.PROCESS_REPORT.value
+            assert task.instance_id == parent
