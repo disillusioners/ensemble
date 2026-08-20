@@ -2682,21 +2682,61 @@ Provide a concise summary:"""
             # sees no PENDING row and skips). See the package docstring
             # in ``daemon/repositories/report_injection/``.
             #
-            # DEEP-REVIEW FIX (2026-08-20, C-DiD): natural completion
-            # racing a recovered PENDING marker. The Phase 2 sweep /
-            # router may have just transitioned a DEFERRED marker →
-            # PENDING via ``transition_deferred_to_pending``, leaving
-            # a non-terminal row with the same obligation triple. The
-            # natural INSERT below hits the
+            # F3 FIX (2026-08-20, SAVEPOINT-scoped rollback):
+            # natural completion racing a recovered PENDING marker.
+            # The Phase 2 sweep / router may have just transitioned a
+            # DEFERRED marker → PENDING via
+            # ``transition_deferred_to_pending``, leaving a
+            # non-terminal row with the same obligation triple. The
+            # natural INSERT hits the
             # ``uq_report_injections_oblig_triple`` partial unique
             # index (PENDING/DEFERRED) and raises
-            # ``sqlalchemy.exc.IntegrityError``. Treat as
-            # already-delivered — the recovered row represents the
-            # in-flight delivery, and the natural path has nothing to
-            # do. Match the existing idempotency-skip semantics
-            # already used elsewhere in this file (the W6 absorption
-            # in ``ReportInjectionRepository.ensure_deferred`` is the
-            # sibling case for the marker-write side).
+            # ``sqlalchemy.exc.IntegrityError``.
+            #
+            # PREVIOUS (buggy) behaviour: ``session.rollback()``
+            # discarded the WHOLE transaction — including the
+            # child's ``status=COMPLETED`` UPDATE made earlier in
+            # the same session. The child was wedged non-terminal
+            # forever, the parent deferral was permanent, and the
+            # sweep re-hit the same error every cycle (F1/F2's
+            # vacuous tests hid this — see review 2026-08-20).
+            #
+            # NEW (F3) behaviour: wrap the injection INSERT in a
+            # SAVEPOINT via ``session.begin_nested()``. On
+            # ``IntegrityError`` matching the obligation-triple
+            # index, ``nested.rollback()`` discards ONLY the
+            # injection INSERT; ``session.commit()`` then commits
+            # the outer transaction so the COMPLETED transition +
+            # completion_report message + PROCESS_REPORT task all
+            # survive. On any OTHER ``IntegrityError``, the catch
+            # re-raises (no swallowing of FK / NOT NULL / other
+            # UNIQUE violations) — the Y2 discriminator
+            # ``_is_obligation_triple_integrity_error`` narrows
+            # the catch.
+            #
+            # Implementation note: the report_message + PROCESS_REPORT
+            # task INSERTs are flushed to the OUTER transaction
+            # BEFORE the SAVEPOINT so they are NOT pending when the
+            # SAVEPOINT flush fires (only the injection is pending
+            # inside the SAVEPOINT). If the outer flush raises
+            # (e.g. a real FK violation on message_queue / task),
+            # we re-raise — those are real bugs, not the
+            # obligation-triple race.
+            try:
+                # Flush report_message + (optional) report_task to
+                # the outer transaction FIRST. After this returns,
+                # the only ORM-pending object is the ReportInjection
+                # we add next (the Core UPDATE on Instance was
+                # already executed via session.execute at ~:2547 and
+                # is in the transaction directly, not via ORM).
+                session.flush()
+            except IntegrityError:
+                # FK or other constraint on message_queue / task —
+                # surface the bug, do NOT swallow. No SAVEPOINT is
+                # active yet so nothing to roll back.
+                raise
+
+            nested = session.begin_nested()
             try:
                 report_injection_row = ReportInjection(
                     parent_instance_id=instance.parent_id,
@@ -2706,11 +2746,11 @@ Provide a concise summary:"""
                     content=last_content,
                 )
                 session.add(report_injection_row)
-                # Flush to surface the IntegrityError early — the
-                # session.add() alone is lazy and would defer the
-                # error to session.commit(), which would also undo
-                # the report_message / report_task INSERTs we want to
-                # discard on this branch anyway.
+                # Flush to surface the IntegrityError early. Only
+                # the injection is pending inside the SAVEPOINT —
+                # the message_queue + task INSERTs are already in
+                # the outer transaction from the pre-SAVEPOINT
+                # flush above, so they survive ``nested.rollback()``.
                 session.flush()
             except IntegrityError as oblig_err:
                 # POST-DEEP-REVIEW (Y2, 2026-08-20): narrow the catch
@@ -2729,6 +2769,18 @@ Provide a concise summary:"""
                 # Any IntegrityError that does NOT match is re-raised
                 # (no new exception type — bare ``raise``) so the
                 # bug surfaces in the existing error-reporting path.
+                #
+                # F3 FIX (2026-08-20): SAVEPOINT-scoped rollback.
+                # ``nested.rollback()`` discards ONLY the injection
+                # INSERT (the SAVEPOINT reverts to its pre-flush
+                # state); the outer transaction retains the
+                # COMPLETED transition + message + task INSERTs.
+                # Must call ``nested.rollback()`` explicitly —
+                # leaving the SessionTransaction to go out of scope
+                # without commit/rollback only RELEASES the
+                # SAVEPOINT (the injection would persist in the
+                # outer transaction).
+                nested.rollback()
                 if not _is_obligation_triple_integrity_error(oblig_err):
                     logger.warning(
                         f"child_reports: unexpected IntegrityError on "
@@ -2743,24 +2795,35 @@ Provide a concise summary:"""
                     raise
                 # Natural × recovered PENDING race: the recovered
                 # row's worker_pool / claim_for_task_delivery owns
-                # delivery. Return idempotency_skip and let the
-                # recovered path complete naturally.
-                session.rollback()
+                # delivery. Commit the outer transaction so the
+                # child COMPLETED transition + completion_report
+                # message + PROCESS_REPORT task survive; only the
+                # injection INSERT was rolled back via the SAVEPOINT.
+                # Without this explicit commit the WriteGuardSession
+                # ``__exit__`` would close() → rollback() the outer
+                # transaction and the COMPLETED transition would
+                # STILL be lost (the bug F3 fixes).
                 logger.info(
                     f"child_reports: natural completion races a "
                     f"recovered PENDING marker for "
                     f"parent={instance.parent_id[:8]}..., "
                     f"child={instance.instance_id[:8]}..., "
                     f"msg={completed_message_id[:8]}...; treating as "
-                    f"already-delivered (idempotency_skip): "
+                    f"already-delivered (idempotency_skip, savepoint "
+                    f"rollback preserves COMPLETED transition): "
                     f"{type(oblig_err).__name__}"
                 )
+                session.commit()
                 return _ChildCompletionDbResult(
                     outcome="idempotency_skip",
                     instance_id=instance_id,
                     agent_id=instance.agent_id,
                     parent_id=instance.parent_id,
                 )
+            # Success path — release the SAVEPOINT so the injection
+            # INSERT is promoted into the outer transaction. The
+            # outer commit at ~:2959 (below) persists everything.
+            nested.commit()
             
             # --- Inline: _update_parent_on_child_complete (no await needed) ---
             # The bus is the SOLE completion authority.
