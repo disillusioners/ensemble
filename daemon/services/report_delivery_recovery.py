@@ -88,14 +88,19 @@ Crash-recovery endpoint (task 2.5):
 
     {
       "lanes": {
-        "deferred": {"recovered": N, "skipped_busy": N, "already_recovered": N, "errors": N},
+        "deferred": {"recovered": N, "skipped_busy": N, "busy_check_failed": N, "already_recovered": N, "errors": N},
         "no_row_backstop": {...},
         "pending_age": {...},
         "recovery_retry": {...},
-        "orphan": {"recovered": N, "skipped_busy": N, "orphan_disposition": N, ...},
+        "orphan": {"recovered": N, "skipped_busy": N, "busy_check_failed": N, "orphan_disposition": N, ...},
       },
       "total_recovered": N,
     }
+
+  ``busy_check_failed`` distinguishes "busy-check itself errored
+  (fail-closed skip)" from ``skipped_busy`` ("parent genuinely busy")
+  — both skip the row, but the former signals transient infra
+  problems worth investigating.
 
 Configuration (task 2.6): see ``daemon/config.py`` ``ServicesConfig``
 — ``report_delivery_recovery_*`` knobs (interval, age bound, batch
@@ -152,7 +157,11 @@ class LaneResult:
 
     Each lane returns this shape to the caller (the endpoint /
     tests). ``skipped_busy`` counts parents that had a live task
-    when the sweep checked; ``already_recovered`` counts rows where
+    when the sweep checked; ``busy_check_failed`` counts parents
+    whose busy-check itself errored (the helper's fail-closed
+    default — operators can distinguish "parent genuinely busy"
+    from "busy-check itself failed" via the two counters);
+    ``already_recovered`` counts rows where
     ``transition_deferred_to_pending`` returned ``False`` (another
     actor won the race); ``errors`` counts per-row exceptions that
     left the row in a recoverable state.
@@ -160,6 +169,7 @@ class LaneResult:
 
     recovered: int = 0
     skipped_busy: int = 0
+    busy_check_failed: int = 0
     already_recovered: int = 0
     orphan_disposition: int = 0
     errors: int = 0
@@ -168,6 +178,7 @@ class LaneResult:
         return {
             "recovered": self.recovered,
             "skipped_busy": self.skipped_busy,
+            "busy_check_failed": self.busy_check_failed,
             "already_recovered": self.already_recovered,
             "orphan_disposition": self.orphan_disposition,
             "errors": self.errors,
@@ -604,13 +615,24 @@ class ReportDeliveryRecoveryService:
 
         A busy-check EXCEPTION also returns ``True`` (safe default):
         a transient ``has_instance_busy`` failure must not let the
-        sweep race a live parent turn.
+        sweep race a live parent turn. The exception branch counts
+        toward ``result.busy_check_failed`` (NOT ``skipped_busy``) so
+        operators can distinguish the two skip causes from the
+        structured lane output:
+
+        * ``skipped_busy`` — parent confirmed busy (live task).
+        * ``busy_check_failed`` — busy-check itself errored; we
+          fail-closed-skipped the row. WARNING log emitted.
         """
         try:
             busy = self._task_repo.has_instance_busy(parent_id)
         except Exception as exc:
             # TOCTOU re-check failure: default to busy (safe — the
             # natural path will recover when its turn resumes).
+            # Counted as ``busy_check_failed`` so operators can
+            # distinguish transient busy-check failures from
+            # genuinely-busy parents in the structured LaneResult.
+            result.busy_check_failed += 1
             logger.warning(
                 f"sweep {lane} busy-check failed "
                 f"parent={parent_id[:8]}...: "

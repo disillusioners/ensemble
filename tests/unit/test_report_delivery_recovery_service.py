@@ -341,6 +341,78 @@ class TestDeferredLane:
         assert result.lanes["deferred"].skipped_busy == 1
         manager._handle_recover_deferred_report.assert_not_called()
 
+    def test_deferred_row_accounts_busy_check_failure(
+        self, engine: Engine, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """When ``has_instance_busy`` ITSELF raises, the row is
+        fail-closed-skipped (skip semantics preserved) AND the
+        ``busy_check_failed`` counter is incremented — operators
+        can distinguish a transient busy-check failure from a
+        genuinely-busy parent via the structured LaneResult.
+
+        Companion to :meth:`test_deferred_row_skipped_when_parent_busy`
+        — that test covers the "confirmed busy" path (counts toward
+        ``skipped_busy``); this one covers the "busy-check itself
+        errored" path (counts toward ``busy_check_failed``).
+        """
+        import logging
+
+        parent = _seed_instance(engine)
+        child = _seed_instance(
+            engine,
+            parent_id=parent,
+            status=InstanceStatus.COMPLETED.value,
+        )
+        _seed_deferred_row(
+            engine,
+            parent_instance_id=parent,
+            child_instance_id=child,
+            child_message_id="child-msg-1",
+        )
+
+        service, manager = _build_service(engine)
+
+        # Rig the busy-check to raise — simulated transient infra
+        # failure (e.g. DB hiccup on the task table). The helper
+        # MUST fail-closed-skip the row AND count it as
+        # ``busy_check_failed`` (NOT ``skipped_busy``).
+        def _raise_busy(_instance_id: str) -> bool:
+            raise RuntimeError("simulated busy-check failure")
+
+        service._task_repo.has_instance_busy = MagicMock(side_effect=_raise_busy)
+
+        caplog.set_level(
+            logging.WARNING, logger="daemon.services.report_delivery_recovery"
+        )
+        result = service.recover_now()
+
+        # Row was skipped (fail-closed), not recovered.
+        assert result.lanes["deferred"].recovered == 0
+        manager._handle_recover_deferred_report.assert_not_called()
+
+        # Counter semantic: busy-check itself errored → distinct
+        # bucket from confirmed-busy.
+        assert result.lanes["deferred"].busy_check_failed == 1
+        assert result.lanes["deferred"].skipped_busy == 0
+
+        # to_dict() also surfaces the new field so the endpoint /
+        # structured logs carry it through.
+        lane_dict = result.lanes["deferred"].to_dict()
+        assert lane_dict["busy_check_failed"] == 1
+        assert lane_dict["skipped_busy"] == 0
+
+        # WARNING log emitted for operator visibility.
+        warnings = [
+            r for r in caplog.records if r.levelno == logging.WARNING
+        ]
+        assert any(
+            "busy-check failed" in r.getMessage() for r in warnings
+        ), (
+            "WARNING log MUST mention 'busy-check failed' for "
+            "operator visibility; got "
+            f"{[r.getMessage() for r in warnings]}"
+        )
+
     def test_idempotent_re_run(self, engine: Engine) -> None:
         """Running the sweep twice is idempotent — the second run
         sees no DEFERRED rows.
