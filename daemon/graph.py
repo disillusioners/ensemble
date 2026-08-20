@@ -5196,10 +5196,13 @@ def build_instance_graph(
             assembly (backward-compatible default — legacy agents
             keep their system-prompt-baked context).
     """
-    # Add proxy header to all LLM requests
+    # Add proxy headers (x-proxy-app + x-proxy-interleaved-thinking) to all LLM requests
     llm_config_with_headers = {
         **llm_config,
-        "default_headers": {"x-proxy-app": "ensemble"},
+        "default_headers": {
+            "x-proxy-app": "ensemble",
+            "x-proxy-interleaved-thinking": "True",
+        },
     }
 
     # Check if vision model is configured

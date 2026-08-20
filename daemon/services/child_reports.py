@@ -664,7 +664,10 @@ class ChildReportsService:
             "api_key": self._config.llm.api_key,
             "model": self._config.llm.model,
             "temperature": 0.3,  # Lower temperature for more focused summaries
-            "default_headers": {"x-proxy-app": "ensemble"},
+            "default_headers": {
+                "x-proxy-app": "ensemble",
+                "x-proxy-interleaved-thinking": "True",
+            },
         }
         # F1: clean at constructor only — facade needs the RAW dict.
         # See ``daemon.services.llm_failover`` (F1 kwarg hygiene).
@@ -1286,7 +1289,10 @@ Provide a concise summary:"""
                 "api_key": self._config.llm.api_key,
                 "model": self._config.llm.model,
                 "temperature": 0.3,
-                "default_headers": {"x-proxy-app": "ensemble"},
+                "default_headers": {
+                    "x-proxy-app": "ensemble",
+                    "x-proxy-interleaved-thinking": "True",
+                },
             }
             # Defensive ``dict()`` wrap matches the 4 sibling sites
             # (``_summarize_instance``, ``_generate_and_broadcast_title``,
