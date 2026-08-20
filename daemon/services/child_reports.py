@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, NamedTuple
 
 from sqlalchemy import exists, func, select, text, update as sa_update
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session
 
 from ..graph import ThinkingChatOpenAI, clean_llm_config
@@ -2610,14 +2611,58 @@ Provide a concise summary:"""
             # the fallback task claims ``TASK_DELIVERED``; the loser
             # sees no PENDING row and skips). See the package docstring
             # in ``daemon/repositories/report_injection/``.
-            report_injection_row = ReportInjection(
-                parent_instance_id=instance.parent_id,
-                child_instance_id=instance.instance_id,
-                child_message_id=completed_message_id,
-                report_message_id=report_message_id,
-                content=last_content,
-            )
-            session.add(report_injection_row)
+            #
+            # DEEP-REVIEW FIX (2026-08-20, C-DiD): natural completion
+            # racing a recovered PENDING marker. The Phase 2 sweep /
+            # router may have just transitioned a DEFERRED marker →
+            # PENDING via ``transition_deferred_to_pending``, leaving
+            # a non-terminal row with the same obligation triple. The
+            # natural INSERT below hits the
+            # ``uq_report_injections_oblig_triple`` partial unique
+            # index (PENDING/DEFERRED) and raises
+            # ``sqlalchemy.exc.IntegrityError``. Treat as
+            # already-delivered — the recovered row represents the
+            # in-flight delivery, and the natural path has nothing to
+            # do. Match the existing idempotency-skip semantics
+            # already used elsewhere in this file (the W6 absorption
+            # in ``ReportInjectionRepository.ensure_deferred`` is the
+            # sibling case for the marker-write side).
+            try:
+                report_injection_row = ReportInjection(
+                    parent_instance_id=instance.parent_id,
+                    child_instance_id=instance.instance_id,
+                    child_message_id=completed_message_id,
+                    report_message_id=report_message_id,
+                    content=last_content,
+                )
+                session.add(report_injection_row)
+                # Flush to surface the IntegrityError early — the
+                # session.add() alone is lazy and would defer the
+                # error to session.commit(), which would also undo
+                # the report_message / report_task INSERTs we want to
+                # discard on this branch anyway.
+                session.flush()
+            except IntegrityError as oblig_err:
+                # Natural × recovered PENDING race: the recovered
+                # row's worker_pool / claim_for_task_delivery owns
+                # delivery. Return idempotency_skip and let the
+                # recovered path complete naturally.
+                session.rollback()
+                logger.info(
+                    f"child_reports: natural completion races a "
+                    f"recovered PENDING marker for "
+                    f"parent={instance.parent_id[:8]}..., "
+                    f"child={instance.instance_id[:8]}..., "
+                    f"msg={completed_message_id[:8]}...; treating as "
+                    f"already-delivered (idempotency_skip): "
+                    f"{type(oblig_err).__name__}"
+                )
+                return _ChildCompletionDbResult(
+                    outcome="idempotency_skip",
+                    instance_id=instance_id,
+                    agent_id=instance.agent_id,
+                    parent_id=instance.parent_id,
+                )
             
             # --- Inline: _update_parent_on_child_complete (no await needed) ---
             # The bus is the SOLE completion authority.

@@ -31,7 +31,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
 from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel
+from sqlmodel import Session, SQLModel, select as sm_select
 
 # Model imports — required so SQLModel.metadata sees the tables when
 # create_all() runs on the test engine.
@@ -800,3 +800,107 @@ class TestGhostChildExclusion:
         )
 
         assert result.outcome == "child_still_running_defer"
+
+
+# =============================================================================
+# DiD — natural completion racing a recovered PENDING marker
+# (deep-review C-DiD, 2026-08-20)
+# =============================================================================
+
+
+class TestNaturalCompletionRacingRecoveredMarker:
+    """Defense-in-depth regression: when the Phase 2 sweep / router
+    has just transitioned a DEFERRED marker to PENDING
+    (``transition_deferred_to_pending``), the child's natural
+    completion path would race the obligation-triple partial unique
+    index (``uq_report_injections_oblig_triple``) — the recovered
+    PENDING row already exists, the natural INSERT hits
+    ``IntegrityError``. The fix absorbs it and returns
+    ``idempotency_skip`` — the recovered row owns delivery via the
+    worker pool / claim_for_task_delivery path.
+
+    Without the fix, the natural path crashes and the recovered
+    PENDING row's delivery never completes.
+    """
+
+    def test_natural_completion_races_recovered_pending_marker(
+        self, engine: Engine
+    ):
+        """Seed a non-terminal ReportInjection row with the same
+        obligation triple; trigger the child's natural completion;
+        assert ``idempotency_skip`` outcome (no crash, no duplicate
+        row).
+        """
+        from daemon.repositories.report_injection.models import (
+            ReportInjection,
+            ReportInjectionState,
+        )
+
+        service = _build_child_reports_service(engine)
+        parent_id = _seed_root_instance(engine)
+        child_id = _seed_child_instance_full(
+            engine,
+            parent_id=parent_id,
+            status=InstanceStatus.COMPLETED.value,
+        )
+
+        # Seed a non-terminal ReportInjection row with the SAME
+        # obligation triple the natural path will try to write.
+        # This simulates the Phase 2 sweep having just transitioned
+        # a DEFERRED marker → PENDING.
+        child_msg_id = "msg-racing"
+        report_msg_id = f"report-{uuid.uuid4().hex[:8]}"
+        with Session(engine) as session:
+            session.add(
+                ReportInjection(
+                    injection_id=f"inj-{uuid.uuid4().hex[:8]}",
+                    parent_instance_id=parent_id,
+                    child_instance_id=child_id,
+                    child_message_id=child_msg_id,
+                    report_message_id=report_msg_id,
+                    content="previously delivered",
+                    state=ReportInjectionState.PENDING.value,
+                    recovery_attempted_at=datetime.now(
+                        timezone.utc
+                    ).isoformat(),
+                )
+            )
+            session.commit()
+
+        # Trigger the natural completion path — the inline INSERT
+        # hits the obligation-triple partial unique index and
+        # raises IntegrityError. The fix absorbs it and returns
+        # ``idempotency_skip``.
+        result = service._process_child_completion_db_sync(
+            instance_id=child_id,
+            completed_message_id=child_msg_id,
+            last_content="... (natural enqueue, racing recovered row)",
+        )
+
+        assert result.outcome == "idempotency_skip", (
+            "natural completion × recovered PENDING race MUST return "
+            "idempotency_skip (DiD defense — the recovered row owns "
+            f"delivery); got outcome={result.outcome}"
+        )
+        assert result.instance_id == child_id
+        assert result.parent_id == parent_id
+
+        # The pre-existing PENDING row is preserved (no duplicate).
+        with Session(engine) as session:
+            rows = session.exec(
+                sm_select(ReportInjection).where(
+                    ReportInjection.parent_instance_id == parent_id
+                ).where(
+                    ReportInjection.child_instance_id == child_id
+                ).where(
+                    ReportInjection.child_message_id == child_msg_id
+                )
+            ).all()
+            assert len(rows) == 1, (
+                f"expected exactly one (recovered) ReportInjection "
+                f"row for the obligation triple; got {len(rows)}"
+            )
+            assert rows[0].state == ReportInjectionState.PENDING.value, (
+                "recovered PENDING row MUST remain PENDING — the "
+                "natural path no-ops via idempotency_skip"
+            )
