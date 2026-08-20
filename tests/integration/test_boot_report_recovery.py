@@ -742,3 +742,155 @@ class TestBootSmokeRegression:
             "was orphaned inside _session_scope (dead code after yield), "
             "so the attribute is missing entirely."
         )
+
+
+# =============================================================================
+# B-1 — production-bound regression for off-loop boot dispatch (2026-08-20)
+# =============================================================================
+#
+# CONTEXT — the C2 deep-review fix (manager.py:5593-5597) dispatches the
+# boot sweep via ``loop.create_task(asyncio.to_thread(
+# self._report_recovery.recover_on_startup))`` so lane bodies run on a
+# worker thread (NOT the loop thread). Pre-fix, ``recover_on_startup``
+# was called synchronously from ``setup_worker_pool`` — on the loop
+# thread — and the per-row ``run_coroutine_threadsafe(...).
+# result(timeout=30.0)`` calls inside the sweep self-blocked the loop
+# (worst case ~30s × 100 rows ≈ 50 min blocked startup, HTTP down).
+#
+# This is the THIRD occurrence of the loop-thread-blocking bug class —
+# bcc02b92, 5fe135e3 fixed the router/reconcile paths, boot was missed.
+#
+# The pre-existing ``TestBootSweepOffLoopThread`` tests at :420-558
+# only assert BEHAVIORAL mechanics: they wire
+# ``loop.create_task(asyncio.to_thread(...))`` THEMSELVES onto a
+# MagicMock — they NEVER bind production source. So if someone reverts
+# the production dispatch back to a synchronous call, those tests
+# still PASS. That is exactly the regression gap this test closes.
+#
+# This is a source-order assertion mirroring the existing TestBootOrder
+# wiring-order test pattern at :195-228. Robust to line drift: anchored
+# on the ``setup_worker_pool`` method name + a balanced-paren walker
+# over its body window — NOT absolute line numbers.
+
+
+class TestBootSweepDispatchShape:
+    """B-1 — the production source at the boot-sweep dispatch site
+    (``manager.setup_worker_pool``) MUST dispatch the sweep via
+    ``asyncio.to_thread(...)`` wrapped in a ``loop.create_task(...)``
+    call. A direct synchronous call to ``recover_on_startup()`` would
+    re-introduce the loop-thread-blocking regression that the C2
+    deep-review fix (2026-08-20) closed.
+    """
+
+    def test_setup_worker_pool_dispatches_boot_sweep_off_loop(
+        self,
+    ) -> None:
+        """The dispatch site at ``setup_worker_pool`` MUST wrap
+        ``self._report_recovery.recover_on_startup`` in
+        ``asyncio.to_thread(...)`` and schedule it via
+        ``self._loop.create_task(...)``.
+
+        Why this test exists: the pre-existing
+        ``TestBootSweepOffLoopThread`` tests construct their OWN
+        ``loop.create_task(asyncio.to_thread(...))`` shape onto a
+        MagicMock — they do not bind production source. A production
+        revert (synchronous ``self._report_recovery.recover_on_startup()``
+        inside ``setup_worker_pool``) leaves those behavioral tests
+        green. This source-scan test pins the production dispatch
+        shape so the regression cannot return silently.
+
+        Robust to line drift: anchored on the ``setup_worker_pool``
+        method name + a balanced-paren walker over its body window,
+        NOT absolute line numbers (verified manually: the unique
+        anchor ``boot_sweep_task = self._loop.create_task(`` only
+        appears once in the file).
+        """
+        import re
+        from pathlib import Path
+
+        manager_path = Path("daemon/manager.py")
+        text = manager_path.read_text()
+
+        # 1) Locate the ``setup_worker_pool`` method body window.
+        method_start = text.find("def setup_worker_pool(")
+        assert method_start != -1, (
+            "daemon/manager.py must contain a setup_worker_pool method"
+        )
+        body_start = text.find("\n", method_start) + 1
+        # Sibling method at 4-space indent closes the body window.
+        next_sibling = text.find("\n    def ", body_start)
+        if next_sibling == -1:
+            next_sibling = len(text)
+        method_body = text[body_start:next_sibling]
+
+        # 2) Locate the dispatch site by its unique anchor. The
+        #    variable name ``boot_sweep_task`` and the explicit
+        #    ``self._loop.create_task(`` prefix appear only at the
+        #    off-loop dispatch site in the file (verified by grep).
+        dispatch_anchor = "boot_sweep_task = self._loop.create_task("
+        dispatch_idx = method_body.find(dispatch_anchor)
+        assert dispatch_idx != -1, (
+            "setup_worker_pool must dispatch the boot sweep via "
+            "'boot_sweep_task = self._loop.create_task(...)'. The C2 "
+            "deep-review fix wraps recover_on_startup in "
+            "asyncio.to_thread so lane bodies run on a worker thread. "
+            "If this anchor is missing, the off-loop dispatch has been "
+            "reverted to a synchronous call — RESTORE IT. (See "
+            "bcc02b92, 5fe135e3 for prior loop-blocking-bug fixes; "
+            "this is the THIRD occurrence of the same bug class.)"
+        )
+
+        # 3) Extract the create_task(...) call arguments via a
+        #    balanced-paren walker. Handles nested to_thread wrapping
+        #    and whitespace changes inside the call.
+        args_start = dispatch_idx + len(dispatch_anchor)
+        depth = 1
+        i = args_start
+        while i < len(method_body) and depth > 0:
+            c = method_body[i]
+            if c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+            i += 1
+        assert depth == 0, (
+            f"Unbalanced parens in boot_sweep dispatch "
+            f"(depth={depth} at end of method body)"
+        )
+        dispatch_args = method_body[args_start : i - 1]
+
+        # 4) The dispatch MUST use asyncio.to_thread to move the
+        #    sweep body off the loop thread.
+        assert "asyncio.to_thread" in dispatch_args, (
+            "The boot sweep dispatch must use 'asyncio.to_thread(...)' "
+            "to move lane execution off the loop thread. The current "
+            f"dispatch args are:\n{dispatch_args!r}\n"
+            "Without to_thread, the sweep runs on the loop thread and "
+            "self-blocks via run_coroutine_threadsafe(...).result("
+            "timeout=30.0) — see C2 deep-review fix (2026-08-20)."
+        )
+
+        # 5) The dispatch MUST reference recover_on_startup (the
+        #    sweep entry point on ReportDeliveryRecoveryService).
+        assert "recover_on_startup" in dispatch_args, (
+            "The boot sweep dispatch must reference "
+            "'self._report_recovery.recover_on_startup' — the sweep "
+            f"entry point. Current dispatch args:\n{dispatch_args!r}"
+        )
+
+        # 6) The dispatch MUST NOT call recover_on_startup() DIRECTLY
+        #    (synchronously). A bare call (with parens) means the
+        #    sweep runs synchronously, then the (None) result is
+        #    wrapped in to_thread (or passed straight to
+        #    create_task). Either way the loop-blocking bug is back.
+        #    to_thread expects the function REFERENCE (no parens).
+        assert not re.search(
+            r"recover_on_startup\s*\(", dispatch_args
+        ), (
+            "The dispatch must NOT call 'recover_on_startup()' "
+            "directly — that re-introduces the loop-thread-blocking "
+            "regression. The current dispatch is:\n"
+            f"{dispatch_args!r}\n"
+            "Use the function REFERENCE (no parens), wrapped in "
+            "asyncio.to_thread(...)."
+        )
