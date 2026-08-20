@@ -40,10 +40,11 @@ periodic-loop test uses ``recover_now``).
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import datetime, timezone
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from sqlalchemy import create_engine, event
@@ -761,6 +762,278 @@ class TestOrphanLane:
         service, _ = _build_service(engine)
         result = service.recover_now()
         assert "orphan" not in result.lanes
+
+
+# =============================================================================
+# ORPHAN lane LIVE SWEEP (Phase 3 task 3.9 / leader digest item 5)
+# =============================================================================
+
+
+def _build_orphan_service(
+    engine: Engine,
+    *,
+    revive_result: bool = True,
+) -> tuple[ReportDeliveryRecoveryService, MagicMock, MagicMock]:
+    """Build the service with ``lane_orphan`` ENABLED.
+
+    The manager mock carries a REAL ``_loop`` (the running loop from
+    the ``pytest.mark.asyncio`` test body) so the ORPHAN lane's
+    ``_try_revive_terminal_parent`` →
+    ``asyncio.run_coroutine_threadsafe(self._manager.
+    _revive_terminal_instance(parent_id), loop)`` bridge resolves
+    without a production InstanceManager. ``_revive_terminal_instance``
+    and ``_handle_recover_deferred_report`` are mockable seams
+    (same pattern as tests/unit/test_resume_router_deferred_recovery.py).
+
+    Returns ``(service, manager, handle_mock)``.
+    """
+    from daemon.repositories.report_injection.repository import (
+        ReportInjectionRepository,
+    )
+
+    ri_repo = ReportInjectionRepository(engine=engine)
+    task_repo = MagicMock()
+    task_repo.has_instance_busy = MagicMock(return_value=False)
+    manager = MagicMock()
+    manager.engine = engine
+    manager._loop = asyncio.get_running_loop()
+    manager._revive_terminal_instance = AsyncMock(return_value=revive_result)
+    handle_mock = MagicMock()
+    manager._handle_recover_deferred_report = handle_mock
+
+    service = ReportDeliveryRecoveryService(
+        task_repo=task_repo,
+        report_injection_repo=ri_repo,
+        queue_repo=MagicMock(),
+        instance_repo=MagicMock(),
+        manager_ref=manager,
+        interval_seconds=300,
+        age_bound_minutes=10,
+        batch_cap=100,
+        recovery_retry_minutes=1,
+        enabled=True,
+        lane_orphan=True,
+    )
+    return service, manager, handle_mock
+
+
+class TestOrphanLaneLiveSweep:
+    """ORPHAN-lane LIVE sweep (leader digest item 5): construct the
+    service with ``lane_orphan`` ENABLED and run ONE ``recover_now()``
+    cycle against a terminal parent + DEFERRED row.
+
+    W1's NEVER-SILENT contract: every row reaches ONE observable
+    disposition — revive-and-deliver (parent revived, marker
+    transitions out of DEFERRED, hand-off invoked) OR structured
+    disposition (logged + counted in ``orphan_disposition``). The
+    sweep must never silently drop the row.
+    """
+
+    @pytest.mark.asyncio
+    async def test_live_sweep_revive_and_deliver(
+        self, engine: Engine
+    ) -> None:
+        """Dispositive happy path: terminal parent + DEFERRED row →
+        ONE recover_now() cycle revives the parent and hands off to
+        the reconcile+re-enter path; the marker LEAVES DEFERRED.
+
+        Observable artifacts asserted:
+
+        * ``lanes["orphan"].recovered == 1`` (structured count);
+        * ``_revive_terminal_instance`` awaited once for the parent
+          (the revival — manager-side running-loop bridge worked);
+        * ``_handle_recover_deferred_report`` called once with the
+          exact row triple (the deliver half);
+        * the marker row's state is no longer DEFERRED (the guarded
+          transition committed BEFORE the hand-off — D2-adjacent
+          ordering; with the mocked manager hand-off the row ends the
+          cycle PENDING).
+        """
+        # Terminal parent + COMPLETED child + DEFERRED obligation.
+        parent = _seed_instance(
+            engine, status=InstanceStatus.COMPLETED.value
+        )
+        child = _seed_instance(
+            engine,
+            parent_id=parent,
+            status=InstanceStatus.COMPLETED.value,
+        )
+        _seed_deferred_row(
+            engine,
+            parent_instance_id=parent,
+            child_instance_id=child,
+            child_message_id="child-msg-1",
+        )
+
+        service, manager, handle_mock = _build_orphan_service(engine)
+        # Production shape: the sweep runs OFF the loop thread (the
+        # endpoint calls it via ``asyncio.to_thread``) so the loop
+        # stays free to execute the ``run_coroutine_threadsafe``
+        # revival bridge. Calling ``recover_now()`` ON the loop
+        # thread would deadlock the bridge (TimeoutError after 8s).
+        result = await asyncio.to_thread(service.recover_now)
+
+        assert isinstance(result, SweepResult)
+        # Lane present + structured outcome.
+        assert "orphan" in result.lanes, (
+            "lane_orphan=True MUST register the orphan lane in the "
+            "sweep result"
+        )
+        orphan = result.lanes["orphan"]
+        assert orphan.recovered == 1, (
+            f"the live orphan sweep must revive-and-deliver the "
+            f"terminal-parent row within one cycle; lanes={result.to_dict()}"
+        )
+        assert orphan.errors == 0
+        assert orphan.orphan_disposition == 0
+
+        # Revival happened (once, for the right parent).
+        manager._revive_terminal_instance.assert_awaited_once_with(parent)
+        # Deliver half: hand-off invoked with the exact row triple.
+        handle_mock.assert_called_once()
+        kwargs = handle_mock.call_args.kwargs
+        assert kwargs["child_instance_id"] == child
+        assert kwargs["child_message_id"] == "child-msg-1"
+        assert kwargs["source"] == "sweep"
+        assert "injection_id" in kwargs
+
+        # The marker LEAVES DEFERRED within the same cycle (guarded
+        # transition committed before the hand-off; mocked manager
+        # hand-off leaves it PENDING).
+        with Session(engine) as session:
+            row = session.exec(
+                sm_select(ReportInjection).where(
+                    ReportInjection.child_instance_id == child
+                )
+            ).first()
+        assert row is not None
+        assert row.state == ReportInjectionState.PENDING.value, (
+            "the orphan lane's guarded transition must move the row "
+            f"out of DEFERRED before the hand-off; got {row.state}"
+        )
+        assert row.recovery_attempted_at is not None
+
+    @pytest.mark.asyncio
+    async def test_live_sweep_revival_failure_structured_disposition(
+        self, engine: Engine, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """NEVER-SILENT half: revival FAILS (e.g. instance row gone)
+        → the row is NOT silently dropped — the structured
+        ``orphan_disposition`` count is incremented and a WARNING
+        naming the orphaned obligation is logged. The DEFERRED row is
+        left in place (explicit operator disposition, retried next
+        cycle).
+        """
+        import logging
+
+        parent = _seed_instance(
+            engine, status=InstanceStatus.COMPLETED.value
+        )
+        child = _seed_instance(
+            engine,
+            parent_id=parent,
+            status=InstanceStatus.COMPLETED.value,
+        )
+        _seed_deferred_row(
+            engine,
+            parent_instance_id=parent,
+            child_instance_id=child,
+            child_message_id="child-msg-2",
+        )
+
+        service, manager, handle_mock = _build_orphan_service(
+            engine, revive_result=False
+        )
+        with caplog.at_level(
+            logging.WARNING, logger="daemon.services.report_delivery_recovery"
+        ):
+            result = await asyncio.to_thread(service.recover_now)
+
+        assert "orphan" in result.lanes
+        orphan = result.lanes["orphan"]
+        # Structured disposition: counted, never silent.
+        assert orphan.orphan_disposition == 1, (
+            "a failed revival MUST land in the structured "
+            "orphan_disposition count (observable disposition)"
+        )
+        assert orphan.recovered == 0
+        assert orphan.errors == 0
+        # The hand-off was NEVER invoked (no delivery attempted).
+        handle_mock.assert_not_called()
+        # Observable log: the WARNING names the orphaned obligation.
+        warnings = [
+            r for r in caplog.records if r.levelno == logging.WARNING
+        ]
+        assert any(
+            "orphan_disposition" in r.getMessage()
+            for r in warnings
+        ), (
+            "the revival-failure disposition MUST be logged at "
+            "WARNING (observable); got "
+            f"{[r.getMessage() for r in warnings]}"
+        )
+        # The row is left DEFERRED (explicit disposition — not
+        # silently dropped, not half-transitioned).
+        with Session(engine) as session:
+            row = session.exec(
+                sm_select(ReportInjection).where(
+                    ReportInjection.child_instance_id == child
+                )
+            ).first()
+        assert row is not None
+        assert row.state == ReportInjectionState.DEFERRED.value
+
+    @pytest.mark.asyncio
+    async def test_live_sweep_no_row_silent_drop_regression(
+        self, engine: Engine
+    ) -> None:
+        """Anti-regression: with revival failing AND the structured
+        count/log assertions stripped, no third outcome exists. This
+        test pins the EXHAUSTIVENESS — recovered +
+        orphan_disposition + errors + skipped counters must account
+        for EVERY row the lane selected.
+
+        A future code change that drops the row without touching any
+        counter fails this test (the lane selected 1 row; the
+        counters must sum to >= 1).
+        """
+        parent = _seed_instance(
+            engine, status=InstanceStatus.TERMINATED.value
+        )
+        child = _seed_instance(
+            engine,
+            parent_id=parent,
+            status=InstanceStatus.COMPLETED.value,
+        )
+        _seed_deferred_row(
+            engine,
+            parent_instance_id=parent,
+            child_instance_id=child,
+            child_message_id="child-msg-3",
+        )
+
+        service, manager, handle_mock = _build_orphan_service(engine)
+        # Revival succeeds — the row goes the revive-and-deliver way.
+        # (Sweep off the loop thread — see revive_and_deliver test.)
+        result = await asyncio.to_thread(service.recover_now)
+
+        orphan = result.lanes["orphan"]
+        accounted = (
+            orphan.recovered
+            + orphan.orphan_disposition
+            + orphan.errors
+            + orphan.skipped_busy
+            + orphan.busy_check_failed
+            + orphan.already_recovered
+        )
+        assert accounted >= 1, (
+            "NEVER-SILENT (W1): every row the orphan lane selected "
+            "MUST be accounted for by a structured counter — a silent "
+            f"drop would leave accounted==0; lane={orphan.to_dict()}"
+        )
+        # And in this configuration the outcome is revive-and-deliver.
+        assert orphan.recovered == 1
+
 
 
 # =============================================================================
