@@ -3,19 +3,27 @@ Phase 2, task 2.3).
 
 Phase 2 task 2.3 inserts a type-aware exemption predicate inside
 the ``_schedule_explicit_handle_resume`` PENDING-task branch. The
-guard exempts PROCESS_REPORT tasks whose message is a READY
+guard exempts PROCESS_REPORT tasks whose message is a
 ``completion_report`` row AND a non-terminal ``report_injections``
 row exists — preventing the unmodified FM-1 loop from killing the
 PROCESS_REPORT tasks that the Phase 2 recovery sweep just created.
 
 The exemption predicate is the canonical ``has_non_terminal_injection_for``
-helper on the manager:
+helper on the manager (one of three conditions in the corrected
+predicate):
 
 * ``task.task_type == PROCESS_REPORT``
-* AND message status is READY
 * AND message type is COMPLETION_REPORT
 * AND a non-terminal ``ReportInjection`` row exists for the
   ``report_message_id`` (PENDING or DEFERRED state).
+
+POST-REVIEW AMENDMENT (2026-08-20, deep-review verdict REJECT): the
+v1 predicate also required ``msg.status == READY`` — that term was
+DEAD CODE because the enclosing loop already filters messages to
+``PENDING|PROCESSING|RETRYING`` (READY messages never enter the
+inner branch). The corrected predicate drops the READY term. The
+natural lifecycle keeps a freshly-swept PROCESS_REPORT task tied
+to a PROCESSING message — FM-1 must exempt exactly there.
 
 PROCESS_MESSAGE tasks keep the existing cancel+complete behavior
 (they cannot be a completion_report delivery).
@@ -377,12 +385,18 @@ class TestFM1GuardProcessMessageUnchanged:
         # helper's True result. PROCESS_MESSAGE fails the first
         # condition → not exempt.
 
-    def test_process_report_message_not_ready(
+    def test_process_report_message_processing_exempt(
         self, engine: Engine
     ) -> None:
-        """A PROCESS_REPORT whose message is NOT READY (e.g.
-        PROCESSING) → NOT exempt. The guard's predicate requires
-        READY message status (a message being delivered).
+        """A PROCESS_REPORT whose message is PROCESSING (the
+        realistic freeze scenario) → EXEMPT. POST-REVIEW
+        AMENDMENT (2026-08-20): the corrected predicate drops
+        the ``msg.status == READY`` term (it was DEAD CODE because
+        the enclosing loop already filters out READY messages).
+        The natural lifecycle keeps a freshly-swept PROCESS_REPORT
+        task tied to a PROCESSING message — the cascade
+        transitioned the Task PAUSED→PENDING (Phase 4b/4c) while
+        the message stayed PROCESSING. FM-1 must exempt this case.
         """
         parent = _seed_instance(engine)
         msg_id, task_id = _seed_message_and_task(
@@ -399,11 +413,9 @@ class TestFM1GuardProcessMessageUnchanged:
         )
 
         manager = _build_minimal_manager(engine)
-        # The helper returns True (the row exists), but the
-        # inline predicate ALSO checks
-        # ``msg.status == MessageStatus.READY.value``. A
-        # PROCESSING message fails the second condition → not
-        # exempt.
+        # The corrected inline predicate no longer checks msg.status.
+        # PROCESS_REPORT + PROCESSING message + non-terminal injection
+        # → exempt (the predicate fires).
         assert manager._has_non_terminal_injection_for(msg_id) is True
 
 
@@ -473,3 +485,188 @@ class TestAntiphantomRaceFixIntact:
             "guarded branch — verified by manager.py inline "
             "comments, not by this unit test."
         )
+
+
+# =============================================================================
+# FM-1 guard — REAL-LOOP end-to-end (deep-review addition, 2026-08-20)
+# =============================================================================
+
+
+class TestFM1GuardRealLoop:
+    """Drive the real ``_schedule_explicit_handle_resume`` path against
+    an in-memory engine.
+
+    The deep-review verdict REJECTed the v1 fix because the unit
+    tests above only exercise the
+    ``_has_non_terminal_injection_for`` helper directly — the inline
+    guard inside the FM-1 loop is not driven by a real flow. This
+    class exercises the REAL FM-1 inner loop end-to-end with:
+
+    * a real ``MessageQueueRepository`` against an in-memory engine,
+    * a real ``TaskRepository`` against the same engine,
+    * a real ``ReportInjectionRepository`` for the helper,
+    * mock ``_request_registry`` + mock ``_resume_processing_background``
+      so we observe the FM-1 cleanup without actually starting the
+      background turn,
+    * mock ``_graph_tasks`` dict.
+
+    The corrected predicate (drop ``msg.status == READY``) is
+    asserted: a PROCESS_REPORT task tied to a non-terminal injection
+    row SURVIVES the cleanup loop while a PROCESS_MESSAGE task is
+    still cancelled+completed.
+
+    The test seeds the realistic freeze scenario:
+    ``msg.status=PROCESSING`` + ``task.status=PENDING`` — this is the
+    shape the cascade produces when a worker claimed the message
+    mid-flight when pause fired and the cascade later transitioned
+    the Task PAUSED→PENDING (Phase 4b/4c).
+    """
+
+    @pytest.mark.asyncio
+    async def test_real_loop_process_report_survives(
+        self, engine: Engine
+    ) -> None:
+        """PROCESS_REPORT + completion_report message + non-terminal
+        injection → SURVIVES the cleanup loop (task still PENDING,
+        message still PROCESSING). PROCESS_MESSAGE + HUMAN → cancelled
+        and completed. POST-REVIEW real-loop regression.
+        """
+        from daemon.cancellation import CancellationTokenSource
+        from daemon.manager import InstanceManager
+        from daemon.repositories.message_queue.repository import (
+            SQLModelMessageQueueRepository,
+        )
+        from daemon.repositories.task.repository import TaskRepository
+
+        parent = _seed_instance(engine)
+
+        # Seed PROCESS_REPORT: message PROCESSING, task PENDING,
+        # injection PENDING. This is the realistic freeze scenario.
+        report_msg_id, report_task_id = _seed_message_and_task(
+            engine,
+            instance_id=parent,
+            task_type=TaskType.PROCESS_REPORT.value,
+            msg_status=MessageStatus.PROCESSING.value,
+            msg_type=MessageType.COMPLETION_REPORT.value,
+        )
+        _seed_injection_row(
+            engine,
+            parent_instance_id=parent,
+            report_message_id=report_msg_id,
+            state=ReportInjectionState.PENDING.value,
+        )
+
+        # Seed PROCESS_MESSAGE: message PROCESSING, task PENDING,
+        # no injection row.
+        msg_id, task_id = _seed_message_and_task(
+            engine,
+            instance_id=parent,
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            msg_status=MessageStatus.PROCESSING.value,
+            msg_type=MessageType.HUMAN.value,
+        )
+
+        # Build the manager with REAL repositories against the engine
+        # — the FM-1 cleanup loop reads/writes through these.
+        manager = _build_minimal_manager(engine)
+        manager._queue_repository = SQLModelMessageQueueRepository(
+            engine=engine
+        )
+        manager._task_repo = TaskRepository(
+            engine=engine,
+            on_pending_task=lambda: None,
+        )
+        # Bind the REAL async method (not a MagicMock) — the
+        # existing helper-only tests already use this pattern via
+        # ``__get__``; the real-loop test needs the real async
+        # method bound so the actual FM-1 cleanup loop runs.
+        manager._schedule_explicit_handle_resume = (
+            InstanceManager._schedule_explicit_handle_resume.__get__(
+                manager
+            )
+        )
+
+        # Mock the request registry — the resume path registers a
+        # CancellationTokenSource but never reads it for the FM-1
+        # cleanup. We mock to avoid wiring a real registry.
+        token_source = CancellationTokenSource()
+        manager._request_registry = MagicMock()
+        manager._request_registry.register = MagicMock(
+            return_value=token_source
+        )
+
+        # Mock the background processing task — we want to observe
+        # the FM-1 cleanup outcome without actually starting the
+        # graph turn. The cleanup runs to completion BEFORE the
+        # background task is created, so this mock only needs to
+        # exist (asyncio.create_task will schedule and immediately
+        # cancel it via the test's event loop teardown).
+        async def _noop_bg(*args, **kwargs):
+            return None
+
+        manager._resume_processing_background = _noop_bg
+        manager._graph_tasks = {}
+
+        # Drive the REAL FM-1 cleanup loop.
+        result = await manager._schedule_explicit_handle_resume(
+            instance_id=parent,
+            message="resume trigger",
+            silent=True,
+            images=None,
+            target_work_id="work-test",
+            selected_suspension_reason="test",
+            handle_work_id="work-handle",
+            route_outcome="test_route",
+        )
+        # The cleanup returns the "resuming" envelope — we don't
+        # assert on the envelope shape; the assertions below are
+        # the real proof.
+        assert result["status"] == "resuming"
+
+        # ASSERTIONS: PROCESS_REPORT survives, PROCESS_MESSAGE is
+        # cancelled + completed.
+        with Session(engine) as session:
+            # PROCESS_REPORT task still PENDING (the FM-1 guard
+            # exempted it because injection row is non-terminal).
+            sm_task = sm_select(Task).where(Task.id == report_task_id)
+            survived_task = session.exec(sm_task).first()
+            assert survived_task.status == TaskStatus.PENDING.value, (
+                "PROCESS_REPORT + non-terminal injection must SURVIVE "
+                "FM-1 cleanup (post-review predicate); got "
+                f"task.status={survived_task.status}"
+            )
+
+            # PROCESS_REPORT message still PROCESSING (the FM-1
+            # guard exempted the row from the complete() call too).
+            sm_msg = sm_select(MessageQueue).where(
+                MessageQueue.message_id == report_msg_id
+            )
+            survived_msg = session.exec(sm_msg).first()
+            assert survived_msg.status == MessageStatus.PROCESSING.value, (
+                "PROCESS_REPORT message must remain PROCESSING "
+                "(FM-1 guard exempts the cancel+complete pair); got "
+                f"msg.status={survived_msg.status}"
+            )
+
+            # PROCESS_MESSAGE task CANCELLED (cancel+complete path).
+            sm_task2 = sm_select(Task).where(Task.id == task_id)
+            cancelled_task = session.exec(sm_task2).first()
+            assert cancelled_task.status == TaskStatus.CANCELLED.value, (
+                "PROCESS_MESSAGE must be CANCELLED by FM-1 cleanup "
+                "(no exemption — guard keys on PROCESS_REPORT only); "
+                f"got task.status={cancelled_task.status}"
+            )
+
+            # PROCESS_MESSAGE message COMPLETED (the message was
+            # PROCESSING so ``complete()`` succeeded; for RETRYING
+            # messages the complete() call no-ops per the guarded
+            # UPDATE — see W3 follow-up).
+            sm_msg2 = sm_select(MessageQueue).where(
+                MessageQueue.message_id == msg_id
+            )
+            completed_msg = session.exec(sm_msg2).first()
+            assert completed_msg.status == MessageStatus.COMPLETED.value, (
+                "PROCESS_MESSAGE message must be COMPLETED by FM-1 "
+                "cleanup; got "
+                f"msg.status={completed_msg.status}"
+            )

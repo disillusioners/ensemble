@@ -7871,6 +7871,38 @@ class InstanceManager:
                         # cancel+complete (they cannot be a
                         # completion_report delivery).
                         #
+                        # **PREDICATE — corrected post deep-review**:
+                        # exempt the cancel+complete when the task is
+                        # a PROCESS_REPORT whose message is a
+                        # COMPLETION_REPORT row AND a non-terminal
+                        # injection row exists (PENDING or DEFERRED).
+                        #
+                        # The original predicate also required
+                        # ``msg.status == MessageStatus.READY.value``,
+                        # but the enclosing loop (manager.py:7737-7744)
+                        # already filters messages to
+                        # ``PENDING|PROCESSING|RETRYING`` — so the
+                        # READY term was DEAD CODE (READY messages
+                        # never enter the inner branch). The deep
+                        # review REJECT verdict confirmed it. The
+                        # corrected predicate drops the READY term
+                        # and matches the plan INTENT
+                        # (task-2.3: "exempt rows tied to DEFERRED∪
+                        # PENDING injections from the type-blind
+                        # kill").
+                        #
+                        # The natural lifecycle keeps a freshly-swept
+                        # PROCESS_REPORT task tied to a message that
+                        # is PROCESSING (worker claimed the message
+                        # mid-flight when pause fired; the cascade
+                        # later transitioned the Task PAUSED→PENDING
+                        # per Phase 4b/4c). FM-1 sees
+                        # ``msg.status=PROCESSING`` + ``task.status=
+                        # PENDING`` — the corrected predicate fires
+                        # exactly there. PROCESS_MESSAGE tasks keep
+                        # the existing cancel+complete (they cannot
+                        # be a completion_report delivery).
+                        #
                         # **Co-dependency with task 2.4 (lands in the
                         # same commit series)**: the recovery sweep
                         # creates the fresh PROCESS_REPORT task; if
@@ -7885,7 +7917,6 @@ class InstanceManager:
                         is_deliverable_process_report = (
                             stale_task.task_type
                             == TaskType.PROCESS_REPORT.value
-                            and msg.status == MessageStatus.READY.value
                             and msg.type
                             == MessageType.COMPLETION_REPORT.value
                             and self._has_non_terminal_injection_for(
