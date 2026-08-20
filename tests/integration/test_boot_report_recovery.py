@@ -556,3 +556,189 @@ class TestBootSweepOffLoopThread:
             f"Sweep ran on the loop thread (ident={captured_thread_ident[0]}); "
             f"the fix must move it off the loop. Loop ident={loop_thread_ident}"
         )
+
+
+# =============================================================================
+# BOOT SMOKE REGRESSION GUARD — Phase 2.1 splice repair (2026-08-20)
+# =============================================================================
+#
+# DO_NOT_SHIP regression: commit 1d5144f4 (Phase 2.1) spliced 4 methods
+# into the middle of ``InstanceManager.__init__`` using
+# ``self._write_guard = WritePauseGuard()`` as the insertion anchor. The
+# rest of the original init body — including the line that wires
+# ``self._completion_registry`` — was orphaned as unreachable code inside
+# ``_session_scope`` (a ``@contextlib.contextmanager`` generator
+# function — anything after the ``yield`` is dead). Boot crashed at
+# ``daemon/manager.py:2049`` with
+# ``AttributeError: '_completion_registry'`` the first time
+# ``manager.initialize()`` ran.
+#
+# Every targeted-test round stayed green because module IMPORT succeeds
+# — only daemon BOOT executes the broken __init__. This test is the
+# permanent CI guard: it constructs ``InstanceManager`` far enough that
+# ``__init__`` COMPLETES, then asserts the attributes that the orphaned
+# init body would have set. Pre-fix it FAILS with AttributeError on
+# ``_completion_registry`` (and many other init-body attributes).
+# Post-fix it PASSES.
+#
+# Isolation: the test monkey-patches ``MigrationRunner.run_pending_migrations``
+# to a no-op. The migration runner currently fails on SQLite due to a
+# pre-existing DROP CONSTRAINT incompatibility — that is unrelated to
+# the splice regression and would mask the AttributeError we want to
+# catch. Bypassing the runner keeps the test focused on __init__.
+
+
+class TestBootSmokeRegression:
+    """Boot smoke guard: ``InstanceManager.__init__`` must set every
+    attribute the original init body set.
+
+    On the broken HEAD (commit 1d5144f4 splice), ``__init__`` ends at
+    ``self._write_guard = WritePauseGuard()`` and the rest of the
+    original init body — including ``self._completion_registry =
+    get_completion_registry()`` — is orphaned as dead code inside the
+    ``_session_scope`` contextmanager (unreachable, after ``yield``).
+    On boot, ``manager.initialize()`` at line 2049
+    (``self._completion_registry.set_event_loop(self._loop)``) raised
+    ``AttributeError: '_completion_registry'``.
+
+    This test asserts that AT LEAST the critical init-body attributes
+    are set after ``__init__`` returns. It does NOT call
+    ``manager.initialize()`` — the regression is observable at
+    ``__init__`` completion, before initialize() runs.
+    """
+
+    def test_init_sets_completion_registry(self, integration_config, monkeypatch) -> None:
+        """``InstanceManager.__init__`` must set ``self._completion_registry``.
+
+        This is the minimal assertion that fails on the broken HEAD
+        (where ``_completion_registry`` was orphaned inside
+        ``_session_scope`` and never assigned at __init__ time). Post-
+        fix, ``__init__`` runs the full original init body and the
+        attribute is set.
+        """
+        # Bypass the migration runner (unrelated pre-existing SQLite bug).
+        from daemon.migrations.runner import MigrationRunner
+        monkeypatch.setattr(
+            MigrationRunner,
+            "run_pending_migrations",
+            lambda self: [],
+        )
+
+        from daemon.manager import InstanceManager
+
+        manager = InstanceManager(integration_config)
+
+        # The critical attribute that boot crashes on.
+        assert hasattr(manager, "_completion_registry"), (
+            "InstanceManager.__init__ must set self._completion_registry "
+            "— on broken HEAD (commit 1d5144f4 splice) this attribute is "
+            "missing because the init body that sets it was orphaned "
+            "inside _session_scope after its yield. This is the boot-"
+            "fatal regression (manager.initialize() at line 2049 raises "
+            "AttributeError: '_completion_registry')."
+        )
+        assert manager._completion_registry is not None, (
+            "_completion_registry must be a real registry instance, not None"
+        )
+
+    def test_init_sets_critical_init_body_attributes(
+        self, integration_config, monkeypatch
+    ) -> None:
+        """``InstanceManager.__init__`` must set every attribute the
+        orphaned init body would have set.
+
+        Spot-checks the attributes most likely to silently regress on a
+        future splice bug. Each attribute lives in the original init
+        body (between ``self._write_guard = WritePauseGuard()`` and
+        ``self._init_warmup_pool()`` in the pre-1d5144f4 file). If
+        any is missing, the splice regression is back.
+        """
+        from daemon.migrations.runner import MigrationRunner
+        monkeypatch.setattr(
+            MigrationRunner,
+            "run_pending_migrations",
+            lambda self: [],
+        )
+
+        from daemon.manager import InstanceManager
+
+        manager = InstanceManager(integration_config)
+
+        # Each entry: (attr, expected_not_none_or_specific_value)
+        # These are the attributes the orphaned init body sets. If
+        # ANY is missing the splice regression has returned.
+        critical_attrs = [
+            "_compactor",  # ContextCompactor (or None if disabled)
+            "instances",  # dict[str, tuple[CompiledStateGraph, str]]
+            "_graph_tasks",  # dict[str, asyncio.Task]
+            "_original_timestamps",  # dict[str, str]
+            "_emitted_message_content",  # dict[str, str]
+            "_last_context_usage",  # dict[str, int]
+            "_llm_semaphore",  # asyncio.Semaphore
+            "_engine",  # SQLAlchemy Engine
+            "_credential_manager",
+            "_db_connection_repository",
+            "_db_pool_manager",
+            "_infra_repository",
+            "_shared_meta_kv_repo",
+            "_queue_repository",
+            "_report_injection_repo",
+            "_instance_ui_prefs_repo",
+            "_request_registry",
+            "_notification_broadcaster",
+            "_execution_gate",
+            "_background_tasks",
+            "_maintenance_service",
+            "_child_reports_service",
+            "_error_reporting_service",
+            "_messaging_service",
+            "_lifecycle_service",
+            "_completion_registry",  # THE critical one for boot crash
+        ]
+        missing = [a for a in critical_attrs if not hasattr(manager, a)]
+        assert not missing, (
+            f"InstanceManager.__init__ did not set the following "
+            f"init-body attributes (splice regression): {missing}. "
+            f"On broken HEAD (commit 1d5144f4) the entire init body "
+            f"after self._write_guard = WritePauseGuard() was orphaned "
+            f"inside _session_scope after its yield, so these "
+            f"attributes were never assigned. The boot crash at "
+            f"manager.initialize() line 2049 (AttributeError: "
+            f"'_completion_registry') is the user-visible symptom."
+        )
+
+    def test_init_calls_get_completion_registry(
+        self, integration_config, monkeypatch
+    ) -> None:
+        """``__init__`` must invoke ``get_completion_registry()`` and
+        bind the result to ``self._completion_registry``.
+
+        This is the line that, on broken HEAD, lived as dead code
+        after ``_session_scope``'s ``yield`` (a contextmanager generator
+        never re-enters post-yield code). The assertion verifies both
+        the side-effect (the global registry is wired) and the
+        attribute binding.
+        """
+        from daemon.migrations.runner import MigrationRunner
+        from daemon.services.completion_registry import get_completion_registry
+
+        monkeypatch.setattr(
+            MigrationRunner,
+            "run_pending_migrations",
+            lambda self: [],
+        )
+
+        # Capture the registry reference the test would resolve — this
+        # is what __init__ should bind.
+        expected_registry = get_completion_registry()
+
+        from daemon.manager import InstanceManager
+
+        manager = InstanceManager(integration_config)
+
+        assert manager._completion_registry is expected_registry, (
+            "__init__ must bind self._completion_registry to the result "
+            "of get_completion_registry() — on broken HEAD this binding "
+            "was orphaned inside _session_scope (dead code after yield), "
+            "so the attribute is missing entirely."
+        )

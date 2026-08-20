@@ -370,237 +370,6 @@ class InstanceManager:
         # this guard; pause_writes() blocks new sessions and drains the
         # in-flight ones so the migration can swap engines safely.
         self._write_guard = WritePauseGuard()
-
-    def _has_non_terminal_injection_for(self, report_message_id: str) -> bool:
-        """Return ``True`` if a non-terminal ``report_injections`` row exists for ``report_message_id``.
-
-        Phase 2 (pause-report-recovery task 2.3) helper for the FM-1
-        type-aware guard. Looks up the
-        ``ReportInjection.report_message_id`` column and returns
-        ``True`` when the row's state is PENDING or DEFERRED (both
-        non-terminal — the obligation is still owed).
-
-        Handles the ``report_message_id IS NULL`` shape (C4) by
-        returning ``False`` — a NULL-keyed row is a Site-1 marker
-        shape, and the FM-1 guard's exemption predicate explicitly
-        covers ONLY rows WITH an artifact. NULL-keyed rows are
-        reconciled by the recovery sweep / router (task 2.1+2.2)
-        before the FM-1 loop sees them.
-
-        Lookup-error default (D1, 2026-08-20): a repository
-        exception returns ``True`` (exempt/preserve) — a transient
-        DB error must not let FM-1 kill a PENDING PROCESS_REPORT
-        task. See the inline D1 comment for the rationale.
-
-        Args:
-            report_message_id: The ``message_id`` of the candidate
-                ``completion_report`` ``MessageQueue`` row.
-
-        Returns:
-            ``True`` when a PENDING or DEFERRED
-            ``report_injections`` row references this
-            ``report_message_id``, OR when the lookup itself failed
-            (D1 safe default — preserve the task); ``False``
-            otherwise (including the NULL-keyed shape and the
-            terminal INJECTED / TASK_DELIVERED shape).
-        """
-        from .repositories.report_injection.models import (
-            ReportInjectionState,
-        )
-
-        if report_message_id is None:
-            return False
-        try:
-            row = self._report_injection_repo.find_row_by_report_message_id(
-                report_message_id
-            )
-        except Exception as exc:  # noqa: BLE001 — FM-1 exemption predicate
-            # D1 (2026-08-20, leader-decided): lookup error → EXEMPT
-            # (return True). Passive+recoverable beats destructive+
-            # recoverable — the pre-D1 ``return False`` let the FM-1
-            # loop KILL the PENDING PROCESS_REPORT task on a
-            # transient DB error (recreating the incident variant
-            # (c) freeze). A false exemption merely leaves the task
-            # to the worker pool / claim lane, which is exactly
-            # where a healthy row would be delivered anyway.
-            logger.warning(
-                f"_has_non_terminal_injection_for: lookup failed "
-                f"message_id={report_message_id[:8]}...: "
-                f"{type(exc).__name__}: {exc} — defaulting to "
-                f"EXEMPT (True) so FM-1 preserves the task"
-            )
-            return True
-        if row is None:
-            return False
-        return row.state in (
-            ReportInjectionState.PENDING.value,
-            ReportInjectionState.DEFERRED.value,
-        )
-
-    async def _is_parent_terminal(self, parent_id: str) -> bool | None:
-        """Return ``True`` if parent is NON-terminal, ``False`` if terminal, ``None`` if missing.
-
-        Phase 2 (pause-report-recovery task 2.1) helper for the
-        router's deferred-recovery step. Used to decide whether the
-        terminal-parent revival path is needed before re-entering
-        child completion.
-
-        This is an ``async def`` because the router awaits the
-        result (``await self._is_parent_terminal(...)`` at
-        ``resume_processing_job``). The repository lookup is a
-        blocking sync call, so it runs in a worker thread via
-        ``asyncio.to_thread`` — calling ``self._instance_repository.get``
-        directly on the loop would block the event loop.
-
-        Args:
-            parent_id: The parent instance ID to inspect.
-
-        Returns:
-            ``True`` — parent is RUNNING / IDLE / WAITING / etc.
-            (the natural completion path will drain the report).
-            ``False`` — parent is COMPLETED / TERMINATED / ERROR /
-            FAILED (revival required before re-entry).
-            ``None`` — parent row missing (caller skips the
-            recovery).
-        """
-        try:
-            inst = await asyncio.to_thread(
-                self._instance_repository.get, parent_id
-            )
-        except Exception as exc:  # noqa: BLE001 — lookup-fail → None (caller skips)
-            logger.warning(
-                f"_is_parent_terminal: lookup failed "
-                f"parent={parent_id[:8]}...: "
-                f"{type(exc).__name__}: {exc}"
-            )
-            return None
-        if inst is None:
-            return None
-        return inst.status not in (
-            InstanceStatus.COMPLETED.value,
-            InstanceStatus.TERMINATED.value,
-            InstanceStatus.ERROR.value,
-            InstanceStatus.FAILED.value,
-        )
-
-    def _get_event_loop(self) -> asyncio.AbstractEventLoop:
-        """Return the manager's asyncio loop (sync accessor).
-
-        Phase 2 helper for the periodic recovery sweep (which runs
-        on a plain ``threading.Thread`` and needs the canonical
-        loop to schedule async coroutines via
-        ``asyncio.run_coroutine_threadsafe``).
-
-        F5 (2026-08-20): loop-fallback hardening — ported from
-        the recovery service's hardened copy
-        (``daemon/services/report_delivery_recovery.py`` Y3, also
-        same day). Both copies now share the same contract: when
-        the manager's stored loop is unset / closed AND
-        ``asyncio.get_event_loop()`` raises ``RuntimeError``,
-        this helper logs a WARNING and raises ``RuntimeError``
-        (NOT ``asyncio.new_event_loop()``).
-
-        Why drop the ``new_event_loop`` fallback: a brand-new
-        loop is NOT the manager's canonical loop. Scheduling
-        onto it from a worker thread while blocking on
-        ``.result(timeout=8.0)`` is a confusing failure mode —
-        a fresh, never-running loop would just hang the worker
-        on ``.result()`` until the 8s budget expires, masking
-        the real problem (the daemon loop is closed / absent).
-        A caller that genuinely needs a loop MUST wire one —
-        silent fallback hides the misconfiguration.
-
-        Returns:
-            The manager's loop (``self._loop``, set during
-            ``initialize()``) when it is non-None and not
-            closed. Otherwise the live ``asyncio.get_event_loop()``
-            if one is set on this thread. Otherwise raises
-            ``RuntimeError`` (caller is expected to absorb the
-            error in its per-row ``except Exception`` and retry
-            next sweep cycle).
-
-        Caller audit (F5, 2026-08-20) — every production caller
-        already wraps ``.result(timeout=8.0)`` in
-        ``except Exception``, so the new ``RuntimeError`` is
-        absorbed naturally and the row is bumped to
-        ``out.errors``:
-
-        * ``daemon/manager.py`` ``_reenter_completion_via_loop``
-          (~line 6434) — ``try / except Exception`` absorbs
-          the new RuntimeError.
-        * ``daemon/manager.py`` ``_fetch_subshape_a_content_sync``
-          (~line 6696) — ``try / except Exception`` absorbs
-          the new RuntimeError.
-
-        Caller test bindings:
-
-        * ``tests/unit/test_resume_router_deferred_recovery.py``
-          line 1230 sets ``holder._loop`` to
-          ``asyncio.get_running_loop()`` (the test's live loop),
-          so the ``loop is not None and not loop.is_closed()``
-          branch returns immediately. No regression.
-        * ``tests/unit/test_resume_router_deferred_recovery.py``
-          line 491 sets ``manager._loop = None`` but does NOT
-          actually invoke ``_get_event_loop`` (the test path
-          uses ``manager._session_scope()`` directly), so the
-          hardening branch is not exercised.
-        * ``tests/unit/test_report_delivery_recovery_service.py``
-          exercises the recovery service's OWN hardened copy
-          (``service._get_event_loop``), not the manager's —
-          independent path, no regression.
-        """
-        loop = getattr(self, "_loop", None)
-        if loop is not None:
-            if not loop.is_closed():
-                return loop
-            # Manager's stored loop is closed (shutdown /
-            # restart-replay path). Fall through to
-            # ``asyncio.get_event_loop()`` and accept that
-            # the closed-loop branch is now observable — if
-            # the live-resolution path also fails, the
-            # terminal branch raises.
-            logger.warning(
-                "InstanceManager._get_event_loop: manager._loop "
-                "is closed — falling back to "
-                "asyncio.get_event_loop()"
-            )
-        try:
-            return asyncio.get_event_loop()
-        except RuntimeError:
-            # Terminal branch: no live loop available. The
-            # caller MUST retry on the next cycle — DO NOT
-            # create a fresh loop (Y3: a fresh loop masks the
-            # closed-loop state behind a confusing dead-lock
-            # on ``.result()``). Log a WARNING for operator
-            # visibility and raise ``RuntimeError``.
-            logger.warning(
-                "InstanceManager._get_event_loop: no live event "
-                "loop available (manager._loop closed or unset, "
-                "no running loop in this thread); the caller "
-                "will retry on the next sweep cycle"
-            )
-            raise RuntimeError(
-                "report-delivery recovery: no live event loop "
-                "available (manager._loop closed and no running "
-                "loop in caller thread)"
-            ) from None
-
-    @contextlib.contextmanager
-    def _session_scope(self):
-        """Yield a ``WriteGuardSession`` over the manager's engine.
-
-        Phase 2 helper (pause-report-recovery). Wraps a SQLModel
-        ``Session`` with the write-pause guard so the Phase 2
-        reconciliation / revival paths share the same gate the rest
-        of the daemon uses. Closes the session on exit.
-        """
-        session = Session(self._engine)
-        try:
-            with WriteGuardSession(session, self._write_guard) as guarded:
-                yield guarded
-        finally:
-            session.close()
-
         # Initialize context compactor
         if self.config.compaction.enabled:
             # ``base_url_backup`` reaches the HA facade through
@@ -1459,6 +1228,237 @@ class InstanceManager:
 
         # Initialize MCP warm-up pool (non-blocking background warmup)
         self._init_warmup_pool()
+
+    def _has_non_terminal_injection_for(self, report_message_id: str) -> bool:
+        """Return ``True`` if a non-terminal ``report_injections`` row exists for ``report_message_id``.
+
+        Phase 2 (pause-report-recovery task 2.3) helper for the FM-1
+        type-aware guard. Looks up the
+        ``ReportInjection.report_message_id`` column and returns
+        ``True`` when the row's state is PENDING or DEFERRED (both
+        non-terminal — the obligation is still owed).
+
+        Handles the ``report_message_id IS NULL`` shape (C4) by
+        returning ``False`` — a NULL-keyed row is a Site-1 marker
+        shape, and the FM-1 guard's exemption predicate explicitly
+        covers ONLY rows WITH an artifact. NULL-keyed rows are
+        reconciled by the recovery sweep / router (task 2.1+2.2)
+        before the FM-1 loop sees them.
+
+        Lookup-error default (D1, 2026-08-20): a repository
+        exception returns ``True`` (exempt/preserve) — a transient
+        DB error must not let FM-1 kill a PENDING PROCESS_REPORT
+        task. See the inline D1 comment for the rationale.
+
+        Args:
+            report_message_id: The ``message_id`` of the candidate
+                ``completion_report`` ``MessageQueue`` row.
+
+        Returns:
+            ``True`` when a PENDING or DEFERRED
+            ``report_injections`` row references this
+            ``report_message_id``, OR when the lookup itself failed
+            (D1 safe default — preserve the task); ``False``
+            otherwise (including the NULL-keyed shape and the
+            terminal INJECTED / TASK_DELIVERED shape).
+        """
+        from .repositories.report_injection.models import (
+            ReportInjectionState,
+        )
+
+        if report_message_id is None:
+            return False
+        try:
+            row = self._report_injection_repo.find_row_by_report_message_id(
+                report_message_id
+            )
+        except Exception as exc:  # noqa: BLE001 — FM-1 exemption predicate
+            # D1 (2026-08-20, leader-decided): lookup error → EXEMPT
+            # (return True). Passive+recoverable beats destructive+
+            # recoverable — the pre-D1 ``return False`` let the FM-1
+            # loop KILL the PENDING PROCESS_REPORT task on a
+            # transient DB error (recreating the incident variant
+            # (c) freeze). A false exemption merely leaves the task
+            # to the worker pool / claim lane, which is exactly
+            # where a healthy row would be delivered anyway.
+            logger.warning(
+                f"_has_non_terminal_injection_for: lookup failed "
+                f"message_id={report_message_id[:8]}...: "
+                f"{type(exc).__name__}: {exc} — defaulting to "
+                f"EXEMPT (True) so FM-1 preserves the task"
+            )
+            return True
+        if row is None:
+            return False
+        return row.state in (
+            ReportInjectionState.PENDING.value,
+            ReportInjectionState.DEFERRED.value,
+        )
+
+    async def _is_parent_terminal(self, parent_id: str) -> bool | None:
+        """Return ``True`` if parent is NON-terminal, ``False`` if terminal, ``None`` if missing.
+
+        Phase 2 (pause-report-recovery task 2.1) helper for the
+        router's deferred-recovery step. Used to decide whether the
+        terminal-parent revival path is needed before re-entering
+        child completion.
+
+        This is an ``async def`` because the router awaits the
+        result (``await self._is_parent_terminal(...)`` at
+        ``resume_processing_job``). The repository lookup is a
+        blocking sync call, so it runs in a worker thread via
+        ``asyncio.to_thread`` — calling ``self._instance_repository.get``
+        directly on the loop would block the event loop.
+
+        Args:
+            parent_id: The parent instance ID to inspect.
+
+        Returns:
+            ``True`` — parent is RUNNING / IDLE / WAITING / etc.
+            (the natural completion path will drain the report).
+            ``False`` — parent is COMPLETED / TERMINATED / ERROR /
+            FAILED (revival required before re-entry).
+            ``None`` — parent row missing (caller skips the
+            recovery).
+        """
+        try:
+            inst = await asyncio.to_thread(
+                self._instance_repository.get, parent_id
+            )
+        except Exception as exc:  # noqa: BLE001 — lookup-fail → None (caller skips)
+            logger.warning(
+                f"_is_parent_terminal: lookup failed "
+                f"parent={parent_id[:8]}...: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            return None
+        if inst is None:
+            return None
+        return inst.status not in (
+            InstanceStatus.COMPLETED.value,
+            InstanceStatus.TERMINATED.value,
+            InstanceStatus.ERROR.value,
+            InstanceStatus.FAILED.value,
+        )
+
+    def _get_event_loop(self) -> asyncio.AbstractEventLoop:
+        """Return the manager's asyncio loop (sync accessor).
+
+        Phase 2 helper for the periodic recovery sweep (which runs
+        on a plain ``threading.Thread`` and needs the canonical
+        loop to schedule async coroutines via
+        ``asyncio.run_coroutine_threadsafe``).
+
+        F5 (2026-08-20): loop-fallback hardening — ported from
+        the recovery service's hardened copy
+        (``daemon/services/report_delivery_recovery.py`` Y3, also
+        same day). Both copies now share the same contract: when
+        the manager's stored loop is unset / closed AND
+        ``asyncio.get_event_loop()`` raises ``RuntimeError``,
+        this helper logs a WARNING and raises ``RuntimeError``
+        (NOT ``asyncio.new_event_loop()``).
+
+        Why drop the ``new_event_loop`` fallback: a brand-new
+        loop is NOT the manager's canonical loop. Scheduling
+        onto it from a worker thread while blocking on
+        ``.result(timeout=8.0)`` is a confusing failure mode —
+        a fresh, never-running loop would just hang the worker
+        on ``.result()`` until the 8s budget expires, masking
+        the real problem (the daemon loop is closed / absent).
+        A caller that genuinely needs a loop MUST wire one —
+        silent fallback hides the misconfiguration.
+
+        Returns:
+            The manager's loop (``self._loop``, set during
+            ``initialize()``) when it is non-None and not
+            closed. Otherwise the live ``asyncio.get_event_loop()``
+            if one is set on this thread. Otherwise raises
+            ``RuntimeError`` (caller is expected to absorb the
+            error in its per-row ``except Exception`` and retry
+            next sweep cycle).
+
+        Caller audit (F5, 2026-08-20) — every production caller
+        already wraps ``.result(timeout=8.0)`` in
+        ``except Exception``, so the new ``RuntimeError`` is
+        absorbed naturally and the row is bumped to
+        ``out.errors``:
+
+        * ``daemon/manager.py`` ``_reenter_completion_via_loop``
+          (~line 6434) — ``try / except Exception`` absorbs
+          the new RuntimeError.
+        * ``daemon/manager.py`` ``_fetch_subshape_a_content_sync``
+          (~line 6696) — ``try / except Exception`` absorbs
+          the new RuntimeError.
+
+        Caller test bindings:
+
+        * ``tests/unit/test_resume_router_deferred_recovery.py``
+          line 1230 sets ``holder._loop`` to
+          ``asyncio.get_running_loop()`` (the test's live loop),
+          so the ``loop is not None and not loop.is_closed()``
+          branch returns immediately. No regression.
+        * ``tests/unit/test_resume_router_deferred_recovery.py``
+          line 491 sets ``manager._loop = None`` but does NOT
+          actually invoke ``_get_event_loop`` (the test path
+          uses ``manager._session_scope()`` directly), so the
+          hardening branch is not exercised.
+        * ``tests/unit/test_report_delivery_recovery_service.py``
+          exercises the recovery service's OWN hardened copy
+          (``service._get_event_loop``), not the manager's —
+          independent path, no regression.
+        """
+        loop = getattr(self, "_loop", None)
+        if loop is not None:
+            if not loop.is_closed():
+                return loop
+            # Manager's stored loop is closed (shutdown /
+            # restart-replay path). Fall through to
+            # ``asyncio.get_event_loop()`` and accept that
+            # the closed-loop branch is now observable — if
+            # the live-resolution path also fails, the
+            # terminal branch raises.
+            logger.warning(
+                "InstanceManager._get_event_loop: manager._loop "
+                "is closed — falling back to "
+                "asyncio.get_event_loop()"
+            )
+        try:
+            return asyncio.get_event_loop()
+        except RuntimeError:
+            # Terminal branch: no live loop available. The
+            # caller MUST retry on the next cycle — DO NOT
+            # create a fresh loop (Y3: a fresh loop masks the
+            # closed-loop state behind a confusing dead-lock
+            # on ``.result()``). Log a WARNING for operator
+            # visibility and raise ``RuntimeError``.
+            logger.warning(
+                "InstanceManager._get_event_loop: no live event "
+                "loop available (manager._loop closed or unset, "
+                "no running loop in this thread); the caller "
+                "will retry on the next sweep cycle"
+            )
+            raise RuntimeError(
+                "report-delivery recovery: no live event loop "
+                "available (manager._loop closed and no running "
+                "loop in caller thread)"
+            ) from None
+
+    @contextlib.contextmanager
+    def _session_scope(self):
+        """Yield a ``WriteGuardSession`` over the manager's engine.
+
+        Phase 2 helper (pause-report-recovery). Wraps a SQLModel
+        ``Session`` with the write-pause guard so the Phase 2
+        reconciliation / revival paths share the same gate the rest
+        of the daemon uses. Closes the session on exit.
+        """
+        session = Session(self._engine)
+        try:
+            with WriteGuardSession(session, self._write_guard) as guarded:
+                yield guarded
+        finally:
+            session.close()
+
 
     def get_blueprint_write_service(
         self,
