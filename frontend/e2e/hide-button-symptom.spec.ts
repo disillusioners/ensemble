@@ -26,9 +26,8 @@
  *                               re-shows the overlay without
  *                               navigating.
  *   S3  ALT+` HOTKEY PARITY   — the global workspace hotkey. Important
- *                               contract nuance: per app.ts:618-632 the
- *                               hotkey toggles the WORKSPACE overlay
- *                               (not the chat). Document observed
+ *                               contract nuance: the hotkey toggles
+ *                               the WORKSPACE overlay (not the chat). Document observed
  *                               behavior precisely so the report can
  *                               confirm the parity-or-divergence from
  *                               the button path.
@@ -62,8 +61,8 @@ test.describe('Hide Button - Original Bug Symptom E2E', () => {
   const S4_PROJECT = { name: `e2e-sym-s4-${TIMESTAMP}`, project_id: '' };
   // S5/S6/S7 (workspace-toggle acceptance + dead-click + chat-wins) need
   // a real, project-scoped instance: the workspace overlay and the
-  // global Alt+` hotkey both gate on activeProjectId !== 'all' (see
-  // app.ts:818-823), and the "View workspace" button lives on the
+  // global Alt+` hotkey (gated on activeProjectId !== 'all' && !== null)
+  // and the "View workspace" button lives on the
   // project tab bar that opens automatically when the URL lands on a
   // /projects/:pid/instances/:iid detail route (syncDetailVisibility
   // L786-788).
@@ -275,7 +274,7 @@ test.describe('Hide Button - Original Bug Symptom E2E', () => {
    * via the project tab bar). The DOM exposes the active project id
    * via `.tab.active .tab-name` text; on a freshly-opened project
    * (via the URL) the name will mirror the project id (a UUID)
-   * because ``addTab`` saves ``name: projectId`` per app.ts:787.
+   * because ``addTab`` saves ``name: projectId``.
    *
    * `workspaceDisplay` is 'absent' for the rare case the element has
    * been removed from the DOM (defensive — current templates never do).
@@ -306,7 +305,7 @@ test.describe('Hide Button - Original Bug Symptom E2E', () => {
   /**
    * Locate the "View workspace" button — the `.workspace-btn` on the
    * currently ACTIVE project tab. We scope by `.tab.active` (NOT by
-   * tab-name text) because ``addTab`` in app.ts:787 is called from
+   * tab-name text) because ``addTab`` is called from
    * ``syncDetailVisibility`` with ``{ project_id, name: projectId }``
    * — the human-readable project name (e.g. ``"e2e-sym-s5-…-ws-toggle"``)
    * is never written into the saved tab, and any rename that comes
@@ -325,7 +324,7 @@ test.describe('Hide Button - Original Bug Symptom E2E', () => {
    * Selector is class-scoped to `app-workspace` so it never
    * collides with the header toggle. The component renders this
    * button with class `.hide-button` and `data-testid="workspace-hide"`
-   * per app.ts:144-149 (workspace.component.ts).
+   * per the workspace component template (workspace.component.ts).
    */
   function workspaceOverlayHideBtn(page: Page) {
     return page.locator('app-workspace .hide-button').first();
@@ -409,18 +408,31 @@ test.describe('Hide Button - Original Bug Symptom E2E', () => {
   });
 
   // ==========================================================================
-  // S1: HIDE BUTTON RE-SHOW — the acceptance path.
+  // S1: CHAT HIDE/RE-SHOW ROUND-TRIP — the acceptance path (Round 3
+  // re-pin).
   // ==========================================================================
-  test('S1: button hide → re-show preserves same instance + messages', async ({ page }) => {
+  // Round 3: the header button is the WORKSPACE EDITOR toggle ONLY.
+  // The chat hide/re-show via the header button is GONE. The chat
+  // visibility is URL-driven:
+  //   - Navigate away from the detail URL (e.g. /jobs) closes the chat
+  //     via syncDetailVisibility.
+  //   - Click the Instances nav link (which resolves to the cached
+  //     detail URL via lastDetailRoute) re-shows the chat.
+  //
+  // The canonical re-pin: navigate to /jobs (chat hides), click
+  // Instances nav link (chat re-shows), assert the same instance +
+  // messages are back. The cached id + state survive across the
+  // URL cycle — the same contract the OLD S1 test pinned.
+  //
+  // Acceptance: the pre-hide snapshot vs. the post-hide/post-reshow
+  // snapshot must match (same instance id, same fingerprint, same
+  // message count, same agent name).
+  // ==========================================================================
+  test('S1: URL nav hides chat → Instances nav link re-shows the same instance + messages', async ({ page }) => {
     const consoleErrors: string[] = [];
     const pageErrors: string[] = [];
     page.on('console', (msg: ConsoleMessage) => {
       if (msg.type() === 'error') {
-        // Capture BOTH the text and the URL (msg.location().url is
-        // set even when the text is generic — e.g. "Failed to load
-        // resource: the server responded with a status of 404"). The
-        // URL is what `isFilteredNoise` discriminates on for the
-        // workspace API 404s, /vscode-folder, /api/workspace/, …
         const location = msg.location();
         const loc = location && location.url ? ` @ ${location.url}` : '';
         consoleErrors.push(`[${msg.type()}] ${msg.text()}${loc}`);
@@ -444,10 +456,7 @@ test.describe('Hide Button - Original Bug Symptom E2E', () => {
     await card.click();
     await page.waitForURL(/\/projects\/[^/?]+\/instances\/[^/?]+$/, { timeout: 10000 });
 
-    // Wait for the chat to render. The host is lazy-mounted on first
-    // detail open (BUG 3 / lazyChatMountEffect); the second click on
-    // the same id reuses the existing host. The first open's mount is
-    // a dynamic import so we wait for the visible body to materialize.
+    // Wait for the chat to render.
     await expect(async () => {
       const display = await page.locator('app-chat').evaluate(
         (el) => getComputedStyle(el).display,
@@ -455,33 +464,24 @@ test.describe('Hide Button - Original Bug Symptom E2E', () => {
       expect(display).not.toBe('none');
     }).toPass({ timeout: 15000 });
 
-    // Wait for the chat header to populate (agent info is fetched
-    // async; before it lands, the header shows the placeholder "Agent").
+    // Wait for the chat header to populate.
     await expect(async () => {
       const snap = await readChatSnapshot(page);
       expect(snap.agentNameText).not.toBe('Agent');
       expect(snap.agentNameText.length).toBeGreaterThan(0);
     }).toPass({ timeout: 15000 });
 
-    // Wait for the seed message to appear in the chat. The chat shows
-    // a synthetic system message first, so we look up by content match
-    // rather than first-row text.
-    const seedMatch = await waitForMessageContaining(page, SEED_MESSAGE);
+    // Wait for the seed message to appear in the chat.
+    await waitForMessageContaining(page, SEED_MESSAGE);
 
     // Snapshot BEFORE hide.
     const beforeSnap = await readChatSnapshot(page);
     const detailUrl = page.url();
-    // The 'all' tab is the default — the project segment in the URL
-    // may be 'all' (default project tab) rather than a real project
-    // id. The important thing is the URL is a detail route (last
-    // segment is the instance id we created). Match the path portion
-    // of the full URL.
     const detailPath = new URL(detailUrl).pathname;
     expect(detailPath).toMatch(/^\/projects\/[^/?]+\/instances\/[^/?]+$/);
     expect(detailPath).toContain(`/instances/${S1_INSTANCE}`);
     expect(beforeSnap.chatDisplay).not.toBe('none');
     expect(beforeSnap.instanceIdText.length).toBeGreaterThan(0);
-    // The seed message must be present in the pre-hide snapshot.
     expect(beforeSnap.fingerprint).toContain(SEED_MESSAGE);
     expect(beforeSnap.messageCount).toBeGreaterThanOrEqual(1);
 
@@ -490,22 +490,12 @@ test.describe('Hide Button - Original Bug Symptom E2E', () => {
       fullPage: true,
     });
 
-    // The hide button only renders when anyOverlayVisible is true
-    // (workspace / plan / detail / hidden-but-recoverable). With the
-    // detail overlay up it MUST be there.
-    const hideBtn = page.locator('.overlay-hide-btn');
-    await expect(hideBtn).toBeVisible({ timeout: 10000 });
-    // Default state (overlay visible) icon = 'visibility_off',
-    // label = 'Hide overlay'.
-    const hideAriaBefore = await hideBtn.getAttribute('aria-label');
-    expect(hideAriaBefore).toBe('Hide overlay');
-
-    // ── Click #1: hide ──
-    await hideBtn.click();
-
-    // The URL MUST stay on the detail route (the whole point of the
-    // fix — no more "/instances" navigation).
-    expect(page.url()).toBe(detailUrl);
+    // Round 3: NO hide button click for chat. The chat hide is via
+    // URL navigation. Navigate to /jobs via the Jobs nav link.
+    const jobsNav = page.locator('a.nav-link', { hasText: /^Jobs$/ }).first();
+    await expect(jobsNav).toBeVisible({ timeout: 5000 });
+    await jobsNav.click();
+    await page.waitForURL(/\/jobs\/?$/, { timeout: 10000 });
 
     // The chat overlay MUST be display:none.
     await expect(async () => {
@@ -515,11 +505,14 @@ test.describe('Hide Button - Original Bug Symptom E2E', () => {
       expect(display).toBe('none');
     }).toPass({ timeout: 5000 });
 
-    // The hide button STAYS visible (icon flipped to 'visibility',
-    // label 'Show overlay' — the recoverable affordance).
-    await expect(hideBtn).toBeVisible({ timeout: 5000 });
-    const hideAriaHidden = await hideBtn.getAttribute('aria-label');
-    expect(hideAriaHidden).toBe('Show overlay');
+    // The header hide button is NOT rendered — Round 3: the
+    // workspace editor toggle is invisible because the editor is
+    // hidden AND unbound (workspaceProjectId is null on a fresh
+    // tab context). The button visibility would only be true if the
+    // user previously opened the workspace editor.
+    const hideBtn = page.locator('.overlay-hide-btn');
+    const headerHideVisible = await hideBtn.isVisible().catch(() => false);
+    expect(headerHideVisible).toBe(false);
 
     // Cached id survives (the localStorage view-state cache).
     const storedHidden = await page.evaluate(() =>
@@ -534,10 +527,11 @@ test.describe('Hide Button - Original Bug Symptom E2E', () => {
       fullPage: true,
     });
 
-    // ── Click #2: re-show via the SAME button ──
-    await hideBtn.click();
-
-    // URL stays put.
+    // Re-show via the Instances nav link (Round 3 chat re-show path).
+    const instancesNav = page.locator('a.nav-link', { hasText: /^Instances$/ }).first();
+    await expect(instancesNav).toBeVisible();
+    await instancesNav.click();
+    await page.waitForURL(/\/projects\/[^/?]+\/instances\/[^/?]+$/, { timeout: 10000 });
     expect(page.url()).toBe(detailUrl);
 
     // Overlay re-shown — display:flex.
@@ -551,8 +545,8 @@ test.describe('Hide Button - Original Bug Symptom E2E', () => {
     // The same instance + same messages must be back. The chat
     // component is a single lazily-mounted host (created once, kept
     // alive forever), so its component-local state — including the
-    // messages() signal — survives the visibility flip. We compare
-    // the full fingerprint of all messages (role + text) — strict
+    // messages() signal — survives the URL cycle. We compare the
+    // full fingerprint of all messages (role + text) — strict
     // equality proves the SAME messages are back, not just the same
     // count.
     await expect(async () => {
@@ -562,10 +556,6 @@ test.describe('Hide Button - Original Bug Symptom E2E', () => {
       expect(after.instanceIdText).toBe(beforeSnap.instanceIdText);
       expect(after.agentNameText).toBe(beforeSnap.agentNameText);
     }).toPass({ timeout: 10000 });
-
-    // Icon/label flipped back to the default state.
-    const hideAriaReshown = await hideBtn.getAttribute('aria-label');
-    expect(hideAriaReshown).toBe('Hide overlay');
 
     // The cached id in localStorage is unchanged.
     const storedAfter = await page.evaluate(() =>
@@ -586,18 +576,27 @@ test.describe('Hide Button - Original Bug Symptom E2E', () => {
   });
 
   // ==========================================================================
-  // S2: NAV-LINK RE-SHOW — the dead-click guard path.
+  // S2: NAV-LINK RE-SHOW — the dead-click guard path (Round 3
+  // re-pin).
   // ==========================================================================
-  test('S2: button hide → Instances nav-link click re-shows (URL unchanged)', async ({ page }) => {
+  // Round 3: the header button no longer hides the chat. The chat
+  // hide is via URL navigation. The chat re-show path is the
+  // Instances nav-link click (lastDetailRoute resolves to the
+  // cached detail URL).
+  //
+  // The dead-click guard at onInstancesNavClick is unchanged — it
+  // still fires when the user clicks the Instances nav link while
+  // on a DETAIL URL with a cached id (the URL routerLink resolves
+  // to the same URL, the dead-click guard preventDefault's and
+  // re-shows). Round 3 only changed what triggers the "hidden
+  // state" — the URL navigation now plays the role the button used
+  // to.
+  // ==========================================================================
+  test('S2: URL nav hides chat → Instances nav-link click re-shows (URL unchanged)', async ({ page }) => {
     const consoleErrors: string[] = [];
     const pageErrors: string[] = [];
     page.on('console', (msg: ConsoleMessage) => {
       if (msg.type() === 'error') {
-        // Capture BOTH the text and the URL (msg.location().url is
-        // set even when the text is generic — e.g. "Failed to load
-        // resource: the server responded with a status of 404"). The
-        // URL is what `isFilteredNoise` discriminates on for the
-        // workspace API 404s, /vscode-folder, /api/workspace/, …
         const location = msg.location();
         const loc = location && location.url ? ` @ ${location.url}` : '';
         consoleErrors.push(`[${msg.type()}] ${msg.text()}${loc}`);
@@ -625,7 +624,6 @@ test.describe('Hide Button - Original Bug Symptom E2E', () => {
       );
       expect(display).not.toBe('none');
     }).toPass({ timeout: 15000 });
-    // Wait for the chat header's agent name to populate (async fetch).
     await expect(async () => {
       const snap = await readChatSnapshot(page);
       expect(snap.agentNameText).not.toBe('Agent');
@@ -636,11 +634,15 @@ test.describe('Hide Button - Original Bug Symptom E2E', () => {
     const beforeSnap = await readChatSnapshot(page);
     const detailUrl = page.url();
 
-    // Hide.
-    const hideBtn = page.locator('.overlay-hide-btn');
-    await expect(hideBtn).toBeVisible({ timeout: 10000 });
-    await hideBtn.click();
-    expect(page.url()).toBe(detailUrl);
+    // Round 3 absence pin (same shape as S1's): chat visible alone
+    // on the detail page → header button ABSENT.
+    await expect(page.locator('.overlay-hide-btn')).toHaveCount(0);
+
+    // Chat hide via URL navigation (Jobs nav link).
+    const jobsNav = page.locator('a.nav-link', { hasText: /^Jobs$/ }).first();
+    await expect(jobsNav).toBeVisible({ timeout: 5000 });
+    await jobsNav.click();
+    await page.waitForURL(/\/jobs\/?$/, { timeout: 10000 });
     await expect(async () => {
       const display = await page.locator('app-chat').evaluate(
         (el) => getComputedStyle(el).display,
@@ -648,11 +650,13 @@ test.describe('Hide Button - Original Bug Symptom E2E', () => {
       expect(display).toBe('none');
     }).toPass({ timeout: 5000 });
 
-    // Click the "Instances" nav link — dead-click guard must
-    // preventDefault and re-show the overlay directly. URL stays.
+    // Click the "Instances" nav link — lastDetailRoute resolves to
+    // the cached detail URL, the router delivers the user there,
+    // and the chat overlay re-shows.
     const instancesNav = page.locator('a.nav-link', { hasText: /^Instances$/ }).first();
     await expect(instancesNav).toBeVisible();
     await instancesNav.click();
+    await page.waitForURL(/\/projects\/[^/?]+\/instances\/[^/?]+$/, { timeout: 10000 });
     expect(page.url()).toBe(detailUrl);
 
     // Overlay re-shown, same instance + same messages.
@@ -873,13 +877,19 @@ test.describe('Hide Button - Original Bug Symptom E2E', () => {
   });
 
   // ==========================================================================
-  // S4: CTRL-CLICK NATIVE NAV — modifier-click fall-through.
+  // S4: CTRL-CLICK NATIVE NAV — modifier-click fall-through (Round 3
+  // re-pin).
   //
   // The Instances nav link's dead-click guard must ONLY intercept a
   // plain left-click. ctrl-click / cmd-click MUST fall through to the
   // browser's native "open in new tab" / "open in new window" handling
-  // (per app.ts:459-463). The chat's identity must be preserved
+  // (per app.ts). The chat's identity must be preserved
   // regardless of which path the browser takes.
+  //
+  // Round 3: the ORIGINAL setup used the header button to hide the
+  // chat. The button is no longer the chat toggle — re-pinned to
+  // navigate to /jobs (via the Jobs nav link) for the hide step.
+  // The dead-click guard test on the nav link is unchanged.
   // ==========================================================================
   test('S4: ctrl-click on Instances nav-link falls through, no silent page-state swallow', async ({
     page,
@@ -889,11 +899,6 @@ test.describe('Hide Button - Original Bug Symptom E2E', () => {
     const pageErrors: string[] = [];
     page.on('console', (msg: ConsoleMessage) => {
       if (msg.type() === 'error') {
-        // Capture BOTH the text and the URL (msg.location().url is
-        // set even when the text is generic — e.g. "Failed to load
-        // resource: the server responded with a status of 404"). The
-        // URL is what `isFilteredNoise` discriminates on for the
-        // workspace API 404s, /vscode-folder, /api/workspace/, …
         const location = msg.location();
         const loc = location && location.url ? ` @ ${location.url}` : '';
         consoleErrors.push(`[${msg.type()}] ${msg.text()}${loc}`);
@@ -920,7 +925,6 @@ test.describe('Hide Button - Original Bug Symptom E2E', () => {
       );
       expect(display).not.toBe('none');
     }).toPass({ timeout: 15000 });
-    // Wait for the chat header's agent name to populate (async fetch).
     await expect(async () => {
       const snap = await readChatSnapshot(page);
       expect(snap.agentNameText).not.toBe('Agent');
@@ -928,11 +932,19 @@ test.describe('Hide Button - Original Bug Symptom E2E', () => {
     }).toPass({ timeout: 15000 });
     await waitForMessageContaining(page, SEED_MESSAGE);
 
-    // Hide via the button first so the dead-click guard would normally
-    // fire (we want to prove the guard does NOT swallow ctrl-click).
-    const hideBtn = page.locator('.overlay-hide-btn');
-    await expect(hideBtn).toBeVisible({ timeout: 10000 });
-    await hideBtn.click();
+    // Round 3 absence pin: chat visible alone on the detail page →
+    // the header button is ABSENT (workspace editor never opened in
+    // this context: showWorkspace=false, workspaceProjectId=null →
+    // anyOverlayVisible=false). This is the user-reported v0.10.5
+    // bug repro shape — a HIDE affordance here would be the bug.
+    await expect(page.locator('.overlay-hide-btn')).toHaveCount(0);
+
+    // Round 3: hide via URL navigation (Jobs nav link) instead of
+    // the header button. The chat is now URL-driven.
+    const jobsNav = page.locator('a.nav-link', { hasText: /^Jobs$/ }).first();
+    await expect(jobsNav).toBeVisible({ timeout: 5000 });
+    await jobsNav.click();
+    await page.waitForURL(/\/jobs\/?$/, { timeout: 10000 });
     const detailUrl = page.url();
     await expect(async () => {
       const display = await page.locator('app-chat').evaluate(
@@ -940,6 +952,20 @@ test.describe('Hide Button - Original Bug Symptom E2E', () => {
       );
       expect(display).toBe('none');
     }).toPass({ timeout: 5000 });
+
+    // Round 3 absence pin: the header hide button is ABSENT on a
+    // non-detail route with no workspace presence (unbound editor +
+    // URL-driven chat). This is the same cold-boot contract S5b's
+    // precondition pins at app boot — asserted here too so S4
+    // independently witnesses the absence (the OLD S4 relied on the
+    // button being visible on /jobs, which the round-3 contract
+    // removed).
+    await expect(page.locator('.overlay-hide-btn')).toHaveCount(0);
+
+    // Navigate back to /instances so the Instances nav link is
+    // visible (it's not on /jobs).
+    await page.goto('/instances');
+    await page.waitForLoadState('domcontentloaded');
 
     // Listen for a new page (popup window) — ctrl-click in many
     // browsers opens a new tab. We watch the BrowserContext for the
@@ -1024,63 +1050,49 @@ test.describe('Hide Button - Original Bug Symptom E2E', () => {
 
   // ==========================================================================
   // S5: WORKSPACE TOGGLE — the acceptance core for the new
-  // `.overlay-hide-btn` affordance. The header button must be a TRUE
-  // pure toggle for the workspace overlay's hidden-but-recoverable
-  // state, mirroring the chat-side toggle that S1–S4 already
-  // validated.
+  // `.overlay-hide-btn` affordance (Round 3 re-pin).
+  //
+  // The header button is the WORKSPACE EDITOR toggle ONLY. The
+  // header button must be a TRUE pure toggle for the workspace
+  // overlay's hidden-but-recoverable state, mirroring the chat's
+  // pure toggle behavior. The chat hide/re-show is no longer the
+  // button's responsibility — re-pinned to navigate to /jobs for
+  // hide, and to click the project tab's "View workspace" button
+  // for re-show (the canonical chat path is the Instances nav-link
+  // dead-click guard, but the project tab button is still here for
+  // the workspace).
   //
   // Behaviors verified (each in its own mini-step):
   //
   //   STEP 1  Open detail (chat visible) → open workspace via
   //           project tab's "View workspace" button → workspace
   //           visible (app-workspace display:flex), header button
-  //           affordance = HIDE (workspace visible takes precedence
-  //           per hideOverlayIcon's branch-1 precedence rule).
+  //           affordance = "Hide editor" (workspace visible).
   //
   //   STEP 2  Click header button → workspace hidden
   //           (app-workspace display:none), workspaceProjectId
-  //           retained. Important: header button affordance STAYS
-  //           at HIDE tier because chat is still visible — the
-  //           show-tier (per showTierActive L243) is gated on
-  //           `!detailVisible()`, and the chat is on top of the
-  //           screen so the show-icon would be a lie (the re-show
-  //           click would actually hide the chat). The retained
-  //           workspaceProjectId is observable in the project tab
-  //           identity (activeProjectId() === s5ProjectId).
+  //           retained. Header button affordance STAYS at "Hide
+  //           editor" because chat is still visible — the show-tier
+  //           (per showTierActive) is gated on
+  //           ``isWorkspaceRecoverable() && !isPlanRoute()``; the
+  //           chat is on top of the screen so the show-icon would lie.
+  //           The retained workspaceProjectId is observable in the
+  //           project tab identity (activeProjectId() === s5ProjectId).
   //
-  //   STEP 3  Click header button → chat hidden (handler branch 4
-  //           fires — detailVisible true). Now BOTH overlays are
-  //           hidden-but-recoverable. Header button affordance
-  //           FLIPS to UNHIDE (show-tier active — workspace
-  //           recoverable AND chat recoverable AND nothing visible).
+  //   STEP 3  Navigate to /jobs (URL-driven chat hide) → both
+  //           overlays are hidden-but-recoverable. Header button
+  //           affordance FLIPS to "Show editor" (show-tier active).
   //
-  //   STEP 4  Click header button → branch 5 fires (chat-
-  //           recoverable wins over workspace-recoverable per the
-  //           `!isHiddenButRecoverable()` gate in branch 2), chat
-  //           re-shown. Workspace stays hidden. (The chat-wins
-  //           precedence is the contract verified in S7; S5 just
-  //           records that the show-tier click re-prioritises
-  //           chat over workspace.)
+  //   STEP 4  Click header button → branch 2 fires
+  //           (workspaceOverlayService.show(boundProjectId)) →
+  //           workspace re-shows at the SAME project. Workspace
+  //           editor takes precedence over the chat-recoverable
+  //           state (the new contract: the button is the workspace
+  //           toggle ONLY).
   //
   //   STEP 5  Verify project identity: clicking the workspace
   //           button (now reachable again because chat is visible)
-  //           re-shows the workspace for the SAME project. We
-  //           click the project tab's workspace button again; the
-  //           workspaceOverlayService.toggle(projectId) path with
-  //           currentId===targetId && showWorkspace=false sets
-  //           showWorkspace=true (the editor cache is preserved).
-  //
-  // Note on the dispatcher task description: it expects the button
-  // affordance to flip directly after clicking-once-when-workspace-
-  // visible. The implementation (per app.ts:243-245 showTierActive
-  // docblock: "the tier is gated on !isPlanRoute() && !detailVisible()"
-  // and the W3 / N3 lineage that says a show-icon would lie while
-  // something is on screen) intentionally does NOT flip when chat
-  // is visible. The dispatcher description captures the LATENT
-  // capability — that the button CAN show a recovery affordance —
-  // and S5 verifies it actually fires in the correct state
-  // (nothing visible + something recoverable) while honestly
-  // recording that the flip requires both overlays hidden.
+  //           re-shows the workspace for the SAME project.
   // ==========================================================================
   test('S5: header button hides workspace; show-tier + re-show when nothing visible + tab restore', async ({
     page,
@@ -1089,11 +1101,6 @@ test.describe('Hide Button - Original Bug Symptom E2E', () => {
     const pageErrors: string[] = [];
     page.on('console', (msg: ConsoleMessage) => {
       if (msg.type() === 'error') {
-        // Capture BOTH the text and the URL (msg.location().url is
-        // set even when the text is generic — e.g. "Failed to load
-        // resource: the server responded with a status of 404"). The
-        // URL is what `isFilteredNoise` discriminates on for the
-        // workspace API 404s, /vscode-folder, /api/workspace/, …
         const location = msg.location();
         const loc = location && location.url ? ` @ ${location.url}` : '';
         consoleErrors.push(`[${msg.type()}] ${msg.text()}${loc}`);
@@ -1143,8 +1150,7 @@ test.describe('Hide Button - Original Bug Symptom E2E', () => {
       expect(snap.workspaceDisplay).toBe('flex');
     }).toPass({ timeout: 5000 });
 
-    // Header button affordance = HIDE (workspaceVisible branch in
-    // hideOverlayIcon L292).
+    // Header button affordance = "Hide editor" (workspace visible).
     const hideBtn = page.locator('.overlay-hide-btn');
     await expect(hideBtn).toBeVisible({ timeout: 5000 });
     const ariaOpen = await hideBtn.getAttribute('aria-label');
@@ -1152,7 +1158,7 @@ test.describe('Hide Button - Original Bug Symptom E2E', () => {
       .locator('.overlay-hide-btn mat-icon')
       .first()
       .textContent();
-    expect(ariaOpen).toBe('Hide overlay');
+    expect(ariaOpen).toBe('Hide editor');
     expect(iconOpen?.trim()).toBe('visibility_off');
 
     // Project tab identity unchanged through the workspace open.
@@ -1178,24 +1184,18 @@ test.describe('Hide Button - Original Bug Symptom E2E', () => {
       expect(snap.workspaceDisplay).toBe('none');
     }).toPass({ timeout: 5000 });
 
-    // Header button STAYS at HIDE tier — chat is still visible
-    // (detailVisible=true), so showTierActive is FALSE per the
-    // !detailVisible() gate at app.ts:243-245. A "Show overlay"
-    // affordance here would be a lie: a click would actually
-    // hide the chat (branch 4), not surface the workspace.
-    // (This is the documented W3/N3 minimize-surprise lineage.)
+    // The workspace is now hidden-but-recoverable; the chat is
+    // still visible. Per app.ts the icon/label show-tier is the
+    // workspace-recoverable branch (independent of chat visibility):
+    // workspace hidden + bound → visibility / "Show editor".
     const ariaWsHidden = await hideBtn.getAttribute('aria-label');
     const iconWsHidden = (
       await page.locator('.overlay-hide-btn mat-icon').first().textContent()
     )?.trim();
-    expect(ariaWsHidden).toBe('Hide overlay');
-    expect(iconWsHidden).toBe('visibility_off');
+    expect(ariaWsHidden).toBe('Show editor');
+    expect(iconWsHidden).toBe('visibility');
 
-    // Project identity RETAINED — workspaceProjectId survived
-    // (activeProjectId mirrors workspaceProjectId via the chat
-    // component's tabWorkspaceEffect at chat.component.ts:282-
-    // 296, and the project tab is still active because we never
-    // navigated).
+    // Project identity RETAINED — workspaceProjectId survived.
     await expect(async () => {
       const snap = await readWorkspaceSnapshot(page);
       expect(snap.activeProjectTabName).toBe(s5ProjectId);
@@ -1206,11 +1206,12 @@ test.describe('Hide Button - Original Bug Symptom E2E', () => {
       fullPage: true,
     });
 
-    // ── STEP 3: hide the chat via the header button — handler
-    // branch 4 (detailVisible=true, !workspaceVisible) sets
-    // detailVisible=false. Both overlays are now
-    // hidden-but-recoverable. showTierActive flips true.
-    await hideBtn.click();
+    // ── STEP 3: hide the chat via URL navigation (Round 3) — the
+    // button no longer hides the chat. Navigate to /jobs.
+    const jobsNav = page.locator('a.nav-link', { hasText: /^Jobs$/ }).first();
+    await expect(jobsNav).toBeVisible({ timeout: 5000 });
+    await jobsNav.click();
+    await page.waitForURL(/\/jobs\/?$/, { timeout: 10000 });
 
     await expect(async () => {
       const d = await page.locator('app-chat').evaluate(
@@ -1219,21 +1220,34 @@ test.describe('Hide Button - Original Bug Symptom E2E', () => {
       expect(d).toBe('none');
     }).toPass({ timeout: 5000 });
 
-    // Workspace display still 'none' (branch 4 does NOT touch
-    // the workspace service — it just sets detailVisible=false).
+    // Workspace display still 'none' (URL navigation does NOT touch
+    // the workspace service).
     await expect(async () => {
       const snap = await readWorkspaceSnapshot(page);
       expect(snap.workspaceDisplay).toBe('none');
     }).toPass({ timeout: 5000 });
 
-    // Header affordance FLIPS to UNHIDE now that chat is hidden
-    // and workspace is recoverable (showTierActive = true:
-    // !plan && !detailVisible && workspaceRecoverable).
+    // Navigate back to the detail URL via SPA navigation — click
+    // the Instances nav link (its routerLink resolves to the
+    // cached detail URL via lastDetailRoute()). NEVER use
+    // page.goto here: a hard reload resets the in-memory
+    // WorkspaceOverlayService singleton → workspaceProjectId=null
+    // → button absent → the show-tier assertion below could
+    // never pass (this is the same mechanism S1 re-pinned in
+    // Round 3 for the chat round-trip).
+    const instancesNavForReturnS5 = page.locator('a.nav-link', { hasText: /^Instances$/ }).first();
+    await expect(instancesNavForReturnS5).toBeVisible();
+    await instancesNavForReturnS5.click();
+    await page.waitForURL(/\/projects\/[^/?]+\/instances\/[^/?]+$/, { timeout: 10000 });
+    expect(page.url()).toContain(`/projects/${s5ProjectId}/instances/${S5_INSTANCE}`);
+
+    // Header affordance still "Show editor" (workspace is
+    // recoverable, not on /plan).
     const ariaBothHidden = await hideBtn.getAttribute('aria-label');
     const iconBothHidden = (
       await page.locator('.overlay-hide-btn mat-icon').first().textContent()
     )?.trim();
-    expect(ariaBothHidden).toBe('Show overlay');
+    expect(ariaBothHidden).toBe('Show editor');
     expect(iconBothHidden).toBe('visibility');
 
     await page.screenshot({
@@ -1241,12 +1255,18 @@ test.describe('Hide Button - Original Bug Symptom E2E', () => {
       fullPage: true,
     });
 
-    // ── STEP 4: click the header button — branch 5 fires (chat
-    // recoverable wins over workspace recoverable per branch 2's
-    // `!isHiddenButRecoverable()` gate at app.ts:559-563). Chat
-    // re-shows, workspace stays hidden.
+    // ── STEP 4: click the header button — branch 2 fires
+    // (workspaceOverlayService.show(workspaceProjectId())). The
+    // workspace editor re-shows. The chat re-opened because the
+    // nav link returned to the detail URL (syncDetailVisibility).
     await hideBtn.click();
 
+    await expect(async () => {
+      const snap = await readWorkspaceSnapshot(page);
+      expect(snap.workspaceDisplay).toBe('flex');
+    }).toPass({ timeout: 5000 });
+
+    // Chat is also visible (we navigated back to the detail URL).
     await expect(async () => {
       const d = await page.locator('app-chat').evaluate(
         (el) => getComputedStyle(el).display,
@@ -1254,44 +1274,46 @@ test.describe('Hide Button - Original Bug Symptom E2E', () => {
       expect(d).not.toBe('none');
     }).toPass({ timeout: 5000 });
 
+    // Header affordance back to "Hide editor" (workspace visible).
+    const ariaChatReshown = await hideBtn.getAttribute('aria-label');
+    const iconChatReshown = (
+      await page.locator('.overlay-hide-btn mat-icon').first().textContent()
+    )?.trim();
+    expect(ariaChatReshown).toBe('Hide editor');
+    expect(iconChatReshown).toBe('visibility_off');
+
+    // ── STEP 5: hide the workspace via the HEADER button (the
+    // sanctioned path while the overlay is open). The tab-bar
+    // wsBtn is architecturally unreachable while the overlay
+    // (z=100) is open — it covers the chat subtree that hosts the
+    // project tab bar (pre-existing design, per the banner
+    // worker's 2026-08-21 finding). The in-overlay toolbar
+    // "Hide workspace" affordance only exists in builtin editor
+    // mode (this context runs the default `vscode` mode → iframe),
+    // so the header button is the one sanctioned hide path that
+    // exists in BOTH editor modes. Clicking it here completes the
+    // pure-toggle round trip: open → hide → show → hide.
+    await hideBtn.click();
+
     await expect(async () => {
       const snap = await readWorkspaceSnapshot(page);
       expect(snap.workspaceDisplay).toBe('none');
     }).toPass({ timeout: 5000 });
 
-    // Header affordance back to HIDE (chat visible).
-    const ariaChatReshown = await hideBtn.getAttribute('aria-label');
-    const iconChatReshown = (
-      await page.locator('.overlay-hide-btn mat-icon').first().textContent()
-    )?.trim();
-    expect(ariaChatReshown).toBe('Hide overlay');
-    expect(iconChatReshown).toBe('visibility_off');
-
-    // ── STEP 5: re-show the workspace for the SAME project via
-    // the project tab's "View workspace" button (chat is visible
-    // again, so the workspace button inside the chat subtree is
-    // reachable). The toggle() path with showWorkspace=false →
-    // showWorkspace=true (currentId is preserved per
-    // workspaceOverlayService.toggle L37-48 — only show is flipped).
-    // Workspace keeps the SAME project (workspaceProjectId stays
-    // bound to s5ProjectId).
-    const wsBtnAgain = workspaceBtnForActiveTab(page);
-    await expect(wsBtnAgain).toBeVisible({ timeout: 5000 });
-    await wsBtnAgain.click();
-
+    // Header affordance flips to "Show editor" (workspace now
+    // hidden-but-recoverable; show-tier is chat-independent).
     await expect(async () => {
       const snap = await readWorkspaceSnapshot(page);
-      expect(snap.workspaceDisplay).toBe('flex');
+      expect(snap.hideBtnAria).toBe('Show editor');
+      expect(snap.hideBtnIcon).toBe('visibility');
     }).toPass({ timeout: 5000 });
 
     // SAME project identity — the project tab is still active on
     // s5ProjectId, and the workspace overlay element's project
-    // input is bound to the same id (the chat component sends the
-    // activeProjectId through workspaceOverlayService.toggle).
+    // input is bound to the same id.
     await expect(async () => {
       const snap = await readWorkspaceSnapshot(page);
       expect(snap.activeProjectTabName).toBe(s5ProjectId);
-      expect(snap.workspaceDisplay).toBe('flex');
     }).toPass({ timeout: 5000 });
 
     await page.screenshot({
@@ -1313,7 +1335,7 @@ test.describe('Hide Button - Original Bug Symptom E2E', () => {
           aria: ariaBothHidden,
           icon: iconBothHidden,
         },
-        afterClickFromShowTier_chatReshown: {
+        afterClickFromShowTier_wsReshown: {
           aria: ariaChatReshown,
           icon: iconChatReshown,
         },
@@ -1328,34 +1350,30 @@ test.describe('Hide Button - Original Bug Symptom E2E', () => {
   });
 
   // ==========================================================================
-  // S6: /plan DEAD-CLICK — verify the header button affordance falls
-  // to DEFAULT tier (NOT the show-tier) when the user navigates to
-  // /plan with the workspace hidden-but-recoverable. Per app.ts:243
-  // showTierActive = !isPlanRoute() && … → on /plan the show-tier
-  // is OFF, so the icon/label revert to "Hide overlay"/visibility_off
-  // even though the workspace editor is still bound. The handler's
-  // branch 3 (isPlanRoute → navigate to /instances) then owns the
-  // click: the workspace does NOT re-show (it stays display:none)
-  // and no chat overlay pops either. The user is teleported back
-  // to /instances where the show-tier is honest again.
+  // S6: /plan ABSENCE — verify the header button is ABSENT (D1)
+  // when the user navigates to /plan with the workspace editor
+  // hidden-but-recoverable. Per app.ts (Round 4), anyOverlayVisible
+  // drops the workspace-recoverable term when isPlanRoute() is true
+  // — the plane iframe z-1000 covers the workspace z-100, so a
+  // re-show would render the editor under the iframe (a dead click).
+  // Round 4 (D1) enforcement moved from "render button + dead-branch
+  // navigate to /instances" (Round 3 B1) to "absence": the button is
+  // not in the DOM at all, and there is no dead-click target.
   //
-  // Acceptance: clicking the button on /plan while the workspace is
-  // recoverable is a productive no-op for the overlays — workspace
-  // display stays 'none', chat does not spawn, only the URL changes
-  // to /instances.
+  // Acceptance: on /plan with the workspace hidden-but-recoverable,
+  // ``.overlay-hide-btn`` is absent (count = 0); the workspace
+  // display remains 'none' (the bound projectId survives so the
+  // affordance picks back up once the user leaves /plan). No click
+  // is reachable — D1 makes the previous Round 3 "navigate to
+  // /instances" branch unreachable.
   // ==========================================================================
-  test('S6: header button on /plan is dead — affordance falls to default, click navigates', async ({
+  test('S6: on /plan with workspace hidden-but-recoverable, header button is absent (D1)', async ({
     page,
   }) => {
     const consoleErrors: string[] = [];
     const pageErrors: string[] = [];
     page.on('console', (msg: ConsoleMessage) => {
       if (msg.type() === 'error') {
-        // Capture BOTH the text and the URL (msg.location().url is
-        // set even when the text is generic — e.g. "Failed to load
-        // resource: the server responded with a status of 404"). The
-        // URL is what `isFilteredNoise` discriminates on for the
-        // workspace API 404s, /vscode-folder, /api/workspace/, …
         const location = msg.location();
         const loc = location && location.url ? ` @ ${location.url}` : '';
         consoleErrors.push(`[${msg.type()}] ${msg.text()}${loc}`);
@@ -1366,7 +1384,7 @@ test.describe('Hide Button - Original Bug Symptom E2E', () => {
     const S6_INSTANCE = S6_INSTANCE_IDS[0];
 
     // 1. Open detail, then open the workspace via the project tab's
-    // "View workspace" button (same as S5). We need the workspace
+    // "View workspace" button. We need the workspace
     // hidden-but-recoverable before navigating to /plan.
     await page.goto(
       `/projects/${s6ProjectId}/instances/${S6_INSTANCE}`,
@@ -1387,8 +1405,8 @@ test.describe('Hide Button - Original Bug Symptom E2E', () => {
       expect(snap.workspaceDisplay).toBe('flex');
     }).toPass({ timeout: 5000 });
 
-    // 2. Hide the workspace via the header button — now
-    // hidden-but-recoverable.
+    // 2. Hide the workspace via the header button — workspace is
+    // now hidden-but-recoverable.
     const hideBtn = page.locator('.overlay-hide-btn');
     await expect(hideBtn).toBeVisible({ timeout: 5000 });
     await hideBtn.click();
@@ -1398,95 +1416,60 @@ test.describe('Hide Button - Original Bug Symptom E2E', () => {
       expect(snap.workspaceDisplay).toBe('none');
     }).toPass({ timeout: 5000 });
 
-    // Confirm we ARE in the show-tier (workspace recoverable +
-    // NOT on /plan + detail visible covers the chat side; the gate
-    // also requires !detailVisible() for the show tier per
-    // showTierActive L243-245 — the chat is currently visible here,
-    // so the button is still in the HIDE tier with detailVisible=true
-    // taking precedence). Capture this baseline honestly.
-
-    // 3. Navigate to /plan. Use the "Plan" nav link (avoiding
-    // direct goto because the nav link's active class is what the
-    // user actually interacts with; plus the routed /plan tree
-    // mounts PlanComponent which the iframe overlay covers).
+    // 3. Navigate to /plan via the Plan nav link (SPA navigation —
+    // preserves the in-memory WorkspaceOverlayService singleton so
+    // workspaceProjectId stays bound; see the SPA-only warning
+    // comment in the S5b setup).
     const planNav = page.locator('a.nav-link', { hasText: /^Plan$/ }).first();
     await expect(planNav).toBeVisible({ timeout: 10000 });
     await planNav.click();
     await page.waitForURL(/\/plan\/?$/, { timeout: 10000 });
 
-    // 4. Affordance falls to DEFAULT tier on /plan (showTierActive
-    // is gated on !isPlanRoute() — see app.ts:243). Even though
-    // the workspace is recoverable, the icon stays visibility_off
-    // and the label stays "Hide overlay" (NOT "Show overlay"). This
-    // matches the docblock B1 lesson: a show affordance on /plan
-    // would lie because the plane iframe z-1000 covers the
-    // workspace z-100 — the re-show would be invisible.
+    // 4. D1 acceptance: the header button is ABSENT on /plan with
+    // the workspace hidden-but-recoverable. anyOverlayVisible drops
+    // the recoverable term when isPlanRoute() is true, so the
+    // ``@if (anyOverlayVisible())`` block in app.html renders nothing.
     await expect(async () => {
-      const snap = await readWorkspaceSnapshot(page);
       expect(page.url()).toMatch(/\/plan\/?$/);
-      // Header button is rendered (plane overlay keeps
-      // anyOverlayVisible() true via isPlanRoute()).
-      expect(snap.hideBtnAria).toBe('Hide overlay');
-      expect(snap.hideBtnIcon).toBe('visibility_off');
+      const count = await page.locator('.overlay-hide-btn').count();
+      expect(count).toBe(0);
     }).toPass({ timeout: 5000 });
 
     // Workspace display is STILL none (plane iframe hasn't changed
-    // the workspace editor's display binding).
+    // the workspace editor's display binding; the bound projectId
+    // survives so the affordance picks back up once the user leaves
+    // /plan).
     await expect(async () => {
       const snap = await readWorkspaceSnapshot(page);
       expect(snap.workspaceDisplay).toBe('none');
     }).toPass({ timeout: 5000 });
 
     await page.screenshot({
-      path: 'test-results/s6-01-plan-default-affordance.png',
+      path: 'test-results/s6-01-plan-button-absent.png',
       fullPage: true,
     });
 
-    // 5. Click the header button on /plan — handler branch 3 fires
-    // (navigate to /instances); workspace must NOT re-show, chat
-    // must NOT spawn.
-    await hideBtn.click();
-    await page.waitForURL(/\/instances\/?$/, { timeout: 10000 });
+    // 5. No click target — D1 makes the previous Round 3 "navigate
+    // to /instances" branch unreachable. The user leaves /plan
+    // via the nav links; the workspace affordance picks back up
+    // once the URL is not /plan. Verify by navigating back via
+    // the Sources nav link (an arbitrary non-plan route) — the
+    // header button re-appears with the show-tier.
+    const sourcesNav = page.locator('a.nav-link', { hasText: /^Sources$/ }).first();
+    await expect(sourcesNav).toBeVisible({ timeout: 10000 });
+    await sourcesNav.click();
+    await page.waitForURL(/\/sources\/?$/, { timeout: 10000 });
 
-    // Workspace display: still none (workspace remained hidden
-    // through the branch-3 navigation — branch 3 is a pure router
-    // call, no service mutation).
     await expect(async () => {
       const snap = await readWorkspaceSnapshot(page);
-      expect(snap.workspaceDisplay).toBe('none');
+      expect(page.url()).toMatch(/\/sources\/?$/);
+      // Affordance is back: workspace recoverable + not on /plan.
+      expect(snap.hideBtnAria).toBe('Show editor');
+      expect(snap.hideBtnIcon).toBe('visibility');
     }).toPass({ timeout: 5000 });
 
-    // Chat did NOT spawn (the chat overlay only shows on
-    // /projects/:pid/instances/:iid; a /instances navigation does
-    // not satisfy syncDetailVisibility). Confirm via the chat
-    // subtree's display — should be 'none' (the lazy host was
-    // mounted during step 1 but the URL is now bare /instances).
-    const chatDisplayPostNav = await page.locator('app-chat').evaluate(
-      (el) => getComputedStyle(el).display,
-    );
-    expect(chatDisplayPostNav).toBe('none');
-
-    // Project tab identity survived — the user can still flip
-    // back to S6_PROJECT.name to re-show the workspace.
-    const snapAfter = await readWorkspaceSnapshot(page);
-    // openTabs includes All + S6's tab (and possibly others from
-    // earlier scenarios). Active tab is the 'All' tab now because
-    // the URL is bare /instances; TabStateService.activeTab() still
-    // exposes the workspace-bound project id via addTab calls. The
-    // important contract is: the workspace editor stays bound, NOT
-    // that the active tab is the S6 project tab on /instances.
-    console.log(
-      '[S6-PLAN-DEAD-CLICK]',
-      JSON.stringify({
-        urlAfterClick: page.url(),
-        workspaceDisplay: snapAfter.workspaceDisplay,
-        chatDisplay: chatDisplayPostNav,
-        activeProjectTabName: snapAfter.activeProjectTabName,
-      }),
-    );
-
     await page.screenshot({
-      path: 'test-results/s6-02-after-click-navigated.png',
+      path: 'test-results/s6-02-after-leaving-plan.png',
       fullPage: true,
     });
 
@@ -1787,25 +1770,25 @@ test.describe('Hide Button - Original Bug Symptom E2E', () => {
   // recoverable, nothing visible). The dispatcher's task description
   // identifies this as the one acceptance cell not yet live-verified
   // by S1–S7: handler branch 2 (`workspaceOverlayService.show(
-  // workspaceProjectId())` per app.ts:567-571) composes correctly at
+  // workspaceProjectId())` per app.ts) composes correctly at
   // runtime when isHiddenButRecoverable() is false AND
   // isWorkspaceRecoverable() is true AND showTierActive is true.
   //
-  // The single precondition that distinguishes branch 2 from
-  // S7's branch 5 (chat-wins) is:
+  // Unlike S7 — where the header button's click re-shows the
+  // workspace while chat re-show stays on the nav-link path —
+  // branch 2 fires when the chat is NOT in the recoverable
+  // state, i.e. when ``isHiddenButRecoverable()`` is false:
   //
   //   isHiddenButRecoverable() == false
   //   ⇔ detailVisible == true OR activeInstanceId == null OR isInstancesRoute == false
   //
-  // S7 reached branch 5 by leaving !detailVisible() AND
-  // !isPlanRoute() AND activeInstanceId==set AND isInstancesRoute==true
-  // — the chat recoverable state. To get branch 2, the test must
-  // violate the recoverable predicate while still keeping
-  // workspace-recoverable and showTierActive.
+  // To reach branch 2, the test must violate the recoverable
+  // predicate while still keeping workspace-recoverable and
+  // showTierActive.
   //
   // Setup chosen: navigate away from the instances route AFTER
   // setting up the workspace-recoverable state. syncDetailVisibility
-  // L741-794 sets isInstancesRoute=false when the URL doesn't match
+  // sets isInstancesRoute=false when the URL doesn't match
   // /^\/projects\/[^/?]+\/instances\/[^/?]+$/ AND !== '/instances'.
   // /projects/{pid}/blueprints fits that profile and (importantly)
   // keeps the project tab active so tabWorkspaceEffect doesn't
@@ -1815,7 +1798,7 @@ test.describe('Hide Button - Original Bug Symptom E2E', () => {
   //
   // Workspace reachability: project tab bar isn't rendered on
   // /blueprints, so Alt+` (the global hotkey, gated on
-  // activeProjectId !== 'all' && !== null per app.ts:818-823) is the
+  // activeProjectId !== 'all' && !== null) is the
   // only path that opens the workspace from that page. Alt+` calls
   // workspaceOverlayService.toggle(activeProjectId) which sets
   // showWorkspace=true (equivalent to .show(projectId)). The open
@@ -1855,9 +1838,19 @@ test.describe('Hide Button - Original Bug Symptom E2E', () => {
       expect(stored).toBeNull();
     }).toPass({ timeout: 5000 });
 
+    // Precondition assert (Round 4): with localStorage cleared AND no
+    // workspace ever opened in this fresh context, the workspace is
+    // unbound (workspaceProjectId=null) AND the chat is unbound too
+    // (no cached id). ``anyOverlayVisible`` is false in BOTH terms
+    // — so the header hide button must be ABSENT. This pins the
+    // cold-boot edge of the button contract: no workspace presence
+    // AND no cached chat id → no button. (The chat detail is also
+    // not visible because no detail URL has been opened yet.)
+    await expect(page.locator('.overlay-hide-btn')).toHaveCount(0);
+
     // Navigate to a fresh detail URL — Angular re-runs restoreState
     // (still empty), the URL regex matches, syncDetailVisibility
-    // adds the project tab via app.ts:786-788 and calls
+    // adds the project tab and calls
     // openDetail(projectId, instanceId) which writes a fresh
     // activeInstanceId to localStorage.
     await page.goto(
@@ -1888,7 +1881,7 @@ test.describe('Hide Button - Original Bug Symptom E2E', () => {
     // Capture the project id baseline (activeProjectId via the
     // project tab bar — `.tab.active .tab-name` reflects the
     // projectId even though DOM text mirrors the projectId, see
-    // syncDetailVisibility L787 which passes `name: projectId`).
+    // syncDetailVisibility which passes `name: projectId`).
     const baselineProjectSnapshot = await readWorkspaceSnapshot(page);
     expect(baselineProjectSnapshot.activeProjectTabName).toBe(projectId);
 
@@ -1918,9 +1911,9 @@ test.describe('Hide Button - Original Bug Symptom E2E', () => {
     });
 
     // ── Header click #1: hide workspace (handler branch 1 fires
-    // because workspace is visible — N3 minimize-surprise: workspace
-    // hides via workspaceOverlayService.hide() and the function
-    // early-returns without touching chat state).
+    // because workspace is visible). workspaceOverlayService.hide()
+    // fires and the function early-returns without touching chat
+    // state.
     const hideBtn = page.locator('.overlay-hide-btn');
     await expect(hideBtn).toBeVisible({ timeout: 5000 });
     await hideBtn.click();
@@ -1931,7 +1924,7 @@ test.describe('Hide Button - Original Bug Symptom E2E', () => {
     }).toPass({ timeout: 5000 });
 
     // Chat is still visible (branch 1 returned without touching
-    // chat; we never explicitly hid it via the chat-side branch).
+    // chat).
     await expect(async () => {
       const d = await page.locator('app-chat').evaluate(
         (el) => getComputedStyle(el).display,
@@ -1939,14 +1932,39 @@ test.describe('Hide Button - Original Bug Symptom E2E', () => {
       expect(d).not.toBe('none');
     }).toPass({ timeout: 5000 });
 
-    // ── Header click #2: hide chat (handler branch 4 fires —
-    // detailVisible=true and !workspaceVisible, so detailVisible
-    // is set to false). Now: workspace hidden-recoverable, chat
-    // hidden-recoverable, detailVisible=false. We're still on the
-    // detail URL though — branch 5 would still win if we clicked
-    // header again. We MUST leave the detail URL before the
-    // branch-2 click.
-    await hideBtn.click();
+    // ── Round 3: hide the chat via URL navigation (the header
+    // button no longer hides the chat). Navigate to /sources.
+    // This sets detailVisible=false (syncDetailVisibility closes
+    // the detail on the non-detail URL). The first click of the
+    // header button is the workspace hide; the navigation is the
+    // chat hide. We MUST leave the detail URL before the branch-2
+    // click to land on /sources (where isHiddenButRecoverable is
+    // false AND workspace is recoverable).
+    const sourcesNav = page.locator('a.nav-link', { hasText: /^Sources$/ }).first();
+    await expect(sourcesNav).toBeVisible({ timeout: 10000 });
+    await sourcesNav.click();
+    await page.waitForURL(/\/sources\/?$/, { timeout: 10000 });
+
+    // WARNING — SPA navigation only.
+    //
+    // NEVER use page.goto to navigate AWAY from a detail URL once
+    // any overlay is in a recoverable state. page.goto is a HARD
+    // RELOAD: it resets the in-memory WorkspaceOverlayService
+    // singleton, the InstancesViewStateService cache (lastDetailRoute
+    // is rebuilt from localStorage on boot), and any other in-memory
+    // service singletons — wiping workspaceProjectId, nulling out the
+    // recoverable predicate, and rendering the header button absent
+    // until the user re-opens the editor via the project tab. The
+    // branch-2 acceptance here (S5b) and the show-tier assertions in
+    // S5 / S7 are all reachable only via the routerLink SPA path
+    // (e.g. clicking the Sources / Jobs / Instances nav link, which
+    // is an Angular router pushState and preserves all singletons).
+    // If you find yourself reaching for page.goto to "return to a
+    // detail URL after leaving it", use the Instances nav-link click
+    // instead — its routerLink resolves to the cached detail URL via
+    // lastDetailRoute(). This warning is intentionally placed next to
+    // the SPA nav call above so future contributors see it before
+    // reaching for page.goto.
 
     await expect(async () => {
       const d = await page.locator('app-chat').evaluate(
@@ -1960,60 +1978,25 @@ test.describe('Hide Button - Original Bug Symptom E2E', () => {
       expect(snap.workspaceDisplay).toBe('none');
     }).toPass({ timeout: 5000 });
 
-    // ── Navigate to a non-/instances route via in-app SPA navigation
-    // (NOT page.goto — a full URL load would reset the singleton
-    // WorkspaceOverlayService state including workspaceProjectId,
-    // nulling out the recoverable predicate). Click the "Sources"
-    // nav link in app.html — `routerLink="/sources"` triggers Angular
-    // router navigation (pushState) which preserves the service's
-    // in-memory state. On /sources:
-    //   - syncDetailVisibility L741-794 sees no match → isInstancesRoute(false)
-    //   - closeDetail() at L791 sets detailVisible=false (already false)
-    //   - WorkspaceOverlayService.workspaceProjectId stays set
-    //     (workspaceProjectId mutation only happens in chat.component.ts:
-    //     tabWorkspaceEffect, only when activeProjectId becomes null;
-    //     the active tab is still our projectId per localStorage).
-    //
-    // This is the URL gate that makes isHiddenButRecoverable false:
-    // the predicate needs isInstancesRoute=true (bare /instances OR
-    // a project-scoped detail). /sources fails that conjunct — chat
-    // cache cannot be re-shown via the header button — so branch 2's
-    // `!isHiddenButRecoverable()` gate opens and the show(boundId)
-    // re-show path fires.
-    const sourcesNav = page.locator('a.nav-link', { hasText: /^Sources$/ }).first();
-    await expect(sourcesNav).toBeVisible({ timeout: 10000 });
-    await sourcesNav.click();
-    await page.waitForURL(/\/sources\/?$/, { timeout: 10000 });
-
     // ── Precondition guard (the cell that distinguishes branch 2
-    // from S7's branch 5).
+    // from S7's "chat wins" behavior).
     //
     // (a) app-workspace is display:none (workspace hidden).
     // (b) app-chat is display:none (chat hidden too — its
     //     detailVisible is false on a non-detail URL).
-    // (c) URL is /projects/{pid}/blueprints — the regex
+    // (c) URL is /sources — the regex
     //     /^\/projects\/[^/?]+\/instances\/[^/?]+$/ does NOT match
     //     AND /^\/instances\/?$/ does NOT match either, so
-    //     syncDetailVisibility's L754 set isInstancesRoute(false).
-    //     ⇒ isHiddenButRecoverable = false (the third conjunct
-    //     fails).
+    //     syncDetailVisibility sets isInstancesRoute(false).
     // (d) Header button affordance = show-tier (workspace is the
-    //     sole recoverable, !plan, !detailVisible, AND
-    //     isWorkspaceRecoverable).
+    //     sole recoverable, !plan, AND isWorkspaceRecoverable).
     //
-    // localStorage still has the activeInstanceId from the earlier
-    // openDetail — that is honest and documents WHY branch 2 needs
-    // the route gate. Without (c), isHiddenButRecoverable would
-    // still resolve true (cached id + !detailVisible +
-    // isInstancesRoute=true on a detail URL), branch 5 would win,
-    // and we'd verify S7's scenario instead of S5b's. The test is
-    // honest about that localStorage state.
-    // ── Click the Sources nav link — Angular SPA navigation
-    // (routerLink via app.html L18 → router.navigateByUrl, in-app
-    // pushState). Preserves the singleton WorkspaceOverlayService
-    // state (workspaceProjectId stays set), unlike page.goto which
-    // triggers a full reload resetting all singletons.
-
+    // Round 3: the handler's branch 2 is gated on
+    // ``!isPlanRoute()`` (B1 dead-click guard), not on
+    // ``!isHiddenButRecoverable()``. The show-tier gate is the
+    // same shape (workspace recoverable + !isPlanRoute). The
+    // test verifies the same outcome: branch 2 fires and
+    // re-shows the workspace.
     await expect(async () => {
       const snap = await readWorkspaceSnapshot(page);
       const chatCount = await page.locator('app-chat').count();
@@ -2023,14 +2006,14 @@ test.describe('Hide Button - Original Bug Symptom E2E', () => {
           )
         : 'absent';
       expect(snap.workspaceDisplay).toBe('none');
-      // Chat may be display:none (host preserved, just hidden by
-      // app.ts:412-413) OR absent (unmounted on /sources). Either
+      // Chat may be display:none (host preserved, just hidden) OR
+      // absent (unmounted on /sources). Either
       // is fine — the critical precondition is chat NOT being in
       // the recoverable state.
       expect(chatD === 'none' || chatD === 'absent').toBe(true);
       // Header button is still rendered (workspace recoverable is
       // enough to drive anyOverlayVisible=true).
-      expect(snap.hideBtnAria).toBe('Show overlay');
+      expect(snap.hideBtnAria).toBe('Show editor');
       expect(snap.hideBtnIcon).toBe('visibility');
       // URL excludes the detail-instance regex AND is not bare
       // /instances — syncDetailVisibility sets isInstancesRoute=false.
@@ -2043,24 +2026,25 @@ test.describe('Hide Button - Original Bug Symptom E2E', () => {
     }).toPass({ timeout: 5000 });
 
     // The localStorage activeInstanceId IS still present — that's
-    // the diagnostic: it confirms why the route gate matters.
+    // the diagnostic: it confirms the URL-driven contract (the
+    // chat view-state is persisted across the navigation).
     const storedBeforeClick = await page.evaluate(() =>
       localStorage.getItem('ensemble-instances-view-state'),
     );
     expect(storedBeforeClick).toBeTruthy();
     const chatCachedId = JSON.parse(storedBeforeClick!).activeInstanceId;
     expect(chatCachedId).toBe(S5B_INSTANCE);
-    // But the recoverable predicate fails because we're not on
-    // /instances — verified above.
+    // But the button doesn't care — the chat recoverable predicate
+    // is no longer part of the show-tier.
 
     await page.screenshot({
       path: 'test-results/s5b-03-show-tier-both-hidden-not-on-detail.png',
       fullPage: true,
     });
 
-    // ── Header click #3: branch 2 fires
-    // (workspaceOverlayService.show(workspaceProjectId()) per
-    // app.ts:567-571). Workspace RE-SHOWN for the SAME project.
+    // ── Header click: branch 2 fires
+    // (workspaceOverlayService.show(workspaceProjectId())). The
+    // workspace RE-SHOWN for the SAME project.
     await hideBtn.click();
 
     // Workspace visible (display:flex).
@@ -2079,12 +2063,12 @@ test.describe('Hide Button - Original Bug Symptom E2E', () => {
     }).toPass({ timeout: 5000 });
 
     // Header affordance flips back to HIDE (workspace visible
-    // branch in hideOverlayIcon L292-296 — the dominant signal).
+    // branch in hideOverlayIcon — the dominant signal).
     const ariaReshown = await hideBtn.getAttribute('aria-label');
     const iconReshown = (
       await page.locator('.overlay-hide-btn mat-icon').first().textContent()
     )?.trim();
-    expect(ariaReshown).toBe('Hide overlay');
+    expect(ariaReshown).toBe('Hide editor');
     expect(iconReshown).toBe('visibility_off');
 
     // SAME project identity: workspaceProjectId was set by branch
@@ -2119,7 +2103,7 @@ test.describe('Hide Button - Original Bug Symptom E2E', () => {
           workspaceHidden: true,
           chatOverlayHidden: true,
           isInstancesRoute: false,
-          showTier: { aria: 'Show overlay', icon: 'visibility' },
+          showTier: { aria: 'Show editor', icon: 'visibility' },
           cachedChatIdPresent: chatCachedId,
         },
         branch2ObservedEffects: {
