@@ -9,7 +9,7 @@ from sqlalchemy import delete as sql_delete, func, update
 from sqlalchemy.engine import Engine
 from sqlmodel import Session as SQLModelSession, select, col
 
-from .models import AdmissionState, JobItem, JobQueue, QueueType
+from .models import ACTIVE_ADMISSION_STATES, AdmissionState, JobItem, JobQueue, QueueType
 
 
 class JobQueueRepository:
@@ -179,19 +179,47 @@ class JobQueueRepository:
             states. Joins through to ``JobItem`` (filtered on
             ``deleted_at IS NULL``) so soft-deleted rows do not
             surface as "admittable".
+
+        Raises:
+            ValueError: ``admission_states`` is an empty list. An
+                empty ``IN ()`` clause compiles to ``WHERE FALSE`` on
+                both SQLite and PostgreSQL, which silently returns
+                zero rows and is indistinguishable from "no
+                admittable work" — that's an admission-starvation
+                footgun, so we surface it loudly. Pass ``None`` (use
+                the default) or include at least one admission state.
         """
         if admission_states is None:
-            admission_states = [
-                AdmissionState.QUEUED.value,
-                AdmissionState.ACTIVE.value,
-            ]
+            # Single source of truth for the in-flight admission set:
+            # ``ACTIVE_ADMISSION_STATES`` (models.py) is the canonical
+            # ``frozenset`` that every membership filter routes through
+            # (see ``JobRepository`` SQL sites and ``LockRepository``
+            # SQL builder). Route the default through it so the set is
+            # spelled in exactly one place.
+            admission_states = list(ACTIVE_ADMISSION_STATES)
+
+        # Defensive: an empty ``IN ()`` clause compiles to ``WHERE FALSE``
+        # on both SQLite and PostgreSQL, which silently returns zero rows
+        # and is indistinguishable from "no admittable work" to the
+        # caller. That's an admission-starvation footgun — surface it
+        # loudly rather than returning an empty list.
+        if not admission_states:
+            raise ValueError(
+                "list_queues_with_admittable_work: admission_states must "
+                "be non-empty; an empty IN (...) clause would silently "
+                "starve the scan. Pass None (default) or include at "
+                "least one admission state."
+            )
 
         with SQLModelSession(self.engine) as db_session:
-            # DISTINCT (queue_id, project_id) via group-by on the
-            # selected pair; SQLAlchemy/Core translates to the
-            # dialect-appropriate form (PG ``DISTINCT``, SQLite
-            # ``DISTINCT``). Ordering by the oldest pending job
-            # keeps a FIFO-ish posture at the queue level.
+            # GROUP BY (queue_id, project_id) deduplicates queues that
+            # share both IDs — same logical shape as DISTINCT but
+            # expressed via GROUP BY so the SELECT can also expose
+            # ``func.min(JobItem.created_at)`` for the ORDER BY clause.
+            # SQLAlchemy/Core translates the GROUP BY to the
+            # dialect-appropriate form (PG GROUP BY, SQLite GROUP BY).
+            # Ordering by the oldest pending job keeps a FIFO-ish
+            # posture at the queue level.
             stmt = (
                 select(JobQueue)
                 .join(JobItem, JobItem.queue_id == JobQueue.queue_id)

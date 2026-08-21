@@ -31,10 +31,16 @@ The fix
 ``JobProcessor._process_next_job`` now derives the scan set from the
 queue-side: ``JobQueueRepository.list_queues_with_admittable_work``
 returns ``JobQueue`` rows that hold at least one non-deleted JobItem
-in ``admission_state IN ('queued','active')``. The scan is bounded by
-``limit=1000`` (configurable), ordered by the oldest pending job, and
-honours the same two-level pause semantics (project-level
-``job_queue_paused``, queue-level ``is_paused``).
+in ``admission_state IN ('queued','active')`` (routed through the
+shared ``models.ACTIVE_ADMISSION_STATES`` constant — see
+``daemon/repositories/job_queue/models.py``). The scan is bounded by
+``limit=1000`` (configurable), ordered by the oldest pending job per
+queue (``MIN(created_at) ASC`` — asserted by
+``test_min_created_at_asc_orders_queues_with_oldest_backlog_first``
+and ``test_min_created_at_asc_stable_under_multiple_items_per_queue``
+in ``TestWorkDrivenScanShape`` below), and honours the same two-level
+pause semantics (project-level ``job_queue_paused``, queue-level
+``is_paused``).
 
 Why this test catches it
 ------------------------
@@ -462,6 +468,11 @@ class TestWorkDrivenScanShape:
     - The scan excludes queues whose only JobItems are dead or done.
     - The scan respects the ``limit`` cap.
     - The scan honours soft-delete (``deleted_at IS NOT NULL``).
+    - The scan orders queues by ``MIN(JobItem.created_at) ASC`` per
+      group (oldest backlog first); asserted by
+      ``test_min_created_at_asc_orders_queues_with_oldest_backlog_first``
+      and
+      ``test_min_created_at_asc_stable_under_multiple_items_per_queue``.
     """
 
     def test_returns_only_queues_with_admittable_work(
@@ -540,3 +551,173 @@ class TestWorkDrivenScanShape:
         # Limit to 3 — only 3 queues should come back.
         result = queue_repo.list_queues_with_admittable_work(limit=3)
         assert len(result) == 3
+
+    def test_min_created_at_asc_orders_queues_with_oldest_backlog_first(
+        self, engine, queue_repository_with_system_queues
+    ):
+        """The scan order is ``MIN(JobItem.created_at) ASC`` per queue.
+
+        The work-driven scan contract: among queues with admittable
+        work, the queue with the oldest pending JobItem is processed
+        first. The previous (broken) ``list_projects`` scan did not
+        carry any ordering invariant — projects were returned
+        ``updated_at DESC``. Pinning the ``MIN(created_at) ASC``
+        ordering here locks the FIFO-ish posture at the queue level
+        so a future regression (e.g. a query rewrite that drops the
+        ``ORDER BY``) catches immediately.
+
+        Setup: 3 queues, each with one queued JobItem, but the
+        JobItems are inserted in NON-monotonic order. The expected
+        scan order is determined purely by ``MIN(created_at)`` per
+        queue — NOT by insertion order or queue_id.
+        """
+        queue_repo: JobQueueRepository = queue_repository_with_system_queues
+
+        # 3 queues on distinct projects so we can identify them
+        # unambiguously. Names are deliberately NOT alphabetical to
+        # ensure the ordering is timestamp-driven, not name-driven.
+        q_zzz = queue_repo.create(
+            project_id="ordering-p-zzz",
+            queue_name="zzz_queue",
+            queue_type=QueueType.FIFO.value,
+            concurrency_limit=1,
+        )
+        q_aaa = queue_repo.create(
+            project_id="ordering-p-aaa",
+            queue_name="aaa_queue",
+            queue_type=QueueType.FIFO.value,
+            concurrency_limit=1,
+        )
+        q_mid = queue_repo.create(
+            project_id="ordering-p-mid",
+            queue_name="mid_queue",
+            queue_type=QueueType.FIFO.value,
+            concurrency_limit=1,
+        )
+
+        # Anchor: pick a fixed reference time so the assertion is
+        # deterministic and does not depend on wall-clock drift.
+        anchor = datetime.now(timezone.utc)
+
+        # Insert JobItems in a deliberate NON-monotonic order to
+        # prove the scan sorts by ``MIN(created_at)``, not by
+        # insertion order. q_mid (mid_queue) gets the NEWEST item,
+        # q_zzz (zzz_queue) gets the MIDDLE item, q_aaa (aaa_queue)
+        # gets the OLDEST item — so the expected scan order is
+        # q_aaa → q_zzz → q_mid.
+        _insert_job_item(
+            engine,
+            job_id=str(uuid.uuid4()),
+            project_id=q_mid.project_id,
+            queue_id=q_mid.queue_id,
+            admission_state=AdmissionState.QUEUED.value,
+            created_at=anchor + timedelta(minutes=30),  # newest
+        )
+        _insert_job_item(
+            engine,
+            job_id=str(uuid.uuid4()),
+            project_id=q_zzz.project_id,
+            queue_id=q_zzz.queue_id,
+            admission_state=AdmissionState.QUEUED.value,
+            created_at=anchor + timedelta(minutes=15),  # middle
+        )
+        _insert_job_item(
+            engine,
+            job_id=str(uuid.uuid4()),
+            project_id=q_aaa.project_id,
+            queue_id=q_aaa.queue_id,
+            admission_state=AdmissionState.QUEUED.value,
+            created_at=anchor,  # oldest
+        )
+
+        result = queue_repo.list_queues_with_admittable_work()
+        # Only consider the 3 ordering queues (other fixtures may
+        # have left queues in the system-scoped engine — we
+        # truncate, but other fixtures may re-seed).
+        result_ids_in_order = [
+            q.queue_id for q in result
+            if q.queue_id in {q_aaa.queue_id, q_zzz.queue_id, q_mid.queue_id}
+        ]
+
+        assert result_ids_in_order == [q_aaa.queue_id, q_zzz.queue_id, q_mid.queue_id], (
+            f"scan order MUST be MIN(created_at) ASC; "
+            f"expected [aaa(oldest), zzz(mid), mid(newest)], "
+            f"got {result_ids_in_order}. "
+            "queue_repo.list_queues_with_admittable_work must ORDER BY "
+            "func.min(JobItem.created_at).asc()."
+        )
+
+    def test_min_created_at_asc_stable_under_multiple_items_per_queue(
+        self, engine, queue_repository_with_system_queues
+    ):
+        """The ordering picks the MIN over multiple JobItems per queue.
+
+        A queue with multiple JobItems of varying ages orders by its
+        OLDEST admittable item (the bottleneck). Adding a newer
+        item to a queue whose oldest item is already the oldest in
+        the system must NOT change its place at the head of the scan.
+        """
+        queue_repo: JobQueueRepository = queue_repository_with_system_queues
+
+        q_oldest = queue_repo.create(
+            project_id="multi-p-oldest",
+            queue_name="multi_oldest",
+            queue_type=QueueType.FIFO.value,
+            concurrency_limit=1,
+        )
+        q_middle = queue_repo.create(
+            project_id="multi-p-mid",
+            queue_name="multi_mid",
+            queue_type=QueueType.FIFO.value,
+            concurrency_limit=1,
+        )
+
+        anchor = datetime.now(timezone.utc)
+
+        # q_oldest: oldest=anchor, newest=anchor+10m
+        _insert_job_item(
+            engine,
+            job_id=str(uuid.uuid4()),
+            project_id=q_oldest.project_id,
+            queue_id=q_oldest.queue_id,
+            admission_state=AdmissionState.QUEUED.value,
+            created_at=anchor,
+        )
+        _insert_job_item(
+            engine,
+            job_id=str(uuid.uuid4()),
+            project_id=q_oldest.project_id,
+            queue_id=q_oldest.queue_id,
+            admission_state=AdmissionState.QUEUED.value,
+            created_at=anchor + timedelta(minutes=10),
+        )
+        # q_middle: oldest=anchor+5m (still newer than q_oldest's
+        # anchor). Adding a much-newer item does NOT move q_middle
+        # before q_oldest because MIN is the tiebreaker.
+        _insert_job_item(
+            engine,
+            job_id=str(uuid.uuid4()),
+            project_id=q_middle.project_id,
+            queue_id=q_middle.queue_id,
+            admission_state=AdmissionState.QUEUED.value,
+            created_at=anchor + timedelta(minutes=5),
+        )
+        _insert_job_item(
+            engine,
+            job_id=str(uuid.uuid4()),
+            project_id=q_middle.project_id,
+            queue_id=q_middle.queue_id,
+            admission_state=AdmissionState.QUEUED.value,
+            created_at=anchor + timedelta(hours=1),  # huge newest
+        )
+
+        result = queue_repo.list_queues_with_admittable_work()
+        result_ids_in_order = [
+            q.queue_id for q in result
+            if q.queue_id in {q_oldest.queue_id, q_middle.queue_id}
+        ]
+        assert result_ids_in_order == [q_oldest.queue_id, q_middle.queue_id], (
+            f"expected oldest-first ordering across multi-item queues; "
+            f"got {result_ids_in_order}. The MIN aggregate MUST be the "
+            f"sort key per (queue_id, project_id) group."
+        )

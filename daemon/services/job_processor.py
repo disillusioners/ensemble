@@ -29,18 +29,43 @@ logger = logging.getLogger(__name__)
 
 class JobProcessor:
     """Background worker that processes queued jobs.
-    
+
     Continuously polls for pending jobs across all queues and processes them.
     Uses two-level pause checks: project-level (job_queue_paused) and queue-level
     (is_paused) to control job processing.
-    
-    The processing order is:
-    1. Iterate through all projects
-    2. Skip if project.job_queue_paused is True (master pause)
-    3. For each active queue in the project, skip if queue.is_paused is True
-    4. Get next pending job for the queue
-    5. Acquire per-queue lock and start job
-    
+
+    Work-driven scan (admission starvation fix, 2026-08): the scan set
+    is derived from queued/active JobItems themselves via
+    ``JobQueueRepository.list_queues_with_admittable_work``, NOT from
+    ``project_repo.list_projects``. The previous project scan starved
+    in DBs with >100 projects (proved on ``ensemble_dev`` 338-projects,
+    system-default ranked #189, 3/4 e2e failures, 0 LLM calls) because
+    ``list_projects(limit=100, updated_at DESC)`` silently truncated
+    the project list and the system-default project's queues were
+    never visited — queued JobItems stayed
+    ``admission_state='queued'``, the queue-admission guard in
+    ``claim_pending_task`` (``task/repository.py:1248-1254``) refused
+    every ``Task.claim`` attempt, and the worker pool sat idle.
+
+    Processing order:
+    1. ``queue_repo.list_queues_with_admittable_work()`` returns
+       queues that hold at least one non-deleted JobItem in
+       ``admission_state IN ('queued','active')``. Bounded by
+       the scan cap (``limit=1000``) so the polling hot path
+       stays bounded.
+    2. For each queue, skip if ``queue.is_paused`` (queue pause).
+    3. Cached project pause lookup: skip if
+       ``project.job_queue_paused`` (project pause). ``None``
+       (cache miss on lookup error) means "don't skip" — the
+       downstream pause check inside
+       ``JobQueueService.start_job`` is the second line of
+       defence, and a transient repo error must not wedge the
+       queue.
+    4. Defer/background idle gates per
+       ``_defer_idle_check`` / ``_background_idle_check``.
+    5. Get next pending job for the queue; acquire per-queue
+       lock and start job.
+
     Attributes:
         _queue_service: JobQueueService instance for job operations.
         _instance_manager: InstanceManager instance for spawning instances.
