@@ -652,72 +652,89 @@ class TestWorkDrivenScanShape:
     ):
         """The ordering picks the MIN over multiple JobItems per queue.
 
-        A queue with multiple JobItems of varying ages orders by its
-        OLDEST admittable item (the bottleneck). Adding a newer
-        item to a queue whose oldest item is already the oldest in
-        the system must NOT change its place at the head of the scan.
+        The MIN aggregate per queue is the sort key — not the MAX.
+        The test data is shaped so ``MIN(created_at) ASC`` and
+        ``MAX(created_at) ASC`` produce OPPOSITE queue orders:
+
+          * q1 has items ``[t=anchor, t=anchor+10m]`` →
+            ``MIN=anchor``, ``MAX=anchor+10m``
+          * q2 has items ``[t=anchor+1m, t=anchor+2m]`` →
+            ``MIN=anchor+1m``, ``MAX=anchor+2m``
+
+        Under ``MIN(created_at) ASC`` the order is ``[q1, q2]``; under
+        ``MAX(created_at) ASC`` it would be ``[q2, q1]`` (q2's max
+        2m beats q1's max 10m). This test would FAIL if the query
+        regressed to ``MAX`` — that's the whole point.
+
+        Multi-item stability: adding a newer item to a queue whose
+        oldest item is already the oldest in the system must NOT
+        change its place at the head of the scan. The +10m item on
+        q1 and the +2m item on q2 do not move either queue from its
+        MIN-based position (``MIN(q1) = anchor``, ``MIN(q2) = anchor+1m``).
         """
         queue_repo: JobQueueRepository = queue_repository_with_system_queues
 
-        q_oldest = queue_repo.create(
-            project_id="multi-p-oldest",
-            queue_name="multi_oldest",
+        q1 = queue_repo.create(
+            project_id="multi-p-q1",
+            queue_name="multi_q1",
             queue_type=QueueType.FIFO.value,
             concurrency_limit=1,
         )
-        q_middle = queue_repo.create(
-            project_id="multi-p-mid",
-            queue_name="multi_mid",
+        q2 = queue_repo.create(
+            project_id="multi-p-q2",
+            queue_name="multi_q2",
             queue_type=QueueType.FIFO.value,
             concurrency_limit=1,
         )
 
         anchor = datetime.now(timezone.utc)
 
-        # q_oldest: oldest=anchor, newest=anchor+10m
+        # q1: items [anchor, anchor+10m] → MIN=anchor, MAX=anchor+10m
         _insert_job_item(
             engine,
             job_id=str(uuid.uuid4()),
-            project_id=q_oldest.project_id,
-            queue_id=q_oldest.queue_id,
+            project_id=q1.project_id,
+            queue_id=q1.queue_id,
             admission_state=AdmissionState.QUEUED.value,
             created_at=anchor,
         )
         _insert_job_item(
             engine,
             job_id=str(uuid.uuid4()),
-            project_id=q_oldest.project_id,
-            queue_id=q_oldest.queue_id,
+            project_id=q1.project_id,
+            queue_id=q1.queue_id,
             admission_state=AdmissionState.QUEUED.value,
             created_at=anchor + timedelta(minutes=10),
         )
-        # q_middle: oldest=anchor+5m (still newer than q_oldest's
-        # anchor). Adding a much-newer item does NOT move q_middle
-        # before q_oldest because MIN is the tiebreaker.
+        # q2: items [anchor+1m, anchor+2m] → MIN=anchor+1m, MAX=anchor+2m
+        # The +2m newest item must NOT move q2 before q1 because
+        # MIN is the tiebreaker (MIN(q1)=anchor < MIN(q2)=anchor+1m).
         _insert_job_item(
             engine,
             job_id=str(uuid.uuid4()),
-            project_id=q_middle.project_id,
-            queue_id=q_middle.queue_id,
+            project_id=q2.project_id,
+            queue_id=q2.queue_id,
             admission_state=AdmissionState.QUEUED.value,
-            created_at=anchor + timedelta(minutes=5),
+            created_at=anchor + timedelta(minutes=1),
         )
         _insert_job_item(
             engine,
             job_id=str(uuid.uuid4()),
-            project_id=q_middle.project_id,
-            queue_id=q_middle.queue_id,
+            project_id=q2.project_id,
+            queue_id=q2.queue_id,
             admission_state=AdmissionState.QUEUED.value,
-            created_at=anchor + timedelta(hours=1),  # huge newest
+            created_at=anchor + timedelta(minutes=2),
         )
 
         result = queue_repo.list_queues_with_admittable_work()
         result_ids_in_order = [
             q.queue_id for q in result
-            if q.queue_id in {q_oldest.queue_id, q_middle.queue_id}
+            if q.queue_id in {q1.queue_id, q2.queue_id}
         ]
-        assert result_ids_in_order == [q_oldest.queue_id, q_middle.queue_id], (
-            f"expected oldest-first ordering across multi-item queues; "
+        assert result_ids_in_order == [q1.queue_id, q2.queue_id], (
+            f"expected MIN(created_at) ASC ordering across multi-item queues; "
             f"got {result_ids_in_order}. The MIN aggregate MUST be the "
-            f"sort key per (queue_id, project_id) group."
+            f"sort key per (queue_id, project_id) group. (If the order is "
+            f"reversed to [q2, q1], the query regressed to MAX — q2's "
+            f"newest=2m would beat q1's newest=10m.)"
         )
