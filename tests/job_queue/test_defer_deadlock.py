@@ -81,17 +81,33 @@ def mock_instance_manager():
 
 @pytest.fixture
 def mock_project_repo():
-    """Create mock project repository."""
+    """Create mock project repository.
+
+    Work-driven scan (admission starvation fix): the JobProcessor now
+    looks up project pause state via ``project_repo.get(project_id)``
+    with a per-iteration cache, NOT via ``list_projects``. Default
+    returns a permissive mock whose ``job_queue_paused`` is False.
+    """
     repo = MagicMock()
-    repo.list_projects = MagicMock(return_value=[])
+
+    def _make_permissive_project():
+        proj = MagicMock()
+        proj.job_queue_paused = False
+        return proj
+
+    repo.get = MagicMock(return_value=_make_permissive_project())
     return repo
 
 
 @pytest.fixture
 def mock_queue_repo():
-    """Create mock queue repository."""
+    """Create mock queue repository.
+
+    Work-driven scan: ``list_queues_with_admittable_work`` is the
+    call path. Default returns ``[]`` (no work to admit).
+    """
     repo = MagicMock()
-    repo.list_by_project = MagicMock(return_value=[])
+    repo.list_queues_with_admittable_work = MagicMock(return_value=[])
     return repo
 
 
@@ -150,8 +166,8 @@ class TestDeferQueueDeadlockScenario:
         started_job_a = MockJob("job-A", project_id="project-1", queue_id="defer-queue-A", status=AdmissionState.ACTIVE.value)
         started_job_a.instance_id = "instance-A"
 
-        mock_project_repo.list_projects.return_value = [project]
-        mock_queue_repo.list_by_project.return_value = [defer_queue_a, defer_queue_b]
+        mock_project_repo.get.return_value = project
+        mock_queue_repo.list_queues_with_admittable_work.return_value = [defer_queue_a, defer_queue_b]
 
         # Both defer queues have PENDING jobs
         mock_queue_service._repository.list_pending_by_queue.side_effect = [
@@ -201,8 +217,8 @@ class TestDeferQueueDeadlockScenario:
         started_job_a = MockJob("job-A", project_id="project-1", queue_id="defer-queue-A", status=AdmissionState.ACTIVE.value)
         started_job_a.instance_id = "instance-A"
 
-        mock_project_repo.list_projects.return_value = [project]
-        mock_queue_repo.list_by_project.return_value = [defer_queue_a, defer_queue_b, defer_queue_c]
+        mock_project_repo.get.return_value = project
+        mock_queue_repo.list_queues_with_admittable_work.return_value = [defer_queue_a, defer_queue_b, defer_queue_c]
 
         # All defer queues have PENDING jobs
         mock_queue_service._repository.list_pending_by_queue.side_effect = [
@@ -252,8 +268,8 @@ class TestDeferQueueDeadlockScenario:
         job_a = MockJob("job-A", project_id="project-1", queue_id="defer-queue-A", status=AdmissionState.QUEUED.value)
         job_b = MockJob("job-B", project_id="project-1", queue_id="defer-queue-B", status=AdmissionState.QUEUED.value)
 
-        mock_project_repo.list_projects.return_value = [project]
-        mock_queue_repo.list_by_project.return_value = [fifo_queue, defer_queue_a, defer_queue_b]
+        mock_project_repo.get.return_value = project
+        mock_queue_repo.list_queues_with_admittable_work.return_value = [fifo_queue, defer_queue_a, defer_queue_b]
 
         # FIFO has PENDING, defer queues have PENDING
         mock_queue_service._repository.list_pending_by_queue.side_effect = [
@@ -302,8 +318,8 @@ class TestDeferQueueDeadlockScenario:
         started_job_a = MockJob("job-A", project_id="project-1", queue_id="defer-queue-A", status=AdmissionState.ACTIVE.value)
         started_job_a.instance_id = "instance-A"
 
-        mock_project_repo.list_projects.return_value = [project]
-        mock_queue_repo.list_by_project.return_value = [fifo_queue, defer_queue_a, defer_queue_b]
+        mock_project_repo.get.return_value = project
+        mock_queue_repo.list_queues_with_admittable_work.return_value = [fifo_queue, defer_queue_a, defer_queue_b]
 
         # FIFO has no jobs, defer queues have PENDING
         mock_queue_service._repository.list_pending_by_queue.side_effect = [
@@ -360,8 +376,8 @@ class TestDeferQueueConcurrencyLimit:
         started_job_a1 = MockJob("job-A1", project_id="project-1", queue_id="defer-queue-A", status=AdmissionState.ACTIVE.value)
         started_job_a1.instance_id = "instance-A1"
 
-        mock_project_repo.list_projects.return_value = [project]
-        mock_queue_repo.list_by_project.return_value = [defer_queue_a, defer_queue_b]
+        mock_project_repo.get.return_value = project
+        mock_queue_repo.list_queues_with_admittable_work.return_value = [defer_queue_a, defer_queue_b]
 
         # Both queues have 2 pending jobs
         mock_queue_service._repository.list_pending_by_queue.side_effect = [

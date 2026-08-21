@@ -375,6 +375,12 @@ class TestDeferQueueJobSpawnsDeferredTask:
         # Arrange — mocked JobProcessor dependencies with a defer queue
         # in the loop. The queue is type=defer; the mock instance
         # manager captures the kwargs passed to enqueue_message.
+        #
+        # Work-driven scan (admission starvation fix): the JobProcessor
+        # now discovers queues via
+        # ``queue_repo.list_queues_with_admittable_work`` and looks up
+        # each queue's project pause state via the cached
+        # ``project_repo.get(project_id)``.
         queue_repo = MagicMock()
         project = MockProject("project-defer", job_queue_paused=False)
         queue = MockQueue(
@@ -382,10 +388,10 @@ class TestDeferQueueJobSpawnsDeferredTask:
             queue_type="defer", is_paused=False,
         )
         job = MockJob("job-defer-1", project_id="project-defer", queue_id="queue-defer-1")
-        queue_repo.list_by_project.return_value = [queue]
+        queue_repo.list_queues_with_admittable_work.return_value = [queue]
 
         mock_project_repo = MagicMock()
-        mock_project_repo.list_projects.return_value = [project]
+        mock_project_repo.get.return_value = project
 
         # Mock queue_service but expose the real ``stamp_message_id``
         # method (callable via the real JobRepository) so the

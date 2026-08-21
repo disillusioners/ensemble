@@ -179,6 +179,24 @@ def make_instance_meta(
     return meta
 
 
+def _permissive_project() -> MagicMock:
+    """Build a mock project whose queue is NOT paused.
+
+    Used by ``_build_processor`` helpers in
+    ``TestJobProcessorOrphanWatchdogWaitingForGuard`` and
+    ``TestJobProcessorInProgressGuardReviewFixes`` so the per-project
+    pause cache in ``JobProcessor._process_next_job`` does not skip
+    the queue. Mirrors the inline ``MagicMock()`` + ``project_id`` +
+    ``job_queue_paused=False`` shape already used at lines 512-517 of
+    this file (the older helper style, before the work-driven scan
+    added the pause-cache lookup).
+    """
+    project = MagicMock()
+    project.project_id = "test-project"
+    project.job_queue_paused = False
+    return project
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Common fixtures (mirrors test_jober_watch_integration.py)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -445,10 +463,10 @@ class TestJobProcessorOrphanWatchdogWaitingForGuard:
 
     def _build_processor(self, mock_queue_service, mock_instance_manager, waiting_for):
         mock_project_repo = MagicMock()
-        mock_project_repo.list_projects = MagicMock(return_value=[])
+        mock_project_repo.get = MagicMock(return_value=_permissive_project())
 
         mock_queue_repo = MagicMock()
-        mock_queue_repo.list_by_project = MagicMock(return_value=[])
+        mock_queue_repo.list_queues_with_admittable_work = MagicMock(return_value=[])
 
         processor = JobProcessor(
             queue_service=mock_queue_service,
@@ -501,9 +519,9 @@ class TestJobProcessorOrphanWatchdogWaitingForGuard:
             is_system=True,
         )
 
-        # Build a mock queue returned by list_by_project
+        # Build a mock queue returned by the work-driven scan.
         mock_queue = MagicMock()
-        mock_queue.queue_id = queue_repo.list_by_project("test-project")[0].queue_id
+        mock_queue.queue_id = "test-queue-id"
         mock_queue.queue_name = "system_parallel_queue"
         mock_queue.is_paused = False
         mock_queue.queue_type = "parallel"
@@ -514,8 +532,9 @@ class TestJobProcessorOrphanWatchdogWaitingForGuard:
         mock_project.job_queue_paused = False
 
         mock_project_repo = MagicMock()
-        mock_project_repo.list_projects = MagicMock(return_value=[mock_project])
-        queue_repo.list_by_project = MagicMock(return_value=[mock_queue])
+        mock_project_repo.get.return_value = mock_project
+        # Work-driven scan: the scanner pulls queues via the new method.
+        queue_repo.list_queues_with_admittable_work = MagicMock(return_value=[mock_queue])
 
         # Set up queue_service
         mock_queue_service = MagicMock()
@@ -858,9 +877,9 @@ class TestJobProcessorInProgressGuardReviewFixes:
         switch fallback).
         """
         mock_project_repo = MagicMock()
-        mock_project_repo.list_projects = MagicMock(return_value=[])
+        mock_project_repo.get = MagicMock(return_value=_permissive_project())
         mock_queue_repo = MagicMock()
-        mock_queue_repo.list_by_project = MagicMock(return_value=[])
+        mock_queue_repo.list_queues_with_admittable_work = MagicMock(return_value=[])
 
         mock_queue_service = MagicMock()
         mock_queue_service._repository = MagicMock()
