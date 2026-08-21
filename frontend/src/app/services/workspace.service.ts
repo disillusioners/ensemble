@@ -240,6 +240,17 @@ export class WorkspaceService implements OnDestroy {
       // FastAPI wraps the message in { "detail": { "error": "..." } }.
       // Some legacy paths use { "detail": "..." } (string) or
       // { "error": "..." } (bare). Cover all three.
+      // Bare string body (e.g. plain-text "Not found"). Skip
+      // HTML-shaped bodies (proxy/gateway error pages) and very long
+      // bodies — both are machine noise, not user-facing reasons —
+      // and let Angular's message carry the failure instead.
+      const bodyString = typeof detail === 'string' && detail ? detail : null;
+      const readableBody =
+        bodyString !== null &&
+        !bodyString.trimStart().startsWith('<') &&
+        bodyString.length <= 200
+          ? bodyString
+          : null;
       const message =
         (detail && typeof detail === 'object' && 'detail' in detail
           ? this._detailError(detail.detail)
@@ -247,7 +258,7 @@ export class WorkspaceService implements OnDestroy {
         (detail && typeof detail === 'object' && 'error' in detail
           ? this._asString((detail as { error: unknown }).error)
           : null) ??
-        (typeof detail === 'string' && detail ? detail : null);
+        readableBody;
       if (message) {
         // Keep the status visible (e.g. "Not found (404)") so callers
         // that key on it — tests, log greps — still see it alongside
@@ -269,9 +280,18 @@ export class WorkspaceService implements OnDestroy {
     return null;
   }
 
-  /** Stringify a non-null value; null/undefined → null. */
+  /**
+   * Stringify a primitive value; null/undefined → null.
+   * Non-primitives (objects, arrays, functions) also return null so a
+   * nested-object ``detail``/``error`` value falls through the chain
+   * (or to Angular's message) instead of leaking ``[object Object]``.
+   */
   private _asString(v: unknown): string | null {
-    return v == null ? null : String(v);
+    if (v == null) return null;
+    if (typeof v !== 'string' && typeof v !== 'number' && typeof v !== 'boolean') {
+      return null;
+    }
+    return String(v) || null;
   }
 
   /** GET /api/workspace/{projectId}/file */
@@ -294,7 +314,7 @@ export class WorkspaceService implements OnDestroy {
           this.activateTab(path);
         }),
         catchError((err) => {
-          this.error.set(err.message || 'Failed to read file');
+          this.error.set(this.extractErrorMessage(err, 'Failed to read file'));
           throw err;
         })
       );
@@ -308,7 +328,7 @@ export class WorkspaceService implements OnDestroy {
       .pipe(
         tap((res) => this.currentDiff.set(res)),
         catchError((err) => {
-          this.error.set(err.message || 'Failed to get diff');
+          this.error.set(this.extractErrorMessage(err, 'Failed to get diff'));
           throw err;
         })
       );

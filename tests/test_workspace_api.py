@@ -411,7 +411,7 @@ class TestGetFileTree:
         assert explicit.json()["path"] == "."
 
     @pytest.mark.asyncio
-    async def test_tree_dot_dot_traversal_still_rejected(self, client):
+    async def test_tree_dot_slash_canonicalizes_to_root_not_escape(self, client):
         """``path=./.`` variants that canonicalize to the root are NOT escapes.
 
         Companion to the dot-alias test: after ``resolve()``, ``./`` and
@@ -426,6 +426,22 @@ class TestGetFileTree:
 
         assert response.status_code == 200, response.text
         assert [n["name"] for n in response.json()["tree"]]
+
+    @pytest.mark.asyncio
+    async def test_tree_bare_dot_dot_rejected(self, client):
+        """``path=..`` must return 403 (canonicalizes above the workdir root).
+
+        Probe-verified by the reviewer (r2): a bare ``..`` resolves to the
+        workdir's PARENT, outside the served boundary — reject it even
+        though no deeper traversal is requested.
+        """
+        ac, _, project_id = client
+
+        response = await ac.get(
+            f"/api/workspace/{project_id}/tree", params={"path": ".."}
+        )
+
+        assert response.status_code == 403
 
     @pytest.mark.asyncio
     async def test_tree_traversal_rejected(self, client):
