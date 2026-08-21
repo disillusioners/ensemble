@@ -8,12 +8,13 @@
  *   - R2  Sidebar: the chat sidebar must keep showing the full instance list
  *        when activeProjectId === 'all' (the "All" pseudo-project), across
  *        route changes.
- *   - R4  Hide button: clicking the unified overlay hide button while the
- *        detail overlay is up must toggle visibility (pure signal flip,
- *        no navigation) — the cached id + project + state survive, and
- *        re-clicking the same hide button re-shows the overlay with
- *        the same instance. No blank screen; the URL stays on the
- *        detail route.
+ *   - R4  Chat hide/show (Round 3): the chat overlay's visibility is
+ *        URL-driven. Navigate to /jobs hides the chat; navigating
+ *        back to the detail URL re-shows it. The previously-tested
+ *        "click the unified overlay hide button" path no longer
+ *        exists — the header button is the workspace editor toggle
+ *        ONLY. The cached instance id + state survive across the
+ *        navigate cycle.
  *   - R5  Workspace overlay: workspace must layer ABOVE the chat detail
  *        (z-index workspace=100 > chat=90 per the documented ladder).
  *   - Terminate flow: terminating the cached instance clears the localStorage
@@ -25,9 +26,14 @@
  *     and asserts the localStorage cache + nav link react correctly. The
  *     shared `trackInstance()` fixture cleans it up in afterAll.
  *
- * Selector strategy: roles/aria-labels preferred. .overlay-hide-btn,
- * [aria-label="Open Workspace Viewer"], a.instance-item, .terminate-btn are
- * all stable across the current UI.
+ * Selector strategy: roles/aria-labels preferred. .overlay-hide-btn
+ * is now the workspace-editor toggle (only rendered when the
+ * workspace is visible or recoverable — Round 3). For chat
+ * hide/re-show this spec uses the Jobs nav link (hide) and the
+ * Instances nav link (re-show via the dead-click guard), not
+ * the header button. [aria-label="Open Workspace Viewer"],
+ * a.instance-item, .terminate-btn are all stable across the
+ * current UI.
  */
 
 import { test, expect, Page, ConsoleMessage } from '@playwright/test';
@@ -169,14 +175,24 @@ test.describe('Instances Detail Overlay - Regression', () => {
     await page.reload();
     await page.waitForLoadState('domcontentloaded'); // networkidle unreachable: permanent notifications SSE stream
 
-    // URL should NOT be the detail route after reload (we navigated to /
-    // implicitly? Actually reload preserves URL — let me be careful here).
-    // The user was on the detail URL; reload stays there. The overlay SHOULD
-    // still be visible because URL points at detail. The "non-flipping"
-    // guarantee is only that a NON-detail URL after reload doesn't open the
-    // overlay. So after reload at the detail URL, overlay stays visible.
-    // To prove R6 non-flipping, we navigate to / first, then reload, and
-    // assert overlay stays hidden.
+    // Prod symptom cell (Round 4): on cold reload at a detail URL
+    // (chat visible, workspace NEVER opened in this fresh context),
+    // the header hide button MUST be absent. The pre-fix bug had
+    // anyOverlayVisible tracking the chat-visible state — the button
+    // was rendered with a "Hide overlay" affordance on a chat-only
+    // detail URL (no workspace presence). The Round 4 fix restricts
+    // anyOverlayVisible to the workspace tier alone, so chat-only
+    // → button absent. This assertion pins the post-fix symptom
+    // cell that the branch was created to fix.
+    await expect(page.locator('.overlay-hide-btn')).toHaveCount(0);
+
+    // URL should NOT be the detail route after reload. The user was
+    // on the detail URL; reload stays there. The overlay SHOULD still
+    // be visible because URL points at detail. The "non-flipping"
+    // guarantee is only that a NON-detail URL after reload doesn't
+    // open the overlay. So after reload at the detail URL, overlay
+    // stays visible. To prove R6 non-flipping, we navigate to /
+    // first, then reload, and assert overlay stays hidden.
     await page.goto('/');
     await page.waitForLoadState('domcontentloaded'); // networkidle unreachable: permanent notifications SSE stream
 
@@ -296,28 +312,38 @@ test.describe('Instances Detail Overlay - Regression', () => {
   });
 
   // ==========================================================================
-  // R4: Hide button → URL becomes /instances, no blank screen, no errors
+  // R4: Chat hide via URL navigation; re-show via Instances nav link.
   // ==========================================================================
-  // R4 — Overlay hide button: pure toggle, no navigation.
+  // R4 — Chat hide/show surface (Round 3 re-pin).
   //
-  // The detail branch of hideActiveOverlay used to call
-  // ``router.navigate(['/instances'])`` to avoid the URL-stuck trap
-  // (the Instances nav link matching the same URL would have been
-  // a no-op against the router). The current behaviour is a pure
-  // signal flip: ``detailVisible`` toggles directly, the URL stays
-  // on the detail route, and the user re-shows via the SAME hide
-  // button. The cached id + project are preserved across the cycle.
+  // The OLD R4 test exercised the "click the unified overlay hide
+  // button to hide the chat; click again to re-show" path. Round 3
+  // removed the chat hide/re-show branches from the header button —
+  // the button is the WORKSPACE EDITOR toggle ONLY. The chat's
+  // visibility is URL-driven:
+  //
+  //   - Navigate to /jobs (a non-detail URL) → syncDetailVisibility
+  //     closes the detail → chat overlay display:none.
+  //   - Navigate to /projects/{pid}/instances/{iid} →
+  //     syncDetailVisibility opens the detail → chat overlay
+  //     display:flex.
+  //
+  // To re-show the chat while the URL is bare /instances (cached id
+  // is bound but the chat is hidden), click the Instances nav link
+  // — its routerLink resolves to the cached detail route via
+  // lastDetailRoute(), so the router delivers the user to the
+  // cached detail URL. The cached id + project + state survive
+  // across the route cycle.
   //
   // What we still verify:
-  //   - The chat overlay is display:none after the hide click.
-  //   - The hide button stays visible (the cached id drives the
-  //     hidden-but-recoverable branch of anyOverlayVisible).
-  //   - The previously selected instance is preserved in the
-  //     localStorage cache + the view-state service.
-  //   - re-clicking the hide button re-shows the overlay (the chat
-  //     interface is present again).
-  //   - No blank screen (the implicit guard the OLD R4 test pinned).
-  test('R4: overlay hide button toggles visibility (no navigation) — cached instance preserved for re-show', async () => {
+  //   - The chat overlay is display:none after the URL leaves the
+  //     detail route.
+  //   - The previously selected instance is preserved in
+  //     localStorage.
+  //   - Re-show via the Instances nav link delivers the user to the
+  //     cached detail URL and the chat overlay display:flex.
+  //   - No blank screen; the URL reaches the cached detail URL.
+  test('R4: chat hide via URL navigation, re-show via Instances nav link — cached instance preserved', async () => {
     // Open detail first.
     await page.goto('/instances');
     await page.waitForLoadState('domcontentloaded'); // networkidle unreachable: permanent notifications SSE stream
@@ -326,20 +352,27 @@ test.describe('Instances Detail Overlay - Regression', () => {
     await card.click();
     await page.waitForURL(/\/projects\/[^/?]+\/instances\/[^/?]+$/, { timeout: 10000 });
 
-    // Hide button only renders when anyOverlayVisible is true.
-    const hideBtn = page.locator('.overlay-hide-btn');
-    await expect(hideBtn).toBeVisible({ timeout: 10000 });
+    // Chat is visible (open the detail URL).
+    await expect(async () => {
+      const display = await page.locator('app-chat').evaluate(
+        (el) => getComputedStyle(el).display,
+      );
+      expect(display).not.toBe('none');
+    }).toPass({ timeout: 10000 });
 
-    // Capture the detail URL so we can assert the URL stays put.
+    // Capture the detail URL so we can assert the re-show lands
+    // on the same URL.
     const detailUrl = page.url();
 
-    // Hide click — detailVisible toggles to false, no navigation.
-    await hideBtn.click();
+    // Chat hide → navigate to /jobs via the nav link (NOT the
+    // header button, which is no longer the chat toggle).
+    const jobsNav = page.locator('a.nav-link', { hasText: /^Jobs$/ }).first();
+    await expect(jobsNav).toBeVisible({ timeout: 5000 });
+    await jobsNav.click();
+    await page.waitForURL(/\/jobs\/?$/, { timeout: 10000 });
 
-    // The URL stays on the detail route (no navigate-to-/instances).
-    expect(page.url()).toBe(detailUrl);
-    // Signal-driven display flip lands ~100-160ms after the click
-    // (Angular change-detection lag). Poll instead of reading once.
+    // The chat overlay is display:none (syncDetailVisibility ran
+    // closeDetail on the non-detail URL).
     await expect(async () => {
       const display = await page.locator('app-chat').evaluate(
         (el) => getComputedStyle(el).display,
@@ -347,14 +380,9 @@ test.describe('Instances Detail Overlay - Regression', () => {
       expect(display).toBe('none');
     }).toPass({ timeout: 5000 });
 
-    // The hide button stays visible (cached id → anyOverlayVisible).
-    await expect(hideBtn).toBeVisible({ timeout: 5000 });
-
     // The cached instance id is preserved in localStorage. What we
-    // actually assert here is that the hide click did NOT clear the
-    // localStorage cache — the exact "selection lost" regression
-    // class. (This is the same page; a fresh-page-context check
-    // would belong in the cold-reload suite below.)
+    // actually assert here is that the URL navigation did NOT clear
+    // the localStorage cache.
     const storedState = await page.evaluate(() =>
       localStorage.getItem('ensemble-instances-view-state'),
     );
@@ -362,18 +390,21 @@ test.describe('Instances Detail Overlay - Regression', () => {
     const parsed = JSON.parse(storedState!);
     expect(parsed.activeInstanceId).toBeTruthy();
 
-    // Re-show via the SAME hide button — pure toggle restores the
-    // overlay with the same instance + messages.
-    await hideBtn.click();
+    // Re-show via the Instances nav link — lastDetailRoute resolves
+    // to the cached detail URL, so the router delivers the user to
+    // the same detail route. The cached id is preserved.
+    const instancesNav = page.locator('a.nav-link', { hasText: /^Instances$/ }).first();
+    await expect(instancesNav).toBeVisible();
+    await instancesNav.click();
+    await page.waitForURL(/\/projects\/[^/?]+\/instances\/[^/?]+$/, { timeout: 10000 });
     expect(page.url()).toBe(detailUrl);
-    // Signal-driven display flip lands ~100-160ms after the click
-    // (Angular change-detection lag). Poll instead of reading once —
-    // immediate read deterministically observes the pre-click state.
+
+    // Chat re-shown — display:flex.
     await expect(async () => {
       const display = await page.locator('app-chat').evaluate(
         (el) => getComputedStyle(el).display,
       );
-      expect(display).toBe('flex');
+      expect(display).not.toBe('none');
     }).toPass({ timeout: 5000 });
 
     expect(consoleErrors, `console errors: ${consoleErrors.join('\n')}`).toEqual([]);
@@ -381,25 +412,31 @@ test.describe('Instances Detail Overlay - Regression', () => {
   });
 
   // ==========================================================================
-  // N1 e2e: Hide → click Instances nav link → overlay re-shows, URL stays.
+  // N1 e2e (Round 3 re-pin): chat is hidden via URL navigation; click
+  // Instances nav link → overlay re-shows.
   //
   // Companion to the (N1) unit-level test in app.component.spec.ts
-  // (which covers the same-URL preventDefault + re-show flip). This
-  // e2e walks the full DOM path: the user clicks the unified hide
-  // button while the chat is visible (cache populated), then clicks
-  // the Instances nav link in the header — the dead-click guard in
-  // ``onInstancesNavClick`` must re-show the overlay and the URL must
-  // stay on the same detail route (the cached id is preserved, no
-  // navigation, no blank screen).
+  // (which covers the dead-click guard + re-show flip). This e2e
+  // walks the full DOM path: the user navigates away from the
+  // detail URL (chat hides via syncDetailVisibility), then clicks
+  // the Instances nav link in the header — lastDetailRoute resolves
+  // to the cached detail URL, so the router delivers the user to
+  // the cached detail and the chat overlay re-shows. The cached id
+  // is preserved across the URL cycle.
   //
-  // Inspection-only: this test cannot be executed in the sandboxed
-  // CI environment because there is no dev server. It is committed
-  // alongside the unit-level fix so the next dev-environment run
-  // exercises the full DOM path. The assertions follow the existing
-  // R4 conventions (lazy-mount + display:none + localStorage check)
-  // so the live environment can run it without bespoke setup.
+  // Round 3: the OLD test used the header button (.overlay-hide-btn)
+  // to hide the chat. The button is no longer the chat toggle —
+  // re-pinned to navigate to /jobs (via the Jobs nav link) for the
+  // hide step. The chat re-show path is the Instances nav link as
+  // before.
+  //
+  // Inspection-only: committed alongside the unit-level fix so the
+  // next dev-environment run exercises the full DOM path. The
+  // assertions follow the existing R4 conventions (lazy-mount +
+  // display:none + localStorage check) so the live environment can
+  // run it without bespoke setup.
   // ==========================================================================
-  test('N1: hide button → Instances nav link click re-shows the overlay (URL unchanged)', async () => {
+  test('N1: URL nav hides chat → Instances nav link click re-shows the overlay (cached id preserved)', async () => {
     // Boot on a detail URL — the constructor's syncDetailVisibility
     // seeds the cached id AND flips the overlay open. Same setup as
     // the R4 test so the test is hermetic (no other-tab pollution).
@@ -410,19 +447,19 @@ test.describe('Instances Detail Overlay - Regression', () => {
     await card.click();
     await page.waitForURL(/\/projects\/[^/?]+\/instances\/[^/?]+$/, { timeout: 10000 });
 
-    // Capture the detail URL so we can assert the URL stays put
-    // across the hide → click-Instance-link cycle (the N1 dead-click
-    // guard fires inside Angular's click handler and prevents the
-    // no-op router navigation; the URL must not change).
+    // Capture the detail URL so we can assert the re-show lands on
+    // the same URL.
     const detailUrl = page.url();
-    const hideBtn = page.locator('.overlay-hide-btn');
-    await expect(hideBtn).toBeVisible({ timeout: 10000 });
 
-    // Hide click — pure toggle closes the overlay, URL stays.
-    await hideBtn.click();
-    expect(page.url()).toBe(detailUrl);
-    // Signal-driven display flip lands ~100-160ms after the click
-    // (Angular change-detection lag). Poll instead of reading once.
+    // Chat hide — navigate to /jobs via the Jobs nav link. The
+    // chat visibility is URL-driven; leaving the detail URL runs
+    // syncDetailVisibility → closeDetail.
+    const jobsNav = page.locator('a.nav-link', { hasText: /^Jobs$/ }).first();
+    await expect(jobsNav).toBeVisible({ timeout: 5000 });
+    await jobsNav.click();
+    await page.waitForURL(/\/jobs\/?$/, { timeout: 10000 });
+
+    // The chat overlay is display:none.
     await expect(async () => {
       const display = await page.locator('app-chat').evaluate(
         (el) => getComputedStyle(el).display,
@@ -430,9 +467,7 @@ test.describe('Instances Detail Overlay - Regression', () => {
       expect(display).toBe('none');
     }).toPass({ timeout: 5000 });
 
-    // Cached id survives the toggle (the regression the original
-    // branch fixed — localStorage cache must still hold the same
-    // activeInstanceId).
+    // Cached id survives the URL navigation.
     const storedAfterHide = await page.evaluate(() =>
       localStorage.getItem('ensemble-instances-view-state'),
     );
@@ -441,14 +476,14 @@ test.describe('Instances Detail Overlay - Regression', () => {
     const cachedId = parsedAfterHide.activeInstanceId;
     expect(cachedId).toBeTruthy();
 
-    // Click the Instances nav link — the dead-click guard detects
-    // the recoverable state, preventDefault fires, and the overlay
-    // re-shows via a pure ``detailVisible.set(true)``. The URL must
-    // NOT change (the production handler calls preventDefault on
-    // the routerLink navigation).
+    // Click the Instances nav link — routerLink resolves to the
+    // cached detail URL via lastDetailRoute, the router delivers
+    // the user to the cached detail route, and the chat overlay
+    // re-shows.
     const instancesNav = page.locator('a.nav-link', { hasText: /^Instances$/ }).first();
     await expect(instancesNav).toBeVisible();
     await instancesNav.click();
+    await page.waitForURL(/\/projects\/[^/?]+\/instances\/[^/?]+$/, { timeout: 10000 });
     expect(page.url()).toBe(detailUrl);
 
     // Overlay re-shown with the same instance — display flips back
@@ -471,29 +506,18 @@ test.describe('Instances Detail Overlay - Regression', () => {
   });
 
   // ==========================================================================
-  // Reload-while-hidden e2e: hide the overlay → reload → syncDetailVisibility
-  // path re-opens it with the cached id unchanged.
+  // Reload-while-hidden e2e (Round 3 re-pin): URL navigation hides
+  // the chat; navigate back to the detail URL via the Instances nav
+  // link (cached route) → reload → overlay re-opens with the cached
+  // id unchanged. The Round 3 re-pin keeps the OLD invariant
+  // ("hide → reload → same instance + same messages") but the hide
+  // step is now URL-driven (the Jobs nav link) instead of the
+  // header button. Round 4 / D1 has no effect on this path.
   //
-  // This walks the boot path the constructor takes on a cold reload:
-  //   - ``restoreState`` populates ``activeInstanceId`` from
-  //     localStorage (R6 non-flipping for visibility).
-  //   - ``syncDetailVisibility(router.url)`` parses the URL — on a
-  //     detail URL it calls ``openDetail(projectId, instanceId)``,
-  //     which flips ``detailVisible`` to true.
-  //   - On a non-detail URL, ``syncDetailVisibility`` calls
-  //     ``closeDetail()``, leaving the overlay hidden.
-  //
-  // The interesting case the test pins: hidden-but-recoverable +
-  // reload-while-still-on-the-detail-URL. The reload preserves the
-  // URL, so ``syncDetailVisibility`` re-opens the overlay from the
-  // cached id + URL match. The user picks up exactly where they left
-  // off — no URL hop, no blank screen, no flicker.
-  //
-  // Inspection-only: dev-server dependency (same as the N1 test
-  // above).
+  // Inspection-only: dev-server dependency (same as the N1 test).
   // ==========================================================================
-  test('Reload-while-hidden: hide → reload on detail URL → overlay re-opens with cached id', async () => {
-    // Boot on a detail URL — same setup pattern as the N1 e2e above.
+  test('Reload-while-hidden: navigate to /jobs → detail URL via nav link → reload → overlay re-opens with cached id', async () => {
+    // Boot on a detail URL.
     await page.goto('/instances');
     await page.waitForLoadState('domcontentloaded');
     const card = page.locator('a.instance-item').first();
@@ -502,13 +526,13 @@ test.describe('Instances Detail Overlay - Regression', () => {
     await page.waitForURL(/\/projects\/[^/?]+\/instances\/[^/?]+$/, { timeout: 10000 });
 
     const detailUrl = page.url();
-    const hideBtn = page.locator('.overlay-hide-btn');
-    await expect(hideBtn).toBeVisible({ timeout: 10000 });
 
-    // Hide click — overlay closes, cached id survives.
-    await hideBtn.click();
-    // Signal-driven display flip lands ~100-160ms after the click
-    // (Angular change-detection lag). Poll instead of reading once.
+    // Chat hide via URL navigation (Jobs nav link).
+    const jobsNav = page.locator('a.nav-link', { hasText: /^Jobs$/ }).first();
+    await expect(jobsNav).toBeVisible({ timeout: 5000 });
+    await jobsNav.click();
+    await page.waitForURL(/\/jobs\/?$/, { timeout: 10000 });
+
     await expect(async () => {
       const display = await page.locator('app-chat').evaluate(
         (el) => getComputedStyle(el).display,
@@ -516,10 +540,7 @@ test.describe('Instances Detail Overlay - Regression', () => {
       expect(display).toBe('none');
     }).toPass({ timeout: 5000 });
 
-    // Capture the cached id before the reload so we can assert it's
-    // the SAME instance that re-opens (the constructor's
-    // ``restoreState`` → ``syncDetailVisibility`` path must read the
-    // same persisted value).
+    // Capture the cached id before the reload.
     const storedBefore = await page.evaluate(() =>
       localStorage.getItem('ensemble-instances-view-state'),
     );
@@ -527,11 +548,26 @@ test.describe('Instances Detail Overlay - Regression', () => {
     const cachedId = JSON.parse(storedBefore!).activeInstanceId;
     expect(cachedId).toBeTruthy();
 
-    // Reload while hidden — the URL is preserved (it was the detail
-    // URL), so the constructor's syncDetailVisibility(router.url)
-    // calls openDetail with the same project/instance ids, which
-    // flips detailVisible back to true. The lazy-mount effect reuses
-    // the existing host (it was mounted on the first detail open)
+    // Re-show via the Instances nav link (which navigates to the
+    // cached detail URL).
+    const instancesNav = page.locator('a.nav-link', { hasText: /^Instances$/ }).first();
+    await expect(instancesNav).toBeVisible();
+    await instancesNav.click();
+    await page.waitForURL(/\/projects\/[^/?]+\/instances\/[^/?]+$/, { timeout: 10000 });
+    expect(page.url()).toBe(detailUrl);
+
+    // Chat visible again.
+    await expect(async () => {
+      const display = await page.locator('app-chat').evaluate(
+        (el) => getComputedStyle(el).display,
+      );
+      expect(display).not.toBe('none');
+    }).toPass({ timeout: 10000 });
+
+    // Reload — the URL is preserved (the detail URL), so the
+    // constructor's syncDetailVisibility(router.url) calls openDetail
+    // with the same project/instance ids, which flips detailVisible
+    // back to true. The lazy-mount effect reuses the existing host
     // and just refreshes the visible input + display.
     await page.reload();
     await page.waitForLoadState('domcontentloaded');
@@ -547,8 +583,7 @@ test.describe('Instances Detail Overlay - Regression', () => {
       expect(display).not.toBe('none');
     }).toPass({ timeout: 10000 });
 
-    // The cached id is unchanged across the reload — syncDetailVisibility
-    // is idempotent for the id (openDetail writes the same value).
+    // The cached id is unchanged across the reload.
     const storedAfter = await page.evaluate(() =>
       localStorage.getItem('ensemble-instances-view-state'),
     );
