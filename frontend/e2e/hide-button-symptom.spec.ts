@@ -744,6 +744,42 @@ test.describe('Hide Button - Original Bug Symptom E2E', () => {
     }).toPass({ timeout: 15000 });
     await waitForMessageContaining(page, SEED_MESSAGE);
 
+    // NEW PRECONDITION (Round 4): SPA-nav from the project tab bar's
+    // "+" menu to make the S3 project the active tab. After card-click
+    // the URL is `/projects/all/instances/<iid>` (the instances list
+    // renders cards under the "all" project context per
+    // instance-list.html:124), so ``tabStateService.activeProjectId``
+    // is the literal string ``"all"`` and the hotkey handler at
+    // app.ts:713 BAILS silently. addTab() (project-tab-bar.html:55-59 +
+    // TabStateService.addTab) sets activeTab to the project UUID —
+    // which makes activeProjectId the real UUID — so the next hotkey
+    // press fires the toggle. Page.goto is forbidden by the e2e
+    // convention (it would null the in-memory
+    // WorkspaceOverlayService singleton), so this is the SPA-nav path:
+    // click ``.tab-add`` to open the menu, click the project's menu
+    // item, wait for the active tab id to flip in localStorage. The URL
+    // stays at `/projects/all/instances/<iid>` (addTab does not
+    // navigate — see comment in TabStateService.addTab and
+    // chat.component.ts:282-296 tabWorkspaceEffect which only mutates
+    // the workspace service, not the URL), but the hotkey gate reads
+    // activeProjectId, not the URL.
+    await page.locator('app-project-tab-bar .tab-add').click();
+    const s3MenuItem = page.getByRole('menuitem', { name: S3_PROJECT.name });
+    await expect(s3MenuItem).toBeVisible({ timeout: 5000 });
+    await s3MenuItem.click();
+    await expect(async () => {
+      const activeId = await page.evaluate(() => {
+        const raw = localStorage.getItem('ensemble-project-tabs');
+        if (!raw) return null;
+        try {
+          return JSON.parse(raw).activeTabId;
+        } catch {
+          return null;
+        }
+      });
+      expect(activeId).toBe(s3ProjectId);
+    }).toPass({ timeout: 5000 });
+
     const beforeSnap = await readChatSnapshot(page);
     const detailUrl = page.url();
 
