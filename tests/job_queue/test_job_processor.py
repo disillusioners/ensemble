@@ -87,17 +87,48 @@ def mock_instance_manager():
 
 @pytest.fixture
 def mock_project_repo():
-    """Create mock project repository."""
+    """Create mock project repository.
+
+    Work-driven scan (admission starvation fix): the JobProcessor now
+    looks up project pause state via ``project_repo.get(project_id)``
+    with a per-iteration cache, NOT via ``list_projects``. Default
+    ``get`` returns a permissive mock whose ``job_queue_paused``
+    attribute evaluates as falsy so the production pause check
+    (``bool(getattr(project, "job_queue_paused", False))``) treats
+    it as "not paused" out of the box. Tests that need explicit
+    pause semantics override ``return_value`` (single project) or
+    ``side_effect`` (per-id) with a MockProject — assigning
+    ``return_value`` clears the default object, and ``side_effect``
+    is compatible with return_value-aware code.
+    """
     repo = MagicMock()
-    repo.list_projects = MagicMock(return_value=[])
+
+    def _make_permissive_project():
+        proj = MagicMock()
+        proj.job_queue_paused = False
+        return proj
+
+    # ``return_value`` covers the common case where tests don't
+    # care about the project pause semantics. Tests that override
+    # ``repo.get.return_value = project`` will get their explicit
+    # object, and tests that override ``repo.get.side_effect = ...``
+    # will get a callable mapping. Either form is compatible with
+    # the production ``await asyncio.to_thread(self._project_repo.get, pid)``
+    # call.
+    repo.get = MagicMock(return_value=_make_permissive_project())
     return repo
 
 
 @pytest.fixture
 def mock_queue_repo():
-    """Create mock queue repository."""
+    """Create mock queue repository.
+
+    Work-driven scan: the JobProcessor now discovers queues via
+    ``list_queues_with_admittable_work``, NOT via
+    ``list_by_project``. Default returns ``[]`` (no work to admit).
+    """
     repo = MagicMock()
-    repo.list_by_project = MagicMock(return_value=[])
+    repo.list_queues_with_admittable_work = MagicMock(return_value=[])
     return repo
 
 
@@ -134,8 +165,8 @@ class TestJobProcessorTwoLevelPause:
         queue = MockQueue("queue-1", "project-1", is_paused=False)
         job = MockJob("job-1", project_id="project-1", queue_id="queue-1")
 
-        mock_project_repo.list_projects.return_value = [project]
-        mock_queue_repo.list_by_project.return_value = [queue]
+        mock_project_repo.get.return_value = project
+        mock_queue_repo.list_queues_with_admittable_work.return_value = [queue]
         mock_queue_service._repository.list_pending_by_queue.return_value = [job]
         
         # Create a job with instance_id set
@@ -166,8 +197,8 @@ class TestJobProcessorTwoLevelPause:
         queue = MockQueue("queue-1", "project-1", is_paused=True)  # Queue is paused
         job = MockJob("job-1", project_id="project-1", queue_id="queue-1")
 
-        mock_project_repo.list_projects.return_value = [project]
-        mock_queue_repo.list_by_project.return_value = [queue]
+        mock_project_repo.get.return_value = project
+        mock_queue_repo.list_queues_with_admittable_work.return_value = [queue]
         mock_queue_service._repository.list_pending_by_queue.return_value = [job]
 
         await processor._process_next_job()
@@ -185,15 +216,18 @@ class TestJobProcessorTwoLevelPause:
         queue = MockQueue("queue-1", "project-1", is_paused=False)
         job = MockJob("job-1", project_id="project-1", queue_id="queue-1")
 
-        mock_project_repo.list_projects.return_value = [project]
-        mock_queue_repo.list_by_project.return_value = [queue]
+        mock_project_repo.get.return_value = project
+        mock_queue_repo.list_queues_with_admittable_work.return_value = [queue]
         mock_queue_service._repository.list_pending_by_queue.return_value = [job]
 
         await processor._process_next_job()
 
-        # Should not even check queues for paused project
-        mock_queue_repo.list_by_project.assert_not_called()
+        # Work-driven scan: list_queues_with_admittable_work IS
+        # called (the queue IS enumerated); the pause skip happens
+        # AFTER the project pause lookup. The observable contract is
+        # that no job is started.
         mock_queue_service.start_job.assert_not_called()
+        mock_instance_manager.spawn_instance_with_mcp.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_both_paused_skips(
@@ -204,8 +238,8 @@ class TestJobProcessorTwoLevelPause:
         queue = MockQueue("queue-1", "project-1", is_paused=True)  # Queue paused
         job = MockJob("job-1", project_id="project-1", queue_id="queue-1")
 
-        mock_project_repo.list_projects.return_value = [project]
-        mock_queue_repo.list_by_project.return_value = [queue]
+        mock_project_repo.get.return_value = project
+        mock_queue_repo.list_queues_with_admittable_work.return_value = [queue]
         mock_queue_service._repository.list_pending_by_queue.return_value = [job]
 
         await processor._process_next_job()
@@ -242,11 +276,11 @@ class TestJobProcessorTwoLevelPause:
         queue_paused = MockQueue("queue-1", "project-1", is_paused=True)
         queue_resumed = MockQueue("queue-1", "project-1", is_paused=False)
 
-        mock_project_repo.list_projects.return_value = [project]
+        mock_project_repo.get.return_value = project
         
         # Setup to return job1 even on first call (simulating the call happens before pause check)
         # But the job won't be started because queue is paused
-        mock_queue_repo.list_by_project.return_value = [queue_paused]
+        mock_queue_repo.list_queues_with_admittable_work.return_value = [queue_paused]
         mock_queue_service._repository.list_pending_by_queue.return_value = [job1]
         
         # First pass: queue is paused, job should be skipped even if returned
@@ -254,7 +288,7 @@ class TestJobProcessorTwoLevelPause:
         mock_queue_service.start_job.assert_not_called()
         
         # Now change the setup for second pass
-        mock_queue_repo.list_by_project.return_value = [queue_resumed]
+        mock_queue_repo.list_queues_with_admittable_work.return_value = [queue_resumed]
         mock_queue_service._repository.list_pending_by_queue.return_value = [job2]
         mock_queue_service.start_job = AsyncMock(return_value=started_job2)
         mock_instance_manager.enqueue_message = AsyncMock()
@@ -280,8 +314,8 @@ class TestJobProcessorPerQueuePolling:
         job1 = MockJob("job-1", project_id="project-1", queue_id="queue-1")
         job2 = MockJob("job-2", project_id="project-1", queue_id="queue-2")
 
-        mock_project_repo.list_projects.return_value = [project]
-        mock_queue_repo.list_by_project.return_value = [queue1, queue2]
+        mock_project_repo.get.return_value = project
+        mock_queue_repo.list_queues_with_admittable_work.return_value = [queue1, queue2]
         mock_queue_service._repository.list_pending_by_queue.side_effect = [[job1], [job2]]
         
         started_job = MockJob("job-1", project_id="project-1", queue_id="queue-1", status=AdmissionState.ACTIVE.value)
@@ -304,8 +338,8 @@ class TestJobProcessorPerQueuePolling:
         job2 = MockJob("job-2", project_id="project-1", queue_id="queue-1")
         job3 = MockJob("job-3", project_id="project-1", queue_id="queue-1")
 
-        mock_project_repo.list_projects.return_value = [project]
-        mock_queue_repo.list_by_project.return_value = [queue]
+        mock_project_repo.get.return_value = project
+        mock_queue_repo.list_queues_with_admittable_work.return_value = [queue]
         mock_queue_service._repository.list_pending_by_queue.return_value = [job1, job2, job3]
         
         # start_job returns None when at concurrency limit
@@ -333,8 +367,8 @@ class TestJobProcessorPerQueuePolling:
         queue = MockQueue("queue-1", "project-1", is_paused=False)
         job = MockJob("job-1", project_id="project-1", queue_id="queue-1", status=AdmissionState.QUEUED.value)
 
-        mock_project_repo.list_projects.return_value = [project]
-        mock_queue_repo.list_by_project.return_value = [queue]
+        mock_project_repo.get.return_value = project
+        mock_queue_repo.list_queues_with_admittable_work.return_value = [queue]
         mock_queue_service._repository.list_pending_by_queue.return_value = [job]
         
         started_job = MockJob("job-1", project_id="project-1", queue_id="queue-1", status=AdmissionState.ACTIVE.value)
@@ -354,8 +388,8 @@ class TestJobProcessorPerQueuePolling:
         project = MockProject("project-1", job_queue_paused=False)
         queue = MockQueue("queue-1", "project-1", is_paused=False)
 
-        mock_project_repo.list_projects.return_value = [project]
-        mock_queue_repo.list_by_project.return_value = [queue]
+        mock_project_repo.get.return_value = project
+        mock_queue_repo.list_queues_with_admittable_work.return_value = [queue]
         mock_queue_service._repository.list_pending_by_queue.return_value = []  # No pending jobs
         mock_queue_service._repository.list_by_queue.return_value = ([], 0)  # No orphan PROCESSING jobs
 
@@ -368,24 +402,34 @@ class TestJobProcessorPerQueuePolling:
     async def test_multiple_projects_queues_polled(
         self, processor, mock_queue_service, mock_instance_manager, mock_project_repo, mock_queue_repo
     ):
-        """Test that processor polls queues across multiple projects."""
+        """Test that processor polls queues across multiple projects.
+
+        Work-driven scan: the processor issues ONE call to
+        ``list_queues_with_admittable_work`` and iterates the
+        returned queue list, looking up each queue's project pause
+        state via the cached ``project_repo.get``.
+        """
         project1 = MockProject("project-1", job_queue_paused=False)
         project2 = MockProject("project-2", job_queue_paused=False)
         queue1 = MockQueue("queue-1", "project-1", is_paused=False)
         queue2 = MockQueue("queue-2", "project-2", is_paused=False)
 
-        mock_project_repo.list_projects.return_value = [project1, project2]
-        mock_queue_repo.list_by_project.side_effect = [
-            [queue1],  # project-1 queues
-            [queue2],  # project-2 queues
-        ]
+        # ``project_repo.get`` is keyed by project_id — return the
+        # right project for each lookup.
+        mock_project_repo.get.side_effect = lambda pid: (
+            project1 if pid == "project-1" else project2
+        )
+        # Single call returning both queues from both projects
+        mock_queue_repo.list_queues_with_admittable_work.return_value = [queue1, queue2]
         mock_queue_service._repository.list_pending_by_queue.side_effect = [[], []]
         mock_queue_service._repository.list_by_queue.return_value = ([], 0)  # No orphan PROCESSING jobs
 
         await processor._process_next_job()
 
-        # Both projects' queues should be checked
-        assert mock_queue_repo.list_by_project.call_count == 2
+        # Both queues' projects should be checked — single scan call,
+        # but the project pause lookup must succeed for both projects.
+        assert mock_queue_repo.list_queues_with_admittable_work.call_count == 1
+        assert mock_project_repo.get.call_count == 2
 
 
 class TestJobProcessorLifecycle:
@@ -440,8 +484,8 @@ class TestJobProcessorErrorHandling:
         queue = MockQueue("queue-1", "project-1", is_paused=False)
         job = MockJob("job-1", project_id="project-1", queue_id="queue-1")
 
-        mock_project_repo.list_projects.return_value = [project]
-        mock_queue_repo.list_by_project.return_value = [queue]
+        mock_project_repo.get.return_value = project
+        mock_queue_repo.list_queues_with_admittable_work.return_value = [queue]
         mock_queue_service._repository.list_pending_by_queue.return_value = [job]
         mock_queue_service.start_job.return_value = None  # Failed to start
 
@@ -462,8 +506,8 @@ class TestJobProcessorErrorHandling:
         started_job = MockJob("job-1", project_id="project-1", queue_id="queue-1", status=AdmissionState.ACTIVE.value)
         started_job.instance_id = "instance-123"
 
-        mock_project_repo.list_projects.return_value = [project]
-        mock_queue_repo.list_by_project.return_value = [queue]
+        mock_project_repo.get.return_value = project
+        mock_queue_repo.list_queues_with_admittable_work.return_value = [queue]
         mock_queue_service._repository.list_pending_by_queue.return_value = [job]
         mock_queue_service.start_job.return_value = started_job
         mock_instance_manager.spawn_instance_with_mcp.side_effect = Exception("Spawn failed")
@@ -487,8 +531,8 @@ class TestJobProcessorErrorHandling:
         started_job = MockJob("job-1", project_id="project-1", queue_id="queue-1", status=AdmissionState.ACTIVE.value)
         started_job.instance_id = "instance-123"
 
-        mock_project_repo.list_projects.return_value = [project]
-        mock_queue_repo.list_by_project.return_value = [queue]
+        mock_project_repo.get.return_value = project
+        mock_queue_repo.list_queues_with_admittable_work.return_value = [queue]
         mock_queue_service._repository.list_pending_by_queue.return_value = [job]
         mock_queue_service.start_job.return_value = started_job
         mock_instance_manager.spawn_instance_with_mcp.return_value = "instance-123"
@@ -543,8 +587,8 @@ class TestOrphanJobRecovery:
         orphan_job.message = "recover me"
         orphan_job.source = "api"
 
-        mock_project_repo.list_projects.return_value = [project]
-        mock_queue_repo.list_by_project.return_value = [queue]
+        mock_project_repo.get.return_value = project
+        mock_queue_repo.list_queues_with_admittable_work.return_value = [queue]
         # No pending jobs, but PROCESSING job exists
         mock_queue_service._repository.list_pending_by_queue.return_value = []
         mock_queue_service._repository.list_by_queue.return_value = ([orphan_job], None)
@@ -581,8 +625,8 @@ class TestOrphanJobRecovery:
         orphan_job = MockJob("job-orphan", project_id="project-1", queue_id="queue-1", status=AdmissionState.ACTIVE.value)
         orphan_job.instance_id = "missing-instance-id"
 
-        mock_project_repo.list_projects.return_value = [project]
-        mock_queue_repo.list_by_project.return_value = [queue]
+        mock_project_repo.get.return_value = project
+        mock_queue_repo.list_queues_with_admittable_work.return_value = [queue]
         mock_queue_service._repository.list_pending_by_queue.return_value = []
         mock_queue_service._repository.list_by_queue.return_value = ([orphan_job], None)
 
@@ -611,8 +655,8 @@ class TestOrphanJobRecovery:
         processing_job = MockJob("job-running", project_id="project-1", queue_id="queue-1", status=AdmissionState.ACTIVE.value)
         processing_job.instance_id = "existing-instance-id"
 
-        mock_project_repo.list_projects.return_value = [project]
-        mock_queue_repo.list_by_project.return_value = [queue]
+        mock_project_repo.get.return_value = project
+        mock_queue_repo.list_queues_with_admittable_work.return_value = [queue]
         mock_queue_service._repository.list_pending_by_queue.return_value = []
         mock_queue_service._repository.list_by_queue.return_value = ([processing_job], None)
 
@@ -660,8 +704,8 @@ class TestOrphanJobRecovery:
         message_orphan.instance_id = "existing-instance-id"
         message_orphan.job_type = "message"
 
-        mock_project_repo.list_projects.return_value = [project]
-        mock_queue_repo.list_by_project.return_value = [queue]
+        mock_project_repo.get.return_value = project
+        mock_queue_repo.list_queues_with_admittable_work.return_value = [queue]
         # No pending jobs — forces the orphan branch.
         mock_queue_service._repository.list_pending_by_queue.return_value = []
         # Surface the message JobItem to the orphan loop.
@@ -1015,8 +1059,8 @@ class TestJobProcessorInstancePause:
         job.instance_id = instance_id
         job.job_type = "message"  # MESSAGE jobs have instance_id
 
-        mock_project_repo.list_projects.return_value = [project]
-        mock_queue_repo.list_by_project.return_value = [queue]
+        mock_project_repo.get.return_value = project
+        mock_queue_repo.list_queues_with_admittable_work.return_value = [queue]
         mock_queue_service._repository.list_pending_by_queue.return_value = [job]
 
         # Mock the paused instance
@@ -1052,8 +1096,8 @@ class TestJobProcessorInstancePause:
         started_job.instance_id = instance_id
         started_job.job_type = "message"
 
-        mock_project_repo.list_projects.return_value = [project]
-        mock_queue_repo.list_by_project.return_value = [queue]
+        mock_project_repo.get.return_value = project
+        mock_queue_repo.list_queues_with_admittable_work.return_value = [queue]
         mock_queue_service._repository.list_pending_by_queue.return_value = [job]
         # Phase 2.5 (D13): the legacy
         # ``find_processing_message_jobs_by_instance`` cross-dispatcher
@@ -1097,8 +1141,8 @@ class TestJobProcessorInstancePause:
         started_job.instance_id = "new-instance-123"
         started_job.job_type = "task"
 
-        mock_project_repo.list_projects.return_value = [project]
-        mock_queue_repo.list_by_project.return_value = [queue]
+        mock_project_repo.get.return_value = project
+        mock_queue_repo.list_queues_with_admittable_work.return_value = [queue]
         mock_queue_service._repository.list_pending_by_queue.return_value = [job]
         mock_queue_service.start_job = AsyncMock(return_value=started_job)
 
@@ -1132,8 +1176,8 @@ class TestJobProcessorInstancePause:
         started_job.instance_id = instance_id
         started_job.job_type = "message"
 
-        mock_project_repo.list_projects.return_value = [project]
-        mock_queue_repo.list_by_project.return_value = [queue]
+        mock_project_repo.get.return_value = project
+        mock_queue_repo.list_queues_with_admittable_work.return_value = [queue]
         mock_queue_service._repository.list_pending_by_queue.return_value = [job]
         # Phase 2.5 (D13): see companion comment in
         # ``test_processes_job_for_running_instance`` — the legacy

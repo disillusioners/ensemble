@@ -296,8 +296,8 @@ class TestStatusStrEnumGuard:
         project = MockProject(project_id="project-1", job_queue_paused=False)
         queue = MockQueue(queue_id="queue-1", project_id="project-1", is_paused=False)
 
-        mock_project_repo.list_projects.return_value = [project]
-        mock_queue_repo.list_by_project.return_value = [queue]
+        mock_project_repo.get.return_value = project
+        mock_queue_repo.list_queues_with_admittable_work.return_value = [queue]
         # No pending jobs - this triggers the orphan job check path
         mock_queue_service._repository.list_pending_by_queue.return_value = []
         # Return our message job as a PROCESSING job in the queue
@@ -339,8 +339,8 @@ class TestStatusStrEnumGuard:
         project = MockProject(project_id="project-1", job_queue_paused=False)
         queue = MockQueue(queue_id="queue-1", project_id="project-1", is_paused=False)
 
-        mock_project_repo.list_projects.return_value = [project]
-        mock_queue_repo.list_by_project.return_value = [queue]
+        mock_project_repo.get.return_value = project
+        mock_queue_repo.list_queues_with_admittable_work.return_value = [queue]
         mock_queue_service._repository.list_pending_by_queue.return_value = []
         mock_queue_service._repository.list_by_queue.return_value = ([job], None)
 
@@ -376,8 +376,8 @@ class TestStatusStrEnumGuard:
         project = MockProject(project_id="project-1", job_queue_paused=False)
         queue = MockQueue(queue_id="queue-1", project_id="project-1", is_paused=False)
 
-        mock_project_repo.list_projects.return_value = [project]
-        mock_queue_repo.list_by_project.return_value = [queue]
+        mock_project_repo.get.return_value = project
+        mock_queue_repo.list_queues_with_admittable_work.return_value = [queue]
         mock_queue_service._repository.list_pending_by_queue.return_value = []
         mock_queue_service._repository.list_by_queue.return_value = ([job], None)
 
@@ -414,8 +414,8 @@ class TestStatusStrEnumGuard:
         project = MockProject(project_id="project-1", job_queue_paused=False)
         queue = MockQueue(queue_id="queue-1", project_id="project-1", is_paused=False)
 
-        mock_project_repo.list_projects.return_value = [project]
-        mock_queue_repo.list_by_project.return_value = [queue]
+        mock_project_repo.get.return_value = project
+        mock_queue_repo.list_queues_with_admittable_work.return_value = [queue]
         mock_queue_service._repository.list_pending_by_queue.return_value = []
         mock_queue_service._repository.list_by_queue.return_value = ([job], None)
 

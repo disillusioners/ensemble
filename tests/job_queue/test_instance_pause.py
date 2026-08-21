@@ -308,6 +308,20 @@ class TestJobProcessorInstancePause:
         service._repository.list_pending_by_queue = MagicMock(return_value=[])
         return service
 
+    def _permissive_project(self):
+        """Return a permissive mock project whose ``job_queue_paused`` is False.
+
+        The default ``project_repo.get`` returns this shape so the
+        production pause-cache check
+        (``bool(getattr(project, "job_queue_paused", False))``)
+        treats it as "not paused" out of the box. Tests that need
+        explicit pause semantics override ``repo.get.return_value``
+        with a real MockProject.
+        """
+        proj = MagicMock()
+        proj.job_queue_paused = False
+        return proj
+
     @pytest.fixture
     def mock_instance_manager(self):
         """Create mock InstanceManager with instance_repository."""
@@ -320,16 +334,22 @@ class TestJobProcessorInstancePause:
 
     @pytest.fixture
     def mock_project_repo(self):
-        """Create mock project repository."""
+        """Create mock project repository.
+
+        Work-driven scan (admission starvation fix): the JobProcessor
+        looks up project pause state via ``project_repo.get(project_id)``
+        with a per-iteration cache. Default returns a permissive mock
+        so the production pause check skips the queue-row.
+        """
         repo = MagicMock()
-        repo.list_projects = MagicMock(return_value=[])
+        repo.get = MagicMock(return_value=self._permissive_project())
         return repo
 
     @pytest.fixture
     def mock_queue_repo(self):
         """Create mock queue repository."""
         repo = MagicMock()
-        repo.list_by_project = MagicMock(return_value=[])
+        repo.list_queues_with_admittable_work = MagicMock(return_value=[])
         return repo
 
     @pytest.fixture
@@ -390,8 +410,8 @@ class TestJobProcessorInstancePause:
         job.message = "test message"
         job.source = "api"
 
-        mock_project_repo.list_projects.return_value = [project]
-        mock_queue_repo.list_by_project.return_value = [queue]
+        mock_project_repo.get.return_value = project
+        mock_queue_repo.list_queues_with_admittable_work.return_value = [queue]
         mock_queue_service._repository.list_pending_by_queue.return_value = [job]
         # Phase 2.5 (D13): the legacy
         # ``find_processing_message_jobs_by_instance`` cross-dispatcher
@@ -462,8 +482,8 @@ class TestJobProcessorInstancePause:
         started_job.instance_id = instance_id
         started_job.job_type = "message"
 
-        mock_project_repo.list_projects.return_value = [project]
-        mock_queue_repo.list_by_project.return_value = [queue]
+        mock_project_repo.get.return_value = project
+        mock_queue_repo.list_queues_with_admittable_work.return_value = [queue]
         mock_queue_service._repository.list_pending_by_queue.return_value = [job]
         # Phase 2.5 (D13): see companion comment in
         # ``test_processor_skips_paused_instance`` — the legacy

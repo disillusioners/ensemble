@@ -987,16 +987,30 @@ class TestJobProcessorOrphanDetection:
 
     @pytest.fixture
     def mock_project_repo(self):
-        """Create mock project repository."""
+        """Create mock project repository.
+
+        Work-driven scan: ``get(project_id)`` is the call path. Default
+        returns a permissive mock whose ``job_queue_paused`` is False.
+        """
         repo = MagicMock()
-        repo.list_projects = MagicMock(return_value=[])
+
+        def _make_permissive_project():
+            proj = MagicMock()
+            proj.job_queue_paused = False
+            return proj
+
+        repo.get = MagicMock(return_value=_make_permissive_project())
         return repo
 
     @pytest.fixture
     def mock_queue_repo(self):
-        """Create mock queue repository."""
+        """Create mock queue repository.
+
+        Work-driven scan: ``list_queues_with_admittable_work`` is the
+        call path. Default returns ``[]`` (no work to admit).
+        """
         repo = MagicMock()
-        repo.list_by_project = MagicMock(return_value=[])
+        repo.list_queues_with_admittable_work = MagicMock(return_value=[])
         return repo
 
     @pytest.fixture
@@ -1050,8 +1064,8 @@ class TestJobProcessorOrphanDetection:
         orphan_task.message = "test"
         orphan_task.source = "api"
 
-        mock_project_repo.list_projects.return_value = [project]
-        mock_queue_repo.list_by_project.return_value = [queue]
+        mock_project_repo.get.return_value = project
+        mock_queue_repo.list_queues_with_admittable_work.return_value = [queue]
         mock_queue_service._repository.list_pending_by_queue.return_value = []
         mock_queue_service._repository.list_by_queue.return_value = ([orphan_task], None)
 
@@ -1106,8 +1120,8 @@ class TestJobProcessorOrphanDetection:
         orphan_task.message = "test"
         orphan_task.source = "api"
 
-        mock_project_repo.list_projects.return_value = [project]
-        mock_queue_repo.list_by_project.return_value = [queue]
+        mock_project_repo.get.return_value = project
+        mock_queue_repo.list_queues_with_admittable_work.return_value = [queue]
         mock_queue_service._repository.list_pending_by_queue.return_value = []
         mock_queue_service._repository.list_by_queue.return_value = ([orphan_task], None)
 
@@ -1159,8 +1173,8 @@ class TestJobProcessorOrphanDetection:
         orphan_task.message = "test"
         orphan_task.source = "api"
 
-        mock_project_repo.list_projects.return_value = [project]
-        mock_queue_repo.list_by_project.return_value = [queue]
+        mock_project_repo.get.return_value = project
+        mock_queue_repo.list_queues_with_admittable_work.return_value = [queue]
         mock_queue_service._repository.list_pending_by_queue.return_value = []
         mock_queue_service._repository.list_by_queue.return_value = ([orphan_task], None)
 
@@ -1212,8 +1226,8 @@ class TestJobProcessorOrphanDetection:
         orphan_task.message = "test"
         orphan_task.source = "api"
 
-        mock_project_repo.list_projects.return_value = [project]
-        mock_queue_repo.list_by_project.return_value = [queue]
+        mock_project_repo.get.return_value = project
+        mock_queue_repo.list_queues_with_admittable_work.return_value = [queue]
         mock_queue_service._repository.list_pending_by_queue.return_value = []
         mock_queue_service._repository.list_by_queue.return_value = ([orphan_task], None)
 
@@ -1263,8 +1277,8 @@ class TestJobProcessorOrphanDetection:
         orphan_task.message = "test"
         orphan_task.source = "api"
 
-        mock_project_repo.list_projects.return_value = [project]
-        mock_queue_repo.list_by_project.return_value = [queue]
+        mock_project_repo.get.return_value = project
+        mock_queue_repo.list_queues_with_admittable_work.return_value = [queue]
         mock_queue_service._repository.list_pending_by_queue.return_value = []
         mock_queue_service._repository.list_by_queue.return_value = ([orphan_task], None)
 
@@ -1316,8 +1330,8 @@ class TestJobProcessorOrphanDetection:
         message_job.message = "test message"
         message_job.source = "api"
 
-        mock_project_repo.list_projects.return_value = [project]
-        mock_queue_repo.list_by_project.return_value = [queue]
+        mock_project_repo.get.return_value = project
+        mock_queue_repo.list_queues_with_admittable_work.return_value = [queue]
         mock_queue_service._repository.list_pending_by_queue.return_value = []
         mock_queue_service._repository.list_by_queue.return_value = ([message_job], None)
 
@@ -1375,8 +1389,8 @@ class TestJobProcessorOrphanDetection:
         message_job.message = "test message"
         message_job.source = "api"
 
-        mock_project_repo.list_projects.return_value = [project]
-        mock_queue_repo.list_by_project.return_value = [queue]
+        mock_project_repo.get.return_value = project
+        mock_queue_repo.list_queues_with_admittable_work.return_value = [queue]
         mock_queue_service._repository.list_pending_by_queue.return_value = []
         mock_queue_service._repository.list_by_queue.return_value = ([message_job], None)
 
@@ -1432,8 +1446,8 @@ class TestJobProcessorOrphanDetection:
         message_job.message = "test message"
         message_job.source = "api"
 
-        mock_project_repo.list_projects.return_value = [project]
-        mock_queue_repo.list_by_project.return_value = [queue]
+        mock_project_repo.get.return_value = project
+        mock_queue_repo.list_queues_with_admittable_work.return_value = [queue]
         mock_queue_service._repository.list_pending_by_queue.return_value = []
         mock_queue_service._repository.list_by_queue.return_value = ([message_job], None)
 
