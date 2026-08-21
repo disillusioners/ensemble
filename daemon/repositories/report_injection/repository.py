@@ -381,19 +381,22 @@ class ReportInjectionRepository:
                     )
                 ).first()
                 if existing is None:
-                    # Should not happen: the IntegrityError fired but
-                    # the SELECT (post-rollback) finds no non-terminal
-                    # row. The terminal rows exist (the index
-                    # predicate excludes them), so a race escalated
-                    # to terminal between the rolled-back INSERT and
-                    # this SELECT. No-op — delivery has happened.
+                    # Benign race, expected occasionally: the
+                    # IntegrityError fired but the SELECT
+                    # (post-rollback) finds no non-terminal row. The
+                    # terminal rows exist (the index predicate
+                    # excludes them), so a race escalated to terminal
+                    # between the rolled-back INSERT and this SELECT.
+                    # No-op — delivery has happened.
                     logger.info(
                         f"[ReportInjection] ensure_deferred no-op: "
-                        f"concurrent terminal race for "
+                        f"report was already delivered "
+                        f"(racing delivery won) for "
                         f"parent={parent_instance_id[:8]}..., "
                         f"child={child_instance_id[:8]}..., "
                         f"msg={child_message_id[:8]}... "
-                        f"(original reason={deferred_reason})"
+                        f"(original reason={deferred_reason}) "
+                        f"— no action needed"
                     )
                     return None
                 if existing.deferred_reason != deferred_reason:
@@ -409,8 +412,9 @@ class ReportInjectionRepository:
                     session.refresh(existing)
                     return existing
                 logger.debug(
-                    f"[ReportInjection] ensure_deferred absorbed "
-                    f"duplicate for "
+                    f"[ReportInjection] ensure_deferred: duplicate "
+                    f"DEFERRED marker skipped (another actor already "
+                    f"wrote it) — benign, for "
                     f"parent={parent_instance_id[:8]}..., "
                     f"child={child_instance_id[:8]}..., "
                     f"msg={child_message_id[:8]}... "
