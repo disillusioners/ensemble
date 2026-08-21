@@ -1,5 +1,5 @@
 import { Injectable, NgZone, OnDestroy, computed, inject, signal } from '@angular/core';
-import { HttpClient, HttpParams } from '@angular/common/http';
+import { HttpClient, HttpErrorResponse, HttpParams } from '@angular/common/http';
 import { Observable, catchError, finalize, of, tap } from 'rxjs';
 import {
   FileContentResponse,
@@ -210,12 +210,68 @@ export class WorkspaceService implements OnDestroy {
           // stale data under the wrong projectId.
           this._treeProjectId = projectId;
         }),
-        catchError((err) => {
-          this.error.set(err.message || 'Failed to load file tree');
+        catchError((err: unknown) => {
+          this.error.set(this.extractErrorMessage(err, 'Failed to load file tree'));
           return of({ project_id: projectId, path, tree: [], truncated: false });
         }),
         finalize(() => this.loading.set(false))
       );
+  }
+
+  /**
+   * Extract a user-readable message from an HTTP error.
+   *
+   * The backend's workspace router raises FastAPI ``HTTPException`` with a
+   * structured ``detail`` body (e.g. ``{"error": "Project has no
+   * main_directory configured"}``). Angular's default ``err.message`` is
+   * ``"Http failure response for /api/workspace/<id>/tree: 400 Bad
+   * Request"`` — which buries the actionable reason and shows a confusing
+   * generic string. This surfaces the backend's reason when present and
+   * falls back to Angular's message or ``fallback`` otherwise.
+   *
+   * Kept here (not in the component) so every workspace GET shares the
+   * same translation; the component's save-error path has its own
+   * status-keyed mapping (``mapSaveError``) because it surfaces the
+   * failure in a snackbar rather than the banner.
+   */
+  private extractErrorMessage(err: unknown, fallback: string): string {
+    if (err instanceof HttpErrorResponse) {
+      const detail = err.error;
+      // FastAPI wraps the message in { "detail": { "error": "..." } }.
+      // Some legacy paths use { "detail": "..." } (string) or
+      // { "error": "..." } (bare). Cover all three.
+      const message =
+        (detail && typeof detail === 'object' && 'detail' in detail
+          ? this._detailError(detail.detail)
+          : null) ??
+        (detail && typeof detail === 'object' && 'error' in detail
+          ? this._asString((detail as { error: unknown }).error)
+          : null) ??
+        (typeof detail === 'string' && detail ? detail : null);
+      if (message) {
+        // Keep the status visible (e.g. "Not found (404)") so callers
+        // that key on it — tests, log greps — still see it alongside
+        // the backend's actionable reason.
+        return err.status > 0 ? `${message} (${err.status})` : message;
+      }
+      // Fall back to Angular's message (already includes status + text).
+      if (err.message) return err.message;
+    }
+    return (err instanceof Error && err.message) ? err.message : fallback;
+  }
+
+  /** Coerce a ``detail`` value (string | dict) to the inner ``error`` string. */
+  private _detailError(detail: unknown): string | null {
+    if (typeof detail === 'string') return detail || null;
+    if (detail && typeof detail === 'object' && 'error' in detail) {
+      return this._asString((detail as { error: unknown }).error);
+    }
+    return null;
+  }
+
+  /** Stringify a non-null value; null/undefined → null. */
+  private _asString(v: unknown): string | null {
+    return v == null ? null : String(v);
   }
 
   /** GET /api/workspace/{projectId}/file */
