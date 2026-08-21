@@ -1,5 +1,14 @@
 # Lesson: e2e "never-claimed" signature ≠ code regression (2026-08-20)
 
+**RESOLUTION 2026-08-21 (fix verified):** the root-cause bug this lesson documented — `_process_next_job`
+`list_projects(limit=100)` scan starvation — is now FIXED on `fix/job-processor-admission-starvation`
+(@ cc35959a) and verified CLOSED on the original failing context (ensemble_dev, 338 projects,
+system-default rank #189, engine-log-verified): Release Gate 3/3 PASS, 5 `found PENDING job`
+admissions, 42 Processing events, 50 spawns. Residual GUARD lines dropped 243 → 5, and the guard
+parenthetical is a STATIC guard-list string (not a queue-admission attribution) — grep for
+`[GUARD]` alone over-counts; grep the window AND check admission/processing counters before
+calling starvation. See RESULTS/2026-08-21-job-processor-admission-starvation.md.
+
 **Context:** Release Gate e2e (`test/packs/e2e_workflows_ensure_test.sh`) on live daemon :8079 during
 feature/job-tools-cross-project-access verification. 3 of 4 tests failed identically, twice.
 
