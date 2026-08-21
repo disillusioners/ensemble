@@ -2298,8 +2298,11 @@ describe('WorkspaceComponent', () => {
       });
 
       it('viewer panes still fill the remaining space (flex grow, basis 0)', () => {
+        // Single-rule window: `[^{]*\{[^}]*` keeps the flex declaration
+        // pinned INSIDE the same rule block as the selector — the old
+        // unbounded `[\s\S]*?` could satisfy itself from any later rule.
         expect(scss).toMatch(
-          /\.viewer-content\s*>\s*app-code-viewer[\s\S]*?flex:\s*1\s+1\s+0/
+          /\.viewer-content\s*>\s*app-code-viewer[^{]*\{[^}]*flex:\s*1\s+1\s+0/
         );
       });
     });

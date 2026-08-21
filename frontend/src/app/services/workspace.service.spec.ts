@@ -237,6 +237,85 @@ describe('WorkspaceService', () => {
       );
       req.error(new ErrorEvent('Network down'));
     });
+
+    it('surfaces the bare {error: "..."} envelope (level-3 shape)', (done) => {
+      service.getFileTree('project-1').subscribe({
+        next: () => {
+          expect(service.error()).toBe('Workspace unavailable (503)');
+          done();
+        },
+        error: done.fail,
+      });
+
+      const req = httpTesting.expectOne(
+        (request) => request.url === '/api/workspace/project-1/tree'
+      );
+      req.flush(
+        { error: 'Workspace unavailable' },
+        { status: 503, statusText: 'Service Unavailable' }
+      );
+    });
+
+    it('nested-object error values fall through to Angular message, never "[object Object]"', (done) => {
+      // W1: a structured (non-primitive) error value must not be
+      // stringified — String({}) is "[object Object]", which reads as
+      // noise in the banner.
+      service.getFileTree('project-1').subscribe({
+        next: () => {
+          expect(service.error()).not.toContain('[object Object]');
+          expect(service.error()).toContain('Http failure');
+          done();
+        },
+        error: done.fail,
+      });
+
+      const req = httpTesting.expectOne(
+        (request) => request.url === '/api/workspace/project-1/tree'
+      );
+      req.flush(
+        { detail: { error: { code: 'INTERNAL', hint: 'nested object' } } },
+        { status: 500, statusText: 'Server Error' }
+      );
+    });
+
+    it('HTML-shaped string bodies (proxy pages) fall back to the Angular message', (done) => {
+      // W2: a gateway/proxy error page is machine noise; never surface
+      // its markup verbatim in the banner.
+      service.getFileTree('project-1').subscribe({
+        next: () => {
+          expect(service.error()).not.toContain('<html');
+          expect(service.error()).toContain('Http failure');
+          done();
+        },
+        error: done.fail,
+      });
+
+      const req = httpTesting.expectOne(
+        (request) => request.url === '/api/workspace/project-1/tree'
+      );
+      req.flush(
+        '<html><body>502 Bad Gateway</body></html>',
+        { status: 502, statusText: 'Bad Gateway' }
+      );
+    });
+
+    it('string bodies longer than 200 chars fall back to the Angular message', (done) => {
+      // W2: overly long bodies are stack traces / debug dumps, not a
+      // user-facing reason.
+      service.getFileTree('project-1').subscribe({
+        next: () => {
+          expect(service.error()).toContain('Http failure');
+          expect(service.error()).not.toContain('x'.repeat(50));
+          done();
+        },
+        error: done.fail,
+      });
+
+      const req = httpTesting.expectOne(
+        (request) => request.url === '/api/workspace/project-1/tree'
+      );
+      req.flush('x'.repeat(201), { status: 400, statusText: 'Bad Request' });
+    });
   });
 
   it('should update currentFile and selectedPath after loading content', (done) => {
