@@ -39,7 +39,7 @@ YELLOW := \033[1;33m
 RED := \033[0;31m
 NC := \033[0m
 
-.PHONY: build install install-deps clean uninstall help sync stop stop-by-port start dev pyinstaller pyinstaller-clean ensure-latest plist-install deploy-demo deploy-live stage-demo
+.PHONY: build install install-deps clean uninstall help sync stop stop-by-port start dev pyinstaller pyinstaller-clean ensure-latest plist-install watchdog-install deploy-demo deploy-live stage-demo
 
 help:
 	@echo "Available targets:"
@@ -47,6 +47,7 @@ help:
 	@echo "  make pyinstaller     - Build binary (dist/ensemble-prod, clears dist first)"
 	@echo "  make install         - Build and install to $(INSTALL_DIR) (backs up existing binary)"
 	@echo "  make plist-install   - Copy staged plist to ~/Library/LaunchAgents (prints launchctl hint)"
+	@echo "  make watchdog-install - Install the watchdog-watcher launchd agent (m3)"
 	@echo "  make install-deps    - Install Python dependencies in $(INSTALL_DIR)"
 	@echo "  make sync            - Install dependencies with uv sync"
 	@echo "  make start           - Start the daemon (dev flow: stop + start.sh)"
@@ -249,6 +250,13 @@ install: pyinstaller
 	mkdir -p $(INSTALL_DIR)/data
 	INSTALL_DIR='$(INSTALL_DIR)' awk 'BEGIN { rep = ENVIRON["INSTALL_DIR"]; p = "INSTALL_DIR_PLACEHOLDER"; lp = length(p) } { while ((i = index($$0, p)) > 0) $$0 = substr($$0, 1, i - 1) rep substr($$0, i + lp); print }' scripts/ensemble-prod.plist \
 		> "$(INSTALL_DIR)/data/ensemble-prod.plist"
+	# Watchdog-watcher (m3): stage the script + its launchd-agent plist
+	# (same literal-substitution awk as above — no sed `&` hazards).
+	mkdir -p $(INSTALL_DIR)/scripts
+	cp $(CURDIR)/scripts/watchdog-watcher.sh $(INSTALL_DIR)/scripts/watchdog-watcher.sh
+	chmod +x $(INSTALL_DIR)/scripts/watchdog-watcher.sh
+	INSTALL_DIR='$(INSTALL_DIR)' awk 'BEGIN { rep = ENVIRON["INSTALL_DIR"]; p = "INSTALL_DIR_PLACEHOLDER"; lp = length(p) } { while ((i = index($$0, p)) > 0) $$0 = substr($$0, 1, i - 1) rep substr($$0, i + lp); print }' scripts/ensemble-watchdog-watcher.plist \
+		> "$(INSTALL_DIR)/data/ensemble-watchdog-watcher.plist"
 	
 	# Copy frontend build (preserve frontend/dist/frontend/browser structure)
 	@echo "$(YELLOW)Copying frontend...$(NC)"
@@ -294,6 +302,34 @@ plist-install:
 	@echo "  launchctl bootout gui/$$(id -u)/com.ensemble.prod"
 	@echo ""
 	@echo "Logs: $(INSTALL_DIR)/data/launcher.log (stdout) + launcher.err.log (stderr)"
+
+# Watchdog-watcher launchd AGENT (Auto-Restart Phase 1, m3): stages the
+# plist with the real path (if missing) and copies it to
+# ~/Library/LaunchAgents. Watches /livez every 300s; notifies when the
+# daemon has been absent >600s. Observation only — never restarts.
+# Demo-env variant: hand-duplicate the plist with Label
+# com.ensemble.watchdog.demo + the demo INSTALL_DIR (see the template's
+# DEMO USAGE note) — same convention as ensemble-prod.plist.
+watchdog-install:
+	@if [ ! -f "$(INSTALL_DIR)/data/ensemble-watchdog-watcher.plist" ]; then \
+		if [ -f "$(INSTALL_DIR)/scripts/watchdog-watcher.sh" ]; then \
+			INSTALL_DIR='$(INSTALL_DIR)' awk 'BEGIN { rep = ENVIRON["INSTALL_DIR"]; p = "INSTALL_DIR_PLACEHOLDER"; lp = length(p) } { while ((i = index($$0, p)) > 0) $$0 = substr($$0, 1, i - 1) rep substr($$0, i + lp); print }' $(CURDIR)/scripts/ensemble-watchdog-watcher.plist > "$(INSTALL_DIR)/data/ensemble-watchdog-watcher.plist"; \
+		else \
+			echo "$(RED)Error: $(INSTALL_DIR)/scripts/watchdog-watcher.sh not found — run 'make install' first.$(NC)"; \
+			exit 1; \
+		fi; \
+	fi
+	mkdir -p $(HOME)/Library/LaunchAgents
+	cp $(INSTALL_DIR)/data/ensemble-watchdog-watcher.plist $(HOME)/Library/LaunchAgents/ensemble-watchdog-watcher.plist
+	@echo "$(GREEN)Watchdog-watcher agent installed: $(HOME)/Library/LaunchAgents/ensemble-watchdog-watcher.plist$(NC)"
+	@echo ""
+	@echo "To load it (macOS launchd):"
+	@echo "  launchctl bootstrap gui/$$(id -u) $(HOME)/Library/LaunchAgents/ensemble-watchdog-watcher.plist"
+	@echo ""
+	@echo "To unload:"
+	@echo "  launchctl bootout gui/$$(id -u)/com.ensemble.watchdog"
+	@echo ""
+	@echo "Logs: $(INSTALL_DIR)/data/watchdog.log (notifies after 600s of /livez absence)"
 
 # Deploy targets (Auto-Restart Phase 1, 3-env topology: dev 8079 / demo 7979 /
 # live 9797). Thin wrappers over scripts/deploy.sh — all logic (config table,
