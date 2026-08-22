@@ -9,8 +9,10 @@
 #
 # Strategy: source launcher.sh (the source-guard in main must hold — sourcing
 # must NOT run anything), then unit-test the pure decision functions
-# (classify_exit / next_backoff / budget_tick), the .env parser, and the
-# state-file round-trip + corrupt tolerance. NO binaries are ever spawned;
+# (classify_exit / next_backoff / budget_tick), the .env parser, the
+# state-file round-trip + corrupt tolerance, and the ADR-012 journal sweep
+# (P2.1 T7: decision table against fixture state.json + release dirs — pure
+# filesystem sandboxes, no daemon, no network). NO binaries are ever spawned;
 # the run-loop itself is not executed here.
 # ============================================================================
 
@@ -373,18 +375,192 @@ assert_eq "partially corrupt state: valid keys survive" "0" "$?"
 )
 assert_eq "missing state file → defaults" "0" "$?"
 
-# ─── 8. journal sweep stub: present journal → logs, returns 0 ──────────────
-section "journal sweep stub"
+# ─── 8. Journal sweep (ADR-012 / P2.1 T7) ──────────────────────────────────
+# Decision table (test-strategy.md §P2.1): stale (>600s) + flipped →
+# sweep-rollback executed (current repointed to previous, sweep_rollback
+# history event, ADR-024 counter+cooldown, quarantine); stale + not flipped
+# → txn cleared; fresh (≤600s) → untouched; no journal → no-op. The sweep is
+# NEVER refused by cap/cooldown (D-FA4.2 entry-side only). kind=restart is
+# never launcher-swept (D-FA4.3). Fixtures are pure filesystem sandboxes.
+section "journal sweep"
 JS_TEST_DIR="$(mktemp -d "${TMPDIR:-/tmp}/launcher-js.XXXXXX")"
-mkdir -p "$JS_TEST_DIR/releases"
-printf '{"txn": {"status": "in-flight"}}\n' > "$JS_TEST_DIR/releases/state.json"
-JS_OUT="$( . "$LAUNCHER"; INSTALL_DIR="$JS_TEST_DIR"; _journal_sweep 2>&1 )"
-assert_eq "journal sweep returns 0" "0" "$?"
-assert_contains "journal sweep logs (stub)" "ADR-012 stub" "$JS_OUT"
 
-JS_TEST_DIR2="$(mktemp -d "${TMPDIR:-/tmp}/launcher-js2.XXXXXX")"
-( . "$LAUNCHER"; INSTALL_DIR="$JS_TEST_DIR2"; _journal_sweep >/dev/null 2>&1 )
-assert_eq "journal sweep: no journal → silent success" "0" "$?"
+# _js_fixture <dir> — two release dirs + `current` -> v0.10.6 (flipped state)
+_js_fixture() {
+    mkdir -p "$1/releases/v0.10.5" "$1/releases/v0.10.6"
+    printf 'x' > "$1/releases/v0.10.5/ensemble-prod"
+    printf 'x' > "$1/releases/v0.10.6/ensemble-prod"
+    ln -sfn "releases/v0.10.6" "$1/current"
+}
+
+# _js_seed <dir> <started_iso> <flipped> [count] [window_start_iso] [cooldown_raw] [kind]
+_js_seed() {
+    local d="$1" started="$2" flipped="$3" cnt="${4:-1}" wstart="${5:-$2}" cd_raw="${6:-null}" kind="${7:-promote}"
+    printf '{"current":"v0.10.5","previous":"v0.10.5","in_flight":{"kind":"%s","target":"v0.10.6","started_at":"%s","flipped":%s,"owner_pid":999999},"rollback_window_count":{"24h":%s,"window_start":"%s"},"cooldown_until":%s,"quarantined":[],"history":[]}\n' \
+        "$kind" "$started" "$flipped" "$cnt" "$wstart" "$cd_raw" > "$d/releases/state.json"
+}
+
+_js_run() {  # run the sweep against <dir> in a fresh launcher shell
+    ( . "$LAUNCHER"; INSTALL_DIR="$1" _journal_sweep >/dev/null 2>&1 )
+}
+
+_js_journal() {  # raw journal bytes
+    cat "$1/releases/state.json" 2>/dev/null
+}
+
+_js_field() {   # _js_field <dir> <key> — top-level field of the journal
+    ( . "$LAUNCHER"; _js_json_field "$(_js_journal "$1")" "$2" 2>/dev/null )
+}
+
+_js_count() {   # rollback_window_count "24h" value
+    ( . "$LAUNCHER"; _js_json_field "$(_js_json_sub "$(_js_journal "$1")" rollback_window_count 2>/dev/null)" 24h 2>/dev/null )
+}
+
+STALE_TS="$(date -ju -v-700S +%Y-%m-%dT%H:%M:%SZ)"
+FRESH_TS="$(date -ju -v-30S +%Y-%m-%dT%H:%M:%SZ)"
+OLD25H_TS="$(date -ju -v-90000S +%Y-%m-%dT%H:%M:%SZ)"
+
+# 8a. stale + flipped:true → sweep-rollback: current repointed to previous,
+#     sweep_rollback history event, counter incremented, cooldown armed,
+#     target quarantined, in_flight cleared (ADR-012/024).
+JS_A="$JS_TEST_DIR/a"; _js_fixture "$JS_A"; _js_seed "$JS_A" "$STALE_TS" true
+_js_run "$JS_A"
+assert_eq "8a sweep-rollback: rc 0 (boot proceeds)" "0" "$?"
+assert_eq "8a current repointed to previous" "releases/v0.10.5" "$(readlink "$JS_A/current")"
+assert_eq "8a journal current updated" "v0.10.5" "$(_js_field "$JS_A" current)"
+assert_eq "8a in_flight cleared" "null" "$(_js_field "$JS_A" in_flight)"
+assert_eq "8a rollback counter incremented (1→2)" "2" "$(_js_count "$JS_A")"
+assert_contains "8a sweep_rollback history event recorded" '"event":"sweep_rollback"' "$(_js_journal "$JS_A")"
+assert_contains "8a failed target quarantined" '"v0.10.6"' \
+    "$( . "$LAUNCHER"; _js_json_sub "$(_js_journal "$JS_A")" quarantined 2>/dev/null)"
+CD_A="$(_js_field "$JS_A" cooldown_until)"
+case "$CD_A" in null|"") _fail "8a cooldown armed after sweep-rollback" "ISO ts" "$CD_A" ;; *) _pass ;; esac
+[ -d "$JS_A/releases/rollback.lock.d" ] && _fail "8a lock dir left behind" "absent" "present" || _pass
+ls "$JS_A" | grep -q 'current\.new' && _fail "8a current.new.\$\$ droppings" "absent" "present" || _pass
+
+# 8b. stale + flipped:false → in_flight cleared, sweep history event,
+#     current UNTOUCHED (never flipped), no counter/cooldown mutation.
+JS_B="$JS_TEST_DIR/b"; _js_fixture "$JS_B"; _js_seed "$JS_B" "$STALE_TS" false
+_js_run "$JS_B"
+assert_eq "8b stale pre-flip txn cleared: rc 0" "0" "$?"
+assert_eq "8b in_flight cleared" "null" "$(_js_field "$JS_B" in_flight)"
+assert_eq "8b current symlink untouched (never flipped)" "releases/v0.10.6" "$(readlink "$JS_B/current")"
+assert_contains "8b sweep history event recorded" '"event":"sweep"' "$(_js_journal "$JS_B")"
+if printf '%s' "$(_js_journal "$JS_B")" | grep -q 'sweep_rollback'; then
+    _fail "8b no sweep_rollback event (nothing rolled back)" "absent" "present"
+else
+    _pass
+fi
+assert_eq "8b rollback counter NOT incremented" "1" "$(_js_count "$JS_B")"
+assert_eq "8b cooldown NOT armed" "null" "$(_js_field "$JS_B" cooldown_until)"
+
+# 8c. fresh (≤600s) in_flight → left completely alone (owner may be alive).
+JS_C="$JS_TEST_DIR/c"; _js_fixture "$JS_C"; _js_seed "$JS_C" "$FRESH_TS" true
+JS_C_BEFORE="$(_js_journal "$JS_C")"
+_js_run "$JS_C"
+assert_eq "8c fresh txn: rc 0" "0" "$?"
+assert_eq "8c journal byte-identical (untouched)" "$JS_C_BEFORE" "$(_js_journal "$JS_C")"
+assert_eq "8c current symlink untouched" "releases/v0.10.6" "$(readlink "$JS_C/current")"
+
+# 8d. no journal → silent no-op (pre-existing behavior preserved).
+JS_D="$JS_TEST_DIR/d"; mkdir -p "$JS_D/releases"
+( . "$LAUNCHER"; INSTALL_DIR="$JS_D" _journal_sweep >/dev/null 2>&1 )
+assert_eq "8d no journal → silent success" "0" "$?"
+
+# 8e. D-FA4.2: the sweep NEVER refuses on cap — count already AT cap (3)
+#     + stale flipped → rollback STILL executes, count → 4, halt event armed.
+JS_E="$JS_TEST_DIR/e"; _js_fixture "$JS_E"; _js_seed "$JS_E" "$STALE_TS" true 3 "$STALE_TS"
+_js_run "$JS_E"
+assert_eq "8e at-cap sweep-rollback still executes: rc 0" "0" "$?"
+assert_eq "8e current repointed past cap" "releases/v0.10.5" "$(readlink "$JS_E/current")"
+assert_eq "8e count increments past cap (entry-side ≥3 check)" "4" "$(_js_count "$JS_E")"
+assert_contains "8e halt event armed at cap" '"event":"halt"' "$(_js_journal "$JS_E")"
+assert_eq "8e in_flight cleared (recovery completed)" "null" "$(_js_field "$JS_E" in_flight)"
+
+# 8f. D-FA4.2: active cooldown NEVER refuses the sweep — cooldown_until in
+#     the FUTURE + stale flipped → rollback still executes + cooldown re-armed.
+JS_F="$JS_TEST_DIR/f"; _js_fixture "$JS_F"
+_js_seed "$JS_F" "$STALE_TS" true 1 "$STALE_TS" "\"$(date -ju -v+300S +%Y-%m-%dT%H:%M:%SZ)\""
+_js_run "$JS_F"
+assert_eq "8f cooldown-active sweep-rollback still executes: rc 0" "0" "$?"
+assert_eq "8f current repointed despite cooldown" "releases/v0.10.5" "$(readlink "$JS_F/current")"
+assert_eq "8f in_flight cleared" "null" "$(_js_field "$JS_F" in_flight)"
+
+# 8g. ADR-005 window rollover (R1.4): window_start >24h old → count resets,
+#     this sweep-rollback re-opens the window at 1.
+JS_G="$JS_TEST_DIR/g"; _js_fixture "$JS_G"; _js_seed "$JS_G" "$STALE_TS" true 2 "$OLD25H_TS"
+_js_run "$JS_G"
+assert_eq "8g stale window rollover → count re-opened at 1" "1" "$(_js_count "$JS_G")"
+
+# 8h. D-FA4.3 / R-SR13: kind=restart is NEVER launcher-swept (daemon boot
+#     sweep owns it) — stale flipped restart txn left untouched.
+JS_H="$JS_TEST_DIR/h"; _js_fixture "$JS_H"; _js_seed "$JS_H" "$STALE_TS" true 1 "$STALE_TS" null restart
+JS_H_BEFORE="$(_js_journal "$JS_H")"
+_js_run "$JS_H"
+assert_eq "8h restart-kind: rc 0" "0" "$?"
+assert_eq "8h restart-kind journal untouched" "$JS_H_BEFORE" "$(_js_journal "$JS_H")"
+assert_eq "8h restart-kind current untouched" "releases/v0.10.6" "$(readlink "$JS_H/current")"
+
+# 8i. fail-closed edges: unparseable started_at + torn journal → untouched,
+#     rc 0 (the sweep never fires on a txn it cannot age / cannot trust).
+JS_I="$JS_TEST_DIR/i"; _js_fixture "$JS_I"
+printf '{"current":"v0.10.5","previous":"v0.10.5","in_flight":{"kind":"promote","target":"v0.10.6","started_at":"yesterday-ish","flipped":true,"owner_pid":1},"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[]}\n' > "$JS_I/releases/state.json"
+_js_run "$JS_I"; JS_I_RC=$?
+assert_eq "8i unparseable started_at → rc 0, untouched" "0" "$JS_I_RC"
+assert_contains "8i unparseable txn left in place" '"flipped":true' "$(_js_journal "$JS_I")"
+JS_I2="$JS_TEST_DIR/i2"; _js_fixture "$JS_I2"
+printf '{"current":"v0.10.5","previous":"v0.10.5","in_flight":{"kind":"promote' > "$JS_I2/releases/state.json"
+JS_I2_RAW='{"current":"v0.10.5","previous":"v0.10.5","in_flight":{"kind":"promote'
+_js_run "$JS_I2"; JS_I2_RC=$?
+assert_eq "8i torn (unbalanced) journal → rc 0" "0" "$JS_I2_RC"
+assert_eq "8i torn journal byte-identical" "$JS_I2_RAW" "$(_js_journal "$JS_I2")"
+
+# 8j. halt-for-human: stale flipped but previous release DIR missing → NO
+#     flip, halt history event, txn left in place (T8 explicit check).
+JS_J="$JS_TEST_DIR/j"; _js_fixture "$JS_J"; _js_seed "$JS_J" "$STALE_TS" true
+rm -rf "$JS_J/releases/v0.10.5"
+_js_run "$JS_J"
+assert_eq "8j missing previous: rc 0 (boot proceeds)" "0" "$?"
+assert_eq "8j current NOT repointed" "releases/v0.10.6" "$(readlink "$JS_J/current")"
+assert_contains "8j halt event recorded" '"event":"halt"' "$(_js_journal "$JS_J")"
+assert_contains "8j txn left in place for diagnosis" '"kind":"promote"' "$(_js_journal "$JS_J")"
+
+# 8k. D5 lock defer: pipeline lock held with a FRESH heartbeat + live owner
+#     → sweep defers (journal untouched, rc 0) — never blocks boot.
+JS_K="$JS_TEST_DIR/k"; _js_fixture "$JS_K"; _js_seed "$JS_K" "$STALE_TS" true
+mkdir -p "$JS_K/releases/rollback.lock.d"
+printf '%s\n' "$$" > "$JS_K/releases/rollback.lock.d/owner"
+printf '%s\n' "$(date +%s)" > "$JS_K/releases/rollback.lock.d/heartbeat"
+JS_K_BEFORE="$(_js_journal "$JS_K")"
+_js_run "$JS_K"
+assert_eq "8k busy live lock → rc 0 (defer)" "0" "$?"
+assert_eq "8k journal untouched while lock busy" "$JS_K_BEFORE" "$(_js_journal "$JS_K")"
+assert_eq "8k current untouched while lock busy" "releases/v0.10.6" "$(readlink "$JS_K/current")"
+assert_eq "8k foreign lock left in place" "present" "$([ -d "$JS_K/releases/rollback.lock.d" ] && echo present)"
+
+# 8l. D5 stale-break: lock dir with DEAD owner + heartbeat >300s old →
+#     sweep breaks it (mv to rollback.lock.stale.*) and proceeds.
+JS_L="$JS_TEST_DIR/l"; _js_fixture "$JS_L"; _js_seed "$JS_L" "$STALE_TS" true
+mkdir -p "$JS_L/releases/rollback.lock.d"
+printf '%s\n' "999999" > "$JS_L/releases/rollback.lock.d/owner"
+printf '%s\n' "$(( $(date +%s) - 400 ))" > "$JS_L/releases/rollback.lock.d/heartbeat"
+_js_run "$JS_L"
+assert_eq "8l stale lock broken + sweep proceeds: rc 0" "0" "$?"
+assert_eq "8l current repointed after stale-break" "releases/v0.10.5" "$(readlink "$JS_L/current")"
+ls "$JS_L/releases" | grep -q 'rollback\.lock\.d\.stale\.' && _pass \
+    || _fail "8l stale lock moved to .stale.*" "present" "$(ls "$JS_L/releases" | tr '\n' ' ')"
+
+# 8m. structural pin: the sweep runs BEFORE binary resolution in main() —
+# the orphaned-flip recovery must not boot the broken release first.
+MAIN_BODY="$(sed -n '/^main()/,/^}/p' "$LAUNCHER")"
+SWEEP_LINE="$(printf '%s\n' "$MAIN_BODY" | grep -n '_journal_sweep' | head -1 | cut -d: -f1)"
+BIN_LINE="$(printf '%s\n' "$MAIN_BODY" | grep -n 'resolve_binary' | head -1 | cut -d: -f1)"
+if [ -n "$SWEEP_LINE" ] && [ -n "$BIN_LINE" ] && [ "$SWEEP_LINE" -lt "$BIN_LINE" ]; then
+    _pass
+else
+    _fail "main(): _journal_sweep precedes resolve_binary" "sweep<binary" "sweep=$SWEEP_LINE binary=$BIN_LINE"
+fi
+
 
 # ─── 9. resolve_binary preference order ─────────────────────────────────────
 section "resolve_binary"
@@ -445,7 +621,7 @@ N_OUT="$( . "$LAUNCHER"; _notify_once test-kind "message body" 2>&1 )"
 assert_contains "_notify_once logs NOTIFY[...]" "NOTIFY[test-kind]" "$N_OUT"
 
 # ─── cleanup ────────────────────────────────────────────────────────────────
-rm -rf "$ENV_TEST_DIR" "$STATE_TEST_DIR" "$JS_TEST_DIR" "$JS_TEST_DIR2" \
+rm -rf "$ENV_TEST_DIR" "$STATE_TEST_DIR" "$JS_TEST_DIR" \
        "$RB_TEST_DIR" "$RB_TEST_DIR2" "$RB_TEST_DIR3" "$RB_TEST_DIR4" \
        "$RB_TEST_DIR5" 2>/dev/null
 
