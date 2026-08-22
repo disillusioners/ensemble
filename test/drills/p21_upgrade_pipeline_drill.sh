@@ -21,6 +21,12 @@
 #      verdict with it
 #   F  retention (T8, sandbox 2): stage 5 + promote through → exactly 3
 #   G  mid-flip SIGKILL (T4, sandbox 3): journal in_flight + flipped:true
+#   H  cross-writer sweep (T7 × review i2, sandbox 4): SIGKILL a REAL
+#      promote after flipped:true (journal 100% lib.sh-written), age the
+#      txn past the 600s sweep gate, then start the REAL launcher.sh
+#      against the sandbox → its sweep rollbacks the REAL orphan:
+#      repoint + sweep_rollback + counter + cooldown + quarantine, and
+#      boots the rolled-back release
 #
 # Drill knobs (sandbox-only conveniences; production defaults unchanged):
 #   ENSEMBLE_PROMOTE_SOAK_S=4  LIVEZ_BUDGET_S=6  READYZ_BUDGET_S=6
@@ -114,7 +120,7 @@ livez_version() { # <port>
 # demo/live install paths cannot match this prefix.
 drill_cleanup() {
     local d
-    for d in "$RUN_DIR"/sbx1 "$RUN_DIR"/sbx2 "$RUN_DIR"/sbx3; do
+    for d in "$RUN_DIR"/sbx1 "$RUN_DIR"/sbx2 "$RUN_DIR"/sbx3 "$RUN_DIR"/sbx4; do
         [ -d "$d" ] && bash "$REPO_ROOT/scripts/stop-ensemble.sh" "$d" > /dev/null 2>&1
     done
     # belt-and-braces: anything still referencing the run dir namespace
@@ -300,6 +306,89 @@ rm -rf "$SBX3/releases/rollback.lock.d"
 jget "$SBX3" 'journal_close_txn; journal_set_current vG2; journal_set_previous vG1' > /dev/null
 promote "$SBX3" $SBX3_PORT vG2 "$RUN_DIR/promote-vG2-recovery.log"
 chk "post-orphan re-promote vG2 exits 0 (drill recovery)" 0 $?
+
+# ═══ Phase H: cross-writer sweep (T7 × review i2) ═════════════════════════
+# The wave-1 gap this closes: nothing ever proved the LAUNCHER's sweep
+# against a journal written by the REAL lib.sh writers (promote's
+# open_txn/mark_flipped). Here a real promote is SIGKILLed right after
+# flipped:true; the on-disk journal is 100% pipeline-written (NOT
+# drill-seeded). The launcher.sh started next must rollback that REAL
+# orphan: repoint + sweep_rollback + counter + cooldown + quarantine.
+printf '\n━━━ Phase H: cross-writer — REAL promote kill → REAL launcher sweep rollback ━━━\n'
+SBX4="$RUN_DIR/sbx4"; SBX4_PORT=18404; mkdir -p "$SBX4"
+# THREE versions: vH0 → vH1 promoted cleanly first, so the journal carries
+# a REAL previous (vH0) for the orphaned vH2 flip to roll back to (a
+# first-ever promote would leave previous=null and the sweep would
+# correctly halt instead of rolling back)
+stage_version "$SBX4" $SBX4_PORT vH0 serve 1 && ok "stage vH0" || bad "stage vH0"
+stage_version "$SBX4" $SBX4_PORT vH1 serve 1 && ok "stage vH1" || bad "stage vH1"
+stage_version "$SBX4" $SBX4_PORT vH2 serve 1 && ok "stage vH2" || bad "stage vH2"
+promote "$SBX4" $SBX4_PORT vH0 "$RUN_DIR/promote-vH0.log"
+chk "promote vH0 exits 0" 0 $?
+promote "$SBX4" $SBX4_PORT vH1 "$RUN_DIR/promote-vH1.log"
+chk "promote vH1 exits 0" 0 $?
+chk "journal carries a real previous (vH0)" "vH0" "$(jget "$SBX4" '_json_field "$(journal_read)" previous')"
+# launch via DIRECT env (env execs bash: $! IS the promote pid — the dk()
+# wrapper runs in a subshell and kill -9 would only kill the wrapper)
+env -u PORT -u POSTGRES_DB -u INSTALL_DIR \
+    ENSEMBLE_PROMOTE_SOAK_S=4 LIVEZ_BUDGET_S=6 READYZ_BUDGET_S=6 \
+    VERSION=vH2 TARGET=sandbox INSTALL_DIR="$SBX4" PORT=$SBX4_PORT \
+    bash "$UP/promote.sh" sandbox > "$RUN_DIR/promote-vH2-killed.log" 2>&1 &
+PRO_PID=$!
+KILLED=0
+i=0
+while [ $i -lt 150 ]; do
+    FLIP="$(jget "$SBX4" '_json_field "$(_json_sub "$(journal_read)" in_flight)" flipped')"
+    if [ "$FLIP" = "true" ]; then
+        kill -9 $PRO_PID 2>/dev/null
+        KILLED=1
+        break
+    fi
+    sleep 0.2
+    i=$((i+1))
+done
+if [ "$KILLED" = "1" ]; then ok "promote vH2 SIGKILLed right after flipped:true (REAL lib.sh journal)"; else bad "never observed flipped:true (vH2)"; fi
+wait $PRO_PID 2>/dev/null
+# the kill races restart_via_launcher: if the orphaned promote got its
+# nohup'd launcher + stub out before dying, that stub holds the port —
+# stop it so the drill's own launcher start below is deterministic
+# (identical sweep input either way: journal + symlink + lock)
+bash "$REPO_ROOT/scripts/stop-ensemble.sh" "$SBX4" $SBX4_PORT > /dev/null 2>&1
+chk "pre-sweep: current orphaned on vH2" "releases/vH2" "$(readlink "$SBX4/current")"
+jsnap "$SBX4" pre-sweep
+chk_contains "pre-sweep: real promote txn on disk" '"kind":"promote"' "$RUN_DIR/j-pre-sweep.json"
+chk_contains "pre-sweep: flipped:true on disk" '"flipped":true' "$RUN_DIR/j-pre-sweep.json"
+if [ -d "$SBX4/releases/rollback.lock.d" ]; then ok "pre-sweep: lock held by dead promote (sweep must dead-owner break)"; else bad "lock unexpectedly absent pre-sweep"; fi
+# age the REAL txn past the 600s sweep gate (knobs stay script constants
+# per T7 — the only way to cross the gate in drill time is rewriting
+# started_at via journal_update itself; logged fixture manipulation, same
+# class as the cooldown clears above)
+jget "$SBX4" 'ts="$(date -ju -v-700S +%Y-%m-%dT%H:%M:%SZ)"; inf="$(_json_sub "$(journal_read)" in_flight)"; k="$(_json_field "$inf" kind)"; t="$(_json_field "$inf" target)"; o="$(_json_field "$inf" owner_pid)"; journal_update in_flight "{\"kind\":\"$k\",\"target\":\"$t\",\"started_at\":\"$ts\",\"flipped\":true,\"owner_pid\":$o}"' > /dev/null
+printf 'DRILL: aged the REAL txn started_at to -700s (fixture manipulation to cross the 600s sweep gate in drill time)\n'
+# start the REAL launcher (promote's launcher_swap staged it at the sandbox
+# root in the stopped window; resolve_install_dir picks the sandbox up from
+# its own location): sweep runs BEFORE binary resolution (T7)
+( cd "$SBX4" && nohup bash ./launcher.sh >> "$SBX4/data/launcher.log" 2>&1 & )
+sleep 2
+chk "cross-writer: sweep repointed current to vH0 (previous)" "releases/vH0" "$(readlink "$SBX4/current")"
+jsnap "$SBX4" post-sweep
+chk_contains "cross-writer: sweep_rollback event in the REAL journal" '"event":"sweep_rollback"' "$RUN_DIR/j-post-sweep.json"
+# semantic reads (the launcher's splice writes "key": value with a space —
+# lib.sh writes "key":value; never assert raw spacing across writers)
+chk "cross-writer: txn cleared" "null" "$(jget "$SBX4" '_json_field "$(journal_read)" in_flight')"
+chk "cross-writer: journal current = vH0" "vH0" "$(jget "$SBX4" '_json_field "$(journal_read)" current')"
+chk_contains "cross-writer: vH2 quarantined" '"vH2"' "$RUN_DIR/j-post-sweep.json"
+chk "cross-writer: rollback counter incremented to 1" 1 "$(jget "$SBX4" journal_rollback_count_24h)"
+CD_H="$(jget "$SBX4" '_json_field "$(journal_read)" cooldown_until')"
+case "$CD_H" in null|"") bad "cross-writer: cooldown armed by the sweep (ADR-024)" ;; *) ok "cross-writer: cooldown armed by the sweep (ADR-024)" ;; esac
+i=0; V=""
+while [ $i -lt 20 ]; do
+    V="$(livez_version $SBX4_PORT)"
+    [ -n "$V" ] && break
+    sleep 0.5; i=$((i+1))
+done
+chk "cross-writer: launcher booted the rolled-back vH0" "vH0" "$V"
+if [ -d "$SBX4/releases/rollback.lock.d" ]; then bad "cross-writer: sweep released the lock"; else ok "cross-writer: sweep released the lock"; fi
 
 # ═══ static: no network fetch, no literal live port ═══════════════════════
 printf '\n━━━ static: no git-pull / no literal live port in scripts/upgrade/ ━━━\n'
