@@ -36,11 +36,12 @@
 #
 # Bash 3.2 / BSD tools only (macOS). No flock(1).
 
-# Literal patterns everywhere: agent dir names contain glob metacharacters
-# (e.g. tidier[v2]) that would otherwise be interpreted as character classes
-# inside ${var#pattern} / ${var%pattern} string ops on JSON keys and paths.
-# No code in this pipeline relies on pathname-expansion globbing.
-set -f
+# NOTE on patterns: agent dir names contain glob metacharacters (e.g.
+# tidier[v2]) — every ${var#pattern} / ${var%pattern} string op that
+# interpolates such names MUST quote the interpolated part
+# (${var#*"${key}"}) so it matches literally. Do NOT add `set -f` here:
+# pathname globbing IS used (retention_evict release scan); the quoted-
+# pattern form is the load-bearing fix.
 # ============================================================================
 
 # Upgrace namespace prefix for every log line (callers set LOG_TAG before
@@ -417,7 +418,7 @@ journal_update() {
                         rest="${rest:1}"
                     done
                 fi
-                out="$head: $raw$rest"
+                out="$head:$raw$rest"
                 break
                 ;;
             *)
@@ -997,29 +998,29 @@ retention_evict() {
     if [ -n "$prev" ] && [ ! -d "$rel/$prev" ]; then
         _warn "retention: journal previous '$prev' has NO release dir (manual deletion?) — rollback target missing; auto-rollback would halt-for-human"
     fi
-    entries=""
+    # Count ALL releases; evict oldest non-pinned until RETENTION_KEEP
+    # remain IN TOTAL (ADR-004: "retention 3 releases" — current + previous
+    # are pinned members of the three, not additions to it).
+    local total=0 name st
+    local entries=""
     for d in "$rel"/*/; do
         [ -d "$d" ] || continue
         name="${d%/}"; name="${name##*/}"
         [ "$name" = "current" ] && continue   # the flip symlink, not a release
+        total=$((total + 1))
         [ "$name" = "$cur" ] && continue
         [ "$name" = "$prev" ] && continue
-        local st
         st="$(manifest_field "$name" staged_at 2>/dev/null)"
         [ -n "$st" ] || st="$(stat -f '%m' "$d" 2>/dev/null)"
         [ -n "$st" ] || st=0
         entries="$entries$st $name\n"
     done
-    [ -z "$entries" ] && return 0
-    n="$(printf "$entries" | grep -c .)"
-    if [ "$n" -le "$RETENTION_KEEP" ]; then
-        _log "retention: $n non-pinned releases ≤ keep=$RETENTION_KEEP — nothing to evict"
+    if [ "$total" -le "$RETENTION_KEEP" ]; then
+        _log "retention: $total releases ≤ keep=$RETENTION_KEEP — nothing to evict"
         return 0
     fi
-    # evict OLDEST first, exactly (n - KEEP) of them (head bounds the count —
-    # the while runs in a pipe subshell so an in-loop counter would not
-    # propagate)
-    local evict_count=$((n - RETENTION_KEEP))
+    local evict_count=$((total - RETENTION_KEEP))
+    _log "retention: $total releases > keep=$RETENTION_KEEP — evicting $evict_count oldest (current=$cur previous=$prev pinned)"
     printf "$entries" | sort | head -"$evict_count" | while read -r st name; do
         [ -n "$name" ] || continue
         _log "retention: evicting $name (staged $st) — neither current ($cur) nor previous ($prev)"

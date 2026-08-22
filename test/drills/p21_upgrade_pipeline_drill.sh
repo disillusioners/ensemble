@@ -44,8 +44,8 @@ PASS=0; FAIL=0; FAILED=""
 ok()   { PASS=$((PASS+1)); printf 'PASS: %s\n' "$1"; }
 bad()  { FAIL=$((FAIL+1)); FAILED="$FAILED\n  ✗ $1"; printf 'FAIL: %s\n' "$1"; }
 chk()  { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (want=$2 got=$3)"; fi }
-chk_contains() { # <name> <needle> <file>
-    if grep -q "$2" "$3" 2>/dev/null; then ok "$1"; else bad "$1 (missing '$2' in $3)"; fi
+chk_contains() { # <name> <needle> <file> — FIXED-STRING match (needles are literals)
+    if grep -qF "$2" "$3" 2>/dev/null; then ok "$1"; else bad "$1 (missing '$2' in $3)"; fi
 }
 
 # Drill knobs + env sanitation (shed the host's ambient daemon env — the
@@ -214,23 +214,18 @@ printf '\n━━━ Phase D: cap 3/24h → halt-for-human (T5) ━━━\n'
 # the stamp to sequence drills (logged fixture manipulation).
 jget "$SBX1" 'journal_update cooldown_until "null"' > /dev/null
 printf 'DRILL: cleared cooldown stamp (fixture manipulation for sequencing)\n'
-chk "count after Phase C rollback = 1" 1 "$(jget "$SBX1" journal_rollback_count_24h)"
+# rollbacks so far: Phase B recovery (manual, counts — T6) = 1,
+# Phase C auto-rollback = 2. The NEXT rollback is the 3rd → arms halt.
+chk "count after Phase C rollback = 2 (B-recovery + C-auto)" 2 "$(jget "$SBX1" journal_rollback_count_24h)"
 stage_version "$SBX1" $SBX1_PORT vD1 serve 1 && ok "stage vD1" || bad "stage vD1"
 promote "$SBX1" $SBX1_PORT vD1 "$RUN_DIR/promote-vD1.log"
 chk "promote vD1 exits 0" 0 $?
 rollback_run "$SBX1" $SBX1_PORT "$RUN_DIR/rollback-d1.log"
-chk "manual rollback #2 exits 0" 0 $?
-chk "count = 2" 2 "$(jget "$SBX1" journal_rollback_count_24h)"
-jget "$SBX1" 'journal_update cooldown_until "null"' > /dev/null
-printf 'DRILL: cleared cooldown stamp (fixture manipulation for sequencing)\n'
-promote "$SBX1" $SBX1_PORT vD1 "$RUN_DIR/promote-vD1b.log"
-chk "re-promote vD1 exits 0" 0 $?
-rollback_run "$SBX1" $SBX1_PORT "$RUN_DIR/rollback-d2.log"
 chk "manual rollback #3 exits 0 (arms halt)" 0 $?
 jsnap "$SBX1" after-cap
 chk_contains "journal halt at cap" '"halt"' "$RUN_DIR/j-after-cap.json"
 chk "count = 3 (halt armed)" 3 "$(jget "$SBX1" journal_rollback_count_24h)"
-promote "$SBX1" $SBX1_PORT vA2 "$RUN_DIR/promote-capped.log"
+promote "$SBX1" $SBX1_PORT vD1 "$RUN_DIR/promote-capped.log"
 chk "promote under cap-halt refused (78)" 78 $?
 chk_contains "halt message" "HALT-FOR-HUMAN" "$RUN_DIR/promote-capped.log"
 
@@ -246,10 +241,11 @@ chk_contains "--force warning printed" "FORCING rollback onto QUARANTINED" "$RUN
 # ═══ Phase F: retention (T8) — fresh sandbox ══════════════════════════════
 printf '\n━━━ Phase F: retention — 5 versions → exactly 3 (T8) ━━━\n'
 SBX2="$RUN_DIR/sbx2"; SBX2_PORT=18402; mkdir -p "$SBX2"
+# interleaved stage→promote (real upgrade cadence): staging all five UP
+# FRONT would let retention evict the not-yet-promoted oldest right after
+# the first commit — correct behavior, wrong drill shape
 for v in vF1 vF2 vF3 vF4 vF5; do
     stage_version "$SBX2" $SBX2_PORT "$v" serve 1 && ok "stage $v" || bad "stage $v"
-done
-for v in vF1 vF2 vF3 vF4 vF5; do
     promote "$SBX2" $SBX2_PORT "$v" "$RUN_DIR/promote-$v.log"
     chk "promote $v exits 0" 0 $?
 done
@@ -269,8 +265,13 @@ stage_version "$SBX3" $SBX3_PORT vG1 serve 1 && ok "stage vG1" || bad "stage vG1
 stage_version "$SBX3" $SBX3_PORT vG2 serve 1 && ok "stage vG2" || bad "stage vG2"
 promote "$SBX3" $SBX3_PORT vG1 "$RUN_DIR/promote-vG1.log"
 chk "promote vG1 exits 0" 0 $?
-dk VERSION=vG2 TARGET=sandbox INSTALL_DIR="$SBX3" PORT=$SBX3_PORT \
-   bash "$UP/promote.sh" sandbox > "$RUN_DIR/promote-vG2-killed.log" 2>&1 &
+# launch via DIRECT env (env execs bash: $! IS the promote pid — the dk()
+# wrapper runs in a subshell and kill -9 would only kill the wrapper,
+# letting the promote survive and race the drill)
+env -u PORT -u POSTGRES_DB -u INSTALL_DIR \
+    ENSEMBLE_PROMOTE_SOAK_S=4 LIVEZ_BUDGET_S=6 READYZ_BUDGET_S=6 \
+    VERSION=vG2 TARGET=sandbox INSTALL_DIR="$SBX3" PORT=$SBX3_PORT \
+    bash "$UP/promote.sh" sandbox > "$RUN_DIR/promote-vG2-killed.log" 2>&1 &
 PRO_PID=$!
 KILLED=0
 i=0
