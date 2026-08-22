@@ -142,6 +142,14 @@ assert_eq "sandbox without PORT exits 78" "78" "$rc"
 out="$(env -u POSTGRES_DB HOME="$FAKE_HOME" TARGET=sandbox INSTALL_DIR="$SBX" PORT=4999 bash "$FAKE_REPO/scripts/upgrade/status.sh" 2>&1)"; rc=$?
 assert_eq "sandbox refuses the live-staged port" "78" "$rc"
 assert_contains "live-port refusal says by-construction" "live-isolation by construction" "$out"
+# m5: the DEV (repo) port + DB complete the env-collision triple — a
+# sandbox must never collide with the repo dev daemon either
+out="$(env -u POSTGRES_DB HOME="$FAKE_HOME" TARGET=sandbox INSTALL_DIR="$SBX" PORT=8079 bash "$FAKE_REPO/scripts/upgrade/status.sh" 2>&1)"; rc=$?
+assert_eq "sandbox refuses the dev port 8079" "78" "$rc"
+assert_contains "dev-port refusal names the DEV port" "DEV (repo) port" "$out"
+out="$(env -u PORT HOME="$FAKE_HOME" TARGET=sandbox INSTALL_DIR="$SBX" PORT="$SBX_PORT" POSTGRES_DB=ensemble_dev bash "$FAKE_REPO/scripts/upgrade/status.sh" 2>&1)"; rc=$?
+assert_eq "sandbox replaces ensemble_dev (warned, sandbox default)" "0" "$rc"
+assert_contains "resolved db is the sandbox default, not ensemble_dev" "db=ensemble_sandbox" "$out"
 
 # ─── 3. stage: manifest + no-.env + marker + idempotency (T2) ───────────────
 section "stage"
@@ -395,6 +403,216 @@ else
 fi
 kill "$SRV_PID" 2>/dev/null
 wait "$SRV_PID" 2>/dev/null
+
+# ─── 8. adopt_stale_txn decision table (promote preflight vs launcher sweep
+#      — D-FA4.3 mirror; review M1/m2: fresh-dead-owner NOT adopted, stale
+#      flipped-adopt performs the FULL sweep recovery incl. repoint +
+#      sweep_rollback event name) ─────────────────────────────────────────────
+section "adopt_stale_txn decision table"
+AD_OPT_DIR="$FIXTURE/adopt"
+mkdir -p "$AD_OPT_DIR"
+# release template with a manifest (rollback_safe) — adopt's manifest gate
+# reads it via manifest_field
+adopt_rel() {  # <dir> <ver> <rollback_safe>
+    mkdir -p "$1/releases/$2"
+    printf '{"version":"%s","binary_version":"%s","rollback_safe":%s}\n' "$2" "$2" "$3" \
+        > "$1/releases/$2/manifest.json"
+    printf 'stub' > "$1/releases/$2/ensemble-prod"
+}
+ADOPT_SEED='{"current":"vP","previous":"PREV","in_flight":{"kind":"promote","target":"vX","started_at":"STARTED","flipped":FLIP,"owner_pid":OWNERPID},"rollback_window_count":{"24h":CNT,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[]}'
+adopt_fixture() {  # <dir> <started-iso-or-GARBAGE> <flipped> <prev> <cnt> <ownerpid> <prev_rbs>
+    rm -rf "$1"; mkdir -p "$1/releases"
+    adopt_rel "$1" vX true
+    # vMISSING names a previous that has NO release dir on purpose (the
+    # missing-previous halt case) — nothing is created for it
+    [ "$4" = "vP" ] && adopt_rel "$1" vP "${7:-true}"
+    printf '%s' "$ADOPT_SEED" \
+        | sed -e "s/STARTED/$2/" -e "s/FLIP/$3/" -e "s/PREV/$4/" -e "s/CNT/$5/" -e "s/OWNERPID/$6/" \
+        > "$1/releases/state.json"
+    ln -sfn releases/vX "$1/current"   # the orphaned flip (vX) — adopt may repoint
+}
+adopt_run() {  # <dir>
+    ( export INSTALL_DIR="$1"; . "$FAKE_REPO/scripts/upgrade/lib.sh"; adopt_stale_txn ) 2>/dev/null
+}
+aj() { cat "$1/releases/state.json" 2>/dev/null; }
+afield() { ( export INSTALL_DIR="$1"; . "$FAKE_REPO/scripts/upgrade/lib.sh"; eval "$2" ) 2>/dev/null; }
+STALE700="$(date -ju -v-700S +%Y-%m-%dT%H:%M:%SZ)"
+FRESH30="$(date -ju -v-30S +%Y-%m-%dT%H:%M:%SZ)"
+
+# 8a. stale flipped → FULL sweep recovery: repoint current→previous,
+#     journal current updated, sweep_rollback event (NOT bare 'sweep' —
+#     m2: P2.3's ledger consumes event names), counter+cooldown armed,
+#     target quarantined, txn cleared.
+adopt_fixture "$AD_OPT_DIR/t1" "$STALE700" true vP 0 999999 true
+adopt_run "$AD_OPT_DIR/t1"
+assert_eq "8a stale flipped adopt: rc 0" "0" "$?"
+assert_eq "8a current REPOINTED to previous (mv -h flip)" "releases/vP" "$(readlink "$AD_OPT_DIR/t1/current")"
+assert_eq "8a journal current updated" "vP" "$(afield "$AD_OPT_DIR/t1" '_json_field "$(journal_read)" current')"
+assert_eq "8a in_flight cleared" "null" "$(afield "$AD_OPT_DIR/t1" '_json_field "$(journal_read)" in_flight')"
+assert_contains "8a history event is sweep_rollback (m2)" '"event":"sweep_rollback"' "$(aj "$AD_OPT_DIR/t1")"
+# the bare pre-flip event name must NOT appear (the closing quote after
+# 'sweep' distinguishes it from 'sweep_rollback')
+if printf '%s' "$(aj "$AD_OPT_DIR/t1")" | grep -qF '"event":"sweep"'; then
+    _fail "8a no bare sweep event on flipped adopt" "absent" "present"
+else
+    _pass
+fi
+assert_eq "8a rollback counter incremented 0→1" "1" "$(afield "$AD_OPT_DIR/t1" 'journal_rollback_count_24h')"
+CD8A="$(afield "$AD_OPT_DIR/t1" '_json_field "$(journal_read)" cooldown_until')"
+case "$CD8A" in null|"") _fail "8a cooldown armed by adopt (ADR-024)" "ISO ts" "$CD8A" ;; *) _pass ;; esac
+assert_contains "8a orphaned target quarantined" '"vX"' "$(afield "$AD_OPT_DIR/t1" '_json_sub "$(journal_read)" quarantined')"
+
+# 8b. stale PRE-flip → cleared only: no repoint, no counter, no cooldown,
+#     'sweep' history event.
+adopt_fixture "$AD_OPT_DIR/t2" "$STALE700" false null 1 999999 true
+# pre-flip: the flip never happened — current still points at the serving
+# release (vP), not the orphan target
+ln -sfn releases/vP "$AD_OPT_DIR/t2/current"
+J_T2_BEFORE="$(aj "$AD_OPT_DIR/t2")"
+adopt_run "$AD_OPT_DIR/t2"
+assert_eq "8b stale pre-flip adopt: rc 0" "0" "$?"
+assert_eq "8b in_flight cleared" "null" "$(afield "$AD_OPT_DIR/t2" '_json_field "$(journal_read)" in_flight')"
+assert_eq "8b current symlink untouched (never flipped)" "releases/vP" "$(readlink "$AD_OPT_DIR/t2/current")"
+assert_contains "8b history event is sweep (clear)" '"event":"sweep"' "$(aj "$AD_OPT_DIR/t2")"
+if printf '%s' "$(aj "$AD_OPT_DIR/t2")" | grep -q '"event":"sweep_rollback"'; then
+    _fail "8b no sweep_rollback event (nothing rolled back)" "absent" "present"
+else
+    _pass
+fi
+assert_eq "8b rollback counter NOT incremented" "0" "$(afield "$AD_OPT_DIR/t2" 'journal_rollback_count_24h')"
+assert_eq "8b cooldown NOT armed" "null" "$(afield "$AD_OPT_DIR/t2" '_json_field "$(journal_read)" cooldown_until')"
+
+# 8c. FRESH txn + DEAD owner → NOT adopted (M1(a): the sweep leaves any
+#     ≤600s txn alone regardless of owner liveness — adoption must too);
+#     rc 78 + journal byte-identical + symlink unchanged.
+adopt_fixture "$AD_OPT_DIR/t3" "$FRESH30" true vP 0 999999 true
+J_T3_BEFORE="$(aj "$AD_OPT_DIR/t3")"
+L_T3_BEFORE="$(readlink "$AD_OPT_DIR/t3/current")"
+adopt_run "$AD_OPT_DIR/t3"
+assert_eq "8c fresh+dead-owner adopt refuses (rc 78)" "78" "$?"
+assert_eq "8c fresh txn journal byte-identical (untouched)" "$J_T3_BEFORE" "$(aj "$AD_OPT_DIR/t3")"
+assert_eq "8c fresh txn symlink unchanged" "$L_T3_BEFORE" "$(readlink "$AD_OPT_DIR/t3/current")"
+
+# 8d. FRESH txn + LIVE owner ($$) → same refusal class.
+adopt_fixture "$AD_OPT_DIR/t4" "$FRESH30" true vP 0 $$ true
+adopt_run "$AD_OPT_DIR/t4"
+assert_eq "8d fresh+live-owner adopt refuses (rc 78)" "78" "$?"
+
+# 8e. unparseable started_at → fail closed (never adopt a txn we cannot
+#     age; the sweep does the same).
+adopt_fixture "$AD_OPT_DIR/t5" "GARBAGE-NOT-A-DATE" true vP 0 999999 true
+J_T5_BEFORE="$(aj "$AD_OPT_DIR/t5")"
+adopt_run "$AD_OPT_DIR/t5"
+assert_eq "8e unparseable started_at refuses (rc 78)" "78" "$?"
+assert_eq "8e unparseable txn journal byte-identical" "$J_T5_BEFORE" "$(aj "$AD_OPT_DIR/t5")"
+
+# 8f. stale flipped + previous NULL → halt-for-human: halt event, NO
+#     repoint, txn LEFT IN PLACE.
+adopt_fixture "$AD_OPT_DIR/t6" "$STALE700" true null 0 999999 true
+adopt_run "$AD_OPT_DIR/t6"
+assert_eq "8f no-previous adopt halts (rc 78)" "78" "$?"
+assert_eq "8f NO repoint on no-previous halt" "releases/vX" "$(readlink "$AD_OPT_DIR/t6/current")"
+assert_contains "8f halt event recorded" '"event":"halt"' "$(aj "$AD_OPT_DIR/t6")"
+assert_contains "8f txn left in place for diagnosis" '"kind":"promote"' "$(aj "$AD_OPT_DIR/t6")"
+
+# 8g. stale flipped + previous release dir MISSING → same halt shape.
+adopt_fixture "$AD_OPT_DIR/t7" "$STALE700" true vMISSING 0 999999 true
+adopt_run "$AD_OPT_DIR/t7"
+assert_eq "8g missing-previous adopt halts (rc 78)" "78" "$?"
+assert_eq "8g NO repoint on missing-previous halt" "releases/vX" "$(readlink "$AD_OPT_DIR/t7/current")"
+assert_contains "8g halt event recorded" '"event":"halt"' "$(aj "$AD_OPT_DIR/t7")"
+
+# 8h. stale flipped + previous NOT rollback_safe (D-FA4.5) → halt, NO repoint.
+adopt_fixture "$AD_OPT_DIR/t8" "$STALE700" true vP 0 999999 false
+adopt_run "$AD_OPT_DIR/t8"
+assert_eq "8h unsafe-previous adopt halts (rc 78)" "78" "$?"
+assert_eq "8h NO repoint on rollback_safe halt" "releases/vX" "$(readlink "$AD_OPT_DIR/t8/current")"
+assert_contains "8h halt event cites the schema-drift guard" 'rollback_safe' "$(aj "$AD_OPT_DIR/t8")"
+
+# 8i. cap interaction (D-FA4.2): count already 2 → adopt STILL performs the
+#     recovery (the recovery never refuses on cap), THEN the enclosing
+#     promote is refused (78) + halt event armed for the next entries.
+adopt_fixture "$AD_OPT_DIR/t9" "$STALE700" true vP 2 999999 true
+adopt_run "$AD_OPT_DIR/t9"
+assert_eq "8i at-cap adopt still recovers then refuses (rc 78)" "78" "$?"
+assert_eq "8i current repointed despite cap (recovery never refuses)" "releases/vP" "$(readlink "$AD_OPT_DIR/t9/current")"
+assert_eq "8i count reaches 3" "3" "$(afield "$AD_OPT_DIR/t9" 'journal_rollback_count_24h')"
+assert_contains "8i halt event armed at cap" '"event":"halt"' "$(aj "$AD_OPT_DIR/t9")"
+assert_eq "8i txn cleared (recovery complete)" "null" "$(afield "$AD_OPT_DIR/t9" '_json_field "$(journal_read)" in_flight')"
+
+# ─── 9. retention eviction order with MIXED sort keys (review i3) ───────────
+section "retention mixed-key eviction order"
+RET_DIR="$FIXTURE/ret"
+rm -rf "$RET_DIR"; mkdir -p "$RET_DIR/releases"
+for v in vC vD vOld; do mkdir -p "$RET_DIR/releases/$v"; done
+printf '{"staged_at":"%s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$RET_DIR/releases/vC/manifest.json"
+printf '{"staged_at":"%s"}\n' "$(date -ju -v-1000S +%Y-%m-%dT%H:%M:%SZ)" > "$RET_DIR/releases/vD/manifest.json"
+# vOld: manifest ISO from 2020 — the TRUE oldest by wall time
+printf '{"staged_at":"2020-01-01T00:00:00Z"}\n' > "$RET_DIR/releases/vOld/manifest.json"
+# vNew: NO manifest → epoch mtime fallback (now) — the NEWEST by wall time;
+# pre-normalization its epoch key sorted lexicographically BEFORE every ISO
+# key (digits '1…' < '2…') and it would be wrongly evicted first.
+mkdir -p "$RET_DIR/releases/vNew"
+# protocol artifacts under releases/ must NOT count as releases (the D5
+# lock dir especially — pre-fix it was silently rm -rf'd as the "oldest
+# release" once its epoch key sorted first)
+mkdir -p "$RET_DIR/releases/rollback.lock.d" "$RET_DIR/releases/.staging.vZ.$$"
+printf '%s\n' "$$" > "$RET_DIR/releases/rollback.lock.d/owner"
+printf '{"current":"vC","previous":"vD","in_flight":null,"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[]}' \
+    > "$RET_DIR/releases/state.json"
+( export INSTALL_DIR="$RET_DIR"; . "$FAKE_REPO/scripts/upgrade/lib.sh"; retention_evict ) > /dev/null 2>&1
+[ ! -d "$RET_DIR/releases/vOld" ] && _pass || _fail "9 evicts the true-oldest (2020 ISO, not pinned)"
+[ -d "$RET_DIR/releases/vNew" ] && _pass || _fail "9 keeps the manifest-less newest (epoch-fallback key)"
+[ -d "$RET_DIR/releases/vC" ] && _pass || _fail "9 keeps current"
+[ -d "$RET_DIR/releases/vD" ] && _pass || _fail "9 keeps previous (pinned)"
+[ -d "$RET_DIR/releases/rollback.lock.d" ] && _pass || _fail "9 NEVER evicts the D5 lock dir (protocol artifact)"
+[ -d "$RET_DIR/releases/.staging.vZ.$$" ] && _pass || _fail "9 never evicts .staging temp dirs"
+
+# ─── 10. manual rollback NOT blocked by cooldown (D-FA4.2: recovery never
+#         refuses — the cooldown/cap gates are promote-ENTRY-side only) ──────
+section "rollback never refuses on cooldown"
+SRV_PORT2=18411
+python3 - "$SRV_PORT2" <<'PYEOF' &
+import sys, http.server, json
+port = int(sys.argv[1])
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/livez":
+            body = json.dumps({"status": "alive", "uptime_seconds": 1, "version": "1.0.0-sbx"}).encode()
+            self.send_response(200)
+        elif self.path == "/readyz":
+            body = json.dumps({"status": "ready", "reasons": []}).encode()
+            self.send_response(200)
+        else:
+            body = b"{}"
+            self.send_response(404)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *a):
+        pass
+http.server.HTTPServer(("127.0.0.1", port), H).serve_forever()
+PYEOF
+SRV2_PID=$!
+sleep 1
+# ACTIVE cooldown + an already-rolled-back-state journal; the manual
+# recovery to the (only, safe) staged release must sail through it.
+COOL_FUT2="$(date -ju -v+300S +%Y-%m-%dT%H:%M:%SZ)"
+printf '{"current":"%s","previous":null,"in_flight":null,"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":"%s","quarantined":[],"history":[]}' \
+    "$SBX_V1" "$COOL_FUT2" > "$JB"
+RB_OUT="$(HOME="$FAKE_HOME" TARGET=sandbox INSTALL_DIR="$SBX" PORT="$SRV_PORT2" \
+    LIVEZ_BUDGET_S=6 READYZ_BUDGET_S=6 \
+    bash "$FAKE_REPO/scripts/upgrade/rollback.sh" sandbox --to "$SBX_V1" 2>&1)"; RB_RC=$?
+assert_eq "10 manual rollback with ACTIVE cooldown exits 0" "0" "$RB_RC"
+if printf '%s' "$RB_OUT" | grep -qi 'cooldown'; then
+    _fail "10 rollback output never mentions a cooldown refusal" "no cooldown mention" "present"
+else
+    _pass
+fi
+assert_contains "10 rollback event recorded despite cooldown" '"event":"rollback"' "$(cat "$JB")"
+kill "$SRV2_PID" 2>/dev/null
+wait "$SRV2_PID" 2>/dev/null
 
 # ─── summary ────────────────────────────────────────────────────────────────
 printf '\n== summary: %d passed, %d failed ==\n' "$PASS" "$FAIL"
