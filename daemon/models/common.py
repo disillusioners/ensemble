@@ -95,4 +95,78 @@ class HealthResponse(BaseModel):
     )
 
 
-__all__ = ["ErrorCodes", "ErrorResponse", "DeleteResponse", "HealthResponse"]
+class LivezResponse(BaseModel):
+    """Liveness probe response (GET /livez).
+
+    Mounted at the app root (NOT under /api) so supervisor/launcher
+    probes hit http://host:PORT/livez directly. Pure event-loop
+    answer: if the handler runs, the process is alive. No database
+    access, no component checks — liveness never depends on
+    infrastructure (ADR-002/003: restart on liveness failure only,
+    never on readiness failure).
+    """
+
+    status: str = Field(..., description="Always 'alive' while the event loop answers")
+    uptime_seconds: float = Field(..., description="Process uptime in seconds")
+    version: str = Field(..., description="Daemon version")
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "status": "alive",
+                "uptime_seconds": 3600.0,
+                "version": "1.0.0",
+            }
+        }
+    )
+
+
+class ReadyzResponse(BaseModel):
+    """Readiness probe response (GET /readyz).
+
+    Served from a background-refreshed cached composite — the handler
+    performs zero database access per request (ADR-003). HTTP 200 when
+    every component is up, 503 + Retry-After when any component is
+    degraded. ``draining`` is a reserved Phase-4 field (drain
+    controller); it is always false in Phase 1.
+    """
+
+    status: str = Field(..., description="'ready' when all components pass, 'degraded' otherwise")
+    components: dict[str, bool] = Field(
+        ...,
+        description="Per-component booleans: database, queue_freshness, services.",
+    )
+    detail: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Diagnostics: reasons (list of degraded reasons), "
+            "queue_max_age_seconds (None when no RUNNING tasks), "
+            "checked_at (ISO timestamp of the last composite refresh)."
+        ),
+    )
+    draining: bool = Field(
+        default=False,
+        description="Reserved Phase-4 drain-controller flag. Always false in Phase 1.",
+    )
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "status": "ready",
+                "components": {
+                    "database": True,
+                    "queue_freshness": True,
+                    "services": True,
+                },
+                "detail": {
+                    "reasons": [],
+                    "queue_max_age_seconds": 12.3,
+                    "checked_at": "2026-08-16T01:00:00+00:00",
+                },
+                "draining": False,
+            }
+        }
+    )
+
+
+__all__ = ["ErrorCodes", "ErrorResponse", "DeleteResponse", "HealthResponse", "LivezResponse", "ReadyzResponse"]

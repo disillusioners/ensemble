@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  ============================================================================
+  ensemble-watchdog-watcher.plist — launchd AGENT (not daemon) for the
+  watchdog-watcher (Auto-Restart Phase 1, plan §4.6 m3 / §6 row
+  "Watchdog (supervisor) dies").
+
+  This is a REPO TEMPLATE, not an installed file. It contains literal
+  INSTALL_DIR_PLACEHOLDER tokens (same convention as
+  scripts/ensemble-prod.plist). `make watchdog-install` stages it with
+  the real path substituted and copies it to ~/Library/LaunchAgents —
+  the printed launchctl bootstrap command activates it.
+
+  Why an AGENT and not part of the daemon's launchd job: this watches
+  for the case where the supervisor configuration itself is broken
+  (unloaded/typo'd plist) — the very case where nothing inside the
+  launchd job tree is alive to say anything. A separate
+  StartInterval-driven agent survives that class of failure by
+  construction (launchd runs it regardless of the daemon job's state).
+
+  Division of labor:
+    launchd job (ensemble-prod.plist) — supervises the launcher/daemon.
+    THIS agent — every 300s, observes ONLY /livez (never /readyz —
+    readiness never triggers action, ADR-003) and notifies via macOS
+    Notification Center when the daemon has been absent >600s. It
+    NEVER restarts or signals anything. See
+    scripts/watchdog-watcher.sh for the full contract and the Phase-6
+    (LLM observer, ADR-008) attach point.
+
+  DEMO USAGE (3-env topology): duplicate with Label
+  com.ensemble.watchdog.demo and the demo INSTALL_DIR — the port comes
+  from each install's staged .env (nothing to edit here; ADR-014).
+
+  Health endpoint: http://127.0.0.1:9797/livez (port resolved from
+  INSTALL_DIR/.env at run time, canonical 9797 — D1 FINAL).
+  ============================================================================
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ensemble.watchdog</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>INSTALL_DIR_PLACEHOLDER/scripts/watchdog-watcher.sh</string>
+        <string>INSTALL_DIR_PLACEHOLDER</string>
+    </array>
+
+    <!-- Every 5 minutes: absent-episodes are detected within 10–15 min
+         (threshold 600s measured from the FIRST miss the watcher
+         observed). Deliberately NOT RunAtLoad-quiet: an early check at
+         load time also verifies the watcher itself was installed. -->
+    <key>StartInterval</key>
+    <integer>300</integer>
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>INSTALL_DIR_PLACEHOLDER/data/watchdog.log</string>
+    <key>StandardErrorPath</key>
+    <string>INSTALL_DIR_PLACEHOLDER/data/watchdog.log</string>
+</dict>
+</plist>

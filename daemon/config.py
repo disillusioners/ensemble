@@ -253,6 +253,26 @@ class DaemonConfig(BaseSettings):
 
     host: str = Field(default="0.0.0.0")
     port: int = Field(default=8079)
+    graceful_shutdown_timeout_seconds: int = Field(
+        default=60,
+        description=(
+            "Uvicorn timeout_graceful_shutdown — SCOPE IS NARROWER THAN THE "
+            "NAME SUGGESTS (uvicorn 0.41.0): it bounds ONLY "
+            "_wait_tasks_to_complete(), i.e. the drain of in-flight "
+            "connections/requests after SIGTERM. The FastAPI lifespan "
+            "shutdown that follows (all 9 steps of manager.shutdown()) is "
+            "NOT bounded by this value. The real hard bound on total "
+            "shutdown time is the launcher's SIGKILL (launcher.sh "
+            "CHILD_STOP_WAIT_S / scripts/stop-ensemble.sh WAIT_S, default "
+            "70s = this value + 10s margin; stop-ensemble.sh reads "
+            "DAEMON_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS from the staged "
+            "INSTALL_DIR/.env to derive its budget — single source of "
+            "truth). Per-step asyncio.wait_for budgets inside "
+            "manager.shutdown() are deferred hardening (pre-Phase-3). "
+            "Within its scope: increase to let long SSE streams and "
+            "checkpoint flushes finish, decrease to restart faster."
+        ),
+    )
 
 
 class LimitsConfig(BaseSettings):
@@ -554,6 +574,27 @@ class ServicesConfig(BaseSettings):
             "5-10x smaller than DEFAULT_STALE_LEASE_SECONDS (300 s) "
             "so a few missed beats don't false-positive flag a live "
             "lease as stale."
+        ),
+    )
+    readiness_refresh_interval_seconds: int = Field(
+        default=10,
+        description=(
+            "How often the /readyz background refresher recomputes the "
+            "readiness composite (database SELECT 1, queue heartbeat "
+            "freshness, critical service presence). The HTTP handler "
+            "itself is an O(1) memory read — this interval is the ONLY "
+            "thing that touches the database for readiness."
+        ),
+    )
+    readiness_queue_freshness_threshold_seconds: int = Field(
+        default=120,
+        description=(
+            "Max allowed age of the newest Task.last_heartbeat_at among "
+            "RUNNING tasks before the queue_freshness readiness component "
+            "flips to degraded. Heartbeat cadence is 30s "
+            "(task_heartbeat_interval_seconds), so 120s = 3 missed "
+            "intervals + one interval of margin. An empty RUNNING set "
+            "counts as fresh."
         ),
     )
     graph_timeout_minutes: float = Field(

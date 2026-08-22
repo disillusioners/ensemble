@@ -61,11 +61,24 @@ export HOST="${HOST:-0.0.0.0}"
 # Create data directory if it doesn't exist
 mkdir -p data
 
-# Kill existing process on port
-if pid=$(lsof -ti :$PORT 2>/dev/null); then
-    echo -e "${YELLOW}Killing existing process on port $PORT (PID: $pid)${NC}"
-    kill $pid 2>/dev/null || true
-    sleep 1
+# Kill existing process on port — OWNERSHIP-SCOPED (incident fix 2026-08-16).
+# This dev script previously lsof-killed whatever held $PORT; when .env.prod
+# supplies PORT=9797 that could terminate the REAL prod daemon on a
+# dev+prod coexistence host. Now: only stop processes owned by THIS repo
+# checkout (cwd-based ownership via scripts/stop-ensemble.sh, which also
+# handles the launcher-first ordering); anything foreign on the port is
+# reported with an operator hint instead of killed.
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if pid=$(lsof -ti :"$PORT" 2>/dev/null); then
+    echo -e "${YELLOW}Port $PORT is held by: $pid${NC}"
+    echo -e "${YELLOW}Stopping only processes owned by this checkout ($REPO_DIR)...${NC}"
+    if [ -x "$REPO_DIR/scripts/stop-ensemble.sh" ]; then
+        bash "$REPO_DIR/scripts/stop-ensemble.sh" "$REPO_DIR" "$PORT"
+    else
+        echo -e "${RED}scripts/stop-ensemble.sh missing — refusing to port-kill (unsafe on coexistence hosts).${NC}"
+        echo -e "${RED}Free port $PORT manually if it belongs to this checkout.${NC}"
+        exit 1
+    fi
 fi
 
 echo ""
@@ -86,8 +99,14 @@ echo ""
 # uvicorn.run("daemon.api:app", host="$HOST", port=$PORT)
 # '
 
+# Dev-flow shutdown bound (review M1, 2026-08-16): 10s task-drain budget on
+# SIGTERM — dev teardown is lighter than prod (no staged .env / launcher), so
+# 10s suits it. SCOPE: uvicorn's timeout_graceful_shutdown bounds only
+# _wait_tasks_to_complete(); the lifespan teardown after it is unbounded
+# here (dev has no launcher SIGKILL) — acceptable for a dev flow, mirrors
+# the honest-scope comments in daemon/__main__.py + daemon/config.py.
 exec -a ensemble-prod $PYTHON -c "
 import uvicorn
 import os
-uvicorn.run('daemon.api:app', host=os.environ['HOST'], port=int(os.environ['PORT']), access_log=False)
+uvicorn.run('daemon.api:app', host=os.environ['HOST'], port=int(os.environ['PORT']), access_log=False, timeout_graceful_shutdown=10)
 "

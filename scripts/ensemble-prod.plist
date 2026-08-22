@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  ============================================================================
+  ensemble-prod.plist — launchd supervisor for the Ensemble daemon
+  (Auto-Restart Phase 1, ADR-001/002/008/010/014)
+  ============================================================================
+  This is a REPO TEMPLATE, not an installed file. It contains literal
+  INSTALL_DIR_PLACEHOLDER tokens because the plist cannot know the install
+  directory at repo time. `make install` stages it with the real path
+  sed'd in (INSTALL_DIR/data/ensemble-prod.plist). `make plist-install`
+  copies the staged plist to ~/Library/LaunchAgents and prints the
+  launchctl bootstrap command.
+
+  DEMO USAGE (3-env topology — dev 8079 / demo 7979 / live 9797): the same
+  shape works for the demo rehearsal env with three edits —
+    Label              com.ensemble.demo        (must differ from prod's)
+    port in your head  7979 comes from ~/agents-ensemble-demo/.env staged
+                       by scripts/deploy.sh (PORT=7979) — nothing to edit
+                       in the plist itself (ADR-014: env, not plist, is
+                       the port source)
+    INSTALL_DIR        ~/agents-ensemble-demo   (the placeholder you
+                       substitute; logs land in its data/launcher.log)
+  Phase 1 ships this ONE template — `make install`'s sed-in path stays
+  LIVE-ONLY for now; when demo moves under launchd, duplicate this file
+  with the three edits above (a make plist-demo generator is trivial but
+  deferred until a launchd-managed demo is actually wanted).
+
+  Division of labor (plan §4.1):
+    launchd  = start at boot, SIGTERM stop, fixed 10s throttle, re-engage
+               only if the LAUNCHER itself dies.
+    launcher = exponential backoff, burst budget, exit-code mapping
+               (see launcher.sh — all restart POLICY lives there, so the
+               same behavior runs under systemd later).
+
+  Health endpoints (authoritative prod port 9797, from INSTALL_DIR/.env
+  staged from repo .env.prod — ADR-014/D1; plan §4.1):
+    liveness : http://localhost:9797/livez
+    readiness: http://localhost:9797/readyz
+  launchd does NOT poll these — the launcher owns restart policy (ADR-002:
+  liveness-only decisions, never readiness).
+
+  KeepAlive semantics (ADR-010) — read before editing:
+    {SuccessfulExit=false, Crashed=true} is an OR: launchd restarts the job
+    when it exits nonzero (SuccessfulExit=false covers ANY nonzero exit,
+    including 75 and 78) OR when it dies on a crash signal (SIGSEGV etc.).
+
+    * Exit 0 (clean stop): NOT matched by either key → launchd stays
+      hands-off. Correct: a clean stop is intentional.
+    * Exit 78 (refuse — fatal config/schema): MATCHED by SuccessfulExit=
+      false → launchd WILL re-run the launcher after ThrottleInterval.
+      This is a real launchd limitation: KeepAlive cannot discriminate
+      between exit codes. The guard is structural anyway — the launcher
+      re-resolves the binary and exits 78 again without ever starting a
+      child, so the "must NOT loop on 78" invariant holds at the process
+      level (one no-op re-exec per ThrottleInterval, no daemon restarts).
+      A `launchctl bootout` (make stop-style) keeps it down for good.
+    * Exit 75 (boot tempfail): ALSO matched by SuccessfulExit=false →
+      launchd would re-engage. Correct per plan: the launcher loops
+      internally on 75 with its own capped backoff (ADR-011) and only
+      exits after classifying a different outcome — launchd re-engaging
+      happens ONLY if the launcher itself dies, which is exactly the
+      belt-and-braces we want.
+    * Exit 1 (burst-abort halt): matched → launchd paces re-engagement at
+      ThrottleInterval. The launcher's state file re-reads the burst
+      budget and re-halts if the crash pattern persists — the halt is
+      therefore "stay down" from the daemon's perspective, with OS-level
+      pacing providing an eventual retry probe.
+
+  EnvironmentVariables: deliberately ABSENT. All env (PORT=9797, DB, LLM
+  keys) comes from INSTALL_DIR/.env, exported by launcher.sh (ADR-014).
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ensemble.prod</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>INSTALL_DIR_PLACEHOLDER/launcher.sh</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>WorkingDirectory</key>
+    <string>INSTALL_DIR_PLACEHOLDER</string>
+
+    <key>StandardOutPath</key>
+    <string>INSTALL_DIR_PLACEHOLDER/data/launcher.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>INSTALL_DIR_PLACEHOLDER/data/launcher.err.log</string>
+</dict>
+</plist>
