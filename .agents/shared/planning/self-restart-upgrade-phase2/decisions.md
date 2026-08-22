@@ -187,20 +187,30 @@ The 4 unverified assumptions of `architecture-recommendation.md` §7, wired to t
 
 ---
 
+## User Rulings — 2026-08-22 (P2.1 implementation dispatch, developer[v2])
+
+- **ADR-009 D3 "fetch" descope — ACCEPTED (user-ruled):** version resolution uses the LOCAL checkout only; NO network fetch of release artifacts anywhere in the release path.
+- **ADR-017 3-factor LIVE gate — RATIFIED as planned (user-ruled):** env-target model as recommended — demo/dev/sandbox free (user directive), live = enforced 3-factor runtime gate (D-FA3.1: user_confirmed param + HUMAN-origin marker + action-binding nonce), env derivation fail-closed from the staged ENSEMBLE_SELF_ENV marker (PORT-derivation fallback stays rejected).
+- **ADR-021 — N=3 confirmed (user-ruled):** three clean demo cycles gate live eligibility.
+- **ADR-025 — ACCEPTED with the daemon-down alerting gap explicitly documented (user-ruled):** option (b) SSE + watchdog-watcher extension is accepted. Known accepted gap: until the P2.3 T8 watcher extension lands, daemon-down abort classes (burst abort, cap-halt-during-death) are NOT alerted — the daemon being down is precisely when SSE cannot deliver. This gap is accepted for the current window and closes in P2.3.
+- **ADR-016…020 and ADR-024 deviations — ACCEPTED as reviewed (user-ruled).** (ADR-016 third tool system_restart; ADR-018 scripts-not-make chassis; ADR-019 ari-only exposure; ADR-020 tools before drain/migration-guard with manifest rollback_safe interim gate; ADR-024 sweep-rollback counts toward 3/24h cap.)
+
+---
+
 ## Decision Index (Phase 2)
 
 | ADR | Topic | Recommendation (one line) | Flag |
 |---|---|---|---|
-| 016 | `system_restart` tool | Third tool, same category; health-gated SIGTERM path, never raw kill | rec ⚠ review |
-| 017 | Env-target gate | demo/dev/sandbox FREE (user directive); live = enforced **3-factor** runtime gate (D-FA3.1: param + HUMAN-origin marker + nonce); derivation = fail-closed `ENSEMBLE_SELF_ENV` marker (D-FA2.3; PORT fallback rejected) | **rec ⚠ NEEDS USER DECISION** |
-| 018 | Pipeline chassis | Env-parameterized `scripts/` stage/promote/rollback; make framing of ADR-009/015 superseded | rec ⚠ review |
-| 019 | Tool exposure | ari-only this phase; jober deferred (delta from ADR-015) | rec ⚠ review |
-| 020 | Phase ordering | Tools before drain/migration-guard; manifest `rollback_safe` interim gate (M3/M5 sanctions) | rec ⚠ review |
-| 021 | N clean cycles | N = 3, objective cycle definition, staleness reset on release change | **⚠ NEEDS USER DECISION** |
+| 016 | `system_restart` tool | Third tool, same category; health-gated SIGTERM path, never raw kill | user-ruled ACCEPTED 2026-08-22 |
+| 017 | Env-target gate | demo/dev/sandbox FREE (user directive); live = enforced **3-factor** runtime gate (D-FA3.1: param + HUMAN-origin marker + nonce); derivation = fail-closed `ENSEMBLE_SELF_ENV` marker (D-FA2.3; PORT fallback rejected) | user-ruled ACCEPTED 2026-08-22 |
+| 018 | Pipeline chassis | Env-parameterized `scripts/` stage/promote/rollback; make framing of ADR-009/015 superseded | user-ruled ACCEPTED 2026-08-22 |
+| 019 | Tool exposure | ari-only this phase; jober deferred (delta from ADR-015) | user-ruled ACCEPTED 2026-08-22 |
+| 020 | Phase ordering | Tools before drain/migration-guard; manifest `rollback_safe` interim gate (M3/M5 sanctions) | user-ruled ACCEPTED 2026-08-22 |
+| 021 | N clean cycles | N = 3, objective cycle definition, staleness reset on release change | user-ruled ACCEPTED 2026-08-22 |
 | 022 | dry_run default | `system_upgrade` defaults to dry_run=true | rec |
 | 023 | Status tool | `upgrade_status` exists — early-return txn handle + journal-derived poller | rec |
-| 024 | Sweep counts as rollback | Confirm ADR-012: launcher journal-sweep rollback feeds 3/24h counters + cooldown | rec ⚠ confirm |
-| 025 | Alert channel | SSE + watchdog-watcher extension (journal/`.launcher-state` markers) | **⚠ NEEDS USER DECISION** |
+| 024 | Sweep counts as rollback | Confirm ADR-012: launcher journal-sweep rollback feeds 3/24h counters + cooldown | user-ruled ACCEPTED 2026-08-22 |
+| 025 | Alert channel | SSE + watchdog-watcher extension (journal/`.launcher-state` markers) | user-ruled ACCEPTED 2026-08-22 (daemon-down gap documented) |
 | 026 | Promote retry policy | Manual re-trigger only this phase | rec |
 | 027 | Version smoke | `/livez` payload `version` == manifest `binary_version` (runtime truth) | rec |
 | 028 | Rollback-of-rollback | Manual, gated flip-forward; halt-for-human + user-chosen version | rec |
@@ -210,8 +220,8 @@ The 4 unverified assumptions of `architecture-recommendation.md` §7, wired to t
 
 | # | Item | Where | Default if silent |
 |---|---|---|---|
-| 1 | **N (clean demo cycles)** — accept 3? | ADR-021 · `test-strategy.md` §4 · `promotion-ladder.md` S3 | 3 |
-| 2 | **Alert channel** — SSE-only, or extend watchdog-watcher for daemon-down abort classes? | ADR-025 · `promotion-ladder.md` §3 | SSE + watcher extension |
-| 3 | **ADR-016…020 deviating from APPROVED ADR-015/009** — approve each deviation (new tool, env-target gate, scripts-not-make, ari-only, early tool phase)? | ADR-016…020 | All five as recommended |
-| 4 | **ADR-024 explicit confirmation** — sweep-rollback counts toward 3/24h cap | ADR-024 | Counted (ADR-012 as written) |
+| 1 | **N (clean demo cycles)** — accept 3? | ADR-021 · `test-strategy.md` §4 · `promotion-ladder.md` S3 | 3 — **Resolved (2026-08-22 user ruling — see addendum)** |
+| 2 | **Alert channel** — SSE-only, or extend watchdog-watcher for daemon-down abort classes? | ADR-025 · `promotion-ladder.md` §3 | SSE + watcher extension — **Resolved (2026-08-22 user ruling — see addendum)** |
+| 3 | **ADR-016…020 deviating from APPROVED ADR-015/009** — approve each deviation (new tool, env-target gate, scripts-not-make, ari-only, early tool phase)? | ADR-016…020 | All five as recommended — **Resolved (2026-08-22 user ruling — see addendum)** |
+| 4 | **ADR-024 explicit confirmation** — sweep-rollback counts toward 3/24h cap | ADR-024 | Counted (ADR-012 as written) — **Resolved (2026-08-22 user ruling — see addendum)** |
 | 5 | **Live-stage runbooks (U1–U6)** — confirm the USER-GATED design (user-executed/approved, never agent-executed) matches intent | `promotion-ladder.md` §5 | As tabled |
