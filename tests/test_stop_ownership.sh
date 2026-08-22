@@ -31,6 +31,14 @@
 #                margin), env-derived (DAEMON_GRACEFUL_SHUTDOWN_
 #                TIMEOUT_SECONDS in staged .env, +10, clamped 10..600),
 #                malformed env → 70, explicit WAIT_S wins over env.
+#   7. P4 EDGE:  the full WAIT_S resolution edge table the Phase-1
+#                tester probe P4 never captured (harness authored,
+#                output lost — deferred 2026-08-17, completed
+#                2026-08-22): explicit ""/-5/abc, env ""/-100/601/599,
+#                floor boundary (raw 0 → 10), quoted + `export `-prefixed
+#                env forms, explicit pass-through below floor / above cap
+#                (deliberate: an explicit override is an operator demand,
+#                not a guess to clamp).
 #
 # Plain bash, no new dependencies. Self-asserting; nonzero exit on failure.
 #
@@ -294,7 +302,89 @@ printf 'DAEMON_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS=100000\n' > "$TMP_D/.env"
 DRY_RUN=1 bash "$STOP_SCRIPT" "$TMP_D" >"$TMP_D/e.txt" 2>&1
 grep -q "WAIT_S resolved to 600s" "$TMP_D/e.txt" && _pass || _fail "M3: cap 600 not applied (got: $(grep 'WAIT_S resolved' "$TMP_D/e.txt" || echo none))"
 
-rm -rf "$TMP_D" 2>/dev/null
+# ─── 7. P4 EDGE TABLE: WAIT_S resolution edges ─────────────────────────────
+# Completes the Phase-1 tester probe P4 whose output was never captured
+# (edge-probe worker lost its table; salvage found harness only). Every
+# case asserts the RESOLVED value printed by the real script under
+# DRY_RUN — no signal is ever sent, no process touched.
+echo "== P4: WAIT_S edge table =="
+TMP_E="$(mktemp -d /tmp/ae-ownertest-E.XXXXXX)"
+CLEANUP_DIRS="$CLEANUP_DIRS $TMP_E"
+
+_resolved() {  # $1 = output file; echoes the resolved value or "none"
+    sed -n 's/.*WAIT_S resolved to \([0-9]*\)s.*/\1/p' "$1" | head -1
+}
+_expect_resolved() {  # $1 = output file, $2 = expected value, $3 = label
+    local got
+    got="$(_resolved "$1")"
+    [ "$got" = "$2" ] && _pass || _fail "$3: expected WAIT_S=$2, got '${got:-none}' ($(grep 'WAIT_S resolved' "$1" || echo 'no resolution line'))"
+}
+
+# 7a. explicit WAIT_S="" (empty) is UNTSET — env-derived value wins
+printf 'DAEMON_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS=30\n' > "$TMP_E/.env"
+WAIT_S="" DRY_RUN=1 bash "$STOP_SCRIPT" "$TMP_E" >"$TMP_E/a.txt" 2>&1
+_expect_resolved "$TMP_E/a.txt" 40 "P4(a): empty explicit WAIT_S must fall through to env-derived"
+
+# 7b. explicit WAIT_S=-5 (malformed) → default 70, NOT env-derived —
+#     a malformed override never silently becomes a different number
+printf 'DAEMON_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS=30\n' > "$TMP_E/.env"
+WAIT_S="-5" DRY_RUN=1 bash "$STOP_SCRIPT" "$TMP_E" >"$TMP_E/b.txt" 2>&1
+_expect_resolved "$TMP_E/b.txt" 70 "P4(b): malformed explicit WAIT_S must fall back to default 70 (not env)"
+
+# 7c. explicit WAIT_S=abc (malformed) → default 70
+WAIT_S="abc" DRY_RUN=1 bash "$STOP_SCRIPT" "$TMP_E" >"$TMP_E/c.txt" 2>&1
+_expect_resolved "$TMP_E/c.txt" 70 "P4(c): non-numeric explicit WAIT_S must fall back to default 70"
+
+# 7d. env value empty ("") → digits-only validation fails → default 70
+printf 'DAEMON_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS=\n' > "$TMP_E/.env"
+DRY_RUN=1 bash "$STOP_SCRIPT" "$TMP_E" >"$TMP_E/d.txt" 2>&1
+_expect_resolved "$TMP_E/d.txt" 70 "P4(d): empty env value must fall back to default 70"
+
+# 7e. env value negative (-100) → not digits → default 70
+printf 'DAEMON_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS=-100\n' > "$TMP_E/.env"
+DRY_RUN=1 bash "$STOP_SCRIPT" "$TMP_E" >"$TMP_E/e.txt" 2>&1
+_expect_resolved "$TMP_E/e.txt" 70 "P4(e): negative env value must fall back to default 70"
+
+# 7f. env boundary pair: 601 → 611 → cap 600; 599 → 609 → cap 600
+printf 'DAEMON_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS=601\n' > "$TMP_E/.env"
+DRY_RUN=1 bash "$STOP_SCRIPT" "$TMP_E" >"$TMP_E/f1.txt" 2>&1
+_expect_resolved "$TMP_E/f1.txt" 600 "P4(f1): env 601 (+10=611) must clamp to cap 600"
+printf 'DAEMON_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS=599\n' > "$TMP_E/.env"
+DRY_RUN=1 bash "$STOP_SCRIPT" "$TMP_E" >"$TMP_E/f2.txt" 2>&1
+_expect_resolved "$TMP_E/f2.txt" 600 "P4(f2): env 599 (+10=609) must clamp to cap 600"
+
+# 7g. floor boundary: env 0 → 0+10=10 — the floor binds at exactly 10
+printf 'DAEMON_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS=0\n' > "$TMP_E/.env"
+DRY_RUN=1 bash "$STOP_SCRIPT" "$TMP_E" >"$TMP_E/g.txt" 2>&1
+_expect_resolved "$TMP_E/g.txt" 10 "P4(g): env 0 (+10=10) must resolve at the floor boundary 10"
+
+# 7h. quoted env values are parsed (both quote styles) → 30+10=40
+printf 'DAEMON_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS="30"\n' > "$TMP_E/.env"
+DRY_RUN=1 bash "$STOP_SCRIPT" "$TMP_E" >"$TMP_E/h1.txt" 2>&1
+_expect_resolved "$TMP_E/h1.txt" 40 "P4(h1): double-quoted env value must be parsed"
+printf "DAEMON_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS='30'\n" > "$TMP_E/.env"
+DRY_RUN=1 bash "$STOP_SCRIPT" "$TMP_E" >"$TMP_E/h2.txt" 2>&1
+_expect_resolved "$TMP_E/h2.txt" 40 "P4(h2): single-quoted env value must be parsed"
+
+# 7i. `export `-prefixed env form is accepted → 30+10=40
+printf 'export DAEMON_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS=30\n' > "$TMP_E/.env"
+DRY_RUN=1 bash "$STOP_SCRIPT" "$TMP_E" >"$TMP_E/i.txt" 2>&1
+_expect_resolved "$TMP_E/i.txt" 40 "P4(i): export-prefixed env line must be parsed"
+
+# 7j. explicit values pass through UNCLAMPED (deliberate contract):
+#     an explicit WAIT_S is an operator demand — below-floor and
+#     above-cap are honored as-is; only the derived paths clamp.
+printf 'DAEMON_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS=30\n' > "$TMP_E/.env"
+WAIT_S=9 DRY_RUN=1 bash "$STOP_SCRIPT" "$TMP_E" >"$TMP_E/j1.txt" 2>&1
+_expect_resolved "$TMP_E/j1.txt" 9 "P4(j1): explicit WAIT_S=9 (below floor) must pass through"
+WAIT_S=599 DRY_RUN=1 bash "$STOP_SCRIPT" "$TMP_E" >"$TMP_E/j2.txt" 2>&1
+_expect_resolved "$TMP_E/j2.txt" 599 "P4(j2): explicit WAIT_S=599 must pass through"
+WAIT_S=600 DRY_RUN=1 bash "$STOP_SCRIPT" "$TMP_E" >"$TMP_E/j3.txt" 2>&1
+_expect_resolved "$TMP_E/j3.txt" 600 "P4(j3): explicit WAIT_S=600 must pass through"
+WAIT_S=601 DRY_RUN=1 bash "$STOP_SCRIPT" "$TMP_E" >"$TMP_E/j4.txt" 2>&1
+_expect_resolved "$TMP_E/j4.txt" 601 "P4(j4): explicit WAIT_S=601 (above cap) must pass through"
+
+rm -rf "$TMP_D" "$TMP_E" 2>/dev/null
 
 # ─── summary ────────────────────────────────────────────────────────────────
 echo
