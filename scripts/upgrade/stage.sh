@@ -174,6 +174,11 @@ if ! lock_acquire; then
     exit 78   # pipeline-busy already logged (structured, not an error)
 fi
 trap 'lock_release' EXIT
+# stage holds this lock through LONG assembly phases (tree copies + sha256
+# walks can exceed LOCK_STALE_S=300s on big trees) — heartbeat at every
+# phase boundary so a concurrent promote/sweep never stale-breaks the lock
+# of a LIVE owner (review m3; promote/rollback heartbeat the same way)
+lock_heartbeat
 
 # ── Install dir (demo/sandbox created on demand; live must pre-exist) ───────
 if [ ! -d "$INSTALL_DIR" ]; then
@@ -200,6 +205,7 @@ cp -R "$REPO_ROOT/frontend/dist/frontend/browser" "$STAGE_TMP/frontend/dist/fron
 cp "$REPO_ROOT/config.yaml" "$STAGE_TMP/config.yaml" || { rm -rf "$STAGE_TMP"; exit 1; }
 cp "$REPO_ROOT/launcher.sh" "$STAGE_TMP/launcher.sh" || { rm -rf "$STAGE_TMP"; exit 1; }
 chmod +x "$STAGE_TMP/launcher.sh"
+lock_heartbeat   # payload copies done; checksum walks start (long phase)
 
 # ADR-014/m6 invariant — NO .env of any kind inside a release dir (catches a
 # stray repo-side .env before it can ever be staged).
@@ -269,6 +275,7 @@ EOF
 # verify the TEMP tree against the manifest we just wrote (T3: after stage).
 # The temp dir lives at $INSTALL_DIR/releases/.staging.<ver>.$$ so the
 # standard integrity_verify path resolution works unchanged.
+lock_heartbeat   # full-tree verify walk (long phase)
 if ! integrity_verify ".staging.$VERSION.$$"; then
     _warn "post-stage integrity check FAILED on the temp assembly — not swapping in"
     rm -rf "$STAGE_TMP"
@@ -313,6 +320,7 @@ fi
 _log "ENSEMBLE_SELF_ENV marker staged: $MARKER (in $ENV_FILE — never inside the release dir)"
 
 # ── Final post-stage verification on the swapped-in release ─────────────────
+lock_heartbeat   # second full-tree verify walk (long phase)
 if ! integrity_verify "$VERSION"; then
     _warn "post-swap integrity check FAILED — release staged but DAMAGED; do not promote"
     exit 1

@@ -48,13 +48,22 @@ LOG_TAG="upgrade-promote"
 
 VERSION="${VERSION:-}"
 TARGET_ARG=""
-for arg in "$@"; do
+args=("$@")
+i=0
+while [ $i -lt ${#args[@]} ]; do
+    arg="${args[$i]}"
     case "$arg" in
         demo|live|sandbox) TARGET_ARG="$arg" ;;
-        --version) : ;;    # handled via VERSION env (kept for symmetry)
+        --version)
+            # documented usage form (promote.sh sandbox --version v1) —
+            # parsed like stage.sh; VERSION env still works (review m4)
+            i=$((i + 1))
+            VERSION="${args[$i]:-}"
+            ;;
         -h|--help) sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "promote: unknown flag '$arg' — set VERSION=<ver> env or use --help" >&2; exit 78 ;;
     esac
+    i=$((i + 1))
 done
 
 # shellcheck source=scripts/upgrade/lib.sh
