@@ -209,7 +209,7 @@ resolve_env() {
             # a sandbox NEVER inherits those values:
             #   - PORT must be explicitly numeric AND must not be the live
             #     install's staged port (resolved from ~/agents-ensemble/.env,
-            #     no literal) nor the demo port;
+            #     no literal), the demo port, or the dev (repo) port;
             #   - POSTGRES_DB equal to another env's DB name is ignored
             #     (warned) and replaced by the sandbox default;
             #   - INSTALL_DIR must not be the demo/live install dir.
@@ -230,17 +230,27 @@ resolve_env() {
                 _warn "sandbox target requires an explicit numeric PORT (got '${PORT:-<empty>}')"
                 exit 78
             fi
-            if [ "$PORT" = "7979" ]; then
-                _warn "sandbox PORT 7979 is the DEMO port — refusing (own-port discipline, test-strategy §5)"
-                exit 78
-            fi
+            case "$PORT" in
+                7979)
+                    _warn "sandbox PORT 7979 is the DEMO port — refusing (own-port discipline, test-strategy §5)"
+                    exit 78
+                    ;;
+                8079)
+                    # the repo dev daemon's port (dev.sh) — a sandbox must
+                    # never collide with it either (review m5: the sandbox
+                    # guard refuses demo + live-staged ports; dev completes
+                    # the triple)
+                    _warn "sandbox PORT 8079 is the DEV (repo) port — refusing (own-port discipline, test-strategy §5)"
+                    exit 78
+                    ;;
+            esac
             _live_port_resolve="$(sed -n 's/^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}PORT[[:space:]]*=[[:space:]]*//p' "$HOME/agents-ensemble/.env" 2>/dev/null | head -1 | tr -d '\r\"'"'"'')"
             if [ -n "$_live_port_resolve" ] && [ "$PORT" = "$_live_port_resolve" ]; then
                 _warn "sandbox PORT equals the LIVE install's staged port — refusing (live-isolation by construction)"
                 exit 78
             fi
             case "$POSTGRES_DB" in
-                ensemble_prod|ensemble_demo|"")
+                ensemble_prod|ensemble_demo|ensemble_dev|"")
                     [ -n "$POSTGRES_DB" ] && _warn "sandbox POSTGRES_DB '$POSTGRES_DB' belongs to another env (or ambient leak) — using the sandbox default"
                     POSTGRES_DB=ensemble_sandbox
                     ;;
@@ -454,13 +464,8 @@ journal_history_append() {
 # journal_open_txn <kind> <target> — set in_flight {kind,target,started_at,
 # flipped:false,owner_pid}. Refuses (returns 1) if a txn is already open.
 journal_open_txn() {
-    local kind="$1" target="$2" json
+    local kind="$1" target="$2" json existing
     json="$(journal_read)" || return 1
-    if [ "$(_json_sub "$json" "in_flight")" != "" ] \
-       && ! _json_field "$(_json_sub "$json" "in_flight")" "kind" > /dev/null 2>&1; then
-        :
-    fi
-    local existing
     existing="$(_json_sub "$json" "in_flight")"
     if [ -n "$existing" ] && [ "$existing" != "null" ]; then
         _warn "journal_open_txn: an in_flight txn already exists — refusing (pipeline-busy)"
@@ -596,7 +601,7 @@ journal_rollback_count_24h() {
 
 # journal_cooldown_active — 0 if within cooldown (refuse entry), 1 if clear.
 journal_cooldown_active() {
-    local json until_epoch
+    local json cd_epoch until_epoch
     json="$(journal_read)" || return 1
     cd_epoch="$(_json_field "$json" "cooldown_until")"
     case "$cd_epoch" in ""|null) return 1 ;; esac
@@ -811,6 +816,7 @@ integrity_verify() {
     # recorded map; names the tampered/missing/extra files). No per-file
     # forks beyond the single walk.
     local sub want_hash got_hash got_lines rec_lines actual_ps key wantf dpath dline
+    local tree
     for tree in agents frontend; do
         got_lines="$(_tree_manifest "$rd/$tree" "")"
         want_hash="$(_json_field "$json" "${tree}_tree_sha256")"
@@ -1007,10 +1013,28 @@ retention_evict() {
         [ -d "$d" ] || continue
         name="${d%/}"; name="${name##*/}"
         [ "$name" = "current" ] && continue   # the flip symlink, not a release
+        # Protocol/working artifacts under releases/ are NOT releases: the
+        # D5 lock dir, its stale-break leftovers, and stage temp assemblies.
+        # (Latent defect exposed by the epoch-key normalization below: with
+        # the old mixed ISO/epoch sort the lock dir — epoch mtime — sorted
+        # lexicographically FIRST and was silently rm -rf'd as the
+        # "oldest release", defeating the lock protocol mid-operation.)
+        case "$name" in
+            rollback.lock.d|rollback.lock.d.stale.*|.staging.*) continue ;;
+        esac
         total=$((total + 1))
         [ "$name" = "$cur" ] && continue
         [ "$name" = "$prev" ] && continue
+        # normalize the sort key to EPOCH: a manifest staged_at (ISO) is
+        # converted; a missing manifest falls back to the dir mtime (already
+        # epoch). Sorting ISO strings against epoch digits lexicographically
+        # is meaningless (digits vs 'T'/'-'/'Z' compare by codepoint, not
+        # time) — normalizing keeps the oldest-first eviction order correct
+        # across mixed staged/unstaged release sets (review i3).
         st="$(manifest_field "$name" staged_at 2>/dev/null)"
+        if [ -n "$st" ]; then
+            st="$(_iso_to_epoch "$st" 2>/dev/null)"
+        fi
         [ -n "$st" ] || st="$(stat -f '%m' "$d" 2>/dev/null)"
         [ -n "$st" ] || st=0
         entries="$entries$st $name\n"
@@ -1021,7 +1045,7 @@ retention_evict() {
     fi
     local evict_count=$((total - RETENTION_KEEP))
     _log "retention: $total releases > keep=$RETENTION_KEEP — evicting $evict_count oldest (current=$cur previous=$prev pinned)"
-    printf "$entries" | sort | head -"$evict_count" | while read -r st name; do
+    printf '%b' "$entries" | sort | head -"$evict_count" | while read -r st name; do
         [ -n "$name" ] || continue
         _log "retention: evicting $name (staged $st) — neither current ($cur) nor previous ($prev)"
         rm -rf "$rel/$name"
@@ -1056,12 +1080,29 @@ promote_entry_check() {
     return 0
 }
 
-# adopt_stale_txn — preflight handling of an orphaned in_flight (owner dead /
-# older than SWEEP_STALE_S): flipped:true → count a sweep-class rollback
-# (ADR-024: sweep rollbacks count + cooldown) + quarantine the orphaned
-# target; flipped:false → clear. Fresh txn → refuse (pipeline-busy).
-# Mirrors the launcher sweep decision table (D-FA4.3) so a promote never
-# tramples an unresolved transaction.
+# adopt_stale_txn — preflight handling of an unresolved in_flight. MIRRORS
+# the launcher sweep decision table (launcher.sh _journal_sweep — D-FA4.3)
+# so a promote never tramples an unresolved transaction and never strands
+# the env on an orphaned flip:
+#   unparseable started_at → FAIL CLOSED (refuse; never adopt a txn we
+#       cannot age — the sweep does the same);
+#   fresh (age ≤ SWEEP_STALE_S) → leave alone + refuse (pipeline-busy).
+#       DEAD OWNER MAKES NO DIFFERENCE: the sweep leaves any fresh txn
+#       alone regardless of owner liveness (the 600s gate is the primary
+#       race guard, R1.3) — adoption does too;
+#   stale + flipped:true → the SAME recovery the sweep would perform:
+#       manifest gate on previous FIRST (null / release dir missing / not
+#       rollback_safe → halt event, NO repoint, txn LEFT IN PLACE, exit
+#       78), then repoint current→previous (atomic_flip — mv -h, the same
+#       rename(2) semantics the sweep uses), quarantine the failed target,
+#       count the rollback + arm cooldown (ADR-024), history event
+#       'sweep_rollback' (P2.3's ledger consumes event names), clear txn;
+#   stale + flipped:false → clear (history event 'sweep').
+# Runs UNDER the caller's lock (promote acquires before calling). After a
+# sweep-rollback adoption the enclosing promote continues into its ENTRY
+# checks, which then apply the freshly armed cooldown/cap — PER DESIGN
+# (D-FA4.2/ADR-024: the NEXT entry is refused inside the 10-min window;
+# rollback.sh manual recovery never refuses on cooldown/cap).
 adopt_stale_txn() {
     local json inf kind target started flipped owner epoch age
     json="$(journal_read)" || return 0
@@ -1073,22 +1114,65 @@ adopt_stale_txn() {
     started="$(_json_field "$inf" started_at)"
     flipped="$(_json_field "$inf" flipped)"
     owner="$(_json_field "$inf" owner_pid)"
-    # fresh owner alive → busy
-    epoch="$(_iso_to_epoch "$started")" || epoch=0
+    # unparseable started_at → fail closed: the sweep leaves such a txn
+    # untouched (launcher.sh:570-573); adoption must not fire on a txn it
+    # cannot prove stale.
+    if ! epoch="$(_iso_to_epoch "$started")"; then
+        _warn "promote refused: in_flight $kind txn (target=$target) has unparseable started_at ('$started') — leaving untouched, pipeline-busy (the sweep fails closed on it too)"
+        exit 78
+    fi
     age=$(( $(_now_epoch) - epoch ))
-    if [ "$age" -lt "$SWEEP_STALE_S" ] && [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then
-        _warn "promote refused: an in_flight $kind txn (target=$target, pid=$owner) is ACTIVE — pipeline-busy"
+    # fresh txn → leave alone + refuse, REGARDLESS of owner liveness (the
+    # sweep's freshness gate ignores liveness; a fresh txn with a dead
+    # owner is resolved by the sweep once it ages, or by the owner).
+    if [ "$age" -le "$SWEEP_STALE_S" ]; then
+        _warn "promote refused: in_flight $kind txn (target=$target, pid=${owner:-?}, age ${age}s ≤ ${SWEEP_STALE_S}s) is FRESH — left alone (owner may be alive; the sweep ages it) — pipeline-busy"
         exit 78
     fi
     if [ "$flipped" = "true" ]; then
-        _warn "adopting STALE flipped txn (age ${age}s, target=$target): counting sweep-class rollback + quarantining $target (ADR-024)"
+        # ── stale flipped → adopt via the sweep-rollback recovery ──────────
+        # Manifest gate on previous FIRST (halt-for-human, NO repoint, txn
+        # left in place — mirrors the sweep's no-previous / missing-dir
+        # halts, plus the D-FA4.5 rollback_safe schema-drift guard every
+        # other rollback path in this pipeline enforces).
+        local prev prev_safe newcnt
+        prev="$(_json_field "$json" previous)"
+        case "$prev" in ''|null)
+            journal_history_append halt "adopt: stale flipped $kind txn (target=$target) but journal has no previous release — halt-for-human, NO repoint, txn left in place"
+            _warn "HALT-FOR-HUMAN: stale flipped txn (target=$target) with NO previous release — cannot adopt-rollback; txn left for the sweep/human"
+            exit 78
+            ;;
+        esac
+        if [ ! -d "$INSTALL_DIR/releases/$prev" ]; then
+            journal_history_append halt "adopt: previous release $prev missing (evicted/manually deleted?) — halt-for-human, NO repoint, txn left in place"
+            _warn "HALT-FOR-HUMAN: previous release $prev is MISSING — cannot adopt-rollback; txn left for the sweep/human"
+            exit 78
+        fi
+        prev_safe="$(manifest_field "$prev" rollback_safe 2>/dev/null)"
+        if [ "$prev_safe" != "true" ]; then
+            journal_history_append halt "adopt: previous release $prev has rollback_safe=${prev_safe:-missing} (D-FA4.5 schema-drift guard) — halt-for-human, NO repoint, txn left in place"
+            _warn "HALT-FOR-HUMAN: previous release $prev is NOT rollback_safe (${prev_safe:-missing}) — refusing to adopt-rollback into schema drift; txn left in place"
+            exit 78
+        fi
+        # Repoint FIRST — the same flip-first ordering as the sweep: if we
+        # die mid-sequence the next launcher start re-runs the sweep on
+        # this same stale txn; every journal step below is idempotent
+        # except the counter increment (over-counts only — conservative,
+        # anti-flapping direction). Without the repoint the promote would
+        # exit stranded: journal.current ≠ symlink target, env left on the
+        # ungated orphaned release, cleared txn blocking future sweeps.
+        _warn "adopting STALE flipped txn (age ${age}s, target=$target): sweep-rollback recovery — repoint current -> $prev, quarantine $target, count + cooldown (ADR-024)"
+        if ! atomic_flip "$prev"; then
+            _warn "adopt: repoint current -> $prev FAILED — txn left in place (the sweep retries at the next launcher start); promote refusing"
+            exit 78
+        fi
         journal_quarantine "$target"
-        journal_history_append sweep "orphaned flipped $kind txn target=$target adopted at promote preflight; counted as rollback"
-        local newcnt
+        journal_set_current "$prev"
         newcnt="$(journal_count_rollback 1)"
+        journal_history_append sweep_rollback "adopt: orphaned flipped $kind txn (target=$target, owner pid ${owner:-?}, age ${age}s) rolled back to $prev at promote preflight; counted as auto-rollback (ADR-024)"
         journal_close_txn
         if [ "$newcnt" -ge "$ROLLBACK_CAP_24H" ]; then
-            journal_history_append halt "sweep-adopt rollback reached cap $ROLLBACK_CAP_24H/24h at promote preflight"
+            journal_history_append halt "adopt sweep-rollback reached cap $ROLLBACK_CAP_24H/24h (count=$newcnt) — promotes refused until the window resets or an operator intervenes"
             _warn "HALT-FOR-HUMAN: cap reached while adopting stale txn — this promote is refused; next entry attempts will refuse too"
             exit 78
         fi
