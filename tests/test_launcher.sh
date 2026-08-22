@@ -407,6 +407,38 @@ RB_TEST_DIR3="$(mktemp -d "${TMPDIR:-/tmp}/launcher-rb3.XXXXXX")"
 ( . "$LAUNCHER"; INSTALL_DIR="$RB_TEST_DIR3"; resolve_binary >/dev/null 2>&1 )
 assert_eq "no binary anywhere → nonzero (78 path)" "1" "$?"
 
+# 9d. P5b dedupe regression lock (a24bf643): both candidates exist, both
+# non-executable → exit 1 with exactly ONE WARN — the via_current one
+# ("trying flat layout"); the guard [ ! -e via_current ] must suppress the
+# second WARN naming the flat path (pre-fix this path warned twice).
+RB_TEST_DIR4="$(mktemp -d "${TMPDIR:-/tmp}/launcher-rb4.XXXXXX")"
+mkdir -p "$RB_TEST_DIR4/current"
+printf '#!/bin/bash\nexit 0\n' > "$RB_TEST_DIR4/current/ensemble-prod"   # non-exec
+printf '#!/bin/bash\nexit 0\n' > "$RB_TEST_DIR4/ensemble-prod"           # non-exec
+(
+    OUT="$( . "$LAUNCHER"; INSTALL_DIR="$RB_TEST_DIR4"; resolve_binary 2>&1 )"
+    RC=$?
+    [ "$RC" -eq 1 ] || exit 80
+    [ "$(printf '%s\n' "$OUT" | grep -c 'WARN:')" -eq 1 ] || exit 81
+    printf '%s\n' "$OUT" | grep -q 'trying flat layout' || exit 82
+    exit 0
+)
+assert_eq "both non-exec → exit 1 + exactly one WARN (P5b dedupe)" "0" "$?"
+
+# 9e. guarded WARN still fires when via_current is absent: flat-only,
+# non-executable → exit 1 with exactly one WARN naming the flat path.
+RB_TEST_DIR5="$(mktemp -d "${TMPDIR:-/tmp}/launcher-rb5.XXXXXX")"
+printf '#!/bin/bash\nexit 0\n' > "$RB_TEST_DIR5/ensemble-prod"           # non-exec
+(
+    OUT="$( . "$LAUNCHER"; INSTALL_DIR="$RB_TEST_DIR5"; resolve_binary 2>&1 )"
+    RC=$?
+    [ "$RC" -eq 1 ] || exit 83
+    [ "$(printf '%s\n' "$OUT" | grep -c 'WARN:')" -eq 1 ] || exit 84
+    printf '%s\n' "$OUT" | grep -qF "$RB_TEST_DIR5/ensemble-prod exists but is not executable" || exit 85
+    exit 0
+)
+assert_eq "flat-only non-exec → exit 1 + one WARN naming flat path" "0" "$?"
+
 # ─── 10. notify stub: callable, returns 0 ───────────────────────────────────
 section "notify stub"
 N_OUT="$( . "$LAUNCHER"; _notify_once test-kind "message body" 2>&1 )"
@@ -414,7 +446,8 @@ assert_contains "_notify_once logs NOTIFY[...]" "NOTIFY[test-kind]" "$N_OUT"
 
 # ─── cleanup ────────────────────────────────────────────────────────────────
 rm -rf "$ENV_TEST_DIR" "$STATE_TEST_DIR" "$JS_TEST_DIR" "$JS_TEST_DIR2" \
-       "$RB_TEST_DIR" "$RB_TEST_DIR2" "$RB_TEST_DIR3" 2>/dev/null
+       "$RB_TEST_DIR" "$RB_TEST_DIR2" "$RB_TEST_DIR3" "$RB_TEST_DIR4" \
+       "$RB_TEST_DIR5" 2>/dev/null
 
 # ─── summary ────────────────────────────────────────────────────────────────
 printf '\n========================================\n'
