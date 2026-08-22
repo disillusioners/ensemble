@@ -366,7 +366,9 @@ resolve_binary() {
             printf '%s\n' "$flat"
             return 0
         fi
-        _log "WARN: $flat exists but is not executable"
+        # P5b dedupe: only warn when this is the sole non-executable report
+        # (via_current absent — otherwise its WARN above already fired).
+        [ ! -e "$via_current" ] && _log "WARN: $flat exists but is not executable"
     fi
     return 1
 }
