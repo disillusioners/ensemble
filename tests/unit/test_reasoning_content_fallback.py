@@ -387,8 +387,7 @@ class TestReasoningEchoGating:
 
     Why this matters:
       - DeepSeek's thinking-mode API requires reasoning_content in the
-        assistant history only for turns that included a tool call; echoing
-        it on plain final-answer turns causes 400s on strict endpoints.
+        assistant history whenever the prior turn had a tool call.
       - Raw OpenAI rejects unknown fields with a 400 error.
       - Some proxies silently ignore unknown fields, in which case echo is
         harmless but wastes payload bytes.
@@ -402,8 +401,6 @@ class TestReasoningEchoGating:
         llm = self._make_llm("deepseek-chat")
         messages = [AIMessage(
             content="Answer.",
-            # tool-call gate (3949b8a7): echo only on tool-call rounds
-            tool_calls=[{"id": "call_1", "name": "ls", "args": {}}],
             additional_kwargs={"reasoning_content": "thinking..."},
         )]
         payload = llm._get_request_payload(messages)
@@ -414,8 +411,6 @@ class TestReasoningEchoGating:
         llm = self._make_llm("DeepSeek-R1")
         messages = [AIMessage(
             content="Answer.",
-            # tool-call gate (3949b8a7): echo only on tool-call rounds
-            tool_calls=[{"id": "call_1", "name": "ls", "args": {}}],
             additional_kwargs={"reasoning_content": "thinking..."},
         )]
         payload = llm._get_request_payload(messages)
@@ -465,8 +460,6 @@ class TestReasoningEchoGating:
             llm = self._make_llm("glm-5")
             messages = [AIMessage(
                 content="Answer.",
-                # tool-call gate (3949b8a7): echo only on tool-call rounds
-                tool_calls=[{"id": "call_1", "name": "ls", "args": {}}],
                 additional_kwargs={"reasoning_content": "thinking..."},
             )]
             payload = llm._get_request_payload(messages)
@@ -502,8 +495,6 @@ class TestReasoningEchoGating:
             HumanMessage(content="hi"),
             AIMessage(
                 content="Answer.",
-                # tool-call gate (3949b8a7): echo only on tool-call rounds
-                tool_calls=[{"id": "call_1", "name": "ls", "args": {}}],
                 additional_kwargs={"reasoning_content": "thinking..."},
             ),
             HumanMessage(content="follow up"),
@@ -520,8 +511,6 @@ class TestReasoningEchoGating:
         llm = self._make_llm("deepseek-chat")
         messages = [AIMessage(
             content="Answer.",
-            # tool-call gate (3949b8a7): echo only on tool-call rounds
-            tool_calls=[{"id": "call_1", "name": "ls", "args": {}}],
             additional_kwargs={"reasoning_content": ""},
         )]
         payload = llm._get_request_payload(messages)
@@ -529,8 +518,7 @@ class TestReasoningEchoGating:
 
     def test_echo_with_tool_calls(self):
         """Multi-turn conversation with tool calls must echo reasoning_content
-        ONLY on the tool-call assistant turn; the final plain answer must NOT
-        carry it (DeepSeek thinking-mode spec, 3949b8a7).
+        on every assistant message (DeepSeek requires it for tool-calling turns).
         """
         llm = self._make_llm("deepseek-chat")
         messages = [
@@ -549,9 +537,7 @@ class TestReasoningEchoGating:
         payload = llm._get_request_payload(messages)
         assistants = [m for m in payload["messages"] if m.get("role") == "assistant"]
         assert assistants[0].get("reasoning_content") == "user wants ls"
-        # tool-call gate (3949b8a7): echo only on tool-call rounds — the final
-        # plain-answer turn must NOT carry reasoning_content
-        assert assistants[1].get("reasoning_content") is None
+        assert assistants[1].get("reasoning_content") == "presenting results"
 
     def test_no_echo_fast_path_matches_parent_output(self):
         """When echo is disabled for a model, the payload must be byte-identical
