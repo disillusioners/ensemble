@@ -16,6 +16,11 @@
 #   6. PORT RESOLUTION: PORT is read from INSTALL_DIR/.env (not hardwired).
 #   7. TUNABLE GUARD: malformed WATCHDOG_ABSENT_THRESHOLD_S falls back to
 #                  600 — never 0 (instant-notify hazard).
+#   8. EXIT-0 CONTRACT: no-args + unresolvable default INSTALL_DIR → FATAL
+#                  logged (naming the dir), exit 0 — no set -u abort.
+#   9. ZERO TUNABLES: explicit WATCHDOG_ABSENT_THRESHOLD_S=0 / PROBE_TIMEOUT_S=0
+#                  fall back to 600 / 3 like garbage (curl max-time 0 = no
+#                  timeout, so zero must never reach curl).
 #
 # The notification step is exercised through the WATCHDOG_NOTIFY_CMD
 # override (the script's documented test seam) — no osascript needed.
@@ -159,6 +164,78 @@ WATCHDOG_ABSENT_THRESHOLD_S="abc" WATCHDOG_NOTIFY_CMD="echo notified >> $TMP/not
     bash "$WATCHER" "$TMP/inst" >"$TMP/tunable.out" 2>&1
 grep -q "threshold 600s" "$TMP/tunable.out" && _pass || _fail "malformed threshold must fall back to 600s (got: $(grep threshold "$TMP/tunable.out" || echo none))"
 [ ! -f "$TMP/notify.log" ] && _pass || _fail "malformed threshold: must not notify on a fresh miss"
+
+# ─── 8. no-args + unresolvable default → FATAL log + exit 0 ─────────────────
+# Contract (header line ~44 + commit 94388762): "Exits 0 always". Under
+# set -u the no-args FATAL path used to reference $1 → bash abort exit 1.
+echo "== watcher: no-args unresolvable default → FATAL logged, exit 0 =="
+env -i HOME="$TMP/no-such-home" PATH="/usr/bin:/bin" \
+    bash "$WATCHER" >"$TMP/noargs.out" 2>&1
+RC_NOARGS=$?
+[ "$RC_NOARGS" -eq 0 ] && _pass || _fail "no-args unresolvable default: must exit 0 — 'Exits 0 always' (got $RC_NOARGS)"
+grep -q "FATAL: cannot resolve INSTALL_DIR" "$TMP/noargs.out" \
+    && _pass || _fail "no-args unresolvable default: must emit FATAL log (got: $(cat "$TMP/noargs.out" 2>/dev/null))"
+grep -Fq "cannot resolve INSTALL_DIR '$TMP/no-such-home/agents-ensemble'" "$TMP/noargs.out" \
+    && _pass || _fail "no-args FATAL must name the attempted default dir (got: $(grep FATAL "$TMP/noargs.out" 2>/dev/null || echo none))"
+grep -q "unbound variable" "$TMP/noargs.out" \
+    && _fail "no-args: must not abort on unbound \$1 under set -u" || _pass
+
+# ─── 9. explicit-zero tunables fall back to defaults (600 / 3) ──────────────
+# "0"/"00" are all-zero digit strings — the guard must reject them like
+# garbage (curl --max-time 0 means NO timeout, so a zero probe timeout
+# must never reach curl).
+echo "== watcher: explicit zero tunables → defaults (600 / 3) =="
+rm -f "$TMP/inst/data/.watchdog-state" "$TMP/notify.log"
+# 9a. WATCHDOG_ABSENT_THRESHOLD_S=0 → first-miss log must say 600s, not 0s
+WATCHDOG_ABSENT_THRESHOLD_S=0 WATCHDOG_NOTIFY_CMD="echo notified >> $TMP/notify.log" \
+    bash "$WATCHER" "$TMP/inst" >"$TMP/zerothresh.out" 2>&1
+grep -q "watching (threshold 600s)" "$TMP/zerothresh.out" \
+    && _pass || _fail "WATCHDOG_ABSENT_THRESHOLD_S=0 must fall back to 600s (got: $(grep threshold "$TMP/zerothresh.out" 2>/dev/null || echo none))"
+# 9b. WATCHDOG_PROBE_TIMEOUT_S=0 against a STALLING server (accepts TCP,
+#     never answers): fixed → probe gives up at the 3s default and records
+#     the miss; buggy (0 reaches curl = no timeout) → run hangs forever.
+STALL_PORT=$(( PORT + 1 ))   # .env still points here from test 6
+if lsof -ti:"$STALL_PORT" >/dev/null 2>&1; then
+    _fail "port $STALL_PORT busy — skipping zero-probe-timeout case"
+else
+    python3 -c "
+import socket
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(('127.0.0.1', $STALL_PORT))
+s.listen(8)
+conns = []
+while True:
+    c, _ = s.accept()
+    conns.append(c)   # accept, never respond
+" &
+    STALL_PID=$!
+    sleep 0.5   # let the staller bind
+    rm -f "$TMP/inst/data/.watchdog-state"
+    T0=$(date +%s)
+    WATCHDOG_PROBE_TIMEOUT_S=0 WATCHDOG_NOTIFY_CMD="echo notified >> $TMP/notify.log" \
+        bash "$WATCHER" "$TMP/inst" >"$TMP/zerotimeout.out" 2>&1 &
+    WPID=$!
+    FINISHED=0
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+        kill -0 "$WPID" 2>/dev/null || { FINISHED=1; break; }
+        sleep 0.5
+    done
+    DUR=$(( $(date +%s) - T0 ))
+    if [ "$FINISHED" -ne 1 ]; then
+        kill -9 "$WPID" 2>/dev/null
+        _fail "WATCHDOG_PROBE_TIMEOUT_S=0: run must not hang (0 reaching curl = no timeout)"
+    else
+        _pass
+        [ "$DUR" -ge 2 ] \
+            && _pass || _fail "WATCHDOG_PROBE_TIMEOUT_S=0: probe must use the 3s default, not instant/zero (duration ${DUR}s)"
+    fi
+    grep -q '^first_miss_at=[0-9]*$' "$TMP/inst/data/.watchdog-state" 2>/dev/null \
+        && _pass || _fail "WATCHDOG_PROBE_TIMEOUT_S=0: giving-up-at-default must record the miss episode"
+    kill -9 "$STALL_PID" 2>/dev/null
+    wait "$STALL_PID" 2>/dev/null
+    wait "$WPID" 2>/dev/null
+fi
 
 # ─── summary ────────────────────────────────────────────────────────────────
 echo

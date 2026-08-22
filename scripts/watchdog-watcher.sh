@@ -56,22 +56,30 @@ _log() {
     printf '%s watchdog-watcher[%s]: %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$$" "$*" >&2
 }
 
-# Positive-integer guard for the tunables — malformed values must never
-# turn the threshold into 0 (instant notify) or garbage arithmetic.
+# Positive-integer guard for the tunables — malformed values (including
+# explicit zero: 0/00/any all-zero string) must never turn the threshold
+# into 0 (instant notify) or garbage arithmetic; like garbage, they fall
+# back to the default.
 _posint() {
     case "$1" in
-        ''|*[!0-9]*) printf '%s' "$2" ;;
-        *)           printf '%s' "$1" ;;
+        ''|*[!0-9]*) printf '%s' "$2" ;;   # empty / non-numeric → default
+        *[1-9]*)     printf '%s' "$1" ;;   # has a nonzero digit → positive int
+        *)           printf '%s' "$2" ;;   # all zeros (0, 00, …) → default
     esac
 }
 WATCHDOG_ABSENT_THRESHOLD_S="$(_posint "$WATCHDOG_ABSENT_THRESHOLD_S" 600)"
 WATCHDOG_PROBE_TIMEOUT_S="$(_posint "$WATCHDOG_PROBE_TIMEOUT_S" 3)"
 
-# Absolute install dir (cwd-independent state paths).
-INSTALL_DIR="$(cd "$INSTALL_DIR" 2>/dev/null && pwd)" || {
-    _log "FATAL: cannot resolve INSTALL_DIR '$1'"
+# Absolute install dir (cwd-independent state paths). Resolve via a
+# scratch var: a failed assignment would clobber $INSTALL_DIR with the
+# empty substitution, and $1 is unbound under set -u on the no-args path —
+# so log pre-assignment $INSTALL_DIR, which still names the bad input.
+# Either way: log the FATAL and still exit 0 (launchd contract).
+_RESOLVED_INSTALL_DIR="$(cd "$INSTALL_DIR" 2>/dev/null && pwd)" || {
+    _log "FATAL: cannot resolve INSTALL_DIR '$INSTALL_DIR'"
     exit 0
 }
+INSTALL_DIR="$_RESOLVED_INSTALL_DIR"
 DATA_DIR="$INSTALL_DIR/data"
 STATE_FILE="$DATA_DIR/.watchdog-state"
 mkdir -p "$DATA_DIR" 2>/dev/null || {
