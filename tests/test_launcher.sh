@@ -561,6 +561,28 @@ else
     _fail "main(): _journal_sweep precedes resolve_binary" "sweep<binary" "sweep=$SWEEP_LINE binary=$BIN_LINE"
 fi
 
+# 8n. D5 protocol completeness (review m1): the launcher's lock acquire
+#     writes the run_id file lib.sh writes — owner/run_id/heartbeat are
+#     the protocol triple; a missing run_id degrades every lib.sh
+#     pipeline-busy diagnostic to run_id=? and blanks status.sh's display.
+JS_N="$JS_TEST_DIR/n"
+mkdir -p "$JS_N/releases"
+( . "$LAUNCHER"; INSTALL_DIR="$JS_N" _js_lock_acquire "$JS_N" >/dev/null 2>&1 )
+assert_eq "8n _js_lock_acquire: rc 0" "0" "$?"
+RUN_ID_FILE="$JS_N/releases/rollback.lock.d/run_id"
+if [ -f "$RUN_ID_FILE" ]; then
+    _pass
+else
+    _fail "8n lock dir has run_id file" "present" "absent"
+fi
+RUN_ID_VAL="$(cat "$RUN_ID_FILE" 2>/dev/null)"
+case "$RUN_ID_VAL" in
+    run-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]-*) _pass ;;
+    *) _fail "8n run_id matches run-YYYYmmdd-HHMMSS-pid shape" "run-…-…" "$RUN_ID_VAL" ;;
+esac
+( . "$LAUNCHER"; INSTALL_DIR="$JS_N" _js_lock_release "$JS_N" >/dev/null 2>&1 )
+[ -d "$JS_N/releases/rollback.lock.d" ] && _fail "8n lock released after _js_lock_release" "absent" "present" || _pass
+
 
 # ─── 9. resolve_binary preference order ─────────────────────────────────────
 section "resolve_binary"
