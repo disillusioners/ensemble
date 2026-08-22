@@ -45,6 +45,31 @@ QUEUE_PROBE_TIMEOUT_S: float = 2.0
 # dependency-free.
 TASK_STATUS_RUNNING = "running"
 
+# Readiness degradation drill knob (Auto-Restart Phase 1, deferred
+# tester probe P7). The Phase-1 tester skipped the /readyz
+# green→red→green probe with reason "no knob": the daemon exposed no
+# documented way to force readiness degradation without touching
+# shared infrastructure (stopping the shared PG was explicitly out).
+# This env var IS that knob: set ENSEMBLE_READINESS_FORCE_DEGRADED=1
+# (or true/yes/on/degraded) to force the /readyz composite to
+# degraded — an honest drill surface for operators (demo-env
+# validation, /readyz 503 semantics) and for tests.
+#
+# Fail-safe by construction:
+#   * it can ONLY degrade — never report ready when a component
+#     failed (no fail-open path, mirroring the m4 sentinel rule);
+#   * unknown values (including "0"/"false"/garbage/empty) are OFF —
+#     a typo never degrades prod;
+#   * it is read per refresh tick, so flipping the env between ticks
+#     of an in-process refresher exercises the full green→red→green
+#     transition (a live daemon needs a restart with the env set —
+#     readiness never restarts the process, and neither does this).
+READINESS_FORCE_DEGRADED_ENV = "ENSEMBLE_READINESS_FORCE_DEGRADED"
+
+_FORCED_DEGRADED_VALUES = frozenset(
+    {"1", "true", "yes", "on", "degraded"}
+)
+
 # Probe-timeout marker for ``_guarded``: the helper returns a
 # ``(timed_out, value)`` tuple so a timeout is distinguishable from
 # the component's own default at the call site. This matters because
@@ -101,6 +126,11 @@ class ReadinessComposite:
         checked_at: UTC timestamp captured at refresh start — the
             composite may be served for up to one refresh interval
             after this moment.
+        forced_degraded: drill knob (``ENSEMBLE_READINESS_FORCE_
+            DEGRADED``) forced the aggregate degraded while PRESERVING
+            the real component readings. Readiness-only surface: the
+            components stay truthful, the reason list names the knob,
+            and the aggregate flips. Never set by real probe paths.
     """
 
     database: bool
@@ -109,11 +139,17 @@ class ReadinessComposite:
     reasons: list[str] = field(default_factory=list)
     queue_max_age_seconds: Optional[float] = None
     checked_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    forced_degraded: bool = False
 
     @property
     def ready(self) -> bool:
-        """All components pass."""
-        return self.database and self.queue_freshness and self.services
+        """All components pass (and no drill knob forcing degraded)."""
+        return (
+            self.database
+            and self.queue_freshness
+            and self.services
+            and not self.forced_degraded
+        )
 
     def to_payload(self, *, draining: bool = False) -> dict:
         """Serialize to the ``ReadyzResponse`` body shape.
@@ -189,6 +225,63 @@ def compute_readiness_composite(
         reasons=reasons,
         queue_max_age_seconds=queue_max_age_seconds,
         checked_at=checked_at or datetime.now(timezone.utc),
+    )
+
+
+def forced_degradation_active(env_value: Optional[str]) -> bool:
+    """Pure evaluation of the drill-knob env value.
+
+    Truthy spellings (case-insensitive): ``1``, ``true``, ``yes``,
+    ``on``, ``degraded``. Everything else — ``None``, empty, ``0``,
+    ``false``, garbage — is OFF, so a malformed value can never
+    degrade prod by accident.
+    """
+    if not env_value:
+        return False
+    return env_value.strip().lower() in _FORCED_DEGRADED_VALUES
+
+
+def apply_forced_degradation(
+    composite: ReadinessComposite,
+    *,
+    env_value: Optional[str],
+) -> ReadinessComposite:
+    """Apply the drill knob to a computed composite (pure).
+
+    Returns the composite unchanged unless the knob is active. When
+    active, returns a degraded copy that PRESERVES the real component
+    readings and ``checked_at`` (the drill must not falsify what the
+    probes actually saw) and appends an honest reason naming the knob —
+    the degraded body always explains itself. One-way: never turns a
+    degraded composite ready.
+    """
+    if not forced_degradation_active(env_value):
+        return composite
+    if not composite.ready:
+        # Already degraded by real causes — add the drill marker so the
+        # reason list stays truthful about every contributor.
+        return ReadinessComposite(
+            database=composite.database,
+            queue_freshness=composite.queue_freshness,
+            services=composite.services,
+            reasons=[
+                *composite.reasons,
+                f"readiness: degraded forced by {READINESS_FORCE_DEGRADED_ENV} (drill)",
+            ],
+            queue_max_age_seconds=composite.queue_max_age_seconds,
+            checked_at=composite.checked_at,
+            forced_degraded=True,
+        )
+    return ReadinessComposite(
+        database=composite.database,
+        queue_freshness=composite.queue_freshness,
+        services=composite.services,
+        reasons=[
+            f"readiness: degraded forced by {READINESS_FORCE_DEGRADED_ENV} (drill)",
+        ],
+        queue_max_age_seconds=composite.queue_max_age_seconds,
+        checked_at=composite.checked_at,
+        forced_degraded=True,
     )
 
 

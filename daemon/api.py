@@ -130,7 +130,9 @@ from daemon.services.live_event_hub import LiveEventHub
 from daemon.services.notification_broadcaster import get_notification_broadcaster
 from daemon.services.editor_utils import get_editor_preference
 from daemon.services.readiness import (
+    READINESS_FORCE_DEGRADED_ENV,
     ReadinessComposite,
+    apply_forced_degradation,
     make_db_probe,
     make_queue_probe,
     refresh_readiness_composite,
@@ -1072,6 +1074,14 @@ async def _periodic_readiness_refresh_loop(
                 queue_probe=make_queue_probe(manager.engine),
                 services_ok=services_ok,
                 queue_freshness_threshold_seconds=queue_freshness_threshold_seconds,
+            )
+            # Drill knob (deferred tester probe P7): read PER TICK from
+            # the environment so flipping it between ticks of an
+            # in-process refresher exercises green→red→green. One-way
+            # (degrade-only); see daemon/services/readiness.py.
+            composite = apply_forced_degradation(
+                composite,
+                env_value=os.environ.get(READINESS_FORCE_DEGRADED_ENV),
             )
             app_state.readiness_composite = composite
             if not composite.ready:

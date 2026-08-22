@@ -21,9 +21,12 @@ import httpx
 import pytest
 
 from daemon.services.readiness import (
+    READINESS_FORCE_DEGRADED_ENV,
     ReadinessComposite,
+    apply_forced_degradation,
     compute_readiness_composite,
     evaluate_queue_freshness,
+    forced_degradation_active,
     refresh_readiness_composite,
 )
 
@@ -551,3 +554,246 @@ async def test_periodic_refresh_loop_populates_state_and_stops():
         await asyncio.wait_for(task, timeout=2)
     except asyncio.CancelledError:
         pass
+
+
+# ── Readiness degradation drill knob (deferred tester probe P7) ────────────
+# The Phase-1 tester skipped the /readyz green→red→green probe with
+# reason "no knob" — the daemon exposed no documented way to force
+# readiness degradation without touching shared infra (stopping the
+# shared PG was explicitly out of bounds). ENSEMBLE_READINESS_FORCE_
+# DEGRADED is that knob; these tests pin its fail-safe contract and
+# the full transition.
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["1", "true", "TRUE", "True", "yes", "on", "degraded", "DEGRADED", " 1 "],
+)
+def test_forced_degradation_truthy_spellings(value):
+    assert forced_degradation_active(value) is True
+
+
+@pytest.mark.parametrize(
+    "value", [None, "", "0", "false", "off", "garbage", "-1", "ready"]
+)
+def test_forced_degradation_off_values(value):
+    assert forced_degradation_active(value) is False
+
+
+def _drill_ready_composite() -> ReadinessComposite:
+    return compute_readiness_composite(
+        database_ok=True,
+        queue_fresh_ok=True,
+        services_ok=True,
+        queue_max_age_seconds=30.0,
+        checked_at=datetime(2026, 8, 22, tzinfo=timezone.utc),
+    )
+
+
+def test_apply_forced_degradation_ready_becomes_degraded():
+    base = _drill_ready_composite()
+    out = apply_forced_degradation(base, env_value="1")
+    assert out.ready is False
+    # Honest reason naming the knob
+    assert any(
+        READINESS_FORCE_DEGRADED_ENV in r and "drill" in r for r in out.reasons
+    ), out.reasons
+    # Component readings are PRESERVED (the drill must not falsify
+    # what the probes actually saw) — only the aggregate flips.
+    assert out.database is True
+    assert out.queue_freshness is True
+    assert out.services is True
+    assert out.queue_max_age_seconds == 30.0
+    assert out.checked_at == base.checked_at
+    # Purity: the input composite is untouched
+    assert base.ready is True
+    assert base.reasons == []
+
+
+def test_apply_forced_degradation_already_degraded_appends_reason():
+    base = compute_readiness_composite(
+        database_ok=False,
+        queue_fresh_ok=True,
+        services_ok=True,
+        queue_max_age_seconds=None,
+    )
+    out = apply_forced_degradation(base, env_value="degraded")
+    assert out.ready is False
+    assert READINESS_FORCE_DEGRADED_ENV in " ".join(out.reasons)
+    # The real cause stays first — the reason list stays truthful
+    assert out.reasons[0].startswith("database:")
+
+
+def test_apply_forced_degradation_is_one_way():
+    # Knob off can never turn a degraded composite ready
+    degraded = compute_readiness_composite(
+        database_ok=False,
+        queue_fresh_ok=True,
+        services_ok=True,
+        queue_max_age_seconds=None,
+    )
+    out = apply_forced_degradation(degraded, env_value=None)
+    assert out is degraded  # unchanged, still degraded
+
+
+def test_apply_forced_degradation_off_values_pass_through():
+    for value in (None, "", "0", "false", "garbage"):
+        base = _drill_ready_composite()
+        out = apply_forced_degradation(base, env_value=value)
+        assert out is base
+        assert out.ready is True
+
+
+@pytest.mark.asyncio
+async def test_green_red_green_transition_with_drill_knob(monkeypatch):
+    """Full green→red→green through refresh + knob, healthy probes throughout.
+
+    The probes stay healthy the entire time — the ONLY thing that
+    changes is the knob, which is exactly the drill semantics the
+    tester needed (degradation without touching shared infra).
+    """
+    healthy_db = lambda: True  # noqa: E731
+    healthy_queue = lambda: None  # noqa: E731  (no RUNNING tasks → fresh)
+
+    async def refresh():
+        return await refresh_readiness_composite(
+            db_probe=healthy_db,
+            queue_probe=healthy_queue,
+            services_ok=True,
+            queue_freshness_threshold_seconds=120,
+        )
+
+    # GREEN — knob off
+    monkeypatch.delenv(READINESS_FORCE_DEGRADED_ENV, raising=False)
+    green = apply_forced_degradation(
+        await refresh(),
+        env_value=None,
+    )
+    assert green.ready is True
+
+    # RED — knob on (probes still healthy)
+    monkeypatch.setenv(READINESS_FORCE_DEGRADED_ENV, "1")
+    import os
+
+    red = apply_forced_degradation(
+        await refresh(),
+        env_value=os.environ.get(READINESS_FORCE_DEGRADED_ENV),
+    )
+    assert red.ready is False
+    assert red.database is True  # readings preserved
+
+    # GREEN AGAIN — knob off
+    monkeypatch.delenv(READINESS_FORCE_DEGRADED_ENV, raising=False)
+    green_again = apply_forced_degradation(
+        await refresh(),
+        env_value=os.environ.get(READINESS_FORCE_DEGRADED_ENV),
+    )
+    assert green_again.ready is True
+
+
+@pytest.mark.asyncio
+async def test_readyz_forced_degradation_503_reports_drill_reason(
+    root_client, app_with_mock_manager
+):
+    """HTTP semantics under the drill knob: 503 + Retry-After + honest reason."""
+    app_with_mock_manager.state.readiness_composite = apply_forced_degradation(
+        _drill_ready_composite(), env_value="1"
+    )
+    resp = await root_client.get("/readyz")
+    assert resp.status_code == 503
+    assert resp.headers.get("Retry-After") == "5"
+    body = resp.json()
+    assert body["status"] == "degraded"
+    assert READINESS_FORCE_DEGRADED_ENV in " ".join(body["detail"]["reasons"])
+    # Component readings preserved in the body — the drill is visible
+    # as a forced state, not as falsified component failures.
+    assert body["components"]["database"] is True
+
+
+@pytest.mark.asyncio
+async def test_periodic_refresh_loop_applies_drill_knob_between_ticks(
+    monkeypatch,
+):
+    """The wired loop reads the knob PER TICK — flipping the env between
+    ticks drives the live composite red and back green without any
+    restart. This is the api.py-side proof of the P7 transition."""
+    import asyncio
+
+    from daemon.api import _periodic_readiness_refresh_loop
+
+    class FakeConn:
+        def execute(self, stmt, params=None):
+            class _R:
+                def __init__(self, value):
+                    self._v = value
+
+                def scalar(self):
+                    return self._v
+
+            if "SELECT 1" in str(stmt):
+                return _R(1)
+            return _R(30.0)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    class FakeEngine:
+        dialect = type("D", (), {"name": "sqlite"})()
+
+        def connect(self):
+            return FakeConn()
+
+    class FakeManager:
+        engine = FakeEngine()
+
+    class FakeState:
+        job_processor = object()
+        live_hub = object()
+        readiness_composite = None
+
+    state = FakeState()
+    task = asyncio.create_task(
+        _periodic_readiness_refresh_loop(
+            manager=FakeManager(),
+            app_state=state,
+            interval_seconds=0.05,
+            queue_freshness_threshold_seconds=120,
+        )
+    )
+
+    async def wait_for(predicate, timeout_s=5.0):
+        deadline = asyncio.get_event_loop().time() + timeout_s
+        while asyncio.get_event_loop().time() < deadline:
+            c = state.readiness_composite
+            if c is not None and predicate(c):
+                return c
+            await asyncio.sleep(0.01)
+        raise AssertionError(
+            f"composite never satisfied predicate; last="
+            f"{state.readiness_composite!r}"
+        )
+
+    try:
+        # GREEN — first tick, knob off
+        monkeypatch.delenv(READINESS_FORCE_DEGRADED_ENV, raising=False)
+        c = await wait_for(lambda c: c.ready is True)
+        assert c.database is True
+
+        # RED — knob flips BETWEEN ticks; no restart, no probe change
+        monkeypatch.setenv(READINESS_FORCE_DEGRADED_ENV, "1")
+        c = await wait_for(lambda c: c.ready is False)
+        assert c.database is True  # readings preserved
+        assert READINESS_FORCE_DEGRADED_ENV in " ".join(c.reasons)
+
+        # GREEN AGAIN — knob off, next tick recovers
+        monkeypatch.delenv(READINESS_FORCE_DEGRADED_ENV, raising=False)
+        await wait_for(lambda c: c.ready is True)
+    finally:
+        task.cancel()
+        try:
+            await asyncio.wait_for(task, timeout=2)
+        except asyncio.CancelledError:
+            pass
