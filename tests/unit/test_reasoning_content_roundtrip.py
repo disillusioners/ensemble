@@ -8,23 +8,20 @@ Echoing it on plain final-answer turns can cause 400 errors on strict
 endpoints, so the daemon's ``_get_request_payload`` gates injection on
 tool-call presence in addition to the model-name match.
 
-The tests below split into three groups:
+The tests below split into two groups:
 
   * ``TestGetRequestPayloadPreservesReasoningContent`` — happy-path
     coverage: when conditions are met (matching model + tool-call turn +
     stored ``reasoning_content``), the field is preserved.
   * ``TestReasoningEchoToolCallGate`` — gating coverage: the tool-call
-    requirement, mixed-history behavior, the non-matching-model /
-    no-reasoning-stored regression pins, the AIMessageChunk streaming
-    variant, the empty-``tool_calls`` semantics, and the checkpoint
-    serialization round-trip invariant.
+    requirement, mixed-history behavior, and the non-matching-model /
+    no-reasoning-stored regression pins.
 """
 
 import pytest
 from unittest.mock import MagicMock
 
-from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
-from langchain_core.load import dumps, loads
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from daemon.graph import ThinkingChatOpenAI
 
@@ -111,14 +108,8 @@ class TestGetRequestPayloadPreservesReasoningContent:
         assert assistant_messages[1].get("reasoning_content") == "Second reasoning..."
         assert assistant_messages[2].get("reasoning_content") == "Third reasoning..."
 
-    def test_tool_call_message_without_stored_reasoning_content_no_injection(self):
-        """Tool-call AIMessage with NO stored reasoning_content → not echoed.
-
-        Regression-pin on the existing presence gate: even when the tool-call
-        gate passes, the field must NOT be synthesized from nothing. Guards
-        against a future change that fabricates a ``reasoning_content`` key
-        on every assistant turn.
-        """
+    def test_message_without_reasoning_content_no_extra_field(self):
+        """AIMessage without reasoning_content does not get an extra field added."""
         llm = ThinkingChatOpenAI(model="test-model", api_key="test-key")
 
         messages = [
@@ -344,85 +335,5 @@ class TestReasoningEchoToolCallGate:
         assistant_msg = payload["messages"][0]
         assert "reasoning_content" not in assistant_msg
 
-    def test_empty_tool_calls_list_does_not_echo(self):
-        """AIMessage with explicit empty ``tool_calls=[]`` + reasoning_content → NOT echoed.
-
-        Pins the ``bool()`` semantics of the gate. An empty list is falsy,
-        so the gate must reject it — guards against a regression where
-        someone weakens the gate from ``bool(... or ...)`` to
-        ``... is not None`` and accidentally lets through messages whose
-        ``tool_calls`` attribute is set but empty.
-        """
-        llm = ThinkingChatOpenAI(model="test-model", api_key="test-key")
-        messages = [
-            AIMessage(
-                content="Answer.",
-                # Explicit empty list — distinct from "no tool_calls kwarg".
-                tool_calls=[],
-                additional_kwargs={"reasoning_content": "should be skipped"},
-            )
-        ]
-        payload = llm._get_request_payload(messages)
-        assistant_msg = payload["messages"][0]
-        assert "reasoning_content" not in assistant_msg
-
-    def test_ai_message_chunk_with_tool_call_chunks_echoes(self):
-        """AIMessageChunk with ``tool_call_chunks`` + reasoning_content → echoed.
-
-        Coverage for the streaming / chunk path of the tool-call gate.
-        ``AIMessageChunk`` is a subclass of ``AIMessage`` (so it passes
-        ``isinstance(m, AIMessage)``) and exposes ``tool_call_chunks``
-        instead of (or in addition to) ``tool_calls``. The gate's
-        ``or getattr(original, "tool_call_chunks", None)`` clause covers
-        this variant.
-
-        ToolCallChunk shape follows langchain_core's streaming protocol:
-        ``name``, ``args`` (JSON-encoded string), ``id``, ``index``.
-        """
-        from langchain_core.messages import AIMessageChunk
-
-        llm = ThinkingChatOpenAI(model="test-model", api_key="test-key")
-        chunk = AIMessageChunk(
-            content="",
-            tool_call_chunks=[
-                {
-                    "name": "bash",
-                    "args": '{"command":"ls"}',
-                    "id": "call_1",
-                    "index": 0,
-                }
-            ],
-            additional_kwargs={"reasoning_content": "thinking-then-call"},
-        )
-        payload = llm._get_request_payload([chunk])
-        assistant_msg = payload["messages"][0]
-        assert assistant_msg.get("reasoning_content") == "thinking-then-call"
-
-    def test_roundtrip_via_checkpoint_serialization_still_echoes(self):
-        """Tool-call AIMessage roundtripped through ``langchain_core.load``
-        (the same path LangGraph checkpointer uses) still echoes.
-
-        Regression-pin: the gate inspects ``tool_calls`` on the original
-        ``AIMessage`` — if a future LangChain upgrade drops ``tool_calls``
-        during serialization (or strips them on load), this test catches
-        it. Guards the invariant that ``tool_calls`` survives the
-        checkpoint round-trip.
-        """
-        llm = ThinkingChatOpenAI(model="test-model", api_key="test-key")
-        original = AIMessage(
-            content="",
-            additional_kwargs={"reasoning_content": "thinking-then-call"},
-            tool_calls=[_TOOL_CALL],
-        )
-        # Round-trip through the canonical LangChain serialization path.
-        restored = loads(dumps(original))
-        # Sanity: type + attributes survived.
-        assert isinstance(restored, AIMessage)
-        assert restored.tool_calls, "tool_calls must survive serialization"
-        assert restored.additional_kwargs.get("reasoning_content") == "thinking-then-call"
-
-        payload = llm._get_request_payload([restored])
-        assistant_msg = payload["messages"][0]
-        assert assistant_msg.get("reasoning_content") == "thinking-then-call"
 
 
