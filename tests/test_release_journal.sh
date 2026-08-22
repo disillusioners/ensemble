@@ -321,6 +321,34 @@ mkjournal 0 "$AGE_86398" null
 JLIB_TEST 'journal_count_rollback 1' > /dev/null
 CD_UNTIL="$(JLIB_TEST '_json_field "$(journal_read)" cooldown_until')"
 [ -n "$CD_UNTIL" ] && [ "$CD_UNTIL" != "null" ] && _pass || _fail "count_rollback arms cooldown_until"
+# the armed stamp must be a REAL now+COOLDOWN_S value — a malformed date
+# invocation silently stamps an unformatted "now" and the cooldown becomes
+# a no-op while still passing the not-null check above (BSD: -v AFTER the
+# `-f fmt value` pair is ignored; verified by the T7 sibling coder). Value
+# + format assertions kill that class dead.
+CD_NOW="$(date +%s)"
+printf '%s' "$CD_UNTIL" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' \
+    && _pass || _fail "cooldown_until is ISO-formatted (not raw date output)"
+CD_EPOCH="$(JLIB_TEST "_iso_to_epoch \"\$CD_UNTIL\"" </dev/null)"
+if [ -n "$CD_EPOCH" ] && [ "$CD_EPOCH" -gt 0 ] \
+   && [ "$((CD_EPOCH - CD_NOW))" -ge 570 ] \
+   && [ "$((CD_EPOCH - CD_NOW))" -le 630 ]; then
+    _pass
+else
+    _fail "cooldown_until ≈ now+600 (got delta ${CD_EPOCH:-unparseable})"
+fi
+# cooldown±1s boundary (plan acceptance): a stamp 1s in the future is
+# ACTIVE (strict <), 1s in the past is CLEAR — the rollover edge. Align to
+# a fresh second boundary first: the stamp and the check read the same
+# clock, and capturing at fraction ~x.9 would let the check's second tick
+# past now+1 (pure test race, not product behavior).
+_t0="$(date +%s)"
+while [ "$(date +%s)" = "$_t0" ]; do :; done
+NOW_ISO="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+mkjournal 0 "$AGE_86398" "\"$(iso_off x +1)\""
+JLIB_TEST 'journal_cooldown_active' && _pass || _fail "cooldown +1s → active"
+mkjournal 0 "$AGE_86398" "\"$(iso_off x -1)\""
+JLIB_TEST 'journal_cooldown_active' || _pass || _fail "cooldown -1s → clear"
 # quarantine: membership + idempotency
 mkjournal 0 "$AGE_86398" null
 JLIB_TEST 'journal_quarantine vQ2; journal_quarantine vQ2' > /dev/null
