@@ -382,8 +382,13 @@ journal_update() {
     while [ -n "$rest" ]; do
         case "$rest" in
             *"\"$field\""*)
-                head="${rest%%*"${field}"*}\"${field}\""
-                rest="${rest#*"${field}"}"
+                # head = prefix up to (and including) the last "field"
+                # occurrence (% removes the shortest suffix containing it);
+                # rest = what follows the occurrence. NOTE: escaped quotes in
+                # the pattern — raw "..." here would be swallowed by the
+                # outer double-quote context (verified).
+                head="${rest%*\"${field}\"*}\"${field}\""
+                rest="${rest#*\"${field}\"}"
                 rest="${rest#*:}"
                 # drop leading whitespace of the old value
                 rest="${rest#"${rest%%[![:space:]]*}"}"
@@ -545,7 +550,8 @@ journal_count_rollback() {
         "{\"24h\": $new_cnt, \"window_start\": \"$(_now_iso)\"}"
     if [ "$arm_cooldown" = "1" ]; then
         local until
-        until="$(date -ju -f '%Y-%m-%dT%H:%M:%SZ' "$(_now_iso)" -v+${COOLDOWN_S}S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" \
+        # BSD date: -v adjustments must precede the [-f fmt date] operand
+        until="$(date -ju -v+${COOLDOWN_S}S -f '%Y-%m-%dT%H:%M:%SZ' "$(_now_iso)" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" \
             || until="$(_now_iso)"
         journal_update "cooldown_until" "\"$until\""
     fi
