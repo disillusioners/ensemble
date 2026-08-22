@@ -1,0 +1,217 @@
+# Self-Restart / Self-Upgrade Phase 2 — Decision Log (ADR-style)
+
+> **HARD CONSTRAINT (user directive — governs every decision below):**
+> "NEVER touch the live/production ensemble environment — it is the running environment of Ari and all live agents (~/agents-ensemble, port 9797, prod DB, ENSEMBLE_DEPLOY_LIVE are out of bounds; live pids must remain untouched). ALL work/testing/drills in dev and demo only. If any plan step would require touching live, mark it as USER-GATED and design it as an explicit user-confirmed action. Sandbox instances (own port + throwaway PG) are fine."
+
+- **Date:** 2026-08-22 · **Author:** W3 (decisions.md) — continues the numbering of `.agents/shared/planning/auto-restart-upgrade/decisions.md` (ADR-001…015)
+- **Siblings (do not author):** `plan-overview.md` + `phaseN-plan.md` (W1), `tool-api-design.md` + `risk-register.md` (W2); companion `test-strategy.md` + `promotion-ladder.md` (this dir)
+- **Status:** all entries below are **RECOMMENDATIONS (rec)** pending review — Phase 2 introduces deliberate deviations from APPROVED ADRs (005, 009, 012, 015); every deviation is flagged.
+
+Format: **Context → Options → Decision/Recommendation → Consequence**, each with *recommended default* and *what breaks if chosen otherwise*. ⚠ = needs user decision at review.
+
+---
+
+## ADR-016 (rec ⚠ review): `system_restart` tool added beyond ADR-015's two tools
+
+**Context.** ADR-015 shipped two tools (`system_upgrade` + `release_info`, category `system_upgrade`, ari+jober). Phase 2's goal is Ari as the front door for restart + self-upgrade; restart is a distinct operation (no version change, no flip, no rollback window) and currently has no agent surface — an operator wanting a conversational restart would have to misuse `system_upgrade` or shell out. ADR-015's constraint stack still applies: no LLM in the recovery path; tools are front doors to deterministic machinery.
+
+**Options.** (a) Two tools only — restart via `system_upgrade` no-op promote (abuses semantics, drags the 10-min rollback window into a simple restart); (b) add `system_restart` as a third tool in the same category; (c) no agent restart — operator-only.
+
+**Decision (rec).** **(b).** `system_restart` joins `system_upgrade` + `release_info` in category `system_upgrade`. Constraints: **health-gated routing, never a raw kill** — the tool drives the same bounded-stop machinery Phase 1 built (SIGTERM + bounded wait via the launcher; `stop-ensemble.sh` SINGLE-TERM ownership pattern is the precedent), then requires the launcher respawn to pass `/livez` within the standard ≤60s budget before the tool reports success. Restart result sequencing must survive the restart itself (⟪SEAM: result-delivery contract — W2 `tool-api-design.md`⟫).
+
+**Recommended default:** three tools, `system_restart` health-gated as above.
+**If the user declines (two tools / none):** restart remains operator-only this phase and D7 (`test-strategy.md` §3) reduces to a scripted-restart drill; Ari cannot offer "restart yourself" conversationally — a stated Phase 2 goal degrades.
+
+---
+
+## ADR-017 (rec ⚠ NEEDS USER DECISION): env-target permission model — demo/dev/sandbox FREE (user directive), LIVE enforced 3-factor runtime gate
+
+**Context.** ADR-015's two-factor gate (param `user_confirmed: true` + server-side user-originated trigger marker) was designed for ONE target: the install the agent runs in. Phase 2 spans four environments (dev 8079 / demo 7979 / sandbox / live 9797) and the hard constraint puts live out of bounds for all initiative work. A uniform gate would either over-gate rehearsals (drills blocked on confirmation theater) or under-gate live (unacceptable).
+
+**Options.** (a) Uniform two-factor everywhere (safe for live, friction-locks every drill); (b) env-target model: demo/dev/sandbox free, live requires the enforced runtime confirmation gate; (c) config-file opt-in list per env.
+
+**Decision (rec).** **(b).** Mechanism per ratified D-FA2.3/D-FA2.4: the daemon's own env is resolved from the **staged `ENSEMBLE_SELF_ENV=dev|demo|live|sandbox` marker in `INSTALL_DIR/.env`** (staged by `deploy.sh`/`stage.sh` — P2.1 T2; ADR-014 mechanism); `target_env` is the same 4-value enum and **must equal the marker value** (check-order step 3 — self-match runs BEFORE any live-gate logic). The **PORT-derivation fallback is REJECTED** (it reintroduces the 7979↔9797 typo class this gate exists to kill); **marker absent → every ACTOR tool refuses fail-closed (`env-marker-absent`, S-31) — read tools still answer**. (Scripts keep the install-dir + port + DB triple assertion as their own separate layer, `test-strategy.md` §5.) Marker target ∈ {demo, dev, sandbox} → executes freely (**user directive: "Demo/dev actions may proceed freely per normal flow"** — no human-confirmation gate on non-live targets). Marker target = live → **enforced 3-factor runtime gate (D-FA3.1 ruled naming: `user_confirmed: true` param + server-side user-originated marker + action-binding nonce)**, refusal otherwise — **a fabricated `user_confirmed` must NOT unlock live** (unit-tested, `test-strategy.md` §1 P2.2). U5 in `promotion-ladder.md` §5.
+
+**Recommended default:** (b) with the `ENSEMBLE_SELF_ENV` staged marker as the fail-closed derivation source (D-FA2.3; PORT fallback rejected).
+**If the user picks (a):** every demo drill needs a live-style confirmation ritual — D4/D5/D7 become slower and the confirmation surface is exercised so often its weight erodes; nothing else breaks. If the user picks (c): an operator-editable list becomes a silent privilege escalation vector — a stale list entry pointing at 9797 re-opens the live hole; not recommended.
+
+---
+
+## ADR-018 (rec ⚠ review): pipeline as env-parameterized scripts, NOT make-target wrapping — supersedes the make-promote framing of ADR-009/015
+
+**Context.** ADR-009 defined `make stage/promote/rollback` (with `install` alias); ADR-015's `system_upgrade` was framed as "runs the same sequence as `make promote`". Verified hazard: `make build`/`make pyinstaller`/`make install` chain through **ensure-latest** (`git checkout latest && git pull`) which yanks a feature branch out from under the build — `scripts/deploy.sh:19-22` exists precisely because of this ("NEVER `make pyinstaller`/`make build`/`make install` … the ensure-latest chain would yank the feature branch", verified). D3 (APPROVED) demoted ensure-latest for staging, but the Makefile remains the wrong chassis for a script-invoked, env-parameterized, agent-callable pipeline.
+
+**Options.** (a) Keep make targets as the pipeline, tools shell into `make promote ENV=demo`; (b) env-parameterized scripts under `scripts/` (extending `deploy.sh`'s pattern) as the canonical pipeline; make targets become thin deprecated wrappers or are retired; (c) a new Python pipeline module invoked by both.
+
+**Decision (rec).** **(b).** Canonical pipeline = `scripts/` stage/promote/rollback with explicit `--target {demo|sandbox|live}` + `--version`, target-triple assertions built in (script-layer discipline, `test-strategy.md` §5 — the TOOL layer uses the `ENSEMBLE_SELF_ENV` marker per ADR-017/D-FA2.3), exit-75/78/1 semantics preserved. Supersedes the *make framing* of ADR-009 (whose substance — stage/promote/rollback decomposition, SIGTERM-not-kill-9, explicit VERSION, fail-if-not-at-tag — carries over unchanged). `system_upgrade` invokes the script, never `make`.
+
+**Recommended default:** (b); retire the make wrappers during P2.1 to avoid two doors.
+**If the user insists on (a):** every tool-invoked promote must neutralize ensure-latest — a footgun that has already bitten once (`deploy.sh:19-22`); also make targets complicate the env-target assertion story. If (c): more code paths to drill for the same guarantee; acceptable but slower to ship.
+
+---
+
+## ADR-019 (rec ⚠ review): ari-only tool exposure this phase — jober deferred (delta from ADR-015's ari+jober)
+
+**Context.** ADR-015 approved `system_upgrade` + `release_info` for **ari + jober**. Phase 2 exposes the tools while jober's operational role in upgrade flows is still undefined; each additional allow-listed agent widens the blast radius of the env-target gate and doubles the drill matrix.
+
+**Options.** (a) ari + jober now (ADR-015 as written); (b) ari only this phase, jober deferred to a later phase with its own drills; (c) ari + jober but jober read-only (`release_info` only).
+
+**Decision (rec).** **(b).** ari-only in `tools.allow` for Phase 2; default-deny keeps the tools invisible to jober and everyone else (ADR-015 registration mechanics — `tools.allow` is the canonical signal). Jober's exposure is a one-line `meta.json` + drill addition later.
+
+**Recommended default:** (b).
+**If the user picks (a):** the drill matrix doubles (jober-driven restart/upgrade legs) and the two-factor marker must be validated across two agents' session semantics — schedule cost, not correctness cost. If (c): minimal delta, but a half-exposed category invites confusion about jober's role; either full deferral or full exposure is cleaner.
+
+---
+
+## ADR-020 (rec ⚠ review): agent tools shipped BEFORE drain/migration-guard phases — M3 drain-free sanction; manifest `rollback_safe` as interim gate; `daemon_meta` remains future
+
+**Context.** ADR-015 placed agent tooling in Phase 7 (after drain/observer). Phase 2 pulls the tools forward on top of Phase 1 infra only. Sanctions already exist in the approved log: **M3 amendment — "Phase 3 promotes drain-free; drain slots in at Phase 4"** (ADR-009), and **ADR-007 M5 — "until `daemon_meta` lands (Phase 5), the same rollback-safety rule is enforced by the release `manifest` (`rollback_safe`) from Phase 2 — two enforcement layers, one rule, no phase-ordering hole."** Both verified in `.agents/shared/planning/auto-restart-upgrade/decisions.md`.
+
+**Options.** (a) Hold tools until drain + migration guard land (original ordering); (b) ship tools now, drain-free, with manifest `rollback_safe` as the only rollback-safety gate; (c) ship tools restricted to restart-only until drain lands.
+
+**Decision (rec).** **(b).** `system_upgrade` launches drain-free promotes (bounded SIGTERM stop; in-flight work resumes from node boundaries — the documented restart semantics, `test-strategy.md` §3 note). Rollback safety rides the manifest gate per ADR-007/M5 until `daemon_meta` (future phase). Risk acceptance must be explicit: a restart during in-flight work loses an in-flight tool call (known semantics) — surfaced to Ari as upgrade-time context, not hidden.
+
+**Recommended default:** (b) — matches the user's stated goal of conversational upgrade control now.
+**If the user picks (a):** Phase 2 shrinks to pipeline-only (P2.1/P2.3) and ari tooling slips behind two more phases — the initiative's headline capability delays. If (c): restart-only tools still need the full gate machinery; little saved, most of the value deferred.
+
+---
+
+## ADR-021 (rec ⚠ NEEDS USER DECISION): N — clean demo cycles before live eligibility
+
+**Context.** `promotion-ladder.md` S3 requires N consecutive clean demo cycles (objective definition in `test-strategy.md` §4.1) before live promotion becomes USER-GATED-available. N trades wall-clock rehearsal cost against confidence.
+
+**Options.** N = 2 (fast) · N = 3 · N = 5 (heavy).
+
+**Decision (rec).** **N = 3.** Each cycle exercises ≥2 periodic recovery ticks; 3 matches the rollback-cap 3/24h symmetry; ≈3 × (gates 3min + soak 5min + observation) per release. **Default if user silent: 3.** Staleness: any release/manifest change mid-count resets to 0.
+
+**If the user picks otherwise:** N=2 halves rehearsal coverage of the ~10-min ReportDeliveryRecovery lag window (a cycle could pass without ever witnessing one recovery tick); N=5 multiplies drill wall-clock ~×1.7 for marginal signal — both workable, both worse trades.
+
+---
+
+## ADR-022 (rec): `dry_run` default for `system_upgrade`
+
+**Context.** The pipeline has a dry-run precedent (`deploy.sh` DRY_RUN=1 — plans without side effects, verified). An agent-facing upgrade tool with a silent live default is a hazard; a mandatory dry-run flag adds a round trip.
+
+**Options.** (a) `dry_run` default false; (b) default true — first call plans (target, version, rollback safety, gates), user/ari confirms, second call with `dry_run: false` executes; (c) no dry_run parameter.
+
+**Decision (rec).** **(b) default true.** Cheap, matches deploy.sh semantics, and gives the env-target gate a natural rehearsal surface. On demo/sandbox the second call is friction-free; on live it stacks with ADR-017's 3-factor LIVE gate (D-FA3.1).
+
+**If picked otherwise (a):** one hallucinated parameter set executes a real promote — the exact failure class ADR-015's two-factor exists to prevent; (c) removes the rehearsal surface entirely.
+
+---
+
+## ADR-023 (rec): does an `upgrade_status`/progress tool exist? — YES, minimal, journal-derived
+
+**Context.** A long promote (gates + 300s soak ≈ 8+ min) exceeds any sensible tool-call wait; Ari needs a way to answer "how's the upgrade going?" mid-flight. ⟪SEAM: W2 `tool-api-design.md` owns the exact call contract⟫
+
+**Options.** (a) No status tool — `system_upgrade` blocks until terminal state; (b) `system_upgrade` returns a txn id immediately + a separate `upgrade_status(txn_id?)` read-only poller (journal-derived); (c) status folded into `release_info`.
+
+**Decision (rec).** **(b)** — `system_upgrade` returns early with a txn handle; `upgrade_status` polls (default: latest in-flight txn), reporting journal state machine position (staged → flipped → gating → soaking → committed/rolled_back/halted). Third+ tool joins the same category and allow-list resolution (unit-tested, `test-strategy.md` §1 P2.2).
+
+**If picked otherwise (a):** tool calls time out or hold turns for ~10 min (longer than the 5-min pack caps conceptually) and mid-flight questions are unanswerable; (c) overloads a stable read-only tool with mutable-progress semantics.
+
+---
+
+## ADR-024 (rec ⚠ confirm): journal-sweep rollback COUNTS as an auto-rollback (ADR-012) — confirmed carry-over into Phase 2 implementation
+
+**Context.** ADR-012's consequence already states: "the sweep counts as an auto-rollback (cooldown + counters apply)". Phase 2 implements the sweep (filling the `launcher.sh:151-174` stub, verified — the contract comment is embedded there). This entry exists to make the confirmation explicit at implementation time, because a sweep-rollback that bypassed the cap would let a pathological promote-die loop circumvent D2.
+
+**Options.** (a) Sweep rollbacks exempt from the 3/24h cap; (b) counted like any auto-rollback (ADR-012 as written).
+
+**Decision (rec).** **(b) — confirm ADR-012 unchanged.** The sweep's rollbacks increment journal counters, respect the 10-min cooldown, and can themselves trigger halt-for-human.
+
+**If picked otherwise (a):** a promote that dies mid-flip repeatedly would sweep-rollback outside the budget — an unbounded hidden rollback path exactly where flapping protection matters most.
+
+---
+
+## ADR-025 (rec ⚠ NEEDS USER DECISION): alert channel — SSE-only vs +watchdog-watcher extension
+
+**Context.** Abort-class events must reach a human. In-daemon SSE (`NotificationBroadcaster`, `daemon/services/notification_broadcaster.py:19`, verified) works only while the daemon lives — burst abort and daemon-death are precisely when it doesn't. The `scripts/watchdog-watcher.sh` precedent (launchd agent, `/livez` only, 300s interval, absent >10min → notify — verified `watchdog-watcher.sh:5-7,174-177`) covers daemon-down but nothing else. ADR-008 planned a watchdog-watcher doubling as observer (Phase 6).
+
+**Options.** (a) SSE-only this phase; (b) SSE + extend watchdog-watcher to also watch `.launcher-state`/journal halt markers (daemon-down coverage incl. burst abort + cap halt); (c) full observer (Phase 6 scope) pulled forward.
+
+**Decision (rec).** **(b)** — small extension of an existing, plist-shipped script (journal halt/burst markers are files the watcher can read without the daemon). (a) leaves burst-abort and cap-halt-during-death unalertable; (c) imports the LLM-observer phase early for marginal gain.
+
+**If the user picks (a):** the two most severe abort classes (daemon dead, cap-halted) rely on the user noticing via Ari on next recovery — acceptable only if the user accepts silent-halt risk. Note U6 in `promotion-ladder.md` §5: any watcher pointed at live is itself USER-GATED.
+
+---
+
+## ADR-026 (rec): retry policy for failed promotes — manual re-trigger, no auto-retry
+
+**Context.** A promote can fail pre-flip (preflight, checksum, lock) or post-flip (gate → auto-rollback per ADR-005). Auto-retrying pre-flip failures risks hammering a broken pipeline; auto-retrying post-rollback promotes would circumvent the cooldown/cap design.
+
+**Options.** (a) Manual only — ari/operator re-calls `system_upgrade` after inspecting `upgrade_status`; (b) auto-retry with cap (e.g. 2 retries, only for pre-flip transient classes); (c) auto-retry everything.
+
+**Decision (rec).** **(a) manual this phase.** Post-rollback retry is already governed by cooldown+cap; pre-flip failures are cheap to re-trigger conversationally. Revisit (b) only if drills show a noisy transient class (e.g. pg_dump preflight timeouts — ADR-007 timeout+skip already mitigates).
+
+**If picked otherwise (b)/(c):** a new counter dimension (promote retries) must join the journal and the drill matrix, and (c) directly fights D2's anti-flapping intent — not recommended.
+
+---
+
+## ADR-027 (rec): version smoke mechanism — `/livez` version field, not a `--version` flag
+
+**Context.** Promote must verify the daemon that came up is the version staged ("version verify", ADR-005 gate). `/livez` already returns `"version"` in its payload (verified live on demo: `/livez` 200 `{"status":"alive","uptime_seconds":…,"version":"0.10.5"}` — RESULTS file §3 demo probe). A `--version` CLI flag would need frozen-binary plumbing (arg parsing before boot) for zero added guarantee.
+
+**Options.** (a) Assert `/livez` payload `version == manifest.binary_version` post-restart; (b) `ensemble-prod --version` exec; (c) both.
+
+**Decision (rec).** **(a).** The smoke must run against the RUNNING daemon anyway (a correct file that boots wrong must still fail the gate) — the HTTP payload is the only source that proves what's actually serving.
+
+**If picked otherwise (b)/(c):** file-level truth without runtime truth can pass a gate where the symlink points right but the process is stale — exactly the class the smoke exists to catch; (c) adds plumbing cost for redundancy.
+
+---
+
+## ADR-028 (rec): rollback of the ROLLBACK — flip-forward recovery, manual + gated, never automatic
+
+**Context.** If a rollback lands on a `previous` that is itself bad (or was evicted/quarantined), the system rests on last-known-good-or-worse. "Undo the rollback" = flip forward to a fixed version. Automatic forward-flipping would create a promote/rollback oscillation outside D2's accounting.
+
+**Options.** (a) Automatic flip-forward when the rollback target fails its gate; (b) manual flip-forward: halt-for-human, ari relays, user picks the version, promote runs the normal gate; (c) not addressed.
+
+**Decision (rec).** **(b).** The rollback target failing its gate is itself a rollback-class event → counters/cooldown/cap apply; at cap or on second failure → halt-for-human with the release list (versions + `rollback_safe` + quarantine flags from the journal via `release_info`). Recovery = user-chosen version through the standard promote gate. Eviction safety already pins `previous` (ADR-004).
+
+**If picked otherwise (a):** an auto flip-forward loop across versions is flapping with extra steps, ungoverned by D2's cap semantics; (c) leaves the worst-case resting state undocumented.
+
+---
+
+## Pre-Freeze Assumption-Closure Checklist (added 2026-08-22 per review)
+
+The 4 unverified assumptions of `architecture-recommendation.md` §7, wired to their owning tasks — **this checklist is executed as the FIRST P2.2 task (T0 — assumption closure) before any other P2.2 work; a red item freezes the dependent design, it does not proceed on hope.** Fail-closed direction throughout: a wrong assumption refuses, never bypasses.
+
+| # | Assumption | Owner task | Verification step (objective) | Status |
+|---|-----------|-----------|-------------------------------|--------|
+| 1 | `USER_ORIGIN_SOURCES` prefix strings — exact external-channel source prefixes (`telegram:`/`discord:`/`slack:` forms) | P2.2 T8 (gate implementation) | Enumerate the ACTUAL adapter source prefixes from the `daemon/sources/` dispatch paths; verify real formats against `instance_messaging.py:1781` docstring (`"telegram:user:1"`) and `routers/messages.py:391` (stamps `"api"`); unit asserts: every whitelisted prefix stamps the origin marker, every `internal_*` source does not | open → close at T8 |
+| 2 | Executor daemonization primitive — `subprocess.Popen(..., start_new_session=True)` ≡ double-fork+setsid on macOS/PyInstaller; no `BashProcessRegistry`-adjacent teardown reaches it | P2.2 T5 (daemonized launcher) | Sandbox run: child survives (a) tool-harness teardown and (b) daemon SIGKILL; static assertion the child is NOT registered in `BashProcessRegistry` (grep/static check in the unit pack) | open → close at T5 |
+| 3 | `watchdog-watcher.sh` extension surface — can read `.launcher-state` + `releases/state.json` (file-format stability) | P2.3 T8 (alerting wiring) — **HARD dependency on P2.1 T4: `releases/state.json` does not exist until the pipeline writes it** | Sandbox test: the watcher extension detects a halt/burst scenario from the real `.launcher-state` + journal files alone (no daemon) | open → close at T8 (P2.3) |
+| 4 | e2e-gate additivity — the post-graph trigger consumer stays OUTSIDE the graph | P2.2 PR review (per-PR, at merge time) | PR-time diff-based confirmation against the `ensure.md:44-53` trigger paths (`claim_pending_task`, `turn_transitions`, `reconcile_turn_mirror`, `job_processor`, `job_locks`): if the diff touches any of them, the FULL e2e release gate runs (`test-strategy.md` §2); the design intent is additive-only so the gate should NOT trigger | open → close per PR |
+
+**ADR minting note (per review edit #1):** ADR-029 (daemonized executor / exit-74 deferred), ADR-030 (launcher in staged payload), ADR-031 (`PRIVILEGED_TOOL_CATEGORIES`), ADR-032 (`USER_ORIGIN_SOURCES` whitelist) are **to be minted here by the implementer** — renumbered +1 from the architect's original 028…031 proposal (collision with the minted ADR-028). **Numbering check is part of the minting task: confirm the current max ADR number in this file and mint sequentially above it — never reuse a minted number.**
+
+---
+
+## Decision Index (Phase 2)
+
+| ADR | Topic | Recommendation (one line) | Flag |
+|---|---|---|---|
+| 016 | `system_restart` tool | Third tool, same category; health-gated SIGTERM path, never raw kill | rec ⚠ review |
+| 017 | Env-target gate | demo/dev/sandbox FREE (user directive); live = enforced **3-factor** runtime gate (D-FA3.1: param + HUMAN-origin marker + nonce); derivation = fail-closed `ENSEMBLE_SELF_ENV` marker (D-FA2.3; PORT fallback rejected) | **rec ⚠ NEEDS USER DECISION** |
+| 018 | Pipeline chassis | Env-parameterized `scripts/` stage/promote/rollback; make framing of ADR-009/015 superseded | rec ⚠ review |
+| 019 | Tool exposure | ari-only this phase; jober deferred (delta from ADR-015) | rec ⚠ review |
+| 020 | Phase ordering | Tools before drain/migration-guard; manifest `rollback_safe` interim gate (M3/M5 sanctions) | rec ⚠ review |
+| 021 | N clean cycles | N = 3, objective cycle definition, staleness reset on release change | **⚠ NEEDS USER DECISION** |
+| 022 | dry_run default | `system_upgrade` defaults to dry_run=true | rec |
+| 023 | Status tool | `upgrade_status` exists — early-return txn handle + journal-derived poller | rec |
+| 024 | Sweep counts as rollback | Confirm ADR-012: launcher journal-sweep rollback feeds 3/24h counters + cooldown | rec ⚠ confirm |
+| 025 | Alert channel | SSE + watchdog-watcher extension (journal/`.launcher-state` markers) | **⚠ NEEDS USER DECISION** |
+| 026 | Promote retry policy | Manual re-trigger only this phase | rec |
+| 027 | Version smoke | `/livez` payload `version` == manifest `binary_version` (runtime truth) | rec |
+| 028 | Rollback-of-rollback | Manual, gated flip-forward; halt-for-human + user-chosen version | rec |
+| — (ruling) | Cooldown × sweep (D-FA4.2 adjudication) | Cooldown arms the next **ENTRY** only (promotes refused inside it); the ADR-012 sweep / an in-flight rollback **NEVER refuses on cap or cooldown** — refusing the recovery strands the env on an orphaned flip; rollback-cap 3/24h is entry-side enforcement | adjudicated (architecture-recommendation.md D-FA4.2) |
+
+## Needs-User-Decision-at-Review Checklist
+
+| # | Item | Where | Default if silent |
+|---|---|---|---|
+| 1 | **N (clean demo cycles)** — accept 3? | ADR-021 · `test-strategy.md` §4 · `promotion-ladder.md` S3 | 3 |
+| 2 | **Alert channel** — SSE-only, or extend watchdog-watcher for daemon-down abort classes? | ADR-025 · `promotion-ladder.md` §3 | SSE + watcher extension |
+| 3 | **ADR-016…020 deviating from APPROVED ADR-015/009** — approve each deviation (new tool, env-target gate, scripts-not-make, ari-only, early tool phase)? | ADR-016…020 | All five as recommended |
+| 4 | **ADR-024 explicit confirmation** — sweep-rollback counts toward 3/24h cap | ADR-024 | Counted (ADR-012 as written) |
+| 5 | **Live-stage runbooks (U1–U6)** — confirm the USER-GATED design (user-executed/approved, never agent-executed) matches intent | `promotion-ladder.md` §5 | As tabled |
