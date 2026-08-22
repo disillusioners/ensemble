@@ -152,7 +152,7 @@ async def lifespan(app: FastAPI):
     """
     # Import services here to avoid circular imports
     from daemon.manager import InstanceManager
-    from daemon.config import load_config
+    from daemon.config import load_config, warn_deprecated_reasoning_echo_env
     from daemon.services.job_queue_service import JobQueueService
     from daemon.services.job_lock_manager import JobLockManager
     from daemon.services.job_processor import JobProcessor
@@ -201,6 +201,10 @@ async def lifespan(app: FastAPI):
         f"[Config] reasoning_echo_disabled_models={ThinkingChatOpenAI.reasoning_echo_disabled_models} "
         f"(models matching these patterns will NOT echo reasoning_content; all others echo)"
     )
+
+    # Warn-once if the removed allowlist env var is still set (no-op when
+    # load_config already emitted it)
+    warn_deprecated_reasoning_echo_env()
 
     # Run RAG auto-test to verify LightRAG connectivity
     # This gracefully disables RAG if it's misconfigured (wrong API key, connection refused, etc.)

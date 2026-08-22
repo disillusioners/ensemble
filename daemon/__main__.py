@@ -16,7 +16,7 @@ warnings.filterwarnings(
 import uvicorn
 from pathlib import Path
 
-from .config import load_config
+from .config import load_config, warn_deprecated_reasoning_echo_env
 
 
 def main():
@@ -34,6 +34,10 @@ def main():
         f"[Config] reasoning_echo_disabled_models={ThinkingChatOpenAI.reasoning_echo_disabled_models} "
         f"(models matching these patterns will NOT echo reasoning_content; all others echo)"
     )
+
+    # Warn-once if the removed allowlist env var is still set (no-op when
+    # load_config already emitted it)
+    warn_deprecated_reasoning_echo_env()
 
     # Log version for debugging
     from . import __version__

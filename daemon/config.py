@@ -7,6 +7,7 @@
 # clarity for marginal modularity; the file crossed 1000 lines in the HA
 # fallback round and the trade-off still holds — keep centralized.
 import json
+import logging
 import os
 import re
 from pathlib import Path
@@ -22,6 +23,8 @@ from .constants import (
     MAX_INSTANCE_HISTORY,
     MAINTENANCE_CHECK_INTERVAL_MINUTES,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def substitute_env_vars(value: Any) -> Any:
@@ -995,6 +998,36 @@ class Config(BaseSettings):
     blueprint: BlueprintConfig = Field(default_factory=BlueprintConfig)
 
 
+# Warn-only deprecation guard for the removed reasoning-echo allowlist env
+# var. The value is deliberately read into NO behavior — the denylist key
+# OPENAI_REASONING_ECHO_DISABLED_MODELS is the only effective control.
+_reasoning_echo_deprecation_warned = False
+
+
+def warn_deprecated_reasoning_echo_env() -> None:
+    """Log a single per-process warning if the old allowlist env var is set.
+
+    ``OPENAI_REASONING_ECHO_MODELS`` stopped being read when the
+    reasoning_content echo default flipped to ON for all models; its
+    replacement is the denylist key ``OPENAI_REASONING_ECHO_DISABLED_MODELS``.
+    Called from ``load_config`` and the startup wiring sites
+    (``daemon/__main__.py``, ``daemon/api.py``); the module-level guard makes
+    the warning fire at most once per process.
+    """
+    global _reasoning_echo_deprecation_warned
+    if _reasoning_echo_deprecation_warned:
+        return
+    _reasoning_echo_deprecation_warned = True
+    if "OPENAI_REASONING_ECHO_MODELS" not in os.environ:
+        return
+    logger.warning(
+        "[Config] OPENAI_REASONING_ECHO_MODELS is set but no longer read; "
+        "reasoning_content echo now defaults to ON for all models. Use "
+        'OPENAI_REASONING_ECHO_DISABLED_MODELS (e.g. "gpt-4o,claude") to '
+        "disable echo for models whose endpoint rejects the field."
+    )
+
+
 def load_config(config_path: str | None = None) -> Config:
     """
     Load configuration from YAML file with environment variable substitution.
@@ -1010,6 +1043,9 @@ def load_config(config_path: str | None = None) -> Config:
         FileNotFoundError: If config file does not exist
         ValueError: If config file is invalid
     """
+    # Warn-once deprecation notice for the removed allowlist env var
+    warn_deprecated_reasoning_echo_env()
+
     # Determine config file path
     if config_path is None:
         config_path = os.environ.get("ENSEMBLE_CONFIG", "./config.yaml")

@@ -1788,7 +1788,7 @@ class ThinkingChatOpenAI(ChatOpenAI):
     reasoning_echo_disabled_models: ClassVar[list[str]] = []
 
     def _should_echo_reasoning(self) -> bool:
-        """Return True if the current model requires reasoning_content echo.
+        """Return True if reasoning_content echo is enabled for the current model.
 
         Denylist: echo is on for every model unless its name case-
         insensitively substring-matches an entry in
