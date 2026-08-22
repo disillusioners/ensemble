@@ -27,12 +27,12 @@ def main():
     # Apply LLM-specific class-level config that must be set before any
     # ThinkingChatOpenAI instance is created.
     from .graph import ThinkingChatOpenAI
-    ThinkingChatOpenAI.reasoning_echo_models = list(
-        config.llm.reasoning_echo_models or []
+    ThinkingChatOpenAI.reasoning_echo_disabled_models = list(
+        config.llm.reasoning_echo_disabled_models or []
     )
     logger.info(
-        f"[Config] reasoning_echo_models={ThinkingChatOpenAI.reasoning_echo_models} "
-        f"(echo reasoning_content back in multi-turn for matching model names)"
+        f"[Config] reasoning_echo_disabled_models={ThinkingChatOpenAI.reasoning_echo_disabled_models} "
+        f"(models matching these patterns will NOT echo reasoning_content; all others echo)"
     )
 
     # Log version for debugging

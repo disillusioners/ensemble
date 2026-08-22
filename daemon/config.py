@@ -126,39 +126,40 @@ class LLMConfig(BaseSettings):
     temperature: float = Field(default=0.7)
     request_timeout: int = Field(default=610, description="Request timeout in seconds (default: 11 minutes)")
 
-    # Models for which reasoning_content from a previous turn must be echoed
-    # back in subsequent assistant messages. Substring match is performed
-    # against the model name (case-insensitive). Default: DeepSeek (required
-    # by their thinking-mode API for tool-calling turns).
-    # Override via OPENAI_REASONING_ECHO_MODELS env var, e.g.
-    #   OPENAI_REASONING_ECHO_MODELS="deepseek,glm,zai"
+    # Models for which reasoning_content echo is DISABLED: reasoning_content
+    # from a previous turn is echoed back in subsequent assistant messages
+    # for every model EXCEPT those whose name case-insensitively
+    # substring-matches an entry here. Default: empty (all models echo).
+    # Override via OPENAI_REASONING_ECHO_DISABLED_MODELS env var, e.g.
+    #   OPENAI_REASONING_ECHO_DISABLED_MODELS="gpt-4o,claude"
     # The NoDecode annotation prevents pydantic-settings from auto-JSON-decoding
     # the env value, so our field_validator can handle comma-separated input.
-    reasoning_echo_models: Annotated[list[str], NoDecode] = Field(
-        default_factory=lambda: ["deepseek"],
+    reasoning_echo_disabled_models: Annotated[list[str], NoDecode] = Field(
+        default_factory=list,
         description=(
             "Model name patterns (case-insensitive substring match) for which "
-            "reasoning_content must be echoed back in multi-turn conversations. "
-            "Default: ['deepseek']."
+            "reasoning_content echo is disabled. All other models echo "
+            "reasoning_content back in multi-turn conversations. "
+            "Default: [] (all models echo)."
         ),
     )
 
-    @field_validator("reasoning_echo_models", mode="before")
+    @field_validator("reasoning_echo_disabled_models", mode="before")
     @classmethod
-    def _parse_reasoning_echo_models(cls, value: Any) -> Any:
+    def _parse_reasoning_echo_disabled_models(cls, value: Any) -> Any:
         """Accept comma-separated strings (and JSON arrays) from env / YAML.
 
         Delegates to ``_parse_csv_or_json_list`` for the shared parsing logic.
         The ``NoDecode`` annotation prevents pydantic-settings from
         auto-parsing env values, so we handle both forms here:
-          - ``"deepseek,glm,zai"`` → ``["deepseek", "glm", "zai"]``
-          - ``'["deepseek","glm","zai"]'`` → ``["deepseek", "glm", "zai"]``
-          - ``["deepseek", "glm", "zai"]`` → unchanged (passthrough)
+          - ``"gpt-4o,claude"`` → ``["gpt-4o", "claude"]``
+          - ``'["gpt-4o","claude"]'`` → ``["gpt-4o", "claude"]``
+          - ``["gpt-4o", "claude"]`` → unchanged (passthrough)
           - ``""`` or whitespace → ``[]``
 
         Env format example::
 
-            OPENAI_REASONING_ECHO_MODELS="deepseek,glm,zai"
+            OPENAI_REASONING_ECHO_DISABLED_MODELS="gpt-4o,claude"
         """
         return _parse_csv_or_json_list(value)
 

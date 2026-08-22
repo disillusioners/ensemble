@@ -16,15 +16,14 @@ from daemon.graph import ThinkingChatOpenAI
 def enable_test_model_echo():
     """These tests use model="test-model" which should trigger echo.
 
-    The default echo list is ["deepseek"], so we add "test-model" so the
-    pre-existing test assertions (which expect echo to happen) still hold.
+    Echo uses denylist semantics: every model echoes unless its name matches
+    ``reasoning_echo_disabled_models``. Resetting the disabled list to empty
+    guarantees "test-model" echoes regardless of state leaked by other tests.
     """
-    original = list(ThinkingChatOpenAI.reasoning_echo_models)
-    ThinkingChatOpenAI.reasoning_echo_models = list(
-        set(original) | {"test-model"}
-    )
+    original = list(ThinkingChatOpenAI.reasoning_echo_disabled_models)
+    ThinkingChatOpenAI.reasoning_echo_disabled_models = []
     yield
-    ThinkingChatOpenAI.reasoning_echo_models = original
+    ThinkingChatOpenAI.reasoning_echo_disabled_models = original
 
 
 class TestGetRequestPayloadPreservesReasoningContent:

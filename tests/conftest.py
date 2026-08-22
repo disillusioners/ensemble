@@ -620,7 +620,7 @@ _TRACKED_ENV_EXACT = frozenset({
     "POSTGRES_PASSWORD",
     "POSTGRES_PORT",
     "DATABASE_URL_POSTGRES",
-    "OPENAI_REASONING_ECHO_MODELS",
+    "OPENAI_REASONING_ECHO_DISABLED_MODELS",
     "OPENAI_MODEL_KEYWORDS",
     "ENSEMBLE_DATA_DIR",
     "TEMP",
@@ -685,8 +685,8 @@ def clean_env():
 
 
 @pytest.fixture(autouse=True)
-def reset_reasoning_echo_models():
-    """Reset ThinkingChatOpenAI.reasoning_echo_models after each test.
+def reset_reasoning_echo_disabled_models():
+    """Reset ThinkingChatOpenAI.reasoning_echo_disabled_models after each test.
 
     The daemon's __main__/lifespan sets this from config; tests that import
     ``daemon.graph`` shouldn't leak state between modules. We snapshot and
@@ -698,9 +698,9 @@ def reset_reasoning_echo_models():
         yield
         return
 
-    original = list(getattr(ThinkingChatOpenAI, "reasoning_echo_models", ["deepseek"]))
+    original = list(getattr(ThinkingChatOpenAI, "reasoning_echo_disabled_models", []))
     yield
-    ThinkingChatOpenAI.reasoning_echo_models = original
+    ThinkingChatOpenAI.reasoning_echo_disabled_models = original
 
 
 @pytest.fixture(autouse=True)

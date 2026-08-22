@@ -377,18 +377,20 @@ class TestCreateChatResultReasoningExtraction:
 
 
 class TestReasoningEchoGating:
-    """Tests for the reasoning_echo_models model-name gating.
+    """Tests for the reasoning_echo_disabled_models model-name gating.
 
-    ``_get_request_payload`` must only inject ``reasoning_content`` for models
-    whose name matches one of the patterns in ``reasoning_echo_models``
-    (default: ``["deepseek"]``). For all other models, the payload must match
-    stock ChatOpenAI behavior — i.e. reasoning_content is NOT injected, even
-    when present on AIMessage.additional_kwargs.
+    ``_get_request_payload`` must inject ``reasoning_content`` for every model
+    EXCEPT those whose name case-insensitively substring-matches an entry in
+    ``reasoning_echo_disabled_models`` (default: ``[]`` — all models echo).
+    For disabled models, the payload must match stock ChatOpenAI behavior —
+    i.e. reasoning_content is NOT injected, even when present on
+    AIMessage.additional_kwargs.
 
     Why this matters:
-      - DeepSeek's thinking-mode API requires reasoning_content in the
-        assistant history whenever the prior turn had a tool call.
-      - Raw OpenAI rejects unknown fields with a 400 error.
+      - DeepSeek-style thinking-mode APIs require reasoning_content in the
+        assistant history to preserve chain-of-thought context.
+      - Providers that reject unknown fields (raw OpenAI 400s) can be listed
+        to opt out of echo.
       - Some proxies silently ignore unknown fields, in which case echo is
         harmless but wastes payload bytes.
     """
@@ -397,7 +399,7 @@ class TestReasoningEchoGating:
         return ThinkingChatOpenAI(model=model, api_key="test-key")
 
     def test_default_echo_for_deepseek_model_name(self):
-        """Default config echoes for any model whose name contains 'deepseek'."""
+        """Default config (empty disabled list) echoes for any model, deepseek included."""
         llm = self._make_llm("deepseek-chat")
         messages = [AIMessage(
             content="Answer.",
@@ -406,19 +408,26 @@ class TestReasoningEchoGating:
         payload = llm._get_request_payload(messages)
         assert payload["messages"][0].get("reasoning_content") == "thinking..."
 
-    def test_default_echo_for_deepseek_case_insensitive(self):
-        """Substring match must be case-insensitive ('DeepSeek-R1' → match)."""
-        llm = self._make_llm("DeepSeek-R1")
-        messages = [AIMessage(
-            content="Answer.",
-            additional_kwargs={"reasoning_content": "thinking..."},
-        )]
-        payload = llm._get_request_payload(messages)
-        assert payload["messages"][0].get("reasoning_content") == "thinking..."
+    def test_disabled_match_case_insensitive(self):
+        """Disabled substring match must be case-insensitive ('DeepSeek-R1'
+        blocked by a 'deepseek' entry)."""
+        original = list(ThinkingChatOpenAI.reasoning_echo_disabled_models)
+        try:
+            ThinkingChatOpenAI.reasoning_echo_disabled_models = ["deepseek"]
+            llm = self._make_llm("DeepSeek-R1")
+            messages = [AIMessage(
+                content="Answer.",
+                additional_kwargs={"reasoning_content": "thinking..."},
+            )]
+            payload = llm._get_request_payload(messages)
+            assert "reasoning_content" not in payload["messages"][0]
+            assert payload["messages"][0].get("reasoning_content") is None
+        finally:
+            ThinkingChatOpenAI.reasoning_echo_disabled_models = original
 
-    def test_no_echo_for_openai_model(self):
-        """GPT-4o and other OpenAI models must NOT receive reasoning_content
-        echo (raw OpenAI rejects unknown fields).
+    def test_default_echo_for_openai_model(self):
+        """GPT-4o and other OpenAI models echo by default under denylist
+        semantics (echo happens unless the model is explicitly disabled).
         """
         llm = self._make_llm("gpt-4o")
         messages = [AIMessage(
@@ -426,56 +435,36 @@ class TestReasoningEchoGating:
             additional_kwargs={"reasoning_content": "thinking..."},
         )]
         payload = llm._get_request_payload(messages)
-        assert "reasoning_content" not in payload["messages"][0]
-        assert payload["messages"][0].get("reasoning_content") is None
+        assert payload["messages"][0].get("reasoning_content") == "thinking..."
 
-    def test_no_echo_for_glm_model(self):
-        """GLM models must not have reasoning_content echoed (not a DeepSeek-style API)."""
-        llm = self._make_llm("glm-5")
-        messages = [AIMessage(
-            content="Answer.",
-            additional_kwargs={"reasoning_content": "thinking..."},
-        )]
-        payload = llm._get_request_payload(messages)
-        assert "reasoning_content" not in payload["messages"][0]
-
-    def test_no_echo_for_claude_model(self):
-        """Claude models (via proxy) must not have reasoning_content echoed
-        (Anthropic's API doesn't accept the field; it uses its own thinking
-        blocks).
+    def test_disabled_entry_blocks_glm_and_spares_others(self):
+        """A 'glm' disabled entry blocks GLM models only; other models
+        (deepseek) keep echoing.
         """
-        llm = self._make_llm("claude-3-5-sonnet-20241022")
-        messages = [AIMessage(
-            content="Answer.",
-            additional_kwargs={"reasoning_content": "thinking..."},
-        )]
-        payload = llm._get_request_payload(messages)
-        assert "reasoning_content" not in payload["messages"][0]
-
-    def test_custom_echo_list_adds_pattern(self):
-        """Adding a pattern to reasoning_echo_models enables echo for matching models."""
-        original = list(ThinkingChatOpenAI.reasoning_echo_models)
+        original = list(ThinkingChatOpenAI.reasoning_echo_disabled_models)
         try:
-            ThinkingChatOpenAI.reasoning_echo_models = original + ["glm"]
-            llm = self._make_llm("glm-5")
+            ThinkingChatOpenAI.reasoning_echo_disabled_models = ["glm"]
             messages = [AIMessage(
                 content="Answer.",
                 additional_kwargs={"reasoning_content": "thinking..."},
             )]
-            payload = llm._get_request_payload(messages)
-            assert payload["messages"][0].get("reasoning_content") == "thinking..."
-        finally:
-            ThinkingChatOpenAI.reasoning_echo_models = original
+            glm_payload = self._make_llm("glm-5")._get_request_payload(messages)
+            assert "reasoning_content" not in glm_payload["messages"][0]
 
-    def test_empty_echo_list_disables_all_echo(self):
-        """Setting reasoning_echo_models=[] disables echo for every model,
-        including DeepSeek. Useful for operators who hit API issues and want
-        to opt out.
+            ds_payload = self._make_llm("deepseek-chat")._get_request_payload(messages)
+            assert ds_payload["messages"][0].get("reasoning_content") == "thinking..."
+        finally:
+            ThinkingChatOpenAI.reasoning_echo_disabled_models = original
+
+    def test_disabled_entry_blocks_claude_model(self):
+        """A 'claude' disabled entry opts Claude-via-proxy models out of echo
+        (Anthropic's API doesn't accept the field; it uses its own thinking
+        blocks).
         """
-        original = list(ThinkingChatOpenAI.reasoning_echo_models)
+        original = list(ThinkingChatOpenAI.reasoning_echo_disabled_models)
         try:
-            ThinkingChatOpenAI.reasoning_echo_models = []
-            llm = self._make_llm("deepseek-chat")
+            ThinkingChatOpenAI.reasoning_echo_disabled_models = ["claude"]
+            llm = self._make_llm("claude-3-5-sonnet-20241022")
             messages = [AIMessage(
                 content="Answer.",
                 additional_kwargs={"reasoning_content": "thinking..."},
@@ -483,7 +472,40 @@ class TestReasoningEchoGating:
             payload = llm._get_request_payload(messages)
             assert "reasoning_content" not in payload["messages"][0]
         finally:
-            ThinkingChatOpenAI.reasoning_echo_models = original
+            ThinkingChatOpenAI.reasoning_echo_disabled_models = original
+
+    def test_custom_disabled_list_blocks_pattern(self):
+        """Adding a pattern to reasoning_echo_disabled_models disables echo
+        for matching models."""
+        original = list(ThinkingChatOpenAI.reasoning_echo_disabled_models)
+        try:
+            ThinkingChatOpenAI.reasoning_echo_disabled_models = original + ["glm"]
+            llm = self._make_llm("glm-5")
+            messages = [AIMessage(
+                content="Answer.",
+                additional_kwargs={"reasoning_content": "thinking..."},
+            )]
+            payload = llm._get_request_payload(messages)
+            assert "reasoning_content" not in payload["messages"][0]
+        finally:
+            ThinkingChatOpenAI.reasoning_echo_disabled_models = original
+
+    def test_empty_disabled_list_all_models_echo(self):
+        """Setting reasoning_echo_disabled_models=[] (the default) leaves
+        every model echoing, deepseek and gpt-4o alike.
+        """
+        original = list(ThinkingChatOpenAI.reasoning_echo_disabled_models)
+        try:
+            ThinkingChatOpenAI.reasoning_echo_disabled_models = []
+            messages = [AIMessage(
+                content="Answer.",
+                additional_kwargs={"reasoning_content": "thinking..."},
+            )]
+            for model in ("deepseek-chat", "gpt-4o"):
+                payload = self._make_llm(model)._get_request_payload(messages)
+                assert payload["messages"][0].get("reasoning_content") == "thinking..."
+        finally:
+            ThinkingChatOpenAI.reasoning_echo_disabled_models = original
 
     def test_echo_skips_non_assistant_messages(self):
         """Even when echo is enabled, only assistant messages get
@@ -545,56 +567,68 @@ class TestReasoningEchoGating:
         removed fields). This is a regression guard against accidentally
         mutating the payload in the gating path.
         """
-        llm = self._make_llm("gpt-4o")
-        messages = [
-            HumanMessage(content="hi"),
-            AIMessage(
-                content="hello",
-                additional_kwargs={"reasoning_content": "should not be sent"},
-            ),
-        ]
-        # Patch the superclass _get_request_payload to return a known-good payload
-        from unittest.mock import patch
-        import langchain_openai.chat_models.base as lc_base
+        original = list(ThinkingChatOpenAI.reasoning_echo_disabled_models)
+        try:
+            ThinkingChatOpenAI.reasoning_echo_disabled_models = ["gpt-4o"]
+            llm = self._make_llm("gpt-4o")
+            messages = [
+                HumanMessage(content="hi"),
+                AIMessage(
+                    content="hello",
+                    additional_kwargs={"reasoning_content": "should not be sent"},
+                ),
+            ]
+            # Patch the superclass _get_request_payload to return a known-good payload
+            from unittest.mock import patch
+            import langchain_openai.chat_models.base as lc_base
 
-        # Run the gated path
-        gated_payload = llm._get_request_payload(messages)
+            # Run the gated path
+            gated_payload = llm._get_request_payload(messages)
 
-        # Run the parent's path on the same LLM and same messages
-        parent = ThinkingChatOpenAI.__bases__[0]
-        with patch.object(parent, "_get_request_payload", wraps=parent._get_request_payload) as spy:
-            parent_payload = spy(llm, messages)
-            # gated payload should equal the parent payload (no echo branch entered)
-            assert gated_payload["messages"] == parent_payload["messages"]
-            assert "reasoning_content" not in gated_payload["messages"][1]
+            # Run the parent's path on the same LLM and same messages
+            parent = ThinkingChatOpenAI.__bases__[0]
+            with patch.object(parent, "_get_request_payload", wraps=parent._get_request_payload) as spy:
+                parent_payload = spy(llm, messages)
+                # gated payload should equal the parent payload (no echo branch entered)
+                assert gated_payload["messages"] == parent_payload["messages"]
+                assert "reasoning_content" not in gated_payload["messages"][1]
+        finally:
+            ThinkingChatOpenAI.reasoning_echo_disabled_models = original
 
 
 class TestShouldEchoReasoningMethod:
     """Direct tests for the _should_echo_reasoning() helper."""
 
-    def test_matches_deepseek_substring(self):
+    def test_default_deepseek_echoes(self):
         llm = ThinkingChatOpenAI(model="deepseek-chat", api_key="test-key")
         assert llm._should_echo_reasoning() is True
 
-    def test_matches_deepseek_capitalized(self):
-        llm = ThinkingChatOpenAI(model="DeepSeek-V3", api_key="test-key")
-        assert llm._should_echo_reasoning() is True
+    def test_disabled_capitalized_model_blocked(self):
+        """Disabled-list matching is case-insensitive ('deepseek' blocks
+        'DeepSeek-V3')."""
+        original = list(ThinkingChatOpenAI.reasoning_echo_disabled_models)
+        try:
+            ThinkingChatOpenAI.reasoning_echo_disabled_models = ["deepseek"]
+            llm = ThinkingChatOpenAI(model="DeepSeek-V3", api_key="test-key")
+            assert llm._should_echo_reasoning() is False
+        finally:
+            ThinkingChatOpenAI.reasoning_echo_disabled_models = original
 
-    def test_does_not_match_gpt(self):
+    def test_default_gpt_echoes(self):
         llm = ThinkingChatOpenAI(model="gpt-4o", api_key="test-key")
-        assert llm._should_echo_reasoning() is False
+        assert llm._should_echo_reasoning() is True
 
     def test_empty_model_name_returns_false(self):
         llm = ThinkingChatOpenAI(model="", api_key="test-key")
         assert llm._should_echo_reasoning() is False
 
-    def test_custom_patterns_applied(self):
-        original = list(ThinkingChatOpenAI.reasoning_echo_models)
+    def test_custom_disabled_patterns_applied(self):
+        original = list(ThinkingChatOpenAI.reasoning_echo_disabled_models)
         try:
-            ThinkingChatOpenAI.reasoning_echo_models = ["custom-pattern"]
+            ThinkingChatOpenAI.reasoning_echo_disabled_models = ["custom-pattern"]
             llm_match = ThinkingChatOpenAI(model="custom-pattern-x", api_key="test-key")
             llm_no_match = ThinkingChatOpenAI(model="deepseek-chat", api_key="test-key")
-            assert llm_match._should_echo_reasoning() is True
-            assert llm_no_match._should_echo_reasoning() is False
+            assert llm_match._should_echo_reasoning() is False
+            assert llm_no_match._should_echo_reasoning() is True
         finally:
-            ThinkingChatOpenAI.reasoning_echo_models = original
+            ThinkingChatOpenAI.reasoning_echo_disabled_models = original
