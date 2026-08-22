@@ -76,8 +76,8 @@ else
 fi
 
 # ── current symlink ─────────────────────────────────────────────────────────
-if [ -L "$REL_DIR/current" ]; then
-    cur_target="$(readlink "$REL_DIR/current")"
+if [ -L "$INSTALL_DIR/current" ]; then
+    cur_target="$(readlink "$INSTALL_DIR/current")"
     _log "current -> $cur_target"
     if [ ! -d "$REL_DIR/${cur_target##*/}" ]; then
         _warn "current symlink DANGLING (target release missing — layout divergence, mutations frozen per D-FA5.3)"
@@ -96,7 +96,7 @@ fi
 
 # ── running version smoke (informational in plain mode) ────────────────────
 cur_name=""
-[ -L "$REL_DIR/current" ] && cur_name="$(readlink "$REL_DIR/current")" && cur_name="${cur_name##*/}"
+[ -L "$INSTALL_DIR/current" ] && cur_name="$(readlink "$INSTALL_DIR/current")" && cur_name="${cur_name##*/}"
 LIVEZ="$(_probe_once "/livez" "$PORT")"
 if [ -n "$LIVEZ" ]; then
     running_ver="$(_json_field "$LIVEZ" version)"
@@ -118,7 +118,7 @@ fi
 if [ "$VERIFY" = "1" ]; then
     _log "verify: integrity check of the currently-pointed release (D-FA4.4)"
     rc=0
-    if [ -z "$cur_name" ] || [ ! -L "$REL_DIR/current" ]; then
+    if [ -z "$cur_name" ] || [ ! -L "$INSTALL_DIR/current" ]; then
         _warn "verify: no current symlink to verify against"
         rc=1
     elif verify_current_release; then

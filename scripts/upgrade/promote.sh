@@ -108,12 +108,12 @@ adopt_stale_txn || exit 78
 promote_entry_check "$VERSION" || exit 78
 
 # 1e. integrity (D-FA4.4): CURRENT (drift detection) + TARGET + manifest
-# fields + no-.env invariant
+# fields + no-.env invariant. Same-version re-promote verifies once.
 CUR_JSON="$(journal_read)"
 CUR="$(_json_field "$CUR_JSON" current)"
 [ "$CUR" = "null" ] && CUR=""
-if [ -n "$CUR" ]; then
-    if [ ! -L "$REL/current" ]; then
+if [ -n "$CUR" ] && [ "$CUR" != "$VERSION" ]; then
+    if [ ! -L "$INSTALL_DIR/current" ]; then
         _warn "journal current='$CUR' but the current SYMLINK is missing (layout divergence — D-FA5.3 freezes mutations)"
         journal_history_append halt "promote refused: layout divergence (journal current $CUR, no symlink)"
         exit 78

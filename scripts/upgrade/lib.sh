@@ -32,7 +32,7 @@
 #     are explicit requirements.
 #
 # NO NETWORK FETCH anywhere in this pipeline (ADR-009 D3): builds come from
-# the LOCAL checkout; no git pull/fetch/clone is ever issued.
+# the LOCAL checkout; no VCS pull/fetch/clone is ever issued.
 #
 # Bash 3.2 / BSD tools only (macOS). No flock(1).
 
@@ -517,6 +517,23 @@ journal_quarantine() {
     journal_update "quarantined" "$new"
 }
 
+# journal_quarantine_clear <ver> — remove from quarantined[]. Called by
+# stage.sh when a version is RE-STAGED: the operator explicitly rebuilt the
+# artifact, so the prior quarantine verdict no longer describes it.
+journal_quarantine_clear() {
+    local ver="$1" json q new
+    json="$(journal_read)" || return 1
+    q="$(_json_sub "$json" "quarantined")"
+    case "$q" in
+        *"\"$ver\""*) ;;
+        *) return 0 ;;
+    esac
+    # rebuild the list without the entry
+    new="$(printf '%s' "$q" | tr -d '[]' | tr ',' '\n' | sed 's/^ *"//;s/" *$//' | grep -v "^$ver\$" | sed 's/^/"/;s/$/"/' | paste -sd, - | sed 's/^/[/;s/$/]/')"
+    [ "$new" = "[]" ] || [ "$new" = "[ ]" ] && new="[]"
+    journal_update "quarantined" "$new"
+}
+
 # journal_is_quarantined <ver>.
 journal_is_quarantined() {
     local json
@@ -704,7 +721,27 @@ _tree_manifest() {
 
 # _tree_hash <dir> — hash over the sorted listing (the tree's identity).
 _tree_hash() {
-    _tree_manifest "$1" "" | awk '{print $1"  "$2}' | shasum -a 256 | awk '{print $1}'
+    _tree_manifest "$1" "" | shasum -a 256 | awk '{print $1}'
+}
+
+# _tree_hash_of_lines <manifest-lines> — aggregate hash of ALREADY-computed
+# _tree_manifest output (avoids a second tree walk).
+_tree_hash_of_lines() {
+    printf '%s\n' "$1" | shasum -a 256 | awk '{print $1}'
+}
+
+# _manifest_map_lines <manifest-json> <tree> — the "<tree>_manifest" flat
+# {path:sha,…} map as "path sha" lines. The map is FLAT by construction
+# (stage.sh writes it: no nested braces, no commas inside paths), so a
+# line-based sed/tr conversion replaces the generic char-walking JSON
+# parser — the latter is O(n²) in bash and costs ~30s on the real agents
+# tree. Paths containing commas/quotes would break this (none exist in the
+# repo; a false mismatch fails CLOSED — flagged for operator inspection).
+_manifest_map_lines() {
+    printf '%s' "$1" | sed -n "s/.*\"$2_manifest\": *{//p" | sed 's/}[^}]*$//' \
+        | tr ',' '\n' \
+        | sed -e 's/^ *"//' -e 's/" *: *"*/ /' -e 's/" *$//' \
+        | sort
 }
 
 # _no_env_in_release <release_dir> — ADR-014/m6 invariant: NO .env of any
@@ -768,40 +805,36 @@ integrity_verify() {
             rc=1
         fi
     fi
-    # agents/frontend trees — aggregate hash first, then per-file pinpoint
-    # against the recorded map (names the tampered file)
-    local sub want_hash got_hash
+    # agents/frontend trees — ONE walk per tree: actual manifest lines feed
+    # both the aggregate hash AND the per-file pinpoint (diff against the
+    # recorded map; names the tampered/missing/extra files). No per-file
+    # forks beyond the single walk.
+    local sub want_hash got_hash got_lines rec_lines actual_ps key wantf dpath dline
     for tree in agents frontend; do
-        sub="$(_json_sub "$json" "${tree}_manifest")"
+        got_lines="$(_tree_manifest "$rd/$tree" "")"
         want_hash="$(_json_field "$json" "${tree}_tree_sha256")"
-        got_hash="$(_tree_hash "$rd/$tree")"
+        got_hash="$(_tree_hash_of_lines "$got_lines")"
         if [ -z "$want_hash" ] || [ "$want_hash" != "$got_hash" ]; then
             _warn "integrity MISMATCH: $ver/$tree tree (want ${want_hash:0:12}… got ${got_hash:0:12}…)"
             rc=1
         fi
-        # per-file pinpoint (runs even after an aggregate mismatch — names
-        # the exact file(s) for diagnosis)
-        if [ -n "$sub" ]; then
-            local rest key wantf
-            rest="$sub"
-            while [ -n "$rest" ]; do
-                rest="${rest#\{}"
-                key="${rest%%\":*}"
-                key="${key#\"}"
-                [ -n "$key" ] || break
-                wantf="$(_json_field "$rest" "$key")"
-                got="$(_sha256 "$rd/$tree/$key")"
-                if [ -z "$got" ] || [ "$wantf" != "$got" ]; then
-                    _warn "integrity MISMATCH: $ver/$tree/$key"
-                    rc=1
-                fi
-                # advance past this pair
-                case "$rest" in
-                    *", "*) rest="${rest#*", "}" ;;
-                    *) break ;;
-                esac
-            done
-        fi
+        # per-file pinpoint: recorded map (flat — sed/tr conversion, no
+        # per-char JSON walk) vs the actual walk ("sha  path" → "path sha");
+        # diff pinpoints every delta (tampered, missing, unrecorded)
+        actual_ps="$(printf '%s\n' "$got_lines" | awk -F '  ' '{print $2" "$1}')"
+        while IFS= read -r dline; do
+            [ -n "$dline" ] || continue
+            case "$dline" in
+                "< "*) dpath="${dline#< }"; dpath="${dpath%% *}"
+                       _warn "integrity MISMATCH: $ver/$tree/$dpath (differs from manifest)"
+                       rc=1 ;;
+                "> "*) dpath="${dline#> }"; dpath="${dpath%% *}"
+                       _warn "integrity MISMATCH: $ver/$tree/$dpath (on disk, not in manifest)"
+                       rc=1 ;;
+            esac
+        done <<EOF
+$(_manifest_map_lines "$json" "$tree" | diff - <(printf '%s\n' "$actual_ps" | sort) 2>/dev/null | grep -E '^[<>]' || true)
+EOF
     done
     return "$rc"
 }
@@ -809,7 +842,7 @@ integrity_verify() {
 # verify_current_release — resolve the `current` symlink + integrity-verify
 # the release it points at. Exit 0 clean; 1 mismatch/unresolvable.
 verify_current_release() {
-    local cur_link="$INSTALL_DIR/releases/current" target
+    local cur_link="$INSTALL_DIR/current" target
     if [ ! -L "$cur_link" ]; then
         _warn "current symlink missing at $cur_link (no staged release promoted yet, or layout divergence)"
         return 1
@@ -863,7 +896,8 @@ stop_via_stop_script() {
 # SINGLE-TERM) — D-FA4.1 amendment: the launcher is part of the release
 # surface; carrying it in-payload makes launcher/binary skew self-healing.
 launcher_swap() {
-    local ver="$1" src="$INSTALL_DIR/releases/$ver/launcher.sh"
+    local ver="$1"
+    local src="$INSTALL_DIR/releases/$ver/launcher.sh"
     if [ ! -f "$src" ]; then
         _warn "launcher_swap: no staged launcher at $src — keeping existing launcher"
         return 1
@@ -875,12 +909,20 @@ launcher_swap() {
 }
 
 # atomic_flip <ver> — rename(2)-semantics symlink flip: build current.new.$$
-# then mv -f over `current` (the mv is the atomic point).
+# then mv -f over `current` (the mv is the atomic point). The link lives at
+# the INSTALL-DIR ROOT ($INSTALL_DIR/current) — the launcher's shipped
+# resolver looks there FIRST (launcher.sh resolve_binary:
+# $INSTALL_DIR/current/ensemble-prod, verified foundation) — and its target
+# is "releases/<ver>", relative to the install dir.
 atomic_flip() {
-    local ver="$1" rel="$INSTALL_DIR/releases"
-    ln -sfn "releases/$ver" "$rel/current.new.$$" || return 1
-    if ! mv -f "$rel/current.new.$$" "$rel/current"; then
-        rm -f "$rel/current.new.$$"
+    local ver="$1"
+    ln -sfn "releases/$ver" "$INSTALL_DIR/current.new.$$" || return 1
+    # mv -h: swap the SYMLINK ITSELF (BSD). Plain mv would follow the
+    # existing current→releases/<old> link and move the new link INTO the
+    # old release dir, silently leaving `current` pointing at the OLD
+    # release — verified on macOS mv(1).
+    if ! mv -h -f "$INSTALL_DIR/current.new.$$" "$INSTALL_DIR/current"; then
+        rm -f "$INSTALL_DIR/current.new.$$"
         return 1
     fi
     _log "current -> releases/$ver (atomic flip)"
@@ -959,6 +1001,7 @@ retention_evict() {
     for d in "$rel"/*/; do
         [ -d "$d" ] || continue
         name="${d%/}"; name="${name##*/}"
+        [ "$name" = "current" ] && continue   # the flip symlink, not a release
         [ "$name" = "$cur" ] && continue
         [ "$name" = "$prev" ] && continue
         local st

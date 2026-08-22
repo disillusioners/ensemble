@@ -213,8 +213,11 @@ _log "computing manifest checksums (per-file sha256 + tree aggregates)"
 BIN_SHA="$(_sha256 "$STAGE_TMP/ensemble-prod")"
 LAUNCHER_SHA="$(_sha256 "$STAGE_TMP/launcher.sh")"
 CONFIG_SHA="$(_sha256 "$STAGE_TMP/config.yaml")"
-AGENTS_TREE="$(_tree_hash "$STAGE_TMP/agents")"
-FRONTEND_TREE="$(_tree_hash "$STAGE_TMP/frontend")"
+# one walk per tree feeds BOTH the aggregate hash and the per-file map
+AGENTS_LINES="$(_tree_manifest "$STAGE_TMP/agents" "")"
+FRONTEND_LINES="$(_tree_manifest "$STAGE_TMP/frontend" "")"
+AGENTS_TREE="$(_tree_hash_of_lines "$AGENTS_LINES")"
+FRONTEND_TREE="$(_tree_hash_of_lines "$FRONTEND_LINES")"
 
 agents_map=""
 first=1
@@ -223,7 +226,9 @@ while IFS= read -r line; do
     sha="${line%%  *}"; rel="${line#*  }"
     if [ $first = 1 ]; then agents_map="\"$(_json_escape "$rel")\":\"$sha\""; first=0
     else agents_map="$agents_map, \"$(_json_escape "$rel")\":\"$sha\""; fi
-done < <(_tree_manifest "$STAGE_TMP/agents" "")
+done <<EOF
+$AGENTS_LINES
+EOF
 frontend_map=""
 first=1
 while IFS= read -r line; do
@@ -231,7 +236,9 @@ while IFS= read -r line; do
     sha="${line%%  *}"; rel="${line#*  }"
     if [ $first = 1 ]; then frontend_map="\"$(_json_escape "$rel")\":\"$sha\""; first=0
     else frontend_map="$frontend_map, \"$(_json_escape "$rel")\":\"$sha\""; fi
-done < <(_tree_manifest "$STAGE_TMP/frontend" "")
+done <<EOF
+$FRONTEND_LINES
+EOF
 
 # staged_at: STABLE across idempotent re-stages (kept from an existing
 # manifest of the same version) — retention ordering must not wobble.
@@ -278,7 +285,9 @@ fi
 
 # ── Journal init (staged mode begins) ───────────────────────────────────────
 journal_init
-journal_write "$(journal_read)"   # no-op normalization; init above is the writer
+# a re-staged version is a REBUILT artifact — a prior quarantine verdict no
+# longer describes it (the operator explicitly rebuilt + re-verified it)
+journal_quarantine_clear "$VERSION"
 
 # ── ENSEMBLE_SELF_ENV marker → INSTALL_DIR/.env (D-FA2.3; NEVER in release) ─
 ENV_FILE="$INSTALL_DIR/.env"

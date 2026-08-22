@@ -364,16 +364,16 @@ stage-demo:
 # TARGET/INSTALL_DIR/PORT/POSTGRES_DB/VERSION pass through the environment
 # (command-line make variables are exported to the recipe).
 upgrade-stage:
-	bash scripts/upgrade/stage.sh $(TARGET) $(ARGS)
+	@bash scripts/upgrade/stage.sh $(TARGET) $(ARGS)
 
 upgrade-promote:
-	bash scripts/upgrade/promote.sh $(TARGET) $(ARGS)
+	@bash scripts/upgrade/promote.sh $(TARGET) $(ARGS)
 
 upgrade-rollback:
-	bash scripts/upgrade/rollback.sh $(TARGET) $(ARGS)
+	@bash scripts/upgrade/rollback.sh $(TARGET) $(ARGS)
 
 upgrade-status:
-	bash scripts/upgrade/status.sh $(TARGET) $(ARGS)
+	@bash scripts/upgrade/status.sh $(TARGET) $(ARGS)
 
 # Clean build artifacts
 clean:

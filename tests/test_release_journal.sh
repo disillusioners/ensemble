@@ -191,7 +191,7 @@ section "integrity verify"
 # seed staged-mode state: journal + current symlink (first promote equivalent)
 (
     cd "$SBX" || exit 1
-    ln -sfn "releases/$SBX_V1" releases/current
+    ln -sfn "releases/$SBX_V1" current
 )
 (
     export INSTALL_DIR="$SBX"
