@@ -4,6 +4,7 @@ import sys
 import uuid
 import logging
 import asyncio
+import contextlib
 import re
 import time
 import json
@@ -66,8 +67,8 @@ from .repositories.task.models import Task, TaskType, TaskStatus
 from .repositories.event.models import Event, EventKind
 from .repositories.db_connection.models import DbConnectionConfig
 from .repositories.shared_meta_kv.models import SharedMetaKV
-from sqlmodel import Session
-from sqlalchemy import text, select
+from sqlmodel import Session, select
+from sqlalchemy import text, select, update as sa_update
 from .tools import create_instance_tools
 from .sources import SourceRegistry, ResponseDispatcher, SourceCleanup
 from .services.live_event_hub import LiveEventHub
@@ -108,7 +109,7 @@ from .cancellation import (
 from .request_registry import ActiveRequestRegistry
 from .compaction import ContextCompactor
 from .constants import WORKER_POOL_SIZE
-from .write_pause_guard import WritePauseGuard
+from .write_pause_guard import WriteGuardSession, WritePauseGuard
 
 # Worker pool imports (lazy import to avoid circular dependency)
 from typing import TYPE_CHECKING
@@ -369,7 +370,6 @@ class InstanceManager:
         # this guard; pause_writes() blocks new sessions and drains the
         # in-flight ones so the migration can swap engines safely.
         self._write_guard = WritePauseGuard()
-
         # Initialize context compactor
         if self.config.compaction.enabled:
             # ``base_url_backup`` reaches the HA facade through
@@ -1228,6 +1228,237 @@ class InstanceManager:
 
         # Initialize MCP warm-up pool (non-blocking background warmup)
         self._init_warmup_pool()
+
+    def _has_non_terminal_injection_for(self, report_message_id: str) -> bool:
+        """Return ``True`` if a non-terminal ``report_injections`` row exists for ``report_message_id``.
+
+        Phase 2 (pause-report-recovery task 2.3) helper for the FM-1
+        type-aware guard. Looks up the
+        ``ReportInjection.report_message_id`` column and returns
+        ``True`` when the row's state is PENDING or DEFERRED (both
+        non-terminal — the obligation is still owed).
+
+        Handles the ``report_message_id IS NULL`` shape (C4) by
+        returning ``False`` — a NULL-keyed row is a Site-1 marker
+        shape, and the FM-1 guard's exemption predicate explicitly
+        covers ONLY rows WITH an artifact. NULL-keyed rows are
+        reconciled by the recovery sweep / router (task 2.1+2.2)
+        before the FM-1 loop sees them.
+
+        Lookup-error default (D1, 2026-08-20): a repository
+        exception returns ``True`` (exempt/preserve) — a transient
+        DB error must not let FM-1 kill a PENDING PROCESS_REPORT
+        task. See the inline D1 comment for the rationale.
+
+        Args:
+            report_message_id: The ``message_id`` of the candidate
+                ``completion_report`` ``MessageQueue`` row.
+
+        Returns:
+            ``True`` when a PENDING or DEFERRED
+            ``report_injections`` row references this
+            ``report_message_id``, OR when the lookup itself failed
+            (D1 safe default — preserve the task); ``False``
+            otherwise (including the NULL-keyed shape and the
+            terminal INJECTED / TASK_DELIVERED shape).
+        """
+        from .repositories.report_injection.models import (
+            ReportInjectionState,
+        )
+
+        if report_message_id is None:
+            return False
+        try:
+            row = self._report_injection_repo.find_row_by_report_message_id(
+                report_message_id
+            )
+        except Exception as exc:  # noqa: BLE001 — FM-1 exemption predicate
+            # D1 (2026-08-20, leader-decided): lookup error → EXEMPT
+            # (return True). Passive+recoverable beats destructive+
+            # recoverable — the pre-D1 ``return False`` let the FM-1
+            # loop KILL the PENDING PROCESS_REPORT task on a
+            # transient DB error (recreating the incident variant
+            # (c) freeze). A false exemption merely leaves the task
+            # to the worker pool / claim lane, which is exactly
+            # where a healthy row would be delivered anyway.
+            logger.warning(
+                f"_has_non_terminal_injection_for: lookup failed "
+                f"message_id={report_message_id[:8]}...: "
+                f"{type(exc).__name__}: {exc} — defaulting to "
+                f"EXEMPT (True) so FM-1 preserves the task"
+            )
+            return True
+        if row is None:
+            return False
+        return row.state in (
+            ReportInjectionState.PENDING.value,
+            ReportInjectionState.DEFERRED.value,
+        )
+
+    async def _is_parent_terminal(self, parent_id: str) -> bool | None:
+        """Return ``True`` if parent is NON-terminal, ``False`` if terminal, ``None`` if missing.
+
+        Phase 2 (pause-report-recovery task 2.1) helper for the
+        router's deferred-recovery step. Used to decide whether the
+        terminal-parent revival path is needed before re-entering
+        child completion.
+
+        This is an ``async def`` because the router awaits the
+        result (``await self._is_parent_terminal(...)`` at
+        ``resume_processing_job``). The repository lookup is a
+        blocking sync call, so it runs in a worker thread via
+        ``asyncio.to_thread`` — calling ``self._instance_repository.get``
+        directly on the loop would block the event loop.
+
+        Args:
+            parent_id: The parent instance ID to inspect.
+
+        Returns:
+            ``True`` — parent is RUNNING / IDLE / WAITING / etc.
+            (the natural completion path will drain the report).
+            ``False`` — parent is COMPLETED / TERMINATED / ERROR /
+            FAILED (revival required before re-entry).
+            ``None`` — parent row missing (caller skips the
+            recovery).
+        """
+        try:
+            inst = await asyncio.to_thread(
+                self._instance_repository.get, parent_id
+            )
+        except Exception as exc:  # noqa: BLE001 — lookup-fail → None (caller skips)
+            logger.warning(
+                f"_is_parent_terminal: lookup failed "
+                f"parent={parent_id[:8]}...: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            return None
+        if inst is None:
+            return None
+        return inst.status not in (
+            InstanceStatus.COMPLETED.value,
+            InstanceStatus.TERMINATED.value,
+            InstanceStatus.ERROR.value,
+            InstanceStatus.FAILED.value,
+        )
+
+    def _get_event_loop(self) -> asyncio.AbstractEventLoop:
+        """Return the manager's asyncio loop (sync accessor).
+
+        Phase 2 helper for the periodic recovery sweep (which runs
+        on a plain ``threading.Thread`` and needs the canonical
+        loop to schedule async coroutines via
+        ``asyncio.run_coroutine_threadsafe``).
+
+        F5 (2026-08-20): loop-fallback hardening — ported from
+        the recovery service's hardened copy
+        (``daemon/services/report_delivery_recovery.py`` Y3, also
+        same day). Both copies now share the same contract: when
+        the manager's stored loop is unset / closed AND
+        ``asyncio.get_event_loop()`` raises ``RuntimeError``,
+        this helper logs a WARNING and raises ``RuntimeError``
+        (NOT ``asyncio.new_event_loop()``).
+
+        Why drop the ``new_event_loop`` fallback: a brand-new
+        loop is NOT the manager's canonical loop. Scheduling
+        onto it from a worker thread while blocking on
+        ``.result(timeout=8.0)`` is a confusing failure mode —
+        a fresh, never-running loop would just hang the worker
+        on ``.result()`` until the 8s budget expires, masking
+        the real problem (the daemon loop is closed / absent).
+        A caller that genuinely needs a loop MUST wire one —
+        silent fallback hides the misconfiguration.
+
+        Returns:
+            The manager's loop (``self._loop``, set during
+            ``initialize()``) when it is non-None and not
+            closed. Otherwise the live ``asyncio.get_event_loop()``
+            if one is set on this thread. Otherwise raises
+            ``RuntimeError`` (caller is expected to absorb the
+            error in its per-row ``except Exception`` and retry
+            next sweep cycle).
+
+        Caller audit (F5, 2026-08-20) — every production caller
+        already wraps ``.result(timeout=8.0)`` in
+        ``except Exception``, so the new ``RuntimeError`` is
+        absorbed naturally and the row is bumped to
+        ``out.errors``:
+
+        * ``daemon/manager.py`` ``_reenter_completion_via_loop``
+          (~line 6434) — ``try / except Exception`` absorbs
+          the new RuntimeError.
+        * ``daemon/manager.py`` ``_fetch_subshape_a_content_sync``
+          (~line 6696) — ``try / except Exception`` absorbs
+          the new RuntimeError.
+
+        Caller test bindings:
+
+        * ``tests/unit/test_resume_router_deferred_recovery.py``
+          line 1230 sets ``holder._loop`` to
+          ``asyncio.get_running_loop()`` (the test's live loop),
+          so the ``loop is not None and not loop.is_closed()``
+          branch returns immediately. No regression.
+        * ``tests/unit/test_resume_router_deferred_recovery.py``
+          line 491 sets ``manager._loop = None`` but does NOT
+          actually invoke ``_get_event_loop`` (the test path
+          uses ``manager._session_scope()`` directly), so the
+          hardening branch is not exercised.
+        * ``tests/unit/test_report_delivery_recovery_service.py``
+          exercises the recovery service's OWN hardened copy
+          (``service._get_event_loop``), not the manager's —
+          independent path, no regression.
+        """
+        loop = getattr(self, "_loop", None)
+        if loop is not None:
+            if not loop.is_closed():
+                return loop
+            # Manager's stored loop is closed (shutdown /
+            # restart-replay path). Fall through to
+            # ``asyncio.get_event_loop()`` and accept that
+            # the closed-loop branch is now observable — if
+            # the live-resolution path also fails, the
+            # terminal branch raises.
+            logger.warning(
+                "InstanceManager._get_event_loop: manager._loop "
+                "is closed — falling back to "
+                "asyncio.get_event_loop()"
+            )
+        try:
+            return asyncio.get_event_loop()
+        except RuntimeError:
+            # Terminal branch: no live loop available. The
+            # caller MUST retry on the next cycle — DO NOT
+            # create a fresh loop (Y3: a fresh loop masks the
+            # closed-loop state behind a confusing dead-lock
+            # on ``.result()``). Log a WARNING for operator
+            # visibility and raise ``RuntimeError``.
+            logger.warning(
+                "InstanceManager._get_event_loop: no live event "
+                "loop available (manager._loop closed or unset, "
+                "no running loop in this thread); the caller "
+                "will retry on the next sweep cycle"
+            )
+            raise RuntimeError(
+                "report-delivery recovery: no live event loop "
+                "available (manager._loop closed and no running "
+                "loop in caller thread)"
+            ) from None
+
+    @contextlib.contextmanager
+    def _session_scope(self):
+        """Yield a ``WriteGuardSession`` over the manager's engine.
+
+        Phase 2 helper (pause-report-recovery). Wraps a SQLModel
+        ``Session`` with the write-pause guard so the Phase 2
+        reconciliation / revival paths share the same gate the rest
+        of the daemon uses. Closes the session on exit.
+        """
+        session = Session(self._engine)
+        try:
+            with WriteGuardSession(session, self._write_guard) as guarded:
+                yield guarded
+        finally:
+            session.close()
+
 
     def get_blueprint_write_service(
         self,
@@ -3892,6 +4123,21 @@ class InstanceManager:
           ``Column(JSON)`` columns that were retyped to
           ``JSONBType`` at the model level. See the DO block
           comment for the rewrite-cost and invalid-JSON warnings.
+        - report_injections DEFERRED marker schema (pause-report-recovery
+          Phase 1, 2026-08-19): adds ``deferred_reason`` (TEXT),
+          ``recovery_attempted_at`` (TEXT), and ``DROP NOT NULL`` on
+          ``report_message_id``; partial unique index
+          ``uq_report_injections_oblig_triple`` on the obligation
+          triple ``WHERE state IN ('PENDING','DEFERRED')``; partial
+          index ``ix_report_injections_recovery_attempted`` on
+          ``recovery_attempted_at`` ``WHERE state = 'PENDING'``. W3
+          pre-check detects and resolves any pre-existing duplicate
+          non-terminal rows (oldest wins, terminal disposition) before
+          the index build. Index name MUST match the SQLite
+          companion migration at
+          ``daemon/migrations/versions/20260819_000001_report_injections_deferred_marker.sql``.
+          See C1 case-lockstep contract in
+          ``daemon/repositories/report_injection/models.py``.
 
         When a new column needs this treatment: add the IF NOT EXISTS
         ALTER + (optional) CREATE INDEX here. Do NOT add raw
@@ -4029,6 +4275,151 @@ class InstanceManager:
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_job_idempotency "
                 "ON job_queue_items(idempotency_key) "
                 "WHERE idempotency_key IS NOT NULL AND deleted_at IS NULL"
+            ),
+            # ── pause-report-recovery Phase 1 (2026-08-19) ─────────────────────
+            # Adds the DEFERRED marker schema on ``report_injections``:
+            #   * ``deferred_reason TEXT`` — open-ended rationale (one of the
+            #     ``DEFERRED_REASON_*`` constants in ``daemon/constants.py``).
+            #   * ``recovery_attempted_at TEXT`` — ISO-8601 stamp on
+            #     ``DEFERRED → PENDING`` for the Phase 2 recovery sweep.
+            #   * ``report_message_id`` → nullable (C4): NULL = pre-artifact
+            #     Site-1 marker shape; the Phase 2 reconciliation handles
+            #     ``report_message_id IS NULL`` explicitly.
+            #   * Partial unique index on the obligation triple
+            #     ``WHERE state IN ('PENDING','DEFERRED')`` — write-once gate
+            #     for concurrent recovery actors (router / sweep / Site 1).
+            #   * Partial index on ``recovery_attempted_at`` for the recovery
+            #     sweep predicate ``state='PENDING' AND recovery_attempted_at
+            #     IS NOT NULL``.
+            #
+            # C1 CASE-LOCKSTEP CONTRACT: the partial-index predicate literals
+            # ``('PENDING','DEFERRED')`` MUST stay uppercase and verbatim
+            # across: the ``ReportInjectionState`` enum in
+            # ``daemon/repositories/report_injection/models.py``, the
+            # SQLAlchemy ``postgresql_where`` / ``sqlite_where`` expression,
+            # the PG DDL emitted here, and the SQLite companion migration
+            # at ``daemon/migrations/versions/20260819_000001_report_injections_deferred_marker.sql``.
+            #
+            # Index NAME must be byte-identical across both DDL paths
+            # (``uq_report_injections_oblig_triple``). Precedent:
+            # ``idx_job_idempotency`` at job_queue/models.py:292-298.
+            #
+            # W3 PRE-CHECK: before creating the partial unique index, detect
+            # and resolve any pre-existing duplicate non-terminal rows
+            # (the PG build would otherwise fail). Query
+            # ``report_injections WHERE state IN ('PENDING','DEFERRED')``
+            # grouped by the obligation triple with ``HAVING COUNT(*) > 1``;
+            # for each duplicate group, keep the oldest row (MIN
+            # injection_id) and transition the rest to ``TASK_DELIVERED``
+            # with a sentinel ``delivered_at``. The PG build sees only one
+            # non-terminal row per triple.
+            #
+            # W8 ROLLBACK RUNBOOK: reverse order = DROP the partial unique
+            # index FIRST, then DROP the partial recovery index, then DROP
+            # the new columns. Reverting columns with the partial unique
+            # index still present is blocked (PG rejects) or leaves the
+            # index orphaned (SQLite).
+            # ── Columns (idempotent via IF NOT EXISTS) ──
+            "ALTER TABLE report_injections ADD COLUMN IF NOT EXISTS deferred_reason TEXT",
+            "ALTER TABLE report_injections ADD COLUMN IF NOT EXISTS recovery_attempted_at TEXT",
+            # Drop NOT NULL on ``report_message_id`` — idempotent via
+            # ``IS NOT NULL`` guard. Safe to re-run on databases that
+            # already have it nullable.
+            (
+                "DO $$\n"
+                "BEGIN\n"
+                "    IF EXISTS (\n"
+                "        SELECT 1 FROM information_schema.columns\n"
+                "        WHERE table_schema = 'public'\n"
+                "          AND table_name = 'report_injections'\n"
+                "          AND column_name = 'report_message_id'\n"
+                "          AND is_nullable = 'NO'\n"
+                "    ) THEN\n"
+                "        ALTER TABLE report_injections "
+                "ALTER COLUMN report_message_id DROP NOT NULL;\n"
+                "    END IF;\n"
+                "END $$\n"
+            ),
+            # ── W3 PRE-CHECK + RESOLUTION ──
+            # Detect duplicates BEFORE the index build. Log each duplicate
+            # group at WARNING so operators can audit, then transition
+            # duplicates (oldest row wins) to ``TASK_DELIVERED`` with a
+            # sentinel ``delivered_at`` so the PG index build sees a clean
+            # table. The oldest row of each group is preserved (the
+            # delivery obligation survives; only the duplicates are
+            # resolved).
+            (
+                "DO $$\n"
+                "DECLARE\n"
+                "    dup_count INTEGER;\n"
+                "BEGIN\n"
+                "    SELECT COUNT(*) INTO dup_count\n"
+                "      FROM (\n"
+                "        SELECT parent_instance_id, child_instance_id, "
+                "               child_message_id\n"
+                "          FROM report_injections\n"
+                "         WHERE state IN ('PENDING', 'DEFERRED')\n"
+                "         GROUP BY parent_instance_id, child_instance_id, "
+                "                  child_message_id\n"
+                "        HAVING COUNT(*) > 1\n"
+                "      ) dups;\n"
+                "    IF dup_count > 0 THEN\n"
+                "        RAISE WARNING 'pause-report-recovery: % duplicate "
+                "non-terminal obligation triple(s) detected on "
+                "report_injections — resolving (oldest wins)', dup_count;\n"
+                "        UPDATE report_injections ri\n"
+                "           SET state = 'TASK_DELIVERED',\n"
+                "               delivered_at = COALESCE(ri.delivered_at, "
+                "                                       ri.created_at)\n"
+                "         WHERE ri.state IN ('PENDING', 'DEFERRED')\n"
+                "           AND EXISTS (\n"
+                "               SELECT 1\n"
+                "                 FROM report_injections newer\n"
+                "                WHERE newer.parent_instance_id = "
+                "                      ri.parent_instance_id\n"
+                "                  AND newer.child_instance_id = "
+                "                      ri.child_instance_id\n"
+                "                  AND newer.child_message_id = "
+                "                      ri.child_message_id\n"
+                "                  AND newer.state IN ('PENDING', "
+                "                                       'DEFERRED')\n"
+                "                  AND newer.injection_id < "
+                "                      ri.injection_id\n"
+                "           );\n"
+                "    END IF;\n"
+                "END $$\n"
+            ),
+            # ── Partial unique index on the obligation triple ──
+            # The exact DDL MUST match the SQLAlchemy ``postgresql_where``
+            # expression and the SQLite companion migration. Predicate
+            # case is the C1 case-lockstep contract — UPPERCASE only.
+            (
+                "CREATE UNIQUE INDEX IF NOT EXISTS "
+                "uq_report_injections_oblig_triple "
+                "ON report_injections(parent_instance_id, "
+                "                     child_instance_id, "
+                "                     child_message_id) "
+                "WHERE state IN ('PENDING','DEFERRED')"
+            ),
+            # ── Partial index for the recovery-sweep predicate ──
+            (
+                "CREATE INDEX IF NOT EXISTS "
+                "ix_report_injections_recovery_attempted "
+                "ON report_injections(recovery_attempted_at) "
+                "WHERE state = 'PENDING'"
+            ),
+            # ── Phase 2 (C3 no-row backstop): non-unique child index ──
+            # The LEFT JOIN in
+            # ``find_completed_children_without_delivery`` keys on
+            # ``(child_instance_id, child_message_id)`` WITHOUT
+            # ``parent_instance_id`` in the leading position. The
+            # unique triple index cannot serve this lookup cheaply
+            # — a non-unique child-pair index keeps the sweep cheap.
+            # Name MUST match the SQLAlchemy model definition.
+            (
+                "CREATE INDEX IF NOT EXISTS "
+                "ix_report_injections_child_msg "
+                "ON report_injections(child_instance_id, child_message_id)"
             ),
             # ── JSON → JSONB column migration (Phase 1, 2026-06-20) ─────────
             # NOTE: create_all() runs FIRST (creating jsonb columns on fresh
@@ -5090,6 +5481,167 @@ class InstanceManager:
         # FIX: C2 — Start periodic background recovery thread
         stale_recovery.start()
 
+        # Phase 2 (pause-report-recovery, task 2.5) — wire the
+        # periodic ``ReportDeliveryRecoveryService`` AFTER the
+        # StaleTaskRecovery wiring (binding order S-c: the
+        # ``_ensure_postgres_columns`` + StaleTaskRecovery pair must
+        # complete first so the ``report_injections`` table has its
+        # Phase 1 columns + indexes, AND so the StaleTaskRecovery
+        # thread is already running when the sweep's busy-check
+        # consults ``task_repo.has_instance_busy``).
+        from .services.report_delivery_recovery import (
+            ReportDeliveryRecoveryService,
+        )
+        try:
+            self._report_recovery = ReportDeliveryRecoveryService(
+                task_repo=task_repo,
+                report_injection_repo=self._report_injection_repo,
+                queue_repo=self._queue_repository,
+                instance_repo=self._instance_repository,
+                manager_ref=self,
+                interval_seconds=(
+                    svc.report_delivery_recovery_interval_seconds
+                ),
+                age_bound_minutes=(
+                    svc.report_delivery_recovery_age_bound_minutes
+                ),
+                batch_cap=svc.report_delivery_recovery_batch_cap,
+                recovery_retry_minutes=(
+                    svc.report_delivery_recovery_retry_minutes
+                ),
+                enabled=svc.report_delivery_recovery_enabled,
+                lane_deferred=svc.report_delivery_recovery_lane_deferred,
+                lane_no_row_backstop=(
+                    svc.report_delivery_recovery_lane_no_row_backstop
+                ),
+                lane_pending_age=(
+                    svc.report_delivery_recovery_lane_pending_age
+                ),
+                lane_recovery_retry=(
+                    svc.report_delivery_recovery_lane_recovery_retry
+                ),
+                lane_orphan=svc.report_delivery_recovery_lane_orphan,
+            )
+            # Fire-and-forget boot sweep (binding order S-c:
+            # ``_ensure_postgres_columns`` is in ``initialize()``,
+            # BEFORE this method runs).
+            #
+            # DEEP-REVIEW FIX (2026-08-20, C2): the boot sweep MUST
+            # NOT execute lane bodies on the loop thread. The chain
+            # ``api.py:241 lifespan → setup_worker_pool (here) →
+            # recover_on_startup → _run_all_lanes_sync`` runs ON the
+            # event-loop thread, and ``_handle_recover_deferred_report``
+            # (manager.py:6343-6351) calls
+            # ``run_coroutine_threadsafe(...).result(timeout=30.0)``
+            # per row → self-blocks the loop. Worst case ~30s × 100
+            # rows ≈ 50 min blocked startup, HTTP down. This was the
+            # THIRD occurrence of the loop-thread-blocking bug class
+            # (bcc02b92, 5fe135e3 fixed router/reconcile paths; boot
+            # was missed).
+            #
+            # The fix: schedule the sweep via
+            # ``asyncio.to_thread`` + ``loop.create_task``, which
+            # moves the lane execution OFF the loop thread. The sweep
+            # body is unchanged — it still uses
+            # ``run_coroutine_threadsafe(...).result(...)`` to bridge
+            # to the loop, but now those bridges are coming FROM a
+            # worker thread (correct: the worker thread blocks on
+            # ``.result()`` while the loop continues serving HTTP).
+            try:
+                if self._loop is not None and not self._loop.is_closed():
+                    # POST-DEEP-REVIEW (Y1, 2026-08-20): attach a
+                    # done-callback so a sweep-body exception is
+                    # logged instead of being silently dropped into a
+                    # garbage-collected task (which would surface only
+                    # as "Task exception was never retrieved"). Boot
+                    # MUST stay non-blocking — the callback fires
+                    # when the worker-thread sweep finishes, the boot
+                    # caller does not await the task.
+                    def _log_boot_sweep_done(
+                        t: asyncio.Task,
+                        *,
+                        _mgr: "InstanceManager" = self,
+                    ) -> None:
+                        # Teardown guard: ``stop()`` may have nulled
+                        # ``_report_recovery`` before the callback
+                        # fires; ``logger`` itself is module-level and
+                        # always safe. We only suppress the noise —
+                        # the exception is always retrievable.
+                        if t.cancelled():
+                            return
+                        exc = t.exception()
+                        if exc is None:
+                            return
+                        if getattr(_mgr, "_report_recovery", None) is None:
+                            logger.debug(
+                                "ReportDeliveryRecoveryService boot "
+                                "sweep task failed after manager "
+                                f"teardown (suppressed): "
+                                f"{type(exc).__name__}: {exc}"
+                            )
+                            return
+                        logger.warning(
+                            "ReportDeliveryRecoveryService boot sweep "
+                            f"task failed (non-fatal): "
+                            f"{type(exc).__name__}: {exc}"
+                        )
+
+                    # Fire-and-forget: the loop schedules the work
+                    # on a thread-pool worker (asyncio.to_thread).
+                    # The boot call returns immediately; the sweep
+                    # runs concurrently on a worker thread.
+                    boot_sweep_task = self._loop.create_task(
+                        asyncio.to_thread(
+                            self._report_recovery.recover_on_startup
+                        )
+                    )
+                    boot_sweep_task.add_done_callback(_log_boot_sweep_done)
+                else:
+                    # Loop unavailable — fall back to running
+                    # synchronously. F7 (2026-08-20): this
+                    # sync-fallback path exists ONLY for tests /
+                    # contexts that did NOT wire an event loop
+                    # (``manager._loop is None or closed``).
+                    # The production boot path always has a live
+                    # loop (set in ``InstanceManager.initialize()``
+                    # via the application startup sequence) and
+                    # takes the ``loop.create_task(asyncio.to_thread
+                    # (...))`` off-loop dispatch above — the boot
+                    # caller returns immediately and the sweep
+                    # runs concurrently on a worker thread.
+                    #
+                    # Keeping this sync branch is DELIBERATE:
+                    # removing it would break every test that
+                    # builds a service without wiring a loop
+                    # (see ``tests/integration/test_boot_report_
+                    # recovery.py`` and friends). The branch is
+                    # safe because ``recover_on_startup()`` is
+                    # sync + idempotent and the boot caller
+                    # already tolerates a blocking initial sweep
+                    # (the boot sequence itself is the gate, not
+                    # the sweep timing).
+                    logger.info(
+                        "ReportDeliveryRecoveryService boot sweep "
+                        "running synchronously (no loop available)"
+                    )
+                    self._report_recovery.recover_on_startup()
+            except Exception as exc:
+                logger.warning(
+                    f"ReportDeliveryRecoveryService startup sweep "
+                    f"failed (non-fatal): {type(exc).__name__}: {exc}"
+                )
+            # Start the periodic background thread.
+            self._report_recovery.start()
+        except Exception as exc:
+            # Per the MVP growth rule — recovery service cleanup on
+            # shutdown means the wiring failure must be logged but
+            # NEVER crash startup.
+            logger.error(
+                f"ReportDeliveryRecoveryService wiring failed "
+                f"(non-fatal): {type(exc).__name__}: {exc}"
+            )
+            self._report_recovery = None
+
         # Execution Gate: stale-lease recovery is performed by the
         # async lifespan in ``daemon/api.py`` BEFORE this method runs,
         # so the very first ``gate.run`` after startup is guaranteed
@@ -5130,11 +5682,16 @@ class InstanceManager:
             self._worker_pool.stop()
             self._worker_pool = None
             logger.info("Worker pool stopped")
-        
+
         if self._stale_recovery is not None:
             self._stale_recovery.stop()
             self._stale_recovery = None
             logger.info("Stale task recovery stopped")
+
+        if getattr(self, "_report_recovery", None) is not None:
+            self._report_recovery.stop()
+            self._report_recovery = None
+            logger.info("Report delivery recovery stopped")
 
     # ── Lifecycle Service Delegations ─────────────────────────────────────────────
 
@@ -5648,6 +6205,947 @@ class InstanceManager:
         return await self._child_reports_service._process_child_completion_and_notify_parent(
             instance_id, completed_message_id
         )
+
+    # --------------------------------------------------------
+    # Phase 2 (pause-report-recovery) recovery helpers
+    # --------------------------------------------------------
+
+    async def _revive_terminal_instance(self, instance_id: str) -> bool:
+        """Revive a terminal parent instance for the ORPHAN sweep lane.
+
+        Phase 2 task 2.4 Lane 5 (W1): a DEFERRED row whose parent is
+        COMPLETED / ERROR / TERMINATED / FAILED needs the parent in
+        RUNNING state to receive its completion_report. Mirrors the
+        instance_messaging.py:1486-1510 precedent
+        (``InstanceMessagingService._prepare_enqueued_message``
+        auto-transitions terminal parents to RUNNING on
+        ``send_message``).
+
+        Returns:
+            ``True`` on successful revival (parent is now RUNNING);
+            ``False`` on revival failure (the caller treats False as
+            ``orphan_disposition`` — observable, never silent).
+        """
+        if not hasattr(self, "_instance_repository") or self._instance_repository is None:
+            logger.warning(
+                f"_revive_terminal_instance: instance_repository not wired; "
+                f"parent={instance_id[:8]}... revival skipped"
+            )
+            return False
+        try:
+            inst = await asyncio.to_thread(
+                self._instance_repository.get, instance_id
+            )
+        except Exception as exc:
+            logger.warning(
+                f"_revive_terminal_instance: lookup failed "
+                f"parent={instance_id[:8]}...: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            return False
+        if inst is None:
+            logger.warning(
+                f"_revive_terminal_instance: parent={instance_id[:8]}... "
+                f"not found in DB"
+            )
+            return False
+        terminal = (
+            inst.status in (
+                InstanceStatus.COMPLETED.value,
+                InstanceStatus.TERMINATED.value,
+                InstanceStatus.ERROR.value,
+                InstanceStatus.FAILED.value,
+            )
+        )
+        if not terminal:
+            # Already non-terminal (RUNNING / PAUSED / IDLE). The
+            # caller's busy-check will skip the recovery. Treat as
+            # success — no revival needed.
+            return True
+        # Auto-transition terminal → RUNNING. Mirrors the
+        # ``send_message`` revival block at
+        # ``instance_messaging.py:1486-1510`` (the
+        # ``is_terminal_revival`` branch sets
+        # ``instance.status = InstanceStatus.RUNNING.value`` +
+        # bumps ``version`` + ``last_activity_at``).
+        try:
+            async with self._write_guard:
+                with self._session_scope() as session:
+                    inst_row = session.get(Instance, instance_id)
+                    if inst_row is None:
+                        return False
+                    if inst_row.status not in (
+                        InstanceStatus.COMPLETED.value,
+                        InstanceStatus.TERMINATED.value,
+                        InstanceStatus.ERROR.value,
+                        InstanceStatus.FAILED.value,
+                    ):
+                        return True
+                    inst_row.status = InstanceStatus.RUNNING.value
+                    inst_row.last_activity_at = datetime.now(timezone.utc)
+                    inst_row.version = (inst_row.version or 1) + 1
+                    inst_row.updated_at = datetime.now(timezone.utc).isoformat()
+                    session.add(inst_row)
+                    # Explicit commit — ``_session_scope`` closes
+                    # the session on exit and that close() rolls
+                    # back any uncommitted rows. Without this
+                    # every ORPHAN / terminal-parent revival
+                    # silently rolls back and the parent stays
+                    # terminal forever.
+                    session.commit()
+                logger.info(
+                    f"_revive_terminal_instance: revived terminal parent "
+                    f"{instance_id[:8]}... {inst.status} → RUNNING"
+                )
+                return True
+        except Exception as exc:
+            logger.warning(
+                f"_revive_terminal_instance: revival write failed "
+                f"parent={instance_id[:8]}...: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            return False
+
+    async def _reenter_completion_async(
+        self,
+        *,
+        child_instance_id: str,
+        child_message_id: str,
+        source: str,
+    ) -> None:
+        """Re-enter the natural completion path on the running loop.
+
+        Phase 2 (pause-report-recovery) helper for the
+        :meth:`_handle_recover_deferred_report_async` router-side
+        re-entry. The pre-re-entry reconciliation is shared with the
+        sweep path (:meth:`_handle_recover_deferred_report`) via
+        :meth:`_reconcile_deferred_report`; ONLY the re-entry
+        dispatch differs — the router runs on the manager's event
+        loop, so it can ``await`` directly. The sweep runs on a
+        daemon thread and must use
+        ``asyncio.run_coroutine_threadsafe(...).result(...)`` to
+        cross the thread boundary.
+
+        Awaiting directly on the loop is critical — calling
+        ``run_coroutine_threadsafe(...).result(timeout=30)`` from
+        the loop thread blocks the loop that must run the
+        scheduled coroutine, producing a guaranteed 30s timeout
+        (Reviewer finding #2 for diff 4167d6b1..HEAD).
+
+        Args:
+            child_instance_id: The child whose completion report
+                is owed.
+            child_message_id: The child's completed
+                ``message_id`` (the obligation-triple member).
+            source: ``"router"`` for the router-side re-entry;
+                passed through to the structured log so the two
+                paths remain distinguishable in production logs.
+
+        Raises:
+            Whatever ``_process_child_completion_and_notify_parent``
+            raises; the caller (router's per-row except block)
+            catches and bumps ``recovery_count`` only on success.
+        """
+        await self._process_child_completion_and_notify_parent(
+            child_instance_id, child_message_id
+        )
+
+    async def _handle_recover_deferred_report_async(
+        self,
+        *,
+        child_instance_id: str,
+        child_message_id: str,
+        injection_id: str,
+        source: str,
+    ) -> None:
+        """Router-side reconcile + re-entry — runs on the event loop.
+
+        Phase 2 (pause-report-recovery task 2.1 + 2.2) async
+        variant for the ROUTER path. Splits the threading model
+        per call site: the router already runs on the manager's
+        event loop (inside ``resume_processing_job``), so the
+        re-entry can ``await`` directly. The SWEEP path
+        (:meth:`_handle_recover_deferred_report`) keeps the
+        cross-thread bridge via
+        ``asyncio.run_coroutine_threadsafe(...).result(...)``
+        because the sweep runs on a plain ``threading.Thread``.
+
+        The pre-re-entry reconciliation is the SAME shared code
+        path the sweep uses — :meth:`_reconcile_deferred_report_async`
+        (sub-shapes ``(b)`` + ``(c)`` mirror the sync
+        :meth:`_reconcile_deferred_report` 1:1; sub-shape ``(a)``
+        shares the artifact-creation helper
+        :meth:`_create_subshape_a_artifacts` and only differs
+        in the content-fetch seam — see
+        :meth:`_fetch_subshape_a_content_async`).
+        Logic cannot drift between the two entry points.
+
+        Args:
+            child_instance_id: The child whose completion report
+                is owed.
+            child_message_id: The child's completed
+                ``message_id`` (the obligation-triple member).
+            injection_id: The ``ReportInjection.injection_id``
+                this call OWNS (the router/sweep's transition /
+                lane claim already won the race).
+            source: ``"router"`` — for structured logging.
+
+        Raises:
+            Whatever the reconcile / re-entry raises; the router's
+            per-row except block catches and logs.
+        """
+        # Step 1: shared pre-re-entry reconciliation.
+        #
+        # Async variant — the router runs ON the manager's
+        # event loop. Calling the sync
+        # ``_reconcile_deferred_report`` from here would, for
+        # sub-shape (a) (the canonical Site-1
+        # ``report_message_id IS NULL`` shape), invoke
+        # ``run_coroutine_threadsafe(...).result(...)`` on the
+        # loop thread → self-block → 15s hang → per-row except
+        # → Site-1 rows stranded (Reviewer finding #2
+        # follow-up at ``bcc02b92``).
+        try:
+            reconciled = await self._reconcile_deferred_report_async(
+                child_instance_id=child_instance_id,
+                child_message_id=child_message_id,
+                injection_id=injection_id,
+                source=source,
+            )
+        except Exception as exc:
+            logger.warning(
+                f"[{source}] reconcile_deferred_report failed "
+                f"child={child_instance_id[:8]}..., "
+                f"msg={child_message_id[:8]}..., "
+                f"injection_id={injection_id[:8]}...: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            raise
+        if reconciled is None:
+            # Reconciliation decided the row needs no further
+            # work (e.g. parent is busy — skipped). The injection
+            # row stays PENDING; lanes 3/4 will retry.
+            return
+
+        # Step 2: re-enter on the running loop (await directly —
+        # see ``_reenter_completion_async`` docstring).
+        try:
+            await self._reenter_completion_async(
+                child_instance_id=child_instance_id,
+                child_message_id=child_message_id,
+                source=source,
+            )
+        except Exception as exc:  # noqa: BLE001 — per-row fail-safe, re-raised
+            logger.warning(
+                f"[{source}] re-enter completion failed "
+                f"child={child_instance_id[:8]}..., "
+                f"msg={child_message_id[:8]}...: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            raise
+
+    def _handle_recover_deferred_report(
+        self,
+        *,
+        child_instance_id: str,
+        child_message_id: str,
+        injection_id: str,
+        source: str,
+    ) -> None:
+        """Reconcile a single DEFERRED/PENDING row and re-enter completion.
+
+        Phase 2 (tasks 2.1 + 2.2). **Sweep-side entry point.**
+        The router (2.1) calls the async variant
+        :meth:`_handle_recover_deferred_report_async` directly
+        (since it already runs on the event loop). The sweep (2.4)
+        calls this sync method from a ``threading.Thread``; the
+        re-entry schedules the async coroutine on the manager's
+        loop via :func:`asyncio.run_coroutine_threadsafe`.
+
+        The contract is identical for both entry points:
+
+        1. **Reconcile (task 2.2)** — partial-artifact
+           reconciliation keyed on the injection row. The
+           ``report_message_id IS NULL`` shape (marker-first
+           Site 1) triggers a FULL artifact creation (report
+           message + PROCESS_REPORT task + report_injection
+           backfill). The non-NULL shape (the row already has
+           an artifact) is split into two sub-shapes:
+           (b) message exists + task missing → create task only;
+           (c) all exist → delivery only (claim_for_task_delivery
+           on the WorkerPool's normal path).
+           CRITICAL: the injection row is the row the router /
+           sweep transitioned (so we MUST UPDATE it in-place —
+           a fresh INSERT would violate the obligation-triple
+           partial unique index).
+        2. **Re-enter** — drive
+           ``_process_child_completion_and_notify_parent`` on
+           the asyncio event loop. The natural path drains the
+           report (either via the live agent-node drain or via
+           the fallback PROCESS_REPORT task).
+
+        Failures are surfaced via structured logging so the
+        sweep's per-row error count is bumped.
+
+        Args:
+            child_instance_id: The child whose completion report
+                is owed.
+            child_message_id: The child's completed
+                ``message_id`` (the obligation-triple member).
+            injection_id: The ``ReportInjection.injection_id``
+                this call OWNS (the router/sweep's transition /
+                lane claim already won the race).
+            source: ``"router"`` / ``"sweep"`` /
+                ``"sweep_no_row_backstop"`` / ``"sweep_pending_age"``
+                / ``"sweep_recovery_retry"`` — for structured
+                logging.
+        """
+        # Step 1: partial-artifact reconciliation (shared with the
+        # router path via ``_handle_recover_deferred_report_async``).
+        try:
+            reconciled = self._reconcile_deferred_report(
+                child_instance_id=child_instance_id,
+                child_message_id=child_message_id,
+                injection_id=injection_id,
+                source=source,
+            )
+        except Exception as exc:  # noqa: BLE001 — per-row fail-safe, re-raised
+            logger.warning(
+                f"[{source}] reconcile_deferred_report failed "
+                f"child={child_instance_id[:8]}..., "
+                f"msg={child_message_id[:8]}..., "
+                f"injection_id={injection_id[:8]}...: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            raise
+        if reconciled is None:
+            # Reconciliation decided the row needs no further
+            # work (e.g. parent is busy — skipped). The injection
+            # row stays PENDING; lanes 3/4 will retry.
+            return
+
+        # Step 2: re-enter the natural completion path. The
+        # sweep runs on a daemon thread, so we bridge via
+        # ``run_coroutine_threadsafe(...).result(timeout=...)``.
+        # The router path uses ``_handle_recover_deferred_report_async``
+        # instead and awaits directly — calling ``.result()`` from
+        # the loop thread would block the loop that must run the
+        # scheduled coroutine.
+        #
+        # POST-DEEP-REVIEW (W3, 2026-08-20): per-row timeout
+        # aligned with the sweep ``stop()`` thread-join budget.
+        # ``stop()`` uses ``thread.join(timeout=10.0)``; the prior
+        # 30s per-row timeout could orphan the daemon thread on
+        # shutdown (the join would expire mid-.result()).
+        # 8s leaves a 2s headroom for the join to complete cleanly;
+        # a row that cannot complete within 8s is bumped to
+        # ``out.errors`` by the per-row except handler and the
+        # sweep continues to the next row (idempotency handles the
+        # retry next cycle — this is the safer-for-shutdown
+        # choice).
+        try:
+            loop = self._get_event_loop()
+            future = asyncio.run_coroutine_threadsafe(
+                self._reenter_completion_async(
+                    child_instance_id=child_instance_id,
+                    child_message_id=child_message_id,
+                    source=source,
+                ),
+                loop,
+            )
+            future.result(timeout=8.0)
+        except Exception as exc:  # noqa: BLE001 — per-row fail-safe, re-raised
+            logger.warning(
+                f"[{source}] re-enter completion failed "
+                f"child={child_instance_id[:8]}..., "
+                f"msg={child_message_id[:8]}...: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            raise
+
+    def _reconcile_deferred_report(
+        self,
+        *,
+        child_instance_id: str,
+        child_message_id: str,
+        injection_id: str,
+        source: str,
+    ) -> dict | None:
+        """Partial-artifact reconciliation for a recovered marker.
+
+        Phase 2 task 2.2. Keyed on the injection row, three
+        sub-shapes:
+
+        (a) ``report_message_id IS NULL`` (C4 — the marker-first
+            Site-1 shape) → FULL artifact creation. Create the
+            ``completion_report`` ``MessageQueue`` row, create the
+            ``PROCESS_REPORT`` ``Task`` row, and UPDATE the
+            injection row's ``report_message_id`` + ``content``
+            columns in-place (the injection row IS the row the
+            router/sweep transitioned — a fresh INSERT would
+            violate the partial unique index).
+        (b) Message exists, task missing (the 2419-2437 shape) →
+            create task only. UPDATE injection row's
+            ``recovery_attempted_at`` (already set by
+            ``transition_deferred_to_pending``; no-op if
+            already stamped).
+        (c) Both exist → delivery only. UPDATE injection row's
+            ``recovery_attempted_at`` (idempotent).
+
+        The injection row is mutated via SQLAlchemy Core
+        ``UPDATE ... WHERE injection_id = :id`` (not ORM
+        ``session.add``) so the WriteGuardSession + the
+        reconciliation row writes share a single transaction.
+
+        Returns:
+            A summary dict with the shape of the reconciliation
+            (used by the structured log); ``None`` when the
+            caller should skip re-entry (parent is busy, or
+            the row no longer exists).
+        """
+        from .repositories.message_queue.models import (
+            MessageQueue,
+            MessageStatus,
+            MessageType,
+        )
+        from .repositories.report_injection.models import (
+            ReportInjection,
+            ReportInjectionState,
+        )
+        from .repositories.task.models import Task, TaskStatus, TaskType
+
+        with self._write_guard:
+            with self._session_scope() as session:
+                inj = session.get(ReportInjection, injection_id)
+                if inj is None:
+                    logger.info(
+                        f"[{source}] reconcile: injection row "
+                        f"{injection_id[:8]}... gone (concurrent delete?)"
+                    )
+                    return None
+
+                # Defensive: another actor escalated the row to
+                # terminal (INJECTED / TASK_DELIVERED) between the
+                # transition and this read. Skip — delivery has
+                # happened.
+                if inj.state in (
+                    ReportInjectionState.INJECTED.value,
+                    ReportInjectionState.TASK_DELIVERED.value,
+                ):
+                    logger.info(
+                        f"[{source}] reconcile: injection "
+                        f"{injection_id[:8]}... already terminal "
+                        f"({inj.state}); skipping"
+                    )
+                    return None
+
+                # Sub-shape (a): marker-first Site 1.
+                if inj.report_message_id is None:
+                    # Fetch the child's last assistant content
+                    # (pre-Phase 2 C3 fix pattern: outside the
+                    # transaction; best-effort).
+                    #
+                    # Sync content-fetch seam — correct for the
+                    # SWEEP path (caller runs on a non-loop
+                    # ``threading.Thread``). The router path uses
+                    # :meth:`_reconcile_deferred_report_async`
+                    # which ``await``s directly (no
+                    # ``run_coroutine_threadsafe(...).result(...)``
+                    # from the loop thread → no self-block).
+                    content = self._fetch_subshape_a_content_sync(
+                        child_instance_id=child_instance_id,
+                        session=session,
+                    )
+                    return self._create_subshape_a_artifacts(
+                        session=session,
+                        inj=inj,
+                        child_instance_id=child_instance_id,
+                        child_message_id=child_message_id,
+                        injection_id=injection_id,
+                        source=source,
+                        content=content,
+                    )
+
+                # Sub-shape (b) + (c): row already has an artifact.
+                report_message_id = inj.report_message_id
+                # Does the message + task already exist?
+                existing_task = session.exec(
+                    select(Task)
+                    .where(Task.message_id == report_message_id)
+                ).first()
+                existing_message = session.exec(
+                    select(MessageQueue)
+                    .where(MessageQueue.message_id == report_message_id)
+                ).first()
+
+                if existing_message is None:
+                    # Sub-shape (b) — message is gone (very unusual;
+                    # could happen after a manual DB cleanup). Re-
+                    # create the message row + create the task.
+                    session.add(
+                        MessageQueue(
+                            message_id=report_message_id,
+                            instance_id=inj.parent_instance_id,
+                            content=inj.content or "[Reconstructed report]",
+                            source=(
+                                f"internal_report:"
+                                f"{child_instance_id}:{child_message_id}"
+                            ),
+                            type=MessageType.COMPLETION_REPORT.value,
+                            status=MessageStatus.READY.value,
+                            priority=0,
+                            enqueued_at=datetime.now(timezone.utc),
+                        )
+                    )
+                    if existing_task is None:
+                        session.add(
+                            Task(
+                                task_type=TaskType.PROCESS_REPORT.value,
+                                instance_id=inj.parent_instance_id,
+                                message_id=report_message_id,
+                                status=TaskStatus.PENDING.value,
+                                created_at=datetime.now(timezone.utc),
+                            )
+                        )
+                    logger.info(
+                        f"[{source}] reconcile (sub-shape b, message-only): "
+                        f"recreated message + task "
+                        f"parent={inj.parent_instance_id[:8]}..., "
+                        f"child={child_instance_id[:8]}..."
+                    )
+                    # Explicit commit — ``_session_scope`` rolls
+                    # back uncommitted rows on close. Without this
+                    # the recreated message + task vanish the moment
+                    # the session-scope exits and the parent's
+                    # processor never sees the report.
+                    session.commit()
+                    return {
+                        "shape": "message_only_recreate",
+                        "report_message_id": report_message_id,
+                    }
+
+                if existing_task is None:
+                    # Sub-shape (b) — message exists, task missing.
+                    session.add(
+                        Task(
+                            task_type=TaskType.PROCESS_REPORT.value,
+                            instance_id=inj.parent_instance_id,
+                            message_id=report_message_id,
+                            status=TaskStatus.PENDING.value,
+                            created_at=datetime.now(timezone.utc),
+                        )
+                    )
+                    logger.info(
+                        f"[{source}] reconcile (sub-shape b, task-only): "
+                        f"created task "
+                        f"parent={inj.parent_instance_id[:8]}..., "
+                        f"child={child_instance_id[:8]}..."
+                    )
+                    # Same explicit-commit requirement as the
+                    # message-only branch above.
+                    session.commit()
+                    return {
+                        "shape": "task_only_create",
+                        "report_message_id": report_message_id,
+                    }
+
+                # Sub-shape (c) — both exist; the natural path
+                # delivers. No DB write needed.
+                logger.info(
+                    f"[{source}] reconcile (sub-shape c, both-exist): "
+                    f"delivery only "
+                    f"parent={inj.parent_instance_id[:8]}..., "
+                    f"child={child_instance_id[:8]}..."
+                )
+                return {
+                    "shape": "delivery_only",
+                    "report_message_id": report_message_id,
+                }
+
+    def _fetch_subshape_a_content_sync(
+        self,
+        *,
+        child_instance_id: str,
+        session,
+    ) -> str:
+        """Sync content-fetch seam for sub-shape (a) — sweep path.
+
+        Used by :meth:`_reconcile_deferred_report` (the SWEEP-side
+        reconcile). The sweep runs on a non-loop
+        ``threading.Thread``, so the cross-thread bridge
+        ``asyncio.run_coroutine_threadsafe(...).result(timeout=8.0)``
+        is correct: the calling thread is NOT the loop thread,
+        so the loop can run the scheduled coroutine while we
+        block on ``.result()``.
+
+        **Do NOT call this from the event loop thread** — it will
+        self-block (Reviewer finding #2 follow-up at
+        ``bcc02b92``). The router path uses
+        :meth:`_fetch_subshape_a_content_async` instead, which
+        ``await``s directly on the loop.
+
+        POST-DEEP-REVIEW (W3, 2026-08-20): timeout aligned with
+        the sweep ``stop()`` thread-join budget. The prior 15s
+        timeout could orphan the daemon thread on shutdown — the
+        join would expire mid-.result(). 8s leaves a 2s headroom
+        for the join; a content fetch that exceeds the budget
+        falls back to ``"[No response content]"`` and the row
+        is re-tried next cycle.
+
+        Returns:
+            The child's last assistant content, or
+            ``"[No response content]"`` on missing/empty/failure.
+        """
+        content = ""
+        try:
+            child_row = session.get(Instance, child_instance_id)
+            if child_row is not None:
+                from .services.child_reports import (
+                    ChildReportsService,
+                )
+                # Re-use the existing
+                # ``_get_last_assistant_message`` async helper
+                # via a one-shot asyncio hop.
+                loop = self._get_event_loop()
+                content = asyncio.run_coroutine_threadsafe(
+                    ChildReportsService._get_last_assistant_message(
+                        self._child_reports_service,
+                        child_instance_id,
+                        child_row.agent_id or "agent",
+                    ),
+                    loop,
+                ).result(timeout=8.0) or "[No response content]"
+        except Exception as exc:  # noqa: BLE001 — best-effort content fetch
+            logger.warning(
+                f"reconcile: content fetch failed "
+                f"child={child_instance_id[:8]}...: "
+                f"{type(exc).__name__}: {exc} — using empty"
+            )
+            content = "[No response content]"
+        return content
+
+    async def _fetch_subshape_a_content_async(
+        self,
+        *,
+        child_instance_id: str,
+        session,
+    ) -> str:
+        """Async content-fetch seam for sub-shape (a) — router path.
+
+        Used by :meth:`_reconcile_deferred_report_async` (the
+        ROUTER-side reconcile). The router runs on the manager's
+        event loop, so the content fetch is ``await``ed directly
+        on the loop — no ``run_coroutine_threadsafe(...).result(...)``
+        bridge, no self-block.
+
+        **Do NOT call this from a non-loop thread** — it will
+        raise ``RuntimeError: ... object asyncgen_hooks is
+        required``. Use
+        :meth:`_fetch_subshape_a_content_sync` from a worker /
+        daemon thread instead.
+
+        Returns:
+            The child's last assistant content, or
+            ``"[No response content]"`` on missing/empty/failure.
+        """
+        content = ""
+        try:
+            child_row = session.get(Instance, child_instance_id)
+            if child_row is not None:
+                from .services.child_reports import (
+                    ChildReportsService,
+                )
+                content = (
+                    await ChildReportsService._get_last_assistant_message(
+                        self._child_reports_service,
+                        child_instance_id,
+                        child_row.agent_id or "agent",
+                    )
+                ) or "[No response content]"
+        except Exception as exc:
+            logger.warning(
+                f"reconcile: content fetch failed "
+                f"child={child_instance_id[:8]}...: "
+                f"{type(exc).__name__}: {exc} — using empty"
+            )
+            content = "[No response content]"
+        return content
+
+    def _create_subshape_a_artifacts(
+        self,
+        *,
+        session,
+        inj: "ReportInjection",
+        child_instance_id: str,
+        child_message_id: str,
+        injection_id: str,
+        source: str,
+        content: str,
+    ) -> dict:
+        """Sub-shape (a) artifact creation — shared between router + sweep.
+
+        Threading-agnostic — runs inside the caller's open
+        ``session_scope`` + ``_write_guard``. Only the content
+        fetch seam differs between the two entry points (see
+        :meth:`_fetch_subshape_a_content_sync` /
+        :meth:`_fetch_subshape_a_content_async`); the
+        message+task+UPDATE step lives in ONE place so router and
+        sweep cannot drift.
+
+        Side effects (single transaction):
+        1. Insert ``completion_report`` ``MessageQueue`` row.
+        2. Insert ``PROCESS_REPORT`` ``Task`` row.
+        3. UPDATE the injection row IN-PLACE with the artifact
+           handle — a fresh INSERT would violate the
+           obligation-triple partial unique index.
+
+        Returns:
+            Summary dict with ``shape`` and ``report_message_id``
+            (the caller passes this through the structured log).
+        """
+        from .repositories.report_injection.models import ReportInjection
+
+        report_message_id = str(uuid.uuid4())
+        # 1. completion_report MessageQueue row
+        session.add(
+            MessageQueue(
+                message_id=report_message_id,
+                instance_id=inj.parent_instance_id,
+                content=content,
+                source=(
+                    f"internal_report:"
+                    f"{child_instance_id}:{child_message_id}"
+                ),
+                type=MessageType.COMPLETION_REPORT.value,
+                status=MessageStatus.READY.value,
+                priority=0,
+                enqueued_at=datetime.now(timezone.utc),
+            )
+        )
+        # 2. PROCESS_REPORT Task row
+        session.add(
+            Task(
+                task_type=TaskType.PROCESS_REPORT.value,
+                instance_id=inj.parent_instance_id,
+                message_id=report_message_id,
+                status=TaskStatus.PENDING.value,
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+        # 3. UPDATE injection row IN-PLACE — backfill the
+        #    artifact (NOT a fresh INSERT — that would violate
+        #    the obligation-triple partial unique index).
+        session.execute(
+            sa_update(ReportInjection)
+            .where(ReportInjection.injection_id == injection_id)
+            .values(
+                report_message_id=report_message_id,
+                content=content,
+            )
+        )
+        # The session_scope context manager rolls back on
+        # ``close()`` — without an explicit commit the
+        # message + task + UPDATE are all lost. Single commit
+        # covers all three writes atomically.
+        session.commit()
+        logger.info(
+            f"[{source}] reconcile (sub-shape a, NULL): "
+            f"created message+task+backfill injection "
+            f"parent={inj.parent_instance_id[:8]}..., "
+            f"child={child_instance_id[:8]}..."
+        )
+        return {
+            "shape": "null_marker_first",
+            "report_message_id": report_message_id,
+        }
+
+    async def _reconcile_deferred_report_async(
+        self,
+        *,
+        child_instance_id: str,
+        child_message_id: str,
+        injection_id: str,
+        source: str,
+    ) -> dict | None:
+        """Async variant of :meth:`_reconcile_deferred_report`.
+
+        Phase 2 (pause-report-recovery) follow-up to
+        ``bcc02b92`` — fixes the inner
+        ``run_coroutine_threadsafe(...).result(...)`` that
+        remained in sub-shape (a) of the sync reconcile. The
+        previous fix split the RE-ENTRY step
+        (:meth:`_handle_recover_deferred_report_async` +
+        :meth:`_reenter_completion_async`); the inner reconcile
+        was still sync and self-blocked the loop on the router
+        path for the highest-value Site-1 shape.
+
+        Used by the ROUTER path
+        (:meth:`_handle_recover_deferred_report_async`) which
+        runs ON the manager's event loop. Sub-shape (a) fetches
+        content via :meth:`_fetch_subshape_a_content_async`
+        (direct ``await``, no cross-thread bridge). Sub-shapes
+        (b) + (c) are unchanged from the sync variant — both
+        shapes only do synchronous DB writes, no async helpers.
+
+        Artifact creation is shared with the sync variant via
+        :meth:`_create_subshape_a_artifacts` so router and
+        sweep cannot drift.
+
+        Returns:
+            A summary dict with the shape of the reconciliation
+            (used by the structured log); ``None`` when the
+            caller should skip re-entry (parent is busy, or
+            the row no longer exists).
+        """
+        from .repositories.message_queue.models import (
+            MessageQueue,
+            MessageStatus,
+            MessageType,
+        )
+        from .repositories.report_injection.models import (
+            ReportInjection,
+            ReportInjectionState,
+        )
+        from .repositories.task.models import Task, TaskStatus, TaskType
+
+        with self._write_guard:
+            with self._session_scope() as session:
+                inj = session.get(ReportInjection, injection_id)
+                if inj is None:
+                    logger.info(
+                        f"[{source}] reconcile: injection row "
+                        f"{injection_id[:8]}... gone (concurrent delete?)"
+                    )
+                    return None
+
+                # Defensive: another actor escalated the row to
+                # terminal (INJECTED / TASK_DELIVERED) between the
+                # transition and this read. Skip — delivery has
+                # happened.
+                if inj.state in (
+                    ReportInjectionState.INJECTED.value,
+                    ReportInjectionState.TASK_DELIVERED.value,
+                ):
+                    logger.info(
+                        f"[{source}] reconcile: injection "
+                        f"{injection_id[:8]}... already terminal "
+                        f"({inj.state}); skipping"
+                    )
+                    return None
+
+                # Sub-shape (a): marker-first Site 1.
+                if inj.report_message_id is None:
+                    # Await directly — do NOT use
+                    # ``run_coroutine_threadsafe(...).result(...)``
+                    # from the loop thread (would self-block).
+                    content = await self._fetch_subshape_a_content_async(
+                        child_instance_id=child_instance_id,
+                        session=session,
+                    )
+                    return self._create_subshape_a_artifacts(
+                        session=session,
+                        inj=inj,
+                        child_instance_id=child_instance_id,
+                        child_message_id=child_message_id,
+                        injection_id=injection_id,
+                        source=source,
+                        content=content,
+                    )
+
+                # Sub-shape (b) + (c): row already has an artifact.
+                report_message_id = inj.report_message_id
+                existing_task = session.exec(
+                    select(Task)
+                    .where(Task.message_id == report_message_id)
+                ).first()
+                existing_message = session.exec(
+                    select(MessageQueue)
+                    .where(MessageQueue.message_id == report_message_id)
+                ).first()
+
+                if existing_message is None:
+                    # Sub-shape (b) — message is gone (very unusual;
+                    # could happen after a manual DB cleanup).
+                    # Re-create the message row + create the task.
+                    session.add(
+                        MessageQueue(
+                            message_id=report_message_id,
+                            instance_id=inj.parent_instance_id,
+                            content=inj.content or "[Reconstructed report]",
+                            source=(
+                                f"internal_report:"
+                                f"{child_instance_id}:{child_message_id}"
+                            ),
+                            type=MessageType.COMPLETION_REPORT.value,
+                            status=MessageStatus.READY.value,
+                            priority=0,
+                            enqueued_at=datetime.now(timezone.utc),
+                        )
+                    )
+                    if existing_task is None:
+                        session.add(
+                            Task(
+                                task_type=TaskType.PROCESS_REPORT.value,
+                                instance_id=inj.parent_instance_id,
+                                message_id=report_message_id,
+                                status=TaskStatus.PENDING.value,
+                                created_at=datetime.now(timezone.utc),
+                            )
+                        )
+                    logger.info(
+                        f"[{source}] reconcile (sub-shape b, message-only): "
+                        f"recreated message + task "
+                        f"parent={inj.parent_instance_id[:8]}..., "
+                        f"child={child_instance_id[:8]}..."
+                    )
+                    # Explicit commit — mirror of the sync sibling
+                    # above. ``_session_scope`` rolls back on close
+                    # so without the commit the recreated rows
+                    # disappear and the router's re-entry finds no
+                    # deliverable artefact.
+                    session.commit()
+                    return {
+                        "shape": "message_only_recreate",
+                        "report_message_id": report_message_id,
+                    }
+
+                if existing_task is None:
+                    # Sub-shape (b) — message exists, task missing.
+                    session.add(
+                        Task(
+                            task_type=TaskType.PROCESS_REPORT.value,
+                            instance_id=inj.parent_instance_id,
+                            message_id=report_message_id,
+                            status=TaskStatus.PENDING.value,
+                            created_at=datetime.now(timezone.utc),
+                        )
+                    )
+                    logger.info(
+                        f"[{source}] reconcile (sub-shape b, task-only): "
+                        f"created task "
+                        f"parent={inj.parent_instance_id[:8]}..., "
+                        f"child={child_instance_id[:8]}..."
+                    )
+                    # Same explicit-commit requirement as the
+                    # message-only branch above.
+                    session.commit()
+                    return {
+                        "shape": "task_only_create",
+                        "report_message_id": report_message_id,
+                    }
+
+                # Sub-shape (c) — both exist; the natural path
+                # delivers. No DB write needed.
+                logger.info(
+                    f"[{source}] reconcile (sub-shape c, both-exist): "
+                    f"delivery only "
+                    f"parent={inj.parent_instance_id[:8]}..., "
+                    f"child={child_instance_id[:8]}..."
+                )
+                return {
+                    "shape": "delivery_only",
+                    "report_message_id": report_message_id,
+                }
 
     async def _send_error_report(
         self, 
@@ -6186,6 +7684,142 @@ class InstanceManager:
                 route_outcome="report_or_external_resume",
             )
 
+        # 2.5. Phase 2 (pause-report-recovery) — DEFERRED marker
+        #      recovery. New step inserted between the paused-turn
+        #      check (step 2) and the ``internal_child_noop`` fall-
+        #      through (step 3). Position UNCHANGED per W2: the
+        #      answer-gate (step 1) and the paused-turn (step 2)
+        #      selectors still win precedence — a live suspension
+        #      handle is more authoritative than a DB-persisted
+        #      marker.
+        #
+        # For each DEFERRED marker (oldest first):
+        #   1. ``transition_deferred_to_pending`` — guarded UPDATE;
+        #      rowcount=0 = another actor recovered → skip row.
+        #   2. ``_handle_recover_deferred_report`` (task 2.1+2.2
+        #      contract) — partial-artifact reconciliation +
+        #      re-entry. Ordering BINDING because the mirror SQL
+        #      guards on ``state='PENDING'`` (task/repository.py:951).
+        #
+        # Terminal parents (COMPLETED / ERROR / TERMINATED / FAILED)
+        # revival-first per the
+        # ``instance_messaging.py:1486-1510`` precedent — revival
+        # failure surfaces as a structured log + ``recovery_count``
+        # increment in the return payload (NEVER silent; covered by
+        # the ORPHAN-lane test 3.6 sub-case).
+        deferred_rows: list = []
+        try:
+            deferred_rows = await asyncio.to_thread(
+                self._report_injection_repo.find_deferred_for_parent,
+                instance_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                f"[RESUME] instance={instance_id[:8]} "
+                f"find_deferred_for_parent failed: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            deferred_rows = []
+
+        if deferred_rows:
+            logger.info(
+                f"[RESUME] instance={instance_id[:8]} "
+                f"route_outcome=deferred_report_recovery "
+                f"deferred_count={len(deferred_rows)} "
+                f"silent={silent}"
+            )
+            recovery_count = 0
+            for deferred_row in deferred_rows:
+                try:
+                    # Step 1: terminal-parent revival (W1).
+                    # The marker contract requires the parent in
+                    # RUNNING state for the natural completion path
+                    # to deliver the report. Mirrors the
+                    # ``send_message`` revival block at
+                    # ``instance_messaging.py:1486-1510``.
+                    parent_running = await self._is_parent_terminal(
+                        deferred_row.parent_instance_id
+                    )
+                    if parent_running is None:
+                        # Parent row missing (deleted). Skip —
+                        # nothing to recover.
+                        logger.info(
+                            f"[RESUME] deferred row "
+                            f"{deferred_row.injection_id[:8]}... "
+                            f"parent missing, skipping"
+                        )
+                        continue
+                    if parent_running is False:
+                        # Terminal — try revival.
+                        revived = await self._revive_terminal_instance(
+                            deferred_row.parent_instance_id
+                        )
+                        if not revived:
+                            logger.warning(
+                                f"[RESUME] deferred row "
+                                f"{deferred_row.injection_id[:8]}... "
+                                f"parent {deferred_row.parent_instance_id[:8]}... "
+                                f"terminal revival failed; "
+                                f"structured log only (NEVER silent)"
+                            )
+                            continue
+                        logger.info(
+                            f"[RESUME] deferred row "
+                            f"{deferred_row.injection_id[:8]}... "
+                            f"parent {deferred_row.parent_instance_id[:8]}... "
+                            f"revived terminal→RUNNING"
+                        )
+
+                    # Step 2: guarded transition.
+                    transitioned = await asyncio.to_thread(
+                        self._report_injection_repo.transition_deferred_to_pending,
+                        deferred_row.injection_id,
+                    )
+                    if not transitioned:
+                        # rowcount=0 — another actor recovered.
+                        logger.debug(
+                            f"[RESUME] deferred row "
+                            f"{deferred_row.injection_id[:8]}... "
+                            f"already recovered (rowcount=0)"
+                        )
+                        continue
+
+                    # Step 3: reconcile + re-enter (task 2.1+2.2).
+                    # Async variant: this router path runs ON the
+                    # event loop, so we await directly. Calling the
+                    # sync ``_handle_recover_deferred_report`` here
+                    # would invoke ``run_coroutine_threadsafe(...).
+                    # result(timeout=30)`` on the loop thread,
+                    # blocking the loop that must run the
+                    # scheduled coroutine → guaranteed 30s timeout.
+                    # The sweep path keeps the sync variant + the
+                    # cross-thread bridge (it runs on a daemon
+                    # thread and cannot await directly).
+                    await self._handle_recover_deferred_report_async(
+                        child_instance_id=deferred_row.child_instance_id,
+                        child_message_id=deferred_row.child_message_id,
+                        injection_id=deferred_row.injection_id,
+                        source="router",
+                    )
+                    recovery_count += 1
+                except Exception as exc:
+                    # Per-row fail-safe: the row is now PENDING (the
+                    # transition committed); lane 3/4 will retry.
+                    # Never bubble — the router returns success so
+                    # the caller can resume normally.
+                    logger.warning(
+                        f"[RESUME] deferred row "
+                        f"{deferred_row.injection_id[:8]}... "
+                        f"recovery failed: {type(exc).__name__}: {exc}"
+                    )
+            return {
+                "instance_id": instance_id,
+                "job_id": None,
+                "message_id": None,
+                "status": "deferred_report_recovery",
+                "recovery_count": recovery_count,
+            }
+
         # 3. No suspension handle and no paused turn.
         if silent:
             # internal_child_noop: legitimate silent child cascade
@@ -6427,6 +8061,117 @@ class InstanceManager:
                         # the resume path is the sole driver
                         # (matching the pre-migration behavior for
                         # CANCELLED tasks at line 6320-6363).
+                        #
+                        # ─── FM-1 guard (Phase 2 task 2.3) ────────────────
+                        # EXEMPT the cancel+complete when ALL of:
+                        #   (1) ``task.type == PROCESS_REPORT``,
+                        #   (2) the linked message is a
+                        #       ``COMPLETION_REPORT``-typed row
+                        #       (NOT ``msg.status == READY`` — see
+                        #       corrected-predicate comment below),
+                        #   (3) a non-terminal injection row
+                        #       exists for the message
+                        #       (DEFERRED or PENDING).
+                        #
+                        # The enclosing loop
+                        # (manager.py:~7737-7744) already filters
+                        # messages to ``PENDING|PROCESSING|RETRYING``
+                        # — so the ORIGINAL predicate's
+                        # ``msg.status == READY`` term was DEAD
+                        # CODE (READY messages never reach the
+                        # inner branch) and is dropped from the
+                        # corrected predicate below. The deep-
+                        # review REJECT verdict confirmed it.
+                        #
+                        # Without this guard the unmodified FM-1
+                        # loop would kill the PROCESS_REPORT task
+                        # that the Phase 2 recovery sweep just
+                        # created — the report obligation would
+                        # land on a fresh PENDING PROCESS_REPORT
+                        # task that the loop then cancels,
+                        # stranding the report.
+                        #
+                        # The exemption predicate covers BOTH the
+                        # PENDING shape (task row PENDING) and the
+                        # DEFERRED shape (recovery just transitioned
+                        # the marker → the row is now PENDING with
+                        # ``recovery_attempted_at`` stamped) — the
+                        # non-terminal check naturally covers both.
+                        # PROCESS_MESSAGE tasks keep the existing
+                        # cancel+complete (they cannot be a
+                        # completion_report delivery).
+                        #
+                        # **PREDICATE — corrected post deep-review**:
+                        # exempt the cancel+complete when the task is
+                        # a PROCESS_REPORT whose message is a
+                        # COMPLETION_REPORT row AND a non-terminal
+                        # injection row exists (PENDING or DEFERRED).
+                        #
+                        # The original predicate also required
+                        # ``msg.status == MessageStatus.READY.value``,
+                        # but the enclosing loop (manager.py:7737-7744)
+                        # already filters messages to
+                        # ``PENDING|PROCESSING|RETRYING`` — so the
+                        # READY term was DEAD CODE (READY messages
+                        # never enter the inner branch). The deep
+                        # review REJECT verdict confirmed it. The
+                        # corrected predicate drops the READY term
+                        # and matches the plan INTENT
+                        # (task-2.3: "exempt rows tied to DEFERRED∪
+                        # PENDING injections from the type-blind
+                        # kill").
+                        #
+                        # The natural lifecycle keeps a freshly-swept
+                        # PROCESS_REPORT task tied to a message that
+                        # is PROCESSING (worker claimed the message
+                        # mid-flight when pause fired; the cascade
+                        # later transitioned the Task PAUSED→PENDING
+                        # per Phase 4b/4c). FM-1 sees
+                        # ``msg.status=PROCESSING`` + ``task.status=
+                        # PENDING`` — the corrected predicate fires
+                        # exactly there. PROCESS_MESSAGE tasks keep
+                        # the existing cancel+complete (they cannot
+                        # be a completion_report delivery).
+                        #
+                        # **Co-dependency with task 2.4 (lands in the
+                        # same commit series)**: the recovery sweep
+                        # creates the fresh PROCESS_REPORT task; if
+                        # the FM-1 guard is missing, that task is
+                        # cancelled before the WorkerPool claims it.
+                        #
+                        # **ANTIPHANTOM-RACE-FIX regression intact**:
+                        # the RUNNING-task skip (~6560-6572) and the
+                        # no-task skip (~6536-6545) above are
+                        # untouched. This guard ONLY EXEMPTS — it
+                        # does NOT re-open the cancel path.
+                        is_deliverable_process_report = (
+                            stale_task.task_type
+                            == TaskType.PROCESS_REPORT.value
+                            and msg.type
+                            == MessageType.COMPLETION_REPORT.value
+                            and self._has_non_terminal_injection_for(
+                                stale_task.message_id
+                            )
+                        )
+                        if is_deliverable_process_report:
+                            # The WorkerPool / claim_for_task_delivery
+                            # lane owns this delivery. The FM-1 loop
+                            # MUST NOT cancel this task. Leave it
+                            # PENDING; the natural drain
+                            # (``claim_for_task_delivery`` or the
+                            # live agent-node drain) handles it.
+                            logger.info(
+                                f"[RESUME] FM-1 guard: skipping "
+                                f"cancel+complete for PROCESS_REPORT "
+                                f"task {stale_task.id} (message "
+                                f"{msg.message_id[:8]}...) — "
+                                f"non-terminal injection row exists; "
+                                f"delivery owns by WorkerPool / "
+                                f"claim_for_task_delivery"
+                            )
+                            skipped_phantom_count += 1
+                            continue
+
                         try:
                             await asyncio.to_thread(
                                 self._queue_repository.complete,

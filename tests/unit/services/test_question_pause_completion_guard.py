@@ -106,7 +106,14 @@ class TestQuestionPauseCompletionGuard:
     def test_paused_root_stays_paused_when_completion_runs(
         self, engine: Engine, dependency_bus: MagicMock
     ) -> None:
-        """A stale completion report cannot turn PAUSED into COMPLETED."""
+        """A stale completion report cannot turn PAUSED into COMPLETED.
+
+        Phase 1 (pause-report-recovery Variant B fix 2): PAUSED is
+        now a separate guard outcome (``deferred_pause``) instead of
+        ``idempotency_skip``. The instance stays PAUSED; the DEFERRED
+        marker is NOT written for a ROOT instance (parent_id is
+        None → no delivery obligation).
+        """
         service = _build_child_reports_service(engine)
         instance_id = _seed_root_instance(
             engine, status=InstanceStatus.PAUSED.value
@@ -118,12 +125,34 @@ class TestQuestionPauseCompletionGuard:
             last_content="stale completion",
         )
 
-        assert result.outcome == "idempotency_skip"
+        # Phase 1: PAUSED status → deferred_pause outcome (NOT
+        # idempotency_skip — that branch is COMPLETED/ERROR only).
+        assert result.outcome == "deferred_pause"
         dependency_bus.count_pending_for_target_sync.assert_not_called()
         with Session(engine) as session:
             instance = session.get(Instance, instance_id)
             assert instance is not None
             assert instance.status == InstanceStatus.PAUSED.value
+            # No DEFERRED marker for a root (parent_id is None).
+            from sqlmodel import select as sm_select
+            from daemon.repositories.report_injection.models import (
+                ReportInjection,
+                ReportInjectionState,
+            )
+            markers = list(
+                session.exec(
+                    sm_select(ReportInjection).where(
+                        ReportInjection.child_instance_id == instance_id
+                    ).where(
+                        ReportInjection.state
+                        == ReportInjectionState.DEFERRED.value
+                    )
+                ).all()
+            )
+            assert markers == [], (
+                "Root instance (parent_id None) must not have a "
+                "DEFERRED marker — no delivery obligation"
+            )
 
     @pytest.mark.parametrize(
         "initial_status",

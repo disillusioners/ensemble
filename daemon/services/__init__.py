@@ -7,6 +7,11 @@ from daemon.services.worker_pool import Worker, WorkerPool
 from daemon.services.task_processor import TaskProcessor, BaseProcessor
 from daemon.services.stale_task_recovery import StaleTaskRecovery
 from daemon.services.job_retry_engine import JobRetryEngine
+from daemon.services.report_delivery_recovery import (
+    LaneResult,
+    ReportDeliveryRecoveryService,
+    SweepResult,
+)
 
 # Instance manager service classes
 from daemon.services.instance_lifecycle import InstanceLifecycleService
@@ -45,6 +50,10 @@ __all__ = [
     "BaseProcessor",
     "StaleTaskRecovery",
     "JobRetryEngine",
+    # Phase 2 (pause-report-recovery) periodic recovery sweep
+    "LaneResult",
+    "ReportDeliveryRecoveryService",
+    "SweepResult",
     # Instance manager services
     "InstanceLifecycleService",
     "InstanceMessagingService",

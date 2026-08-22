@@ -7,6 +7,9 @@ still providing detailed documentation via the tool_help() function.
 
 from importlib import import_module
 from typing import Callable, Any
+import logging
+
+_logger = logging.getLogger(__name__)
 
 # Global registry: tool_name -> full documentation string
 _full_docs: dict[str, str] = {}
@@ -193,21 +196,27 @@ def list_tools_by_category() -> dict[str, list[str]]:
     return categories
 
 
-def discover_all_tool_names() -> set[str]:
-    """Statically discover all @tool-decorated function names across CATEGORY_MODULES.
+def _scan_category_module_sources() -> tuple[set[str], bool]:
+    """AST-scan every CATEGORY_MODULES source file for ``@tool``-decorated names.
 
-    Many tools are created inside factory functions (e.g. ``create_project_tools``)
-    and use ``@tool`` inside the factory body, so they never register in
-    ``_tool_metadata`` at import time. This function AST-scans the source of every
-    category module to find ``@tool``-decorated functions at ANY nesting depth.
+    Shared by ``discover_all_tool_names()`` (which then merges with the static
+    ``KNOWN_TOOL_NAMES`` fallback) and ``discover_source_only_tool_names()``
+    (which raises on zero-source — the frozen-binary case).
 
     Returns:
-        Set of tool names discoverable from static source analysis.
+        (tool_names, any_source_read) — ``any_source_read`` is True iff at least
+        one category-module source file was actually read from disk. The AST
+        walker descends into every nested scope so factory-internal ``@tool``
+        decorations are caught (they never register at import time).
     """
     import ast
     from pathlib import Path
 
     tool_names: set[str] = set()
+    # Tracks whether ANY source file was actually read on this call. When the
+    # whole daemon/ tree is bytecode-only (frozen binary), this stays False and
+    # the caller decides what to do (fallback vs raise).
+    any_source_read = False
 
     for category_key, module_path_str in CATEGORY_MODULES.items():
         paths = module_path_str if isinstance(module_path_str, list) else [module_path_str]
@@ -232,6 +241,7 @@ def discover_all_tool_names() -> set[str]:
                 if not file_path.exists():
                     continue
 
+                any_source_read = True
                 source = file_path.read_text()
                 tree = ast.parse(source)
 
@@ -263,6 +273,85 @@ def discover_all_tool_names() -> set[str]:
             except (OSError, SyntaxError, Exception):
                 continue
 
+    return tool_names, any_source_read
+
+
+def discover_source_only_tool_names() -> set[str]:
+    """Pure source discovery — NO merge with ``KNOWN_TOOL_NAMES``, NO frozen fallback.
+
+    This function is the regen source of truth for the ``KNOWN_TOOL_NAMES``
+    static fallback and the canonical basis for bidirectional drift detection
+    between source and the static universe. It MUST return only what the
+    on-disk ``daemon/tools/`` source contains; it never augments with the
+    static list.
+
+    Frozen-binary contract: when ZERO ``CATEGORY_MODULES`` source files are
+    readable (typical PyInstaller frozen build where ``daemon/`` ships as
+    bytecode only), this function raises ``RuntimeError`` rather than
+    silently returning the static universe. Drift detection in a frozen
+    environment is not meaningful — callers that need the frozen-safe
+    merged result should use ``discover_all_tool_names()`` instead.
+
+    Returns:
+        Set of ``@tool``-decorated function names discovered by AST-scanning
+        every CATEGORY_MODULES source file on disk.
+
+    Raises:
+        RuntimeError: if ZERO ``CATEGORY_MODULES`` source files are readable
+            (frozen binary, or path resolution failed for every category).
+    """
+    tool_names, any_source_read = _scan_category_module_sources()
+    if not any_source_read:
+        raise RuntimeError(
+            "discover_source_only_tool_names(): no CATEGORY_MODULES source files "
+            "readable (frozen binary?) — source-only discovery is unavailable; "
+            "use discover_all_tool_names() for the frozen-safe universe"
+        )
+    return tool_names
+
+
+def discover_all_tool_names() -> set[str]:
+    """Statically discover all @tool-decorated function names across CATEGORY_MODULES.
+
+    Many tools are created inside factory functions (e.g. ``create_project_tools``)
+    and use ``@tool`` inside the factory body, so they never register in
+    ``_tool_metadata`` at import time. This function AST-scans the source of every
+    category module to find ``@tool``-decorated functions at ANY nesting depth.
+
+    Frozen-binary safe: in PyInstaller-frozen builds the ``daemon/`` package ships
+    as bytecode only and ``file_path.exists()`` is False for every category
+    module. In that case the static fallback universe ``KNOWN_TOOL_NAMES`` is
+    returned (and a single debug log is emitted). When some source files are
+    readable but others are not, the result merges source-discovered names with
+    ``KNOWN_TOOL_NAMES`` so source stays canonical where present and the static
+    list covers the rest.
+
+    For pure source-of-truth discovery (drift detection, regenerating
+    ``KNOWN_TOOL_NAMES``), use ``discover_source_only_tool_names()`` instead.
+
+    Returns:
+        Set of tool names discoverable from static source analysis, augmented
+        with the static ``KNOWN_TOOL_NAMES`` fallback.
+    """
+    tool_names, any_source_read = _scan_category_module_sources()
+
+    if not any_source_read:
+        # No CATEGORY_MODULES source files readable — typically a PyInstaller
+        # frozen binary where daemon/ is bytecode-only. Fall back to the static
+        # universe so factory-created tool names remain visible to the validator
+        # and we don't emit false-positive "unknown tool" warnings. Single
+        # debug log; not per-file.
+        _logger.debug(
+            "discover_all_tool_names: no CATEGORY_MODULES source files readable "
+            "(frozen binary?); falling back to KNOWN_TOOL_NAMES (%d entries)",
+            len(KNOWN_TOOL_NAMES),
+        )
+        return set(KNOWN_TOOL_NAMES)
+
+    # Partial-source path: source is canonical where present; KNOWN_TOOL_NAMES
+    # covers the rest. Merging is defensive — if a maintainer adds a @tool and
+    # forgets to regenerate KNOWN_TOOL_NAMES, the source scan still catches it.
+    tool_names |= KNOWN_TOOL_NAMES
     return tool_names
 
 
@@ -366,6 +455,206 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     "plane": "daemon.tools.plane_tools",
     "plane_sync": "daemon.tools.plane_sync",
 }
+
+
+# Static fallback universe of @tool-decorated function names across CATEGORY_MODULES.
+#
+# discover_all_tool_names() AST-scans source files on disk to find @tool-decorated
+# functions at any nesting depth. In PyInstaller frozen binaries (e.g. ensemble-prod)
+# daemon/ ships as bytecode only — file_path.exists() returns False for every
+# category module and the discovery function silently returns an empty set. The
+# result: every factory-created tool name (project_*, todo_view, terminate_instance,
+# ...) vanishes from the validator universe and produces false-positive "unknown
+# tool" warnings on agent boot (prod incident 2026-08-20 20:00:35, 32 warnings for
+# agent project-manager).
+#
+# This constant is the frozen-binary fallback. discover_all_tool_names() falls back
+# to set(KNOWN_TOOL_NAMES) when ZERO source files are readable, and merges with
+# source-discovered names otherwise (source is canonical where present; the static
+# list covers the rest).
+#
+# Maintenance: when you add a new @tool-decorated function to a CATEGORY_MODULES
+# module, regenerate this set by running:
+#
+#     uv run python -c "from daemon.tools._tool_registry import discover_source_only_tool_names; print(sorted(discover_source_only_tool_names()))"
+#
+# The output is the unambiguous source-only universe (no merge with this
+# constant, no frozen fallback). In a frozen-binary environment this command
+# fails loudly with RuntimeError instead of producing a false-OK output —
+# drift detection only makes sense from source. Bidirectional drift between
+# source and KNOWN_TOOL_NAMES is caught by the test
+# tests/unit/tools/test_frozen_tool_name_discovery.py::test_known_tool_names_matches_source_exactly_no_drift.
+#
+# Paste the printed (sorted) names into the frozenset below. Keep this
+# constant adjacent to CATEGORY_MODULES so a maintainer adding a new tool module
+# is looking at exactly this area.
+KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
+    "access_memory",
+    "agent_create",
+    "agent_delete",
+    "agent_list",
+    "agent_modify",
+    "agent_read",
+    "ask_questions",
+    "bash",
+    "blueprint_acknowledge_pending",
+    "blueprint_claim_pending",
+    "blueprint_create",
+    "blueprint_disable",
+    "blueprint_get",
+    "blueprint_get_pending_count",
+    "blueprint_list",
+    "blueprint_release_lease",
+    "blueprint_search",
+    "blueprint_update",
+    "clear_councilor_errors",
+    "convene_council",
+    "convene_council_with_skill",
+    "db_conn_add",
+    "db_conn_delete",
+    "db_conn_list",
+    "db_conn_test",
+    "db_postgres_dml_select",
+    "dlq_list",
+    "dlq_replay",
+    "edit_file",
+    "ens_system_log_list",
+    "ens_system_log_read",
+    "ens_system_log_search",
+    "ens_system_log_tail",
+    "experience",
+    "explain_image",
+    "explore",
+    "external_opencode_abort_session",
+    "external_opencode_answer_question",
+    "external_opencode_get_status",
+    "external_opencode_init_session",
+    "external_opencode_resume_session",
+    "external_opencode_send_message",
+    "external_opencode_wait_any",
+    "external_opencode_wait_for_result",
+    "generate_chart",
+    "get_instance_info",
+    "glob_files",
+    "grep_files",
+    "infra_asset_create",
+    "infra_asset_delete",
+    "infra_asset_get",
+    "infra_asset_list",
+    "infra_asset_search",
+    "infra_asset_update",
+    "infra_history_get",
+    "infra_type_list",
+    "infra_type_register",
+    "inner_soul",
+    "job_cancel",
+    "job_continue",
+    "job_create",
+    "job_delete",
+    "job_get",
+    "job_inject",
+    "job_list",
+    "job_messages",
+    "job_progress",
+    "job_restore",
+    "job_retry",
+    "job_tree",
+    "language_skip_check",
+    "list_context",
+    "list_directory",
+    "list_instances",
+    "list_watched_jobs",
+    "plane_sync_project",
+    "proc_list",
+    "proc_logs",
+    "proc_run",
+    "proc_status",
+    "proc_stop",
+    "project_add_directory",
+    "project_add_shortname",
+    "project_add_tag",
+    "project_cn_add",
+    "project_cn_list",
+    "project_cn_remove",
+    "project_create",
+    "project_delete",
+    "project_delete_metadata",
+    "project_get",
+    "project_get_by_directory",
+    "project_get_by_instance",
+    "project_history_add",
+    "project_history_delete",
+    "project_history_list",
+    "project_history_search",
+    "project_link",
+    "project_list",
+    "project_remove_directory",
+    "project_remove_shortname",
+    "project_remove_tag",
+    "project_search",
+    "project_set_metadata",
+    "project_set_shortnames",
+    "project_set_status",
+    "project_set_tags",
+    "project_unlink",
+    "project_update",
+    "queue_create",
+    "queue_list",
+    "queue_update",
+    "rag_create_entity",
+    "rag_create_relation",
+    "rag_delete_docs",
+    "rag_delete_entity",
+    "rag_delete_relation",
+    "rag_get_entity",
+    "rag_get_graph",
+    "rag_insert_text",
+    "rag_insert_texts",
+    "rag_list_docs",
+    "rag_merge_entities",
+    "rag_query",
+    "rag_query_data",
+    "rag_search_labels",
+    "rag_track_status",
+    "rag_update_entity",
+    "read_context",
+    "read_file",
+    "send_message",
+    "shared_meta_kv",
+    "skill_analyze",
+    "skill_create",
+    "skill_evolve",
+    "skill_execute_capture",
+    "skill_feedback",
+    "skill_fix",
+    "skill_get_metrics",
+    "skill_list",
+    "skill_resolve_ab",
+    "skill_search",
+    "skill_view",
+    "spawn_councilor",
+    "spawn_instance",
+    "system_config",
+    "system_env",
+    "system_health",
+    "terminate_instance",
+    "time",
+    "todo_clear",
+    "todo_graph_add_edge",
+    "todo_graph_add_subtask",
+    "todo_graph_create",
+    "todo_graph_remove_edge",
+    "todo_graph_remove_subtask",
+    "todo_graph_update",
+    "todo_graph_update_subtask",
+    "todo_list_create",
+    "todo_list_update",
+    "todo_view",
+    "tool_help",
+    "unwatch_job",
+    "watch_job",
+    "watch_jobs",
+    "write_file",})
 
 
 def get_tool_categories(allowed_tools: set[str] | None = None) -> dict[str, list[str]]:

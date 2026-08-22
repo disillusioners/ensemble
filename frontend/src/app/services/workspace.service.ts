@@ -1,5 +1,5 @@
 import { Injectable, NgZone, OnDestroy, computed, inject, signal } from '@angular/core';
-import { HttpClient, HttpParams } from '@angular/common/http';
+import { HttpClient, HttpErrorResponse, HttpParams } from '@angular/common/http';
 import { Observable, catchError, finalize, of, tap } from 'rxjs';
 import {
   FileContentResponse,
@@ -210,12 +210,88 @@ export class WorkspaceService implements OnDestroy {
           // stale data under the wrong projectId.
           this._treeProjectId = projectId;
         }),
-        catchError((err) => {
-          this.error.set(err.message || 'Failed to load file tree');
+        catchError((err: unknown) => {
+          this.error.set(this.extractErrorMessage(err, 'Failed to load file tree'));
           return of({ project_id: projectId, path, tree: [], truncated: false });
         }),
         finalize(() => this.loading.set(false))
       );
+  }
+
+  /**
+   * Extract a user-readable message from an HTTP error.
+   *
+   * The backend's workspace router raises FastAPI ``HTTPException`` with a
+   * structured ``detail`` body (e.g. ``{"error": "Project has no
+   * main_directory configured"}``). Angular's default ``err.message`` is
+   * ``"Http failure response for /api/workspace/<id>/tree: 400 Bad
+   * Request"`` — which buries the actionable reason and shows a confusing
+   * generic string. This surfaces the backend's reason when present and
+   * falls back to Angular's message or ``fallback`` otherwise.
+   *
+   * Kept here (not in the component) so every workspace GET shares the
+   * same translation; the component's save-error path has its own
+   * status-keyed mapping (``mapSaveError``) because it surfaces the
+   * failure in a snackbar rather than the banner.
+   */
+  private extractErrorMessage(err: unknown, fallback: string): string {
+    if (err instanceof HttpErrorResponse) {
+      const detail = err.error;
+      // FastAPI wraps the message in { "detail": { "error": "..." } }.
+      // Some legacy paths use { "detail": "..." } (string) or
+      // { "error": "..." } (bare). Cover all three.
+      // Bare string body (e.g. plain-text "Not found"). Skip
+      // HTML-shaped bodies (proxy/gateway error pages) and very long
+      // bodies — both are machine noise, not user-facing reasons —
+      // and let Angular's message carry the failure instead.
+      const bodyString = typeof detail === 'string' && detail ? detail : null;
+      const readableBody =
+        bodyString !== null &&
+        !bodyString.trimStart().startsWith('<') &&
+        bodyString.length <= 200
+          ? bodyString
+          : null;
+      const message =
+        (detail && typeof detail === 'object' && 'detail' in detail
+          ? this._detailError(detail.detail)
+          : null) ??
+        (detail && typeof detail === 'object' && 'error' in detail
+          ? this._asString((detail as { error: unknown }).error)
+          : null) ??
+        readableBody;
+      if (message) {
+        // Keep the status visible (e.g. "Not found (404)") so callers
+        // that key on it — tests, log greps — still see it alongside
+        // the backend's actionable reason.
+        return err.status > 0 ? `${message} (${err.status})` : message;
+      }
+      // Fall back to Angular's message (already includes status + text).
+      if (err.message) return err.message;
+    }
+    return (err instanceof Error && err.message) ? err.message : fallback;
+  }
+
+  /** Coerce a ``detail`` value (string | dict) to the inner ``error`` string. */
+  private _detailError(detail: unknown): string | null {
+    if (typeof detail === 'string') return detail || null;
+    if (detail && typeof detail === 'object' && 'error' in detail) {
+      return this._asString((detail as { error: unknown }).error);
+    }
+    return null;
+  }
+
+  /**
+   * Stringify a primitive value; null/undefined → null.
+   * Non-primitives (objects, arrays, functions) also return null so a
+   * nested-object ``detail``/``error`` value falls through the chain
+   * (or to Angular's message) instead of leaking ``[object Object]``.
+   */
+  private _asString(v: unknown): string | null {
+    if (v == null) return null;
+    if (typeof v !== 'string' && typeof v !== 'number' && typeof v !== 'boolean') {
+      return null;
+    }
+    return String(v) || null;
   }
 
   /** GET /api/workspace/{projectId}/file */
@@ -238,7 +314,7 @@ export class WorkspaceService implements OnDestroy {
           this.activateTab(path);
         }),
         catchError((err) => {
-          this.error.set(err.message || 'Failed to read file');
+          this.error.set(this.extractErrorMessage(err, 'Failed to read file'));
           throw err;
         })
       );
@@ -252,7 +328,7 @@ export class WorkspaceService implements OnDestroy {
       .pipe(
         tap((res) => this.currentDiff.set(res)),
         catchError((err) => {
-          this.error.set(err.message || 'Failed to get diff');
+          this.error.set(this.extractErrorMessage(err, 'Failed to get diff'));
           throw err;
         })
       );

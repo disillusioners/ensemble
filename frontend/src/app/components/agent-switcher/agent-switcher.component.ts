@@ -5,6 +5,7 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatMenuModule } from '@angular/material/menu';
 import { Agent } from '../../models';
 import { deduplicateAgentsById } from '../../utils/agent-dedup';
+import { InstancesViewStateService } from '../../services/instances-view-state.service';
 
 const RECENT_AGENTS_KEY = 'ensemble_recent_agents';
 const MAX_RECENT = 5;
@@ -39,6 +40,17 @@ export class AgentSwitcherComponent {
   @ViewChild('dropdownMenu') dropdownMenu!: ElementRef<HTMLDivElement>;
 
   private readonly host = inject(ElementRef<HTMLElement>);
+
+  /**
+   * Root-provided view-state service. The agent-switcher lives
+   * inside the persistent instance-detail overlay, so its
+   * document-level listeners stay registered even while the
+   * overlay is hidden. F6 fix: gate those handlers on
+   * ``detailVisible()`` so an outside click on a different route
+   * doesn't close a dropdown the user can't see (same defect class
+   * as todo-list.component.ts:361/371).
+   */
+  private readonly viewState = inject(InstancesViewStateService);
 
   readonly isOpen = signal(false);
   readonly focusedIndex = signal(-1);
@@ -442,6 +454,13 @@ export class AgentSwitcherComponent {
 
   @HostListener('document:click', ['$event'])
   onDocumentClick(event: MouseEvent): void {
+    // F6: the agent-switcher stays alive (and its document-level
+    // listeners stay registered) while the detail overlay is
+    // hidden. Without this gate, an outside click on the
+    // underlying page would close a dropdown the user cannot
+    // see, racing with their interaction on the list page. Same
+    // defect class as todo-list.component.ts:361.
+    if (!this.viewState.detailVisible()) return;
     const target = event.target as HTMLElement;
     if (!target.closest('.agent-switcher-container')) {
       this.closeDropdown();
@@ -450,6 +469,10 @@ export class AgentSwitcherComponent {
 
   @HostListener('document:keydown', ['$event'])
   onDocumentKeydown(event: KeyboardEvent): void {
+    // F6: same gate as onDocumentClick — Escape on the underlying
+    // page must not close a dropdown while the overlay is hidden.
+    // Mirrors todo-list.component.ts:371.
+    if (!this.viewState.detailVisible()) return;
     // Close dropdown when pressing Escape and it's not handled by another element
     if (event.key === 'Escape' && this.isOpen()) {
       const activeElement = document.activeElement;

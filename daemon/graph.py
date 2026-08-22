@@ -1771,31 +1771,36 @@ class ThinkingChatOpenAI(ChatOpenAI):
     """
 
     # Class-level config: model name patterns (case-insensitive substring
-    # match) for which reasoning_content MUST be echoed back in multi-turn
-    # assistant messages.
+    # match) for which reasoning_content echo is DISABLED. Every other model
+    # echoes reasoning_content back in multi-turn assistant messages.
     #
-    # Why this is configurable:
+    # Why this is configurable (denylist semantics):
     #   - DeepSeek thinking mode requires reasoning_content in the assistant
-    #     history whenever the prior turn included a tool call, or the model
-    #     loses its chain-of-thought context. See:
+    #     history to preserve its chain-of-thought context across turns. See:
     #     https://api-docs.deepseek.com/guides/thinking_mode
-    #   - Other providers (e.g. raw OpenAI) reject unknown fields like
-    #     reasoning_content, so we must NOT echo for those.
+    #   - Most providers/proxies accept or silently ignore the extra field,
+    #     so echo is safe by default; providers that reject it (e.g. raw
+    #     OpenAI returning 400 on unknown fields) can be listed here.
     #
-    # The daemon sets this from LLMConfig.reasoning_echo_models at startup
-    # (see daemon/__main__.py and daemon/manager.py). Default keeps DeepSeek
-    # behavior working out of the box.
-    reasoning_echo_models: ClassVar[list[str]] = ["deepseek"]
+    # The daemon sets this from LLMConfig.reasoning_echo_disabled_models at
+    # startup (see daemon/__main__.py and daemon/api.py). Default is empty:
+    # every model echoes.
+    reasoning_echo_disabled_models: ClassVar[list[str]] = []
 
     def _should_echo_reasoning(self) -> bool:
-        """Return True if the current model requires reasoning_content echo.
+        """Return True if reasoning_content echo is enabled for the current model.
 
-        Substring match (case-insensitive) against ``reasoning_echo_models``.
+        Denylist: echo is on for every model unless its name case-
+        insensitively substring-matches an entry in
+        ``reasoning_echo_disabled_models``.
         """
         model = (self.model_name or "").lower()
         if not model:
             return False
-        return any(pattern.lower() in model for pattern in self.reasoning_echo_models)
+        return not any(
+            pattern.lower() in model
+            for pattern in self.reasoning_echo_disabled_models
+        )
 
     def _create_chat_result(
         self,
@@ -1907,16 +1912,20 @@ class ThinkingChatOpenAI(ChatOpenAI):
     ) -> dict:
         """Override to preserve reasoning_content in assistant message dicts.
 
-        Only injects ``reasoning_content`` for models listed in
-        ``reasoning_echo_models`` (default: ``["deepseek"]``).
+        Injects ``reasoning_content`` for every model EXCEPT those listed in
+        ``reasoning_echo_disabled_models`` (default: empty — all models echo).
 
-        Why this is gated by model name:
-          - DeepSeek thinking mode requires reasoning_content in the assistant
-            history whenever the prior turn included a tool call, or the model
-            loses its chain-of-thought context. See:
-            https://api-docs.deepseek.com/guides/thinking_mode
-          - Other providers (e.g. raw OpenAI) reject unknown fields like
-            reasoning_content with a 400 error, so we must skip echo for them.
+        Echo depends only on:
+          (a) the model name not matching the disabled list (case-insensitive
+              substring), AND
+          (b) ``reasoning_content`` being present (not None) on the AIMessage.
+
+        Why the disabled list exists:
+          - Most providers/proxies accept or silently ignore the extra field,
+            so echo is safe by default and preserves thinking context across
+            turns (required by DeepSeek-style thinking-mode APIs).
+          - Providers that reject unknown fields with a 400 error (e.g. raw
+            OpenAI) can be added to the disabled list.
           - Some proxies ignore unknown fields silently, in which case echo is
             harmless but wastes a few hundred bytes of payload per turn.
 
@@ -1924,9 +1933,9 @@ class ThinkingChatOpenAI(ChatOpenAI):
         ``reasoning_content`` from additional_kwargs, so we re-inject it after
         the parent has built the payload.
         """
-        # Fast path: skip the entire message-matching machinery for models that
-        # don't require reasoning echo. This keeps the hot path identical to
-        # stock ChatOpenAI for GPT-4o, GLM, Claude, etc.
+        # Fast path: skip the entire message-matching machinery for models on
+        # the disabled list. This keeps the hot path identical to stock
+        # ChatOpenAI for disabled models.
         if not self._should_echo_reasoning():
             return super()._get_request_payload(input_, stop=stop, **kwargs)
 
@@ -5176,10 +5185,13 @@ def build_instance_graph(
             assembly (backward-compatible default — legacy agents
             keep their system-prompt-baked context).
     """
-    # Add proxy header to all LLM requests
+    # Add proxy headers (x-proxy-app + x-proxy-interleaved-thinking) to all LLM requests
     llm_config_with_headers = {
         **llm_config,
-        "default_headers": {"x-proxy-app": "ensemble"},
+        "default_headers": {
+            "x-proxy-app": "ensemble",
+            "x-proxy-interleaved-thinking": "True",
+        },
     }
 
     # Check if vision model is configured

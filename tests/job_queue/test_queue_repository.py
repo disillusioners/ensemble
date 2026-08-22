@@ -756,6 +756,112 @@ class TestQueueRepositoryOrdering:
         assert queues[1].queue_name == "zulu"
 
 
+class TestListQueuesWithAdmittableWork:
+    """Tests for ``JobQueueRepository.list_queues_with_admittable_work``.
+
+    Work-driven scan method backing the admission-starvation fix
+    (``daemon/services/job_processor.py:_process_next_job``). The
+    SQLite-backed tests in
+    ``tests/job_queue/test_job_processor_admission_starvation.py``
+    cover the integration contract; this class targets the
+    SQLite repository surface directly so the input-validation
+    contracts (the empty-list ValueError footgun) are pinned at the
+    lowest level where the SQL is built.
+    """
+
+    def test_empty_admission_states_raises_value_error(self, queue_repository):
+        """Empty ``admission_states`` raises ``ValueError``.
+
+        An empty ``IN ()`` clause compiles to ``WHERE FALSE`` on both
+        SQLite and PostgreSQL, which silently returns zero rows and
+        is indistinguishable from "no admittable work" to the
+        caller — an admission-starvation footgun. Surface it loudly
+        rather than letting the SQL degenerate silently.
+        """
+        repo: JobQueueRepository = queue_repository
+        with pytest.raises(ValueError) as excinfo:
+            repo.list_queues_with_admittable_work(admission_states=[])
+
+        # The message names the failure mode so the next person to
+        # debug a starvation incident immediately recognises it.
+        assert "admission_states must be non-empty" in str(excinfo.value)
+
+    def test_default_admission_states_routes_through_active_constant(
+        self, queue_repository
+    ):
+        """The default (``admission_states=None``) is equivalent to
+        passing ``ACTIVE_ADMISSION_STATES`` explicitly.
+
+        Pins the single-source-of-truth contract from Nit #4: the
+        default MUST route through ``models.ACTIVE_ADMISSION_STATES``
+        so the in-flight set is spelled in exactly one place. If the
+        constant is ever extended (e.g. a new admission state added),
+        the default follows automatically.
+        """
+        from daemon.repositories.job_queue.models import ACTIVE_ADMISSION_STATES
+
+        repo: JobQueueRepository = queue_repository
+
+        # Seed a queue with one queued JobItem so the scan has
+        # something to return. Direct INSERT via the engine — mirrors
+        # ``test_job_processor_admission_starvation.py`` helpers and
+        # avoids needing the full ``JobRepository.create`` surface.
+        queue = repo.create(
+            project_id="default-routing-p1",
+            queue_name="routing_fifo",
+            queue_type=QueueType.FIFO.value,
+            concurrency_limit=1,
+        )
+        with repo.engine.begin() as conn:  # type: ignore[attr-defined]
+            from sqlalchemy import text as sql_text
+
+            conn.execute(
+                sql_text(
+                    "INSERT INTO job_queue_items "
+                    "(job_id, agent_id, agent_dir, message, source, "
+                    "project_id, queue_id, priority, admission_state, "
+                    "created_at, instance_id, job_type, retry_count, "
+                    "metadata) VALUES "
+                    "(:job_id, 'a', 'agents/a', 'm', 'api', "
+                    ":project_id, :queue_id, 5, :admission_state, "
+                    ":created_at, NULL, 'task', 0, '{}')"
+                ),
+                {
+                    "job_id": "routing-job-1",
+                    "project_id": queue.project_id,
+                    "queue_id": queue.queue_id,
+                    "admission_state": AdmissionState.QUEUED.value,
+                    "created_at": "2026-08-01T00:00:00+00:00",
+                },
+            )
+
+        default_ids = {
+            q.queue_id for q in repo.list_queues_with_admittable_work()
+        }
+        explicit_ids = {
+            q.queue_id
+            for q in repo.list_queues_with_admittable_work(
+                admission_states=list(ACTIVE_ADMISSION_STATES),
+            )
+        }
+
+        assert default_ids == explicit_ids, (
+            "default (None) must route through ACTIVE_ADMISSION_STATES — "
+            f"got default={default_ids}, explicit={explicit_ids}"
+        )
+        # Sanity: the seeded queue is in both result sets.
+        assert queue.queue_id in default_ids
+
+    def test_explicit_admission_state_works(self, queue_repository):
+        """Passing an explicit list works (positive case for the empty-list guard)."""
+        # Even if no rows match, the call must NOT raise — only the
+        # empty-list case is invalid.
+        result = queue_repository.list_queues_with_admittable_work(
+            admission_states=[AdmissionState.DONE.value],
+        )
+        assert result == []
+
+
 class TestJobQueueModel:
     """Tests for JobQueue model methods."""
 

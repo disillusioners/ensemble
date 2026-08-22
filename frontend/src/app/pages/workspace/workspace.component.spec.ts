@@ -2191,4 +2191,120 @@ describe('WorkspaceComponent', () => {
       expect(component.validatedWorkdir()).toBe('');
     });
   });
+
+  // ── 13) Error banner (S5 regression) ──────────────────────────
+  // Live e2e (tester r3, S5) proved that when the tree API fails
+  // (e.g. project without main_directory → 400), the rendered
+  // `.error-banner` stretched to fill the ENTIRE workspace flex
+  // container (1280×664) and intercepted clicks on the project tab
+  // bar beneath the overlay. The SCSS fix constrains the banner to a
+  // content-height strip via a flex-column `.viewer-content`.
+  //
+  // Jest (jsdom) cannot do real layout, so the CSS contract is pinned
+  // via source-text checks on the compiled stylesheet (precedent:
+  // instance-detail.component.spec.ts) plus a DOM test asserting the
+  // banner renders as a sibling BEFORE the viewer pane (so a
+  // top-anchored strip cannot cover the pane) and stays dismissible.
+  describe('error banner (S5 regression)', () => {
+    /** Boot the workspace and fail the initial tree request (400). */
+    function bootWithTreeError(): void {
+      fixture.detectChanges();
+      const treeReq = httpMock.expectOne(
+        (r) => r.url === '/api/workspace/test-project-id/tree'
+      );
+      // Mirror the real backend envelope for a project without
+      // main_directory: {"detail": {"error": "Project has no
+      // main_directory configured"}}.
+      treeReq.flush(
+        { detail: { error: 'Project has no main_directory configured' } },
+        { status: 400, statusText: 'Bad Request' }
+      );
+      flushValidatedWorkdir('test-project-id');
+      fixture.detectChanges();
+    }
+
+    it('renders the error banner with the backend reason when the tree load fails', () => {
+      bootWithTreeError();
+
+      const banner = fixture.nativeElement.querySelector('.error-banner');
+      expect(banner).not.toBeNull();
+      const message = banner.querySelector('.error-message')?.textContent;
+      expect(message).toContain('Project has no main_directory configured');
+      expect(message).toContain('400');
+    });
+
+    it('renders the banner as a previous sibling of the viewer pane (top strip, not overlay)', () => {
+      bootWithTreeError();
+
+      const content = fixture.nativeElement.querySelector('.viewer-content');
+      expect(content).not.toBeNull();
+      const children = Array.from(content.children);
+      const bannerIndex = children.findIndex((el) =>
+        el.classList.contains('error-banner')
+      );
+      const paneIndex = children.findIndex((el) =>
+        el.classList.contains('empty-state')
+      );
+      expect(bannerIndex).toBeGreaterThanOrEqual(0);
+      expect(paneIndex).toBeGreaterThanOrEqual(0);
+      // Banner comes FIRST in DOM order — with the flex-column layout
+      // it occupies a strip at the top and the pane takes the rest.
+      expect(bannerIndex).toBeLessThan(paneIndex);
+    });
+
+    it('dismiss button clears the banner from the DOM', () => {
+      bootWithTreeError();
+
+      const banner = fixture.nativeElement.querySelector('.error-banner');
+      expect(banner).not.toBeNull();
+      banner.querySelector('button[aria-label="Dismiss error"]')?.click();
+      fixture.detectChanges();
+
+      expect(fixture.nativeElement.querySelector('.error-banner')).toBeNull();
+    });
+
+    describe('SCSS contract (source-text)', () => {
+      // jsdom applies no layout, so the geometry fix is pinned by
+      // reading the stylesheet source — the same pattern used by
+      // instance-detail.component.spec.ts for template invariants.
+      const fs = require('fs') as typeof import('fs');
+      const join = require('path') as typeof import('path');
+      const scssPath = join.join(__dirname, 'workspace.component.scss');
+      const scss = fs.readFileSync(scssPath, 'utf8');
+
+      it('viewer-content is a flex column (banner + pane share vertical space)', () => {
+        const match = scss.match(/\.viewer-content\s*\{[^}]*\}/);
+        expect(match).not.toBeNull();
+        expect(match![0]).toContain('display: flex');
+        expect(match![0]).toContain('flex-direction: column');
+      });
+
+      it('error-banner is constrained to content height (no grow/shrink/stretch)', () => {
+        const matches = scss.match(/\.error-banner\s*\{[^}]*\}/g);
+        expect(matches).not.toBeNull();
+        // The full rule set (there are two blocks: base + position).
+        const all = matches!.join('\n');
+        expect(all).toContain('flex: 0 0 auto');
+        expect(all).toContain('height: auto');
+      });
+
+      it('no blanket `.viewer-content > *` full-height rule remains', () => {
+        // The root cause: `.viewer-content > * { height: 100% }`
+        // stretched EVERY child — including the banner — to the full
+        // workspace height. Must not come back. Comments are stripped
+        // first so prose mentioning the selector doesn't self-trip.
+        const noComments = scss.replace(/\/\*[\s\S]*?\*\//g, '');
+        expect(noComments).not.toMatch(/\.viewer-content\s*>\s*\*/);
+      });
+
+      it('viewer panes still fill the remaining space (flex grow, basis 0)', () => {
+        // Single-rule window: `[^{]*\{[^}]*` keeps the flex declaration
+        // pinned INSIDE the same rule block as the selector — the old
+        // unbounded `[\s\S]*?` could satisfy itself from any later rule.
+        expect(scss).toMatch(
+          /\.viewer-content\s*>\s*app-code-viewer[^{]*\{[^}]*flex:\s*1\s+1\s+0/
+        );
+      });
+    });
+  });
 });

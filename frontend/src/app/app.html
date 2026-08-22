@@ -9,7 +9,12 @@
         <h1 class="app-title">Agents Ensemble</h1>
       </a>
       <nav class="header-nav">
-        <a routerLink="/instances" routerLinkActive="active" class="nav-link">Instances</a>
+        <a
+          [routerLink]="instancesViewState.lastDetailRoute() ?? ['/instances']"
+          [class.active]="isInstancesRoute()"
+          (click)="onInstancesNavClick($event)"
+          class="nav-link"
+        >Instances</a>
         <a routerLink="/sources" routerLinkActive="active" class="nav-link">Sources</a>
         <a routerLink="/schedules" routerLinkActive="active" class="nav-link">Schedules</a>
         <a routerLink="/jobs" routerLinkActive="active" class="nav-link">Jobs</a>
@@ -19,12 +24,29 @@
         }
       </nav>
     </div>
-    
+
     <div class="header-right">
-      <!-- Unified overlay hide button — visible when any overlay is active -->
+      <!-- Unified overlay hide/show button — Round 4 contract:
+           the workspace editor toggle ONLY. Visibility matrix:
+             - workspace visible (any route) → rendered (Hide editor)
+             - workspace recoverable + not on /plan → rendered (Show editor)
+             - workspace recoverable + on /plan → ABSENT (D1; the plane
+               iframe z-1000 covers the workspace z-100 — a workspace
+               re-show under it would be a dead click; the absence is
+               the guard, not a button that misleads the user)
+             - workspace hidden + unbound → ABSENT (always)
+           The icon + aria-label flip mirrors the single workspace
+           condition. See app.ts ``hideOverlayIcon`` /
+           ``hideOverlayAriaLabel`` / ``hideActiveOverlay`` docblocks
+           for the full decision table. -->
       @if (anyOverlayVisible()) {
-        <button mat-icon-button (click)="hideActiveOverlay()" class="overlay-hide-btn" aria-label="Hide overlay">
-          <mat-icon>visibility_off</mat-icon>
+        <button
+          mat-icon-button
+          (click)="hideActiveOverlay()"
+          class="overlay-hide-btn"
+          [attr.aria-label]="hideOverlayAriaLabel()"
+        >
+          <mat-icon>{{ hideOverlayIcon() }}</mat-icon>
         </button>
       }
       <app-job-queue-indicator></app-job-queue-indicator>
@@ -86,5 +108,23 @@
       [style.display]="workspaceOverlayService.showWorkspace() ? 'flex' : 'none'"
       (hide)="workspaceOverlayService.hide()"
     ></app-workspace>
+
+    <!-- Instance detail overlay host anchor. Same root-mounted +
+         display-toggled pattern as the workspace overlay, but the
+         chat component itself is LAZILY created (see App's
+         ``lazyChatMountEffect``): an initially-empty ``<ng-container``
+         anchor (no DOM node — createComponent inserts a sibling) is
+         populated via ``ViewContainerRef.createComponent`` on the
+         FIRST detail open. Keeping the heavy chat chunk out of the
+         initial bundle restored the <6 MB budget (BUG 3); the created
+         component stays alive across all later hide/show cycles, so
+         component-local state (scroll, draft input, expanded todo
+         nodes) still survives navigation. The App effect writes the
+         ``visible`` signal input (driving the chat's SSE/keyboard
+         hide/show convention) and the host element's inline
+         ``display`` (flex/none) on every visibility change.
+         z-index ladder: chat=90, workspace=100, plane=1000 (see
+         app.scss) — workspace wins when both overlays are open. -->
+    <ng-container #chatHost></ng-container>
   </main>
 </div>

@@ -154,6 +154,170 @@ describe('WorkspaceService', () => {
     req.flush('Not found', { status: 404, statusText: 'Not Found' });
   });
 
+  // ── Tree error-message extraction (S5 regression) ─────────────
+  // Live e2e (tester r3, S5): GET /api/workspace/<pid>/tree?path=.
+  // returns 400 {"detail":{"error":"Project has no main_directory
+  // configured"}} for projects without a workspace dir. Angular's
+  // default error.message buried that reason; the service now
+  // surfaces the backend's structured reason in the error signal.
+  describe('getFileTree error message extraction (S5)', () => {
+    it('surfaces the FastAPI detail.error reason with the status for a 400 no-main_directory response', (done) => {
+      service.getFileTree('project-1').subscribe({
+        next: (result) => {
+          expect(result.tree).toEqual([]);
+          expect(service.error()).toBe(
+            'Project has no main_directory configured (400)'
+          );
+          done();
+        },
+        error: done.fail,
+      });
+
+      const req = httpTesting.expectOne(
+        (request) =>
+          request.url === '/api/workspace/project-1/tree' &&
+          request.params.get('path') === '.'
+      );
+      req.flush(
+        { detail: { error: 'Project has no main_directory configured' } },
+        { status: 400, statusText: 'Bad Request' }
+      );
+    });
+
+    it('handles the string-detail envelope {"detail": "..."} too', (done) => {
+      service.getFileTree('project-1').subscribe({
+        next: () => {
+          expect(service.error()).toBe('Workspace directory not found (404)');
+          done();
+        },
+        error: done.fail,
+      });
+
+      const req = httpTesting.expectOne(
+        (request) => request.url === '/api/workspace/project-1/tree'
+      );
+      req.flush(
+        { detail: 'Workspace directory not found' },
+        { status: 404, statusText: 'Not Found' }
+      );
+    });
+
+    it('falls back to Angular message when the body carries no readable reason', (done) => {
+      service.getFileTree('project-1').subscribe({
+        next: () => {
+          expect(service.error()).toContain('500');
+          done();
+        },
+        error: done.fail,
+      });
+
+      const req = httpTesting.expectOne(
+        (request) => request.url === '/api/workspace/project-1/tree'
+      );
+      // Empty body — the extractor must fall back to Angular's
+      // "Http failure response for …: 500 …" message.
+      req.flush(null, { status: 500, statusText: 'Server Error' });
+    });
+
+    it('network-level failures (status 0) surface Angular message, not the bare fallback', (done) => {
+      service.getFileTree('project-1').subscribe({
+        next: () => {
+          // Angular renders network failures as "Http failure response
+          // for (unknown url): 0 Unknown Error" — the extractor's
+          // non-empty-message branch keeps that instead of the generic
+          // "Failed to load file tree" default.
+          expect(service.error()).toContain('Http failure');
+          done();
+        },
+        error: done.fail,
+      });
+
+      const req = httpTesting.expectOne(
+        (request) => request.url === '/api/workspace/project-1/tree'
+      );
+      req.error(new ErrorEvent('Network down'));
+    });
+
+    it('surfaces the bare {error: "..."} envelope (level-3 shape)', (done) => {
+      service.getFileTree('project-1').subscribe({
+        next: () => {
+          expect(service.error()).toBe('Workspace unavailable (503)');
+          done();
+        },
+        error: done.fail,
+      });
+
+      const req = httpTesting.expectOne(
+        (request) => request.url === '/api/workspace/project-1/tree'
+      );
+      req.flush(
+        { error: 'Workspace unavailable' },
+        { status: 503, statusText: 'Service Unavailable' }
+      );
+    });
+
+    it('nested-object error values fall through to Angular message, never "[object Object]"', (done) => {
+      // W1: a structured (non-primitive) error value must not be
+      // stringified — String({}) is "[object Object]", which reads as
+      // noise in the banner.
+      service.getFileTree('project-1').subscribe({
+        next: () => {
+          expect(service.error()).not.toContain('[object Object]');
+          expect(service.error()).toContain('Http failure');
+          done();
+        },
+        error: done.fail,
+      });
+
+      const req = httpTesting.expectOne(
+        (request) => request.url === '/api/workspace/project-1/tree'
+      );
+      req.flush(
+        { detail: { error: { code: 'INTERNAL', hint: 'nested object' } } },
+        { status: 500, statusText: 'Server Error' }
+      );
+    });
+
+    it('HTML-shaped string bodies (proxy pages) fall back to the Angular message', (done) => {
+      // W2: a gateway/proxy error page is machine noise; never surface
+      // its markup verbatim in the banner.
+      service.getFileTree('project-1').subscribe({
+        next: () => {
+          expect(service.error()).not.toContain('<html');
+          expect(service.error()).toContain('Http failure');
+          done();
+        },
+        error: done.fail,
+      });
+
+      const req = httpTesting.expectOne(
+        (request) => request.url === '/api/workspace/project-1/tree'
+      );
+      req.flush(
+        '<html><body>502 Bad Gateway</body></html>',
+        { status: 502, statusText: 'Bad Gateway' }
+      );
+    });
+
+    it('string bodies longer than 200 chars fall back to the Angular message', (done) => {
+      // W2: overly long bodies are stack traces / debug dumps, not a
+      // user-facing reason.
+      service.getFileTree('project-1').subscribe({
+        next: () => {
+          expect(service.error()).toContain('Http failure');
+          expect(service.error()).not.toContain('x'.repeat(50));
+          done();
+        },
+        error: done.fail,
+      });
+
+      const req = httpTesting.expectOne(
+        (request) => request.url === '/api/workspace/project-1/tree'
+      );
+      req.flush('x'.repeat(201), { status: 400, statusText: 'Bad Request' });
+    });
+  });
+
   it('should update currentFile and selectedPath after loading content', (done) => {
     const response = makeFileContent();
 

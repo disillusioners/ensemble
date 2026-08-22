@@ -6,6 +6,7 @@ import { OverlayModule, CdkOverlayOrigin } from '@angular/cdk/overlay';
 import { ApiService } from '../../services/api.service';
 import { SseService, TodoNode, TodoItem, SubTask } from '../../services/sse.service';
 import { TodoGraphPopupComponent } from '../todo-graph-popup/todo-graph-popup.component';
+import { InstancesViewStateService } from '../../services/instances-view-state.service';
 
 // Module-level helpers (no closure over component state)
 
@@ -102,6 +103,18 @@ export class TodoListComponent {
   private readonly sseService = inject(SseService);
   private readonly api = inject(ApiService);
   private readonly destroyRef = inject(DestroyRef);
+  /**
+   * Detail-overlay visibility flag. The todo list lives inside the
+   * root-mounted chat subtree that survives hide cycles, so its
+   * document-level handlers (@HostListener on `document:click` and
+   * `document:keydown.escape`) would otherwise stay live while the
+   * overlay is hidden — an Escape press on the underlying list page
+   * would close a popup the user can't see, and an outside click
+   * would dismiss the same invisible popup. W6: gate the handlers on
+   * ``detailVisible()`` so they only fire when the user can actually
+   * see the todo subtree.
+   */
+  private readonly viewState = inject(InstancesViewStateService);
 
   readonly NODE_WIDTH = NODE_WIDTH;
   readonly NODE_HEIGHT = NODE_HEIGHT;
@@ -341,6 +354,11 @@ export class TodoListComponent {
   // state are reset together.
   @HostListener('document:click', ['$event'])
   onDocumentClick(_event: MouseEvent): void {
+    // W6: the component stays alive (and its document-level listeners
+    // stay registered) while the detail overlay is hidden, so bail
+    // before touching popup state — an outside click on the list page
+    // must not dismiss a popup the user cannot see.
+    if (!this.viewState.detailVisible()) return;
     if (this.commentPopupNodeId() || this.subtaskPopupNodeId()) {
       this.closeAllPopups();
     }
@@ -348,6 +366,9 @@ export class TodoListComponent {
 
   @HostListener('document:keydown.escape', ['$event'])
   onEscape(event: Event): void {
+    // W6: same gate as onDocumentClick — Escape on the underlying list
+    // page must not close an invisible popup while the overlay is hidden.
+    if (!this.viewState.detailVisible()) return;
     if (this.commentPopupNodeId() || this.subtaskPopupNodeId()) {
       event.preventDefault();
       this.closeAllPopups();

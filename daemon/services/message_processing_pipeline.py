@@ -71,6 +71,22 @@ Design notes
   pipeline does NOT create its own token — cancellation ownership
   stays with the dispatcher (the path that knows how to translate
   cancellation into the right terminal action).
+
+- **Pause-report-recovery Phase 1 (Site 1 fix, FM-11-hardened).**
+  The pause cascade's ``graph_task.cancel()`` (instance_lifecycle.py)
+  can fire DURING ``await self._is_instance_paused(...)`` in this
+  pipeline. ``asyncio.CancelledError`` is BaseException (Py3.13+) —
+  a naive marker write inside the pause-skip branch would be killed
+  by the cancellation before reaching the DB. The marker write is
+  therefore hoisted into a ``finally`` block at the try/except
+  indent, scheduled via
+  ``asyncio.create_task(asyncio.shield(asyncio.to_thread(...)))`` —
+  schedule and DETACH, do not hold the Task ref, do not await from
+  the cancelled finally. The detached task survives the
+  ``_handle_cancel`` second cancel point (the
+  ``await callbacks.on_cancel(exc)``) by construction. The
+  sweep's no-row backstop query is the permanent net for a lost
+  write (FM-11 + FM-13).
 """
 
 from __future__ import annotations
@@ -81,6 +97,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 
 from daemon.cancellation import OperationCancelledError
+from daemon.constants import DEFERRED_REASON_PAUSE_TOCTOU
 from daemon.repositories.instance.models import InstanceStatus
 from daemon.services.dependency_bus import get_dependency_bus
 from daemon.services.message_processing_errors import (
@@ -419,6 +436,16 @@ class MessageProcessingPipeline:
             work_fn=_do_process,
         )
 
+        # ---- Pre-Stage-6: pause check (cached for FM-11 hardening) ----
+        # Phase 1 (pause-report-recovery): cache the pause-check result
+        # BEFORE entering the try/except so the marker write can be
+        # hoisted into ``finally`` (FM-11 — the pause cascade can fire
+        # DURING ``await _is_instance_paused(...)`` and the marker
+        # write would never run inside the cancelled if-branch).
+        # Storing the boolean in a local keeps the result observable to
+        # the finally block at the try/except indent.
+        was_paused = await self._is_instance_paused(context.instance_id)
+
         # ---- Stages 3-6: shared post-processing (inside try/except) ----
         try:
             # Stage 4: mark message COMPLETED. The discovery report
@@ -469,7 +496,7 @@ class MessageProcessingPipeline:
             # cached state. If the instance is PAUSED, skip child
             # completion entirely; the next message (resume) will run
             # child completion with a clean state.
-            if await self._is_instance_paused(context.instance_id):
+            if was_paused:
                 logger.info(
                     f"MessageProcessingPipeline: skipping child completion "
                     f"for {context.instance_id[:8]}... — instance is "
@@ -505,6 +532,60 @@ class MessageProcessingPipeline:
                         f"raised (non-fatal): {cb_err}"
                     )
             return ProcessingResult(success=False, error=e)
+        finally:
+            # ── FM-11 Phase 1 marker write (DETACHED SHIELD) ──────────────
+            # When the pause cascade fired, the natural child-completion
+            # path skipped and (without this block) the parent's
+            # delivery obligation would be lost: the child's message is
+            # already COMPLETED, the child's instance is already
+            # terminal, but no ReportInjection row exists yet. Phase 1
+            # persists a DEFERRED marker on ``report_injections`` so the
+            # Phase 2 router/sweep can recover the obligation when the
+            # parent resumes.
+            #
+            # The marker write MUST survive the cancel cascade. The
+            # canonical pattern (W4):
+            #   ``asyncio.create_task(asyncio.shield(asyncio.to_thread(
+            #       repo.ensure_deferred, ...)))``
+            # — schedule and DETACH. The Task ref is NOT held by the
+            # pipeline (a strong ref would tie the dispatch lifecycle to
+            # the pipeline coroutine). The Task is not awaited from
+            # the cancelled finally; awaiting a shielded coroutine from
+            # a cancelled finally would be re-cancelled by the same
+            # cancellation. ALL error handling is self-contained inside
+            # the dispatched coroutine (``try / except Exception`` →
+            # warn-log; DB errors are best-effort by necessity — no
+            # Stage-6 transaction exists).
+            #
+            # Control flow (C2): the detached dispatch is scheduled in
+            # ``finally`` BEFORE the except arm re-raises; the
+            # ``except asyncio.CancelledError`` arm then routes through
+            # ``_handle_cancel``, whose
+            # ``await callbacks.on_cancel(exc)`` is a SECOND cancel
+            # point. The detached dispatch task is not awaited by the
+            # cancelled path, so it survives by construction.
+            #
+            # Event-loop-shutdown caveat: the detached shield task may
+            # be killed if the event loop shuts down between schedule
+            # and execution. The Phase 2 no-row backstop query
+            # (``find_completed_children_missing_report`` promoted to
+            # permanent periodic lane) is the net under a lost write
+            # here (FM-11 + FM-13).
+            #
+            # W5 PARENT_ID: ``ProcessingContext`` has no ``parent_id``
+            # member — FETCH inside the dispatched coroutine. Load the
+            # ``Instance`` row for ``context.instance_id``, read
+            # ``instance.parent_id``. ROOT GUARD: ``parent_id is None``
+            # → no marker (root instances have no parent). ID
+            # orientation: ``parent_instance_id = instance.parent_id``,
+            # ``child_instance_id = context.instance_id``,
+            # ``child_message_id = context.message_id``,
+            # ``reason = DEFERRED_REASON_PAUSE_TOCTOU``.
+            if was_paused:
+                self._schedule_deferred_pause_marker(
+                    instance_id=context.instance_id,
+                    child_message_id=context.message_id,
+                )
 
         # ---- Happy path return ----
         # gate_outcome.content is what the dispatcher (WorkerPool/JobQueue)
@@ -705,6 +786,185 @@ class MessageProcessingPipeline:
                 exc_info=True,
             )
             # Don't fail the task — the message was processed successfully.
+
+    def _schedule_deferred_pause_marker(
+        self,
+        instance_id: str,
+        child_message_id: str | None,
+    ) -> None:
+        """Schedule the FM-11-hardened DEFERRED marker write (DETACHED).
+
+        Phase 1 (pause-report-recovery): when the pause cascade fires
+        DURING the pipeline's post-processing (the cancel-mid-shield
+        race that silently drops child-completion reports), the natural
+        child-completion path is skipped — but the child's message is
+        already COMPLETED and its instance is already terminal. This
+        helper schedules a DEFERRED marker write on
+        ``report_injections`` so the Phase 2 router/sweep can recover
+        the obligation when the parent resumes.
+
+        The canonical pattern (W4 — FM-11 closure Option A):
+
+        .. code-block:: python
+
+            asyncio.create_task(
+                asyncio.shield(
+                    asyncio.to_thread(repo.ensure_deferred, ...)
+                )
+            )
+
+        — schedule and DETACH. The Task ref is NOT held by the
+        pipeline (a strong ref would tie the dispatch lifecycle to the
+        pipeline coroutine). The Task is NOT awaited from the
+        cancelled finally; awaiting a shielded coroutine from a
+        cancelled finally would be re-cancelled by the same
+        cancellation. ALL error handling is self-contained inside the
+        dispatched coroutine (``try / except Exception`` → warn-log;
+        DB errors are best-effort by necessity — no Stage-6
+        transaction exists).
+
+        Control flow (C2): the detached dispatch is scheduled in the
+        caller's ``finally`` block BEFORE the except arm re-raises;
+        ``except asyncio.CancelledError`` then routes through
+        ``_handle_cancel``, whose ``await callbacks.on_cancel(exc)``
+        is a SECOND cancel point. The detached dispatch task is not
+        awaited by the cancelled path, so it survives by construction.
+
+        Event-loop-shutdown caveat: the detached shield task may be
+        killed if the event loop shuts down between schedule and
+        execution. The Phase 2 no-row backstop query
+        (``find_completed_children_missing_report`` promoted to
+        permanent periodic lane) is the net under a lost write here
+        (FM-11 + FM-13).
+
+        W5 PARENT_ID: ``ProcessingContext`` has no ``parent_id``
+        member — FETCH inside the dispatched coroutine. Load the
+        ``Instance`` row for ``instance_id``, read
+        ``instance.parent_id``. ROOT GUARD: ``parent_id is None`` → no
+        marker (root instances have no parent and therefore no
+        delivery obligation).
+
+        Args:
+            instance_id: The CHILD instance whose completion was
+                paused (the ``context.instance_id`` from the pipeline).
+            child_message_id: The ``message_id`` that just completed
+                (the ``context.message_id``).
+        """
+        repo = getattr(
+            self._manager, "_report_injection_repo", None
+        )
+        if repo is None:
+            logger.debug(
+                f"MessageProcessingPipeline: _report_injection_repo "
+                f"unavailable; cannot schedule DEFERRED marker for "
+                f"{instance_id[:8]}..."
+            )
+            return
+
+        instance_repo = getattr(
+            self._manager, "_instance_repository", None
+        )
+        if instance_repo is None:
+            logger.debug(
+                f"MessageProcessingPipeline: _instance_repository "
+                f"unavailable; cannot fetch parent_id for "
+                f"{instance_id[:8]}..."
+            )
+            return
+
+        reason = DEFERRED_REASON_PAUSE_TOCTOU
+
+        async def _dispatch_marker() -> None:
+            """Self-contained dispatcher (FM-11 closure)."""
+            try:
+                # W5: fetch the child's parent_id inside the
+                # coroutine — ProcessingContext has no parent_id
+                # member. The instance row lookup is the single point
+                # of truth for the parent relationship (instance
+                # hierarchy lookup).
+                instance = await asyncio.to_thread(
+                    instance_repo.get, instance_id
+                )
+                if instance is None:
+                    logger.info(
+                        f"MessageProcessingPipeline: DEFERRED marker "
+                        f"skipped — instance {instance_id[:8]}... "
+                        f"disappeared before fetch"
+                    )
+                    return
+                parent_id = getattr(instance, "parent_id", None)
+                # ROOT GUARD: root instances have no parent and
+                # therefore no delivery obligation.
+                if parent_id is None:
+                    logger.debug(
+                        f"MessageProcessingPipeline: DEFERRED marker "
+                        f"skipped for root instance "
+                        f"{instance_id[:8]}... (no parent_id)"
+                    )
+                    return
+                # ID orientation: parent = fetched parent_id,
+                # child = instance_id, message = child_message_id,
+                # reason = DEFERRED_REASON_PAUSE_TOCTOU.
+                await asyncio.to_thread(
+                    repo.ensure_deferred,
+                    parent_instance_id=parent_id,
+                    child_instance_id=instance_id,
+                    child_message_id=child_message_id or "",
+                    deferred_reason=reason,
+                )
+            except Exception as e:
+                # ALL error handling self-contained — best-effort by
+                # necessity. No Stage-6 transaction exists to roll
+                # back. The Phase 2 no-row backstop query is the net
+                # under a lost write.
+                logger.warning(
+                    f"MessageProcessingPipeline: DEFERRED marker "
+                    f"write failed for {instance_id[:8]}... "
+                    f"(non-fatal, Phase 2 no-row backstop will catch): "
+                    f"{e}"
+                )
+
+        # Schedule + DETACH. The Task ref is intentionally dropped —
+        # the dispatch lifecycle is decoupled from the pipeline
+        # coroutine. The dispatched coroutine never raises to the
+        # caller (all errors are caught inside ``_dispatch_marker``).
+        try:
+            # W4 canonical pattern: ``asyncio.create_task(
+            # asyncio.shield(asyncio.to_thread(...)))`` — schedule
+            # and DETACH. Wrapped in an outer ``async def`` so the
+            # ``create_task`` API accepts a coroutine (Python 3.14
+            # ``create_task`` rejects the ``Future`` that
+            # ``asyncio.shield`` returns when invoked outside a
+            # coroutine; the outer coroutine bridges the gap).
+            async def _shielded_marker() -> None:
+                await asyncio.shield(_dispatch_marker())
+
+            task = asyncio.create_task(_shielded_marker())
+            # Attach a no-op done callback so a warning is logged if
+            # the Task is unexpectedly cancelled mid-flight (e.g. an
+            # event-loop shutdown). We do not retain the Task ref —
+            # the pipeline cannot wait for it.
+            def _log_done(t: asyncio.Task) -> None:
+                if t.cancelled():
+                    logger.warning(
+                        f"MessageProcessingPipeline: DEFERRED marker "
+                        f"Task for {instance_id[:8]}... cancelled "
+                        f"(event-loop shutdown?)"
+                    )
+                elif t.exception() is not None:
+                    logger.warning(
+                        f"MessageProcessingPipeline: DEFERRED marker "
+                        f"Task for {instance_id[:8]}... raised: "
+                        f"{t.exception()!r}"
+                    )
+            task.add_done_callback(_log_done)
+        except RuntimeError as e:
+            # No running event loop — extremely unusual (the pipeline
+            # is async); log and move on.
+            logger.warning(
+                f"MessageProcessingPipeline: could not schedule "
+                f"DEFERRED marker (no event loop): {e}"
+            )
 
     async def _is_instance_paused(self, instance_id: str) -> bool:
         """Defensive PAUSED re-check: query fresh instance status from DB.

@@ -12,6 +12,7 @@ import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatIconModule } from '@angular/material/icon';
 import { ApiService } from '../../services/api.service';
 import { SseService } from '../../services/sse.service';
+import { InstancesViewStateService } from '../../services/instances-view-state.service';
 import type { InstanceInfo } from '../../models';
 
 export interface InstanceDeleteDialogData {
@@ -55,6 +56,14 @@ export class InstanceDeleteDialogComponent {
   private readonly snackBar = inject(MatSnackBar);
   private readonly sseService = inject(SseService);
   private readonly router = inject(Router);
+  /**
+   * View-state singleton for the root-mounted detail overlay.
+   * Successful termination AND hard-delete from this dialog must drop
+   * the cached id (W1) so the next "Instances" nav-link click does
+   * not restore a dead instance. The service is a no-op when the
+   * terminated id doesn't match the current cache.
+   */
+  private readonly viewState = inject(InstancesViewStateService);
 
   protected readonly dialogRef =
     inject<MatDialogRef<InstanceDeleteDialogComponent>>(MatDialogRef);
@@ -88,8 +97,13 @@ export class InstanceDeleteDialogComponent {
     if (this.isBusy()) return;
     this.isBusy.set(true);
 
-    this.api.deleteInstance(this.data.instance.instance_id, false).subscribe({
+    const terminatedId = this.data.instance.instance_id;
+    this.api.deleteInstance(terminatedId, false).subscribe({
       next: () => {
+        // W1: drop the cached id from the view-state service. The
+        // service is a no-op when the terminated id isn't the active
+        // cache, so this is safe for unrelated rows too.
+        this.viewState.clearInstance(terminatedId);
         this.snackBar.open('Instance terminated', 'Close', {
           duration: 3000,
           panelClass: 'success-snackbar',
@@ -142,8 +156,13 @@ export class InstanceDeleteDialogComponent {
     if (this.isBusy()) return;
     this.isBusy.set(true);
 
-    this.api.deleteInstance(this.data.instance.instance_id, true).subscribe({
+    const deletedInstanceId = this.data.instance.instance_id;
+    this.api.deleteInstance(deletedInstanceId, true).subscribe({
       next: () => {
+        // W1: drop the cached id from the view-state service. Same
+        // semantics as handleTerminate — clearInstance is a no-op
+        // when the id isn't the active cache.
+        this.viewState.clearInstance(deletedInstanceId);
         this.snackBar.open('Instance deleted', 'Close', {
           duration: 3000,
           panelClass: 'success-snackbar',
@@ -153,7 +172,6 @@ export class InstanceDeleteDialogComponent {
         // receiving events for an instance that no longer exists in the DB.
         // chat.component.ts does the same in its ngOnDestroy / handleInstanceIdChange
         // paths; the call is idempotent and safe when no channel is open.
-        const deletedInstanceId = this.data.instance.instance_id;
         this.sseService.disconnect();
         this.sseService.clearEvents();
 

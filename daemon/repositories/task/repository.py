@@ -927,6 +927,14 @@ class TaskRepository:
                         )
                 END
             """
+            # ``source_task_id = CAST(:task_id AS TEXT)`` — the
+            # ``dependency_watchers.source_task_id`` column is TEXT
+            # (Phase 1 schema, cross-driver literal) while
+            # ``Task.id`` is INTEGER on SQLite (rowid-backed) and
+            # INTEGER/BIGINT on PostgreSQL. The CAST is the canonical
+            # cross-driver cross-type join key (cheap-suggestion
+            # 2026-08-20 — explicit contract comment at the CAST
+            # site for future readers).
             updated_counts["dependency_watchers"] = conn.execute(
                 text(f"""
                     UPDATE dependency_watchers

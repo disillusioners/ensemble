@@ -29,18 +29,43 @@ logger = logging.getLogger(__name__)
 
 class JobProcessor:
     """Background worker that processes queued jobs.
-    
+
     Continuously polls for pending jobs across all queues and processes them.
     Uses two-level pause checks: project-level (job_queue_paused) and queue-level
     (is_paused) to control job processing.
-    
-    The processing order is:
-    1. Iterate through all projects
-    2. Skip if project.job_queue_paused is True (master pause)
-    3. For each active queue in the project, skip if queue.is_paused is True
-    4. Get next pending job for the queue
-    5. Acquire per-queue lock and start job
-    
+
+    Work-driven scan (admission starvation fix, 2026-08): the scan set
+    is derived from queued/active JobItems themselves via
+    ``JobQueueRepository.list_queues_with_admittable_work``, NOT from
+    ``project_repo.list_projects``. The previous project scan starved
+    in DBs with >100 projects (proved on ``ensemble_dev`` 338-projects,
+    system-default ranked #189, 3/4 e2e failures, 0 LLM calls) because
+    ``list_projects(limit=100, updated_at DESC)`` silently truncated
+    the project list and the system-default project's queues were
+    never visited — queued JobItems stayed
+    ``admission_state='queued'``, the queue-admission guard in
+    ``claim_pending_task`` (``task/repository.py:1248-1254``) refused
+    every ``Task.claim`` attempt, and the worker pool sat idle.
+
+    Processing order:
+    1. ``queue_repo.list_queues_with_admittable_work()`` returns
+       queues that hold at least one non-deleted JobItem in
+       ``admission_state IN ('queued','active')``. Bounded by
+       the scan cap (``limit=1000``) so the polling hot path
+       stays bounded.
+    2. For each queue, skip if ``queue.is_paused`` (queue pause).
+    3. Cached project pause lookup: skip if
+       ``project.job_queue_paused`` (project pause). ``None``
+       (cache miss on lookup error) means "don't skip" — the
+       downstream pause check inside
+       ``JobQueueService.start_job`` is the second line of
+       defence, and a transient repo error must not wedge the
+       queue.
+    4. Defer/background idle gates per
+       ``_defer_idle_check`` / ``_background_idle_check``.
+    5. Get next pending job for the queue; acquire per-queue
+       lock and start job.
+
     Attributes:
         _queue_service: JobQueueService instance for job operations.
         _instance_manager: InstanceManager instance for spawning instances.
@@ -629,550 +654,621 @@ class JobProcessor:
                 logger.exception(f"Error in processing loop: {e}")
     
     async def _process_next_job(self) -> None:
-        """Get the next pending job from any active queue and process it.
-        
+        """Get the next pending job from any queue that has work and process it.
+
         Implements two-level pause checking:
         1. Project-level pause (job_queue_paused) - master override that stops ALL queues
         2. Queue-level pause (is_paused) - individual queue control
-        
+
+        Work-driven scan (admission starvation fix, 2026-08):
+        The scan set is derived from queued/active JobItems themselves
+        via ``JobQueueRepository.list_queues_with_admittable_work``,
+        NOT from ``project_repo.list_projects``. The previous project
+        scan starved in DBs with >100 projects (proved on
+        ``ensemble_dev`` 338-projects, system-default ranked #189,
+        3/4 e2e failures, 0 LLM calls) because
+        ``list_projects(limit=100, updated_at DESC)`` silently
+        truncated the project list and the system-default project's
+        queues were never visited — queued JobItems stayed
+        ``admission_state='queued'``, the queue-admission guard in
+        ``claim_pending_task`` (``task/repository.py:1248-1254``)
+        refused every ``Task.claim`` attempt, and the worker pool
+        sat idle.
+
         Processing order:
-        1. Get all projects
-        2. Skip if project.job_queue_paused is True (master pause)
-        3. Get all queues for the project
-        4. Skip if queue.is_paused is True (individual queue pause)
-        5. Get next pending job for the queue
-        6. Acquire per-queue lock and start job
+        1. ``queue_repo.list_queues_with_admittable_work()`` returns
+           queues that hold at least one non-deleted JobItem in
+           ``admission_state IN ('queued','active')``. Bounded by
+           the scan cap (``limit=1000``) so the polling hot path
+           stays bounded.
+        2. For each queue, skip if ``queue.is_paused`` (queue pause).
+        3. Cached project pause lookup: skip if
+           ``project.job_queue_paused`` (project pause).
+        4. Defer/background idle gates per
+           ``_defer_idle_check`` / ``_background_idle_check``.
+        5. Get next pending job for the queue; acquire per-queue
+           lock and start job.
+
+        The previous project-list iteration never visited queues
+        for projects outside the top-100 by ``updated_at``; the
+        work-driven scan naturally covers every project that has
+        even one queued/active JobItem, bounded only by the cap.
+        See tests/job_queue/test_job_processor_admission_starvation.py
+        for the regression test (fails on base, passes on fix).
+
+        Note: the ``queue_repo.list_queues_with_admittable_work``
+        ordering is ``min(created_at) ASC`` so the queue with the
+        oldest backlog is processed first. Multiple queues may share
+        a project_id; the project pause state is cached once per
+        project to avoid N+1 ``project_repo.get`` calls.
         """
         logger.debug("[TRACE] _process_next_job: waking up to check for jobs")
-        
-        # Get all projects
-        projects = await asyncio.to_thread(self._project_repo.list_projects)
-        
-        logger.debug(f"[TRACE] _process_next_job: checking {len(projects)} project(s)")
-        
-        for project in projects:
-            # Level 1 pause check: Master pause (project-level)
-            # This is the master override that stops ALL queues for a project
-            if project.job_queue_paused:
+
+        # Work-driven scan: enumerate queues via actual pending
+        # work. Bypasses the project-list iteration that starved in
+        # DBs with >100 projects (system-default often ranks outside
+        # the default limit=100). See method docstring above.
+        queues_with_work = await asyncio.to_thread(
+            self._queue_repo.list_queues_with_admittable_work,
+            limit=1000,
+        )
+
+        logger.debug(
+            f"[TRACE] _process_next_job: {len(queues_with_work)} "
+            f"queue(s) with admittable work"
+        )
+
+        # Per-project pause cache: many queues may share a
+        # project_id. Look up each project's ``job_queue_paused`` at
+        # most once per iteration. ``None`` (cache miss on lookup
+        # error) means "don't skip" — the downstream pause check
+        # inside ``JobQueueService.start_job`` is the second line of
+        # defence, and a transient repo error must not wedge the
+        # queue.
+        project_pause_cache: dict[str, bool | None] = {}
+
+        for queue in queues_with_work:
+            # Level 2 pause check: Individual queue pause
+            # This allows pausing specific queues while others continue
+            if queue.is_paused:
                 continue
-            
-            # Get all queues for this project
-            queues = await asyncio.to_thread(
-                self._queue_repo.list_by_project, project.project_id
-            )
-            
-            for queue in queues:
-                # Level 2 pause check: Individual queue pause
-                # This allows pausing specific queues while others continue
-                if queue.is_paused:
-                    continue
 
-                # Defer queue check: only process when project is completely idle
-                # Only applies to queues with queue_type attribute (skip mock/test objects)
-                pending = await asyncio.to_thread(
-                    self._queue_service._repository.list_pending_by_queue, queue.queue_id
-                )
-                
-                if queue.queue_type == "defer" and pending:
-                    # Gate A (Phase 1 of defer-seam bugfix, 2026-06-30):
-                    # Defer queues only activate when no non-deferred
-                    # work is in flight. Use the shared predicate on
-                    # TaskRepository so the claim path and the admission
-                    # probe never disagree.
-                    #
-                    # Access path: ``JobProcessor`` does not directly
-                    # inject ``TaskRepository``; reach it through the
-                    # already-injected ``InstanceManager``. ``TaskRepository.has_active_non_deferred_work``
-                    # is the shared predicate backing Gate A, Gate B
-                    # (``_select_next_eligible_job``), and the maintenance
-                    # ``_is_idle`` check.
-                    non_defer_active = await self._defer_idle_check(
-                        queue.project_id
-                    )
-                    if non_defer_active:
-                        continue
-
-                if queue.queue_type == "background" and pending:
-                    # Gate A (Phase 3 background seam, 2026-07-14):
-                    # Background queues only activate when no
-                    # non-deferred, non-background work is in flight
-                    # ANYWHERE in the system (system-wide scope, not
-                    # project-scoped — see
-                    # ``_background_idle_check`` docstring for the
-                    # rationale and ``has_active_non_background_work``
-                    # for the shared predicate). Uses the same
-                    # shared predicate so the claim path and the
-                    # admission probe never disagree. Sister check to
-                    # the defer gate above; runs ALONGSIDE it so a
-                    # project that has both a defer queue and a
-                    # background queue evaluates both gates correctly.
-                    background_should_wait = await self._background_idle_check()
-                    if background_should_wait:
-                        continue
-
-                if not pending:
-                    # Also check for ACTIVE-admission jobs that have instance_id set but
-                    # no spawned instance yet. These jobs were transitioned to
-                    # admission_state='active' (via status=PROCESSING) by
-                    # trigger_next_job() but the JobProcessor missed them due to
-                    # event-driven or polling timing gaps.
-                    #
-                    # Phase 3 admission-decision migration: filter on
-                    # ``admission_state='active'`` rather than
-                    # ``statuses=['processing']``. This catches PAUSED jobs too
-                    # (admission_state='active' under the new model — pause is
-                    # an Instance concern, lock still held), which the legacy
-                    # ``status='processing'`` filter silently dropped.
-                    active_jobs, _ = await asyncio.to_thread(
-                        self._queue_service._repository.list_by_queue, queue.queue_id,
-                        admission_states=[AdmissionState.ACTIVE.value]
-                    )
-                    for proc_job in (active_jobs or []):
-                        # W1: skip message orphans. Message jobs target
-                        # an EXISTING instance — re-running
-                        # ``spawn_instance_with_mcp`` or
-                        # ``enqueue_message`` here would create a
-                        # duplicate instance + duplicate Task. The
-                        # synchronous Task contract
-                        # (``enqueue_message_job`` already wrote the
-                        # Task row) means the message branch in
-                        # ``_process_next_job`` is the only legitimate
-                        # dispatch path for message jobs. ACTIVE
-                        # message orphans whose Task is missing are
-                        # recovered by ``JobRecoveryService
-                        # .recover_on_startup`` (it checks Task
-                        # existence and resets stale rows to queued).
-                        if proc_job.job_type == "message":
-                            continue
-
-                        # NOTE: the legacy "inline MESSAGE-specific
-                        # orphan guard" was removed in D11. The W1
-                        # guard above now owns that responsibility
-                        # for the ACTIVE-admission loop: message jobs
-                        # are skipped up front because their target
-                        # instance already exists and the Task row is
-                        # already written by ``enqueue_message_job``.
-                        # A stuck ACTIVE MESSAGE row that survives
-                        # both the message branch and the W1 skip is
-                        # recovered by ``JobRecoveryService`` at
-                        # startup; we no longer attempt inline
-                        # re-spawn or fail here.
-
-                        # Skip if instance already spawned (normal case).
-                        # If instance_id is set but get_instance raises KeyError,
-                        # the instance might be in the process of being spawned
-                        # (e.g., by JobFeedbackObserver). Skip and let it complete.
-                        if proc_job.instance_id:
-                            try:
-                                await self._instance_manager.get_instance(proc_job.instance_id)
-                                continue  # Instance exists, skip
-                            except KeyError:
-                                # Instance not in memory — check if it was terminated/completed/errored
-                                # before attempting to re-spawn
-                                if (
-                                    hasattr(self._instance_manager, '_instance_repository')
-                                    and self._instance_manager._instance_repository is not None
-                                ):
-                                    try:
-                                        instance_meta = await asyncio.to_thread(
-                                            self._instance_manager._instance_repository.get,
-                                            proc_job.instance_id
-                                        )
-                                        if instance_meta is not None:
-                                            # Instance exists in DB — check its status
-                                            if instance_meta.status == InstanceStatus.COMPLETED.value:
-                                                if await self._emit_in_progress_if_children_pending(
-                                                    instance_meta, proc_job, "TASK", "completed"
-                                                ):
-                                                    continue
-                                                logger.info(
-                                                    f"JobProcessor: TASK job {proc_job.job_id[:8]}... "
-                                                    f"instance {proc_job.instance_id[:8]}... is completed, "
-                                                    f"completing job"
-                                                )
-                                                result_summary = await self._capture_result_summary(
-                                                    proc_job.instance_id, proc_job.job_id, "TASK"
-                                                )
-                                                await self._queue_service.complete_job(
-                                                    proc_job.job_id,
-                                                    demand_state=DemandState.COMPLETED,
-                                                    result_summary=result_summary,
-                                                )
-                                                self._cleanup_in_progress_tracking(proc_job.job_id)
-                                                continue
-                                            elif instance_meta.status in TERMINAL_CANCEL_STATUSES:
-                                                status_display = instance_meta.status.value if hasattr(instance_meta.status, 'value') else instance_meta.status
-                                                if await self._emit_in_progress_if_children_pending(
-                                                    instance_meta, proc_job, "TASK", status_display
-                                                ):
-                                                    continue
-                                                logger.info(
-                                                    f"JobProcessor: TASK job {proc_job.job_id[:8]}... "
-                                                    f"instance {proc_job.instance_id[:8]}... is {status_display}, "
-                                                    f"cancelling job"
-                                                )
-                                                await self._queue_service.complete_job(
-                                                    proc_job.job_id,
-                                                    demand_state=DemandState.CANCELLED,
-                                                    error=f"Instance is {status_display}",
-                                                )
-                                                self._cleanup_in_progress_tracking(proc_job.job_id)
-                                                continue
-                                            elif instance_meta.status == InstanceStatus.ERROR.value:
-                                                if await self._emit_in_progress_if_children_pending(
-                                                    instance_meta, proc_job, "TASK", "errored"
-                                                ):
-                                                    continue
-                                                logger.warning(
-                                                    f"JobProcessor: TASK job {proc_job.job_id[:8]}... "
-                                                    f"instance {proc_job.instance_id[:8]}... errored, failing job"
-                                                )
-                                                await self._queue_service.complete_job(
-                                                    proc_job.job_id,
-                                                    demand_state=DemandState.FAILED,
-                                                    error="Instance errored",
-                                                )
-                                                self._cleanup_in_progress_tracking(proc_job.job_id)
-                                                continue
-                                            elif instance_meta.status == InstanceStatus.PAUSED.value:
-                                                logger.debug(
-                                                    f"JobProcessor: TASK job {proc_job.job_id[:8]}... "
-                                                    f"instance {proc_job.instance_id[:8]}... is paused, skipping"
-                                                )
-                                                continue
-                                            # Instance is in a non-terminal state but not in memory —
-                                            # genuine crash, proceed to re-spawn below
-                                    except Exception as e:
-                                        logger.warning(
-                                            f"JobProcessor: failed to check instance status for "
-                                            f"{proc_job.instance_id[:8]}...: {e}"
-                                        )
-                                        continue  # Don't crash on transient errors
-
-                                # Instance genuinely crashed or missing — re-spawn
-                                logger.info(
-                                    f"JobProcessor: recovering orphan PROCESSING job {proc_job.job_id[:8]}... "
-                                    f"(instance {proc_job.instance_id[:8]}... missing)"
-                                )
-                                try:
-                                    instance_id = await self._instance_manager.spawn_instance_with_mcp(
-                                        agent_id=proc_job.agent_id,
-                                        instance_id=proc_job.instance_id,  # Reuse existing valid UUID
-                                        project_id=proc_job.project_id,
-                                    )
-                                    result = await self._instance_manager.enqueue_message(
-                                        instance_id=instance_id,
-                                        message=proc_job.message,
-                                        source=proc_job.source,
-                                        is_deferred=(queue.queue_type == "defer"),
-                                        is_background=(queue.queue_type == "background"),
-                                    )
-                                    # Stamp message_id defensively — a
-                                    # stamping failure must not fail an
-                                    # otherwise-successful recovery. The
-                                    # NULL-safe cross-system guard tolerates
-                                    # a missing ``message_id``.
-                                    if result and result.message_id:
-                                        try:
-                                            await asyncio.to_thread(
-                                                self._queue_service._repository.stamp_message_id,
-                                                proc_job.job_id, result.message_id,
-                                            )
-                                        except Exception as stamp_err:
-                                            logger.warning(
-                                                f"JobProcessor: failed to stamp "
-                                                f"message_id on orphan recovery "
-                                                f"for job {proc_job.job_id[:8]}...: {stamp_err}"
-                                            )
-                                    logger.info(
-                                        f"Job {proc_job.job_id} recovered for instance {instance_id} "
-                                        f"on queue {queue.queue_name}"
-                                    )
-                                    continue  # Successfully recovered
-                                except Exception as e:
-                                    # Failed to recover - mark as failed to prevent permanent orphan
-                                    logger.error(
-                                        f"Failed to recover orphan job {proc_job.job_id[:8]}...: {e}"
-                                    )
-                                    await self._queue_service.complete_job(
-                                        proc_job.job_id, demand_state=DemandState.FAILED, error=str(e)
-                                    )
-                                    self._cleanup_in_progress_tracking(proc_job.job_id)
-                                    continue
-                            except Exception as e:
-                                logger.warning(
-                                    "Instance check failed for job %s (instance %s): %s",
-                                    proc_job.job_id[:8],
-                                    proc_job.instance_id[:8] if proc_job.instance_id else "N/A",
-                                    e,
-                                )
-                                continue  # Don't crash on transient errors
-                        # No instance_id: this is a genuine orphan (shouldn't happen
-                        # in normal operation, but kept as safety net)
-                        # This job was started by trigger_next_job() but instance not spawned
-                        logger.info(
-                            f"JobProcessor: resuming orphan PROCESSING job {proc_job.job_id[:8]}... "
-                            f"on queue {queue.queue_name}"
-                        )
-                        try:
-                            instance_id = await self._instance_manager.spawn_instance_with_mcp(
-                                agent_id=proc_job.agent_id,
-                                instance_id=proc_job.instance_id,
-                                project_id=proc_job.project_id,
-                            )
-                            result = await self._instance_manager.enqueue_message(
-                                instance_id=instance_id,
-                                message=proc_job.message,
-                                source=proc_job.source,
-                                is_deferred=(queue.queue_type == "defer"),
-                                is_background=(queue.queue_type == "background"),
-                            )
-                            # Stamp message_id defensively — a stamping
-                            # failure must not fail an otherwise-successful
-                            # resume. The NULL-safe cross-system guard
-                            # tolerates a missing ``message_id``.
-                            if result and result.message_id:
-                                try:
-                                    await asyncio.to_thread(
-                                        self._queue_service._repository.stamp_message_id,
-                                        proc_job.job_id, result.message_id,
-                                    )
-                                except Exception as stamp_err:
-                                    logger.warning(
-                                        f"JobProcessor: failed to stamp "
-                                        f"message_id on orphan resume "
-                                        f"for job {proc_job.job_id[:8]}...: {stamp_err}"
-                                    )
-                            logger.info(
-                                f"Job {proc_job.job_id} resumed for instance {instance_id} "
-                                f"on queue {queue.queue_name}"
-                            )
-                        except Exception as e:
-                            logger.error(f"Failed to resume orphan job {proc_job.job_id[:8]}...: {e}")
-                            await self._queue_service.complete_job(
-                                proc_job.job_id, demand_state=DemandState.FAILED, error=str(e)
-                            )
-                            self._cleanup_in_progress_tracking(proc_job.job_id)
-                    continue
-
-                job = pending[0]
-
-                # [TRACE] Log job found
-                job_type = getattr(job, 'job_type', 'task')
-                logger.info(
-                    f"[TRACE] _process_next_job: found PENDING job {job.job_id[:8]}... "
-                    f"job_type={job_type} instance={job.instance_id[:8] if job.instance_id else 'N/A'}..."
-                )
-
-                # NOTE: The legacy MESSAGE-specific DB-level
-                # sibling pre-check was removed in D11. The unified
-                # observer owns message dispatch end-to-end — it
-                # runs the concurrency gate via the Execution Gate.
-                # JobQueue no longer needs a DB-level sibling check
-                # for MESSAGE jobs.
-                #
-                # Instance-level pause, however, must be evaluated here
-                # (BEFORE ``start_job``) so the test contract holds:
-                # ``TestJobProcessorInstancePause::test_skips_job_for_paused_instance``
-                # asserts that ``start_job`` is NOT called when the
-                # target instance is paused. The downstream pause check
-                # inside ``JobQueueService.start_job`` would return None
-                # too late — we want to avoid the lock acquisition
-                # attempt entirely. Errors here fall through to
-                # ``start_job`` (which has its own pause check) so a
-                # transient repo error doesn't wedge the queue.
-                if (
-                    job.instance_id
-                    and getattr(self._instance_manager, "_instance_repository", None) is not None
-                ):
-                    try:
-                        instance_meta = await asyncio.to_thread(
-                            self._instance_manager._instance_repository.get,
-                            job.instance_id,
-                        )
-                        if instance_meta is not None and instance_meta.status == InstanceStatus.PAUSED.value:
-                            status_display = (
-                                instance_meta.status.value
-                                if hasattr(instance_meta.status, "value")
-                                else instance_meta.status
-                            )
-                            logger.info(
-                                f"JobProcessor: SKIP {job_type} job "
-                                f"{job.job_id[:8]}... — instance "
-                                f"{job.instance_id[:8]}... is {status_display}, "
-                                f"staying PENDING"
-                            )
-                            continue
-                    except Exception as e:
-                        logger.warning(
-                            f"JobProcessor: instance pause pre-check failed "
-                            f"for job {job.job_id[:8]}... (instance "
-                            f"{job.instance_id[:8] if job.instance_id else 'N/A'}...): "
-                            f"{e}. Falling through to start_job."
-                        )
-
-                # Try to start the job (acquires per-queue lock internally)
-                # Note: JobQueueService.start_job() also performs an
-                # instance pause check — that's the second line of defense
-                # if the pre-check above raced or errored.
-                logger.debug(f"[TRACE] _process_next_job: attempting to start job {job.job_id[:8]}...")
+            # Level 1 pause check: Master pause (project-level)
+            # Cached across iterations because multiple queues
+            # commonly share a project_id.
+            pid = queue.project_id
+            if pid not in project_pause_cache:
                 try:
-                    started_job = await self._queue_service.start_job(job.job_id)
-                    if started_job is None:
-                        # Lock acquisition failed or job was cancelled
-                        logger.debug(f"[TRACE] _process_next_job: SKIP job {job.job_id[:8]}... — start_job returned None (lock contention or cancelled)")
-                        continue
-
-                    logger.debug(
-                        f"[TRACE] _process_next_job: started_job {started_job.job_id[:8]}... "
-                        f"instance={started_job.instance_id[:8] if started_job.instance_id else 'N/A'}... "
-                        f"admission_state={started_job.admission_state}"
+                    project = await asyncio.to_thread(
+                        self._project_repo.get, pid
                     )
+                    if project is None:
+                        project_pause_cache[pid] = False
+                    else:
+                        project_pause_cache[pid] = bool(
+                            getattr(project, "job_queue_paused", False)
+                        )
+                except Exception as lookup_err:
+                    logger.warning(
+                        f"JobProcessor._process_next_job: project "
+                        f"pause lookup failed for {pid!r}: "
+                        f"{lookup_err!r} — treating as unpaused"
+                    )
+                    # Fail-open sentinel: ``None`` means "don't skip" — treated as
+                    # not-paused here; JobQueueService.start_job re-checks
+                    # ``job_queue_paused`` at job_queue_service.py:2976-2982 as
+                    # the second line of defence, so a transient repo error
+                    # cannot wedge the queue.
+                    project_pause_cache[pid] = None
+            if project_pause_cache[pid]:
+                continue
 
-                    # Phase 5 (Option B): MESSAGE BRANCH — wake-only.
-                    # Synchronous Task contract:
-                    #   - ``enqueue_message_job`` already created the
-                    #     Task + MessageQueue rows synchronously via
-                    #     ``_prepare_enqueued_message`` and stamped
-                    #     ``message_id`` onto the JobItem. The Task
-                    #     row is PENDING and visible to the worker pool.
-                    #   - This branch does NOT call ``enqueue_message``
-                    #     (would create a duplicate Task) and does NOT
-                    #     call ``spawn_instance_with_mcp`` (message
-                    #     jobs target an EXISTING instance — the
-                    #     ``start_job`` step preserved the
-                    #     ``instance_id`` from the original
-                    #     ``enqueue_message_job`` call).
-                    #   - We ONLY wake the worker pool so a worker
-                    #     thread can claim the pre-existing PENDING
-                    #     Task and route it to the existing instance.
-                    # ``JobFeedbackObserver`` owns the terminal
-                    # transition + slot-lock release.
-                    if job.job_type == "message":
-                        try:
-                            # Extract dispatch-time metadata (stored on
-                            # the JobItem's JSON ``job_metadata`` column
-                            # at ``enqueue_message_job`` time). Kept
-                            # here as a no-op read — useful for
-                            # debugging via structured logs.
-                            job_meta = job.job_metadata or {}
+            # Defer queue check: only process when project is completely idle
+            # Only applies to queues with queue_type attribute (skip mock/test objects)
+            pending = await asyncio.to_thread(
+                self._queue_service._repository.list_pending_by_queue, queue.queue_id
+            )
 
-                            # Wake the worker pool so a worker thread
-                            # can claim the pre-existing PENDING Task.
-                            # The Task + MessageQueue rows were already
-                            # written by ``enqueue_message_job``; this
-                            # is a surface-only signal.
-                            worker_pool = getattr(
-                                self._instance_manager, "_worker_pool", None
-                            )
-                            if worker_pool is not None:
-                                worker_pool.notify_work()
+            if queue.queue_type == "defer" and pending:
+                # Gate A (Phase 1 of defer-seam bugfix, 2026-06-30):
+                # Defer queues only activate when no non-deferred
+                # work is in flight. Use the shared predicate on
+                # TaskRepository so the claim path and the admission
+                # probe never disagree.
+                #
+                # Access path: ``JobProcessor`` does not directly
+                # inject ``TaskRepository``; reach it through the
+                # already-injected ``InstanceManager``. ``TaskRepository.has_active_non_deferred_work``
+                # is the shared predicate backing Gate A, Gate B
+                # (``_select_next_eligible_job``), and the maintenance
+                # ``_is_idle`` check.
+                non_defer_active = await self._defer_idle_check(
+                    queue.project_id
+                )
+                if non_defer_active:
+                    continue
 
-                            logger.info(
-                                f"JobProcessor (message branch): woke "
-                                f"worker pool for pre-existing Task on "
-                                f"job {job.job_id[:8]}... / instance "
-                                f"{started_job.instance_id[:8] if started_job.instance_id else 'N/A'}..."
-                            )
-                            # S1 fix: clear the in-progress tracking
-                            # entry on the SUCCESS path. Prior code only
-                            # cleared it on the enqueue_message failure
-                            # branch, which leaked entries in
-                            # ``_last_in_progress`` / ``_in_progress_since``
-                            # over time. The dispatch itself succeeds;
-                            # the JobItem stays ``active`` until
-                            # ``JobFeedbackObserver`` releases the slot.
-                            self._cleanup_in_progress_tracking(job.job_id)
-                        except Exception as e:
-                            logger.error(
-                                f"Failed to wake worker pool for "
-                                f"message job {job.job_id[:8]}...: {e}"
-                            )
-                            await self._queue_service.complete_job(
-                                job.job_id,
-                                demand_state=DemandState.FAILED,
-                                error=f"Failed to wake worker pool for message job: {e}",
-                            )
-                            self._cleanup_in_progress_tracking(job.job_id)
-                        # Skip the task-path spawn below — message jobs
-                        # use the existing instance.
+            if queue.queue_type == "background" and pending:
+                # Gate A (Phase 3 background seam, 2026-07-14):
+                # Background queues only activate when no
+                # non-deferred, non-background work is in flight
+                # ANYWHERE in the system (system-wide scope, not
+                # project-scoped — see
+                # ``_background_idle_check`` docstring for the
+                # rationale and ``has_active_non_background_work``
+                # for the shared predicate). Uses the same
+                # shared predicate so the claim path and the
+                # admission probe never disagree. Sister check to
+                # the defer gate above; runs ALONGSIDE it so a
+                # project that has both a defer queue and a
+                # background queue evaluates both gates correctly.
+                background_should_wait = await self._background_idle_check()
+                if background_should_wait:
+                    continue
+
+            if not pending:
+                # Also check for ACTIVE-admission jobs that have instance_id set but
+                # no spawned instance yet. These jobs were transitioned to
+                # admission_state='active' (via status=PROCESSING) by
+                # trigger_next_job() but the JobProcessor missed them due to
+                # event-driven or polling timing gaps.
+                #
+                # Phase 3 admission-decision migration: filter on
+                # ``admission_state='active'`` rather than
+                # ``statuses=['processing']``. This catches PAUSED jobs too
+                # (admission_state='active' under the new model — pause is
+                # an Instance concern, lock still held), which the legacy
+                # ``status='processing'`` filter silently dropped.
+                active_jobs, _ = await asyncio.to_thread(
+                    self._queue_service._repository.list_by_queue, queue.queue_id,
+                    admission_states=[AdmissionState.ACTIVE.value]
+                )
+                for proc_job in (active_jobs or []):
+                    # W1: skip message orphans. Message jobs target
+                    # an EXISTING instance — re-running
+                    # ``spawn_instance_with_mcp`` or
+                    # ``enqueue_message`` here would create a
+                    # duplicate instance + duplicate Task. The
+                    # synchronous Task contract
+                    # (``enqueue_message_job`` already wrote the
+                    # Task row) means the message branch in
+                    # ``_process_next_job`` is the only legitimate
+                    # dispatch path for message jobs. ACTIVE
+                    # message orphans whose Task is missing are
+                    # recovered by ``JobRecoveryService
+                    # .recover_on_startup`` (it checks Task
+                    # existence and resets stale rows to queued).
+                    if proc_job.job_type == "message":
                         continue
 
-                    # === TASK PATH (existing) ===
-                    # Spawn instance for this job
+                    # NOTE: the legacy "inline MESSAGE-specific
+                    # orphan guard" was removed in D11. The W1
+                    # guard above now owns that responsibility
+                    # for the ACTIVE-admission loop: message jobs
+                    # are skipped up front because their target
+                    # instance already exists and the Task row is
+                    # already written by ``enqueue_message_job``.
+                    # A stuck ACTIVE MESSAGE row that survives
+                    # both the message branch and the W1 skip is
+                    # recovered by ``JobRecoveryService`` at
+                    # startup; we no longer attempt inline
+                    # re-spawn or fail here.
+
+                    # Skip if instance already spawned (normal case).
+                    # If instance_id is set but get_instance raises KeyError,
+                    # the instance might be in the process of being spawned
+                    # (e.g., by JobFeedbackObserver). Skip and let it complete.
+                    if proc_job.instance_id:
+                        try:
+                            await self._instance_manager.get_instance(proc_job.instance_id)
+                            continue  # Instance exists, skip
+                        except KeyError:
+                            # Instance not in memory — check if it was terminated/completed/errored
+                            # before attempting to re-spawn
+                            if (
+                                hasattr(self._instance_manager, '_instance_repository')
+                                and self._instance_manager._instance_repository is not None
+                            ):
+                                try:
+                                    instance_meta = await asyncio.to_thread(
+                                        self._instance_manager._instance_repository.get,
+                                        proc_job.instance_id
+                                    )
+                                    if instance_meta is not None:
+                                        # Instance exists in DB — check its status
+                                        if instance_meta.status == InstanceStatus.COMPLETED.value:
+                                            if await self._emit_in_progress_if_children_pending(
+                                                instance_meta, proc_job, "TASK", "completed"
+                                            ):
+                                                continue
+                                            logger.info(
+                                                f"JobProcessor: TASK job {proc_job.job_id[:8]}... "
+                                                f"instance {proc_job.instance_id[:8]}... is completed, "
+                                                f"completing job"
+                                            )
+                                            result_summary = await self._capture_result_summary(
+                                                proc_job.instance_id, proc_job.job_id, "TASK"
+                                            )
+                                            await self._queue_service.complete_job(
+                                                proc_job.job_id,
+                                                demand_state=DemandState.COMPLETED,
+                                                result_summary=result_summary,
+                                            )
+                                            self._cleanup_in_progress_tracking(proc_job.job_id)
+                                            continue
+                                        elif instance_meta.status in TERMINAL_CANCEL_STATUSES:
+                                            status_display = instance_meta.status.value if hasattr(instance_meta.status, 'value') else instance_meta.status
+                                            if await self._emit_in_progress_if_children_pending(
+                                                instance_meta, proc_job, "TASK", status_display
+                                            ):
+                                                continue
+                                            logger.info(
+                                                f"JobProcessor: TASK job {proc_job.job_id[:8]}... "
+                                                f"instance {proc_job.instance_id[:8]}... is {status_display}, "
+                                                f"cancelling job"
+                                            )
+                                            await self._queue_service.complete_job(
+                                                proc_job.job_id,
+                                                demand_state=DemandState.CANCELLED,
+                                                error=f"Instance is {status_display}",
+                                            )
+                                            self._cleanup_in_progress_tracking(proc_job.job_id)
+                                            continue
+                                        elif instance_meta.status == InstanceStatus.ERROR.value:
+                                            if await self._emit_in_progress_if_children_pending(
+                                                instance_meta, proc_job, "TASK", "errored"
+                                            ):
+                                                continue
+                                            logger.warning(
+                                                f"JobProcessor: TASK job {proc_job.job_id[:8]}... "
+                                                f"instance {proc_job.instance_id[:8]}... errored, failing job"
+                                            )
+                                            await self._queue_service.complete_job(
+                                                proc_job.job_id,
+                                                demand_state=DemandState.FAILED,
+                                                error="Instance errored",
+                                            )
+                                            self._cleanup_in_progress_tracking(proc_job.job_id)
+                                            continue
+                                        elif instance_meta.status == InstanceStatus.PAUSED.value:
+                                            logger.debug(
+                                                f"JobProcessor: TASK job {proc_job.job_id[:8]}... "
+                                                f"instance {proc_job.instance_id[:8]}... is paused, skipping"
+                                            )
+                                            continue
+                                        # Instance is in a non-terminal state but not in memory —
+                                        # genuine crash, proceed to re-spawn below
+                                except Exception as e:
+                                    logger.warning(
+                                        f"JobProcessor: failed to check instance status for "
+                                        f"{proc_job.instance_id[:8]}...: {e}"
+                                    )
+                                    continue  # Don't crash on transient errors
+
+                            # Instance genuinely crashed or missing — re-spawn
+                            logger.info(
+                                f"JobProcessor: recovering orphan PROCESSING job {proc_job.job_id[:8]}... "
+                                f"(instance {proc_job.instance_id[:8]}... missing)"
+                            )
+                            try:
+                                instance_id = await self._instance_manager.spawn_instance_with_mcp(
+                                    agent_id=proc_job.agent_id,
+                                    instance_id=proc_job.instance_id,  # Reuse existing valid UUID
+                                    project_id=proc_job.project_id,
+                                )
+                                result = await self._instance_manager.enqueue_message(
+                                    instance_id=instance_id,
+                                    message=proc_job.message,
+                                    source=proc_job.source,
+                                    is_deferred=(queue.queue_type == "defer"),
+                                    is_background=(queue.queue_type == "background"),
+                                )
+                                # Stamp message_id defensively — a
+                                # stamping failure must not fail an
+                                # otherwise-successful recovery. The
+                                # NULL-safe cross-system guard tolerates
+                                # a missing ``message_id``.
+                                if result and result.message_id:
+                                    try:
+                                        await asyncio.to_thread(
+                                            self._queue_service._repository.stamp_message_id,
+                                            proc_job.job_id, result.message_id,
+                                        )
+                                    except Exception as stamp_err:
+                                        logger.warning(
+                                            f"JobProcessor: failed to stamp "
+                                            f"message_id on orphan recovery "
+                                            f"for job {proc_job.job_id[:8]}...: {stamp_err}"
+                                        )
+                                logger.info(
+                                    f"Job {proc_job.job_id} recovered for instance {instance_id} "
+                                    f"on queue {queue.queue_name}"
+                                )
+                                continue  # Successfully recovered
+                            except Exception as e:
+                                # Failed to recover - mark as failed to prevent permanent orphan
+                                logger.error(
+                                    f"Failed to recover orphan job {proc_job.job_id[:8]}...: {e}"
+                                )
+                                await self._queue_service.complete_job(
+                                    proc_job.job_id, demand_state=DemandState.FAILED, error=str(e)
+                                )
+                                self._cleanup_in_progress_tracking(proc_job.job_id)
+                                continue
+                        except Exception as e:
+                            logger.warning(
+                                "Instance check failed for job %s (instance %s): %s",
+                                proc_job.job_id[:8],
+                                proc_job.instance_id[:8] if proc_job.instance_id else "N/A",
+                                e,
+                            )
+                            continue  # Don't crash on transient errors
+                    # No instance_id: this is a genuine orphan (shouldn't happen
+                    # in normal operation, but kept as safety net)
+                    # This job was started by trigger_next_job() but instance not spawned
+                    logger.info(
+                        f"JobProcessor: resuming orphan PROCESSING job {proc_job.job_id[:8]}... "
+                        f"on queue {queue.queue_name}"
+                    )
                     try:
                         instance_id = await self._instance_manager.spawn_instance_with_mcp(
-                            agent_id=job.agent_id,
-                            instance_id=started_job.instance_id,
-                            project_id=job.project_id,
+                            agent_id=proc_job.agent_id,
+                            instance_id=proc_job.instance_id,
+                            project_id=proc_job.project_id,
                         )
-                    except Exception as e:
-                        logger.error(f"Failed to spawn instance for job {job.job_id}: {e}")
-                        await self._queue_service.complete_job(
-                            job.job_id, demand_state=DemandState.FAILED, error=str(e)
-                        )
-                        self._cleanup_in_progress_tracking(job.job_id)
-                        continue
-
-                    # Send the job message to the instance
-                    try:
                         result = await self._instance_manager.enqueue_message(
                             instance_id=instance_id,
-                            message=job.message,
-                            source=job.source,
+                            message=proc_job.message,
+                            source=proc_job.source,
                             is_deferred=(queue.queue_type == "defer"),
                             is_background=(queue.queue_type == "background"),
-                            # Stamp the JobItem's ``job_id`` onto the
-                            # driving Task's ``work_id`` so the Task is
-                            # explicitly linked to its JobItem (the
-                            # documented ``work_id == job_id`` contract).
-                            # This gives drift detection (F10) and the
-                            # work resolver a precise Task↔JobItem key
-                            # instead of guessing via the instance's
-                            # "freshest" JobItem — which falsely flagged
-                            # ``job_continue`` continuation Tasks.
-                            work_id=job.job_id,
                         )
-                        # Stamp the message_id back onto the JobItem so
-                        # the cross-system guard in ``claim_pending_task``
-                        # can correlate active MESSAGE JobItems with their
-                        # ``message_queue`` row. Failure here is
-                        # non-fatal — the dispatch has already succeeded,
-                        # and the NULL-safe guard tolerates a missing
-                        # ``message_id`` (it just falls back to the legacy
-                        # sibling check).
+                        # Stamp message_id defensively — a stamping
+                        # failure must not fail an otherwise-successful
+                        # resume. The NULL-safe cross-system guard
+                        # tolerates a missing ``message_id``.
                         if result and result.message_id:
                             try:
                                 await asyncio.to_thread(
                                     self._queue_service._repository.stamp_message_id,
-                                    job.job_id, result.message_id,
+                                    proc_job.job_id, result.message_id,
                                 )
                             except Exception as stamp_err:
                                 logger.warning(
-                                    f"JobProcessor: failed to stamp message_id "
-                                    f"for job {job.job_id[:8]}...: {stamp_err}"
+                                    f"JobProcessor: failed to stamp "
+                                    f"message_id on orphan resume "
+                                    f"for job {proc_job.job_id[:8]}...: {stamp_err}"
                                 )
+                        logger.info(
+                            f"Job {proc_job.job_id} resumed for instance {instance_id} "
+                            f"on queue {queue.queue_name}"
+                        )
                     except Exception as e:
-                        logger.error(f"Failed to enqueue message for job {job.job_id}: {e}")
+                        logger.error(f"Failed to resume orphan job {proc_job.job_id[:8]}...: {e}")
                         await self._queue_service.complete_job(
-                            job.job_id, demand_state=DemandState.FAILED, error=str(e)
+                            proc_job.job_id, demand_state=DemandState.FAILED, error=str(e)
+                        )
+                        self._cleanup_in_progress_tracking(proc_job.job_id)
+                continue
+
+            job = pending[0]
+
+            # [TRACE] Log job found
+            job_type = getattr(job, 'job_type', 'task')
+            logger.info(
+                f"[TRACE] _process_next_job: found PENDING job {job.job_id[:8]}... "
+                f"job_type={job_type} instance={job.instance_id[:8] if job.instance_id else 'N/A'}..."
+            )
+
+            # NOTE: The legacy MESSAGE-specific DB-level
+            # sibling pre-check was removed in D11. The unified
+            # observer owns message dispatch end-to-end — it
+            # runs the concurrency gate via the Execution Gate.
+            # JobQueue no longer needs a DB-level sibling check
+            # for MESSAGE jobs.
+            #
+            # Instance-level pause, however, must be evaluated here
+            # (BEFORE ``start_job``) so the test contract holds:
+            # ``TestJobProcessorInstancePause::test_skips_job_for_paused_instance``
+            # asserts that ``start_job`` is NOT called when the
+            # target instance is paused. The downstream pause check
+            # inside ``JobQueueService.start_job`` would return None
+            # too late — we want to avoid the lock acquisition
+            # attempt entirely. Errors here fall through to
+            # ``start_job`` (which has its own pause check) so a
+            # transient repo error doesn't wedge the queue.
+            if (
+                job.instance_id
+                and getattr(self._instance_manager, "_instance_repository", None) is not None
+            ):
+                try:
+                    instance_meta = await asyncio.to_thread(
+                        self._instance_manager._instance_repository.get,
+                        job.instance_id,
+                    )
+                    if instance_meta is not None and instance_meta.status == InstanceStatus.PAUSED.value:
+                        status_display = (
+                            instance_meta.status.value
+                            if hasattr(instance_meta.status, "value")
+                            else instance_meta.status
+                        )
+                        logger.info(
+                            f"JobProcessor: SKIP {job_type} job "
+                            f"{job.job_id[:8]}... — instance "
+                            f"{job.instance_id[:8]}... is {status_display}, "
+                            f"staying PENDING"
+                        )
+                        continue
+                except Exception as e:
+                    logger.warning(
+                        f"JobProcessor: instance pause pre-check failed "
+                        f"for job {job.job_id[:8]}... (instance "
+                        f"{job.instance_id[:8] if job.instance_id else 'N/A'}...): "
+                        f"{e}. Falling through to start_job."
+                    )
+
+            # Try to start the job (acquires per-queue lock internally)
+            # Note: JobQueueService.start_job() also performs an
+            # instance pause check — that's the second line of defense
+            # if the pre-check above raced or errored.
+            logger.debug(f"[TRACE] _process_next_job: attempting to start job {job.job_id[:8]}...")
+            try:
+                started_job = await self._queue_service.start_job(job.job_id)
+                if started_job is None:
+                    # Lock acquisition failed or job was cancelled
+                    logger.debug(f"[TRACE] _process_next_job: SKIP job {job.job_id[:8]}... — start_job returned None (lock contention or cancelled)")
+                    continue
+
+                logger.debug(
+                    f"[TRACE] _process_next_job: started_job {started_job.job_id[:8]}... "
+                    f"instance={started_job.instance_id[:8] if started_job.instance_id else 'N/A'}... "
+                    f"admission_state={started_job.admission_state}"
+                )
+
+                # Phase 5 (Option B): MESSAGE BRANCH — wake-only.
+                # Synchronous Task contract:
+                #   - ``enqueue_message_job`` already created the
+                #     Task + MessageQueue rows synchronously via
+                #     ``_prepare_enqueued_message`` and stamped
+                #     ``message_id`` onto the JobItem. The Task
+                #     row is PENDING and visible to the worker pool.
+                #   - This branch does NOT call ``enqueue_message``
+                #     (would create a duplicate Task) and does NOT
+                #     call ``spawn_instance_with_mcp`` (message
+                #     jobs target an EXISTING instance — the
+                #     ``start_job`` step preserved the
+                #     ``instance_id`` from the original
+                #     ``enqueue_message_job`` call).
+                #   - We ONLY wake the worker pool so a worker
+                #     thread can claim the pre-existing PENDING
+                #     Task and route it to the existing instance.
+                # ``JobFeedbackObserver`` owns the terminal
+                # transition + slot-lock release.
+                if job.job_type == "message":
+                    try:
+                        # Extract dispatch-time metadata (stored on
+                        # the JobItem's JSON ``job_metadata`` column
+                        # at ``enqueue_message_job`` time). Kept
+                        # here as a no-op read — useful for
+                        # debugging via structured logs.
+                        job_meta = job.job_metadata or {}
+
+                        # Wake the worker pool so a worker thread
+                        # can claim the pre-existing PENDING Task.
+                        # The Task + MessageQueue rows were already
+                        # written by ``enqueue_message_job``; this
+                        # is a surface-only signal.
+                        worker_pool = getattr(
+                            self._instance_manager, "_worker_pool", None
+                        )
+                        if worker_pool is not None:
+                            worker_pool.notify_work()
+
+                        logger.info(
+                            f"JobProcessor (message branch): woke "
+                            f"worker pool for pre-existing Task on "
+                            f"job {job.job_id[:8]}... / instance "
+                            f"{started_job.instance_id[:8] if started_job.instance_id else 'N/A'}..."
+                        )
+                        # S1 fix: clear the in-progress tracking
+                        # entry on the SUCCESS path. Prior code only
+                        # cleared it on the enqueue_message failure
+                        # branch, which leaked entries in
+                        # ``_last_in_progress`` / ``_in_progress_since``
+                        # over time. The dispatch itself succeeds;
+                        # the JobItem stays ``active`` until
+                        # ``JobFeedbackObserver`` releases the slot.
+                        self._cleanup_in_progress_tracking(job.job_id)
+                    except Exception as e:
+                        logger.error(
+                            f"Failed to wake worker pool for "
+                            f"message job {job.job_id[:8]}...: {e}"
+                        )
+                        await self._queue_service.complete_job(
+                            job.job_id,
+                            demand_state=DemandState.FAILED,
+                            error=f"Failed to wake worker pool for message job: {e}",
                         )
                         self._cleanup_in_progress_tracking(job.job_id)
-                        continue
+                    # Skip the task-path spawn below — message jobs
+                    # use the existing instance.
+                    continue
 
-                    logger.info(
-                        f"Job {job.job_id} queued for instance {instance_id} "
-                        f"on queue {queue.queue_name}"
+                # === TASK PATH (existing) ===
+                # Spawn instance for this job
+                try:
+                    instance_id = await self._instance_manager.spawn_instance_with_mcp(
+                        agent_id=job.agent_id,
+                        instance_id=started_job.instance_id,
+                        project_id=job.project_id,
                     )
                 except Exception as e:
-                    logger.exception(f"Failed to process job {job.job_id}: {e}")
-                    try:
-                        await self._queue_service.complete_job(
-                            job.job_id, demand_state=DemandState.FAILED, error=str(e)
-                        )
-                        self._cleanup_in_progress_tracking(job.job_id)
-                    except Exception:
-                        pass
+                    logger.error(f"Failed to spawn instance for job {job.job_id}: {e}")
+                    await self._queue_service.complete_job(
+                        job.job_id, demand_state=DemandState.FAILED, error=str(e)
+                    )
+                    self._cleanup_in_progress_tracking(job.job_id)
+                    continue
+
+                # Send the job message to the instance
+                try:
+                    result = await self._instance_manager.enqueue_message(
+                        instance_id=instance_id,
+                        message=job.message,
+                        source=job.source,
+                        is_deferred=(queue.queue_type == "defer"),
+                        is_background=(queue.queue_type == "background"),
+                        # Stamp the JobItem's ``job_id`` onto the
+                        # driving Task's ``work_id`` so the Task is
+                        # explicitly linked to its JobItem (the
+                        # documented ``work_id == job_id`` contract).
+                        # This gives drift detection (F10) and the
+                        # work resolver a precise Task↔JobItem key
+                        # instead of guessing via the instance's
+                        # "freshest" JobItem — which falsely flagged
+                        # ``job_continue`` continuation Tasks.
+                        work_id=job.job_id,
+                    )
+                    # Stamp the message_id back onto the JobItem so
+                    # the cross-system guard in ``claim_pending_task``
+                    # can correlate active MESSAGE JobItems with their
+                    # ``message_queue`` row. Failure here is
+                    # non-fatal — the dispatch has already succeeded,
+                    # and the NULL-safe guard tolerates a missing
+                    # ``message_id`` (it just falls back to the legacy
+                    # sibling check).
+                    if result and result.message_id:
+                        try:
+                            await asyncio.to_thread(
+                                self._queue_service._repository.stamp_message_id,
+                                job.job_id, result.message_id,
+                            )
+                        except Exception as stamp_err:
+                            logger.warning(
+                                f"JobProcessor: failed to stamp message_id "
+                                f"for job {job.job_id[:8]}...: {stamp_err}"
+                            )
+                except Exception as e:
+                    logger.error(f"Failed to enqueue message for job {job.job_id}: {e}")
+                    await self._queue_service.complete_job(
+                        job.job_id, demand_state=DemandState.FAILED, error=str(e)
+                    )
+                    self._cleanup_in_progress_tracking(job.job_id)
+                    continue
+
+                logger.info(
+                    f"Job {job.job_id} queued for instance {instance_id} "
+                    f"on queue {queue.queue_name}"
+                )
+            except Exception as e:
+                logger.exception(f"Failed to process job {job.job_id}: {e}")
+                try:
+                    await self._queue_service.complete_job(
+                        job.job_id, demand_state=DemandState.FAILED, error=str(e)
+                    )
+                    self._cleanup_in_progress_tracking(job.job_id)
+                except Exception:
+                    pass
 
         # C5 orphan fallback removed (Phase 2): All jobs now have normalized project_id,
         # so there are no longer any orphan jobs without project_id to handle.

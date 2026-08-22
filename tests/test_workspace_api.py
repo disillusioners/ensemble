@@ -390,6 +390,60 @@ class TestGetFileTree:
         assert data["path"] == "src"
 
     @pytest.mark.asyncio
+    async def test_tree_explicit_dot_is_root_alias(self, client):
+        """``path=.`` (explicit) is identical to the omitted-default root tree.
+
+        S5/e2e regression guard: the workspace frontend sends an explicit
+        ``path=.`` query param (``WorkspaceService.getFileTree`` default).
+        This pins that the explicit form resolves to the workdir root —
+        same tree as omitting the param — rather than being rejected.
+        """
+        ac, _, project_id = client
+
+        explicit = await ac.get(
+            f"/api/workspace/{project_id}/tree", params={"path": "."}
+        )
+        implicit = await ac.get(f"/api/workspace/{project_id}/tree")
+
+        assert explicit.status_code == 200, explicit.text
+        assert implicit.status_code == 200, implicit.text
+        assert explicit.json()["tree"] == implicit.json()["tree"]
+        assert explicit.json()["path"] == "."
+
+    @pytest.mark.asyncio
+    async def test_tree_dot_slash_canonicalizes_to_root_not_escape(self, client):
+        """``path=./.`` variants that canonicalize to the root are NOT escapes.
+
+        Companion to the dot-alias test: after ``resolve()``, ``./`` and
+        ``.`` both canonicalize to the workdir root and must serve the
+        tree. Only paths resolving OUTSIDE the boundary 403.
+        """
+        ac, _, project_id = client
+
+        response = await ac.get(
+            f"/api/workspace/{project_id}/tree", params={"path": "./"}
+        )
+
+        assert response.status_code == 200, response.text
+        assert [n["name"] for n in response.json()["tree"]]
+
+    @pytest.mark.asyncio
+    async def test_tree_bare_dot_dot_rejected(self, client):
+        """``path=..`` must return 403 (canonicalizes above the workdir root).
+
+        Probe-verified by the reviewer (r2): a bare ``..`` resolves to the
+        workdir's PARENT, outside the served boundary — reject it even
+        though no deeper traversal is requested.
+        """
+        ac, _, project_id = client
+
+        response = await ac.get(
+            f"/api/workspace/{project_id}/tree", params={"path": ".."}
+        )
+
+        assert response.status_code == 403
+
+    @pytest.mark.asyncio
     async def test_tree_traversal_rejected(self, client):
         """``GET /tree?path=../../../etc`` must return 403."""
         ac, _, project_id = client

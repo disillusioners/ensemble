@@ -25,24 +25,22 @@ llm:
   request_timeout: 610  # HTTP client timeout per LLM call (seconds). Counts
                         # toward task_timeout_minutes budget for each retry.
 
-  # Models for which reasoning_content from a previous turn must be echoed
-  # back in subsequent assistant messages. Case-insensitive substring match
-  # against the model name. Required by DeepSeek's thinking-mode API for
-  # tool-calling turns — see https://api-docs.deepseek.com/guides/thinking_mode
-  # Override via OPENAI_REASONING_ECHO_MODELS env var (comma-separated or
-  # JSON array). Default: ["deepseek"].
-  reasoning_echo_models:
-    - deepseek
+  # Models for which reasoning_content echo is DISABLED: reasoning_content
+  # from a previous turn is echoed back in subsequent assistant messages for
+  # every model EXCEPT those whose name case-insensitively substring-matches
+  # an entry here (e.g. providers that reject the field with a 400). Empty
+  # default = all models echo.
+  # Override via OPENAI_REASONING_ECHO_DISABLED_MODELS env var (comma-separated
+  # or JSON array). Default: [].
+  reasoning_echo_disabled_models: ${OPENAI_REASONING_ECHO_DISABLED_MODELS:-}
 
   # Models allowed as instance model overrides at spawn time. Case-insensitive
   # exact match against the override model name; a match against ANY entry
   # is sufficient. Empty list = all models allowed (no restriction).
-  # Override via OPENAI_ALLOWED_MODELS env var (comma-separated or JSON array).
-  # Default: common OpenAI models. Set to empty list to disable restriction.
+  # Override via OPENAI_ALLOWED_MODELS env var (comma-separated or
+  # JSON array). Default: ["agentic", "coding"].
   # Exact model names only — this is NOT a prefix or substring match.
-  allowed_models:
-    - agentic
-    - coding
+  allowed_models: ${OPENAI_ALLOWED_MODELS:-agentic,coding}
 
 # Server Configuration  
 daemon:

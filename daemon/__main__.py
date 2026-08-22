@@ -17,7 +17,7 @@ warnings.filterwarnings(
 import uvicorn
 from pathlib import Path
 
-from .config import load_config
+from .config import load_config, warn_deprecated_reasoning_echo_env
 
 # ── Process exit-code contract (Auto-Restart ADR-010/011) ─────────────────
 # The launcher (Phase 1) maps exit codes to restart policy:
@@ -217,13 +217,17 @@ def main():
     # Apply LLM-specific class-level config that must be set before any
     # ThinkingChatOpenAI instance is created.
     from .graph import ThinkingChatOpenAI
-    ThinkingChatOpenAI.reasoning_echo_models = list(
-        config.llm.reasoning_echo_models or []
+    ThinkingChatOpenAI.reasoning_echo_disabled_models = list(
+        config.llm.reasoning_echo_disabled_models or []
     )
     logger.info(
-        f"[Config] reasoning_echo_models={ThinkingChatOpenAI.reasoning_echo_models} "
-        f"(echo reasoning_content back in multi-turn for matching model names)"
+        f"[Config] reasoning_echo_disabled_models={ThinkingChatOpenAI.reasoning_echo_disabled_models} "
+        f"(models matching these patterns will NOT echo reasoning_content; all others echo)"
     )
+
+    # Warn-once if the removed allowlist env var is still set (no-op when
+    # load_config already emitted it)
+    warn_deprecated_reasoning_echo_env()
 
     # Log version for debugging
     from . import __version__

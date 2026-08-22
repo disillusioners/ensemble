@@ -4,13 +4,14 @@ import asyncio
 import logging
 import uuid
 from datetime import datetime, UTC
-from typing import Annotated, Any, TYPE_CHECKING
+from typing import Annotated, Any, Optional, TYPE_CHECKING
 
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 from ._tool_registry import register_tool_category
 from ._truncate import truncate_dict_result
+from daemon import constants
 from daemon.repositories.instance.models import InstanceStatus
 from daemon.repositories.job_queue.models import AdmissionState
 from daemon.repositories.job_queue.watcher_models import ALL_TERMINAL_STATES
@@ -273,7 +274,8 @@ Security: tool_call arguments are truncated and outputs are omitted
 to prevent leakage of secrets, file contents, or credentials.
 
 Access control: the caller's project_id must match the job's
-project_id (when both are set).
+project_id (when both are set); system-default (unscoped-or-root) callers
+act as global operators and may access jobs in any project.
 
 Args:
     job_id: The job ID to inspect. Required.
@@ -296,6 +298,10 @@ Counts total and active (non-terminal) instances.
 
 Terminal statuses: completed, terminated, error, failed.
 
+Access control: the caller's project_id must match the job's
+project_id (when both are set); system-default (unscoped-or-root) callers
+act as global operators and may access jobs in any project.
+
 Args:
     job_id: The job ID to inspect. Required.
 
@@ -316,7 +322,8 @@ instance tree counts (total, active, completed).
 Active = not in terminal status (completed, terminated, error, failed).
 
 Access control: the caller's project_id must match the job's
-project_id (when both are set).
+project_id (when both are set); system-default (unscoped-or-root) callers
+act as global operators and may access jobs in any project.
 
 Args:
     job_id: The job ID to check. Required.
@@ -347,7 +354,8 @@ use ``job_continue`` instead (the message gets enqueued via the normal
 queue path on the next dispatch).
 
 Access control: the caller's project_id must match the job's
-project_id (when both are set).
+project_id (when both are set); system-default (unscoped-or-root) callers
+act as global operators and may access jobs in any project.
 
 Args:
     job_id: The job ID whose instance will receive the injection. Required.
@@ -362,6 +370,92 @@ Returns:
 Example:
     job_inject(job_id="job_abc123", message="Also remember to add tests")""",
 }
+
+
+def _check_job_access(
+    manager: "InstanceManager | None",
+    current_instance_id: str,
+    record: "WorkRecord",
+) -> Optional[dict]:
+    """Project-scoped C2 access check for job-visibility tools.
+
+    Returns ``None`` when access is allowed, or a ``{"error": ...}`` dict
+    that the caller should return verbatim when access is denied.
+
+    Semantics:
+      * No ``current_instance_id`` (caller is anonymous) → allowed.
+      * ``record.project_id`` is None (legacy/unscoped job) → allowed.
+      * Caller instance not found in the repo → allowed (fail-open,
+        matches the pre-extraction behaviour).
+      * Caller's ``project_id`` is None → allowed (fail-open).
+      * Caller's ``project_id == constants.SYSTEM_DEFAULT_PROJECT_ID``
+        → allowed (the "global operator" tier — chat-facing agents
+        such as Ari/Jober run in the system-default project and need
+        cross-project visibility to manage jobs in any project).
+      * Otherwise: caller and job must share the same project_id;
+        mismatch → access denied.
+
+    The system-default constant is read via ``constants.SYSTEM_DEFAULT_PROJECT_ID``
+    at call time so that the repo-wide autouse fixture that patches the
+    module attribute (``tests/conftest.py:_ensure_system_default_project_id``
+    at ``tests/conftest.py:706-734``) takes effect. Reading the constant
+    via ``from daemon.constants import …`` at module load would bind the
+    pre-patch value and silently bypass the global-operator tier in tests.
+    This file used to ship a redundant local autouse fixture that
+    duplicated the conftest patch; it was removed because the conftest
+    fixture already covers every test in the suite.
+
+    Pre-bootstrap guard: if ``constants.SYSTEM_DEFAULT_PROJECT_ID`` is
+    ``None`` (startup not yet complete), the helper falls back to the
+    legacy strict-match behaviour — system-default callers are denied
+    rather than given free reign. Production never hits this path:
+    ``ensure_system_default_project`` runs in the API lifespan startup
+    before any tool call can land.
+
+    System-default membership is granted to (1) any instance created
+    without an explicit project (all of ``None``, ``""``, ``"null"``,
+    ``"none"`` are normalized via ``project_normalizer.normalize_project_id``
+    to the system-default UUID at spawn time) AND (2) ALL legacy
+    ``project_id IS NULL`` instance rows backfilled to the system-default
+    project at API lifespan startup (``daemon/api.py:512-528`` runs an
+    idempotent ``backfill_system_default_project_id`` sweep on every
+    boot). Consequence: system-default membership is the global-operator
+    tier — it grants cross-project access to all four visibility tools
+    (``job_messages``, ``job_tree``, ``job_progress``, ``job_inject``),
+    including the ``job_inject`` write primitive. This is intentional
+    and user-approved design: project-based gating, not agent-based — the
+    four visibility tools are chat-facing primitives that Ari/Jober and
+    other ops-tier agents use to manage jobs in any project, and the
+    alternative (per-agent allow-list) was rejected as a scaling hazard
+    for the orchestrator fleet.
+    """
+    if not (current_instance_id and record.project_id):
+        return None
+
+    if manager is None:
+        # Defense-in-depth: unreachable at all 4 current call sites
+        # (each performs ``if manager is None: return None`` before
+        # invoking this helper). Kept so a future unguarded call site
+        # can't accidentally reintroduce the pre-helper C2 regression.
+        return None
+
+    caller = manager._instance_repository.get(current_instance_id)
+    if caller is None or caller.project_id is None:
+        return None
+
+    # Read at call time so test monkeypatching of the module attribute wins.
+    system_default = constants.SYSTEM_DEFAULT_PROJECT_ID
+    if system_default is not None and caller.project_id == system_default:
+        return None
+
+    if caller.project_id != record.project_id:
+        logger.warning(
+            "job access denied: caller=%s caller_project=%s job=%s job_project=%s",
+            current_instance_id, caller.project_id, getattr(record, "work_id", None), record.project_id,
+        )
+        return {"error": "Access denied: job does not belong to caller's project"}
+
+    return None
 
 
 def create_job_tools(
@@ -1318,13 +1412,12 @@ def create_job_tools(
             if manager is None:
                 return {"error": "Instance manager not available"}
 
-            # C2: Project-scoped access control. Verify the caller's
-            # project matches the job's project. If either is None
-            # (no project scoping), allow access (backward compatible).
-            if current_instance_id and record.project_id:
-                caller = manager._instance_repository.get(current_instance_id) if manager else None
-                if caller and caller.project_id and caller.project_id != record.project_id:
-                    return {"error": "Access denied: job does not belong to caller's project"}
+            # C2: Project-scoped access control. See ``_check_job_access``
+            # docstring for the system-default (global-operator) carve-out
+            # used by chat-facing agents such as Ari/Jober.
+            deny = _check_job_access(manager, current_instance_id, record)
+            if deny is not None:
+                return deny
 
             root_instance = manager._instance_repository.get(instance_id)
             if root_instance is None:
@@ -1438,13 +1531,12 @@ def create_job_tools(
             if manager is None:
                 return {"error": "Instance manager not available"}
 
-            # C2: Project-scoped access control. Verify the caller's
-            # project matches the job's project. If either is None
-            # (no project scoping), allow access (backward compatible).
-            if current_instance_id and record.project_id:
-                caller = manager._instance_repository.get(current_instance_id) if manager else None
-                if caller and caller.project_id and caller.project_id != record.project_id:
-                    return {"error": "Access denied: job does not belong to caller's project"}
+            # C2: Project-scoped access control. See ``_check_job_access``
+            # docstring for the system-default (global-operator) carve-out
+            # used by chat-facing agents such as Ari/Jober.
+            deny = _check_job_access(manager, current_instance_id, record)
+            if deny is not None:
+                return deny
 
             root = manager._instance_repository.get(instance_id)
             if root is None:
@@ -1552,13 +1644,12 @@ def create_job_tools(
             if manager is None:
                 return {"error": "Instance manager not available"}
 
-            # C2: Project-scoped access control. Verify the caller's
-            # project matches the job's project. If either is None
-            # (no project scoping), allow access (backward compatible).
-            if current_instance_id and record.project_id:
-                caller = manager._instance_repository.get(current_instance_id) if manager else None
-                if caller and caller.project_id and caller.project_id != record.project_id:
-                    return {"error": "Access denied: job does not belong to caller's project"}
+            # C2: Project-scoped access control. See ``_check_job_access``
+            # docstring for the system-default (global-operator) carve-out
+            # used by chat-facing agents such as Ari/Jober.
+            deny = _check_job_access(manager, current_instance_id, record)
+            if deny is not None:
+                return deny
 
             root_instance = manager._instance_repository.get(instance_id)
             if root_instance is None:
@@ -1666,10 +1757,11 @@ def create_job_tools(
                 return {"error": "Instance manager not available"}
 
             # Access control: project-scoped check (same as job_messages).
-            if current_instance_id and record.project_id:
-                caller = manager._instance_repository.get(current_instance_id)
-                if caller and caller.project_id and caller.project_id != record.project_id:
-                    return {"error": "Access denied: job does not belong to caller's project"}
+            # See ``_check_job_access`` docstring for the system-default
+            # (global-operator) carve-out used by chat-facing agents.
+            deny = _check_job_access(manager, current_instance_id, record)
+            if deny is not None:
+                return deny
 
             instance_meta = manager._instance_repository.get(instance_id)
             if instance_meta is None:

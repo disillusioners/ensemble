@@ -159,3 +159,20 @@ PLANE_STATUS_MAP: dict[str, str] = {
     "archived": "cancelled",
     "completed": "completed",
 }
+
+# ── Pause-report-recovery Phase 1 (DEFERRED marker reasons) ────────────────────
+# Storage-layer contract (C1): the literal values below MUST match the
+# storage enum / DDL predicate literals verbatim (UPPERCASE). The
+# ``report_injections`` partial unique index
+# (``uq_report_injections_oblig_triple``) uses the
+# ``state IN ('PENDING','DEFERRED')`` predicate — the
+# ``DEFERRED_REASON_*`` values below are the only values written to
+# ``report_injections.deferred_reason`` by the pause drop-site writers
+# (Site 1 — message_processing_pipeline.py:472-, Variant B live site —
+# child_reports.py:2106-, Variant B idempotency guard —
+# child_reports.py:1626-). Any new reason value is added to BOTH this
+# list AND any DDL / docs in the same change.
+DEFERRED_REASON_PAUSE_TOCTOU: str = "PAUSE_TOCTOU"
+DEFERRED_REASON_PENDING_MESSAGES: str = "PENDING_MESSAGES"
+DEFERRED_REASON_IDEMPOTENCY_SKIP: str = "IDEMPOTENCY_SKIP"
+DEFERRED_REASON_RESUME_ROUTER: str = "RESUME_ROUTER"

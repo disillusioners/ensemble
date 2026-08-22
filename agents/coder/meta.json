@@ -6,7 +6,7 @@
   "color": "accent-blue",
   "version": "0.2.0",
   "innate_skills": ["todo", "chart", "dynamic-skill"],
-  "skill_injection": true,
+  "skill_injection": false,
   "no_force_explore": true,
   "tools": {
     "allow": ["bash", "proc", "filesystem", "time", "self", "help", "knowledge", "context", "shared_meta_kv", "instance"]

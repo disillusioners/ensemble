@@ -106,17 +106,34 @@ def mock_instance_manager():
 
 @pytest.fixture
 def mock_project_repo():
-    """Create mock project repository."""
+    """Create mock project repository.
+
+    Work-driven scan: ``get(project_id)`` is the call path. Default
+    returns a permissive mock whose ``job_queue_paused`` is False
+    so the production pause check skips the queue-row. Override
+    ``return_value`` / ``side_effect`` in tests that need explicit
+    pause semantics.
+    """
     repo = MagicMock()
-    repo.list_projects = MagicMock(return_value=[])
+
+    def _make_permissive_project():
+        proj = MagicMock()
+        proj.job_queue_paused = False
+        return proj
+
+    repo.get = MagicMock(return_value=_make_permissive_project())
     return repo
 
 
 @pytest.fixture
 def mock_queue_repo():
-    """Create mock queue repository."""
+    """Create mock queue repository.
+
+    Work-driven scan: ``list_queues_with_admittable_work`` is the
+    call path. Default returns ``[]`` (no work to admit).
+    """
     repo = MagicMock()
-    repo.list_by_project = MagicMock(return_value=[])
+    repo.list_queues_with_admittable_work = MagicMock(return_value=[])
     return repo
 
 
@@ -150,8 +167,8 @@ class TestProjectIdAutoInjection:
         queue = MockQueue("queue-1", SAMPLE_PROJECT_UUID, is_paused=False)
         job = MockJob("job-1", project_id=SAMPLE_PROJECT_UUID, queue_id="queue-1")
 
-        mock_project_repo.list_projects.return_value = [project]
-        mock_queue_repo.list_by_project.return_value = [queue]
+        mock_project_repo.get.return_value = project
+        mock_queue_repo.list_queues_with_admittable_work.return_value = [queue]
         mock_queue_service._repository.list_pending_by_queue.return_value = [job]
         mock_queue_service.start_job = AsyncMock(
             return_value=create_started_job("job-1", SAMPLE_PROJECT_UUID)
@@ -197,11 +214,13 @@ class TestProjectIdAutoInjection:
             poll_interval=0.1,
         )
 
-        # Setup: No regular jobs (all projects/queues return empty)
-        mock_project_repo.list_projects.return_value = []
-        mock_queue_repo.list_by_project.return_value = []
+        # Setup: No regular jobs (all projects/queues return empty).
+        # Work-driven scan: project lookup returns ``None``
+        # (project removed), no queues with work, no orphan jobs.
+        mock_project_repo.get.return_value = None
+        mock_queue_repo.list_queues_with_admittable_work.return_value = []
         mock_queue_service._repository.list_pending_by_queue.return_value = []
-        
+
         # No orphan jobs - list_all_pending returns empty
         mock_queue_service._repository.list_all_pending.return_value = []
 
@@ -238,8 +257,8 @@ class TestProjectIdAutoInjection:
         queue = MockQueue("queue-1", "project-1", is_paused=False)
         job = MockJob("job-1", project_id="project-1", queue_id="queue-1")
 
-        mock_project_repo.list_projects.return_value = [project]
-        mock_queue_repo.list_by_project.return_value = [queue]
+        mock_project_repo.get.return_value = project
+        mock_queue_repo.list_queues_with_admittable_work.return_value = [queue]
         mock_queue_service._repository.list_pending_by_queue.return_value = [job]
         mock_queue_service.start_job = AsyncMock(
             return_value=create_started_job("job-1", "project-1")
@@ -287,8 +306,8 @@ class TestProjectIdAutoInjection:
         job = MockJob("job-1", project_id=None, queue_id="queue-1")
         job.project_id = None  # Explicitly set to None
 
-        mock_project_repo.list_projects.return_value = [project]
-        mock_queue_repo.list_by_project.return_value = [queue]
+        mock_project_repo.get.return_value = project
+        mock_queue_repo.list_queues_with_admittable_work.return_value = [queue]
         mock_queue_service._repository.list_pending_by_queue.return_value = [job]
         mock_queue_service.start_job = AsyncMock(
             return_value=create_started_job("job-1", None)
@@ -331,8 +350,8 @@ class TestProjectIdAutoInjection:
         job = MockJob("job-1", project_id=None, queue_id="queue-1")
         job.project_id = None
 
-        mock_project_repo.list_projects.return_value = [project]
-        mock_queue_repo.list_by_project.return_value = [queue]
+        mock_project_repo.get.return_value = project
+        mock_queue_repo.list_queues_with_admittable_work.return_value = [queue]
         mock_queue_service._repository.list_pending_by_queue.return_value = [job]
         mock_queue_service.start_job = AsyncMock(
             return_value=create_started_job("job-1", None)
@@ -374,8 +393,8 @@ class TestProjectIdAutoInjection:
         queue = MockQueue("queue-1", SAMPLE_PROJECT_UUID, is_paused=False)
         job = MockJob("job-1", project_id=SAMPLE_PROJECT_UUID, queue_id="queue-1")
 
-        mock_project_repo.list_projects.return_value = [project]
-        mock_queue_repo.list_by_project.return_value = [queue]
+        mock_project_repo.get.return_value = project
+        mock_queue_repo.list_queues_with_admittable_work.return_value = [queue]
         mock_queue_service._repository.list_pending_by_queue.return_value = [job]
         mock_queue_service.start_job = AsyncMock(
             return_value=create_started_job("job-1", SAMPLE_PROJECT_UUID)
@@ -423,8 +442,8 @@ class TestProjectIdAutoInjection:
         normal_job = MockJob("normal-job", project_id="normal-project", queue_id="queue-1")
 
         # First iteration: process normal job
-        mock_project_repo.list_projects.return_value = [project]
-        mock_queue_repo.list_by_project.return_value = [queue]
+        mock_project_repo.get.return_value = project
+        mock_queue_repo.list_queues_with_admittable_work.return_value = [queue]
         mock_queue_service._repository.list_pending_by_queue.return_value = [normal_job]
         mock_queue_service._repository.list_all_pending.return_value = []  # No orphan path
         mock_queue_service.start_job = AsyncMock(

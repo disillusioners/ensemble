@@ -404,3 +404,197 @@ describe('AgentSwitcherComponent', () => {
     });
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────
+// F6 — Document-handler gate on viewState.detailVisible()
+//
+// Mirrors todo-list.component.spec.ts's lightweight testable-class
+// pattern: drive only the document-handler slice of
+// AgentSwitcherComponent in isolation so the F6 fix
+// (gate `onDocumentClick` / `onDocumentKeydown` on
+// `viewState.detailVisible()`) is pinned without spinning up the
+// full TestBed + ViewChild + ElementRef plumbing.
+// ─────────────────────────────────────────────────────────────────────────
+
+import { signal } from '@angular/core';
+
+/**
+ * Mock InstancesViewStateService — mirrors the subset the
+ * document-level handlers read: `detailVisible`. The F6 gate bails
+ * on the handlers when the detail overlay is hidden, so tests flip
+ * this signal to drive both gate branches.
+ */
+class MockInstancesViewStateServiceForSwitcher {
+  readonly detailVisible = signal(false);
+}
+
+/**
+ * TestableAgentSwitcher — mirrors the production
+ * `AgentSwitcherComponent` document-handler slice:
+ * `onDocumentClick` and `onDocumentKeydown`. The handler logic
+ * must match production byte-for-byte so a regression in the
+ * `detailVisible()` gate is caught here.
+ */
+class TestableAgentSwitcher {
+  readonly isOpen = signal(false);
+  /** Mirrors the production `inject(InstancesViewStateService)`. */
+  readonly viewState = new MockInstancesViewStateServiceForSwitcher();
+
+  /** Tracks calls so the tests can observe closeDropdown() firing. */
+  closeDropdownCalls = 0;
+
+  /**
+   * Mirrors `@HostListener('document:click')`. The F6 fix adds the
+   * `!detailVisible()` early return at the top — the rest of the
+   * body matches production.
+   */
+  onDocumentClick(event: MouseEvent): void {
+    if (!this.viewState.detailVisible()) return;
+    const target = event.target as HTMLElement;
+    if (!target.closest('.agent-switcher-container')) {
+      this.closeDropdown();
+    }
+  }
+
+  /**
+   * Mirrors `@HostListener('document:keydown')`. The F6 fix adds
+   * the `!detailVisible()` early return at the top.
+   */
+  onDocumentKeydown(event: KeyboardEvent): void {
+    if (!this.viewState.detailVisible()) return;
+    if (event.key === 'Escape' && this.isOpen()) {
+      const activeElement = document.activeElement;
+      const container = document.querySelector('.agent-switcher-container');
+      if (container?.contains(activeElement)) {
+        event.preventDefault();
+        this.closeDropdown();
+      }
+    }
+  }
+
+  private closeDropdown(): void {
+    this.closeDropdownCalls++;
+    this.isOpen.set(false);
+  }
+}
+
+describe('AgentSwitcherComponent — F6 detail-visibility gate on document handlers', () => {
+  let component: TestableAgentSwitcher;
+
+  beforeEach(() => {
+    component = new TestableAgentSwitcher();
+  });
+
+  describe('onDocumentClick', () => {
+    it('is a no-op while detailVisible=false: dropdown stays open', () => {
+      // Outside click on the underlying list page while the
+      // detail overlay is hidden — the dropdown the user cannot
+      // see must NOT be torn down.
+      component.isOpen.set(true);
+      component.viewState.detailVisible.set(false);
+
+      component.onDocumentClick({ target: document.body } as unknown as MouseEvent);
+
+      expect(component.closeDropdownCalls).toBe(0);
+      expect(component.isOpen()).toBe(true);
+    });
+
+    it('closes the dropdown while detailVisible=true (visible overlay)', () => {
+      // Outside click on a route other than the detail overlay —
+      // but the overlay is currently visible, so the click is
+      // inside the overlay's chrome and the dropdown must close
+      // normally.
+      component.isOpen.set(true);
+      component.viewState.detailVisible.set(true);
+
+      component.onDocumentClick({ target: document.body } as unknown as MouseEvent);
+
+      expect(component.closeDropdownCalls).toBe(1);
+      expect(component.isOpen()).toBe(false);
+    });
+
+    it('does NOT close when the click is inside the agent-switcher container (visible)', () => {
+      // Production branch: target.closest('.agent-switcher-container')
+      // matches — closeDropdown is NOT called. With the gate
+      // present this still works as before.
+      component.isOpen.set(true);
+      component.viewState.detailVisible.set(true);
+      const inside = document.createElement('div');
+      inside.classList.add('agent-switcher-container');
+      document.body.appendChild(inside);
+
+      try {
+        component.onDocumentClick({ target: inside } as unknown as MouseEvent);
+        expect(component.closeDropdownCalls).toBe(0);
+        expect(component.isOpen()).toBe(true);
+      } finally {
+        document.body.removeChild(inside);
+      }
+    });
+  });
+
+  describe('onDocumentKeydown', () => {
+    it('is a no-op while detailVisible=false: dropdown stays open AND Escape is NOT consumed', () => {
+      // Same shape as todo-list's onEscape test: the underlying
+      // page still receives the Escape (no preventDefault steal
+      // from an invisible overlay).
+      component.isOpen.set(true);
+      component.viewState.detailVisible.set(false);
+      const event = {
+        key: 'Escape',
+        defaultPrevented: false,
+        preventDefault(): void { (this as { defaultPrevented: boolean }).defaultPrevented = true; },
+      } as unknown as KeyboardEvent;
+
+      component.onDocumentKeydown(event);
+
+      expect(component.closeDropdownCalls).toBe(0);
+      expect(component.isOpen()).toBe(true);
+      expect(event.defaultPrevented).toBe(false);
+    });
+
+    it('closes the dropdown when detailVisible=true and Escape fires (visible overlay)', () => {
+      component.isOpen.set(true);
+      component.viewState.detailVisible.set(true);
+      // Build a real container + child element so document.activeElement
+      // is inside it (production branch).
+      const inside = document.createElement('button');
+      const container = document.createElement('div');
+      container.classList.add('agent-switcher-container');
+      container.appendChild(inside);
+      document.body.appendChild(container);
+      inside.focus();
+      const event = {
+        key: 'Escape',
+        defaultPrevented: false,
+        preventDefault(): void { (this as { defaultPrevented: boolean }).defaultPrevented = true; },
+      } as unknown as KeyboardEvent;
+
+      try {
+        component.onDocumentKeydown(event);
+        expect(component.closeDropdownCalls).toBe(1);
+        expect(component.isOpen()).toBe(false);
+      } finally {
+        document.body.removeChild(container);
+      }
+    });
+
+    it('does NOT close when detailVisible=true but the dropdown is closed', () => {
+      // Production branch: isOpen() is false, so the inner
+      // Escape branch does not fire even when the overlay is
+      // visible. The gate is independent of this branch.
+      component.isOpen.set(false);
+      component.viewState.detailVisible.set(true);
+      const event = {
+        key: 'Escape',
+        defaultPrevented: false,
+        preventDefault(): void { (this as { defaultPrevented: boolean }).defaultPrevented = true; },
+      } as unknown as KeyboardEvent;
+
+      component.onDocumentKeydown(event);
+
+      expect(component.closeDropdownCalls).toBe(0);
+      expect(event.defaultPrevented).toBe(false);
+    });
+  });
+});

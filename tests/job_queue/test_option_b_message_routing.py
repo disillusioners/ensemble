@@ -507,11 +507,16 @@ class TestProcessorRoutesMessage:
         )
 
         # Build a real JobProcessor with a mocked InstanceManager.
+        # Work-driven scan (admission starvation fix): the
+        # JobProcessor discovers queues via
+        # ``queue_repo.list_queues_with_admittable_work`` and looks
+        # up each queue's project pause state via the cached
+        # ``project_repo.get(project_id)``.
         project_repo = MagicMock()
-        project_repo.list_projects.return_value = [MagicMock(
+        project_repo.get.return_value = MagicMock(
             project_id="test-project",
             job_queue_paused=False,
-        )]
+        )
         instance_manager = MagicMock()
         # The instance exists and is not PAUSED.
         instance_manager._instance_repository = MagicMock()
@@ -541,7 +546,7 @@ class TestProcessorRoutesMessage:
             queue_type="parallel",
             concurrency_limit=3,
         )
-        queue_repo_with_queues.list_by_project.return_value = [mock_queue]
+        queue_repo_with_queues.list_queues_with_admittable_work.return_value = [mock_queue]
 
         processor = JobProcessor(
             queue_service=job_queue_service,

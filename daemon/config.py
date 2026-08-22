@@ -7,6 +7,7 @@
 # clarity for marginal modularity; the file crossed 1000 lines in the HA
 # fallback round and the trade-off still holds — keep centralized.
 import json
+import logging
 import os
 import re
 from pathlib import Path
@@ -22,6 +23,8 @@ from .constants import (
     MAX_INSTANCE_HISTORY,
     MAINTENANCE_CHECK_INTERVAL_MINUTES,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def substitute_env_vars(value: Any) -> Any:
@@ -126,39 +129,40 @@ class LLMConfig(BaseSettings):
     temperature: float = Field(default=0.7)
     request_timeout: int = Field(default=610, description="Request timeout in seconds (default: 11 minutes)")
 
-    # Models for which reasoning_content from a previous turn must be echoed
-    # back in subsequent assistant messages. Substring match is performed
-    # against the model name (case-insensitive). Default: DeepSeek (required
-    # by their thinking-mode API for tool-calling turns).
-    # Override via OPENAI_REASONING_ECHO_MODELS env var, e.g.
-    #   OPENAI_REASONING_ECHO_MODELS="deepseek,glm,zai"
+    # Models for which reasoning_content echo is DISABLED: reasoning_content
+    # from a previous turn is echoed back in subsequent assistant messages
+    # for every model EXCEPT those whose name case-insensitively
+    # substring-matches an entry here. Default: empty (all models echo).
+    # Override via OPENAI_REASONING_ECHO_DISABLED_MODELS env var, e.g.
+    #   OPENAI_REASONING_ECHO_DISABLED_MODELS="gpt-4o,claude"
     # The NoDecode annotation prevents pydantic-settings from auto-JSON-decoding
     # the env value, so our field_validator can handle comma-separated input.
-    reasoning_echo_models: Annotated[list[str], NoDecode] = Field(
-        default_factory=lambda: ["deepseek"],
+    reasoning_echo_disabled_models: Annotated[list[str], NoDecode] = Field(
+        default_factory=list,
         description=(
             "Model name patterns (case-insensitive substring match) for which "
-            "reasoning_content must be echoed back in multi-turn conversations. "
-            "Default: ['deepseek']."
+            "reasoning_content echo is disabled. All other models echo "
+            "reasoning_content back in multi-turn conversations. "
+            "Default: [] (all models echo)."
         ),
     )
 
-    @field_validator("reasoning_echo_models", mode="before")
+    @field_validator("reasoning_echo_disabled_models", mode="before")
     @classmethod
-    def _parse_reasoning_echo_models(cls, value: Any) -> Any:
+    def _parse_reasoning_echo_disabled_models(cls, value: Any) -> Any:
         """Accept comma-separated strings (and JSON arrays) from env / YAML.
 
         Delegates to ``_parse_csv_or_json_list`` for the shared parsing logic.
         The ``NoDecode`` annotation prevents pydantic-settings from
         auto-parsing env values, so we handle both forms here:
-          - ``"deepseek,glm,zai"`` → ``["deepseek", "glm", "zai"]``
-          - ``'["deepseek","glm","zai"]'`` → ``["deepseek", "glm", "zai"]``
-          - ``["deepseek", "glm", "zai"]`` → unchanged (passthrough)
+          - ``"gpt-4o,claude"`` → ``["gpt-4o", "claude"]``
+          - ``'["gpt-4o","claude"]'`` → ``["gpt-4o", "claude"]``
+          - ``["gpt-4o", "claude"]`` → unchanged (passthrough)
           - ``""`` or whitespace → ``[]``
 
         Env format example::
 
-            OPENAI_REASONING_ECHO_MODELS="deepseek,glm,zai"
+            OPENAI_REASONING_ECHO_DISABLED_MODELS="gpt-4o,claude"
         """
         return _parse_csv_or_json_list(value)
 
@@ -454,6 +458,88 @@ class ServicesConfig(BaseSettings):
             "Interval (seconds) for the periodic dual-table drift "
             "reconciler (F5/F10). Default 300s (5min) — drift is rare "
             "so a slower cadence keeps the logs quiet."
+        ),
+    )
+    # Phase 2 (pause-report-recovery, task 2.6): the periodic
+    # ``ReportDeliveryRecoveryService`` sweep. S-e defaults —
+    # tunable per-lane kill-switches; disabled → zero behavior
+    # change.
+    report_delivery_recovery_enabled: bool = Field(
+        default=True,
+        description=(
+            "Master kill-switch for the periodic "
+            "ReportDeliveryRecoveryService. When False the service "
+            "is not constructed and the crash-recovery endpoint is "
+            "unavailable. Defaults to True (S-e)."
+        ),
+    )
+    report_delivery_recovery_interval_seconds: int = Field(
+        default=300,
+        description=(
+            "Periodic sweep interval (seconds) for the "
+            "ReportDeliveryRecoveryService. Default 300s (5min). "
+            "S-e recommended default; tunable via env."
+        ),
+    )
+    report_delivery_recovery_age_bound_minutes: int = Field(
+        default=10,
+        description=(
+            "Minimum age before a DEFERRED / PENDING row is eligible "
+            "for recovery (Lanes 1, 3, 4). Default 10 minutes."
+        ),
+    )
+    report_delivery_recovery_batch_cap: int = Field(
+        default=100,
+        description=(
+            "Maximum rows per lane per run (batch cap — MVP growth "
+            "rule). Remainder logged and re-claimed next cycle."
+        ),
+    )
+    report_delivery_recovery_retry_minutes: int = Field(
+        default=1,
+        description=(
+            "Lane 4 retry interval (rows stamped "
+            "recovery_attempted_at younger than this are skipped). "
+            "S-e proposed default; flagged as proposed default."
+        ),
+    )
+    report_delivery_recovery_lane_deferred: bool = Field(
+        default=True,
+        description=(
+            "Lane 1 (DEFERRED rows for non-terminal parents) "
+            "per-lane kill-switch. Gated by "
+            "has_instance_busy(parent_id), no age bound — age "
+            "filtering lives on Lanes 3+4. Defaults to True."
+        ),
+    )
+    report_delivery_recovery_lane_no_row_backstop: bool = Field(
+        default=True,
+        description=(
+            "Lane 2 (no-row backstop, C3 designed query) per-lane "
+            "kill-switch. Defaults to True (the ONLY net under "
+            "FM-11)."
+        ),
+    )
+    report_delivery_recovery_lane_pending_age: bool = Field(
+        default=True,
+        description=(
+            "Lane 3 (age-bounded PENDING, permanent W9) per-lane "
+            "kill-switch. Defaults to True."
+        ),
+    )
+    report_delivery_recovery_lane_recovery_retry: bool = Field(
+        default=True,
+        description=(
+            "Lane 4 (recovery_attempted_at retry, permanent "
+            "W9/FM-13) per-lane kill-switch. Defaults to True."
+        ),
+    )
+    report_delivery_recovery_lane_orphan: bool = Field(
+        default=True,
+        description=(
+            "Lane 5 (ORPHAN — terminal parents, W1) per-lane "
+            "kill-switch. Defaults to True (NEVER silent — terminal-"
+            "parent rows always reach a structured disposition)."
         ),
     )
     drift_reconcile_min_pending_age_seconds: int = Field(
@@ -953,6 +1039,36 @@ class Config(BaseSettings):
     blueprint: BlueprintConfig = Field(default_factory=BlueprintConfig)
 
 
+# Warn-only deprecation guard for the removed reasoning-echo allowlist env
+# var. The value is deliberately read into NO behavior — the denylist key
+# OPENAI_REASONING_ECHO_DISABLED_MODELS is the only effective control.
+_reasoning_echo_deprecation_warned = False
+
+
+def warn_deprecated_reasoning_echo_env() -> None:
+    """Log a single per-process warning if the old allowlist env var is set.
+
+    ``OPENAI_REASONING_ECHO_MODELS`` stopped being read when the
+    reasoning_content echo default flipped to ON for all models; its
+    replacement is the denylist key ``OPENAI_REASONING_ECHO_DISABLED_MODELS``.
+    Called from ``load_config`` and the startup wiring sites
+    (``daemon/__main__.py``, ``daemon/api.py``); the module-level guard makes
+    the warning fire at most once per process.
+    """
+    global _reasoning_echo_deprecation_warned
+    if _reasoning_echo_deprecation_warned:
+        return
+    _reasoning_echo_deprecation_warned = True
+    if "OPENAI_REASONING_ECHO_MODELS" not in os.environ:
+        return
+    logger.warning(
+        "[Config] OPENAI_REASONING_ECHO_MODELS is set but no longer read; "
+        "reasoning_content echo now defaults to ON for all models. Use "
+        'OPENAI_REASONING_ECHO_DISABLED_MODELS (e.g. "gpt-4o,claude") to '
+        "disable echo for models whose endpoint rejects the field."
+    )
+
+
 def load_config(config_path: str | None = None) -> Config:
     """
     Load configuration from YAML file with environment variable substitution.
@@ -968,6 +1084,9 @@ def load_config(config_path: str | None = None) -> Config:
         FileNotFoundError: If config file does not exist
         ValueError: If config file is invalid
     """
+    # Warn-once deprecation notice for the removed allowlist env var
+    warn_deprecated_reasoning_echo_env()
+
     # Determine config file path
     if config_path is None:
         config_path = os.environ.get("ENSEMBLE_CONFIG", "./config.yaml")

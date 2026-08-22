@@ -795,9 +795,9 @@ class TestRestoreInstanceModelOverride:
 class TestAllowedModelsConfigParsing:
     """Tests for the ``_parse_csv_or_json_list`` helper in ``daemon.config``.
 
-    This helper backs both ``LLMConfig.reasoning_echo_models`` and
+    This helper backs both ``LLMConfig.reasoning_echo_disabled_models`` and
     ``LLMConfig.allowed_models`` parsing from env / YAML inputs, so any
-    regression here affects every consumer of the allow-list machinery.
+    regression here affects every consumer of the list-parsing machinery.
     """
 
     def test_csv_string_parsing(self) -> None:

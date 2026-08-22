@@ -105,6 +105,7 @@ from daemon.routers import (
     settings_router,       # /api/settings (Phase 1: user language preference)
     skill_bank_router,        # /api/skill-bank (Skill Bank CRUD)
     blueprints_router,        # /api/projects/{project_id}/blueprints (Project Blueprints CRUD)
+    recovery_router,          # /api/recovery (Phase 2: pause-report-recovery crash-recovery endpoint)
 )
 from daemon.routers.workspace import router as workspace_router
 
@@ -157,7 +158,7 @@ async def lifespan(app: FastAPI):
     """
     # Import services here to avoid circular imports
     from daemon.manager import InstanceManager
-    from daemon.config import load_config
+    from daemon.config import load_config, warn_deprecated_reasoning_echo_env
     from daemon.services.job_queue_service import JobQueueService
     from daemon.services.job_lock_manager import JobLockManager
     from daemon.services.job_processor import JobProcessor
@@ -199,13 +200,17 @@ async def lifespan(app: FastAPI):
     # for the `python -m daemon` entry point so that `uvicorn daemon.api:app`
     # works the same way.
     from daemon.graph import ThinkingChatOpenAI
-    ThinkingChatOpenAI.reasoning_echo_models = list(
-        config.llm.reasoning_echo_models or []
+    ThinkingChatOpenAI.reasoning_echo_disabled_models = list(
+        config.llm.reasoning_echo_disabled_models or []
     )
     daemon_logger.info(
-        f"[Config] reasoning_echo_models={ThinkingChatOpenAI.reasoning_echo_models} "
-        f"(echo reasoning_content back in multi-turn for matching model names)"
+        f"[Config] reasoning_echo_disabled_models={ThinkingChatOpenAI.reasoning_echo_disabled_models} "
+        f"(models matching these patterns will NOT echo reasoning_content; all others echo)"
     )
+
+    # Warn-once if the removed allowlist env var is still set (no-op when
+    # load_config already emitted it)
+    warn_deprecated_reasoning_echo_env()
 
     # Run RAG auto-test to verify LightRAG connectivity
     # This gracefully disables RAG if it's misconfigured (wrong API key, connection refused, etc.)
@@ -1671,6 +1676,7 @@ def create_app() -> FastAPI:
     api_router.include_router(skill_bank_router)        # /api/skill-bank (Skill Bank CRUD)
     api_router.include_router(blueprints_router)        # /api/projects/{project_id}/blueprints (Project Blueprints CRUD)
     api_router.include_router(workspace_router)         # /api/workspace (Phase 1: workspace viewer)
+    api_router.include_router(recovery_router)          # /api/recovery (Phase 2: pause-report-recovery crash-recovery endpoint)
 
     app.include_router(api_router)
 

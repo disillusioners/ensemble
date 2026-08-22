@@ -590,7 +590,10 @@ class ContextCompactor:
         self.llm_config = llm_config
         self.llm_config_with_headers = {
             **llm_config,
-            "default_headers": {"x-proxy-app": "ensemble"},
+            "default_headers": {
+                "x-proxy-app": "ensemble",
+                "x-proxy-interleaved-thinking": "True",
+            },
         }
     
     async def compact_state(self, context: CompactionContext) -> CompactionResult | None:

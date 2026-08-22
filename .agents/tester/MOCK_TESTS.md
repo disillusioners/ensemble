@@ -95,3 +95,84 @@ Update when mock tests are added/modified.
 - **Runtime**: 0.20 s
 - **Quick Fixes**: none — production code matched the spec
 - **Report**: see "Result" section of the script's stdout output
+
+
+---
+
+## Mock Test: Reasoning-Echo Denylist Real-Behavior Verification
+
+### Metadata
+- **Created**: 2026-08-22
+- **Script**: `tests/mocks/reasoning_echo_denylist_mock.py`
+- **Language**: Python
+- **Status**: ACTIVE
+
+### Configuration
+- **Timeout**: 180 s self (`signal.alarm`) + `timeout 200` outer guard (dual-layer)
+- **Service Port**: n/a — pure in-process; no network listener, no daemon start
+- **Mock Ports**: n/a
+- **Cleanup**: env vars saved/restored around every scenario; no processes spawned
+
+### What It Tests
+Real-behavior verification of the allowlist→denylist flip in
+`ThinkingChatOpenAI` (`daemon/graph.py`, branch `feature/reasoning-echo-denylist`,
+commits `28ea76a9` + `018800b8`):
+- ALL models echo `reasoning_content` in outgoing request payloads by default
+- Models matching env `OPENAI_REASONING_ECHO_DISABLED_MODELS`
+  (comma-separated, case-insensitive substring) are EXCLUDED
+- Old env `OPENAI_REASONING_ECHO_MODELS` is dead but logs a deprecation
+  warning (`warn_deprecated_reasoning_echo_env`)
+- Reasoning-presence gate unchanged: message without `reasoning_content`
+  never echoes (any model/env)
+
+Asserts against the REAL `ThinkingChatOpenAI` class — the class under test
+is never stubbed.
+
+### Mock Services Required
+- None — in-process construction of `ThinkingChatOpenAI` + message history;
+  request payload inspected at the `_get_request_payload` seam (or the exact
+  seam the code exposes — implementer adapts to actual wiring:
+  `LLMConfig` → env parsing → ClassVar set at startup per `daemon/__main__.py`).
+
+### Test Scenarios
+1. **S1 default**: no echo env vars set → model `gpt-4o` payload assistant
+   message INCLUDES `reasoning_content`.
+2. **S2 denylist spares others**: `OPENAI_REASONING_ECHO_DISABLED_MODELS=gpt-4o`
+   → `gpt-4o` payload EXCLUDES it; `deepseek-chat` payload still INCLUDES it.
+3. **S3 case-insensitive**: env value `GPT-4O` disables `gpt-4o`.
+4. **S4 empty-string env**: `OPENAI_REASONING_ECHO_DISABLED_MODELS=` → parses
+   to `[]` → all models echo (no `[""]` poison entry that would disable everything).
+5. **S5 deprecation**: `OPENAI_REASONING_ECHO_MODELS=deepseek` set →
+   deprecation warning fires (exactly once), behavior unchanged
+   (`gpt-4o` still echoes — old key no longer gates anything).
+6. **S6 presence gate**: plain non-tool-call assistant turn WITH
+   `reasoning_content` echoes; assistant message WITHOUT `reasoning_content`
+   never echoes (any model/env).
+
+### Success Criteria
+- [ ] All 6 scenarios pass with assertion evidence (payload includes/excludes
+      `reasoning_content` per scenario)
+- [ ] Total runtime well under 5 min (target < 60 s)
+- [ ] No process leaks, no network calls
+- [ ] Env fully restored after run
+
+### Implementation Notes
+- Follow the pattern of `tests/mocks/pinned_cleanup_protection_mock.py`
+  (in-process, per-scenario isolation, dual-layer timeout, RESULT: PASS/FAIL).
+- Env control: save/restore `os.environ`; set the ClassVar the same way
+  `daemon/__main__.py` does at startup (read the code for exact wiring).
+- Deprecation-warning capture: `warnings.catch_warnings(record=True)` or the
+  project's logging capture — implementer adapts to the helper's mechanism.
+- Test code only — production code is NEVER modified. Genuine production
+  bugs are reported, not fixed.
+
+### Last Run
+- **Date**: 2026-08-22T11:02 (local)
+- **Worker Instance**: tester worker (real-behavior verification dispatch)
+- **Result**: PASS (6/6 scenarios; exit 0; runtime 0.15 s under `timeout 200` + `signal.alarm(180)`)
+- **Quick Fixes**: none — production behavior matched the spec on all six scenarios
+- **Report**: stdout of `tests/mocks/reasoning_echo_denylist_mock.py` (per-scenario
+  evidence inlined); notable observation from S5: `warn_deprecated_reasoning_echo_env`
+  dedups via a per-process module flag that is consumed even when the env var is
+  absent at the first call, so a later call with the env var set stays silent
+  (per-process budget, not per-env-state).

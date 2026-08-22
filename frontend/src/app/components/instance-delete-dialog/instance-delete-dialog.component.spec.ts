@@ -91,6 +91,21 @@ class MockSseService {
   }
 }
 
+/**
+ * Mock InstancesViewStateService — mirrors the subset of the real
+ * service the dialog touches: ``clearInstance`` (W1). The W1 tests
+ * assert it is called with the terminated / deleted instance id on
+ * success and NOT called on the error paths (where the instance is
+ * still alive server-side).
+ */
+class MockInstancesViewStateService {
+  clearInstanceCalls: string[] = [];
+
+  clearInstance(instanceId: string): void {
+    this.clearInstanceCalls.push(instanceId);
+  }
+}
+
 // Mock Router — tracks current URL and records `navigate` calls.
 class MockRouter {
   currentUrl = '/projects/all/instances';
@@ -132,6 +147,7 @@ class TestableInstanceDeleteDialogComponent {
   protected readonly snackBar: MockMatSnackBar;
   protected readonly sseService: MockSseService;
   protected readonly router: MockRouter;
+  protected readonly viewState: MockInstancesViewStateService;
   protected readonly dialogRef: MockMatDialogRef<boolean | { action: 'terminate' | 'delete' }>;
   protected readonly data: unknown;
 
@@ -140,6 +156,7 @@ class TestableInstanceDeleteDialogComponent {
     snackBar: MockMatSnackBar,
     sseService: MockSseService,
     router: MockRouter,
+    viewState: MockInstancesViewStateService,
     dialogRef: MockMatDialogRef<boolean | { action: 'terminate' | 'delete' }>,
     data: TestDialogData,
   ) {
@@ -147,6 +164,7 @@ class TestableInstanceDeleteDialogComponent {
     this.snackBar = snackBar;
     this.sseService = sseService;
     this.router = router;
+    this.viewState = viewState;
     this.dialogRef = dialogRef;
     this.data = data;
   }
@@ -166,6 +184,10 @@ class TestableInstanceDeleteDialogComponent {
       .deleteInstance((this.data as TestDialogData).instance.instance_id, false)
       .subscribe({
         next: () => {
+          // W1: drop the cached id from the view-state service. The
+          // service is a no-op when the terminated id isn't the active
+          // cache, so this is safe for unrelated rows too.
+          this.viewState.clearInstance((this.data as TestDialogData).instance.instance_id);
           this.snackBar.open('Instance terminated', 'Close', {
             duration: 3000,
             panelClass: 'success-snackbar',
@@ -201,6 +223,10 @@ class TestableInstanceDeleteDialogComponent {
       .deleteInstance((this.data as TestDialogData).instance.instance_id, true)
       .subscribe({
         next: () => {
+          // W1: drop the cached id from the view-state service. Same
+          // semantics as handleTerminate — clearInstance is a no-op
+          // when the id isn't the active cache.
+          this.viewState.clearInstance((this.data as TestDialogData).instance.instance_id);
           this.snackBar.open('Instance deleted', 'Close', {
             duration: 3000,
             panelClass: 'success-snackbar',
@@ -263,6 +289,7 @@ function createComponent(
     snackBar?: MockMatSnackBar;
     sseService?: MockSseService;
     router?: MockRouter;
+    viewState?: MockInstancesViewStateService;
     dialogRef?: MockMatDialogRef<boolean | { action: 'terminate' | 'delete' }>;
   } = {},
 ): {
@@ -271,12 +298,14 @@ function createComponent(
   snackBar: MockMatSnackBar;
   sseService: MockSseService;
   router: MockRouter;
+  viewState: MockInstancesViewStateService;
   dialogRef: MockMatDialogRef<boolean | { action: 'terminate' | 'delete' }>;
 } {
   const api = overrides.api ?? new MockApiService();
   const snackBar = overrides.snackBar ?? new MockMatSnackBar();
   const sseService = overrides.sseService ?? new MockSseService();
   const router = overrides.router ?? new MockRouter();
+  const viewState = overrides.viewState ?? new MockInstancesViewStateService();
   const dialogRef =
     overrides.dialogRef ??
     new MockMatDialogRef<boolean | { action: 'terminate' | 'delete' }>();
@@ -287,11 +316,12 @@ function createComponent(
     snackBar,
     sseService,
     router,
+    viewState,
     dialogRef,
     data,
   );
 
-  return { component, api, snackBar, sseService, router, dialogRef };
+  return { component, api, snackBar, sseService, router, viewState, dialogRef };
 }
 
 // ===========================================================================
@@ -584,6 +614,68 @@ describe('InstanceDeleteDialogComponent', () => {
       component.handleConfirmDelete();
       expect(api.deleteInstanceCalls).toHaveLength(0);
       expect(dialogRef.closeResult.called).toBe(false);
+    });
+  });
+
+  // ---- g) W1: viewState.clearInstance wiring ----
+  //
+  // Successful termination AND hard-delete must drop the cached
+  // instance id from InstancesViewStateService so the next "Instances"
+  // nav-link click never restores a dead instance. Error paths must
+  // NOT call it — the instance is still alive server-side, and the
+  // service no-ops for non-matching ids anyway (left unwired per the
+  // W1 spec; these assertions pin that decision).
+
+  describe('W1 — viewState.clearInstance wiring', () => {
+    it('handleTerminate success calls clearInstance with the terminated instance id', () => {
+      const { component, viewState } = createComponent(
+        createMockInstance({ instance_id: 'inst-w1-terminate' }),
+      );
+
+      component.handleTerminate();
+
+      expect(viewState.clearInstanceCalls).toEqual(['inst-w1-terminate']);
+    });
+
+    it('handleConfirmDelete success calls clearInstance with the deleted instance id', () => {
+      const { component, viewState } = createComponent(
+        createMockInstance({ instance_id: 'inst-w1-delete' }),
+      );
+
+      component.handleConfirmDelete();
+
+      expect(viewState.clearInstanceCalls).toEqual(['inst-w1-delete']);
+    });
+
+    it('handleTerminate api error does NOT call clearInstance (instance still alive)', () => {
+      const { component, api, viewState } = createComponent();
+      api.setResult('error', Object.assign(new Error('Boom'), {
+        error: { detail: 'Terminate failed' },
+      }));
+
+      component.handleTerminate();
+
+      expect(viewState.clearInstanceCalls).toHaveLength(0);
+    });
+
+    it('handleConfirmDelete api error does NOT call clearInstance (instance still alive)', () => {
+      const { component, api, viewState } = createComponent();
+      api.setResult('error', Object.assign(new Error('Boom'), {
+        error: { detail: 'Delete failed' },
+      }));
+
+      component.handleConfirmDelete();
+
+      expect(viewState.clearInstanceCalls).toHaveLength(0);
+    });
+
+    it('clearInstance is called exactly once per success (terminate does not double-fire)', () => {
+      const { component, viewState } = createComponent();
+
+      component.handleTerminate();
+      component.handleConfirmDelete();  // isBusy stays true after success → no-op
+
+      expect(viewState.clearInstanceCalls).toHaveLength(1);
     });
   });
 
