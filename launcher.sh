@@ -456,22 +456,28 @@ _js_lock_dir() {
 # _js_lock_acquire <install_dir> [wait_s] — 0 acquired, 1 busy.
 _js_lock_acquire() {
     local install_dir="$1" wait_s="${2:-$SWEEP_LOCK_WAIT_S}"
-    local lock hb owner_pid age waited=0
+    local lock hb owner_pid run_id age waited=0
     lock="$(_js_lock_dir "$install_dir")"
     mkdir -p "$(dirname "$lock")" 2>/dev/null
     while :; do
         if mkdir "$lock" 2>/dev/null; then
             printf '%s\n' "$$" > "$lock/owner" 2>/dev/null
+            # run_id: the D5 protocol file lib.sh writes on acquire —
+            # without it a launcher-held lock degrades every lib.sh
+            # stale-break/pipeline-busy diagnostic to run_id=? and
+            # status.sh shows an empty run (review m1).
+            printf '%s\n' "run-$(date +%Y%m%d-%H%M%S)-$$" > "$lock/run_id" 2>/dev/null
             printf '%s\n' "$(_now)" > "$lock/heartbeat" 2>/dev/null
             return 0
         fi
         # exists — stale? heartbeat > SWEEP_LOCK_STALE_S → break it (mv)
         hb="$(cat "$lock/heartbeat" 2>/dev/null)"
         owner_pid="$(cat "$lock/owner" 2>/dev/null)"
+        run_id="$(cat "$lock/run_id" 2>/dev/null)"
         if printf '%s' "$hb" | grep -Eq '^[0-9]+$'; then
             age=$(( $(_now) - hb ))
             if [ "$age" -gt "$SWEEP_LOCK_STALE_S" ]; then
-                _log "journal sweep: pipeline lock stale (heartbeat ${age}s old, owner pid ${owner_pid:-?}) — breaking"
+                _log "journal sweep: pipeline lock stale (heartbeat ${age}s old, owner pid ${owner_pid:-?}, run ${run_id:-?}) — breaking"
                 mv "$lock" "${lock}.stale.$$" 2>/dev/null || continue
                 continue
             fi
