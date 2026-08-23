@@ -741,6 +741,28 @@ adopt_run "$AD_OPT_DIR/t12"
 assert_eq "8k control: unquarantined previous still adopts" "0" "$?"
 assert_eq "8k control repointed to previous" "releases/vP" "$(readlink "$AD_OPT_DIR/t12/current")"
 
+# 8l. failed-counter path (review nit): journal writes FAIL after the repoint
+#     (read-only releases/ dir → journal_count_rollback rc≠0 → newcnt="") —
+#     the M5 WARN still fires and the recovery still completes rc 0 (loudly-
+#     warned degraded state, NO new halt semantics), and the guarded cap
+#     check must NOT emit a stray `[: : integer expression expected` on
+#     stderr when newcnt is empty.
+adopt_fixture "$AD_OPT_DIR/t13" "$STALE700" true vP 0 999999 true
+chmod 555 "$AD_OPT_DIR/t13/releases"   # journal writes fail; reads + root-level flip still work
+( export INSTALL_DIR="$AD_OPT_DIR/t13"; . "$FAKE_REPO/scripts/upgrade/lib.sh"; adopt_stale_txn ) \
+    >/dev/null 2>"$AD_OPT_DIR/t13/stderr.txt"
+RC_8L=$?
+chmod 755 "$AD_OPT_DIR/t13/releases"   # restore so fixture cleanup can rm -rf
+assert_eq "8l failed-counter adopt still completes rc 0 (no new halt)" "0" "$RC_8L"
+assert_eq "8l repoint landed despite counter failure" "releases/vP" "$(readlink "$AD_OPT_DIR/t13/current")"
+assert_contains "8l M5 counter-failure WARN still fires (loud, not silent)" \
+    "counter/cooldown write FAILED" "$(cat "$AD_OPT_DIR/t13/stderr.txt")"
+if grep -q "integer expression expected" "$AD_OPT_DIR/t13/stderr.txt"; then
+    _fail "8l no stray 'integer expression expected' on failed-counter cap check" "absent" "present"
+else
+    _pass
+fi
+
 # ─── 9. retention eviction order with MIXED sort keys (review i3) ───────────
 section "retention mixed-key eviction order"
 RET_DIR="$FIXTURE/ret"
