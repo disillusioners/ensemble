@@ -1,6 +1,6 @@
 # Upgrade Drills Runbook — Self-Restart / Self-Upgrade Phase 2 (P2.3)
 
-- **Version:** 1.0 @ <commit> *(commit hash filled at commit time)*
+- **Version:** 1.0 @ f16ab3be *(B8b — final runbook-content commit of P2.3)*
 - **Canonical path:** `docs/runbooks/upgrade-drills.md` — **this file is the canonical drill runbook** (P2.3 design decision D2, `phase3-plan.md`; the alternative `.agents/devops/RUNBOOKS/` location was NOT chosen — this line is the canonical-path statement D2 requires).
 - **Scope:** DR-1…DR-5 are executed on **demo (7979) / sandbox only** by this initiative. §8 (live promotion) is **USER-GATED DESIGN — NEVER EXECUTED BY THIS INITIATIVE** (D3). §9 is a hard gate that precedes any live eligibility.
 - **Companion docs:** `phase3-plan.md` (D1–D4, carry-over matrix, tasks T1–T9) · `test-strategy.md` §3 (drill matrix) / §4.1 (canonical clean-cycle definition) / §5 (environment discipline) · `promotion-ladder.md` (S0–S6, U1–U6) · `decisions.md` (ADR-016…034).
