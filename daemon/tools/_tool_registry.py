@@ -61,6 +61,11 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
     "job_tree",
     "job_progress",
     "job_inject",
+    # system_upgrade read pair — created by create_upgrade_tools() factory
+    # (daemon/tools/upgrade_tools.py, P2.2 Dispatch A). The actor tools
+    # (system_restart / system_upgrade) join this set in Dispatch B.
+    "release_info",
+    "upgrade_status",
 })
 
 
@@ -69,6 +74,23 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
 # these — the tool names are only known after the MCP server responds.
 DYNAMIC_TOOL_PREFIXES: frozenset[str] = frozenset({
     "plane_",
+})
+
+
+# Categories that are OPT-IN-ONLY regardless of the empty-allow default.
+#
+# R-SR16 (P2.2 tool-api-design.md §3.5, architect-resolved 2026-08-22):
+# ``resolve_tool_filter`` treats an absent/empty allow list as "everything
+# is potentially allowed" — which would default-grant these categories to
+# every agent created without an explicit allow-list (watcher is empty-allow
+# today). Privileged categories NEVER join that default universe: an agent
+# reaches them ONLY through an explicit ``tools.allow`` entry naming the
+# category or one of its tools. Enforced structurally in
+# ``daemon.tools.instance`` (the ``resolve_tool_filter`` empty-allow branch
+# and the default-allow paths of ``_apply_tool_filter``) — no deny rules
+# needed. Today: ``system_upgrade`` (restart/upgrade authority).
+PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
+    "system_upgrade",
 })
 
 
@@ -454,6 +476,7 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     "system-log": "daemon.tools.system_log_tools",
     "plane": "daemon.tools.plane_tools",
     "plane_sync": "daemon.tools.plane_sync",
+    "system_upgrade": "daemon.tools.upgrade_tools",
 }
 
 
@@ -619,6 +642,7 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "rag_update_entity",
     "read_context",
     "read_file",
+    "release_info",
     "send_message",
     "shared_meta_kv",
     "skill_analyze",
@@ -652,6 +676,7 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "todo_view",
     "tool_help",
     "unwatch_job",
+    "upgrade_status",
     "watch_job",
     "watch_jobs",
     "write_file",})

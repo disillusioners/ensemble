@@ -197,9 +197,15 @@ from .db_tools import create_db_tools
 from .infra import create_infra_tools
 from .system import create_system_tools
 from .system_log_tools import create_system_log_tools
+from .upgrade_tools import create_upgrade_tools
 from .language_tools import create_language_tools
 from .proc_tools import create_proc_tools
-from ._tool_registry import list_tools_by_category, scan_tools_for_full_docs, register_tool_category
+from ._tool_registry import (
+    PRIVILEGED_TOOL_CATEGORIES,
+    list_tools_by_category,
+    scan_tools_for_full_docs,
+    register_tool_category,
+)
 from daemon.services.project_normalizer import normalize_project_id
 from daemon.utils import DEFAULT_FUZZY_MATCH_DISTANCE
 from daemon.constants import DEFAULT_PAGE_LIMIT
@@ -274,10 +280,15 @@ def resolve_tool_filter(
             }
             tool_categories["mcp"] = list(mcp_tools)
     if allow is None or len(allow) == 0:
-        # No allow list means everything is potentially allowed
-        # Start with all tools from all categories
+        # No allow list means everything is potentially allowed — EXCEPT
+        # privileged categories (R-SR16, P2.2 tool-api-design.md §3.5):
+        # those NEVER join the default universe; an agent reaches them only
+        # through an explicit allow entry naming the category or one of its
+        # tools. Structural opt-in — no deny rules needed.
         allowed_tools: set[str] = set()
-        for category_tools in tool_categories.values():
+        for category_key, category_tools in tool_categories.items():
+            if category_key in PRIVILEGED_TOOL_CATEGORIES:
+                continue
             allowed_tools.update(category_tools)
     else:
         # Expand allow list (categories → individual tools)
@@ -2075,6 +2086,18 @@ Returns:
     system_log_tool_list = create_system_log_tools(manager, current_instance_id, agent_id)
     tools.extend(system_log_tool_list)
 
+    # ── System Upgrade tools (read-only release/upgrade observability; P2.2 Dispatch A) ──
+    # §8 checklist item 5 — the CRITICAL list-append: decorator-only =
+    # never constructed = silently invisible (precedents: job_tools above,
+    # question_tool_list). The category is PRIVILEGED (R-SR16): the tool
+    # filter never default-grants it — agents see these tools ONLY via an
+    # explicit tools.allow entry naming "system_upgrade" (ari's entry lands
+    # with Dispatch B; until then the tools exist but are granted to no one).
+    upgrade_tool_list = create_upgrade_tools(
+        manager, current_instance_id, agent_id, agent_tag=version_tag
+    )
+    tools.extend(upgrade_tool_list)
+
     # ── MCP tools: load BEFORE creating help tool so we have the names ──
     # IMPORTANT: MCP tools MUST be loaded BEFORE help tool creation
     # because create_help_tool needs MCP tool names for category expansion.
@@ -2116,6 +2139,26 @@ Returns:
     return tools
 
 
+def _strip_privileged_category_tools(tools: list[Any]) -> list[Any]:
+    """Remove privileged-category tools from a default-allow (unfiltered) list.
+
+    R-SR16 (P2.2 tool-api-design.md §3.5, architect-resolved 2026-08-22):
+    categories in ``PRIVILEGED_TOOL_CATEGORIES`` (today: ``system_upgrade``)
+    are opt-in-only — an agent reaches them ONLY through an explicit
+    ``tools.allow`` entry naming the category or one of its tools. The
+    default-allow paths below (no tools config at all, or an empty
+    allow+deny pair — e.g. ``watcher``) would otherwise default-grant them.
+
+    Defense-in-depth with the ``resolve_tool_filter`` empty-allow branch:
+    that one covers the empty-allow + non-empty-deny universe construction;
+    this one covers the two return-all paths.
+    """
+    return [
+        t for t in tools
+        if getattr(t, "_tool_category", None) not in PRIVILEGED_TOOL_CATEGORIES
+    ]
+
+
 def _apply_tool_filter(tools: list[Any], agent_id: str, mcp_tool_names: list[str] | None = None, version_tag: str | None = None) -> list[Any]:
     """Apply tool filtering based on agent's tools configuration.
     
@@ -2143,8 +2186,10 @@ def _apply_tool_filter(tools: list[Any], agent_id: str, mcp_tool_names: list[str
         agent_meta = registry.get_resolved(agent_id)
 
     if agent_meta is None or agent_meta.tools is None:
-        # No tools config → all tools allowed (backward compatible)
-        return tools
+        # No tools config → all tools allowed (backward compatible) —
+        # except privileged categories (R-SR16): opt-in-only, never
+        # default-granted.
+        return _strip_privileged_category_tools(tools)
 
     # Collect all tool names for MCP category expansion
     all_tool_names: set[str] = set()
@@ -2177,9 +2222,10 @@ def _apply_tool_filter(tools: list[Any], agent_id: str, mcp_tool_names: list[str
         all_tool_names=all_tool_names,
     )
 
-    # If None returned, all tools are allowed
+    # If None returned, all tools are allowed — except privileged
+    # categories (R-SR16): opt-in-only, never default-granted.
     if allowed_tools is None:
-        return tools
+        return _strip_privileged_category_tools(tools)
 
     # Filter tools by name
     filtered_tools = []
