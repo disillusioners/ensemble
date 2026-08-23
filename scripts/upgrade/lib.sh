@@ -99,9 +99,9 @@ _sha256() { shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'; }
 _canon_dir() { (cd "$1" 2>/dev/null && pwd -P) || printf '%s' "$1"; }
 
 # _json_escape <string> — minimal JSON string escaper (quotes + backslash +
-# ALL control chars < 0x20 as standard \u00XX escapes). Bash 3.2-safe,
-# builtin-only (printf -v — no per-char subshell forks; reasons are short
-# and stage.sh maps stay fast).
+# ALL control chars < 0x20 plus DEL 0x7F as standard \u00XX escapes). Bash
+# 3.2-safe, builtin-only (printf -v — no per-char subshell forks; reasons
+# are short and stage.sh maps stay fast).
 # N4 (P2.2 fix pass 2026-08-23): the old version only handled \n \t \r —
 # any other raw control char passed through verbatim; the first N4 cut
 # then escaped by `-lt 32` alone, but bash 3.2 printf '%d' yields SIGNED
@@ -110,8 +110,10 @@ _canon_dir() { (cd "$1" 2>/dev/null && pwd -P) || printf '%s' "$1"; }
 # hex digits). Both failures share the nastiest property: lenient readers
 # (python/jq, this file's own extractor) ACCEPT the mangled form — the
 # damage is SILENT TEXT CORRUPTION, not a parse failure, so nothing fails
-# loudly. Now: 0 <= code < 0x20 escapes as \u00XX; negative (high UTF-8
-# byte) passes through raw — valid UTF-8 JSON. NUL cannot occur in bash
+# loudly. Now: 0 <= code < 0x20, plus DEL (0x7F — NIT-D, P2.3 B3.5: the
+# one control char >= 0x20 the tidy ledger wanted escaped for parity with
+# the < 0x20 family), escapes as \u00XX; negative (high UTF-8 byte)
+# passes through raw — valid UTF-8 JSON. NUL cannot occur in bash
 # strings/argv.
 _json_escape() {
     local s="$1" out="" ch i code
@@ -123,7 +125,7 @@ _json_escape() {
     for ((i = 0; i < ${#s}; i++)); do
         ch="${s:i:1}"
         printf -v code '%d' "'$ch"
-        if [ "$code" -ge 0 ] && [ "$code" -lt 32 ]; then
+        if [ "$code" -ge 0 ] && { [ "$code" -lt 32 ] || [ "$code" -eq 127 ]; }; then
             printf -v ch '\\u%04x' "$code"
         fi
         out+="$ch"
@@ -721,6 +723,22 @@ lock_dir_path() { printf '%s/releases/rollback.lock.d' "$INSTALL_DIR"; }
 
 lock_run_id=""
 
+# _pid_alive <pid> — kill -0 liveness with EPERM=ALIVE semantics
+# (kill -0 EPERM, P2.1 ledger → closed P2.3 B3.5): exit 0 → alive;
+# ENOENT/ESRCH → dead; EPERM → ALIVE — the process exists but belongs to
+# another user (permission denied ≠ dead; breaking a live foreign owner's
+# lock would trample its txn). Matches the Python journal twin
+# upgrade_journal._pid_alive (PermissionError → True). Stderr-text match:
+# bash builtin kill and /bin/kill both render "Operation not permitted".
+_pid_alive() {
+    local err
+    err="$(kill -0 "$1" 2>&1)" && return 0
+    case "$err" in
+        *"not permitted"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 # lock_acquire [wait_s] — acquire or fail after bounded wait. Sets
 # lock_run_id. Returns: 0 acquired (incl. stale-break); 1 busy after wait.
 lock_acquire() {
@@ -745,9 +763,11 @@ lock_acquire() {
         # LIVE owner lets a concurrent action trample a txn whose owner is
         # still mutating it. A missing/garbage owner pid is UNVERIFIABLE:
         # nothing to protect, the heartbeat alone breaks it (preserves
-        # crash progress). kill -0 (POSIX) is the liveness test; residual
-        # pid-reuse wedge (crashed owner, pid reused by a live process)
-        # degrades to pipeline-busy — safer than trampling a live owner.
+        # crash progress). kill -0 via _pid_alive (POSIX) is the liveness
+        # test — EPERM counts as ALIVE (foreign-user owner; see _pid_alive
+        # above); residual pid-reuse wedge (crashed owner, pid reused by a
+        # live process) degrades to pipeline-busy — safer than trampling a
+        # live owner.
         hb="$(cat "$lock/heartbeat" 2>/dev/null)"
         owner_pid="$(cat "$lock/owner" 2>/dev/null)"
         run_id="$(cat "$lock/run_id" 2>/dev/null)"
@@ -756,7 +776,7 @@ lock_acquire() {
             if [ "$age" -gt "$LOCK_STALE_S" ]; then
                 local owner_live=0
                 if [ -n "$owner_pid" ] && printf '%s' "$owner_pid" | grep -Eq '^[0-9]+$' \
-                   && kill -0 "$owner_pid" 2>/dev/null; then
+                   && _pid_alive "$owner_pid"; then
                     owner_live=1
                 fi
                 if [ "$owner_live" -eq 0 ]; then
@@ -769,8 +789,9 @@ lock_acquire() {
             fi
         fi
         # owner process dead? (crash left a fresh-heartbeat dir) — break too
+        # (_pid_alive: EPERM = alive under another user — never break)
         if [ -n "$owner_pid" ] && printf '%s' "$owner_pid" | grep -Eq '^[0-9]+$' \
-           && ! kill -0 "$owner_pid" 2>/dev/null; then
+           && ! _pid_alive "$owner_pid"; then
             _log "pipeline lock owner pid $owner_pid is dead — breaking lock"
             mv "$lock" "${lock}.stale.$$" 2>/dev/null || continue
             continue

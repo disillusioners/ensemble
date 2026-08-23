@@ -520,17 +520,24 @@ def create_job_tools(
     ) -> dict:
         """Submit a new job to the queue. Use tool_help("job_create") for details."""
         try:
-            # MAJOR-1(a) (P2.2 fix pass 2026-08-23): an agent caller's
-            # source is FORCED to agent:<caller> — unconditionally, not
-            # merely when it happens to equal the default "api". A
-            # caller-supplied source (e.g. source="telegram:attacker")
+            # MAJOR-1(a) (P2.2 fix pass 2026-08-23) + MINOR-B (P2.2
+            # carry-over, closed P2.3 B3.5): the source derivation is
+            # server-side-UNCONDITIONAL — NO caller-supplied ``source`` is
+            # ever trusted verbatim on this path. Agent callers →
+            # ``agent:<caller>`` (a hostile source="telegram:attacker"
             # must never thread through dispatch to the user-origin
-            # whitelist stamp (manager.stamp_user_origin_window /
-            # USER_ORIGIN_SOURCES) — that would forge factor 2 of the
-            # live 3-factor gate with zero human involvement. Mirrors
-            # job_continue's forced source below.
-            if caller_agent_id:
-                source = f"agent:{caller_agent_id}"
+            # whitelist stamp — manager.stamp_user_origin_window /
+            # USER_ORIGIN_SOURCES — that would forge factor 2 of the live
+            # 3-factor gate with zero human involvement). Empty caller →
+            # ``internal_agent:unknown`` (F3, mirrors job_continue below):
+            # NEVER the default "api" — "api" is whitelisted, and the
+            # genuine web-UI path keeps its server-stamped value on the
+            # HTTP router (jobs_crud.py), not here.
+            source = (
+                f"agent:{caller_agent_id}"
+                if caller_agent_id
+                else "internal_agent:unknown"
+            )
             normalized_project_id = normalize_project_id(project_id)
 
             # Pre-generate job_id so we can register the watcher BEFORE

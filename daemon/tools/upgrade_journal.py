@@ -530,9 +530,12 @@ def _pid_alive(pid: Any) -> bool:
     except ProcessLookupError:
         return False
     except PermissionError:
-        # Deliberate conservative divergence from lib.sh's shell `kill -0`
-        # (EPERM → dead there): treat EPERM as ALIVE — never break a lock
-        # whose owner may be live; degrades to pipeline-busy instead.
+        # EPERM → ALIVE — the process exists but belongs to another user;
+        # never break a lock whose owner may be live; degrades to
+        # pipeline-busy instead. lib.sh's _pid_alive now matches this
+        # semantics (kill -0 EPERM → alive, P2.3 B3.5) — the former
+        # deliberate divergence (EPERM → dead on the shell side) is
+        # closed.
         return True  # exists but owned by another user
 
 
@@ -892,9 +895,12 @@ def reconcile_pending_op(install_dir: Path) -> str | None:
     terminal = _terminal_event_after(data, op.armed_at)
     if terminal is not None:
         event, entry = terminal
-        # "Never raises" contract: the 3-write closure below is best-effort
-        # (a failed write is logged and left as-is — the pending_op survives
-        # for the boot sweep / operator; this is a janitor, never a gate).
+        # "Never raises" contract: the 3-call closure below is best-effort
+        # (NIT-F, P2.3 B3.5: was "3-write" — ensure_extensions writes only
+        # when a field is missing, so the steady-state closure performs 2
+        # writes, not 3; a failed write is logged and left as-is — the
+        # pending_op survives for the boot sweep / operator; this is a
+        # janitor, never a gate).
         try:
             ensure_extensions(install_dir)
             clear_pending_op(install_dir, clear_restart_marker=False)

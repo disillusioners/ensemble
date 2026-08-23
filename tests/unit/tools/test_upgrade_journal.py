@@ -1056,12 +1056,66 @@ class TestUserOriginSources:
         InstanceManager.stamp_user_origin_window(harness, "inst-1", "agent:worker", "m-5")
         assert "inst-1" not in harness._user_origin_windows
 
+    async def test_m2_seam_nonsilent_none_source_clears_window(self) -> None:
+        """M2 (P2.2 fix pass 2026-08-23; seam test added P2.3 B3.5
+        MINOR-A): a NON-silent dispatch with ``message_source=None``
+        CLEARS the user-origin window via the REAL dispatch funnel —
+        ``InstanceManager._process_message_with_tracking`` calls the real
+        stamp site at its top, and the stamp treats None as
+        non-whitelisted/clearing. A source-less agent-authored turn must
+        never inherit a prior turn's user authorization (fail-closed).
+        Silent resume remains the ONLY skip: no message is injected, so
+        the window keeps the original turn's."""
+        from daemon.manager import InstanceManager
+
+        harness = object.__new__(InstanceManager)  # skip heavy __init__
+        harness._user_origin_windows = {}
+        delegations: list[dict] = []
+
+        class _MessagingStub:
+            async def _process_message_with_tracking(self, **kwargs):
+                delegations.append(kwargs)
+                return "MessageResult-stub"
+
+        harness._messaging_service = _MessagingStub()
+
+        # Genuine user turn stamps the window.
+        harness.stamp_user_origin_window("inst-1", "api", "m-1")
+        assert "inst-1" in harness._user_origin_windows
+
+        # (a) NON-silent + message_source=None → the REAL funnel clears it.
+        await harness._process_message_with_tracking(
+            instance_id="inst-1",
+            message="agent-authored turn with no source",
+            message_id="m-2",
+            message_source=None,
+            silent=False,
+        )
+        assert delegations, "the funnel must still delegate to the messaging service"
+        assert "inst-1" not in harness._user_origin_windows, (
+            "M2: a non-silent source=None dispatch must CLEAR the window "
+            "via the real stamp site"
+        )
+
+        # (b) Silent resume is the only skip — the window survives.
+        harness.stamp_user_origin_window("inst-1", "api", "m-3")
+        await harness._process_message_with_tracking(
+            instance_id="inst-1",
+            message="",
+            message_id="m-4",
+            message_source=None,
+            silent=True,
+        )
+        assert "inst-1" in harness._user_origin_windows
+        assert harness._user_origin_windows["inst-1"]["message_id"] == "m-3"
+
 
 # ── N4 (P2.2 fix pass 2026-08-23) — _json_escape control-char hardening ──────
 
 
 class TestJsonEscapeControlChars:
-    """lib.sh ``_json_escape`` escapes EVERY control char < 0x20 as a
+    """lib.sh ``_json_escape`` escapes EVERY control char < 0x20 (plus
+    DEL 0x7F — NIT-D, P2.3 B3.5) as a
     standard ``\\u00XX`` escape — and passes NON-ASCII (é, curly quotes,
     CJK) through raw: bash 3.2 ``printf '%d'`` yields SIGNED bytes, so a
     bare ``-lt 32`` guard dragged every char >= 0x80 into the escape
@@ -1084,6 +1138,17 @@ class TestJsonEscapeControlChars:
         # Exact byte output — high UTF-8 bytes survive verbatim:
         # é=\u00e9 “=\u201c ”=\u201d 中=\u4e2d.
         assert rc.stdout == 'a\\u001bb\\u001fc\\u000bd\\ne\\\\f\\"g h\u00e9\u201cq\u201d\u4e2dz', repr(rc.stdout)
+
+    def test_del_0x7f_escaped(self, install: Path) -> None:
+        """NIT-D (P2.2 tidy cycle-3, closed P2.3 B3.5): DEL (0x7F) — the
+        one control char >= 0x20 — escapes as \\u007f, same \\u00XX form
+        as the < 0x20 family."""
+        rc = _bash_lib(
+            install,
+            'printf \'%s\' "$(_json_escape "$(printf \'x\\177y\')")"',
+        )
+        assert rc.returncode == 0, rc.stderr
+        assert rc.stdout == 'x\\u007fy', repr(rc.stdout)
 
     def test_hostile_reason_detail_journal_stays_parseable(self, install: Path) -> None:
         """End-to-end at the real writer: ``journal_history_append`` with

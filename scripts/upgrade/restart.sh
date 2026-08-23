@@ -70,7 +70,7 @@ while [ $i -lt ${#args[@]} ]; do
         --run-id)   i=$((i + 1)); RUN_ID="${args[$i]:-}" ;;
         --reason)   i=$((i + 1)); REASON="${args[$i]:-}" ;;
         --grace-s)  i=$((i + 1)); GRACE_S="${args[$i]:-}" ;;
-        -h|--help)  sed -n '2,52p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help)  sed -n '2,53p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;; # NIT-3 (P2.3): include the ==== closer (banner-parity)
         *) echo "restart: unknown flag '$arg' — see --help" >&2; exit 78 ;;
     esac
     i=$((i + 1))

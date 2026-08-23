@@ -17,9 +17,10 @@
 #     each factor missing alone refuses; spoofed origins stamp no window;
 #     fabricated user_confirmed alone refuses; the full PASS case consumes
 #     the nonce and arms; replay refused; TTL expiry
-#   - sequencing (D2/D3): armed tools return SCHEDULED with ZERO spawns
-#     inside the call (marker + journal set instead); second arm →
-#     pipeline-busy naming the active run_id
+#   - sequencing (D2/D3): armed tools return with ZERO spawns
+#     inside the call (restart banner RESTART SCHEDULED, upgrade banner
+#     UPGRADE ARMED — N5 wording, P2.3); marker + journal set instead;
+#     second arm → pipeline-busy naming the active run_id
 #   - dry_run default TRUE: zero journal mutation, no lock, no marker
 #   - journal primitives: kill -9 atomic-write safety (real SIGKILL, bounded
 #     <2s), torn detection, BOTH lock stale-break branches, lib.sh interop
