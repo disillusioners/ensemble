@@ -66,12 +66,17 @@ while [ $i -lt ${#args[@]} ]; do
             ;;
         --skip-build)
             SKIP_BUILD=1
-            # optional following arg = prebuilt binary path
+            # optional following arg = prebuilt binary path. NEVER swallow a
+            # target token (demo|live|sandbox) — `stage.sh --skip-build
+            # sandbox --version v1` used to eat "sandbox" as BINARY_SRC and
+            # silently default the target to demo (Batch C, council 🟢
+            # suggestion taken). A leading '-' also ends the option value.
             nxt=$((i + 1))
             if [ $nxt -lt ${#args[@]} ]; then
                 case "${args[$nxt]}" in
                     -*) ;;
                     "") ;;
+                    demo|live|sandbox) ;;
                     *) BINARY_SRC="${args[$nxt]}"; i=$nxt ;;
                 esac
             fi
@@ -165,8 +170,14 @@ case "$ROLLBACK_SAFE" in
         ;;
 esac
 
-# binary_version: what /livez will report (daemon __version__). Derived from
-# the tag (strip leading v); ENSEMBLE_BINARY_VERSION overrides for odd cases.
+# binary_version: the string the RUNNING daemon self-reports on /livez —
+# daemon/api.py serves `from daemon import __version__` (daemon/__init__.py),
+# and the manifest's binary_version is what gate_version compares that
+# self-report against (D2). DERIVATION: the tag with the leading "v"
+# stripped (tag v0.10.6 → "0.10.6") — i.e. the release flow RELIES on the
+# tag matching daemon/__init__.py __version__; if they drift, the gate
+# fails closed at promote (version-verify mismatch) even though the binary
+# is fine. ENSEMBLE_BINARY_VERSION overrides for odd cases (stubs, drills).
 BINARY_VERSION="${ENSEMBLE_BINARY_VERSION:-${VERSION#v}}"
 
 # ── Lock (D5: stage mutates releases/ — serialize with promote/rollback) ────
@@ -282,12 +293,33 @@ if ! integrity_verify ".staging.$VERSION.$$"; then
     exit 1
 fi
 
-# swap in (rm + mv; no flip — `current` untouched)
-rm -rf "$REL"
-if ! mv "$STAGE_TMP" "$REL"; then
-    _warn "failed to move staged release into place"
-    rm -rf "$STAGE_TMP"
-    exit 1
+# swap in — RENAME-ASIDE, not rm-then-mv (Batch C, council 🟢 suggestion
+# taken): the old `rm -rf "$REL"; mv …` left a window with NEITHER the old
+# nor the new release dir — a crash there destroyed the rollback target.
+# Rename-aside keeps the old payload on disk until the new one is in place;
+# a crash mid-swap leaves either the aside dir (recoverable/evictable) or
+# both, never neither. No flip — `current` is untouched throughout.
+if [ -e "$REL" ]; then
+    REL_ASIDE="$REL.aside.$$"
+    if ! mv "$REL" "$REL_ASIDE"; then
+        _warn "failed to move the existing $REL aside — keeping it in place"
+        rm -rf "$STAGE_TMP"
+        exit 1
+    fi
+    if mv "$STAGE_TMP" "$REL"; then
+        rm -rf "$REL_ASIDE"
+    else
+        _warn "failed to move staged release into place — restoring the previous payload"
+        mv "$REL_ASIDE" "$REL" || _warn "RESTORE FAILED: $REL_ASIDE must be moved back to $REL by hand"
+        rm -rf "$STAGE_TMP"
+        exit 1
+    fi
+else
+    if ! mv "$STAGE_TMP" "$REL"; then
+        _warn "failed to move staged release into place"
+        rm -rf "$STAGE_TMP"
+        exit 1
+    fi
 fi
 
 # ── Journal init (staged mode begins) ───────────────────────────────────────

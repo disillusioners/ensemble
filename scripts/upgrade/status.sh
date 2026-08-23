@@ -61,12 +61,30 @@ else
 fi
 
 # ── release inventory ───────────────────────────────────────────────────────
+# Protocol/working artifacts under releases/ are listed SEPARATELY and
+# labelled — they must not read as releases (Batch C doc item): the D5
+# rollback.lock.d (plus its stale-break leftovers rollback.lock.d.stale.*)
+# and stage.sh's .staging.* temp assemblies. NOTE: no *.torn artifacts
+# exist — torn-write detection is content-based (see lib.sh journal_read).
 REL_DIR="$INSTALL_DIR/releases"
 if [ -d "$REL_DIR" ]; then
     _log "releases:"
-    for d in "$REL_DIR"/*/; do
+    # .staging.* are dot-dirs — invisible to the plain */ glob; glob them
+    # explicitly so they show up labelled (unmatched literal is filtered
+    # by the -d check).
+    for d in "$REL_DIR"/*/ "$REL_DIR"/.staging.*/; do
         [ -d "$d" ] || continue
         name="${d%/}"; name="${name##*/}"
+        case "$name" in
+            rollback.lock.d|rollback.lock.d.stale.*)
+                printf '    %-24s [protocol artifact — pipeline lock, not a release]\n' "$name"
+                continue
+                ;;
+            .staging.*)
+                printf '    %-24s [protocol artifact — stage temp assembly, not a release]\n' "$name"
+                continue
+                ;;
+        esac
         rb="$(manifest_field "$name" rollback_safe 2>/dev/null)"
         q=""; journal_is_quarantined "$name" 2>/dev/null && q=" [QUARANTINED]"
         printf '    %-24s rollback_safe=%s%s\n' "$name" "${rb:-?}" "$q"
