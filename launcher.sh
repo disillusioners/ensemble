@@ -197,6 +197,10 @@ load_env_file() {
 #   Cap/cooldown are ENTRY-side enforcement only (D-FA4.2): the sweep
 #   increments counters and arms cooldown/halt but never refuses to run —
 #   refusing the recovery would strand the env on an orphaned flip.
+#   Stale-snapshot guard (B2a): after acquiring the lock the sweep
+#   RE-READS the journal and revalidates the txn — a txn that changed or
+#   disappeared between the first read and the acquire means the owner is
+#   alive and acting; the sweep releases and does nothing.
 #   The sweep is fail-open for BOOT: any internal failure logs and returns
 #   0 so the start path always proceeds to binary resolution.
 #
@@ -609,6 +613,28 @@ _journal_sweep() {
     if ! _js_lock_acquire "$install_dir"; then
         return 0
     fi
+
+    # Re-read the journal UNDER the lock and revalidate the txn (B2a —
+    # mirrors rollback.sh's re-read-under-lock). The snapshot above was
+    # taken BEFORE the acquire; a promote/rollback that completed, cleared,
+    # or replaced its txn in that window must not be undone by mutations
+    # below (flip-back of a good current, phantom quarantine, phantom
+    # counter/cooldown). The txn OBJECT is the identity: any field change
+    # (kind/target/started_at/flipped/owner_pid) or disappearance → the
+    # owner is alive and acting — do nothing, release, boot proceeds.
+    local json2 inf2
+    if ! json2="$(_js_journal_read "$journal")"; then
+        _log "WARN: journal sweep: journal became unreadable under the lock — refusing to act on the stale snapshot, boot proceeds"
+        _js_lock_release "$install_dir"
+        return 0
+    fi
+    inf2="$(_js_json_sub "$json2" "in_flight")"
+    if [ "$inf2" != "$inf" ]; then
+        _log "journal sweep: in_flight changed under the lock (owner still alive — txn completed or replaced) — NOT acting on the stale snapshot"
+        _js_lock_release "$install_dir"
+        return 0
+    fi
+    json="$json2"   # mutations below read other fields (previous, …) fresh
 
     # Kill-window heal (promote.sh atomic_flip ↔ journal_mark_flipped): if
     # promote dies between the flip and the marker, the journal says
