@@ -197,6 +197,13 @@ The 4 unverified assumptions of `architecture-recommendation.md` §7, wired to t
 
 ---
 
+## Standing Rulings — P2.1 final fix cycle (2026-08-23, reviewer-directed)
+
+- **ADR-033 · Halt-semantics ruling (deviation #3 — standing):** halt paths boot-and-continue on the degraded current BY DESIGN. Under launchd KeepAlive, blocking boot = crash-loop → burst-abort → dark env, strictly worse than degraded-but-known serving. The correct posture is: serve degraded current + journal `halt` events + notify; the dangerous direction is already guarded by the rollback_safe gate (and the M4 quarantine gate). Confirmed across all four rollback paths (promote auto-rollback, adopt_stale_txn, launcher sweep, manual rollback refusal).
+- **ADR-034 · Splice escape-discipline note (for P2.2 authors):** the Python journal module that P2.2 introduces MUST preserve the journal splice's escape discipline — a field divergence requires ≥2 occurrences and is only synthesizable by hand-editing; a single-occurrence assert is logged as P2.3 hardening (do NOT tighten the splice to single-occurrence semantics; the ≥2 discipline is the deliberate safety margin against false-positive torn writes).
+
+---
+
 ## Decision Index (Phase 2)
 
 | ADR | Topic | Recommendation (one line) | Flag |
@@ -215,6 +222,8 @@ The 4 unverified assumptions of `architecture-recommendation.md` §7, wired to t
 | 027 | Version smoke | `/livez` payload `version` == manifest `binary_version` (runtime truth) | rec |
 | 028 | Rollback-of-rollback | Manual, gated flip-forward; halt-for-human + user-chosen version | rec |
 | — (ruling) | Cooldown × sweep (D-FA4.2 adjudication) | Cooldown arms the next **ENTRY** only (promotes refused inside it); the ADR-012 sweep / an in-flight rollback **NEVER refuses on cap or cooldown** — refusing the recovery strands the env on an orphaned flip; rollback-cap 3/24h is entry-side enforcement | adjudicated (architecture-recommendation.md D-FA4.2) |
+| 033 | Halt semantics on degraded current (deviation #3) | Halt paths boot-and-continue BY DESIGN; serve degraded current + journal `halt` events + notify (KeepAlive crash-loop → burst-abort → dark env strictly worse); dangerous direction guarded by rollback_safe + M4 quarantine gates; confirmed across all four rollback paths (promote auto-rollback, adopt_stale_txn, launcher sweep, manual rollback refusal) | standing ruling 2026-08-23 |
+| 034 | Splice escape discipline (P2.2 journal module) | Python journal module MUST preserve ≥2-occurrence + hand-edit-only synthesis for field divergence; single-occurrence assert logged as P2.3 hardening — do NOT tighten to single-occurrence semantics (≥2 is the deliberate safety margin against false-positive torn writes) | standing ruling 2026-08-23 |
 
 ## Needs-User-Decision-at-Review Checklist
 
