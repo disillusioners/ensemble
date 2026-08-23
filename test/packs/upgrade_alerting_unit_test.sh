@@ -478,6 +478,57 @@ try:
 except Exception as exc:  # pragma: no cover — failure path
     report("t6c closed-loop sink call drops the alert WITHOUT raising", False, repr(exc))
 
+# ── T8 (P2.3 B4 leg 2): SHELL-written refusal journal → real classifier ────
+# The shell entry-refusal helper (lib.sh _refuse) journals `refusal` events
+# from OUTSIDE the daemon process; this scenario proves the REAL Python
+# side maps such a shell-written entry to the SSE kind upgrade_promote_refusal
+# with the D-FA2.2 reason token — the dormant kind goes live the moment a
+# shell refusal lands in the journal. The shell writes via the REAL lib.sh
+# journal_history_append (no daemon, no network); Python reads it back with
+# the REAL journal_read and replays the post-write observation hook on the
+# actual entry (the daemon-outside writer cannot hop the in-process sink).
+import subprocess  # noqa: E402 — T8 only, keeps the diff surgical
+
+d = fresh_install()
+shell_detail = (
+    "promote refused: rollback cooldown active until 2026-08-23T10:30:00Z "
+    "(ADR-005: 10-min anti-flapping) (reason=cooldown)"
+)
+proc = subprocess.run(
+    ["bash", "-c",
+     f'. "{os.environ["REPO_ROOT"]}/scripts/upgrade/lib.sh"\n'
+     f'export INSTALL_DIR="{d}"\n'
+     f'journal_init\n'
+     f'journal_history_append refusal {shell_detail!r}\n'],
+    capture_output=True, text=True,
+)
+data = uj.journal_read(d)
+hist = data.get("history") or []
+ok_hist = (proc.returncode == 0 and len(hist) == 1
+           and hist[0].get("event") == "refusal"
+           and hist[0].get("detail") == shell_detail)
+report("t8a shell-written refusal entry reads back via real journal_read",
+       ok_hist, f"rc={proc.returncode} stderr={proc.stderr.strip()[:120]} hist={hist}")
+
+kind = uj.ALERT_KIND_BY_EVENT.get(hist[0]["event"]) if ok_hist else None
+report("t8b real classifier maps shell refusal → upgrade_promote_refusal",
+       kind == "upgrade_promote_refusal", str(kind))
+report("t8c D-FA2.2 reason token parsed from the shell detail",
+       ok_hist and uj._reason_token(hist[0]["detail"]) == "cooldown",
+       str(uj._reason_token(hist[0]["detail"]) if ok_hist else None))
+
+sink = RecordingSink()
+uj.register_alert_sink(sink)
+if ok_hist:
+    uj._emit_terminal_class_alert(data, hist[0]["event"], hist[0]["detail"], hist[0]["ts"])
+p = sink.calls[0] if sink.calls else {}
+report("t8d shell refusal entry → real emission hook → SSE payload",
+       p.get("kind") == "upgrade_promote_refusal"
+       and p.get("source_event") == "refusal"
+       and p.get("reason") == "cooldown"
+       and p.get("detail") == shell_detail,
+       str(p))
+
 print(f"DRIVER {'FAIL' if FAILURES else 'PASS'} ({len(FAILURES)} failed)", flush=True)
 sys.exit(1 if FAILURES else 0)
 PYEOF
@@ -496,6 +547,7 @@ for SCEN in \
     t4a t4b \
     t5a \
     t6a t6b t6c \
+    t8a t8b t8c t8d \
 ; do
     assert_contains "scenario $SCEN pass line" "SCENARIO ${SCEN}: PASS" "$BATT_OUT"
     assert_not_contains "scenario $SCEN no fail line" "SCENARIO ${SCEN}: FAIL" "$BATT_OUT"

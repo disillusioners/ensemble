@@ -1224,6 +1224,25 @@ retention_evict() {
 }
 
 # ── Entry-side refusal checks (D-FA4.2: ENTRY only — never the recovery) ────
+# _refuse <reason-token> <message...> — entry-refusal: WARN the message
+# UNCHANGED, best-effort-append a `refusal` journal history event carrying
+# the D-FA2.2 reason=<token> (activates the dormant upgrade_promote_refusal
+# SSE kind, P2.3 B4/T8a), then exit 78. Best-effort ONLY: an absent/torn/
+# unwritable journal WARNs once and the refusal exit proceeds — NEVER
+# blocks, NEVER alters the exit code, and NEVER acquires the pipeline lock
+# (an in-flight txn's lock is sacred; callers hold it already or accept a
+# dropped event). ADR-034: the append rides the plain journal_history_append
+# splice — additive only, no new write mechanics. The lock-busy refusal
+# sites deliberately do NOT journal (unlocked append would race the live
+# lock-holder's read-modify-write; pipeline-busy is structured-logged).
+_refuse() {
+    local reason="$1"; shift
+    _warn "$*"
+    journal_history_append refusal "$* (reason=$reason)" >/dev/null 2>&1 \
+        || _warn "refusal journal append FAILED (best-effort) — proceeding to exit 78"
+    exit 78
+}
+
 # promote_entry_check <target_ver> — refuses (exit 78) on: halthead (cap
 # exhausted in-window), cooldown window, quarantined target, fresh in_flight.
 # The AUTO-ROLLBACK path and the launcher sweep NEVER call this.
@@ -1232,20 +1251,17 @@ promote_entry_check() {
     # cap / halt state
     cnt="$(journal_rollback_count_24h)"
     if [ "$cnt" -ge "$ROLLBACK_CAP_24H" ]; then
-        _warn "HALT-FOR-HUMAN: rollback cap $ROLLBACK_CAP_24H/24h reached (count=$cnt) — promotes refused until the 24h window resets or an operator intervenes (journal halt events carry the record)"
-        exit 78
+        _refuse cap "HALT-FOR-HUMAN: rollback cap $ROLLBACK_CAP_24H/24h reached (count=$cnt) — promotes refused until the 24h window resets or an operator intervenes (journal halt events carry the record)"
     fi
     # cooldown
     if journal_cooldown_active; then
         local until
         until="$(_json_field "$(journal_read)" cooldown_until)"
-        _warn "promote refused: rollback cooldown active until $until (ADR-005: 10-min anti-flapping)"
-        exit 78
+        _refuse cooldown "promote refused: rollback cooldown active until $until (ADR-005: 10-min anti-flapping)"
     fi
     # quarantined target
     if journal_is_quarantined "$target_ver"; then
-        _warn "promote refused: version '$target_ver' is QUARANTINED (prior gate failure) — quarantine is cleared only by re-staging the version"
-        exit 78
+        _refuse quarantine "promote refused: version '$target_ver' is QUARANTINED (prior gate failure) — quarantine is cleared only by re-staging the version"
     fi
     return 0
 }

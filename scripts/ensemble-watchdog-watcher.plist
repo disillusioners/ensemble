@@ -21,10 +21,14 @@
 
   Division of labor:
     launchd job (ensemble-prod.plist) — supervises the launcher/daemon.
-    THIS agent — every 300s, observes ONLY /livez (never /readyz —
+    THIS agent — every 300s, probes ONLY /livez (never /readyz —
     readiness never triggers action, ADR-003) and notifies via macOS
     Notification Center when the daemon has been absent >600s. It
-    NEVER restarts or signals anything. See
+    NEVER restarts or signals anything. Since P2.3 B4 (ADR-025(b)) the
+    same agent also file-watches two daemon-DOWN channels — the
+    launcher burst-abort marker (.launcher-state) and terminal journal
+    events (releases/state.json halt/sweep_rollback) — best-effort,
+    skipped silently where those files do not exist yet. See
     scripts/watchdog-watcher.sh for the full contract and the Phase-6
     (LLM observer, ADR-008) attach point.
 

@@ -109,8 +109,7 @@ lock_heartbeat
 
 # 1b. staged mode sanity
 if [ ! -d "$TARGET_REL" ]; then
-    _warn "target release $TARGET_REL does not exist — stage it first (stage.sh $UP_TARGET --version $VERSION)"
-    exit 78
+    _refuse not-staged "target release $TARGET_REL does not exist — stage it first (stage.sh $UP_TARGET --version $VERSION)"
 fi
 journal_init || { _warn "cannot initialize journal"; exit 1; }
 J="$(journal_read)" || {
@@ -119,7 +118,7 @@ J="$(journal_read)" || {
 }
 
 # 1c. adopt-or-refuse an existing in_flight (sweep-mirroring, D-FA4.3)
-adopt_stale_txn || exit 78
+adopt_stale_txn || _refuse txn-busy "promote refused: unresolved in_flight txn (see the adopt diagnostics above — pipeline-busy)"
 
 # 1d. ENTRY-side checks (D-FA4.2): cap/halt · cooldown · quarantine
 promote_entry_check "$VERSION" || exit 78

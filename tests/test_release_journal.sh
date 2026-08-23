@@ -1200,6 +1200,69 @@ assert_eq "12e NO rollback count" "$W2_COUNT_BEFORE" "$(b4_inf 'journal_rollback
 assert_eq "12e NO cooldown armed" "null" "$(m4_field cooldown_until)"
 assert_eq "12e healthy version NOT quarantined" "[]" "$(b4_inf '_json_sub "$(journal_read)" quarantined')"
 
+# ─── 13. P2.3 B4 leg 2: _refuse journals entry-refusals (best-effort) ──────
+section "_refuse: journaled entry refusals (upgrade_promote_refusal)"
+# The shell entry-refusal helper journals a `refusal` history event with the
+# D-FA2.2 reason=<token> (activating the dormant SSE kind daemon-side) while
+# preserving the WARN text and the exit-78 contract. Best-effort ONLY: a
+# missing/unwritable journal never blocks or rewrites the refusal.
+
+# 13a. happy path: journal present → WARN unchanged, refusal event + token,
+#      exit 78.
+RF="$FIXTURE/refuse-sbx"; mkdir -p "$RF/releases"
+(
+    export INSTALL_DIR="$RF"
+    . "$FAKE_REPO/scripts/upgrade/lib.sh"
+    journal_init
+    _refuse cooldown "promote refused: rollback cooldown active until $NOW_ISO (ADR-005: 10-min anti-flapping)"
+) >"$RF/out" 2>&1
+RF_RC=$?
+assert_eq "13a _refuse exits 78" "78" "$RF_RC"
+assert_contains "13a WARN text unchanged" "promote refused: rollback cooldown active until" "$(cat "$RF/out")"
+assert_contains "13a refusal event journaled" '"event":"refusal"' "$(cat "$RF/releases/state.json")"
+assert_contains "13a D-FA2.2 reason token in detail" 'reason=cooldown' "$(cat "$RF/releases/state.json")"
+
+# 13b. best-effort: journal ABSENT → append FAILS, one WARN, exit 78 intact.
+RF2="$FIXTURE/refuse-nojournal"; mkdir -p "$RF2"
+(
+    export INSTALL_DIR="$RF2"
+    . "$FAKE_REPO/scripts/upgrade/lib.sh"
+    _refuse cap "HALT-FOR-HUMAN: rollback cap 3/24h reached (count=3)"
+) >"$RF2/out" 2>&1
+RF2_RC=$?
+assert_eq "13b absent journal: _refuse still exits 78" "78" "$RF2_RC"
+assert_contains "13b best-effort WARN on failed append" "best-effort" "$(cat "$RF2/out")"
+if [ -e "$RF2/releases/state.json" ]; then
+    _fail "13b no journal may be created by the refusal path" "absent" "present"
+else
+    _pass
+fi
+
+# 13c. ADR-034 splice discipline: a SECOND refusal appends its own event —
+#      additive append only, the ≥2-occurrence splice survives.
+(
+    export INSTALL_DIR="$RF"
+    . "$FAKE_REPO/scripts/upgrade/lib.sh"
+    _refuse quarantine "promote refused: version 'v9' is QUARANTINED (prior gate failure)"
+) >/dev/null 2>&1
+assert_eq "13c two refusals → two history events (splice ≥2 discipline)" "2" \
+    "$(grep -o '"event":"refusal"' "$RF/releases/state.json" | wc -l | tr -d ' ')"
+
+# 13d. real entry gate: cap'd journal → promote_entry_check journals the
+#      refusal (reason=cap) and still exits 78.
+RF3="$FIXTURE/entry-sbx"; mkdir -p "$RF3/releases"
+printf '%s' "$JBASE" | sed -e 's/COUNT/3/' -e "s/WSTART/$NOW_ISO/" -e 's/CD/null/' \
+    > "$RF3/releases/state.json"
+(
+    export INSTALL_DIR="$RF3"
+    . "$FAKE_REPO/scripts/upgrade/lib.sh"
+    promote_entry_check v9
+) >"$RF3/out" 2>&1
+RF3_RC=$?
+assert_eq "13d cap'd journal → promote_entry_check exits 78" "78" "$RF3_RC"
+assert_contains "13d entry refusal journaled" '"event":"refusal"' "$(cat "$RF3/releases/state.json")"
+assert_contains "13d reason=cap token" 'reason=cap' "$(cat "$RF3/releases/state.json")"
+
 # ─── summary ────────────────────────────────────────────────────────────────
 printf '\n== summary: %d passed, %d failed ==\n' "$PASS" "$FAIL"
 if [ "$FAIL" -gt 0 ]; then
