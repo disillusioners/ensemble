@@ -657,6 +657,79 @@ CD_R="$(_js_field "$JS_R" cooldown_until)"
 case "$CD_R" in null|"") _fail "8r cooldown armed after kill-window heal" "ISO ts" "$CD_R" ;; *) _pass ;; esac
 [ -d "$JS_R/releases/rollback.lock.d" ] && _fail "8r lock dir left behind" "absent" "present" || _pass
 
+# 8s. B2(a) stale-snapshot guard — owner COMPLETES under the lock: the
+#     sweep read the journal (stale flipped txn) BEFORE acquiring the lock;
+#     if the live owner commits + clears its txn in that window, the sweep
+#     must NOT act on the stale snapshot — no flip-back of the good current,
+#     no phantom quarantine/counter/cooldown, lock released. Simulated by
+#     overriding _js_lock_acquire in the test shell (post-source, subshell-
+#     local): it performs the owner's completing mutations, then takes the
+#     lock exactly as the real acquire would.
+JS_S="$JS_TEST_DIR/s"; _js_fixture "$JS_S"; _js_seed "$JS_S" "$STALE_TS" true
+(
+    . "$LAUNCHER"
+    _js_lock_acquire() {
+        # the live owner finishes between the sweep's first read and this
+        # acquire: commit v0.10.6 (symlink flip + journal) + clear txn
+        ln -sfn "releases/v0.10.6" "$1/current"
+        printf '{"current":"v0.10.6","previous":"v0.10.5","in_flight":null,"rollback_window_count":{"24h":1,"window_start":"%s"},"cooldown_until":null,"quarantined":[],"history":[]}\n' \
+            "$STALE_TS" > "$1/releases/state.json"
+        # then the acquire itself succeeds (mkdir IS the acquire, D5)
+        mkdir "$1/releases/rollback.lock.d" 2>/dev/null
+        printf '%s\n' "$$" > "$1/releases/rollback.lock.d/owner"
+        printf '%s\n' "run-test-$$" > "$1/releases/rollback.lock.d/run_id"
+        printf '%s\n' "$(date +%s)" > "$1/releases/rollback.lock.d/heartbeat"
+        return 0
+    }
+    INSTALL_DIR="$JS_S" _journal_sweep >/dev/null 2>&1
+)
+assert_eq "8s owner-completed-under-lock: rc 0 (boot proceeds)" "0" "$?"
+assert_eq "8s current NOT flipped back (the good commit stands)" "releases/v0.10.6" "$(readlink "$JS_S/current")"
+assert_eq "8s journal current untouched by sweep" "v0.10.6" "$(_js_field "$JS_S" current)"
+assert_eq "8s txn stays cleared (owner's commit intact)" "null" "$(_js_field "$JS_S" in_flight)"
+if printf '%s' "$(_js_journal "$JS_S")" | grep -q '"event":"sweep'; then
+    _fail "8s no sweep event on the stale snapshot" "absent" "present"
+else
+    _pass
+fi
+assert_eq "8s counter NOT incremented (no phantom count)" "1" "$(_js_count "$JS_S")"
+assert_eq "8s cooldown NOT armed (no phantom cooldown)" "null" "$(_js_field "$JS_S" cooldown_until)"
+assert_eq "8s committed version NOT quarantined" "[]" \
+    "$( . "$LAUNCHER"; _js_json_sub "$(_js_journal "$JS_S")" quarantined 2>/dev/null)"
+[ -d "$JS_S/releases/rollback.lock.d" ] && _fail "8s lock released after revalidation skip" "absent" "present" || _pass
+
+# 8t. B2(a) variant — txn REPLACED under the lock: the snapshot's owner died
+#     pre-flip, but before the sweep acts a NEW promote has already cleared
+#     the corpse and opened its OWN fresh txn (different target/started_at).
+#     Acting on the stale snapshot would clear the LIVE txn (killing the new
+#     promote mid-flight). The sweep must compare and do nothing.
+JS_T="$JS_TEST_DIR/t"; _js_fixture "$JS_T"; _js_seed "$JS_T" "$STALE_TS" false
+ln -sfn "releases/v0.10.5" "$JS_T/current"   # true pre-flip: current on the serving release
+(
+    . "$LAUNCHER"
+    _js_lock_acquire() {
+        printf '{"current":"v0.10.5","previous":"v0.10.5","in_flight":{"kind":"promote","target":"v0.11.0","started_at":"%s","flipped":false,"owner_pid":%s},"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[]}\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$$" > "$1/releases/state.json"
+        mkdir "$1/releases/rollback.lock.d" 2>/dev/null
+        printf '%s\n' "$$" > "$1/releases/rollback.lock.d/owner"
+        printf '%s\n' "run-test-$$" > "$1/releases/rollback.lock.d/run_id"
+        printf '%s\n' "$(date +%s)" > "$1/releases/rollback.lock.d/heartbeat"
+        return 0
+    }
+    INSTALL_DIR="$JS_T" _journal_sweep >/dev/null 2>&1
+)
+assert_eq "8t txn-replaced-under-lock: rc 0 (boot proceeds)" "0" "$?"
+assert_contains "8t the LIVE replacement txn is NOT cleared" '"target":"v0.11.0"' "$(_js_journal "$JS_T")"
+assert_eq "8t in_flight still an open txn (not null)" "promote" \
+    "$( . "$LAUNCHER"; _js_json_field "$(_js_json_sub "$(_js_journal "$JS_T")" in_flight 2>/dev/null)" kind 2>/dev/null)"
+if printf '%s' "$(_js_journal "$JS_T")" | grep -q '"event":"sweep'; then
+    _fail "8t no sweep event on the stale snapshot" "absent" "present"
+else
+    _pass
+fi
+assert_eq "8t current untouched" "releases/v0.10.5" "$(readlink "$JS_T/current")"
+[ -d "$JS_T/releases/rollback.lock.d" ] && _fail "8t lock released after revalidation skip" "absent" "present" || _pass
+
 
 # ─── 9. resolve_binary preference order ─────────────────────────────────────
 section "resolve_binary"

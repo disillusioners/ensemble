@@ -150,6 +150,22 @@ assert_contains "dev-port refusal names the DEV port" "DEV (repo) port" "$out"
 out="$(env -u PORT HOME="$FAKE_HOME" TARGET=sandbox INSTALL_DIR="$SBX" PORT="$SBX_PORT" POSTGRES_DB=ensemble_dev bash "$FAKE_REPO/scripts/upgrade/status.sh" 2>&1)"; rc=$?
 assert_eq "sandbox replaces ensemble_dev (warned, sandbox default)" "0" "$rc"
 assert_contains "resolved db is the sandbox default, not ensemble_dev" "db=ensemble_sandbox" "$out"
+# M2: the live-port guard fails CLOSED. A live .env that EXISTS but cannot
+# be read must not silently disable the guard (that is exactly how a sandbox
+# ends up on the live port); an ABSENT .env = no live install on this host
+# → nothing to collide with → sandbox proceeds. (Runs as the fixture owner,
+# non-root: chmod 000 denies the owner read.)
+chmod 000 "$FAKE_HOME/agents-ensemble/.env"
+out="$(env -u PORT -u POSTGRES_DB HOME="$FAKE_HOME" TARGET=sandbox INSTALL_DIR="$SBX" PORT="$SBX_PORT" \
+    bash "$FAKE_REPO/scripts/upgrade/status.sh" 2>&1)"; rc=$?
+assert_eq "M2 unreadable live .env → sandbox refused (78)" "78" "$rc"
+assert_contains "M2 refusal is a loud fail-closed WARN" "fail-closed" "$out"
+chmod 644 "$FAKE_HOME/agents-ensemble/.env"
+mv "$FAKE_HOME/agents-ensemble/.env" "$FAKE_HOME/agents-ensemble/.env.away"
+out="$(env -u PORT -u POSTGRES_DB HOME="$FAKE_HOME" TARGET=sandbox INSTALL_DIR="$SBX" PORT="$SBX_PORT" \
+    bash "$FAKE_REPO/scripts/upgrade/status.sh" 2>&1)"; rc=$?
+assert_eq "M2 absent live .env (no live install) → sandbox proceeds" "0" "$rc"
+mv "$FAKE_HOME/agents-ensemble/.env.away" "$FAKE_HOME/agents-ensemble/.env"
 
 # ─── 3. stage: manifest + no-.env + marker + idempotency (T2) ───────────────
 section "stage"
@@ -357,6 +373,30 @@ mkjournal 0 "$AGE_86398" "\"$(iso_off x +1)\""
 JLIB_TEST 'journal_cooldown_active' && _pass || _fail "cooldown +1s → active"
 mkjournal 0 "$AGE_86398" "\"$(iso_off x -1)\""
 JLIB_TEST 'journal_cooldown_active' || _pass || _fail "cooldown -1s → clear"
+# M3: cooldown fails CLOSED on garbage stamps — a present-but-unparseable
+# cooldown_until is an ACTIVE cooldown (the anti-flapping window must never
+# silently no-op); explicit null and VALID stamps behave exactly as before.
+mkjournal 0 "$AGE_86398" '"NOT-A-DATE"'
+JLIB_TEST 'journal_cooldown_active' && _pass || _fail "M3 garbage cooldown_until → ACTIVE (fail-closed)"
+mkjournal 0 "$AGE_86398" '""'
+JLIB_TEST 'journal_cooldown_active' && _pass || _fail "M3 empty-string cooldown_until → ACTIVE (fail-closed)"
+printf '{"current":"v1","previous":"v0","in_flight":null,"rollback_window_count":{"24h":0,"window_start":null},"quarantined":["vQ"],"history":[]}' > "$JB"
+JLIB_TEST 'journal_cooldown_active' && _pass || _fail "M3 absent cooldown_until field (schema drift) → ACTIVE"
+mkjournal 0 "$AGE_86398" null
+JLIB_TEST 'journal_cooldown_active' || _pass || _fail "M3 null cooldown → clear (behavior unchanged)"
+mkjournal 0 "$AGE_86398" "\"$COOL_PAST\""
+JLIB_TEST 'journal_cooldown_active' || _pass || _fail "M3 valid past cooldown → clear (behavior unchanged)"
+mkjournal 0 "$AGE_86398" "\"$COOL_FUTURE\""
+JLIB_TEST 'journal_cooldown_active' && _pass || _fail "M3 valid future cooldown → active (behavior unchanged)"
+# M3 end-to-end: promote ENTRY refuses on a garbage stamp (the entry check
+# is journal_cooldown_active's only consumer) — journal left untouched.
+printf '{"current":"%s","previous":null,"in_flight":null,"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":"GARBAGE-STAMP","quarantined":[],"history":[]}' \
+    "$SBX_V1" > "$JB"
+M3_OUT="$(HOME="$FAKE_HOME" VERSION="$SBX_V1" TARGET=sandbox INSTALL_DIR="$SBX" PORT="$SBX_PORT" \
+    bash "$FAKE_REPO/scripts/upgrade/promote.sh" sandbox 2>&1)"; M3_RC=$?
+assert_eq "M3 promote with garbage cooldown refused (78)" "78" "$M3_RC"
+assert_contains "M3 promote refusal names the cooldown" "cooldown" "$M3_OUT"
+assert_eq "M3 txn untouched by the refusal" "null" "$(JLIB_TEST '_json_field "$(journal_read)" in_flight')"
 # quarantine: membership + idempotency
 mkjournal 0 "$AGE_86398" null
 JLIB_TEST 'journal_quarantine vQ2; journal_quarantine vQ2' > /dev/null
@@ -403,6 +443,89 @@ else
 fi
 kill "$SRV_PID" 2>/dev/null
 wait "$SRV_PID" 2>/dev/null
+
+# ─── 7b. B2(b): _probe heartbeats the lock across the gate span, and the
+#        budget is WALL-CLOCK (deadline-epoch, not iteration-count × sleep)
+# ─────────────────────────────────────────────────────────────────────────
+section "probe heartbeat + wall-clock budget (B2b)"
+HBX="$FIXTURE/probe-hb"; mkdir -p "$HBX/releases"
+# (a) heartbeat freshness: a probe span EXCEEDING the (test-shortened)
+#     LOCK_STALE_S must still leave the lock fresh — proving in-loop
+#     refresh, not just the entry beat. Knob shortened POST-SOURCE inside
+#     the test shell only; production keeps the 300s script constant.
+(
+    export INSTALL_DIR="$HBX"
+    . "$FAKE_REPO/scripts/upgrade/lib.sh"
+    LOCK_STALE_S=3
+    lock_acquire 0 || exit 10
+    # seed a heartbeat ALREADY stale vs the shortened knob (the pre-fix
+    # steady state mid-gate)
+    printf '%s\n' "$(( $(date +%s) - 100 ))" > "$HBX/releases/rollback.lock.d/heartbeat"
+    _probe "/livez" 5 1 > /dev/null 2>&1   # :1 — nothing listens; instant refusals
+    HB="$(cat "$HBX/releases/rollback.lock.d/heartbeat" 2>/dev/null)"
+    AGE=$(( $(date +%s) - HB ))
+    [ "$AGE" -lt "$LOCK_STALE_S" ] || exit 20   # fresh ⇒ a second starter cannot stale-break us
+    lock_release || exit 21
+    exit 0
+) 2>/dev/null
+assert_eq "B2b _probe keeps the lock heartbeat fresh across a span > LOCK_STALE_S" "0" "$?"
+
+# (b) heartbeat ownership guard: a NON-owner (per the owner file) must
+#     never refresh a foreign lock — that would keep a dead owner's lock
+#     alive. Only owner==$$ writes.
+(
+    export INSTALL_DIR="$HBX"
+    . "$FAKE_REPO/scripts/upgrade/lib.sh"
+    mkdir -p "$HBX/releases/rollback.lock.d"
+    printf '%s\n' "999999" > "$HBX/releases/rollback.lock.d/owner"
+    printf '%s\n' "$(( $(date +%s) - 100 ))" > "$HBX/releases/rollback.lock.d/heartbeat"
+    BEFORE="$(cat "$HBX/releases/rollback.lock.d/heartbeat")"
+    lock_heartbeat   # we are NOT pid 999999 — must be a silent no-op
+    AFTER="$(cat "$HBX/releases/rollback.lock.d/heartbeat")"
+    [ "$BEFORE" = "$AFTER" ] || exit 30
+    # …and our OWN lock does refresh
+    printf '%s\n' "$$" > "$HBX/releases/rollback.lock.d/owner"
+    sleep 1
+    lock_heartbeat || exit 31
+    NEW="$(cat "$HBX/releases/rollback.lock.d/heartbeat")"
+    [ "$NEW" -gt "$BEFORE" ] || exit 32
+    rm -rf "$HBX/releases/rollback.lock.d"
+    exit 0
+) 2>/dev/null
+assert_eq "B2b lock_heartbeat is ownership-guarded (no foreign refresh)" "0" "$?"
+
+# (c) wall-clock budget: against an accepting-but-silent endpoint each curl
+#     burns its full 5s max-time. The old iteration counter (2s/try) would
+#     run a "6s" budget for ~28s wall (4 tries × 7s); the deadline must
+#     bound the span to budget + one in-flight curl (+slack).
+HANG_PORT=18453
+python3 - "$HANG_PORT" <<'PYEOF' &
+import socket, sys
+port = int(sys.argv[1])
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", port)); s.listen(8)
+while True:
+    try:
+        c, _ = s.accept()
+        c.recv(65536)   # accept and never respond — curl burns max-time
+    except Exception:
+        pass
+PYEOF
+HANG_PID=$!
+sleep 1
+PROBE_SPAN="$(
+    export INSTALL_DIR="$HBX"
+    . "$FAKE_REPO/scripts/upgrade/lib.sh"
+    T0="$(_now_epoch)"
+    _probe "/livez" 6 "$HANG_PORT" > /dev/null 2>&1
+    T1="$(_now_epoch)"
+    printf '%s' "$((T1 - T0))"
+)"; PROBE_RC=$?
+kill "$HANG_PID" 2>/dev/null
+wait "$HANG_PID" 2>/dev/null
+[ "$PROBE_SPAN" -ge 5 ] && _pass || _fail "B2b probe span really waited (≥5s, got ${PROBE_SPAN}s)"
+[ "$PROBE_SPAN" -le 15 ] && _pass || _fail "B2b probe budget is WALL-CLOCK (≤ budget+curl+slack, got ${PROBE_SPAN}s — iteration-count would be ~28s)"
 
 # ─── 8. adopt_stale_txn decision table (promote preflight vs launcher sweep
 #      — D-FA4.3 mirror; review M1/m2: fresh-dead-owner NOT adopted, stale
@@ -625,6 +748,151 @@ fi
 assert_contains "10 rollback event recorded despite cooldown" '"event":"rollback"' "$(cat "$JB")"
 kill "$SRV2_PID" 2>/dev/null
 wait "$SRV2_PID" 2>/dev/null
+
+# ─── 11. B4: post-stop aborts leave the txn OPEN for sweep self-recovery ───
+# Policy (all four abort sites, promote + rollback): in_flight is NEVER
+# closed on an abort that follows a stop — a closed txn makes the sweep a
+# no-op while the env is dark. `current` stays untouched at the
+# last-known-good release, so the next launcher start boots LKG and the
+# sweep clears the stale pre-flip txn at that same start.
+section "B4 post-stop abort → txn open → sweep recovers"
+# second staged version so every txn target ≠ current (the sweep's B3
+# kill-window heal must NOT classify these pre-flip txns as flipped).
+# v2 gets its OWN commit: stage.sh's exact-tag guard uses
+# `git describe --exact-match HEAD`, which returns only ONE of two tags
+# on the same commit (verified: v1 would shadow v2).
+SBX_V2="v2.0.0-sbx"
+printf 'b4-second-version\n' > "$FAKE_REPO/B4_FIXTURE"
+git -C "$FAKE_REPO" add B4_FIXTURE
+git -C "$FAKE_REPO" -c user.email=t@t -c user.name=t commit -qm b4-fixture >/dev/null 2>&1
+git -C "$FAKE_REPO" tag "$SBX_V2" 2>/dev/null
+HOME="$FAKE_HOME" VERSION="$SBX_V2" TARGET=sandbox INSTALL_DIR="$SBX" PORT="$SBX_PORT" \
+    bash "$FAKE_REPO/scripts/upgrade/stage.sh" sandbox --skip-build "$FIXTURE/stub-prod" > /dev/null 2>&1
+[ -f "$SBX/releases/$SBX_V2/manifest.json" ] && _pass || _fail "B4 fixture: v2 staged"
+
+b4_seed_journal() {  # <current-ver-or-null>
+    local cur
+    if [ "$1" = "null" ]; then cur=null; else cur="\"$1\""; fi
+    printf '{"current":%s,"previous":null,"in_flight":null,"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[]}' \
+        "$cur" > "$JB"
+}
+b4_age_txn() {  # age in_flight started_at past the 600s sweep gate (drill pattern)
+    ( export INSTALL_DIR="$SBX"; . "$FAKE_REPO/scripts/upgrade/lib.sh"
+      ts="$(date -ju -v-700S +%Y-%m-%dT%H:%M:%SZ)"
+      inf="$(_json_sub "$(journal_read)" in_flight)"
+      k="$(_json_field "$inf" kind)"; t="$(_json_field "$inf" target)"; o="$(_json_field "$inf" owner_pid)"
+      journal_update in_flight "{\"kind\":\"$k\",\"target\":\"$t\",\"started_at\":\"$ts\",\"flipped\":false,\"owner_pid\":$o}"
+    ) > /dev/null 2>&1
+}
+b4_sweep() {  # the next launcher start's first act (ADR-012) — REAL launcher sweep
+    ( . "$REPO_ROOT/launcher.sh"; INSTALL_DIR="$SBX" _journal_sweep >/dev/null 2>&1 )
+}
+b4_inf() { ( export INSTALL_DIR="$SBX"; . "$FAKE_REPO/scripts/upgrade/lib.sh"; eval "$1" ) 2>/dev/null; }
+b4_inf_kind()  { b4_inf '_json_field "$(_json_sub "$(journal_read)" in_flight)" kind'; }
+b4_inf_flip()  { b4_inf '_json_field "$(_json_sub "$(journal_read)" in_flight)" flipped'; }
+b4_run_promote() {  # <version>
+    HOME="$FAKE_HOME" VERSION="$1" TARGET=sandbox INSTALL_DIR="$SBX" PORT="$SBX_PORT" \
+        LIVEZ_BUDGET_S=4 READYZ_BUDGET_S=4 \
+        bash "$FAKE_REPO/scripts/upgrade/promote.sh" sandbox 2>&1
+}
+b4_run_rollback() {  # <version>
+    HOME="$FAKE_HOME" TARGET=sandbox INSTALL_DIR="$SBX" PORT="$SBX_PORT" \
+        LIVEZ_BUDGET_S=4 READYZ_BUDGET_S=4 \
+        bash "$FAKE_REPO/scripts/upgrade/rollback.sh" sandbox --to "$1" 2>&1
+}
+
+# 11a. promote abort at LAUNCHER SWAP (stop SUCCEEDED → env dark): make the
+#      install launcher unwritable so the payload cp fails.
+run_stage --skip-build "$FIXTURE/stub-prod" > /dev/null 2>&1   # v1 payload clean
+printf 'fixture-launcher\n' > "$SBX/launcher.sh"; chmod 644 "$SBX/launcher.sh"
+ln -sfn "releases/$SBX_V1" "$SBX/current"
+b4_seed_journal "$SBX_V1"
+chmod 444 "$SBX/launcher.sh"
+B4A_OUT="$(b4_run_promote "$SBX_V2")"; B4A_RC=$?
+chmod 644 "$SBX/launcher.sh"
+assert_eq "11a swap-fail abort exits 1" "1" "$B4A_RC"
+assert_contains "11a abort says txn left open" "txn left open" "$B4A_OUT"
+assert_eq "11a txn OPEN kind=promote (sweep input preserved)" "promote" "$(b4_inf_kind)"
+assert_eq "11a txn flipped:false (pre-flip)" "false" "$(b4_inf_flip)"
+assert_contains "11a halt event recorded" '"event":"halt"' "$(cat "$JB")"
+assert_eq "11a current untouched at LKG" "releases/$SBX_V1" "$(readlink "$SBX/current")"
+[ -d "$SBX/releases/rollback.lock.d" ] && _fail "11a lock released on abort" "absent" "present" || _pass
+JB_11A_FRESH="$(cat "$JB")"
+b4_sweep
+assert_eq "11a fresh txn: immediate launcher start defers (byte-identical)" "$JB_11A_FRESH" "$(cat "$JB")"
+b4_age_txn
+b4_sweep
+assert_eq "11a aged txn: sweep clears (journal recovered)" "null" "$(b4_inf '_json_field "$(journal_read)" in_flight')"
+assert_eq "11a recovery keeps current at LKG — env boots v1" "releases/$SBX_V1" "$(readlink "$SBX/current")"
+assert_contains "11a clear event is sweep (not sweep_rollback)" '"event":"sweep"' "$(cat "$JB")"
+assert_eq "11a no phantom rollback count" "0" "$(b4_inf 'journal_rollback_count_24h')"
+
+# 11b. promote abort at STOP (stop script fails — daemon liveness unknown;
+#      the wrong-comment regression: "environment untouched" was a lie).
+b4_seed_journal "$SBX_V1"
+chmod 000 "$FAKE_REPO/scripts/stop-ensemble.sh"
+B4B_OUT="$(b4_run_promote "$SBX_V2")"; B4B_RC=$?
+chmod 644 "$FAKE_REPO/scripts/stop-ensemble.sh"
+assert_eq "11b stop-fail abort exits 1" "1" "$B4B_RC"
+assert_contains "11b abort admits daemon state UNKNOWN" "UNKNOWN" "$B4B_OUT"
+assert_contains "11b abort says txn left open" "txn left open" "$B4B_OUT"
+assert_eq "11b txn OPEN kind=promote" "promote" "$(b4_inf_kind)"
+assert_eq "11b current untouched at LKG" "releases/$SBX_V1" "$(readlink "$SBX/current")"
+[ -d "$SBX/releases/rollback.lock.d" ] && _fail "11b lock released on abort" "absent" "present" || _pass
+b4_age_txn
+b4_sweep
+assert_eq "11b aged txn: sweep clears" "null" "$(b4_inf '_json_field "$(journal_read)" in_flight')"
+assert_eq "11b recovery keeps current at LKG" "releases/$SBX_V1" "$(readlink "$SBX/current")"
+
+# 11c. promote abort at ATOMIC FLIP: unwritable install dir — the temp
+#      symlink cannot be created; launcher swap (cp onto existing writable
+#      file) still succeeds, so the abort is precisely at the flip.
+b4_seed_journal null
+chmod 555 "$SBX"
+B4C_OUT="$(b4_run_promote "$SBX_V2")"; B4C_RC=$?
+chmod 755 "$SBX"
+assert_eq "11c flip-fail abort exits 1" "1" "$B4C_RC"
+assert_contains "11c abort says txn left open" "txn left open" "$B4C_OUT"
+assert_eq "11c txn OPEN kind=promote" "promote" "$(b4_inf_kind)"
+assert_eq "11c current untouched at LKG" "releases/$SBX_V1" "$(readlink "$SBX/current")"
+if ls "$SBX" | grep -q 'current\.new'; then
+    _fail "11c no current.new.\$\$ droppings" "absent" "present"
+else
+    _pass
+fi
+b4_age_txn
+b4_sweep
+assert_eq "11c aged txn: sweep clears" "null" "$(b4_inf '_json_field "$(journal_read)" in_flight')"
+assert_eq "11c recovery keeps current at LKG" "releases/$SBX_V1" "$(readlink "$SBX/current")"
+
+# 11d. manual rollback abort at STOP.
+b4_seed_journal "$SBX_V1"
+chmod 000 "$FAKE_REPO/scripts/stop-ensemble.sh"
+B4D_OUT="$(b4_run_rollback "$SBX_V2")"; B4D_RC=$?
+chmod 644 "$FAKE_REPO/scripts/stop-ensemble.sh"
+assert_eq "11d rollback stop-fail abort exits 1" "1" "$B4D_RC"
+assert_contains "11d abort says txn left open" "txn left open" "$B4D_OUT"
+assert_eq "11d txn OPEN kind=rollback" "rollback" "$(b4_inf_kind)"
+assert_eq "11d current untouched at LKG" "releases/$SBX_V1" "$(readlink "$SBX/current")"
+[ -d "$SBX/releases/rollback.lock.d" ] && _fail "11d lock released on abort" "absent" "present" || _pass
+b4_age_txn
+b4_sweep
+assert_eq "11d aged txn: sweep clears" "null" "$(b4_inf '_json_field "$(journal_read)" in_flight')"
+assert_eq "11d recovery keeps current at LKG" "releases/$SBX_V1" "$(readlink "$SBX/current")"
+
+# 11e. manual rollback abort at REPOINT (flip).
+b4_seed_journal "$SBX_V1"
+chmod 555 "$SBX"
+B4E_OUT="$(b4_run_rollback "$SBX_V2")"; B4E_RC=$?
+chmod 755 "$SBX"
+assert_eq "11e rollback repoint-fail abort exits 1" "1" "$B4E_RC"
+assert_contains "11e abort says txn left open" "txn left open" "$B4E_OUT"
+assert_eq "11e txn OPEN kind=rollback" "rollback" "$(b4_inf_kind)"
+assert_eq "11e current untouched at LKG" "releases/$SBX_V1" "$(readlink "$SBX/current")"
+b4_age_txn
+b4_sweep
+assert_eq "11e aged txn: sweep clears" "null" "$(b4_inf '_json_field "$(journal_read)" in_flight')"
+assert_eq "11e recovery keeps current at LKG — env boots v1" "releases/$SBX_V1" "$(readlink "$SBX/current")"
 
 # ─── summary ────────────────────────────────────────────────────────────────
 printf '\n== summary: %d passed, %d failed ==\n' "$PASS" "$FAIL"
