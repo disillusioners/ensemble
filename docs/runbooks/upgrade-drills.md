@@ -61,7 +61,7 @@ DR-0 baseline for this batch: live listener pid 31150 (ppid 31130), port `<live-
 4. **Isolated HOME fixture** — run harness steps under `HOME=$(mktemp -d)` (`tests/test_release_journal.sh` precedent) so nothing resolves from the real home — which contains the live and demo install dirs.
 5. **Zero live-port literals** in any script, command, or evidence file you author; the sandbox port is explicit (`PORT=8377`) and asserted.
 6. **`ENSEMBLE_DEPLOY_LIVE` is never set** — scripts that read it treat unset = refuse live (`deploy.sh` exit-78 semantics). The upgrade suite's own live guard variable `ENSEMBLE_UPGRADE_LIVE` is likewise **never set by any drill** (live targeting exists only in §8, user-executed).
-7. **Sandbox stage invocation shape** (from `stage.sh` usage): `TARGET=sandbox INSTALL_DIR=<dir> PORT=<port> [POSTGRES_DB=<db>] bash scripts/upgrade/stage.sh sandbox --version v1 --skip-build ./stub-prod`.
+7. **Sandbox stage invocation shape** (from `stage.sh` usage): `TARGET=sandbox INSTALL_DIR=<dir> PORT=<port> [POSTGRES_DB=<db>] bash scripts/upgrade/stage.sh sandbox --version v1 --skip-build ./stub-prod`. Arg styles: the `VERSION=<v>` env form is equivalent to the `--version` flag form (both documented in `stage.sh` usage); DR-4 demo staging uses the env form — a real build from the repo unless `--skip-build` passes a stub.
 
 ---
 
@@ -86,7 +86,14 @@ nc -z 127.0.0.1 <closed-port>; echo "probe=$?"                   # expect refuse
 tail -f ~/agents-ensemble-demo/data/launcher.log                 # exit-75 lines + backoff waits
 cp ~/agents-ensemble-demo/.launcher-state <ev>/launcher-state-cycle1.txt
 sleep 70; cp ~/agents-ensemble-demo/.launcher-state <ev>/launcher-state-cycle2.txt
-# D1.4 — restore + recovery:
+# D1.4 — restore + recovery. FIRST stop the tempfail-looping launcher from D1.2
+# (the demo launcher supervising nothing, looping on exit 75): the stop line owns it
+# via stop-ensemble.sh's own verification tiers (cmdline exe-path / cwd ==
+# ~/agents-ensemble-demo, launcher.sh shape; never kills by port — no live-port
+# resource), assert-then-SIGTERM per the DR-0 ownership protocol precedent
+# (.agents/tester/RESULTS/2026-08-23-p2-3-dr0-preflight.md — kill withheld on
+# assertion failure). Restart only once the stop transcript shows the launcher
+# TERMined — else a second launcher stacks on the looping one.
 bash scripts/stop-ensemble.sh ~/agents-ensemble-demo 7979
 (cd ~/agents-ensemble-demo && nohup ./launcher.sh >> data/launcher.log 2>&1 &)
 curl -s localhost:7979/livez; curl -s localhost:7979/readyz      # both 200, reasons: []
@@ -240,7 +247,8 @@ VERSION=v0.10.6-dr4b ENSEMBLE_ROLLBACK_SAFE=1 bash scripts/upgrade/stage.sh demo
 cp ~/agents-ensemble-demo/.env ~/agents-ensemble-demo/.env.dr4-backup
 echo 'ENSEMBLE_READINESS_FORCE_DEGRADED=1' >> ~/agents-ensemble-demo/.env
 VERSION=v0.10.6-dr4b bash scripts/upgrade/promote.sh demo &   # watch transcript…
-# …gate failure logged ⇒ IMMEDIATELY: cp .env.dr4-backup .env   (halt-trap lesson)
+# …gate failure logged ⇒ IMMEDIATELY run the clearance (halt-trap lesson):
+cp ~/agents-ensemble-demo/.env.dr4-backup ~/agents-ensemble-demo/.env
 wait; echo "exit=$?"                                            # expect 1 (rolled back)
 ```
 
@@ -248,18 +256,19 @@ Expected: promote exit **1** (rolled back, env recovered); journal **`rollback`*
 
 ### (c) Cap-exhaustion → halt-for-human
 
-Repeat the (b) induction **3 times total** (rollbacks 1–3 in the 24h window). Sequencing note: rollbacks inside the 10-min cooldown are refused — either respect the cooldowns (~30 min wall-clock) or clear cooldown stamps between legs per the sandbox-drill convention (**every clearing logged in the transcript**; the boundary math itself is unit-proven in `release_journal_unit_test`). Then:
+Repeat the (b) induction **3 times total, one FRESH version per leg** (rollbacks 1–3 in the 24h window) — `VERSION=v0.10.6-dr4b1`, then `-dr4b2`, then `-dr4b3`, each staged with the `ENSEMBLE_ROLLBACK_SAFE=1` override per the constraint above: each leg stages its own version, promotes it, lets it fail the gate, rolls it back — each rollback increments the cap counter and quarantines **that** version (re-promoting a rolled-back version is refused `quarantine`; it never reaches the cap leg). Sequencing note: respect cooldowns (~30 min wall-clock between rollback legs — the cooldown refuses entry-side promotes inside the window; the refusal is journaled with reason=cooldown; the boundary math itself is unit-proven in `release_journal_unit_test`). Rollback #3 arms the cap (journal `halt` event, exit 1). Then:
 
 ```bash
-VERSION=v0.10.6-dr4c bash scripts/upgrade/promote.sh demo; echo "exit=$?"
-# expect: exit 78 + "HALT-FOR-HUMAN: rollback cap 3/24h reached (count=3)"  (lib.sh entry check)
+VERSION=v0.10.6-dr4c ENSEMBLE_ROLLBACK_SAFE=1 bash scripts/upgrade/stage.sh demo  # 4th-leg target staged FIRST — not-staged refuses BEFORE the cap check (wrong reason)
+for i in 1 2 3; do VERSION=v0.10.6-dr4c bash scripts/upgrade/promote.sh demo; echo "attempt $i exit=$?"; done
+# expect: 3× exit 78 + "HALT-FOR-HUMAN: rollback cap 3/24h reached (count=3)"  (lib.sh entry check)
 ```
 
-Expected: **4th entry refused** at preflight (`rollback-cap-exceeded`, exit 78); journal **`halt`** event; SSE notification emitted + captured by a subscribed test client (D4/T8 alert); counters visible in the journal dump. Note D-FA4.2: cap enforcement is **entry-side only** — the rollback/sweep recovery path itself never refuses on cap. Operational recovery is the documented `halt_ack` (recorded journal action naming who/when; counters reset) — but **the drill's restore is the R3.2 reset below**, which is mandatory anyway.
+Expected: **4th entry refused** at preflight — repeated ×3 to prove halt stability: **all 3 refusals `rollback-cap-exceeded`** (exit 78), each journaled (P2.3 refusal journaling, commit `22f9a839`) as a `refusal` history event — shell token `reason=cap`; the tool layer surfaces the same condition as `rollback-cap-exceeded` (`upgrade_tools.py`); journal **`halt`** event (armed at rollback #3); SSE notification emitted + captured by a subscribed test client (D4/T8 alert); counters visible in the journal dump. Note D-FA4.2: cap enforcement is **entry-side only** — the rollback/sweep recovery path itself never refuses on cap. Operational recovery is the documented `halt_ack` (recorded journal action naming who/when; counters reset) — but **the drill's restore is the R3.2 reset below**, which is mandatory anyway.
 
 ### (d) Sweep-recovery of a stale `in_flight`
 
-Induce an **orphaned flip**: run a promote against a version-lie target (the (b) alternative induction — no knob needed) and **SIGKILL `promote.sh` after the flip step** (abort-lane policy B4: the journal txn is left OPEN by design; `current` is left flipped). Then let the ADR-012 journal sweep converge it:
+Induce an **orphaned flip**: run a promote against a version-lie target (the (b) alternative induction — no knob needed) and **SIGKILL `promote.sh` after the flip step** (abort-lane policy — P2.1 B4 batch, commit `edbadebf` "post-stop aborts leave the txn open for sweep recovery", stated in the `scripts/upgrade/promote.sh` header: the journal txn is left OPEN by design; `current` is left flipped). Then let the ADR-012 journal sweep converge it:
 
 ```bash
 # … promote killed mid-window (post-flip); txn left in_flight, flipped:true
@@ -280,7 +289,7 @@ The cap-exhaustion leg leaves **3 rollbacks + a halt-armed counter** in the demo
 bash scripts/upgrade/status.sh demo          # 1. assert: in_flight null (post-sweep), pipeline lock free
 mv ~/agents-ensemble-demo/releases/state.json \
    ~/agents-ensemble-demo/releases/state.json.archive-dr4-$(date -u +%Y%m%d-%H%M)   # 2. archive (evidence)
-bash scripts/upgrade/promote.sh demo --help >/dev/null 2>&1 || true
+bash scripts/upgrade/promote.sh demo --help >/dev/null 2>&1 || true   # smoke: the script still runs post-archive (--help exits in arg-parsing, before any journal op — cannot touch the journal)
 # 3. fresh init: the next pipeline op auto-inits the empty journal (lib.sh journal_init):
 #    {"current":null,"previous":null,"in_flight":null,
 #     "rollback_window_count":{"24h":0,"window_start":null},
@@ -316,6 +325,13 @@ R3.2 reset executed + verified (counters zeroed, halt cleared, archive kept) · 
 
 **Restart-semantics accounting note (design constraint on this drill — from `test-strategy.md` §3):** an **in-flight tool call at stop is LOST** (turn resumes from the node boundary); tasks stay `PROCESSING` on crash (not `FAILED`); `StaleTaskRecovery` sweeps stale `RUNNING` >15min; MessageQueue is EPHEMERAL (`clear_all(preserve_in_flight=True)` at startup); ReportDeliveryRecovery is periodic-only (300s interval / 10-min age bound / batch 100, **no boot sweep**). **Therefore: never assert instant delivery of anything queued pre-stop — assert delivery within the recovery window (worst case: next 300s recovery tick + 10-min age bound).** The known Task↔JobItem reconciliation gap is pre-existing and OUT of P2 scope — if tripped, document, do not fix.
 
+### Expected outputs
+
+- `system_restart` transcript: stop→respawn→`/livez` ≤60s, and the tool result is the **structured terminal state delivered post-restart** — never an intermediate.
+- `system_upgrade` transcript: `dry_run` plan (target, version, rollback safety, gates) → confirming call **arms** the run (deferred/armed banner + **run_id**) → `upgrade_status` polls by run_id through the journal phases (staged → flipped → gating → soaking → committed) → terminal state.
+- Refusal paths (exact tokens): fake-confirmation → `user-confirmation-missing` / `nonce-instance-mismatch` / `nonce-action-mismatch` (a fabricated param must NOT unlock); live-target → `env-self-match`.
+- Parity check: Ari's `release_info` / `upgrade_status` fields (version, counters, `in_flight`, quarantine) match the `status.sh demo` journal dump **field-for-field — zero diffs**.
+
 ### Evidence to capture
 
 Tool transcripts (restart + upgrade + both refusals) · journal events per step · the parity diff (Ari report vs `status.sh` dump) · recovery-window delivery timestamps (restart semantics above) · live pid checkpoints.
@@ -328,7 +344,7 @@ Demo green assertion (`/readyz` 200 `reasons: []`) · no `pending_op` left in th
 
 ## 7. Cumulative N-cycle ledger (human-copy table)
 
-The gate measurement for S3 → live eligibility (ADR-021, N=3 user-ruled). **The machine-checkable source of truth is the demo journal (`releases/state.json`) + the ledger checker (P2.3 B2, pack `drill_ledger_unit_test`); this table is the human-auditable copy, DERIVED from checker output — when they disagree, the journal wins.** Per-cycle RESULTS files: `.agents/tester/RESULTS/2026-MM-DD-selfrestart-phase2-clean-cycle-{n}-{env}.md`.
+The gate measurement for S3 → live eligibility (ADR-021, N=3 user-ruled). **The machine-checkable source of truth is the demo journal (`releases/state.json`) + the ledger checker (`scripts/upgrade/ledger_check.py` + pack `test/packs/drill_ledger_unit_test.sh` — the P2.3 B2 batch); this table is the human-auditable copy, DERIVED from checker output — when they disagree, the journal wins.** Per-cycle RESULTS files: `.agents/tester/RESULTS/2026-MM-DD-selfrestart-phase2-clean-cycle-{n}-{env}.md`.
 
 **Cycle verdicts are judged against the CANONICAL five clauses of `test-strategy.md` §4.1** (clause 1 ari-driven upgrade cycle; clause 2 restart cycle clean; clause 3 no readiness degradation outside drills; clause 4 no unintended work loss; clause 5 zero live contact). A cycle is clean iff all five pass. **Staleness:** any release/manifest change mid-count resets the count to 0 — the N gate must be satisfied by cycles all targeting the SAME release version. Failed cycles do NOT auto-reset the count; record them with cause.
 
