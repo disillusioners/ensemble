@@ -1679,6 +1679,14 @@ class TestForgedSourceDispatchSeam:
             agent_id="ari",
         )
         job_create = next(t for t in job_tools if t.name == "job_create")
+        # NIT-7 (P2.3 review cycle 1): the dead ``source`` param is
+        # deprecated-and-ignored BY SCHEMA CONTRACT — the description must
+        # say so (server derives unconditionally; removal deferred for
+        # schema compat). The hostile→derived assertion below is the
+        # behavioral enforcement of the same ignore.
+        src_field = job_create.args_schema.model_fields["source"]
+        assert "DEPRECATED" in (src_field.description or ""), src_field.description
+        assert "IGNORED" in (src_field.description or ""), src_field.description
         result = await job_create.ainvoke(
             {
                 "agent_id": "ari",

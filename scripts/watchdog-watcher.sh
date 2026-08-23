@@ -38,8 +38,8 @@
 # /livez, the watcher file-watches two daemon-DOWN channels, readable
 # without the daemon process:
 #   (a) INSTALL_DIR/.launcher-state — the launcher's burst-abort marker
-#       (last_exit=1 + crash_count > budget 5, launcher.sh budget_tick/
-#       write_state) — one notify per abort occurrence;
+#       (last_exit=1 + crash_count > BUDGET_MAX_CRASHES, launcher.sh
+#       budget_tick/write_state) — one notify per abort occurrence;
 #   (b) INSTALL_DIR/releases/state.json — journal halt (halt_for_human)
 #       and sweep_rollback history events (the same terminal classes the
 #       in-daemon SSE emits; plain sweep-clears stay quiet, R3.4).
@@ -68,12 +68,28 @@ set -u
 
 WATCHDOG_ABSENT_THRESHOLD_S="${WATCHDOG_ABSENT_THRESHOLD_S:-600}"
 WATCHDOG_PROBE_TIMEOUT_S="${WATCHDOG_PROBE_TIMEOUT_S:-3}"
-INSTALL_DIR="${1:-$HOME/agents-ensemble}"
-PORT_OVERRIDE="${2:-}"
 
 _log() {
     printf '%s watchdog-watcher[%s]: %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$$" "$*" >&2
 }
+
+# MINOR-3 (P2.3 review cycle 1 — hard-constraint violation as written):
+# INSTALL_DIR is EXPLICIT-ONLY. There is NO default, here or anywhere —
+# the former fallback resolved to the LIVE install (~/agents-ensemble),
+# so a watcher installed without configuration silently watched live,
+# the exact U6 violation. Pointing a watcher at an env is an explicit
+# per-env operator action (duplicate the plist with that env's dir —
+# see the plist template's DEMO USAGE note). Absent/empty argument →
+# usage error + NONZERO exit: operator-facing misconfiguration, not a
+# runtime outcome (the StartInterval agent re-runs on its own cadence
+# and does not retry-loop on exit status).
+if [ $# -lt 1 ] || [ -z "${1:-}" ]; then
+    _log "FATAL: INSTALL_DIR argument required (explicit-only, NO default — promotion ladder U6; a default would silently watch the live install)"
+    _log "Usage: bash scripts/watchdog-watcher.sh INSTALL_DIR [PORT]"
+    exit 2
+fi
+INSTALL_DIR="$1"
+PORT_OVERRIDE="${2:-}"
 
 # Positive-integer guard for the tunables — malformed values (including
 # explicit zero: 0/00/any all-zero string) must never turn the threshold
@@ -241,22 +257,28 @@ write_alert_state() {
 }
 
 # (a) .launcher-state burst-abort marker (launcher.sh abort action persists
-# last_exit=1 + crash_count > BUDGET_MAX_CRASHES(5) + last_backoff=0, then
+# last_exit=1 + crash_count > BUDGET_MAX_CRASHES + last_backoff=0, then
 # exits 1 staying down). One notify per abort OCCURRENCE: the latch stores
 # the alerted crash_count — a deeper burst (count grows) re-notifies; a
 # clean exit / fresh burst (marker predicate gone) re-arms silently.
+# NIT-6 (P2.3 review cycle 1): the budget is a NAMED pin, not a magic
+# number — the watcher's abort predicate must detect exactly the class
+# the launcher aborts on (crash count EXCEEDS the budget within the
+# 10-min window). If launcher.sh's knob ever changes, this pin — and the
+# greppable name coupling — is what makes the drift visible.
+BUDGET_MAX_CRASHES=5  # MUST match launcher.sh BUDGET_MAX_CRASHES (>5 crashes/10-min window → launcher abort)
 check_burst_abort() {
     local f="$INSTALL_DIR/.launcher-state" last_exit count
     last_exit="$(_file_kv "$f" last_exit)"
     count="$(_file_kv "$f" crash_count)"
     if [ "$last_exit" = "1" ] \
        && printf '%s' "$count" | grep -Eq '^[0-9]+$' \
-       && [ "$count" -gt 5 ]; then
+       && [ "$count" -gt "$BUDGET_MAX_CRASHES" ]; then
         if [ "$count" -ne "$ABORT_SEEN" ]; then
             ABORT_SEEN="$count"
             write_alert_state
             _notify "Ensemble launcher burst-abort (staying down)" \
-                "crash #${count} inside the 10-min window (budget 5) — launcher exited 1 and stays down; see $INSTALL_DIR/data/launcher.err.log" \
+                "crash #${count} inside the 10-min window (budget ${BUDGET_MAX_CRASHES}) — launcher exited 1 and stays down; see $INSTALL_DIR/data/launcher.err.log" \
                 "launcher-abort"
         fi
         return 0

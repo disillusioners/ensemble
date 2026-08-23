@@ -502,7 +502,7 @@ def create_job_tools(
         queue_id: Annotated[str | None, Field(default=None, description="Specific queue to submit to")]
         idempotency_key: Annotated[str | None, Field(default=None, description="Deduplication key")]
         metadata: Annotated[dict[str, Any] | None, Field(default=None, description="Custom key-value metadata")]
-        source: Annotated[str, Field(default="api", description="Source identifier")]
+        source: Annotated[str, Field(default="api", description="DEPRECATED and IGNORED (NIT-7, P2.3 review cycle 1): the server derives source UNCONDITIONALLY since B3.5 (agent:<caller> for agent callers, internal_agent:unknown otherwise) — any value passed here has no effect. Param retained purely for schema compat; removal deferred.")]
         watch: Annotated[bool, Field(default=False, description="Watch the job for lifecycle events")]
 
     @register_tool_category("job")
@@ -515,7 +515,7 @@ def create_job_tools(
         queue_id: Annotated[str | None, Field(default=None, description="Specific queue to submit to")] = None,
         idempotency_key: Annotated[str | None, Field(default=None, description="Deduplication key")] = None,
         metadata: Annotated[dict[str, Any] | None, Field(default=None, description="Custom key-value metadata")] = None,
-        source: Annotated[str, Field(default="api", description="Source identifier")] = "api",
+        source: Annotated[str, Field(default="api", description="DEPRECATED and IGNORED: server derives source unconditionally (B3.5); retained for schema compat, removal deferred")] = "api",
         watch: Annotated[bool, Field(default=False, description="Watch the job for lifecycle events")] = False,
     ) -> dict:
         """Submit a new job to the queue. Use tool_help("job_create") for details."""

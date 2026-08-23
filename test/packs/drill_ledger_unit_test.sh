@@ -13,7 +13,11 @@
 #   ≥3 ⇒ ELIGIBLE; else NOT-READY with needed-count), live-path refusal
 #   (exit 78 on resolved-path compare vs the literal live install root —
 #   before any read, nothing created; demo dir + repo-named dir + symlink
-#   cases), invalid-journal exit 1, --help contract, --json parity, and the
+#   + case-variant-spelling cases [MINOR-2: BOTH sides normcase+casefolded,
+#   samefile walk for existing components — APFS case-insensitivity must
+#   not dodge the refusal]), HOME-unset / Path.home()-RuntimeError
+#   hardening (clean _die_unreadable-style exit 1, never a traceback —
+#   NIT-8), invalid-journal exit 1, --help contract, --json parity, and the
 #   zero-live-port-literal self-check on both new files.
 #   Fixtures: HOME-isolated mktemp dirs with hand-built releases/state.json
 #   (JSON shapes per tests/test_release_journal.sh fixtures). No daemon, no
@@ -272,6 +276,25 @@ ln -s "$FAKE_HOME/agents-ensemble" "$FIXTURE/live-alias"   # symlink smuggling
 run_ckpt "$FAKE_HOME" "$FIXTURE/live-alias/x/state.json" closed
 assert_eq "t6e symlink into live root refused 78" "78" "$rc_ckpt"
 
+# MINOR-2 (P2.3 review cycle 1 — case-fold hole): APFS is case-insensitive
+# by default and os.path.normcase is IDENTITY on POSIX, so the literal
+# compare alone would let a mixed-case spelling of the live install root
+# dodge the refusal. Folded compare is existence-agnostic (refuses on
+# shape); the samefile walk additionally covers existing case-variant
+# components. The demo dir name must STILL be accepted under folding.
+run_ckpt "$FAKE_HOME" "$FAKE_HOME/Agents-Ensemble/nonexistent-2/state.json" closed
+assert_eq "t6f case-variant live spelling refused 78 (shape, non-existent)" "78" "$rc_ckpt"
+mkdir -p "$FAKE_HOME/Agents-Ensemble/releases"
+printf '%s\n' '{"current":"v1","previous":null,"in_flight":null,"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[]}' \
+    > "$FAKE_HOME/Agents-Ensemble/releases/state.json"
+run_ckpt "$FAKE_HOME" "$FAKE_HOME/Agents-Ensemble/releases/state.json" closed
+assert_eq "t6g case-variant EXISTING live dir refused 78" "78" "$rc_ckpt"
+mkdir -p "$FAKE_HOME/Agents-Ensemble-Demo/releases"
+printf '%s\n' '{"current":"v1","previous":null,"in_flight":null,"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[]}' \
+    > "$FAKE_HOME/Agents-Ensemble-Demo/releases/state.json"
+run_ckpt "$FAKE_HOME" "$FAKE_HOME/Agents-Ensemble-Demo/releases/state.json" closed
+assert_eq "t6h case-variant DEMO spelling still accepted (fold ≠ over-refuse)" "0" "$rc_ckpt"
+
 # ═══ T7: zero live-port literals in both new files (constructed literal —
 # this pack never contains the contiguous digits either) ═══
 section "T7 zero-live-port-literal self-check"
@@ -311,7 +334,7 @@ assert_eq "t8c json count-after-break parity" "1" "$(json_field "$OUT" 'd["conse
 run_ckpt "$FAKE_HOME" "$T1D/releases/state.json" closed --json
 assert_eq "t8d json staleness parity" "True" "$(json_field "$OUT" 'str(d["staleness"]["reset"])')"
 assert_eq "t8d json superseded cycles" "1,2" "$(json_field "$OUT" '",".join(str(c) for c in d["superseded_cycles"])')"
-assert_contains "t8d json coverage note present" "clauses 3-5" "$OUT"
+assert_contains "t8d json coverage note present (clause-2 added, NIT-8)" "clauses 2-5" "$OUT"
 
 # ═══ T9: invalid journals → exit 1; CLI contract ═══
 section "T9 invalid journal + CLI contract"
@@ -335,10 +358,62 @@ OUT="$(python3 "$CHECKER" --journal x 2>"$FIXTURE/stderr.txt")"; rc_ckpt=$?
 assert_eq "t9d missing --f2-state rejected (usage)" "2" "$rc_ckpt"
 OUT="$(HOME="$FAKE_HOME" python3 "$CHECKER" --journal x --f2-state maybe 2>"$FIXTURE/stderr.txt")"; rc_ckpt=$?
 assert_eq "t9e invalid f2 choice rejected (usage)" "2" "$rc_ckpt"
-assert_contains "t9f help documents §4.1 clauses 3" "clauses 3" "$HELP_OUT"
+assert_contains "t9f help documents §4.1 clauses 2-5 (restart-cycle-clean)" "clauses 2-5" "$HELP_OUT"
 assert_contains "t9f help documents ADR-021" "ADR-021" "$HELP_OUT"
 assert_contains "t9f help documents live refusal" "exit 78" "$HELP_OUT"
 assert_contains "t9f help says f2-state is caller-supplied" "caller" "$HELP_OUT"
+
+# ═══ T10 (NIT-8, P2.3 review cycle 1): HOME-unset / Path.home() hardening ═══
+# Path.home() raises RuntimeError only when NO fallback resolves (HOME
+# unset AND the pwd lookup fails) — on macOS env -u HOME still resolves
+# via getpwuid, so the wrap is force-tested by patching. Both cases must
+# die _die_unreadable-style: clean message + exit 1, NEVER a traceback.
+section "T10 HOME-unset hardening (NIT-8)"
+# (a) real env -u HOME run: whatever the platform fallback does, the
+#     checker must never traceback and must exit sanely.
+env -u HOME python3 "$CHECKER" --journal "$T2D/releases/state.json" --f2-state closed \
+    >"$FIXTURE/t10a.out" 2>"$FIXTURE/t10a.err"
+RC_T10A=$?
+T10A_ALL="$(cat "$FIXTURE/t10a.out" "$FIXTURE/t10a.err")"
+assert_not_contains "t10a env-u-HOME: no traceback" "Traceback" "$T10A_ALL"
+case "$RC_T10A" in
+    0|1|78) _pass ;;
+    *) _fail "t10a env-u-HOME: sane exit code" "0|1|78" "$RC_T10A" ;;
+esac
+# (b) forced Path.home() RuntimeError → clean exit 1 naming the baseline.
+T10B="$(python3 - "$CHECKER" <<'PYX' 2>"$FIXTURE/t10b.err"
+import pathlib, runpy, sys
+checker = sys.argv[1]
+def _boom(*a, **k):
+    raise RuntimeError("homeless (forced for the NIT-8 test)")
+pathlib.Path.home = _boom
+sys.argv = [checker, "--journal", "/tmp/nit8/state.json", "--f2-state", "closed"]
+try:
+    runpy.run_path(checker, run_name="__main__")
+except SystemExit as exc:
+    print(f"EXIT={exc.code}")
+PYX
+)"
+assert_contains "t10b forced Path.home() RuntimeError → exit 1" "EXIT=1" "$T10B"
+assert_contains "t10b clean message names the refusal baseline" "cannot determine the live install root" "$(cat "$FIXTURE/t10b.err")"
+assert_not_contains "t10b no traceback" "Traceback" "$(cat "$FIXTURE/t10b.err")"
+# (c) tilde journal + forced expanduser RuntimeError → same clean death.
+T10C="$(python3 - "$CHECKER" <<'PYX' 2>"$FIXTURE/t10c.err"
+import pathlib, runpy, sys
+checker = sys.argv[1]
+def _boom2(self, *a, **k):
+    raise RuntimeError("homeless (forced for the NIT-8 test)")
+pathlib.Path.expanduser = _boom2
+sys.argv = [checker, "--journal", "~/nit8/state.json", "--f2-state", "closed"]
+try:
+    runpy.run_path(checker, run_name="__main__")
+except SystemExit as exc:
+    print(f"EXIT={exc.code}")
+PYX
+)"
+assert_contains "t10c forced expanduser RuntimeError → exit 1" "EXIT=1" "$T10C"
+assert_contains "t10c clean message names the path" "cannot expand journal path" "$(cat "$FIXTURE/t10c.err")"
+assert_not_contains "t10c no traceback" "Traceback" "$(cat "$FIXTURE/t10c.err")"
 
 # ─── summary ────────────────────────────────────────────────────────────────
 printf '\n== summary: %d passed, %d failed ==\n' "$PASS" "$FAIL"

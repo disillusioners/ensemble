@@ -39,13 +39,16 @@
 #                 F2-open) REGARDLESS of count — hard block, runbook §9.
 #
 # Coverage note (test-strategy §4.1): this checker covers the journal-
-# checkable clauses. §4.1 clauses 3–5 (readiness log-scan, work-loss resume
-# evidence, live-pid checkpoint) are EXTERNAL evidence audited in RESULTS
-# files — the gate consumer folds both.
+# checkable clauses. §4.1 clauses 2–5 (restart-cycle-clean, readiness
+# log-scan, work-loss resume evidence, live-pid checkpoint) are EXTERNAL
+# evidence audited in RESULTS files — the gate consumer folds both.
 #
 # Live-path refusal: refuses (exit 78) when the RESOLVED journal path is
 # under the live install root (~/agents-ensemble), compared after
-# expanduser+resolve so symlinks cannot smuggle a live path in. The live dir
+# expanduser+resolve so symlinks cannot smuggle a live path in, and
+# (MINOR-2) case-folded on BOTH sides + samefile-resolved for existing
+# paths, so a mixed-case spelling cannot dodge it on case-insensitive
+# APFS. The live dir
 # NAME is a substring of the demo dir name (~/agents-ensemble-demo) — name
 # matching is never used, only the resolved literal install-root comparison,
 # so the demo install and any checkout directory that merely shares the name
@@ -61,6 +64,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -72,9 +76,9 @@ LIVE_INSTALL_DIRNAME = "agents-ensemble"  # literal live install root: ~/agents-
 
 COVERAGE_NOTE = (
     "coverage: journal-checkable clauses of test-strategy.md 4.1 only; "
-    "clauses 3-5 (readiness log-scan, work-loss resume evidence, live-pid "
-    "checkpoint) are external evidence audited in RESULTS files — the gate "
-    "consumer folds both"
+    "clauses 2-5 (restart-cycle-clean, readiness log-scan, work-loss "
+    "resume evidence, live-pid checkpoint) are external evidence audited "
+    "in RESULTS files — the gate consumer folds both"
 )
 
 
@@ -94,18 +98,71 @@ def _refuse_live(path: Path) -> None:
 
 
 def live_install_root() -> Path:
-    """The literal live install root, resolved lazily (HOME override works)."""
-    return (Path.home() / LIVE_INSTALL_DIRNAME).resolve(strict=False)
+    """The literal live install root, resolved lazily (HOME override works).
+
+    NIT-8 (P2.3 review cycle 1): ``Path.home()`` raises ``RuntimeError``
+    when HOME is unset — degrade to a clean ``_die_unreadable``-style exit
+    (message + exit 1), NEVER a traceback. The live-path refusal baseline
+    is not derivable without a home; refusing to run is the fail-closed
+    behavior."""
+    try:
+        home = Path.home()
+    except RuntimeError as exc:
+        _die_unreadable(
+            f"cannot determine the live install root for the live-path "
+            f"refusal: {exc} (HOME unset?) — refusing to run without the "
+            f"refusal baseline"
+        )
+    return (home / LIVE_INSTALL_DIRNAME).resolve(strict=False)
 
 
 def check_live_path(raw_journal: str) -> Path:
     """Resolve the journal path; refuse (exit 78) if under the live install
     root. Resolve+compare against the literal live install path — never a
-    name-substring match (the demo dir name contains the live dir name)."""
-    resolved = Path(raw_journal).expanduser().resolve(strict=False)
+    name-substring match (the demo dir name contains the live dir name).
+
+    MINOR-2 (P2.3 review cycle 1 — case-fold hole): APFS is
+    case-INSENSITIVE by default, and ``os.path.normcase`` is IDENTITY on
+    POSIX — so the literal compare above alone would let a mixed-case
+    spelling of the live root dodge the refusal. BOTH sides are therefore
+    normcase'd (and explicitly case-folded — normcase alone is a no-op on
+    POSIX) before the containment compare, and existing paths are
+    ADDITIONALLY resolved via ``os.path.samefile`` (symlink/case-variant
+    and Unicode-normalization spellings the string compares cannot see)."""
+    try:
+        resolved = Path(raw_journal).expanduser().resolve(strict=False)
+    except RuntimeError as exc:
+        # NIT-8: expanduser raises RuntimeError when a "~"-prefixed path
+        # is given with HOME unset — same clean exit as live_install_root.
+        _die_unreadable(
+            f"cannot expand journal path '{raw_journal}': {exc} (HOME unset?)"
+        )
     live = live_install_root()
     if resolved == live or live in resolved.parents:
         _refuse_live(resolved)
+    # case-folded containment: fold BOTH sides (normcase + casefold —
+    # normcase is identity on POSIX, and APFS is case-insensitive by
+    # default), existence-agnostic: equal-or-under refuses.
+    resolved_folded = os.path.normcase(str(resolved)).casefold()
+    live_folded = os.path.normcase(str(live)).casefold()
+    if resolved_folded == live_folded or resolved_folded.startswith(
+        live_folded + os.sep
+    ):
+        _refuse_live(resolved)
+    # samefile resolution for EXISTING paths (symlink / case-variant /
+    # Unicode-normalization spellings): if any existing component of the
+    # journal path is the same filesystem object as the live install
+    # root, refuse. Absent components simply skip — the string compares
+    # above already ran.
+    if live.exists():
+        probe: Optional[Path] = resolved
+        while probe is not None and str(probe) != probe.anchor:
+            try:
+                if probe.exists() and os.path.samefile(probe, live):
+                    _refuse_live(resolved)
+            except OSError:
+                pass  # vanished mid-walk / permission — string compares ran
+            probe = probe.parent
     return resolved
 
 
@@ -349,11 +406,12 @@ def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
             "             txn-open event, so the commit IS the start marker.\n"
             "  CLEAN      window has zero rollback / sweep_rollback / halt\n"
             "             events; any such event ⇒ VIOLATION with cause.\n"
-            "             NOTE — §4.1 clauses 3–5 (readiness log-scan,\n"
-            "             work-loss resume evidence, live-pid checkpoint) are\n"
-            "             EXTERNAL evidence audited in RESULTS files; this\n"
-            "             checker covers the journal-checkable clauses, the\n"
-            "             gate consumer folds both.\n"
+            "             NOTE — §4.1 clauses 2-5 (restart-cycle-clean,\n"
+            "             readiness log-scan, work-loss resume evidence,\n"
+            "             live-pid checkpoint) are EXTERNAL evidence audited\n"
+            "             in RESULTS files; this checker covers the\n"
+            "             journal-checkable clauses, the gate consumer folds\n"
+            "             both.\n"
             "  staleness  cycles count ONLY within the same release version;\n"
             "             a version change resets the run and marks older\n"
             "             cycles SUPERSEDED (§4.3).\n"

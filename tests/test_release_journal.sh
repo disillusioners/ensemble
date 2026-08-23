@@ -172,6 +172,69 @@ out="$(env -u PORT -u POSTGRES_DB HOME="$FAKE_HOME" TARGET=sandbox INSTALL_DIR="
 assert_eq "M2 absent live .env (no live install) → sandbox proceeds" "0" "$rc"
 mv "$FAKE_HOME/agents-ensemble/.env.away" "$FAKE_HOME/agents-ensemble/.env"
 
+# ─── 2b. MINOR-4b (P2.3 review cycle 1): promote live F2 gate —
+# --f2-verified-closed is an ADDITIONAL factor on top of the live guard.
+# The fake-live install (fixture HOME redirect) keeps everything isolated;
+# nothing is ever contacted — both refusals fire pre-lock, pre-action. ───
+section "MINOR-4b promote live F2 gate (--f2-verified-closed)"
+# (a) guard + NO flag → 78 with the distinct f2-not-verified reason (the
+#     guard passed; the SECOND factor refused) — and the refusal is
+#     JOURNALED on the fake-live install (best-effort append, distinct
+#     D-FA2.2 token — auditable at the enforcement point).
+rm -rf "$FAKE_HOME/agents-ensemble/releases"
+out="$(HOME="$FAKE_HOME" ENSEMBLE_UPGRADE_LIVE=1 TARGET=live VERSION=vX \
+    bash "$FAKE_REPO/scripts/upgrade/promote.sh" live 2>&1)"; rc=$?
+assert_eq "f2 gate: guard + no flag exits 78" "78" "$rc"
+assert_contains "f2 gate: refusal names the flag" "--f2-verified-closed" "$out"
+assert_contains "f2 gate: distinct reason token" "f2-not-verified" "$out"
+if [ -f "$FAKE_HOME/agents-ensemble/releases/state.json" ]; then
+    JREF="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(":".join(h.get("detail","") for h in d.get("history",[])))' \
+        "$FAKE_HOME/agents-ensemble/releases/state.json" 2>/dev/null)"
+    assert_contains "f2 gate: refusal journaled on the (fake) live install" "reason=f2-not-verified" "$JREF"
+else
+    _pass   # absent journal: best-effort append legitimately dropped (WARNed)
+fi
+# (b) guard + flag → the F2 gate PASSES; the next refusal is not-staged
+#     (a LATER preflight stage) — never f2-not-verified.
+out="$(HOME="$FAKE_HOME" ENSEMBLE_UPGRADE_LIVE=1 TARGET=live VERSION=vX \
+    bash "$FAKE_REPO/scripts/upgrade/promote.sh" live --f2-verified-closed 2>&1)"; rc=$?
+assert_eq "f2 gate: guard + flag proceeds past the F2 gate" "78" "$rc"
+assert_contains "f2 gate: later refusal is not-staged (gate passed)" "does not exist — stage it first" "$out"
+assert_not_contains "f2 gate: no f2-not-verified once flag present" "f2-not-verified" "$out"
+# (c) NO guard + flag → the LIVE GUARD still refuses first (the guard is
+#     the primary factor and is NOT replaced by the flag).
+out="$(HOME="$FAKE_HOME" TARGET=live VERSION=vX \
+    bash "$FAKE_REPO/scripts/upgrade/promote.sh" live --f2-verified-closed 2>&1)"; rc=$?
+assert_eq "f2 gate: no guard still 78 (guard primary)" "78" "$rc"
+assert_contains "f2 gate: guard refusal fires, not the F2 one" "REFUSING to operate on live" "$out"
+# (d) demo lane: the flag is NEVER required (and the gate does not fire).
+out="$(HOME="$FAKE_HOME" TARGET=demo VERSION=vX \
+    bash "$FAKE_REPO/scripts/upgrade/promote.sh" demo 2>&1)"; rc=$?
+assert_eq "f2 gate: demo lane unaffected (not-staged refusal)" "78" "$rc"
+assert_contains "f2 gate: demo reaches not-staged, not f2" "does not exist — stage it first" "$out"
+# (e) lib.sh unit: journal_mark_f2_verified stamps the attestation ON the
+#     open txn — f2_verified_closed:true + ts + optional operator note —
+#     additively (existing txn fields untouched; JSON stays valid).
+F2SBOX="$FIXTURE/f2sbox"; mkdir -p "$F2SBOX/releases"
+INSTALL_DIR="$F2SBOX" REPO="$FAKE_REPO" F2_VERIFIED_NOTE="ops ticket 42 — fixture note" \
+    bash -c '. "$REPO/scripts/upgrade/lib.sh"
+        journal_init && journal_open_txn promote vF2 && journal_mark_f2_verified' \
+    >/dev/null 2>&1
+PYOUT="$(python3 - "$F2SBOX/releases/state.json" <<'PYF2'
+import json, sys
+try:
+    inf = json.load(open(sys.argv[1]))["in_flight"]
+    ok = (inf["f2_verified_closed"] is True and bool(inf["f2_verified_at"])
+          and inf["f2_verified_note"] == "ops ticket 42 — fixture note"
+          and inf["kind"] == "promote" and inf["flipped"] is False
+          and isinstance(inf["owner_pid"], int))
+    print("STAMP_OK" if ok else "STAMP_BAD")
+except Exception:
+    print("STAMP_ERR")
+PYF2
+)"
+assert_eq "f2 stamp: txn carries f2_verified_closed+at+note additively" "STAMP_OK" "$PYOUT"
+
 # M1 (Batch C): the sandbox INSTALL_DIR exclusion compares PHYSICAL paths —
 # a symlink alias or trailing-slash spelling of the live/demo dir passed
 # the old string compare. Fake demo dir created so the demo-side canonical

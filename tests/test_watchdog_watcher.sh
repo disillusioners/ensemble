@@ -16,14 +16,17 @@
 #   6. PORT RESOLUTION: PORT is read from INSTALL_DIR/.env (not hardwired).
 #   7. TUNABLE GUARD: malformed WATCHDOG_ABSENT_THRESHOLD_S falls back to
 #                  600 — never 0 (instant-notify hazard).
-#   8. EXIT-0 CONTRACT: no-args + unresolvable default INSTALL_DIR → FATAL
-#                  logged (naming the dir), exit 0 — no set -u abort.
+#   8. EXPLICIT-ONLY INSTALL_DIR (MINOR-3/U6): absent or EMPTY argument →
+#                  usage error, NONZERO exit, FATAL logged; NO HOME-based
+#                  default is attempted anywhere (the former default
+#                  resolved to the LIVE install — the U6 violation).
 #   9. ZERO TUNABLES: explicit WATCHDOG_ABSENT_THRESHOLD_S=0 / PROBE_TIMEOUT_S=0
 #                  fall back to 600 / 3 like garbage (curl max-time 0 = no
 #                  timeout, so zero must never reach curl).
 #  10. B4/ADR-025(b) BURST-ABORT: a real-shape .launcher-state abort marker
-#                  (last_exit=1, crash_count>5) alone → one notify per abort
-#                  occurrence (latch by count; deeper burst re-notifies;
+#                  (last_exit=1, crash_count > the BUDGET_MAX_CRASHES pin —
+#                  NIT-6, coupled to launcher.sh) alone → one notify per
+#                  abort occurrence (latch by count; deeper burst re-notifies;
 #                  cleared marker re-arms); healthy /livez does not gate it.
 #  11. B4/ADR-025(b) JOURNAL: real-shape releases/state.json halt /
 #                  sweep_rollback events alone → count-latched notify citing
@@ -176,20 +179,33 @@ WATCHDOG_ABSENT_THRESHOLD_S="abc" WATCHDOG_NOTIFY_CMD="echo notified >> $TMP/not
 grep -q "threshold 600s" "$TMP/tunable.out" && _pass || _fail "malformed threshold must fall back to 600s (got: $(grep threshold "$TMP/tunable.out" || echo none))"
 [ ! -f "$TMP/notify.log" ] && _pass || _fail "malformed threshold: must not notify on a fresh miss"
 
-# ─── 8. no-args + unresolvable default → FATAL log + exit 0 ─────────────────
-# Contract (header line ~44 + commit 94388762): "Exits 0 always". Under
-# set -u the no-args FATAL path used to reference $1 → bash abort exit 1.
-echo "== watcher: no-args unresolvable default → FATAL logged, exit 0 =="
+# ─── 8. MINOR-3 (U6): INSTALL_DIR explicit-only — absent/empty → usage
+# refusal, NONZERO exit. The former contract here ("no-args unresolvable
+# default → FATAL logged, exit 0") pinned the DEFAULT itself — the exact
+# U6 violation: the fallback resolved to the LIVE install, so a watcher
+# installed without configuration silently watched live. Now there is NO
+# default anywhere: missing/empty arg → usage error; nothing HOME-based
+# is resolved or named, and set -u never sees an unbound $1.
+echo "== watcher: absent/empty INSTALL_DIR → usage refusal (nonzero) =="
 env -i HOME="$TMP/no-such-home" PATH="/usr/bin:/bin" \
     bash "$WATCHER" >"$TMP/noargs.out" 2>&1
 RC_NOARGS=$?
-[ "$RC_NOARGS" -eq 0 ] && _pass || _fail "no-args unresolvable default: must exit 0 — 'Exits 0 always' (got $RC_NOARGS)"
-grep -q "FATAL: cannot resolve INSTALL_DIR" "$TMP/noargs.out" \
-    && _pass || _fail "no-args unresolvable default: must emit FATAL log (got: $(cat "$TMP/noargs.out" 2>/dev/null))"
-grep -Fq "cannot resolve INSTALL_DIR '$TMP/no-such-home/agents-ensemble'" "$TMP/noargs.out" \
-    && _pass || _fail "no-args FATAL must name the attempted default dir (got: $(grep FATAL "$TMP/noargs.out" 2>/dev/null || echo none))"
+[ "$RC_NOARGS" -ne 0 ] && _pass || _fail "no-args: must exit NONZERO (explicit-only INSTALL_DIR usage error; got $RC_NOARGS)"
+grep -q "FATAL: INSTALL_DIR argument required" "$TMP/noargs.out" \
+    && _pass || _fail "no-args: must emit the FATAL usage line (got: $(cat "$TMP/noargs.out" 2>/dev/null))"
+grep -q "Usage: bash scripts/watchdog-watcher.sh INSTALL_DIR" "$TMP/noargs.out" \
+    && _pass || _fail "no-args: must print usage"
+grep -Fq "agents-ensemble" "$TMP/noargs.out" \
+    && _fail "no-args: must NOT name/attempt any HOME-based default dir (U6)" || _pass
 grep -q "unbound variable" "$TMP/noargs.out" \
     && _fail "no-args: must not abort on unbound \$1 under set -u" || _pass
+# empty-string INSTALL_DIR → the same refusal (an empty dir is no dir)
+env -i HOME="$TMP/no-such-home" PATH="/usr/bin:/bin" \
+    bash "$WATCHER" "" >"$TMP/emptyarg.out" 2>&1
+RC_EMPTY=$?
+[ "$RC_EMPTY" -ne 0 ] && _pass || _fail "empty INSTALL_DIR: must exit NONZERO (got $RC_EMPTY)"
+grep -q "FATAL: INSTALL_DIR argument required" "$TMP/emptyarg.out" \
+    && _pass || _fail "empty INSTALL_DIR: must emit the FATAL usage line"
 
 # ─── 9. explicit-zero tunables fall back to defaults (600 / 3) ──────────────
 # "0"/"00" are all-zero digit strings — the guard must reject them like

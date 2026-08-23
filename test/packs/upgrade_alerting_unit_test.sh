@@ -47,6 +47,13 @@
 #       marker-absent/dev → zero writes; live carve-out pinned
 #       (interlock-tripwired P2.2 contract — armed live refusals are
 #       journal-read-only);
+#     - T10 (P2.3 review cycle 1, MINOR-1): journal race discipline — the
+#       pipeline-busy lock-busy carve-out (skip the append; mirrors the
+#       B4 shell _refuse carve-out) + concurrent-journal-write proof:
+#       sequenced interleaving of refusal appends vs REAL shell-lane
+#       promote-style RMWs (lib.sh journal_open/close_txn subprocesses)
+#       loses NO update and never tears; barrier-released concurrent
+#       writers with a continuous reader never expose a torn file;
 #     - zero-live-port-literal self-check on the new/changed files
 #       (fragment-built pattern per drill_ledger pack; prose says
 #       "live port").
@@ -624,15 +631,19 @@ try:
 
     # (d) never-raises, unwritable journal: refusal still returns the
     # IDENTICAL string, append skipped, exactly ONE warning log line.
+    # (MINOR-1: reason is deliberately NOT pipeline-busy — that token now
+    # skips the append by the lock-busy carve-out BEFORE any write is
+    # attempted, so it could never produce the warning this case pins.
+    # The carve-out's own writable-journal case is t10a below.)
     os.chmod(DEMO_INSTALL / "releases", 0o555)
     ut_records.clear()
-    out3 = ut._refusal("UPGRADE", "pipeline-busy", "lock held")
+    out3 = ut._refusal("UPGRADE", "rollback-cap-exceeded", "lock held")
     os.chmod(DEMO_INSTALL / "releases", 0o755)
     warns = [r for r in ut_records if r.levelno == logging.WARNING
              and "refusal journal append FAILED" in r.getMessage()]
     hist = uj.journal_read(DEMO_INSTALL)["history"]
     report("t9d unwritable journal: refusal identical, append skipped, one log line",
-           out3 == "Error: UPGRADE REFUSED — reason=pipeline-busy: lock held"
+           out3 == "Error: UPGRADE REFUSED — reason=rollback-cap-exceeded: lock held"
            and len(hist) == 3 and len(warns) == 1,
            f"warns={len(warns)} hist_n={len(hist)}")
 
@@ -693,6 +704,134 @@ finally:
     ut.logger.removeHandler(_ut_cap)
     uj.register_alert_sink(None)
 
+# ── T10 (P2.3 review cycle 1, MINOR-1): refusal-append vs promote-style RMW ──
+# The lock-busy carve-out (upgrade_tools._journal_refusal_event skips the
+# append when reason=pipeline-busy) removes the BY-CONSTRUCTION racing
+# pair: a pipeline-busy refusal fires precisely BECAUSE a txn holder is
+# live. What remains is proven here at the file level:
+#   (a) carve-out pin: pipeline-busy journals NOTHING on a WRITABLE
+#       journal — no event, no warning; the skip precedes any write;
+#   (b) control: a non-busy refusal on the same journal still appends;
+#   (c) sequenced interleaving (deterministic): ROUNDS of REAL shell-lane
+#       promote-style read-modify-write (lib.sh journal_open_txn →
+#       journal_close_txn via real subprocesses) interleaved with
+#       daemon-lane refusal appends against the SAME journal — every
+#       write survives (no lost update: all refusal events present AND
+#       the final closed-txn state intact) and the journal parses after
+#       EVERY step (atomic-replace torn discipline);
+#   (d) barrier threads (deterministic for torn-safety): concurrent
+#       refusal-append + RMW writer threads released by ONE barrier, with
+#       a continuous reader — the file is NEVER torn (journal_read always
+#       parses; JournalTorn never raised). Lost-update under truly
+#       unsynchronized RMWs is exactly the race the (a) carve-out removes
+#       for the by-construction pair, so (d) pins torn-safety only — by
+#       design, not omission. Bounded: fixed iteration counts, <10s.
+_prev2 = os.environ.get("ENSEMBLE_SELF_ENV")
+try:
+    os.environ["ENSEMBLE_SELF_ENV"] = "demo"
+    T10_INSTALL = DEMO_INSTALL  # writable; resolves via the REAL marker chain
+
+    # (a) carve-out on a WRITABLE journal: skip happens pre-write.
+    ut_records.clear()
+    hist_n0 = len(uj.journal_read(T10_INSTALL)["history"])
+    out_a = ut._refusal("UPGRADE", "pipeline-busy", "second arm while run active")
+    warns_a = [r for r in ut_records if r.levelno == logging.WARNING]
+    hist_a = uj.journal_read(T10_INSTALL)["history"]
+    report("t10a pipeline-busy carve-out: no event, no warning, string unchanged",
+           out_a == ("Error: UPGRADE REFUSED — reason=pipeline-busy: "
+                     "second arm while run active")
+           and len(hist_a) == hist_n0 and len(warns_a) == 0,
+           f"hist {hist_n0}->{len(hist_a)} warns={len(warns_a)}")
+
+    # (b) control: non-busy refusal on the same journal still appends (+1).
+    out_b = ut._refusal("UPGRADE", "cooldown-active", "control append")
+    hist_b = uj.journal_read(T10_INSTALL)["history"]
+    report("t10b control: non-busy refusal still appends exactly one event",
+           out_b.startswith("Error: UPGRADE REFUSED — reason=cooldown-active")
+           and len(hist_b) == hist_n0 + 1
+           and uj._reason_token(hist_b[-1]["detail"]) == "cooldown-active",
+           f"hist_n={len(hist_b)}")
+
+    # (c) sequenced interleaving — real shell RMWs vs daemon refusal appends.
+    ROUNDS = 6
+    ok_c, note_c = True, ""
+    for rnd in range(ROUNDS):
+        proc = subprocess.run(
+            ["bash", "-c",
+             f'. "{os.environ["REPO_ROOT"]}/scripts/upgrade/lib.sh"\n'
+             f'export INSTALL_DIR="{T10_INSTALL}"\n'
+             f'journal_open_txn promote "v-t10-{rnd}" || exit 9\n'
+             f'journal_close_txn || exit 9\n'],
+            capture_output=True, text=True)
+        if proc.returncode != 0:
+            ok_c, note_c = False, f"round {rnd} shell rc={proc.returncode} err={proc.stderr.strip()[:120]}"
+            break
+        ut._journal_refusal_event("cooldown-active", f"t10c interleaved refusal {rnd}")
+        try:
+            uj.journal_read(T10_INSTALL)  # parses after EVERY step
+        except Exception as exc:
+            ok_c, note_c = False, f"round {rnd} journal unparseable post-step: {exc}"
+            break
+    hist_c = uj.journal_read(T10_INSTALL)["history"] if ok_c else []
+    refusal_details = [h["detail"] for h in hist_c if h.get("event") == "refusal"]
+    got_all_rounds = all(
+        any(f"t10c interleaved refusal {rnd}" in d for d in refusal_details)
+        for rnd in range(ROUNDS)
+    )
+    inf = uj.journal_read(T10_INSTALL).get("in_flight") if ok_c else "unread"
+    report("t10c sequenced interleave: every refusal append + every txn RMW survives",
+           ok_c and got_all_rounds and inf is None,
+           f"rounds_ok={ok_c} all_appends={got_all_rounds} in_flight={inf} {note_c}")
+
+    # (d) barrier threads: torn-safety under true concurrency.
+    T10D = fresh_install()
+    barrier = threading.Barrier(3)
+    stop_flag = threading.Event()
+    torn_errors = []
+
+    def _t10d_refusal_writer():
+        barrier.wait()
+        for i in range(60):
+            uj.journal_history_append(T10D, "refusal", f"t10d concurrent refusal {i}")
+        stop_flag.set()
+
+    def _t10d_rmw_writer():
+        barrier.wait()
+        for i in range(60):
+            uj.journal_update_field(
+                T10D, "cooldown_until",
+                "2026-08-23T10:00:00Z" if i % 2 else None,
+            )
+        stop_flag.set()
+
+    def _t10d_reader():
+        barrier.wait()
+        while not stop_flag.is_set():
+            try:
+                uj.journal_read(T10D)
+            except uj.JournalTorn as exc:
+                torn_errors.append(str(exc))
+
+    th_a = threading.Thread(target=_t10d_refusal_writer)
+    th_b = threading.Thread(target=_t10d_rmw_writer)
+    th_r = threading.Thread(target=_t10d_reader)
+    th_a.start(); th_b.start(); th_r.start()
+    th_a.join(10); th_b.join(10); stop_flag.set(); th_r.join(2)
+    final_ok = True
+    try:
+        uj.journal_read(T10D)
+    except Exception as exc:
+        final_ok = False
+        torn_errors.append(f"final read: {exc}")
+    report("t10d barrier threads: journal NEVER torn under concurrent writers",
+           not torn_errors and final_ok,
+           f"torn={torn_errors[:2]}")
+finally:
+    if _prev2 is None:
+        os.environ.pop("ENSEMBLE_SELF_ENV", None)
+    else:
+        os.environ["ENSEMBLE_SELF_ENV"] = _prev2
+
 print(f"DRIVER {'FAIL' if FAILURES else 'PASS'} ({len(FAILURES)} failed)", flush=True)
 sys.exit(1 if FAILURES else 0)
 PYEOF
@@ -713,6 +852,7 @@ for SCEN in \
     t6a t6b t6c \
     t8a t8b t8c t8d \
     t9a t9b t9c t9d t9e t9f \
+    t10a t10b t10c t10d \
 ; do
     assert_contains "scenario $SCEN pass line" "SCENARIO ${SCEN}: PASS" "$BATT_OUT"
     assert_not_contains "scenario $SCEN no fail line" "SCENARIO ${SCEN}: FAIL" "$BATT_OUT"

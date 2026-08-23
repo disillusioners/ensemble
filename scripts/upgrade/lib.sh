@@ -351,6 +351,10 @@ EOF
 #     "in_flight": null | { "kind": "promote|rollback|sweep_rollback",
 #                           "target": "<ver>", "started_at": "<iso>",
 #                           "flipped": false, "owner_pid": <int> },
+#                           [live-lane promote only, MINOR-4b, additive:]
+#                           "f2_verified_closed": true,
+#                           "f2_verified_at": "<iso>",
+#                           "f2_verified_note": "<opt operator note>",
 #     "rollback_window_count": { "24h": <int>, "window_start": "<iso>" },
 #     "cooldown_until": "<iso>|null",
 #     "quarantined": ["<ver>", ...],
@@ -547,6 +551,29 @@ journal_mark_flipped() {
     journal_update "in_flight" "$new_inf"
 }
 
+# journal_mark_f2_verified — MINOR-4b (P2.3 review cycle 1): stamp the
+# operator's --f2-verified-closed attestation INTO the open in_flight txn
+# (live lane only; promote.sh calls it immediately after journal_open_txn,
+# under the held lock). Adds f2_verified_closed:true + f2_verified_at
+# (ISO ts) + optional f2_verified_note (from F2_VERIFIED_NOTE env, the
+# operator's audit trail). ADDITIVE fields only — existing readers (the
+# launcher sweep's _js_json_field, the Python twin) parse named fields
+# and ignore extras, so the D4 schema stays splice-compatible.
+journal_mark_f2_verified() {
+    local json inf new_inf note
+    json="$(journal_read)" || return 1
+    inf="$(_json_sub "$json" "in_flight")"
+    [ -n "$inf" ] || { _warn "journal_mark_f2_verified: no in_flight txn"; return 1; }
+    new_inf="${inf%\}}"
+    note="${F2_VERIFIED_NOTE:-}"
+    if [ -n "$note" ]; then
+        new_inf="${new_inf},\"f2_verified_closed\":true,\"f2_verified_at\":\"$(_now_iso)\",\"f2_verified_note\":\"$(_json_escape "$note")\"}"
+    else
+        new_inf="${new_inf},\"f2_verified_closed\":true,\"f2_verified_at\":\"$(_now_iso)\"}"
+    fi
+    journal_update "in_flight" "$new_inf"
+}
+
 # journal_close_txn — in_flight = null.
 journal_close_txn() {
     journal_update "in_flight" "null"
@@ -728,11 +755,13 @@ lock_run_id=""
 # ENOENT/ESRCH → dead; EPERM → ALIVE — the process exists but belongs to
 # another user (permission denied ≠ dead; breaking a live foreign owner's
 # lock would trample its txn). Matches the Python journal twin
-# upgrade_journal._pid_alive (PermissionError → True). Stderr-text match:
-# bash builtin kill and /bin/kill both render "Operation not permitted".
+# upgrade_journal._pid_alive (PermissionError → True). Stderr-text match
+# under LC_ALL=C (NIT-5 — locale-stable: a localized shell must not flip
+# the branch): bash builtin kill and /bin/kill both render "Operation not
+# permitted".
 _pid_alive() {
     local err
-    err="$(kill -0 "$1" 2>&1)" && return 0
+    err="$(LC_ALL=C kill -0 "$1" 2>&1)" && return 0
     case "$err" in
         *"not permitted"*) return 0 ;;
         *) return 1 ;;

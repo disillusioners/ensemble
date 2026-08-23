@@ -36,6 +36,13 @@
   com.ensemble.watchdog.demo and the demo INSTALL_DIR — the port comes
   from each install's staged .env (nothing to edit here; ADR-014).
 
+  INSTALL_DIR is REQUIRED and passed EXPLICITLY in ProgramArguments —
+  watchdog-watcher.sh is explicit-only (no default anywhere, promotion
+  ladder U6): a staged plist missing the install-dir argument fails the
+  watcher's usage gate (nonzero exit, logged) instead of silently
+  watching the live install. Duplicate this plist per env with the
+  env's own dir; never rely on a fallback.
+
   Health endpoint: http://127.0.0.1:9797/livez (port resolved from
   INSTALL_DIR/.env at run time, canonical 9797 — D1 FINAL).
   ============================================================================

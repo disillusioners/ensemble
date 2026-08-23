@@ -471,11 +471,12 @@ _js_lock_dir() {
 # but belongs to another user (permission denied ≠ dead; breaking a live
 # foreign owner's lock would trample its txn). Matches the Python journal
 # twin upgrade_journal._pid_alive (PermissionError → True). Stderr-text
-# match: bash builtin kill and /bin/kill both render "Operation not
-# permitted".
+# match under LC_ALL=C (NIT-5 — locale-stable: a localized shell must
+# not flip the branch): bash builtin kill and /bin/kill both render
+# "Operation not permitted".
 _pid_alive() {
     local err
-    err="$(kill -0 "$1" 2>&1)" && return 0
+    err="$(LC_ALL=C kill -0 "$1" 2>&1)" && return 0
     case "$err" in
         *"not permitted"*) return 0 ;;
         *) return 1 ;;

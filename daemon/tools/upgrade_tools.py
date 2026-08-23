@@ -652,6 +652,16 @@ def _journal_refusal_event(reason: str, message: str) -> None:
       absent/invalid, dev repo checkout, non-frozen sandbox: the SAME
       ``_self_env_marker`` → ``_resolve_install_dir`` resolution the
       tools already use, so dev / marker-absent refusals journal nothing;
+    * LOCK-BUSY carve-out (MINOR-1, P2.3 review cycle 1 — mirrors the B4
+      shell discipline in lib.sh ``_refuse``: "the lock-busy refusal
+      sites deliberately do NOT journal"): when ``reason ==
+      "pipeline-busy"`` the append is SKIPPED entirely. A pipeline-busy
+      refusal fires precisely BECAUSE a txn holder holds the pipeline
+      lock — an unlocked best-effort append here would race the live
+      holder's read-modify-write on the WHOLE journal document (an
+      append that read pre-flip state could write it back, erasing
+      ``flipped:true`` — a lost UPDATE, not just a lost event).
+      pipeline-busy is structured-logged by the caller instead;
     * NO lock acquisition — an in-flight txn's lock is sacred; the append
       rides the plain ``journal_history_append`` splice (ADR-034 additive
       discipline), like lib.sh ``_refuse``;
@@ -676,6 +686,14 @@ def _journal_refusal_event(reason: str, message: str) -> None:
             # lane); live refusal records arrive via the shell lane's
             # lib.sh ``_refuse`` append + B4 watcher/relay, not from the
             # daemon's tool-refusal path.
+            return
+        if reason == "pipeline-busy":
+            # LOCK-BUSY carve-out (MINOR-1 — see docstring): pipeline-busy
+            # BY CONSTRUCTION means a live txn holder exists and is doing
+            # read-modify-write cycles on this very journal; an unlocked
+            # append here can clobber the holder's txn state. Skip the
+            # append; the refusal string + structured caller logging
+            # carry the record.
             return
         uj.journal_history_append(
             install_dir, "refusal", f"{message} (reason={reason})"
