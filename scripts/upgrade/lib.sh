@@ -1086,6 +1086,9 @@ promote_entry_check() {
 # the env on an orphaned flip:
 #   unparseable started_at → FAIL CLOSED (refuse; never adopt a txn we
 #       cannot age — the sweep does the same);
+#   kind=restart → NEVER adopted (D-FA4.3: the daemon boot sweep owns
+#       restart txns; the launcher sweep skips them too) — refuse, leave
+#       untouched;
 #   fresh (age ≤ SWEEP_STALE_S) → leave alone + refuse (pipeline-busy).
 #       DEAD OWNER MAKES NO DIFFERENCE: the sweep leaves any fresh txn
 #       alone regardless of owner liveness (the 600s gate is the primary
@@ -1114,6 +1117,13 @@ adopt_stale_txn() {
     started="$(_json_field "$inf" started_at)"
     flipped="$(_json_field "$inf" flipped)"
     owner="$(_json_field "$inf" owner_pid)"
+    # D-FA4.3 / R-SR13: restart-kind pending-ops are NEVER adopted (the
+    # launcher sweep skips them too) — restarts are self-completing and the
+    # daemon boot sweep owns them (P2.2). Leave untouched; pipeline-busy.
+    if [ "$kind" = "restart" ]; then
+        _warn "promote refused: in_flight kind=restart (target=${target:-?}) — D-FA4.3: restart txns are never adopted/swept (daemon boot sweep owns them); leaving untouched, pipeline-busy"
+        exit 78
+    fi
     # unparseable started_at → fail closed: the sweep leaves such a txn
     # untouched (launcher.sh:570-573); adoption must not fire on a txn it
     # cannot prove stale.
@@ -1132,9 +1142,10 @@ adopt_stale_txn() {
     if [ "$flipped" = "true" ]; then
         # ── stale flipped → adopt via the sweep-rollback recovery ──────────
         # Manifest gate on previous FIRST (halt-for-human, NO repoint, txn
-        # left in place — mirrors the sweep's no-previous / missing-dir
-        # halts, plus the D-FA4.5 rollback_safe schema-drift guard every
-        # other rollback path in this pipeline enforces).
+        # left in place — mirrors the sweep's no-previous / missing-dir /
+        # rollback_safe halts; D-FA4.5 schema-drift guard, enforced by
+        # every rollback path in this pipeline INCLUDING the launcher
+        # sweep).
         local prev prev_safe newcnt
         prev="$(_json_field "$json" previous)"
         case "$prev" in ''|null)

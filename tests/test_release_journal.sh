@@ -419,15 +419,15 @@ adopt_rel() {  # <dir> <ver> <rollback_safe>
         > "$1/releases/$2/manifest.json"
     printf 'stub' > "$1/releases/$2/ensemble-prod"
 }
-ADOPT_SEED='{"current":"vP","previous":"PREV","in_flight":{"kind":"promote","target":"vX","started_at":"STARTED","flipped":FLIP,"owner_pid":OWNERPID},"rollback_window_count":{"24h":CNT,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[]}'
-adopt_fixture() {  # <dir> <started-iso-or-GARBAGE> <flipped> <prev> <cnt> <ownerpid> <prev_rbs>
+ADOPT_SEED='{"current":"vP","previous":"PREV","in_flight":{"kind":"KIND","target":"vX","started_at":"STARTED","flipped":FLIP,"owner_pid":OWNERPID},"rollback_window_count":{"24h":CNT,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[]}'
+adopt_fixture() {  # <dir> <started-iso-or-GARBAGE> <flipped> <prev> <cnt> <ownerpid> <prev_rbs> [kind]
     rm -rf "$1"; mkdir -p "$1/releases"
     adopt_rel "$1" vX true
     # vMISSING names a previous that has NO release dir on purpose (the
     # missing-previous halt case) — nothing is created for it
     [ "$4" = "vP" ] && adopt_rel "$1" vP "${7:-true}"
     printf '%s' "$ADOPT_SEED" \
-        | sed -e "s/STARTED/$2/" -e "s/FLIP/$3/" -e "s/PREV/$4/" -e "s/CNT/$5/" -e "s/OWNERPID/$6/" \
+        | sed -e "s/STARTED/$2/" -e "s/FLIP/$3/" -e "s/PREV/$4/" -e "s/CNT/$5/" -e "s/OWNERPID/$6/" -e "s/KIND/${8:-promote}/" \
         > "$1/releases/state.json"
     ln -sfn releases/vX "$1/current"   # the orphaned flip (vX) — adopt may repoint
 }
@@ -539,6 +539,18 @@ assert_eq "8i current repointed despite cap (recovery never refuses)" "releases/
 assert_eq "8i count reaches 3" "3" "$(afield "$AD_OPT_DIR/t9" 'journal_rollback_count_24h')"
 assert_contains "8i halt event armed at cap" '"event":"halt"' "$(aj "$AD_OPT_DIR/t9")"
 assert_eq "8i txn cleared (recovery complete)" "null" "$(afield "$AD_OPT_DIR/t9" '_json_field "$(journal_read)" in_flight')"
+
+# 8j. D-FA4.3: kind=restart txn → NEVER adopted (the launcher sweep skips
+#     restarts too — they are self-completing, the daemon boot sweep owns
+#     them, P2.2): refuse 78, journal byte-identical, no repoint — even
+#     stale + flipped.
+adopt_fixture "$AD_OPT_DIR/t10" "$STALE700" true vP 0 999999 true restart
+J_T10_BEFORE="$(aj "$AD_OPT_DIR/t10")"
+L_T10_BEFORE="$(readlink "$AD_OPT_DIR/t10/current")"
+adopt_run "$AD_OPT_DIR/t10"
+assert_eq "8j restart-kind adopt refuses (rc 78)" "78" "$?"
+assert_eq "8j restart-kind journal byte-identical (untouched)" "$J_T10_BEFORE" "$(aj "$AD_OPT_DIR/t10")"
+assert_eq "8j restart-kind symlink unchanged (no repoint)" "$L_T10_BEFORE" "$(readlink "$AD_OPT_DIR/t10/current")"
 
 # ─── 9. retention eviction order with MIXED sort keys (review i3) ───────────
 section "retention mixed-key eviction order"
