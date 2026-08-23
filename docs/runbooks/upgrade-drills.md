@@ -31,7 +31,7 @@ curl -s localhost:7979/livez   # 200, {"status":"alive", ... "version":"<ver>"}
 curl -s localhost:7979/readyz  # 200, reasons: []
 ```
 
-**0.2 DR-0 record exists and is current.** First batch reference: `.agents/tester/RESULTS/2026-08-23-p2-3-dr0-preflight.md` (verdict `DR-0: CONTINUE`). If demo/live state has changed since the last DR-0 (release promoted, daemon restarted, launcher swapped), re-run the DR-0 shape (S1–S5) and record a fresh dated file before drilling.
+**0.2 DR-0 record exists and is current.** First batch reference: `.agents/tester/RESULTS/2026-08-23-p2-3-dr0-preflight.md` (verdict `DR-0: CONTINUE`). **Scope ruling (FL-1):** a fresh dated DR-0 record is minted at each demo-state-changing **batch** boundary (release promoted, daemon restarted, launcher swapped) — the mint is the dispatcher's job, not a drill's. Within a batch, each drill instead performs an **inline S1–S5-shaped re-inventory** (triple, probes, family pids + lstart, launcher-state, live baseline) recorded in its own RESULTS file — per-drill write-scope is RESULTS-only.
 
 **0.3 Dev environment:** `uv sync --extra dev` — **bare `uv sync` STRIPS the dev extra** (pytest-timeout drift; project critical note). Any pack run in the same session happens after this.
 
@@ -73,15 +73,21 @@ DR-0 baseline for this batch: live listener pid 31150 (ppid 31130), port `<live-
 
 ```bash
 # D1.0 — §0 checklist + pid baseline (0.4) into <ev> = evidence dir
-# D1.1 — record the real demo DATABASE_URL (evidence):
-grep -n '^DATABASE_URL=' ~/agents-ensemble-demo/.env | tee <ev>/env-before.txt
+# D1.1 — record the demo's real PG config (evidence). Demo .env carries it as
+# POSTGRES_* parts (the old DATABASE_URL key is read by nothing — F-DR1-3); record
+# the parts — sufficient to reconstruct the effective URL:
+grep -n '^POSTGRES_' ~/agents-ensemble-demo/.env | tee <ev>/env-before.txt
 # D1.2 — drill-scoped bad-PG override (R3.1: drill-scoped, restorable):
 bash scripts/stop-ensemble.sh ~/agents-ensemble-demo 7979        # clean stop
-# pick an unreachable LOCAL socket verified closed first (never a real service port):
-nc -z 127.0.0.1 <closed-port>; echo "probe=$?"                   # expect refused
+# pick an unreachable LOCAL socket — an uncommon port, double-checked closed first
+# (nc refused AND lsof unlisted; never a real service port):
+nc -z 127.0.0.1 <closed-port>; echo "nc=$?"                      # expect refused
+lsof -nP -iTCP:<closed-port> | wc -l                             # expect 0 (unlisted)
 (cd ~/agents-ensemble-demo && \
- DATABASE_URL='postgresql://drill:drill@127.0.0.1:<closed-port>/drill_unreachable' \
+ POSTGRES_URL='postgresql://drill:drill@127.0.0.1:<closed-port>/drill_unreachable' \
  nohup ./launcher.sh >> data/launcher.log 2>&1 &)
+# (launch shape, F-DR1-5: this line leaves a /bin/sh -c wrapper parent next to the
+#  launcher — expected; stop-ensemble.sh's TERM handles both — observed DR-1/DR-3)
 # D1.3 — observe ≥2 full cycles:
 tail -f ~/agents-ensemble-demo/data/launcher.log                 # exit-75 lines + backoff waits
 cp ~/agents-ensemble-demo/.launcher-state <ev>/launcher-state-cycle1.txt
@@ -97,10 +103,10 @@ sleep 70; cp ~/agents-ensemble-demo/.launcher-state <ev>/launcher-state-cycle2.t
 bash scripts/stop-ensemble.sh ~/agents-ensemble-demo 7979
 (cd ~/agents-ensemble-demo && nohup ./launcher.sh >> data/launcher.log 2>&1 &)
 curl -s localhost:7979/livez; curl -s localhost:7979/readyz      # both 200, reasons: []
-diff <ev>/env-before.txt <(grep -n '^DATABASE_URL=' ~/agents-ensemble-demo/.env)  # unchanged
+diff <ev>/env-before.txt <(grep -n '^POSTGRES_' ~/agents-ensemble-demo/.env)  # unchanged
 ```
 
-If the deployed daemon's config layer does not honor the ambient-env override, fall back to: `cp .env .env.drill-backup` → edit `DATABASE_URL` in place → D1.4 restores from `.env.drill-backup` and verifies byte-identical. The shared `.env` is never left edited.
+No `.env`-edit fallback exists — the old edit-in-place `DATABASE_URL` fallback was equally dead (same unread key) and is removed; the ambient override is the only induction path. Known fenced defect (F-DR1-2, fenced post-P2.3 — `decisions.md`): ambient `POSTGRES_URL` is honored by the checkpointer chain (`daemon/persistence.py`) but ignored by `daemon/repositories/factory.py` (parts-only) — DR-1 observed one split-brain boot (engine on the real DB while the checkpointer hit the drill socket); do not mis-diagnose that as drill failure.
 
 ### Expected outputs
 
@@ -127,10 +133,24 @@ Override removed (or `.env` restored byte-identical from backup) → normal laun
 ```bash
 SBX=/tmp/ens-sbx-dr2-$$; PORT=8377; PG=ensemble_dr2_$$
 createdb "$PG"
+# PRECONDITION (F-DR2-1): stage.sh carries an exact-tag guard (stage.sh:106-110 —
+# `git describe --tags --exact-match HEAD` must equal VERSION; ADR-009 D3 "stage
+# what was built") — an untagged HEAD refuses with exit 78 BEFORE staging. Stage
+# from a tagged fixture repo (tests/test_release_journal.sh:62-101 precedent:
+# identical scripts + payloads in a throwaway repo, git init + commit + tag `v1` —
+# same invocation, run from the fixture repo root) OR tag the repo first.
 TARGET=sandbox INSTALL_DIR="$SBX" PORT=$PORT POSTGRES_DB="$PG" \
   bash scripts/upgrade/stage.sh sandbox --version v1 --skip-build ./<stub-binary>
 # induce the fatal-config class (Phase-1 exit-75-smoke precedent shapes):
 rm "$SBX/releases/v1/ensemble-prod"            # missing binary → boot refuses (exit 78 class)
+# (info, F-DR2-3: a stage-only sandbox has no `current` — the refusal already fires
+#  on absent current+flat; the rm'd binary isn't a resolution candidate. Kept as
+#  belt-and-braces hardening; load-bearing only if a promote had flipped `current`.)
+# launcher_swap (F-DR2-2): stage puts launcher.sh ONLY in releases/<ver>/ — the
+# INSTALL_DIR root copy arrives via promote's launcher_swap step (lib.sh). A
+# stage-only sandbox must run it itself (fixture precedent: real `launcher_swap v1`;
+# cp + chmod is the byte-identical equivalent):
+cp "$SBX/releases/v1/launcher.sh" "$SBX/launcher.sh" && chmod +x "$SBX/launcher.sh"
 HOME=$(mktemp -d) PORT=$PORT INSTALL_DIR="$SBX" \
   bash "$SBX/launcher.sh"; echo "exit=$?" | tee <ev>/exit-code.txt   # expect: exit=78
 sleep 60; pgrep -fl "$SBX" | tee <ev>/no-respawn-check.txt           # expect: no output (no loop)
@@ -159,7 +179,7 @@ Throwaway PG dropped + sandbox dir removed + port verified free. Nothing else ex
 
 ## 4. DR-3 — P7 readiness green→red→green (demo) [carry-over #3]
 
-**What it closes:** the P7 readiness drill on a deployed daemon, with the restore semantics documented **verbatim** (T2). **Pass criterion (one line):** 5-row timestamped `200 → 503 → 200` readiness transition captured with `/livez` 200 throughout and green restored **by restart** with the knob verified absent from the demo `.env`.
+**What it closes:** the P7 readiness drill on a deployed daemon, with the restore semantics documented **verbatim** (T2). **Pass criterion (one line):** 6-row timestamped `200 → 503 → still-503 → 200` readiness transition captured with `/livez` 200 throughout and green restored **by restart** with the knob verified absent from the demo `.env`.
 
 ### The restore-semantics note — VERBATIM (from `.agents/tester/RESULTS/2026-08-22-ar-phase1-followups-verification.md:47`)
 
@@ -172,23 +192,32 @@ I.e.: **restore = restart-required, NOT instant.** The knob (`ENSEMBLE_READINESS
 ### Procedure
 
 ```bash
-# P7.0 — §0 checklist + green baseline (row 1 of 5, timestamped):
+# P7.0 — §0 checklist + green baseline (row 1 of 6, timestamped):
 date -u +%FT%TZ; curl -s -w '\n%{http_code}\n' localhost:7979/readyz | tee <ev>/p7-transcript.txt
 # P7.1 — set the knob (drill-scoped edit, backed up — RESULTS §2 row (h) precedent):
 cp ~/agents-ensemble-demo/.env ~/agents-ensemble-demo/.env.dr3-backup
+# trailing-newline pre-check (FL-4): tail -c 1 must be a bare newline — on a
+# no-trailing-newline .env the append would corrupt the last KEY=VALUE line; append
+# the newline first if absent (never assume the demo .env's shape — DR-3's happened
+# to end in \n):
+[ -z "$(tail -c 1 ~/agents-ensemble-demo/.env)" ] || echo >> ~/agents-ensemble-demo/.env
 echo 'ENSEMBLE_READINESS_FORCE_DEGRADED=1' >> ~/agents-ensemble-demo/.env
 # P7.2 — restart to load it (manual restart procedure — stop-ensemble.sh + launcher):
 bash scripts/stop-ensemble.sh ~/agents-ensemble-demo 7979
 (cd ~/agents-ensemble-demo && nohup ./launcher.sh >> data/launcher.log 2>&1 &)
-# P7.3 — red rows (2-3 of 5, timestamped):
+# P7.3 — red rows (2-3 of 6, timestamped):
 date -u +%FT%TZ; curl -s -w '\n%{http_code}\n' localhost:7979/readyz   # 503 + forced reason
 date -u +%FT%TZ; curl -s localhost:7979/livez                          # 200 (independence)
 grep '\[Readiness\] degraded' ~/agents-ensemble-demo/data/launcher.log | tail -1
-# P7.4 — clear the knob AND restart (restore is NOT instant — see verbatim note):
+# P7.4a — clear the knob but do NOT restart yet; probe the still-red state on a
+# FRESH tick (the drill's thesis — restore is NOT instant; see verbatim note).
+# Wait ≥2 refresh ticks (~25s) and check `checked_at` moved past the clear:
 cp ~/agents-ensemble-demo/.env.dr3-backup ~/agents-ensemble-demo/.env
+sleep 25; date -u +%FT%TZ; curl -s -w '\n%{http_code}\n' localhost:7979/readyz   # STILL 503 + same forced reason
+# P7.4b — restart (the only restore path on a deployed daemon):
 bash scripts/stop-ensemble.sh ~/agents-ensemble-demo 7979
 (cd ~/agents-ensemble-demo && nohup ./launcher.sh >> data/launcher.log 2>&1 &)
-# P7.5 — green row (4-5 of 5, timestamped):
+# P7.5 — green rows (5-6 of 6, timestamped):
 date -u +%FT%TZ; curl -s -w '\n%{http_code}\n' localhost:7979/readyz   # 200, reasons: []
 date -u +%FT%TZ; curl -s localhost:7979/livez                          # 200
 diff ~/agents-ensemble-demo/.env ~/agents-ensemble-demo/.env.dr3-backup  # empty = knob gone
@@ -196,21 +225,22 @@ diff ~/agents-ensemble-demo/.env ~/agents-ensemble-demo/.env.dr3-backup  # empty
 
 ### Expected outputs
 
-5-row timestamped transition (Phase-1 §1 P7 shape; precedent pacing 15:36:31 → 15:36:49 → 15:37:27):
+6-row timestamped transition (Phase-1 §1 P7 shape; precedent pacing 15:36:31 → 15:36:49 → 15:37:27):
 
 | row | probe | expected |
 |---|---|---|
 | 1 | `/readyz` baseline | 200, `reasons: []` |
 | 2 | `/readyz` post-knob+restart | **503** + forced reason |
 | 3 | `/livez` same window | **200** (independence) |
-| 4 | `/readyz` post-clear+**restart** | 200, `reasons: []` |
-| 5 | `/livez` same window | 200 |
+| 4 | `/readyz` post-clear, **no restart yet** (thesis row) | **503** + same forced reason on a FRESH tick — `checked_at` moved past the clear (launcher exports `.env` at launch only; the refresher reads the process environ per tick) |
+| 5 | `/readyz` post-clear+**restart** | 200, `reasons: []` |
+| 6 | `/livez` same window | 200 |
 
 Plus one `[Readiness] degraded` log line while red, and a clean `.env` diff after restore.
 
 ### Evidence to capture
 
-The 5-row timestamped transcript · `.env` set/clear diff (backup ↔ working copy) · the `[Readiness] degraded` log line · live pid checkpoint start/end.
+The 6-row timestamped transcript · `.env` set/clear diff (backup ↔ working copy) · the `[Readiness] degraded` log line · live pid checkpoint start/end.
 
 ### Restore of the drill
 
