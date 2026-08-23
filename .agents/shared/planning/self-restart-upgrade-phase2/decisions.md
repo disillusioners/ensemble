@@ -268,6 +268,14 @@ The 4 unverified assumptions of `architecture-recommendation.md` §7, wired to t
 
 ---
 
+## P2.3 Gate Rulings & Fences (2026-08-23, developer[v2] gate dispatch)
+
+1. **U4 live-read per-request approval — FENCED.** "Assigned to P2.3 by promotion-ladder.md §5 U4 note, but omitted from phase3-plan.md (plan of record); fenced to the dedicated loopback-API-auth/F2 follow-up workstream — rationale: intertwined with F2 auth boundary; no live-resident Ari exists in P2.3 scope."
+2. **Tidier P2.3 refactor batch — FENCED (user override 2026-08-23).** The tidier LEDGER set (actor-tool dedup, 330-line system_upgrade split, module split, type hardening, journal diagnosability) is fenced to a dedicated post-P2.3 refactor pass, overriding the tidier notes.md "P2.3 refactor batch" label. Rationale: refactoring code under drill before drilling invalidates drill evidence; the FIX-NOW subset already landed (b9bee5cd). Exception: an individual sub-item may be pulled into a P2.3 batch ONLY if a P2.3 feature directly requires it — minimal, justified in the batch report.
+3. **MINOR-A/B — `[inferred, verbatim lost]`.** Minted by review-council-p2p2-fix (cycle 2, verifying 0949dd51). Verbatim text exists only in live-environment session data — unreachable by agents per the hard constraint (wanderer hunt 2026-08-23 confirmed; it correctly did not reach live). Best-evidence reconstruction, concordant across 3 independent non-live sources — (a) critical-note positional order, (b) decisions.md:245-257 documenting both fixes, (c) tidier notes.md:27 label set: MINOR-A ≈ M2 `source=None` seam test (fix landed, seam test missing); MINOR-B ≈ `job_create` source forcing fires only when caller_agent_id set → make unconditional. Disposition: IN — subsumed by the P2.3 B3.5 burn-down batch (both are its first two items). Optional: a human operator MAY recover verbatim text from the live ensemble UI (user-executed, allowed) to close the ledger reference definitively — nothing in P2.3 blocks on it.
+
+---
+
 ## Decision Index (Phase 2)
 
 | ADR | Topic | Recommendation (one line) | Flag |
