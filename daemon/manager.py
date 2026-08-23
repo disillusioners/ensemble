@@ -6265,9 +6265,14 @@ class InstanceManager:
         # in hand. Whitelisted source → stamp the per-turn window the live
         # 3-factor gate reads; any other source → clear it (per-turn
         # semantics — an agent/internal-originated turn never inherits an
-        # earlier turn's user authorization). Skipped on silent resume
-        # (no message is injected; the window keeps the original turn's).
-        if not silent and message_source is not None:
+        # earlier turn's user authorization). Silent resume is the ONLY
+        # skip (no message is injected; the window keeps the original
+        # turn's). M2 (P2.2 fix pass 2026-08-23): a NON-silent dispatch
+        # with source=None must ALSO stamp — stamp_user_origin_window
+        # treats None as non-whitelisted and CLEARS the window, so a
+        # source-less dispatch no longer leaves a prior turn's user-origin
+        # window alive (fail-closed direction).
+        if not silent:
             self.stamp_user_origin_window(instance_id, message_source, message_id)
 
         return await self._messaging_service._process_message_with_tracking(

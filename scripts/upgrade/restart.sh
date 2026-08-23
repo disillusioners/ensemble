@@ -41,6 +41,8 @@
 #   bash scripts/upgrade/restart.sh <demo|live|sandbox> --run-id <r-...> \
 #        [--reason "<text>"] [--grace-s <n>]
 #   (sandbox also needs INSTALL_DIR=<dir> PORT=<port> [POSTGRES_DB=<db>])
+#   The target is REQUIRED (positional arg or TARGET env) — no silent
+#   default; absent/invalid → exit 78 before anything else.
 #
 # EXIT CODES: 0 restarted + gated · 1 gate failed (markers still cleared —
 # the launcher's own burst protection owns a crash-looping daemon) ·
@@ -77,7 +79,16 @@ done
 # shellcheck source=scripts/upgrade/lib.sh
 . "$SCRIPT_DIR/lib.sh"
 
-resolve_env "${TARGET_ARG:-${TARGET:-demo}}"
+# M6 (P2.2 fix pass 2026-08-23): the target must be EXPLICIT — the old
+# silent ${TARGET:-demo} default let a no-arg invocation operate on the
+# REAL demo install. Require the positional target arg or a TARGET env;
+# absent → refusal 78 (resolve_env's own 78 handles invalid values).
+UP_TARGET_SEL="${TARGET_ARG:-${TARGET:-}}"
+if [ -z "$UP_TARGET_SEL" ]; then
+    _warn "explicit target required — pass <demo|live|sandbox> as the first arg or set TARGET (no silent default)"
+    exit 78
+fi
+resolve_env "$UP_TARGET_SEL"
 require_live_guard "$UP_TARGET"
 echo_env_triple
 

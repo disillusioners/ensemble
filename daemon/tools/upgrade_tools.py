@@ -1830,13 +1830,56 @@ never decides go/rollback).
                                 "nonce-already-used: nonce consumed at "
                                 f"{action.consumed_at} — re-run dry_run"
                             )
+                        elif action.issued_to_instance != current_instance_id:
+                            # MAJOR-1(b) (P2.2 fix pass 2026-08-23): the
+                            # nonce is instance-bound (issued_to_instance is
+                            # recorded at mint, upgrade_journal.py). A nonce
+                            # minted for a DIFFERENT instance must not arm
+                            # from this one — fail-closed, matching the
+                            # window/TTL checks (also closes reviewer N2:
+                            # the field was recorded but never checked).
+                            factor_failures.append(
+                                "nonce-instance-mismatch: the nonce was "
+                                "issued to another instance (or an "
+                                "unattributed record) — re-run dry_run from "
+                                "THIS instance to mint a fresh nonce"
+                            )
                         else:
                             ttl = parse_iso_utc(action.ttl_expires_at)
-                            if ttl is not None and datetime.now(tz=timezone.utc) > ttl:
+                            # M1 (P2.2 fix pass): fail CLOSED on an
+                            # unparseable/absent ttl_expires_at — an
+                            # unparseable TTL counts as EXPIRED (same
+                            # refusal flavor), never as still-valid
+                            # (fail-open would let a corrupt nonce record
+                            # outlive its TTL; mirrors the adjacent window
+                            # expires_at check above).
+                            if ttl is None or datetime.now(tz=timezone.utc) > ttl:
                                 factor_failures.append(
                                     f"nonce-expired: nonce issued at "
                                     f"{action.issued_at}, TTL 15min elapsed. "
                                     "Re-run dry_run to obtain a fresh nonce."
+                                )
+                            elif (
+                                action.target != version
+                                or action.kind != "upgrade"
+                                or action.env != self_env
+                            ):
+                                # MAJOR-2 (P2.2 fix pass 2026-08-23): the
+                                # nonce is ACTION-BOUND (§4.2(b)/§4.3) — it
+                                # authorizes exactly the (kind, env, target)
+                                # triple it was minted for. An armed call
+                                # naming a DIFFERENT version than the
+                                # dry_run that minted the nonce must refuse
+                                # even with all 3 factors otherwise green.
+                                factor_failures.append(
+                                    "nonce-action-mismatch: the nonce was "
+                                    f"minted for kind={action.kind} "
+                                    f"env={action.env} target="
+                                    f"{action.target or '?'} but this call "
+                                    f"arms kind=upgrade env={self_env} "
+                                    f"target={version} — the nonce is "
+                                    "action-bound (§4.2(b)); re-run dry_run "
+                                    "for THIS action"
                                 )
                             else:
                                 # Factor 3: the triggering HUMAN message CONTENT
@@ -2031,10 +2074,14 @@ env-marker-absent, env-self-match, target-not-staged,
 target-quarantined, manifest-unsafe (rollback_safe=false),
 rollback-cap-exceeded (3/24h), cooldown-active, pipeline-busy (open
 txn / armed pending-op / lock held — names the run_id),
-user-confirmation-missing, nonce-mismatch, nonce-expired,
-nonce-already-used, nonce-verification-unavailable,
-executor-scripts-unavailable, no-staged-install, journal-unavailable
-(install dir resolves but the journal is torn/absent), layout-divergence.
+user-confirmation-missing, nonce-mismatch, nonce-expired (also when
+ttl_expires_at is unparseable — fail-closed), nonce-instance-mismatch
+(the nonce was minted for another instance), nonce-action-mismatch
+(the nonce was minted for a different kind/env/target than this call —
+the nonce is action-bound, §4.2(b)), nonce-already-used,
+nonce-verification-unavailable, executor-scripts-unavailable,
+no-staged-install, journal-unavailable (install dir resolves but the
+journal is torn/absent), layout-divergence.
 
 Never auto-retry a refusal — relay it verbatim (the LLM never decides
 go/rollback).

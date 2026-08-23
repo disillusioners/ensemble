@@ -99,15 +99,36 @@ _sha256() { shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'; }
 _canon_dir() { (cd "$1" 2>/dev/null && pwd -P) || printf '%s' "$1"; }
 
 # _json_escape <string> — minimal JSON string escaper (quotes + backslash +
-# control chars via printf %s safe subset). Bash 3.2-safe.
+# ALL control chars < 0x20 as standard \u00XX escapes). Bash 3.2-safe,
+# builtin-only (printf -v — no per-char subshell forks; reasons are short
+# and stage.sh maps stay fast).
+# N4 (P2.2 fix pass 2026-08-23): the old version only handled \n \t \r —
+# any other raw control char passed through verbatim; the first N4 cut
+# then escaped by `-lt 32` alone, but bash 3.2 printf '%d' yields SIGNED
+# bytes, so chars >= 0x80 (é, curly quotes, CJK — routine in LLM-authored
+# --reason) went negative, passed the guard, and rendered \uffffff… (>4
+# hex digits). Both failures share the nastiest property: lenient readers
+# (python/jq, this file's own extractor) ACCEPT the mangled form — the
+# damage is SILENT TEXT CORRUPTION, not a parse failure, so nothing fails
+# loudly. Now: 0 <= code < 0x20 escapes as \u00XX; negative (high UTF-8
+# byte) passes through raw — valid UTF-8 JSON. NUL cannot occur in bash
+# strings/argv.
 _json_escape() {
-    local s="$1"
+    local s="$1" out="" ch i code
     s="${s//\\/\\\\}"
     s="${s//\"/\\\"}"
     s="${s//$'\n'/\\n}"
     s="${s//$'\t'/\\t}"
     s="${s//$'\r'/\\r}"
-    printf '%s' "$s"
+    for ((i = 0; i < ${#s}; i++)); do
+        ch="${s:i:1}"
+        printf -v code '%d' "'$ch"
+        if [ "$code" -ge 0 ] && [ "$code" -lt 32 ]; then
+            printf -v ch '\\u%04x' "$code"
+        fi
+        out+="$ch"
+    done
+    printf '%s' "$out"
 }
 
 # _json_field <json> <key> — crude top-level "key": "value" / number / bool

@@ -520,8 +520,16 @@ def create_job_tools(
     ) -> dict:
         """Submit a new job to the queue. Use tool_help("job_create") for details."""
         try:
-            # Override source if using default "api" and called by an agent
-            if source == "api" and caller_agent_id:
+            # MAJOR-1(a) (P2.2 fix pass 2026-08-23): an agent caller's
+            # source is FORCED to agent:<caller> — unconditionally, not
+            # merely when it happens to equal the default "api". A
+            # caller-supplied source (e.g. source="telegram:attacker")
+            # must never thread through dispatch to the user-origin
+            # whitelist stamp (manager.stamp_user_origin_window /
+            # USER_ORIGIN_SOURCES) — that would forge factor 2 of the
+            # live 3-factor gate with zero human involvement. Mirrors
+            # job_continue's forced source below.
+            if caller_agent_id:
                 source = f"agent:{caller_agent_id}"
             normalized_project_id = normalize_project_id(project_id)
 
@@ -983,7 +991,9 @@ def create_job_tools(
             result = await manager.enqueue_message_job(
                 instance_id=instance_id,
                 message=message,
-                source=f"agent:{caller_agent_id}" if caller_agent_id else "api",
+                # F3 (P2.2 fix pass): never mint a whitelisted source on the
+                # empty-caller fallback — "api" is in USER_ORIGIN_SOURCES.
+                source=f"agent:{caller_agent_id}" if caller_agent_id else "internal_agent:unknown",
             )
 
             # 7. Return new job_id (provided by AsyncMessageResult)

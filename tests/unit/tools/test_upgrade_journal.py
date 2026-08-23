@@ -134,6 +134,16 @@ def _dead_pid() -> int:
     pytest.fail("could not obtain a dead pid for the stale-lock fixture")
 
 
+def _isolated_home(base: Path) -> str:
+    """M3 (P2.2 fix pass 2026-08-23): a fake HOME for subprocess env dicts —
+    lib.sh's resolve_env canon-checks ``$HOME/agents-ensemble*`` (a
+    live-path READ on any host with an install). No subprocess started by
+    this module may reach the developer's real home."""
+    home = base / "fake-home"
+    home.mkdir(exist_ok=True)
+    return str(home)
+
+
 def _bash_lib(install_dir: Path, script: str) -> subprocess.CompletedProcess:
     """Run a bash snippet with lib.sh sourced and INSTALL_DIR pointed at the
     fixture. The env is deliberately SCRUBBED (only PATH/HOME survive) so an
@@ -141,7 +151,7 @@ def _bash_lib(install_dir: Path, script: str) -> subprocess.CompletedProcess:
     cannot color the interop result."""
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-        "HOME": os.environ.get("HOME", str(Path.home())),
+        "HOME": _isolated_home(install_dir.parent),  # M3: never the real home
         "INSTALL_DIR": str(install_dir),
     }
     return subprocess.run(
@@ -465,7 +475,7 @@ class TestLockProtocol:
 
         env = {
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-            "HOME": os.environ.get("HOME", str(Path.home())),
+            "HOME": _isolated_home(install.parent),  # M3: never the real home
             "INSTALL_DIR": str(install),
         }
         # Direction 1: Python holds → lib.sh (live subshell) sees it busy.
@@ -1044,3 +1054,55 @@ class TestUserOriginSources:
         # survives an agent-originated follow-up turn).
         InstanceManager.stamp_user_origin_window(harness, "inst-1", "agent:worker", "m-5")
         assert "inst-1" not in harness._user_origin_windows
+
+
+# ── N4 (P2.2 fix pass 2026-08-23) — _json_escape control-char hardening ──────
+
+
+class TestJsonEscapeControlChars:
+    """lib.sh ``_json_escape`` escapes EVERY control char < 0x20 as a
+    standard ``\\u00XX`` escape — and passes NON-ASCII (é, curly quotes,
+    CJK) through raw: bash 3.2 ``printf '%d'`` yields SIGNED bytes, so a
+    bare ``-lt 32`` guard dragged every char >= 0x80 into the escape
+    branch (\\uffffff… — silently accepted by lenient readers). Before
+    N4 only \\n/\\t/\\r were handled — a raw \\x1f/\\x0b/\\x1b inside an
+    LLM-controlled ``--reason`` wrote INVALID JSON for every strict
+    reader even though lib.sh's own crude extractor tolerated it.
+    Journal integrity is load-bearing."""
+
+    def test_direct_escape_output(self, install: Path) -> None:
+        """The escaper itself: control chars → \\u00XX; printables, classic
+        escapes, and NON-ASCII (F1: bash 3.2 signed bytes — high UTF-8
+        bytes must pass through RAW, never into the \\u00XX branch)
+        untouched."""
+        rc = _bash_lib(
+            install,
+            'printf \'%s\' "$(_json_escape "$(printf \'a\\033b\\037c\\013d\\ne\\\\f\\"g h\\303\\251\\342\\200\\234q\\342\\200\\235\\344\\270\\255z\')")"',
+        )
+        assert rc.returncode == 0, rc.stderr
+        # Exact byte output — high UTF-8 bytes survive verbatim:
+        # é=\u00e9 “=\u201c ”=\u201d 中=\u4e2d.
+        assert rc.stdout == 'a\\u001bb\\u001fc\\u000bd\\ne\\\\f\\"g h\u00e9\u201cq\u201d\u4e2dz', repr(rc.stdout)
+
+    def test_hostile_reason_detail_journal_stays_parseable(self, install: Path) -> None:
+        """End-to-end at the real writer: ``journal_history_append`` with
+        a hostile detail (newlines + ESC + US + VT + non-ASCII é/“”/CJK —
+        the shape an LLM-controlled --reason produces) writes a journal
+        that lib.sh still reads (rc 0) AND python json.loads parses, with
+        the detail round-tripping EXACTLY — decoded equality, not just
+        parseability: F1's signed-char bug had lenient readers ACCEPT a
+        silently-corrupted \\uffffff… escape, and exact round-trip is the
+        only assertion that catches silent corruption."""
+        rc = _bash_lib(
+            install,
+            'detail="$(printf \'line1\\nline2\\033ESC\\037US\\013VT caf\\303\\251 \\342\\200\\234quotes\\342\\200\\235 \\344\\270\\255 end\')"\n'
+            'journal_history_append restart "reason: $detail"\n'
+            'journal_read >/dev/null\n'
+            'echo LIBSH_PARSE_RC=$?\n',
+        )
+        assert rc.returncode == 0, rc.stderr
+        assert "LIBSH_PARSE_RC=0" in rc.stdout
+        # The strict reader: raw control bytes would make json.loads fail.
+        data = json.loads(uj.journal_path(install).read_bytes())
+        detail = data["history"][-1]["detail"]
+        assert detail == "reason: line1\nline2\x1bESC\x1fUS\x0bVT caf\u00e9 \u201cquotes\u201d \u4e2d end", repr(detail)
