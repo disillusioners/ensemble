@@ -165,12 +165,15 @@ lock_heartbeat
 if ! stop_via_stop_script; then
     # B4 policy (leave-txn-open, applied at all four abort sites): the txn
     # stays OPEN so the sweep self-recovers. `current` still points at the
-    # last-known-good release, so ANY next launcher start (watchdog or
-    # operator) boots LKG, and the sweep clears the stale pre-flip txn at
-    # that same start. Closing the txn here would tell the sweep "nothing
-    # happened" while the env may be dark. We do NOT restart via launcher
-    # either: a FAILED stop leaves daemon liveness unknown — a blind boot
-    # could double-boot onto a still-running daemon.
+    # last-known-good release, so the next launcher start boots LKG, and
+    # the sweep clears the stale pre-flip txn at that same start. The dark
+    # window is bounded, not instant: watchdog-watcher is NOTIFY-ONLY
+    # (launchd hands off after its exit-0; it never restarts anything), so
+    # recovery rides the watcher notify (~600-900s) and then the next
+    # operator/launchd start of the launcher. Closing the txn here would
+    # tell the sweep "nothing happened" while the env may be dark. We do
+    # NOT restart via launcher either: a FAILED stop leaves daemon liveness
+    # unknown — a blind boot could double-boot onto a still-running daemon.
     _warn "stop-ensemble.sh FAILED — daemon state UNKNOWN (may be down); aborting promote BEFORE any flip (current untouched at last-known-good; txn left open for sweep recovery)"
     journal_history_append halt "promote aborted pre-flip: stop failed for $VERSION — txn left open for sweep recovery (current untouched at LKG)"
     exit 1

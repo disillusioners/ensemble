@@ -127,8 +127,12 @@ if ! stop_via_stop_script; then
     # B4 policy (leave-txn-open, same as promote's four abort sites): the
     # txn stays OPEN for sweep self-recovery. `current` is untouched at the
     # serving release, so the next launcher start boots it (LKG) and the
-    # sweep clears the stale pre-flip txn then. No restart here either — a
-    # FAILED stop leaves daemon liveness unknown (double-boot risk).
+    # sweep clears the stale pre-flip txn then. The dark window is bounded,
+    # not instant: watchdog-watcher is NOTIFY-ONLY (launchd hands off after
+    # its exit-0; it never restarts anything), so recovery rides the
+    # watcher notify (~600-900s) and then the next operator/launchd start.
+    # No restart here either — a FAILED stop leaves daemon liveness
+    # unknown (double-boot risk).
     _warn "stop FAILED — daemon state UNKNOWN (may be down); aborting rollback before any flip (current untouched; txn left open for sweep recovery)"
     journal_history_append halt "manual rollback to $TO_VERSION aborted: stop failed — txn left open for sweep recovery (current untouched)"
     exit 1

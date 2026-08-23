@@ -454,7 +454,9 @@ _js_quarantine() {
 # ── rollback.lock.d — mkdir-lock, D5 protocol (self-contained) ─────────────
 # mkdir IS the atomic acquire (portable; no flock on stock macOS). Contents:
 # owner (pid), heartbeat (epoch). Stale: heartbeat older than
-# SWEEP_LOCK_STALE_S or dead owner pid → mv to rollback.lock.d.stale.<pid>
+# SWEEP_LOCK_STALE_S AND owner pid dead/unverifiable (W1 — a live owner
+# mid un-heartbeated long op, e.g. the ≤600s stop span, is never broken)
+# → mv to rollback.lock.d.stale.<pid>
 # (never rmdir — racy) → re-acquire. Bounded wait; the launcher passes
 # wait=0 (never delay boot — defer to the next start instead).
 
@@ -479,16 +481,36 @@ _js_lock_acquire() {
             printf '%s\n' "$(_now)" > "$lock/heartbeat" 2>/dev/null
             return 0
         fi
-        # exists — stale? heartbeat > SWEEP_LOCK_STALE_S → break it (mv)
+        # exists — stale? Break only when the heartbeat is > SWEEP_LOCK_STALE_S
+        # AND the owner pid is dead/unverifiable (W1). A stale heartbeat
+        # ALONE must NOT break the lock: promote/rollback hold it un-
+        # heartbeated across the stop-script span (stop-ensemble WAIT_S
+        # clamps to 600s > the 300s staleness bound), and breaking under a
+        # LIVE owner lets a concurrent launcher start clear/roll back a txn
+        # whose owner is still mutating it — the B3 ungated-flip class. A
+        # missing/garbage owner pid is UNVERIFIABLE: nothing to protect, so
+        # the heartbeat alone breaks it (preserves crash progress). kill -0
+        # (POSIX) is the liveness test; residual pid-reuse wedge (crashed
+        # owner, pid reused by a live process) degrades to DEFER — safer
+        # than trampling a live owner; operator removes the stale lock.
         hb="$(cat "$lock/heartbeat" 2>/dev/null)"
         owner_pid="$(cat "$lock/owner" 2>/dev/null)"
         run_id="$(cat "$lock/run_id" 2>/dev/null)"
         if printf '%s' "$hb" | grep -Eq '^[0-9]+$'; then
             age=$(( $(_now) - hb ))
             if [ "$age" -gt "$SWEEP_LOCK_STALE_S" ]; then
-                _log "journal sweep: pipeline lock stale (heartbeat ${age}s old, owner pid ${owner_pid:-?}, run ${run_id:-?}) — breaking"
-                mv "$lock" "${lock}.stale.$$" 2>/dev/null || continue
-                continue
+                local owner_live=0
+                if [ -n "$owner_pid" ] && printf '%s' "$owner_pid" | grep -Eq '^[0-9]+$' \
+                   && kill -0 "$owner_pid" 2>/dev/null; then
+                    owner_live=1
+                fi
+                if [ "$owner_live" -eq 0 ]; then
+                    _log "journal sweep: pipeline lock stale (heartbeat ${age}s old, owner pid ${owner_pid:-?} dead/unverifiable, run ${run_id:-?}) — breaking"
+                    mv "$lock" "${lock}.stale.$$" 2>/dev/null || continue
+                    continue
+                fi
+                # LIVE owner mid un-heartbeated long op (the stop span) —
+                # fall through to the bounded wait/defer below; NEVER break.
             fi
         fi
         # owner process dead? (crash left a fresh-heartbeat dir) — break too
@@ -499,7 +521,7 @@ _js_lock_acquire() {
             continue
         fi
         if [ "$waited" -ge "$wait_s" ]; then
-            _log "journal sweep: pipeline lock held (owner pid ${owner_pid:-?}, heartbeat fresh) — deferring sweep to next start"
+            _log "journal sweep: pipeline lock held by a LIVE owner (pid ${owner_pid:-?}, run ${run_id:-?}) — deferring sweep to next start"
             return 1
         fi
         sleep 1
@@ -643,11 +665,24 @@ _journal_sweep() {
     # would clear it and boot the ungated, never-verified release. If
     # current already points at the txn target, run the rollback branch
     # instead (this also heals the handled mark_flipped-failure path).
-    local cur_link
+    # W2 guard (B4×B3): heal ONLY when the journal's own `current` differs
+    # from the txn target — the flip moves the symlink OFF the journaled
+    # baseline, so journal current ≠ target is what proves a flip happened.
+    # A same-version re-promote opens its txn while journal current already
+    # == target (the symlink never moves), so an aged PRE-flip abort of it
+    # also satisfies cur_link == target; healing there would sweep-rollback
+    # + quarantine + count the HEALTHY serving version (B4's current-at-LKG
+    # invariant broken for the same-version case). With journal current ==
+    # target the txn is genuinely pre-flip → the clear branch below owns it.
+    # A missing `current` field (degenerate/hand-edited journal) leaves
+    # jcur="" ≠ target → the symlink evidence still heals, as before.
+    local cur_link jcur
     cur_link="$(readlink "$install_dir/current" 2>/dev/null)" || cur_link=""
+    jcur="$(_js_json_field "$json" "current" 2>/dev/null)" || jcur=""
     if [ "$flipped" != "true" ] && [ -n "$target" ] \
-       && [ "$cur_link" = "releases/$target" ]; then
-        _log "journal sweep: flipped marker is false but current already -> releases/$target (owner died in the atomic_flip/mark_flipped window) — treating as flipped"
+       && [ "$cur_link" = "releases/$target" ] \
+       && [ "$jcur" != "$target" ]; then
+        _log "journal sweep: flipped marker is false but current already -> releases/$target while journal current=${jcur:-<none>} (owner died in the atomic_flip/mark_flipped window) — treating as flipped"
         flipped="true"
     fi
 

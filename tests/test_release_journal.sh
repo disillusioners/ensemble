@@ -541,6 +541,38 @@ assert_eq "B2b _probe keeps the lock heartbeat fresh across a span > LOCK_STALE_
 ) 2>/dev/null
 assert_eq "B2b lock_heartbeat is ownership-guarded (no foreign refresh)" "0" "$?"
 
+# ─── 7c. W1 mirror: lib.sh lock_acquire — stale heartbeat × LIVE owner ─────
+# The stop-script span (WAIT_S clamps to 600s) is un-heartbeated and
+# exceeds LOCK_STALE_S (300); a stale heartbeat alone must NOT break the
+# lock while the owner pid is ALIVE (kill -0) — the concurrent action
+# defers (pipeline-busy) instead of trampling a live owner mid-promote.
+# Dead owner + same stale heartbeat → break proceeds (crash recovery).
+section "W1 lock_acquire: stale heartbeat × live owner (lib.sh)"
+W1L_DIR="$FIXTURE/w1lock"; rm -rf "$W1L_DIR"; mkdir -p "$W1L_DIR/releases"
+sleep 30 & W1L_OWNER=$!
+mkdir -p "$W1L_DIR/releases/rollback.lock.d"
+printf '%s\n' "$W1L_OWNER" > "$W1L_DIR/releases/rollback.lock.d/owner"
+printf '%s\n' "run-w1-$W1L_OWNER" > "$W1L_DIR/releases/rollback.lock.d/run_id"
+printf '%s\n' "$(( $(date +%s) - 400 ))" > "$W1L_DIR/releases/rollback.lock.d/heartbeat"  # >300s stale, owner LIVE
+( export INSTALL_DIR="$W1L_DIR"; . "$FAKE_REPO/scripts/upgrade/lib.sh"; lock_acquire 2 ) \
+    > /dev/null 2>"$W1L_DIR/acquire1.log"
+assert_eq "7c stale-hb + LIVE owner → busy after bounded wait (rc 1)" "1" "$?"
+assert_eq "7c live-owner lock NOT broken" "present" \
+    "$([ -d "$W1L_DIR/releases/rollback.lock.d" ] && echo present)"
+if ls "$W1L_DIR/releases" | grep -q 'rollback\.lock\.d\.stale\.'; then
+    _fail "7c no stale-break artifacts while owner lives" "absent" "$(ls "$W1L_DIR/releases" | tr '\n' ' ')"
+else
+    _pass
+fi
+# liveness is what protected it: same lock, owner now DEAD → stale-break acquires
+kill "$W1L_OWNER" 2>/dev/null; wait "$W1L_OWNER" 2>/dev/null
+( export INSTALL_DIR="$W1L_DIR"; . "$FAKE_REPO/scripts/upgrade/lib.sh"; lock_acquire 2 ) \
+    > /dev/null 2>"$W1L_DIR/acquire2.log"
+assert_eq "7c dead owner → stale-break acquire succeeds (rc 0)" "0" "$?"
+ls "$W1L_DIR/releases" | grep -q 'rollback\.lock\.d\.stale\.' && _pass \
+    || _fail "7c dead-owner break moved the lock aside" "present" "$(ls "$W1L_DIR/releases" | tr '\n' ' ')"
+( export INSTALL_DIR="$W1L_DIR"; . "$FAKE_REPO/scripts/upgrade/lib.sh"; lock_release ) > /dev/null 2>&1
+
 # (c) wall-clock budget: against an accepting-but-silent endpoint each curl
 #     burns its full 5s max-time. The old iteration counter (2s/try) would
 #     run a "6s" budget for ~28s wall (4 tries × 7s); the deadline must
@@ -741,27 +773,65 @@ adopt_run "$AD_OPT_DIR/t12"
 assert_eq "8k control: unquarantined previous still adopts" "0" "$?"
 assert_eq "8k control repointed to previous" "releases/vP" "$(readlink "$AD_OPT_DIR/t12/current")"
 
-# 8l. failed-counter path (review nit): journal writes FAIL after the repoint
-#     (read-only releases/ dir → journal_count_rollback rc≠0 → newcnt="") —
-#     the M5 WARN still fires and the recovery still completes rc 0 (loudly-
-#     warned degraded state, NO new halt semantics), and the guarded cap
-#     check must NOT emit a stray `[: : integer expression expected` on
-#     stderr when newcnt is empty.
+# 8l. failed-counter path (review nit): the counter write ALONE fails
+#     (journal seeded WITHOUT the rollback_window_count field —
+#     journal_update refuses to splice a missing field, while in_flight
+#     still closes) → the M5 WARN fires and the recovery still completes
+#     rc 0 (loudly-warned degraded state, NO new halt semantics), and the
+#     guarded cap check must NOT emit a stray `[: : integer expression
+#     expected` on stderr when newcnt is empty. (Pre-W3 this was fixture'd
+#     via a blanket chmod 555 — that now trips the checked-write refusal
+#     at quarantine first; 8m below owns that shape.)
 adopt_fixture "$AD_OPT_DIR/t13" "$STALE700" true vP 0 999999 true
-chmod 555 "$AD_OPT_DIR/t13/releases"   # journal writes fail; reads + root-level flip still work
+sed -i '' 's/,"rollback_window_count":{"24h":0,"window_start":null}//' "$AD_OPT_DIR/t13/releases/state.json"
 ( export INSTALL_DIR="$AD_OPT_DIR/t13"; . "$FAKE_REPO/scripts/upgrade/lib.sh"; adopt_stale_txn ) \
-    >/dev/null 2>"$AD_OPT_DIR/t13/stderr.txt"
+    >/dev/null 2>"$AD_OPT_DIR/t13-stderr.txt"
 RC_8L=$?
-chmod 755 "$AD_OPT_DIR/t13/releases"   # restore so fixture cleanup can rm -rf
 assert_eq "8l failed-counter adopt still completes rc 0 (no new halt)" "0" "$RC_8L"
 assert_eq "8l repoint landed despite counter failure" "releases/vP" "$(readlink "$AD_OPT_DIR/t13/current")"
 assert_contains "8l M5 counter-failure WARN still fires (loud, not silent)" \
-    "counter/cooldown write FAILED" "$(cat "$AD_OPT_DIR/t13/stderr.txt")"
-if grep -q "integer expression expected" "$AD_OPT_DIR/t13/stderr.txt"; then
+    "counter/cooldown write FAILED" "$(cat "$AD_OPT_DIR/t13-stderr.txt")"
+assert_eq "8l txn CLOSED despite the counter-only failure (warn-only by design)" \
+    "null" "$(afield "$AD_OPT_DIR/t13" '_json_field "$(journal_read)" in_flight')"
+if grep -q "integer expression expected" "$AD_OPT_DIR/t13-stderr.txt"; then
     _fail "8l no stray 'integer expression expected' on failed-counter cap check" "absent" "present"
 else
     _pass
 fi
+
+# 8m. W3 (M5 completed): recovery STATE writes are checked — a chmod-induced
+#     write failure in the flipped-adopt recovery (read-only releases/ after
+#     the repoint) must leave the txn OPEN with a LOUD warn and refuse the
+#     promote (exit 78). Pre-fix the quarantine/set_current/close failures
+#     were silently ignored — a set_current failure followed by a successful
+#     close was permanent silent divergence; a quarantine failure silently
+#     left the gate-failed version promotable. The open txn is exactly what
+#     the launcher sweep retries idempotently at the next start.
+adopt_fixture "$AD_OPT_DIR/t14" "$STALE700" true vP 0 999999 true
+chmod 555 "$AD_OPT_DIR/t14/releases"   # journal writes fail; root-level repoint still works
+( export INSTALL_DIR="$AD_OPT_DIR/t14"; . "$FAKE_REPO/scripts/upgrade/lib.sh"; adopt_stale_txn ) \
+    >/dev/null 2>"$AD_OPT_DIR/t14-stderr.txt"
+RC_8M=$?
+chmod 755 "$AD_OPT_DIR/t14/releases"   # restore so fixture cleanup can rm -rf
+assert_eq "8m write-failed adopt refuses (rc 78 — W3)" "78" "$RC_8M"
+assert_eq "8m repoint landed before the failing write" "releases/vP" "$(readlink "$AD_OPT_DIR/t14/current")"
+assert_contains "8m loud WARN names the refused write + open txn" "txn LEFT OPEN" "$(cat "$AD_OPT_DIR/t14-stderr.txt")"
+assert_contains "8m the failing write is named (quarantine)" "quarantine write FAILED" "$(cat "$AD_OPT_DIR/t14-stderr.txt")"
+assert_eq "8m txn LEFT OPEN for the sweep to retry" "promote" "$(afield "$AD_OPT_DIR/t14" '_json_field "$(_json_sub "$(journal_read)" in_flight)" kind')"
+
+# 8n. W3 pre-flip variant: close failure while CLEARING a stale pre-flip
+#     txn → same contract: txn OPEN, loud warn, exit 78 (never report the
+#     clear as done over a failed write).
+adopt_fixture "$AD_OPT_DIR/t15" "$STALE700" false null 1 999999 true
+ln -sfn releases/vP "$AD_OPT_DIR/t15/current"   # pre-flip: current on the serving release
+chmod 555 "$AD_OPT_DIR/t15/releases"
+( export INSTALL_DIR="$AD_OPT_DIR/t15"; . "$FAKE_REPO/scripts/upgrade/lib.sh"; adopt_stale_txn ) \
+    >/dev/null 2>"$AD_OPT_DIR/t15-stderr.txt"
+RC_8N=$?
+chmod 755 "$AD_OPT_DIR/t15/releases"
+assert_eq "8n pre-flip close failure refuses (rc 78 — W3)" "78" "$RC_8N"
+assert_contains "8n loud WARN fires on the pre-flip close failure" "txn LEFT OPEN" "$(cat "$AD_OPT_DIR/t15-stderr.txt")"
+assert_eq "8n pre-flip txn LEFT OPEN" "promote" "$(afield "$AD_OPT_DIR/t15" '_json_field "$(_json_sub "$(journal_read)" in_flight)" kind')"
 
 # ─── 9. retention eviction order with MIXED sort keys (review i3) ───────────
 section "retention mixed-key eviction order"
@@ -1095,6 +1165,40 @@ assert_eq "12d journal-write failure at commit exits 1 (NOT 0 — M5)" "1" "$M5_
 assert_contains "12d failure is a loud JOURNAL DIVERGENCE" "JOURNAL DIVERGENCE" "$M5_OUT"
 assert_eq "12d the flip itself completed (env on target)" "releases/$SBX_V2" "$(readlink "$SBX/current")"
 assert_contains "12d txn could not be closed under the read-only dir (message warns of the sweep risk)" '"kind":"promote"' "$(cat "$JB")"
+
+# 12e. W2 (B4×B3): same-version re-promote abort (stop fails) → aged → the
+#      launcher sweep must CLEAR the pre-flip txn with NO rollback /
+#      quarantine / count / cooldown. Pre-fix the kill-window heal fired on
+#      cur_link == target alone — but in a same-version re-promote current
+#      == target from the start, so the heal swept the HEALTHY serving
+#      version back, quarantined it, and armed cooldown (B4's
+#      current-at-LKG invariant broken). Post-fix the heal requires the
+#      journal's own current ≠ txn target (the flip must have moved the
+#      symlink off the journaled baseline). Closes the reviewer's N6 gap.
+ln -sfn "releases/$SBX_V1" "$SBX/current"
+m4_seed "$SBX_V1" "$SBX_V2" '[]'
+b4_inf 'journal_update cooldown_until "null"' > /dev/null 2>&1
+W2_COUNT_BEFORE="$(b4_inf 'journal_rollback_count_24h')"
+chmod 000 "$FAKE_REPO/scripts/stop-ensemble.sh"
+W2E_OUT="$(b4_run_promote "$SBX_V1")"; W2E_RC=$?
+chmod 644 "$FAKE_REPO/scripts/stop-ensemble.sh"
+assert_eq "12e same-version stop-fail abort exits 1" "1" "$W2E_RC"
+assert_eq "12e txn OPEN with target == journal current (same-version)" "$SBX_V1" \
+    "$(b4_inf '_json_field "$(_json_sub "$(journal_read)" in_flight)" target')"
+b4_age_txn
+b4_sweep
+assert_eq "12e aged txn: sweep CLEARS pre-flip (no heal)" "null" "$(b4_inf '_json_field "$(journal_read)" in_flight')"
+assert_eq "12e current stays on the healthy serving version" "releases/$SBX_V1" "$(readlink "$SBX/current")"
+assert_eq "12e journal current unchanged" "$SBX_V1" "$(m4_field current)"
+assert_contains "12e clear event is sweep (pre-flip clear)" '"event":"sweep"' "$(cat "$JB")"
+if printf '%s' "$(cat "$JB")" | grep -q 'sweep_rollback'; then
+    _fail "12e NO sweep_rollback (healthy version not rolled back)" "absent" "present"
+else
+    _pass
+fi
+assert_eq "12e NO rollback count" "$W2_COUNT_BEFORE" "$(b4_inf 'journal_rollback_count_24h')"
+assert_eq "12e NO cooldown armed" "null" "$(m4_field cooldown_until)"
+assert_eq "12e healthy version NOT quarantined" "[]" "$(b4_inf '_json_sub "$(journal_read)" quarantined')"
 
 # ─── summary ────────────────────────────────────────────────────────────────
 printf '\n== summary: %d passed, %d failed ==\n' "$PASS" "$FAIL"

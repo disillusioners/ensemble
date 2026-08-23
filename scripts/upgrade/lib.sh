@@ -690,8 +690,10 @@ journal_cooldown_active() {
 #   - mkdir "$INSTALL_DIR/releases/rollback.lock.d" is the atomic acquire
 #   - contents: owner (pid), run_id, heartbeat (epoch secs, refreshed
 #     ~30s by the live owner)
-#   - stale: heartbeat older than LOCK_STALE_S → mv the dir to
-#     rollback.lock.stale.<pid> (never rmdir — racy) → re-acquire
+#   - stale: heartbeat older than LOCK_STALE_S AND owner pid dead/
+#     unverifiable (W1: a live owner's lock is never broken on heartbeat
+#     age alone — the stop span is un-heartbeated up to 600s) → mv the
+#     dir to rollback.lock.stale.<pid> (never rmdir — racy) → re-acquire
 #   - second invocation: structured "pipeline-busy run_id=…" (exit 75
 #     flavor at the caller), NOT a crash
 lock_dir_path() { printf '%s/releases/rollback.lock.d' "$INSTALL_DIR"; }
@@ -713,16 +715,36 @@ lock_acquire() {
             printf '%s\n' "$(_now_epoch)" > "$lock/heartbeat" 2>/dev/null
             return 0
         fi
-        # exists — stale? heartbeat > LOCK_STALE_S → break it (mv, not rmdir)
+        # exists — stale? Break only when the heartbeat is > LOCK_STALE_S AND
+        # the owner pid is dead/unverifiable (W1 — mirrors _js_lock_acquire
+        # in launcher.sh; the PROTOCOL is the contract, D5). A stale
+        # heartbeat ALONE must NOT break the lock: promote/rollback hold it
+        # un-heartbeated across the stop-script span (stop-ensemble WAIT_S
+        # clamps to 600s > the 300s staleness bound), and breaking under a
+        # LIVE owner lets a concurrent action trample a txn whose owner is
+        # still mutating it. A missing/garbage owner pid is UNVERIFIABLE:
+        # nothing to protect, the heartbeat alone breaks it (preserves
+        # crash progress). kill -0 (POSIX) is the liveness test; residual
+        # pid-reuse wedge (crashed owner, pid reused by a live process)
+        # degrades to pipeline-busy — safer than trampling a live owner.
         hb="$(cat "$lock/heartbeat" 2>/dev/null)"
         owner_pid="$(cat "$lock/owner" 2>/dev/null)"
         run_id="$(cat "$lock/run_id" 2>/dev/null)"
         if printf '%s' "$hb" | grep -Eq '^[0-9]+$'; then
             age=$(( $(_now_epoch) - hb ))
             if [ "$age" -gt "$LOCK_STALE_S" ]; then
-                _log "pipeline lock stale (heartbeat ${age}s old, owner pid ${owner_pid:-?}, run ${run_id:-?}) — breaking"
-                mv "$lock" "${lock}.stale.$$" 2>/dev/null || continue
-                continue
+                local owner_live=0
+                if [ -n "$owner_pid" ] && printf '%s' "$owner_pid" | grep -Eq '^[0-9]+$' \
+                   && kill -0 "$owner_pid" 2>/dev/null; then
+                    owner_live=1
+                fi
+                if [ "$owner_live" -eq 0 ]; then
+                    _log "pipeline lock stale (heartbeat ${age}s old, owner pid ${owner_pid:-?} dead/unverifiable, run ${run_id:-?}) — breaking"
+                    mv "$lock" "${lock}.stale.$$" 2>/dev/null || continue
+                    continue
+                fi
+                # LIVE owner mid un-heartbeated long op (the stop span) —
+                # fall through to the bounded wait/busy below; NEVER break.
             fi
         fi
         # owner process dead? (crash left a fresh-heartbeat dir) — break too
@@ -733,7 +755,7 @@ lock_acquire() {
             continue
         fi
         if [ "$waited" -ge "$wait_s" ]; then
-            _log "pipeline-busy run_id=${run_id:-?} owner=${owner_pid:-?} — another pipeline action holds the lock"
+            _log "pipeline-busy run_id=${run_id:-?} owner=${owner_pid:-?} (live) — another pipeline action holds the lock"
             return 1
         fi
         sleep 1
@@ -1206,8 +1228,13 @@ promote_entry_check() {
 #       mv -h, the same rename(2) semantics the sweep uses), quarantine
 #       the failed target, count the rollback + arm cooldown (ADR-024),
 #       history event 'sweep_rollback' (P2.3's ledger consumes event
-#       names), clear txn;
-#   stale + flipped:false → clear (history event 'sweep').
+#       names), clear txn. W3: every recovery state write (quarantine /
+#       set_current / close_txn) is CHECKED — any failure leaves the txn
+#       OPEN (the sweep retries this recovery idempotently), WARNs loudly,
+#       and refuses the promote (exit 78). The counter write stays
+#       warn-only (over-count is the safe drift direction);
+#   stale + flipped:false → clear (history event 'sweep'). Close failure
+#       → txn LEFT OPEN + loud warn + exit 78 (W3 — same contract).
 # Runs UNDER the caller's lock (promote acquires before calling). After a
 # sweep-rollback adoption the enclosing promote continues into its ENTRY
 # checks, which then apply the freshly armed cooldown/cap — PER DESIGN
@@ -1297,8 +1324,23 @@ adopt_stale_txn() {
             _warn "adopt: repoint current -> $prev FAILED — txn left in place (the sweep retries at the next launcher start); promote refusing"
             exit 78
         fi
-        journal_quarantine "$target"
-        journal_set_current "$prev"
+        # W3 (M5 completed): every recovery STATE write below is checked —
+        # a failed write must leave the txn OPEN (the sweep retries this
+        # recovery idempotently at the next launcher start) and refuse the
+        # promote (exit 78) with a loud warn. NEVER close over a failed
+        # state write: a set_current failure followed by a successful close
+        # is permanent silent divergence, and a quarantine failure silently
+        # leaves the gate-failed version promotable. The counter write
+        # stays warn-only by design (9be59635 — over-count is the only
+        # safe drift direction); history appends are advisory.
+        journal_quarantine "$target" || {
+            _warn "adopt: quarantine write FAILED for $target after the repoint — txn LEFT OPEN (the sweep retries this recovery idempotently at the next launcher start); promote refusing (W3)"
+            exit 78
+        }
+        journal_set_current "$prev" || {
+            _warn "adopt: journal_set_current $prev FAILED after the repoint — txn LEFT OPEN, never closed over a failed state write (the sweep retries idempotently); promote refusing (W3)"
+            exit 78
+        }
         newcnt="$(journal_count_rollback 1)" || newcnt=""
         if [ -z "$newcnt" ]; then
             # M5: the recovery's repoint/quarantine already landed — do not
@@ -1309,7 +1351,10 @@ adopt_stale_txn() {
             _warn "adopt: rollback counter/cooldown write FAILED after the repoint — journal diverged; anti-flapping count may be lost (repair the journal)"
         fi
         journal_history_append sweep_rollback "adopt: orphaned flipped $kind txn (target=$target, owner pid ${owner:-?}, age ${age}s) rolled back to $prev at promote preflight; counted as auto-rollback (ADR-024)"
-        journal_close_txn
+        journal_close_txn || {
+            _warn "adopt: txn close FAILED after the sweep-rollback recovery — txn LEFT OPEN for the sweep to retry idempotently at the next launcher start; promote refusing (W3)"
+            exit 78
+        }
         if [ -n "$newcnt" ] && [ "$newcnt" -ge "$ROLLBACK_CAP_24H" ]; then
             journal_history_append halt "adopt sweep-rollback reached cap $ROLLBACK_CAP_24H/24h (count=$newcnt) — promotes refused until the window resets or an operator intervenes"
             _warn "HALT-FOR-HUMAN: cap reached while adopting stale txn — this promote is refused; next entry attempts will refuse too"
@@ -1318,7 +1363,12 @@ adopt_stale_txn() {
     else
         _warn "adopting STALE pre-flip txn (age ${age}s, target=$target): clearing (never flipped)"
         journal_history_append sweep "orphaned pre-flip $kind txn target=$target cleared at promote preflight"
-        journal_close_txn
+        # W3: same checked-write contract — a failed close leaves the txn
+        # OPEN for the sweep to retry; never report the clear as done.
+        journal_close_txn || {
+            _warn "adopt: txn close FAILED while clearing the stale pre-flip txn — txn LEFT OPEN (the sweep retries idempotently); promote refusing (W3)"
+            exit 78
+        }
     fi
     return 0
 }

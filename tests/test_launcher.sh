@@ -730,6 +730,88 @@ fi
 assert_eq "8t current untouched" "releases/v0.10.5" "$(readlink "$JS_T/current")"
 [ -d "$JS_T/releases/rollback.lock.d" ] && _fail "8t lock released after revalidation skip" "absent" "present" || _pass
 
+# 8u. W2 (B4×B3): same-version re-promote abort — journal current == txn
+#     target, symlink == target, flipped:false, aged. The kill-window heal
+#     must NOT fire: the flip never moved the symlink off the journaled
+#     baseline (journal current == target proves no flip). The sweep clears
+#     the pre-flip txn with NO rollback / quarantine / count / cooldown;
+#     current stays on the healthy serving version. Pre-fix the heal fired
+#     on cur_link == target alone and swept the healthy version back.
+JS_U="$JS_TEST_DIR/u"; _js_fixture "$JS_U"
+printf '{"current":"v0.10.6","previous":"v0.10.5","in_flight":{"kind":"promote","target":"v0.10.6","started_at":"%s","flipped":false,"owner_pid":999999},"rollback_window_count":{"24h":1,"window_start":"%s"},"cooldown_until":null,"quarantined":[],"history":[]}\n' \
+    "$STALE_TS" "$STALE_TS" > "$JS_U/releases/state.json"
+_js_run "$JS_U"
+assert_eq "8u same-version abort: rc 0 (boot proceeds)" "0" "$?"
+assert_eq "8u txn cleared via the pre-flip branch (no heal)" "null" "$(_js_field "$JS_U" in_flight)"
+assert_eq "8u current stays on the healthy serving version" "releases/v0.10.6" "$(readlink "$JS_U/current")"
+assert_eq "8u journal current untouched" "v0.10.6" "$(_js_field "$JS_U" current)"
+assert_contains "8u sweep (clear) event recorded" '"event":"sweep"' "$(_js_journal "$JS_U")"
+if printf '%s' "$(_js_journal "$JS_U")" | grep -q 'sweep_rollback'; then
+    _fail "8u no sweep_rollback (healthy version not rolled back)" "absent" "present"
+else
+    _pass
+fi
+assert_eq "8u rollback counter NOT incremented" "1" "$(_js_count "$JS_U")"
+assert_eq "8u cooldown NOT armed" "null" "$(_js_field "$JS_U" cooldown_until)"
+assert_eq "8u healthy version NOT quarantined" "[]" \
+    "$( . "$LAUNCHER"; _js_json_sub "$(_js_journal "$JS_U")" quarantined 2>/dev/null)"
+
+# 8u2. W2 control: the SAME shape but journal current ≠ target (the flip
+#      DID move the symlink off the baseline) → the heal still fires (the
+#      genuine kill-window case, pinned against the 8u over-correction).
+JS_U2="$JS_TEST_DIR/u2"; _js_fixture "$JS_U2"
+printf '{"current":"v0.10.5","previous":"v0.10.5","in_flight":{"kind":"promote","target":"v0.10.6","started_at":"%s","flipped":false,"owner_pid":999999},"rollback_window_count":{"24h":1,"window_start":"%s"},"cooldown_until":null,"quarantined":[],"history":[]}\n' \
+    "$STALE_TS" "$STALE_TS" > "$JS_U2/releases/state.json"
+_js_run "$JS_U2"
+assert_eq "8u2 kill-window control: rc 0" "0" "$?"
+assert_eq "8u2 heal still fires when journal current ≠ target" "releases/v0.10.5" "$(readlink "$JS_U2/current")"
+assert_contains "8u2 sweep_rollback event (heal ran the rollback branch)" '"event":"sweep_rollback"' "$(_js_journal "$JS_U2")"
+
+# 8v. W1: stale lock heartbeat + LIVE owner (the un-heartbeated stop span)
+#      → the sweep's lock acquire must NOT break the lock — defer instead
+#      (journal untouched, rc 0, boot proceeds). Owner = a real live child.
+JS_V="$JS_TEST_DIR/v"; _js_fixture "$JS_V"; _js_seed "$JS_V" "$STALE_TS" true
+sleep 30 & JS_V_OWNER=$!
+mkdir -p "$JS_V/releases/rollback.lock.d"
+printf '%s\n' "$JS_V_OWNER" > "$JS_V/releases/rollback.lock.d/owner"
+printf '%s\n' "run-w1-$JS_V_OWNER" > "$JS_V/releases/rollback.lock.d/run_id"
+printf '%s\n' "$(( $(date +%s) - 400 ))" > "$JS_V/releases/rollback.lock.d/heartbeat"  # >300s stale, owner LIVE
+JS_V_BEFORE="$(_js_journal "$JS_V")"
+_js_run "$JS_V"
+assert_eq "8v stale-hb + live owner: rc 0 (defer, boot proceeds)" "0" "$?"
+assert_eq "8v journal untouched (sweep deferred)" "$JS_V_BEFORE" "$(_js_journal "$JS_V")"
+assert_eq "8v current untouched (no rollback under a live owner)" "releases/v0.10.6" "$(readlink "$JS_V/current")"
+assert_eq "8v lock NOT broken (live owner protected)" "present" "$([ -d "$JS_V/releases/rollback.lock.d" ] && echo present)"
+if ls "$JS_V/releases" | grep -q 'rollback\.lock\.d\.stale\.'; then
+    _fail "8v no stale-break artifacts while the owner lives" "absent" "$(ls "$JS_V/releases" | tr '\n' ' ')"
+else
+    _pass
+fi
+# liveness is what protected it: same lock, owner now DEAD → break + sweep proceeds
+kill "$JS_V_OWNER" 2>/dev/null; wait "$JS_V_OWNER" 2>/dev/null
+_js_run "$JS_V"
+assert_eq "8v dead owner: stale lock broken, sweep proceeds" "0" "$?"
+assert_eq "8v sweep rolled back after the owner died" "releases/v0.10.5" "$(readlink "$JS_V/current")"
+ls "$JS_V/releases" | grep -q 'rollback\.lock\.d\.stale\.' && _pass \
+    || _fail "8v dead-owner break moved the lock aside" "present" "$(ls "$JS_V/releases" | tr '\n' ' ')"
+
+# 8w. W1 unit seam: _js_lock_acquire itself — stale heartbeat + LIVE owner
+#     → rc 1 (busy at wait=0, never delays boot), lock intact; the lib.sh
+#     mirror (lock_acquire) is proven in the release-journal pack (7c).
+JS_W="$JS_TEST_DIR/w"; mkdir -p "$JS_W/releases"
+sleep 30 & JS_W_OWNER=$!
+mkdir -p "$JS_W/releases/rollback.lock.d"
+printf '%s\n' "$JS_W_OWNER" > "$JS_W/releases/rollback.lock.d/owner"
+printf '%s\n' "run-w1-$JS_W_OWNER" > "$JS_W/releases/rollback.lock.d/run_id"
+printf '%s\n' "$(( $(date +%s) - 400 ))" > "$JS_W/releases/rollback.lock.d/heartbeat"
+( . "$LAUNCHER"; _js_lock_acquire "$JS_W" 0 >/dev/null 2>&1 )
+assert_eq "8w _js_lock_acquire: stale-hb + live owner → busy (1)" "1" "$?"
+assert_eq "8w lock dir intact" "present" "$([ -d "$JS_W/releases/rollback.lock.d" ] && echo present)"
+kill "$JS_W_OWNER" 2>/dev/null; wait "$JS_W_OWNER" 2>/dev/null
+( . "$LAUNCHER"; _js_lock_acquire "$JS_W" 0 >/dev/null 2>&1 )
+assert_eq "8w dead owner → acquire succeeds via stale-break (0)" "0" "$?"
+( . "$LAUNCHER"; _js_lock_release "$JS_W" >/dev/null 2>&1 )
+
 
 # ─── 9. resolve_binary preference order ─────────────────────────────────────
 section "resolve_binary"
