@@ -34,6 +34,19 @@
 #       AND worker-thread append both deliver via
 #       NotificationBroadcaster.emit (event_type=kind, data=payload);
 #       closed-loop call drops the alert without raising;
+#     - T8 (B4 leg 2): SHELL-written refusal journal → real classifier
+#       maps it to upgrade_promote_refusal (pack-level truth for the
+#       shell lane);
+#     - T9 (P2.3 B6.5 / F-B6c-1): the IN-DAEMON tool-refusal lane —
+#       REAL _refusal() path (real actor-gate call site + direct) journals
+#       via the real journal_history_append: exactly one refusal event
+#       per invocation carrying the D-FA2.2 token in the lib.sh _refuse
+#       detail shape, sink fires upgrade_promote_refusal per event;
+#       never-raises on unwritable/absent journal (identical refusal
+#       string, one warning line, journal never materialized);
+#       marker-absent/dev → zero writes; live carve-out pinned
+#       (interlock-tripwired P2.2 contract — armed live refusals are
+#       journal-read-only);
 #     - zero-live-port-literal self-check on the new/changed files
 #       (fragment-built pattern per drill_ledger pack; prose says
 #       "live port").
@@ -529,6 +542,157 @@ report("t8d shell refusal entry → real emission hook → SSE payload",
        and p.get("detail") == shell_detail,
        str(p))
 
+# ── T9 (P2.3 B6.5 / F-B6c-1): REAL _refusal() path journals + alerts ────────
+# The T8 seam closure: in-daemon tool refusals journal via the REAL
+# journal_history_append (single write point inside _refusal —
+# _journal_refusal_event), so the B3 upgrade_promote_refusal alert kind
+# is reachable from the tool lane. Fixture: HOME-isolated demo/live
+# install dirs resolved through the REAL _self_env_marker →
+# _resolve_install_dir chain (no monkeypatching — the rider resolves
+# exactly as production). NEVER touches a real ~/agents-ensemble* path.
+from daemon.tools import upgrade_tools as ut  # noqa: E402 — T9 only
+
+DEMO_INSTALL = Path.home() / "agents-ensemble-demo"
+LIVE_INSTALL = Path.home() / "agents-ensemble"
+T9_MSG = "(3/24h) — halted-for-human; see release_info(section=journal)."
+T9_MSG2 = "rollback cooldown active until 2026-08-23T10:30:00Z"
+
+_prev_self_env = os.environ.get("ENSEMBLE_SELF_ENV")
+ut_records = []
+_ut_cap = logging.Handler()
+_ut_cap.emit = lambda rec: ut_records.append(rec)
+ut.logger.addHandler(_ut_cap)
+ut.logger.setLevel(logging.WARNING)
+try:
+    os.environ["ENSEMBLE_SELF_ENV"] = "demo"
+    uj.journal_init(DEMO_INSTALL)
+    uj.ensure_extensions(DEMO_INSTALL)
+
+    # (a)+(b) REAL refusal site — the actor env gate (tools code, not a
+    # hand-built string) journals exactly ONE refusal event carrying the
+    # token in the shell _refuse detail shape, and the sink fires once.
+    sink = RecordingSink()
+    uj.register_alert_sink(sink)
+    _g_self, _g_dir, gate_refusal = ut._actor_env_gate("UPGRADE", "bogus-env")
+    _enum = "|".join(ut.VALID_ENVS)
+    expect_detail = (
+        f"target_env must be one of {_enum} (got 'bogus-env'). "
+        "(reason=invalid-target-env)"
+    )
+    hist = uj.journal_read(DEMO_INSTALL)["history"]
+    p = sink.calls[0] if sink.calls else {}
+    report("t9a real refusal site: journal gains exactly ONE refusal event w/ token",
+           gate_refusal == ("Error: UPGRADE REFUSED — reason=invalid-target-env: "
+                            f"target_env must be one of {_enum} (got 'bogus-env').")
+           and len(hist) == 1 and hist[0]["event"] == "refusal"
+           and hist[0]["detail"] == expect_detail
+           and uj._reason_token(hist[0]["detail"]) == "invalid-target-env",
+           f"hist={hist} out={gate_refusal[:80]}")
+    report("t9a sink fired once: kind upgrade_promote_refusal, token present",
+           len(sink.calls) == 1 and p.get("kind") == "upgrade_promote_refusal"
+           and p.get("source_event") == "refusal"
+           and p.get("reason") == "invalid-target-env",
+           f"calls={len(sink.calls)} p={p}")
+
+    # direct _refusal(): return byte-identical to the pure formatter, and
+    # the journal/sink each gain exactly one more entry.
+    sink = RecordingSink()
+    uj.register_alert_sink(sink)
+    out = ut._refusal("UPGRADE", "rollback-cap-exceeded", T9_MSG)
+    hist = uj.journal_read(DEMO_INSTALL)["history"]
+    report("t9b _refusal direct: return byte-identical, +1 event, no dupes",
+           out == f"Error: UPGRADE REFUSED — reason=rollback-cap-exceeded: {T9_MSG}"
+           and len(hist) == 2
+           and [h["event"] for h in hist] == ["refusal", "refusal"]
+           and uj._reason_token(hist[1]["detail"]) == "rollback-cap-exceeded"
+           and len(sink.calls) == 1,
+           f"hist_n={len(hist)} calls={len(sink.calls)} out={out[:60]}")
+
+    # (c) each-refusal-journals-once: a SECOND distinct invocation → its
+    # own event + its own alert; no duplicates within one event.
+    sink = RecordingSink()
+    uj.register_alert_sink(sink)
+    out2 = ut._refusal("RESTART", "cooldown-active", T9_MSG2)
+    hist = uj.journal_read(DEMO_INSTALL)["history"]
+    tokens = [uj._reason_token(h["detail"]) for h in hist]
+    report("t9c two distinct refusals → two events, two alerts, no dupes",
+           out2.startswith("Error: RESTART REFUSED — reason=cooldown-active: ")
+           and len(hist) == 3 and len(sink.calls) == 1
+           and tokens == ["invalid-target-env", "rollback-cap-exceeded",
+                          "cooldown-active"],
+           f"hist_n={len(hist)} calls={len(sink.calls)} tokens={tokens}")
+
+    # (d) never-raises, unwritable journal: refusal still returns the
+    # IDENTICAL string, append skipped, exactly ONE warning log line.
+    os.chmod(DEMO_INSTALL / "releases", 0o555)
+    ut_records.clear()
+    out3 = ut._refusal("UPGRADE", "pipeline-busy", "lock held")
+    os.chmod(DEMO_INSTALL / "releases", 0o755)
+    warns = [r for r in ut_records if r.levelno == logging.WARNING
+             and "refusal journal append FAILED" in r.getMessage()]
+    hist = uj.journal_read(DEMO_INSTALL)["history"]
+    report("t9d unwritable journal: refusal identical, append skipped, one log line",
+           out3 == "Error: UPGRADE REFUSED — reason=pipeline-busy: lock held"
+           and len(hist) == 3 and len(warns) == 1,
+           f"warns={len(warns)} hist_n={len(hist)}")
+
+    # (d) absent journal: identical string, journal NOT materialized by
+    # the refusal append, one warning line.
+    jp = DEMO_INSTALL / "releases" / "state.json"
+    jp_absent = DEMO_INSTALL / "releases" / "state.json.absent-t9d"
+    jp.rename(jp_absent)
+    ut_records.clear()
+    out4 = ut._refusal("UPGRADE", "journal-unavailable", "absent journal")
+    warns = [r for r in ut_records if r.levelno == logging.WARNING
+             and "refusal journal append FAILED" in r.getMessage()]
+    report("t9d absent journal: refusal identical, journal NOT materialized, one log line",
+           out4 == "Error: UPGRADE REFUSED — reason=journal-unavailable: absent journal"
+           and not jp.exists() and len(warns) == 1,
+           f"exists={jp.exists()} warns={len(warns)}")
+    jp_absent.rename(jp)
+
+    # (e) marker-absent / no-install contexts: clean refusals, ZERO
+    # journal writes, ZERO alerts.
+    sink = RecordingSink()
+    uj.register_alert_sink(sink)
+    os.environ.pop("ENSEMBLE_SELF_ENV", None)
+    out5 = ut._refusal("UPGRADE", "env-marker-absent", "marker absent")
+    os.environ["ENSEMBLE_SELF_ENV"] = "dev"  # dev resolves NO install dir
+    out6 = ut._refusal("RESTART", "no-staged-install", "dev has no staged install")
+    hist = uj.journal_read(DEMO_INSTALL)["history"]
+    report("t9e marker-absent + dev: clean refusals, zero journal writes/alerts",
+           out5 == "Error: UPGRADE REFUSED — reason=env-marker-absent: marker absent"
+           and out6 == ("Error: RESTART REFUSED — reason=no-staged-install: "
+                        "dev has no staged install")
+           and len(hist) == 3 and len(sink.calls) == 0,
+           f"hist_n={len(hist)} calls={len(sink.calls)}")
+
+    # live carve-out (interlock-tripwired P2.2 contract: armed live
+    # refusals are pipeline-read-only): a live-self daemon's tool
+    # refusals journal NOTHING — live refusal records arrive via the
+    # shell lane's lib.sh _refuse append + B4 watcher/relay instead.
+    os.environ["ENSEMBLE_SELF_ENV"] = "live"
+    uj.journal_init(LIVE_INSTALL)
+    uj.ensure_extensions(LIVE_INSTALL)
+    out7 = ut._refusal("UPGRADE", "user-confirmation-missing", "gate failed")
+    report("t9f live carve-out: refusal journals nothing on the live install",
+           out7 == ("Error: UPGRADE REFUSED — reason=user-confirmation-missing: "
+                    "gate failed")
+           and uj.journal_read(LIVE_INSTALL)["history"] == []
+           and len(sink.calls) == 0,
+           f"live_hist={uj.journal_read(LIVE_INSTALL)['history']} calls={len(sink.calls)}")
+finally:
+    if _prev_self_env is None:
+        os.environ.pop("ENSEMBLE_SELF_ENV", None)
+    else:
+        os.environ["ENSEMBLE_SELF_ENV"] = _prev_self_env
+    try:
+        os.chmod(DEMO_INSTALL / "releases", 0o755)
+    except OSError:
+        pass
+    ut.logger.removeHandler(_ut_cap)
+    uj.register_alert_sink(None)
+
 print(f"DRIVER {'FAIL' if FAILURES else 'PASS'} ({len(FAILURES)} failed)", flush=True)
 sys.exit(1 if FAILURES else 0)
 PYEOF
@@ -548,6 +712,7 @@ for SCEN in \
     t5a \
     t6a t6b t6c \
     t8a t8b t8c t8d \
+    t9a t9b t9c t9d t9e t9f \
 ; do
     assert_contains "scenario $SCEN pass line" "SCENARIO ${SCEN}: PASS" "$BATT_OUT"
     assert_not_contains "scenario $SCEN no fail line" "SCENARIO ${SCEN}: FAIL" "$BATT_OUT"

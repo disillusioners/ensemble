@@ -631,9 +631,72 @@ _OUTCOME_LABELS: dict[str, str] = {
 # ═══════════════════════════════════════
 
 
+def _journal_refusal_event(reason: str, message: str) -> None:
+    """Best-effort ``refusal`` journal append — the lib.sh ``_refuse`` twin
+    (B4) for the in-daemon tool lane (P2.3 B6.5 / F-B6c-1, user-ruled
+    option i).
+
+    SINGLE WRITE POINT: called only from :func:`_refusal` — every refusal
+    site journals exactly once by construction (upgrade_tools.py had ZERO
+    ``journal_history_append`` calls, so the B3 ``upgrade_promote_refusal``
+    alert kind was unreachable from the tool lane; this closes that seam).
+
+    Rider discipline (mirrors the B3 emitter + shell ``_refuse`` exactly):
+    * NEVER-raises — the refusal string/return/behavior is PRIMARY and
+      byte-unchanged; the append is wrapped ``except Exception`` (NEVER
+      BaseException — CancelledError project gotcha) with ONE warning
+      line on any failure (absent/torn journal → ``JournalTorn``;
+      unwritable → ``OSError``); the append can never delay or alter the
+      refusal path;
+    * silent skip when no staged install resolves — self-env marker
+      absent/invalid, dev repo checkout, non-frozen sandbox: the SAME
+      ``_self_env_marker`` → ``_resolve_install_dir`` resolution the
+      tools already use, so dev / marker-absent refusals journal nothing;
+    * NO lock acquisition — an in-flight txn's lock is sacred; the append
+      rides the plain ``journal_history_append`` splice (ADR-034 additive
+      discipline), like lib.sh ``_refuse``;
+    * detail matches the shell ``_refuse`` rendering exactly —
+      ``<msg> (reason=<token>)`` — so ``_reason_token`` (upgrade_journal)
+      parses the D-FA2.2 token; env context rides the WRITE LOCATION
+      (the daemon's own-env journal), not a re-stamped detail field.
+    """
+    try:
+        self_env = _self_env_marker()
+        if self_env is None:
+            return
+        install_dir = _resolve_install_dir(self_env)
+        if install_dir is None:
+            return  # dev / unresolved / non-frozen sandbox — nothing staged
+        if self_env == "live":
+            # LIVE carve-out (P2.2 contract, interlock-tripwired): live
+            # armed-refusal paths are journal-READ-ONLY —
+            # test_live_refusals_never_mutate_pipeline is the enforced
+            # acceptance; A2's raw-string live refusal is the same
+            # boundary. Demo/dev/sandbox refusals journal (the B6c/T8
+            # lane); live refusal records arrive via the shell lane's
+            # lib.sh ``_refuse`` append + B4 watcher/relay, not from the
+            # daemon's tool-refusal path.
+            return
+        uj.journal_history_append(
+            install_dir, "refusal", f"{message} (reason={reason})"
+        )
+    except Exception as exc:  # NEVER BaseException (CancelledError gotcha)
+        logger.warning(
+            "upgrade_tools: refusal journal append FAILED (best-effort) — "
+            "refusal proceeds unchanged (reason=%s): %s",
+            reason,
+            exc,
+        )
+
+
 def _refusal(label: str, reason: str, message: str) -> str:
     """Structured refusal string — D-FA2.2: ``Error:`` prefix, distinct
-    machine-readable ``reason=<token>`` per taxonomy entry."""
+    machine-readable ``reason=<token>`` per taxonomy entry.
+
+    P2.3 B6.5 (F-B6c-1): ALSO journals a ``refusal`` history event through
+    the real append path (best-effort rider — single write point here,
+    see :func:`_journal_refusal_event`); the returned string is unchanged."""
+    _journal_refusal_event(reason, message)
     return f"Error: {label} REFUSED — reason={reason}: {message}"
 
 
