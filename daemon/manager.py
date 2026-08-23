@@ -2811,7 +2811,7 @@ class InstanceManager:
     def set_pending_system_execution(self, instance_id: str, spec: dict) -> None:
         """Arm the post-turn executor trigger marker (D-FA1.4). Called by the
         actor tools at arm time; consumed by
-        :meth:`drain_pending_system_executions` at exact turn-end."""
+        :meth:`drain_pending_system_execution` at exact turn-end."""
         self._pending_system_executions[instance_id] = dict(spec)
 
     async def drain_pending_system_execution(self, instance_id: str) -> bool:
@@ -2830,16 +2830,15 @@ class InstanceManager:
           ``promote.sh``; the pending_op closes via lazy reconcile once the
           promote's terminal event lands in the journal.
 
-        Never raises — a spawn failure is journaled as a halt event and the
-        marker is still consumed (the journal pending_op remains the
-        durable fallback for the boot sweep).
+        Never raises — a spawn failure is logged as a warning and the
+        marker is still consumed (no halt journal event is written here;
+        the journal pending_op remains the durable fallback for the
+        boot sweep).
         """
         spec = self._pending_system_executions.pop(instance_id, None)
         if spec is None:
             return False
         try:
-            from pathlib import Path
-
             from daemon.tools import upgrade_journal as _uj
 
             kind = str(spec.get("kind", ""))
@@ -2849,7 +2848,7 @@ class InstanceManager:
             env = str(spec.get("env", ""))
             argv: list[str] = []
             extra_env: dict[str, str] = {}
-            if install_dir and str(install_dir):
+            if install_dir:
                 extra_env["INSTALL_DIR"] = str(install_dir)
             if spec.get("port"):
                 extra_env["PORT"] = str(spec["port"])

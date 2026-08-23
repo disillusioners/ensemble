@@ -61,7 +61,6 @@ from .upgrade_journal import (
     PendingAction,
     PendingOp,
     USER_ORIGIN_SOURCES,
-    is_user_origin_source,
     iso_plus,
     mint_nonce,
     mint_run_id,
@@ -71,8 +70,7 @@ from .upgrade_journal import (
     lock_run_id as journal_lock_run_id,
     now_iso,
     parse_iso_utc,
-    reconcile_pending_op,
-    spawn_executor,
+    spawn_executor,  # noqa: F401  # test patch seam (no_spawn)
 )
 
 if TYPE_CHECKING:
@@ -210,29 +208,17 @@ def _resolve_install_dir(self_env: str | None) -> Path | None:
     return None
 
 
-def _parse_iso_utc(ts: Any) -> datetime | None:
-    """Parse a journal ISO timestamp (``YYYY-MM-DDTHH:MM:SSZ``); None on garbage.
-
-    Mirrors lib.sh ``_iso_to_epoch`` fail-closed discipline: an unparseable
-    timestamp must never be treated as fresh/aged — callers display
-    "unknown" instead of guessing an elapsed.
-    """
-    if not isinstance(ts, str) or not ts:
-        return None
-    try:
-        return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-    except ValueError:
-        return None
-
-
 def _journal_read(install_dir: Path | None) -> tuple[dict[str, Any] | None, str]:
     """Torn-safe READ of ``<install_dir>/releases/state.json``.
 
-    Returns ``(data, status)`` with status in ``{"ok", "absent", "torn"}``.
-    Semantics mirror lib.sh ``journal_read``: absent → no journal yet;
-    empty file or unparseable/unbalanced JSON → torn (treat as untrusted —
-    pipeline mutations refuse; reads just report it). NEVER writes,
-    NEVER splices, NEVER locks.
+    Returns ``(data, status)`` with status in ``{"ok", "absent", "torn",
+    "no-install-dir", "unreadable"}``: ok → parsed dict; absent → no
+    journal file yet; no-install-dir → no staged install resolves (data
+    is None without touching the filesystem); unreadable → OSError on
+    the read (logged); torn → empty file, unparseable JSON, or a
+    non-object JSON value (treat as untrusted — pipeline mutations
+    refuse; reads just report it). Semantics mirror lib.sh
+    ``journal_read``. NEVER writes, NEVER splices, NEVER locks.
     """
     if install_dir is None:
         return None, "no-install-dir"
@@ -451,20 +437,6 @@ def _lock_state(install_dir: Path | None) -> str:
     )
 
 
-def _lock_run_id(install_dir: Path | None) -> str | None:
-    """The active pipeline lock's run_id, if a lock is held. Read-only."""
-    if install_dir is None:
-        return None
-    run_id_file = install_dir / "releases" / "rollback.lock.d" / "run_id"
-    try:
-        if run_id_file.is_file():
-            val = run_id_file.read_text(encoding="utf-8").strip()
-            return val or None
-    except OSError:
-        pass
-    return None
-
-
 def _launcher_state(install_dir: Path | None) -> str:
     """``.launcher-state`` summary (§7) — key=value file, absent → defaults."""
     if install_dir is None:
@@ -472,16 +444,12 @@ def _launcher_state(install_dir: Path | None) -> str:
     sp = install_dir / ".launcher-state"
     if not sp.is_file():
         return f"launcher state: none at {sp}"
-    values: dict[str, str] = {}
-    try:
-        for line in sp.read_text(encoding="utf-8").splitlines():
-            if "=" in line:
-                key, _, value = line.partition("=")
-                values[key.strip()] = value.strip()
-    except OSError as exc:
-        return f"launcher state: unreadable at {sp} ({exc})"
+    values = _launcher_state_values(install_dir)
     # Keys per launcher.sh read_state: last_exit, crash_count, window_start,
-    # last_backoff, notified_75, last_uptime. Ignore corrupt lines (launcher
+    # last_backoff, notified_75, last_uptime. notified_75 is parsed but
+    # silently dropped from this render (it only gates launcher.sh's own
+    # one-shot tempfail-75 desktop notification — no display value here;
+    # behavior unchanged). Corrupt/absent lines → '?' defaults (launcher
     # semantics: corrupt → defaults, never fatal).
     keys = ("last_exit", "crash_count", "window_start", "last_backoff", "last_uptime")
     rendered = " ".join(f"{k}={values.get(k, '?')}" for k in keys)
@@ -907,17 +875,26 @@ def create_upgrade_tools(
     agent_id: str = "",
     agent_tag: str | None = None,
 ) -> list:
-    """Create the system_upgrade category's read-only tool pair.
+    """Create the system_upgrade category's 4-tool surface: the read pair
+    (``release_info``, ``upgrade_status``) + the actor pair
+    (``system_restart``, ``system_upgrade``).
 
     Args:
-        manager: The :class:`InstanceManager` instance — used ONLY to read
-            the daemon's own serving port (self-probe) for observability.
-            No manager mutation of any kind happens in these tools.
+        manager: The :class:`InstanceManager` instance. The read pair uses
+            it only for the daemon's own serving port (self-probe); the
+            actor tools additionally rely on three manager interactions —
+            ``set_pending_system_execution`` (in-memory post-turn trigger
+            marker, best-effort), ``_task_repo.has_instance_busy``
+            (advisory busy check, never gates), and the
+            ``_user_origin_windows`` dict (live 3-factor gate reads).
+            No durable manager state is mutated; journal + lock on disk
+            carry the durability.
         current_instance_id: Owning instance identifier (audit logging).
         agent_id: Caller's agent identifier (audit logging; the tool surface
             is unchanged for all agents — gating happens via tools.allow).
-        agent_tag: Caller's version tag (reserved for the Dispatch-B actor
-            tools; accepted now so instance.py wiring is stable).
+        agent_tag: Caller's version tag. Accepted but unused by the tool
+            bodies — kept so instance.py wiring stays stable across agent
+            versions (removal is tracked in the P2.3 ledger).
 
     Returns:
         ``[release_info, upgrade_status, system_restart, system_upgrade]``.
@@ -1163,7 +1140,7 @@ Returns:
             journal, journal_status = _journal_read(install_dir)
             port = _self_port(manager)
             tail = max(1, min(int(tail), 100))
-            lock_run_id = _lock_run_id(install_dir)
+            lock_run_id = journal_lock_run_id(install_dir)
 
             lines: list[str] = [f"UPGRADE STATUS — env={_env_display(self_env)}"]
 
@@ -1216,7 +1193,7 @@ Returns:
             in_flight = journal.get("in_flight") if isinstance(journal, dict) else None
 
             if isinstance(in_flight, dict):
-                started = _parse_iso_utc(in_flight.get("started_at"))
+                started = parse_iso_utc(in_flight.get("started_at"))
                 if started is not None:
                     elapsed = int((datetime.now(tz=timezone.utc) - started).total_seconds())
                     elapsed_txt = f"{elapsed}s"
@@ -1387,12 +1364,16 @@ Returns:
             # no-staged-install.
             journal: dict[str, Any] | None = None
             journal_status = "unreadable"
-            try:
-                if install_dir is not None:
+            if install_dir is not None:
+                try:
                     uj.reconcile_pending_op(install_dir)
-                    journal, journal_status = _journal_read(install_dir)
-            except Exception:
-                journal = None
+                except Exception as exc:  # best-effort sweep — never gates
+                    logger.warning(
+                        "system_restart: reconcile_pending_op failed for "
+                        "%s: %s — continuing on journal read status",
+                        install_dir, exc,
+                    )
+                journal, journal_status = _journal_read(install_dir)
             if install_dir is None:
                 return _refusal(
                     label,
@@ -1524,7 +1505,24 @@ Returns:
                 uj.write_pending_op(install_dir, op)
             except (JournalTorn, OSError, KeyError) as exc:
                 journal_lock_release(install_dir)
-                return f"Error: system_restart failed while arming: {type(exc).__name__}: {exc}"
+                # Un-wedge: in_flight is written BEFORE write_pending_op —
+                # an arming failure between the two would leave the journal
+                # claiming a live txn with no pending_op. Best-effort clear
+                # (never raises; a failed unwind is logged, not raised).
+                try:
+                    uj.journal_update_field(install_dir, "in_flight", None)
+                except Exception as unwind_exc:
+                    logger.warning(
+                        "system_restart: in_flight unwind after arming "
+                        "failure FAILED — journal may be wedged (manual "
+                        "repair: journal_update in_flight null): %s",
+                        unwind_exc,
+                    )
+                return (
+                    f"Error: system_restart failed while arming: {type(exc).__name__}: {exc} "
+                    "(partial arm unwound best-effort; no restart scheduled — "
+                    "inspect release_info(section=journal) if this repeats)"
+                )
 
             marker_ok = _set_execution_marker(
                 manager,
@@ -1546,7 +1544,7 @@ Returns:
                     "executes: after this turn (deferred post-turn trigger; the "
                     "fallback is restart.sh's bounded waiter / boot sweep)",
                     "expected downtime 15-90s (SINGLE-TERM + launcher re-exec + boot preflight)",
-                    "post-restart: ask me to run upgrade_status(run_id=\"" + run_id + "\") or release_info(section=current)",
+                    f"post-restart: ask me to run upgrade_status(run_id=\"{run_id}\") or release_info(section=current)",
                     f"journal: releases/state.json pending-op opened (kind=restart, started_at={op.armed_at}, owner=exec-pending)",
                     f"trigger: {'post-turn-callback armed' if marker_ok else 'post-turn callback unavailable — fallback (bounded waiter/boot sweep)'}",
                     busy,
@@ -1621,8 +1619,12 @@ never decides go/rollback).
             if install_dir is not None:
                 try:
                     uj.reconcile_pending_op(install_dir)
-                except Exception:
-                    pass
+                except Exception as exc:  # best-effort sweep — never gates
+                    logger.warning(
+                        "system_upgrade: reconcile_pending_op failed for "
+                        "%s: %s — continuing on journal read status",
+                        install_dir, exc,
+                    )
                 journal, journal_status = _journal_read(install_dir)
             if install_dir is None:
                 return _refusal(
@@ -1758,7 +1760,7 @@ never decides go/rollback).
                         "CONFIRMATION REQUIRED (live): nonce "
                         f"{nonce_grouped(action.nonce)} — the user must reply "
                         "with this nonce; then call system_upgrade("
-                        "user_confirmed=true, nonce=\"" + nonce_grouped(action.nonce) + "\"). "
+                        f"user_confirmed=true, nonce=\"{nonce_grouped(action.nonce)}\"). "
                         "Nonce single-use, expires in 15min."
                     )
                     lines.append(
@@ -1933,7 +1935,7 @@ never decides go/rollback).
                     f"pending op run_id={pending.run_id} kind={pending.kind} "
                     f"armed_at={pending.armed_at} — poll upgrade_status",
                 )
-            if cooldown != "clear" and not cooldown.startswith("clear"):
+            if not cooldown.startswith("clear"):
                 return _refusal(
                     label,
                     "cooldown-active",

@@ -320,7 +320,7 @@ class TestDocsDefaultDeny:
     @pytest.fixture
     def staged(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         def _stage(agent_id: str, tools_cfg: dict | None) -> None:
-            agents_dir = _stage_synthetic_agent(tmp_path, agent_id, tools_cfg)
+            _stage_synthetic_agent(tmp_path, agent_id, tools_cfg)
             # Redirect the registry boot path's agents-dir resolution.
             monkeypatch.setattr(dr, "__file__", str(tmp_path / "daemon" / "registry.py"))
             monkeypatch.setattr(dr, "_registry", None)

@@ -676,14 +676,25 @@ def reconcile_pending_op(install_dir: Path) -> str | None:
     terminal = _terminal_event_after(data, op.armed_at)
     if terminal is not None:
         event, entry = terminal
-        ensure_extensions(install_dir)
-        clear_pending_op(install_dir, clear_restart_marker=False)
-        journal_history_append(
-            install_dir,
-            "sweep",
-            f"pending_op run_id={op.run_id} closed by reconcile: terminal event "
-            f"'{event}' at {entry.get('ts', '?')} ({str(entry.get('detail', ''))[:120]})",
-        )
+        # "Never raises" contract: the 3-write closure below is best-effort
+        # (a failed write is logged and left as-is — the pending_op survives
+        # for the boot sweep / operator; this is a janitor, never a gate).
+        try:
+            ensure_extensions(install_dir)
+            clear_pending_op(install_dir, clear_restart_marker=False)
+            journal_history_append(
+                install_dir,
+                "sweep",
+                f"pending_op run_id={op.run_id} closed by reconcile: terminal event "
+                f"'{event}' at {entry.get('ts', '?')} ({str(entry.get('detail', ''))[:120]})",
+            )
+        except (JournalTorn, OSError) as exc:
+            logger.warning(
+                "upgrade_journal: reconcile terminal-closure write FAILED "
+                "(pending_op left as-is): %s",
+                exc,
+            )
+            return None
         return (
             f"pending_op run_id={op.run_id} closed — terminal event "
             f"'{event}' at {entry.get('ts', '?')}"
@@ -694,14 +705,22 @@ def reconcile_pending_op(install_dir: Path) -> str | None:
     if expires is not None and datetime.now(tz=timezone.utc) > expires + timedelta(
         seconds=RECONCILE_GRACE_S
     ):
-        ensure_extensions(install_dir)
-        clear_pending_op(install_dir, clear_restart_marker=False)
-        journal_history_append(
-            install_dir,
-            "sweep",
-            f"pending_op run_id={op.run_id} cleared by reconcile: no in_flight, no "
-            f"terminal event, past expires_at {op.expires_at}+grace (executor died pre-open?)",
-        )
+        try:  # same never-raises contract as the terminal closure above
+            ensure_extensions(install_dir)
+            clear_pending_op(install_dir, clear_restart_marker=False)
+            journal_history_append(
+                install_dir,
+                "sweep",
+                f"pending_op run_id={op.run_id} cleared by reconcile: no in_flight, no "
+                f"terminal event, past expires_at {op.expires_at}+grace (executor died pre-open?)",
+            )
+        except (JournalTorn, OSError) as exc:
+            logger.warning(
+                "upgrade_journal: reconcile expiry-closure write FAILED "
+                "(pending_op left as-is): %s",
+                exc,
+            )
+            return None
         return f"pending_op run_id={op.run_id} cleared (expired, executor died pre-open)"
     return None
 

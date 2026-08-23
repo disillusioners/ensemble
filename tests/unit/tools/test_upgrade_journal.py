@@ -46,7 +46,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import signal
 import subprocess
 import sys
@@ -86,7 +85,9 @@ LIB_SH = REPO_ROOT / "scripts" / "upgrade" / "lib.sh"
 
 # A port that is none of: dev 8079, demo 7979, prod 9797 — and is never
 # actually bound by these tests (status.sh only probes it read-only).
-SANDBOX_PORT = "8399"
+# Same name+type as test_upgrade_tools.py's SANDBOX_PORT (a shared test
+# module is P2.3 — until then keep the two aligned).
+SANDBOX_PORT = 8399
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -604,7 +605,7 @@ class TestNonceStore:
         return action
 
     def test_mint_persists_and_finds(self, install: Path) -> None:
-        action = self._store(install)
+        self._store(install)  # side effect: persists the pending action
         actions = journal_read(install)["pending_actions"]
         assert "r-nonce-1" in actions
         found = uj.find_pending_action_by_nonce(install, "CONFIRM-ABCDEFGH")
@@ -910,7 +911,7 @@ class TestExecutorSpawn:
 
         for key, val in (
             ("INSTALL_DIR", str(install)),
-            ("PORT", SANDBOX_PORT),
+            ("PORT", str(SANDBOX_PORT)),
             ("POSTGRES_DB", "ensemble_sandbox"),
             ("PGHOST", "127.0.0.1"),
             ("ENSEMBLE_UPGRADE_LIVE", "1"),  # poison: must NOT pass
@@ -936,7 +937,7 @@ class TestExecutorSpawn:
                     k, _, v = line.partition("=")
                     child_env[k] = v
             assert child_env["INSTALL_DIR"] == str(install)
-            assert child_env["PORT"] == SANDBOX_PORT
+            assert child_env["PORT"] == str(SANDBOX_PORT)
             assert child_env["PGHOST"] == "127.0.0.1"
             assert child_env["RUN_ID"] == "r-spawn"
             assert "OPENAI_API_KEY" not in child_env

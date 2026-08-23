@@ -19,3 +19,10 @@
 - Positive: all "NOT consumed here" markers verified truthful; `[LLM-HA]` prefix + field placement consistent across config surfaces; test file organization strong (finding-named classes).
 - Deferred to Reviewer: W5 dead-swap `_on_backup=True` while URL unchanged; `base_url_backup` key flows into SkillEmbeddingService config dicts (manager.py:841,1008).
 - Exclusions honored: F811 warnings (13, accepted r1), primary-only v1 scope, 2 doc nits, pytest-timeout dep.
+
+## 2026-08-23 — P2.2 self-restart/upgrade tools (feature/self-restart-p2p2-ari-tools, d4c41d68..0949dd51), Iteration 001
+- Dispatch: 3 parallel workers (readable-code @85d54c44, static-hygiene @9eabd488, robustness @1568b35f). All reported fully; skill_feedback soft-failed on all 3 ("No usage record found" — load_skill-injected skills untracked).
+- Verdict: FIX-NOW(list) — 0 High / 14 Medium / 22 Low after dedup. No merge-blocker; FIX-NOW set is entirely trivial (docstrings, dead code, twin-helper deletion, comment fixes, ~4-line except-path guards). LEDGER set: structural refactors of security-approved code (actor-tool dedup, 330-line system_upgrade split, module split, type hardening).
+- Key merged findings: local twin helpers `_parse_iso_utc`/`_lock_run_id` duplicate imported journal originals (upgrade_tools.py:213/:454); stale "granted to no one" wiring comment at instance.py:2089-2095 (comment asserts false security property after ari allow landed); partial-arm in_flight wedge (upgrade_tools.py:1491-1527); false "Never raises" docstring on reconcile_pending_op (upgrade_journal.py:660).
+- Exclusions honored: gate security/correctness not re-litigated (APPROVED-WITH-NITS); P2.3 ledger items MINOR-A/B, NITs C-G, F2, N1/N5/N6/OBS untouched. Frozen-binary drift contract re-verified green by hygiene worker.
+- Positive anchors worth citing as house style: T2 registration checklist comment + greppable test (upgrade_tools.py:107-140); refusal token taxonomy + `_refusal_reason` regex test helper; torn-journal byte-preservation tests; `except Exception` discipline (CancelledError gotcha NOT reproduced).

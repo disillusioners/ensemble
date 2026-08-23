@@ -2086,13 +2086,13 @@ Returns:
     system_log_tool_list = create_system_log_tools(manager, current_instance_id, agent_id)
     tools.extend(system_log_tool_list)
 
-    # ── System Upgrade tools (read-only release/upgrade observability; P2.2 Dispatch A) ──
+    # ── System Upgrade tools (release/upgrade observability + actor pair; P2.2 A+B) ──
     # §8 checklist item 5 — the CRITICAL list-append: decorator-only =
     # never constructed = silently invisible (precedents: job_tools above,
     # question_tool_list). The category is PRIVILEGED (R-SR16): the tool
-    # filter never default-grants it — agents see these tools ONLY via an
-    # explicit tools.allow entry naming "system_upgrade" (ari's entry lands
-    # with Dispatch B; until then the tools exist but are granted to no one).
+    # filter never default-grants it — a privileged category reached ONLY
+    # via an explicit tools.allow entry naming "system_upgrade" (ari's
+    # entry landed with Dispatch B).
     upgrade_tool_list = create_upgrade_tools(
         manager, current_instance_id, agent_id, agent_tag=version_tag
     )

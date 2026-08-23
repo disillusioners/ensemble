@@ -57,9 +57,11 @@ LIB_SH = REPO_ROOT / "scripts" / "upgrade" / "lib.sh"
 
 UPGRADE_TOOL_NAMES = {"release_info", "upgrade_status", "system_restart", "system_upgrade"}
 
-# A sandbox port for the status.sh parity fixture: none of dev 8079 / demo
-# 7979 / prod 9797, and never bound by these tests.
-PARITY_PORT = 8399
+# A sandbox port for the status.sh parity + executor-env fixtures: none of
+# dev 8079 / demo 7979 / prod 9797, and never bound by these tests. Same
+# name+type as test_upgrade_journal.py's SANDBOX_PORT (a shared test module
+# is P2.3 — until then keep the two aligned).
+SANDBOX_PORT = 8399
 
 INSTANCE_ID = "inst-upgrade-tests-1"
 
@@ -177,7 +179,7 @@ def test_static_no_direct_process_spawn_in_tools_module() -> None:
 def parity_port_free() -> None:
     """Pre-flight guard for the parity fixture: status.sh probes
     ``http://localhost:$PORT/livez`` and the parity test asserts the
-    "not answering" verdict — if something ALREADY listens on PARITY_PORT
+    "not answering" verdict — if something ALREADY listens on SANDBOX_PORT
     that assertion is unreliable (a foreign listener answering /livez is
     not a parity failure). Skip loudly instead. Fail-loud semantics stay:
     this guard only fires when the port is occupied, which is itself the
@@ -188,10 +190,10 @@ def parity_port_free() -> None:
         try:
             with socket.socket(family, socket.SOCK_STREAM) as s:
                 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                s.bind((host, PARITY_PORT))
+                s.bind((host, SANDBOX_PORT))
         except OSError:
             pytest.skip(
-                f"PARITY_PORT {PARITY_PORT} already bound on {host} — the "
+                f"SANDBOX_PORT {SANDBOX_PORT} already bound on {host} — the "
                 "/livez 'not answering' parity assertions would be unreliable"
             )
         except (AttributeError, ValueError):  # pragma: no cover — no IPv6 here
@@ -212,12 +214,7 @@ def harness(install: Path, monkeypatch: pytest.MonkeyPatch, no_spawn: list):
     monkeypatch.setenv("ENSEMBLE_SELF_ENV", "demo")
     monkeypatch.setattr(ut, "_resolve_install_dir", lambda self_env: install)
 
-    manager = MagicMock(name="InstanceManager")
-    manager.config.daemon.port = 0  # falsy → _self_port None → no network
-    task_repo = MagicMock(name="task_repo")
-    task_repo.has_instance_busy = MagicMock(return_value=False)
-    manager._task_repo = task_repo
-    manager._queue_repository = None  # opt in per live-gate test
+    manager = _base_manager()  # no-network port, idle task repo, no queue repo
     markers: list[dict] = []
     manager.set_pending_system_execution = MagicMock(
         side_effect=lambda iid, spec: markers.append(dict(spec))
@@ -333,7 +330,7 @@ class TestReadPairParity:
             "HOME": _isolated_home(inst.parent),  # M3: never the real home
             "TARGET": "sandbox",
             "INSTALL_DIR": str(inst),
-            "PORT": str(PARITY_PORT),
+            "PORT": str(SANDBOX_PORT),
             "POSTGRES_DB": "ensemble_sandbox",
         }
         rc = subprocess.run(
@@ -350,7 +347,7 @@ class TestReadPairParity:
         monkeypatch.setenv("ENSEMBLE_SELF_ENV", "sandbox")
         monkeypatch.setattr(ut, "_resolve_install_dir", lambda self_env: inst)
         manager = MagicMock()
-        manager.config.daemon.port = PARITY_PORT
+        manager.config.daemon.port = SANDBOX_PORT
         manager._task_repo = None
         tools = _build_tools(manager)
         return await tools["release_info"].ainvoke({})
@@ -776,6 +773,51 @@ class TestSystemRestartMatrix:
         assert _refusal_reason(out) == "journal-unavailable"
         assert "torn" in out
 
+    async def test_arm_failure_unwinds_in_flight_wedge(
+        self, harness, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """P2.2 fix pass: arming throws BETWEEN the in_flight write and the
+        pending_op write (disk full) — the except path must best-effort
+        clear in_flight so the journal never claims a live txn with no
+        pending_op (the partial-arm wedge), and the error carries a
+        remediation hint."""
+        tools, _, install = harness
+
+        def _boom(install_dir, op):
+            raise OSError("disk full (test)")
+
+        monkeypatch.setattr(uj, "write_pending_op", _boom)
+        out = await tools["system_restart"].ainvoke(
+            {"target_env": "demo", "reason": "x", "dry_run": False}
+        )
+        assert out.startswith("Error: system_restart failed while arming")
+        assert "unwound" in out  # remediation hint present
+        journal = uj.journal_read(install)
+        assert journal["in_flight"] is None, "wedge: in_flight must be cleared"
+        assert uj.read_pending_op(install) is None
+        assert uj.lock_run_id(install) is None  # lock released too
+
+    async def test_reconcile_failure_does_not_gate_journal_read(
+        self, harness, monkeypatch: pytest.MonkeyPatch, caplog
+    ) -> None:
+        """P2.2 fix pass: reconcile_pending_op raising must never blind the
+        tool — the journal READ status alone decides (journal-unavailable
+        only when the read says torn/absent), and the failure is logged."""
+        tools, _, install = harness
+
+        def _boom(install_dir):
+            raise RuntimeError("reconcile exploded (test)")
+
+        monkeypatch.setattr(uj, "reconcile_pending_op", _boom)
+        out = await tools["system_restart"].ainvoke(
+            {"target_env": "demo", "reason": "x", "dry_run": True}
+        )
+        assert _refusal_reason(out) is None, out
+        assert "RESTART PREVIEW" in out  # healthy journal read → preview
+        assert any(
+            "reconcile_pending_op failed" in str(r.message) for r in caplog.records
+        )
+
     async def test_pipeline_busy_in_flight_txn_names_run_id(self, harness) -> None:
         tools, _, install = harness
         uj.journal_update_field(
@@ -916,7 +958,7 @@ class TestSystemRestartMatrix:
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
             "HOME": _isolated_home(install.parent),  # M3: never the real home
             "INSTALL_DIR": str(install),
-            "PORT": str(PARITY_PORT),
+            "PORT": str(SANDBOX_PORT),
             "POSTGRES_DB": "ensemble_sandbox",
         }
         rc = subprocess.run(
@@ -945,7 +987,7 @@ class TestSystemRestartMatrix:
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
             "HOME": _isolated_home(install.parent),  # M3: never the real home
             "INSTALL_DIR": str(install),
-            "PORT": str(PARITY_PORT),
+            "PORT": str(SANDBOX_PORT),
             "POSTGRES_DB": "ensemble_sandbox",
         }
         rc = subprocess.run(
@@ -985,6 +1027,26 @@ class TestSystemUpgradeMatrix:
         uj.journal_path(install).unlink()
         out = await tools["system_upgrade"].ainvoke({"target_env": "demo"})
         assert _refusal_reason(out) == "journal-unavailable"
+
+    async def test_reconcile_failure_does_not_gate_journal_read(
+        self, harness, monkeypatch: pytest.MonkeyPatch, caplog
+    ) -> None:
+        """P2.2 fix pass (system_upgrade site): a reconcile exception is
+        logged and never gates — the journal READ status decides alone."""
+        tools, _, _ = harness
+
+        def _boom(install_dir):
+            raise RuntimeError("reconcile exploded (test)")
+
+        monkeypatch.setattr(uj, "reconcile_pending_op", _boom)
+        out = await tools["system_upgrade"].ainvoke(
+            {"target_env": "demo", "dry_run": True}
+        )
+        assert _refusal_reason(out) is None, out
+        assert "UPGRADE PREFLIGHT" in out  # healthy journal read → preflight
+        assert any(
+            "reconcile_pending_op failed" in str(r.message) for r in caplog.records
+        )
 
     async def test_target_not_staged_no_default(self, harness) -> None:
         """No version given and no staged-but-not-current release (only the
@@ -1168,12 +1230,7 @@ def live_harness(install: Path, monkeypatch: pytest.MonkeyPatch):
     share the exact same harness shape."""
     monkeypatch.setenv("ENSEMBLE_SELF_ENV", "live")  # FAKE
     monkeypatch.setattr(ut, "_resolve_install_dir", lambda self_env: install)
-    manager = MagicMock(name="InstanceManager-live")
-    manager.config.daemon.port = 0
-    task_repo = MagicMock()
-    task_repo.has_instance_busy = MagicMock(return_value=False)
-    manager._task_repo = task_repo
-    manager._queue_repository = None
+    manager = _base_manager()  # no-network port, idle task repo, no queue repo
     windows: dict[str, dict] = {}
     manager._user_origin_windows = windows
     markers: list[dict] = []
