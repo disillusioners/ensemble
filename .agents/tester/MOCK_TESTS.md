@@ -176,3 +176,62 @@ is never stubbed.
   dedups via a per-process module flag that is consumed even when the env var is
   absent at the first call, so a later call with the env var set stays silent
   (per-process budget, not per-env-state).
+
+
+## Mock Test: P2.2 Upgrade-Tools Live-Safety Dynamic Sandbox
+
+### Metadata
+- **Created**: 2026-08-23
+- **Script**: `tests/mocks/upgrade_tools_live_safety_mock.py` (during verification: developed/run from `/tmp/p22-dynamic-sandbox/` to keep the worktree pristine; placed into `tests/mocks/` + committed as test-infra after all parallel pack runs complete)
+- **Language**: Python
+- **Status**: ACTIVE (PASS 7/7, 2026-08-23 — see Last Run below)
+
+### Configuration
+- **Timeout**: 240 s internal (`signal.alarm` + per-subprocess timeouts) + `timeout 300` outer guard
+- **Service Port**: none (in-process tool invocation through the real tool-factory seam); if a daemon boot proves unavoidable, port 10797 ONLY
+- **Mock Ports**: n/a — no external service mocks; fake filesystem state only
+- **DB**: in-memory SQLite / tmp files ONLY; throwaway PG on 15433 ONLY if the real seam requires PG — never dev/prod DBs
+- **Cleanup**: fixture tmp sandbox removed; spawned executor trees collected via inline `pgrep -P` collectors (macOS: shell-function collectors silently fail) then TERM'd; ports verified free
+
+### What It Tests
+Real P2.2 tool paths end-to-end against FAKE deploy state — proving (a) the 4 tools genuinely work through the real factory/stamping/gate/spawn code and (b) they cannot touch the real live install:
+- `release_info` / `upgrade_status` read-only parity vs real `scripts/upgrade/status.sh`-written fixture
+- `system_restart` live refusal (unconditional, including the all-factors-satisfied case)
+- `system_upgrade` refusal taxonomy dynamic spot-checks
+- 3-factor LIVE gate PASS against a FAKE live marker (tmp install)
+- restart arming on FAKE demo env + REAL `spawn_executor` spawn with env-allowlist strip proof
+- journal-poll after fake restart (terminal state, SAME run_id round-trip)
+
+### Mock Services Required
+- None external. Fake deploy trees under a tmp sandbox root written by REAL `scripts/upgrade/lib.sh` + `status.sh` (fixture parity with real marker/journal formats — same discipline as the interlock pack).
+
+### Test Scenarios
+1. **S1 read-only parity**: `release_info`/`upgrade_status` fields == `status.sh` output on the same tmp fixture (P2.1-state parity).
+2. **S2 live restart refusal**: target_env=live → `system_restart` refused outright with its unconditional refusal token, even with user_confirmed + HUMAN origin + valid nonce.
+3. **S3 refusal taxonomy** (≥1 dynamic case each): missing user_confirmed; spoofed/api-origin (through the REAL origin-stamping path → no HUMAN stamp → refuse); nonce mismatch; expired nonce; replayed nonce; invalid target env.
+4. **S4 3-factor PASS on FAKE live marker**: nonce minted via the real nonce store (bound target/kind/env/instance) → arm succeeds, journal pending_op written, nonce consumed; identical replay → refused.
+5. **S5 demo restart arming + REAL spawn**: poison sentinels (`ENSEMBLE_UPGRADE_LIVE=1`, `ENSEMBLE_DEPLOY_LIVE=…`, HOME-adjacent probe vars) set in the PARENT env; fixture executor payload dumps its received env to a sandbox file → assert the allowlist stripped every poison var in the ACTUAL spawned process; `dry_run` default TRUE zero-mutation check.
+6. **S6 journal-poll completion**: fake executor completes (marker/journal transition) → `upgrade_status` reports terminal state with SAME run_id as armed.
+7. **S7 zero-live-contact guards**: (a) `lsof -nP -iTCP:9797 -sTCP:LISTEN` output identical before/after (read-only); (b) read-only `stat` of `~/agents-ensemble` top-level (mtime/size) unchanged, if it exists; (c) every resolved path in fixtures/logs/journal stays under the sandbox tmp root (assert no escape); (d) no leaked processes/ports after cleanup.
+
+### Success Criteria
+- [ ] All scenarios pass with per-scenario evidence
+- [ ] Env-allowlist strip PROVEN in a real spawned process (S5 env-dump file)
+- [ ] Zero live contact: guards (a)–(d) green
+- [ ] Runtime well under 5 min per run; cleanup verified
+- [ ] Branch/reviewed source NOT modified; only the new mock script (committed later as test-infra)
+
+### Implementation Notes
+- Precedent: `tests/mocks/reasoning_echo_denylist_mock.py` (in-process, per-scenario isolation, dual-layer timeout, `RESULT: PASS/FAIL`).
+- Invoke tools through the REAL factory (`create_instance_tools`) with a real instance context; mock ONLY at the outermost edges (LLM/network) — none expected here.
+- Fake markers must be built by real `lib.sh`/`status.sh` writers — do not hand-roll formats.
+- NEVER: modify `~/agents-ensemble` (read-only stat allowed), bind/connect 9797, use prod DB, export `ENSEMBLE_DEPLOY_LIVE`, kill live pids. If any scenario cannot be exercised without live contact: STOP that scenario and report — do not force.
+- Complements the committed M5 drill (`RESULTS/2026-08-23-p2-2-daemonized-executor-survival.md`: real `spawn_executor` survival across parent SIGKILL).
+
+### Last Run
+- **Date**: 2026-08-23 (P2.2 pre-merge tester verification)
+- **Worker Instance**: tester worker (mock-test skill dispatch)
+- **Script**: developed/run from `/tmp/p22-dynamic-sandbox/` (shared-worktree isolation); placed at `tests/mocks/upgrade_tools_live_safety_mock.py` + committed as test-infra after all parallel pack runs finished
+- **Result**: PASS — 7/7 scenarios, 3 consecutive stable runs (~3s each vs 240s/300s caps); S1 parity 16/16; S2 live-restart refused with all factors satisfied; S3 7 distinct refusal tokens incl. spoofed-origin via real stamping path; S4 3-factor PASS + nonce consumed + replay refused; S5 real-spawn allowlist proof (ENSEMBLE_UPGRADE_LIVE/ENSEMBLE_DEPLOY_LIVE/ENSEMBLE_SELF_ENV/OPENAI_API_KEY/ANTHROPIC_API_KEY/POSTGRES_PASSWORD/POSTGRES_URL/AWS_SECRET_ACCESS_KEY/XDG_CONFIG_HOME/SECRET_POISON_CANARY all stripped; PGPASSWORD present by design per PG* prefix, R-SR09); S6 terminal same-run_id round-trip via shell-twin finalize; S7 guards all green (9797 lsof identical, live-install stat unchanged, sandbox-contained paths, no leaks)
+- **Quick Fixes**: none — no production bugs found; 4 real-behavior observations reported (PG* passthrough → P2.3 ledger; opportunistic GC of dead nonce records at write time — gate TTL is the real guard; Python/shell twin protocol interop confirmed; harness marker-drain note)
+- **Report**: `RESULTS/2026-08-23-p2-2-premerge-verification.md` §3
