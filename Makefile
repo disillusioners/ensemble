@@ -39,7 +39,7 @@ YELLOW := \033[1;33m
 RED := \033[0;31m
 NC := \033[0m
 
-.PHONY: build install install-deps clean uninstall help sync stop stop-by-port start dev pyinstaller pyinstaller-clean ensure-latest plist-install watchdog-install deploy-demo deploy-live stage-demo
+.PHONY: build install install-deps clean uninstall help sync stop stop-by-port start dev pyinstaller pyinstaller-clean ensure-latest plist-install watchdog-install deploy-demo deploy-live stage-demo upgrade-stage upgrade-promote upgrade-rollback upgrade-status
 
 help:
 	@echo "Available targets:"
@@ -55,6 +55,7 @@ help:
 	@echo "  make stop-by-port    - OPT-IN legacy port kill (unsafe on coexistence hosts)"
 	@echo "  make deploy-demo     - Deploy to the DEMO env (~/agents-ensemble-demo, :7979, ensemble_demo)"
 	@echo "  make deploy-live     - Deploy to LIVE (~/agents-ensemble, :9797) — needs ENSEMBLE_DEPLOY_LIVE=1"
+	@echo "  make upgrade-stage|promote|rollback|status - Release pipeline thin wrappers (scripts/upgrade/, P2.1) — pass TARGET=[demo|live|sandbox] + env"
 	@echo "  make stage-demo      - Deploy to demo WITHOUT starting it (stage only)"
 	@echo "  make dev             - stop + sync + start"
 	@echo "  make clean           - Remove build artifacts"
@@ -346,6 +347,33 @@ deploy-live:
 
 stage-demo:
 	bash $(DEPLOY_SCRIPT) demo --no-start $(ARGS)
+
+# Upgrade pipeline targets (Self-Restart/Self-Upgrade Phase 2, P2.1 T9) —
+# THIN WRAPPERS ONLY: every script under scripts/upgrade/ owns ALL pipeline
+# logic (env table, live guard, journal, lock, integrity, gate, rollback —
+# ADR-018). The release path NEVER auto-pulls: it builds from the LOCAL
+# checkout only (ADR-009 D3 — explicit VERSION, fail-if-not-at-tag, no
+# `git pull`/`git fetch` anywhere in scripts/upgrade/), and these wrappers
+# must NEVER invoke make build/pyinstaller/install (the ensure-latest chain
+# would yank the feature branch — deploy.sh:19-22 rationale).
+# Usage: make upgrade-stage TARGET=sandbox INSTALL_DIR=/tmp/ens-sbx PORT=8377 \
+#            VERSION=v1 ARGS="--skip-build ./stub"
+#        make upgrade-promote TARGET=demo VERSION=v0.10.6
+#        make upgrade-rollback TARGET=sandbox ARGS="--to v3"
+#        make upgrade-status TARGET=sandbox INSTALL_DIR=/tmp/ens-sbx PORT=8377
+# TARGET/INSTALL_DIR/PORT/POSTGRES_DB/VERSION pass through the environment
+# (command-line make variables are exported to the recipe).
+upgrade-stage:
+	@bash scripts/upgrade/stage.sh $(TARGET) $(ARGS)
+
+upgrade-promote:
+	@bash scripts/upgrade/promote.sh $(TARGET) $(ARGS)
+
+upgrade-rollback:
+	@bash scripts/upgrade/rollback.sh $(TARGET) $(ARGS)
+
+upgrade-status:
+	@bash scripts/upgrade/status.sh $(TARGET) $(ARGS)
 
 # Clean build artifacts
 clean:
