@@ -103,6 +103,7 @@ def load_tools_doc_for_agent(
     from .registry import get_registry
     from .tools.instance import resolve_tool_filter, expand_allow_for_innate_skills
     from .tools._tool_registry import get_tool_categories, get_category_doc, _tool_metadata
+    from .tools.help import _default_documented_tools
 
     # Ensure _tool_metadata is populated by scanning tool modules
     # This is needed because load_tools_doc_for_agent may be called before
@@ -139,8 +140,10 @@ def load_tools_doc_for_agent(
     # Innate skills (e.g. "opencode") implicitly grant their tool categories
     # so the system prompt lists them even when `tools.allow` omits them.
     if tool_filter is None:
-        # No filter → all tools allowed, pass None to get all categories
-        allowed_tools: set[str] | None = None
+        # No filter → all tools allowed — EXCEPT privileged categories
+        # (R-SR16): docs mirror the execution side, which strips them from
+        # the default-allow universe. Document the non-privileged universe.
+        allowed_tools: set[str] | None = _default_documented_tools(mcp_tool_names)
     else:
         effective_allow = expand_allow_for_innate_skills(
             tool_filter.allow,
@@ -151,9 +154,11 @@ def load_tools_doc_for_agent(
             deny=tool_filter.deny,
             all_tool_names=all_tool_names,
         )
-        # If None returned, all tools are allowed
+        # If None returned (empty allow+deny → all tools), all tools are
+        # allowed — EXCEPT privileged categories (R-SR16), same as the
+        # no-filter path above.
         if allowed_tools is None:
-            allowed_tools = None
+            allowed_tools = _default_documented_tools(mcp_tool_names)
     
     # Get categories with their tools
     categories = get_tool_categories(allowed_tools)

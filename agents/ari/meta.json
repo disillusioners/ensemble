@@ -22,7 +22,8 @@
       "job_messages",
       "job_tree",
       "job_progress",
-      "job_inject"
+      "job_inject",
+      "system_upgrade"
     ],
     "deny": ["edit_file", "write_file"]
   }

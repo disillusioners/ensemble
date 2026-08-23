@@ -61,11 +61,13 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
     "job_tree",
     "job_progress",
     "job_inject",
-    # system_upgrade read pair — created by create_upgrade_tools() factory
-    # (daemon/tools/upgrade_tools.py, P2.2 Dispatch A). The actor tools
-    # (system_restart / system_upgrade) join this set in Dispatch B.
+    # system_upgrade tools — created by create_upgrade_tools() factory
+    # (daemon/tools/upgrade_tools.py, P2.2 Dispatch A read pair + Dispatch B
+    # actor pair).
     "release_info",
     "upgrade_status",
+    "system_restart",
+    "system_upgrade",
 })
 
 
@@ -661,6 +663,8 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "system_config",
     "system_env",
     "system_health",
+    "system_restart",
+    "system_upgrade",
     "terminate_instance",
     "time",
     "todo_clear",

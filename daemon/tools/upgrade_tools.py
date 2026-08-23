@@ -1,46 +1,41 @@
-"""System Upgrade tools — read-only release/upgrade observability (P2.2 Dispatch A).
+"""System Upgrade tools — release/upgrade observability + actor tools (P2.2).
 
 Category ``system_upgrade`` per the self-restart/upgrade Phase-2 design
 (``.agents/shared/planning/self-restart-upgrade-phase2/tool-api-design.md``).
-THIS dispatch implements ONLY the read pair:
 
-* ``release_info``  — §2.3: releases / current / journal / changelog views.
-* ``upgrade_status`` — §2.4: run-scoped pipeline poller (journal + lock tail).
+* ``release_info``  — §2.3: releases / current / journal / changelog views
+  (read-only, Dispatch A).
+* ``upgrade_status`` — §2.4: run-scoped pipeline poller (journal + lock
+  tail; run_id correlation via the lock dir + the Dispatch-B pending_op /
+  in_flight.run_id records).
+* ``system_restart`` — §2.2 + D-FA1.4: arm → return → poll. LIVE refused
+  outright (A2). demo/dev/sandbox free (journaled + lock-protected).
+* ``system_upgrade`` — §2.1 + §4: dry_run-default-true preflight (live:
+  issues the action-binding nonce) / armed promote via daemonized
+  ``promote.sh``. LIVE armed = 3-factor gate (param + user-origin marker
+  + nonce content match) BEFORE any live action.
 
-The actor tools (``system_restart`` / ``system_upgrade``), the journal
-write-side helpers (temp+rename writes, ``pending_restart`` marker,
-``confirmed_by_human``), the daemonized executor and the nonce /
-``USER_ORIGIN_SOURCES`` gate are **Dispatch B** — deliberately absent here.
+Read pair discipline (hard constraint, live-safe — unchanged from
+Dispatch A): the read tools perform NO mutations of any kind. The ACTOR
+tools mutate EXCLUSIVELY through the P2.1 pipeline surfaces: journal
+writes go through ``upgrade_journal`` (atomic temp+rename, ADR-034
+splice-discipline preserved), execution goes through daemonized
+``restart.sh`` / ``promote.sh`` (SINGLE-TERM stop contract — NEVER a raw
+kill), serialization through the ``rollback.lock.d`` mkdir protocol.
 
-READ-ONLY BY CONSTRUCTION (hard constraint, live-safe):
-    * The module performs NO mutations of any kind — no process signals
-      (``os.kill`` is never imported/called), no lock acquisition, no
-      journal/state writes, no ENSEMBLE_DEPLOY_LIVE access, no subprocesses.
-    * Journal discipline (ADR-034): this dispatch NEVER writes or splices
-      ``releases/state.json``; reads are open()-read-parse only, with the
-      same torn-write rejection semantics as ``scripts/upgrade/lib.sh``
-      ``journal_read`` (empty file or unparseable JSON → "torn", untrusted).
-    * The only network touch is an OPTIONAL self-probe of the daemon's OWN
-      ``/livez`` + ``/readyz`` ports (D8/§7 observability) — localhost,
-      resolved from the running daemon's own ``config.daemon.port``, short
-      timeout. It can never address another environment's port.
-    * Self-match rule (§3.2, reviewer ruling 2026-08-22 — reads included):
-      ``target_env`` must equal the daemon's own env (resolved from the
-      staged ``ENSEMBLE_SELF_ENV`` marker, D-FA2.3 — PORT-derivation
-      fallback REJECTED). Cross-env reads are refused structurally with
-      ``env-self-match``; a dev/demo/sandbox daemon can NEVER address live,
-      whatever parameters the LLM passes.
-    * Marker absent → read tools STILL answer (fail-open for reads only;
-      the ``env-marker-absent`` fail-closed refusals are ACTOR-tool
-      behavior, Dispatch B). The unresolved self-env is represented as
-      ``env=unresolved (dev-context)`` and only ``target_env`` omitted or
-      ``"dev"`` is accepted in that state.
+Journal discipline (ADR-034): ``upgrade_journal`` never writes or
+splices ``releases/state.json`` textually — the document round-trips
+structurally (json.loads → dict → json.dumps), preserving lib.sh's ≥2
+occurrence escape tolerance for field divergence by construction.
 
-All state read here is the REAL P2.1 pipeline state — journal schema,
-releases/ layout, manifests, lock protocol and ``.launcher-state`` keys
-follow ``scripts/upgrade/lib.sh`` / ``stage.sh`` / ``status.sh`` exactly;
-no fields are invented (the journal schema contract is the comment above
-``journal_init`` in lib.sh).
+Self-match rule (§3.2, reviewer ruling 2026-08-22): ``target_env`` must
+equal the daemon's own env (staged ``ENSEMBLE_SELF_ENV`` marker,
+D-FA2.3 — PORT-derivation fallback REJECTED). Cross-env reads AND
+actions are refused structurally with ``env-self-match``; a
+dev/demo/sandbox daemon can NEVER address live, whatever parameters the
+LLM passes. Marker absent → read tools STILL answer (fail-open for
+reads only); ACTOR tools refuse ``env-marker-absent`` fail-closed
+(S-31).
 """
 
 from __future__ import annotations
@@ -60,6 +55,25 @@ from typing import TYPE_CHECKING, Any, Literal
 from langchain_core.tools import tool
 
 from ._tool_registry import register_tool_category
+from . import upgrade_journal as uj
+from .upgrade_journal import (
+    JournalTorn,
+    PendingAction,
+    PendingOp,
+    USER_ORIGIN_SOURCES,
+    is_user_origin_source,
+    iso_plus,
+    mint_nonce,
+    mint_run_id,
+    nonce_grouped,
+    lock_acquire as journal_lock_acquire,
+    lock_release as journal_lock_release,
+    lock_run_id as journal_lock_run_id,
+    now_iso,
+    parse_iso_utc,
+    reconcile_pending_op,
+    spawn_executor,
+)
 
 if TYPE_CHECKING:
     from daemon.manager import InstanceManager
@@ -68,19 +82,26 @@ logger = logging.getLogger(__name__)
 
 CATEGORY_NAME = "System Upgrade"
 CATEGORY_DOC = """\
-Read-only visibility into the staged release/upgrade pipeline (P2.1).
+Visibility + conversational control of the staged release/upgrade
+pipeline (P2.1 pipeline, P2.2 tool surface).
 
 - `release_info` — current release, staged releases + manifests, journal
   state (in-flight txn, rollback cap/cooldown, quarantine), pipeline lock,
   launcher state, and the daemon's own /livez + /readyz probes.
-- `upgrade_status` — poll a pipeline run: in-flight txn phase, journal
-  history tail, terminal outcome (committed / rolled-back / halted).
+- `upgrade_status` — poll a pipeline run by run_id: in-flight phase,
+  journal history tail, terminal outcome (committed / rolled-back /
+  halted).
+- `system_restart` — schedule an intentional restart (arm → return →
+  poll; SINGLE-TERM stop + launcher re-exec, never a raw kill). LIVE is
+  refused outright this initiative.
+- `system_upgrade` — arm the promote pipeline (dry_run defaults TRUE;
+  live requires the 3-factor confirmation: user_confirmed + user-origin
+  turn + nonce echoed by the user).
 
-Both tools target ONLY the running daemon's own environment
+All four tools target ONLY the running daemon's own environment
 (``target_env`` must equal the staged ENSEMBLE_SELF_ENV marker);
-cross-env reads are refused. They never mutate: no signals, no locks,
-no journal writes. Actor tools (system_restart / system_upgrade) arrive
-in a later dispatch.
+cross-env calls are refused. Reads never mutate; actor tools mutate only
+through the journal (atomic writes) and the daemonized pipeline scripts.
 """
 
 # ─── P2.2 REGISTRATION CHECKLIST (T2 — re-verify on every tool change) ───────
@@ -94,7 +115,7 @@ in a later dispatch.
 #  2. daemon/tools/_tool_registry.py CATEGORY_MODULES entry:
 #     "system_upgrade": "daemon.tools.upgrade_tools".                  [DONE A]
 #  3. daemon/tools/_tool_registry.py DYNAMIC_TOOL_NAMES += the tool
-#     names (factory-created, not import-time registered).             [DONE A]
+#     names (factory-created, not import-time registered).             [DONE A+B]
 #  4. daemon/tools/_tool_registry.py KNOWN_TOOL_NAMES — REGENERATE via:
 #     uv run python -c "from daemon.tools._tool_registry import
 #     discover_source_only_tool_names; print(sorted(discover_source_only_tool_names()))"
@@ -110,26 +131,29 @@ in a later dispatch.
 #     branch + default-allow paths — the category is opt-in-only; agents
 #     reach it ONLY via an explicit tools.allow entry.                  [DONE A]
 #  8. agents/ari/meta.json tools.allow += "system_upgrade" + Ari prompt
-#     fragment (confirmation protocol).                                 [DEFERRED — B]
+#     fragment (confirmation protocol) in tools_note.md.               [DONE B]
 #  9. Actor tools system_restart / system_upgrade bodies + write-side
-#     journal helpers + daemonized executor + nonce gate.               [DEFERRED — B]
+#     journal helpers (daemon/tools/upgrade_journal.py) + daemonized
+#     executor + nonce / USER_ORIGIN_SOURCES gate + post-turn trigger. [DONE B]
 # 10. Docs: CATEGORY_DOC above; docs/ has no per-tool catalog to update
 #     (tool_help reads _full_doc_).                                     [DONE A]
-# ─────────────────────────────────────────────────────────────────────────────
+# ───────────────────────────────────────
 
 
 VALID_ENVS: tuple[str, ...] = ("dev", "demo", "live", "sandbox")
 
-# Env triple table mirroring scripts/upgrade/lib.sh resolve_env (display
-# parity with status.sh "resolved env:" line). NOTE: dev has NO staged
-# install dir (the repo checkout is not a releases/ install); the probe
-# port is always the daemon's OWN serving port (manager config), never
-# derived from a guessable table entry.
-_ENV_TRIPLE: dict[str, dict[str, str | None]] = {
-    "dev": {"dir": None, "db": "ensemble_dev"},
-    "demo": {"dir": "~/agents-ensemble-demo", "db": "ensemble_demo"},
-    "live": {"dir": "~/agents-ensemble", "db": "ensemble_prod"},
-    "sandbox": {"dir": None, "db": "ensemble_sandbox"},  # dir: frozen-binary derived
+# Env DB-name table mirroring scripts/upgrade/lib.sh resolve_env (display
+# parity with status.sh "resolved env:" line). Install dirs are
+# intentionally NOT table-driven: dev has NO staged install dir, sandbox
+# derives it from the frozen binary location, demo/live resolve via
+# _resolve_install_dir — the dir display always uses that resolver's
+# answer, never a table guess. The probe port likewise comes from the
+# daemon's OWN serving port (manager config), never a table entry.
+_ENV_DB: dict[str, str] = {
+    "dev": "ensemble_dev",
+    "demo": "ensemble_demo",
+    "live": "ensemble_prod",
+    "sandbox": "ensemble_sandbox",
 }
 
 # Rollback window constants (display parity — authoritative values live in
@@ -503,10 +527,15 @@ def _self_port(manager: "InstanceManager") -> int | None:
 
 
 def _http_get_local(port: int, path: str) -> str | None:
-    """Blocking single GET on localhost (stdlib only). Never widens reach."""
+    """Blocking single GET on localhost (stdlib only). Never widens reach.
+    Deliberately proxy-bypassed (``ProxyHandler({})``): this is a SELF-probe
+    and must hit the daemon directly — an ambient ``http_proxy`` would
+    otherwise route it through a foreign proxy (and a bogus/unreachable
+    proxy would fail a perfectly healthy daemon)."""
     url = f"http://localhost:{port}{path}"
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
-        with urllib.request.urlopen(url, timeout=_PROBE_TIMEOUT_S) as resp:
+        with opener.open(url, timeout=_PROBE_TIMEOUT_S) as resp:
             return resp.read().decode("utf-8", errors="replace")
     except (urllib.error.URLError, OSError, ValueError):
         return None
@@ -543,12 +572,12 @@ def _env_display(self_env: str | None) -> str:
 
 def _env_triple_line(self_env: str | None, install_dir: Path | None, port: int | None) -> str:
     """Parity with status.sh ``resolved env: target=... dir=... port=... db=...``."""
-    triple = _ENV_TRIPLE.get(self_env or "", {"dir": None, "db": "unknown"})
+    db = _ENV_DB.get(self_env or "", "unknown")
     dir_display = str(install_dir) if install_dir is not None else "none (no staged install)"
     port_display = str(port) if port is not None else "?"
     return (
         f"resolved env: target={self_env or 'unresolved'} dir={dir_display} "
-        f"port={port_display} db={triple['db']}"
+        f"port={port_display} db={db}"
     )
 
 
@@ -624,7 +653,252 @@ _OUTCOME_LABELS: dict[str, str] = {
     "sweep": "swept (orphaned pre-flip txn cleared)",
     "halt": "halted-for-human",
     "quarantine": "quarantine recorded",
+    "restart": "restarted (intentional)",
+    "nonce_consumed": "live-confirmation nonce consumed",
 }
+
+
+# ═══════════════════════════════════════
+# Actor-tool helpers (P2.2 Dispatch B — system_restart / system_upgrade)
+# ═══════════════════════════════════════
+
+
+def _refusal(label: str, reason: str, message: str) -> str:
+    """Structured refusal string — D-FA2.2: ``Error:`` prefix, distinct
+    machine-readable ``reason=<token>`` per taxonomy entry."""
+    return f"Error: {label} REFUSED — reason={reason}: {message}"
+
+
+def _actor_env_gate(
+    label: str, target_env: str | None
+) -> tuple[str | None, Path | None, str | None]:
+    """Actor-tool env checks in the D-FA2.4 order. Returns
+    ``(self_env, install_dir, refusal)``.
+
+    1. enum validation (invalid-target-env)
+    2. staged-marker resolution — absent → env-marker-absent (S-31:
+       ACTOR tools fail-closed; the read pair answers fail-open)
+    3. self-match (env-self-match) — BEFORE any live-gate logic, so a
+       cross-env attempt can never reach the live branch.
+    """
+    if target_env is None or target_env not in VALID_ENVS:
+        return None, None, _refusal(
+            label,
+            "invalid-target-env",
+            f"target_env must be one of {'|'.join(VALID_ENVS)} (got '{target_env}').",
+        )
+    self_env = _self_env_marker()
+    if self_env is None:
+        return None, None, _refusal(
+            label,
+            "env-marker-absent",
+            "ENSEMBLE_SELF_ENV marker absent/invalid — the daemon's own env is "
+            "unresolved, so actor tools refuse fail-closed (S-31/D-FA2.3; read "
+            "tools still answer). PORT-derivation is deliberately NOT attempted.",
+        )
+    if target_env != self_env:
+        return None, None, _refusal(
+            label,
+            "env-self-match",
+            f"target_env={target_env} but self-env={self_env}. Tools cannot "
+            "target a different environment than the running daemon "
+            "(hard constraint §3).",
+        )
+    return self_env, _resolve_install_dir(self_env), None
+
+
+def _launcher_state_values(install_dir: Path | None) -> dict[str, str]:
+    """Parse ``.launcher-state`` (key=value; corrupt lines ignored — launcher
+    semantics: corrupt → defaults, never fatal)."""
+    if install_dir is None:
+        return {}
+    sp = install_dir / ".launcher-state"
+    try:
+        if not sp.is_file():
+            return {}
+        values: dict[str, str] = {}
+        for line in sp.read_text(encoding="utf-8").splitlines():
+            if "=" in line:
+                key, _, value = line.partition("=")
+                values[key.strip()] = value.strip()
+        return values
+    except OSError:
+        return {}
+
+
+_LAUNCHER_BUDGET_MAX_CRASHES = 5     # launcher.sh BUDGET_MAX_CRASHES
+_LAUNCHER_BUDGET_WINDOW_S = 600      # launcher.sh BUDGET_WINDOW_S
+_LAUNCHER_CLEAN_EXITS = {"0", "75", "78"}
+
+
+def _burst_abort_latched(install_dir: Path | None) -> bool:
+    """Is the launcher in the burst-abort hold (exit-1 latch)? Signature
+    (launcher.sh budget_tick abort branch): crash_count > 5 within the
+    fresh 600s window AND last_exit is a crash-class code (not 0/75/78).
+    A restart would zero the uptime and reset the burst budget — masking
+    the failure (§5 interlock 6) — so it is refused."""
+    values = _launcher_state_values(install_dir)
+    count = values.get("crash_count", "")
+    last_exit = values.get("last_exit", "")
+    window = values.get("window_start", "")
+    if not count.isdigit() or not last_exit.lstrip("-").isdigit():
+        return False
+    if int(count) <= _LAUNCHER_BUDGET_MAX_CRASHES:
+        return False
+    if last_exit in _LAUNCHER_CLEAN_EXITS:
+        return False
+    if window.isdigit() and int(window) > 0:
+        age = int(datetime.now(tz=timezone.utc).timestamp()) - int(window)
+        if age > _LAUNCHER_BUDGET_WINDOW_S:
+            return False  # window aged out — no longer the latch hold
+    return True
+
+
+def _rollback_count_24h(journal: dict[str, Any] | None) -> int | None:
+    """Sliding-window rollback count — mirror of lib.sh
+    ``journal_rollback_count_24h`` (window anchored at the LAST rollback;
+    window_start >24h old → 0; empty/null window → 0; unparseable non-null
+    window keeps the stored count — the conservative direction)."""
+    if not isinstance(journal, dict):
+        return None
+    counts = journal.get("rollback_window_count")
+    if not isinstance(counts, dict):
+        return None
+    raw = counts.get("24h")
+    try:
+        count = int(raw)
+    except (TypeError, ValueError):
+        return None
+    wstart = counts.get("window_start")
+    if not isinstance(wstart, str) or not wstart or wstart == "null":
+        return 0
+    started = parse_iso_utc(wstart)
+    if started is not None:
+        age = (datetime.now(tz=timezone.utc) - started).total_seconds()
+        if age >= 86400:
+            return 0
+    return count
+
+
+def _cooldown_state(journal: dict[str, Any] | None) -> str:
+    """'clear' | 'active-until=<iso>' — FAIL CLOSED (lib.sh M3): a
+    present-but-unparseable cooldown_until counts as ACTIVE; only an
+    explicit null/absent field is clear."""
+    if not isinstance(journal, dict):
+        return "unknown"
+    until = journal.get("cooldown_until")
+    if until is None or until == "null":
+        return "clear"
+    ts = parse_iso_utc(until)
+    if ts is None:
+        return "active-until=<unparseable> (fail-closed, ADR-005 anti-flapping)"
+    if datetime.now(tz=timezone.utc) < ts:
+        return f"active-until={until}"
+    return "clear"
+
+
+def _target_release_state(
+    install_dir: Path | None, version: str
+) -> tuple[str, dict[str, Any]]:
+    """(status, manifest) with status in
+    {"ok", "target-not-staged", "manifest-unsafe", "target-quarantined"}
+    (manifest empty unless ok/partial)."""
+    if install_dir is None:
+        return "target-not-staged", {}
+    rel_dir = install_dir / "releases" / version
+    if not rel_dir.is_dir():
+        return "target-not-staged", {}
+    manifest: dict[str, Any] = {}
+    mp = rel_dir / "manifest.json"
+    try:
+        loaded = json.loads(mp.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            manifest = loaded
+    except (OSError, json.JSONDecodeError):
+        manifest = {}
+    if not manifest:
+        return "manifest-unsafe", {}
+    rb = manifest.get("rollback_safe")
+    if rb is not True and str(rb).strip().lower() != "true":
+        return "manifest-unsafe", manifest
+    return "ok", manifest
+
+
+def _in_flight_state(journal: dict[str, Any] | None) -> dict[str, Any] | None:
+    if isinstance(journal, dict) and isinstance(journal.get("in_flight"), dict):
+        return journal["in_flight"]
+    return None
+
+
+def _resolve_scripts_dir(install_dir: Path | None) -> Path | None:
+    """Locate the P2.1 pipeline scripts (``lib.sh`` + payloads). Order:
+    (1) explicit ``ENSEMBLE_UPGRADE_SCRIPTS_DIR`` (drills/ops); (2) the
+    repo checkout this module lives in (source-mode daemons — the frozen
+    binary does not carry scripts/); (3) ``<install_dir>/scripts/upgrade``
+    (if a future release stages them). Armed execution without a resolvable
+    scripts dir refuses ``executor-scripts-unavailable`` (fail-closed)."""
+    candidates: list[Path] = []
+    override = os.environ.get("ENSEMBLE_UPGRADE_SCRIPTS_DIR", "").strip()
+    if override:
+        candidates.append(Path(override))
+    try:
+        candidates.append(Path(__file__).resolve().parents[2] / "scripts" / "upgrade")
+    except (IndexError, OSError):
+        pass
+    if install_dir is not None:
+        candidates.append(install_dir / "scripts" / "upgrade")
+    for cand in candidates:
+        try:
+            if (cand / "lib.sh").is_file():
+                return cand
+        except OSError:
+            continue
+    return None
+
+
+async def _busy_advisory(manager: "InstanceManager", instance_id: str) -> str:
+    """D-FA5.2: ``has_instance_busy`` reported in every actor result but
+    NEVER gates — an env wedged busy would deadlock upgrades forever;
+    checkpoint resume is the correctness net."""
+    try:
+        repo = getattr(manager, "_task_repo", None)
+        if repo is None or not hasattr(repo, "has_instance_busy"):
+            return "busy-check=unavailable (task repository not wired)"
+        busy = await asyncio.to_thread(repo.has_instance_busy, instance_id)
+        if busy:
+            return (
+                "busy-check=BUSY (live tasks exist — restart proceeds; in-flight "
+                "work resumes from checkpoints, D-FA5.2)"
+            )
+        return "busy-check=idle"
+    except Exception as exc:  # advisory only — never blocks
+        return f"busy-check=unavailable ({type(exc).__name__})"
+
+
+def _set_execution_marker(manager: "InstanceManager", instance_id: str, spec: dict[str, Any]) -> bool:
+    """Arm the in-memory post-turn trigger marker (D-FA1.4). The DURABLE
+    state is the journal pending_op (written before the tool returns);
+    this marker only tells the post-graph callback to fire the daemonized
+    executor at exact turn-end. Best-effort: a lost marker degrades to the
+    fallback (bounded waiter / boot sweep) — latency, never silent loss."""
+    setter = getattr(manager, "set_pending_system_execution", None)
+    if not callable(setter):
+        logger.warning(
+            "upgrade_tools: manager lacks set_pending_system_execution — "
+            "post-turn trigger unavailable (fallback: manual restart.sh / boot sweep)"
+        )
+        return False
+    setter(instance_id, spec)
+    return True
+
+
+def _live_gate_summary(label: str, factor_failures: list[str]) -> str:
+    return _refusal(
+        label,
+        factor_failures[0],
+        "; ".join(factor_failures) if factor_failures else "3-factor gate failed",
+    )
+
 
 
 def create_upgrade_tools(
@@ -646,7 +920,7 @@ def create_upgrade_tools(
             tools; accepted now so instance.py wiring is stable).
 
     Returns:
-        ``[release_info, upgrade_status]``.
+        ``[release_info, upgrade_status, system_restart, system_upgrade]``.
     """
 
     @register_tool_category("system_upgrade")
@@ -658,11 +932,11 @@ def create_upgrade_tools(
     ) -> str:
         """Read-only release/upgrade pipeline snapshot for THIS daemon's environment. Use tool_help("release_info") for details."""
         try:
-            refusal = _check_target_env("release_info", target_env, _self_env_marker())
+            self_env = _self_env_marker()  # resolved ONCE per invocation
+            refusal = _check_target_env("release_info", target_env, self_env)
             if refusal:
                 return refusal
 
-            self_env = _self_env_marker()
             install_dir = _resolve_install_dir(self_env)
             journal, journal_status = _journal_read(install_dir)
             releases = _scan_releases(install_dir, journal)
@@ -880,11 +1154,11 @@ Returns:
     ) -> str:
         """Poll a pipeline run for THIS daemon's environment: in-flight phase, journal tail, terminal outcome. Use tool_help("upgrade_status") for details."""
         try:
-            refusal = _check_target_env("upgrade_status", target_env, _self_env_marker())
+            self_env = _self_env_marker()  # resolved ONCE per invocation
+            refusal = _check_target_env("upgrade_status", target_env, self_env)
             if refusal:
                 return refusal
 
-            self_env = _self_env_marker()
             install_dir = _resolve_install_dir(self_env)
             journal, journal_status = _journal_read(install_dir)
             port = _self_port(manager)
@@ -893,21 +1167,51 @@ Returns:
 
             lines: list[str] = [f"UPGRADE STATUS — env={_env_display(self_env)}"]
 
-            # run_id correlation (§2.4). NOTE: the P2.1 journal schema has
-            # NO run_id field (in_flight = kind/target/started_at/flipped/
-            # owner_pid; history = ts/event/detail). Today the only run-id
-            # source is the pipeline lock directory. Run-scoped journal
-            # pending-ops arrive with the Dispatch-B write side; until then
-            # a run_id that matches nothing is an error + latest-state
-            # fallback rather than a fabricated run view.
+            # run_id correlation (§2.4 / D-FA1.1 — run_id is the cross-death
+            # join key). Sources: the active pipeline lock directory, the
+            # Dispatch-B pending_op record, and in_flight.run_id (tool-armed
+            # restart txns carry it). A run_id that matches nothing is an
+            # error + latest-state fallback rather than a fabricated run view.
+            pending_op_json = (
+                journal.get("pending_op") if isinstance(journal, dict) else None
+            )
+            pending_run_id = (
+                pending_op_json.get("run_id")
+                if isinstance(pending_op_json, dict)
+                else None
+            )
+            in_flight_run_id = (
+                journal.get("in_flight", {}).get("run_id")
+                if isinstance(journal, dict) and isinstance(journal.get("in_flight"), dict)
+                else None
+            )
             run_note = None
-            if run_id is not None and (lock_run_id is None or lock_run_id != run_id):
-                run_note = (
-                    f"Error: upgrade_status — unknown run_id={run_id}: no pipeline "
-                    "lock or journal record matches this run id (the P2.1 journal "
-                    "is not run-id keyed; run-scoped pending-ops arrive with the "
-                    "actor tools' journal write side). Latest self-env state follows:"
+            if run_id is not None and run_id not in {
+                lock_run_id,
+                pending_run_id,
+                in_flight_run_id,
+            }:
+                # Terminated-run UX (review nit #8): a finished run's
+                # terminal event names its run_id in the history detail —
+                # the run IS known, just no longer active. Soften the note
+                # instead of crying "unknown run_id" at a completed run.
+                history = journal.get("history") if isinstance(journal, dict) else None
+                run_in_history = isinstance(history, list) and any(
+                    isinstance(e, dict) and run_id in str(e.get("detail", ""))
+                    for e in history
                 )
+                if run_in_history:
+                    run_note = (
+                        f"run_id={run_id} not active — terminal events in "
+                        "tail below (the run completed; its journal record "
+                        "is historical)"
+                    )
+                else:
+                    run_note = (
+                        f"Error: upgrade_status — unknown run_id={run_id}: no pipeline "
+                        "lock, pending-op, or journal record matches this run id "
+                        "(latest self-env state follows)"
+                    )
 
             in_flight = journal.get("in_flight") if isinstance(journal, dict) else None
 
@@ -927,16 +1231,22 @@ Returns:
                     f"owner_pid={in_flight.get('owner_pid', '?')} phase={phase}"
                 )
                 lines.append(
-                    f"run: {lock_run_id or 'no run-id recorded (P2.1 journal is not run-id keyed)'}"
+                    f"run: {lock_run_id or in_flight_run_id or 'no run-id recorded'}"
                 )
+                if isinstance(pending_op_json, dict):
+                    lines.append(
+                        f"pending-op: run_id={pending_run_id} kind={pending_op_json.get('kind')} "
+                        f"target={pending_op_json.get('target')} armed_at={pending_op_json.get('armed_at')} "
+                        f"trigger={pending_op_json.get('trigger')} owner_kind={pending_op_json.get('owner_kind')}"
+                    )
                 lines.append(_lock_state(install_dir))
                 lines.append(_rollback_window_summary(journal))
                 hist = _history_tail(journal, tail)
                 if hist:
                     lines.append(f"journal tail (last {len(hist)}):")
                     lines.extend(hist)
-                if run_id is not None and lock_run_id is not None and run_id == lock_run_id:
-                    lines.append(f"run_id={run_id} matches the active pipeline lock")
+                if run_id is not None and run_id in {lock_run_id, in_flight_run_id}:
+                    lines.append(f"run_id={run_id} matches the active pipeline run")
                 lines.append(_upgrade_log_tail(install_dir, lines=min(tail, 50)))
                 lines.append(
                     "next: terminal outcome lands in journal history as "
@@ -1020,15 +1330,13 @@ Args:
         (dev|demo|live|sandbox). Omit to target self. Cross-env reads are
         REFUSED (env-self-match — reads included, reviewer ruling
         2026-08-22). Marker absent → only omitted or "dev" accepted.
-    run_id: Optional pipeline run identifier. NOTE: the P2.1 journal
-        schema is NOT run-id keyed (in_flight = kind/target/started_at/
-        flipped/owner_pid; history = ts/event/detail) — today the only
-        run-id source is the active pipeline lock directory
-        (releases/rollback.lock.d/run_id). A run_id matching nothing
-        returns "Error: upgrade_status — unknown run_id=..." plus the
-        latest self-env state as fallback. Run-scoped journal correlation
-        (the cross-death join key) arrives with the actor tools' journal
-        write side (P2.2 Dispatch B). Default: latest state for self-env.
+    run_id: Optional pipeline run identifier (the cross-death join key
+        returned by system_restart / system_upgrade). Correlated against
+        the active pipeline lock directory (releases/rollback.lock.d/
+        run_id), the journal pending_op record, and in_flight.run_id.
+        A run_id matching nothing returns "Error: upgrade_status —
+        unknown run_id=..." plus the latest self-env state as fallback.
+        Default: latest state for self-env.
     tail: Journal history lines to include (default 20, clamped 1..100).
 
 Returns:
@@ -1038,4 +1346,699 @@ Returns:
     /livez + /readyz probes hit ONLY the daemon's own serving port.
 """
 
-    return [release_info, upgrade_status]
+    # ═══════════════════ ACTOR TOOLS (P2.2 Dispatch B) ═════════════════════
+
+    @register_tool_category("system_upgrade")
+    @tool
+    async def system_restart(
+        target_env: str,
+        reason: str,
+        user_confirmed: bool = False,
+        mode: str = "graceful-now",
+        nonce: str | None = None,
+        dry_run: bool = True,
+    ) -> str:
+        """Schedule an intentional restart of THIS daemon's environment (end-of-turn, health-gated). Use tool_help("system_restart") for details."""
+        try:
+            label = "RESTART"
+            # D-FA2.4 order: enum checks first (mode + target_env)…
+            if mode != "graceful-now":
+                return _refusal(
+                    label, "unknown-mode", "mode must be graceful-now."
+                )
+            self_env, install_dir, refusal = _actor_env_gate(label, target_env)
+            if refusal:
+                return refusal
+            # …then the live outright refusal (A2 — BEFORE any gate logic;
+            # no override, no dry-run exception).
+            if self_env == "live":
+                return (
+                    "Error: RESTART REFUSED — reason=live-restart-refused: live "
+                    "restart is USER-GATED this initiative (A2/§3.1) — the tool "
+                    "refuses outright, no gate, no override. Use the manual "
+                    "procedure: bash scripts/stop-ensemble.sh <install-dir> then "
+                    "start launcher.sh (see the P2.3 runbook)."
+                )
+
+            # Pipeline preconditions (armed + dry-run reporting). A torn or
+            # absent journal is DISTINCT from no-install-dir (review nit
+            # #11): the install dir resolves but the journal cannot be
+            # trusted → its own refusal token, never a misleading
+            # no-staged-install.
+            journal: dict[str, Any] | None = None
+            journal_status = "unreadable"
+            try:
+                if install_dir is not None:
+                    uj.reconcile_pending_op(install_dir)
+                    journal, journal_status = _journal_read(install_dir)
+            except Exception:
+                journal = None
+            if install_dir is None:
+                return _refusal(
+                    label,
+                    "no-staged-install",
+                    "no staged install dir resolves for this env (dev repo "
+                    "checkout / unresolved) — a restart acts on a staged install.",
+                )
+            if journal is None:
+                return _refusal(
+                    label,
+                    "journal-unavailable",
+                    f"journal at {install_dir / 'releases' / 'state.json'} is "
+                    f"{journal_status} (torn/absent) — halt-for-human: repair "
+                    "the journal before any pipeline action (reads still answer).",
+                )
+            pending = uj.read_pending_op(install_dir)
+            held_run = journal_lock_run_id(install_dir)
+            in_flight = _in_flight_state(journal)
+            if in_flight is not None:
+                kind = in_flight.get("kind", "?")
+                inf_run = in_flight.get("run_id")
+                run_frag = f" run_id={inf_run}" if inf_run else ""
+                return _refusal(
+                    label,
+                    "pipeline-busy",
+                    f"in-flight txn kind={kind} target={in_flight.get('target', '?')} "
+                    f"started_at={in_flight.get('started_at', '?')}{run_frag} "
+                    "(run upgrade_status to follow it; a restart txn is completed by "
+                    "restart.sh, a promote txn by promote.sh)",
+                )
+            if pending is not None:
+                return _refusal(
+                    label,
+                    "pipeline-busy",
+                    f"pending op run_id={pending.run_id} kind={pending.kind} "
+                    f"armed_at={pending.armed_at} is armed (lock run_id={held_run or 'none'}); "
+                    "poll upgrade_status(run_id=...) for its outcome",
+                )
+            if held_run is not None:
+                return _refusal(
+                    label,
+                    "pipeline-busy",
+                    f"pipeline lock held (run_id={held_run}) — another pipeline "
+                    "action owns it; retry via upgrade_status",
+                )
+            if _burst_abort_latched(install_dir):
+                return _refusal(
+                    label,
+                    "restart-under-burst-abort",
+                    "daemon is in burst-abort hold (launcher exit-1 latch; "
+                    f"{_launcher_state_values(install_dir).get('crash_count', '?')} "
+                    "crashes in the 600s window); restart would mask the failure. "
+                    "Resolve the burst condition first.",
+                )
+
+            busy = await _busy_advisory(manager, current_instance_id)
+
+            if dry_run:
+                cur_target, _note = _current_symlink(install_dir)
+                lines = [
+                    f"RESTART PREVIEW (dry-run) — env={self_env} mode=graceful-now",
+                    f"reason: {reason}",
+                    f"current release: {cur_target.rsplit('/', 1)[-1] if cur_target else 'none (dev/unstaged)'}",
+                    _launcher_state(install_dir),
+                    busy,
+                    "PLAN: arm journal pending-op (kind=restart) → this turn "
+                    "completes → daemonized restart.sh (SINGLE-TERM stop via "
+                    "stop-ensemble.sh — NEVER a raw kill) → detached launcher "
+                    "re-exec → /livez gate ≤60s → journal 'restart' event",
+                    "expected downtime 15-90s; in-flight turns freeze at node "
+                    "boundaries and resume (checkpoint resume)",
+                    "NO mutation happened (dry-run). Call again with "
+                    "dry_run=false to schedule the restart.",
+                ]
+                return "\n".join(lines)
+
+            # ARM (§6.3: arm → return → poll; the tool returns BEFORE any
+            # stop signal — the executor fires at exact turn-end).
+            scripts_dir = _resolve_scripts_dir(install_dir)
+            if scripts_dir is None or not (scripts_dir / "restart.sh").is_file():
+                return _refusal(
+                    label,
+                    "executor-scripts-unavailable",
+                    "cannot resolve scripts/upgrade/restart.sh (set "
+                    "ENSEMBLE_UPGRADE_SCRIPTS_DIR or run from a source checkout)",
+                )
+            run_id = mint_run_id()
+            acquired, busy_run = journal_lock_acquire(install_dir, run_id)
+            if not acquired:
+                return _refusal(
+                    label,
+                    "pipeline-busy",
+                    f"per-env lock held (run_id={busy_run or held_run or '?'}) — "
+                    "retry via upgrade_status",
+                )
+            try:
+                uj.journal_init(install_dir)
+                uj.ensure_extensions(install_dir)
+                cur_target, _n2 = _current_symlink(install_dir)
+                cur_ver = cur_target.rsplit("/", 1)[-1] if cur_target else None
+                op = PendingOp(
+                    run_id=run_id,
+                    kind="restart",
+                    env=self_env,
+                    target=cur_ver,
+                    mode="graceful-now",
+                    reason=reason,
+                    armed_by_instance=current_instance_id,
+                    owner_pid=os.getpid(),
+                    owner_kind="tool-arm",
+                    expires_at=iso_plus(now_iso(), uj.PENDING_OP_EXPIRE_RESTART_S),
+                    confirmed_by_human=False,
+                    confirmed_source=None,
+                )
+                # The restart txn (D2): kind=restart is NEVER adopted/swept by
+                # promote.sh or the launcher (D-FA4.3) — restart.sh owns it.
+                uj.journal_update_field(
+                    install_dir,
+                    "in_flight",
+                    {
+                        "kind": "restart",
+                        "target": cur_ver,
+                        "started_at": now_iso(),
+                        "flipped": False,
+                        "owner_pid": os.getpid(),
+                        "run_id": run_id,
+                    },
+                )
+                uj.write_pending_op(install_dir, op)
+            except (JournalTorn, OSError, KeyError) as exc:
+                journal_lock_release(install_dir)
+                return f"Error: system_restart failed while arming: {type(exc).__name__}: {exc}"
+
+            marker_ok = _set_execution_marker(
+                manager,
+                current_instance_id,
+                {
+                    "kind": "restart",
+                    "env": self_env,
+                    "run_id": run_id,
+                    "target": cur_ver,
+                    "reason": reason,
+                    "install_dir": str(install_dir),
+                    "scripts_dir": str(scripts_dir),
+                    "port": _self_port(manager),
+                },
+            )
+            return "\n".join(
+                [
+                    f"RESTART SCHEDULED — run_id={run_id} env={self_env} mode=graceful-now reason=\"{reason}\"",
+                    "executes: after this turn (deferred post-turn trigger; the "
+                    "fallback is restart.sh's bounded waiter / boot sweep)",
+                    "expected downtime 15-90s (SINGLE-TERM + launcher re-exec + boot preflight)",
+                    "post-restart: ask me to run upgrade_status(run_id=\"" + run_id + "\") or release_info(section=current)",
+                    f"journal: releases/state.json pending-op opened (kind=restart, started_at={op.armed_at}, owner=exec-pending)",
+                    f"trigger: {'post-turn-callback armed' if marker_ok else 'post-turn callback unavailable — fallback (bounded waiter/boot sweep)'}",
+                    busy,
+                ]
+            )
+        except Exception as exc:  # never raise — structured error string
+            logger.warning(
+                "system_restart failed for instance=%s: %s", current_instance_id, exc
+            )
+            return f"Error: system_restart failed: {type(exc).__name__}: {exc}"
+
+    system_restart._full_doc_ = """\
+Schedule an intentional restart of THIS daemon's own environment
+(P2.2). Arm → return → poll: the tool returns "RESTART SCHEDULED
+run_id=..." BEFORE any stop signal; the daemonized restart.sh fires at
+exact turn-end (post-turn callback; bounded-waiter/boot-sweep fallback)
+and performs a SINGLE-TERM stop (stop-ensemble.sh contract — NEVER a raw
+kill) followed by a detached launcher re-exec and a /livez ≤60s gate.
+
+Args:
+    target_env: MUST equal the daemon's own environment
+        (dev|demo|live|sandbox; the staged ENSEMBLE_SELF_ENV marker).
+        Marker absent → refused env-marker-absent (fail-closed; the read
+        tools still answer). Cross-env → refused env-self-match.
+    reason: Free-text, journaled (audit trail).
+    user_confirmed: Accepted for schema stability; ignored on non-live
+        (no human-confirmation gate per the user directive).
+    mode: Must be "graceful-now" (anything else → unknown-mode).
+    nonce: Accepted for schema stability (future live opt-in); ignored.
+    dry_run: DEFAULT TRUE (D-FA2.2) — a hallucinated parameter set must
+        never execute a real restart. dry_run=true returns a preview +
+        plan with ZERO mutation; dry_run=false arms the restart.
+
+LIVE: refused outright this initiative (reason=live-restart-refused —
+A2; the refusal points at the manual procedure; no gate, no override,
+no dry-run exception). demo/dev/sandbox: free (env-derivation +
+self-match guard only) but journaled + lock-protected.
+
+Refusal reasons (distinct tokens): unknown-mode, invalid-target-env,
+env-marker-absent, env-self-match, live-restart-refused, pipeline-busy
+(open txn / armed pending-op / lock held — names the active run_id),
+restart-under-burst-abort (launcher exit-1 latch), executor-scripts-
+unavailable, no-staged-install, journal-unavailable (install dir
+resolves but the journal is torn/absent).
+
+Never auto-retry a refusal — relay it verbatim to the user (the LLM
+never decides go/rollback).
+"""
+
+    @register_tool_category("system_upgrade")
+    @tool
+    async def system_upgrade(
+        target_env: str,
+        version: str | None = None,
+        user_confirmed: bool = False,
+        dry_run: bool = True,
+        nonce: str | None = None,
+    ) -> str:
+        """Run the P2.1 promote pipeline for THIS daemon's environment (armed → poll via upgrade_status). Use tool_help("system_upgrade") for details."""
+        try:
+            label = "UPGRADE"
+            self_env, install_dir, refusal = _actor_env_gate(label, target_env)
+            if refusal:
+                return refusal
+
+            # Journal + pipeline state (shared by dry-run and armed paths).
+            # Torn/absent journal ≠ no-install-dir (review nit #11 — same
+            # split as system_restart): distinct refusal token so the
+            # diagnosis matches the condition.
+            journal: dict[str, Any] | None = None
+            journal_status = "unreadable"
+            if install_dir is not None:
+                try:
+                    uj.reconcile_pending_op(install_dir)
+                except Exception:
+                    pass
+                journal, journal_status = _journal_read(install_dir)
+            if install_dir is None:
+                return _refusal(
+                    label,
+                    "no-staged-install",
+                    "no staged install dir resolves for this env — upgrades act "
+                    "on a staged releases/ install (run stage.sh first).",
+                )
+            if journal is None:
+                return _refusal(
+                    label,
+                    "journal-unavailable",
+                    f"journal at {install_dir / 'releases' / 'state.json'} is "
+                    f"{journal_status} (torn/absent) — halt-for-human: repair "
+                    "the journal before any pipeline action (reads still answer).",
+                )
+
+            # Target resolution: explicit version or latest staged.
+            releases = [r for r in _scan_releases(install_dir, journal) if r.is_release]
+            current_target, cur_note = _current_symlink(install_dir)
+            cur_ver = current_target.rsplit("/", 1)[-1] if current_target else None
+            quarantined_list = (
+                [str(v) for v in journal.get("quarantined")]
+                if isinstance(journal.get("quarantined"), list)
+                else []
+            )
+            if version is None:
+                if cur_note:
+                    return _refusal(
+                        label, "layout-divergence", f"current symlink issue: {cur_note}"
+                    )
+                staged_versions = [
+                    r.name
+                    for r in releases
+                    if r.name != cur_ver and r.name not in quarantined_list
+                ]
+                if not staged_versions:
+                    return _refusal(
+                        label,
+                        "target-not-staged",
+                        "no version given and no staged-but-not-current release "
+                        "found. Run release_info(section=releases) and pass an "
+                        "explicit version.",
+                    )
+                version = sorted(staged_versions)[-1]
+            if version in quarantined_list:
+                return _refusal(
+                    label,
+                    "target-quarantined",
+                    f"version '{version}' is QUARANTINED (prior gate failure) — "
+                    "quarantine clears only by re-staging the version.",
+                )
+            tstate, manifest = _target_release_state(install_dir, version)
+            if tstate == "target-not-staged":
+                return _refusal(
+                    label,
+                    "target-not-staged",
+                    f"releases/{version} not found. Run release_info(section=releases).",
+                )
+            if tstate == "manifest-unsafe":
+                rb = manifest.get("rollback_safe") if manifest else None
+                return _refusal(
+                    label,
+                    "manifest-unsafe",
+                    f"target manifest rollback_safe={str(rb).lower()} (drop-release) — "
+                    "halt-for-human.",
+                )
+
+            # Entry-side anti-flapping state (D-FA4.2: ENTRY only).
+            cap = _rollback_count_24h(journal)
+            if cap is not None and cap >= ROLLBACK_CAP_24H:
+                return _refusal(
+                    label,
+                    "rollback-cap-exceeded",
+                    f"({ROLLBACK_CAP_24H}/24h) — halted-for-human; see "
+                    "release_info(section=journal). ADR-005 D2.",
+                )
+            cooldown = _cooldown_state(journal)
+            held_run = journal_lock_run_id(install_dir)
+            in_flight = _in_flight_state(journal)
+            pending = uj.read_pending_op(install_dir)
+            lock_line = (
+                "lock: free"
+                if held_run is None
+                else f"lock: HELD (run_id={held_run})"
+            )
+            txn_line = (
+                "in-flight=none"
+                if in_flight is None
+                else f"in-flight={_in_flight_summary(journal)}"
+            )
+            cap_line = _rollback_window_summary(journal)
+            busy = await _busy_advisory(manager, current_instance_id)
+
+            # ── dry_run: preflight (+ live nonce issue, §3.1 row 3) ──────
+            if dry_run:
+                bin_ver = manifest.get("binary_version", "?")
+                quar = (
+                    [str(v) for v in (journal.get("quarantined") or [])]
+                    if isinstance(journal.get("quarantined"), list)
+                    else []
+                )
+                lines = [
+                    f"UPGRADE PREFLIGHT (dry-run) — env={self_env} target={version}",
+                    f"current={cur_ver or 'none'} (via releases/current)"
+                    + (" rollback_safe=true" if cur_ver else ""),
+                    f"target staged: releases/{version} manifest "
+                    f"rollback_safe={str(manifest.get('rollback_safe')).lower()} "
+                    f"known_schema_gen={manifest.get('known_schema_gen', '?')} "
+                    f"binary_version={bin_ver}",
+                    f"journal: current={journal.get('current')} previous={journal.get('previous')} "
+                    f"{cap_line} quarantine={quar}",
+                    f"{txn_line}",
+                    f"{lock_line}",
+                    f"cooldown={cooldown}",
+                    busy,
+                    "PLAN: pg_dump preflight → stop (SINGLE-TERM) → flip "
+                    f"current→{version} → start → gate (/livez ≤60s, /readyz "
+                    "≤120s, 300s soak) → commit | auto-rollback",
+                ]
+                if self_env == "live":
+                    run_id = mint_run_id()
+                    action = PendingAction(
+                        run_id=run_id,
+                        nonce=mint_nonce(),
+                        kind="upgrade",
+                        env=self_env,
+                        target=version,
+                        issued_to_instance=current_instance_id,
+                    )
+                    uj.store_pending_action(install_dir, action)
+                    lines.append(
+                        "CONFIRMATION REQUIRED (live): nonce "
+                        f"{nonce_grouped(action.nonce)} — the user must reply "
+                        "with this nonce; then call system_upgrade("
+                        "user_confirmed=true, nonce=\"" + nonce_grouped(action.nonce) + "\"). "
+                        "Nonce single-use, expires in 15min."
+                    )
+                    lines.append(
+                        "NOTE: this preflight persisted ONLY the nonce "
+                        f"pending-action (run_id={run_id}) — no pipeline mutation."
+                    )
+                else:
+                    lines.append(
+                        "NO mutation happened (dry-run). Call again with "
+                        "dry_run=false to arm the promote."
+                    )
+                return "\n".join(lines)
+
+            # ── armed ──────────────────────────────
+            # LIVE: the 3-factor gate (§4.3) BEFORE any live action.
+            confirmed_source: str | None = None
+            confirmed_action: PendingAction | None = None
+            confirmed_msg_id: str | None = None
+            if self_env == "live":
+                factor_failures: list[str] = []
+                if not user_confirmed:
+                    factor_failures.append(
+                        "user-confirmation-missing: the user_confirmed param is "
+                        "false — relay to the user: reply with the nonce to authorize"
+                    )
+                # Factor 2: server-side user-origin marker on THIS turn.
+                window = None
+                windows = getattr(manager, "_user_origin_windows", None)
+                if isinstance(windows, dict):
+                    window = windows.get(current_instance_id)
+                if window is None:
+                    factor_failures.append(
+                        "user-confirmation-missing: this turn was not triggered "
+                        "by a whitelisted user-origin message "
+                        f"(USER_ORIGIN_SOURCES={sorted(USER_ORIGIN_SOURCES)})"
+                    )
+                else:
+                    expires = parse_iso_utc(window.get("expires_at"))
+                    # Fail-closed (review nit #5): an unparseable/absent
+                    # expires_at counts as EXPIRED — same refusal flavor —
+                    # never as still-valid (fail-open would let a corrupt
+                    # window marker unlock the live gate).
+                    if expires is None or datetime.now(tz=timezone.utc) > expires:
+                        factor_failures.append(
+                            "user-confirmation-missing: the user-origin window "
+                            f"expired at {window.get('expires_at')} — ask again in "
+                            "a fresh user turn"
+                        )
+                    else:
+                        confirmed_source = window.get("source")
+                        confirmed_msg_id = window.get("message_id")
+                # Factor 1+3 combined when the param IS set.
+                if user_confirmed and window is not None:
+                    if not nonce:
+                        factor_failures.append(
+                            "user-confirmation-missing: no nonce supplied — a "
+                            "fabricated user_confirmed alone never unlocks live "
+                            "(relay the dry-run nonce to the user)"
+                        )
+                    else:
+                        action = uj.find_pending_action_by_nonce(install_dir, nonce)
+                        if action is None:
+                            factor_failures.append(
+                                "nonce-mismatch: nonce does not match any pending "
+                                "nonce for this install — re-run dry_run"
+                            )
+                        elif action.consumed_at is not None:
+                            factor_failures.append(
+                                "nonce-already-used: nonce consumed at "
+                                f"{action.consumed_at} — re-run dry_run"
+                            )
+                        else:
+                            ttl = parse_iso_utc(action.ttl_expires_at)
+                            if ttl is not None and datetime.now(tz=timezone.utc) > ttl:
+                                factor_failures.append(
+                                    f"nonce-expired: nonce issued at "
+                                    f"{action.issued_at}, TTL 15min elapsed. "
+                                    "Re-run dry_run to obtain a fresh nonce."
+                                )
+                            else:
+                                # Factor 3: the triggering HUMAN message CONTENT
+                                # contains the nonce — read the MessageQueue row
+                                # by message_id ONLY (S-07: single row, no bulk
+                                # history). Row wiped/unreadable → fail-closed
+                                # (D-FA3.3 nonce-verification-unavailable).
+                                row_content: str | None = None
+                                try:
+                                    repo = getattr(manager, "_queue_repository", None)
+                                    row = (
+                                        await asyncio.to_thread(repo.get, confirmed_msg_id)
+                                        if repo is not None and confirmed_msg_id
+                                        else None
+                                    )
+                                    row_content = getattr(row, "content", None)
+                                except Exception:
+                                    row_content = None
+                                if row_content is None:
+                                    factor_failures.append(
+                                        "nonce-verification-unavailable: the "
+                                        "triggering message row could not be read "
+                                        "(daemon restarted since issuance? the row "
+                                        "is wiped at boot) — re-run dry_run (R-SR19)"
+                                    )
+                                elif not uj.nonce_in_content(action.nonce, row_content):
+                                    factor_failures.append(
+                                        "user-confirmation-missing: this turn was "
+                                        "not triggered by a user message carrying "
+                                        f"nonce {nonce_grouped(action.nonce)}. Relay "
+                                        "to the user: reply with the nonce to authorize."
+                                    )
+                                else:
+                                    confirmed_action = action
+                if factor_failures:
+                    return _live_gate_summary(label, factor_failures)
+
+            # Armed preconditions (dynamic state — refusals, not notes).
+            if in_flight is not None:
+                return _refusal(
+                    label,
+                    "pipeline-busy",
+                    f"in-flight txn kind={in_flight.get('kind', '?')} "
+                    f"target={in_flight.get('target', '?')} (run upgrade_status "
+                    "to follow it)",
+                )
+            if pending is not None:
+                return _refusal(
+                    label,
+                    "pipeline-busy",
+                    f"pending op run_id={pending.run_id} kind={pending.kind} "
+                    f"armed_at={pending.armed_at} — poll upgrade_status",
+                )
+            if cooldown != "clear" and not cooldown.startswith("clear"):
+                return _refusal(
+                    label,
+                    "cooldown-active",
+                    f"rollback cooldown {cooldown} (ADR-005: 10-min "
+                    "anti-flapping) — promotes refused until it lapses",
+                )
+            if held_run is not None:
+                return _refusal(
+                    label,
+                    "pipeline-busy",
+                    f"per-env lock held (run_id={held_run}) — retry via upgrade_status",
+                )
+            scripts_dir = _resolve_scripts_dir(install_dir)
+            if scripts_dir is None or not (scripts_dir / "promote.sh").is_file():
+                return _refusal(
+                    label,
+                    "executor-scripts-unavailable",
+                    "cannot resolve scripts/upgrade/promote.sh (set "
+                    "ENSEMBLE_UPGRADE_SCRIPTS_DIR or run from a source checkout)",
+                )
+
+            # ARM (§6.3): lock + pending-op written BEFORE returning.
+            # Live: carry the nonce record's run_id — the dry-run that minted
+            # the nonce and the armed op share one cross-death join key. The
+            # nonce was fully VALIDATED read-only by the 3-factor gate above
+            # (match / unused / unexpired); the single-use burn happens only
+            # AFTER the lock is ours, so a busy-lock race refusal never
+            # wastes the nonce (no re-run of dry_run for a lock never taken).
+            run_id = (
+                confirmed_action.run_id
+                if confirmed_action is not None
+                else mint_run_id()
+            )
+            acquired, busy_run = journal_lock_acquire(install_dir, run_id)
+            if not acquired:
+                return _refusal(
+                    label,
+                    "pipeline-busy",
+                    f"per-env lock held (run_id={busy_run or '?'}) — retry via upgrade_status",
+                )
+            try:
+                if confirmed_action is not None:
+                    uj.consume_pending_action(
+                        install_dir, confirmed_action, confirmed_msg_id
+                    )
+                uj.journal_init(install_dir)
+                uj.ensure_extensions(install_dir)
+                op = PendingOp(
+                    run_id=run_id,
+                    kind="promote",
+                    env=self_env,
+                    target=version,
+                    reason=f"upgrade to {version}",
+                    armed_by_instance=current_instance_id,
+                    owner_pid=os.getpid(),
+                    owner_kind="tool-arm",
+                    expires_at=iso_plus(now_iso(), uj.PENDING_OP_EXPIRE_PROMOTE_S),
+                    nonce=confirmed_action.nonce if confirmed_action else None,
+                    nonce_consumed=confirmed_action is not None,
+                    confirmed_by_human=confirmed_source is not None,
+                    confirmed_source=confirmed_source,
+                )
+                uj.write_pending_op(install_dir, op)
+            except (JournalTorn, OSError, KeyError) as exc:
+                journal_lock_release(install_dir)
+                return f"Error: system_upgrade failed while arming: {type(exc).__name__}: {exc}"
+
+            marker_ok = _set_execution_marker(
+                manager,
+                current_instance_id,
+                {
+                    "kind": "promote",
+                    "env": self_env,
+                    "run_id": run_id,
+                    "target": version,
+                    "install_dir": str(install_dir),
+                    "scripts_dir": str(scripts_dir),
+                    "port": _self_port(manager),
+                },
+            )
+            return "\n".join(
+                [
+                    f"UPGRADE SCHEDULED — run_id={run_id} env={self_env} target={version} mode=promote",
+                    "executes: after this turn completes (deferred — daemonized promote.sh)",
+                    f"watch: upgrade_status(run_id=\"{run_id}\") for phase transitions; terminal state readable post-restart",
+                    f"journal: releases/state.json txn opened (started_at={op.armed_at}, owner=exec-pending)",
+                    (
+                        f"live-confirmation: nonce consumed (confirmed_source={confirmed_source})"
+                        if confirmed_action is not None
+                        else "confirmation: none required (non-live target)"
+                    ),
+                    f"trigger: {'post-turn-callback armed' if marker_ok else 'post-turn callback unavailable — fallback (boot sweep)'}",
+                    busy,
+                ]
+            )
+        except Exception as exc:  # never raise — structured error string
+            logger.warning(
+                "system_upgrade failed for instance=%s: %s", current_instance_id, exc
+            )
+            return f"Error: system_upgrade failed: {type(exc).__name__}: {exc}"
+
+    system_upgrade._full_doc_ = """\
+Arm the P2.1 promote pipeline (stop → flip → start → gate → commit |
+auto-rollback) for THIS daemon's own environment. Arm → return → poll:
+the tool returns "UPGRADE SCHEDULED run_id=..." immediately — the
+daemonized promote.sh fires at end-of-turn and survives the daemon's
+own death (the normal case when upgrading the daemon you run on).
+Track it with upgrade_status(run_id=...); the terminal state
+(committed / rolled-back / halted-for-human) is readable post-restart.
+
+Args:
+    target_env: MUST equal the daemon's own environment
+        (dev|demo|live|sandbox; staged ENSEMBLE_SELF_ENV marker).
+        Marker absent → env-marker-absent; cross-env → env-self-match.
+    version: Target release name; default: latest staged-but-not-current
+        release (quarantined ones skipped).
+    user_confirmed: LIVE only (ignored on demo/dev/sandbox — the user
+        directive makes non-live free). Necessary, NEVER sufficient: a
+        fabricated true does not unlock live.
+    dry_run: DEFAULT TRUE (D-FA2.2). dry_run=true → preflight (plan +
+        journal/lock/cooldown state) with NO pipeline mutation; on live
+        it issues the confirmation nonce. dry_run=false → arm.
+    nonce: LIVE only — the nonce issued by a prior dry_run, which the
+        user must have echoed back in their reply.
+
+LIVE 3-factor gate (§4.3, enforced server-side BEFORE any live action):
+(1) user_confirmed=true param; (2) this turn triggered by a
+whitelisted user-origin message (USER_ORIGIN_SOURCES: api + the
+telegram/webhook/whatsapp/discord/slack channel prefixes); (3) that
+HUMAN message's CONTENT contains the action-binding nonce
+(single-use, TTL 15min, persisted in the journal — survives daemon
+death). A fabricated param fails (2); a self-echoed nonce in an
+agent/internal-origin message fails (2)+(3). NOTE: this initiative
+never exercises the live happy path — live refusals only.
+
+Refusal reasons (distinct tokens): invalid-target-env,
+env-marker-absent, env-self-match, target-not-staged,
+target-quarantined, manifest-unsafe (rollback_safe=false),
+rollback-cap-exceeded (3/24h), cooldown-active, pipeline-busy (open
+txn / armed pending-op / lock held — names the run_id),
+user-confirmation-missing, nonce-mismatch, nonce-expired,
+nonce-already-used, nonce-verification-unavailable,
+executor-scripts-unavailable, no-staged-install, journal-unavailable
+(install dir resolves but the journal is torn/absent), layout-divergence.
+
+Never auto-retry a refusal — relay it verbatim (the LLM never decides
+go/rollback).
+"""
+
+    return [release_info, upgrade_status, system_restart, system_upgrade]
+

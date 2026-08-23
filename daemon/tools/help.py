@@ -19,6 +19,7 @@ from ._tool_registry import (
     scan_tools_for_full_docs,
     CATEGORY_MODULES,
     register_tool_category,
+    PRIVILEGED_TOOL_CATEGORIES,
 )
 
 logger = logging.getLogger(__name__)
@@ -32,6 +33,32 @@ Usage:
 - `tool_help("tool_name")` — Detailed docs for a specific tool
 - `tool_help(category="project")` — List tools by category
 """
+
+
+def _default_documented_tools(mcp_tool_names: list[str] | None = None) -> set[str]:
+    """Docs-side equivalent of instance.py's ``_strip_privileged_category_tools``.
+
+    The execution side strips categories in ``PRIVILEGED_TOOL_CATEGORIES``
+    (R-SR16, P2.2 tool-api-design.md §3.5) from the default-allow universe,
+    so the None (no-allow-list) docs paths must not advertise them either:
+    privileged categories are documented ONLY to agents whose explicit
+    ``tools.allow`` names the category or one of its tools.
+
+    Returns the documented-tool universe for the None paths: every
+    registered tool except privileged-category tools, plus MCP tool names
+    when provided (mirrors ``resolve_tool_filter`` MCP expansion).
+
+    Shared with ``daemon.loader.load_tools_doc_for_agent`` so the two docs
+    paths cannot drift.
+    """
+    documented: set[str] = set()
+    for category_key, category_tools in list_tools_by_category().items():
+        if category_key in PRIVILEGED_TOOL_CATEGORIES:
+            continue
+        documented.update(category_tools)
+    if mcp_tool_names:
+        documented.update(mcp_tool_names)
+    return documented
 
 
 def _get_allowed_tools(
@@ -62,7 +89,10 @@ def _get_allowed_tools(
     agent_meta = registry.get_version(agent_id, version_tag) or registry.get_resolved(agent_id)
 
     if agent_meta is None or agent_meta.tools is None:
-        return None
+        # No filter → all tools allowed — EXCEPT privileged categories
+        # (R-SR16): docs mirror the execution side, which strips them from
+        # the default-allow universe. Document the non-privileged universe.
+        return _default_documented_tools(mcp_tool_names)
 
     # Build all_tool_names set for MCP category expansion
     all_tool_names: set[str] | None = None
@@ -75,11 +105,17 @@ def _get_allowed_tools(
         agent_meta.innate_skills,
     )
 
-    return resolve_tool_filter(
+    resolved = resolve_tool_filter(
         allow=effective_allow,
         deny=agent_meta.tools.deny,
         all_tool_names=all_tool_names,
     )
+    if resolved is None:
+        # Empty allow+deny → resolve says "all tools" — EXCEPT privileged
+        # categories (R-SR16): mirror the execution-side strip so docs do
+        # not advertise tools the agent cannot call.
+        return _default_documented_tools(mcp_tool_names)
+    return resolved
 
 
 def create_help_tool(
