@@ -760,4 +760,3 @@ Notes: feature e2e specs live at `frontend/e2e/instances-state-cache-core.spec.t
  frontend/e2e/reload-tabs-regression.spec.ts (commit ad35bf68). Serial, workers=1 pinned. | 2026-08-19 | ⚠️ functional PASS / hygiene FAIL (CSP env) — R-TAB-1/3/4 full + R-TAB-5 interaction asserts via --grep; R-TAB-2 browser-unevidenced (serial+precondition; Jest L933 fix + L997 control compensates) |
 
 Notes: feature e2e specs live at `frontend/e2e/instances-state-cache-core.spec.ts`, `-regression.spec.ts`, `-lazy.spec.ts` (13 tests total). Spec-evolution commits on feature branch: 13393065, 7a13b985, 42d37bfd, c648f230, b957a838, 0a36a32c, 8c868be1, 581c5a13, 21794ba2. Sweep infra classes: networkidle ×8 sites (notification stream never idles), workspace fixtures need on-disk seeding.
-e fixtures need on-disk seeding.
