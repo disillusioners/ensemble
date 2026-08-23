@@ -181,10 +181,15 @@ load_env_file() {
 #   Read INSTALL_DIR/releases/state.json. If an upgrade transaction is
 #   `in-flight` AND older than the 10-minute rollback window
 #   (now - txn.started_at > SWEEP_STALE_S):
-#     - flip already happened → launcher executes the rollback itself:
-#       repoint `current` to `previous`, notify, escalate (counts as an
+#     - flip already happened (marker flipped:true, OR current already
+#       resolves to the txn target — the atomic_flip/mark_flipped kill
+#       window is healed into this branch) → launcher executes the
+#       rollback itself: previous must be rollback_safe:true (D-FA4.5
+#       manifest gate — else halt-for-human, NO repoint), repoint
+#       `current` to `previous`, notify, escalate (counts as an
 #       auto-rollback for ADR-005 cooldown/counters — ADR-024);
-#     - flip never happened → clear the pre-flip transaction and continue.
+#     - flip never happened (current NOT at the txn target) → clear the
+#       pre-flip transaction and continue.
 #   The sweep runs at a layer BELOW the daemon, so it recovers even when
 #   the daemon is the thing that won't boot.
 #   kind=restart is NEVER launcher-swept (D-FA4.3 / R-SR13: restarts are
@@ -530,6 +535,18 @@ _js_flip_current() {
     return 0
 }
 
+# _js_manifest_field <install_dir> <ver> <key> — top-level release manifest
+# field. Same semantics as lib.sh manifest_field (the protocol, not the
+# code, is the shared contract): nonzero on missing/unreadable manifest or
+# absent key. Callers fail closed on EVERY unreadable shape (D-FA4.5).
+_js_manifest_field() {
+    local mp json
+    mp="$1/releases/$2/manifest.json"
+    [ -f "$mp" ] || return 1
+    json="$(cat "$mp" 2>/dev/null)" || return 1
+    _js_json_field "$json" "$3"
+}
+
 # ── The sweep itself ────────────────────────────────────────────────────────
 _journal_sweep() {
     local install_dir="${1:-${INSTALL_DIR:-}}"
@@ -593,6 +610,21 @@ _journal_sweep() {
         return 0
     fi
 
+    # Kill-window heal (promote.sh atomic_flip ↔ journal_mark_flipped): if
+    # promote dies between the flip and the marker, the journal says
+    # flipped:false while `current` ALREADY resolves to releases/$target.
+    # Trust the symlink over the marker: treating that txn as pre-flip
+    # would clear it and boot the ungated, never-verified release. If
+    # current already points at the txn target, run the rollback branch
+    # instead (this also heals the handled mark_flipped-failure path).
+    local cur_link
+    cur_link="$(readlink "$install_dir/current" 2>/dev/null)" || cur_link=""
+    if [ "$flipped" != "true" ] && [ -n "$target" ] \
+       && [ "$cur_link" = "releases/$target" ]; then
+        _log "journal sweep: flipped marker is false but current already -> releases/$target (owner died in the atomic_flip/mark_flipped window) — treating as flipped"
+        flipped="true"
+    fi
+
     local rc=0
     if [ "$flipped" = "true" ]; then
         # ── Sweep-rollback (ADR-012 / ADR-024 / D-FA4.2) ────────────────────
@@ -621,6 +653,26 @@ _journal_sweep() {
                 "sweep: previous release $prev missing (manual deletion?) — halt-for-human, txn left in place" \
                 || rc=1
             _log "HALT: journal sweep: previous release $prev missing — halt-for-human, boot proceeds on current"
+            _js_lock_release "$install_dir"
+            return 0
+        fi
+
+        # Manifest gate (ADR-005 M5 / D-FA4.5): previous must be
+        # rollback_safe:true — the SAME gate promote auto-rollback, manual
+        # rollback.sh, and adopt_stale_txn enforce. Missing/unreadable
+        # manifest, absent field, or any value ≠ true → halt-for-human:
+        # NO repoint (never boot the old binary against a possibly
+        # migrated DB — risk R1.2), journal halt event, txn left in place.
+        local prev_safe
+        prev_safe="$(_js_manifest_field "$install_dir" "$prev" rollback_safe 2>/dev/null)" \
+            || prev_safe=""
+        if [ "$prev_safe" != "true" ]; then
+            _notify_once "sweep-halt" \
+                "HALT-FOR-HUMAN: stale flipped $kind txn (target=${target:-?}) but previous release $prev is NOT rollback_safe (${prev_safe:-missing manifest}) — refusing to sweep-rollback into schema drift (D-FA4.5); boot proceeds on current; see $install_dir/releases/state.json"
+            _js_history_append "$journal" "halt" \
+                "sweep: previous release $prev has rollback_safe=${prev_safe:-missing} (D-FA4.5 schema-drift guard) — halt-for-human, txn left in place" \
+                || rc=1
+            _log "HALT: journal sweep: previous $prev not rollback_safe (${prev_safe:-missing}) — halt-for-human, boot proceeds on current"
             _js_lock_release "$install_dir"
             return 0
         fi
