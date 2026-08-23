@@ -142,6 +142,17 @@ pkill -f "p21-drills/.*/current/ensemble-prod" 2>/dev/null
 pkill -f "p21-drills/.*/launcher.sh" 2>/dev/null
 sleep 1
 
+# live-isolation baseline (Batch C: print→assert conversion). Every drill
+# phase runs inside throwaway sandboxes; the live install's listener pids
+# (resolved from the live .env — never a literal port) must be IDENTICAL at
+# the end of the drill run. Empty-vs-empty (no live install staged on this
+# host) passes trivially — there is nothing to protect.
+live_pids_snapshot() {
+    lsof -ti:"$(sed -n 's/^[[:space:]]*PORT=//p' "$HOME/agents-ensemble/.env" 2>/dev/null | head -1)" 2>/dev/null | sort | tr '\n' ' '
+}
+LIVE_PIDS_BASE="$(live_pids_snapshot)"
+printf 'live pid checkpoint (baseline): %s\n' "${LIVE_PIDS_BASE:-<none>}"
+
 # ═══ Phase 0: guards ══════════════════════════════════════════════════════
 printf '\n━━━ Phase 0: guards ━━━\n'
 dk TARGET=live bash "$UP/status.sh" live > "$RUN_DIR/g-live.log" 2>&1
@@ -399,9 +410,17 @@ else
 fi
 if grep -rn '9797' "$UP" > /dev/null 2>&1; then bad "literal live port in scripts/upgrade/"; else ok "no literal live port"; fi
 
-# live-isolation assertion: the live install's listener pids unchanged
-LIVE_PIDS="$(lsof -ti:$(sed -n 's/^[[:space:]]*PORT=//p' "$HOME/agents-ensemble/.env" 2>/dev/null | head -1) 2>/dev/null | tr '\n' ' ')"
-printf 'live pid checkpoint (end of drills): %s\n' "${LIVE_PIDS:-<none>}"
+# live-isolation ASSERTION (Batch C: print→assert conversion): fail the
+# drill if the live install's listener pid set changed at any point during
+# the phases. Sorted sets compare order-insensitively; empty==empty (no
+# live install on this host) is a pass.
+LIVE_PIDS_END="$(live_pids_snapshot)"
+printf 'live pid checkpoint (end of drills): %s\n' "${LIVE_PIDS_END:-<none>}"
+if [ "$LIVE_PIDS_BASE" = "$LIVE_PIDS_END" ]; then
+    ok "live-isolation: live pid set unchanged across all drills (baseline == end)"
+else
+    bad "live-isolation: live pid set CHANGED across drills (baseline='${LIVE_PIDS_BASE:-<none>}' end='${LIVE_PIDS_END:-<none>}')"
+fi
 
 printf '\n═══ DRILLS COMPLETE: %d passed, %d failed ═══\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || printf 'failed:%b\n' "$FAILED"

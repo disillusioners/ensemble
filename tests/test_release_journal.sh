@@ -112,13 +112,18 @@ run_stage() {  # run_stage <extra args...> — env preset for the sandbox
 
 # ─── 1. syntax gates ────────────────────────────────────────────────────────
 section "syntax gates"
+# Batch C doc fix: this used to read `bash -n … || [ "$s" = lib ]` — the
+# fallback made the lib.sh iteration UNFAILABLE (a tautology that proved
+# nothing). lib.sh IS directly parseable (`bash -n` checks syntax; sourcing
+# is not required for that), so every script in the loop is now genuinely
+# asserted.
 for s in lib stage promote rollback status; do
-    if bash -n "$FAKE_REPO/scripts/upgrade/$s.sh" 2>/dev/null \
-       || [ "$s" = lib ]; then _pass; else _fail "$s.sh passes bash -n"; fi
+    if bash -n "$FAKE_REPO/scripts/upgrade/$s.sh" 2>/dev/null; then
+        _pass
+    else
+        _fail "$s.sh passes bash -n"
+    fi
 done
-# lib.sh is sourced — check via the sourcing scripts above (promote/status
-# exercise it); a direct bash -n on lib.sh is also valid:
-bash -n "$FAKE_REPO/scripts/upgrade/lib.sh" 2>/dev/null && _pass || _fail "lib.sh passes bash -n"
 
 # ─── 2. live-guard matrix (T1) ──────────────────────────────────────────────
 section "live-guard matrix"
@@ -167,6 +172,27 @@ out="$(env -u PORT -u POSTGRES_DB HOME="$FAKE_HOME" TARGET=sandbox INSTALL_DIR="
 assert_eq "M2 absent live .env (no live install) → sandbox proceeds" "0" "$rc"
 mv "$FAKE_HOME/agents-ensemble/.env.away" "$FAKE_HOME/agents-ensemble/.env"
 
+# M1 (Batch C): the sandbox INSTALL_DIR exclusion compares PHYSICAL paths —
+# a symlink alias or trailing-slash spelling of the live/demo dir passed
+# the old string compare. Fake demo dir created so the demo-side canonical
+# resolution has something to resolve to.
+mkdir -p "$FAKE_HOME/agents-ensemble-demo"
+ln -sfn "$FAKE_HOME/agents-ensemble" "$FIXTURE/live-alias"
+out="$(env -u PORT -u POSTGRES_DB HOME="$FAKE_HOME" TARGET=sandbox INSTALL_DIR="$FIXTURE/live-alias" PORT="$SBX_PORT" \
+    bash "$FAKE_REPO/scripts/upgrade/status.sh" 2>&1)"; rc=$?
+assert_eq "M1 symlinked alias of the live dir refused (78)" "78" "$rc"
+assert_contains "M1 alias refusal says throwaway dir" "must be a throwaway dir" "$out"
+out="$(env -u PORT -u POSTGRES_DB HOME="$FAKE_HOME" TARGET=sandbox INSTALL_DIR="$FAKE_HOME/agents-ensemble/" PORT="$SBX_PORT" \
+    bash "$FAKE_REPO/scripts/upgrade/status.sh" 2>&1)"; rc=$?
+assert_eq "M1 trailing-slash live dir refused (78)" "78" "$rc"
+assert_contains "M1 trailing-slash refusal says throwaway dir" "must be a throwaway dir" "$out"
+out="$(env -u PORT -u POSTGRES_DB HOME="$FAKE_HOME" TARGET=sandbox INSTALL_DIR="$FAKE_HOME/agents-ensemble-demo/" PORT="$SBX_PORT" \
+    bash "$FAKE_REPO/scripts/upgrade/status.sh" 2>&1)"; rc=$?
+assert_eq "M1 trailing-slash demo dir refused (78)" "78" "$rc"
+out="$(env -u PORT -u POSTGRES_DB HOME="$FAKE_HOME" TARGET=sandbox INSTALL_DIR="$SBX" PORT="$SBX_PORT" \
+    bash "$FAKE_REPO/scripts/upgrade/status.sh" 2>&1)"; rc=$?
+assert_eq "M1 legitimately different sandbox dir still passes" "0" "$rc"
+
 # ─── 3. stage: manifest + no-.env + marker + idempotency (T2) ───────────────
 section "stage"
 STAGE_OUT="$(run_stage --skip-build "$FIXTURE/stub-prod" 2>&1)"; STAGE_RC=$?
@@ -194,6 +220,27 @@ sleep 1
 run_stage --skip-build "$FIXTURE/stub-prod" > /dev/null 2>&1
 M2="$(shasum -a 256 "$MANIFEST" | awk '{print $1}')"
 assert_eq "re-stage manifest byte-identical" "$M1" "$M2"
+# rename-aside swap-in (Batch C): a successful re-stage leaves NO .aside
+# droppings — the old payload is moved aside and removed only after the
+# new one is in place
+if ls "$SBX/releases" | grep -q '\.aside\.'; then
+    _fail "re-stage leaves no .aside droppings" "absent" "$(ls "$SBX/releases" | tr '\n' ' ')"
+else
+    _pass
+fi
+
+# --skip-build positional swallow (Batch C): a target token after
+# --skip-build must be parsed as the TARGET, never eaten as the binary
+# path (pre-fix it silently resolved the default target=demo — exposed
+# only WITHOUT a TARGET env, so none is passed here)
+out="$(env -u TARGET -u PORT -u POSTGRES_DB HOME="$FAKE_HOME" INSTALL_DIR="$SBX" PORT="$SBX_PORT" VERSION="$SBX_V1" \
+    bash "$FAKE_REPO/scripts/upgrade/stage.sh" --skip-build sandbox 2>&1)"; rc=$?
+assert_contains "--skip-build does not swallow the sandbox target token" "target=sandbox" "$out"
+if printf '%s' "$out" | grep -q 'target=demo'; then
+    _fail "--skip-build never resolves the default demo target here" "no target=demo" "target=demo present"
+else
+    _pass
+fi
 
 # missing tag → 78
 out="$(HOME="$FAKE_HOME" VERSION=v99.9.9 TARGET=sandbox INSTALL_DIR="$SBX" PORT="$SBX_PORT" \
@@ -675,6 +722,25 @@ assert_eq "8j restart-kind adopt refuses (rc 78)" "78" "$?"
 assert_eq "8j restart-kind journal byte-identical (untouched)" "$J_T10_BEFORE" "$(aj "$AD_OPT_DIR/t10")"
 assert_eq "8j restart-kind symlink unchanged (no repoint)" "$L_T10_BEFORE" "$(readlink "$AD_OPT_DIR/t10/current")"
 
+# 8k. M4: stale flipped + previous QUARANTINED (known-bad) → halt, NO
+#     repoint, txn left in place. Consumption-side gate: never
+#     adopt-rollback onto a release the journal itself marks bad.
+adopt_fixture "$AD_OPT_DIR/t11" "$STALE700" true vP 0 999999 true
+# strand the fixture journal: previous vP is in quarantined[]
+sed -i '' 's/"quarantined":\[\]/"quarantined":["vP"]/' "$AD_OPT_DIR/t11/releases/state.json"
+J_T11_BEFORE="$(aj "$AD_OPT_DIR/t11")"
+adopt_run "$AD_OPT_DIR/t11"
+assert_eq "8k quarantined-previous adopt halts (rc 78)" "78" "$?"
+assert_eq "8k NO repoint on quarantined-previous halt" "releases/vX" "$(readlink "$AD_OPT_DIR/t11/current")"
+assert_contains "8k halt event cites quarantine (M4)" 'QUARANTINED' "$(aj "$AD_OPT_DIR/t11")"
+assert_contains "8k txn left in place for diagnosis" '"kind":"promote"' "$(aj "$AD_OPT_DIR/t11")"
+# sanity: the same fixture WITHOUT the quarantine entry adopts (proves the
+# gate — not an unrelated halt — produced 8k's refusal)
+adopt_fixture "$AD_OPT_DIR/t12" "$STALE700" true vP 0 999999 true
+adopt_run "$AD_OPT_DIR/t12"
+assert_eq "8k control: unquarantined previous still adopts" "0" "$?"
+assert_eq "8k control repointed to previous" "releases/vP" "$(readlink "$AD_OPT_DIR/t12/current")"
+
 # ─── 9. retention eviction order with MIXED sort keys (review i3) ───────────
 section "retention mixed-key eviction order"
 RET_DIR="$FIXTURE/ret"
@@ -893,6 +959,120 @@ b4_age_txn
 b4_sweep
 assert_eq "11e aged txn: sweep clears" "null" "$(b4_inf '_json_field "$(journal_read)" in_flight')"
 assert_eq "11e recovery keeps current at LKG — env boots v1" "releases/$SBX_V1" "$(readlink "$SBX/current")"
+
+# ─── 12. Batch C: M4 no-strand + quarantined-previous gates + M5 commit
+#         journal-write failure ────────────────────────────────────────────
+section "Batch C: M4 quarantine gates + M5 commit-path writes"
+# third staged version (own fixture commit — git describe --exact-match
+# returns ONE tag per commit; see the B4 note above)
+SBX_V3="v3.0.0-sbx"
+printf 'batchc-third-version\n' > "$FAKE_REPO/BATCHC_FIXTURE"
+git -C "$FAKE_REPO" add BATCHC_FIXTURE
+git -C "$FAKE_REPO" -c user.email=t@t -c user.name=t commit -qm batchc-fixture >/dev/null 2>&1
+git -C "$FAKE_REPO" tag "$SBX_V3" 2>/dev/null
+HOME="$FAKE_HOME" VERSION="$SBX_V3" TARGET=sandbox INSTALL_DIR="$SBX" PORT="$SBX_PORT" \
+    bash "$FAKE_REPO/scripts/upgrade/stage.sh" sandbox --skip-build "$FIXTURE/stub-prod" > /dev/null 2>&1
+[ -f "$SBX/releases/$SBX_V3/manifest.json" ] && _pass || _fail "12 fixture: v3 staged"
+
+m4_seed() {  # <current> <previous-or-null> <quarantined-json-array>
+    local cur="$1" prev="$2" q="$3"
+    [ "$prev" = "null" ] && prev=null || prev="\"$prev\""
+    printf '{"current":"%s","previous":%s,"in_flight":null,"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":%s,"history":[]}' \
+        "$cur" "$prev" "$q" > "$JB"
+}
+m4_field() { b4_inf "_json_field \"\$(journal_read)\" $1"; }
+
+# 12a. M4 no-strand: same-version re-promote (current == VERSION) that FAILS
+#      its gate must NOT record the just-quarantined version as previous.
+#      Pre-fix bookkeeping set previous=CUR==VERSION and quarantined VERSION
+#      three lines later — stranding previous==quarantined and arming a
+#      later auto-rollback onto a known-bad release. Post-fix: previous
+#      keeps its pre-promote value.
+ln -sfn "releases/$SBX_V1" "$SBX/current"
+m4_seed "$SBX_V1" "$SBX_V2" '[]'
+M4A_OUT="$(b4_run_promote "$SBX_V1")"; M4A_RC=$?
+assert_eq "12a same-version gate-fail halts at re-gate (78)" "78" "$M4A_RC"
+assert_eq "12a previous NOT the quarantined same-version (M4 no-strand)" "$SBX_V2" "$(m4_field previous)"
+assert_eq "12a current = the rolled-back-to previous" "$SBX_V2" "$(m4_field current)"
+assert_contains "12a failed version quarantined" "\"$SBX_V1\"" "$(b4_inf '_json_sub "$(journal_read)" quarantined')"
+assert_eq "12a repointed to the safe previous" "releases/$SBX_V2" "$(readlink "$SBX/current")"
+
+# 12b. M4 consumption gate: a (drifted/hand-edited) journal whose previous
+#      is QUARANTINED → promote auto-rollback halts, NO repoint (never
+#      auto-flip onto a known-bad release).
+ln -sfn "releases/$SBX_V1" "$SBX/current"
+m4_seed "$SBX_V1" "$SBX_V2" "[\"$SBX_V2\"]"
+b4_inf 'journal_update cooldown_until "null"' > /dev/null 2>&1
+M4B_OUT="$(b4_run_promote "$SBX_V3")"; M4B_RC=$?
+assert_eq "12b quarantined-previous auto-rollback halts (78)" "78" "$M4B_RC"
+assert_contains "12b halt names the QUARANTINED previous (M4)" "QUARANTINED" "$M4B_OUT"
+assert_eq "12b NO repoint — current stays on the flipped target" "releases/$SBX_V3" "$(readlink "$SBX/current")"
+assert_contains "12b halt event recorded" '"event":"halt"' "$(cat "$JB")"
+assert_eq "12b journal current = degraded target" "$SBX_V3" "$(m4_field current)"
+assert_eq "12b txn closed by the halt" "null" "$(b4_inf '_json_field "$(journal_read)" in_flight')"
+
+# 12c. M4 launcher-sweep gate: stale flipped txn + quarantined previous →
+#      the REAL sweep halts, boot proceeds on current, txn left in place.
+M4SW="$FIXTURE/m4sweep"; rm -rf "$M4SW"; mkdir -p "$M4SW/releases"
+adopt_rel "$M4SW" vX true
+adopt_rel "$M4SW" vP true
+printf '{"current":"vX","previous":"vP","in_flight":{"kind":"promote","target":"vX","started_at":"%s","flipped":true,"owner_pid":999999},"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":["vP"],"history":[]}' \
+    "$STALE700" > "$M4SW/releases/state.json"
+ln -sfn releases/vX "$M4SW/current"
+( . "$REPO_ROOT/launcher.sh"; INSTALL_DIR="$M4SW" _journal_sweep ) > /dev/null 2>&1
+assert_eq "12c sweep does NOT repoint onto quarantined previous" "releases/vX" "$(readlink "$M4SW/current")"
+assert_contains "12c sweep halt event cites quarantine (M4)" 'QUARANTINED' "$(cat "$M4SW/releases/state.json")"
+assert_contains "12c sweep leaves the txn in place" '"kind":"promote"' "$(cat "$M4SW/releases/state.json")"
+[ -d "$M4SW/releases/rollback.lock.d" ] && _fail "12c sweep released the lock" "absent" "present" || _pass
+
+# 12d. M5: a journal write failure at COMMIT must fail loud and NON-ZERO —
+#      pre-fix it only WARNed and exited 0 with the flipped symlink and the
+#      journal diverged (and the open flipped txn made the next launcher
+#      start sweep-ROLLBACK the healthy promote). Fixture: a stub daemon
+#      serving v2's binary_version that makes releases/ read-only at the
+#      version-verify probe (the last request before commit).
+M5_PORT=18467
+python3 - "$M5_PORT" "$SBX/releases" <<'PYEOF' &
+import sys, http.server, json, os
+port = int(sys.argv[1]); releases_dir = sys.argv[2]
+livez_hits = [0]
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/livez":
+            livez_hits[0] += 1
+            if livez_hits[0] >= 2:   # version-verify probe = last before commit
+                os.chmod(releases_dir, 0o555)
+            body = json.dumps({"status": "alive", "uptime_seconds": 1,
+                               "version": "2.0.0-sbx"}).encode()
+            self.send_response(200)
+        elif self.path == "/readyz":
+            body = json.dumps({"status": "ready", "reasons": []}).encode()
+            self.send_response(200)
+        else:
+            body = b"{}"; self.send_response(404)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *a):
+        pass
+http.server.HTTPServer(("127.0.0.1", port), H).serve_forever()
+PYEOF
+M5_PID=$!
+sleep 1
+ln -sfn "releases/$SBX_V1" "$SBX/current"
+m4_seed "$SBX_V1" null '[]'
+b4_inf 'journal_update cooldown_until "null"' > /dev/null 2>&1
+M5_OUT="$(HOME="$FAKE_HOME" VERSION="$SBX_V2" TARGET=sandbox INSTALL_DIR="$SBX" PORT="$M5_PORT" \
+    LIVEZ_BUDGET_S=6 READYZ_BUDGET_S=6 ENSEMBLE_PROMOTE_SOAK_S=0 \
+    bash "$FAKE_REPO/scripts/upgrade/promote.sh" sandbox 2>&1)"; M5_RC=$?
+kill "$M5_PID" 2>/dev/null; wait "$M5_PID" 2>/dev/null
+chmod 755 "$SBX/releases" 2>/dev/null
+rm -rf "$SBX/releases/rollback.lock.d" 2>/dev/null
+assert_eq "12d journal-write failure at commit exits 1 (NOT 0 — M5)" "1" "$M5_RC"
+assert_contains "12d failure is a loud JOURNAL DIVERGENCE" "JOURNAL DIVERGENCE" "$M5_OUT"
+assert_eq "12d the flip itself completed (env on target)" "releases/$SBX_V2" "$(readlink "$SBX/current")"
+assert_contains "12d txn could not be closed under the read-only dir (message warns of the sweep risk)" '"kind":"promote"' "$(cat "$JB")"
 
 # ─── summary ────────────────────────────────────────────────────────────────
 printf '\n== summary: %d passed, %d failed ==\n' "$PASS" "$FAIL"
