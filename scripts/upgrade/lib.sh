@@ -244,10 +244,24 @@ resolve_env() {
                     exit 78
                     ;;
             esac
-            _live_port_resolve="$(sed -n 's/^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}PORT[[:space:]]*=[[:space:]]*//p' "$HOME/agents-ensemble/.env" 2>/dev/null | head -1 | tr -d '\r\"'"'"'')"
-            if [ -n "$_live_port_resolve" ] && [ "$PORT" = "$_live_port_resolve" ]; then
-                _warn "sandbox PORT equals the LIVE install's staged port — refusing (live-isolation by construction)"
-                exit 78
+            # Live-port cross-check (own-port discipline, test-strategy §5).
+            # FAIL CLOSED (M2): a live .env that EXISTS but cannot be read
+            # must not silently disable the guard — that is exactly how a
+            # sandbox ends up on the live port. Unreadable/unsourcedable →
+            # refuse the sandbox outright. An ABSENT .env means no live
+            # install is staged on this host — nothing to collide with.
+            _live_env="$HOME/agents-ensemble/.env"
+            if [ -e "$_live_env" ] || [ -L "$_live_env" ]; then
+                if [ -d "$_live_env" ] || [ ! -r "$_live_env" ] \
+                   || [ ! -f "$_live_env" ]; then
+                    _warn "sandbox guard: live install .env at $_live_env exists but is NOT a readable file — cannot verify PORT collision — refusing (fail-closed)"
+                    exit 78
+                fi
+                _live_port_resolve="$(sed -n 's/^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}PORT[[:space:]]*=[[:space:]]*//p' "$_live_env" 2>/dev/null | head -1 | tr -d '\r\"'"'"'')"
+                if [ -n "$_live_port_resolve" ] && [ "$PORT" = "$_live_port_resolve" ]; then
+                    _warn "sandbox PORT equals the LIVE install's staged port — refusing (live-isolation by construction)"
+                    exit 78
+                fi
             fi
             case "$POSTGRES_DB" in
                 ensemble_prod|ensemble_demo|ensemble_dev|"")
@@ -600,12 +614,20 @@ journal_rollback_count_24h() {
 }
 
 # journal_cooldown_active — 0 if within cooldown (refuse entry), 1 if clear.
+# FAIL CLOSED (M3): a present-but-unparseable cooldown_until (garbage stamp,
+# empty string, absent field) is treated as an ACTIVE cooldown — a corrupt
+# stamp must never silently disable the ADR-005 anti-flapping window. Only
+# an explicit null is "no cooldown". Remediation: fix the stamp or let the
+# next journal_count_rollback overwrite it.
 journal_cooldown_active() {
     local json cd_epoch until_epoch
     json="$(journal_read)" || return 1
     cd_epoch="$(_json_field "$json" "cooldown_until")"
-    case "$cd_epoch" in ""|null) return 1 ;; esac
-    until_epoch="$(_iso_to_epoch "$cd_epoch")" || return 1
+    case "$cd_epoch" in null) return 1 ;; esac
+    if [ -z "$cd_epoch" ] || ! until_epoch="$(_iso_to_epoch "$cd_epoch")"; then
+        _warn "cooldown_until is unparseable ('${cd_epoch:-<absent>}') — treating cooldown as ACTIVE (fail-closed, ADR-005 anti-flapping)"
+        return 0
+    fi
     [ "$(_now_epoch)" -lt "$until_epoch" ]
 }
 
@@ -668,10 +690,18 @@ lock_acquire() {
 }
 
 # lock_heartbeat — refresh the heartbeat (call ~every 30s from long ops).
+# OWNERSHIP-GUARDED (B2b): only the lock's owner (per the owner file) may
+# refresh it. An unguarded write from a non-owner would keep ANOTHER
+# process's lock alive — masking a crashed owner — or resurrect a lock a
+# stale-breaker already moved aside. This guard is what lets _probe refresh
+# the heartbeat unconditionally: probes also run from lockless display
+# paths (status.sh-style) and must be a no-op there.
 lock_heartbeat() {
-    local lock
+    local lock owner
     lock="$(lock_dir_path)"
     [ -d "$lock" ] || return 1
+    owner="$(cat "$lock/owner" 2>/dev/null)"
+    [ "$owner" = "$$" ] || return 1
     printf '%s\n' "$(_now_epoch)" > "$lock/heartbeat" 2>/dev/null
 }
 
@@ -867,13 +897,30 @@ verify_current_release() {
 # _probe <path> <budget_s> <port> — body on stdout, 0 on success; nonzero
 # when the budget expires without an HTTP response. 2s sleep between tries,
 # curl --max-time 5 (same as deploy.sh).
+#
+# B2b hardening — both halves:
+#   - WALL-CLOCK budget: deadline = start-epoch + budget. The old
+#     iteration counter added only the 2s sleeps, never the curl time
+#     (up to 5s/try), so a "60s" /livez gate could span ~210s wall and a
+#     full gate run ~640s — past LOCK_STALE_S (300) and most of
+#     SWEEP_STALE_S (600). The deadline bounds the gate to its documented
+#     wall seconds (+ at most one in-flight curl of 5s).
+#   - LOCK HEARTBEAT every iteration: gate loops used to be the one long
+#     lock-held span with NO heartbeat, so a second launcher start could
+#     stale-break a LIVE owner's lock mid-gate and double-rollback
+#     underneath it. lock_heartbeat is ownership-guarded — this is a no-op
+#     when the caller does not hold the pipeline lock.
 _probe() {
-    local path="$1" budget="$2" port="$3" waited=0 body=""
-    while [ "$waited" -le "$budget" ]; do
+    local path="$1" budget="$2" port="$3" deadline now body=""
+    deadline=$(( $(_now_epoch) + budget ))
+    lock_heartbeat
+    while :; do
         body="$(curl -fsS --max-time 5 "http://localhost:$port$path" 2>/dev/null)" \
             && { printf '%s\n' "$body"; return 0; }
+        now="$(_now_epoch)"
+        [ "$now" -lt "$deadline" ] || break
+        lock_heartbeat
         sleep 2
-        waited=$((waited + 2))
     done
     return 1
 }
@@ -965,14 +1012,19 @@ gate_version() {
 
 # gate_soak <seconds> <expected_version> — ADR-005 soak: keep probing both
 # endpoints through the window; any red → fail. Heartbeats the pipeline lock.
+# Wall-clock deadline (B2b, same as _probe): three probes × curl max-time 5
+# per iteration made the old iteration counter overcount sleeps and
+# undercount curl — a "300s" soak could stretch to ~450s wall and push the
+# promote outer window past SWEEP_STALE_S.
 gate_soak() {
-    local soak_s="$1" expected="$2" waited=0 rc
+    local soak_s="$1" expected="$2" waited=0 now deadline rc
     if [ "$soak_s" -le 0 ]; then
         _log "soak skipped (0s — drill knob)"
         return 0
     fi
     _log "soak ${soak_s}s (re-probe /livez + /readyz every 30s)"
-    while [ "$waited" -lt "$soak_s" ]; do
+    deadline=$(( $(_now_epoch) + soak_s ))
+    while :; do
         lock_heartbeat
         if ! _probe_once "/livez" "$PORT" > /dev/null; then
             _warn "soak FAILURE: /livez went red at ${waited}s"
@@ -983,6 +1035,8 @@ gate_soak() {
             return 1
         fi
         gate_version "$expected" > /dev/null || { _warn "soak FAILURE: version drifted at ${waited}s"; return 1; }
+        now="$(_now_epoch)"
+        [ "$now" -lt "$deadline" ] || break
         sleep 30
         waited=$((waited + 30))
     done
