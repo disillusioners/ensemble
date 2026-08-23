@@ -607,6 +607,13 @@ async def lifespan(app: FastAPI):
     # Initialize NotificationBroadcaster and wire into InstanceManager
     notification_broadcaster = get_notification_broadcaster()
     manager.set_notification_broadcaster(notification_broadcaster)
+
+    # P2.3 B3 (T8a): terminal-class upgrade-journal alerts → SSE. The
+    # sync→async hop lives in upgrade_journal (broadcaster_alert_sink);
+    # this registration must run ON the loop (boot) and is last-wins.
+    from daemon.tools.upgrade_journal import broadcaster_alert_sink, register_alert_sink
+
+    register_alert_sink(broadcaster_alert_sink(notification_broadcaster))
     
     # Auto-provision system queues for existing projects
     try:
