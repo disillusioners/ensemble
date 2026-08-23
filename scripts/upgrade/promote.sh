@@ -39,6 +39,11 @@
 # EXIT CODES: 0 committed · 1 rolled back (env recovered, promote failed) ·
 # 78 refusal (preflight/halt/cooldown/cap/quarantine/integrity/busy/live) ·
 # 75 gate-unreachable class is handled internally by rollback.
+#
+# ABORT-LANE POLICY (B4): every post-stop abort (stop/swap/flip failure)
+# leaves the journal txn OPEN — never closed — so the ADR-012 sweep self-
+# recovers: `current` is untouched at the last-known-good release, the next
+# launcher start boots it, and the sweep clears the stale txn then.
 # ============================================================================
 
 set -u
@@ -155,25 +160,37 @@ _log "txn open: promote target=$VERSION pid=$$ (outer window $((SWEEP_STALE_S))s
 # ═══════════════════════════ 2. STOP (D6) ══════════════════════════════════
 lock_heartbeat
 if ! stop_via_stop_script; then
-    _warn "stop-ensemble.sh FAILED — aborting promote BEFORE any flip (environment untouched)"
-    journal_close_txn
-    journal_history_append halt "promote aborted pre-flip: stop failed for $VERSION"
+    # B4 policy (leave-txn-open, applied at all four abort sites): the txn
+    # stays OPEN so the sweep self-recovers. `current` still points at the
+    # last-known-good release, so ANY next launcher start (watchdog or
+    # operator) boots LKG, and the sweep clears the stale pre-flip txn at
+    # that same start. Closing the txn here would tell the sweep "nothing
+    # happened" while the env may be dark. We do NOT restart via launcher
+    # either: a FAILED stop leaves daemon liveness unknown — a blind boot
+    # could double-boot onto a still-running daemon.
+    _warn "stop-ensemble.sh FAILED — daemon state UNKNOWN (may be down); aborting promote BEFORE any flip (current untouched at last-known-good; txn left open for sweep recovery)"
+    journal_history_append halt "promote aborted pre-flip: stop failed for $VERSION — txn left open for sweep recovery (current untouched at LKG)"
     exit 1
 fi
 
 # ═══════════════════ 3. LAUNCHER SWAP (stopped window) ═════════════════════
 launcher_swap "$VERSION" || {
-    _warn "launcher swap failed — aborting promote BEFORE any flip"
-    journal_close_txn
-    journal_history_append halt "promote aborted pre-flip: launcher swap failed for $VERSION"
+    # B4 leave-txn-open: env is DARK here (stop succeeded) and current is
+    # untouched at LKG — the next launcher start boots LKG; the sweep then
+    # clears this stale pre-flip txn. Never close the txn on a post-stop
+    # abort: in_flight:null makes the sweep a no-op → env stays dark until
+    # a human intervenes.
+    _warn "launcher swap failed — aborting promote BEFORE any flip (current untouched at last-known-good; txn left open for sweep recovery)"
+    journal_history_append halt "promote aborted pre-flip: launcher swap failed for $VERSION — txn left open for sweep recovery"
     exit 1
 }
 
 # ═══════════════════════════ 4. ATOMIC FLIP ════════════════════════════════
 if ! atomic_flip "$VERSION"; then
-    _warn "ATOMIC FLIP FAILED — current untouched; aborting"
-    journal_close_txn
-    journal_history_append halt "promote aborted: flip failed for $VERSION (current untouched)"
+    # B4 leave-txn-open (same policy): current untouched at LKG; the next
+    # launcher start boots it and the sweep clears this stale pre-flip txn.
+    _warn "ATOMIC FLIP FAILED — current untouched; aborting (txn left open — the sweep clears it at the next launcher start, which boots the untouched current = LKG)"
+    journal_history_append halt "promote aborted: flip failed for $VERSION (current untouched) — txn left open for sweep recovery"
     exit 1
 fi
 
@@ -260,16 +277,19 @@ fi
 PREV_BIN_VERSION="$(manifest_field "$PREV" binary_version 2>/dev/null)"
 
 # rollback: stop → launcher from PREV → repoint → restart → short re-gate
+# (B4 note: these abort sites already follow the leave-txn-open policy —
+# the txn is flipped:true here, so an open txn makes the next launcher
+# start sweep-ROLLBACK to previous; closing it would strand the env.)
 lock_heartbeat
 if ! stop_via_stop_script; then
-    _warn "rollback: stop of the failed release FAILED — halting for human"
-    journal_history_append halt "rollback stop failed for $VERSION — halt-for-human"
+    _warn "rollback: stop of the failed release FAILED — halting for human (txn left open — the next launcher start sweep-rolls-back to previous)"
+    journal_history_append halt "rollback stop failed for $VERSION — halt-for-human; txn left open for sweep recovery"
     exit 1
 fi
 launcher_swap "$PREV"
 if ! atomic_flip "$PREV"; then
-    _warn "rollback: repoint to $PREV FAILED — halting for human"
-    journal_history_append halt "rollback repoint to $PREV failed — halt-for-human"
+    _warn "rollback: repoint to $PREV FAILED — halting for human (txn left open — the next launcher start sweep-rolls-back to previous)"
+    journal_history_append halt "rollback repoint to $PREV failed — halt-for-human; txn left open for sweep recovery"
     exit 1
 fi
 restart_via_launcher

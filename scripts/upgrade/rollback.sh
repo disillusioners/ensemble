@@ -124,14 +124,22 @@ fi
 # ── Stop → launcher swap → repoint → restart (D6 + amendment) ───────────────
 lock_heartbeat
 if ! stop_via_stop_script; then
-    _warn "stop FAILED — aborting rollback before any flip"
-    journal_close_txn
+    # B4 policy (leave-txn-open, same as promote's four abort sites): the
+    # txn stays OPEN for sweep self-recovery. `current` is untouched at the
+    # serving release, so the next launcher start boots it (LKG) and the
+    # sweep clears the stale pre-flip txn then. No restart here either — a
+    # FAILED stop leaves daemon liveness unknown (double-boot risk).
+    _warn "stop FAILED — daemon state UNKNOWN (may be down); aborting rollback before any flip (current untouched; txn left open for sweep recovery)"
+    journal_history_append halt "manual rollback to $TO_VERSION aborted: stop failed — txn left open for sweep recovery (current untouched)"
     exit 1
 fi
 launcher_swap "$TO_VERSION" || { _warn "launcher swap failed — keeping current launcher"; }
 if ! atomic_flip "$TO_VERSION"; then
-    _warn "repoint FAILED — current untouched; halting"
-    journal_history_append halt "manual rollback repoint to $TO_VERSION failed (current untouched)"
+    # B4 leave-txn-open: env is dark (stop succeeded) and current is
+    # untouched at the pre-rollback release (LKG) — the next launcher start
+    # boots it and the sweep clears this stale pre-flip txn.
+    _warn "repoint FAILED — current untouched; halting (txn left open — the sweep clears it at the next launcher start, which boots the untouched current = LKG)"
+    journal_history_append halt "manual rollback repoint to $TO_VERSION failed (current untouched) — txn left open for sweep recovery"
     exit 1
 fi
 journal_mark_flipped
