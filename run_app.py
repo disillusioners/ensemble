@@ -32,4 +32,14 @@ if getattr(sys, 'frozen', False):
 
 # Now import and run the main function
 import daemon.__main__
-daemon.__main__.main()
+
+# Boot DB preflight (F-DR1-1, P2.3 B5.6): the FROZEN entry runs it HERE —
+# before main() loads config or starts uvicorn — so the launcher's
+# tempfail contract (exit 75 unreachable / 78 auth-refused, ADR-011) is
+# owned by this entry itself, not inherited from main()'s internal call
+# ordering. Same underlying function as the `python -m daemon` dev entry:
+# same BOOT_DB_TIMEOUT_S budget, same exit codes, same log lines.
+# main(run_preflight=False) then skips its internal call, so the probe
+# fires EXACTLY ONCE per boot on every entry.
+daemon.__main__._boot_db_preflight()
+daemon.__main__.main(run_preflight=False)

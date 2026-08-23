@@ -209,8 +209,14 @@ def _boot_db_preflight() -> None:
         )
 
 
-def main():
-    """Main entry point."""
+def main(run_preflight: bool = True):
+    """Main entry point.
+
+    ``run_preflight=False`` is used ONLY by the frozen entry
+    (``run_app.py``), which runs ``_boot_db_preflight()`` itself —
+    earlier, before this function's config steps — so the probe fires
+    exactly once per boot on every entry (F-DR1-1, P2.3 B5.6).
+    """
     # Load config to get host/port
     config = load_config()
 
@@ -236,7 +242,9 @@ def main():
     # Boot DB preflight (Auto-Restart Phase 1, ADR-011): exit 75 on
     # definite PG unreachability BEFORE binding the port or starting
     # uvicorn. Cheap (single SELECT 1) and fail-open on check errors.
-    _boot_db_preflight()
+    # Skipped when the caller (run_app.py frozen entry) already ran it.
+    if run_preflight:
+        _boot_db_preflight()
 
     # Note: uvicorn handles SIGTERM and SIGINT automatically.
     # The FastAPI lifespan shutdown (via @asynccontextmanager) will be

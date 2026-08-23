@@ -83,9 +83,17 @@ bash scripts/stop-ensemble.sh ~/agents-ensemble-demo 7979        # clean stop
 # (nc refused AND lsof unlisted; never a real service port):
 nc -z 127.0.0.1 <closed-port>; echo "nc=$?"                      # expect refused
 lsof -nP -iTCP:<closed-port> | wc -l                             # expect 0 (unlisted)
-(cd ~/agents-ensemble-demo && \
- POSTGRES_URL='postgresql://drill:drill@127.0.0.1:<closed-port>/drill_unreachable' \
- nohup ./launcher.sh >> data/launcher.log 2>&1 &)
+# Delivery + key (why an .env PART edit, not an ambient var): the launcher
+# re-exports INSTALL_DIR/.env AFTER inheriting ambient env (ADR-014
+# load_env_file — unconditional export), so ambient POSTGRES_* parts are
+# clobbered back (verified 2026-08-23: demo .env L35 POSTGRES_PORT wins over
+# ambient) — ambient induction is inert. The PART override POSTGRES_PORT moves
+# the boot preflight AND the repositories engine together (the exit-75
+# tempfail track end-to-end); POSTGRES_URL moves ONLY the checkpointer
+# (F-DR1-2 split-brain → uvicorn exit-3 crash track — fenced-defect note below).
+cp ~/agents-ensemble-demo/.env <ev>/env-drill-backup            # restore artifact
+sed -i '' 's/^POSTGRES_PORT=.*/POSTGRES_PORT=<closed-port>/' ~/agents-ensemble-demo/.env
+(cd ~/agents-ensemble-demo && nohup ./launcher.sh >> data/launcher.log 2>&1 &)
 # (launch shape, F-DR1-5: this line leaves a /bin/sh -c wrapper parent next to the
 #  launcher — expected; stop-ensemble.sh's TERM handles both — observed DR-1/DR-3)
 # D1.3 — observe ≥2 full cycles:
@@ -101,12 +109,13 @@ sleep 70; cp ~/agents-ensemble-demo/.launcher-state <ev>/launcher-state-cycle2.t
 # assertion failure). Restart only once the stop transcript shows the launcher
 # TERMined — else a second launcher stacks on the looping one.
 bash scripts/stop-ensemble.sh ~/agents-ensemble-demo 7979
+cp <ev>/env-drill-backup ~/agents-ensemble-demo/.env    # undo D1.2 part override BEFORE relaunch
 (cd ~/agents-ensemble-demo && nohup ./launcher.sh >> data/launcher.log 2>&1 &)
 curl -s localhost:7979/livez; curl -s localhost:7979/readyz      # both 200, reasons: []
 diff <ev>/env-before.txt <(grep -n '^POSTGRES_' ~/agents-ensemble-demo/.env)  # unchanged
 ```
 
-No `.env`-edit fallback exists — the old edit-in-place `DATABASE_URL` fallback was equally dead (same unread key) and is removed; the ambient override is the only induction path. Known fenced defect (F-DR1-2, fenced post-P2.3 — `decisions.md`): ambient `POSTGRES_URL` is honored by the checkpointer chain (`daemon/persistence.py`) but ignored by `daemon/repositories/factory.py` (parts-only) — DR-1 observed one split-brain boot (engine on the real DB while the checkpointer hit the drill socket); do not mis-diagnose that as drill failure.
+The `.env` PART edit above is the ONLY working induction path: the old edit-in-place `DATABASE_URL` fallback was dead because of the KEY (read by nothing — F-DR1-3), and ambient overrides of any kind are clobbered by the launcher's own `.env` export (ADR-014). Known fenced defect (F-DR1-2, fenced post-P2.3 — `decisions.md`): ambient `POSTGRES_URL` is honored by the checkpointer chain (`daemon/persistence.py`) but ignored by `daemon/repositories/factory.py` (parts-only) — DR-1 observed one split-brain boot (engine on the real DB while the checkpointer hit the drill socket); do not mis-diagnose that as drill failure.
 
 ### Expected outputs
 
