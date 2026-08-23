@@ -672,6 +672,27 @@ _journal_sweep() {
             return 0
             ;;
         esac
+        # M4 quarantine gate: a QUARANTINED previous is a known-bad release
+        # (it failed a gate before) — the sweep must never flip onto it.
+        # Same halt shape as the other gates (notify + halt event, NO
+        # repoint, txn left in place, boot proceeds on current). Guards a
+        # stranded/hand-edited journal: promote's rollback bookkeeping no
+        # longer writes previous==quarantined, but consumption fails closed
+        # here regardless.
+        local prev_q
+        prev_q="$(_js_json_sub "$json" "quarantined" 2>/dev/null)" || prev_q=""
+        case "$prev_q" in
+            *"\"$prev\""*)
+                _notify_once "sweep-halt" \
+                    "HALT-FOR-HUMAN: stale flipped $kind txn (target=${target:-?}) but previous release $prev is QUARANTINED (known-bad — M4) — refusing to sweep-rollback onto it; boot proceeds on current; see $install_dir/releases/state.json"
+                _js_history_append "$journal" "halt" \
+                    "sweep: previous release $prev is QUARANTINED (known-bad) — halt-for-human, NO repoint, txn left in place (M4)" \
+                    || rc=1
+                _log "HALT: journal sweep: previous $prev is quarantined (known-bad) — halt-for-human, boot proceeds on current (M4)"
+                _js_lock_release "$install_dir"
+                return 0
+                ;;
+        esac
         if [ ! -d "$install_dir/releases/$prev" ]; then
             _notify_once "sweep-halt" \
                 "HALT-FOR-HUMAN: stale flipped $kind txn (target=${target:-?}) but previous release dir releases/$prev is missing (manual deletion?) — cannot sweep-rollback; boot proceeds on current; see $install_dir/releases/state.json"
@@ -703,6 +724,17 @@ _journal_sweep() {
             return 0
         fi
 
+        # NOTE (D-FA4.1, Batch C): this sweep-rollback mutates current + the
+        # journal but does NOT restore the previous release's launcher.sh —
+        # promote's auto-rollback and manual rollback.sh both launcher_swap
+        # in the stopped window, the sweep deliberately cannot: it runs
+        # INSIDE launcher.sh, and overwriting the script under a running
+        # bash corrupts its lazy reads mid-execution. The residual skew
+        # (new launcher booting the rolled-back old release) is benign per
+        # D-FA4.1: the running launcher has already proven it boots this
+        # install, and the next successful promote re-syncs launcher↔binary
+        # in its stopped window. The swap-on-rollback policy difference is
+        # documented at each site (promote.sh 8b / rollback.sh / here).
         if ! _js_flip_current "$install_dir" "$prev"; then
             _log "WARN: journal sweep: could not repoint current to $prev — txn left in place for the next sweep, boot proceeds"
             _js_lock_release "$install_dir"

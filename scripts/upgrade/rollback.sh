@@ -163,12 +163,14 @@ if [ -z "$REGATE_FAIL" ] && [ -n "$TO_BIN_VERSION" ]; then
 fi
 
 # ── Journal bookkeeping: counts toward the cap (ADR-005); NO cooldown arm ───
+# M5: the writes below are checked — a failure must not exit 0 "rolled
+# back" with the journal diverged from the repointed symlink.
 OLD_CUR="$(_json_field "$J" current)"
 [ "$OLD_CUR" = "null" ] && OLD_CUR=""
-journal_set_current "$TO_VERSION"
-journal_set_previous "${OLD_CUR:-null}"
-NEW_COUNT="$(journal_count_rollback 0)"
-journal_close_txn
+journal_set_current "$TO_VERSION"        || journal_fail_loud "manual rollback: set_current $TO_VERSION"
+journal_set_previous "${OLD_CUR:-null}"  || journal_fail_loud "manual rollback: set_previous ${OLD_CUR:-null}"
+NEW_COUNT="$(journal_count_rollback 0)" || journal_fail_loud "manual rollback: counter (anti-flapping count lost — repair the journal)"
+journal_close_txn                        || journal_fail_loud "manual rollback: close_txn"
 
 if [ -n "$REGATE_FAIL" ]; then
     journal_history_append halt "manual rollback to $TO_VERSION landed but re-gate FAILED ($REGATE_FAIL) — halt-for-human (ADR-028)"

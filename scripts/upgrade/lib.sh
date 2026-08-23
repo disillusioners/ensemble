@@ -91,6 +91,13 @@ _iso_to_epoch() {
 # _sha256 <file> — BSD shasum.
 _sha256() { shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'; }
 
+# _canon_dir <dir> — PHYSICAL path of an existing dir (cd + pwd -P: resolves
+# symlinks AND normalizes trailing slashes / dot components). Fallback: the
+# raw string when the dir cannot be entered (an unresolvable dir cannot be
+# an alias of a live dir that exists; the caller's existence check rejects
+# it right after). Bash 3.2/BSD-safe (no readlink -f on stock macOS).
+_canon_dir() { (cd "$1" 2>/dev/null && pwd -P) || printf '%s' "$1"; }
+
 # _json_escape <string> — minimal JSON string escaper (quotes + backslash +
 # control chars via printf %s safe subset). Bash 3.2-safe.
 _json_escape() {
@@ -216,8 +223,19 @@ resolve_env() {
             INSTALL_DIR="${INSTALL_DIR:-}"
             PORT="${PORT:-}"
             POSTGRES_DB="${POSTGRES_DB:-}"
-            case "$INSTALL_DIR" in
-                "$HOME/agents-ensemble"|"$HOME/agents-ensemble-demo")
+            # M1 (council rework Batch C): compare PHYSICAL paths, not raw
+            # strings — a symlink alias or a trailing-slash spelling of the
+            # live/demo dir passed the old string match. Both sides go
+            # through _canon_dir (cd + pwd -P), so aliases normalize to the
+            # real install dir and are refused; an unresolvable INSTALL_DIR
+            # falls back to its raw string and is rejected by the existence
+            # check below anyway.
+            local canon_sbx canon_live canon_demo
+            canon_sbx="$(_canon_dir "$INSTALL_DIR")"
+            canon_live="$(_canon_dir "$HOME/agents-ensemble")"
+            canon_demo="$(_canon_dir "$HOME/agents-ensemble-demo")"
+            case "$canon_sbx" in
+                "$canon_live"|"$canon_demo")
                     _warn "sandbox INSTALL_DIR must be a throwaway dir — refusing to operate on $INSTALL_DIR"
                     exit 78
                     ;;
@@ -328,10 +346,14 @@ journal_init() {
 }
 
 # journal_read — print journal JSON; exit 1 when absent/unreadable/torn.
-# Torn-write detection: a trailing ".torn" sibling is left by any writer
-# that was killed between truncate and mv (only possible when someone wrote
-# WITHOUT our discipline — our writers never touch the target in place), or
-# the file itself fails the brace-balance sanity check.
+# Torn-write detection is CONTENT-based (Batch C doc correction — earlier
+# comments described a ".torn marker sibling" mechanism that never existed
+# in code; there is NO .torn file, and none is needed): our writers never
+# touch the target in place (temp-file + mv is atomic), so a torn state.json
+# can only come from an OUT-of-discipline writer — and it is caught by (a)
+# the empty-file check and (b) the brace/bracket-balance scan below, which
+# rejects truncated JSON. Nothing under releases/ named *.torn is produced
+# or consumed by this pipeline.
 journal_read() {
     local jp
     jp="$(journal_path)"
@@ -564,9 +586,36 @@ journal_is_quarantined() {
     esac
 }
 
+# journal_fail_loud <what> [exit_rc] — a post-flip journal mutation FAILED
+# (M5, council rework Batch C). Pre-fix, promote's commit path only WARNED
+# and exited 0 with the flipped symlink and the journal diverged — and a
+# journal_set_current/close_txn failure left the txn OPEN + flipped:true,
+# so the NEXT launcher start would sweep-ROLLBACK a HEALTHY promote.
+# Here: best-effort close the txn (if ANY write still lands, closing kills
+# the sweep-rollback risk), best-effort halt event, then exit NON-ZERO with
+# an unmissable divergence message. Never exit 0 past a failed journal
+# write. Operator remediation: repair the journal dir/file to agree with
+# the `current` symlink before the next launcher start.
+journal_fail_loud() {
+    local what="$1" rc="${2:-1}"
+    journal_close_txn 2>/dev/null || true
+    journal_history_append halt "journal write FAILED ($what) — journal diverged from the flipped current symlink; best-effort txn close attempted; repair the journal before the next launcher start" 2>/dev/null || true
+    printf '%s[%s]: JOURNAL DIVERGENCE: journal write FAILED at %s — best-effort txn close attempted. The env may be healthy but the journal does not agree with the current symlink; repair %s BEFORE the next launcher start (a surviving open flipped txn makes the sweep roll back a healthy promote)\n' \
+        "$LOG_TAG" "${UP_TARGET:-lib}" "$what" "$(journal_path)" >&2
+    exit "$rc"
+}
+
 # journal_count_rollback — increment rollback_window_count with 24h window
 # rollover; arms cooldown_until (now + COOLDOWN_S) when <arm_cooldown> = 1.
 # Prints the new count (0-3 form: the count AFTER this rollback).
+# WINDOW ANCHOR (Batch C doc): this is a SLIDING window anchored at the
+# LAST rollback, not a tumbling 24h calendar window — window_start is
+# re-stamped on EVERY counted rollback, so N rollbacks are refused only
+# while all N fall inside the 24h span ending at the newest one. Sparse
+# rollback pairs ≥24h apart never accumulate toward the cap; a burst is
+# capped at 3 regardless of how the stamps drift. Callers needing a fixed
+# anchor would require a schema change (out of scope; ADR-005 D2 wording
+# "3/24h" is implemented as this sliding-anchor reading).
 # Window rule: first rollback opens the window; a rollback whose window_start
 # is >24h old resets count to 0 and re-opens the window.
 journal_count_rollback() {
@@ -583,14 +632,17 @@ journal_count_rollback() {
         cnt=0   # window rolled over — this rollback re-opens it
     fi
     new_cnt=$((cnt + 1))
+    # M5: a failed counter/cooldown write must propagate — callers (promote
+    # 8b bookkeeping, rollback.sh) treat rc≠0 as a journal divergence and
+    # fail loud instead of exiting 0 with the anti-flapping count lost.
     journal_update "rollback_window_count" \
-        "{\"24h\": $new_cnt, \"window_start\": \"$(_now_iso)\"}"
+        "{\"24h\": $new_cnt, \"window_start\": \"$(_now_iso)\"}" || return 1
     if [ "$arm_cooldown" = "1" ]; then
         local until
         # BSD date: -v adjustments must precede the [-f fmt date] operand
         until="$(date -ju -v+${COOLDOWN_S}S -f '%Y-%m-%dT%H:%M:%SZ' "$(_now_iso)" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" \
             || until="$(_now_iso)"
-        journal_update "cooldown_until" "\"$until\""
+        journal_update "cooldown_until" "\"$until\"" || return 1
     fi
     printf '%s' "$new_cnt"
 }
@@ -1148,12 +1200,13 @@ promote_entry_check() {
 #       alone regardless of owner liveness (the 600s gate is the primary
 #       race guard, R1.3) — adoption does too;
 #   stale + flipped:true → the SAME recovery the sweep would perform:
-#       manifest gate on previous FIRST (null / release dir missing / not
-#       rollback_safe → halt event, NO repoint, txn LEFT IN PLACE, exit
-#       78), then repoint current→previous (atomic_flip — mv -h, the same
-#       rename(2) semantics the sweep uses), quarantine the failed target,
-#       count the rollback + arm cooldown (ADR-024), history event
-#       'sweep_rollback' (P2.3's ledger consumes event names), clear txn;
+#       manifest gate on previous FIRST (null / QUARANTINED (M4) / release
+#       dir missing / not rollback_safe → halt event, NO repoint, txn LEFT
+#       IN PLACE, exit 78), then repoint current→previous (atomic_flip —
+#       mv -h, the same rename(2) semantics the sweep uses), quarantine
+#       the failed target, count the rollback + arm cooldown (ADR-024),
+#       history event 'sweep_rollback' (P2.3's ledger consumes event
+#       names), clear txn;
 #   stale + flipped:false → clear (history event 'sweep').
 # Runs UNDER the caller's lock (promote acquires before calling). After a
 # sweep-rollback adoption the enclosing promote continues into its ENTRY
@@ -1208,6 +1261,19 @@ adopt_stale_txn() {
             exit 78
             ;;
         esac
+        # M4: a QUARANTINED previous is a known-bad release (it failed a
+        # gate before) — never adopt-rollback onto it. Same halt shape as
+        # promote's auto-rollback gate and the launcher sweep's: halt event,
+        # NO repoint, txn left in place. Guards against a stranded/hand-
+        # edited journal (promote's bookkeeping no longer strands
+        # previous==quarantined, but drift must fail closed at consumption
+        # too). Gate order matches promote 8b and the sweep: null →
+        # QUARANTINED → missing dir → rollback_safe.
+        if journal_is_quarantined "$prev"; then
+            journal_history_append halt "adopt: previous release $prev is QUARANTINED (known-bad) — halt-for-human, NO repoint, txn left in place (M4)"
+            _warn "HALT-FOR-HUMAN: previous release $prev is QUARANTINED — refusing to adopt-rollback onto a known-bad release; txn left for the sweep/human (M4)"
+            exit 78
+        fi
         if [ ! -d "$INSTALL_DIR/releases/$prev" ]; then
             journal_history_append halt "adopt: previous release $prev missing (evicted/manually deleted?) — halt-for-human, NO repoint, txn left in place"
             _warn "HALT-FOR-HUMAN: previous release $prev is MISSING — cannot adopt-rollback; txn left for the sweep/human"
@@ -1233,7 +1299,15 @@ adopt_stale_txn() {
         fi
         journal_quarantine "$target"
         journal_set_current "$prev"
-        newcnt="$(journal_count_rollback 1)"
+        newcnt="$(journal_count_rollback 1)" || newcnt=""
+        if [ -z "$newcnt" ]; then
+            # M5: the recovery's repoint/quarantine already landed — do not
+            # undo them — but the counter/cooldown write FAILED: the
+            # anti-flapping count is lost until the journal is repaired.
+            # Loud, not silent (the sweep-rollback over-count direction is
+            # the only safe drift here).
+            _warn "adopt: rollback counter/cooldown write FAILED after the repoint — journal diverged; anti-flapping count may be lost (repair the journal)"
+        fi
         journal_history_append sweep_rollback "adopt: orphaned flipped $kind txn (target=$target, owner pid ${owner:-?}, age ${age}s) rolled back to $prev at promote preflight; counted as auto-rollback (ADR-024)"
         journal_close_txn
         if [ "$newcnt" -ge "$ROLLBACK_CAP_24H" ]; then

@@ -74,6 +74,9 @@ done
 # shellcheck source=scripts/upgrade/lib.sh
 . "$SCRIPT_DIR/lib.sh"
 
+# M5: journal_fail_loud (lib.sh) is the fail-loud handler for every
+# post-flip journal write below — see its comment there.
+
 resolve_env "${TARGET_ARG:-${TARGET:-demo}}"
 require_live_guard "$UP_TARGET"
 echo_env_triple
@@ -227,12 +230,15 @@ fi
 
 # ═════════════════ 8a. COMMIT — or 8b. AUTO-ROLLBACK (T5) ══════════════════
 if [ -z "$gate_fail_reason" ]; then
-    # commit
+    # commit — M5: every journal write is checked; a failed write must
+    # never let the promote exit 0 with the symlink/journal diverged (see
+    # journal_fail_loud in lib.sh).
     OLD_CUR="$CUR"
-    journal_set_current "$VERSION"
-    journal_set_previous "${OLD_CUR:-null}"
-    journal_close_txn
-    journal_history_append commit "promote $VERSION committed (gate+soak green; previous=${OLD_CUR:-none})"
+    journal_set_current "$VERSION"        || journal_fail_loud "commit: journal_set_current $VERSION"
+    journal_set_previous "${OLD_CUR:-null}" || journal_fail_loud "commit: journal_set_previous ${OLD_CUR:-null}"
+    journal_close_txn                     || journal_fail_loud "commit: journal_close_txn"
+    journal_history_append commit "promote $VERSION committed (gate+soak green; previous=${OLD_CUR:-none})" \
+                                          || journal_fail_loud "commit: history append"
     _log "COMMITTED: current=$VERSION previous=${OLD_CUR:-<none>}"
     retention_evict
     lock_release
@@ -247,29 +253,43 @@ PREV_JSON="$(journal_read)"
 PREV="$(_json_field "$PREV_JSON" previous)"
 [ "$PREV" = "null" ] && PREV=""
 
-# T5 manifest gate FIRST (D-FA4.5): previous must EXIST and be rollback_safe
+# T5 manifest gate FIRST (D-FA4.5): previous must EXIST, be rollback_safe,
+# and NOT be quarantined (M4 — a quarantined previous is a known-bad release;
+# flipping onto it is what quarantine exists to prevent).
 if [ -z "$PREV" ]; then
-    journal_close_txn
-    journal_set_current "$VERSION"
-    journal_set_previous "null"
-    journal_history_append halt "gate fail ($gate_fail_reason) with NO previous release — halt-for-human, daemon rests on $VERSION (degraded, alerted)"
+    journal_close_txn                       || journal_fail_loud "halt(no-previous): close_txn" 78
+    journal_set_current "$VERSION"          || journal_fail_loud "halt(no-previous): set_current" 78
+    journal_set_previous "null"             || journal_fail_loud "halt(no-previous): set_previous" 78
+    journal_history_append halt "gate fail ($gate_fail_reason) with NO previous release — halt-for-human, daemon rests on $VERSION (degraded, alerted)" \
+                                            || true   # history is advisory; state writes above are the contract
     _warn "HALT-FOR-HUMAN: no previous release to roll back to — daemon stays on $VERSION (degraded). Notify + human recovery per ADR-028."
     lock_release
     exit 78
 fi
+if journal_is_quarantined "$PREV"; then
+    journal_close_txn                       || journal_fail_loud "halt(quarantined-previous): close_txn" 78
+    journal_set_current "$VERSION"          || journal_fail_loud "halt(quarantined-previous): set_current" 78
+    journal_history_append halt "gate fail ($gate_fail_reason) but previous $PREV is QUARANTINED (known-bad) — halt-for-human, NO repoint (M4: never auto-flip onto a quarantined release)" \
+                                            || true
+    _warn "HALT-FOR-HUMAN: previous release $PREV is QUARANTINED — daemon stays on $VERSION (degraded). NO repoint (M4). Human picks the next version (ADR-028)."
+    lock_release
+    exit 78
+fi
 if [ ! -d "$REL/$PREV" ]; then
-    journal_close_txn
-    journal_set_current "$VERSION"
-    journal_history_append halt "gate fail ($gate_fail_reason) but previous $PREV is MISSING (evicted/manually deleted) — halt-for-human, NO repoint"
+    journal_close_txn                       || journal_fail_loud "halt(missing-previous): close_txn" 78
+    journal_set_current "$VERSION"          || journal_fail_loud "halt(missing-previous): set_current" 78
+    journal_history_append halt "gate fail ($gate_fail_reason) but previous $PREV is MISSING (evicted/manually deleted) — halt-for-human, NO repoint" \
+                                            || true
     _warn "HALT-FOR-HUMAN: previous release $PREV missing — daemon stays on $VERSION (degraded). NO repoint (ADR-005 M5)."
     lock_release
     exit 78
 fi
 PREV_SAFE="$(manifest_field "$PREV" rollback_safe 2>/dev/null)"
 if [ "$PREV_SAFE" != "true" ]; then
-    journal_close_txn
-    journal_set_current "$VERSION"
-    journal_history_append halt "gate fail ($gate_fail_reason) but previous $PREV has rollback_safe=$PREV_SAFE — halt-for-human, NO repoint (schema-drift guard D-FA4.5)"
+    journal_close_txn                       || journal_fail_loud "halt(unsafe-previous): close_txn" 78
+    journal_set_current "$VERSION"          || journal_fail_loud "halt(unsafe-previous): set_current" 78
+    journal_history_append halt "gate fail ($gate_fail_reason) but previous $PREV has rollback_safe=$PREV_SAFE — halt-for-human, NO repoint (schema-drift guard D-FA4.5)" \
+                                            || true
     _warn "HALT-FOR-HUMAN: previous $PREV is NOT rollback_safe — daemon stays on $VERSION (degraded) rather than flipping into schema drift. NO repoint."
     lock_release
     exit 78
@@ -313,34 +333,48 @@ fi
 # journal: rollback bookkeeping (counts toward cap — ADR-005; cooldown armed).
 # Restore the pre-promote pairing: current=PREV, previous=old current (the
 # release we were serving before this promote began).
-journal_set_current "$PREV"
-journal_set_previous "${CUR:-null}"
-NEW_COUNT="$(journal_count_rollback 1)"
-journal_history_append rollback "auto-rollback $VERSION → $PREV (gate fail: $gate_fail_reason; re-gate ${REGATE_FAIL:-green})"
-journal_quarantine "$VERSION"
+# M4 no-strand guard: when the promote WAS a same-version re-promote
+# (CUR == VERSION), the "old current" IS the version being quarantined
+# below — recording it as previous would strand previous==quarantined
+# and arm a later auto-rollback onto a known-bad release. In that case leave
+# previous at its pre-promote value (== the release just rolled back onto;
+# degenerate previous==current, but never quarantined — a later failed
+# promote still finds a valid, distinct rollback target once current moves).
+if [ "$CUR" != "$VERSION" ] || [ -z "$CUR" ]; then
+    journal_set_previous "${CUR:-null}"    || journal_fail_loud "rollback bookkeeping: set_previous ${CUR:-null}"
+fi
+journal_set_current "$PREV"                || journal_fail_loud "rollback bookkeeping: set_current $PREV"
+NEW_COUNT="$(journal_count_rollback 1)" || journal_fail_loud "rollback bookkeeping: counter/cooldown (cooldown NOT armed — treat as active until verified)"
+journal_history_append rollback "auto-rollback $VERSION → $PREV (gate fail: $gate_fail_reason; re-gate ${REGATE_FAIL:-green})" \
+                                            || true
+journal_quarantine "$VERSION"              || journal_fail_loud "rollback bookkeeping: quarantine $VERSION (it stays promotable — operator must quarantine manually or re-stage)"
 journal_history_append quarantine "$VERSION quarantined after gate failure (skipped by future promotes)"
 
 if [ -n "$REGATE_FAIL" ]; then
     # ADR-028: the rollback target failing its gate is halt-for-human; the
     # rollback-class event already counted above.
-    journal_close_txn
-    journal_history_append halt "previous $PREV failed re-gate ($REGATE_FAIL) — halt-for-human with release list; recovery = user-chosen version via promote"
+    journal_close_txn                     || journal_fail_loud "re-gate halt: close_txn" 78
+    journal_history_append halt "previous $PREV failed re-gate ($REGATE_FAIL) — halt-for-human with release list; recovery = user-chosen version via promote" \
+                                          || true
     _warn "HALT-FOR-HUMAN: rollback landed on $PREV but re-gate FAILED ($REGATE_FAIL). Human picks the next version (ADR-028)."
     lock_release
     exit 78
 fi
 
 if [ "$NEW_COUNT" -ge "$ROLLBACK_CAP_24H" ]; then
-    journal_close_txn
-    journal_history_append halt "rollback cap $ROLLBACK_CAP_24H/24h reached (count=$NEW_COUNT) — halt-for-human; promotes refused until the window resets"
+    journal_close_txn                     || journal_fail_loud "cap halt: close_txn" 1
+    journal_history_append halt "rollback cap $ROLLBACK_CAP_24H/24h reached (count=$NEW_COUNT) — halt-for-human; promotes refused until the window resets" \
+                                          || true
     _warn "HALT-FOR-HUMAN: rollback cap reached ($NEW_COUNT/$ROLLBACK_CAP_24H in 24h) — environment restored to $PREV; further promotes refused until window reset (ADR-005 D2)"
     lock_release
     exit 1
 fi
 
-journal_close_txn
-journal_history_append rollback "rollback complete: serving $PREV_BIN_VERSION on :$PORT; cooldown armed (${COOLDOWN_S}s); window count $NEW_COUNT/$ROLLBACK_CAP_24H"
+journal_close_txn                         || journal_fail_loud "rollback complete: close_txn"
+journal_history_append rollback "rollback complete: serving $PREV_BIN_VERSION on :$PORT; cooldown armed (${COOLDOWN_S}s); window count $NEW_COUNT/$ROLLBACK_CAP_24H" \
+                                          || true
 _log "ROLLBACK COMPLETE: current=$PREV serving ${PREV_BIN_VERSION:-?}; quarantine=$VERSION; cooldown ${COOLDOWN_S}s; count $NEW_COUNT/$ROLLBACK_CAP_24H"
 retention_evict
 lock_release
 exit 1   # the PROMOTE failed — environment recovered, human attention wanted
+
