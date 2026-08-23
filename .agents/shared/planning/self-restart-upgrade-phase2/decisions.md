@@ -255,6 +255,17 @@ The 4 unverified assumptions of `architecture-recommendation.md` §7, wired to t
   - **OBS residual (§4.2(a))** — single-host trust model: an agent WITH bash can POST to the unauthenticated local API and forge an `api`-source dispatch (the whitelist cannot distinguish a genuine web-UI human from a localhost forger). Documented residual of D-FA3.4 single-host model; closes only with an auth boundary on the local API (out of P2.2 scope).
   - **T7–T9 e2e drills** — P2.3 DR-5 scope (see RESULTS/2026-08-23-p2-2-daemonized-executor-survival.md scope note).
 
+## P2.2 Tidy Fix cycle-3 (2026-08-23, review-council-p2p2-tidy) — MAJOR-1 fixed; nits → P2.3 carry-over
+
+**Context.** Reviewer cycle-3 on b9bee5cd (`refactor(p2.2): tidier fix-now`): ONE MAJOR only, everything else in b9bee5cd confirmed. **MAJOR-1**: the item-A twin-helper reroute was NOT behavior-neutral — the deleted local `_lock_run_id` accepted `Path | None` (explicit None → None guard); the journal original `journal_lock_run_id` takes `Path` only, so `upgrade_status` on dev (`install_dir=None`) returned `Error: upgrade_status failed: TypeError…` where the parent commit rendered the honest `journal: none (no staged install dir…)`. Missed by the 134-pack + 835-suite: no test exercised `upgrade_status` with `install_dir=None`. **Fixed journal-side (Option A, dispatcher-chosen)**: `upgrade_journal.lock_run_id` widened to `Path | None` + None guard — mirrors the conventionally None-hardened read helpers in upgrade_tools.py AND hardens the journal-side actor call sites (~:1393, ~:1706) which were only refusal-guarded; `upgrade_tools.py:1143` untouched. Regression: `test_no_install_dir_reads_render_honestly` (both read tools, mutation-lethal).
+
+- **P2.3 carry-over ledger (reviewer cycle-3 nits, deliberately NOT implemented in this pass):**
+  - **NIT-1** — cooldown conjunct domain pin; deferred.
+  - **NIT-2** — unwind-after-lock-release ordering swap; deferred.
+  - **NIT-3** — `restart.sh` help wants a `====` closer (banner-parity); cosmetic, deferred.
+  - **NIT-4** — `_launcher_state_values` raw render in one display path; cosmetic polish, deferred.
+  - **NIT-5** — **refactor rule**: twin-helper equivalence = signature + guards + call-site reachability, NOT body similarity; one behavior-diff assertion per deleted helper.
+
 ---
 
 ## Decision Index (Phase 2)

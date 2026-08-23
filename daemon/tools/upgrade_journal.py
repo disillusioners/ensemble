@@ -432,8 +432,15 @@ def lock_release(install_dir: Path, owner_pid: int | None = None) -> bool:
     return True
 
 
-def lock_run_id(install_dir: Path) -> str | None:
-    """The active lock's run_id, if held (read-only)."""
+def lock_run_id(install_dir: Path | None) -> str | None:
+    """The active lock's run_id, if held (read-only).
+
+    None-hardened (P2.2 review cycle-3, MAJOR-1): dev/unresolved envs have
+    no staged install dir — ``None`` means "no lock to read", mirroring the
+    None-hardened read helpers in upgrade_tools.py. Hardening here also
+    covers the journal-side actor call sites, not just upgrade_status."""
+    if install_dir is None:
+        return None
     return _lock_read_file(lock_dir(install_dir), "run_id") or None
 
 

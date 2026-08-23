@@ -611,6 +611,37 @@ class TestReadPairRefusals:
         out_live = await tools["release_info"].ainvoke({"target_env": "live"})
         assert _refusal_reason(out_live) == "env-self-match"
 
+    async def test_no_install_dir_reads_render_honestly(
+        self, harness, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Cycle-3 MAJOR-1 regression: ``install_dir=None`` (dev repo
+        checkout / unresolved env) must render the honest "no staged
+        install dir" lines — the read pair RENDERS, never TypeErrors into
+        an ``Error:`` prefix. The b9bee5cd twin-helper reroute deleted the
+        local ``_lock_run_id``'s ``Path | None`` guard; journal
+        ``lock_run_id`` is None-hardened (Option A) to restore parity."""
+        tools, _, _ = harness  # self-env=demo, resolver overridden below
+        monkeypatch.setattr(ut, "_resolve_install_dir", lambda self_env: None)
+
+        status = await tools["upgrade_status"].ainvoke({})
+        assert (
+            "journal: none (no staged install dir — dev repo checkout or "
+            "unresolved env; no pipeline runs to poll)" in status
+        )
+        assert "pipeline lock: unknown (no install dir)" in status
+        assert "Error:" not in status  # TypeError path renders as Error:, never here
+
+        info = await tools["release_info"].ainvoke({})
+        assert (
+            "releases: none (no staged install dir — dev repo checkout or "
+            "unresolved env)" in info
+        )
+        assert (
+            "journal: none (no staged install dir — dev repo checkout or "
+            "unresolved env)" in info
+        )
+        assert "Error:" not in info
+
     async def test_release_info_sections_and_errors(self, harness) -> None:
         from pydantic import ValidationError
 
