@@ -753,6 +753,31 @@ class InstanceManager:
         # (``_drain_deferred_watchover_terminate``).
         self._deferred_watchover_terminate: set[str] = set()
 
+        # ── P2.2 Dispatch B (self-restart/self-upgrade) — additive state ──
+        #
+        # Per-instance USER-ORIGIN WINDOW (D-FA3.2). Stamped at the top of
+        # ``_process_message_with_tracking`` (the one funnel every dispatch
+        # lane — API chat, external channels, internal reports, agent
+        # sends — flows through with the triggering message's source and
+        # content in hand). Only sources passing the USER_ORIGIN_SOURCES
+        # whitelist stamp the window; every other source (all internal_*,
+        # scheduler, cascade_resume, agent:*) CLEARS it — the window is
+        # strictly per-turn, so an agent-dispatched turn never inherits a
+        # stale user authorization. Instance-scoped by key (children never
+        # inherit — their sources are internal_*, S-06). The live 3-factor
+        # gate in daemon/tools/upgrade_tools.py reads it.
+        self._user_origin_windows: dict[str, dict] = {}
+
+        # Per-instance DEFERRED SYSTEM-EXECUTION marker (D-FA1.4). The actor
+        # tools (system_restart / system_upgrade) set it while arming (the
+        # DURABLE state is the journal pending_op — written before the tool
+        # returns); the post-graph completion path (the C2-safe consumer in
+        # instance_messaging.py, mirroring _drain_deferred_watchover_terminate)
+        # pops it at exact turn-end and fires the daemonized executor. A lost
+        # marker degrades to the fallback (restart.sh bounded waiter / boot
+        # sweep) — latency, never silent loss (D-FA5.4).
+        self._pending_system_executions: dict[str, dict] = {}
+
         # Watchover activation/deactivation service (Phase 3, T3.4-T3.6).
         # Holds no I/O state — it delegates everything to the manager
         # facade below. Constructed here so the router can call
@@ -2732,6 +2757,151 @@ class InstanceManager:
             return False
         self._deferred_question_pause.discard(instance_id)
         return True
+
+    # =========================================================================
+    # P2.2 Dispatch B — user-origin windows + deferred system executions.
+    #
+    # additive-only surface for the self-restart/self-upgrade actor tools
+    # (daemon/tools/upgrade_tools.py) and the post-graph consumer in
+    # daemon/services/instance_messaging.py. All mechanics live in
+    # daemon/tools/upgrade_journal.py; the manager only carries the
+    # in-memory markers (the journal pending_op is the durable authority).
+    # =========================================================================
+
+    def stamp_user_origin_window(
+        self,
+        instance_id: str,
+        source: str | None,
+        message_id: str | None,
+    ) -> None:
+        """Stamp (or CLEAR) the per-instance user-origin window (D-FA3.2).
+
+        Called from the top of :meth:`_process_message_with_tracking` — the
+        single funnel where the triggering message's source is known. A
+        source passing ``USER_ORIGIN_SOURCES`` stamps
+        ``{source, message_id, stamped_at, expires_at}``; any other source
+        clears the window (per-turn semantics: an agent/internal-originated
+        turn must never inherit an earlier turn's user authorization).
+        Cheap, in-memory, never raises.
+        """
+        try:
+            from daemon.tools.upgrade_journal import NONCE_TTL_S
+        except Exception:  # pragma: no cover — defensive; module always present
+            NONCE_TTL_S = 15 * 60  # noqa: N816
+        try:
+            from daemon.tools import upgrade_journal as _uj
+
+            if _uj.is_user_origin_source(source):
+                now = _uj.now_iso()
+                self._user_origin_windows[instance_id] = {
+                    "source": source,
+                    "message_id": message_id,
+                    "stamped_at": now,
+                    "expires_at": _uj.iso_plus(now, NONCE_TTL_S),
+                }
+            else:
+                self._user_origin_windows.pop(instance_id, None)
+        except Exception as exc:  # never break message dispatch
+            logger.warning(
+                "stamp_user_origin_window failed for %s: %s",
+                instance_id[:8] if isinstance(instance_id, str) else instance_id,
+                exc,
+            )
+
+    def set_pending_system_execution(self, instance_id: str, spec: dict) -> None:
+        """Arm the post-turn executor trigger marker (D-FA1.4). Called by the
+        actor tools at arm time; consumed by
+        :meth:`drain_pending_system_execution` at exact turn-end."""
+        self._pending_system_executions[instance_id] = dict(spec)
+
+    async def drain_pending_system_execution(self, instance_id: str) -> bool:
+        """Pop the marker and fire the daemonized executor (post-graph path).
+
+        Mirrors the C2-safe deferred pattern: runs OUTSIDE the task identity
+        guard (the caller is the post-graph completion path after
+        ``_graph_tasks`` popped; the caller wraps this in ``asyncio.shield``).
+        One shot per armed op:
+
+        * restart → daemonized ``restart.sh`` (adopts the tool-acquired
+          pipeline lock; SINGLE-TERM stop + detached launcher re-exec +
+          /livez gate; closes the txn + pending_op itself);
+        * promote  → release the arm-time lock (the handoff — promote.sh
+          re-acquires it at its own preflight), then daemonized
+          ``promote.sh``; the pending_op closes via lazy reconcile once the
+          promote's terminal event lands in the journal.
+
+        Never raises — a spawn failure is logged as a warning and the
+        marker is still consumed (no halt journal event is written here;
+        the journal pending_op remains the durable fallback for the
+        boot sweep).
+        """
+        spec = self._pending_system_executions.pop(instance_id, None)
+        if spec is None:
+            return False
+        try:
+            from daemon.tools import upgrade_journal as _uj
+
+            kind = str(spec.get("kind", ""))
+            install_dir = Path(str(spec.get("install_dir", "")))
+            scripts_dir = Path(str(spec.get("scripts_dir", "")))
+            run_id = str(spec.get("run_id", ""))
+            env = str(spec.get("env", ""))
+            argv: list[str] = []
+            extra_env: dict[str, str] = {}
+            if install_dir:
+                extra_env["INSTALL_DIR"] = str(install_dir)
+            if spec.get("port"):
+                extra_env["PORT"] = str(spec["port"])
+
+            if kind == "restart":
+                argv = [
+                    "bash", str(scripts_dir / "restart.sh"), env,
+                    "--run-id", run_id,
+                ]
+                if spec.get("reason"):
+                    argv += ["--reason", str(spec["reason"])]
+            elif kind == "promote":
+                # Handoff: promote.sh acquires the lock itself at preflight;
+                # releasing here keeps exactly one lock holder at a time.
+                _uj.lock_release(install_dir)
+                argv = [
+                    "bash", str(scripts_dir / "promote.sh"), env,
+                    "--version", str(spec.get("target", "")),
+                ]
+            else:
+                logger.warning(
+                    "drain_pending_system_execution: unknown kind=%r for %s",
+                    kind, instance_id[:8],
+                )
+                return False
+
+            child_pid = _uj.spawn_executor(argv, install_dir, extra_env)
+            logger.info(
+                "[system-execution] fired %s executor run_id=%s pid=%s "
+                "(daemonized, start_new_session)",
+                kind, run_id, child_pid,
+            )
+            # Record the executor identity in the journal pending_op
+            # (advisory owner info; the op itself is already durable).
+            try:
+                op = _uj.read_pending_op(install_dir)
+                if op is not None and op.run_id == run_id:
+                    op.owner_pid = child_pid
+                    op.owner_kind = "executor"
+                    op.trigger = "post-turn-callback"
+                    _uj.write_pending_op(install_dir, op)
+            except Exception as exc:
+                logger.warning(
+                    "[system-execution] pending_op owner update failed: %s", exc
+                )
+            return True
+        except Exception as exc:
+            logger.warning(
+                "[system-execution] drain failed for %s: %s — the journal "
+                "pending_op remains (boot-sweep fallback)",
+                instance_id[:8], exc,
+            )
+            return False
 
     # =========================================================================
     # Watchover accessors (Phase 1 — core graph interception).
@@ -6087,6 +6257,23 @@ class InstanceManager:
         Raises:
             OperationCancelledError: If cancellation is requested.
         """
+        # ── P2.2 Dispatch B: user-origin window stamp (D-FA3.2) ──────────
+        # STRICTLY ADDITIVE. This is the one funnel every dispatch lane
+        # (API chat, external channels, internal reports, agent sends)
+        # flows through with the triggering message's SOURCE + CONTENT id
+        # in hand. Whitelisted source → stamp the per-turn window the live
+        # 3-factor gate reads; any other source → clear it (per-turn
+        # semantics — an agent/internal-originated turn never inherits an
+        # earlier turn's user authorization). Silent resume is the ONLY
+        # skip (no message is injected; the window keeps the original
+        # turn's). M2 (P2.2 fix pass 2026-08-23): a NON-silent dispatch
+        # with source=None must ALSO stamp — stamp_user_origin_window
+        # treats None as non-whitelisted and CLEARS the window, so a
+        # source-less dispatch no longer leaves a prior turn's user-origin
+        # window alive (fail-closed direction).
+        if not silent:
+            self.stamp_user_origin_window(instance_id, message_source, message_id)
+
         return await self._messaging_service._process_message_with_tracking(
             instance_id=instance_id,
             message=message,

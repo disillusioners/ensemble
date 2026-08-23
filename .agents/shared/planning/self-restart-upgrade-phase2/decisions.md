@@ -172,14 +172,54 @@ Format: **Context → Options → Decision/Recommendation → Consequence**, eac
 
 ---
 
+## ADR-029 (minted 2026-08-23, P2.2 Dispatch B): daemonized executor for restart AND promote; exit-74 deferred
+
+**Context.** Both actor tools (`system_restart`, `system_upgrade`) must execute past their own process's death — a promote stops the daemon it runs on, and the tool call in-flight at a stop is lost (verified semantics). Architect fork (D-FA1.3): (A) daemonized external executor vs (B) launcher exit-code 74 "restart-me" extension.
+
+**Decision.** **(A), generalized:** ONE mechanism — `subprocess.Popen(..., start_new_session=True)` (≡ double-fork + `setsid` on macOS/PyInstaller; assumption #2 closed by the Dispatch-B sandbox drill), env-allowlisted (`PATH HOME INSTALL_DIR PORT POSTGRES_DB PG* TMPDIR` — no `.env` passthrough, R-SR09), stdio → `data/upgrade.log`, PID journaled in the pending_op, **never registered in `BashProcessRegistry`** (must survive tool-harness teardown — static-asserted). Payloads: `restart.sh` (new, T7) and `promote.sh`. **Exit-74 deferred** to a future ADR (design preserved: ADR-010 amendment + launcher capability probe + `launcher-not-74-aware` refusal); rationale: R-SR06 ship-ordering, pre-74 bootstrapping window, and the post-turn trigger (ADR-031-adjacent D-FA1.4) removes the waiter race 74 was meant to kill.
+
+**Consequence.** The executor survives daemon SIGKILL mid-gate (T5 drill asserts); orphan accountability rides the journal pending_op (`owner_pid`, `expires_at`) + the ADR-012 sweep backstop; residual env-leak surface bounded by the allowlist. Exit-74 remains a one-line-ish future opt-in.
+
+---
+
+## ADR-030 (minted 2026-08-23, P2.2 Dispatch B): launcher travels in the staged payload (D-FA4.1 amendment record)
+
+**Context.** The launcher enforces the exit-code/burst/journal-sweep contract the releases assume; an old launcher running a new binary's contract is drift (R-SR06).
+
+**Decision.** `launcher.sh` joins the staged release trio (`stage.sh` copies it; the manifest gains `launcher_sha256`; `promote.sh` swaps `INSTALL_DIR/launcher.sh` in the stopped window). Implemented in P2.1; minted here because the upgrade pipeline's correctness (promote-time launcher swap, restart-via-current-launcher) depends on it and the P2.2 executor invokes the swapped launcher.
+
+**Consequence.** Launcher/binary skew self-heals at the next promote; the restart executor (`restart.sh`) re-execs `INSTALL_DIR/launcher.sh` knowing it matches the current release's manifest.
+
+---
+
+## ADR-031 (minted 2026-08-23, P2.2 Dispatch A/B): PRIVILEGED_TOOL_CATEGORIES — the system_upgrade category is opt-in-only
+
+**Context.** `resolve_tool_filter` treats an absent/empty `tools.allow` as "everything potentially allowed" — a permission leak for privileged categories (R-SR16): `watcher` (the only empty-allow agent today) would default-receive restart/upgrade authority.
+
+**Decision.** `PRIVILEGED_TOOL_CATEGORIES = frozenset({"system_upgrade"})` in `daemon/tools/_tool_registry.py`, consumed by the empty-allow branch + default-allow paths of `daemon/tools/instance.py`: the category NEVER joins the default universe; agents reach it ONLY via an explicit `tools.allow` entry naming the category or one of its tools. Architect-resolved (D-FA2.5/FA6): excluding it regresses nobody and is the desired outcome for `watcher`.
+
+**Consequence.** Default-deny for restart/upgrade authority is structural (no deny rules); ari's explicit `"system_upgrade"` entry (T3) is the only exposure this phase; adding agents later is a deliberate, reviewable one-line trust expansion.
+
+---
+
+## ADR-032 (minted 2026-08-23, P2.2 Dispatch B): USER_ORIGIN_SOURCES whitelist — structural user-origin for the live gate
+
+**Context.** `MessageType.HUMAN` is the else-branch DEFAULT of the source classification (`instance_messaging.py:1310-1319`): `cascade_resume`, `internal_invoke_and_wait:`, `agent:` rows are HUMAN-typed today. "LLM cannot enqueue HUMAN rows" held only by caller discipline — insufficient for the live 3-factor gate (R10/R-SR07). The else-branch mis-typing itself is DEFERRED (separate follow-up defect, wide blast radius — do not fix in this initiative).
+
+**Decision.** Positive source whitelist, frozen from an enumeration of the ACTUAL dispatch-path source formats (assumption #1 closed): exact `"api"` (`routers/messages.py:391` — the web-UI chat path) + the five human-channel prefixes `telegram:` `webhook:` `whatsapp:` `discord:` `slack:` (`sources/registry.py:869` builds `"<source_id>:<user_id>"`; SourceType enum `daemon/models/source.py:17`). NOT whitelisted: `scheduler` (machine), every `internal_*`, `cascade_resume`, `agent:*`. The whitelist gates AT THE TOOL/STAMP SITE — the per-turn user-origin window (`manager._user_origin_windows`, D-FA3.2) is stamped ONLY for whitelisted sources and CLEARED for every other source, so agent-originated turns never inherit stale authorization. Live constant: `daemon/tools/upgrade_journal.USER_ORIGIN_SOURCES`.
+
+**Consequence.** A fabricated `user_confirmed=true` fails factor 2; a self-echoed nonce in an AGENT/internal-origin message fails factors 2+3 — the gate's anti-forgery becomes structural. Fail-closed residual: a source whose configured `source_id` does not start with its type name (free-form pattern `^[a-zA-Z0-9_-]+$`) gets NO marker — rename the source or use the web UI. Single-host trust model otherwise unchanged (D-FA3.4).
+
+---
+
 ## Pre-Freeze Assumption-Closure Checklist (added 2026-08-22 per review)
 
 The 4 unverified assumptions of `architecture-recommendation.md` §7, wired to their owning tasks — **this checklist is executed as the FIRST P2.2 task (T0 — assumption closure) before any other P2.2 work; a red item freezes the dependent design, it does not proceed on hope.** Fail-closed direction throughout: a wrong assumption refuses, never bypasses.
 
 | # | Assumption | Owner task | Verification step (objective) | Status |
 |---|-----------|-----------|-------------------------------|--------|
-| 1 | `USER_ORIGIN_SOURCES` prefix strings — exact external-channel source prefixes (`telegram:`/`discord:`/`slack:` forms) | P2.2 T8 (gate implementation) | Enumerate the ACTUAL adapter source prefixes from the `daemon/sources/` dispatch paths; verify real formats against `instance_messaging.py:1781` docstring (`"telegram:user:1"`) and `routers/messages.py:391` (stamps `"api"`); unit asserts: every whitelisted prefix stamps the origin marker, every `internal_*` source does not | open → close at T8 |
-| 2 | Executor daemonization primitive — `subprocess.Popen(..., start_new_session=True)` ≡ double-fork+setsid on macOS/PyInstaller; no `BashProcessRegistry`-adjacent teardown reaches it | P2.2 T5 (daemonized launcher) | Sandbox run: child survives (a) tool-harness teardown and (b) daemon SIGKILL; static assertion the child is NOT registered in `BashProcessRegistry` (grep/static check in the unit pack) | open → close at T5 |
+| 1 | `USER_ORIGIN_SOURCES` prefix strings — exact external-channel source prefixes (`telegram:`/`discord:`/`slack:` forms) | P2.2 T8 (gate implementation) | Enumerate the ACTUAL adapter source prefixes from the `daemon/sources/` dispatch paths; verify real formats against `instance_messaging.py:1781` docstring (`"telegram:user:1"`) and `routers/messages.py:391` (stamps `"api"`); unit asserts: every whitelisted prefix stamps the origin marker, every `internal_*` source does not | CLOSED 2026-08-23 (Dispatch B) — frozen in `daemon/tools/upgrade_journal.py` (ADR-032); enumeration = api + telegram:/webhook:/whatsapp:/discord:/slack: |
+| 2 | Executor daemonization primitive — `subprocess.Popen(..., start_new_session=True)` ≡ double-fork+setsid on macOS/PyInstaller; no `BashProcessRegistry`-adjacent teardown reaches it | P2.2 T5 (daemonized launcher) | Sandbox run: child survives (a) tool-harness teardown and (b) daemon SIGKILL; static assertion the child is NOT registered in `BashProcessRegistry` (grep/static check in the unit pack) | CLOSED 2026-08-23 (Dispatch B sandbox drill — see the Dispatch-B report: child survived harness teardown + parent SIGKILL; grep clean) |
 | 3 | `watchdog-watcher.sh` extension surface — can read `.launcher-state` + `releases/state.json` (file-format stability) | P2.3 T8 (alerting wiring) — **HARD dependency on P2.1 T4: `releases/state.json` does not exist until the pipeline writes it** | Sandbox test: the watcher extension detects a halt/burst scenario from the real `.launcher-state` + journal files alone (no daemon) | open → close at T8 (P2.3) |
 | 4 | e2e-gate additivity — the post-graph trigger consumer stays OUTSIDE the graph | P2.2 PR review (per-PR, at merge time) | PR-time diff-based confirmation against the `ensure.md:44-53` trigger paths (`claim_pending_task`, `turn_transitions`, `reconcile_turn_mirror`, `job_processor`, `job_locks`): if the diff touches any of them, the FULL e2e release gate runs (`test-strategy.md` §2); the design intent is additive-only so the gate should NOT trigger | open → close per PR |
 
@@ -202,6 +242,30 @@ The 4 unverified assumptions of `architecture-recommendation.md` §7, wired to t
 - **ADR-033 · Halt-semantics ruling (deviation #3 — standing):** halt paths boot-and-continue on the degraded current BY DESIGN. Under launchd KeepAlive, blocking boot = crash-loop → burst-abort → dark env, strictly worse than degraded-but-known serving. The correct posture is: serve degraded current + journal `halt` events + notify; the dangerous direction is already guarded by the rollback_safe gate (and the M4 quarantine gate). Confirmed across all four rollback paths (promote auto-rollback, adopt_stale_txn, launcher sweep, manual rollback refusal).
 - **ADR-034 · Splice escape-discipline note (for P2.2 authors):** the Python journal module that P2.2 introduces MUST preserve the journal splice's escape discipline — a field divergence requires ≥2 occurrences and is only synthesizable by hand-editing; a single-occurrence assert is logged as P2.3 hardening (do NOT tighten the splice to single-occurrence semantics; the ≥2 discipline is the deliberate safety margin against false-positive torn writes).
 
+## P2.2 Fix Pass (2026-08-23) — reviewer MAJORs + minors; deviations & ledger
+
+**Context.** Independent reviewer REJECTED (narrow) on 2 unanimous MAJORs in the 3-factor LIVE gate: (MAJOR-1) `job_create` accepted a caller-supplied `source` verbatim for agent callers (the agent-override only fired on the exact default `"api"`), forging factor 2 with zero human involvement; (MAJOR-2) the nonce was not action-bound to `version` — an armed call naming a different version than the dry_run that minted the nonce passed all 3 factors. Both fixed in the gate + at the dispatch seam; live-safety (previously verified HOLDING twice) untouched.
+
+- **Gate hardening landed (code):** `job_create` forces `source=agent:<caller>` whenever `caller_agent_id` is set (mirrors `job_continue`); the gate enforces `issued_to_instance == current_instance_id` (new token `nonce-instance-mismatch` — also closes reviewer N2: the field was recorded at mint but never checked) and `(kind, env, target)` action-binding vs the armed call (new token `nonce-action-mismatch`, §4.2(b)/§4.3); unparseable `ttl_expires_at` fails CLOSED (M1); a non-silent dispatch with `message_source=None` now CLEARS the user-origin window via the real stamp site (M2 — stamp already treats None as non-whitelisted/clearing); `_json_escape` escapes ALL control chars < 0x20 as `\u00XX` (N4 — a raw control char inside a JSON string is invalid for every strict reader; an LLM-controlled `--reason` could TORN the journal); `restart.sh` requires an explicit target arg or `TARGET` env, exit 78 otherwise (M6 — the silent `${TARGET:-demo}` default aimed no-arg calls at the REAL demo install); tests HOME-isolated (M3 — the last real-home/live-path read removed from the suite).
+- **⚠ DEVIATION (M4, recorded per fix-pass instruction): live reads gate on SELF-MATCH ONLY.** `promotion-ladder.md` §5 U4 specifies self-match **+ explicit user approval per live-read request**; the implemented read tools (`release_info`, `upgrade_status`) enforce the self-match rule (a non-live-resident Ari is refused `env-self-match` outright; marker absent → reads fail-open per ADR-017) but do **NOT** implement the per-request approval step. **U4 implementation = P2.3 ladder scope.** Residual accepted this phase: a LIVE-resident Ari can read its own live observability (journal/releases/changelog state) without a per-request human approval — read-only, own-env only, no pipeline mutation. Noted in `promotion-ladder.md` U4 row.
+- **Ledger carry-overs (documented, deliberately NOT implemented in this pass):**
+  - **N1** — nonce refusal tokens could carry structured sub-tokens for telemetry; current flat strings stand.
+  - **N5** — armed-call output says "UPGRADE SCHEDULED"; "ARMED/DEFERRED" wording is clearer; cosmetic, deferred.
+  - **N6** — default-version pick uses lexical sort (`sorted()[-1]`), so 1.2.9 beats 1.2.10; explicit `version=` unaffected; deferred.
+  - **OBS residual (§4.2(a))** — single-host trust model: an agent WITH bash can POST to the unauthenticated local API and forge an `api`-source dispatch (the whitelist cannot distinguish a genuine web-UI human from a localhost forger). Documented residual of D-FA3.4 single-host model; closes only with an auth boundary on the local API (out of P2.2 scope).
+  - **T7–T9 e2e drills** — P2.3 DR-5 scope (see RESULTS/2026-08-23-p2-2-daemonized-executor-survival.md scope note).
+
+## P2.2 Tidy Fix cycle-3 (2026-08-23, review-council-p2p2-tidy) — MAJOR-1 fixed; nits → P2.3 carry-over
+
+**Context.** Reviewer cycle-3 on b9bee5cd (`refactor(p2.2): tidier fix-now`): ONE MAJOR only, everything else in b9bee5cd confirmed. **MAJOR-1**: the item-A twin-helper reroute was NOT behavior-neutral — the deleted local `_lock_run_id` accepted `Path | None` (explicit None → None guard); the journal original `journal_lock_run_id` takes `Path` only, so `upgrade_status` on dev (`install_dir=None`) returned `Error: upgrade_status failed: TypeError…` where the parent commit rendered the honest `journal: none (no staged install dir…)`. Missed by the 134-pack + 835-suite: no test exercised `upgrade_status` with `install_dir=None`. **Fixed journal-side (Option A, dispatcher-chosen)**: `upgrade_journal.lock_run_id` widened to `Path | None` + None guard — mirrors the conventionally None-hardened read helpers in upgrade_tools.py AND hardens the journal-side actor call sites (~:1393, ~:1706) which were only refusal-guarded; `upgrade_tools.py:1143` untouched. Regression: `test_no_install_dir_reads_render_honestly` (both read tools, mutation-lethal).
+
+- **P2.3 carry-over ledger (reviewer cycle-3 nits, deliberately NOT implemented in this pass):**
+  - **NIT-1** — cooldown conjunct domain pin; deferred.
+  - **NIT-2** — unwind-after-lock-release ordering swap; deferred.
+  - **NIT-3** — `restart.sh` help wants a `====` closer (banner-parity); cosmetic, deferred.
+  - **NIT-4** — `_launcher_state_values` raw render in one display path; cosmetic polish, deferred.
+  - **NIT-5** — **refactor rule**: twin-helper equivalence = signature + guards + call-site reachability, NOT body similarity; one behavior-diff assertion per deleted helper.
+
 ---
 
 ## Decision Index (Phase 2)
@@ -221,6 +285,10 @@ The 4 unverified assumptions of `architecture-recommendation.md` §7, wired to t
 | 026 | Promote retry policy | Manual re-trigger only this phase | rec |
 | 027 | Version smoke | `/livez` payload `version` == manifest `binary_version` (runtime truth) | rec |
 | 028 | Rollback-of-rollback | Manual, gated flip-forward; halt-for-human + user-chosen version | rec |
+| 029 | Executor seam | Daemonized executor (start_new_session) for restart + promote; exit-74 deferred; not in BashProcessRegistry | minted 2026-08-23 (P2.2 Dispatch B) |
+| 030 | Launcher in staged payload | launcher.sh travels with the release; swapped in the stopped window (D-FA4.1) | minted 2026-08-23 (P2.2 Dispatch B; implemented in P2.1) |
+| 031 | Privileged categories | PRIVILEGED_TOOL_CATEGORIES={system_upgrade} excluded from the empty-allow universe — opt-in only (R-SR16) | minted 2026-08-23 (P2.2; implemented in Dispatch A) |
+| 032 | USER_ORIGIN_SOURCES | Whitelist {api + telegram:/webhook:/whatsapp:/discord:/slack:} gates the per-turn user-origin window; everything else (internal_*, scheduler, agent:*) clears it — structural anti-forgery for the live gate | minted 2026-08-23 (P2.2 Dispatch B) |
 | — (ruling) | Cooldown × sweep (D-FA4.2 adjudication) | Cooldown arms the next **ENTRY** only (promotes refused inside it); the ADR-012 sweep / an in-flight rollback **NEVER refuses on cap or cooldown** — refusing the recovery strands the env on an orphaned flip; rollback-cap 3/24h is entry-side enforcement | adjudicated (architecture-recommendation.md D-FA4.2) |
 | 033 | Halt semantics on degraded current (deviation #3) | Halt paths boot-and-continue BY DESIGN; serve degraded current + journal `halt` events + notify (KeepAlive crash-loop → burst-abort → dark env strictly worse); dangerous direction guarded by rollback_safe + M4 quarantine gates; confirmed across all four rollback paths (promote auto-rollback, adopt_stale_txn, launcher sweep, manual rollback refusal) | standing ruling 2026-08-23 |
 | 034 | Splice escape discipline (P2.2 journal module) | Python journal module MUST preserve ≥2-occurrence + hand-edit-only synthesis for field divergence; single-occurrence assert logged as P2.3 hardening — do NOT tighten to single-occurrence semantics (≥2 is the deliberate safety margin against false-positive torn writes) | standing ruling 2026-08-23 |

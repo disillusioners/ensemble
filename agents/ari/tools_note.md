@@ -351,3 +351,69 @@ a completed job's instance.
 If a job spawned more than 20 instances (deep delegation trees), `job_messages`
 refuses to run and points to `job_tree`. This is intentional — reading
 checkpoints for 20+ instances is too slow.
+
+---
+
+## System Upgrade / Restart Tools (P2.2)
+
+Four tools in the `system_upgrade` category control the staged
+release/upgrade pipeline of the environment I run in. `release_info` and
+`upgrade_status` are read-only. `system_restart` and `system_upgrade` are
+ACTOR tools — they change the system, under a strict confirmation
+protocol.
+
+### Which Tool to Use
+
+- **`release_info`** — snapshot: current release, staged releases, journal
+  (in-flight txn, rollback cap, cooldown, quarantine), lock state, my own
+  /livez + /readyz. Answer "what version are we on / am I safe to
+  upgrade?" with this first.
+- **`upgrade_status(run_id=...)`** — poll ONE run (the run_id an actor
+  tool returned). Phase transitions while in flight; terminal outcome
+  (committed / rolled-back / halted-for-human) readable even after a
+  restart — the journal survives process death.
+- **`system_restart`** — schedule an intentional restart of this
+  environment. Returns `RESTART SCHEDULED run_id=...` BEFORE anything
+  stops; the restart executes at end-of-turn. Never blocks.
+- **`system_upgrade`** — arm the promote pipeline to a staged version.
+  Returns `UPGRADE SCHEDULED run_id=...` immediately; the pipeline runs
+  after my turn (it may restart the daemon I run on — that is normal).
+
+### The Confirmation Protocol (ACTOR tools)
+
+1. **Dry-run first, always.** Both actor tools default to
+   `dry_run=true`. The first call PLANS and mutates nothing. A
+   hallucinated parameter set can never execute a real action on the
+   first call.
+2. **Non-live targets (demo/dev/sandbox)**: no human confirmation needed —
+   after showing the dry-run plan, call again with `dry_run=false` to
+   arm.
+3. **Live targets**: `system_upgrade` requires a **3-factor runtime
+   gate** I cannot fabricate — (a) `user_confirmed=true` param,
+   (b) the turn must be triggered by a genuine user message, and
+   (c) the user must echo the **nonce** the dry-run issued
+   (`CONFIRM-XXXXXXXX`, single-use, 15min TTL). My flow: dry-run →
+   relay the nonce to the user verbatim → the user replies with the
+   nonce in their own message → only then call with
+   `user_confirmed=true, nonce="..."`. Passing `user_confirmed=true`
+   myself without the user's nonce reply WILL be refused — that is the
+   gate working, not a bug.
+4. **Live restart is refused outright** — no gate, no override. I relay
+   the manual procedure message to the user instead.
+5. **Relay refusals verbatim, never auto-retry.** Every refusal is a
+   structured `Error: ... REFUSED — reason=<token>: ...` string. I report
+   it to the user as-is. I never decide go/rollback on my own and never
+   re-invoke an actor tool after a refusal without a new user
+   instruction.
+
+### Gotchas
+
+- **`target_env` must be my own environment** (the staged
+  `ENSEMBLE_SELF_ENV` marker). Cross-env calls are refused
+  (`env-self-match`) — by construction, not convention.
+- **Both actor tools return before acting.** After `SCHEDULED`, the
+  outcome arrives via `upgrade_status(run_id=...)` — possibly after a
+  restart, when the user asks "did it work?".
+- **Refusal ≠ failure of the tool.** `pipeline-busy`, `cooldown-active`,
+  `rollback-cap-exceeded` are the anti-flapping interlocks doing their
+  job; relay them, wait, or ask the user.

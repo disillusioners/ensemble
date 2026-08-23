@@ -973,6 +973,32 @@ class InstanceMessagingService:
             if _term_ok:
                 self._manager.clear_watchover_terminate_requested(instance_id)
 
+    async def _drain_pending_system_executions(self, instance_id: str) -> None:
+        """Drain the deferred system-execution marker (P2.2 Dispatch B, D-FA1.4).
+
+        Mirrors the C2-safe deferred pattern of
+        ``_drain_deferred_watchover_terminate`` above: the actor tools
+        (``system_restart`` / ``system_upgrade``) set an in-memory marker at
+        arm time (the DURABLE state is the journal ``pending_op``); this
+        post-graph completion path — running OUTSIDE the task identity
+        guard, AFTER ``_graph_tasks`` was popped — pops the marker and fires
+        the daemonized executor at EXACT turn-end. ``asyncio.shield``'d so a
+        transient cancel during the spawn cannot corrupt anything; never
+        raises (a failed drain leaves the journal pending_op as the
+        durable fallback — bounded waiter / boot sweep).
+        """
+        marker = getattr(self._manager, "_pending_system_executions", None)
+        drain = getattr(self._manager, "drain_pending_system_execution", None)
+        if not isinstance(marker, dict) or instance_id not in marker:
+            return
+        try:
+            await asyncio.shield(drain(instance_id))
+        except Exception as exc:
+            logger.warning(
+                f"[send_message] deferred system-execution drain "
+                f"failed for {instance_id[:8]}...: {type(exc).__name__}: {exc}"
+            )
+
     async def send_message(self, instance_id: str, message: str) -> "MessageResult":
         """Send a message to an instance and get the response.
 
@@ -1115,6 +1141,12 @@ class InstanceMessagingService:
             # question_pause pattern). See the helper docstring for the full
             # contract (C2 torn-state + H2 retry-on-failure semantics).
             await self._drain_deferred_watchover_terminate(instance_id)
+
+            # P2.2 Dispatch B: deferred system-execution drain (D-FA1.4).
+            # The marker set by the actor tools fires the daemonized
+            # executor at exact turn-end (additive consumer of this
+            # post-graph path; shielded inside the helper; never raises).
+            await self._drain_pending_system_executions(instance_id)
 
             # Always unregister the task, but only if we're still the registered task
             # (handles race condition where new execution starts before our finally runs)
@@ -3738,6 +3770,12 @@ class InstanceMessagingService:
             # question_pause pattern). See the helper docstring for the full
             # contract (C2 torn-state + H2 retry-on-failure semantics).
             await self._drain_deferred_watchover_terminate(instance_id)
+
+            # P2.2 Dispatch B: deferred system-execution drain (D-FA1.4).
+            # The marker set by the actor tools fires the daemonized
+            # executor at exact turn-end (additive consumer of this
+            # post-graph path; shielded inside the helper; never raises).
+            await self._drain_pending_system_executions(instance_id)
 
             # Always unregister the task, but only if we're still the registered task
             # (handles race condition where new execution starts before our finally runs)
