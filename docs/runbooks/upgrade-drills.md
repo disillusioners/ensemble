@@ -51,6 +51,14 @@ DR-0 baseline for this batch: live listener pid 31150 (ppid 31130), port `<live-
 
 **0.6 String discipline (live dir ⊂ demo dir).** The live dir name is a **substring of the demo dir name** (`~/agents-ensemble` matches inside `~/agents-ensemble-demo`). Any grep/pattern that must match the live dir — and only it — is **anchored with a trailing slash or end-anchor** (`~/agents-ensemble/`), never a bare prefix. Unanchored live-path patterns false-match the demo install.
 
+**0.7 Drill-harness executor traps (banked from P2.3 friction — binding for every drill executor):**
+
+1. **FL-7 — process groups: `nohup` without `setsid` stays in the spawner's process group.** A TERM sent to a wrapper's group (e.g. a `proc_stop` of a promote/rollback wrapper) kills EVERYTHING in-group — including the freshly-committed daemon tree (B6b r1→r2: TERM'd wrapper group → daemon tree killed, demo dark ≈2m08s; graceful 143, journal durable). **Always `$!`-capture the real child pid at spawn and act on THAT pid only; never TERM a wrapper that spawned nohup'd daemons — let wrappers exit naturally (file-redirect, no `tee`).**
+2. **FL-8 — `pgrep -f` matches wrapper cmdlines.** The wrapper's command line contains the script text, so `pgrep -f <script>` finds the wrapper (and kills it) instead of the child. **Match by captured pid only** (`$!` at spawn); never by `pgrep -f` of a script path.
+3. **FL-21 — retention with `previous=null` evicts ALL prior releases.** On a fresh-anchored journal (`previous=null`), the next commit's keep-3 retention can evict the entire prior set INCLUDING the just-superseded release — leaving **no on-disk rollback target**. **Per-cycle rollback-target check step before any rollback-dependent assertion:** journal `previous` non-null AND that release present on disk.
+4. **FL-29 — the stage tag-guard requires a tagged HEAD.** After an evidence commit lands, the release tag sits ≥1 commit behind HEAD and re-staging REFUSES (`git describe --tags --exact-match HEAD` ≠ VERSION). **Detach-to-tag dance:** `git checkout <tag>` (detached HEAD; dirty doc files carry if their blobs match) → stage → `git checkout <branch>` — transient, restore the branch IMMEDIATELY; no tag moved, no new version minted (staleness rule).
+5. **Doc-edit invariants for this runbook and drill evidence:** the P7 verbatim note stays byte-untouched (T2; re-grep after any edit); **zero live-port literals** anywhere authored — the live port is always `<live-port>` (or *live port* in prose); torn-write discipline — **one edit per message/command, then grep the edit marker** before the next; never batch-mutate evidence files.
+
 ---
 
 ## 1. Sandbox conventions (DR-2 and any sandbox leg)
@@ -340,6 +348,22 @@ bash scripts/upgrade/status.sh demo          # 4. VERIFY: counters 24h=0, cooldo
 
 Notes: journal `current`/`previous` re-anchor on the next **commit**; until then `status.sh` resolves the `current` symlink independently (readlink + manifest verify) — verify the daemon's serving version stayed put across the reset. The archive file is a plain file in `releases/` — invisible to the release inventory glob; keep it as audit evidence. **Verify counters zeroed + halt cleared BEFORE any clean cycles.**
 
+### DR-4 composition constraints (F-B6b-1/2 — banked from the B6b plan-blockers + the Option-A continue-batch)
+
+**Constraint 1 — rollback legs REQUIRE a non-null `previous` (F-B6b-1).** A from-scratch journal (post-R3.2 reset) has `previous=null`, and the auto-rollback path (promote 8b) gates on `previous` **FIRST**: a null `previous` takes the **halt(no-previous)** branch — the daemon rests DEGRADED on the failed target; no repoint, no quarantine, no counter, no rollback evidence. Therefore: **before any rollback leg, execute TWO re-anchor clean commits** (commit 1 anchors `current`; commit 2 anchors `previous`) — both known-good versions, both full gates + 300s soak. This is exactly the Option-A continue-batch shape (B6b §12: dr4r1 → dr4r2, `previous=dr4r1` anchored ≠ null, then legs dr4b1/b2/b3 ran as designed).
+
+**Constraint 2 — under an armed cap, the sweep induction is the `rollback.sh` orphan, NOT a killed promote (F-B6b-2).** Once the cap is armed (`count=3`), `promote_entry_check` refuses entry (`reason=cap`, exit 78) **before** `journal_open_txn` — a refused promote flips nothing, so there is no post-flip moment to SIGKILL at; the promote-path orphan induction is **unexecutable after (c)** in any ordering. The cap-legal creation path is `rollback.sh` (the D-FA4.2 recovery lane — exempt from cap/cooldown entry refusal): stage a throwaway target, run `rollback.sh demo --to <target>`, SIGKILL it **post-`journal_mark_flipped`** — leaving an orphaned `in_flight{kind:rollback, flipped:true}` — then sleep past `SWEEP_STALE_S` and restart; the launcher sweep converges it (`sweep_rollback`, counter increments past the cap, never refused). **Kill-target discipline (FL-8): capture the pid at spawn (`$!`) and kill THAT pid; NEVER `pgrep -f <script>` — the wrapper's cmdline contains the script text and matches first (B6b: the SIGKILL hit the wrapper; the real rollback.sh completed normally).**
+
+**DR-4 verdict-token table (verbatim tokens as observed in B6b — assert these exact strings):**
+
+| Condition | Journal history event (verbatim token) | Exit / shell token |
+|---|---|---|
+| Clean promote (leg a) / re-anchor commit | `commit` — "promote \<v\> committed (gate+soak green; previous=\<p\>)" | exit 0 |
+| Induced-failure rollback (legs b/c) | `rollback` + `quarantine` — "auto-rollback \<v\> → \<p\> (gate fail: …; re-gate green)" / "\<v\> quarantined after gate failure (skipped by future promotes)" | exit 1 |
+| Cap armed at rollback #3 | `halt` — "rollback cap 3/24h reached (count=3) — halt-for-human; promotes refused until the window resets" | exit 1 |
+| Entry refused at count≥3 (4th promote) | `refusal` — `reason=cap` (P2.3 refusal journaling) | exit 78, "HALT-FOR-HUMAN: rollback cap 3/24h reached (count=3)"; tool layer surfaces `rollback-cap-exceeded` |
+| Stale in-flight converged (leg d) | `sweep_rollback` (+ `halt` re-armed at count≥3) | — |
+
 ### Evidence to capture (DR-4)
 
 Per leg: command transcript with exit codes · journal `history` JSON (per-leg event: `commit` / `rollback`+quarantine+cooldown / `halt` / `sweep_rollback`) · launcher log excerpts · SSE alert capture (leg c) · **every `ENSEMBLE_ROLLBACK_SAFE` override use** · SIGKILL timestamp + orphaned-flip proof (leg d) · **the R3.2 reset transcript + post-reset journal dump** · live pid checkpoints per leg.
@@ -364,6 +388,8 @@ R3.2 reset executed + verified (counters zeroed, halt cleared, archive kept) · 
 
 **Restart-semantics accounting note (design constraint on this drill — from `test-strategy.md` §3):** an **in-flight tool call at stop is LOST** (turn resumes from the node boundary); tasks stay `PROCESSING` on crash (not `FAILED`); `StaleTaskRecovery` sweeps stale `RUNNING` >15min; MessageQueue is EPHEMERAL (`clear_all(preserve_in_flight=True)` at startup); ReportDeliveryRecovery is periodic-only (300s interval / 10-min age bound / batch 100, **no boot sweep**). **Therefore: never assert instant delivery of anything queued pre-stop — assert delivery within the recovery window (worst case: next 300s recovery tick + 10-min age bound).** The known Task↔JobItem reconciliation gap is pre-existing and OUT of P2 scope — if tripped, document, do not fix.
 
+**Read-pair refusal journaling — FL-24 known behavior, not a gap.** Read-pair (`release_info` / `upgrade_status`) env refusals — e.g. `target_env=live` hitting `env-self-match` via `_check_target_env` — are **transcript-only by design**: the T8 journal rider rides `_refusal()` (actor-tool paths) only, and the alert taxonomy is **terminal-class** (halt / actor-refusal / rollback+quarantine). A per-call validation answer ("you asked about the wrong env") is not a terminal pipeline event — **no journal event and no SSE alert is expected, produced, or missing** for read-pair refusals; do not count journal/SSE refusal events assuming read-pair inclusion (B7 L-3; friction FL-24).
+
 ### Expected outputs
 
 - `system_restart` transcript: stop→respawn→`/livez` ≤60s, and the tool result is the **structured terminal state delivered post-restart** — never an intermediate.
@@ -383,15 +409,20 @@ Demo green assertion (`/readyz` 200 `reasons: []`) · no `pending_op` left in th
 
 ## 7. Cumulative N-cycle ledger (human-copy table)
 
-The gate measurement for S3 → live eligibility (ADR-021, N=3 user-ruled). **The machine-checkable source of truth is the demo journal (`releases/state.json`) + the ledger checker (`scripts/upgrade/ledger_check.py` + pack `test/packs/drill_ledger_unit_test.sh` — the P2.3 B2 batch); this table is the human-auditable copy, DERIVED from checker output — when they disagree, the journal wins.** Per-cycle RESULTS files: `.agents/tester/RESULTS/2026-MM-DD-selfrestart-phase2-clean-cycle-{n}-{env}.md`.
+The gate measurement for S3 → live eligibility (ADR-021, N=3 user-ruled). **The machine-checkable source of truth is the demo journal (`releases/state.json`) + the ledger checker (`scripts/upgrade/ledger_check.py` + pack `test/packs/drill_ledger_unit_test.sh` — the P2.3 B2 batch); this table is the human-auditable copy, DERIVED from checker output — when they disagree, the journal wins.** Per-cycle evidence: the per-batch drill RESULTS files (`.agents/tester/RESULTS/2026-08-23-p2-3-*.md`) — each cycle row below links its file directly.
 
 **Cycle verdicts are judged against the CANONICAL five clauses of `test-strategy.md` §4.1** (clause 1 ari-driven upgrade cycle; clause 2 restart cycle clean; clause 3 no readiness degradation outside drills; clause 4 no unintended work loss; clause 5 zero live contact). A cycle is clean iff all five pass. **Staleness:** any release/manifest change mid-count resets the count to 0 — the N gate must be satisfied by cycles all targeting the SAME release version. Failed cycles do NOT auto-reset the count; record them with cause.
 
 | Cycle # | Date | Version | Journal txn id | Verdict (§4.1 clauses 1–5) | Evidence link |
 |---|---|---|---|---|---|
-| *(none recorded yet — table populated from `drill_ledger_unit_test` checker output as cycles complete)* | | | | | |
+| (rehearsal) | 2026-08-23 | v0.10.7-p2.3-b65 | 2026-08-23T21:39:13Z | **SUPERSEDED** (rehearsal — script-driven, not ari-driven; was CLEAN-with-flag; superseded by the version change — the cycle-#1 ruling precedent: staleness reset at the version boundary) | `2026-08-23-p2-3-b65-promote-t8-recapture.md` |
+| #1 | 2026-08-23 | v0.10.8-p2.3-b7cyc1 | 2026-08-23T22:06:58Z | **CLEAN** (c1–c7; ari-driven, in-journal `armed_by_instance` provenance) — B7 | `2026-08-23-p2-3-b7-dr5-ari-e2e.md` |
+| #2 | 2026-08-23 | v0.10.8-p2.3-b7cyc1 | 2026-08-23T22:33:21Z | **CLEAN** (c1–c7) — B8a §4.4 | `2026-08-23-p2-3-b8a-cycles23-ledger3.md` |
+| #3 | 2026-08-23 | v0.10.8-p2.3-b7cyc1 | 2026-08-23T22:42:47Z | **CLEAN** (c1–c7) — B8a §5.4 | `2026-08-23-p2-3-b8a-cycles23-ledger3.md` |
 
-**Gate rule (see §9 for the hard block):** promotion out of the demo rung requires this ledger showing **3 consecutive clean cycles with zero clause violations** — **AND** F2 closed. F2-open ⇒ hard-blocked regardless of cycle count.
+**Ledger status: COMPLETE — 3 consecutive CLEAN @ v0.10.8-p2.3-b7cyc1 (txns 22:06:58Z / 22:33:21Z / 22:42:47Z); consecutive clean = 3 (need 3, ADR-021 N=3).** Checker-derived (B8a §8 verbatim, journal md5 at capture `3817b176…`, 12 events); the checker (`ledger_check.py`) is the machine source of truth and this table the human copy — journal wins on disagreement.
+
+**Gate rule (see §9 for the hard block) — verdict tokens are pack-authoritative (`ledger_check.py`; FL-12 closed, no prose drift):** promotion out of the demo rung requires this ledger showing **3 consecutive clean cycles with zero clause violations** (satisfied: 3 @ b7cyc1) **AND** F2 closed. Verdict tokens exactly as the checker emits them: **f2-closed + count≥3 ⇒ `ELIGIBLE`** · **f2-open ⇒ `BLOCKED`** (§9 hard-block, regardless of cycle count) · **f2-closed + count<3 ⇒ `NOT-READY`**. Current honest state: **ELIGIBLE-pending-F2** — the count axis is satisfied, the F2 axis is open (§9), so the operative verdict today is **BLOCKED (f2-open)**; both states proven on the completed real ledger (B8a §8, both `--f2-state` runs verbatim).
 
 ---
 
@@ -425,6 +456,14 @@ Live `system_restart` via tools is **refused outright** this initiative (ADR-016
 - **Abort path:** launcher burst-abort posture (exit-1 class, >5 crashes/10min) → the daemon stays down by design; watchdog-watcher notifies (ADR-025(b), if the user enabled U6) → human decides. Halt-for-human conditions (rollback cap) per §2 of the ladder.
 
 **U-marker map (promotion-ladder.md §5):** U1 live promote/STAGE confirmations (journal `user_confirmed_by/at`) · U2 post-promote verification (read-only, per-action approved) · U3 live rollback (per-action) · U4 live reads by agents (**fenced** to the loopback-API-auth/F2 follow-up workstream — see `decisions.md` P2.3 Gate Rulings & Fences) · U5 tool-path live gate (3-factor, refusal-only for restart) · U6 watchdog-watcher on live (user-approved install/enable).
+
+### 8.4 Frozen-install executor-scripts provisioning — FL-23 design (a), implementation FENCED pre-live (user-ruled 2026-08-23)
+
+**(i) Spec (design (a) — self-contained releases).** `stage.sh` bundles `scripts/upgrade/` into the release (`releases/<ver>/scripts/upgrade/`). Consequences: releases are **self-contained** (restart/upgrade executors travel with the payload they serve); the bundled scripts are **version-pinned to the binary they serve** (a release's executor scripts and its binary are one unit — no cross-version script/binary mixing); **rollback restores the matching scripts** (the previous release's own bundle is what rollback re-gates, so the recovery path never runs newer scripts against an older binary). Resolution order for the executor scripts dir: **explicit env override (`ENSEMBLE_UPGRADE_SCRIPTS_DIR`) → release-local bundle → repo (`scripts/upgrade/`, dev only)**. Dev keeps the repo path; demo/live resolve release-local; the env override remains the ops escape hatch (disclosed use only — see (iii)).
+
+**(ii) PRE-LIVE CHECKLIST item (fenced workstream, user-ruled 2026-08-23 — the gate gets STRICTER pre-live, not looser):** before live eligibility may be asserted on the bundled mechanism, ALL of: (1) the bundling implementation lands (stage.sh change + resolution chain); (2) ONE script-driven promote validates the bundled-release path end-to-end on demo; (3) **3 fresh ari-driven cycles on the bundled release are required before live eligibility** — the qualifying cycles must run on the mechanism being certified. Rationale (staleness rule, §7): a mid-phase mechanism promote would reset the banked ledger — the N-gate must be satisfied by cycles exercising the FINAL mechanism, so the change must land inside the qualifying window, not between banked cycles and promotion.
+
+**(iii) Provenance note for the banked cycles.** Cycles #1–#3 (§7) ran with the **disclosed `ENSEMBLE_UPGRADE_SCRIPTS_DIR` env-var provisioning**: a one-line `.env` append per cycle (value recorded in each RESULTS file), the var live during the armed call, `.env` restored **bit-exact** after each cycle's evidence capture (`cmp` + md5 proofs — B7 §2 / B8a §2). The mechanism is identical across all three banked cycles (consistent evidence within the ledger); design (a) supersedes the env-var path for future releases per the checklist above. `decisions.md` item 7 (Gate Rulings & Fences) records the ruling.
 
 ---
 
