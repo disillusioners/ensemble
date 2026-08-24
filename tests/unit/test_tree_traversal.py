@@ -337,7 +337,362 @@ class TestTreeTraversalIntegration:
         _create_instance(repo, "bottom", parent_id="left")
         # Add second path - this would create duplicate in hierarchy but primary key prevents it
         # So we test that each child has exactly one parent
-        
+
         tree_ids = repo.get_tree_ids("root")
         assert len(tree_ids) == 4  # root, left, right, bottom
         assert set(tree_ids) == {"root", "left", "right", "bottom"}
+
+
+# =============================================================================
+# P1 (phase1-plan.md T1) — get_tree_ids_permanent
+# =============================================================================
+
+class TestGetTreeIdsPermanent:
+    """P1 (phase1-plan.md T1): permanent-lineage enumeration via
+    ``instances.parent_id``.
+
+    These tests verify the new helper that backs the kill-switch wrapper
+    :meth:`SQLModelInstanceRepository.get_cascade_tree_ids`. The wrapper
+    defaults to this helper (mode ``permanent``); ``hierarchy`` mode
+    falls back to the transient ``get_tree_ids``.
+
+    Critical property: ``get_tree_ids_permanent`` is independent of the
+    ``instance_hierarchy`` working set. Rows deleted on child completion
+    (the B1 / B4 root cause) do NOT affect the snapshot — every
+    descendant whose ``parent_id`` chain resolves to the root is
+    enumerated regardless of churn.
+    """
+
+    def test_returns_self_for_single_node(self, repo: SQLModelInstanceRepository):
+        """Single node (no parent, no children) returns ``[self]``."""
+        _create_instance(repo, "lonely")
+        assert repo.get_tree_ids_permanent("lonely") == ["lonely"]
+
+    def test_returns_empty_for_nonexistent_root(self, repo: SQLModelInstanceRepository):
+        """Missing root returns ``[]`` — matches ``get_tree_ids`` contract."""
+        assert repo.get_tree_ids_permanent("nope-not-here") == []
+
+    def test_three_level_tree_returns_all_descendants(
+        self, repo: SQLModelInstanceRepository
+    ):
+        """Three-level chain: root → child → grandchild returns all three."""
+        _create_instance(repo, "root")
+        _create_instance(repo, "child", parent_id="root")
+        _create_instance(repo, "grandchild", parent_id="child")
+
+        result = repo.get_tree_ids_permanent("root")
+        assert set(result) == {"root", "child", "grandchild"}
+        assert len(result) == 3
+
+    def test_wide_tree_returns_all_siblings(
+        self, repo: SQLModelInstanceRepository
+    ):
+        """Wide tree: root + N children + M grandchildren = N+M+1."""
+        _create_instance(repo, "root")
+        for i in range(5):
+            _create_instance(repo, f"child-{i}", parent_id="root")
+            for j in range(3):
+                _create_instance(repo, f"gc-{i}-{j}", parent_id=f"child-{i}")
+        result = repo.get_tree_ids_permanent("root")
+        # root + 5 children + 15 grandchildren = 21
+        assert len(result) == 21
+        assert "root" in result
+
+    def test_sees_completed_descendants_via_parent_id(
+        self, repo: SQLModelInstanceRepository
+    ):
+        """B1 regression guard: a COMPLETED child (hierarchy row deleted)
+        is STILL enumerated via its permanent ``parent_id``.
+
+        This is the B1 / B4 root cause: cascade enumeration via the
+        transient ``instance_hierarchy`` table silently misses
+        descendants whose hierarchy rows were deleted on completion.
+        ``get_tree_ids_permanent`` walks ``instances.parent_id`` instead
+        and is immune to the deletion.
+        """
+        from daemon.repositories.instance.models import InstanceStatus
+
+        _create_instance(repo, "root")
+        child = _create_instance(repo, "child", parent_id="root")
+        grandchild = _create_instance(repo, "grandchild", parent_id="child")
+
+        # Mark child + grandchild as COMPLETED (terminal). The cascade
+        # bug scenario also deletes the ``instance_hierarchy`` rows on
+        # completion, mirroring what production does.
+        child.status = InstanceStatus.COMPLETED.value
+        grandchild.status = InstanceStatus.COMPLETED.value
+        with SQLModelSession(repo.engine) as session:
+            session.add(child)
+            session.add(grandchild)
+            session.commit()
+
+        # Force-delete the hierarchy rows that the bug-leaving production
+        # code would have removed at child completion (see
+        # ``child_reports.py:922`` / ``error_reporting.py:233`` /
+        # ``_terminate_instance_db_sync:3324-3333``).
+        with SQLModelSession(repo.engine) as session:
+            from sqlalchemy import delete as sql_delete
+            session.exec(sql_delete(InstanceHierarchy).where(
+                InstanceHierarchy.parent_id.in_(["root", "child"])
+            ))
+            session.commit()
+
+        # Sanity: the transient ``get_tree_ids`` now MISSES the
+        # completed descendants — this is the exact B1/B4 symptom.
+        transient = repo.get_tree_ids("root")
+        assert transient == ["root"], (
+            f"transient get_tree_ids should miss completed descendants; "
+            f"got {transient}"
+        )
+
+        # The permanent enumerator still sees the full tree.
+        permanent = repo.get_tree_ids_permanent("root")
+        assert set(permanent) == {"root", "child", "grandchild"}, (
+            f"get_tree_ids_permanent must see churned descendants via "
+            f"parent_id; got {permanent}"
+        )
+
+    def test_traversal_cap_silently_truncates_at_depth_256(
+        self, repo: SQLModelInstanceRepository, caplog
+    ):
+        """C12 — tree at or beyond the cap is silently truncated, one-time WARN.
+
+        Build a chain of 258 nodes (root at depth 0, deepest at depth 257)
+        so the depth-257 frontier is non-empty when the loop exhausts.
+        Expected: ``visited`` has 257 entries (root + 256 descendants), and
+        exactly one WARN is logged.
+        """
+        import logging
+        caplog.set_level(logging.WARNING, logger="daemon.repositories.instance.repository")
+
+        # 258 nodes in a chain: root → n1 → n2 → ... → n257
+        _create_instance(repo, "root")
+        prev_id = "root"
+        for i in range(1, 258):
+            cur_id = f"n{i}"
+            _create_instance(repo, cur_id, parent_id=prev_id)
+            prev_id = cur_id
+
+        result = repo.get_tree_ids_permanent("root")
+
+        # Cap is 256: visited has root + 256 descendants = 257 entries.
+        assert len(result) == 257, (
+            f"expected 257 visited nodes at cap; got {len(result)}"
+        )
+        # Root is always first.
+        assert result[0] == "root"
+        # Deepest visited node is at depth 256 (n256). n257 is dropped.
+        assert "n256" in result
+        assert "n257" not in result
+
+        # One-time warning logged.
+        warning_records = [
+            r for r in caplog.records
+            if "traversal depth cap" in r.message and r.levelno == logging.WARNING
+        ]
+        assert len(warning_records) == 1, (
+            f"expected exactly one traversal-cap WARN; got {len(warning_records)}"
+        )
+
+    def test_sees_revived_descendants_via_parent_id(
+        self, repo: SQLModelInstanceRepository
+    ):
+        """Revive semantics guard — a revived child (no hierarchy row
+        re-inserted) is still enumerated.
+
+        Revive never re-inserts ``instance_hierarchy`` rows (the writers
+        are at ``repository.py:206`` and ``instance_lifecycle.py:3450``,
+        neither runs on revive). A revived instance is invisible to
+        ``instance_hierarchy`` readers but its ``parent_id`` survives in
+        ``instances``, so ``get_tree_ids_permanent`` sees it.
+        """
+        _create_instance(repo, "root")
+        child = _create_instance(repo, "child", parent_id="root")
+
+        # Simulate revive: no hierarchy row exists for the child (the
+        # original hierarchy row was deleted on the child's prior
+        # completion, never re-inserted on revive).
+        with SQLModelSession(repo.engine) as session:
+            from sqlalchemy import delete as sql_delete
+            session.exec(sql_delete(InstanceHierarchy).where(
+                InstanceHierarchy.parent_id == "root"
+            ))
+            session.commit()
+
+        # Transient enumeration: misses the revived child.
+        transient = repo.get_tree_ids("root")
+        assert transient == ["root"]
+
+        # Permanent: still sees the revived child.
+        permanent = repo.get_tree_ids_permanent("root")
+        assert set(permanent) == {"root", "child"}
+
+    def test_cycle_self_parent_is_guarded_by_depth_cap(
+        self, repo: SQLModelInstanceRepository
+    ):
+        """Cycle guard — ``_MAX_TRAVERSAL_DEPTH=256`` + visited set
+        prevents infinite loops from a self-parenting node.
+
+        Self-parenting makes ``parent_id == instance_id``. The visited
+        set prevents the cycle from looping; the depth cap is the
+        ultimate fallback if the visited set is ever bypassed.
+        """
+        from daemon.repositories.instance.models import InstanceStatus
+
+        _create_instance(repo, "root")
+        # A node that points to itself.
+        cyclic = _create_instance(repo, "cyclic")
+        cyclic.status = InstanceStatus.RUNNING.value
+        cyclic.parent_id = "cyclic"  # self-parent — creates a cycle
+        with SQLModelSession(repo.engine) as session:
+            session.add(cyclic)
+            session.commit()
+
+        # Must terminate (depth cap + visited set); not hang.
+        result = repo.get_tree_ids_permanent("root")
+        assert "root" in result
+        # cyclic is a separate node from root; root's BFS doesn't reach
+        # it because root.parent_id is None. So `cyclic` is not in
+        # root's tree. This test just ensures no infinite loop.
+        assert isinstance(result, list)
+
+
+# =============================================================================
+# P1 (phase1-plan.md T1) — get_cascade_tree_ids wrapper
+# =============================================================================
+
+class TestGetCascadeTreeIds:
+    """P1 (phase1-plan.md T1, C4): kill-switch wrapper that routes
+    cascades to either ``get_tree_ids_permanent`` (default ``permanent``)
+    or the legacy ``get_tree_ids`` (``hierarchy`` env).
+
+    Env-driven mode is cached on first call (restart-required semantics).
+    The boot-time INFO log is exercised separately in
+    ``test_cascade_lineage_boot_log`` (see below) so the wrapper
+    contract is unit-testable without forking the daemon.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_mode_cache(self, monkeypatch):
+        """Reset the module-level ``_CASCADE_LINEAGE_MODE`` cache and
+        the ``_CASCADE_LINEAGE_BOOT_LOG_EMITTED`` flag so each test
+        re-reads the env cleanly (the cache is otherwise a one-shot
+        process-wide singleton).
+        """
+        from daemon.repositories.instance import repository as repo_mod
+        monkeypatch.setattr(repo_mod, "_CASCADE_LINEAGE_MODE", None)
+        monkeypatch.setattr(
+            repo_mod, "_CASCADE_LINEAGE_BOOT_LOG_EMITTED", False
+        )
+
+    def test_default_mode_routes_to_permanent(
+        self, repo: SQLModelInstanceRepository, monkeypatch
+    ):
+        """Default mode (``permanent``) routes to ``get_tree_ids_permanent``."""
+        monkeypatch.delenv("ENSEMBLE_CASCADE_LINEAGE", raising=False)
+        _create_instance(repo, "root")
+        _create_instance(repo, "child", parent_id="root")
+        result = repo.get_cascade_tree_ids("root")
+        assert set(result) == {"root", "child"}
+
+    def test_hierarchy_mode_routes_to_legacy(
+        self, repo: SQLModelInstanceRepository, monkeypatch
+    ):
+        """``hierarchy`` env routes to legacy ``get_tree_ids``.
+
+        With a transient ``instance_hierarchy`` row present (the
+        ``create()`` call inserts one for any non-None ``parent_id``),
+        both modes return the same ids — proving the wrapper's
+        mode-switching surface. The semantic difference is exercised
+        in :class:`TestGetTreeIdsPermanent`.
+        """
+        monkeypatch.setenv("ENSEMBLE_CASCADE_LINEAGE", "hierarchy")
+
+        _create_instance(repo, "root")
+        _create_instance(repo, "child", parent_id="root")
+
+        result = repo.get_cascade_tree_ids("root")
+        assert set(result) == {"root", "child"}
+
+    def test_unknown_mode_warns_and_falls_back_to_permanent(
+        self, repo: SQLModelInstanceRepository, monkeypatch, caplog
+    ):
+        """Unknown ``ENSEMBLE_CASCADE_LINEAGE`` value → WARN + ``permanent`` fallback."""
+        import logging
+        monkeypatch.setenv("ENSEMBLE_CASCADE_LINEAGE", "nonsense")
+
+        caplog.set_level(
+            logging.WARNING, logger="daemon.repositories.instance.repository"
+        )
+        _create_instance(repo, "root")
+        result = repo.get_cascade_tree_ids("root")
+        assert result == ["root"]
+        # WARN logged.
+        warnings = [
+            r for r in caplog.records
+            if "not a recognized cascade-lineage mode" in r.message
+            and r.levelno == logging.WARNING
+        ]
+        assert len(warnings) == 1, (
+            f"expected one WARN for unknown mode; got {len(warnings)}"
+        )
+
+    def test_get_tree_ids_behavior_unchanged(
+        self, repo: SQLModelInstanceRepository
+    ):
+        """``get_tree_ids()`` behavior is unchanged (staged deprecation).
+
+        The plan keeps ``get_tree_ids`` during migration with a
+        corrected docstring (no behavior change). This test pins that
+        contract: an instance with no hierarchy row is not enumerated,
+        and one with a hierarchy row IS enumerated (matching the legacy
+        semantics).
+        """
+        # Single node with no parent → root only.
+        _create_instance(repo, "solo")
+        assert repo.get_tree_ids("solo") == ["solo"]
+
+        # Parent + child → both enumerated (create() inserts the
+        # hierarchy row when parent_id is set, so legacy gets both).
+        _create_instance(repo, "root")
+        _create_instance(repo, "child", parent_id="root")
+        assert set(repo.get_tree_ids("root")) == {"root", "child"}
+
+        # Force-delete the hierarchy row (the B1/B4 churn scenario).
+        with SQLModelSession(repo.engine) as session:
+            from sqlalchemy import delete as sql_delete
+            session.exec(sql_delete(InstanceHierarchy).where(
+                InstanceHierarchy.parent_id == "root"
+            ))
+            session.commit()
+        # Legacy now misses the child (this is the B1/B4 symptom).
+        assert repo.get_tree_ids("root") == ["root"]
+
+
+def test_cascade_lineage_boot_log_emits_once(caplog, monkeypatch):
+    """P1 (C4) — ``emit_cascade_lineage_boot_log`` emits the INFO
+    exactly once per process and names the resolved mode.
+    """
+    import logging
+    from daemon.repositories.instance import repository as repo_mod
+
+    # Reset module-level flag so we can re-trigger in this test.
+    monkeypatch.setattr(repo_mod, "_CASCADE_LINEAGE_BOOT_LOG_EMITTED", False)
+    monkeypatch.setattr(repo_mod, "_CASCADE_LINEAGE_MODE", None)
+
+    caplog.set_level(
+        logging.INFO, logger="daemon.repositories.instance.repository"
+    )
+
+    repo_mod.emit_cascade_lineage_boot_log()
+    repo_mod.emit_cascade_lineage_boot_log()  # second call — no-op
+
+    info_records = [
+        r for r in caplog.records
+        if "Cascade lineage mode resolved" in r.message
+        and r.levelno == logging.INFO
+    ]
+    assert len(info_records) == 1, (
+        f"expected exactly one boot-time INFO; got {len(info_records)}"
+    )
+    assert "permanent" in info_records[0].message

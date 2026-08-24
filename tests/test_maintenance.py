@@ -1340,9 +1340,11 @@ class TestCheckpointCleanupJobPinnedProtection:
 
         assert job._get_protected_instance_ids() == set()
         # No tree lookups should have happened — pure prefs query is the
-        # fast path when the result is empty.
+        # fast path when the result is empty. P1 (phase1-plan.md T6):
+        # ``get_cascade_tree_ids`` is the new wrapper; the transient
+        # ``get_tree_ids`` is no longer called from this code path.
         instance_repo.get_tree_root_id.assert_not_called()
-        instance_repo.get_tree_ids.assert_not_called()
+        instance_repo.get_cascade_tree_ids.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_get_protected_resolves_pinned_to_subtree(self):
@@ -1372,6 +1374,9 @@ class TestCheckpointCleanupJobPinnedProtection:
         instance_repo.get_tree_root_id = MagicMock(return_value="root-A")
         # ``root-A`` subtree contains 4 nodes.
         instance_repo.get_tree_ids = MagicMock(
+            return_value=["root-A", "child-A1", "child-A2", "grandchild-A2a"]
+        )
+        instance_repo.get_cascade_tree_ids = MagicMock(
             return_value=["root-A", "child-A1", "child-A2", "grandchild-A2a"]
         )
 
@@ -1408,6 +1413,7 @@ class TestCheckpointCleanupJobPinnedProtection:
             side_effect=lambda iid: None if iid == "orphan-id" else iid
         )
         instance_repo.get_tree_ids = MagicMock(return_value=["root-A", "child-A1"])
+        instance_repo.get_cascade_tree_ids = MagicMock(return_value=["root-A", "child-A1"])
 
         job = self._make_job(config, checkpointer, instance_repo, ui_prefs_repo)
 
@@ -1457,6 +1463,7 @@ class TestCheckpointCleanupJobPinnedProtection:
         )
         instance_repo.get_tree_root_id = MagicMock(return_value="pinned-A")
         instance_repo.get_tree_ids = MagicMock(return_value=["pinned-A"])
+        instance_repo.get_cascade_tree_ids = MagicMock(return_value=["pinned-A"])
 
         job = self._make_job(
             config, checkpointer, instance_repo, ui_prefs_repo, on_instance_deleted
@@ -1532,6 +1539,7 @@ class TestCheckpointCleanupJobPinnedProtection:
         )
         instance_repo.get_tree_root_id = MagicMock(return_value="pinned-oldest")
         instance_repo.get_tree_ids = MagicMock(return_value=["pinned-oldest"])
+        instance_repo.get_cascade_tree_ids = MagicMock(return_value=["pinned-oldest"])
 
         job = self._make_job(
             config, checkpointer, instance_repo, ui_prefs_repo, on_instance_deleted
@@ -1604,6 +1612,9 @@ class TestCheckpointCleanupJobPinnedProtection:
         instance_repo.get_tree_ids = MagicMock(
             return_value=["root-A", "child-A1", "child-A2"]
         )
+        instance_repo.get_cascade_tree_ids = MagicMock(
+            return_value=["root-A", "child-A1", "child-A2"]
+        )
 
         job = self._make_job(
             config, checkpointer, instance_repo, ui_prefs_repo, on_instance_deleted
@@ -1671,6 +1682,9 @@ class TestCheckpointCleanupJobPinnedProtection:
         instance_repo.get_tree_ids = MagicMock(
             return_value=["root-A", "child-A1", "child-A2", "grandchild-A2a"]
         )
+        instance_repo.get_cascade_tree_ids = MagicMock(
+            return_value=["root-A", "child-A1", "child-A2", "grandchild-A2a"]
+        )
 
         job = self._make_job(
             config, checkpointer, instance_repo, ui_prefs_repo, on_instance_deleted
@@ -1722,6 +1736,7 @@ class TestCheckpointCleanupJobPinnedProtection:
         )
         instance_repo.get_tree_root_id = MagicMock(return_value="pinned-A")
         instance_repo.get_tree_ids = MagicMock(return_value=["pinned-A"])
+        instance_repo.get_cascade_tree_ids = MagicMock(return_value=["pinned-A"])
 
         job = self._make_job(config, checkpointer, instance_repo, ui_prefs_repo)
 
@@ -1773,6 +1788,7 @@ class TestCheckpointCleanupJobPinnedProtection:
         )
         instance_repo.get_tree_root_id = MagicMock(return_value="pinned-A")
         instance_repo.get_tree_ids = MagicMock(return_value=["pinned-A"])
+        instance_repo.get_cascade_tree_ids = MagicMock(return_value=["pinned-A"])
 
         job = self._make_job(config, checkpointer, instance_repo, ui_prefs_repo)
 
@@ -1832,6 +1848,7 @@ class TestCheckpointCleanupJobPinnedProtection:
         )
         instance_repo.get_tree_root_id = MagicMock(return_value="pinned-old")
         instance_repo.get_tree_ids = MagicMock(return_value=["pinned-old"])
+        instance_repo.get_cascade_tree_ids = MagicMock(return_value=["pinned-old"])
 
         job = self._make_job(
             config, checkpointer, instance_repo, ui_prefs_repo, on_instance_deleted
@@ -1869,9 +1886,11 @@ class TestCheckpointCleanupJobPinnedProtection:
 
         with pytest.raises(RuntimeError, match="db down"):
             job._get_protected_instance_ids()
-        # No compensating tree lookups should have run.
+        # No compensating tree lookups should have run. P1
+        # (phase1-plan.md T6): the wrapper ``get_cascade_tree_ids`` is
+        # the new entry point.
         instance_repo.get_tree_root_id.assert_not_called()
-        instance_repo.get_tree_ids.assert_not_called()
+        instance_repo.get_cascade_tree_ids.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_ttl_skips_cycle_when_prefs_lookup_fails(self):
@@ -2108,6 +2127,9 @@ class TestCheckpointCleanupJobPinnedProtection:
         instance_repo.get_tree_ids = MagicMock(
             side_effect=lambda root_id: [root_id]
         )
+        instance_repo.get_cascade_tree_ids = MagicMock(
+            side_effect=lambda root_id: [root_id]
+        )
 
         job = self._make_job(
             config, checkpointer, instance_repo, ui_prefs_repo, on_instance_deleted
@@ -2160,6 +2182,9 @@ class TestCheckpointCleanupJobPinnedProtection:
         instance_repo.get_tree_ids = MagicMock(
             side_effect=lambda root_id: [root_id]
         )
+        instance_repo.get_cascade_tree_ids = MagicMock(
+            side_effect=lambda root_id: [root_id]
+        )
 
         job = self._make_job(
             config, checkpointer, instance_repo, ui_prefs_repo, on_instance_deleted
@@ -2171,6 +2196,117 @@ class TestCheckpointCleanupJobPinnedProtection:
         checkpointer.adelete_thread.assert_not_called()
         instance_repo.delete.assert_not_called()
         on_instance_deleted.assert_not_called()
+
+
+    # P1 (phase1-plan.md T6, C11) — ``pinned_subtree_terminal_count``
+    # metric is emitted per maintenance tick so the polarity change
+    # (terminal descendants of pinned roots are now protected from TTL
+    # purge) is observable, not silent.
+    @pytest.mark.asyncio
+    async def test_pinned_subtree_terminal_count_metric_emitted(
+        self, caplog: pytest.LogCaptureFixture,
+    ):
+        """P1 (T6, C11): ``pinned_subtree_terminal_count=N`` INFO line
+        emitted at the start of ``execute()`` carrying the sum of
+        terminal descendants across every pinned root.
+        """
+        import logging
+        caplog.set_level(logging.INFO, logger="daemon.services.maintenance")
+
+        config = PersistenceConfig()
+        checkpointer = MagicMock()
+        checkpointer.list_thread_ids = AsyncMock(return_value=[])
+        instance_repo = MagicMock()
+        on_instance_deleted = MagicMock()
+        ui_prefs_repo = MagicMock()
+
+        # Pin a root that has a 2-node terminal subtree.
+        ui_prefs_repo.get_pinned_instance_ids = MagicMock(
+            return_value={"pinned-root"}
+        )
+        # _get_protected_instance_ids() returns the root + 2 terminal
+        # descendants.
+        instance_repo.get_tree_root_id = MagicMock(return_value="pinned-root")
+        instance_repo.get_tree_ids = MagicMock(
+            return_value=["pinned-root", "child-1", "child-2"]
+        )
+        instance_repo.get_cascade_tree_ids = MagicMock(
+            return_value=["pinned-root", "child-1", "child-2"]
+        )
+
+        def get_side_effect(iid):
+            return {
+                "pinned-root": MagicMock(status="running"),
+                "child-1": MagicMock(status="completed"),
+                "child-2": MagicMock(status="terminated"),
+            }.get(iid)
+
+        instance_repo.get = MagicMock(side_effect=get_side_effect)
+        instance_repo.list = MagicMock(return_value=([], 0))
+        instance_repo.delete = MagicMock(
+            return_value={"deleted": True, "instance_id": "any", "agent_dir": "/test"}
+        )
+
+        job = self._make_job(
+            config, checkpointer, instance_repo, ui_prefs_repo, on_instance_deleted
+        )
+
+        await job.execute()
+
+        # The metric line is emitted exactly once per execute() call.
+        metric_records = [
+            r for r in caplog.records
+            if "pinned_subtree_terminal_count=" in r.message
+            and r.levelno == logging.INFO
+        ]
+        assert len(metric_records) == 1, (
+            f"expected exactly one pinned_subtree_terminal_count emit; "
+            f"got {len(metric_records)}"
+        )
+        # Sum of terminal descendants = child-1 (completed) + child-2
+        # (terminated) = 2. The pinned root itself is running, not
+        # terminal, so it does NOT count.
+        assert "pinned_subtree_terminal_count=2" in metric_records[0].message, (
+            f"metric should sum to 2; got: {metric_records[0].message}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_pinned_subtree_terminal_count_zero_when_no_pinned(
+        self, caplog: pytest.LogCaptureFixture,
+    ):
+        """No pinned → metric is ``0`` (still emitted so operators can
+        verify the polarity change is being tracked end-to-end).
+        """
+        import logging
+        caplog.set_level(logging.INFO, logger="daemon.services.maintenance")
+
+        config = PersistenceConfig()
+        checkpointer = MagicMock()
+        checkpointer.list_thread_ids = AsyncMock(return_value=[])
+        instance_repo = MagicMock()
+        on_instance_deleted = MagicMock()
+        ui_prefs_repo = MagicMock()
+
+        ui_prefs_repo.get_pinned_instance_ids = MagicMock(return_value=set())
+        instance_repo.get = MagicMock(return_value=None)
+        instance_repo.list = MagicMock(return_value=([], 0))
+
+        job = self._make_job(
+            config, checkpointer, instance_repo, ui_prefs_repo, on_instance_deleted
+        )
+
+        await job.execute()
+
+        metric_records = [
+            r for r in caplog.records
+            if "pinned_subtree_terminal_count=" in r.message
+        ]
+        # Metric still emitted (so the polarity change is observable)
+        # but with value 0 since no pinned roots exist.
+        assert len(metric_records) == 1, (
+            f"expected exactly one metric emit; got {len(metric_records)}"
+        )
+        assert "pinned_subtree_terminal_count=0" in metric_records[0].message
 
 
 # ─────────────────────────────────────────────────────────────────────────────

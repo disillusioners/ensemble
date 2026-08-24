@@ -60,7 +60,7 @@ from .mcp import warmup_pool as _warmup_pool_module
 from .mcp.config import McpStdioConfig
 from .opencode import OpenCodeSessionRegistry, create_opencode_session_repository
 
-from .repositories.instance.repository import get_agent_name
+from .repositories.instance.repository import emit_cascade_lineage_boot_log, get_agent_name
 from .repositories.instance.models import Instance, InstanceStatus
 from .repositories.message_queue.models import MessageQueue, MessageStatus, MessageType
 from .repositories.task.models import Task, TaskType, TaskStatus
@@ -697,6 +697,13 @@ class InstanceManager:
         # NEW: Session repository for session management
         # Must be created before SourceRegistry for scheduler session mode
         self._instance_repository = create_instance_repository(engine=self._engine, create_tables=False)
+
+        # P1 (phase1-plan.md §T1 acceptance, C4): one-time INFO log
+        # naming the resolved cascade-lineage mode. Default 'permanent'
+        # (instances.parent_id); 'hierarchy' falls back to legacy
+        # instance_hierarchy. Restart-required to flip. See FT-004 for
+        # the kill-switch removal ticket.
+        emit_cascade_lineage_boot_log()
 
         # NEW: Pluggable message sources system
         self.source_registry = SourceRegistry(

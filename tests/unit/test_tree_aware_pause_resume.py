@@ -218,6 +218,7 @@ class TestTreeAwarePauseCascade:
         # Mock: child1 is the entry point, but root is the tree root
         mock_repo.get_tree_root_id.return_value = root_id
         mock_repo.get_tree_ids.return_value = [root_id, child1_id, grandchild_id, child2_id]
+        mock_repo.get_cascade_tree_ids.return_value = [root_id, child1_id, grandchild_id, child2_id]
 
         def get_side_effect(instance_id):
             if instance_id == root_id:
@@ -259,6 +260,7 @@ class TestTreeAwarePauseCascade:
 
         mock_repo.get_tree_root_id.return_value = instance_id
         mock_repo.get_tree_ids.return_value = [instance_id]
+        mock_repo.get_cascade_tree_ids.return_value = [instance_id]
         mock_repo.get.return_value = self._make_instance(instance_id, status="running")
 
         result = await lifecycle_service.pause_instance_cascade(instance_id)
@@ -289,6 +291,7 @@ class TestTreeAwarePauseCascade:
 
         mock_repo.get_tree_root_id.return_value = root_id
         mock_repo.get_tree_ids.return_value = [root_id, child_id]
+        mock_repo.get_cascade_tree_ids.return_value = [root_id, child_id]
         mock_repo.get_ancestor_ids.return_value = []
 
         def get_side_effect(instance_id):
@@ -326,6 +329,7 @@ class TestTreeAwarePauseCascade:
 
         mock_repo.get_tree_root_id.return_value = root_id
         mock_repo.get_tree_ids.return_value = [root_id, child1_id, child2_id, child3_id]
+        mock_repo.get_cascade_tree_ids.return_value = [root_id, child1_id, child2_id, child3_id]
         # Resuming from child2, so ancestors = [root]
         mock_repo.get_ancestor_ids.return_value = [root_id]
 
@@ -366,6 +370,7 @@ class TestTreeAwarePauseCascade:
 
         mock_repo.get_tree_root_id.return_value = root_id
         mock_repo.get_tree_ids.return_value = [root_id, l1_id, l2_id, leaf_id]
+        mock_repo.get_cascade_tree_ids.return_value = [root_id, l1_id, l2_id, leaf_id]
         # Leaf's ancestors: [l2, l1, root]
         mock_repo.get_ancestor_ids.return_value = [l2_id, l1_id, root_id]
 
@@ -417,6 +422,7 @@ class TestTreeAwarePauseCascade:
 
         mock_repo.get_tree_root_id.return_value = root_id
         mock_repo.get_tree_ids.return_value = [root_id, l1_id, l2_id, l3_id, m1_id, m2_id, m3_id]
+        mock_repo.get_cascade_tree_ids.return_value = [root_id, l1_id, l2_id, l3_id, m1_id, m2_id, m3_id]
         # m2's ancestors: [l1, root]
         mock_repo.get_ancestor_ids.return_value = [l1_id, root_id]
 
@@ -513,6 +519,7 @@ class TestEdgeCases:
 
         mock_repo.get_tree_root_id.return_value = None
         mock_repo.get_tree_ids.return_value = [instance_id]
+        mock_repo.get_cascade_tree_ids.return_value = [instance_id]
         mock_repo.get.return_value = None
 
         result = await lifecycle_service.pause_instance_cascade(instance_id)
@@ -528,6 +535,7 @@ class TestEdgeCases:
 
         mock_repo.get_tree_root_id.return_value = None
         mock_repo.get_tree_ids.return_value = [instance_id]
+        mock_repo.get_cascade_tree_ids.return_value = [instance_id]
         mock_repo.get_ancestor_ids.return_value = []
         mock_repo.get.return_value = None
 
@@ -551,6 +559,7 @@ class TestEdgeCases:
 
         mock_repo.get_tree_root_id.return_value = root_id
         mock_repo.get_tree_ids.return_value = [root_id, child1_id, child2_id]
+        mock_repo.get_cascade_tree_ids.return_value = [root_id, child1_id, child2_id]
 
         def get_side_effect(instance_id):
             if instance_id == root_id:
@@ -599,6 +608,7 @@ class TestEdgeCases:
 
         mock_repo.get_tree_root_id.return_value = root_id
         mock_repo.get_tree_ids.return_value = [root_id, child1_id, child2_id]
+        mock_repo.get_cascade_tree_ids.return_value = [root_id, child1_id, child2_id]
         mock_repo.get_ancestor_ids.return_value = []
 
         def get_side_effect(instance_id):
@@ -640,6 +650,7 @@ class TestEdgeCases:
 
         mock_repo.get_tree_root_id.return_value = root_id
         mock_repo.get_tree_ids.return_value = [root_id, running_child_id, paused_child_id]
+        mock_repo.get_cascade_tree_ids.return_value = [root_id, running_child_id, paused_child_id]
 
         def get_side_effect(instance_id):
             if instance_id == root_id:
@@ -672,6 +683,7 @@ class TestEdgeCases:
         # Single instance is its own root
         mock_repo.get_tree_root_id.return_value = instance_id
         mock_repo.get_tree_ids.return_value = [instance_id]
+        mock_repo.get_cascade_tree_ids.return_value = [instance_id]
 
         # Pause test
         mock_repo.get.return_value = self._make_instance(instance_id, status="running")

@@ -534,7 +534,12 @@ class TestEmptyTreeFallback:
             }
 
         repo = MagicMock()
-        repo.get_tree_ids = MagicMock(return_value=[])
+        # P1 (phase1-plan.md T4): ``hard_delete_instance`` snapshot
+        # switched from transient ``get_tree_ids`` to the kill-switch
+        # wrapper ``get_cascade_tree_ids``. The wrapper routes to
+        # ``get_tree_ids_permanent`` by default. Empty result still
+        # triggers the single-id fallback downstream.
+        repo.get_cascade_tree_ids = MagicMock(return_value=[])
         repo.hard_delete_tree = MagicMock(side_effect=_fake_hard_delete_tree)
 
         manager = MagicMock()
@@ -576,9 +581,18 @@ class TestEmptyTreeFallback:
 
         result = await svc.hard_delete_instance(instance_id)
 
-        # The repo's get_tree_ids was queried exactly once with the
-        # requested root, and returned the empty list we mocked.
-        repo.get_tree_ids.assert_called_once_with(instance_id)
+        # P1 (phase1-plan.md T4 + T3): the kill-switch wrapper
+        # ``get_cascade_tree_ids`` is invoked TWICE — once from
+        # ``hard_delete_instance``'s snapshot step (T4) and once from
+        # the ``terminate_instance`` cascade (T3's enumerate-first
+        # restructure). Both calls pass the requested root; both
+        # return the empty list we mocked. The fallback still kicks
+        # in: ``hard_delete_tree`` receives ``[instance_id]``.
+        assert repo.get_cascade_tree_ids.call_count == 2, (
+            f"expected 2 get_cascade_tree_ids calls (snapshot + "
+            f"terminate cascade); got {repo.get_cascade_tree_ids.call_count}"
+        )
+        repo.get_cascade_tree_ids.assert_called_with(instance_id)
 
         # The fallback kicked in: hard_delete_tree received [instance_id].
         assert captured["tree_ids"] == [instance_id]

@@ -173,6 +173,7 @@ async def test_lifecycle_pause_threads_reason_to_db_boundary():
     manager = MagicMock()
     manager._instance_repository.get_tree_root_id.return_value = "iid"
     manager._instance_repository.get_tree_ids.return_value = ["iid"]
+    manager._instance_repository.get_cascade_tree_ids.return_value = ["iid"]
     manager._instance_repository.get.return_value = SimpleNamespace(
         status=InstanceStatus.RUNNING.value,
         agent_id="coder",

@@ -754,6 +754,7 @@ class TestPausedAtField:
         # Mock the tree traversal methods on the repository
         mock_manager._instance_repository.get_tree_root_id.return_value = instance_id
         mock_manager._instance_repository.get_tree_ids.return_value = [instance_id]
+        mock_manager._instance_repository.get_cascade_tree_ids.return_value = [instance_id]
 
         # Create mock meta for the instance
         mock_meta = MagicMock()
