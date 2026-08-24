@@ -872,7 +872,7 @@ N_OUT="$( . "$LAUNCHER"; _notify_once test-kind "message body" 2>&1 )"
 assert_contains "_notify_once logs NOTIFY[...]" "NOTIFY[test-kind]" "$N_OUT"
 
 # ─── 11. kill-0 EPERM twins: _pid_alive (P2.3 B4 leg 3 — B3.5 mirror) ───────
-# launcher.sh:522/:536 (W1 lock-owner liveness) must treat kill -0 EPERM as
+# launcher.sh:523/:537 (W1 lock-owner liveness) must treat kill -0 EPERM as
 # ALIVE, matching B3.5's lib.sh _pid_alive. pid 1 (launchd, root-owned) is
 # the clean EPERM source for an unprivileged runner: raw kill -0 fails with
 # "Operation not permitted" while the process is plainly alive.

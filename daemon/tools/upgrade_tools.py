@@ -36,6 +36,11 @@ dev/demo/sandbox daemon can NEVER address live, whatever parameters the
 LLM passes. Marker absent → read tools STILL answer (fail-open for
 reads only); ACTOR tools refuse ``env-marker-absent`` fail-closed
 (S-31).
+
+L8 (tidier, P2.3 final batch): this module is deliberately large — the
+module split (reads / actor tools / gate) is fenced to the post-P2.3
+refactor pass (decisions.md "P2.3 Gate Rulings & Fences" item 2); do not
+grow it further without pulling that fence.
 """
 
 from __future__ import annotations
@@ -829,7 +834,11 @@ def _rollback_count_24h(journal: dict[str, Any] | None) -> int | None:
     return count
 
 
-def _version_sort_key(tag: str) -> tuple[int, tuple]:
+# L4 (tidier, P2.3 final batch): the rank tuple is parameterized — rank 1
+# carries int segments, rank 0 the lexical (tag,) fallback.
+def _version_sort_key(
+    tag: str,
+) -> tuple[int, tuple[int, ...]] | tuple[int, tuple[str, ...]]:
     """Sort key for release tags — semantic (numeric dot-segments) where
     parseable, lexical fallback otherwise (N6, P2.3 B3.5: the old
     ``sorted()[-1]`` lexical pick made 1.2.9 beat 1.2.10).

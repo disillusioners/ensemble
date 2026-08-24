@@ -611,3 +611,129 @@ def test_run_app_source_pins_preflight_call():
     assert src.index("daemon.__main__._boot_db_preflight()") < src.index(
         "daemon.__main__.main(run_preflight=False)"
     )
+
+
+# ── P2.3 final batch (tidier M1/M3) — alert-sink boot seam ─────────────────
+# Pack home: boot_probes_unit_test (this file + test_health_probes.py).
+# M1: the upgrade-journal SSE emit done-callback must never raise on a
+# CANCELLED task (CancelledError from task.exception() — the 2026-07-12
+# wait_for_result family). M3: the alert-sink registration must NEVER
+# gate daemon startup (import failure → one warning, boot continues).
+
+
+def test_m1_log_emit_result_cancelled_task_warns_once_not_raises(caplog):
+    """M1 (tidier): a cancelled broadcaster.emit task → ONE warning line,
+    no CancelledError escaping the done-callback (mutation-lethal guard —
+    the pre-fix body called task.exception() unconditionally)."""
+    import asyncio
+    import logging
+
+    from daemon.tools.upgrade_journal import _log_emit_result
+
+    async def _scenario():
+        loop = asyncio.get_running_loop()
+        task = loop.create_task(asyncio.sleep(3600))
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        assert task.cancelled() is True
+        with caplog.at_level(logging.WARNING, logger="daemon.tools.upgrade_journal"):
+            _log_emit_result(task)  # MUST NOT raise
+        return task
+
+    asyncio.run(_scenario())
+    warnings = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "CANCELLED" in r.message
+    ]
+    assert len(warnings) == 1, f"expected exactly one CANCELLED warning, got {warnings!r}"
+
+
+def test_m1_log_emit_result_failed_task_still_warns(caplog):
+    """M1 companion (regression): the pre-existing failure path keeps its
+    single warning — the cancelled-guard changed nothing else."""
+    import asyncio
+    import logging
+
+    from daemon.tools.upgrade_journal import _log_emit_result
+
+    async def _scenario():
+        loop = asyncio.get_running_loop()
+
+        async def _boom():
+            raise RuntimeError("emit exploded")
+
+        task = loop.create_task(_boom())
+        try:
+            await task
+        except RuntimeError:
+            pass
+        with caplog.at_level(logging.WARNING, logger="daemon.tools.upgrade_journal"):
+            _log_emit_result(task)
+        return task
+
+    asyncio.run(_scenario())
+    warnings = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "emit FAILED" in r.message
+    ]
+    assert len(warnings) == 1
+
+
+def test_m3_alert_sink_registration_failure_never_gates_boot(monkeypatch, caplog):
+    """M3 (tidier): simulated import failure at the registration seam →
+    the helper logs ONE warning and RETURNS (never raises — the alert
+    sink must never gate daemon startup)."""
+    import logging
+    import sys
+
+    import daemon.api as api_mod
+
+    # poison the module entry: `import daemon.tools.upgrade_journal`
+    # inside the helper raises ImportError ("... halted; None in sys.modules")
+    monkeypatch.setitem(sys.modules, "daemon.tools.upgrade_journal", None)
+    with caplog.at_level(logging.WARNING, logger="daemon.api"):
+        api_mod._register_upgrade_alert_sink(object())  # must NOT raise
+    warnings = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "alert-sink" in r.message
+    ]
+    assert len(warnings) == 1, f"expected one alert-sink warning, got {[r.message for r in caplog.records]}"
+    assert "boot continues" in warnings[0].message
+
+
+def test_m3_alert_sink_registration_success_path(monkeypatch):
+    """M3 companion: happy path still registers exactly once through the
+    real register_alert_sink API (last-wins), sinking the broadcaster.
+    Runs ON a live loop — broadcaster_alert_sink captures the running
+    loop at construction (same condition as the lifespan call site)."""
+    import asyncio
+
+    import daemon.tools.upgrade_journal as uj
+    import daemon.api as api_mod
+
+    calls = []
+    real_register = uj.register_alert_sink
+
+    def _recording_register(sink):
+        calls.append(sink)
+        return real_register(sink)
+
+    monkeypatch.setattr(uj, "register_alert_sink", _recording_register)
+    broadcaster = object()
+
+    async def _scenario():
+        api_mod._register_upgrade_alert_sink(broadcaster)
+
+    asyncio.run(_scenario())
+    assert len(calls) == 1
+    # the registered sink IS the broadcaster bridge (wrapped, not raw)
+    assert calls[0] is not broadcaster
+    assert callable(calls[0])
+    # restore no-op sink so later tests see a clean registry
+    real_register(None)

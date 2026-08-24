@@ -563,7 +563,23 @@ journal_mark_f2_verified() {
     local json inf new_inf note
     json="$(journal_read)" || return 1
     inf="$(_json_sub "$json" "in_flight")"
-    [ -n "$inf" ] || { _warn "journal_mark_f2_verified: no in_flight txn"; return 1; }
+    # M2 (tidier, P2.3 final batch): _json_sub returns ANY balanced
+    # container — an array-shaped (or otherwise non-object) in_flight
+    # extraction passed the old non-empty check, and the blind %\}} strip
+    # + append below then wrote MALFORMED JSON into the journal (torn on
+    # next read). Refuse on null/absent/empty AND any non-'{' shape; the
+    # only stampable form is a real object. No journal write on refusal.
+    case "$inf" in
+        '{'*) ;;
+        ''|null)
+            _warn "journal_mark_f2_verified: no in_flight txn (in_flight null/absent) — refusing to stamp (journal untouched)"
+            return 1
+            ;;
+        *)
+            _warn "journal_mark_f2_verified: in_flight read is null/malformed (not a JSON object: '${inf:0:40}') — refusing to stamp (journal untouched)"
+            return 1
+            ;;
+    esac
     new_inf="${inf%\}}"
     note="${F2_VERIFIED_NOTE:-}"
     if [ -n "$note" ]; then
@@ -1076,7 +1092,6 @@ _probe_once() {
 }
 
 # ── Promote/rollback shared mechanics (D6 + D-FA4.1 amendment) ──────────────
-
 # stop_via_stop_script — SIGTERM-bounded, ownership-scoped stop. ALWAYS via
 # scripts/stop-ensemble.sh (D6: reused, never duplicated; NEVER a raw kill).
 stop_via_stop_script() {
@@ -1266,6 +1281,13 @@ retention_evict() {
 # lock-holder's read-modify-write; pipeline-busy is structured-logged).
 _refuse() {
     local reason="$1"; shift
+    # L10 (tidier, P2.3 final batch): a token-less or message-less refusal is
+    # a caller bug — refuse LOUDLY (warn + exit 78) WITHOUT journaling an
+    # empty reason=()/detail record (the taxonomy stays greppable).
+    if [ -z "${reason:-}" ] || [ -z "$*" ]; then
+        _warn "refusal helper MISUSED: _refuse requires a non-empty reason token AND message (got reason='${reason:-}' msg='$*') — refusing without journaling"
+        exit 78
+    fi
     _warn "$*"
     journal_history_append refusal "$* (reason=$reason)" >/dev/null 2>&1 \
         || _warn "refusal journal append FAILED (best-effort) — proceeding to exit 78"
@@ -1280,7 +1302,7 @@ promote_entry_check() {
     # cap / halt state
     cnt="$(journal_rollback_count_24h)"
     if [ "$cnt" -ge "$ROLLBACK_CAP_24H" ]; then
-        _refuse cap "HALT-FOR-HUMAN: rollback cap $ROLLBACK_CAP_24H/24h reached (count=$cnt) — promotes refused until the 24h window resets or an operator intervenes (journal halt events carry the record)"
+        _refuse cap "HALT-FOR-HUMAN: rollback cap $ROLLBACK_CAP_24H/24h reached (count=$cnt) — promotes refused until the 24h window resets or an operator intervenes (the journal refusal event reason=cap carries the record, D-FA2.2; the halt events that ARMED the cap sit in the rollback windows' history)"
     fi
     # cooldown
     if journal_cooldown_active; then

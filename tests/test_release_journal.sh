@@ -235,6 +235,37 @@ PYF2
 )"
 assert_eq "f2 stamp: txn carries f2_verified_closed+at+note additively" "STAMP_OK" "$PYOUT"
 
+# (e2) M2 (tidier, P2.3 final batch): journal_mark_f2_verified null/malformed
+#      guard — a null or non-object in_flight must REFUSE (rc 1) with NO
+#      stamp and NO journal corruption. Pre-fix, an array-shaped extraction
+#      passed the non-empty check and the %\}}-strip+append wrote malformed
+#      JSON into the journal.
+F2N="$FIXTURE/f2null"; mkdir -p "$F2N/releases"
+printf '{"current":"v1","in_flight":null,"history":[]}\n' > "$F2N/releases/state.json"
+F2N_OUT="$(INSTALL_DIR="$F2N" REPO="$FAKE_REPO" bash -c '. "$REPO/scripts/upgrade/lib.sh"
+    journal_mark_f2_verified' 2>&1)"; F2N_RC=$?
+assert_eq "M2 null in_flight: refuse rc 1" "1" "$F2N_RC"
+assert_contains "M2 null in_flight: warning names the refusal" "refusing to stamp" "$F2N_OUT"
+PY_N="$(python3 - "$F2N/releases/state.json" <<'PYN'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    print("VALID" if d["in_flight"] is None and "f2_verified_closed" not in d else "STAMPED_OR_DRIFT")
+except Exception:
+    print("CORRUPT")
+PYN
+)"
+assert_eq "M2 null in_flight: journal valid, unstamped, in_flight still null" "VALID" "$PY_N"
+
+F2M="$FIXTURE/f2malformed"; mkdir -p "$F2M/releases"
+printf '{"current":"v1","in_flight":[1,2],"history":[]}\n' > "$F2M/releases/state.json"
+F2M_RAW="$(cat "$F2M/releases/state.json")"
+F2M_OUT="$(INSTALL_DIR="$F2M" REPO="$FAKE_REPO" bash -c '. "$REPO/scripts/upgrade/lib.sh"
+    journal_mark_f2_verified' 2>&1)"; F2M_RC=$?
+assert_eq "M2 malformed (array) in_flight: refuse rc 1" "1" "$F2M_RC"
+assert_contains "M2 malformed in_flight: warning names the refusal" "refusing to stamp" "$F2M_OUT"
+assert_eq "M2 malformed in_flight: journal BYTE-UNCHANGED (no stamp attempt)" "$F2M_RAW" "$(cat "$F2M/releases/state.json")"
+
 # M1 (Batch C): the sandbox INSTALL_DIR exclusion compares PHYSICAL paths —
 # a symlink alias or trailing-slash spelling of the live/demo dir passed
 # the old string compare. Fake demo dir created so the demo-side canonical

@@ -70,7 +70,10 @@
 # resolved from INSTALL_DIR/.env (see CANONICAL_PORT_DEFAULT for the
 # fallback).
 #
-# Exits 0 always (a launchd agent must not spawn retry loops of its own).
+# Exits 0 on every RUNTIME outcome (a launchd agent must not spawn retry
+# loops of its own) — the ONE exception is the usage guard above: a
+# missing/empty INSTALL_DIR argument exits 2 (operator-facing
+# misconfiguration, not a runtime outcome).
 # Bash 3.2 / BSD tools compatible.
 # ============================================================================
 
@@ -289,6 +292,17 @@ write_alert_state() {
 # 10-min window). If launcher.sh's knob ever changes, this pin — and the
 # greppable name coupling — is what makes the drift visible.
 BUDGET_MAX_CRASHES=5  # MUST match launcher.sh BUDGET_MAX_CRASHES (>5 crashes/10-min window → launcher abort)
+
+# L12 (tidier, P2.3 final batch): the alert-state terminal-event patterns
+# are NAMED PINS, not inline magic — the journal writers serialize
+# history entries compact ("event":"halt" — lib.sh journal_history_append
+# and the Python twin emit no spaces; the ` *` tolerates hand-edited
+# spacing). If either writer's shape ever changes, these names — and the
+# watchdog_watcher pack's fixture twins — are what make the drift visible.
+JOURNAL_TERMINAL_EVENT_RE='"event": *"(halt|sweep_rollback)"'
+JOURNAL_HALTAIL_DETAIL_RE='"event": *"halt", *"detail": *"[^"]*'
+JOURNAL_SWEEPTAIL_DETAIL_RE='"event": *"sweep_rollback", *"detail": *"[^"]*'
+
 check_burst_abort() {
     local f="$INSTALL_DIR/.launcher-state" last_exit count
     last_exit="$(_file_kv "$f" last_exit)"
@@ -339,11 +353,11 @@ check_journal_events() {
         *'}') ;;
         *) return 0 ;;
     esac
-    n="$(grep -oE '"event": *"(halt|sweep_rollback)"' "$f" 2>/dev/null | wc -l | tr -d ' ')"
+    n="$(grep -oE "$JOURNAL_TERMINAL_EVENT_RE" "$f" 2>/dev/null | wc -l | tr -d ' ')"
     case "$n" in ''|*[!0-9]*) return 0 ;; esac
     if [ "$n" -gt "$JOURNAL_SEEN" ]; then
-        detail="$(grep -oE '"event": *"halt", *"detail": *"[^"]*' "$f" 2>/dev/null | tail -1 | sed 's/.*"detail": *"//')"
-        [ -n "$detail" ] || detail="$(grep -oE '"event": *"sweep_rollback", *"detail": *"[^"]*' "$f" 2>/dev/null | tail -1 | sed 's/.*"detail": *"//')"
+        detail="$(grep -oE "$JOURNAL_HALTAIL_DETAIL_RE" "$f" 2>/dev/null | tail -1 | sed 's/.*"detail": *"//')"
+        [ -n "$detail" ] || detail="$(grep -oE "$JOURNAL_SWEEPTAIL_DETAIL_RE" "$f" 2>/dev/null | tail -1 | sed 's/.*"detail": *"//')"
         JOURNAL_SEEN="$n"
         write_alert_state
         _notify "Ensemble upgrade journal: ${n} halt/sweep event(s)" \

@@ -278,6 +278,11 @@ The 4 unverified assumptions of `architecture-recommendation.md` §7, wired to t
 6. **B4 "refusal live end-to-end" — CLARIFIED (F-B6c-1, 2026-08-23).** The B4 claim was pack-level truth (t8a–t8d: real lib.sh refusal append → real classifier → alert) ≠ runtime truth: the in-daemon tool-refusal lane never journaled (upgrade_tools.py had zero journal_history_append calls — _refusal() was a pure formatter), so no runtime alert fired. B6.5 closes the lane: the append now rides _refusal() itself (best-effort, single write point). Shell lane remains file-write-only by design (structurally bypasses the in-process sink; watcher/relay territory).
 7. **FL-23 frozen-install scripts provisioning — design (a) SPECIFIED, implementation FENCED pre-live (user-ruled 2026-08-23).** §8 now specifies stage.sh bundling of `scripts/upgrade/` into the release (self-contained; resolution: env override → release-local → repo-dev-only). Implementation is a PRE-LIVE checklist item with a stricter gate: bundling lands + one script-driven promote validates + 3 fresh ari-driven cycles on the bundled release before live eligibility (staleness rule: a mid-phase mechanism promote would reset the banked ledger — cycles #1–#3 ran on the disclosed env-var mechanism, bit-exact restored, for evidence consistency).
 
+P2.3 final-batch deferrals (tidier 6M+14L batch, 2026-08-24 — single-line ledger):
+- (a) Rank-tuple defensive copy at `_version_sort_key` call sites — deferred (tidier B; tuples are immutable, the copy would be ceremonial).
+- (b) Untyped `counters` dict pass-through in the alert payload (`data.get("rollback_window_count")`) — accepted as-is (tidier C; journal-derived display data, no consumer types on it).
+- (c) Lifespan-ordering watch item: the notification broadcaster is created + wired onto the manager BEFORE `_register_upgrade_alert_sink` runs (api.py boot order verified safe 2026-08-24); keep that order — a sink registered before its broadcaster exists would capture a dead reference.
+
 ---
 
 ## Decision Index (Phase 2)

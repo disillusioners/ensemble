@@ -66,6 +66,11 @@ Executor spawn (D-FA1.3 / D4):
     harness's SIGTERM teardown must never reach it. stdio →
     ``<install_dir>/data/upgrade.log``; env is ALLOWLISTED (R-SR09 — no
     ``.env`` passthrough, no API keys).
+
+L8 (tidier, P2.3 final batch): this module is deliberately large — the
+module split (journal / lock / nonce / alert) is fenced to the post-P2.3
+refactor pass (decisions.md "P2.3 Gate Rulings & Fences" item 2); do not
+grow it further without pulling that fence.
 """
 
 from __future__ import annotations
@@ -250,7 +255,7 @@ def journal_write(install_dir: Path, data: dict[str, Any]) -> None:
     # + future threaded callers make it live. Per-writer uniqueness via
     # threading.get_ident() + uuid.uuid4().hex[:8] — combined with the
     # existing pid + ms timestamp, a collision now requires four concurrent
-    # writers all hitting the same nanosecond with the same uuid prefix,
+    # writers all hitting the same millisecond with the same uuid prefix,
     # which is astronomically unlikely without the attacker controlling
     # both the clock and /dev/urandom. P2.3 caller discipline still
     # serializes journal writes externally; this is the inner ring.
@@ -459,9 +464,19 @@ def broadcaster_alert_sink(
     return sink
 
 
-def _log_emit_result(task: "asyncio.Future[Any]") -> None:
+def _log_emit_result(task: asyncio.Future[Any]) -> None:
     """Done-callback for the dispatched ``broadcaster.emit`` — a failed
     emit is ONE warning line (best-effort alert, journal unaffected)."""
+    # M1 (tidier, P2.3 final batch): a CANCELLED task raises CancelledError
+    # from task.exception() — inside a done-callback that escapes as loop
+    # noise. Same family as the 2026-07-12 wait_for_result gotcha: check
+    # cancelled FIRST (single warning), never consume the exception.
+    if task.cancelled():
+        logger.warning(
+            "upgrade_journal: SSE alert emit CANCELLED (alert dropped; "
+            "journal already written)"
+        )
+        return
     exc = task.exception()
     if exc is not None:
         logger.warning(
@@ -499,6 +514,11 @@ def _emit_terminal_class_alert(
         return  # ordinary write — terminal-class only (R3.4)
     in_flight = data.get("in_flight")
     quarantined = data.get("quarantined")
+    # M6 (tidier): the run_id conditional hoisted out of the payload dict —
+    # a named local reads as what it is (None unless in_flight is an object).
+    run_id = (
+        in_flight.get("run_id") if isinstance(in_flight, dict) else None
+    )
     payload = {
         "kind": kind,
         "source_event": event,
@@ -508,11 +528,7 @@ def _emit_terminal_class_alert(
         "counters": data.get("rollback_window_count"),
         "cooldown_until": data.get("cooldown_until"),
         "quarantined": quarantined if isinstance(quarantined, list) else [],
-        "run_id": (
-            in_flight.get("run_id")
-            if isinstance(in_flight, dict)
-            else None
-        ),
+        "run_id": run_id,
         "ts": ts,
     }
     try:
@@ -701,7 +717,7 @@ class PendingOp:
         return asdict(self)
 
     @classmethod
-    def from_json(cls, data: Any) -> "PendingOp | None":
+    def from_json(cls, data: Any) -> PendingOp | None:
         if not isinstance(data, dict) or not data.get("run_id"):
             return None
         kwargs = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
@@ -758,7 +774,7 @@ class PendingAction:
         return asdict(self)
 
     @classmethod
-    def from_json(cls, data: Any) -> "PendingAction | None":
+    def from_json(cls, data: Any) -> PendingAction | None:
         if not isinstance(data, dict) or not data.get("nonce"):
             return None
         kwargs = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}

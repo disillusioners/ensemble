@@ -111,6 +111,11 @@ if [ -z "$VERSION" ]; then
     exit 78
 fi
 
+# D1 (reviewer ruling, P2.3 final batch): the direct exit-78s above and the
+# SOAK_S case below are INPUT-VALIDATION refusals — journal-less BY DESIGN
+# (nothing has been locked, opened, or mutated yet; the reviewed carve-out
+# set is CLOSED — no conversion to _refuse journaling).
+
 SOAK_S="${ENSEMBLE_PROMOTE_SOAK_S:-$SOAK_S_DEFAULT}"
 case "$SOAK_S" in
     ''|*[!0-9]*) _warn "invalid ENSEMBLE_PROMOTE_SOAK_S='$SOAK_S' (digits only)"; exit 78 ;;
@@ -145,8 +150,10 @@ J="$(journal_read)" || {
 # 1c. adopt-or-refuse an existing in_flight (sweep-mirroring, D-FA4.3)
 adopt_stale_txn || _refuse txn-busy "promote refused: unresolved in_flight txn (see the adopt diagnostics above — pipeline-busy)"
 
-# 1d. ENTRY-side checks (D-FA4.2): cap/halt · cooldown · quarantine
-promote_entry_check "$VERSION" || exit 78
+# 1d. ENTRY-side checks (D-FA4.2): cap/halt · cooldown · quarantine.
+# L11 (tidier): promote_entry_check only ever returns 0 — every refusal
+# path inside it exits 78 itself (_refuse) — so no caller-side exit arm.
+promote_entry_check "$VERSION"
 
 # 1e. integrity (D-FA4.4): CURRENT (drift detection) + TARGET + manifest
 # fields + no-.env invariant. Same-version re-promote verifies once.

@@ -68,7 +68,7 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, NoReturn
 
 N_REQUIRED = 3  # ADR-021 (user-ruled 2026-08-22): N = 3 clean cycles
 VIOLATION_EVENTS = ("rollback", "sweep_rollback", "halt")
@@ -82,7 +82,7 @@ COVERAGE_NOTE = (
 )
 
 
-def _die_unreadable(msg: str) -> "NoReturn":  # type: ignore[valid-type]
+def _die_unreadable(msg: str) -> NoReturn:
     print(f"ledger_check: ERROR: {msg}", file=sys.stderr)
     sys.exit(1)
 
@@ -155,7 +155,7 @@ def check_live_path(raw_journal: str) -> Path:
     # root, refuse. Absent components simply skip — the string compares
     # above already ran.
     if live.exists():
-        probe: Optional[Path] = resolved
+        probe: Path | None = resolved
         while probe is not None and str(probe) != probe.anchor:
             try:
                 if probe.exists() and os.path.samefile(probe, live):
@@ -166,7 +166,7 @@ def check_live_path(raw_journal: str) -> Path:
     return resolved
 
 
-def load_journal(path: Path) -> dict:
+def load_journal(path: Path) -> dict[str, Any]:
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as exc:
@@ -183,7 +183,7 @@ def load_journal(path: Path) -> dict:
 _COMMIT_VERSION_RE = re.compile(r"^promote\s+(\S+)\s+committed\b")
 
 
-def event_version(event: dict) -> str:
+def event_version(event: dict[str, Any]) -> str:
     """Cycle version: explicit `version` field if a future writer adds one,
     else parsed from the commit detail ('promote <ver> committed (...)'),
     else 'unknown'."""
@@ -194,12 +194,12 @@ def event_version(event: dict) -> str:
     return match.group(1) if match else "unknown"
 
 
-def _ev(event: dict, key: str) -> str:
+def _ev(event: dict[str, Any], key: str) -> str:
     value = event.get(key)
     return str(value) if value is not None else "?"
 
 
-def derive_cycles(history: list) -> list:
+def derive_cycles(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Cycles from commit events, oldest → newest. Window = [this commit,
     next commit) — events between a cycle's commit and the next cycle's
     commit belong to that cycle's window (history is newest-last)."""
@@ -227,7 +227,7 @@ def derive_cycles(history: list) -> list:
     return cycles
 
 
-def classify(cycles: list) -> dict:
+def classify(cycles: list[dict[str, Any]]) -> dict[str, Any]:
     """Per-cycle verdicts (CLEAN/VIOLATION/SUPERSEDED), the trailing
     consecutive-clean run, and staleness state. Walk newest → oldest:
     a version change ends counting and supersedes that cycle and every
@@ -235,12 +235,12 @@ def classify(cycles: list) -> dict:
     but keeps history visible (no reset-to-zero)."""
     n = len(cycles)
     verdicts = ["CLEAN" if not c["causes"] else "VIOLATION" for c in cycles]
-    current_version: Optional[str] = cycles[-1]["version"] if cycles else None
+    current_version: str | None = cycles[-1]["version"] if cycles else None
     run = 0
     counting = True
     staleness_hit = False
-    superseded: list = []
-    reset: Optional[dict] = None
+    superseded: list[int] = []
+    reset: dict[str, Any] | None = None
     for i in range(n - 1, -1, -1):
         if staleness_hit:
             verdicts[i] = "SUPERSEDED"
@@ -274,7 +274,7 @@ def classify(cycles: list) -> dict:
     }
 
 
-def gate(count: int, f2_state: str, current_version: Optional[str]) -> dict:
+def gate(count: int, f2_state: str, current_version: str | None) -> dict[str, Any]:
     """Runbook §9: F2-open ⇒ BLOCKED regardless of count (hard block);
     F2 closed + count ≥ N(=3) ⇒ ELIGIBLE; F2 closed + count < N ⇒
     NOT-READY with how many more are needed."""
@@ -311,7 +311,7 @@ def gate(count: int, f2_state: str, current_version: Optional[str]) -> dict:
     return {"verdict": "NOT-READY", "reasons": reasons, "clean_needed": needed}
 
 
-def build_report(resolved: Path, f2_state: str, data: dict) -> dict:
+def build_report(resolved: Path, f2_state: str, data: dict[str, Any]) -> dict[str, Any]:
     history = data.get("history")
     if not isinstance(history, list):
         _die_unreadable("journal 'history' missing or not a list")
@@ -345,7 +345,7 @@ def build_report(resolved: Path, f2_state: str, data: dict) -> dict:
     }
 
 
-def render_plain(report: dict) -> str:
+def render_plain(report: dict[str, Any]) -> str:
     lines = []
     lines.append(f"ledger-check: journal={report['journal']}")
     lines.append(f"f2-state: {report['f2_state']}")
@@ -386,7 +386,7 @@ def render_plain(report: dict) -> str:
     return "\n".join(lines)
 
 
-def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="ledger_check.py",
         description=(
@@ -463,7 +463,7 @@ def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def main(argv: Optional[list] = None) -> None:
+def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     resolved = check_live_path(args.journal)  # refusal fires before any read
     data = load_journal(resolved)
