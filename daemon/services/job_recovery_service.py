@@ -1273,7 +1273,17 @@ class JobRecoveryService:
         reconciled = 0
         details: list[dict] = []
 
-        with self.engine.begin() as conn:
+        # Resolve the engine via the task_repository (JobRecoveryService
+        # itself doesn't hold an engine — repositories do).
+        engine = self._task_repository.engine if self._task_repository else None
+        if engine is None:
+            logger.debug(
+                "_pattern_e_dead_letter_dead_parent_process_reports: "
+                "task_repository not wired; pattern (e) skipped"
+            )
+            return None
+
+        with engine.begin() as conn:
             # 1. Candidate SELECT — scope-strict (R3) on
             # ``process_report`` type, status='pending', age threshold,
             # and the parent-status EXISTS folded in (closes the
