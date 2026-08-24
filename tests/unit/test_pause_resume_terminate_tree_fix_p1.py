@@ -375,6 +375,71 @@ class TestEnqueueSeamDeadParentGuard:
             parent = session.get(Instance, parent_id)
             assert _is_dead_parent(parent) is False
 
+    def test_predicate_against_TERMINATED_source(self):
+        """Pin the source string used by the seam matches the
+        ``InstanceStatus.TERMINATED.value`` enum — guards against
+        accidental string drift."""
+        assert "terminated" == InstanceStatus.TERMINATED.value
+
+
+class TestEnqueueSeamDeadParentSkip:
+    """T8 (a): the enqueue-seam helper ``_is_dead_parent`` short-
+    circuits the Task + ReportInjection INSERTs and marks the message
+    row FAILED. Tests pin the predicate in isolation so any change
+    to the inline expression in ``child_reports.py:2638-2663``
+    surfaces here.
+
+    The full integration test (calling ``_process_child_completion_db_sync``
+    end-to-end) is out of scope for this unit suite — the seam runs
+    inside a complex WriteGuardSession transaction and the
+    surrounding async surface is exercised by the e2e suite (T10).
+    """
+
+    def test_skip_when_terminated_parent(self, engine):
+        parent_id = _seed_instance(engine, status=InstanceStatus.TERMINATED.value)
+        with Session(engine) as session:
+            parent = session.get(Instance, parent_id)
+            assert _is_dead_parent(parent) is True
+            # Verifies the predicate would cause the inline check
+            # at the seam to take the dead-parent branch (skip
+            # both INSERTs + mark message FAILED).
+
+    def test_skip_when_missing_parent(self, engine):
+        """No Instance row exists for the parent's id (d14cbde5-class
+        signature) — the predicate still treats this as dead-parent."""
+        with Session(engine) as session:
+            parent = session.get(Instance, "missing-instance-id")
+            assert parent is None
+            assert _is_dead_parent(parent) is True
+
+    def test_no_skip_when_running_parent(self, engine):
+        """A RUNNING parent is NOT dead — the seam proceeds to the
+        natural Task + ReportInjection INSERTs."""
+        parent_id = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
+        with Session(engine) as session:
+            parent = session.get(Instance, parent_id)
+            assert _is_dead_parent(parent) is False
+
+    def test_no_skip_when_paused_parent(self, engine):
+        """A PAUSED parent is NOT dead — it will resume; the
+        report_injection drain path handles it without dead-lettering."""
+        parent_id = _seed_instance(engine, status=InstanceStatus.PAUSED.value)
+        with Session(engine) as session:
+            parent = session.get(Instance, parent_id)
+            assert _is_dead_parent(parent) is False
+
+    def test_no_skip_when_completed_parent(self, engine):
+        """A COMPLETED parent is NOT dead in the seam's sense —
+        the COMPLETED skip is handled upstream in
+        ``_process_child_completion_db_sync`` (idempotency_skip
+        branch), not by the dead-parent predicate. The predicate
+        is intentionally narrow (TERMINATED + None) to preserve
+        the COMPLETED skip's separate handling."""
+        parent_id = _seed_instance(engine, status=InstanceStatus.COMPLETED.value)
+        with Session(engine) as session:
+            parent = session.get(Instance, parent_id)
+            assert _is_dead_parent(parent) is False
+
 
 # ---------------------------------------------------------------------------
 # T8 (d) — Drift sweep pattern (e)

@@ -2643,8 +2643,50 @@ Provide a concise summary:"""
                 parent is not None
                 and parent.status == InstanceStatus.PAUSED.value
             )
-            if marker_paused or db_paused:
-                skip_reason = "marker" if marker_paused else "db_status"
+            # Phase 1 / T8 (a) dead-parent guard (plan
+            # ``.agents/shared/planning/pause-resume-terminate-tree-fix/phase1-plan.md``
+            # Rev 2.1 AF2 C1). The parent is "dead" when:
+            #   * it was deleted out from under the child (parent is
+            #     ``None`` — the missing-instance case, d14cbde5-class
+            #     signature), OR
+            #   * it has reached the TERMINATED terminal state.
+            # A dead parent can never claim a PENDING process_report
+            # Task (the pause gate at ``task/repository.py`` ~:1315-
+            # 1336 filters ``status IN (paused, terminated)`` uniformly
+            # for ALL task types), and the ``report_injection`` drain
+            # path also has no live agent-node to inject into. So the
+            # creation-time skip suppresses BOTH the Task INSERT and
+            # the report_injections INSERT; the message row is
+            # RETAINED but marked ``MessageStatus.FAILED`` (audit +
+            # payload retention, plan §Axis 2 = 2a); one structured
+            # log line carries ``report_message_id`` so operators can
+            # trace the dead-lettered delivery.
+            db_dead_parent = (
+                parent is None
+                or parent.status == InstanceStatus.TERMINATED.value
+            )
+            if marker_paused or db_paused or db_dead_parent:
+                if marker_paused:
+                    skip_reason = "marker"
+                elif db_paused:
+                    skip_reason = "db_status"
+                else:
+                    # Plan §T8 (a) — dead-parent branch. Mark the
+                    # message row FAILED here (BEFORE the
+                    # pre-SAVEPOINT flush) so the failure state
+                    # commits atomically with the message row.
+                    skip_reason = "dead_parent"
+                    report_message.status = MessageStatus.FAILED.value
+                    logger.info(
+                        f"child_reports: dead-parent skip — message "
+                        f"marked FAILED, no PROCESS_REPORT Task created "
+                        f"for parent "
+                        f"{instance.parent_id[:8] if instance.parent_id else '?'}... "
+                        f"(reason={skip_reason}, "
+                        f"parent_status={parent.status if parent else 'missing'}, "
+                        f"report_message_id={report_message_id}); "
+                        f"report_injection INSERT below is also skipped"
+                    )
                 logger.info(
                     f"child_reports: skipping PROCESS_REPORT Task creation for parent "
                     f"{instance.parent_id[:8]}... — reason={skip_reason}; "
@@ -2742,119 +2784,173 @@ Provide a concise summary:"""
                 # active yet so nothing to roll back.
                 raise
 
-            nested = session.begin_nested()
-            try:
-                report_injection_row = ReportInjection(
-                    parent_instance_id=instance.parent_id,
-                    child_instance_id=instance.instance_id,
-                    child_message_id=completed_message_id,
-                    report_message_id=report_message_id,
-                    content=last_content,
-                )
-                session.add(report_injection_row)
-                # Flush to surface the IntegrityError early. Only
-                # the injection is pending inside the SAVEPOINT —
-                # the message_queue + task INSERTs are already in
-                # the outer transaction from the pre-SAVEPOINT
-                # flush above, so they survive ``nested.rollback()``.
-                session.flush()
-            except Exception as err:
-                # F4 FIX (2026-08-20, SAVEPOINT exception-leak hardening):
-                # broad catch (was ``except IntegrityError``). A
-                # non-IntegrityError raised at the inner flush (e.g.
-                # ``OperationalError`` on a DB disconnect, downstream
-                # ``RuntimeError``) OR at the ``ReportInjection(...)``
-                # constructor (attribute error, type error) previously
-                # propagated WITHOUT ``nested.rollback()`` — the
-                # SAVEPOINT was left open and was contained only by the
-                # outer ``WriteGuardSession`` close, which rolls back
-                # the WHOLE transaction. That is data-safe but coarse,
-                # and the leaked SAVEPOINT relied on close-time cleanup.
-                #
-                # Constructor-failure window: the ``ReportInjection(...)``
-                # constructor call (lines 2741-2747) is INSIDE the
-                # ``try`` block, so the broadened ``except Exception``
-                # catches it and triggers ``nested.rollback()``. The
-                # window is closed.
-                #
-                # Y2 discriminator semantics preserved EXACTLY:
-                #   * obligation-triple IntegrityError → rollback savepoint
-                #     + commit outer + idempotency_skip (F3 savepoint
-                #     fence, COMPLETED transition preserved).
-                #   * unrelated IntegrityError → rollback savepoint + bare
-                #     raise (no swallowing, bug surfaces — Y2 semantics).
-                #   * non-IntegrityError → rollback savepoint + bare raise
-                #     (preserve original identity; new branch — was
-                #     previously silent on the SAVEPOINT leak).
-                #
-                # Always roll back the SAVEPOINT FIRST so any exception
-                # (IntegrityError OR non-IntegrityError) is contained.
-                # Must call ``nested.rollback()`` explicitly — leaving the
-                # SessionTransaction to go out of scope without
-                # commit/rollback only RELEASES the SAVEPOINT (the
-                # injection would persist in the outer transaction).
-                nested.rollback()
-                if not isinstance(err, IntegrityError) or not _is_obligation_triple_integrity_error(err):
-                    # Non-IntegrityError OR unrelated IntegrityError:
-                    # surface the bug. The log line discriminates the
-                    # two cases for operator visibility, but both
-                    # branches trigger bare ``raise`` — the original
-                    # exception identity is preserved (no wrapping).
-                    if isinstance(err, IntegrityError):
-                        logger.warning(
-                            f"child_reports: unexpected IntegrityError on "
-                            f"ReportInjection INSERT (not obligation-triple "
-                            f"— FK / NOT NULL / other UNIQUE?). Surfacing "
-                            f"instead of swallowing. parent="
-                            f"{instance.parent_id[:8]}..., child="
-                            f"{instance.instance_id[:8]}..., msg="
-                            f"{completed_message_id[:8]}...: "
-                            f"{type(err).__name__}: {err.orig}"
-                        )
-                    else:
-                        logger.warning(
-                            f"child_reports: non-IntegrityError raised "
-                            f"during ReportInjection INSERT (savepoint "
-                            f"rolled back, exception propagates). "
-                            f"Surfacing. parent="
-                            f"{instance.parent_id[:8]}..., child="
-                            f"{instance.instance_id[:8]}..., msg="
-                            f"{completed_message_id[:8]}...: "
-                            f"{type(err).__name__}: {err}"
-                        )
-                    raise
-                # Natural × recovered PENDING race: the recovered
-                # row's worker_pool / claim_for_task_delivery owns
-                # delivery. Commit the outer transaction so the
-                # child COMPLETED transition + completion_report
-                # message + PROCESS_REPORT task survive; only the
-                # injection INSERT was rolled back via the SAVEPOINT.
-                # Without this explicit commit the WriteGuardSession
-                # ``__exit__`` would close() → rollback() the outer
-                # transaction and the COMPLETED transition would
-                # STILL be lost (the bug F3 fixes).
+            if db_dead_parent:
+                # Plan §T8 (a) companion-artifact disposition (AF2 C3):
+                # the dead-parent skip above already marked the message
+                # row FAILED and skipped the Task INSERT. The injection
+                # INSERT must also be skipped — a stranded injection
+                # row would otherwise be matched by Lane-3/4's
+                # ``find_pending_past_age`` past the 10-min bound and
+                # re-claim forever (inflated ``recovered`` metric, the
+                # AF2 C3 trap). The companion row is honestly omitted
+                # (``uq_report_injections_oblig_triple`` never violated
+                # because the row never enters INJECTED/TASK_DELIVERED —
+                # honestly reflecting non-delivery). Mirror the skip
+                # by short-circuiting through the same nested SAVEPOINT
+                # so the outer transaction stays clean and the F4
+                # SAVEPOINT-exception-leak hardening still applies
+                # (no-op nested commit, then drop straight to the
+                # success path below).
+                nested = session.begin_nested()
                 logger.info(
-                    f"child_reports: natural completion races a "
-                    f"recovered PENDING marker for "
-                    f"parent={instance.parent_id[:8]}..., "
-                    f"child={instance.instance_id[:8]}..., "
-                    f"msg={completed_message_id[:8]}...; treating as "
-                    f"already-delivered (idempotency_skip, savepoint "
-                    f"rollback preserves COMPLETED transition): "
-                    f"{type(err).__name__}"
+                    f"child_reports: skipping report_injections INSERT "
+                    f"for dead parent "
+                    f"{instance.parent_id[:8] if instance.parent_id else '?'}... "
+                    f"(reason=dead_parent, report_message_id={report_message_id})"
                 )
-                session.commit()
-                return _ChildCompletionDbResult(
-                    outcome="idempotency_skip",
-                    instance_id=instance_id,
-                    agent_id=instance.agent_id,
-                    parent_id=instance.parent_id,
-                )
+                nested.commit()
+                report_injection_row = None
+            else:
+                nested = session.begin_nested()
+                try:
+                    report_injection_row = ReportInjection(
+                        parent_instance_id=instance.parent_id,
+                        child_instance_id=instance.instance_id,
+                        child_message_id=completed_message_id,
+                        report_message_id=report_message_id,
+                        content=last_content,
+                    )
+                    session.add(report_injection_row)
+                    # Flush to surface the IntegrityError early. Only
+                    # the injection is pending inside the SAVEPOINT —
+                    # the message_queue + task INSERTs are already in
+                    # the outer transaction from the pre-SAVEPOINT
+                    # flush above, so they survive ``nested.rollback()``.
+                    session.flush()
+                except Exception as err:
+                    # F4 FIX (2026-08-20, SAVEPOINT exception-leak hardening):
+                    # broad catch (was ``except IntegrityError``). A
+                    # non-IntegrityError raised at the inner flush (e.g.
+                    # ``OperationalError`` on a DB disconnect, downstream
+                    # ``RuntimeError``) OR at the ``ReportInjection(...)``
+                    # constructor (attribute error, type error) previously
+                    # propagated WITHOUT ``nested.rollback()`` — the
+                    # SAVEPOINT was left open and was contained only by the
+                    # outer ``WriteGuardSession`` close, which rolls back
+                    # the WHOLE transaction. That is data-safe but coarse,
+                    # and the leaked SAVEPOINT relied on close-time cleanup.
+                    #
+                    # Constructor-failure window: the ``ReportInjection(...)``
+                    # constructor call (lines 2741-2747) is INSIDE the
+                    # ``try`` block, so the broadened ``except Exception``
+                    # catches it and triggers ``nested.rollback()``. The
+                    # window is closed.
+                    #
+                    # Y2 discriminator semantics preserved EXACTLY:
+                    #   * obligation-triple IntegrityError → rollback savepoint
+                    #     + commit outer + idempotency_skip (F3 savepoint
+                    #     fence, COMPLETED transition preserved).
+                    #   * unrelated IntegrityError → rollback savepoint + bare
+                    #     raise (no swallowing, bug surfaces — Y2 semantics).
+                    #   * non-IntegrityError → rollback savepoint + bare raise
+                    #     (preserve original identity; new branch — was
+                    #     previously silent on the SAVEPOINT leak).
+                    #
+                    # Always roll back the SAVEPOINT FIRST so any exception
+                    # (IntegrityError OR non-IntegrityError) is contained.
+                    # Must call ``nested.rollback()`` explicitly — leaving the
+                    # SessionTransaction to go out of scope without
+                    # commit/rollback only RELEASES the SAVEPOINT (the
+                    # injection would persist in the outer transaction).
+                    nested.rollback()
+                    if not isinstance(err, IntegrityError) or not _is_obligation_triple_integrity_error(err):
+                        # Non-IntegrityError OR unrelated IntegrityError:
+                        # surface the bug. The log line discriminates the
+                        # two cases for operator visibility, but both
+                        # branches trigger bare ``raise`` — the original
+                        # exception identity is preserved (no wrapping).
+                        if isinstance(err, IntegrityError):
+                            logger.warning(
+                                f"child_reports: unexpected IntegrityError on "
+                                f"ReportInjection INSERT (not obligation-triple "
+                                f"— FK / NOT NULL / other UNIQUE?). Surfacing "
+                                f"instead of swallowing. parent="
+                                f"{instance.parent_id[:8]}..., child="
+                                f"{instance.instance_id[:8]}..., msg="
+                                f"{completed_message_id[:8]}...: "
+                                f"{type(err).__name__}: {err.orig}"
+                            )
+                        else:
+                            logger.warning(
+                                f"child_reports: non-IntegrityError raised "
+                                f"during ReportInjection INSERT (savepoint "
+                                f"rolled back, exception propagates). "
+                                f"Surfacing. parent="
+                                f"{instance.parent_id[:8]}..., child="
+                                f"{instance.instance_id[:8]}..., msg="
+                                f"{completed_message_id[:8]}...: "
+                                f"{type(err).__name__}: {err}"
+                            )
+                        raise
+                    # Natural × recovered PENDING race: the recovered
+                    # row's worker_pool / claim_for_task_delivery owns
+                    # delivery. Commit the outer transaction so the
+                    # child COMPLETED transition + completion_report
+                    # message + PROCESS_REPORT task survive; only the
+                    # injection INSERT was rolled back via the SAVEPOINT.
+                    # Without this explicit commit the WriteGuardSession
+                    # ``__exit__`` would close() → rollback() the outer
+                    # transaction and the COMPLETED transition would
+                    # STILL be lost (the bug F3 fixes).
+                    logger.info(
+                        f"child_reports: natural completion races a "
+                        f"recovered PENDING marker for "
+                        f"parent={instance.parent_id[:8]}..., "
+                        f"child={instance.instance_id[:8]}..., "
+                        f"msg={completed_message_id[:8]}...; treating as "
+                        f"already-delivered (idempotency_skip, savepoint "
+                        f"rollback preserves COMPLETED transition): "
+                        f"{type(err).__name__}"
+                    )
+                    session.commit()
+                    return _ChildCompletionDbResult(
+                        outcome="idempotency_skip",
+                        instance_id=instance_id,
+                        agent_id=instance.agent_id,
+                        parent_id=instance.parent_id,
+                    )
             # Success path — release the SAVEPOINT so the injection
             # INSERT is promoted into the outer transaction. The
             # outer commit at ~:2959 (below) persists everything.
             nested.commit()
-            
+
+            # Plan §T8 (a) dead-parent early return.
+            # When ``db_dead_parent`` is True the message row is already
+            # marked FAILED, no Task was created, no injection row was
+            # created. The downstream parent-cascade path is invalid
+            # (parent is None or TERMINATED) — skip it and return a
+            # dedicated outcome so the async caller can suppress the
+            # post-commit side effects (SSE / CompletionRegistry /
+            # lifecycle event / CM resolve hook) on the event loop.
+            # Commit the message's FAILED status atomically here so it
+            # survives even when the parent row is missing entirely.
+            if db_dead_parent:
+                logger.info(
+                    f"child_reports: dead-parent early return after "
+                    f"SAVEPOINT release — message row marked FAILED, "
+                    f"no Task/injection created, no parent cascade "
+                    f"triggered. parent="
+                    f"{instance.parent_id[:8] if instance.parent_id else '?'}..., "
+                    f"report_message_id={report_message_id}"
+                )
+                session.commit()
+                return _ChildCompletionDbResult(
+                    outcome="dead_parent_skip",
+                    instance_id=instance_id,
+                    agent_id=instance.agent_id,
+                    parent_id=instance.parent_id,
+                )
+
             # --- Inline: _update_parent_on_child_complete (no await needed) ---
             # The bus is the SOLE completion authority.
             if parent is None:
@@ -3188,6 +3284,25 @@ Provide a concise summary:"""
                 f"ChildReportsService: deferred_pause outcome for "
                 f"{instance_id[:8]}... — DEFERRED marker persisted by "
                 f"sync helper; Phase 2 recovery will pick up"
+            )
+            return
+
+        # Phase 1 / T8 (a) dead-parent skip (plan
+        # ``.agents/shared/planning/pause-resume-terminate-tree-fix/``):
+        # the message row was marked FAILED, no PROCESS_REPORT Task
+        # was created, no ``report_injections`` row was created. There
+        # is no live parent to notify, no CompletionRegistry entry to
+        # mark complete, no SSE status_change to emit. Side-effect-
+        # free return — the work row is dead (or will be dead-lettered
+        # by the T8 (d) sweep if a stranded row from a prior version
+        # of the seam exists).
+        if outcome == "dead_parent_skip":
+            logger.info(
+                f"ChildReportsService: dead_parent_skip outcome for "
+                f"{instance_id[:8]}... — message marked FAILED in sync "
+                f"helper, no parent cascade (parent is "
+                f"{parent_id[:8] if parent_id else 'missing'}... — "
+                f"TERMINATED or missing); no side effects to fire"
             )
             return
 
