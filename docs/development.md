@@ -25,8 +25,10 @@ source .venv/bin/activate
 # Install dependencies with uv (recommended)
 make sync
 
-# OR install with pip
-pip install -e ".[dev]"
+# OR install with pip (dev deps live in a PEP 735 dependency-group;
+# --group requires pip >= 25.1)
+pip install -e .
+pip install --group dev
 ```
 
 ### Frontend Setup

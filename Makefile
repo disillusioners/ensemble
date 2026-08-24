@@ -68,8 +68,8 @@ help:
 
 # Sync dependencies with uv
 sync:
-	@echo "$(GREEN)Syncing dependencies (incl. dev extras for pytest-timeout)...$(NC)"
-	uv sync --extra dev
+	@echo "$(GREEN)Syncing dependencies (incl. dev group for pytest-timeout)...$(NC)"
+	uv sync
 	@echo "$(GREEN)Dependencies synced!$(NC)"
 
 # Stop the daemon — OWNERSHIP-SCOPED (incident fix, 2026-08-16).

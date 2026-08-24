@@ -84,7 +84,7 @@ P2.3's "tests" ARE the drills (§3) + the ladder gates (`promotion-ladder.md`) +
 
 **Standing rule:** when in doubt, run the gate. The gate is also the default for any P2 PR whose blast-radius is classified big/critical per `ensure.md:5` (cross-module → release gate).
 
-**Prerequisites whenever the gate runs** (`ensure.md:36-41`): daemon via `./dev.sh`, `unset SSL_CERT_FILE SSL_CERT_DIR`, `PYTEST_TIMEOUT=280` + `--override-ini="timeout=280"`, queue cleanup (`GET /api/jobs?status=pending`) before each test, one-by-one execution. **Venv gotcha:** run `uv sync --extra dev` first — bare `uv sync` STRIPS the dev extra and causes pytest-timeout drift (project critical note; RESULTS file §1 "venv/uv-sync" row).
+**Prerequisites whenever the gate runs** (`ensure.md:36-41`): daemon via `./dev.sh`, `unset SSL_CERT_FILE SSL_CERT_DIR`, `PYTEST_TIMEOUT=280` + `--override-ini="timeout=280"`, queue cleanup (`GET /api/jobs?status=pending`) before each test, one-by-one execution. **Venv note:** run bare `uv sync` first — the `dev` dependency-group is default-installed since the PEP 735 migration (2026-08-24); the pre-migration gotcha (bare sync stripped the dev extra → pytest-timeout drift, RESULTS file §1 "venv/uv-sync" row) is fixed.
 
 ---
 
@@ -155,7 +155,7 @@ Failure of any clause disqualifies the cycle (record it as a failed cycle with c
 - **All new tests join `test/packs/`** — dual-layer 5-min timeout, never bare `pytest` (`ensure.md:4-6`). Suggested pack names: `release_journal_unit_test`, `upgrade_gate_unit_test`, `upgrade_tools_registry_unit_test`, `drill_ledger_unit_test`.
 - **No `-x`** for suite runs; `--tb=short -q` and review all failures (`ensure.md:8`).
 - **Quarantine-aware:** pre-existing failures live in `.agents/tester/QUARANTINE.md` (5 known TestAccessMemoryArchive failures — pre-existing, quarantined; do not let them red the gate).
-- **Venv gotcha:** `uv sync --extra dev` before gates — bare `uv sync` strips the dev extra → pytest-timeout drift (project critical note; RESULTS §1).
+- **Venv note:** bare `uv sync` before gates — the `dev` dependency-group is default-installed since the PEP 735 migration (2026-08-24); pre-migration gotcha (sync stripped the dev extra → pytest-timeout drift, RESULTS §1) is fixed.
 - **Launcher changes** → `launcher_supervisor_unit_test` pack (74/74 baseline, RESULTS §3) must stay green; journal-sweep implementation extends this pack per the ADR-012 contract embedded at `launcher.sh:151-174` (verified).
 - **Frozen-binary drift lock:** any `daemon/tools/` change re-runs `test/packs/frozen_tool_name_discovery_unit_test.sh`; regen one-liner runs **in source mode only**.
 

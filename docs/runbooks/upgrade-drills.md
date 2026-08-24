@@ -33,7 +33,7 @@ curl -s localhost:7979/readyz  # 200, reasons: []
 
 **0.2 DR-0 record exists and is current.** First batch reference: `.agents/tester/RESULTS/2026-08-23-p2-3-dr0-preflight.md` (verdict `DR-0: CONTINUE`). **Scope ruling (FL-1):** a fresh dated DR-0 record is minted at each demo-state-changing **batch** boundary (release promoted, daemon restarted, launcher swapped) — the mint is the dispatcher's job, not a drill's. Within a batch, each drill instead performs an **inline S1–S5-shaped re-inventory** (triple, probes, family pids + lstart, launcher-state, live baseline) recorded in its own RESULTS file — per-drill write-scope is RESULTS-only.
 
-**0.3 Dev environment:** `uv sync --extra dev` — **bare `uv sync` STRIPS the dev extra** (pytest-timeout drift; project critical note). Any pack run in the same session happens after this.
+**0.3 Dev environment:** `uv sync` — the `dev` dependency-group (PEP 735) is default-installed by bare sync since the 2026-08-24 migration, so pytest-timeout comes along. The pre-migration gotcha (bare sync stripped the dev extra → pytest-timeout drift) no longer applies. Any pack run in the same session happens after this.
 
 **0.4 Live pid baseline capture** (write to the drill's evidence dir; never signal):
 
