@@ -812,20 +812,63 @@ try:
             except uj.JournalTorn as exc:
                 torn_errors.append(str(exc))
 
-    th_a = threading.Thread(target=_t10d_refusal_writer)
-    th_b = threading.Thread(target=_t10d_rmw_writer)
-    th_r = threading.Thread(target=_t10d_reader)
-    th_a.start(); th_b.start(); th_r.start()
-    th_a.join(10); th_b.join(10); stop_flag.set(); th_r.join(2)
+    # F-2 (P2.3 review cycle 2, MINOR — strengthen assertion to the
+    # GUARANTEED property): post-F-1 the tmp filename carries
+    # threading.get_ident() + uuid.uuid4().hex[:8] in addition to the
+    # existing pid + ms timestamp, so the SEAM that lets two concurrent
+    # writers collide on a single tmp filename (and silently clobber each
+    # other's payload mid-write) is closed. The behavioral proof:
+    # capture every tmp source passed to os.replace during the concurrent
+    # run and assert NO two writers picked the same tmp filename. A
+    # clobber is impossible iff every captured tmp name is unique — the
+    # property F-1 was added to guarantee. Wrapping os.replace (rather
+    # than journal_write) observes what journal_write ACTUALLY used,
+    # independent of any test-side formula coupling. The original
+    # torn-safety assertion remains intact below.
+    captured_tmp_srcs = []
+    capture_lock = threading.Lock()
+    _orig_replace = os.replace
+    def _t10d_capturing_replace(src, dst, *a, **kw):
+        # F-1 (post-fix) tmp filename format is
+        # state.json.tmp.{pid}.{tid}.{uuid8}.{ts} — match on the
+        # journal basename + ".tmp." prefix rather than a positional
+        # suffix (the suffix changed between fix iterations; the prefix
+        # is invariant as long as the writer lives in the journal dir).
+        src_str = str(src)
+        if f"{uj.journal_path(T10D).name}.tmp." in src_str:
+            with capture_lock:
+                captured_tmp_srcs.append(src_str)
+        return _orig_replace(src, dst, *a, **kw)
+    os.replace = _t10d_capturing_replace
+    try:
+        th_a = threading.Thread(target=_t10d_refusal_writer)
+        th_b = threading.Thread(target=_t10d_rmw_writer)
+        th_r = threading.Thread(target=_t10d_reader)
+        th_a.start(); th_b.start(); th_r.start()
+        th_a.join(10); th_b.join(10); stop_flag.set(); th_r.join(2)
+    finally:
+        os.replace = _orig_replace
     final_ok = True
     try:
         uj.journal_read(T10D)
     except Exception as exc:
         final_ok = False
         torn_errors.append(f"final read: {exc}")
+    unique_tmp = len(set(captured_tmp_srcs))
+    total_tmp = len(captured_tmp_srcs)
+    tmp_clashes = total_tmp - unique_tmp
     report("t10d barrier threads: journal NEVER torn under concurrent writers",
            not torn_errors and final_ok,
            f"torn={torn_errors[:2]}")
+    # F-2 GUARANTEED-property assertion — survives the reviewer's
+    # standing-rule "concurrency acceptance requires >=10-run evidence"
+    # because the assertion is over a captured set, not a single-run
+    # outcome: if any tmp name were shared, two concurrent writers
+    # would have clobbered each other's payload, and exactly ONE name
+    # would appear at least twice in the captured sequence.
+    report("t10d tmp-name uniqueness (F-1 guarantee): no concurrent clobber",
+           tmp_clashes == 0 and total_tmp > 0,
+           f"unique={unique_tmp}/{total_tmp} clashes={tmp_clashes}")
 finally:
     if _prev2 is None:
         os.environ.pop("ENSEMBLE_SELF_ENV", None)

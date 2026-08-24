@@ -18,8 +18,10 @@
 #   * Read-only against the install except its own state file under
 #     INSTALL_DIR/data/.
 #
-# Port resolution mirrors the launcher/stop convention (ADR-014):
-# PORT from INSTALL_DIR/.env (staged from repo .env.prod), default 9797.
+# Port resolution mirrors the launcher/stop convention (ADR-014): PORT from
+# INSTALL_DIR/.env (staged from repo .env.prod), defaulting to the canonical
+# port (literal lives in CANONICAL_PORT_DEFAULT — every other reference
+# interpolates; the number is not repeated anywhere else in this file).
 # An explicit second argument overrides (used by tests).
 #
 # State (INSTALL_DIR/data/.watchdog-state, atomic tmp+mv write):
@@ -58,7 +60,15 @@
 #   WATCHDOG_PROBE_TIMEOUT_S     (default 3)
 #
 # Usage (normally via launchd; manual for verification):
-#   bash scripts/watchdog-watcher.sh [INSTALL_DIR] [PORT]
+#   bash scripts/watchdog-watcher.sh INSTALL_DIR [PORT]
+#
+# INSTALL_DIR is REQUIRED (explicit-only — promotion-ladder U6; a default
+# would silently watch the live install). Absent/empty INSTALL_DIR exits
+# NONZERO (exit 2) below — operator-facing misconfiguration, not a runtime
+# outcome (the StartInterval agent re-runs on its own cadence and does not
+# retry-loop on exit status). PORT is optional; when absent the port is
+# resolved from INSTALL_DIR/.env (see CANONICAL_PORT_DEFAULT for the
+# fallback).
 #
 # Exits 0 always (a launchd agent must not spawn retry loops of its own).
 # Bash 3.2 / BSD tools compatible.
@@ -127,9 +137,15 @@ mkdir -p "$DATA_DIR" 2>/dev/null || {
     ALERT_STATE_FILE=""
 }
 
-# ── Port resolution: PORT from INSTALL_DIR/.env, else 9797 (ADR-014/D1) ────
+# ── Port resolution: PORT from INSTALL_DIR/.env, else the canonical port ─────
+# CANONICAL_PORT_DEFAULT is the SINGLE source of the live fallback numeral
+# for THIS file. Every other reference (the WARN line below, any future
+# diagnostic) interpolates ${CANONICAL_PORT_DEFAULT} — repeating the literal
+# anywhere else is a port-literal-rule violation (operational scripts that
+# legitimately need the numeral — deploy.sh, status.sh — own their own copy).
 # Same tolerant parsing as stop-ensemble.sh's env reader: optional
 # `export ` prefix, optional surrounding quotes, digits-only validation.
+CANONICAL_PORT_DEFAULT="9797"
 _resolve_port() {
     if [ -n "$PORT_OVERRIDE" ]; then
         printf '%s' "$PORT_OVERRIDE"
@@ -142,12 +158,18 @@ _resolve_port() {
         \"*\") raw="${raw#\"}"; raw="${raw%\"}" ;;
         \'*\') raw="${raw#\'}"; raw="${raw%\'}" ;;
     esac
-    printf '%s' "$raw" | grep -Eq '^[0-9]+$' || raw=""
-    if [ -z "$raw" ]; then
-        printf '%s' "9797"
-    else
+    if printf '%s' "$raw" | grep -Eq '^[0-9]+$'; then
         printf '%s' "$raw"
+        return 0
     fi
+    # F-4 (P2.3 review cycle 2, MINOR): when .env is absent/unreadable OR
+    # has no digits-only PORT= line, fall back to the canonical port AND
+    # surface a WARN (operator-visible). The former silent fallback was a
+    # hazard: an unreadable .env looked healthy but the watcher probed a
+    # port nothing was listening on, silently registering an instant
+    # "absent" episode. Reviewed cycle 2 — F-4.
+    _log "WARN: PORT unresolved from $env_file (absent/unreadable or no digits-only PORT= line) — assuming canonical port ${CANONICAL_PORT_DEFAULT} (ADR-014)"
+    printf '%s' "${CANONICAL_PORT_DEFAULT}"
 }
 PORT="$(_resolve_port)"
 

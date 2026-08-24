@@ -46,8 +46,13 @@ LIVE="$HOME/agents-ensemble"            # §0.6 — the anchored pattern below c
 # Tier 1a — cmdline carries an anchored exe under the live install dir:
 ps -axo pid,ppid,lstart,command | grep -E "$LIVE/(launcher\.sh|ensemble-prod|current/ensemble-prod)( |$)" \
   | tee <evidence-dir>/live-pid-start.txt
-# Tier 1b — relative `./ensemble-prod` form (cwd == live install dir):
-ps -axo pid=,args= 2>/dev/null \
+# Tier 1b — relative `./ensemble-prod` form (cwd == live install dir).
+# Same column shape as Tier 1a + empty-field header suppression (`=` suffixes
+# strip the column-name header line) so byte-level diff against
+# live-pid-start.txt is deterministic — the prior `pid=,args=` shape missed
+# ppid/lstart, so the two tiers weren't comparable and the diff always
+# failed for the relative-form cases. Reviewed cycle 2 — F-3.
+ps -axo pid=,ppid=,lstart=,command= 2>/dev/null \
   | awk '{if ($0 ~ /(ensemble-prod)( |$)/ || $0 ~ /(^|\/)launcher\.sh( |$)/) print $1}' \
   | while read -r p; do
       [ "$(lsof -a -p "$p" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)" = "$LIVE" ] && \

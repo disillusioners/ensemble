@@ -78,7 +78,9 @@ import re
 import secrets
 import shutil
 import subprocess
+import threading
 import time
+import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -242,7 +244,20 @@ def journal_write(install_dir: Path, data: dict[str, Any]) -> None:
     """
     jp = journal_path(install_dir)
     jp.parent.mkdir(parents=True, exist_ok=True)
-    tmp = jp.with_name(f"{jp.name}.tmp.{os.getpid()}.{int(time.time() * 1000)}")
+    # F-1 (P2.3 review cycle 2, MINOR — defense-in-depth): the tmp filename
+    # is pid-based, so two threads in the SAME process collide. The seam is
+    # currently unreachable (single-threaded callers today) but B6.5's sink
+    # + future threaded callers make it live. Per-writer uniqueness via
+    # threading.get_ident() + uuid.uuid4().hex[:8] — combined with the
+    # existing pid + ms timestamp, a collision now requires four concurrent
+    # writers all hitting the same nanosecond with the same uuid prefix,
+    # which is astronomically unlikely without the attacker controlling
+    # both the clock and /dev/urandom. P2.3 caller discipline still
+    # serializes journal writes externally; this is the inner ring.
+    tmp = jp.with_name(
+        f"{jp.name}.tmp.{os.getpid()}.{threading.get_ident()}."
+        f"{uuid.uuid4().hex[:8]}.{int(time.time() * 1000)}"
+    )
     payload = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
     try:
         with tmp.open("w", encoding="utf-8") as fh:
