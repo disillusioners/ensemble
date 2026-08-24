@@ -1,8 +1,8 @@
 # Plan Overview: pause-resume-terminate-tree-fix (B1–B7 + SSE)
 
-Date: 2026-08-24 (Rev 2 — architect-corrected per `architecture-recommendation.md` @ 8abca8b5; decision log in `decisions.md`)
+Date: 2026-08-24 (Rev 2.1 — architect-corrected @ 8abca8b5 + reviewer-corrected per council 2bb126df; decision log in `decisions.md`)
 Branch: `feature/pause-resume-terminate-tree-fix` (planning artifacts committed here)
-Status: **Rev 2 — architect review COMPLETE, all flags resolved (§5), leader decisions D1–D5 recorded. Ready for implementation dispatch.**
+Status: **Rev 2.1 — reviewer council 2bb126df APPROVED (unanimous, 0 critical); required corrections W1/W2/§D/W6/W9 + kickoff W3/W4/W7/W8 folded. READY FOR IMPLEMENTATION DISPATCH.**
 Evidence: `.agents/tester/RESULTS/2026-08-24-pause-resume-terminate-tree-propagation-repro.md` (static + live repro, 6 phases, ~130 evidence files)
 Synthesized by: planner[v2] (aggregation of 3 research passes + 3 plan-creation worker outputs)
 
@@ -108,18 +108,6 @@ Per `.agents/tester/rules/ensure.md` (change set touches job/task/queue system �
 ## 10. Follow-Up Tickets Filed by P3 (out of batch)
 
 FT-001 (B7a future-dated rows), FT-002 (B7c status disagreement), FT-003 (SSE fan-out), **FT-004** (kill-switch removal criterion, ~+30 days post-soak + V1/O1), **FT-005** (Lane-5-vs-sweep policy coherence, leader D4) — plus optionally a B6 ticket. Deferred-with-name from P1: V1 (visibility tools enumeration), O1 (observer `_cleanup_descendants_of` — carries the AF1 flip-condition verification).
-
-## 11. Out of Scope (batch guardrails)
-
-Phase 4b/4c turn-reconciler migration (`_terminate_instance_db_sync`, `_finalize_job_db_sync`); F9/F16 residuals; `_llm_select`/HA splits; any `emit_terminal` API redesign beyond B3's minimum; new watcher states; schema changes; SSE implementation; B7a/B7c implementation.
--with-name from P1: V1 (visibility tools enumeration), O1 (observer `_cleanup_descendants_of`).
-
-## 11. Out of Scope (batch guardrails)
-
-Phase 4b/4c turn-reconciler migration (`_terminate_instance_db_sync`, `_finalize_job_db_sync`); F9/F16 residuals; `_llm_select`/HA splits; any `emit_terminal` API redesign beyond B3's minimum; new watcher states; schema changes; SSE implementation; B7a/B7c implementation.
-it_terminal` API redesign beyond B3's minimum; new watcher states; schema changes; SSE implementation; B7a/B7c implementation.
-a changes; SSE implementation; B7a/B7c implementation.
--with-name from P1: V1 (visibility tools enumeration), O1 (observer `_cleanup_descendants_of`).
 
 ## 11. Out of Scope (batch guardrails)
 

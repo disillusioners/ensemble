@@ -50,3 +50,24 @@ Decision log for the batch. Sources: architect review `architecture-recommendati
 ## Blueprint amendment queued (post-P1, C6)
 
 "Query-time lineage survives revive" needs refinement: `instance_hierarchy` is a lossy spawn-to-report edge table under revive (revive never re-inserts rows); `instances.parent_id` is the lineage authority; no new hierarchy readers permitted.
+
+---
+
+## Rev 2.1 — reviewer council 2bb126df (2026-08-24T19:31:26Z)
+
+**Verdict: APPROVED (unanimous, 0 critical, 9 warnings) — Rev 2.1 is the pre-dispatch condition.** Folded:
+
+| Item | Correction | Folded into |
+|------|-----------|-------------|
+| W1 (required) | T2.5 guard widened to ANY non-deleted JobItem (CANCELLED evaded the queued/active filter); Criterion 6 rescoped; residue folded to Task↔JobItem reconciliation-gap note | phase2-plan.md |
+| W2 (required) | T2.4 atomicity reframed — strict ordering + early-abort + per-row `enqueued_at` stamp (load-bearing) replaces the unimplementable single transaction; `run_coroutine_threadsafe` bridge specified; pre-existing-FIRED healing test added | phase2-plan.md |
+| §D (required) | Stale premise corrected — single `cancel_for_target` call site `:1816` (pause-side removed pre-Phase-2, comment `:2243`); dead `op=='pause'` branch dropped; `:1816` patched unconditionally; FIRED-not-CANCELLED path-coverage test; architect-doc erratum noted | phase2-plan.md + erratum @ architecture-recommendation.md |
+| W6 (required) | Mock-migration paths corrected (4/8 wrong) + 3 missing suites added + repo-wide grep-discovery as Task-1 acceptance | phase1-plan.md |
+| W9 (required) | §11 Out-of-Scope deduplicated (3x garbled -> 1 clean) | plan-overview.md |
+| W3 (kickoff) | Stamped-vs-unstamped sub-class pinned by unit repro; healing assertion extended; durable drain lanes named | phase2-plan.md |
+| W4 (kickoff) | Task 2.13 added — `child_outcome` metadata routed through `_process_child_completion_and_notify_parent` (graph.py:275-300) + payload-reach test | phase2-plan.md |
+| W7 (kickoff) | T9 -> daemon restart -> T10 sequencing pinned (dev livelock `d14cbde5` made e2e non-deterministic) | phase1-plan.md |
+| W8 (kickoff) | `preserve_completed_at` zero-caller reservation comment spec'd at repository.py:1134, cross-ref architecture-recommendation §6.2 | phase3-plan.md |
+| #8 (trivial) | Migration citation fixed: `20260819_000001_report_injections_deferred_marker.sql` (not 20260624_000004); phantom "phase1-plan §1.7" cross-ref repointed | phase2/phase3-plan.md |
+
+Remaining reviewer suggestions -> backlog (not blocking dispatch). **Status: Rev 2.1 ready-for-dispatch.**
