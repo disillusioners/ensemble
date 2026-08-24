@@ -6,7 +6,7 @@
   "color": "accent-orange",
   "version": "1.0.0",
   "innate_skills": ["dynamic-skill", "chart", "question", "todo"],
-  "skill_injection": true,
+  "skill_injection": false,
   "capabilities": ["docker", "kubernetes", "terraform", "ci-cd", "shell-ops"],
   "tools": {
     "allow": ["bash", "proc", "filesystem", "time", "self", "help", "image", "knowledge", "mcp", "context", "shared_meta_kv", "db", "infra", "project", "dynamic-skill", "question"]
