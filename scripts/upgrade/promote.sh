@@ -35,6 +35,9 @@
 #   VERSION=v0.10.6 bash scripts/upgrade/promote.sh demo
 #   bash scripts/upgrade/promote.sh sandbox --version v1
 #   (sandbox needs INSTALL_DIR=<dir> PORT=<port>)
+#   TARGET=live ADDITIONALLY requires BOTH the ENSEMBLE_UPGRADE_LIVE=1
+#   guard env AND the explicit --f2-verified-closed operator flag
+#   (MINOR-4b: a second factor, not a replacement — see the F2 gate).
 #
 # EXIT CODES: 0 committed · 1 rolled back (env recovered, promote failed) ·
 # 78 refusal (preflight/halt/cooldown/cap/quarantine/integrity/busy/live) ·
@@ -53,6 +56,7 @@ LOG_TAG="upgrade-promote"
 
 VERSION="${VERSION:-}"
 TARGET_ARG=""
+F2_VERIFIED_CLOSED=0
 args=("$@")
 i=0
 while [ $i -lt ${#args[@]} ]; do
@@ -65,7 +69,13 @@ while [ $i -lt ${#args[@]} ]; do
             i=$((i + 1))
             VERSION="${args[$i]:-}"
             ;;
-        -h|--help) sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --f2-verified-closed)
+            # MINOR-4b (P2.3 review cycle 1): explicit operator flag —
+            # TARGET=live additionally requires it (see the F2 gate after
+            # require_live_guard). No value; presence is the attestation.
+            F2_VERIFIED_CLOSED=1
+            ;;
+        -h|--help) sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "promote: unknown flag '$arg' — set VERSION=<ver> env or use --help" >&2; exit 78 ;;
     esac
     i=$((i + 1))
@@ -79,12 +89,32 @@ done
 
 resolve_env "${TARGET_ARG:-${TARGET:-demo}}"
 require_live_guard "$UP_TARGET"
+
+# MINOR-4b (P2.3 review cycle 1): live-target F2 gate. promote.sh live is
+# a DEAD PATH until F2 (the unauthenticated loopback API user-origin forge
+# lane) closes — but the gate is enforced NOW: TARGET=live ADDITIONALLY
+# requires the explicit --f2-verified-closed operator flag. This is a
+# SECOND factor on top of the ENSEMBLE_UPGRADE_LIVE=1 guard above (which
+# stays) — not a replacement. Distinct D-FA2.2 reason token
+# (f2-not-verified) so the journal refusal record + SSE alert are
+# distinguishable from the live-guard refusal. When the flag IS present,
+# the attestation is recorded on the live txn at open time
+# (journal_mark_f2_verified, lib.sh) — auditable at the enforcement point.
+if [ "$UP_TARGET" = "live" ] && [ "$F2_VERIFIED_CLOSED" != "1" ]; then
+    _refuse f2-not-verified "promote refused (f2-not-verified): TARGET=live requires the explicit --f2-verified-closed operator flag — F2 user-origin forge lane verified closed (runbook §9 hard block; ENSEMBLE_UPGRADE_LIVE=1 remains a separate, still-required factor)"
+fi
+
 echo_env_triple
 
 if [ -z "$VERSION" ]; then
     _warn "explicit VERSION required — e.g. VERSION=v0.10.6 bash scripts/upgrade/promote.sh demo"
     exit 78
 fi
+
+# D1 (reviewer ruling, P2.3 final batch): the direct exit-78s above and the
+# SOAK_S case below are INPUT-VALIDATION refusals — journal-less BY DESIGN
+# (nothing has been locked, opened, or mutated yet; the reviewed carve-out
+# set is CLOSED — no conversion to _refuse journaling).
 
 SOAK_S="${ENSEMBLE_PROMOTE_SOAK_S:-$SOAK_S_DEFAULT}"
 case "$SOAK_S" in
@@ -109,8 +139,7 @@ lock_heartbeat
 
 # 1b. staged mode sanity
 if [ ! -d "$TARGET_REL" ]; then
-    _warn "target release $TARGET_REL does not exist — stage it first (stage.sh $UP_TARGET --version $VERSION)"
-    exit 78
+    _refuse not-staged "target release $TARGET_REL does not exist — stage it first (stage.sh $UP_TARGET --version $VERSION)"
 fi
 journal_init || { _warn "cannot initialize journal"; exit 1; }
 J="$(journal_read)" || {
@@ -119,10 +148,12 @@ J="$(journal_read)" || {
 }
 
 # 1c. adopt-or-refuse an existing in_flight (sweep-mirroring, D-FA4.3)
-adopt_stale_txn || exit 78
+adopt_stale_txn || _refuse txn-busy "promote refused: unresolved in_flight txn (see the adopt diagnostics above — pipeline-busy)"
 
-# 1d. ENTRY-side checks (D-FA4.2): cap/halt · cooldown · quarantine
-promote_entry_check "$VERSION" || exit 78
+# 1d. ENTRY-side checks (D-FA4.2): cap/halt · cooldown · quarantine.
+# L11 (tidier): promote_entry_check only ever returns 0 — every refusal
+# path inside it exits 78 itself (_refuse) — so no caller-side exit arm.
+promote_entry_check "$VERSION"
 
 # 1e. integrity (D-FA4.4): CURRENT (drift detection) + TARGET + manifest
 # fields + no-.env invariant. Same-version re-promote verifies once.
@@ -156,6 +187,15 @@ fi
 if ! journal_open_txn "promote" "$VERSION"; then
     _warn "cannot open journal txn (an in_flight survived adoption?) — pipeline-busy"
     exit 78
+fi
+# MINOR-4b: on the live lane, stamp the operator's F2 attestation ON the
+# open txn (f2_verified_closed:true + timestamp + optional operator note
+# from F2_VERIFIED_NOTE) — auditable at the enforcement point; the field
+# rides the txn's window into the journal record. Additive fields only —
+# existing readers parse named fields and ignore extras (D4 splice
+# discipline). Demo/sandbox lanes stamp nothing (the flag is live-only).
+if [ "$UP_TARGET" = "live" ] && [ "$F2_VERIFIED_CLOSED" = "1" ]; then
+    journal_mark_f2_verified || journal_fail_loud "preflight: journal_mark_f2_verified (F2 attestation record)"
 fi
 PROMOTE_START="$(_now_epoch)"
 _log "txn open: promote target=$VERSION pid=$$ (outer window $((SWEEP_STALE_S))s from txn start)"

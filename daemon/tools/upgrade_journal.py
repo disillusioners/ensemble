@@ -49,6 +49,14 @@ the P2.1 fields keeps working because its own fields are never removed):
 * ``pending_restart`` — null | "<run_id>" (phase2-plan D2 restart marker).
 * ``pending_actions`` — {} | {"<run_id>": {nonce record}} (D-FA3.3).
 
+Terminal-class alert emission (P2.3 B3/T8a): a module-level sink registry
+(:func:`register_alert_sink` — default no-op, last-wins; the daemon boots
+the real SSE sink via :func:`broadcaster_alert_sink`) + emission hooks in
+:func:`journal_history_append` for the 3 alert kinds (cap-halt / promote
+refusal / auto-rollback). Best-effort, never-raises, terminal-class only —
+see the ALERT EVENT SET note at the emission section for the full
+contract (incl. why launcher burst-abort is deliberately NOT an SSE kind).
+
 Executor spawn (D-FA1.3 / D4):
     :func:`spawn_executor` runs the payload via ``subprocess.Popen(...,
     start_new_session=True)`` (≡ double-fork + ``setsid`` on macOS and
@@ -58,10 +66,16 @@ Executor spawn (D-FA1.3 / D4):
     harness's SIGTERM teardown must never reach it. stdio →
     ``<install_dir>/data/upgrade.log``; env is ALLOWLISTED (R-SR09 — no
     ``.env`` passthrough, no API keys).
+
+L8 (tidier, P2.3 final batch): this module is deliberately large — the
+module split (journal / lock / nonce / alert) is fenced to the post-P2.3
+refactor pass (decisions.md "P2.3 Gate Rulings & Fences" item 2); do not
+grow it further without pulling that fence.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -69,11 +83,13 @@ import re
 import secrets
 import shutil
 import subprocess
+import threading
 import time
+import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -233,7 +249,20 @@ def journal_write(install_dir: Path, data: dict[str, Any]) -> None:
     """
     jp = journal_path(install_dir)
     jp.parent.mkdir(parents=True, exist_ok=True)
-    tmp = jp.with_name(f"{jp.name}.tmp.{os.getpid()}.{int(time.time() * 1000)}")
+    # F-1 (P2.3 review cycle 2, MINOR — defense-in-depth): the tmp filename
+    # is pid-based, so two threads in the SAME process collide. The seam is
+    # currently unreachable (single-threaded callers today) but B6.5's sink
+    # + future threaded callers make it live. Per-writer uniqueness via
+    # threading.get_ident() + uuid.uuid4().hex[:8] — combined with the
+    # existing pid + ms timestamp, a collision now requires four concurrent
+    # writers all hitting the same millisecond with the same uuid prefix,
+    # which is astronomically unlikely without the attacker controlling
+    # both the clock and /dev/urandom. P2.3 caller discipline still
+    # serializes journal writes externally; this is the inner ring.
+    tmp = jp.with_name(
+        f"{jp.name}.tmp.{os.getpid()}.{threading.get_ident()}."
+        f"{uuid.uuid4().hex[:8]}.{int(time.time() * 1000)}"
+    )
     payload = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
     try:
         with tmp.open("w", encoding="utf-8") as fh:
@@ -268,14 +297,21 @@ def journal_update_field(install_dir: Path, field_name: str, value: Any) -> dict
 
 
 def journal_history_append(install_dir: Path, event: str, detail: str) -> None:
-    """Append to ``history`` (newest last) — lib.sh ``journal_history_append``."""
+    """Append to ``history`` (newest last) — lib.sh ``journal_history_append``.
+
+    P2.3 B3/T8a: a TERMINAL-CLASS event (see ``ALERT_KIND_BY_EVENT``)
+    additionally emits a best-effort SSE alert AFTER the durable write —
+    never-raises, sink absent = silent no-op (see the emission section
+    below)."""
     data = journal_read(install_dir)
     history = data.get("history")
     if not isinstance(history, list):
         history = []
-    history.append({"ts": now_iso(), "event": event, "detail": detail})
+    ts = now_iso()
+    history.append({"ts": ts, "event": event, "detail": detail})
     data["history"] = history
     journal_write(install_dir, data)
+    _emit_terminal_class_alert(data, event, detail, ts)
 
 
 def ensure_extensions(install_dir: Path) -> dict[str, Any]:
@@ -301,6 +337,210 @@ def ensure_extensions(install_dir: Path) -> dict[str, Any]:
     return data
 
 
+# ── Terminal-class alert emission (P2.3 B3 / T8a — D4 deterministic SSE) ────
+#
+# Alert EVENT SET (caller-ruled 2026-08-23 — exactly 3 SSE kinds):
+#
+#   ``upgrade_cap_halt``          journal ``halt`` history entry — the
+#                                 halt-for-human record (rollback-cap
+#                                 reached, gate-fail-with-no-rollback,
+#                                 adopt halts …; the ledger checker's
+#                                 violation class).
+#   ``upgrade_promote_refusal``   journal ``refusal`` history entry —
+#                                 entry-side refusals (cap/cooldown/lock/
+#                                 quarantine/gate-refuse), reason token
+#                                 parsed from the detail via the D-FA2.2
+#                                 ``reason=<token>`` convention.
+#   ``upgrade_auto_rollback``     journal ``rollback`` / ``sweep_rollback``
+#                                 / ``quarantine`` history entries —
+#                                 auto-rollback executed + its quarantine
+#                                 stamp. promote.sh appends the rollback
+#                                 entry BEFORE stamping quarantine, so
+#                                 the quarantine-entry alert is the one
+#                                 whose payload carries the COMPLETE
+#                                 quarantine list.
+#
+# Deliberately NOT an SSE kind: launcher burst-abort. It is a
+# daemon-down class — structurally undeliverable by SSE (the daemon is
+# the thing that died). Covered instead by the B4 watchdog-watcher
+# extension (ADR-025(b): file-watch of ``.launcher-state`` abort markers
+# + journal halt/sweep events, readable without the daemon) + Ari's
+# next-recovery relay from the journal.
+#
+# Emission contract:
+#   * the hook fires in :func:`journal_history_append` AFTER the durable
+#     write — the journal is PRIMARY, the alert best-effort;
+#   * never-raises: the sink call is wrapped in ``except Exception``
+#     (NEVER BaseException — the CancelledError project gotcha) with a
+#     single log line; a failing/absent sink never breaks or delays a
+#     journal write; sink absent (unit tests, scripts context) = silent
+#     no-op;
+#   * terminal-class ONLY (R3.4 anti-spam): ordinary entries (staged,
+#     commit, restart, sweep, nonce_consumed, arm-class field writes,
+#     idempotent re-stage, sweep-clear of non-rollback txns, adoption
+#     without rollback) emit NOTHING; ONE alert per history EVENT (a
+#     second refusal appends its own event → its own alert; never
+#     duplicates within one event);
+#   * payloads are derived FROM THE JOURNAL (promotion-ladder §3:
+#     evidence-cited, not vibes) — counters, cooldown, quarantine list
+#     and the in-flight run_id/txn handle are read from the
+#     just-written document, and ``source_event`` names the journal
+#     history event type;
+#   * the SHELL-side journal writers (promote.sh / rollback.sh /
+#     restart.sh via lib.sh) run daemonized OUTSIDE the daemon process —
+#     their appends cannot hop this in-process sink; those surfaces are
+#     covered by the same B4 watcher + relay channels. In-daemon
+#     appends (this module and future Python writers) emit here.
+#
+# ADR-034: nothing below touches the splice's >=2-occurrence/escape
+# discipline — emission is purely post-write observation.
+
+ALERT_KIND_BY_EVENT: dict[str, str] = {
+    "halt": "upgrade_cap_halt",
+    "refusal": "upgrade_promote_refusal",
+    "rollback": "upgrade_auto_rollback",
+    "sweep_rollback": "upgrade_auto_rollback",
+    "quarantine": "upgrade_auto_rollback",
+}
+
+# The registered sink (sync callable, receives the alert payload dict).
+# Default: None = silent no-op. Plain module attribute (GIL-atomic
+# last-wins assignment; the registry is deliberately single-slot).
+_alert_sink: Callable[[dict[str, Any]], None] | None = None
+
+
+def register_alert_sink(
+    sink: Callable[[dict[str, Any]], None] | None,
+) -> Callable[[dict[str, Any]], None] | None:
+    """Register the terminal-class alert sink — LAST-WINS.
+
+    The daemon registers the real sink once at boot (api lifespan, via
+    :func:`broadcaster_alert_sink`); tests re-register freely and reset
+    to the silent no-op default with ``register_alert_sink(None)``.
+    Returns the PREVIOUS sink so callers can restore it. Idempotent:
+    re-registering the same callable is a harmless self-replacement."""
+    global _alert_sink
+    previous = _alert_sink
+    _alert_sink = sink
+    return previous
+
+
+def broadcaster_alert_sink(
+    broadcaster: Any,
+) -> Callable[[dict[str, Any]], None]:
+    """Build the REAL daemon sink: publish alerts via the
+    NotificationBroadcaster SSE service (daemon/services/
+    notification_broadcaster.py — the module singleton wired in the api
+    lifespan; registration lands there, ONE line at boot).
+
+    MUST be built ON the running event loop (boot); the returned sync
+    callable is then safe from ANY thread — loop thread (tool calls) and
+    executor threads alike hop through ``loop.call_soon_threadsafe`` →
+    ``asyncio.ensure_future(broadcaster.emit(...))``. A closed/shutdown
+    loop drops the alert with one log line (best-effort — the journal
+    write is already durable). Never raises into the journal caller."""
+    loop = asyncio.get_running_loop()
+
+    def sink(payload: dict[str, Any]) -> None:
+        notification = {
+            "event_type": str(payload.get("kind", "upgrade_alert")),
+            "data": payload,
+            "timestamp": payload.get("ts"),
+        }
+
+        def _dispatch() -> None:
+            task = asyncio.ensure_future(broadcaster.emit(notification))
+            task.add_done_callback(_log_emit_result)
+
+        try:
+            loop.call_soon_threadsafe(_dispatch)
+        except RuntimeError:
+            logger.warning(
+                "upgrade_journal: alert loop closed — alert dropped "
+                "(best-effort; journal already written): %s",
+                payload.get("kind"),
+            )
+
+    return sink
+
+
+def _log_emit_result(task: asyncio.Future[Any]) -> None:
+    """Done-callback for the dispatched ``broadcaster.emit`` — a failed
+    emit is ONE warning line (best-effort alert, journal unaffected)."""
+    # M1 (tidier, P2.3 final batch): a CANCELLED task raises CancelledError
+    # from task.exception() — inside a done-callback that escapes as loop
+    # noise. Same family as the 2026-07-12 wait_for_result gotcha: check
+    # cancelled FIRST (single warning), never consume the exception.
+    if task.cancelled():
+        logger.warning(
+            "upgrade_journal: SSE alert emit CANCELLED (alert dropped; "
+            "journal already written)"
+        )
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning(
+            "upgrade_journal: SSE alert emit FAILED (alert dropped; "
+            "journal already written): %s",
+            exc,
+        )
+
+
+_REASON_TOKEN_RE = re.compile(r"\breason=([a-z0-9][a-z0-9-]*)")
+
+
+def _reason_token(detail: str) -> str | None:
+    """Parse the D-FA2.2 ``reason=<token>`` from a history detail, if any."""
+    match = _REASON_TOKEN_RE.search(detail or "")
+    return match.group(1) if match else None
+
+
+def _emit_terminal_class_alert(
+    data: dict[str, Any], event: str, detail: str, ts: str
+) -> None:
+    """Best-effort alert for a terminal-class history append.
+
+    Called from :func:`journal_history_append` AFTER the durable write
+    with the just-written document in hand (payload fields are read from
+    it — journal-derived evidence). NEVER raises: a failing sink is
+    logged with a single line and dropped; the journal write — already
+    complete — is unaffected. Sink absent or ordinary (non-terminal)
+    event: silent no-op."""
+    sink = _alert_sink
+    if sink is None:
+        return
+    kind = ALERT_KIND_BY_EVENT.get(event)
+    if kind is None:
+        return  # ordinary write — terminal-class only (R3.4)
+    in_flight = data.get("in_flight")
+    quarantined = data.get("quarantined")
+    # M6 (tidier): the run_id conditional hoisted out of the payload dict —
+    # a named local reads as what it is (None unless in_flight is an object).
+    run_id = (
+        in_flight.get("run_id") if isinstance(in_flight, dict) else None
+    )
+    payload = {
+        "kind": kind,
+        "source_event": event,
+        "reason": _reason_token(detail),
+        "detail": detail,
+        "version": data.get("current"),
+        "counters": data.get("rollback_window_count"),
+        "cooldown_until": data.get("cooldown_until"),
+        "quarantined": quarantined if isinstance(quarantined, list) else [],
+        "run_id": run_id,
+        "ts": ts,
+    }
+    try:
+        sink(payload)
+    except Exception as exc:  # NEVER BaseException (CancelledError gotcha)
+        logger.warning(
+            "upgrade_journal: alert sink FAILED (alert dropped; journal "
+            "write unaffected): %s",
+            exc,
+        )
+
+
 # ── rollback.lock.d — mkdir lock, the D-FA5.1 protocol ──────────────────────
 
 
@@ -321,9 +561,12 @@ def _pid_alive(pid: Any) -> bool:
     except ProcessLookupError:
         return False
     except PermissionError:
-        # Deliberate conservative divergence from lib.sh's shell `kill -0`
-        # (EPERM → dead there): treat EPERM as ALIVE — never break a lock
-        # whose owner may be live; degrades to pipeline-busy instead.
+        # EPERM → ALIVE — the process exists but belongs to another user;
+        # never break a lock whose owner may be live; degrades to
+        # pipeline-busy instead. lib.sh's _pid_alive now matches this
+        # semantics (kill -0 EPERM → alive, P2.3 B3.5) — the former
+        # deliberate divergence (EPERM → dead on the shell side) is
+        # closed.
         return True  # exists but owned by another user
 
 
@@ -474,7 +717,7 @@ class PendingOp:
         return asdict(self)
 
     @classmethod
-    def from_json(cls, data: Any) -> "PendingOp | None":
+    def from_json(cls, data: Any) -> PendingOp | None:
         if not isinstance(data, dict) or not data.get("run_id"):
             return None
         kwargs = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
@@ -531,7 +774,7 @@ class PendingAction:
         return asdict(self)
 
     @classmethod
-    def from_json(cls, data: Any) -> "PendingAction | None":
+    def from_json(cls, data: Any) -> PendingAction | None:
         if not isinstance(data, dict) or not data.get("nonce"):
             return None
         kwargs = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
@@ -683,9 +926,12 @@ def reconcile_pending_op(install_dir: Path) -> str | None:
     terminal = _terminal_event_after(data, op.armed_at)
     if terminal is not None:
         event, entry = terminal
-        # "Never raises" contract: the 3-write closure below is best-effort
-        # (a failed write is logged and left as-is — the pending_op survives
-        # for the boot sweep / operator; this is a janitor, never a gate).
+        # "Never raises" contract: the 3-call closure below is best-effort
+        # (NIT-F, P2.3 B3.5: was "3-write" — ensure_extensions writes only
+        # when a field is missing, so the steady-state closure performs 2
+        # writes, not 3; a failed write is logged and left as-is — the
+        # pending_op survives for the boot sweep / operator; this is a
+        # janitor, never a gate).
         try:
             ensure_extensions(install_dir)
             clear_pending_op(install_dir, clear_restart_marker=False)

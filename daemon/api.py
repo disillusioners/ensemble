@@ -152,6 +152,28 @@ else:
 FRONTEND_DIST = BASE_DIR / "frontend" / "dist" / "frontend" / "browser"
 
 
+def _register_upgrade_alert_sink(notification_broadcaster) -> None:
+    """P2.3 B3 (T8a) + M3 (tidier, P2.3 final batch): wire the terminal-class
+    upgrade-journal alert sink to the SSE broadcaster. The sync→async hop
+    lives in upgrade_journal (``broadcaster_alert_sink``); registration runs
+    ON the loop (boot) and is last-wins. The alert sink is best-effort
+    observability — it must NEVER gate daemon startup: any failure here
+    (import, wiring, sink construction) is ONE warning line and boot
+    continues with upgrade alerts disabled."""
+    try:
+        from daemon.tools.upgrade_journal import (
+            broadcaster_alert_sink,
+            register_alert_sink,
+        )
+
+        register_alert_sink(broadcaster_alert_sink(notification_broadcaster))
+    except Exception as e:
+        logger.warning(
+            f"Upgrade alert-sink registration failed (upgrade SSE alerts "
+            f"disabled; boot continues): {e}"
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan context manager.
@@ -607,6 +629,10 @@ async def lifespan(app: FastAPI):
     # Initialize NotificationBroadcaster and wire into InstanceManager
     notification_broadcaster = get_notification_broadcaster()
     manager.set_notification_broadcaster(notification_broadcaster)
+
+    # P2.3 B3 (T8a): terminal-class upgrade-journal alerts → SSE, via the
+    # M3-wrapped helper — a failing registration NEVER gates startup.
+    _register_upgrade_alert_sink(notification_broadcaster)
     
     # Auto-provision system queues for existing projects
     try:

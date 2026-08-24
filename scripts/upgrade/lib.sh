@@ -99,9 +99,9 @@ _sha256() { shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'; }
 _canon_dir() { (cd "$1" 2>/dev/null && pwd -P) || printf '%s' "$1"; }
 
 # _json_escape <string> — minimal JSON string escaper (quotes + backslash +
-# ALL control chars < 0x20 as standard \u00XX escapes). Bash 3.2-safe,
-# builtin-only (printf -v — no per-char subshell forks; reasons are short
-# and stage.sh maps stay fast).
+# ALL control chars < 0x20 plus DEL 0x7F as standard \u00XX escapes). Bash
+# 3.2-safe, builtin-only (printf -v — no per-char subshell forks; reasons
+# are short and stage.sh maps stay fast).
 # N4 (P2.2 fix pass 2026-08-23): the old version only handled \n \t \r —
 # any other raw control char passed through verbatim; the first N4 cut
 # then escaped by `-lt 32` alone, but bash 3.2 printf '%d' yields SIGNED
@@ -110,8 +110,10 @@ _canon_dir() { (cd "$1" 2>/dev/null && pwd -P) || printf '%s' "$1"; }
 # hex digits). Both failures share the nastiest property: lenient readers
 # (python/jq, this file's own extractor) ACCEPT the mangled form — the
 # damage is SILENT TEXT CORRUPTION, not a parse failure, so nothing fails
-# loudly. Now: 0 <= code < 0x20 escapes as \u00XX; negative (high UTF-8
-# byte) passes through raw — valid UTF-8 JSON. NUL cannot occur in bash
+# loudly. Now: 0 <= code < 0x20, plus DEL (0x7F — NIT-D, P2.3 B3.5: the
+# one control char >= 0x20 the tidy ledger wanted escaped for parity with
+# the < 0x20 family), escapes as \u00XX; negative (high UTF-8 byte)
+# passes through raw — valid UTF-8 JSON. NUL cannot occur in bash
 # strings/argv.
 _json_escape() {
     local s="$1" out="" ch i code
@@ -123,7 +125,7 @@ _json_escape() {
     for ((i = 0; i < ${#s}; i++)); do
         ch="${s:i:1}"
         printf -v code '%d' "'$ch"
-        if [ "$code" -ge 0 ] && [ "$code" -lt 32 ]; then
+        if [ "$code" -ge 0 ] && { [ "$code" -lt 32 ] || [ "$code" -eq 127 ]; }; then
             printf -v ch '\\u%04x' "$code"
         fi
         out+="$ch"
@@ -349,6 +351,10 @@ EOF
 #     "in_flight": null | { "kind": "promote|rollback|sweep_rollback",
 #                           "target": "<ver>", "started_at": "<iso>",
 #                           "flipped": false, "owner_pid": <int> },
+#                           [live-lane promote only, MINOR-4b, additive:]
+#                           "f2_verified_closed": true,
+#                           "f2_verified_at": "<iso>",
+#                           "f2_verified_note": "<opt operator note>",
 #     "rollback_window_count": { "24h": <int>, "window_start": "<iso>" },
 #     "cooldown_until": "<iso>|null",
 #     "quarantined": ["<ver>", ...],
@@ -545,6 +551,45 @@ journal_mark_flipped() {
     journal_update "in_flight" "$new_inf"
 }
 
+# journal_mark_f2_verified — MINOR-4b (P2.3 review cycle 1): stamp the
+# operator's --f2-verified-closed attestation INTO the open in_flight txn
+# (live lane only; promote.sh calls it immediately after journal_open_txn,
+# under the held lock). Adds f2_verified_closed:true + f2_verified_at
+# (ISO ts) + optional f2_verified_note (from F2_VERIFIED_NOTE env, the
+# operator's audit trail). ADDITIVE fields only — existing readers (the
+# launcher sweep's _js_json_field, the Python twin) parse named fields
+# and ignore extras, so the D4 schema stays splice-compatible.
+journal_mark_f2_verified() {
+    local json inf new_inf note
+    json="$(journal_read)" || return 1
+    inf="$(_json_sub "$json" "in_flight")"
+    # M2 (tidier, P2.3 final batch): _json_sub returns ANY balanced
+    # container — an array-shaped (or otherwise non-object) in_flight
+    # extraction passed the old non-empty check, and the blind %\}} strip
+    # + append below then wrote MALFORMED JSON into the journal (torn on
+    # next read). Refuse on null/absent/empty AND any non-'{' shape; the
+    # only stampable form is a real object. No journal write on refusal.
+    case "$inf" in
+        '{'*) ;;
+        ''|null)
+            _warn "journal_mark_f2_verified: no in_flight txn (in_flight null/absent) — refusing to stamp (journal untouched)"
+            return 1
+            ;;
+        *)
+            _warn "journal_mark_f2_verified: in_flight read is null/malformed (not a JSON object: '${inf:0:40}') — refusing to stamp (journal untouched)"
+            return 1
+            ;;
+    esac
+    new_inf="${inf%\}}"
+    note="${F2_VERIFIED_NOTE:-}"
+    if [ -n "$note" ]; then
+        new_inf="${new_inf},\"f2_verified_closed\":true,\"f2_verified_at\":\"$(_now_iso)\",\"f2_verified_note\":\"$(_json_escape "$note")\"}"
+    else
+        new_inf="${new_inf},\"f2_verified_closed\":true,\"f2_verified_at\":\"$(_now_iso)\"}"
+    fi
+    journal_update "in_flight" "$new_inf"
+}
+
 # journal_close_txn — in_flight = null.
 journal_close_txn() {
     journal_update "in_flight" "null"
@@ -721,6 +766,24 @@ lock_dir_path() { printf '%s/releases/rollback.lock.d' "$INSTALL_DIR"; }
 
 lock_run_id=""
 
+# _pid_alive <pid> — kill -0 liveness with EPERM=ALIVE semantics
+# (kill -0 EPERM, P2.1 ledger → closed P2.3 B3.5): exit 0 → alive;
+# ENOENT/ESRCH → dead; EPERM → ALIVE — the process exists but belongs to
+# another user (permission denied ≠ dead; breaking a live foreign owner's
+# lock would trample its txn). Matches the Python journal twin
+# upgrade_journal._pid_alive (PermissionError → True). Stderr-text match
+# under LC_ALL=C (NIT-5 — locale-stable: a localized shell must not flip
+# the branch): bash builtin kill and /bin/kill both render "Operation not
+# permitted".
+_pid_alive() {
+    local err
+    err="$(LC_ALL=C kill -0 "$1" 2>&1)" && return 0
+    case "$err" in
+        *"not permitted"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 # lock_acquire [wait_s] — acquire or fail after bounded wait. Sets
 # lock_run_id. Returns: 0 acquired (incl. stale-break); 1 busy after wait.
 lock_acquire() {
@@ -745,9 +808,11 @@ lock_acquire() {
         # LIVE owner lets a concurrent action trample a txn whose owner is
         # still mutating it. A missing/garbage owner pid is UNVERIFIABLE:
         # nothing to protect, the heartbeat alone breaks it (preserves
-        # crash progress). kill -0 (POSIX) is the liveness test; residual
-        # pid-reuse wedge (crashed owner, pid reused by a live process)
-        # degrades to pipeline-busy — safer than trampling a live owner.
+        # crash progress). kill -0 via _pid_alive (POSIX) is the liveness
+        # test — EPERM counts as ALIVE (foreign-user owner; see _pid_alive
+        # above); residual pid-reuse wedge (crashed owner, pid reused by a
+        # live process) degrades to pipeline-busy — safer than trampling a
+        # live owner.
         hb="$(cat "$lock/heartbeat" 2>/dev/null)"
         owner_pid="$(cat "$lock/owner" 2>/dev/null)"
         run_id="$(cat "$lock/run_id" 2>/dev/null)"
@@ -756,7 +821,7 @@ lock_acquire() {
             if [ "$age" -gt "$LOCK_STALE_S" ]; then
                 local owner_live=0
                 if [ -n "$owner_pid" ] && printf '%s' "$owner_pid" | grep -Eq '^[0-9]+$' \
-                   && kill -0 "$owner_pid" 2>/dev/null; then
+                   && _pid_alive "$owner_pid"; then
                     owner_live=1
                 fi
                 if [ "$owner_live" -eq 0 ]; then
@@ -769,8 +834,9 @@ lock_acquire() {
             fi
         fi
         # owner process dead? (crash left a fresh-heartbeat dir) — break too
+        # (_pid_alive: EPERM = alive under another user — never break)
         if [ -n "$owner_pid" ] && printf '%s' "$owner_pid" | grep -Eq '^[0-9]+$' \
-           && ! kill -0 "$owner_pid" 2>/dev/null; then
+           && ! _pid_alive "$owner_pid"; then
             _log "pipeline lock owner pid $owner_pid is dead — breaking lock"
             mv "$lock" "${lock}.stale.$$" 2>/dev/null || continue
             continue
@@ -1026,7 +1092,6 @@ _probe_once() {
 }
 
 # ── Promote/rollback shared mechanics (D6 + D-FA4.1 amendment) ──────────────
-
 # stop_via_stop_script — SIGTERM-bounded, ownership-scoped stop. ALWAYS via
 # scripts/stop-ensemble.sh (D6: reused, never duplicated; NEVER a raw kill).
 stop_via_stop_script() {
@@ -1203,6 +1268,32 @@ retention_evict() {
 }
 
 # ── Entry-side refusal checks (D-FA4.2: ENTRY only — never the recovery) ────
+# _refuse <reason-token> <message...> — entry-refusal: WARN the message
+# UNCHANGED, best-effort-append a `refusal` journal history event carrying
+# the D-FA2.2 reason=<token> (activates the dormant upgrade_promote_refusal
+# SSE kind, P2.3 B4/T8a), then exit 78. Best-effort ONLY: an absent/torn/
+# unwritable journal WARNs once and the refusal exit proceeds — NEVER
+# blocks, NEVER alters the exit code, and NEVER acquires the pipeline lock
+# (an in-flight txn's lock is sacred; callers hold it already or accept a
+# dropped event). ADR-034: the append rides the plain journal_history_append
+# splice — additive only, no new write mechanics. The lock-busy refusal
+# sites deliberately do NOT journal (unlocked append would race the live
+# lock-holder's read-modify-write; pipeline-busy is structured-logged).
+_refuse() {
+    local reason="$1"; shift
+    # L10 (tidier, P2.3 final batch): a token-less or message-less refusal is
+    # a caller bug — refuse LOUDLY (warn + exit 78) WITHOUT journaling an
+    # empty reason=()/detail record (the taxonomy stays greppable).
+    if [ -z "${reason:-}" ] || [ -z "$*" ]; then
+        _warn "refusal helper MISUSED: _refuse requires a non-empty reason token AND message (got reason='${reason:-}' msg='$*') — refusing without journaling"
+        exit 78
+    fi
+    _warn "$*"
+    journal_history_append refusal "$* (reason=$reason)" >/dev/null 2>&1 \
+        || _warn "refusal journal append FAILED (best-effort) — proceeding to exit 78"
+    exit 78
+}
+
 # promote_entry_check <target_ver> — refuses (exit 78) on: halthead (cap
 # exhausted in-window), cooldown window, quarantined target, fresh in_flight.
 # The AUTO-ROLLBACK path and the launcher sweep NEVER call this.
@@ -1211,20 +1302,17 @@ promote_entry_check() {
     # cap / halt state
     cnt="$(journal_rollback_count_24h)"
     if [ "$cnt" -ge "$ROLLBACK_CAP_24H" ]; then
-        _warn "HALT-FOR-HUMAN: rollback cap $ROLLBACK_CAP_24H/24h reached (count=$cnt) — promotes refused until the 24h window resets or an operator intervenes (journal halt events carry the record)"
-        exit 78
+        _refuse cap "HALT-FOR-HUMAN: rollback cap $ROLLBACK_CAP_24H/24h reached (count=$cnt) — promotes refused until the 24h window resets or an operator intervenes (the journal refusal event reason=cap carries the record, D-FA2.2; the halt events that ARMED the cap sit in the rollback windows' history)"
     fi
     # cooldown
     if journal_cooldown_active; then
         local until
         until="$(_json_field "$(journal_read)" cooldown_until)"
-        _warn "promote refused: rollback cooldown active until $until (ADR-005: 10-min anti-flapping)"
-        exit 78
+        _refuse cooldown "promote refused: rollback cooldown active until $until (ADR-005: 10-min anti-flapping)"
     fi
     # quarantined target
     if journal_is_quarantined "$target_ver"; then
-        _warn "promote refused: version '$target_ver' is QUARANTINED (prior gate failure) — quarantine is cleared only by re-staging the version"
-        exit 78
+        _refuse quarantine "promote refused: version '$target_ver' is QUARANTINED (prior gate failure) — quarantine is cleared only by re-staging the version"
     fi
     return 0
 }

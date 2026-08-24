@@ -502,7 +502,7 @@ def create_job_tools(
         queue_id: Annotated[str | None, Field(default=None, description="Specific queue to submit to")]
         idempotency_key: Annotated[str | None, Field(default=None, description="Deduplication key")]
         metadata: Annotated[dict[str, Any] | None, Field(default=None, description="Custom key-value metadata")]
-        source: Annotated[str, Field(default="api", description="Source identifier")]
+        source: Annotated[str, Field(default="api", description="DEPRECATED and IGNORED (NIT-7, P2.3 review cycle 1): the server derives source UNCONDITIONALLY since B3.5 (agent:<caller> for agent callers, internal_agent:unknown otherwise) — any value passed here has no effect. Param retained purely for schema compat; removal deferred.")]
         watch: Annotated[bool, Field(default=False, description="Watch the job for lifecycle events")]
 
     @register_tool_category("job")
@@ -515,22 +515,29 @@ def create_job_tools(
         queue_id: Annotated[str | None, Field(default=None, description="Specific queue to submit to")] = None,
         idempotency_key: Annotated[str | None, Field(default=None, description="Deduplication key")] = None,
         metadata: Annotated[dict[str, Any] | None, Field(default=None, description="Custom key-value metadata")] = None,
-        source: Annotated[str, Field(default="api", description="Source identifier")] = "api",
+        source: Annotated[str, Field(default="api", description="DEPRECATED and IGNORED: server derives source unconditionally (B3.5); retained for schema compat, removal deferred")] = "api",
         watch: Annotated[bool, Field(default=False, description="Watch the job for lifecycle events")] = False,
     ) -> dict:
         """Submit a new job to the queue. Use tool_help("job_create") for details."""
         try:
-            # MAJOR-1(a) (P2.2 fix pass 2026-08-23): an agent caller's
-            # source is FORCED to agent:<caller> — unconditionally, not
-            # merely when it happens to equal the default "api". A
-            # caller-supplied source (e.g. source="telegram:attacker")
+            # MAJOR-1(a) (P2.2 fix pass 2026-08-23) + MINOR-B (P2.2
+            # carry-over, closed P2.3 B3.5): the source derivation is
+            # server-side-UNCONDITIONAL — NO caller-supplied ``source`` is
+            # ever trusted verbatim on this path. Agent callers →
+            # ``agent:<caller>`` (a hostile source="telegram:attacker"
             # must never thread through dispatch to the user-origin
-            # whitelist stamp (manager.stamp_user_origin_window /
-            # USER_ORIGIN_SOURCES) — that would forge factor 2 of the
-            # live 3-factor gate with zero human involvement. Mirrors
-            # job_continue's forced source below.
-            if caller_agent_id:
-                source = f"agent:{caller_agent_id}"
+            # whitelist stamp — manager.stamp_user_origin_window /
+            # USER_ORIGIN_SOURCES — that would forge factor 2 of the live
+            # 3-factor gate with zero human involvement). Empty caller →
+            # ``internal_agent:unknown`` (F3, mirrors job_continue below):
+            # NEVER the default "api" — "api" is whitelisted, and the
+            # genuine web-UI path keeps its server-stamped value on the
+            # HTTP router (jobs_crud.py), not here.
+            source = (
+                f"agent:{caller_agent_id}"
+                if caller_agent_id
+                else "internal_agent:unknown"
+            )
             normalized_project_id = normalize_project_id(project_id)
 
             # Pre-generate job_id so we can register the watcher BEFORE

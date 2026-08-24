@@ -18,8 +18,17 @@ Auto-Restart Phase 1:
   ``sqlalchemy`` module symbol, not ``daemon.__main__``'s local).
 * ``timeout_graceful_shutdown`` is forwarded to ``uvicorn.run`` (fixes
   C1 — bounded SIGTERM shutdown).
+* P2.3 B5.6 (F-DR1-1): the frozen entry ``run_app.py`` (the
+  ``ensemble.spec`` PyInstaller entry) runs the SAME
+  ``_boot_db_preflight`` explicitly BEFORE delegating to ``main()`` and
+  calls ``main(run_preflight=False)`` — exit 75/78 reach the launcher
+  on frozen-binary boots too (not uvicorn's exit-3 crash track), and
+  the probe fires exactly once per entry. The pack cannot boot a built
+  binary, so these tests exercise run_app.py's module body directly
+  (runpy); frozen-binary e2e is proven by the DR-1 re-run drill itself.
 """
 
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -400,3 +409,331 @@ def test_uvicorn_wiring_unchanged(uvicorn_run_patch, tmp_path):
     assert kwargs["port"] == config.daemon.port
     assert kwargs["access_log"] is False
     assert kwargs["reload"] is False
+
+
+# ── Frozen entry (run_app.py) pre-uvicorn preflight (F-DR1-1, P2.3 B5.6) ────
+
+
+def _run_run_app():
+    """Execute run_app.py (the ensemble.spec frozen entry) in a fresh
+    namespace. ``daemon.__main__`` is already imported, so attribute
+    patches on the module take effect; the frozen-only ``.env`` block is
+    inert under pytest (``sys.frozen`` unset)."""
+    import runpy
+
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return runpy.run_path(
+        os.path.join(repo_root, "run_app.py"), run_name="run_app_under_test"
+    )
+
+
+def test_run_app_runs_preflight_before_main(uvicorn_run_patch, tmp_path):
+    """Wiring + order + exactly-once: run_app calls _boot_db_preflight
+    BEFORE main(), passes run_preflight=False, one probe per boot."""
+    import daemon.__main__ as entry
+
+    order = []
+    with (
+        patch.dict(
+            "os.environ",
+            {"ENSEMBLE_DATA_DIR": str(tmp_path), "DATA_DIR": ""},
+            clear=False,
+        ),
+        patch.object(
+            entry, "_boot_db_preflight", side_effect=lambda: order.append("preflight")
+        ) as pf_mock,
+        patch.object(
+            entry, "main", side_effect=lambda *a, **k: order.append("main")
+        ) as main_mock,
+    ):
+        _run_run_app()
+
+    pf_mock.assert_called_once()
+    main_mock.assert_called_once_with(run_preflight=False)
+    assert order == ["preflight", "main"]
+    uvicorn_run_patch.assert_not_called()  # main() was the mock
+
+
+def test_run_app_preflight_pg_unreachable_exits_75_before_main(
+    uvicorn_run_patch, tmp_path
+):
+    """F-DR1-1 core: PG unreachable on the frozen path → SystemExit 75
+    from run_app's OWN preflight call — BEFORE main() runs, so uvicorn
+    never owns the process (no exit-3 crash track)."""
+    from sqlalchemy.exc import OperationalError
+
+    import daemon.__main__ as entry
+
+    engine = MagicMock()
+    engine.connect.side_effect = OperationalError(
+        "SELECT 1", None, Exception("connection refused")
+    )
+
+    with (
+        patch.dict(
+            "os.environ",
+            {"ENSEMBLE_DATA_DIR": str(tmp_path), "DATA_DIR": ""},
+            clear=False,
+        ),
+        patch(
+            "daemon.ensemble_config.EnsembleConfig.load_or_create",
+            side_effect=lambda d: _pg_config(postgres=True),
+        ),
+        patch("sqlalchemy.create_engine", return_value=engine),
+        patch.object(entry, "main") as main_mock,
+    ):
+        with pytest.raises(SystemExit) as excinfo:
+            _run_run_app()
+
+    assert excinfo.value.code == 75
+    main_mock.assert_not_called()
+    uvicorn_run_patch.assert_not_called()
+
+
+def test_run_app_preflight_pg_auth_refused_exits_78_before_main(
+    uvicorn_run_patch, tmp_path
+):
+    """Auth refusal on the frozen path → SystemExit 78 before main()."""
+    import daemon.__main__ as entry
+
+    engine = MagicMock()
+    engine.connect.side_effect = _auth_refused_operational_error("28P01")
+
+    with (
+        patch.dict(
+            "os.environ",
+            {"ENSEMBLE_DATA_DIR": str(tmp_path), "DATA_DIR": ""},
+            clear=False,
+        ),
+        patch(
+            "daemon.ensemble_config.EnsembleConfig.load_or_create",
+            side_effect=lambda d: _pg_config(postgres=True),
+        ),
+        patch("sqlalchemy.create_engine", return_value=engine),
+        patch.object(entry, "main") as main_mock,
+    ):
+        with pytest.raises(SystemExit) as excinfo:
+            _run_run_app()
+
+    assert excinfo.value.code == 78
+    main_mock.assert_not_called()
+    uvicorn_run_patch.assert_not_called()
+
+
+def test_run_app_success_boots_uvicorn_with_single_probe(uvicorn_run_patch, tmp_path):
+    """Happy path end-to-end through REAL run_app + REAL main(): the
+    probe engine is built EXACTLY ONCE across both call sites and
+    uvicorn.run is reached — no double probe, no new boot steps."""
+    conn = MagicMock()
+    engine = MagicMock()
+    engine.connect.return_value.__enter__.return_value = conn
+
+    with (
+        patch.dict(
+            "os.environ",
+            {"ENSEMBLE_DATA_DIR": str(tmp_path), "DATA_DIR": ""},
+            clear=False,
+        ),
+        patch(
+            "daemon.ensemble_config.EnsembleConfig.load_or_create",
+            side_effect=lambda d: _pg_config(postgres=True),
+        ),
+        patch("sqlalchemy.create_engine", return_value=engine) as engine_mock,
+    ):
+        _run_run_app()
+
+    engine_mock.assert_called_once()  # single probe across run_app + main
+    conn.execute.assert_called_once()
+    engine.dispose.assert_called_once()
+    uvicorn_run_patch.assert_called_once()
+
+
+def test_main_default_runs_preflight_once(uvicorn_run_patch, tmp_path):
+    """Dev entry (`python -m daemon`) unchanged: main() still probes
+    exactly once, in its original position."""
+    import daemon.__main__ as entry
+
+    with (
+        patch.dict(
+            "os.environ",
+            {"ENSEMBLE_DATA_DIR": str(tmp_path), "DATA_DIR": ""},
+            clear=False,
+        ),
+        patch.object(entry, "_boot_db_preflight") as pf_mock,
+    ):
+        entry.main()
+
+    pf_mock.assert_called_once()
+    uvicorn_run_patch.assert_called_once()
+
+
+def test_main_run_preflight_false_skips_probe(uvicorn_run_patch, tmp_path):
+    """The skip flag (frozen-entry only) suppresses main()'s internal
+    probe without touching any other boot step."""
+    import daemon.__main__ as entry
+
+    with (
+        patch.dict(
+            "os.environ",
+            {"ENSEMBLE_DATA_DIR": str(tmp_path), "DATA_DIR": ""},
+            clear=False,
+        ),
+        patch.object(entry, "_boot_db_preflight") as pf_mock,
+    ):
+        entry.main(run_preflight=False)
+
+    pf_mock.assert_not_called()
+    uvicorn_run_patch.assert_called_once()
+
+
+def test_preflight_contract_constants_unchanged():
+    """Equivalence pin: the probe keeps Phase-1's exact contract — exit
+    75 tempfail / 78 auth-refused / BOOT_DB_TIMEOUT_S=10s budget."""
+    import daemon.__main__ as entry
+    from daemon.constants import BOOT_DB_TIMEOUT_S
+
+    assert entry._EXIT_BOOT_DB_TEMPFAIL == 75
+    assert entry._EXIT_BOOT_DB_AUTH_REFUSED == 78
+    assert BOOT_DB_TIMEOUT_S == 10
+
+
+def test_run_app_source_pins_preflight_call():
+    """Source-shape pin (torn-write guard): the frozen entry keeps the
+    explicit pre-uvicorn preflight call BEFORE the skip-flag handoff."""
+    from pathlib import Path
+
+    src = (
+        Path(__file__).resolve().parent.parent / "run_app.py"
+    ).read_text(encoding="utf-8")
+    assert "daemon.__main__._boot_db_preflight()" in src
+    assert "daemon.__main__.main(run_preflight=False)" in src
+    # order pin: the probe call precedes the main() handoff in source
+    assert src.index("daemon.__main__._boot_db_preflight()") < src.index(
+        "daemon.__main__.main(run_preflight=False)"
+    )
+
+
+# ── P2.3 final batch (tidier M1/M3) — alert-sink boot seam ─────────────────
+# Pack home: boot_probes_unit_test (this file + test_health_probes.py).
+# M1: the upgrade-journal SSE emit done-callback must never raise on a
+# CANCELLED task (CancelledError from task.exception() — the 2026-07-12
+# wait_for_result family). M3: the alert-sink registration must NEVER
+# gate daemon startup (import failure → one warning, boot continues).
+
+
+def test_m1_log_emit_result_cancelled_task_warns_once_not_raises(caplog):
+    """M1 (tidier): a cancelled broadcaster.emit task → ONE warning line,
+    no CancelledError escaping the done-callback (mutation-lethal guard —
+    the pre-fix body called task.exception() unconditionally)."""
+    import asyncio
+    import logging
+
+    from daemon.tools.upgrade_journal import _log_emit_result
+
+    async def _scenario():
+        loop = asyncio.get_running_loop()
+        task = loop.create_task(asyncio.sleep(3600))
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        assert task.cancelled() is True
+        with caplog.at_level(logging.WARNING, logger="daemon.tools.upgrade_journal"):
+            _log_emit_result(task)  # MUST NOT raise
+        return task
+
+    asyncio.run(_scenario())
+    warnings = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "CANCELLED" in r.message
+    ]
+    assert len(warnings) == 1, f"expected exactly one CANCELLED warning, got {warnings!r}"
+
+
+def test_m1_log_emit_result_failed_task_still_warns(caplog):
+    """M1 companion (regression): the pre-existing failure path keeps its
+    single warning — the cancelled-guard changed nothing else."""
+    import asyncio
+    import logging
+
+    from daemon.tools.upgrade_journal import _log_emit_result
+
+    async def _scenario():
+        loop = asyncio.get_running_loop()
+
+        async def _boom():
+            raise RuntimeError("emit exploded")
+
+        task = loop.create_task(_boom())
+        try:
+            await task
+        except RuntimeError:
+            pass
+        with caplog.at_level(logging.WARNING, logger="daemon.tools.upgrade_journal"):
+            _log_emit_result(task)
+        return task
+
+    asyncio.run(_scenario())
+    warnings = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "emit FAILED" in r.message
+    ]
+    assert len(warnings) == 1
+
+
+def test_m3_alert_sink_registration_failure_never_gates_boot(monkeypatch, caplog):
+    """M3 (tidier): simulated import failure at the registration seam →
+    the helper logs ONE warning and RETURNS (never raises — the alert
+    sink must never gate daemon startup)."""
+    import logging
+    import sys
+
+    import daemon.api as api_mod
+
+    # poison the module entry: `import daemon.tools.upgrade_journal`
+    # inside the helper raises ImportError ("... halted; None in sys.modules")
+    monkeypatch.setitem(sys.modules, "daemon.tools.upgrade_journal", None)
+    with caplog.at_level(logging.WARNING, logger="daemon.api"):
+        api_mod._register_upgrade_alert_sink(object())  # must NOT raise
+    warnings = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "alert-sink" in r.message
+    ]
+    assert len(warnings) == 1, f"expected one alert-sink warning, got {[r.message for r in caplog.records]}"
+    assert "boot continues" in warnings[0].message
+
+
+def test_m3_alert_sink_registration_success_path(monkeypatch):
+    """M3 companion: happy path still registers exactly once through the
+    real register_alert_sink API (last-wins), sinking the broadcaster.
+    Runs ON a live loop — broadcaster_alert_sink captures the running
+    loop at construction (same condition as the lifespan call site)."""
+    import asyncio
+
+    import daemon.tools.upgrade_journal as uj
+    import daemon.api as api_mod
+
+    calls = []
+    real_register = uj.register_alert_sink
+
+    def _recording_register(sink):
+        calls.append(sink)
+        return real_register(sink)
+
+    monkeypatch.setattr(uj, "register_alert_sink", _recording_register)
+    broadcaster = object()
+
+    async def _scenario():
+        api_mod._register_upgrade_alert_sink(broadcaster)
+
+    asyncio.run(_scenario())
+    assert len(calls) == 1
+    # the registered sink IS the broadcaster bridge (wrapped, not raw)
+    assert calls[0] is not broadcaster
+    assert callable(calls[0])
+    # restore no-op sink so later tests see a clean registry
+    real_register(None)

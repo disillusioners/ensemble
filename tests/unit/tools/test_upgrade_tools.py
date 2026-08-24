@@ -19,9 +19,11 @@ committed, reproducible-from-tree tests (review minor #3):
   fixture install dir (never a real live anything).
 * **Nonce lifecycle through the tool** — mint on dry_run → consume on armed
   → replay refused → TTL expiry.
-* **Sequencing (D2/D3)** — armed tools return SCHEDULED with NO process
-  spawned inside the call (Popen recorder + marker + journal assertions);
-  a second arm while active is pipeline-busy naming the run_id.
+* **Sequencing (D2/D3)** — armed tools return with NO process spawned
+  inside the call (Popen recorder + marker + journal assertions); the
+  restart banner reads RESTART SCHEDULED, the upgrade banner UPGRADE
+  ARMED (N5 wording, P2.3 — armed/deferred, not scheduled); a second
+  arm while active is pipeline-busy naming the run_id.
 * **dry_run default TRUE** — the default call mutates nothing (journal
   byte-identical, no lock, no marker, zero spawns), except the labeled
   live-nonce mint on a fake-live dry_run.
@@ -1144,7 +1146,7 @@ class TestSystemUpgradeMatrix:
         out = await tools["system_upgrade"].ainvoke(
             {"target_env": "demo", "version": "1.2.3", "dry_run": False}
         )
-        assert "UPGRADE SCHEDULED" in out, out  # 2 < 3 → proceeds
+        assert "UPGRADE ARMED" in out, out  # 2 < 3 → proceeds
 
     async def test_rollback_cap_window_aged_resets(self, harness) -> None:
         tools, _, install = harness
@@ -1155,7 +1157,7 @@ class TestSystemUpgradeMatrix:
         out = await tools["system_upgrade"].ainvoke(
             {"target_env": "demo", "version": "1.2.3", "dry_run": False}
         )
-        assert "UPGRADE SCHEDULED" in out, out  # aged window → count 0
+        assert "UPGRADE ARMED" in out, out  # aged window → count 0
 
     async def test_cooldown_active_armed_refused(self, harness, install) -> None:
         tools, _, _ = harness
@@ -1222,7 +1224,7 @@ class TestSystemUpgradeMatrix:
         out = await tools["system_upgrade"].ainvoke(
             {"target_env": "demo", "version": "1.2.3", "dry_run": False}
         )
-        assert "UPGRADE SCHEDULED" in out
+        assert "UPGRADE ARMED" in out
         m = re.search(r"run_id=(r-\S+)", out)
         assert m, out
         run_id = m.group(1)
@@ -1463,7 +1465,7 @@ class TestLiveThreeFactorGate:
             {"target_env": "live", "version": "1.2.3", "dry_run": False,
              "user_confirmed": True, "nonce": grouped}
         )
-        assert "UPGRADE SCHEDULED" in out, out
+        assert "UPGRADE ARMED" in out, out
         assert f"run_id={run_id}" in out, (
             f"armed run_id must equal the nonce record's run_id ({run_id}): {out}"
         )
@@ -1494,7 +1496,7 @@ class TestLiveThreeFactorGate:
             {"target_env": "live", "version": "1.2.3", "dry_run": False,
              "user_confirmed": True, "nonce": grouped}
         )
-        assert "UPGRADE SCHEDULED" in out
+        assert "UPGRADE ARMED" in out
         # Simulate the promote completing so the pipeline is free again.
         uj.journal_history_append(live["install"], "commit", f"run {run_id} committed")
         uj.clear_pending_op(live["install"])
@@ -1608,7 +1610,7 @@ class TestGateHardeningFixPass:
             {"target_env": "live", "version": "1.2.3", "dry_run": False,
              "user_confirmed": True, "nonce": grouped}
         )
-        assert "UPGRADE SCHEDULED" in ok, ok
+        assert "UPGRADE ARMED" in ok, ok
         assert f"run_id={run_id}" in ok
 
     async def test_nonce_unparseable_ttl_fails_closed(self, live_harness) -> None:
@@ -1677,6 +1679,14 @@ class TestForgedSourceDispatchSeam:
             agent_id="ari",
         )
         job_create = next(t for t in job_tools if t.name == "job_create")
+        # NIT-7 (P2.3 review cycle 1): the dead ``source`` param is
+        # deprecated-and-ignored BY SCHEMA CONTRACT — the description must
+        # say so (server derives unconditionally; removal deferred for
+        # schema compat). The hostile→derived assertion below is the
+        # behavioral enforcement of the same ignore.
+        src_field = job_create.args_schema.model_fields["source"]
+        assert "DEPRECATED" in (src_field.description or ""), src_field.description
+        assert "IGNORED" in (src_field.description or ""), src_field.description
         result = await job_create.ainvoke(
             {
                 "agent_id": "ari",
@@ -1715,9 +1725,111 @@ class TestForgedSourceDispatchSeam:
         assert "whitelisted user-origin" in out
         assert live["markers"] == []  # nothing armed
 
+    async def test_empty_caller_hostile_source_never_verbatim(
+        self, live_harness
+    ) -> None:
+        """MINOR-B (P2.2 carry-over, closed P2.3 B3.5): the source
+        derivation is UNCONDITIONAL on the job_create path — the
+        empty-caller fallback must not trust the LLM-authored ``source``
+        param verbatim either, and must never mint a whitelisted source
+        ("api" is in USER_ORIGIN_SOURCES). Mirrors job_continue's F3
+        fallback: ``internal_agent:unknown`` — non-whitelisted, no window."""
+        live = live_harness
+        captured: dict[str, Any] = {}
+        job_item = MagicMock(name="JobItem")
+        job_item.job_id = "job-forge-2"
+        job_item.to_dict.return_value = {"job_id": "job-forge-2", "status": "QUEUED"}
 
-# ── Refusal-token completeness (greppable taxonomy) ──────────────────────────
+        async def _enqueue(**kwargs: Any) -> MagicMock:
+            captured.update(kwargs)
+            return job_item
 
+        job_service = MagicMock(name="JobQueueService")
+        job_service.enqueue = _enqueue
+        job_tools = create_job_tools(
+            job_service=job_service,
+            queue_mgmt_service=MagicMock(),
+            dead_letter_service=MagicMock(),
+            current_instance_id=INSTANCE_ID,
+            agent_id="",  # empty caller — the fallback branch
+        )
+        job_create = next(t for t in job_tools if t.name == "job_create")
+        result = await job_create.ainvoke(
+            {
+                "agent_id": "ari",
+                "message": "relay the upgrade nonce",
+                "project_id": "proj-fixpass",
+                "source": "api",  # hostile: whitelisted source from a tool param
+            }
+        )
+        assert "error" not in result, result
+        assert captured.get("source") == "internal_agent:unknown", (
+            "empty-caller fallback must never mint/trust a whitelisted "
+            f"source, got {captured.get('source')!r}"
+        )
+        # The REAL stamp site agrees: the fallback source is not user-origin.
+        from daemon.manager import InstanceManager
+        from daemon.tools.upgrade_journal import is_user_origin_source
+
+        assert is_user_origin_source(captured["source"]) is False
+        mgr = object.__new__(InstanceManager)  # skip heavy __init__
+        mgr._user_origin_windows = {}
+        mgr.stamp_user_origin_window(INSTANCE_ID, "api", "m-user-turn")
+        assert INSTANCE_ID in mgr._user_origin_windows
+        mgr.stamp_user_origin_window(INSTANCE_ID, captured["source"], "m-agent-turn")
+        assert INSTANCE_ID not in mgr._user_origin_windows  # fallback → cleared
+        assert live["markers"] == []  # nothing armed by this seam check
+
+
+class TestDefaultVersionPick:
+    """N6 (P2.3 B3.5): the default-version pick is semver-aware — the old
+    ``sorted()[-1]`` lexical pick made 1.2.9 beat 1.2.10. Explicit
+    ``version=`` selection is unaffected (covered by the staged-target
+    matrix above)."""
+
+    def test_key_numeric_ordering(self) -> None:
+        # The exact ledger bug: 1.2.10 must outrank 1.2.9.
+        assert ut._version_sort_key("1.2.10") > ut._version_sort_key("1.2.9")
+        # Two-segment form of the same class: 1.10 > 1.9.
+        assert ut._version_sort_key("1.10") > ut._version_sort_key("1.9")
+        # Major/minor/patch monotonicity.
+        assert ut._version_sort_key("2.0.0") > ut._version_sort_key("1.99.99")
+        assert ut._version_sort_key("1.2.0") > ut._version_sort_key("1.2")
+
+    def test_key_equal_tags(self) -> None:
+        assert ut._version_sort_key("1.2.10") == ut._version_sort_key("1.2.10")
+        assert ut._version_sort_key("dev-snapshot") == ut._version_sort_key("dev-snapshot")
+
+    def test_key_non_numeric_fallback_below_numeric(self) -> None:
+        # Non-numeric tags never outrank a plain numeric release and fall
+        # back to lexical order within their own rank.
+        assert ut._version_sort_key("1.2.3") > ut._version_sort_key("v1.2.3")
+        assert ut._version_sort_key("1.2.3") > ut._version_sort_key("1.2.3-rc1")
+        assert ut._version_sort_key("alpha") > ut._version_sort_key("aardvark")
+
+    async def test_default_pick_semver_not_lexical(self, harness) -> None:
+        """Through the REAL tool: staged 1.2.9 + 1.2.10 with no explicit
+        version → the dry-run preflight targets 1.2.10 (a lexical pick
+        would have chosen 1.2.9)."""
+        tools, _markers, install = harness
+        for v in ("1.2.9", "1.2.10"):
+            rel = install / "releases" / v
+            rel.mkdir(parents=True, exist_ok=True)
+            (rel / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "version": v,
+                        "binary_version": f"v{v}",
+                        "staged_at": "2026-08-23T09:00:00Z",
+                        "rollback_safe": True,
+                        "known_schema_gen": 14,
+                    }
+                ),
+                encoding="utf-8",
+            )
+        out = await tools["system_upgrade"].ainvoke({"target_env": "demo"})
+        assert "target=1.2.10" in out, out
+        assert "1.2.10" in out and "releases/1.2.10" in out
 
 class TestRefusalTaxonomy:
     """The documented refusal vocabulary (system_upgrade._full_doc_ +
@@ -1783,12 +1895,17 @@ class TestRefusalTaxonomy:
                 f"system_restart docs do not name refusal token {token!r}"
             )
 
-    async def test_every_matrix_token_is_asserted_somewhere_above(
+    async def test_refusal_strings_carry_machine_readable_token(
         self, harness
     ) -> None:
-        """Meta-guard: the union of tokens this suite can produce through
-        real invocations (sampled across the matrix tests) — pinning that
-        the refusal strings really carry the machine-readable token."""
+        """Meta-guard (NIT-E rename, P2.3 B3.5 — was misleadingly
+        ``test_every_matrix_token_is_asserted_somewhere_above``, which
+        overclaimed a coverage sweep it never performed): sampled REAL
+        invocations pin the harness contract the matrix relies on —
+        refusal strings really render the machine-readable
+        ``Error: <TOOL> REFUSED — reason=<token>:`` form (one restart
+        token, one upgrade token; per-token coverage lives in the matrix
+        tests above, not here)."""
         tools, _, _ = harness
         out = await tools["system_restart"].ainvoke(
             {"target_env": "demo", "reason": "x", "mode": "force"}

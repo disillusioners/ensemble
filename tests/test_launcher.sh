@@ -871,6 +871,57 @@ section "notify stub"
 N_OUT="$( . "$LAUNCHER"; _notify_once test-kind "message body" 2>&1 )"
 assert_contains "_notify_once logs NOTIFY[...]" "NOTIFY[test-kind]" "$N_OUT"
 
+# ─── 11. kill-0 EPERM twins: _pid_alive (P2.3 B4 leg 3 — B3.5 mirror) ───────
+# launcher.sh:523/:537 (W1 lock-owner liveness) must treat kill -0 EPERM as
+# ALIVE, matching B3.5's lib.sh _pid_alive. pid 1 (launchd, root-owned) is
+# the clean EPERM source for an unprivileged runner: raw kill -0 fails with
+# "Operation not permitted" while the process is plainly alive.
+section "kill-0 EPERM semantics (_pid_alive launcher twin)"
+
+# 11a. pid 1 is alive under BOTH outcomes: non-root → EPERM branch → ALIVE;
+#      root → plain success → ALIVE. uid-independent contract.
+( . "$LAUNCHER"; _pid_alive 1 ) >/dev/null 2>&1
+assert_eq "11a pid 1 (root-owned): EPERM→ALIVE (non-root) / success→ALIVE (root)" "0" "$?"
+
+# 11b. prove the EPERM string-branch fired when unprivileged: raw kill -0 1
+#      fails "not permitted" AND the helper still returns 0. Under root the
+#      raw call succeeds (EPERM not cleanly simulable on pid 1) — the
+#      string-branch is then covered by the 11d twin-identity assertion.
+RAW_K0_ERR="$(kill -0 1 2>&1)"; RAW_K0_RC=$?
+case "$RAW_K0_ERR" in
+    *"not permitted"*)
+        assert_eq "11b raw kill -0 1 EPERM under unprivileged runner" "1" "$RAW_K0_RC"
+        ( . "$LAUNCHER"; _pid_alive 1 ) >/dev/null 2>&1
+        assert_eq "11b EPERM string-branch → ALIVE (rc 0)" "0" "$?"
+        ;;
+    *)
+        if [ "$RAW_K0_RC" -eq 0 ] && [ "$(id -u)" -eq 0 ]; then
+            _pass   # root: branch covered via 11d (identical body to lib.sh)
+        else
+            _fail "11b unexpected kill -0 1 state" "EPERM or root-success" "rc=$RAW_K0_RC err=$RAW_K0_ERR"
+        fi
+        ;;
+esac
+
+# 11c. dead pid: a reaped child reads dead (helper returns nonzero).
+bash -c 'exit 0' & DEAD_PID=$!
+wait "$DEAD_PID" 2>/dev/null
+( . "$LAUNCHER"; _pid_alive "$DEAD_PID" ) >/dev/null 2>&1
+if [ "$?" -ne 0 ]; then _pass; else _fail "11c reaped pid $DEAD_PID must read dead"; fi
+
+# 11d. twin identity: the launcher-local _pid_alive body is byte-identical
+#      to B3.5's scripts/upgrade/lib.sh _pid_alive body (launcher.sh never
+#      sources lib.sh — the mirror IS the contract; shared-semantics proof
+#      for environments where EPERM cannot be simulated).
+TWIN_LAUNCHER="$(sed -n '/^_pid_alive() {/,/^}/p' "$LAUNCHER")"
+TWIN_LIB="$(sed -n '/^_pid_alive() {/,/^}/p' "$REPO_ROOT/scripts/upgrade/lib.sh")"
+if [ -n "$TWIN_LAUNCHER" ] && [ "$TWIN_LAUNCHER" = "$TWIN_LIB" ]; then
+    _pass
+else
+    _fail "11d _pid_alive twin bodies must be byte-identical (launcher vs lib.sh)" \
+        "identical bodies" "launcher=[${TWIN_LAUNCHER}] lib=[${TWIN_LIB}]"
+fi
+
 # ─── cleanup ────────────────────────────────────────────────────────────────
 rm -rf "$ENV_TEST_DIR" "$STATE_TEST_DIR" "$JS_TEST_DIR" \
        "$RB_TEST_DIR" "$RB_TEST_DIR2" "$RB_TEST_DIR3" "$RB_TEST_DIR4" \

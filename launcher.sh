@@ -464,6 +464,25 @@ _js_lock_dir() {
     printf '%s/releases/rollback.lock.d' "$1"
 }
 
+# _pid_alive <pid> — kill -0 liveness with EPERM=ALIVE semantics (B3.5
+# lib.sh _pid_alive twin, mirrored locally: the launcher is the BOOT path
+# and must stay self-contained — it never sources scripts/upgrade/lib.sh).
+# exit 0 → alive; ENOENT/ESRCH → dead; EPERM → ALIVE — the process exists
+# but belongs to another user (permission denied ≠ dead; breaking a live
+# foreign owner's lock would trample its txn). Matches the Python journal
+# twin upgrade_journal._pid_alive (PermissionError → True). Stderr-text
+# match under LC_ALL=C (NIT-5 — locale-stable: a localized shell must
+# not flip the branch): bash builtin kill and /bin/kill both render
+# "Operation not permitted".
+_pid_alive() {
+    local err
+    err="$(LC_ALL=C kill -0 "$1" 2>&1)" && return 0
+    case "$err" in
+        *"not permitted"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 # _js_lock_acquire <install_dir> [wait_s] — 0 acquired, 1 busy.
 _js_lock_acquire() {
     local install_dir="$1" wait_s="${2:-$SWEEP_LOCK_WAIT_S}"
@@ -501,7 +520,7 @@ _js_lock_acquire() {
             if [ "$age" -gt "$SWEEP_LOCK_STALE_S" ]; then
                 local owner_live=0
                 if [ -n "$owner_pid" ] && printf '%s' "$owner_pid" | grep -Eq '^[0-9]+$' \
-                   && kill -0 "$owner_pid" 2>/dev/null; then
+                   && _pid_alive "$owner_pid"; then
                     owner_live=1
                 fi
                 if [ "$owner_live" -eq 0 ]; then
@@ -515,7 +534,7 @@ _js_lock_acquire() {
         fi
         # owner process dead? (crash left a fresh-heartbeat dir) — break too
         if [ -n "$owner_pid" ] && printf '%s' "$owner_pid" | grep -Eq '^[0-9]+$' \
-           && ! kill -0 "$owner_pid" 2>/dev/null; then
+           && ! _pid_alive "$owner_pid"; then
             _log "journal sweep: pipeline lock owner pid $owner_pid is dead — breaking lock"
             mv "$lock" "${lock}.stale.$$" 2>/dev/null || continue
             continue

@@ -36,6 +36,11 @@ dev/demo/sandbox daemon can NEVER address live, whatever parameters the
 LLM passes. Marker absent → read tools STILL answer (fail-open for
 reads only); ACTOR tools refuse ``env-marker-absent`` fail-closed
 (S-31).
+
+L8 (tidier, P2.3 final batch): this module is deliberately large — the
+module split (reads / actor tools / gate) is fenced to the post-P2.3
+refactor pass (decisions.md "P2.3 Gate Rulings & Fences" item 2); do not
+grow it further without pulling that fence.
 """
 
 from __future__ import annotations
@@ -631,9 +636,90 @@ _OUTCOME_LABELS: dict[str, str] = {
 # ═══════════════════════════════════════
 
 
+def _journal_refusal_event(reason: str, message: str) -> None:
+    """Best-effort ``refusal`` journal append — the lib.sh ``_refuse`` twin
+    (B4) for the in-daemon tool lane (P2.3 B6.5 / F-B6c-1, user-ruled
+    option i).
+
+    SINGLE WRITE POINT: called only from :func:`_refusal` — every refusal
+    site journals exactly once by construction (upgrade_tools.py had ZERO
+    ``journal_history_append`` calls, so the B3 ``upgrade_promote_refusal``
+    alert kind was unreachable from the tool lane; this closes that seam).
+
+    Rider discipline (mirrors the B3 emitter + shell ``_refuse`` exactly):
+    * NEVER-raises — the refusal string/return/behavior is PRIMARY and
+      byte-unchanged; the append is wrapped ``except Exception`` (NEVER
+      BaseException — CancelledError project gotcha) with ONE warning
+      line on any failure (absent/torn journal → ``JournalTorn``;
+      unwritable → ``OSError``); the append can never delay or alter the
+      refusal path;
+    * silent skip when no staged install resolves — self-env marker
+      absent/invalid, dev repo checkout, non-frozen sandbox: the SAME
+      ``_self_env_marker`` → ``_resolve_install_dir`` resolution the
+      tools already use, so dev / marker-absent refusals journal nothing;
+    * LOCK-BUSY carve-out (MINOR-1, P2.3 review cycle 1 — mirrors the B4
+      shell discipline in lib.sh ``_refuse``: "the lock-busy refusal
+      sites deliberately do NOT journal"): when ``reason ==
+      "pipeline-busy"`` the append is SKIPPED entirely. A pipeline-busy
+      refusal fires precisely BECAUSE a txn holder holds the pipeline
+      lock — an unlocked best-effort append here would race the live
+      holder's read-modify-write on the WHOLE journal document (an
+      append that read pre-flip state could write it back, erasing
+      ``flipped:true`` — a lost UPDATE, not just a lost event).
+      pipeline-busy is structured-logged by the caller instead;
+    * NO lock acquisition — an in-flight txn's lock is sacred; the append
+      rides the plain ``journal_history_append`` splice (ADR-034 additive
+      discipline), like lib.sh ``_refuse``;
+    * detail matches the shell ``_refuse`` rendering exactly —
+      ``<msg> (reason=<token>)`` — so ``_reason_token`` (upgrade_journal)
+      parses the D-FA2.2 token; env context rides the WRITE LOCATION
+      (the daemon's own-env journal), not a re-stamped detail field.
+    """
+    try:
+        self_env = _self_env_marker()
+        if self_env is None:
+            return
+        install_dir = _resolve_install_dir(self_env)
+        if install_dir is None:
+            return  # dev / unresolved / non-frozen sandbox — nothing staged
+        if self_env == "live":
+            # LIVE carve-out (P2.2 contract, interlock-tripwired): live
+            # armed-refusal paths are journal-READ-ONLY —
+            # test_live_refusals_never_mutate_pipeline is the enforced
+            # acceptance; A2's raw-string live refusal is the same
+            # boundary. Demo/dev/sandbox refusals journal (the B6c/T8
+            # lane); live refusal records arrive via the shell lane's
+            # lib.sh ``_refuse`` append + B4 watcher/relay, not from the
+            # daemon's tool-refusal path.
+            return
+        if reason == "pipeline-busy":
+            # LOCK-BUSY carve-out (MINOR-1 — see docstring): pipeline-busy
+            # BY CONSTRUCTION means a live txn holder exists and is doing
+            # read-modify-write cycles on this very journal; an unlocked
+            # append here can clobber the holder's txn state. Skip the
+            # append; the refusal string + structured caller logging
+            # carry the record.
+            return
+        uj.journal_history_append(
+            install_dir, "refusal", f"{message} (reason={reason})"
+        )
+    except Exception as exc:  # NEVER BaseException (CancelledError gotcha)
+        logger.warning(
+            "upgrade_tools: refusal journal append FAILED (best-effort) — "
+            "refusal proceeds unchanged (reason=%s): %s",
+            reason,
+            exc,
+        )
+
+
 def _refusal(label: str, reason: str, message: str) -> str:
     """Structured refusal string — D-FA2.2: ``Error:`` prefix, distinct
-    machine-readable ``reason=<token>`` per taxonomy entry."""
+    machine-readable ``reason=<token>`` per taxonomy entry.
+
+    P2.3 B6.5 (F-B6c-1): ALSO journals a ``refusal`` history event through
+    the real append path (best-effort rider — single write point here,
+    see :func:`_journal_refusal_event`); the returned string is unchanged."""
+    _journal_refusal_event(reason, message)
     return f"Error: {label} REFUSED — reason={reason}: {message}"
 
 
@@ -746,6 +832,27 @@ def _rollback_count_24h(journal: dict[str, Any] | None) -> int | None:
         if age >= 86400:
             return 0
     return count
+
+
+# L4 (tidier, P2.3 final batch): the rank tuple is parameterized — rank 1
+# carries int segments, rank 0 the lexical (tag,) fallback.
+def _version_sort_key(
+    tag: str,
+) -> tuple[int, tuple[int, ...]] | tuple[int, tuple[str, ...]]:
+    """Sort key for release tags — semantic (numeric dot-segments) where
+    parseable, lexical fallback otherwise (N6, P2.3 B3.5: the old
+    ``sorted()[-1]`` lexical pick made 1.2.9 beat 1.2.10).
+
+    Fully-numeric dot tags (``1.2.10``) sort as a tuple of ints AFTER all
+    non-numeric tags (rank 1 vs 0), so a stray ``v1.2.3``/``1.2.3-rc1``
+    directory can never outrank a plain numeric release; different
+    lengths compare prefix-first (``1.2`` < ``1.2.0`` < ``1.2.10``).
+    Mixed/non-numeric tags fall back to plain lexical order within rank 0.
+    """
+    parts = tag.split(".")
+    if parts and all(p.isdigit() for p in parts):
+        return (1, tuple(int(p) for p in parts))
+    return (0, (tag,))
 
 
 def _cooldown_state(journal: dict[str, Any] | None) -> str:
@@ -1423,10 +1530,13 @@ Returns:
                 return _refusal(
                     label,
                     "restart-under-burst-abort",
+                    # NIT-4 (P2.2 tidy cycle-3, closed P2.3 B3.5): render
+                    # via the curated _launcher_state helper — the same
+                    # display path release_info/restart-preview use —
+                    # instead of a raw single-field dict get.
                     "daemon is in burst-abort hold (launcher exit-1 latch; "
-                    f"{_launcher_state_values(install_dir).get('crash_count', '?')} "
-                    "crashes in the 600s window); restart would mask the failure. "
-                    "Resolve the burst condition first.",
+                    f"{_launcher_state(install_dir)}); restart would mask "
+                    "the failure. Resolve the burst condition first.",
                 )
 
             busy = await _busy_advisory(manager, current_instance_id)
@@ -1504,11 +1614,18 @@ Returns:
                 )
                 uj.write_pending_op(install_dir, op)
             except (JournalTorn, OSError, KeyError) as exc:
-                journal_lock_release(install_dir)
+                # NIT-2 (P2.2 tidy cycle-3 carry-over, closed P2.3 B3.5):
+                # unwind BEFORE releasing the lock. Releasing first opened
+                # a window where a concurrent action acquires the lock and
+                # reads a half-unwound journal (in_flight set, owner gone)
+                # → pipeline-busy mis-report / adoption on a dead arm.
+                # Clearing under our own lock keeps the journal coherent
+                # for the next owner.
                 # Un-wedge: in_flight is written BEFORE write_pending_op —
                 # an arming failure between the two would leave the journal
                 # claiming a live txn with no pending_op. Best-effort clear
-                # (never raises; a failed unwind is logged, not raised).
+                # (the block never raises; a failed unwind is logged, not
+                # raised).
                 try:
                     uj.journal_update_field(install_dir, "in_flight", None)
                 except Exception as unwind_exc:
@@ -1518,6 +1635,7 @@ Returns:
                         "repair: journal_update in_flight null): %s",
                         unwind_exc,
                     )
+                journal_lock_release(install_dir)
                 return (
                     f"Error: system_restart failed while arming: {type(exc).__name__}: {exc} "
                     "(partial arm unwound best-effort; no restart scheduled — "
@@ -1669,7 +1787,10 @@ never decides go/rollback).
                         "found. Run release_info(section=releases) and pass an "
                         "explicit version.",
                     )
-                version = sorted(staged_versions)[-1]
+                # N6 (P2.3 B3.5): semver-aware pick — lexical sorted()[-1]
+                # made 1.2.9 beat 1.2.10. Explicit version= selection is
+                # unaffected (this branch only picks the default target).
+                version = max(staged_versions, key=_version_sort_key)
             if version in quarantined_list:
                 return _refusal(
                     label,
@@ -1935,7 +2056,14 @@ never decides go/rollback).
                     f"pending op run_id={pending.run_id} kind={pending.kind} "
                     f"armed_at={pending.armed_at} — poll upgrade_status",
                 )
-            if not cooldown.startswith("clear"):
+            # NIT-1 (P2.2 tidy cycle-3 carry-over, closed P2.3 B3.5): the
+            # pre-tidy conjunct (cooldown != "clear" and not
+            # cooldown.startswith("clear")) survived the simplification
+            # as a loose PREFIX match. Pin the test to the exact value
+            # domain of _cooldown_state's clear sentinel — "clear" is the
+            # only clear-valued state the helper emits, and a prefix test
+            # would silently admit any future "clear…"-prefixed state.
+            if cooldown != "clear":
                 return _refusal(
                     label,
                     "cooldown-active",
@@ -2018,7 +2146,7 @@ never decides go/rollback).
             )
             return "\n".join(
                 [
-                    f"UPGRADE SCHEDULED — run_id={run_id} env={self_env} target={version} mode=promote",
+                    f"UPGRADE ARMED — run_id={run_id} env={self_env} target={version} mode=promote",
                     "executes: after this turn completes (deferred — daemonized promote.sh)",
                     f"watch: upgrade_status(run_id=\"{run_id}\") for phase transitions; terminal state readable post-restart",
                     f"journal: releases/state.json txn opened (started_at={op.armed_at}, owner=exec-pending)",
@@ -2040,9 +2168,10 @@ never decides go/rollback).
     system_upgrade._full_doc_ = """\
 Arm the P2.1 promote pipeline (stop → flip → start → gate → commit |
 auto-rollback) for THIS daemon's own environment. Arm → return → poll:
-the tool returns "UPGRADE SCHEDULED run_id=..." immediately — the
-daemonized promote.sh fires at end-of-turn and survives the daemon's
-own death (the normal case when upgrading the daemon you run on).
+the tool returns "UPGRADE ARMED run_id=..." immediately (armed/deferred —
+no execution inside the call; N5 wording, P2.3 B3.5) — the daemonized
+promote.sh fires at end-of-turn and survives the daemon's own death (the
+normal case when upgrading the daemon you run on).
 Track it with upgrade_status(run_id=...); the terminal state
 (committed / rolled-back / halted-for-human) is readable post-restart.
 
@@ -2051,7 +2180,9 @@ Args:
         (dev|demo|live|sandbox; staged ENSEMBLE_SELF_ENV marker).
         Marker absent → env-marker-absent; cross-env → env-self-match.
     version: Target release name; default: latest staged-but-not-current
-        release (quarantined ones skipped).
+        release (quarantined ones skipped; "latest" is semver-aware —
+        1.2.10 outranks 1.2.9, non-numeric tags sort lexically below
+        numeric ones).
     user_confirmed: LIVE only (ignored on demo/dev/sandbox — the user
         directive makes non-live free). Necessary, NEVER sufficient: a
         fabricated true does not unlock live.
@@ -2090,4 +2221,3 @@ go/rollback).
 """
 
     return [release_info, upgrade_status, system_restart, system_upgrade]
-

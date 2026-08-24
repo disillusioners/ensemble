@@ -172,6 +172,100 @@ out="$(env -u PORT -u POSTGRES_DB HOME="$FAKE_HOME" TARGET=sandbox INSTALL_DIR="
 assert_eq "M2 absent live .env (no live install) → sandbox proceeds" "0" "$rc"
 mv "$FAKE_HOME/agents-ensemble/.env.away" "$FAKE_HOME/agents-ensemble/.env"
 
+# ─── 2b. MINOR-4b (P2.3 review cycle 1): promote live F2 gate —
+# --f2-verified-closed is an ADDITIONAL factor on top of the live guard.
+# The fake-live install (fixture HOME redirect) keeps everything isolated;
+# nothing is ever contacted — both refusals fire pre-lock, pre-action. ───
+section "MINOR-4b promote live F2 gate (--f2-verified-closed)"
+# (a) guard + NO flag → 78 with the distinct f2-not-verified reason (the
+#     guard passed; the SECOND factor refused) — and the refusal is
+#     JOURNALED on the fake-live install (best-effort append, distinct
+#     D-FA2.2 token — auditable at the enforcement point).
+rm -rf "$FAKE_HOME/agents-ensemble/releases"
+out="$(HOME="$FAKE_HOME" ENSEMBLE_UPGRADE_LIVE=1 TARGET=live VERSION=vX \
+    bash "$FAKE_REPO/scripts/upgrade/promote.sh" live 2>&1)"; rc=$?
+assert_eq "f2 gate: guard + no flag exits 78" "78" "$rc"
+assert_contains "f2 gate: refusal names the flag" "--f2-verified-closed" "$out"
+assert_contains "f2 gate: distinct reason token" "f2-not-verified" "$out"
+if [ -f "$FAKE_HOME/agents-ensemble/releases/state.json" ]; then
+    JREF="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(":".join(h.get("detail","") for h in d.get("history",[])))' \
+        "$FAKE_HOME/agents-ensemble/releases/state.json" 2>/dev/null)"
+    assert_contains "f2 gate: refusal journaled on the (fake) live install" "reason=f2-not-verified" "$JREF"
+else
+    _pass   # absent journal: best-effort append legitimately dropped (WARNed)
+fi
+# (b) guard + flag → the F2 gate PASSES; the next refusal is not-staged
+#     (a LATER preflight stage) — never f2-not-verified.
+out="$(HOME="$FAKE_HOME" ENSEMBLE_UPGRADE_LIVE=1 TARGET=live VERSION=vX \
+    bash "$FAKE_REPO/scripts/upgrade/promote.sh" live --f2-verified-closed 2>&1)"; rc=$?
+assert_eq "f2 gate: guard + flag proceeds past the F2 gate" "78" "$rc"
+assert_contains "f2 gate: later refusal is not-staged (gate passed)" "does not exist — stage it first" "$out"
+assert_not_contains "f2 gate: no f2-not-verified once flag present" "f2-not-verified" "$out"
+# (c) NO guard + flag → the LIVE GUARD still refuses first (the guard is
+#     the primary factor and is NOT replaced by the flag).
+out="$(HOME="$FAKE_HOME" TARGET=live VERSION=vX \
+    bash "$FAKE_REPO/scripts/upgrade/promote.sh" live --f2-verified-closed 2>&1)"; rc=$?
+assert_eq "f2 gate: no guard still 78 (guard primary)" "78" "$rc"
+assert_contains "f2 gate: guard refusal fires, not the F2 one" "REFUSING to operate on live" "$out"
+# (d) demo lane: the flag is NEVER required (and the gate does not fire).
+out="$(HOME="$FAKE_HOME" TARGET=demo VERSION=vX \
+    bash "$FAKE_REPO/scripts/upgrade/promote.sh" demo 2>&1)"; rc=$?
+assert_eq "f2 gate: demo lane unaffected (not-staged refusal)" "78" "$rc"
+assert_contains "f2 gate: demo reaches not-staged, not f2" "does not exist — stage it first" "$out"
+# (e) lib.sh unit: journal_mark_f2_verified stamps the attestation ON the
+#     open txn — f2_verified_closed:true + ts + optional operator note —
+#     additively (existing txn fields untouched; JSON stays valid).
+F2SBOX="$FIXTURE/f2sbox"; mkdir -p "$F2SBOX/releases"
+INSTALL_DIR="$F2SBOX" REPO="$FAKE_REPO" F2_VERIFIED_NOTE="ops ticket 42 — fixture note" \
+    bash -c '. "$REPO/scripts/upgrade/lib.sh"
+        journal_init && journal_open_txn promote vF2 && journal_mark_f2_verified' \
+    >/dev/null 2>&1
+PYOUT="$(python3 - "$F2SBOX/releases/state.json" <<'PYF2'
+import json, sys
+try:
+    inf = json.load(open(sys.argv[1]))["in_flight"]
+    ok = (inf["f2_verified_closed"] is True and bool(inf["f2_verified_at"])
+          and inf["f2_verified_note"] == "ops ticket 42 — fixture note"
+          and inf["kind"] == "promote" and inf["flipped"] is False
+          and isinstance(inf["owner_pid"], int))
+    print("STAMP_OK" if ok else "STAMP_BAD")
+except Exception:
+    print("STAMP_ERR")
+PYF2
+)"
+assert_eq "f2 stamp: txn carries f2_verified_closed+at+note additively" "STAMP_OK" "$PYOUT"
+
+# (e2) M2 (tidier, P2.3 final batch): journal_mark_f2_verified null/malformed
+#      guard — a null or non-object in_flight must REFUSE (rc 1) with NO
+#      stamp and NO journal corruption. Pre-fix, an array-shaped extraction
+#      passed the non-empty check and the %\}}-strip+append wrote malformed
+#      JSON into the journal.
+F2N="$FIXTURE/f2null"; mkdir -p "$F2N/releases"
+printf '{"current":"v1","in_flight":null,"history":[]}\n' > "$F2N/releases/state.json"
+F2N_OUT="$(INSTALL_DIR="$F2N" REPO="$FAKE_REPO" bash -c '. "$REPO/scripts/upgrade/lib.sh"
+    journal_mark_f2_verified' 2>&1)"; F2N_RC=$?
+assert_eq "M2 null in_flight: refuse rc 1" "1" "$F2N_RC"
+assert_contains "M2 null in_flight: warning names the refusal" "refusing to stamp" "$F2N_OUT"
+PY_N="$(python3 - "$F2N/releases/state.json" <<'PYN'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    print("VALID" if d["in_flight"] is None and "f2_verified_closed" not in d else "STAMPED_OR_DRIFT")
+except Exception:
+    print("CORRUPT")
+PYN
+)"
+assert_eq "M2 null in_flight: journal valid, unstamped, in_flight still null" "VALID" "$PY_N"
+
+F2M="$FIXTURE/f2malformed"; mkdir -p "$F2M/releases"
+printf '{"current":"v1","in_flight":[1,2],"history":[]}\n' > "$F2M/releases/state.json"
+F2M_RAW="$(cat "$F2M/releases/state.json")"
+F2M_OUT="$(INSTALL_DIR="$F2M" REPO="$FAKE_REPO" bash -c '. "$REPO/scripts/upgrade/lib.sh"
+    journal_mark_f2_verified' 2>&1)"; F2M_RC=$?
+assert_eq "M2 malformed (array) in_flight: refuse rc 1" "1" "$F2M_RC"
+assert_contains "M2 malformed in_flight: warning names the refusal" "refusing to stamp" "$F2M_OUT"
+assert_eq "M2 malformed in_flight: journal BYTE-UNCHANGED (no stamp attempt)" "$F2M_RAW" "$(cat "$F2M/releases/state.json")"
+
 # M1 (Batch C): the sandbox INSTALL_DIR exclusion compares PHYSICAL paths —
 # a symlink alias or trailing-slash spelling of the live/demo dir passed
 # the old string compare. Fake demo dir created so the demo-side canonical
@@ -1199,6 +1293,69 @@ fi
 assert_eq "12e NO rollback count" "$W2_COUNT_BEFORE" "$(b4_inf 'journal_rollback_count_24h')"
 assert_eq "12e NO cooldown armed" "null" "$(m4_field cooldown_until)"
 assert_eq "12e healthy version NOT quarantined" "[]" "$(b4_inf '_json_sub "$(journal_read)" quarantined')"
+
+# ─── 13. P2.3 B4 leg 2: _refuse journals entry-refusals (best-effort) ──────
+section "_refuse: journaled entry refusals (upgrade_promote_refusal)"
+# The shell entry-refusal helper journals a `refusal` history event with the
+# D-FA2.2 reason=<token> (activating the dormant SSE kind daemon-side) while
+# preserving the WARN text and the exit-78 contract. Best-effort ONLY: a
+# missing/unwritable journal never blocks or rewrites the refusal.
+
+# 13a. happy path: journal present → WARN unchanged, refusal event + token,
+#      exit 78.
+RF="$FIXTURE/refuse-sbx"; mkdir -p "$RF/releases"
+(
+    export INSTALL_DIR="$RF"
+    . "$FAKE_REPO/scripts/upgrade/lib.sh"
+    journal_init
+    _refuse cooldown "promote refused: rollback cooldown active until $NOW_ISO (ADR-005: 10-min anti-flapping)"
+) >"$RF/out" 2>&1
+RF_RC=$?
+assert_eq "13a _refuse exits 78" "78" "$RF_RC"
+assert_contains "13a WARN text unchanged" "promote refused: rollback cooldown active until" "$(cat "$RF/out")"
+assert_contains "13a refusal event journaled" '"event":"refusal"' "$(cat "$RF/releases/state.json")"
+assert_contains "13a D-FA2.2 reason token in detail" 'reason=cooldown' "$(cat "$RF/releases/state.json")"
+
+# 13b. best-effort: journal ABSENT → append FAILS, one WARN, exit 78 intact.
+RF2="$FIXTURE/refuse-nojournal"; mkdir -p "$RF2"
+(
+    export INSTALL_DIR="$RF2"
+    . "$FAKE_REPO/scripts/upgrade/lib.sh"
+    _refuse cap "HALT-FOR-HUMAN: rollback cap 3/24h reached (count=3)"
+) >"$RF2/out" 2>&1
+RF2_RC=$?
+assert_eq "13b absent journal: _refuse still exits 78" "78" "$RF2_RC"
+assert_contains "13b best-effort WARN on failed append" "best-effort" "$(cat "$RF2/out")"
+if [ -e "$RF2/releases/state.json" ]; then
+    _fail "13b no journal may be created by the refusal path" "absent" "present"
+else
+    _pass
+fi
+
+# 13c. ADR-034 splice discipline: a SECOND refusal appends its own event —
+#      additive append only, the ≥2-occurrence splice survives.
+(
+    export INSTALL_DIR="$RF"
+    . "$FAKE_REPO/scripts/upgrade/lib.sh"
+    _refuse quarantine "promote refused: version 'v9' is QUARANTINED (prior gate failure)"
+) >/dev/null 2>&1
+assert_eq "13c two refusals → two history events (splice ≥2 discipline)" "2" \
+    "$(grep -o '"event":"refusal"' "$RF/releases/state.json" | wc -l | tr -d ' ')"
+
+# 13d. real entry gate: cap'd journal → promote_entry_check journals the
+#      refusal (reason=cap) and still exits 78.
+RF3="$FIXTURE/entry-sbx"; mkdir -p "$RF3/releases"
+printf '%s' "$JBASE" | sed -e 's/COUNT/3/' -e "s/WSTART/$NOW_ISO/" -e 's/CD/null/' \
+    > "$RF3/releases/state.json"
+(
+    export INSTALL_DIR="$RF3"
+    . "$FAKE_REPO/scripts/upgrade/lib.sh"
+    promote_entry_check v9
+) >"$RF3/out" 2>&1
+RF3_RC=$?
+assert_eq "13d cap'd journal → promote_entry_check exits 78" "78" "$RF3_RC"
+assert_contains "13d entry refusal journaled" '"event":"refusal"' "$(cat "$RF3/releases/state.json")"
+assert_contains "13d reason=cap token" 'reason=cap' "$(cat "$RF3/releases/state.json")"
 
 # ─── summary ────────────────────────────────────────────────────────────────
 printf '\n== summary: %d passed, %d failed ==\n' "$PASS" "$FAIL"
