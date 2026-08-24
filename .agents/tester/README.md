@@ -19,6 +19,7 @@
 
 ## ensure.md
 - Status: ✅ ACTIVE — `.agents/tester/rules/ensure.md` exists with Core + Release Gate requirements
+- **2026-08-24 LIVE REPRO (no packs run — investigation only):** pause/resume/terminate tree-propagation bugs CONFIRMED on dev (4 critical: pause no down-cascade; resume strands root when children completed during pause; terminate no up-propagation (watcher CANCELLED → ghost-child wait); terminate-root down-cascade enumerates children=0 → orphan + GUARD livelock). Plus /stop wrong-target (pauses ROOT regardless of path param), detail-endpoint 404 post-resume, work-row timestamp anomalies. Evidence: `/tmp/pause-repro-20260824/` + `RESULTS/2026-08-24-pause-resume-terminate-tree-propagation-repro.md`. Dev daemon left running with livelock (evidence).
 - E2E Release Gate (4 tests): last run **2026-08-02 on `latest` @ `70a22d62`** → ✅ PASS (4/4). happy_path 51s, pause+resume 42s, terminate+revive 45s, 3-level cascade 111s. Validates premature root COMPLETED fix — no premature completion at any level in the 3-level cascade. See `RESULTS/2026-08-02-premature-completion-fix-e2e.md`.
 - Previous run: 2026-07-28 on `feature/context-injection-restructure` → ✅ PASS (4/4). happy_path 68s, pause+resume 44s, terminate+revive 50s, 3-level cascade 115s. See `RESULTS/2026-07-28-e2e-workflows-release-gate.md`.
 - Pack: `test/packs/e2e_workflows_ensure_test.sh` (run individually per ensure.md "one by one" rule)
