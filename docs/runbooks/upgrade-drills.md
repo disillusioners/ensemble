@@ -12,7 +12,7 @@
 
 *Redaction note: the source's live-port numeral is rendered `<live-port>` here per this file's port-literal rule — the single deviation; every other character is byte-identical to source.*
 
-> **Port-literal rule for this file:** zero live-port literals appear anywhere below. The live port is always written *live port* in prose; the operator resolves its value at runtime from the live install's own config, never from this document. Demo port 7979 and sandbox ports (8377/8378 precedent) are the only port numbers written here.
+> **Port-literal rule for this file:** zero live-port literals appear anywhere below. The live port is always written *live port* in prose; the operator discovers it at runtime by install-dir-anchored process discovery (§0.4), never from this document. Demo port 7979 and sandbox ports (8377/8378 precedent) are the only port numbers written here.
 
 **Standing live-pid-checkpoint invariant (every drill, no exceptions):** capture the live listener pid set read-only (`ps`/`lsof`, never a signal) at every drill start and end; the checkpoint output must be **byte-identical** to the DR-0 baseline at both ends. Any drift ⇒ abort the drill, change nothing else, escalate. (Phase-1 §5 precedent; `test-strategy.md` §5.5.)
 
@@ -39,9 +39,22 @@ curl -s localhost:7979/readyz  # 200, reasons: []
 
 ```bash
 mkdir -p <evidence-dir>
-# resolve the live listener READ-ONLY; identify by install-dir association, not by a port literal here:
-lsof -nP -iTCP -sTCP:LISTEN | grep -F "$(sed -n 's/^PORT=//p' ~/agents-ensemble/.env | head -1)"
-ps -o pid,ppid,lstart,command -p <live-pids> | tee <evidence-dir>/live-pid-start.txt
+# resolve the live listener READ-ONLY by install-dir-anchored process match
+# (stop-ensemble.sh ownership shape — §0.6 trailing-slash excludes demo on
+# substring overlap; never read live files, never select by a port literal):
+LIVE="$HOME/agents-ensemble"            # §0.6 — the anchored pattern below carries the trailing slash
+# Tier 1a — cmdline carries an anchored exe under the live install dir:
+ps -axo pid,ppid,lstart,command | grep -E "$LIVE/(launcher\.sh|ensemble-prod|current/ensemble-prod)( |$)" \
+  | tee <evidence-dir>/live-pid-start.txt
+# Tier 1b — relative `./ensemble-prod` form (cwd == live install dir):
+ps -axo pid=,args= 2>/dev/null \
+  | awk '{if ($0 ~ /(ensemble-prod)( |$)/ || $0 ~ /(^|\/)launcher\.sh( |$)/) print $1}' \
+  | while read -r p; do
+      [ "$(lsof -a -p "$p" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)" = "$LIVE" ] && \
+        ps -o pid,ppid,lstart,command -p "$p"
+    done | tee -a <evidence-dir>/live-pid-start.txt
+# resolve the listening port as an OUTPUT from the anchored pids (never an input):
+lsof -nP -iTCP -sTCP:LISTEN -a -p $(awk '{print $1}' <evidence-dir>/live-pid-start.txt | paste -sd,)
 # at drill end: re-run both, diff against live-pid-start.txt — MUST be byte-identical
 ```
 
@@ -413,6 +426,8 @@ The gate measurement for S3 → live eligibility (ADR-021, N=3 user-ruled). **Th
 
 **Cycle verdicts are judged against the CANONICAL five clauses of `test-strategy.md` §4.1** (clause 1 ari-driven upgrade cycle; clause 2 restart cycle clean; clause 3 no readiness degradation outside drills; clause 4 no unintended work loss; clause 5 zero live contact). A cycle is clean iff all five pass. **Staleness:** any release/manifest change mid-count resets the count to 0 — the N gate must be satisfied by cycles all targeting the SAME release version. Failed cycles do NOT auto-reset the count; record them with cause.
 
+**Clause judging provenance (NIT-8).** The checker (`ledger_check.py`) judges the **journal-derivable clauses only** — clause 1 (`cycle = committed promote txn`; CLEAN = zero `rollback` / `sweep_rollback` / `halt` in the txn window). **Clauses 2–5 are EXTERNAL evidence** — audited in each per-cycle RESULTS file, not derived from the journal; the checker's coverage note (updated a9b5ed6c, NIT-8) names them verbatim: *"clauses 2-5 (restart-cycle-clean, readiness log-scan, work-loss resume evidence, live-pid checkpoint) are external evidence audited in RESULTS files — the gate consumer folds both."* Each cycle row's CLEAN verdict above therefore rests on **both** axes (checker + RESULTS); the gate consumer folds both per the coverage note.
+
 | Cycle # | Date | Version | Journal txn id | Verdict (§4.1 clauses 1–5) | Evidence link |
 |---|---|---|---|---|---|
 | (rehearsal) | 2026-08-23 | v0.10.7-p2.3-b65 | 2026-08-23T21:39:13Z | **SUPERSEDED** (rehearsal — script-driven, not ari-driven; was CLEAN-with-flag; superseded by the version change — the cycle-#1 ruling precedent: staleness reset at the version boundary) | `2026-08-23-p2-3-b65-promote-t8-recapture.md` |
@@ -428,7 +443,7 @@ The gate measurement for S3 → live eligibility (ADR-021, N=3 user-ruled). **Th
 
 ## 8. LIVE PROMOTION — USER-GATED DESIGN (D3 — NEVER EXECUTED BY THIS INITIATIVE)
 
-Everything in this section is **designed, documented, rehearsed-on-demo — and executed ONLY by the user** (`promotion-ladder.md` §5 U1–U6). Agents never set the guard variable; automation stops at demo **permanently** (ADR-017: S4–S6 have no automation path). Commands below show **guard VARIABLE names only** (`ENSEMBLE_UPGRADE_LIVE=1`); the user runs them with the live install's own resolved values. §9's hard block applies **before any of this is even eligible**.
+Everything in this section is **designed, documented, rehearsed-on-demo — and executed ONLY by the user** (`promotion-ladder.md` §5 U1–U6). Agents never set the guard variable; automation stops at demo **permanently** (ADR-017: S4–S6 have no automation path). Commands below show **guard VARIABLE + flag NAMES only** — the live-promote guard is `ENSEMBLE_UPGRADE_LIVE=1`; the live-promote **additional factor** is the explicit `--f2-verified-closed` operator flag (MINOR-4b, §9; the user runs them with the live install's own resolved values and attestation timestamp/note). §9's hard block applies **before any of this is even eligible**.
 
 ### 8.1 Live staged-mode migration (first `stage.sh live` — converts the live dir from flat/legacy `.bak`s to staged mode) — U1
 
@@ -441,7 +456,7 @@ Everything in this section is **designed, documented, rehearsed-on-demo — and 
 ### 8.2 Live promote — U1 (verification U2; rollback U3)
 
 - **Preconditions:** 8.1 done · staged release integrity-verified (`status.sh live --verify` clean) · manifest `rollback_safe` checked by the user against the live DB's real migration state (ADR-020 interim rule: two enforcement layers, one rule; releases that drop columns are NEVER rollback targets — halt-for-human instead).
-- **User-executed command (guard-bearing):** `ENSEMBLE_UPGRADE_LIVE=1 bash scripts/upgrade/promote.sh live VERSION=<v>`.
+- **User-executed command (guard-bearing + SECOND factor — MINOR-4b):** `ENSEMBLE_UPGRADE_LIVE=1 bash scripts/upgrade/promote.sh live VERSION=<v> --f2-verified-closed` (the explicit flag is an **additional** factor on top of the guard; guard stays). **Attestation on the open txn** (lib.sh `journal_mark_f2_verified`, additive fields): `f2_verified_closed:true` + `f2_verified_at` (ISO timestamp) + optional `f2_verified_note` (from `F2_VERIFIED_NOTE` env) — auditable at the enforcement point.
 - **Expected journal events:** `in_flight{kind:promote}` → `flipped:true` → gates (`/livez` ≤60s, `/readyz` ≤120s, version verify, 300s soak) → **`commit`** (current/previous updated, retention) — or on gate failure: auto-**`rollback`** + quarantine + cooldown + counter (cap 3/24h; at cap → `halt` for human).
 - **Verification probes (user-run; any agent involvement is read-only GETs only, explicitly approved per action — U2):** `GET /livez` (200, version == manifest `binary_version` — ADR-027), `GET /readyz` (200, `reasons: []`), `ENSEMBLE_UPGRADE_LIVE=1 bash scripts/upgrade/status.sh live`.
 - **Abort path:** auto-rollback is built-in on gate failure. Manual: `ENSEMBLE_UPGRADE_LIVE=1 bash scripts/upgrade/rollback.sh live` (manifest `rollback_safe` gate; cap + cooldown apply). If the rollback target is itself bad/quarantined → **halt-for-human**; recovery = **ADR-028 flip-forward**: the user picks a known-good version and promotes it through the standard gate (never automatic).
@@ -475,6 +490,8 @@ Live `system_restart` via tools is **refused outright** this initiative (ADR-016
 2. **F2 CLOSED:** the **unauthenticated loopback API user-origin forge lane** closed or the local API authenticated. The lane (critical note e5a83653, **HIGH**): `POST /jobs` accepts `body.source` **verbatim** (`daemon/routers/jobs_crud.py:275-278`); `POST /messages` stamps `source="api"` (`daemon/routers/messages.py:391`); the `USER_ORIGIN_SOURCES` whitelist cannot distinguish a genuine web-UI human from a localhost forger (`daemon/tools/upgrade_journal.py:714-717` lane; `decisions.md` OBS residual §4.2(a) — single-host trust model, closes only with an auth boundary on the local API).
 
 **F2-open ⇒ the gate is HARD-BLOCKED regardless of cycle count.** No number of clean cycles substitutes for the forge lane being closed — a forged user-origin on live would bypass the very gate the cycles exist to certify.
+
+**Pipeline enforcement (MINOR-4b — live rung is now gated at the script too, not just by convention).** `promote.sh live` is the enforcement point. Without `--f2-verified-closed`, the script **refuses** with the distinct journal token **`f2-not-verified`** (best-effort refusal journaling + SSE alert) and **exit 78** — regardless of `ENSEMBLE_UPGRADE_LIVE=1` being set, the guard alone is no longer sufficient. With `--f2-verified-closed` passed, the attestation is stamped on the live txn at open time (`journal_mark_f2_verified`, lib.sh): `f2_verified_closed:true` + `f2_verified_at` (ISO timestamp) + optional `f2_verified_note` (from `F2_VERIFIED_NOTE` env) — **auditable at the enforcement point**, riding the txn into the journal record. The `ENSEMBLE_UPGRADE_LIVE=1` guard remains a separate, still-required factor; the flag is **additive, not a replacement**.
 
 **And even with F2 closed:** the live rung remains **USER-EXECUTED** — automation stops at demo **permanently** (ADR-017 env-target model; `promotion-ladder.md` S4–S6 are USER rows; §8 above is a design, never an agent procedure).
 
