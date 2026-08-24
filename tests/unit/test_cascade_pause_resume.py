@@ -1552,14 +1552,21 @@ def test_pause_cascade_handles_paused_task_row_through_real_suspend_turn(
 
     The blocker was: ``_StatusTransition._reconcile`` unconditionally
     threads ``connection=connection`` to ``reconcile_turn_mirror``;
-    the duck-typed ``_TransitionTaskRepo`` adapter inside
-    ``_pause_cascade_db_sync`` previously did NOT accept that kwarg,
-    so any pause of a tree with a PAUSED-task-bearing RUNNING row
-    raised ``TypeError: ... unexpected keyword argument 'connection'``.
+    the duck-typed ``_TransitionTaskRepo`` adapters previously did NOT
+    accept that kwarg, so ``_resume_cascade_db_sync`` — whose
+    ``ResumeTurn.run`` calls ``_reconcile()`` unconditionally — raised
+    ``TypeError: ... unexpected keyword argument 'connection'``.
 
-    The fix added ``**kwargs`` to the adapter. This test exercises
-    the REAL pause cascade end-to-end (no mock of the adapter) with
-    a seed state that mirrors the masked failure mode:
+    The fix added ``**kwargs`` to BOTH ``_TransitionTaskRepo`` adapters
+    (pause + resume). Review softening: the pause-side fix is
+    DEFENSIVE — ``SuspendTurn.run`` never calls ``_reconcile()`` (it
+    is a single guarded UPDATE), so no live ``connection=`` threading
+    exercises the pause adapter's kwarg tolerance during pause. The
+    kwarg contract's regression coverage is resume-side, where
+    ``ResumeTurn.run`` calls ``_reconcile()`` unconditionally (see
+    the resume-side seam tests in this file). This test still
+    exercises the REAL pause cascade end-to-end (no mock of the
+    adapter) with a seed state that mirrors the masked failure mode:
 
       * Instance is RUNNING with a PAUSED task row (the seam
         iterates RUNNING tasks; the PAUSED task row in this seed is
@@ -1578,13 +1585,14 @@ def test_pause_cascade_handles_paused_task_row_through_real_suspend_turn(
     # RUNNING task — the cascade target.
     _seed_task(engine, instance_id=iid, status=TaskStatus.RUNNING.value)
     # PAUSED task row already present — the cascade must skip it
-    # (its ``status='running'`` guard excludes non-running rows)
-    # and the adapter must accept ``connection=`` without TypeError.
+    # (its ``status='running'`` guard excludes non-running rows);
+    # the adapter stays kwarg-tolerant (defensive — see docstring).
     _seed_task(engine, instance_id=iid, status=TaskStatus.PAUSED.value)
 
-    # Drive the REAL helper. Pre-fix this raised
-    # ``TypeError: ... unexpected keyword argument 'connection'``
-    # from the adapter inside ``SuspendTurn._reconcile``.
+    # Drive the REAL helper. On the pause path this cannot hit the
+    # kwarg ``TypeError`` (``SuspendTurn.run`` never calls
+    # ``_reconcile()``) — the adapter's ``**kwargs`` is defensive;
+    # the resume-side seam tests cover the live kwarg threading.
     result = lifecycle_service._pause_cascade_db_sync(
         engine,
         write_guard,
