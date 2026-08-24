@@ -6985,7 +6985,7 @@ class InstanceManager:
                             sa_update(ReportInjection)
                             .where(ReportInjection.injection_id == injection_id)
                             .values(
-                                state="failed",  # dead-letter sentinel
+                                state=ReportInjectionState.FAILED.value,  # dead-letter sentinel
                             )
                         )
                         logger.info(
@@ -7414,6 +7414,29 @@ class InstanceManager:
                     )
                     return None
 
+                # F2 fix: dead-parent guard in the ASYNC variant.
+                # The sync ``_reconcile_deferred_report`` reads the
+                # parent Instance row ONCE and consults
+                # ``db_dead_parent`` to short-circuit sub-shape (b)/(c)
+                # into the ``dead_parent_skip`` shape instead of
+                # recreating PENDING artefacts. Pre-F2, the async
+                # variant recreated ``MessageStatus.READY`` message
+                # rows + INSERTed PENDING ``process_report`` Tasks
+                # unconditionally — a dead parent reached via the
+                # router re-created the permanently-unclaimable
+                # PENDING row (the B4-tail livelock class, exactly).
+                # Read the parent row HERE so the sub-shape (b) and
+                # (c) branches below can consult it; the predicate
+                # mirrors the sync sibling + the T8 (a) enqueue seam
+                # exactly (``parent is None or parent.status ==
+                # TERMINATED``).
+                from .repositories.instance.models import Instance, InstanceStatus
+                parent_row = session.get(Instance, inj.parent_instance_id)
+                db_dead_parent = (
+                    parent_row is None
+                    or parent_row.status == InstanceStatus.TERMINATED.value
+                )
+
                 # Sub-shape (a): marker-first Site 1.
                 if inj.report_message_id is None:
                     # Await directly — do NOT use
@@ -7448,6 +7471,40 @@ class InstanceManager:
                     # Sub-shape (b) — message is gone (very unusual;
                     # could happen after a manual DB cleanup).
                     # Re-create the message row + create the task.
+                    if db_dead_parent:
+                        # F2: dead-parent skip — mirror of the sync
+                        # sibling. Recreate the message row but mark
+                        # it FAILED; skip the PROCESS_REPORT Task
+                        # INSERT (would be permanently unclaimable,
+                        # pause gate, plan §R8).
+                        session.add(
+                            MessageQueue(
+                                message_id=report_message_id,
+                                instance_id=inj.parent_instance_id,
+                                content=inj.content or "[Reconstructed report]",
+                                source=(
+                                    f"internal_report:"
+                                    f"{child_instance_id}:{child_message_id}"
+                                ),
+                                type=MessageType.COMPLETION_REPORT.value,
+                                status=MessageStatus.FAILED.value,
+                                priority=0,
+                                enqueued_at=datetime.now(timezone.utc),
+                            )
+                        )
+                        logger.info(
+                            f"[{source}] reconcile (sub-shape b, message-only): "
+                            f"dead-parent skip — recreated message marked "
+                            f"FAILED, no PROCESS_REPORT Task created. parent="
+                            f"{inj.parent_instance_id[:8]}..., "
+                            f"parent_status={parent_row.status if parent_row else 'missing'}, "
+                            f"child={child_instance_id[:8]}..."
+                        )
+                        session.commit()
+                        return {
+                            "shape": "dead_parent_skip",
+                            "report_message_id": report_message_id,
+                        }
                     session.add(
                         MessageQueue(
                             message_id=report_message_id,
@@ -7492,6 +7549,36 @@ class InstanceManager:
 
                 if existing_task is None:
                     # Sub-shape (b) — message exists, task missing.
+                    if db_dead_parent:
+                        # F2: dead-parent skip — mirror of the sync
+                        # sibling + T8 (a). The existing message row
+                        # is left untouched (already in the DB); no
+                        # Task row is created (would be permanently
+                        # unclaimable, pause gate). The injection row
+                        # is the row this seam OWNS — flip its state
+                        # to the dead-letter sentinel so downstream
+                        # Lane-3/4 readers skip it.
+                        session.execute(
+                            sa_update(ReportInjection)
+                            .where(ReportInjection.injection_id == injection_id)
+                            .values(
+                                state=ReportInjectionState.FAILED.value,  # dead-letter sentinel
+                            )
+                        )
+                        logger.info(
+                            f"[{source}] reconcile (sub-shape b, task-only): "
+                            f"dead-parent skip — message already in DB, "
+                            f"no PROCESS_REPORT Task created, injection "
+                            f"row marked state=failed. parent="
+                            f"{inj.parent_instance_id[:8]}..., "
+                            f"parent_status={parent_row.status if parent_row else 'missing'}, "
+                            f"child={child_instance_id[:8]}..."
+                        )
+                        session.commit()
+                        return {
+                            "shape": "dead_parent_skip",
+                            "report_message_id": report_message_id,
+                        }
                     session.add(
                         Task(
                             task_type=TaskType.PROCESS_REPORT.value,

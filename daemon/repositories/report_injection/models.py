@@ -110,6 +110,15 @@ class ReportInjectionState(str, enum.Enum):
     DEFERRED = "DEFERRED"
     INJECTED = "INJECTED"
     TASK_DELIVERED = "TASK_DELIVERED"
+    # Dead-letter sentinel (T8 (b) / T8 (e)). A recover-from-DEFERRED
+    # seam (manager.py ``_create_subshape_a_artifacts`` + sub-shape
+    # (b) task-only branch) that finds a dead parent flips the
+    # injection row to this state instead of minting a permanently-
+    # unclaimable PROCESS_REPORT Task (pause gate, plan §R8). Distinct
+    # from INJECTED / TASK_DELIVERED (which would falsely signal
+    # delivery). Stored verbatim — the storage layer is
+    # case-sensitive (C1). Terminal.
+    FAILED = "failed"
 
 
 class ReportInjection(SQLModel, table=True):

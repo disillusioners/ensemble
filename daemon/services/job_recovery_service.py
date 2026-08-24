@@ -1230,42 +1230,86 @@ class JobRecoveryService:
         *,
         min_pending_age_seconds: int,
     ) -> dict | None:
-        """Pattern (e) implementation: dead-letter stranded PENDING
-        ``process_report`` Tasks whose target ``instances`` row is
-        TERMINATED or missing, AND delete the companion
-        ``report_injections`` row.
+        """Pattern (e) async wrapper — delegates to a sync sweep body
+        via ``asyncio.to_thread`` so the long-lived ``engine.begin()``
+        transaction does not block the event loop on the first real
+        stranded row.
 
-        Predicate (strict scope per plan §R3):
-
-          * ``task.status = 'pending'``
-          * ``task.task_type = 'process_report'``
-          * ``task.created_at <= now() - min_pending_age_seconds``
-          * parent Instance row is ``TERMINATED`` OR parent row does
-            NOT exist (the missing-parent case is the d14cbde5-class
-            signature; the table JOIN is left-outer)
-
-        This is the production equivalent of the test seam
-        ``_pattern_e_dead_letter_pending_process_reports`` in
-        ``tests/unit/test_pause_resume_terminate_tree_fix_p1.py``.
-        The production seam uses
-        :class:`daemon.services.turn_transitions.DeadLetterTurn`
-        directly (not a SQL raw UPDATE) so the MIRROR_SET invariant
-        is preserved through the canonical named-transition path.
-
-        The sweep itself does NOT touch ``job_queue_items`` directly
-        — the named transition's ``reconcile_turn_mirror`` call IS
-        the SOLE completion authority for the JobItem mirror
-        (plan §C6 invariant). Companion ``report_injections`` row
-        DELETE is the only direct mirror write this sweep performs,
-        scoped to a single row per dead-lettered Task.
-
-        Returns ``None`` when nothing was dead-lettered (caller
-        continues without bumping ``reconciled``); otherwise a dict
-        with ``reconciled`` count + ``details`` list of per-row
-        records (caller appends to its own ``details`` list).
+        The full sweep predicate, the companion ``report_injections``
+        DELETE, and the ``DeadLetterTurn`` mirror reconcile all live
+        in :meth:`_pattern_e_dead_letter_sweep_sync` (the F1
+        production-path seam). The async wrapper is a thin bridge
+        that resolves the engine from ``self._task_repository`` and
+        surfaces the result shape (``None`` when nothing was
+        dead-lettered, ``{reconciled, details}`` otherwise) to the
+        caller (``reconcile_drift_states``).
         """
-        from daemon.repositories.task.models import Task, TaskStatus, TaskType
-        from daemon.repositories.instance.models import Instance, InstanceStatus
+        engine = self._task_repository.engine if self._task_repository else None
+        if engine is None:
+            logger.debug(
+                "_pattern_e_dead_letter_dead_parent_process_reports: "
+                "task_repository not wired; pattern (e) skipped"
+            )
+            return None
+
+        try:
+            return await asyncio.to_thread(
+                self._pattern_e_dead_letter_sweep_sync,
+                engine,
+                self._task_repository,
+                min_pending_age_seconds,
+            )
+        except Exception as e:
+            logger.error(
+                f"reconcile_drift_states: Pattern (e) check failed: {e}",
+                exc_info=True,
+            )
+            return None
+
+    def _pattern_e_dead_letter_sweep_sync(
+        self,
+        engine,
+        task_repository,
+        min_pending_age_seconds: int,
+    ) -> dict | None:
+        """Pattern (e) sync body — F1 production-path seam.
+
+        Walks the dead-parent ``process_report`` candidate set and
+        dead-letters each row in a single ``engine.begin()``
+        transaction. Three correctness invariants preserved:
+
+          * F1 (a): the entire SELECT + per-row UPDATE + companion
+            DELETE + named transition lives inside ONE
+            ``engine.begin()`` — the mirror reconcile therefore
+            JOINS this transaction (the named transition's
+            ``_reconcile()`` is called with ``connection=conn`` so
+            ``reconcile_turn_mirror`` writes against the same
+            engine). Pre-fix, ``_reconcile()`` opened its own
+            ``engine.begin()`` inside the sweep's open txn, which
+            self-deadlocked on PG (no ``lock_timeout``) and silently
+            lost the reconcile on file SQLite (``OperationalError``
+            after busy-timeout, swallowed by the per-row except).
+          * F1 (b): the long sync SQL runs on a worker thread via
+            ``asyncio.to_thread`` in the async wrapper — the event
+            loop cannot block on ``engine.begin()``.
+          * F1 (c): the sweep predicate and the EXISTS-in-WHERE
+            revive-race closure are unchanged from the verified
+            shape — only the reconcile-threading was wrong.
+
+        The companion ``report_injections`` DELETE is scoped to a
+        single row per dead-lettered Task (the
+        ``report_message_id == task.message_id`` lookup is exact).
+        The named transition's ``reconcile_turn_mirror`` is the
+        SOLE completion authority for the 8-mirror set; this
+        sweep never touches ``job_queue_items`` directly (plan §C6
+        invariant).
+
+        Returns ``None`` when nothing was dead-lettered; otherwise a
+        ``{reconciled, details}`` dict for the caller to merge into
+        its ``reconcile_drift_states`` summary.
+        """
+        from daemon.repositories.task.models import TaskStatus, TaskType
+        from daemon.repositories.instance.models import InstanceStatus
         from daemon.services.turn_transitions import DeadLetterTurn
 
         threshold = datetime.now(timezone.utc) - timedelta(
@@ -1274,16 +1318,6 @@ class JobRecoveryService:
 
         reconciled = 0
         details: list[dict] = []
-
-        # Resolve the engine via the task_repository (JobRecoveryService
-        # itself doesn't hold an engine — repositories do).
-        engine = self._task_repository.engine if self._task_repository else None
-        if engine is None:
-            logger.debug(
-                "_pattern_e_dead_letter_dead_parent_process_reports: "
-                "task_repository not wired; pattern (e) skipped"
-            )
-            return None
 
         with engine.begin() as conn:
             # 1. Candidate SELECT — scope-strict (R3) on
@@ -1380,12 +1414,19 @@ class JobRecoveryService:
                 # completion authority for the 8-mirror set. The
                 # transition's UPDATE will rowcount 0 (no longer
                 # PENDING after step 2), but the mirror reconcile
-                # still fires — that's the canonical path.
-                if self._task_repository is not None:
+                # still fires — that's the canonical path. F1 fix:
+                # ``DeadLetterTurn.run(_SessionAdapter(conn))`` passes
+                # the underlying ``conn`` to ``_reconcile`` so the
+                # mirror reconcile joins THIS transaction (see
+                # ``turn_transitions.py:_StatusTransition._reconcile``
+                # ``connection=`` parameter). Pre-fix, the reconcile
+                # opened a nested ``engine.begin()`` and self-
+                # deadlocked on PG / silently failed on SQLite.
+                if task_repository is not None:
                     try:
                         t = DeadLetterTurn(
                             work_id=work_id,
-                            task_repo=self._task_repository,
+                            task_repo=task_repository,
                             reason="drift_sweep_dead_parent",
                         )
                         t.run(_SessionAdapter(conn))

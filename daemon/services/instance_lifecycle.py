@@ -1611,254 +1611,278 @@ class InstanceLifecycleService:
                 # post-commit side effects. P1 (T3): the snapshot
                 # iteration still runs below so descendants of this node
                 # are visited even though the per-instance work is
-                # skipped. Track via ``_p1_skip_post_commit`` flag.
+                # skipped.
+                #
+                # F3 fix: implement the ``_p1_skip_post_commit`` flag.
+                # Pre-F3, control fell through directly into the
+                # post-commit outbox (status_change SSE,
+                # injection_consumed SSE, cleanup_instance, lock
+                # release, job-cancel loop, dispatch-bus notify, bus
+                # cancel, lifecycle-event publish) — violating
+                # ``_terminate_instance_db_sync``'s documented contract
+                # ("Caller short-circuits WITHOUT firing any side
+                # effects"). The flag suppresses the post-commit outbox
+                # when ``db_result.skip``; the enumerate-first contract
+                # is preserved (skip gates ACTING on the node, not
+                # traversal — the snapshot iteration outside this
+                # ``else:`` block still visits descendants).
+                _p1_skip_post_commit = True
                 duration_ms = int((time.monotonic() - t0) * 1000)
                 logger.info(
                     f"[TRACE] terminate_instance: {instance_id[:8]}... skipped "
                     f"(row missing or already terminal; graph_unwind_ms={graph_unwind_ms}, "
-                    f"jobs_cancelled=0, children=0, duration_ms={duration_ms})"
+                    f"jobs_cancelled=0, children=0, duration_ms={duration_ms}, "
+                    f"post_commit_outbox=suppressed — F3)"
                 )
                 if terminal_reason == "watchover_terminated":
                     self._clear_watchover_termination_marker(instance_id)
                 # Fall through to step 3 (snapshot iteration). The
                 # descendants still need visiting.
-
-            if terminal_reason == "watchover_terminated":
-                # The authoritative DB transition committed. Clear the persistent
-                # crash-recovery intent now; post-commit SSE/resource cleanup
-                # failures must not cause the stale-marker sweeper to re-arm it.
-                self._clear_watchover_termination_marker(instance_id)
-
-            parent_id = db_result.parent_id
-            agent_id = db_result.agent_id
-            message_jobs_cancelled = db_result.message_jobs_cancelled
-            all_jobs_cancelled = db_result.all_jobs_cancelled
-            message_queue_removed = db_result.message_queue_removed
-            tasks_removed = db_result.tasks_removed
-            # Total cancelled jobs (message + remaining sweep) for the summary log.
-            jobs_cancelled = message_jobs_cancelled + all_jobs_cancelled
-
-            # ─── Post-commit outbox: fire side effects on the event loop ──────────
-            # All of these run AFTER the WriteGuardSession committed, so any
-            # subscriber (SSE client, watcher, completion consumer) sees a DB
-            # state consistent with the side-effect payload.
-
-            # 5.5. Emit status_change SSE event for the terminated instance.
-            try:
-                await self._manager._live_hub.stream_status_change(
-                    instance_id, "terminated", agent_id=agent_id
-                )
-            except Exception as e:
-                logger.warning(
-                    f"terminate_instance: status_change SSE emit failed for "
-                    f"{instance_id[:8]}...: {e}"
-                )
-
-            # Phase 3: emit ``injection_consumed`` POST-COMMIT alongside the
-            # status_change for any instance whose RAM queue was cleared in
-            # the pre-DB step. The new lifecycle is
-            # ``injection_pending`` (per message) → ``injection_consumed``
-            # (once, for all messages) — there is no longer an
-            # ``injection_cleared`` event. The lifecycle path emits
-            # ``injection_consumed`` (one closure event for the whole queue)
-            # so the FE can drop the pending indicator. ``None`` queue means
-            # the slot was empty — no emit.
-            if cleared_injection:
-                try:
-                    # Use the OLDEST entry for content + timestamp — it
-                    # matches the FIFO order the agent would have seen.
-                    head_entry = cleared_injection[0]
-                    await self._manager._live_hub.stream_message(
-                        instance_id,
-                        message={
-                            "instance_id": instance_id,
-                            "event_type": "injection_consumed",
-                            "content": head_entry.get("content"),
-                            "timestamp": head_entry.get("timestamp"),
-                            "pending_count": len(cleared_injection),
-                        },
-                        event_type="injection_consumed",
-                    )
-                except Exception as e:
-                    # Log + swallow — terminate must not fail on SSE outage.
-                    logger.warning(
-                        f"terminate_instance: injection_consumed SSE emit "
-                        f"failed for {instance_id[:8]}...: "
-                        f"{type(e).__name__}: {e}"
-                    )
-
-            # Phase 2 / T2.8 (CR-4 / TD-5): cleanup_instance was hoisted from
-            # pre-graph-cancel to AFTER the post-commit status_change /
-            # injection_consumed SSE events. Watchover terminations and other
-            # SSE events MUST reach active clients BEFORE the live hub tears
-            # down their connections — otherwise the FR-23 contract ("user
-            # always sees the watchover termination event") is violated.
-            # Wrapped in try/except so a transient live_hub failure does not
-            # block the rest of the terminate cascade.
-            try:
-                await self._manager._live_hub.cleanup_instance(instance_id)
-            except Exception as e:
-                logger.warning(
-                    f"terminate_instance: cleanup_instance failed for "
-                    f"{instance_id[:8]}...: {type(e).__name__}: {e}"
-                )
-
-            # 6. Release project lock if JobQueueService is connected.
-            if self._job_queue_service is not None:
-                try:
-                    released_projects = await self._job_queue_service.release_lock_by_instance(instance_id)
-                    if released_projects:
-                        logger.info(
-                            f"Released {len(released_projects)} project lock(s) for instance "
-                            f"{instance_id[:8]}...: {released_projects}"
-                        )
-                except Exception as e:
-                    logger.warning(f"Failed to release locks for instance {instance_id[:8]}...: {e}")
-
-            # 7.5/7.6. Cancel remaining non-PROCESSING jobs.
-            # These are best-effort async cancels. The DB cancel for the
-            # PROCESSING job is already in the helper; this loop only handles
-            # the per-job notify path that the helper did NOT do (the helper
-            # bulk-updates job rows but does not call cancel_job per job).
-            #
-            # Message-type JobItems (job_type='message') are pure mirrors of
-            # the Task row — they are created by enqueue_message_job but the
-            # Task lifecycle owns their visibility. The loop below skips them
-            # (see the ``if remaining_job.job_type == "message": continue``
-            # check inside). Only task-type JobItems need per-job cancel/notify.
-            #
-            # Why this is safe AFTER commit: the DB cancel already happened;
-            # the only thing this loop does is fire the per-job side effects
-            # (notify_watchers etc.). A crash between the helper's commit and
-            # this loop leaves the rows terminal but un-notified — recoverable
-            # by the next job_processor poll.
-            if self._job_queue_service is not None:
-                try:
-                    all_jobs = self._job_queue_service._repository.find_jobs_by_instance(
-                        instance_id, job_type=None
-                    )
-                    for remaining_job in all_jobs:
-                        # MESSAGE JobItems are informational mirrors (D13 contract), not lifecycle-managed jobs.
-                        # They are created by enqueue_message_job as a derived view; the Task row is authoritative.
-                        # terminate cleanup must NOT cancel them — the Task lifecycle owns their visibility.
-                        if remaining_job.job_type == "message":
-                            continue
-                        if remaining_job.admission_state in (AdmissionState.DONE.value, AdmissionState.DEAD.value):
-                            continue
-                        try:
-                            if remaining_job.admission_state == AdmissionState.ACTIVE.value:
-                                # Defensive: the helper should have already
-                                # transitioned PROCESSING jobs to CANCELLED in
-                                # the same transaction. complete_job() here is
-                                # idempotent — atomic_transition will no-op on
-                                # already-terminal rows.
-                                await self._job_queue_service.complete_job(
-                                    remaining_job.job_id,
-                                    demand_state=DemandState.CANCELLED,
-                                    error="Instance terminated during cleanup",
-                                )
-                            else:
-                                # PENDING / FAILED — safe to use cancel_job().
-                                await self._job_queue_service.cancel_job(remaining_job.job_id)
-                        except Exception as e:
-                            logger.warning(
-                                f"terminate_instance: failed to cancel job "
-                                f"{remaining_job.job_id[:8]}...: {e}"
-                            )
-                except Exception as e:
-                    logger.warning(f"Failed to cleanup remaining jobs for instance {instance_id[:8]}...: {e}")
-
-                # Trigger the next pending job for the project so the queue
-                # doesn't stall (mirrors the original step 7 follow-up).
-                try:
-                    processing_job = self._job_queue_service.get_job_by_instance_sync(instance_id)
-                    if processing_job and processing_job.project_id:
-                        self._job_queue_service.trigger_next_job_sync(processing_job.project_id)
-                except Exception as e:
-                    logger.debug(
-                        f"trigger_next_job_sync after terminate of "
-                        f"{instance_id[:8]}... failed: {e}"
-                    )
-
-            # 9. Wake the JobProcessor so it can sweep TERMINATED-instance artifacts
-            # immediately rather than waiting up to 30s for the next poll boundary.
-            # Safe to call after commit — JobProcessor's orphan-check will see
-            # TERMINATED and reclaim resources promptly.
-            mgmt = getattr(self._manager, '_job_queue_mgmt_service', None)
-            bus = getattr(mgmt, '_dispatch_bus', None) if mgmt is not None else None
-            if bus is not None:
-                try:
-                    bus.notify_all()
-                except Exception as e:
-                    logger.warning(
-                        f"Failed to notify dispatch bus during terminate of {instance_id[:8]}... "
-                        f"({type(e).__name__}: {e})"
-                    )
-
-            # 7.8. Cancel PENDING DependencyBus watchers targeting the
-            # terminated instance. The bus replaces the CorrelationManager
-            # as the SOLE completion authority (Phase 5, 2026-06-23): its
-            # ``cancel_for_target`` transitions the watcher rows to
-            # CANCELLED so the child's terminal event no-ops on the
-            # cancel path. Without this, an in-flight child task would
-            # deliver a FollowUp onto a dead parent.
-            #
-            # Failure handling: a bus failure is logged at WARNING and
-            # swallowed — termination must not fail on cleanup. The bus
-            # is the SOLE authority; a missing singleton is a wiring
-            # failure logged at debug.
-            bus = get_dependency_bus()
-            if bus is not None:
-                try:
-                    await bus.cancel_for_target(instance_id)
-                except Exception as e:
-                    logger.warning(
-                        f"Failed to cancel bus watchers for terminated instance "
-                        f"{instance_id[:8]}...: {e}"
-                    )
             else:
-                logger.debug(
-                    f"Bus singleton None at terminate of "
-                    f"{instance_id[:8]}... — no-op"
-                )
+                _p1_skip_post_commit = False
 
-            # 8. Publish lifecycle event for terminated instance.
-            if self._events_service:
+            if not _p1_skip_post_commit:
+                if terminal_reason == "watchover_terminated":
+                    # The authoritative DB transition committed. Clear the persistent
+                    # crash-recovery intent now; post-commit SSE/resource cleanup
+                    # failures must not cause the stale-marker sweeper to re-arm it.
+                    self._clear_watchover_termination_marker(instance_id)
+
+                parent_id = db_result.parent_id
+                agent_id = db_result.agent_id
+                message_jobs_cancelled = db_result.message_jobs_cancelled
+                all_jobs_cancelled = db_result.all_jobs_cancelled
+                message_queue_removed = db_result.message_queue_removed
+                tasks_removed = db_result.tasks_removed
+                # Total cancelled jobs (message + remaining sweep) for the summary log.
+                jobs_cancelled = message_jobs_cancelled + all_jobs_cancelled
+
+                # ─── Post-commit outbox: fire side effects on the event loop ──────────
+                # All of these run AFTER the WriteGuardSession committed, so any
+                # subscriber (SSE client, watcher, completion consumer) sees a DB
+                # state consistent with the side-effect payload.
+
+                # 5.5. Emit status_change SSE event for the terminated instance.
                 try:
-                    await self._events_service._publish_instance_lifecycle_event(
-                        instance_id=instance_id,
-                        status="terminated",
-                        error=None,
-                        parent_id=parent_id,
+                    await self._manager._live_hub.stream_status_change(
+                        instance_id, "terminated", agent_id=agent_id
                     )
                 except Exception as e:
                     logger.warning(
-                        f"Failed to publish lifecycle event for terminated instance "
+                        f"terminate_instance: status_change SSE emit failed for "
                         f"{instance_id[:8]}...: {e}"
                     )
 
-            # 8.5. Cancel PENDING DependencyBus watchers targeting the
-            # terminated instance. Done AFTER the DB cascade + lifecycle
-            # event so any subscriber that races us sees consistent DB
-            # state. Without this, an in-flight child task would deliver
-            # a FollowUp onto a dead parent — the bus's
-            # ``cancel_for_target`` transitions the watcher rows to
-            # CANCELLED so the child's terminal event no-ops on the
-            # cancel path.
-            await _cancel_bus_watchers_for(
-                self._manager, instance_id, "terminate_instance"
-            )
+                # Phase 3: emit ``injection_consumed`` POST-COMMIT alongside the
+                # status_change for any instance whose RAM queue was cleared in
+                # the pre-DB step. The new lifecycle is
+                # ``injection_pending`` (per message) → ``injection_consumed``
+                # (once, for all messages) — there is no longer an
+                # ``injection_cleared`` event. The lifecycle path emits
+                # ``injection_consumed`` (one closure event for the whole queue)
+                # so the FE can drop the pending indicator. ``None`` queue means
+                # the slot was empty — no emit.
+                if cleared_injection:
+                    try:
+                        # Use the OLDEST entry for content + timestamp — it
+                        # matches the FIFO order the agent would have seen.
+                        head_entry = cleared_injection[0]
+                        await self._manager._live_hub.stream_message(
+                            instance_id,
+                            message={
+                                "instance_id": instance_id,
+                                "event_type": "injection_consumed",
+                                "content": head_entry.get("content"),
+                                "timestamp": head_entry.get("timestamp"),
+                                "pending_count": len(cleared_injection),
+                            },
+                            event_type="injection_consumed",
+                        )
+                    except Exception as e:
+                        # Log + swallow — terminate must not fail on SSE outage.
+                        logger.warning(
+                            f"terminate_instance: injection_consumed SSE emit "
+                            f"failed for {instance_id[:8]}...: "
+                            f"{type(e).__name__}: {e}"
+                        )
 
-            # Summary log: surface total duration and unwind cost in one line so the
-            # next latency regression is self-explanatory. Matches the [TRACE] style
-            # used in daemon/services/job_processor.py and daemon/services/instance_lifecycle.py.
-            duration_ms = int((time.monotonic() - t0) * 1000)
-            logger.info(
-                f"[TRACE] terminate_instance: {instance_id[:8]}... complete "
-                f"(graph_unwind_ms={graph_unwind_ms}, jobs_cancelled={jobs_cancelled}, "
-                f"children={len(snapshot)-1 if not skip_per_node_work else 0}, duration_ms={duration_ms}, "
-                f"msgq_removed={message_queue_removed}, tasks_removed={tasks_removed})"
-            )
+                # Phase 2 / T2.8 (CR-4 / TD-5): cleanup_instance was hoisted from
+                # pre-graph-cancel to AFTER the post-commit status_change /
+                # injection_consumed SSE events. Watchover terminations and other
+                # SSE events MUST reach active clients BEFORE the live hub tears
+                # down their connections — otherwise the FR-23 contract ("user
+                # always sees the watchover termination event") is violated.
+                # Wrapped in try/except so a transient live_hub failure does not
+                # block the rest of the terminate cascade.
+                try:
+                    await self._manager._live_hub.cleanup_instance(instance_id)
+                except Exception as e:
+                    logger.warning(
+                        f"terminate_instance: cleanup_instance failed for "
+                        f"{instance_id[:8]}...: {type(e).__name__}: {e}"
+                    )
+
+                # 6. Release project lock if JobQueueService is connected.
+                if self._job_queue_service is not None:
+                    try:
+                        released_projects = await self._job_queue_service.release_lock_by_instance(instance_id)
+                        if released_projects:
+                            logger.info(
+                                f"Released {len(released_projects)} project lock(s) for instance "
+                                f"{instance_id[:8]}...: {released_projects}"
+                            )
+                    except Exception as e:
+                        logger.warning(f"Failed to release locks for instance {instance_id[:8]}...: {e}")
+
+                # 7.5/7.6. Cancel remaining non-PROCESSING jobs.
+                # These are best-effort async cancels. The DB cancel for the
+                # PROCESSING job is already in the helper; this loop only handles
+                # the per-job notify path that the helper did NOT do (the helper
+                # bulk-updates job rows but does not call cancel_job per job).
+                #
+                # Message-type JobItems (job_type='message') are pure mirrors of
+                # the Task row — they are created by enqueue_message_job but the
+                # Task lifecycle owns their visibility. The loop below skips them
+                # (see the ``if remaining_job.job_type == "message": continue``
+                # check inside). Only task-type JobItems need per-job cancel/notify.
+                #
+                # Why this is safe AFTER commit: the DB cancel already happened;
+                # the only thing this loop does is fire the per-job side effects
+                # (notify_watchers etc.). A crash between the helper's commit and
+                # this loop leaves the rows terminal but un-notified — recoverable
+                # by the next job_processor poll.
+                if self._job_queue_service is not None:
+                    try:
+                        all_jobs = self._job_queue_service._repository.find_jobs_by_instance(
+                            instance_id, job_type=None
+                        )
+                        for remaining_job in all_jobs:
+                            # MESSAGE JobItems are informational mirrors (D13 contract), not lifecycle-managed jobs.
+                            # They are created by enqueue_message_job as a derived view; the Task row is authoritative.
+                            # terminate cleanup must NOT cancel them — the Task lifecycle owns their visibility.
+                            if remaining_job.job_type == "message":
+                                continue
+                            if remaining_job.admission_state in (AdmissionState.DONE.value, AdmissionState.DEAD.value):
+                                continue
+                            try:
+                                if remaining_job.admission_state == AdmissionState.ACTIVE.value:
+                                    # Defensive: the helper should have already
+                                    # transitioned PROCESSING jobs to CANCELLED in
+                                    # the same transaction. complete_job() here is
+                                    # idempotent — atomic_transition will no-op on
+                                    # already-terminal rows.
+                                    await self._job_queue_service.complete_job(
+                                        remaining_job.job_id,
+                                        demand_state=DemandState.CANCELLED,
+                                        error="Instance terminated during cleanup",
+                                    )
+                                else:
+                                    # PENDING / FAILED — safe to use cancel_job().
+                                    await self._job_queue_service.cancel_job(remaining_job.job_id)
+                            except Exception as e:
+                                logger.warning(
+                                    f"terminate_instance: failed to cancel job "
+                                    f"{remaining_job.job_id[:8]}...: {e}"
+                                )
+                    except Exception as e:
+                        logger.warning(f"Failed to cleanup remaining jobs for instance {instance_id[:8]}...: {e}")
+
+                    # Trigger the next pending job for the project so the queue
+                    # doesn't stall (mirrors the original step 7 follow-up).
+                    try:
+                        processing_job = self._job_queue_service.get_job_by_instance_sync(instance_id)
+                        if processing_job and processing_job.project_id:
+                            self._job_queue_service.trigger_next_job_sync(processing_job.project_id)
+                    except Exception as e:
+                        logger.debug(
+                            f"trigger_next_job_sync after terminate of "
+                            f"{instance_id[:8]}... failed: {e}"
+                        )
+
+                # 9. Wake the JobProcessor so it can sweep TERMINATED-instance artifacts
+                # immediately rather than waiting up to 30s for the next poll boundary.
+                # Safe to call after commit — JobProcessor's orphan-check will see
+                # TERMINATED and reclaim resources promptly.
+                mgmt = getattr(self._manager, '_job_queue_mgmt_service', None)
+                bus = getattr(mgmt, '_dispatch_bus', None) if mgmt is not None else None
+                if bus is not None:
+                    try:
+                        bus.notify_all()
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to notify dispatch bus during terminate of {instance_id[:8]}... "
+                            f"({type(e).__name__}: {e})"
+                        )
+
+                # 7.8. Cancel PENDING DependencyBus watchers targeting the
+                # terminated instance. The bus replaces the CorrelationManager
+                # as the SOLE completion authority (Phase 5, 2026-06-23): its
+                # ``cancel_for_target`` transitions the watcher rows to
+                # CANCELLED so the child's terminal event no-ops on the
+                # cancel path. Without this, an in-flight child task would
+                # deliver a FollowUp onto a dead parent.
+                #
+                # Failure handling: a bus failure is logged at WARNING and
+                # swallowed — termination must not fail on cleanup. The bus
+                # is the SOLE authority; a missing singleton is a wiring
+                # failure logged at debug.
+                bus = get_dependency_bus()
+                if bus is not None:
+                    try:
+                        await bus.cancel_for_target(instance_id)
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to cancel bus watchers for terminated instance "
+                            f"{instance_id[:8]}...: {e}"
+                        )
+                else:
+                    logger.debug(
+                        f"Bus singleton None at terminate of "
+                        f"{instance_id[:8]}... — no-op"
+                    )
+
+                # 8. Publish lifecycle event for terminated instance.
+                if self._events_service:
+                    try:
+                        await self._events_service._publish_instance_lifecycle_event(
+                            instance_id=instance_id,
+                            status="terminated",
+                            error=None,
+                            parent_id=parent_id,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to publish lifecycle event for terminated instance "
+                            f"{instance_id[:8]}...: {e}"
+                        )
+
+                # 8.5. Cancel PENDING DependencyBus watchers targeting the
+                # terminated instance. Done AFTER the DB cascade + lifecycle
+                # event so any subscriber that races us sees consistent DB
+                # state. Without this, an in-flight child task would deliver
+                # a FollowUp onto a dead parent — the bus's
+                # ``cancel_for_target`` transitions the watcher rows to
+                # CANCELLED so the child's terminal event no-ops on the
+                # cancel path.
+                await _cancel_bus_watchers_for(
+                    self._manager, instance_id, "terminate_instance"
+                )
+
+                # Summary log: surface total duration and unwind cost in one line so the
+                # next latency regression is self-explanatory. Matches the [TRACE] style
+                # used in daemon/services/job_processor.py and daemon/services/instance_lifecycle.py.
+                duration_ms = int((time.monotonic() - t0) * 1000)
+                logger.info(
+                    f"[TRACE] terminate_instance: {instance_id[:8]}... complete "
+                    f"(graph_unwind_ms={graph_unwind_ms}, jobs_cancelled={jobs_cancelled}, "
+                    f"children={len(snapshot)-1 if not skip_per_node_work else 0}, duration_ms={duration_ms}, "
+                    f"msgq_removed={message_queue_removed}, tasks_removed={tasks_removed})"
+                )
+            # End F3 fix — ``if not _p1_skip_post_commit`` gate. When
+            # ``_p1_skip_post_commit`` is True the post-commit outbox
+            # above was suppressed; the snapshot iteration below still
+            # runs so descendants of the skipped node are visited
+            # (enumerate-first contract preserved).
 
         # ── 3. Snapshot iteration: classify each entry, act on non-terminals ──
         # NORMATIVE terminal-skip rule (Approach §): classification gates
@@ -3242,14 +3266,25 @@ class InstanceLifecycleService:
                     message_queue_removed=0,
                     tasks_removed=0,
                 )
-            if instance.status == InstanceStatus.TERMINATED.value:
+            if instance.status in TERMINAL_STATUSES:
                 # Re-entrancy guard re-discovered here. The async caller
                 # already short-circuited on the fast-path pre-read, but
                 # a concurrent terminate could have raced us between that
                 # read and this one. Idempotent no-op.
+                #
+                # F4: widened from ``== TERMINATED`` to
+                # ``in TERMINAL_STATUSES``. A node that reached
+                # COMPLETED / ERROR / FAILED in the TOCTOU window
+                # between the async meta read and this sync re-read
+                # would otherwise get ``status='terminated'`` stamped
+                # over its true terminal status — failure-mode (b)'s
+                # class. Match the async guard's widened predicate so
+                # the two layers cannot drift.
                 logger.debug(
                     f"terminate_instance: instance {instance_id[:8]}... already "
-                    f"terminated (sync helper re-entrancy guard)"
+                    f"terminal (status={instance.status}; sync helper "
+                    f"re-entrancy guard — widened per F4 to all "
+                    f"TERMINAL_STATUSES)"
                 )
                 return _TerminateResult(
                     skip=True,

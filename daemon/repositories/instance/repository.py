@@ -441,10 +441,12 @@ class SQLModelInstanceRepository:
         terminate restructures to enumerate-first per T3).
 
         Traversal cap: ``_MAX_TRAVERSAL_DEPTH = 256`` (``repository.py:33``).
-        Trees at or beyond the cap are **silently truncated** to the
-        visited set at depth 256; callers that suspect deeper trees must
-        log a one-time warning + raise the cap (rare; admin tool only).
-        Cycle self-parenting is guarded by the depth cap + visited set.
+        Trees at or beyond the cap are **WARN-logged at depth 256** (one-time
+        ``logger.warning`` emitted when the ``for...else`` clause fires with
+        a non-empty ``frontier``); the visited set itself is the truthful
+        result. Callers that suspect deeper trees must raise the cap
+        (rare; admin tool only). Cycle self-parenting is guarded by the
+        depth cap + visited set.
         """
         with SQLModelSession(self.engine) as db_session:
             # Root must exist in the permanent record.

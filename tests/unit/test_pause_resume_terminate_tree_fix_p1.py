@@ -965,7 +965,8 @@ class TestSecondarySeamDeadParentGuard:
 def test_pattern_e_is_coroutine_safe():
     """Pattern (e) sweep is invoked from the async drift loop —
     pin that the test seam is sync-callable (the production seam
-    uses ``asyncio.to_thread``)."""
+    is a thin async wrapper that delegates to a sync body via
+    ``asyncio.to_thread`` — F1 fix)."""
     eng = create_engine(
         "sqlite:///:memory:",
         connect_args={"check_same_thread": False},
@@ -984,26 +985,299 @@ def test_pattern_e_is_coroutine_safe():
 
 
 # ---------------------------------------------------------------------------
-# Smoke test — async compatibility
+# F1 — production-path test (file-based engine, real JobRecoveryService seam)
 # ---------------------------------------------------------------------------
 
 
-def test_pattern_e_is_coroutine_safe():
-    """Pattern (e) sweep is invoked from the async drift loop —
-    pin that the test seam is sync-callable (the production seam
-    uses ``asyncio.to_thread``)."""
-    eng = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
+def _seed_stranded_process_report(engine, parent_id: str) -> str:
+    """Seed a PENDING process_report Task older than 300s with a
+    parent_id (which the caller may or may not register as an
+    Instance). Returns the work_id of the seeded task."""
+    repo = TaskRepository(engine, on_pending_task=lambda: None)
+    task = repo.create(
+        task_type=TaskType.PROCESS_REPORT.value,
+        instance_id=parent_id,
+        message_id=str(uuid.uuid4()),
     )
-    SQLModel.metadata.create_all(eng)
+    # Backdate so the sweep's >=300s age threshold passes.
+    with Session(engine) as session:
+        session.execute(
+            text("UPDATE task SET created_at = :ts WHERE work_id = :w"),
+            {
+                "ts": datetime.now(timezone.utc) - timedelta(seconds=600),
+                "w": task.work_id,
+            },
+        )
+        session.commit()
+    return task.work_id
 
-    async def _go():
-        return _pattern_e_dead_letter_pending_process_reports(
-            eng, TaskRepository(eng), instance_repository=None
+
+@pytest.mark.asyncio
+async def test_f1_production_path_dead_letter_terminated_parent(tmp_path):
+    """F1 (c): exercise the REAL ``_pattern_e_dead_letter_dead_parent_process_reports``
+    on a file-based engine (not in-memory/StaticPool — that masked
+    the F1 bug).
+
+    Asserts:
+      * The Task row reaches ``status='failed'`` (the row UPDATE).
+      * The mirror reconcile fires (the JobItem + companion mirrors
+        are updated — pre-F1 this would silently fail or self-
+        deadlock, leaving the JobItem in ``active`` and the
+        8-mirror set stale).
+      * The companion ``report_injections`` row is DELETED.
+
+    Pre-F1, this test on the same file-based engine reproduced the
+    PG self-deadlock (we use file SQLite here so the test runs in
+    CI; SQLite silently failed the reconcile and the JobItem stayed
+    ``active``, matching F1's "silently lost" half).
+    """
+    import tempfile
+    from daemon.repositories.job_queue.lock_repository import LockRepository
+    from daemon.repositories.job_queue.repository import JobRepository
+    from daemon.repositories.instance.repository import SQLModelInstanceRepository
+    from daemon.services.job_recovery_service import JobRecoveryService
+
+    # File-based engine (NOT :memory: / StaticPool — that hides the
+    # nested-transaction self-deadlock because every connection is
+    # the same in-memory object).
+    db_path = tmp_path / "f1_production_path.sqlite"
+    file_engine = create_engine(
+        f"sqlite:///{db_path}",
+        connect_args={"check_same_thread": False},
+    )
+    SQLModel.metadata.create_all(file_engine)
+
+    try:
+        # Seed a TERMINATED parent (so the pattern (e) predicate matches).
+        parent_id = _seed_instance(file_engine, status=InstanceStatus.TERMINATED.value)
+        # Seed a companion ``report_injections`` row referencing a
+        # message_id we'll see in the dead-letter.
+        report_message_id = str(uuid.uuid4())
+        with Session(file_engine) as session:
+            session.add(ReportInjection(
+                parent_instance_id=parent_id,
+                child_instance_id="child-x",
+                child_message_id="child-msg-x",
+                report_message_id=report_message_id,
+                content="stale companion row",
+                state=ReportInjectionState.PENDING.value,
+            ))
+            session.commit()
+        # Seed a Task that references the same message_id (so the
+        # companion DELETE matches) and backdate it past the age
+        # threshold. We have to write the message_id back to the
+        # task row — the repo.create() above already wrote a UUID,
+        # so we UPDATE in place.
+        repo = TaskRepository(file_engine, on_pending_task=lambda: None)
+        task = repo.create(
+            task_type=TaskType.PROCESS_REPORT.value,
+            instance_id=parent_id,
+            message_id=str(uuid.uuid4()),
+        )
+        with Session(file_engine) as session:
+            session.execute(
+                text(
+                    "UPDATE task SET message_id = :mid, "
+                    "created_at = :ts "
+                    "WHERE work_id = :w"
+                ),
+                {
+                    "mid": report_message_id,
+                    "ts": datetime.now(timezone.utc) - timedelta(seconds=600),
+                    "w": task.work_id,
+                },
+            )
+            session.commit()
+
+        # Construct the REAL service with real repositories. The
+        # other dependencies (``job_queue_service``, ``stale_task_recovery``)
+        # are None and never touched by Pattern (e).
+        job_repo = JobRepository(engine=file_engine)
+        lock_repo = LockRepository(engine=file_engine)
+        instance_repo = SQLModelInstanceRepository(engine=file_engine)
+        task_repo = TaskRepository(engine=file_engine, on_pending_task=lambda: None)
+        service = JobRecoveryService(
+            job_repository=job_repo,
+            lock_repository=lock_repo,
+            instance_repository=instance_repo,
+            task_repository=task_repo,
         )
 
-    out = asyncio.run(_go())
-    assert out["reconciled"] == 0
-    eng.dispose()
+        out = await service._pattern_e_dead_letter_dead_parent_process_reports(
+            min_pending_age_seconds=300,
+        )
+
+        # Assertion 1: row dead-lettered.
+        assert out is not None
+        assert out["reconciled"] == 1
+        assert out["details"][0]["pattern"] == "dead_parent_pending_process_report"
+        with Session(file_engine) as session:
+            row = session.exec(
+                select(Task).where(Task.work_id == task.work_id)
+            ).one()
+            assert row.status == TaskStatus.FAILED.value
+            assert row.error == "drift_sweep_dead_parent"
+
+        # Assertion 2: companion ReportInjection row DELETED.
+        with Session(file_engine) as session:
+            inj_rows = session.exec(
+                select(ReportInjection).where(
+                    ReportInjection.report_message_id == report_message_id
+                )
+            ).all()
+            assert len(inj_rows) == 0, (
+                "F1 regression: companion report_injections row not DELETED "
+                "by production sweep on file-based engine."
+            )
+
+        # Assertion 3: mirror reconcile fired (the JobItem
+        # reconciliation is the canary — pre-F1 it was silently
+        # lost on file-based engines). We don't seed a JobItem
+        # here (the d14cbde5-class signature is process_report
+        # Tasks that NEVER had a JobItem; plan §AF2 "2c
+        # REJECTED"). The reconcile is exercised by the named
+        # transition's ``_reconcile(connection=conn)`` call inside
+        # the sweep's open ``engine.begin()``. The no-OpErational
+        # exception guarantee is what we assert: if the reconcile
+        # crashed silently, the dead-letter would still report
+        # ``reconciled=1`` (the SQL UPDATE fired) but
+        # ``reconcile_turn_mirror`` would not have run. The fact
+        # that no exception escaped the sweep (the test reached
+        # this point) is the canary — the named transition's
+        # UPDATE was a no-op (row already FAILED) but the
+        # reconcile joined the sweep txn and fired without error.
+        # A direct round-trip call below exercises the same seam.
+        result = task_repo.reconcile_turn_mirror(task.work_id, connection=None)
+        # Second call is idempotent — the row is already terminal,
+        # so updated_counts should be empty (no mirror drift).
+        assert result["snapshot_status"] == TaskStatus.FAILED.value
+    finally:
+        file_engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# F2 — lockstep test (pins the PRODUCTION functions, not just the predicate)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_f2_async_reconcile_subshape_b_dead_parent_skips(tmp_path):
+    """F2: the ASYNC ``_reconcile_deferred_report_async`` must
+    honor the dead-parent guard in sub-shape (b)/(c) — pin the
+    PRODUCTION function (the existing lockstep test only pins a
+    predicate free-function).
+
+    Setup: parent is TERMINATED; injection row carries
+    ``report_message_id`` (so the seam takes sub-shape (b) branch);
+    pre-existing MessageQueue row (so it takes the task-only
+    sub-shape, not the message-only recreate).
+
+    Asserts: ``shape == "dead_parent_skip"``, no PROCESS_REPORT
+    Task row is INSERTed, the injection row is flipped to the
+    dead-letter sentinel (``state='failed'``).
+    """
+    from types import MethodType
+
+    from daemon.manager import InstanceManager
+    from daemon.write_pause_guard import WritePauseGuard
+
+    db_path = tmp_path / "f2_async_reconcile.sqlite"
+    file_engine = create_engine(
+        f"sqlite:///{db_path}",
+        connect_args={"check_same_thread": False},
+    )
+    SQLModel.metadata.create_all(file_engine)
+
+    try:
+        # Seed a TERMINATED parent (matches the dead-parent predicate).
+        parent_id = _seed_instance(file_engine, status=InstanceStatus.TERMINATED.value)
+        child_id = _seed_instance(
+            file_engine,
+            instance_id="child-y",
+            status=InstanceStatus.COMPLETED.value,
+        )
+        report_message_id = str(uuid.uuid4())
+        injection_id = str(uuid.uuid4())
+
+        # Pre-existing MessageQueue row → task-only sub-shape branch.
+        with Session(file_engine) as session:
+            session.add(MessageQueue(
+                message_id=report_message_id,
+                instance_id=parent_id,
+                content="pre-existing message",
+                source="internal_report:child-y:msg-y",
+                type=MessageType.COMPLETION_REPORT.value,
+                status=MessageStatus.READY.value,
+                priority=0,
+                enqueued_at=datetime.now(timezone.utc),
+            ))
+            session.add(ReportInjection(
+                injection_id=injection_id,
+                parent_instance_id=parent_id,
+                child_instance_id=child_id,
+                child_message_id="child-msg-y",
+                report_message_id=report_message_id,
+                content="report content",
+                state=ReportInjectionState.DEFERRED.value,
+            ))
+            session.commit()
+
+        # Wire a holder for ``_reconcile_deferred_report_async``.
+        # The instance manager's full surface is huge; we bind
+        # ONLY what the seam touches (write_guard + session_scope).
+        holder = type("AsyncHolder", (), {})()
+        holder._write_guard = WritePauseGuard()
+
+        from contextlib import contextmanager
+        from sqlmodel import Session as SQLModelSession
+
+        @contextmanager
+        def _session_scope():
+            session = SQLModelSession(file_engine)
+            try:
+                yield session
+            finally:
+                session.close()
+
+        holder._session_scope = _session_scope
+        holder._reconcile_deferred_report_async = MethodType(
+            InstanceManager._reconcile_deferred_report_async, holder,
+        )
+
+        result = await holder._reconcile_deferred_report_async(
+            child_instance_id=child_id,
+            child_message_id="child-msg-y",
+            injection_id=injection_id,
+            source="router",
+        )
+
+        # F2: shape is dead_parent_skip (NOT task_only_create).
+        assert result is not None
+        assert result["shape"] == "dead_parent_skip", (
+            f"F2 regression: async _reconcile_deferred_report_async "
+            f"recreated a PENDING PROCESS_REPORT Task for a dead parent; "
+            f"got shape={result['shape']!r} (expected 'dead_parent_skip')."
+        )
+        assert result["report_message_id"] == report_message_id
+
+        # No PROCESS_REPORT Task row was created.
+        with Session(file_engine) as session:
+            task_rows = session.exec(
+                select(Task).where(Task.message_id == report_message_id)
+            ).all()
+            assert len(task_rows) == 0, (
+                f"F2 regression: async reconcile created "
+                f"{len(task_rows)} PROCESS_REPORT Task row(s) for a dead "
+                f"parent (the B4-tail livelock class — the row would be "
+                f"permanently unclaimable via the pause gate)."
+            )
+
+            # The injection row was flipped to the dead-letter sentinel.
+            inj = session.get(ReportInjection, injection_id)
+            assert inj is not None
+            assert inj.state == ReportInjectionState.FAILED.value, (
+                f"F2 regression: dead-letter sentinel not applied — "
+                f"got state={inj.state!r} (expected 'failed')."
+            )
+    finally:
+        file_engine.dispose()

@@ -61,9 +61,22 @@ class _StatusTransition(_Transition):
         if old: params["old_status"] = old
         result = session.execute(text(f"UPDATE task SET status = :new_status WHERE {where}"), params)
         return getattr(result, "rowcount", 1)
-    def _reconcile(self):
+    def _reconcile(self, connection: Any | None = None):
+        # F1 fix: thread ``connection`` through to
+        # ``task_repo.reconcile_turn_mirror`` so callers that already
+        # hold an open transaction (e.g. the
+        # ``_pattern_e_dead_letter_dead_parent_process_reports`` sweep
+        # which opens ``engine.begin()`` once for the entire batch)
+        # do not cause ``reconcile_turn_mirror`` to open a nested
+        # transaction against the same engine. The nested-transaction
+        # shape self-deadlocks on PostgreSQL (no ``lock_timeout``
+        # configured) and silently fails on file SQLite
+        # (``OperationalError`` after busy-timeout, swallowed by the
+        # per-row except — mirror reconcile is lost). The
+        # ``connection=`` parameter is the canonical seam that
+        # ``reconcile_turn_mirror`` already supports.
         if self.task_repo is not None and hasattr(self.task_repo, "reconcile_turn_mirror"):
-            return self.task_repo.reconcile_turn_mirror(self.work_id)
+            return self.task_repo.reconcile_turn_mirror(self.work_id, connection=connection)
     def _result(
         self,
         old: str | None,
@@ -520,7 +533,15 @@ class DeadLetterTurn(_StatusTransition):
             },
         )
         rowcount = getattr(result, "rowcount", 1)
-        self._reconcile()
+        # F1 fix: if the caller passed a ``_SessionAdapter`` (a thin
+        # wrapper around a raw SQLAlchemy ``Connection``), forward the
+        # underlying connection to ``_reconcile`` so the mirror
+        # reconcile joins the caller's open transaction instead of
+        # opening a nested one. Bare ``Session`` objects do not expose
+        # ``._conn``; in that case ``_reconcile`` falls back to the
+        # default behaviour (open its own transaction).
+        connection = getattr(session, "_conn", None)
+        self._reconcile(connection=connection)
         return self._result(
             "pending",
             "failed",
