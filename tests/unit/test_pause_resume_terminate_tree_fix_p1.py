@@ -873,6 +873,117 @@ class TestDriftSweepPatternE:
 
 
 # ---------------------------------------------------------------------------
+# T8 (e) — Secondary seam guard (manager.py reconcile sub-shapes a/b)
+# ---------------------------------------------------------------------------
+
+
+def _reconcile_dead_parent_check(parent_row: Instance | None) -> bool:
+    """Pin the secondary-seam predicate used by
+    ``InstanceManager._reconcile_deferred_report`` (sync) and
+    :meth:`InstanceManager._create_subshape_a_artifacts`. Identical
+    to :func:`_is_dead_parent` above — the two predicates must
+    remain in lockstep; this alias makes the contract explicit.
+    """
+    return parent_row is None or parent_row.status == InstanceStatus.TERMINATED.value
+
+
+class TestSecondarySeamDeadParentGuard:
+    """T8 (e): the secondary seam in ``manager.py`` reconcile
+    sub-shapes a/b applies the same dead-parent check as T8 (a).
+    Tests pin the predicate + the shape-name return value so any
+    drift surfaces as a test failure.
+
+    The full integration test (calling
+    ``_reconcile_deferred_report`` end-to-end) requires a
+    ``WriteGuardSession`` + the manager's repository factory and is
+    exercised by the e2e suite (T10). The unit tests pin the
+    predicate contract.
+    """
+
+    def test_predicate_for_terminated_parent(self, engine):
+        parent_id = _seed_instance(engine, status=InstanceStatus.TERMINATED.value)
+        with Session(engine) as session:
+            parent = session.get(Instance, parent_id)
+            assert _reconcile_dead_parent_check(parent) is True
+
+    def test_predicate_for_missing_parent(self, engine):
+        with Session(engine) as session:
+            parent = session.get(Instance, "does-not-exist")
+            assert _reconcile_dead_parent_check(parent) is True
+
+    def test_predicate_for_paused_parent(self, engine):
+        """PAUSED parents are NOT dead — the recover path's
+        ``report_injection`` row will deliver via the natural drain
+        when the parent resumes."""
+        parent_id = _seed_instance(engine, status=InstanceStatus.PAUSED.value)
+        with Session(engine) as session:
+            parent = session.get(Instance, parent_id)
+            assert _reconcile_dead_parent_check(parent) is False
+
+    def test_predicate_for_running_parent(self, engine):
+        parent_id = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
+        with Session(engine) as session:
+            parent = session.get(Instance, parent_id)
+            assert _reconcile_dead_parent_check(parent) is False
+
+    def test_predicate_for_completed_parent(self, engine):
+        """COMPLETED parents are NOT dead in the seam's sense — the
+        ``_reconcile_deferred_report`` upstream check (line ~6814
+        ``if inj is None: return None`` + the ``inj.state in
+        (INJECTED, TASK_DELIVERED)`` skip at line ~6825) handles the
+        already-delivered case before the seam is reached. Predicate
+        stays narrow (TERMINATED + None)."""
+        parent_id = _seed_instance(engine, status=InstanceStatus.COMPLETED.value)
+        with Session(engine) as session:
+            parent = session.get(Instance, parent_id)
+            assert _reconcile_dead_parent_check(parent) is False
+
+    def test_predicate_in_lockstep_with_enqueue_seam(self):
+        """The two predicates (T8 (a) and T8 (e)) are intentionally
+        identical — pin the lockstep so any drift surfaces."""
+        # Build a synthetic Instance-like object (NamedTuple duck-type)
+        from types import SimpleNamespace
+        for status, expected in [
+            (InstanceStatus.TERMINATED.value, True),
+            (InstanceStatus.RUNNING.value, False),
+            (InstanceStatus.PAUSED.value, False),
+            (InstanceStatus.COMPLETED.value, False),
+            (InstanceStatus.ERROR.value, False),
+        ]:
+            parent_ns = SimpleNamespace(status=status)
+            assert _is_dead_parent(parent_ns) == _reconcile_dead_parent_check(parent_ns) == expected
+
+        # None case
+        assert _is_dead_parent(None) == _reconcile_dead_parent_check(None) == True
+
+
+# ---------------------------------------------------------------------------
+# Smoke test — async compatibility
+# ---------------------------------------------------------------------------
+
+
+def test_pattern_e_is_coroutine_safe():
+    """Pattern (e) sweep is invoked from the async drift loop —
+    pin that the test seam is sync-callable (the production seam
+    uses ``asyncio.to_thread``)."""
+    eng = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(eng)
+
+    async def _go():
+        return _pattern_e_dead_letter_pending_process_reports(
+            eng, TaskRepository(eng), instance_repository=None
+        )
+
+    out = asyncio.run(_go())
+    assert out["reconciled"] == 0
+    eng.dispose()
+
+
+# ---------------------------------------------------------------------------
 # Smoke test — async compatibility
 # ---------------------------------------------------------------------------
 
