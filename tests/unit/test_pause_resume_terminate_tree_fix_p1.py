@@ -984,6 +984,150 @@ def test_pattern_e_is_coroutine_safe():
     eng.dispose()
 
 
+@pytest.mark.asyncio
+async def test_w6_mirror_reconcile_failure_surfaces_in_details_payload(tmp_path):
+    """W6 (governor-council NEEDS-FIXES): when the named transition's
+    mirror reconcile raises inside Pattern (e), the failure must
+    surface in the sweep's ``details`` payload with
+    ``pattern='mirror_reconcile_failed'``.
+
+    Pre-fix the failure was logged at ERROR but silently lost — the
+    sweep's ``reconciled`` counter did NOT increment (count semantics
+    preserved), and there was no entry in ``details`` for the
+    operator to observe. Drift became invisible.
+
+    Post-fix:
+      * The SQL UPDATE succeeds (Task row goes FAILED via the SQL
+        UPDATE at :1393 — the named transition's UPDATE matches zero
+        rows, no exception).
+      * The named transition's mirror reconcile raises (simulated via
+        a faulty ``reconcile_turn_mirror`` task_repository method).
+      * The exception is caught.
+      * A ``details`` entry with ``pattern='mirror_reconcile_failed'``
+        is appended (so the operator sees the count).
+      * The ``reconciled`` counter does NOT increment — only successful
+        rows count (semantics preserved per the task constraint).
+      * The Task row IS FAILED (the SQL UPDATE succeeded), so the
+        pattern's primary contract — dead-letter the stranded row —
+        is honored.
+    """
+    from daemon.repositories.job_queue.lock_repository import LockRepository
+    from daemon.repositories.job_queue.repository import JobRepository
+    from daemon.repositories.instance.repository import SQLModelInstanceRepository
+    from daemon.services.job_recovery_service import JobRecoveryService
+
+    db_path = tmp_path / "w6_mirror_reconcile_failure.sqlite"
+    file_engine = create_engine(
+        f"sqlite:///{db_path}",
+        connect_args={"check_same_thread": False},
+    )
+    SQLModel.metadata.create_all(file_engine)
+
+    try:
+        parent_id = _seed_instance(
+            file_engine, status=InstanceStatus.TERMINATED.value
+        )
+        task = _seed_task(file_engine, parent_id)
+        # Backdate so the >=300s age threshold passes.
+        with Session(file_engine) as session:
+            session.execute(
+                text("UPDATE task SET created_at = :ts WHERE work_id = :w"),
+                {
+                    "ts": datetime.now(timezone.utc) - timedelta(seconds=600),
+                    "w": task.work_id,
+                },
+            )
+            session.commit()
+
+        # Wire the production service with a faulty task_repo that
+        # raises from ``reconcile_turn_mirror`` (the named transition's
+        # mirror-reconcile step).
+        job_repo = JobRepository(engine=file_engine)
+        lock_repo = LockRepository(engine=file_engine)
+        instance_repo = SQLModelInstanceRepository(engine=file_engine)
+
+        class _FaultyTaskRepo:
+            """TaskRepository stand-in whose mirror reconcile raises."""
+
+            def __init__(self, base):
+                self._base = base
+
+            def reconcile_turn_mirror(self, *args, **kwargs):
+                raise RuntimeError("simulated mirror reconcile failure")
+
+            def __getattr__(self, name):
+                return getattr(self._base, name)
+
+        base_task_repo = TaskRepository(
+            engine=file_engine, on_pending_task=lambda: None
+        )
+        faulty_task_repo = _FaultyTaskRepo(base_task_repo)
+
+        service = JobRecoveryService(
+            job_repository=job_repo,
+            lock_repository=lock_repo,
+            instance_repository=instance_repo,
+            task_repository=faulty_task_repo,
+        )
+
+        out = await service._pattern_e_dead_letter_dead_parent_process_reports(
+            min_pending_age_seconds=300,
+        )
+
+        # The sweep returned a payload (the SQL UPDATE for the row
+        # succeeded, so ``out`` is not None).
+        assert out is not None, (
+            "W6 regression: sweep must return a payload even when the "
+            "mirror reconcile fails (the SQL UPDATE succeeded)"
+        )
+
+        # W6 assertion 1: a ``mirror_reconcile_failed`` entry is in
+        # ``details`` so operators can observe drift.
+        mirror_failures = [
+            d for d in out["details"] if d["pattern"] == "mirror_reconcile_failed"
+        ]
+        assert len(mirror_failures) == 1, (
+            f"W6 regression: mirror reconcile failures must surface in "
+            f"the details payload with pattern='mirror_reconcile_failed' "
+            f"(pre-fix the failure was silently lost); got "
+            f"{[d['pattern'] for d in out['details']]}"
+        )
+        failure = mirror_failures[0]
+        assert failure["task_id"] == task.id, (
+            f"W6 detail must identify the dead-lettered task; "
+            f"got task_id={failure['task_id']} expected={task.id}"
+        )
+        assert "simulated mirror reconcile failure" in failure["reason"], (
+            f"W6 detail must carry the reconcile exception text; got "
+            f"reason={failure['reason']!r}"
+        )
+
+        # W6 assertion 2: the ``reconciled`` counter does NOT count the
+        # mirror-reconcile failure (semantics preserved — only full
+        # successes count).
+        assert out["reconciled"] == 0, (
+            f"W6 count semantics: ``reconciled`` counts only successful "
+            f"rows (mirror_reconcile_failed entries go to ``details`` "
+            f"only); got reconciled={out['reconciled']}"
+        )
+
+        # W6 assertion 3: the Task row IS FAILED — the SQL UPDATE
+        # succeeded before the mirror reconcile raised. The pattern's
+        # primary contract is honored.
+        with Session(file_engine) as session:
+            row = session.exec(
+                select(Task).where(Task.work_id == task.work_id)
+            ).one()
+            assert row.status == TaskStatus.FAILED.value, (
+                f"W6 primary contract: the SQL UPDATE must dead-letter "
+                f"the row even when the mirror reconcile fails (the "
+                f"mirror is a side-effect, not a gate); got "
+                f"status={row.status!r}"
+            )
+    finally:
+        file_engine.dispose()
+
+
 # ---------------------------------------------------------------------------
 # F1 — production-path test (file-based engine, real JobRecoveryService seam)
 # ---------------------------------------------------------------------------
@@ -1278,6 +1422,178 @@ async def test_f2_async_reconcile_subshape_b_dead_parent_skips(tmp_path):
             assert inj.state == ReportInjectionState.FAILED.value, (
                 f"F2 regression: dead-letter sentinel not applied — "
                 f"got state={inj.state!r} (expected 'failed')."
+            )
+    finally:
+        file_engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# W1 — Production-path test for enqueue seam (dead_parent_skip)
+# ---------------------------------------------------------------------------
+
+
+def _build_manager_stub(engine):
+    """Build a minimal ``InstanceManager`` stub for
+    ``ChildReportsService._process_child_completion_db_sync``.
+
+    The dead_parent_skip path only touches:
+
+      * ``self._manager.engine`` — DB engine (SQLModel.metadata.create_all
+        must have been called on this engine)
+      * ``self._manager.write_guard`` — WritePauseGuard for the session
+      * ``self._manager._deferred_question_pause`` — set of instance_ids
+        paused mid-graph; the dead_parent branch checks
+        ``instance.parent_id in _deferred_question_pause`` (must be a
+        set, not ``None``)
+
+    Every other surface (``_live_hub``, ``_checkpointer``,
+    ``_instance_repository``, ``_queue_repository``) is NOT touched on
+    the dead_parent branch — the function returns before reaching any
+    ``self._manager.<other>`` access. Wiring only the seam reduces the
+    stub's drift surface and pins the contract: any new manager
+    attribute the dead_parent branch needs will surface here as an
+    ``AttributeError``, alerting the next maintainer to update this
+    stub.
+    """
+    from daemon.write_pause_guard import WritePauseGuard
+
+    manager = type("ManagerStub", (), {})()
+    manager.engine = engine
+    manager.write_guard = WritePauseGuard()
+    manager._deferred_question_pause = set()
+    return manager
+
+
+@pytest.mark.asyncio
+async def test_w1_production_path_dead_parent_skip(tmp_path):
+    """W1: the REAL ``ChildReportsService._process_child_completion_db_sync``
+    on a file-based engine — TERMINATED parent takes the dead_parent_skip
+    branch.
+
+    Asserts the full end-to-end behavior on the production seam
+    (NOT the test-local ``_is_dead_parent`` predicate that
+    ``TestEnqueueSeamDeadParent*`` pins):
+
+      * Outcome is ``"dead_parent_skip"`` (the dedicated outcome the
+        async caller uses to suppress post-commit side effects).
+      * The message_queue row created during the call is committed
+        with ``status='failed'`` (audit + payload retention per
+        plan §Axis 2 = 2a).
+      * ZERO ``Task`` rows reference the parent (no PROCESS_REPORT
+        enqueue).
+      * ZERO ``ReportInjection`` rows reference the child (the F3
+        obligation-triple mirror row is honestly omitted — never
+        enters ``INJECTED``/``TASK_DELIVERED``).
+      * The child instance is COMPLETED (atomic guard UPDATE fired
+        in the same transaction).
+
+    The existing ``TestEnqueueSeamDeadParent*`` suite pins only the
+    predicate free-function; this test pins the production seam so a
+    regression at any of the four branches above surfaces here.
+    """
+    from daemon.services.child_reports import ChildReportsService
+
+    db_path = tmp_path / "w1_dead_parent_skip.sqlite"
+    file_engine = create_engine(
+        f"sqlite:///{db_path}",
+        connect_args={"check_same_thread": False},
+    )
+    SQLModel.metadata.create_all(file_engine)
+
+    try:
+        # Seed a TERMINATED parent + a non-terminal child whose
+        # ``parent_id`` points at the parent. The child status must
+        # be RUNNING / WAITING_CHILDREN (NOT COMPLETED/ERROR/PAUSED)
+        # so the dead_parent branch is reached instead of the
+        # idempotency_skip branch above it.
+        parent_id = _seed_instance(
+            file_engine, status=InstanceStatus.TERMINATED.value
+        )
+        child_id = _seed_instance(
+            file_engine,
+            status=InstanceStatus.RUNNING.value,
+            parent_id=parent_id,
+        )
+
+        # Drive the REAL seam. The function's ``completed_message_id``
+        # arg is used to construct the source discriminator on the
+        # message row; it does not need to point at any pre-existing
+        # message — only the parent / child Instance shapes matter.
+        manager = _build_manager_stub(file_engine)
+        service = ChildReportsService(manager=manager, events_service=None)
+
+        result = service._process_child_completion_db_sync(
+            instance_id=child_id,
+            completed_message_id=f"msg-{uuid.uuid4().hex[:8]}",
+            last_content="dead-parent skip body",
+        )
+
+        # Outcome is the dead_parent_skip dedicated label.
+        assert result.outcome == "dead_parent_skip", (
+            f"W1 regression: production seam did not take the "
+            f"dead_parent branch (got outcome={result.outcome!r}); "
+            f"a misroute here would silently skip the FAILED message "
+            f"marking and recreate the B4-tail livelock."
+        )
+
+        # Message_queue row: ONE row, status=FAILED, no Task row,
+        # no ReportInjection row. The report_message created during
+        # the function call has its ``message_id`` re-derived from
+        # the source discriminator ``internal_report:<child>:<msg>``
+        # — easier to assert by status + content + child pointer.
+        with Session(file_engine) as session:
+            rows = session.exec(
+                select(MessageQueue).where(
+                    MessageQueue.instance_id == parent_id
+                )
+            ).all()
+            # The function creates exactly one report message for the
+            # parent (the child-completion report). With the dead_parent
+            # branch the message is marked FAILED and committed.
+            assert len(rows) == 1, (
+                f"W1 regression: expected exactly one report message "
+                f"row for parent {parent_id[:8]}..., got {len(rows)}"
+            )
+            assert rows[0].status == MessageStatus.FAILED.value, (
+                f"W1 regression: dead_parent message must be FAILED, "
+                f"got status={rows[0].status!r}"
+            )
+
+            # ZERO Task rows reference the parent — the
+            # PROCESS_REPORT enqueue was suppressed at the seam.
+            task_rows = session.exec(
+                select(Task).where(Task.instance_id == parent_id)
+            ).all()
+            assert len(task_rows) == 0, (
+                f"W1 regression: dead_parent branch must NOT create "
+                f"a Task row (B4-tail livelock class — the row would "
+                f"be permanently unclaimable via the pause gate). "
+                f"Got {len(task_rows)} Task row(s)."
+            )
+
+            # ZERO ReportInjection rows for the child — the companion
+            # row was honestly omitted (no INJECTED/TASK_DELIVERED
+            # terminal state will ever be written).
+            inj_rows = session.exec(
+                select(ReportInjection).where(
+                    ReportInjection.child_instance_id == child_id
+                )
+            ).all()
+            assert len(inj_rows) == 0, (
+                f"W1 regression: dead_parent branch must NOT create "
+                f"a ReportInjection row (a stranded row would be "
+                f"matched by Lane-3/4's find_pending_past_age past "
+                f"the 10-min bound and re-claim forever — the AF2 C3 "
+                f"trap). Got {len(inj_rows)} ReportInjection row(s)."
+            )
+
+            # The child instance reached COMPLETED via the atomic guard
+            # UPDATE (line ~2554) — the function still finalizes the
+            # child's status even when the parent is dead.
+            child = session.get(Instance, child_id)
+            assert child.status == InstanceStatus.COMPLETED.value, (
+                f"W1 regression: child instance must be COMPLETED "
+                f"(atomic guard UPDATE fired), got status={child.status!r}"
             )
     finally:
         file_engine.dispose()

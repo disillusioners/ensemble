@@ -51,6 +51,16 @@ class _Transition(ABC):
     def run(self, session: Any) -> TransitionResult: ...
 
 class _StatusTransition(_Transition):
+    # ``connection=`` kwarg threaded to ``reconcile_turn_mirror`` (F1
+    # fix): callers that already hold an open transaction (the
+    # ``_pattern_e_dead_letter_dead_parent_process_reports`` sweep
+    # opens ``engine.begin()`` once for the entire batch) must NOT
+    # let ``reconcile_turn_mirror`` open a nested transaction against
+    # the same engine — nested transactions self-deadlock on PostgreSQL
+    # (no ``lock_timeout`` configured) and silently fail on file SQLite
+    # (``OperationalError`` after busy-timeout, swallowed by the
+    # per-row except — mirror reconcile is lost). ``connection=`` is
+    # the canonical seam ``reconcile_turn_mirror`` already supports.
     status_from: ClassVar[str | None] = None
     status_to: ClassVar[str] = ""
     def __init__(self, work_id: str, task_repo: Any = None, instance_id: str | None = None, **_: Any):
@@ -62,19 +72,7 @@ class _StatusTransition(_Transition):
         result = session.execute(text(f"UPDATE task SET status = :new_status WHERE {where}"), params)
         return getattr(result, "rowcount", 1)
     def _reconcile(self, connection: Any | None = None):
-        # F1 fix: thread ``connection`` through to
-        # ``task_repo.reconcile_turn_mirror`` so callers that already
-        # hold an open transaction (e.g. the
-        # ``_pattern_e_dead_letter_dead_parent_process_reports`` sweep
-        # which opens ``engine.begin()`` once for the entire batch)
-        # do not cause ``reconcile_turn_mirror`` to open a nested
-        # transaction against the same engine. The nested-transaction
-        # shape self-deadlocks on PostgreSQL (no ``lock_timeout``
-        # configured) and silently fails on file SQLite
-        # (``OperationalError`` after busy-timeout, swallowed by the
-        # per-row except — mirror reconcile is lost). The
-        # ``connection=`` parameter is the canonical seam that
-        # ``reconcile_turn_mirror`` already supports.
+        # See class docstring above for the F1 threading rationale.
         if self.task_repo is not None and hasattr(self.task_repo, "reconcile_turn_mirror"):
             return self.task_repo.reconcile_turn_mirror(self.work_id, connection=connection)
     def _result(

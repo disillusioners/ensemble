@@ -140,7 +140,7 @@ _INJECTED_STATE: str = ReportInjectionState.INJECTED.value
 _TASK_DELIVERED_STATE: str = ReportInjectionState.TASK_DELIVERED.value
 # Dead-letter sentinel (T8 (b) / T8 (e)). Stored verbatim — the storage
 # layer is case-sensitive (C1). Not in the partial-unique-index
-# predicate (``ix_report_injections_oblig_triple`` excludes terminal
+# predicate (``uq_report_injections_oblig_triple`` excludes terminal
 # states including this one — a fresh non-terminal obligation for a
 # previously-dead-lettered triple is allowed, e.g. a re-spawn scenario).
 _FAILED_STATE: str = ReportInjectionState.FAILED.value

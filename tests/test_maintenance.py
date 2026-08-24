@@ -1271,8 +1271,10 @@ class TestCheckpointCleanupJobPinnedProtection:
       pinned ``instance_id`` strings.
     * ``instance_repo.get_tree_root_id(pinned_id)`` returns the root
       for each pinned instance (a root resolves to itself).
-    * ``instance_repo.get_tree_ids(root_id)`` returns the full subtree
-      (root + descendants) for each root.
+    * ``instance_repo.get_cascade_tree_ids(root_id)`` returns the full
+      subtree (root + descendants) for each root (the kill-switch
+      wrapper that production actually calls; ``get_tree_ids`` is the
+      legacy transient path and is NEVER called from this code path).
     * ``instance_repo.list`` returns terminal instances as usual for
       the expiration / cap enumeration.
     """
@@ -1372,10 +1374,10 @@ class TestCheckpointCleanupJobPinnedProtection:
         )
         # ``child-A1`` walks up to ``root-A``.
         instance_repo.get_tree_root_id = MagicMock(return_value="root-A")
-        # ``root-A`` subtree contains 4 nodes.
-        instance_repo.get_tree_ids = MagicMock(
-            return_value=["root-A", "child-A1", "child-A2", "grandchild-A2a"]
-        )
+        # ``root-A`` subtree contains 4 nodes. Production flows through
+        # the kill-switch wrapper ``get_cascade_tree_ids`` (phase1-plan
+        # T6); ``get_tree_ids`` is the legacy transient path and is
+        # NEVER called from this code path.
         instance_repo.get_cascade_tree_ids = MagicMock(
             return_value=["root-A", "child-A1", "child-A2", "grandchild-A2a"]
         )
@@ -1390,6 +1392,11 @@ class TestCheckpointCleanupJobPinnedProtection:
             "child-A2",
             "grandchild-A2a",
         }
+        # W2 (governor-council NEEDS-FIXES): pin the production call
+        # site. ``_get_protected_instance_ids`` flows through the
+        # wrapper ``get_cascade_tree_ids(root_id)`` — the legacy
+        # ``get_tree_ids`` must NOT be called from this code path.
+        instance_repo.get_cascade_tree_ids.assert_called_once_with("root-A")
 
     @pytest.mark.asyncio
     async def test_get_protected_skips_orphan_pinned_row(self):
@@ -1412,7 +1419,8 @@ class TestCheckpointCleanupJobPinnedProtection:
         instance_repo.get_tree_root_id = MagicMock(
             side_effect=lambda iid: None if iid == "orphan-id" else iid
         )
-        instance_repo.get_tree_ids = MagicMock(return_value=["root-A", "child-A1"])
+        # Production flows through ``get_cascade_tree_ids``; legacy
+        # ``get_tree_ids`` is NEVER called.
         instance_repo.get_cascade_tree_ids = MagicMock(return_value=["root-A", "child-A1"])
 
         job = self._make_job(config, checkpointer, instance_repo, ui_prefs_repo)
@@ -1462,7 +1470,6 @@ class TestCheckpointCleanupJobPinnedProtection:
             return_value={"pinned-A"}
         )
         instance_repo.get_tree_root_id = MagicMock(return_value="pinned-A")
-        instance_repo.get_tree_ids = MagicMock(return_value=["pinned-A"])
         instance_repo.get_cascade_tree_ids = MagicMock(return_value=["pinned-A"])
 
         job = self._make_job(
@@ -1538,7 +1545,6 @@ class TestCheckpointCleanupJobPinnedProtection:
             return_value={"pinned-oldest"}
         )
         instance_repo.get_tree_root_id = MagicMock(return_value="pinned-oldest")
-        instance_repo.get_tree_ids = MagicMock(return_value=["pinned-oldest"])
         instance_repo.get_cascade_tree_ids = MagicMock(return_value=["pinned-oldest"])
 
         job = self._make_job(
@@ -1609,9 +1615,6 @@ class TestCheckpointCleanupJobPinnedProtection:
         # root-A is a root → returns itself.
         instance_repo.get_tree_root_id = MagicMock(return_value="root-A")
         # root-A's subtree includes the child we're trying to delete.
-        instance_repo.get_tree_ids = MagicMock(
-            return_value=["root-A", "child-A1", "child-A2"]
-        )
         instance_repo.get_cascade_tree_ids = MagicMock(
             return_value=["root-A", "child-A1", "child-A2"]
         )
@@ -1679,9 +1682,6 @@ class TestCheckpointCleanupJobPinnedProtection:
             return_value={"child-A1"}
         )
         instance_repo.get_tree_root_id = MagicMock(return_value="root-A")
-        instance_repo.get_tree_ids = MagicMock(
-            return_value=["root-A", "child-A1", "child-A2", "grandchild-A2a"]
-        )
         instance_repo.get_cascade_tree_ids = MagicMock(
             return_value=["root-A", "child-A1", "child-A2", "grandchild-A2a"]
         )
@@ -1735,7 +1735,6 @@ class TestCheckpointCleanupJobPinnedProtection:
             return_value={"pinned-A"}
         )
         instance_repo.get_tree_root_id = MagicMock(return_value="pinned-A")
-        instance_repo.get_tree_ids = MagicMock(return_value=["pinned-A"])
         instance_repo.get_cascade_tree_ids = MagicMock(return_value=["pinned-A"])
 
         job = self._make_job(config, checkpointer, instance_repo, ui_prefs_repo)
@@ -1787,7 +1786,6 @@ class TestCheckpointCleanupJobPinnedProtection:
             return_value={"pinned-A"}
         )
         instance_repo.get_tree_root_id = MagicMock(return_value="pinned-A")
-        instance_repo.get_tree_ids = MagicMock(return_value=["pinned-A"])
         instance_repo.get_cascade_tree_ids = MagicMock(return_value=["pinned-A"])
 
         job = self._make_job(config, checkpointer, instance_repo, ui_prefs_repo)
@@ -1847,7 +1845,6 @@ class TestCheckpointCleanupJobPinnedProtection:
             return_value={"pinned-old"}
         )
         instance_repo.get_tree_root_id = MagicMock(return_value="pinned-old")
-        instance_repo.get_tree_ids = MagicMock(return_value=["pinned-old"])
         instance_repo.get_cascade_tree_ids = MagicMock(return_value=["pinned-old"])
 
         job = self._make_job(
@@ -2124,9 +2121,6 @@ class TestCheckpointCleanupJobPinnedProtection:
         instance_repo.get_tree_root_id = MagicMock(
             side_effect=lambda iid: iid
         )
-        instance_repo.get_tree_ids = MagicMock(
-            side_effect=lambda root_id: [root_id]
-        )
         instance_repo.get_cascade_tree_ids = MagicMock(
             side_effect=lambda root_id: [root_id]
         )
@@ -2179,9 +2173,6 @@ class TestCheckpointCleanupJobPinnedProtection:
         instance_repo.get_tree_root_id = MagicMock(
             side_effect=lambda iid: iid
         )
-        instance_repo.get_tree_ids = MagicMock(
-            side_effect=lambda root_id: [root_id]
-        )
         instance_repo.get_cascade_tree_ids = MagicMock(
             side_effect=lambda root_id: [root_id]
         )
@@ -2227,9 +2218,6 @@ class TestCheckpointCleanupJobPinnedProtection:
         # _get_protected_instance_ids() returns the root + 2 terminal
         # descendants.
         instance_repo.get_tree_root_id = MagicMock(return_value="pinned-root")
-        instance_repo.get_tree_ids = MagicMock(
-            return_value=["pinned-root", "child-1", "child-2"]
-        )
         instance_repo.get_cascade_tree_ids = MagicMock(
             return_value=["pinned-root", "child-1", "child-2"]
         )

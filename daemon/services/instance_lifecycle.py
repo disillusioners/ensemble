@@ -1822,24 +1822,16 @@ class InstanceLifecycleService:
                 # cancel path. Without this, an in-flight child task would
                 # deliver a FollowUp onto a dead parent.
                 #
-                # Failure handling: a bus failure is logged at WARNING and
-                # swallowed — termination must not fail on cleanup. The bus
-                # is the SOLE authority; a missing singleton is a wiring
-                # failure logged at debug.
-                bus = get_dependency_bus()
-                if bus is not None:
-                    try:
-                        await bus.cancel_for_target(instance_id)
-                    except Exception as e:
-                        logger.warning(
-                            f"Failed to cancel bus watchers for terminated instance "
-                            f"{instance_id[:8]}...: {e}"
-                        )
-                else:
-                    logger.debug(
-                        f"Bus singleton None at terminate of "
-                        f"{instance_id[:8]}... — no-op"
-                    )
+                # W5 (governor-council NEEDS-FIXES): collapsed into the
+                # ``_cancel_bus_watchers_for`` helper at :48-84. Pre-fix,
+                # this inline block AND the helper call below (step 8.5)
+                # both ran the same idempotent cancel — duplicated, no
+                # behavior change, but the duplicate call surface was
+                # easy to misread. The helper owns the cancel contract;
+                # both step 7.8 and step 8.5 are now single-call.
+                await _cancel_bus_watchers_for(
+                    self._manager, instance_id, "terminate_instance"
+                )
 
                 # 8. Publish lifecycle event for terminated instance.
                 if self._events_service:
@@ -1856,17 +1848,16 @@ class InstanceLifecycleService:
                             f"{instance_id[:8]}...: {e}"
                         )
 
-                # 8.5. Cancel PENDING DependencyBus watchers targeting the
-                # terminated instance. Done AFTER the DB cascade + lifecycle
-                # event so any subscriber that races us sees consistent DB
-                # state. Without this, an in-flight child task would deliver
-                # a FollowUp onto a dead parent — the bus's
-                # ``cancel_for_target`` transitions the watcher rows to
-                # CANCELLED so the child's terminal event no-ops on the
-                # cancel path.
-                await _cancel_bus_watchers_for(
-                    self._manager, instance_id, "terminate_instance"
-                )
+                # 8.5 (post-lifecycle-event cancel): REMOVED in W5. The
+                # step 7.8 block above now calls the
+                # ``_cancel_bus_watchers_for`` helper directly — pre-fix,
+                # both step 7.8 (inline) and this step 8.5 (helper)
+                # issued the same idempotent ``bus.cancel_for_target``
+                # call. The two-call surface was redundant; collapsing
+                # to a single helper call (here) preserves the
+                # post-commit ordering (DB cascade + lifecycle event +
+                # bus cancel all fire AFTER commit) without duplication.
+                # The helper's idempotent cancel is the SOLE call site.
 
                 # Summary log: surface total duration and unwind cost in one line so the
                 # next latency regression is self-explanatory. Matches the [TRACE] style
@@ -3679,8 +3670,17 @@ status=InstanceStatus.IDLE.value,
         # ``TaskRepository.reconcile_turn_mirror`` owns its own connection.
         # Defer that call until this guarded transaction commits; otherwise a
         # nested engine transaction could publish a half-cascade.
+        #
+        # ``**kwargs`` silently accepts and ignores the ``connection=``
+        # kwarg that ``_StatusTransition._reconcile`` threads through
+        # (turn_transitions.py:~79). The adapter defers reconcile to
+        # post-commit, so it cannot honor a thread-the-connection
+        # optimization — but freezing the kwarg name here would also
+        # be wrong: the canonical seam is whatever the transition
+        # chooses to pass. Accept-and-ignore is the deferred-reconcile
+        # contract (governor resolution for the P1 NEEDS-FIXES blocker).
         class _TransitionTaskRepo:
-            def reconcile_turn_mirror(_self, work_id: str):
+            def reconcile_turn_mirror(_self, work_id: str, **kwargs: Any):
                 deferred_reconcile_ids.append(work_id)
 
             def __getattr__(_self, name: str):
@@ -3937,8 +3937,17 @@ status=InstanceStatus.IDLE.value,
         # The repository reconciler opens its own transaction.  Use a tiny
         # transaction-local sink while the cascade is open, then drain it
         # only after the guarded instance/task writes commit.
+        #
+        # ``**kwargs`` silently accepts and ignores the ``connection=``
+        # kwarg that ``_StatusTransition._reconcile`` threads through
+        # (turn_transitions.py:~79). The adapter defers reconcile to
+        # post-commit, so it cannot honor a thread-the-connection
+        # optimization — but freezing the kwarg name here would also
+        # be wrong: the canonical seam is whatever the transition
+        # chooses to pass. Accept-and-ignore is the deferred-reconcile
+        # contract (governor resolution for the P1 NEEDS-FIXES blocker).
         class _TransitionTaskRepo:
-            def reconcile_turn_mirror(_self, work_id: str):
+            def reconcile_turn_mirror(_self, work_id: str, **kwargs: Any):
                 deferred_reconcile_ids.append(work_id)
 
             def __getattr__(_self, name: str):

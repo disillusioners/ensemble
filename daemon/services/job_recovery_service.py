@@ -1462,13 +1462,47 @@ class JobRecoveryService:
                         # Task row is already FAILED via the SQL
                         # UPDATE above. Pattern (a) / (d) safety nets
                         # catch any orphan on the next cycle.
+                        #
+                        # W6 (governor-council NEEDS-FIXES): surface the
+                        # failure in the sweep's ``details`` payload so
+                        # drift is observable (operators see the
+                        # mirror-reconcile failure count alongside the
+                        # successful count — no longer silently lost).
+                        # Count semantics for successful rows are
+                        # unchanged (``reconciled`` still counts only
+                        # full successes). The ``mirror_reconcile_failed``
+                        # entry is appended below so callers can split
+                        # the two counts.
                         logger.error(
                             f"reconcile_drift_states: Pattern (e) "
                             f"mirror reconcile failed for task "
                             f"{task_id}: {recon_err}",
                             exc_info=True,
                         )
+                        details.append({
+                            "pattern": "mirror_reconcile_failed",
+                            "job_id": None,
+                            "task_id": task_id,
+                            "instance_id": instance_id,
+                            "reason": (
+                                f"Pattern (e) dead-letter succeeded (Task "
+                                f"row FAILED via SQL UPDATE) but the "
+                                f"named transition's mirror reconcile "
+                                f"raised: {type(recon_err).__name__}: "
+                                f"{recon_err}. Mirrors may stay stale "
+                                f"until the next sweep cycle."
+                            ),
+                        })
 
-        if reconciled == 0:
+        # W6 (governor-council NEEDS-FIXES): return the payload whenever
+        # ANY row was processed — even if every row failed mirror
+        # reconcile (the SQL UPDATE still dead-lettered the rows; only
+        # the named transition's mirror reconcile raised). Pre-fix the
+        # `if reconciled == 0: return None` short-circuit swallowed the
+        # failure detail so a sweep where every row failed to
+        # reconcile returned None (operator-invisible drift). Now we
+        # return the payload when there is any details entry — that
+        # way failures are always observable.
+        if reconciled == 0 and not details:
             return None
         return {"reconciled": reconciled, "details": details}

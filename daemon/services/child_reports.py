@@ -2809,9 +2809,22 @@ Provide a concise summary:"""
                     f"(reason=dead_parent, report_message_id={report_message_id})"
                 )
                 nested.commit()
+                # F5 FIX (W1 bug): ``nested.commit()`` above CLOSES the
+                # SAVEPOINT (SessionTransaction moves to ``CLOSED``). The
+                # generic success-path ``nested.commit()`` below would
+                # raise ``sqlalchemy.exc.ResourceClosedError`` and abort
+                # the whole transaction — a previously masked production
+                # defect (37f6402b introduced the dead_parent branch
+                # without restructuring the success-path commit). Flag the
+                # commit so the success-path branch skips it. The empty
+                # SAVEPOINT was already released; the outer commit at
+                # ~:2959 below persists the FAILED message + child
+                # COMPLETED transition.
+                nested_already_committed = True
                 report_injection_row = None
             else:
                 nested = session.begin_nested()
+                nested_already_committed = False
                 try:
                     report_injection_row = ReportInjection(
                         parent_instance_id=instance.parent_id,
@@ -2922,7 +2935,13 @@ Provide a concise summary:"""
             # Success path — release the SAVEPOINT so the injection
             # INSERT is promoted into the outer transaction. The
             # outer commit at ~:2959 (below) persists everything.
-            nested.commit()
+            #
+            # F5 FIX (W1 bug): skip when the dead_parent branch already
+            # released the empty SAVEPOINT above — re-committing a
+            # CLOSED SessionTransaction raises ``ResourceClosedError``
+            # and aborts the outer transaction.
+            if not nested_already_committed:
+                nested.commit()
 
             # Plan §T8 (a) dead-parent early return.
             # When ``db_dead_parent`` is True the message row is already

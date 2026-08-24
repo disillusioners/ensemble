@@ -27,7 +27,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from daemon.services.instance_lifecycle import InstanceLifecycleService
+from daemon.services.instance_lifecycle import (
+    InstanceLifecycleService,
+    _TerminateResult,
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -457,3 +460,215 @@ async def test_all_terminal_snapshot_short_circuits_with_no_recursion():
         f"no recursion expected when all descendants are terminal; "
         f"got recursed={recursed}"
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 7 — F3 _p1_skip_post_commit suppression (P1 NEEDS-FIXES W3)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_w5_terminate_calls_bus_cancel_exactly_once():
+    """W5 (governor-council NEEDS-FIXES): ``terminate_instance`` must
+    invoke the ``_cancel_bus_watchers_for`` helper exactly once per
+    terminated instance (no double-call from step 7.8 + step 8.5).
+
+    Pre-fix, step 7.8 had an inline ``bus.cancel_for_target`` call
+    AND step 8.5 had a helper call — both targeting the same watchers,
+    idempotent but duplicated. The collapse routes both through the
+    helper at :48-84; this test asserts the call count is 1.
+
+    The test wires a real ``DependencyBus`` singleton with a
+    ``cancel_for_target`` spy. Terminating the instance runs the full
+    terminate cascade (mocked surfaces for graph, repo, etc.) and
+    asserts the spy's call count.
+    """
+    from daemon.services.dependency_bus import (
+        get_dependency_bus,
+        set_dependency_bus,
+    )
+    from daemon.services.instance_lifecycle import InstanceLifecycleService
+    from daemon.services.dependency_bus import DependencyBus
+
+    # Build a real DependencyBus with a spy ``cancel_for_target``.
+    from unittest.mock import MagicMock as _MagicMock
+    from daemon.repositories.dependency_bus.repository import DependencyWatcherRepository
+    bus = DependencyBus(DependencyWatcherRepository(engine=_MagicMock()))
+    cancel_call_count = 0
+
+    async def spy_cancel_for_target(target_instance_id):
+        nonlocal cancel_call_count
+        cancel_call_count += 1
+        return 0
+
+    bus.cancel_for_target = spy_cancel_for_target
+    set_dependency_bus(bus)
+
+    try:
+        manager = _make_manager()
+        # Root is RUNNING (not terminal) so terminate_instance
+        # proceeds through the full cascade (the fast-path skip
+        # at :1431 is gated on terminal status).
+        manager._instance_repository.get.side_effect = lambda iid: {
+            "w5-root": _make_instance("w5-root", "running"),
+        }.get(iid)
+        manager._instance_repository.get_cascade_tree_ids = MagicMock(
+            return_value=["w5-root"]
+        )
+        manager.instances = {"w5-root": MagicMock()}
+
+        svc = _make_lifecycle_service(manager)
+        # The sync helper returns skip=False (the row was non-terminal
+        # at fast-path, and we're returning a non-skip result so the
+        # post-commit outbox fires — including the helper call we are
+        # spying on).
+        svc._terminate_instance_db_sync = MagicMock(
+            return_value=_TerminateResult(
+                skip=False,
+                parent_id=None,
+                agent_id="test-agent",
+                message_jobs_cancelled=0,
+                all_jobs_cancelled=0,
+                message_queue_removed=0,
+                tasks_removed=0,
+            )
+        )
+
+        # Spy the recursive call (no descendants, but the framework
+        # still wires the spy to keep the test self-contained).
+        recursed: list[str] = []
+        real = svc.terminate_instance
+
+        async def spying_terminate(iid, terminal_reason="aborted"):
+            recursed.append(iid)
+            return True
+
+        svc.terminate_instance = spying_terminate  # type: ignore[method-assign]
+
+        await real("w5-root")
+
+        # W5 assertion: bus.cancel_for_target invoked EXACTLY ONCE
+        # (pre-fix the count was 2; post-collapse it is 1). The helper
+        # is the SOLE call site.
+        assert cancel_call_count == 1, (
+            f"W5 regression: bus.cancel_for_target must be called "
+            f"exactly once per terminated instance (the W5 collapse "
+            f"removed the duplicated step 7.8 + step 8.5 surfaces); "
+            f"got {cancel_call_count}"
+        )
+    finally:
+        # Restore the bus singleton to avoid polluting other tests.
+        set_dependency_bus(None)
+
+
+@pytest.mark.asyncio
+async def test_skip_path_suppresses_post_commit_outbox():
+    """W3 (governor-council NEEDS-FIXES): the ``_p1_skip_post_commit``
+    flag suppresses the post-commit outbox when
+    ``_terminate_instance_db_sync`` returns ``skip=True``.
+
+    Pre-F3, control fell through the ``if db_result.skip:`` branch
+    directly into the post-commit outbox — status_change SSE,
+    injection_consumed SSE, cleanup_instance, lock release, job-cancel
+    loop, dispatch-bus notify, bus cancel, lifecycle-event publish —
+    violating the helper's documented contract ("Caller short-circuits
+    WITHOUT firing any side effects"). The flag suppresses the
+    outbox; the snapshot iteration below still runs so descendants of
+    the skipped node are visited (enumerate-first contract preserved).
+
+    Asserts:
+      * The post-commit outbox fires ZERO side effects when
+        ``_terminate_instance_db_sync`` returns ``skip=True``.
+      * The snapshot iteration still recurses into live descendants
+        (the grandchild is reached; classification gates ACTING, never
+        traversal).
+    """
+    manager = _make_manager()
+    # The sync helper returns skip=True: row missing or already
+    # terminal (idempotency re-entrancy). Wire
+    # ``_terminate_instance_db_sync`` to return the skip-shape
+    # ``_TerminateResult`` so the F3 flag path is exercised without
+    # touching a real DB. ``terminate_instance`` calls the helper as
+    # a bound method (``self._terminate_instance_db_sync``), not via
+    # the manager — wire it on the service in
+    # ``_make_lifecycle_service``.
+    #
+    # The fast-path guard at
+    # ``daemon/services/instance_lifecycle.py``:1431 sets
+    # ``skip_per_node_work = meta.status in TERMINAL_STATUSES`` and
+    # short-circuits BEFORE the sync helper is called. To exercise
+    # the F3 ``_p1_skip_post_commit`` branch (which only fires inside
+    # the ``if db_result.skip:`` block after the sync helper
+    # returned), the fast-path meta must report a non-terminal status
+    # AND the instance must be present in ``manager.instances`` (so
+    # the in-memory cleanup branch at :1564-1569 does NOT return
+    # False early). Then the sync helper's own re-read returns
+    # ``skip=True`` (TOCTOU race simulation) and the F3 branch fires.
+    manager._instance_repository.get.side_effect = lambda iid: {
+        "root-missing": _make_instance("root-missing", "running"),
+        "grandchild-live": _make_instance("grandchild-live", "running"),
+    }.get(iid)
+    manager._instance_repository.get_cascade_tree_ids = MagicMock(
+        return_value=["root-missing", "grandchild-live"]
+    )
+    # Place the root in ``manager.instances`` so the in-memory
+    # cleanup branch (deletes the entry) does NOT short-circuit with
+    # ``return False`` before reaching the sync helper call.
+    manager.instances = {"root-missing": MagicMock()}
+
+    svc = _make_lifecycle_service(manager)
+    svc._terminate_instance_db_sync = MagicMock(
+        return_value=_TerminateResult(
+            skip=True,
+            parent_id=None,
+            agent_id=None,
+            message_jobs_cancelled=0,
+            all_jobs_cancelled=0,
+            message_queue_removed=0,
+            tasks_removed=0,
+        )
+    )
+
+    # Spy the recursive call so we can confirm the snapshot iteration
+    # still recurses into the live grandchild.
+    recursed: list[str] = []
+    real = svc.terminate_instance
+
+    async def spying_terminate(iid, terminal_reason="aborted"):
+        recursed.append(iid)
+        return True
+
+    svc.terminate_instance = spying_terminate  # type: ignore[method-assign]
+
+    await real("root-missing")
+
+    # W3 assertion 1: the sync helper returned skip=True.
+    svc._terminate_instance_db_sync.assert_called_once()
+
+    # W3 assertion 2: snapshot iteration STILL recursed into the live
+    # grandchild (the enumerate-first contract — classification gates
+    # ACTING, never traversal). The terminal root is handled inline
+    # (no recursion); its descendant grandchild is independent.
+    assert "grandchild-live" in recursed, (
+        f"W3 regression: live grandchild must be recursed into even when "
+        f"the root returns skip=True (enumerate-first contract); "
+        f"got recursed={recursed}"
+    )
+    assert "root-missing" not in recursed, (
+        f"missing root is handled inline by step 2; must NOT appear in "
+        f"the recursion list; got recursed={recursed}"
+    )
+
+    # W3 assertion 3: the post-commit outbox is SUPPRESSED. Every
+    # side-effect that fires inside the ``if not _p1_skip_post_commit:``
+    # gate must report zero calls.
+    manager._live_hub.stream_status_change.assert_not_called()
+    manager._live_hub.stream_message.assert_not_called()
+    manager._live_hub.cleanup_instance.assert_not_called()
+    manager._job_queue_mgmt_service._dispatch_bus.notify_all.assert_not_called()
+    # _cancel_bus_watchers_for is a module-level helper; it consults
+    # ``get_dependency_bus()`` which is None in this test, so it is a
+    # no-op — there is no async-callable mock to assert against. The
+    # remaining inline ``bus.cancel_for_target`` call (step 7.8) is
+    # also gated by ``if not _p1_skip_post_commit`` and uses the same
+    # bus singleton (None), so it is a no-op here too.
