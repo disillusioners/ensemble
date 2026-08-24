@@ -492,7 +492,7 @@ Live `system_restart` via tools is **refused outright** this initiative (ADR-016
 **Gate rule — live promotion eligibility requires BOTH:**
 
 1. **Ledger:** 3 consecutive clean demo cycles with **zero** `test-strategy.md` §4.1 clause violations (§7 table, same release version, no staleness reset), **AND**
-2. **F2 CLOSED:** the **unauthenticated loopback API user-origin forge lane** closed or the local API authenticated. The lane (critical note e5a83653, **HIGH**): `POST /jobs` accepts `body.source` **verbatim** (`daemon/routers/jobs_crud.py:275-278`); `POST /messages` stamps `source="api"` (`daemon/routers/messages.py:391`); the `USER_ORIGIN_SOURCES` whitelist cannot distinguish a genuine web-UI human from a localhost forger (`daemon/tools/upgrade_journal.py:714-717` lane; `decisions.md` OBS residual §4.2(a) — single-host trust model, closes only with an auth boundary on the local API).
+2. **F2 CLOSED:** the **unauthenticated loopback API user-origin forge lane** closed or the local API authenticated. The lane (critical note e5a83653, **HIGH**): `POST /jobs` accepts `body.source` **verbatim** (`daemon/routers/jobs_crud.py:275-278`); `POST /messages` stamps `source="api"` (`daemon/routers/messages.py:391`); the `USER_ORIGIN_SOURCES` whitelist cannot distinguish a genuine web-UI human from a localhost forger (`daemon/tools/upgrade_journal.py:1038-1092` whitelist, gate `daemon/tools/upgrade_tools.py:1910-1935`; `decisions.md` OBS residual §4.2(a) — single-host trust model, closes only with an auth boundary on the local API).
 
 **F2-open ⇒ the gate is HARD-BLOCKED regardless of cycle count.** No number of clean cycles substitutes for the forge lane being closed — a forged user-origin on live would bypass the very gate the cycles exist to certify.
 
