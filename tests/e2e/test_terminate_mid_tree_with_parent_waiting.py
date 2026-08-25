@@ -83,14 +83,24 @@ def _wait_for_status(
 
 
 def _direct_children(parent_id: str) -> list[str]:
-    """List direct children of ``parent_id`` via the instances API."""
-    response = requests.get(
-        f"{API_BASE}/instances", params={"parent_id": parent_id}, timeout=30
-    )
+    """List direct children of ``parent_id`` via the parent's ``children`` field.
+
+    ``GET /api/instances`` has no ``parent_id`` filter — the query param is
+    silently ignored and a flat root-based page is returned (an "arbitrary
+    instance" footgun). Fetch the parent's detail instead, read its
+    advertised ``children`` ids, and guard each resolved child against a
+    ``parent_id`` mismatch before using it.
+    """
+    response = requests.get(f"{API_BASE}/instances/{parent_id}", timeout=30)
     response.raise_for_status()
-    data = response.json()
-    items = data if isinstance(data, list) else data.get("instances", [])
-    return [i.get("instance_id") for i in items if i.get("instance_id")]
+    child_ids = response.json().get("children", []) or []
+    resolved: list[str] = []
+    for child_id in child_ids:
+        detail = requests.get(f"{API_BASE}/instances/{child_id}", timeout=30)
+        detail.raise_for_status()
+        if detail.json().get("parent_id") == parent_id:
+            resolved.append(child_id)
+    return resolved
 
 
 def test_terminate_mid_tree_with_parent_waiting():

@@ -21,13 +21,11 @@ The plan's §B5 E2E spec is reproduced here:
   This proves BOTH /stop subtree semantics AND /pause whole-tree semantics
   unchanged.
 
-NOTE — DO NOT EXECUTE. This file is authored per the task contract
-``authoring only; must be collection-clean (import-syntax valid)``. The
-LLM at ``localhost:4123`` is flaky and the e2e suite is tester-gated;
-the dispatcher routes e2e execution through the ``tester`` agent's
-``RESULTS`` journal. The ``pytest.mark.skipif`` decorator at module
-level skips when the daemon is not running on ``localhost:8079``, but
-collection itself must succeed in CI / local quick-runs.
+This file is executed live as the B5 acceptance (merge gate for
+feature/pause-resume-terminate-tree-fix — its sanctioned first
+execution). The ``pytest.mark.skipif`` decorator at module level skips
+when the daemon is not running on ``localhost:8079``; collection
+itself must also succeed in CI / local quick-runs.
 
 Why both `/stop` and `/pause` are exercised
 --------------------------------------------
@@ -152,25 +150,32 @@ TREE_MESSAGE = (
 def _wait_for_grandchild(parent_id: str, timeout: int) -> str | None:
     """Wait for ``parent_id`` to have at least one direct child.
 
-    Mirrors the B3 E2E pattern (``_direct_children`` +
-    ``_wait_for_child_spawned``); tester spawns the worker mid-turn.
+    ``GET /api/instances`` has no ``parent_id`` filter (the param is
+    silently ignored and a flat root-based page is returned), so poll the
+    parent's own ``children`` field — mirroring ``_wait_for_child_spawned``
+    — and guard the resolved id against a ``parent_id`` mismatch before
+    using it.
     """
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
             response = requests.get(
-                f"{API_BASE}/instances",
-                params={"parent_id": parent_id},
-                timeout=30,
+                f"{API_BASE}/instances/{parent_id}", timeout=30
             )
             response.raise_for_status()
-            data = response.json()
-            items = data if isinstance(data, list) else data.get("instances", [])
-            children = [
-                i.get("instance_id") for i in items if i.get("instance_id")
-            ]
+            children = response.json().get("children", []) or []
             if children:
-                return children[0]
+                child_id = children[0]
+                detail = requests.get(
+                    f"{API_BASE}/instances/{child_id}", timeout=30
+                )
+                detail.raise_for_status()
+                if detail.json().get("parent_id") == parent_id:
+                    return child_id
+                logger.warning(
+                    f"[WAIT_GRANDCHILD] {child_id[:8]}... parent_id mismatch "
+                    f"(expected parent {parent_id[:8]}...); retrying"
+                )
         except requests.exceptions.RequestException as exc:
             logger.warning(
                 f"[WAIT_GRANDCHILD] GET failed (will retry): {exc}"

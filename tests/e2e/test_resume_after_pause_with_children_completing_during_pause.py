@@ -38,7 +38,6 @@ from tests.e2e.test_e2e_workflows import (
     COMPLETION_TIMEOUT,
     POLL_INTERVAL,
     PROJECT_ID,
-    SPAWN_TIMEOUT,
     TERMINAL_STATUSES,
     _daemon_running,
     _get_messages,
@@ -64,11 +63,19 @@ pytestmark = [
 ]
 
 # Two children, each sleeping long enough to straddle the pause window.
+# The leader must spawn them ITSELF: delegating to a developer child
+# collides with the permission model (developer ∉ developer.team_members
+# → "Agent 'developer' is not allowed to spawn 'developer'") and
+# grandchildren would not count as the leader's direct children anyway.
 SPAWN_MESSAGE = (
-    "ask developer to spawn exactly 2 developer children; each child must "
-    "run a bash sleep of 90 seconds and then reply 'done sleeping'; wait "
-    "for both children to finish before you reply"
+    "Using spawn_instance yourself (do not delegate), spawn exactly 2 "
+    "developer children directly under you; each child must run a bash "
+    "sleep of 90 seconds and then reply 'done sleeping'; wait for both "
+    "children to finish before you reply"
 )
+
+# Spawn-wait raised 60s → 120s (LLM failover tax compensation, primary down)
+B2_SPAWN_TIMEOUT = 120
 
 PAUSE_SETTLE_SECONDS = 100  # > child sleep so both complete DURING pause
 
@@ -114,7 +121,7 @@ def test_resume_after_pause_with_children_completing_during_pause():
         _send_message(leader_id, SPAWN_MESSAGE)
 
         child_ids: list[str] = []
-        deadline = time.time() + SPAWN_TIMEOUT
+        deadline = time.time() + B2_SPAWN_TIMEOUT
         while len(child_ids) < 2 and time.time() < deadline:
             child = _wait_for_child_spawned(leader_id, timeout=10)
             if child and child not in child_ids:
@@ -122,7 +129,7 @@ def test_resume_after_pause_with_children_completing_during_pause():
             else:
                 time.sleep(POLL_INTERVAL)
         assert len(child_ids) == 2, (
-            f"Leader did not spawn 2 children within {SPAWN_TIMEOUT}s "
+            f"Leader did not spawn 2 children within {B2_SPAWN_TIMEOUT}s "
             f"(got {len(child_ids)})"
         )
         logger.info(f"[B2] children spawned: {[c[:8] for c in child_ids]}")
