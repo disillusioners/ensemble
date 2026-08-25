@@ -656,37 +656,119 @@ class TestCase4PreserveCompletedAtFlagOptIn:
         )
 
     def test_default_branch_does_not_emit_coalesce(self, repository, sample_job_data, fifo_queue):
-        """Default ``False`` does NOT emit COALESCE SQL.
+        """Default ``False`` does NOT emit COALESCE SQL (real seam).
 
-        Negative control: with default (no flag), the SQL UPDATE does
-        NOT include a COALESCE expression for ``completed_at`` — the
-        column is stripped via ``_REMOVED_JOB_COLUMNS`` before the
-        UPDATE is built, so it never appears in the SET clause at all.
+        Negative control companion to
+        ``test_repository_true_branch_emits_coalesce_sql``: drives the
+        REAL ``JobRepository.atomic_transition`` on the default path
+        (``preserve_completed_at`` unset) with ``completed_at`` (and
+        ``result_summary``) in ``extra_updates`` — the exact call shape
+        the stamp sites use — and captures the compiled SQL via the
+        same ``session.exec()`` / ``session.get()`` mocks as the
+        sibling True-branch test.
+
+        Asserts:
+          1. ``atomic_transition`` actually emitted an UPDATE (the
+             seam was driven — non-vacuous);
+          2. that UPDATE references neither ``completed_at`` nor
+             ``result_summary`` — both are stripped via
+             ``_REMOVED_JOB_COLUMNS`` before the statement is built;
+          3. NO captured statement contains a ``COALESCE`` reference
+             to ``completed_at`` (the reserved True-branch SQL must
+             not fire on the default path).
+
+        Revision note (sweep #4): the prior version of this test
+        fabricated its own ``sqlmodel_update(JobItem)`` statement and
+        asserted the SQL it had just built — it never drove
+        ``atomic_transition``, so it pinned nothing about the
+        repository. Replaced with this real-seam version.
         """
-        from sqlmodel import update as sqlmodel_update
-
         sample_job_data["queue_id"] = fifo_queue
         job = repository.create(**sample_job_data)
         job_id = job.job_id
 
-        # Default-False build: ``completed_at`` is stripped; the SET
-        # clause contains only ``admission_state``.
-        stmt = (
-            sqlmodel_update(JobItem)
-            .where(JobItem.job_id == job_id)
-            .where(JobItem.admission_state == AdmissionState.QUEUED.value)
-            .values(admission_state=AdmissionState.DONE.value)
+        # Same mock strategy as the sibling True-branch test.
+        captured_sqls: list[str] = []
+        from sqlmodel import Session as _SMS
+        from sqlalchemy.engine.result import Result
+
+        def capture_exec(self, statement, *args, **kwargs):
+            try:
+                compiled = str(statement.compile(
+                    dialect=repository.engine.dialect,
+                    compile_kwargs={"literal_binds": False},
+                ))
+                captured_sqls.append(compiled)
+            except Exception:
+                pass
+            fake_result = Result.__new__(Result)
+            fake_result.rowcount = 0
+            fake_result._hardclosed = False
+            return fake_result
+
+        def capture_get(self, *args, **kwargs):
+            return None
+
+        from unittest.mock import patch as _patch
+
+        with _patch.object(_SMS, "exec", capture_exec), \
+             _patch.object(_SMS, "get", capture_get):
+            # Default-path trigger: NO preserve_completed_at flag, but
+            # completed_at (and result_summary — both members of
+            # _REMOVED_JOB_COLUMNS) passed exactly as the stamp sites
+            # do. The mocked exec fakes rowcount=0 and the mocked get
+            # returns None, so the disambiguation path returns None —
+            # SQL capture is the point, not row state (same contract
+            # as the sibling test).
+            result = repository.atomic_transition(
+                job_id,
+                from_status=AdmissionState.QUEUED.value,
+                to_status=AdmissionState.DONE.value,
+                completed_at=_now_iso(),
+                result_summary="test",
+            )
+
+        # Mocked disambiguation (rowcount=0 + get→None) — same as the
+        # sibling True-branch test.
+        assert result is None
+
+        # 1. The seam was driven — atomic_transition emitted SQL.
+        assert captured_sqls, (
+            "No SQL captured — atomic_transition did not emit any "
+            "statement on the default path"
         )
-        compiled_sql = str(stmt.compile(
-            dialect=repository.engine.dialect,
-            compile_kwargs={"literal_binds": False},
-        ))
-        assert "completed_at" not in compiled_sql.lower(), (
-            f"Default branch should not reference completed_at (stripped): {compiled_sql!r}"
+
+        update_sqls = [
+            s for s in captured_sqls
+            if s.lstrip().lower().startswith("update")
+        ]
+        assert update_sqls, (
+            "atomic_transition did not emit an UPDATE on the default "
+            "path. Captured SQLs:\n" + "\n".join(captured_sqls[:5])
         )
-        assert "coalesce" not in compiled_sql.lower(), (
-            f"Default branch should not emit COALESCE: {compiled_sql!r}"
-        )
+
+        # 2. Stripped columns must NOT appear in the UPDATE at all.
+        for sql in update_sqls:
+            lowered = sql.lower()
+            assert "completed_at" not in lowered, (
+                f"Default branch should not reference completed_at "
+                f"(stripped via _REMOVED_JOB_COLUMNS): {sql!r}"
+            )
+            assert "result_summary" not in lowered, (
+                f"Default branch should not reference result_summary "
+                f"(stripped via _REMOVED_JOB_COLUMNS): {sql!r}"
+            )
+
+        # 3. No COALESCE reference to completed_at anywhere in the
+        # captured SQL (the reserved True-branch UPDATE must not fire).
+        for sql in captured_sqls:
+            lowered = sql.lower()
+            assert not (
+                "coalesce" in lowered and "completed_at" in lowered
+            ), (
+                f"Default branch must not emit "
+                f"COALESCE(completed_at, ...): {sql!r}"
+            )
 
     def test_no_callers_wire_true(self):
         """Static guard: no caller wires ``preserve_completed_at=True``.

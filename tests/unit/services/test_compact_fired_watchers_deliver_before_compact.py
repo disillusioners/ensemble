@@ -30,6 +30,8 @@ does, with the manager's ``enqueue_message`` as an ``AsyncMock``.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
@@ -877,3 +879,209 @@ async def test_h_blocker1_chain_paused_parent_no_stamp_then_resume_heals(
         "and deleted rows aren't present for Pass 2). Double "
         "delivery would mean the dedup primitive is broken."
     )
+
+
+# ─── (W-B) cancel()-branch discrimination — B2 closure pins (review round 2) ──
+
+
+class _WBTimeoutFuture:
+    """Future-double for the 8s-bridge timeout branch (W-B / B2 pins).
+
+    Forces ``future.result(timeout=8.0)`` to raise
+    ``concurrent.futures.TimeoutError`` WITHOUT paying the real 8s
+    wait, then replays a deterministic post-timeout state:
+
+      * ``cancel_returns``   — what ``cancel()`` returns;
+      * ``cancelled_state``  — what ``cancelled()`` reports;
+      * ``exception_result`` — what ``exception(timeout=0)`` returns
+        (``None`` ⟹ done-with-result; an exception ⟹ done-with-
+        exception).
+
+    Only the surface ``_compact_fired_watchers_for_paused`` touches
+    (result / cancel / cancelled / exception) is implemented.
+    """
+
+    def __init__(self, *, cancel_returns, cancelled_state, exception_result):
+        self.cancel_returns = cancel_returns
+        self.cancelled_state = cancelled_state
+        self.exception_result = exception_result
+        self.cancel_calls = 0
+        self.exception_calls = 0
+
+    def result(self, timeout=None):
+        raise concurrent.futures.TimeoutError("simulated 8s bridge timeout")
+
+    def cancel(self):
+        self.cancel_calls += 1
+        return self.cancel_returns
+
+    def cancelled(self):
+        return self.cancelled_state
+
+    def exception(self, timeout=None):
+        self.exception_calls += 1
+        return self.exception_result
+
+
+def _install_wb_bridge(monkeypatch, fut: _WBTimeoutFuture) -> None:
+    """Route the compact's ``run_coroutine_threadsafe`` to ``fut``.
+
+    The production call site hands the enqueue coroutine to the
+    bridge; the double closes it un-awaited (no coroutine-never-
+    awaited warning). ``monkeypatch`` restores the real
+    ``asyncio.run_coroutine_threadsafe`` on teardown; nothing else
+    in these tests schedules cross-thread coroutines, so the
+    patch is deterministic within the test.
+    """
+
+    def _fake_run_coroutine_threadsafe(coro, loop):
+        coro.close()
+        return fut
+
+    monkeypatch.setattr(
+        asyncio, "run_coroutine_threadsafe", _fake_run_coroutine_threadsafe
+    )
+
+
+@pytest.mark.asyncio
+async def test_wb_t1_cancel_true_aborts_without_stamp(
+    engine, lifecycle_service, monkeypatch
+):
+    """T1 (W-B): ``future.cancel()`` returns True → abort, no stamp.
+
+    The 8s bridge timeout fires and ``cancel()`` succeeds (the
+    chained future transitioned to CANCELLED before completion —
+    the coroutine never committed its enqueue). Expected: Pass 1
+    aborts BEFORE the stamp, the row stays un-stamped (visible to
+    the next Pass 1 cycle), and Pass 2 never runs — proven by the
+    stale fired_at row SURVIVING (a stamped-stale row would be
+    reaped by the DELETE).
+    """
+    iid = _seed_instance(engine, InstanceStatus.PAUSED.value)
+    wid = _seed_watcher(
+        engine,
+        target_instance_id=iid,
+        source_task_id="task-wb-t1",
+        child_id="child-WB1",
+        state=DependencyWatcherState.FIRED.value,
+        # Stale: if Pass 2 wrongly ran (or the row were wrongly
+        # stamped), the DELETE would reap it — survival is the pin.
+        fired_at=_STALE_ISO,
+        enqueued_at=None,
+    )
+    loop = asyncio.get_running_loop()
+    lifecycle_service._manager._loop = loop
+    fut = _WBTimeoutFuture(
+        cancel_returns=True, cancelled_state=True, exception_result=None
+    )
+    _install_wb_bridge(monkeypatch, fut)
+
+    deleted = await asyncio.to_thread(
+        lifecycle_service._compact_fired_watchers_for_paused, iid
+    )
+
+    assert deleted == 0
+    row = _read_watcher_row(engine, wid)
+    assert row is not None, "row must survive the abort (Pass 2 skipped)"
+    assert row["enqueued_at"] is None, "row must stay un-stamped"
+    assert fut.cancel_calls == 1, "the W-B branch must be the one that ran"
+
+
+@pytest.mark.asyncio
+async def test_wb_t2_cancel_false_done_with_result_stamps(
+    engine, lifecycle_service, monkeypatch
+):
+    """T2 (W-B): ``cancel()==False`` + done-WITH-RESULT → stamp.
+
+    The happy fall-through the pre-fix comment assumed: the chained
+    future completed with a result — the enqueue committed before
+    the timeout. Expected: the row IS stamped and Pass 2 reaps it.
+    ``deleted == 1`` is itself the proof of the stamp: Pass 2's
+    DELETE predicate requires ``enqueued_at IS NOT NULL``.
+    """
+    iid = _seed_instance(engine, InstanceStatus.PAUSED.value)
+    wid = _seed_watcher(
+        engine,
+        target_instance_id=iid,
+        source_task_id="task-wb-t2",
+        child_id="child-WB2",
+        state=DependencyWatcherState.FIRED.value,
+        fired_at=_STALE_ISO,  # stale → reaped by Pass 2 once stamped
+        enqueued_at=None,
+    )
+    loop = asyncio.get_running_loop()
+    lifecycle_service._manager._loop = loop
+    fut = _WBTimeoutFuture(
+        cancel_returns=False, cancelled_state=False, exception_result=None
+    )
+    _install_wb_bridge(monkeypatch, fut)
+
+    deleted = await asyncio.to_thread(
+        lifecycle_service._compact_fired_watchers_for_paused, iid
+    )
+
+    # Stamped (else the DELETE predicate would not match) + stale →
+    # reaped: the durability-guarantee chain end-to-end.
+    assert deleted == 1
+    assert _read_watcher_row(engine, wid) is None
+
+
+@pytest.mark.asyncio
+async def test_wb_t3_cancel_false_done_with_exception_aborts_without_stamp(
+    engine, lifecycle_service, monkeypatch, caplog
+):
+    """T3 (W-B, B2): ``cancel()==False`` + done-WITH-EXCEPTION → abort.
+
+    The microsecond window B2 closes: the enqueue coroutine completed
+    with an exception between ``cancel()`` returning False and the
+    stamp. Pre-fix, the False branch treated ANY done future as
+    clean success — the row was stamped despite the FAILED enqueue
+    and Pass 2's DELETE reaped it, silently degrading delivery to
+    the Lane 3/4 backstop. Post-fix: abort WITHOUT stamping, the
+    enqueue's exception surfaced by name in the abort WARNING, and
+    the row survives un-stamped for the next cycle's retry.
+    """
+    iid = _seed_instance(engine, InstanceStatus.PAUSED.value)
+    wid = _seed_watcher(
+        engine,
+        target_instance_id=iid,
+        source_task_id="task-wb-t3",
+        child_id="child-WB3",
+        state=DependencyWatcherState.FIRED.value,
+        # Stale: pre-fix, the wrongly-stamped row would be DELETED by
+        # Pass 2 (message lost — the exact B2 degradation).
+        fired_at=_STALE_ISO,
+        enqueued_at=None,
+    )
+    loop = asyncio.get_running_loop()
+    lifecycle_service._manager._loop = loop
+    boom = RuntimeError("enqueue completed-with-exception (simulated B2)")
+    fut = _WBTimeoutFuture(
+        cancel_returns=False, cancelled_state=False, exception_result=boom
+    )
+    _install_wb_bridge(monkeypatch, fut)
+
+    with caplog.at_level(
+        logging.WARNING, logger="daemon.services.instance_lifecycle"
+    ):
+        deleted = await asyncio.to_thread(
+            lifecycle_service._compact_fired_watchers_for_paused, iid
+        )
+
+    assert deleted == 0, "Pass 2 must not run — the enqueue FAILED"
+    row = _read_watcher_row(engine, wid)
+    assert row is not None, "row must survive (not reaped by Pass 2)"
+    assert row["enqueued_at"] is None, (
+        "row must NOT be stamped — the enqueue completed with an "
+        "exception (stamping it would let Pass 2 DELETE it and "
+        "silently degrade delivery to the Lane 3/4 backstop)"
+    )
+    assert fut.exception_calls == 1, "the B2 exception probe must have run"
+    # The exception is surfaced by name in the abort WARNING(s).
+    warning_text = " ".join(
+        r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
+    )
+    assert "RuntimeError" in warning_text, (
+        "the abort WARNING must name the enqueue's exception"
+    )
+    assert "simulated B2" in warning_text

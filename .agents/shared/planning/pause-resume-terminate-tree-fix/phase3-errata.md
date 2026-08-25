@@ -56,13 +56,38 @@
 
 ---
 
-## E4. P2 test-count provenance: 35/35 vs observed 34 · 🟡 paperwork
+## E4. P2 unit-test aggregate: 38 passed across 8 shipper files (scope-anchored) · 🟡 paperwork
 
-**Source:** P2 closure-council report.
+**Source:** P2 closure-council report, reconciled with the committed
+test inventory in this session (2026-08-25).
 
-**Finding:** P2 closure reports "35/35 tests pass" but the 6-file aggregate under `tests/unit/services/` and `tests/unit/repositories/` shows **34 tests across the 6 P2-shipped files** (after the +3 fast-follow tests: 31 baseline + 3 = 34). The "35/35" count is **one more** than the 6-file scope shows — likely a test outside the 6-file scope, possibly `tests/test_dependency_bus.py` (the dependency-bus unit tests, which exercise the P2 dependency-aggregation surface but live in a separate file).
+**Finding (scope-anchored, committed artifacts as authority):** the
+P2 unit-test aggregate across the **8 P2-shipped files** is
+**38 tests passed**, with the per-file breakdown anchored to the
+committed ``def test_*`` counts in each file:
 
-**Action:** No plan edit. Future readers reconciling the P2 test count should know the 35th test is in `tests/test_dependency_bus.py` (or equivalent out-of-6-file scope) and not in the 6-file aggregate.
+| File (under `tests/unit/services/`) | Tests |
+|---|---|
+| `test_child_outcome_payload_surfacing.py` | 5 |
+| `test_compact_fired_watchers_deliver_before_compact.py` | 10 |
+| `test_dependency_bus_fire_for_terminated.py` | 6 |
+| `test_parent_completion_idempotency_terminated.py` | 2 |
+| `test_resume_cascade_drift_guard.py` | 6 |
+| `test_revive_non_replay.py` | 2 |
+| `test_terminate_downside_row_drain.py` | 4 |
+| `test_terminate_path_coverage_fire_with_outcome.py` | 3 |
+| **Total (8 files)** | **38** |
+
+Sum: 5+10+6+2+6+2+4+3 = **38** (verified against the committed
+``def test_*`` count in each file at 2026-08-25). The previously-cited
+"35/35" / "34 across 6 files" framings are **superseded** — the
+38-across-8-files figure is the scope-anchored reality, with each
+per-file count reproducible by `grep -cE '^\s*(async )?def test_'
+<file>`.
+
+**Action:** No plan edit. Future readers reconciling the P2 test
+count should use **38 across 8 files** as the canonical P2 unit-test
+aggregate, not the older 35/35 or 34/6 figures.
 
 ---
 
@@ -88,6 +113,74 @@
 
 ---
 
+## E7. Claims-vs-reality addendum (record-keeping corrections, no code impact) · 🟢 paperwork
+
+**Source:** P3 errata delta pass (2026-08-25). Reconciling documentation
+claims against the committed test inventory and the live source
+under `daemon/routers/`. These are **record-keeping corrections** —
+no production code or test code is changed by this entry.
+
+**(a) B7(b) report "11 tests" claim vs committed reality of 10 tests**
+
+The b7b manual-evidence report (`tests/manual/b7b_rearm_admission_history.md`)
+references the test suite in `tests/unit/repositories/test_job_queue_atomic_transition.py`
+and (in summary form) implies / claims 11 tests. The **committed
+reality** (counted via `grep -cE '^\s*(async )?def test_'` at
+2026-08-25) is **10 tests**:
+
+| # | Test | Line |
+|---|---|---|
+| 1 | `test_rearm_recomplete_cycle_feasible` | 205 |
+| 2 | `test_second_complete_without_rearm_raises` | 251 |
+| 3 | `test_failed_at_re_stamps_to_last_failure` | 300 |
+| 4 | `test_rearm_recancel_cycle_feasible` | 365 |
+| 5 | `test_default_false_is_byte_identical` | 426 |
+| 6 | `test_explicit_false_matches_default` | 457 |
+| 7 | `test_true_branch_generates_coalesce_sql` | 494 |
+| 8 | `test_repository_true_branch_emits_coalesce_sql` | 594 |
+| 9 | `test_default_branch_does_not_emit_coalesce` | 658 |
+| 10 | `test_no_callers_wire_true` | 691 |
+
+The "11 tests" figure is **off-by-one** relative to the committed
+test inventory. **No code impact**; this is a record-keeping
+correction for future readers reconciling the b7b work scope.
+
+**(b) B6 `probe1.md` "5 sites / 8 lines" surfacing-count claim vs measured reality of 12 lines**
+
+`p3-b6-diagnosis-bundle/probe1.md` line 44 (and E3 above, which
+inherits the same wording) characterizes the surfacing sites for the
+``INSTANCE_NOT_FOUND`` `ErrorResponse` body as **"5 sites" in
+`daemon/routers/instances.py` and "1 site" in
+`daemon/routers/messages.py`** (6 sites total). The **measured
+reality** (verified by `grep -nE 'INSTANCE_NOT_FOUND' daemon/routers/`
+at 2026-08-25) is **12 surfacing sites across 2 files**:
+
+| File | Sites | Lines |
+|---|---|---|
+| `daemon/routers/instances.py` | **9** | 502, 604, 649, 682, 962, 1220, 1400, 1483, 1509 |
+| `daemon/routers/messages.py` | **3** | 171, 477, 527 |
+| **Total** | **12** | (2 files) |
+
+The claim understates the surfacing footprint by **6 sites** (12
+measured vs 6 claimed). **No code impact** — the body shape
+(`ErrorResponse(code=INSTANCE_NOT_FOUND, ...)`) is identical at all
+12 sites; the count is purely a documentation-fidelity correction.
+The E3 wording ("5 sites in instances.py and 1 site in
+messages.py:171") is preserved as-is here for record-keeping; the
+12-line reality is the authoritative count.
+
+**(c) No code impact**
+
+Both (a) and (b) are documentation/scope-fidelity corrections. The
+committed production code, test code, and disposition logic are
+unchanged. Future readers should anchor their cross-document
+reconciliation to the measured counts (10 tests; 12 surfacing
+sites), not the claim-flavoured summaries.
+
+**Action:** No plan edit. No code edit. Errata lives here.
+
+---
+
 ## Summary
 
 | #   | Severity | Surface                                    | Disposition                                                            |
@@ -95,6 +188,7 @@
 | E1  | 🟡        | Task-table re-stamp surface (B7b)          | FT-002 addendum; no plan edit                                          |
 | E2  | 🟡        | B6 NOT-REPRODUCIBLE on HEAD                | FT-004 filed; no plan edit                                             |
 | E3  | 🟢        | B5 Files-Touched + wire shape + composition| 9 tests not 8; no plan edit                                            |
-| E4  | 🟡        | P2 35/35 vs 34 count                       | 35th test is out-of-6-file scope; no plan edit                         |
+| E4  | 🟡        | P2 unit-test aggregate                     | **38 across 8 files** (scope-anchored, committed `def test_*` count)  |
 | E5  | 🟢        | Stale 3-tuple annotation + mock             | Out of scope (tidier cleanup candidate); no plan edit                  |
 | E6  | 🟢        | phase2-plan.md Rev 2.2 overstatement        | ✅ In-place correction applied by W-C.c                                |
+| E7  | 🟢        | Claims-vs-reality addendum                 | (a) b7b "11 tests" → 10; (b) probe1.md "5/1 sites" → 12 measured; no code impact |

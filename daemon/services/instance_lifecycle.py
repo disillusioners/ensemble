@@ -4166,20 +4166,27 @@ status=InstanceStatus.IDLE.value,
                         # observe the still-un-stamped row and enqueue
                         # AGAIN, double-delivering to the parent).
                         # ``future.cancel()`` best-effort cancels the
-                        # underlying asyncio task; returns False if
-                        # the task already finished, in which case the
-                        # enqueue has already committed — we treat
-                        # that as success (the stamp proceeds) so the
-                        # row's DELETE-safety is preserved. The
-                        # early-abort path (cancel returned True OR
-                        # the timeout still fires the structured
-                        # warning) logs and aborts before the
-                        # stamp + Pass 2.
+                        # underlying asyncio task. cancel()=True ⟹
+                        # cancelled BEFORE completion — the coroutine
+                        # did not commit its enqueue; abort, no stamp.
+                        # cancel()=False ⟹ the chained future is DONE
+                        # (for run_coroutine_threadsafe chained
+                        # futures the future is never RUNNING
+                        # mid-coroutine on py3.13) — either
+                        # done-with-result (the enqueue already
+                        # committed; the stamp proceeds so the row's
+                        # DELETE-safety is preserved) or
+                        # done-with-exception / cancelled-by-another-
+                        # party (the enqueue did NOT commit; abort, no
+                        # stamp — the B2 guards below discriminate
+                        # BEFORE the stamp). Every abort path logs and
+                        # short-circuits before the stamp + Pass 2.
                         cancelled_ok = future.cancel()
                         if cancelled_ok:
-                            # Cancel succeeded — the scheduled
-                            # coroutine has not committed its
-                            # enqueue. Early-abort Pass 1 BEFORE
+                            # cancel()=True — the future transitioned
+                            # to CANCELLED before completion: the
+                            # scheduled coroutine has not committed
+                            # its enqueue. Early-abort Pass 1 BEFORE
                             # the stamp so the row stays
                             # un-stamped, visible to the next
                             # Pass 1 cycle (which will deliver
@@ -4205,20 +4212,83 @@ status=InstanceStatus.IDLE.value,
                             # catches this and short-circuits
                             # Pass 2.
                             raise
-                        # cancelled_ok is False — the future
-                        # already completed and the enqueue has
-                        # already committed (a duplicate
-                        # ``MessageQueue`` row was created for
-                        # the parent). Falling through to the
-                        # stamp is the safe choice: the row's
-                        # ``enqueued_at IS NOT NULL`` predicate
-                        # is the durability guarantee, and the
-                        # dedup invariant on the ``message_queue``
-                        # claim lane prevents the parent from
-                        # receiving the same report twice. We
-                        # log at INFO so the duplicate-enqueue
-                        # is observable without aborting the
-                        # compact.
+                        # cancelled_ok is False — the chained future
+                        # is DONE (never RUNNING mid-coroutine for
+                        # run_coroutine_threadsafe chained futures).
+                        # "Done" is TWO states, not one (B2 closure,
+                        # review round 2): done-with-result → the
+                        # enqueue already committed (a duplicate
+                        # ``MessageQueue`` row was created for the
+                        # parent) and falling through to the stamp is
+                        # the safe choice — the row's
+                        # ``enqueued_at IS NOT NULL`` predicate is the
+                        # durability guarantee, and the dedup
+                        # invariant on the ``message_queue`` claim
+                        # lane prevents the parent from receiving the
+                        # same report twice. OR done-with-exception /
+                        # cancelled-by-another-party → the enqueue did
+                        # NOT commit and the row MUST stay un-stamped,
+                        # or Pass 2's DELETE would reap it and
+                        # silently degrade delivery to the Lane 3/4
+                        # backstop.
+                        if future.cancelled():
+                            # Guard FIRST — ``Future.exception()``
+                            # RAISES CancelledError on a cancelled
+                            # future, so this must precede the
+                            # ``exception()`` probe below. Someone
+                            # else cancelled the future between our
+                            # ``cancel()`` call and now; the enqueue
+                            # did not commit — the row must survive
+                            # un-stamped.
+                            logger.warning(
+                                "_compact_fired_watchers_for_paused: "
+                                "8s bridge timeout for buffered "
+                                f"FollowUp to paused instance "
+                                f"{instance_id[:8]}... — "
+                                f"future.cancel()=False but future "
+                                f"is CANCELLED (cancelled by "
+                                f"another party); aborting Pass 1 "
+                                f"before stamp (row survives to "
+                                f"next cycle)"
+                            )
+                            # Re-raise the in-flight TimeoutError so
+                            # the outer except (Exception,
+                            # CancelledError) below catches this and
+                            # short-circuits Pass 2 — same convention
+                            # as the True branch above.
+                            raise
+                        # Safe probe: cancel()==False ⟹ done for
+                        # run_coroutine_threadsafe chained futures
+                        # (never RUNNING mid-coroutine on py3.13), so
+                        # ``exception(timeout=0)`` cannot block.
+                        exc = future.exception(timeout=0)
+                        if exc is not None:
+                            # B2: the enqueue coroutine completed
+                            # WITH AN EXCEPTION in the microsecond
+                            # window between ``cancel()`` returning
+                            # False and the stamp. Abort WITHOUT
+                            # stamping — the row survives un-stamped
+                            # for the next cycle's retry / Lane 3/4
+                            # backstop.
+                            logger.warning(
+                                "_compact_fired_watchers_for_paused: "
+                                "8s bridge timeout for buffered "
+                                f"FollowUp to paused instance "
+                                f"{instance_id[:8]}... — "
+                                f"future.cancel()=False but future "
+                                f"completed with exception "
+                                f"({type(exc).__name__}: {exc}); "
+                                f"aborting Pass 1 before stamp "
+                                f"(row survives to next cycle)"
+                            )
+                            # Surface the enqueue's own failure (not
+                            # the TimeoutError) so the outer handler's
+                            # early-abort WARNING names the real
+                            # cause; Pass 2 short-circuits.
+                            raise exc
+                        # Done-with-result only from here on. We log
+                        # at INFO so the duplicate-enqueue is
+                        # observable without aborting the compact.
                         logger.info(
                             "_compact_fired_watchers_for_paused: "
                             "8s bridge timeout for buffered "

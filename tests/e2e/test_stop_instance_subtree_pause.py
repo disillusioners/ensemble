@@ -8,8 +8,16 @@ The plan's §B5 E2E spec is reproduced here:
   ``POST /instances/{tester}/stop`` → confirm only ``[tester, worker]`` paused
     (leader running).
   Wait 5s, assert leader still polling / has NOT entered paused state.
-  ``POST /instances/{leader}/pause`` (not /stop) → confirm whole tree pauses
-    (``paused_ids == [leader, tester, worker]``).
+  ``POST /instances/{leader}/pause`` (not /stop) → confirm the whole tree
+    ENDS UP paused. NOTE (B1 correction): the plan's literal sentence
+    expected ``paused_ids == [leader, tester, worker]``, but the pause
+    cascade's skip predicate (``instance_lifecycle.py:2450-2456``)
+    classifies ALREADY-PAUSED nodes into ``skipped_ids`` — not only
+    terminal ones. The actual response contract is
+    ``paused_ids == [leader]`` + ``skipped_ids == [tester, worker]``,
+    with whole-tree-paused verified as the END state via
+    ``_wait_for_status``. Pinned by unit case 4 in
+    ``tests/unit/routers/test_stop_instance_subtree.py``.
   This proves BOTH /stop subtree semantics AND /pause whole-tree semantics
   unchanged.
 
@@ -35,8 +43,9 @@ The plan's B5 acceptance sentence pins two distinct contracts:
 
 This e2e proves both contracts in one tree-shaped scenario. The
 composition is the key acceptance: ``/stop`` only affects the target
-subtree, and a subsequent ``/pause`` on the ancestor pauses the
-already-paused subtree uniformly (no double-cascade surprise).
+subtree, and a subsequent ``/pause`` on the ancestor leaves the whole
+tree paused — reporting the already-paused subtree in ``skipped_ids``
+(no double-cascade surprise).
 
 Run (live daemon on :8079, started via ``./dev.sh``)::
 
@@ -187,9 +196,12 @@ def test_stop_pauses_target_subtree_then_pause_pauses_whole_tree():
         ``paused_ids == [tester, worker]`` (NOT the leader).
     *   Wait 5s and assert leader has NOT paused
         (``status not in {paused, ...}``).
-    *   ``POST /instances/{leader}/pause`` →
-        ``paused_ids == [leader, tester, worker]`` (whole tree pauses
-        uniformly, including the already-paused subtree).
+    *   ``POST /instances/{leader}/pause`` → response reports
+        ``paused_ids == [leader]`` and ``skipped_ids ==
+        [tester, worker]`` — the cascade's skip predicate classifies
+        already-PAUSED nodes as skipped (not only terminal ones);
+        the END state is still whole-tree paused, asserted via
+        ``_wait_for_status`` on all three nodes.
 
     The composition is the load-bearing acceptance — the
     ``cascade_to_root`` kwarg (subtree vs whole tree) does not regress
@@ -250,30 +262,47 @@ def test_stop_pauses_target_subtree_then_pause_pauses_whole_tree():
             f"Leader status unexpected after /stop: {leader_status}"
         )
 
-        # ── /pause leader → whole tree pauses uniformly ──────────
+        # ── /pause leader → response: leader paused, subtree skipped ──
         pause_result = _pause_instance(leader_id)
         assert pause_result.get("paused") is True
         pause_paused_ids = set(pause_result.get("paused_ids", []))
-        # /pause cascades the whole tree: leader + tester + worker all
-        # end up in paused_ids. The cascade classifies already-paused
-        # subtree nodes into ``paused_ids`` (the helper writes
-        # ``status=paused`` regardless of starting state, but the
-        # classification loop's filter passes them through because
-        # they're not in a TERMINAL status yet).
-        assert pause_paused_ids == {leader_id, tester_id, worker_id}, (
-            "/pause must pause the whole tree uniformly; got "
+        pause_skipped_ids = set(pause_result.get("skipped_ids", []))
+        # /pause cascades the whole tree, but the cascade's skip
+        # predicate (instance_lifecycle.py:2450-2456) classifies
+        # ALREADY-PAUSED nodes into ``skipped_ids`` — not only terminal
+        # ones. tester+worker were paused by the preceding /stop, so
+        # the response reports them as skipped and only the leader as
+        # newly paused. Pinned by unit case 4
+        # (tests/unit/routers/test_stop_instance_subtree.py::
+        # test_case4_stop_already_paused_returns_all_skipped) and the
+        # COMPOSITION case in the same file.
+        assert pause_paused_ids == {leader_id}, (
+            "B1: /pause after /stop must report only the leader as "
+            "newly paused; got "
             f"paused_ids={pause_paused_ids}, expected "
-            f"{{ {leader_id[:8]}, {tester_id[:8]}, {worker_id[:8]} }}"
+            f"{{ {leader_id[:8]} }}"
+        )
+        assert pause_skipped_ids == {tester_id, worker_id}, (
+            "B1: already-paused subtree nodes must land in "
+            f"skipped_ids; got skipped_ids={pause_skipped_ids}, "
+            f"expected {{ {tester_id[:8]}, {worker_id[:8]} }}"
         )
 
-        # Wait briefly for the leader's transition to settle on disk.
-        ok, final = _wait_for_status(
-            leader_id, {"paused"}, timeout=COMPLETION_TIMEOUT
-        )
-        assert ok, (
-            f"leader never reached paused status after /pause "
-            f"(last={final})"
-        )
+        # End-state IS whole-tree paused (the B5 contract): tester and
+        # worker were paused by /stop and stay paused; the leader just
+        # transitioned. Settle all three via the file's poll helper.
+        for node_id, role in (
+            (leader_id, "leader"),
+            (tester_id, "tester"),
+            (worker_id, "worker"),
+        ):
+            settled, final = _wait_for_status(
+                node_id, {"paused"}, timeout=COMPLETION_TIMEOUT
+            )
+            assert settled, (
+                f"{role} never reached paused status after /pause "
+                f"(last={final})"
+            )
 
     finally:
         # Best-effort cleanup — terminate the leader so the worker
