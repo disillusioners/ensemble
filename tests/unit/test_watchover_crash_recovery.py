@@ -221,6 +221,9 @@ async def test_manager_pause_facade_threads_suspension_reason():
     )
 
     assert result["paused_ids"] == ["iid"]
+    # ``pause_instance_cascade`` defaults ``cascade_to_root=True`` (see
+    # ``daemon/manager.py`` facade, P3 /stop work) — the facade forwards
+    # the default, so the lifecycle mock receives it.
     manager._lifecycle_service.pause_instance_cascade.assert_awaited_once_with(
-        "iid", suspension_reason="watchover_setup"
+        "iid", suspension_reason="watchover_setup", cascade_to_root=True
     )
