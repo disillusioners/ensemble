@@ -103,6 +103,11 @@ def _direct_children(parent_id: str) -> list[str]:
     return resolved
 
 
+# Leader-spawns-tester window raised 60s -> 120s (LLM failover tax
+# compensation, primary down) — mirrors B5's sanctioned raise.
+B3_TESTER_TIMEOUT = 120
+
+
 def test_terminate_mid_tree_with_parent_waiting():
     """B3 acceptance: UP propagation completes the waiting leader."""
     leader_id: str | None = None
@@ -112,7 +117,7 @@ def test_terminate_mid_tree_with_parent_waiting():
         assert leader_id
         _send_message(leader_id, TREE_MESSAGE)
 
-        tester_id = _wait_for_child_spawned(leader_id, timeout=SPAWN_TIMEOUT)
+        tester_id = _wait_for_child_spawned(leader_id, timeout=B3_TESTER_TIMEOUT)
         assert tester_id, "leader did not spawn a tester child in time"
 
         # Wait for the tester to spawn the sleeping grandchild.
