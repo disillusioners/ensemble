@@ -60,7 +60,7 @@ class TestPauseInstanceCascade:
         manager._live_hub.stream_status_change = AsyncMock()
         manager._instance_repository.count_children = MagicMock(return_value=0)
         manager._instance_repository.get_tree_root_id = MagicMock(return_value=None)
-        manager._instance_repository.get_tree_ids = MagicMock(return_value=[])
+        manager._instance_repository.get_cascade_tree_ids = MagicMock(return_value=[])
         return manager
 
     @pytest.fixture
@@ -192,7 +192,7 @@ class TestPauseInstanceCascade:
         instance_id = "test-instance-123"
         # Mock tree traversal methods
         mock_repo.get_tree_root_id.return_value = instance_id
-        mock_repo.get_tree_ids.return_value = [instance_id]
+        mock_repo.get_cascade_tree_ids.return_value = [instance_id]
         mock_repo.get.return_value = self._make_instance(instance_id, status="running")
 
         result = await lifecycle_service.pause_instance_cascade(instance_id)
@@ -224,7 +224,7 @@ class TestPauseInstanceCascade:
 
         # Mock tree traversal methods
         mock_repo.get_tree_root_id.return_value = parent_id
-        mock_repo.get_tree_ids.return_value = [parent_id, child1_id, child2_id]
+        mock_repo.get_cascade_tree_ids.return_value = [parent_id, child1_id, child2_id]
 
         def get_side_effect(instance_id):
             if instance_id == parent_id:
@@ -248,6 +248,13 @@ class TestPauseInstanceCascade:
             assert "paused_at" in call[1]
             assert call[1]["status"] == "paused"
 
+        # W2 residual (governor-council NEEDS-FIXES): pin the production
+        # enumeration path. The pause cascade flows through
+        # ``get_cascade_tree_ids(root_id)`` (P1 phase1-plan T2); the legacy
+        # transient ``get_tree_ids`` must NOT be called from this code path.
+        mock_repo.get_cascade_tree_ids.assert_called_once_with(parent_id)
+        mock_repo.get_tree_ids.assert_not_called()
+
     @pytest.mark.skip(reason="Phase 5: pre-existing failure; not Phase 4 column-drop")
     @pytest.mark.asyncio
     async def test_pause_instance_with_nested_children(self, lifecycle_service, mock_repo, mock_registry):
@@ -270,7 +277,7 @@ class TestPauseInstanceCascade:
 
         # Mock tree traversal methods
         mock_repo.get_tree_root_id.return_value = parent_id
-        mock_repo.get_tree_ids.return_value = [parent_id, child1_id, grandchild_id, child2_id]
+        mock_repo.get_cascade_tree_ids.return_value = [parent_id, child1_id, grandchild_id, child2_id]
 
         def get_side_effect(instance_id):
             if instance_id == parent_id:
@@ -304,7 +311,7 @@ class TestPauseInstanceCascade:
         """
         instance_id = "paused-instance"
         mock_repo.get_tree_root_id.return_value = instance_id
-        mock_repo.get_tree_ids.return_value = [instance_id]
+        mock_repo.get_cascade_tree_ids.return_value = [instance_id]
         mock_repo.get.return_value = self._make_instance(instance_id, status="paused")
 
         result = await lifecycle_service.pause_instance_cascade(instance_id)
@@ -335,7 +342,7 @@ class TestPauseInstanceCascade:
 
         # Mock tree traversal methods
         mock_repo.get_tree_root_id.return_value = parent_id
-        mock_repo.get_tree_ids.return_value = [parent_id, child1_id, child2_id]
+        mock_repo.get_cascade_tree_ids.return_value = [parent_id, child1_id, child2_id]
 
         def get_side_effect(instance_id):
             if instance_id == parent_id:
@@ -368,7 +375,7 @@ class TestPauseInstanceCascade:
         """
         instance_id = "nonexistent-instance"
         mock_repo.get_tree_root_id.return_value = None  # Root not found
-        mock_repo.get_tree_ids.return_value = [instance_id]  # Falls back to instance_id
+        mock_repo.get_cascade_tree_ids.return_value = [instance_id]  # Falls back to instance_id
         mock_repo.get.return_value = None  # Instance doesn't exist
 
         result = await lifecycle_service.pause_instance_cascade(instance_id)
@@ -392,7 +399,7 @@ class TestPauseInstanceCascade:
 
         # Mock tree traversal methods
         mock_repo.get_tree_root_id.return_value = parent_id
-        mock_repo.get_tree_ids.return_value = [parent_id, child_id]
+        mock_repo.get_cascade_tree_ids.return_value = [parent_id, child_id]
 
         def get_side_effect(instance_id):
             if instance_id == parent_id:
@@ -433,7 +440,7 @@ class TestPauseInstanceCascade:
 
         # Mock tree traversal methods
         mock_repo.get_tree_root_id.return_value = parent_id
-        mock_repo.get_tree_ids.return_value = [parent_id, child_id, grandchild_id]
+        mock_repo.get_cascade_tree_ids.return_value = [parent_id, child_id, grandchild_id]
 
         def get_side_effect(instance_id):
             if instance_id == parent_id:
@@ -474,7 +481,7 @@ class TestPauseInstanceCascade:
 
         # Mock tree traversal methods
         mock_repo.get_tree_root_id.return_value = parent_id
-        mock_repo.get_tree_ids.return_value = [parent_id, child1_id, child2_id, child3_id]
+        mock_repo.get_cascade_tree_ids.return_value = [parent_id, child1_id, child2_id, child3_id]
 
         def get_side_effect(instance_id):
             if instance_id == parent_id:
@@ -513,7 +520,7 @@ class TestPauseInstanceCascade:
         parent_id = "parent-waiting"
 
         mock_repo.get_tree_root_id.return_value = parent_id
-        mock_repo.get_tree_ids.return_value = [parent_id]
+        mock_repo.get_cascade_tree_ids.return_value = [parent_id]
         mock_repo.get.return_value = self._make_instance(
             parent_id, status="running", waiting_for=3
         )
@@ -543,7 +550,7 @@ class TestPauseInstanceCascade:
         parent_id = "parent-not-waiting"
 
         mock_repo.get_tree_root_id.return_value = parent_id
-        mock_repo.get_tree_ids.return_value = [parent_id]
+        mock_repo.get_cascade_tree_ids.return_value = [parent_id]
         mock_repo.get.return_value = self._make_instance(
             parent_id, status="running", waiting_for=0
         )
@@ -573,7 +580,7 @@ class TestPauseInstanceCascade:
         instance_id = "leaf-instance"
 
         mock_repo.get_tree_root_id.return_value = instance_id
-        mock_repo.get_tree_ids.return_value = [instance_id]
+        mock_repo.get_cascade_tree_ids.return_value = [instance_id]
         mock_repo.get.return_value = self._make_instance(
             instance_id, status="running", children=[], waiting_for=0
         )
@@ -734,7 +741,7 @@ class TestResumeInstanceCascade:
         instance_id = "test-instance-123"
         # Mock tree traversal methods
         mock_repo.get_tree_root_id.return_value = instance_id
-        mock_repo.get_tree_ids.return_value = [instance_id]
+        mock_repo.get_cascade_tree_ids.return_value = [instance_id]
         mock_repo.get_ancestor_ids.return_value = []
         mock_repo.get.return_value = self._make_instance(instance_id, status="paused")
 
@@ -762,7 +769,7 @@ class TestResumeInstanceCascade:
 
         # Mock tree traversal methods
         mock_repo.get_tree_root_id.return_value = parent_id
-        mock_repo.get_tree_ids.return_value = [parent_id, child1_id, child2_id]
+        mock_repo.get_cascade_tree_ids.return_value = [parent_id, child1_id, child2_id]
         mock_repo.get_ancestor_ids.return_value = []  # No ancestors for root
 
         def get_side_effect(instance_id):
@@ -805,7 +812,7 @@ class TestResumeInstanceCascade:
 
         # Mock tree traversal methods
         mock_repo.get_tree_root_id.return_value = parent_id
-        mock_repo.get_tree_ids.return_value = [parent_id, child1_id, child2_id]
+        mock_repo.get_cascade_tree_ids.return_value = [parent_id, child1_id, child2_id]
         # Child1's ancestors are [parent_id]
         mock_repo.get_ancestor_ids.return_value = [parent_id]
 
@@ -845,7 +852,7 @@ class TestResumeInstanceCascade:
         """
         instance_id = "running-instance"
         mock_repo.get_tree_root_id.return_value = instance_id
-        mock_repo.get_tree_ids.return_value = [instance_id]
+        mock_repo.get_cascade_tree_ids.return_value = [instance_id]
         mock_repo.get_ancestor_ids.return_value = []
         mock_repo.get.return_value = self._make_instance(instance_id, status="running")
 
@@ -854,6 +861,13 @@ class TestResumeInstanceCascade:
         assert result["resumed_ids"] == []
         assert result["skipped_ids"] == [instance_id]
         mock_repo.update.assert_not_called()
+
+        # W2 residual: pin the production enumeration path. The resume
+        # cascade flows through ``get_cascade_tree_ids(root_id)`` (P1
+        # phase1-plan T5); the legacy transient ``get_tree_ids`` must
+        # NOT be called from this code path.
+        mock_repo.get_cascade_tree_ids.assert_called_once_with(instance_id)
+        mock_repo.get_tree_ids.assert_not_called()
 
     @pytest.mark.skip(reason="Phase 5: pre-existing failure; not Phase 4 column-drop")
     @pytest.mark.asyncio
@@ -865,7 +879,7 @@ class TestResumeInstanceCascade:
 
         # Mock tree traversal methods
         mock_repo.get_tree_root_id.return_value = parent_id
-        mock_repo.get_tree_ids.return_value = [parent_id, child1_id, child2_id]
+        mock_repo.get_cascade_tree_ids.return_value = [parent_id, child1_id, child2_id]
         mock_repo.get_ancestor_ids.return_value = []
 
         def get_side_effect(instance_id):
@@ -890,7 +904,7 @@ class TestResumeInstanceCascade:
         """Test resuming a non-existent instance."""
         instance_id = "nonexistent-instance"
         mock_repo.get_tree_root_id.return_value = None
-        mock_repo.get_tree_ids.return_value = [instance_id]  # Falls back to instance_id
+        mock_repo.get_cascade_tree_ids.return_value = [instance_id]  # Falls back to instance_id
         mock_repo.get_ancestor_ids.return_value = []
         mock_repo.get.return_value = None  # Instance doesn't exist
 
@@ -901,6 +915,13 @@ class TestResumeInstanceCascade:
         assert result["skipped_ids"] == [instance_id]
         assert result["target_id"] == instance_id
         mock_repo.update.assert_not_called()
+
+        # W2 residual: pin the production enumeration path. Root lookup
+        # missed → root_id falls back to instance_id; the cascade still
+        # enumerates via ``get_cascade_tree_ids`` (P1 phase1-plan T5),
+        # never via the legacy transient ``get_tree_ids``.
+        mock_repo.get_cascade_tree_ids.assert_called_once_with(instance_id)
+        mock_repo.get_tree_ids.assert_not_called()
 
     @pytest.mark.skip(reason="Phase 5: pre-existing failure; not Phase 4 column-drop")
     @pytest.mark.asyncio
@@ -927,7 +948,7 @@ class TestResumeInstanceCascade:
 
         # Mock tree traversal methods
         mock_repo.get_tree_root_id.return_value = root_id
-        mock_repo.get_tree_ids.return_value = [root_id, parent_id, child_id, grandchild_id]
+        mock_repo.get_cascade_tree_ids.return_value = [root_id, parent_id, child_id, grandchild_id]
         # Grandchild's ancestors: [child, parent, root]
         mock_repo.get_ancestor_ids.return_value = [child_id, parent_id, root_id]
 

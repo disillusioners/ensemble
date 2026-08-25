@@ -1131,11 +1131,13 @@ class JobRepository:
     # STATE TRANSITIONS
     # --------------------------------------------------------
 
+    # Reserved for a deliberate first-touch-timestamp caller; do NOT wire without re-reading architecture-recommendation.md §6.2 — preserve-on-re-complete freezes failure-time stamps on re-armed jobs. See Phase 3 plan Rev 2.1 (council 2bb126df W8) for the rationale. Cross-ref §6.2 (Decision table — Approach A: Default False, no call-site wiring; re-scope B7(b) as verify+pin).
     def atomic_transition(
         self,
         job_id: str,
         from_status: str | None,
         to_status: str,
+        preserve_completed_at: bool = False,
         **extra_updates: Any,
     ) -> JobItem | None:
         """
@@ -1168,6 +1170,32 @@ class JobRepository:
                 caller passes ``None`` and the SQL guard becomes
                 ``status IS NULL`` (always false for persisted rows).
             to_status: Target status.
+            preserve_completed_at: **RESERVED** — see the verbatim
+                reservation comment immediately above this signature
+                (``daemon/repositories/job_queue/repository.py:1134``,
+                Phase 3 plan Rev 2.1, council 2bb126df W8,
+                architecture-recommendation.md §6.2). When ``True``
+                AND ``completed_at`` is present in ``extra_updates``,
+                the SQL UPDATE emits
+                ``completed_at = COALESCE(completed_at, :completed_at)``
+                instead of the byte-identical default
+                ``completed_at = :completed_at`` form — protecting an
+                existing first-touch timestamp from being clobbered by
+                a re-armed-then-re-completed job. **Default ``False``
+                is MANDATORY** (not just caller-compatible) per the
+                architecture: the verified re-arm path
+                (``rearm_with_lock`` ``repository.py:1974-2167`` +
+                observer call ``job_feedback_observer.py:1470-1474``)
+                means preserve-on-default would freeze stale/failure
+                timestamps on legitimately re-run jobs. **Zero callers
+                wire ``True`` in Phase 3** (Task 3.8 was DELETED per
+                AF-P3-7 — see ``phase3-plan.md`` §Rev 2 Changelog row
+                9). The flag is intentionally DEFINED but UNWIRED at
+                all 4 stamp sites (``complete_job:2275``,
+                ``fail_job:2298``, ``terminate_job:2504``, observer
+                fail-safe ``job_feedback_observer.py:1885-1891``); the
+                reservation comment is the safety net until a
+                deliberate first-touch caller arrives.
             **extra_updates: Additional fields to set in the same
                 UPDATE statement. Supported keys observed across
                 callers: ``started_at``, ``completed_at``,
@@ -1216,14 +1244,40 @@ class JobRepository:
         # touches columns that exist in the schema. ``failed_at`` is
         # re-added to the model and is NOT in ``_REMOVED_JOB_COLUMNS``,
         # so it flows through unchanged.
+        #
+        # ``preserve_completed_at`` (RESERVED — see the verbatim
+        # reservation comment at ``repository.py:1134``, Phase 3 plan
+        # Rev 2.1 council 2bb126df W8) carves out an opt-in path that
+        # flows ``completed_at`` through the filter when the caller has
+        # explicitly opted in. With the default ``False`` (MANDATORY
+        # per architecture §6.2), behavior is byte-identical: the
+        # column is still stripped. With ``True``, the kwarg is
+        # preserved AND the SQL UPDATE emits
+        # ``completed_at = COALESCE(completed_at, :completed_at)``
+        # below instead of ``completed_at = :completed_at`` — see the
+        # ``if preserve_completed_at and 'completed_at' in
+        # extra_updates:`` branch.
+        strip_columns = _REMOVED_JOB_COLUMNS
+        if preserve_completed_at and "completed_at" in extra_updates:
+            # Opt-in caller — let ``completed_at`` flow into the UPDATE
+            # via the COALESCE branch below.
+            strip_columns = _REMOVED_JOB_COLUMNS - {"completed_at"}
         filtered_updates = {
             k: v for k, v in extra_updates.items()
-            if k not in _REMOVED_JOB_COLUMNS
+            if k not in strip_columns
         }
         set_values: dict[str, Any] = {
             "admission_state": to_admission,
             **filtered_updates,
         }
+        # COALESCE branch (RESERVED — see comment above). Only fires
+        # when the caller passes BOTH ``preserve_completed_at`` set to
+        # True AND a ``completed_at`` kwarg. Zero callers in Phase 3 (Task
+        # 3.8 DELETED per AF-P3-7); see the reservation comment at
+        # ``repository.py:1134``.
+        completed_at_coalesce_value: Any | None = None
+        if preserve_completed_at and "completed_at" in extra_updates:
+            completed_at_coalesce_value = extra_updates["completed_at"]
 
         with SQLModelSession(self.engine) as session:
             # Atomic UPDATE with admission_state guard. PostgreSQL
@@ -1239,6 +1293,38 @@ class JobRepository:
             if from_admission is not None:
                 stmt = stmt.where(JobItem.admission_state == from_admission)
             stmt = stmt.values(**set_values)
+            if completed_at_coalesce_value is not None:
+                # Reserved COALESCE branch — see the verbatim
+                # reservation comment at ``repository.py:1134``.
+                #
+                # This branch issues a raw ``text()`` SQL UPDATE because
+                # SQLAlchemy's ORM compilation rejects columns that
+                # aren't on the SQLModel (``sqlalchemy/sql/crud.py:381``
+                # raises ``CompileError`` for "Unconsumed column names").
+                # The ``JobItem`` SQLModel has no ``completed_at``
+                # attribute after Phase 5; the COALESCE branch is
+                # reserved for a future schema re-introduction. The raw
+                # ``text()`` form lets us reference the column by name
+                # without going through SQLAlchemy's compile-time
+                # column resolution. ``bindparam`` with ``value=``
+                # inlines the parameter at compile time so the SQL is
+                # fully self-contained.
+                from sqlalchemy import bindparam, text as sa_text
+                stmt = sa_text(
+                    "UPDATE job_queue_items "
+                    "SET admission_state = :__to_admission__, "
+                    "    completed_at = COALESCE(completed_at, :__preserve_completed_at__) "
+                    "WHERE job_id = :job_id "
+                    "AND admission_state = :from_admission"
+                ).bindparams(
+                    bindparam("__to_admission__", value=to_admission),
+                    bindparam(
+                        "__preserve_completed_at__",
+                        value=completed_at_coalesce_value,
+                    ),
+                    bindparam("job_id", value=job_id),
+                    bindparam("from_admission", value=from_admission),
+                )
             result = session.exec(stmt)
             session.commit()
 

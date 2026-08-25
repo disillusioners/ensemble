@@ -60,7 +60,7 @@ from .mcp import warmup_pool as _warmup_pool_module
 from .mcp.config import McpStdioConfig
 from .opencode import OpenCodeSessionRegistry, create_opencode_session_repository
 
-from .repositories.instance.repository import get_agent_name
+from .repositories.instance.repository import emit_cascade_lineage_boot_log, get_agent_name
 from .repositories.instance.models import Instance, InstanceStatus
 from .repositories.message_queue.models import MessageQueue, MessageStatus, MessageType
 from .repositories.task.models import Task, TaskType, TaskStatus
@@ -697,6 +697,13 @@ class InstanceManager:
         # NEW: Session repository for session management
         # Must be created before SourceRegistry for scheduler session mode
         self._instance_repository = create_instance_repository(engine=self._engine, create_tables=False)
+
+        # P1 (phase1-plan.md §T1 acceptance, C4): one-time INFO log
+        # naming the resolved cascade-lineage mode. Default 'permanent'
+        # (instances.parent_id); 'hierarchy' falls back to legacy
+        # instance_hierarchy. Restart-required to flip. See FT-004 for
+        # the kill-switch removal ticket.
+        emit_cascade_lineage_boot_log()
 
         # NEW: Pluggable message sources system
         self.source_registry = SourceRegistry(
@@ -6826,6 +6833,24 @@ class InstanceManager:
                     )
                     return None
 
+                # Phase 1 / T8 (e) dead-parent guard (plan
+                # ``.agents/shared/planning/pause-resume-terminate-tree-fix/``).
+                # Read the parent Instance row ONCE so all three
+                # sub-shapes can consult it without re-querying. The
+                # predicate mirrors the T8 (a) enqueue seam check
+                # exactly (``parent is None or parent.status ==
+                # TERMINATED``). Best-effort: a missing parent row
+                # (``None``) is treated as dead-parent (the d14cbde5-
+                # class signature). The variable is bound to the
+                # enclosing ``_reconcile_deferred_report`` scope so
+                # the sub-shape (b) branches can consult it.
+                from .repositories.instance.models import InstanceStatus
+                parent_row = session.get(Instance, inj.parent_instance_id)
+                db_dead_parent = (
+                    parent_row is None
+                    or parent_row.status == InstanceStatus.TERMINATED.value
+                )
+
                 # Sub-shape (a): marker-first Site 1.
                 if inj.report_message_id is None:
                     # Fetch the child's last assistant content
@@ -6869,6 +6894,40 @@ class InstanceManager:
                     # Sub-shape (b) — message is gone (very unusual;
                     # could happen after a manual DB cleanup). Re-
                     # create the message row + create the task.
+                    if db_dead_parent:
+                        # Phase 1 / T8 (e) dead-parent guard. Mirror of
+                        # the T8 (a) enqueue seam — recreate the
+                        # message row but mark it FAILED; skip the
+                        # PROCESS_REPORT Task INSERT (would be
+                        # permanently unclaimable, pause gate).
+                        session.add(
+                            MessageQueue(
+                                message_id=report_message_id,
+                                instance_id=inj.parent_instance_id,
+                                content=inj.content or "[Reconstructed report]",
+                                source=(
+                                    f"internal_report:"
+                                    f"{child_instance_id}:{child_message_id}"
+                                ),
+                                type=MessageType.COMPLETION_REPORT.value,
+                                status=MessageStatus.FAILED.value,
+                                priority=0,
+                                enqueued_at=datetime.now(timezone.utc),
+                            )
+                        )
+                        logger.info(
+                            f"[{source}] reconcile (sub-shape b, message-only): "
+                            f"dead-parent skip — recreated message marked "
+                            f"FAILED, no PROCESS_REPORT Task created. parent="
+                            f"{inj.parent_instance_id[:8]}..., "
+                            f"parent_status={parent_row.status if parent_row else 'missing'}, "
+                            f"child={child_instance_id[:8]}..."
+                        )
+                        session.commit()
+                        return {
+                            "shape": "dead_parent_skip",
+                            "report_message_id": report_message_id,
+                        }
                     session.add(
                         MessageQueue(
                             message_id=report_message_id,
@@ -6913,6 +6972,36 @@ class InstanceManager:
 
                 if existing_task is None:
                     # Sub-shape (b) — message exists, task missing.
+                    if db_dead_parent:
+                        # Phase 1 / T8 (e) dead-parent guard — mirror
+                        # of T8 (a). The existing message row is left
+                        # untouched (already in the DB); no Task row
+                        # is created (would be permanently
+                        # unclaimable, pause gate). The injection row
+                        # is the row this seam OWNS — flip its state
+                        # to the dead-letter sentinel so downstream
+                        # Lane-3/4 readers skip it.
+                        session.execute(
+                            sa_update(ReportInjection)
+                            .where(ReportInjection.injection_id == injection_id)
+                            .values(
+                                state=ReportInjectionState.FAILED.value,  # dead-letter sentinel
+                            )
+                        )
+                        logger.info(
+                            f"[{source}] reconcile (sub-shape b, task-only): "
+                            f"dead-parent skip — message already in DB, "
+                            f"no PROCESS_REPORT Task created, injection "
+                            f"row marked state=failed. parent="
+                            f"{inj.parent_instance_id[:8]}..., "
+                            f"parent_status={parent_row.status if parent_row else 'missing'}, "
+                            f"child={child_instance_id[:8]}..."
+                        )
+                        session.commit()
+                        return {
+                            "shape": "dead_parent_skip",
+                            "report_message_id": report_message_id,
+                        }
                     session.add(
                         Task(
                             task_type=TaskType.PROCESS_REPORT.value,
@@ -7086,61 +7175,158 @@ class InstanceManager:
            handle — a fresh INSERT would violate the
            obligation-triple partial unique index.
 
+        Phase 1 / T8 (e) dead-parent guard (plan
+        ``.agents/shared/planning/pause-resume-terminate-tree-fix/``):
+        the same dead-parent check applied at the enqueue seam
+        (``child_reports.py`` T8 (a)) is also applied here. The
+        recover-from-DEFERRED path is a secondary seam — a
+        recovered marker that transitions a deferred injection to
+        PENDING and then tries to mint a fresh ``PROCESS_REPORT``
+        Task is structurally identical to the natural enqueue
+        path. If the parent is missing or TERMINATED at recovery
+        time, the freshly-minted Task would be permanently
+        unclaimable (pause gate, plan §R8). So:
+
+          * ``MessageQueue`` row INSERTED but immediately marked
+            ``MessageStatus.FAILED.value`` (audit + payload
+            retention, mirror of T8 (a) Axis 2 = 2a).
+          * ``PROCESS_REPORT`` ``Task`` row SKIPPED.
+          * ``ReportInjection`` row's ``report_message_id`` is
+            still updated in-place so the obligation-triple
+            consistency is preserved (the row references the now-
+            failed message).
+          * The injection row's ``state`` is transitioned to a
+            dead-letter terminal marker via UPDATE — the
+            ``ReportInjectionState.FAILED`` sentinel (INJECTED /
+            TASK_DELIVERED would falsely signal delivery; see the
+            enum member comment in models.py, plan §T8 (b)).
+          * Returns ``{"shape": "dead_parent_skip", ...}`` so the
+            caller suppresses re-entry (the parent cascade path
+            is invalid for a dead parent).
+
         Returns:
             Summary dict with ``shape`` and ``report_message_id``
             (the caller passes this through the structured log).
         """
+        from .repositories.instance.models import InstanceStatus
         from .repositories.report_injection.models import ReportInjection
+
+        # T8 (e) dead-parent guard — read the parent Instance row
+        # (best-effort: if the row is missing the SELECT returns
+        # None which matches the predicate). The check uses the
+        # same predicate as the enqueue seam (T8 (a)):
+        # ``parent is None or parent.status == TERMINATED``.
+        parent_row = session.get(Instance, inj.parent_instance_id)
+        db_dead_parent = (
+            parent_row is None
+            or parent_row.status == InstanceStatus.TERMINATED.value
+        )
 
         report_message_id = str(uuid.uuid4())
         # 1. completion_report MessageQueue row
-        session.add(
-            MessageQueue(
-                message_id=report_message_id,
-                instance_id=inj.parent_instance_id,
-                content=content,
-                source=(
-                    f"internal_report:"
-                    f"{child_instance_id}:{child_message_id}"
-                ),
-                type=MessageType.COMPLETION_REPORT.value,
-                status=MessageStatus.READY.value,
-                priority=0,
-                enqueued_at=datetime.now(timezone.utc),
+        if db_dead_parent:
+            # Mark the message row FAILED atomically with the
+            # injection UPDATE so the failure state survives the
+            # commit. The row is RETAINED (plan §Axis 2 = 2a)
+            # but its status reflects non-delivery honestly.
+            session.add(
+                MessageQueue(
+                    message_id=report_message_id,
+                    instance_id=inj.parent_instance_id,
+                    content=content,
+                    source=(
+                        f"internal_report:"
+                        f"{child_instance_id}:{child_message_id}"
+                    ),
+                    type=MessageType.COMPLETION_REPORT.value,
+                    status=MessageStatus.FAILED.value,
+                    priority=0,
+                    enqueued_at=datetime.now(timezone.utc),
+                )
             )
-        )
-        # 2. PROCESS_REPORT Task row
-        session.add(
-            Task(
-                task_type=TaskType.PROCESS_REPORT.value,
-                instance_id=inj.parent_instance_id,
-                message_id=report_message_id,
-                status=TaskStatus.PENDING.value,
-                created_at=datetime.now(timezone.utc),
+        else:
+            session.add(
+                MessageQueue(
+                    message_id=report_message_id,
+                    instance_id=inj.parent_instance_id,
+                    content=content,
+                    source=(
+                        f"internal_report:"
+                        f"{child_instance_id}:{child_message_id}"
+                    ),
+                    type=MessageType.COMPLETION_REPORT.value,
+                    status=MessageStatus.READY.value,
+                    priority=0,
+                    enqueued_at=datetime.now(timezone.utc),
+                )
             )
-        )
+
+        # 2. PROCESS_REPORT Task row — T8 (e) skip when dead-parent
+        if not db_dead_parent:
+            session.add(
+                Task(
+                    task_type=TaskType.PROCESS_REPORT.value,
+                    instance_id=inj.parent_instance_id,
+                    message_id=report_message_id,
+                    status=TaskStatus.PENDING.value,
+                    created_at=datetime.now(timezone.utc),
+                )
+            )
+
         # 3. UPDATE injection row IN-PLACE — backfill the
         #    artifact (NOT a fresh INSERT — that would violate
         #    the obligation-triple partial unique index).
-        session.execute(
-            sa_update(ReportInjection)
-            .where(ReportInjection.injection_id == injection_id)
-            .values(
-                report_message_id=report_message_id,
-                content=content,
+        if db_dead_parent:
+            # T8 (e) dead-parent: also flip the injection row's
+            # state to the dead-letter sentinel so downstream
+            # Lane-3/4 readers skip it on the next sweep. The
+            # report_message_id is still backfilled for obligation-
+            # triple consistency.
+            session.execute(
+                sa_update(ReportInjection)
+                .where(ReportInjection.injection_id == injection_id)
+                .values(
+                    report_message_id=report_message_id,
+                    content=content,
+                    state=ReportInjectionState.FAILED.value,  # dead-letter sentinel
+                )
             )
-        )
+            logger.info(
+                f"[{source}] reconcile (sub-shape a, NULL): "
+                f"dead-parent skip — message marked FAILED, no "
+                f"PROCESS_REPORT Task created, injection row "
+                f"marked state=failed. parent="
+                f"{inj.parent_instance_id[:8] if inj.parent_instance_id else '?'}..., "
+                f"parent_status={parent_row.status if parent_row else 'missing'}, "
+                f"report_message_id={report_message_id}, "
+                f"injection_id={injection_id[:8]}..."
+            )
+        else:
+            session.execute(
+                sa_update(ReportInjection)
+                .where(ReportInjection.injection_id == injection_id)
+                .values(
+                    report_message_id=report_message_id,
+                    content=content,
+                )
+            )
+            logger.info(
+                f"[{source}] reconcile (sub-shape a, NULL): "
+                f"created message+task+backfill injection "
+                f"parent={inj.parent_instance_id[:8]}..., "
+                f"child={child_instance_id[:8]}..."
+            )
+
         # The session_scope context manager rolls back on
         # ``close()`` — without an explicit commit the
         # message + task + UPDATE are all lost. Single commit
         # covers all three writes atomically.
         session.commit()
-        logger.info(
-            f"[{source}] reconcile (sub-shape a, NULL): "
-            f"created message+task+backfill injection "
-            f"parent={inj.parent_instance_id[:8]}..., "
-            f"child={child_instance_id[:8]}..."
-        )
+        if db_dead_parent:
+            return {
+                "shape": "dead_parent_skip",
+                "report_message_id": report_message_id,
+            }
         return {
             "shape": "null_marker_first",
             "report_message_id": report_message_id,
@@ -7220,6 +7406,29 @@ class InstanceManager:
                     )
                     return None
 
+                # F2 fix: dead-parent guard in the ASYNC variant.
+                # The sync ``_reconcile_deferred_report`` reads the
+                # parent Instance row ONCE and consults
+                # ``db_dead_parent`` to short-circuit sub-shape (b)/(c)
+                # into the ``dead_parent_skip`` shape instead of
+                # recreating PENDING artefacts. Pre-F2, the async
+                # variant recreated ``MessageStatus.READY`` message
+                # rows + INSERTed PENDING ``process_report`` Tasks
+                # unconditionally — a dead parent reached via the
+                # router re-created the permanently-unclaimable
+                # PENDING row (the B4-tail livelock class, exactly).
+                # Read the parent row HERE so the sub-shape (b) and
+                # (c) branches below can consult it; the predicate
+                # mirrors the sync sibling + the T8 (a) enqueue seam
+                # exactly (``parent is None or parent.status ==
+                # TERMINATED``).
+                from .repositories.instance.models import Instance, InstanceStatus
+                parent_row = session.get(Instance, inj.parent_instance_id)
+                db_dead_parent = (
+                    parent_row is None
+                    or parent_row.status == InstanceStatus.TERMINATED.value
+                )
+
                 # Sub-shape (a): marker-first Site 1.
                 if inj.report_message_id is None:
                     # Await directly — do NOT use
@@ -7254,6 +7463,40 @@ class InstanceManager:
                     # Sub-shape (b) — message is gone (very unusual;
                     # could happen after a manual DB cleanup).
                     # Re-create the message row + create the task.
+                    if db_dead_parent:
+                        # F2: dead-parent skip — mirror of the sync
+                        # sibling. Recreate the message row but mark
+                        # it FAILED; skip the PROCESS_REPORT Task
+                        # INSERT (would be permanently unclaimable,
+                        # pause gate, plan §R8).
+                        session.add(
+                            MessageQueue(
+                                message_id=report_message_id,
+                                instance_id=inj.parent_instance_id,
+                                content=inj.content or "[Reconstructed report]",
+                                source=(
+                                    f"internal_report:"
+                                    f"{child_instance_id}:{child_message_id}"
+                                ),
+                                type=MessageType.COMPLETION_REPORT.value,
+                                status=MessageStatus.FAILED.value,
+                                priority=0,
+                                enqueued_at=datetime.now(timezone.utc),
+                            )
+                        )
+                        logger.info(
+                            f"[{source}] reconcile (sub-shape b, message-only): "
+                            f"dead-parent skip — recreated message marked "
+                            f"FAILED, no PROCESS_REPORT Task created. parent="
+                            f"{inj.parent_instance_id[:8]}..., "
+                            f"parent_status={parent_row.status if parent_row else 'missing'}, "
+                            f"child={child_instance_id[:8]}..."
+                        )
+                        session.commit()
+                        return {
+                            "shape": "dead_parent_skip",
+                            "report_message_id": report_message_id,
+                        }
                     session.add(
                         MessageQueue(
                             message_id=report_message_id,
@@ -7298,6 +7541,36 @@ class InstanceManager:
 
                 if existing_task is None:
                     # Sub-shape (b) — message exists, task missing.
+                    if db_dead_parent:
+                        # F2: dead-parent skip — mirror of the sync
+                        # sibling + T8 (a). The existing message row
+                        # is left untouched (already in the DB); no
+                        # Task row is created (would be permanently
+                        # unclaimable, pause gate). The injection row
+                        # is the row this seam OWNS — flip its state
+                        # to the dead-letter sentinel so downstream
+                        # Lane-3/4 readers skip it.
+                        session.execute(
+                            sa_update(ReportInjection)
+                            .where(ReportInjection.injection_id == injection_id)
+                            .values(
+                                state=ReportInjectionState.FAILED.value,  # dead-letter sentinel
+                            )
+                        )
+                        logger.info(
+                            f"[{source}] reconcile (sub-shape b, task-only): "
+                            f"dead-parent skip — message already in DB, "
+                            f"no PROCESS_REPORT Task created, injection "
+                            f"row marked state=failed. parent="
+                            f"{inj.parent_instance_id[:8]}..., "
+                            f"parent_status={parent_row.status if parent_row else 'missing'}, "
+                            f"child={child_instance_id[:8]}..."
+                        )
+                        session.commit()
+                        return {
+                            "shape": "dead_parent_skip",
+                            "report_message_id": report_message_id,
+                        }
                     session.add(
                         Task(
                             task_type=TaskType.PROCESS_REPORT.value,
@@ -7669,6 +7942,7 @@ class InstanceManager:
         instance_id: str,
         *,
         suspension_reason: str | None = None,
+        cascade_to_root: bool = True,
     ) -> dict:
         """Pause an instance and cascade to all children (soft pause).
 
@@ -7681,6 +7955,16 @@ class InstanceManager:
             suspension_reason: Optional reason persisted on suspended task
                 turns. ``None`` preserves the lifecycle service's existing
                 ``paused_external`` default.
+            cascade_to_root: When ``True`` (default), walk up to the tree
+                root so the WHOLE tree pauses — the long-standing behavior
+                used by ``/pause`` and the 5 internal callers
+                (``instance_messaging.py:1119, :3748``,
+                ``watchover_service.py:1004, :1470``, and this manager
+                facade). When ``False``, pause only the target subtree
+                rooted at ``instance_id`` — used by ``/stop``. Both
+                branches flow through the lifecycle service's
+                ``get_cascade_tree_ids`` wrapper so P1's
+                ``ENSEMBLE_CASCADE_LINEAGE`` kill-switch is honored.
 
         Returns:
             Dict with:
@@ -7690,6 +7974,7 @@ class InstanceManager:
         return await self._lifecycle_service.pause_instance_cascade(
             instance_id,
             suspension_reason=suspension_reason,
+            cascade_to_root=cascade_to_root,
         )
 
     async def resume_instance_cascade(self, instance_id: str) -> dict:

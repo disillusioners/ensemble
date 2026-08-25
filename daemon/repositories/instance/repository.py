@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import warnings
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,6 +37,71 @@ _MAX_TRAVERSAL_DEPTH = 256
 # Prevents pathological trees (huge fan-out, accidental cycles) from blowing
 # up response size / DB latency. Triggers a truncation warning when hit.
 MAX_DESCENDANTS_PER_PAGE = 1000
+
+# Kill-switch wrapper state (P1, AF1 governance; removal ticket FT-004).
+# When ``ENSEMBLE_CASCADE_LINEAGE=permanent`` (default), cascades enumerate
+# the permanent lineage via ``get_tree_ids_permanent`` — sees descendants
+# regardless of churn (completed / errored / revived mid-cascade). When
+# ``hierarchy``, cascades fall back to the legacy ``instance_hierarchy``
+# working set — useful only as a deploy-window escape hatch if P1's
+# permanent enumeration surfaces a regression in production. Unknown
+# values fall back to ``permanent`` with a WARN. The resolved mode is
+# cached on first access so the wrapper is hot-path safe; ``boot_log_emitted``
+# is set once the manager logs the resolved mode at startup.
+_CASCADE_LINEAGE_ENV = "ENSEMBLE_CASCADE_LINEAGE"
+_CASCADE_LINEAGE_MODE: str | None = None
+_CASCADE_LINEAGE_BOOT_LOG_EMITTED: bool = False
+
+
+def _resolve_cascade_lineage_mode() -> str:
+    """Resolve and cache the cascade-lineage mode from the kill-switch env.
+
+    Returns:
+        ``"permanent"`` (default) or ``"hierarchy"``. Unknown values fall
+        back to ``"permanent"`` with a one-shot WARN (admin-tool-only
+        escalation path; see FT-004 removal ticket).
+    """
+    global _CASCADE_LINEAGE_MODE
+    if _CASCADE_LINEAGE_MODE is not None:
+        return _CASCADE_LINEAGE_MODE
+    raw = os.environ.get(_CASCADE_LINEAGE_ENV, "permanent").strip().lower()
+    if raw in ("permanent", "hierarchy"):
+        _CASCADE_LINEAGE_MODE = raw
+    else:
+        logger.warning(
+            "%s=%r is not a recognized cascade-lineage mode; "
+            "falling back to 'permanent'. Valid values: 'permanent', "
+            "'hierarchy'. See FT-004 for the kill-switch removal ticket.",
+            _CASCADE_LINEAGE_ENV,
+            raw,
+        )
+        _CASCADE_LINEAGE_MODE = "permanent"
+    return _CASCADE_LINEAGE_MODE
+
+
+def emit_cascade_lineage_boot_log() -> None:
+    """Emit the one-time boot-time INFO log naming the resolved mode.
+
+    Called by ``InstanceManager.__init__`` after the instance repository
+    is wired. Restart-required semantics (C4) — the kill-switch env is
+    read on first ``get_cascade_tree_ids`` call, not on every call; if
+    an operator flips the env mid-flight they need to restart for the
+    flip to take effect. FT-004 documents the removal criterion (~+30
+    days post-soak + V1/O1 verification outcomes).
+    """
+    global _CASCADE_LINEAGE_BOOT_LOG_EMITTED
+    if _CASCADE_LINEAGE_BOOT_LOG_EMITTED:
+        return
+    _CASCADE_LINEAGE_BOOT_LOG_EMITTED = True
+    mode = _resolve_cascade_lineage_mode()
+    logger.info(
+        "Cascade lineage mode resolved: %s (env %s=%s); "
+        "permanent enumeration uses instances.parent_id, hierarchy "
+        "fallback uses instance_hierarchy. Restart required to flip.",
+        mode,
+        _CASCADE_LINEAGE_ENV,
+        os.environ.get(_CASCADE_LINEAGE_ENV, "<unset>"),
+    )
 
 
 def get_agent_name(agent_dir: str) -> str:
@@ -312,19 +378,38 @@ class SQLModelInstanceRepository:
 
     def get_tree_ids(self, root_id: str) -> list[str]:
         """Get all instance IDs in the tree starting from root_id (BFS).
-        
+
+        Walks the transient ``instance_hierarchy`` working set. NOTE: this
+        enumeration is **transient by construction** — hierarchy rows are
+        deleted on child completion (``child_reports.py``, ``error_reporting.py``)
+        and on ``_terminate_instance_db_sync`` (``instance_lifecycle.py:3331``),
+        and they are NEVER re-inserted on revive (``instance_messaging.py:1510-1530``
+        transitions terminal→RUNNING without writing to ``instance_hierarchy``).
+        As a result, this helper silently misses descendants that completed,
+        errored, or were revived during churn — which is the cause of B1 (pause
+        does not cascade DOWN) and B4 (terminate-root misses live children).
+
+        For cascades that must see the **complete permanent lineage** regardless
+        of churn, use :meth:`get_tree_ids_permanent` (or, in production, the
+        kill-switch wrapper :meth:`get_cascade_tree_ids`). This helper is
+        retained during staged deprecation (leader D5; see plan
+        ``phase1-plan.md`` AF1 resolution + removal ticket FT-004); the
+        "active working set" framing in earlier docstrings was incorrect.
+
         Args:
             root_id: Root instance ID to start traversal.
-            
+
         Returns:
-            List of instance IDs including root_id and all descendants.
+            List of instance IDs including root_id and all descendants still
+            represented in ``instance_hierarchy``. Empty when the root is not
+            in the DB.
         """
         with SQLModelSession(self.engine) as db_session:
             # Check root exists
             root = db_session.get(Instance, root_id)
             if root is None:
                 return []
-            
+
             result = [root_id]
             queue = [root_id]
             for _ in range(_MAX_TRAVERSAL_DEPTH):
@@ -339,6 +424,105 @@ class SQLModelInstanceRepository:
                         result.append(child_id)
                         queue.append(child_id)
             return result
+
+    def get_tree_ids_permanent(self, root_id: str) -> list[str]:
+        """Complete permanent-lineage tree enumeration (root + ALL descendants).
+
+        Walks ``instances.parent_id`` (permanent — survives completion, error,
+        terminate, revive) rather than the ``instance_hierarchy`` working set
+        (rows deleted at child_reports.py:922 / error_reporting.py:233 /
+        child_reports.py:2872 / instance_lifecycle.py:3331, plus the 5th
+        site ``_terminate_instance_db_sync`` at
+        ``instance_lifecycle.py:3324-3333``). Use for ANY cascade that must
+        see the whole tree regardless of churn.
+
+        NO status filter by design — callers classify AFTER enumeration
+        (pause skips PAUSED/TERMINAL at instance_lifecycle.py:2094-2102;
+        terminate restructures to enumerate-first per T3).
+
+        Traversal cap: ``_MAX_TRAVERSAL_DEPTH = 256`` (``repository.py:33``).
+        Trees at or beyond the cap are **WARN-logged at depth 256** (one-time
+        ``logger.warning`` emitted when the ``for...else`` clause fires with
+        a non-empty ``frontier``); the visited set itself is the truthful
+        result. Callers that suspect deeper trees must raise the cap
+        (rare; admin tool only). Cycle self-parenting is guarded by the
+        depth cap + visited set.
+        """
+        with SQLModelSession(self.engine) as db_session:
+            # Root must exist in the permanent record.
+            root = db_session.get(Instance, root_id)
+            if root is None:
+                return []
+
+            visited: list[str] = [root_id]
+            seen: set[str] = {root_id}
+            frontier: list[str] = [root_id]
+            for _ in range(_MAX_TRAVERSAL_DEPTH):
+                if not frontier:
+                    break
+                next_frontier: list[str] = []
+                for current_id in frontier:
+                    rows = db_session.exec(
+                        select(Instance.instance_id).where(
+                            Instance.parent_id == current_id
+                        )
+                    ).all()
+                    for child_id in rows:
+                        if child_id not in seen:
+                            seen.add(child_id)
+                            visited.append(child_id)
+                            next_frontier.append(child_id)
+                frontier = next_frontier
+            else:
+                # `for...else` fires only when the loop ran to its cap
+                # without breaking. If `frontier` is still non-empty,
+                # the tree was truncated — log a one-time warning so the
+                # operator notices (admin-tool-only escalation path;
+                # production trees are well under 256).
+                if frontier:
+                    logger.warning(
+                        "get_tree_ids_permanent(%r): traversal depth cap "
+                        "_MAX_TRAVERSAL_DEPTH=%d reached with %d unvisited "
+                        "frontier nodes; tree truncated. Admin tool only — "
+                        "raise the cap if your tree legitimately exceeds it.",
+                        root_id,
+                        _MAX_TRAVERSAL_DEPTH,
+                        len(frontier),
+                    )
+            return visited
+
+    def get_cascade_tree_ids(self, root_id: str) -> list[str]:
+        """Deploy-window escape hatch — pick the cascade-lineage source.
+
+        All cascade call sites (pause, terminate, hard-delete snapshot,
+        resume, maintenance pin-protection) call THIS method instead of
+        ``get_tree_ids`` directly so the operator can flip between
+        permanent lineage and the legacy ``instance_hierarchy`` working
+        set without a code revert.
+
+        Mode is read from the ``ENSEMBLE_CASCADE_LINEAGE`` env var
+        (default ``permanent``); see :func:`_resolve_cascade_lineage_mode`
+        for the full resolution rules and :func:`emit_cascade_lineage_boot_log`
+        for the one-time boot-time INFO log. **Restart-required semantics**
+        (C4): the env is cached on first call, so a mid-flight flip does
+        NOT take effect until the daemon restarts. Flipping after churn
+        re-exposes the B1/B4 defects (pause does not cascade DOWN to
+        churned descendants; terminate-root misses live children).
+
+        Removal criterion: ~+30 days post-soak + V1/O1 verification
+        outcomes (ticket **FT-004**, filed in ``decisions.md:46``).
+
+        Args:
+            root_id: Root instance ID to start traversal.
+
+        Returns:
+            List of instance IDs — see :meth:`get_tree_ids_permanent`
+            (``permanent`` mode) or :meth:`get_tree_ids` (``hierarchy`` mode).
+        """
+        mode = _resolve_cascade_lineage_mode()
+        if mode == "hierarchy":
+            return self.get_tree_ids(root_id)
+        return self.get_tree_ids_permanent(root_id)
 
     def get_ancestor_ids(self, instance_id: str) -> list[str]:
         """Get all ancestor instance IDs (parent, grandparent, ..., up to root).

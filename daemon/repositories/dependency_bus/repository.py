@@ -298,6 +298,134 @@ class DependencyWatcherRepository:
             )
             return list(session.exec(stmt))
 
+    def fetch_pending_for_child_instance(
+        self, child_instance_id: str
+    ) -> list[DependencyWatcher]:
+        """Return PENDING watchers registered on a child instance.
+
+        Phase 2 (pause-resume-terminate-tree-fix, task 2.2). Terminate-side
+        fire primitive: matches watchers whose
+        ``follow_up_payload.metadata.child_id == child_instance_id``
+        across EVERY target — the terminated child may have multiple
+        waiting parents, none of which the caller knows up front.
+
+        Mirrors :meth:`fetch_pending_for_target_and_child`'s matching
+        strategy (in-memory filter over the PENDING set; the
+        ``watcher_metadata`` JSONB alternative is driver-dependent by
+        design, and ``watch()`` writes no ``watcher_metadata`` — the
+        ``child_id`` key lives only in the serialized FollowUp payload).
+        The initial scan is the state-only PENDING filter (same shape
+        as :meth:`fetch_all_pending`): terminate events are rare and
+        the global PENDING set is bounded (one row per live parent↔child
+        registration), so a full PENDING scan filtered in memory is the
+        canonical driver-neutral path — never a hot-path query.
+
+        The matched rows are returned as full :class:`DependencyWatcher`
+        instances so the caller can pass each ``watch_id`` to
+        :meth:`transition_state` and each ``source_task_id`` to the
+        bus's per-task lock.
+
+        Args:
+            child_instance_id: The terminated child instance id to
+                match against ``follow_up_payload``'s
+                ``metadata.child_id`` field.
+
+        Returns:
+            List of PENDING :class:`DependencyWatcher` rows whose
+            payload's ``metadata.child_id == child_instance_id``.
+            Empty list if none match.
+        """
+        with Session(self.engine) as session:
+            stmt = select(DependencyWatcher).where(
+                DependencyWatcher.state == _PENDING_STATE
+            )
+            rows = list(session.exec(stmt))
+            matched: list[DependencyWatcher] = []
+            for row in rows:
+                payload = row.follow_up_payload
+                if not isinstance(payload, dict):
+                    continue
+                meta = payload.get("metadata")
+                if not isinstance(meta, dict):
+                    continue
+                if meta.get("child_id") == child_instance_id:
+                    matched.append(row)
+            return matched
+
+    def fetch_child_outcome_for_fired(
+        self, child_instance_id: str
+    ) -> str | None:
+        """Return the ``child_outcome`` metadata value for a child's FIRED rows.
+
+        Phase 2 (pause-resume-terminate-tree-fix, task 2.13 — W4).
+        Surfaces the additive outcome marker that
+        :meth:`daemon.services.dependency_bus.DependencyBus.fire_for_terminated_target`
+        stamps into fired FollowUps so the child-completion path can
+        copy it into the ``report_injection`` payload the parent LLM
+        reads.
+
+        Matching mirrors :meth:`fetch_pending_for_child_instance`
+        (in-memory filter over the FIRED set by
+        ``follow_up_payload.metadata.child_id``). Best-effort by
+        design: the compact hook may DELETE old stamped rows 60s
+        after delivery — a missing row simply means no marker (the
+        report content still delivers; the marker is additive).
+
+        Args:
+            child_instance_id: The child instance id to look up.
+
+        Returns:
+            A ``child_outcome`` metadata value found on a FIRED row
+            for the child (e.g. ``"terminated"``), or ``None`` when
+            no FIRED row carries the marker.
+        """
+        fired_state = DependencyWatcherState.FIRED.value
+        with Session(self.engine) as session:
+            stmt = select(DependencyWatcher).where(
+                DependencyWatcher.state == fired_state
+            )
+            for row in session.exec(stmt):
+                payload = row.follow_up_payload
+                if not isinstance(payload, dict):
+                    continue
+                meta = payload.get("metadata")
+                if not isinstance(meta, dict):
+                    continue
+                if meta.get("child_id") != child_instance_id:
+                    continue
+                value = meta.get("child_outcome")
+                if isinstance(value, str) and value:
+                    return value
+            return None
+
+    def update_follow_up_payload(self, watch_id: str, payload: dict) -> bool:
+        """Overwrite a watcher row's ``follow_up_payload`` (fire-time enrichment).
+
+        Phase 2 (task 2.2/2.13): ``fire_for_terminated_target`` stamps
+        the additive ``child_outcome`` marker into the FollowUp it
+        returns AND persists the enriched payload back onto the FIRED
+        row so downstream lookups
+        (:meth:`fetch_child_outcome_for_fired`) can surface it to the
+        parent-LLM-visible report payload. The base keys are copied
+        verbatim — enrichment is additive only.
+
+        Args:
+            watch_id: The watcher row to update.
+            payload: The full enriched FollowUp payload dict.
+
+        Returns:
+            ``True`` iff the row was updated.
+        """
+        with Session(self.engine) as session:
+            stmt = (
+                sa_update(DependencyWatcher)
+                .where(DependencyWatcher.watch_id == watch_id)
+                .values(follow_up_payload=payload)
+            )
+            result = session.execute(stmt)
+            session.commit()
+            return bool(result.rowcount)
+
     def count_pending_for_target(self, target_instance_id: str) -> int:
         """Return the PENDING watcher COUNT for a given parent instance id.
 

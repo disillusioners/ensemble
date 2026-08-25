@@ -534,7 +534,12 @@ class TestEmptyTreeFallback:
             }
 
         repo = MagicMock()
-        repo.get_tree_ids = MagicMock(return_value=[])
+        # P1 (phase1-plan.md T4): ``hard_delete_instance`` snapshot
+        # switched from transient ``get_tree_ids`` to the kill-switch
+        # wrapper ``get_cascade_tree_ids``. The wrapper routes to
+        # ``get_tree_ids_permanent`` by default. Empty result still
+        # triggers the single-id fallback downstream.
+        repo.get_cascade_tree_ids = MagicMock(return_value=[])
         repo.hard_delete_tree = MagicMock(side_effect=_fake_hard_delete_tree)
 
         manager = MagicMock()
@@ -576,9 +581,18 @@ class TestEmptyTreeFallback:
 
         result = await svc.hard_delete_instance(instance_id)
 
-        # The repo's get_tree_ids was queried exactly once with the
-        # requested root, and returned the empty list we mocked.
-        repo.get_tree_ids.assert_called_once_with(instance_id)
+        # P1 (phase1-plan.md T4 + T3): the kill-switch wrapper
+        # ``get_cascade_tree_ids`` is invoked TWICE — once from
+        # ``hard_delete_instance``'s snapshot step (T4) and once from
+        # the ``terminate_instance`` cascade (T3's enumerate-first
+        # restructure). Both calls pass the requested root; both
+        # return the empty list we mocked. The fallback still kicks
+        # in: ``hard_delete_tree`` receives ``[instance_id]``.
+        assert repo.get_cascade_tree_ids.call_count == 2, (
+            f"expected 2 get_cascade_tree_ids calls (snapshot + "
+            f"terminate cascade); got {repo.get_cascade_tree_ids.call_count}"
+        )
+        repo.get_cascade_tree_ids.assert_called_with(instance_id)
 
         # The fallback kicked in: hard_delete_tree received [instance_id].
         assert captured["tree_ids"] == [instance_id]
@@ -586,6 +600,200 @@ class TestEmptyTreeFallback:
         assert result["root_instance_id"] == instance_id
         # No checkpointer → 0 threads swept, no error.
         assert result["checkpoint_threads_deleted"] == 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 4b — T4/R7 hard-delete test gap (P1 NEEDS-FIXES W4)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestHardDeleteCompletedDescendantWithDeletedHierarchy:
+    """W4 (governor-council NEEDS-FIXES): a COMPLETED descendant whose
+    ``instance_hierarchy`` rows were deleted (the ``child_reports`` /
+    ``error_reporting`` cleanup sites fire on child completion) MUST
+    still reach ``hard_delete_tree`` when its root is hard-deleted.
+
+    This is the D1 behavior change: pre-P1, the legacy
+    ``get_tree_ids`` walked the ``instance_hierarchy`` working set —
+    so a child whose hierarchy rows were deleted (the common case
+    after a normal child completion) was INVISIBLE to the snapshot
+    and its checkpoint + dependent rows survived the root hard-delete.
+    P1 (phase1-plan T4) switched the snapshot to the permanent
+    ``get_cascade_tree_ids`` wrapper (``get_tree_ids_permanent``)
+    which walks ``instances.parent_id`` (the permanent record,
+    not deleted by completion). ALL descendants now reach
+    ``hard_delete_tree`` — even completed ones — and their
+    checkpoints are swept.
+
+    Seed: root (RUNNING) → child (COMPLETED, hierarchy rows deleted)
+    → grandchild (RUNNING). Drive ``hard_delete_instance(root)``.
+    Assert:
+      * ``hard_delete_tree`` receives ALL three ids (including the
+        COMPLETED child — the D1 behavior change).
+      * The checkpoint sweep iterates over ALL three ids (the
+        completed-descendant checkpoint IS swept).
+    """
+
+    @pytest.mark.asyncio
+    async def test_completed_descendant_with_deleted_hierarchy_reaches_cascade(
+        self, engine, write_guard,
+    ):
+        from daemon.repositories.instance.repository import SQLModelInstanceRepository
+        from daemon.services.instance_lifecycle import InstanceLifecycleService
+
+        # Tree shape: root → child (COMPLETED) → grandchild.
+        # The child's ``instance_hierarchy`` row is DELETED (the
+        # child_reports cleanup site removed it on completion — this is
+        # the canonical D1 seed).
+        root_id = "w4-root"
+        child_id = "w4-child-completed"
+        grandchild_id = "w4-grandchild-live"
+        now = datetime.now(timezone.utc).isoformat()
+        with Session(engine) as s:
+            s.add(Instance(
+                instance_id=root_id, agent_id="developer",
+                agent_dir="/tmp/agents/developer", agent_name="developer",
+                parent_id=None, status="running", version=1,
+                created_at=now, updated_at=now,
+            ))
+            s.add(Instance(
+                instance_id=child_id, agent_id="developer",
+                agent_dir="/tmp/agents/developer", agent_name="developer",
+                parent_id=root_id, status="completed", version=1,
+                created_at=now, updated_at=now,
+                terminal_reason="work_finished_successfully",
+            ))
+            s.add(Instance(
+                instance_id=grandchild_id, agent_id="developer",
+                agent_dir="/tmp/agents/developer", agent_name="developer",
+                parent_id=child_id, status="running", version=1,
+                created_at=now, updated_at=now,
+            ))
+            # Root → child hierarchy row (kept). The child → grandchild
+            # hierarchy row is DELIBERATELY OMITTED — this is the D1 seed
+            # shape (the child_reports cleanup site removed it on
+            # completion of the child's last message).
+            s.add(InstanceHierarchy(
+                parent_id=root_id, child_id=child_id, created_at=now,
+            ))
+            # NOTE: NO InstanceHierarchy(parent_id=child_id, child_id=grandchild_id)
+            s.commit()
+
+        # Real repository for cascade (the permanent-lineage
+        # ``get_cascade_tree_ids`` is the D1-fix code path).
+        repo = SQLModelInstanceRepository(engine)
+
+        # Spy the ``hard_delete_tree`` calls — the assertion surface
+        # for the W4 contract.
+        hard_delete_called_with: list[list[str]] = []
+        original_hard_delete_tree = repo.hard_delete_tree
+
+        def spy_hard_delete_tree(tree_ids):
+            hard_delete_called_with.append(list(tree_ids))
+            return original_hard_delete_tree(tree_ids)
+
+        repo.hard_delete_tree = spy_hard_delete_tree
+
+        # Build a manager whose terminate + hard_delete wire to the real
+        # service. The checkpointer is a mock with an ``adelete_thread``
+        # spy — that's how the checkpoint sweep assertion is wired.
+        manager = MagicMock()
+        manager._instance_repository = repo
+        manager.engine = engine
+        manager.write_guard = write_guard
+        manager._graph_tasks = {}
+        manager._request_registry = MagicMock()
+        manager._live_hub = MagicMock()
+        manager._live_hub.cleanup_instance = AsyncMock()
+        manager._live_hub.stream_status_change = AsyncMock()
+        manager._watcher_repo = MagicMock()
+        manager._watcher_repo.remove_all_watches_for_instance = MagicMock(
+            return_value=0,
+        )
+        manager._mcp_service = None
+        manager.instances = {}
+        manager._queue_repository = MagicMock()
+        manager._queue_repository.delete_by_instance = MagicMock(return_value=0)
+        manager._job_queue_mgmt_service = MagicMock()
+        manager._job_queue_mgmt_service._dispatch_bus = MagicMock()
+        manager._job_queue_mgmt_service._dispatch_bus.notify_all = MagicMock()
+        manager._job_queue_mgmt_service.find_jobs_by_instance = MagicMock(
+            return_value=[]
+        )
+
+        # Checkpointer with a spy on adelete_thread — this is the
+        # W4 D1 assertion surface.
+        adelete_calls: list[str] = []
+        manager._checkpointer = MagicMock()
+        manager._checkpointer.adelete_thread = AsyncMock(
+            side_effect=lambda tid: adelete_calls.append(tid) or None
+        )
+
+        svc = InstanceLifecycleService(
+            manager=manager,
+            cancellation_service=MagicMock(),
+            job_queue_service=MagicMock(
+                _repository=MagicMock(find_jobs_by_instance=MagicMock(return_value=[])),
+                cancel_job=AsyncMock(return_value=True),
+                complete_job=AsyncMock(return_value=None),
+                release_lock_by_instance=AsyncMock(return_value=[]),
+                trigger_next_job_sync=MagicMock(),
+                get_job_by_instance_sync=MagicMock(return_value=None),
+            ),
+        )
+
+        # Drive the REAL hard_delete_instance end-to-end.
+        result = await svc.hard_delete_instance(root_id)
+
+        # W4 assertion 1: ALL three ids reach ``hard_delete_tree``
+        # — INCLUDING the COMPLETED child (whose hierarchy row was
+        # deleted). Pre-D1 the snapshot used the legacy
+        # ``get_tree_ids`` (hierarchy-walking) and missed the child
+        # entirely. This is the load-bearing behavior change.
+        assert len(hard_delete_called_with) == 1, (
+            f"W4 regression: expected exactly one ``hard_delete_tree`` "
+            f"call; got {len(hard_delete_called_with)}"
+        )
+        tree_ids_passed = set(hard_delete_called_with[0])
+        assert tree_ids_passed == {root_id, child_id, grandchild_id}, (
+            f"W4 regression: hard_delete_tree must receive ALL tree ids "
+            f"(D1 behavior change — completed descendant with deleted "
+            f"hierarchy is included via parent_id permanent lineage); "
+            f"got {sorted(tree_ids_passed)}"
+        )
+
+        # W4 assertion 2: the checkpoint sweep iterates over ALL three
+        # ids — the COMPLETED child's checkpoint IS swept (the D1
+        # behavior change). Pre-D1 the completed child's checkpoint
+        # survived root hard-delete (orphan).
+        assert sorted(adelete_calls) == sorted([root_id, child_id, grandchild_id]), (
+            f"W4 regression: checkpoint sweep must iterate ALL tree ids "
+            f"(including the COMPLETED child — D1 behavior change); "
+            f"got adelete_calls={sorted(adelete_calls)}"
+        )
+
+        # Sanity: every dependent row for every tree id is gone.
+        with Session(engine) as s:
+            for iid in (root_id, child_id, grandchild_id):
+                assert s.get(Instance, iid) is None, (
+                    f"instance {iid} should be hard-deleted"
+                )
+                assert _count_where(s, JobWatcher, instance_id=iid) == 0
+                assert _count_where(s, Task, instance_id=iid) == 0
+                assert _count_where(s, Event, instance_id=iid) == 0
+                assert _count_where(s, MessageQueue, instance_id=iid) == 0
+                assert _count_where(s, JobItem, instance_id=iid) == 0
+
+        # Result contract: D1 behavior — completed-descendant
+        # checkpoints are now swept (D1 = "yes" pre-1, "no" pre-fix).
+        assert result["terminated"] is True
+        assert result["deleted"] is True
+        assert result["checkpoint_threads_deleted"] == 3, (
+            f"W4 D1 behavior change: checkpoint sweep must count 3 "
+            f"(root + completed child + live grandchild); got "
+            f"{result['checkpoint_threads_deleted']}"
+        )
+        assert result["checkpoint_errors"] == []
 
 
 # ─────────────────────────────────────────────────────────────────────────────

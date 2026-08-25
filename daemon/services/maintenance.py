@@ -411,8 +411,29 @@ class CheckpointCleanupJob:
 
         Each operation runs independently with its own error handling.
         Failures are logged but do not prevent subsequent operations.
+
+        P1 (phase1-plan.md T6, C11): emits the
+        ``pinned_subtree_terminal_count`` metric once per maintenance
+        tick (sum of terminal descendant counts across every pinned
+        root). Makes the polarity change from transient
+        ``get_tree_ids`` to permanent ``get_cascade_tree_ids`` observable
+        — terminal descendants under pinned roots are now protected from
+        TTL purge, and the operator can verify the new behavior is in
+        effect without diffing the DB.
         """
         logger.info("Starting checkpoint cleanup job")
+
+        # P1 metric emit (C11). Computed once per tick; summed across
+        # pinned roots. Stays a single INFO line so log-asserting tests
+        # can pin the count without scraping the protected-set structure.
+        pinned_terminal_count = self._compute_pinned_subtree_terminal_count()
+        if pinned_terminal_count > 0 or self._ui_prefs_repo is not None:
+            logger.info(
+                "pinned_subtree_terminal_count=%d (sum of terminal "
+                "descendants under pinned roots; P1 polarity change "
+                "now visible)",
+                pinned_terminal_count,
+            )
 
         # Operation A: Cleanup orphaned threads
         await self._cleanup_orphaned_threads()
@@ -427,6 +448,48 @@ class CheckpointCleanupJob:
         await self._prune_per_thread_checkpoints()
 
         logger.info("Checkpoint cleanup job completed")
+
+    def _compute_pinned_subtree_terminal_count(self) -> int:
+        """Sum of terminal descendants across every pinned root.
+
+        P1 (phase1-plan.md T6, C11): the metric operator observes to
+        verify the polarity change is live. Walks the same protected
+        subtree as :meth:`_get_protected_instance_ids` (so the count is
+        consistent with the protection set the cleanup actually applies),
+        then queries each member's status via the instance repo and
+        counts the ones in :data:`TERMINAL_STATUSES`. Returns 0 when
+        ``_ui_prefs_repo`` is not wired (backward-compatible mode).
+
+        One DB read per protected node — bounded by total pinned
+        subtree size (typically small; production trees well under 100
+        nodes). Not a hot path; runs once per maintenance tick.
+        """
+        if self._ui_prefs_repo is None:
+            return 0
+        try:
+            protected = self._get_protected_instance_ids()
+        except Exception:
+            # Mirror ``_get_protected_instance_ids``'s fail-safe: the
+            # exception propagates from cleanup callers, but for the
+            # metric we degrade to 0 so a transient DB hiccup doesn't
+            # mask the polarity-change observation.
+            logger.warning(
+                "_compute_pinned_subtree_terminal_count: "
+                "_get_protected_instance_ids raised; emitting 0",
+                exc_info=True,
+            )
+            return 0
+        terminal_count = 0
+        for iid in protected:
+            try:
+                inst = self._instance_repo.get(iid)
+            except Exception:
+                # Best-effort — a single missing/corrupt row should
+                # not poison the count. Skip and continue.
+                continue
+            if inst is not None and inst.status in TERMINAL_STATUSES:
+                terminal_count += 1
+        return terminal_count
 
     async def _cleanup_orphaned_threads(self) -> None:
         """(A) Delete checkpoint threads with no matching instance.
@@ -766,9 +829,18 @@ class CheckpointCleanupJob:
         its tree root via :meth:`SQLModelInstanceRepository.get_tree_root_id`,
         and the entire subtree under that root (the root itself plus
         every descendant) is collected via
-        :meth:`SQLModelInstanceRepository.get_tree_ids`. This means a
+        :meth:`SQLModelInstanceRepository.get_cascade_tree_ids`. This means a
         pinned child protects all of its siblings + cousins + their
         descendants under the same root.
+
+        P1 (phase1-plan.md T6, R6, C11): enumeration switched from the
+        transient ``get_tree_ids`` to the kill-switch wrapper
+        ``get_cascade_tree_ids``. Polarity change: terminal descendants of
+        a pinned root are now protected (previously the transient set
+        could miss them when their hierarchy rows were deleted, allowing
+        premature TTL purge). Matches user pin intent. Observable via the
+        ``pinned_subtree_terminal_count`` metric emitted from
+        :meth:`execute` so the polarity change is not silent.
 
         Returns an empty ``set`` when ``self._ui_prefs_repo is None``
         (the UI-prefs repo has not been wired) — that is the
@@ -828,12 +900,14 @@ class CheckpointCleanupJob:
                         "was reached; protecting it as its own root",
                         pinned_id,
                     )
-                    protected.update(self._instance_repo.get_tree_ids(pinned_id))
+                    protected.update(
+                        self._instance_repo.get_cascade_tree_ids(pinned_id)
+                    )
                 continue
             roots.add(root_id)
 
         for root_id in roots:
-            subtree = self._instance_repo.get_tree_ids(root_id)
+            subtree = self._instance_repo.get_cascade_tree_ids(root_id)
             protected.update(subtree)
 
         return protected

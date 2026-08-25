@@ -217,7 +217,7 @@ class TestTreeAwarePauseCascade:
 
         # Mock: child1 is the entry point, but root is the tree root
         mock_repo.get_tree_root_id.return_value = root_id
-        mock_repo.get_tree_ids.return_value = [root_id, child1_id, grandchild_id, child2_id]
+        mock_repo.get_cascade_tree_ids.return_value = [root_id, child1_id, grandchild_id, child2_id]
 
         def get_side_effect(instance_id):
             if instance_id == root_id:
@@ -248,6 +248,14 @@ class TestTreeAwarePauseCascade:
         data_ids = {iid for iid, _agent, _wf in pause_call["paused_instances_data"]}
         assert data_ids == {root_id, child1_id, child2_id, grandchild_id}
 
+        # W2 residual (governor-council NEEDS-FIXES): pin the production
+        # enumeration path. Pausing FROM a child still enumerates from
+        # the ROOT via ``get_cascade_tree_ids(root_id)`` (P1
+        # phase1-plan T2); the legacy transient ``get_tree_ids`` must
+        # NOT be called from this code path.
+        mock_repo.get_cascade_tree_ids.assert_called_once_with(root_id)
+        mock_repo.get_tree_ids.assert_not_called()
+
     @pytest.mark.skip(reason="Phase 5: DependencyBus not initialized; pre-existing failure")
     @pytest.mark.asyncio
     async def test_pause_single_instance_no_tree(self, lifecycle_service, mock_repo, mock_registry):
@@ -258,7 +266,7 @@ class TestTreeAwarePauseCascade:
         instance_id = "single-instance"
 
         mock_repo.get_tree_root_id.return_value = instance_id
-        mock_repo.get_tree_ids.return_value = [instance_id]
+        mock_repo.get_cascade_tree_ids.return_value = [instance_id]
         mock_repo.get.return_value = self._make_instance(instance_id, status="running")
 
         result = await lifecycle_service.pause_instance_cascade(instance_id)
@@ -288,7 +296,7 @@ class TestTreeAwarePauseCascade:
         child_id = "child"
 
         mock_repo.get_tree_root_id.return_value = root_id
-        mock_repo.get_tree_ids.return_value = [root_id, child_id]
+        mock_repo.get_cascade_tree_ids.return_value = [root_id, child_id]
         mock_repo.get_ancestor_ids.return_value = []
 
         def get_side_effect(instance_id):
@@ -325,7 +333,7 @@ class TestTreeAwarePauseCascade:
         child3_id = "child3"
 
         mock_repo.get_tree_root_id.return_value = root_id
-        mock_repo.get_tree_ids.return_value = [root_id, child1_id, child2_id, child3_id]
+        mock_repo.get_cascade_tree_ids.return_value = [root_id, child1_id, child2_id, child3_id]
         # Resuming from child2, so ancestors = [root]
         mock_repo.get_ancestor_ids.return_value = [root_id]
 
@@ -365,7 +373,7 @@ class TestTreeAwarePauseCascade:
         leaf_id = "leaf"
 
         mock_repo.get_tree_root_id.return_value = root_id
-        mock_repo.get_tree_ids.return_value = [root_id, l1_id, l2_id, leaf_id]
+        mock_repo.get_cascade_tree_ids.return_value = [root_id, l1_id, l2_id, leaf_id]
         # Leaf's ancestors: [l2, l1, root]
         mock_repo.get_ancestor_ids.return_value = [l2_id, l1_id, root_id]
 
@@ -416,7 +424,7 @@ class TestTreeAwarePauseCascade:
         m1_id, m2_id, m3_id = "m1", "m2", "m3"
 
         mock_repo.get_tree_root_id.return_value = root_id
-        mock_repo.get_tree_ids.return_value = [root_id, l1_id, l2_id, l3_id, m1_id, m2_id, m3_id]
+        mock_repo.get_cascade_tree_ids.return_value = [root_id, l1_id, l2_id, l3_id, m1_id, m2_id, m3_id]
         # m2's ancestors: [l1, root]
         mock_repo.get_ancestor_ids.return_value = [l1_id, root_id]
 
@@ -512,7 +520,7 @@ class TestEdgeCases:
         instance_id = "nonexistent-instance"
 
         mock_repo.get_tree_root_id.return_value = None
-        mock_repo.get_tree_ids.return_value = [instance_id]
+        mock_repo.get_cascade_tree_ids.return_value = [instance_id]
         mock_repo.get.return_value = None
 
         result = await lifecycle_service.pause_instance_cascade(instance_id)
@@ -527,7 +535,7 @@ class TestEdgeCases:
         instance_id = "nonexistent-instance"
 
         mock_repo.get_tree_root_id.return_value = None
-        mock_repo.get_tree_ids.return_value = [instance_id]
+        mock_repo.get_cascade_tree_ids.return_value = [instance_id]
         mock_repo.get_ancestor_ids.return_value = []
         mock_repo.get.return_value = None
 
@@ -537,6 +545,13 @@ class TestEdgeCases:
         assert result["skipped_ids"] == [instance_id]
         assert result["target_id"] == instance_id
         mock_repo.update.assert_not_called()
+
+        # W2 residual: pin the production enumeration path. Root lookup
+        # missed → root_id falls back to instance_id; the cascade still
+        # enumerates via ``get_cascade_tree_ids`` (P1 phase1-plan T5),
+        # never via the legacy transient ``get_tree_ids``.
+        mock_repo.get_cascade_tree_ids.assert_called_once_with(instance_id)
+        mock_repo.get_tree_ids.assert_not_called()
 
     @pytest.mark.skip(reason="Phase 5: DependencyBus not initialized; pre-existing failure")
     @pytest.mark.asyncio
@@ -550,7 +565,7 @@ class TestEdgeCases:
         child2_id = "child2"
 
         mock_repo.get_tree_root_id.return_value = root_id
-        mock_repo.get_tree_ids.return_value = [root_id, child1_id, child2_id]
+        mock_repo.get_cascade_tree_ids.return_value = [root_id, child1_id, child2_id]
 
         def get_side_effect(instance_id):
             if instance_id == root_id:
@@ -598,7 +613,7 @@ class TestEdgeCases:
         child2_id = "child2"
 
         mock_repo.get_tree_root_id.return_value = root_id
-        mock_repo.get_tree_ids.return_value = [root_id, child1_id, child2_id]
+        mock_repo.get_cascade_tree_ids.return_value = [root_id, child1_id, child2_id]
         mock_repo.get_ancestor_ids.return_value = []
 
         def get_side_effect(instance_id):
@@ -639,7 +654,7 @@ class TestEdgeCases:
         paused_child_id = "paused-child"
 
         mock_repo.get_tree_root_id.return_value = root_id
-        mock_repo.get_tree_ids.return_value = [root_id, running_child_id, paused_child_id]
+        mock_repo.get_cascade_tree_ids.return_value = [root_id, running_child_id, paused_child_id]
 
         def get_side_effect(instance_id):
             if instance_id == root_id:
@@ -671,7 +686,7 @@ class TestEdgeCases:
 
         # Single instance is its own root
         mock_repo.get_tree_root_id.return_value = instance_id
-        mock_repo.get_tree_ids.return_value = [instance_id]
+        mock_repo.get_cascade_tree_ids.return_value = [instance_id]
 
         # Pause test
         mock_repo.get.return_value = self._make_instance(instance_id, status="running")
@@ -688,9 +703,19 @@ class TestEdgeCases:
         assert len(pause_call["paused_instances_data"]) == 1
         assert pause_call["paused_instances_data"][0][0] == instance_id
 
+        # W2 residual (pause half): single enumeration via the wrapper
+        # ``get_cascade_tree_ids``; legacy ``get_tree_ids`` never called.
+        mock_repo.get_cascade_tree_ids.assert_called_once_with(instance_id)
+        mock_repo.get_tree_ids.assert_not_called()
+
         # Reset for resume test
         mock_repo.get.return_value = self._make_instance(instance_id, status="paused")
         mock_repo.get_ancestor_ids.return_value = []
+        # W2 residual: the repo is shared across the pause and resume
+        # invocations — reset the enumeration mocks so the resume-half
+        # ``assert_called_once_with`` pin below stays deterministic.
+        mock_repo.get_cascade_tree_ids.reset_mock()
+        mock_repo.get_tree_ids.reset_mock()
         captured["pause_calls"].clear()
         captured["resume_calls"].clear()
 
@@ -707,3 +732,9 @@ class TestEdgeCases:
         assert resume_call["tree_ids"] == [instance_id]
         assert resume_call["is_root_resume"] is True
         assert resume_call["result"].waiting_for_by_instance[instance_id] == 0
+
+        # W2 residual (resume half): after the mid-test reset, the resume
+        # enumeration flows through ``get_cascade_tree_ids`` exactly once;
+        # legacy ``get_tree_ids`` never called.
+        mock_repo.get_cascade_tree_ids.assert_called_once_with(instance_id)
+        mock_repo.get_tree_ids.assert_not_called()

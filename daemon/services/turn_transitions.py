@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from threading import local
 from typing import Any, ClassVar
 
@@ -50,6 +51,16 @@ class _Transition(ABC):
     def run(self, session: Any) -> TransitionResult: ...
 
 class _StatusTransition(_Transition):
+    # ``connection=`` kwarg threaded to ``reconcile_turn_mirror`` (F1
+    # fix): callers that already hold an open transaction (the
+    # ``_pattern_e_dead_letter_dead_parent_process_reports`` sweep
+    # opens ``engine.begin()`` once for the entire batch) must NOT
+    # let ``reconcile_turn_mirror`` open a nested transaction against
+    # the same engine — nested transactions self-deadlock on PostgreSQL
+    # (no ``lock_timeout`` configured) and silently fail on file SQLite
+    # (``OperationalError`` after busy-timeout, swallowed by the
+    # per-row except — mirror reconcile is lost). ``connection=`` is
+    # the canonical seam ``reconcile_turn_mirror`` already supports.
     status_from: ClassVar[str | None] = None
     status_to: ClassVar[str] = ""
     def __init__(self, work_id: str, task_repo: Any = None, instance_id: str | None = None, **_: Any):
@@ -60,9 +71,10 @@ class _StatusTransition(_Transition):
         if old: params["old_status"] = old
         result = session.execute(text(f"UPDATE task SET status = :new_status WHERE {where}"), params)
         return getattr(result, "rowcount", 1)
-    def _reconcile(self):
+    def _reconcile(self, connection: Any | None = None):
+        # See class docstring above for the F1 threading rationale.
         if self.task_repo is not None and hasattr(self.task_repo, "reconcile_turn_mirror"):
-            return self.task_repo.reconcile_turn_mirror(self.work_id)
+            return self.task_repo.reconcile_turn_mirror(self.work_id, connection=connection)
     def _result(
         self,
         old: str | None,
@@ -426,6 +438,121 @@ class AbortTurn(_StatusTransition):
             wakeup_payload={"event": "turn_aborted", "reason": self.reason, "work_id": self.work_id},
         )
 
+class DeadLetterTurn(_StatusTransition):
+    """DEAD_LETTER_TURN transition — terminal-write a PENDING Task as FAILED.
+
+    Phase 1 / T8 (c) of the pause/resume/terminate tree-fix
+    (``.agents/shared/planning/pause-resume-terminate-tree-fix/``,
+    Rev 2.1, council 2bb126df). Replaces the Rev-1 plan's
+    ``fail_task → AbortTurn(reason='failed')`` shape which was
+    proven a no-op on PENDING rows:
+
+      * ``fail_task`` pre-check ``prior_row[0] != RUNNING → return
+        None`` (``task/repository.py`` D8 chokepoint — gates on
+        RUNNING).
+      * ``AbortTurn.run`` gates ``status IN ('running','paused')``
+        (``turn_transitions.py:402-415``).
+      * No named transition terminal-writes PENDING.
+
+    ``DeadLetterTurn`` closes the gap for ``process_report`` Tasks
+    that target a TERMINATED/missing parent — the B4 livelock root
+    cause. Per leader D3 the canonical ``terminal_reason='failed'``
+    is the operator-visible signal ("delivery did not succeed").
+    ``'cancelled'`` is the architect-acceptable alternative but
+    ``'failed'`` is preferred because it accurately distinguishes
+    "delivery structurally impossible" from "user cancellation".
+
+    Atomic shape: a single guarded UPDATE
+    ``status='pending' → 'failed'`` so a racing
+    ``claim_pending_task`` (which already transitioned the row to
+    RUNNING) cannot double-fire. Rowcount 0 means the row was no
+    longer PENDING when we ran — caller treats this as a stale
+    invocation. Mirrors the transition-helper convention used by
+    ``AbortTurn`` / ``ResumeTurn``.
+
+    Companion ``reconcile_turn_mirror`` is invoked to propagate the
+    terminal state across the 8-mirror set (``task``,
+    ``job_queue_items``, ``message_queue``, ``job_locks``,
+    ``dependency_watchers``, ``report_injections``, ``instances``,
+    ``job_watchers``). The reconciler is the SOLE completion
+    authority for ``JobItem`` rows — ``DeadLetterTurn`` itself never
+    touches ``job_queue_items`` directly, preserving the turn-
+    reconciler invariant from increment1-plan §5.1.
+
+    Used by:
+
+      * T8 (d) drift sweep (``job_recovery_service.reconcile_drift_states``
+        pattern (e)) — for already-stranded PENDING ``process_report``
+        rows whose target instance is TERMINATED or missing.
+      * T8 (a) enqueue seam dead-letter fallback (no production
+        callers yet — the seam is the primary skip path).
+
+    Args:
+        work_id: The Task ``work_id`` to dead-letter (must currently
+            be ``status='pending'``).
+        task_repo: TaskRepository for mirror reconciliation. Optional
+            — when ``None`` the caller is responsible for running
+            ``reconcile_turn_mirror`` themselves.
+        reason: Optional free-form reason for the structured log
+            line. Defaults to ``"dead_letter"``; callers may
+            override (``"drift_sweep_dead_parent"``,
+            ``"enqueue_seam_dead_parent"``, etc.). The Task model
+            has no ``terminal_reason`` column (only JobItem does) so
+            the reason is purely observability.
+        **kwargs: Forwarded to ``_StatusTransition.__init__`` —
+            ``instance_id`` is captured for the outbox result.
+    """
+    MIRROR_SET = ALL_8_MIRRORS
+
+    def __init__(self, work_id, task_repo=None, reason: str = "dead_letter", **kwargs):
+        super().__init__(work_id, task_repo, kwargs.get("instance_id"))
+        self.reason = reason
+
+    def run(self, session):
+        # Single guarded UPDATE — ``status='pending'`` is the race gate
+        # against ``claim_pending_task`` which transitions PENDING →
+        # RUNNING atomically inside the same DB. rowcount 0 means the
+        # row is no longer PENDING (already claimed, cancelled, or
+        # completed) and the caller should treat this as a stale
+        # invocation; the caller's structured log will note the skip.
+        result = session.execute(
+            text(
+                "UPDATE task SET status = :new_status, "
+                "completed_at = :completed_at, "
+                "error = :error "
+                "WHERE work_id = :work_id AND status = :old_status"
+            ),
+            {
+                "new_status": "failed",
+                "completed_at": datetime.now(timezone.utc),
+                "error": self.reason,
+                "work_id": self.work_id,
+                "old_status": "pending",
+            },
+        )
+        rowcount = getattr(result, "rowcount", 1)
+        # F1 fix: if the caller passed a ``_SessionAdapter`` (a thin
+        # wrapper around a raw SQLAlchemy ``Connection``), forward the
+        # underlying connection to ``_reconcile`` so the mirror
+        # reconcile joins the caller's open transaction instead of
+        # opening a nested one. Bare ``Session`` objects do not expose
+        # ``._conn``; in that case ``_reconcile`` falls back to the
+        # default behaviour (open its own transaction).
+        connection = getattr(session, "_conn", None)
+        self._reconcile(connection=connection)
+        return self._result(
+            "pending",
+            "failed",
+            rowcount=rowcount,
+            cross_turn_side_effects=("instance_error", "cancel_dependency_watchers"),
+            wakeup_payload={
+                "event": "turn_dead_lettered",
+                "work_id": self.work_id,
+                "reason": self.reason,
+            },
+        )
+
+
 class RetryTurn(_Transition):
     """RETRY_TURN — supersede a parent Task with a fresh child.
 
@@ -580,4 +707,4 @@ class RetryTurn(_Transition):
             },
         )
 
-TRANSITIONS: tuple[type[_Transition], ...] = (BeginTurn, ClaimTurn, SuspendTurn, ResumeTurn, CompleteTurn, AbortTurn, RetryTurn)
+TRANSITIONS: tuple[type[_Transition], ...] = (BeginTurn, ClaimTurn, SuspendTurn, ResumeTurn, CompleteTurn, AbortTurn, DeadLetterTurn, RetryTurn)

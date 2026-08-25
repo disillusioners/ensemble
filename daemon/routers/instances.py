@@ -1363,17 +1363,58 @@ async def dismiss_question(
     }
 
 
-# 7. POST /instances/{instance_id}/stop - Deprecated: use POST /pause instead
+# 7. POST /instances/{instance_id}/stop - Deprecated: subtree pause
+# B5 fix (pause-resume-terminate-tree-fix, phase3-plan Rev 2.1):
+# ``/stop`` used to delegate to ``pause_instance`` which silently re-rooted
+# the pause to the project root via ``pause_instance_cascade``'s
+# whole-tree default. That made ``POST /instances/{mid}/stop`` pause the
+# entire tree instead of the subtree rooted at ``mid`` — the B5 defect.
+# The handler now bypasses ``pause_instance`` and calls
+# ``pause_instance_cascade(instance_id, cascade_to_root=False)`` directly
+# so the target subtree (the instance named in the path + its descendants)
+# is what pauses. ``/pause`` keeps whole-tree semantics (default True) and
+# is NOT modified. The 5 internal callers (instance_messaging ×2,
+# watchover_service ×2, manager facade) keep the default True whole-tree
+# behavior — see phase3-plan §Architect Flags AF-B5.
 @router.post("/{instance_id}/stop", deprecated=True)
 async def stop_instance_deprecated(
     instance_id: str,
     request: Request,
 ) -> dict:
-    """Deprecated: Use POST /pause instead."""
+    """Deprecated: pauses the target instance and its descendants (subtree).
+
+    Use ``POST /instances/{instance_id}/pause`` for whole-tree pause.
+    """
     manager = _get_manager(request)
     if manager.is_write_paused:
         raise HTTPException(status_code=503, detail="Writes are paused for database migration")
-    return await pause_instance(instance_id, request)
+
+    # Existence check mirrors ``pause_instance`` so the 404 path is
+    # identical for both routes.
+    try:
+        await manager.get_instance(instance_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail=ErrorResponse(
+                code=ErrorCodes.INSTANCE_NOT_FOUND,
+                message=f"Instance not found: {instance_id}"
+            ).model_dump()
+        )
+
+    # Subtree-only cascade: ``cascade_to_root=False`` skips the
+    # ``repo.get_tree_root_id(instance_id)`` re-root, so only the target
+    # subtree pauses. Same wrapper (``get_cascade_tree_ids``) honors
+    # P1's ``ENSEMBLE_CASCADE_LINEAGE`` kill-switch.
+    result = await manager.pause_instance_cascade(
+        instance_id,
+        cascade_to_root=False,
+    )
+    return {
+        "paused": True,
+        "paused_ids": result["paused_ids"],
+        "skipped_ids": result["skipped_ids"],
+    }
 
 
 # 7. GET /instances/{instance_id}/messages - Get message history

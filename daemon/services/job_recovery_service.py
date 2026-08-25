@@ -20,6 +20,8 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
+from sqlalchemy import text
+
 from daemon.repositories.instance.models import InstanceStatus
 from daemon.repositories.job_queue.models import AdmissionState, Decision
 from daemon.repositories.task.models import TaskStatus
@@ -54,6 +56,34 @@ _ALIVE_INSTANCE_STATUSES: set[str] = {
     InstanceStatus.QUEUED.value,
     InstanceStatus.WAITING_CHILDREN.value,
 }
+
+
+class _SessionAdapter:
+    """Minimal adapter that lets the named-transition ``run(session)``
+    interface accept a SQLAlchemy ``Connection`` directly.
+
+    The named transitions (``DeadLetterTurn``, ``AbortTurn``, etc.)
+    call ``session.execute(text(...))`` to write their updates.
+    The drift sweep Pattern (e) holds a long-lived
+    ``self.engine.begin()`` connection so the entire sweep is one
+    transaction (atomic SELECT + per-row UPDATE + companion
+    DELETE + named transition ``run()``); passing a raw
+    ``Connection`` avoids opening a fresh nested SAVEPOINT per
+    row.
+
+    The adapter delegates ``execute`` to the underlying connection
+    and exposes no other session surface — the named transitions
+    used here only touch the ``task`` table via the ``run``
+   `` method.
+    """
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def execute(self, statement, params=None):
+        if params is None:
+            return self._conn.execute(statement)
+        return self._conn.execute(statement, params)
 
 
 class JobRecoveryService:
@@ -1118,4 +1148,364 @@ class JobRecoveryService:
             logger.debug(msg)
         else:
             logger.info(msg)
+
+        # ── Pattern (e): PENDING process_report Task on TERMINATED
+        # / missing parent (plan §T8 (d), AF2 C1/C3) ───────────────
+        # Phase 1 / T8 (d) of the pause-resume-terminate-tree-fix
+        # (``.agents/shared/planning/pause-resume-terminate-tree-fix/``
+        # Rev 2.1). The B4-tail livelock root cause: a PENDING
+        # ``process_report`` Task whose target ``instances`` row is
+        # TERMINATED (or missing) is permanently unclaimable — the
+        # pause gate at ``task/repository.py`` ~:1315-1336 filters
+        # ``status IN (paused, terminated)`` uniformly for ALL task
+        # types. The Task sits PENDING forever; the ``[GUARD] … blocked
+        # by guard`` diagnostic in ``claim_pending_task`` loops every
+        # poll.
+        #
+        # Pattern (d) above would catch the JobItem-side terminal case
+        # but ``process_report`` Tasks have NO linked JobItem (the
+        # plan §AF2 "2c REJECTED" rationale, ``daemon/repositories/job_queue/repository.py:2736-2741``
+        # cleanup bucket 4 requires ``EXISTS(job_queue_items …)`` —
+        # process_report never matches). The dead-letter is scoped
+        # strictly to ``process_report`` Tasks (R3 — do not mask other
+        # starvation via a broad sweep).
+        #
+        # Action per row:
+        #   1. Atomic UPDATE ``status='pending' → 'failed'`` with the
+        #      parent-status EXISTS folded into WHERE (closes the
+        #      revive race — TOCTOU window between read and write).
+        #   2. ``DeadLetterTurn`` named transition (canonical
+        #      ``terminal_reason='failed'`` per leader D3) via
+        #      ``reconcile_turn_mirror(work_id)`` — the SOLE
+        #      completion authority for the 8-mirror set.
+        #   3. DELETE the companion ``report_injections`` row whose
+        #      ``report_message_id == task.message_id`` (no injection
+        #      terminal state exists; INJECTED / TASK_DELIVERED would
+        #      falsely signal delivery — the AF2 C3 trap).
+        #
+        # Sweep age threshold ≥300s default (TOCTOU healing) — a fresh
+        # PENDING row may have just been enqueued by the natural
+        # completion path and we must not race it.
+        #
+        # The ``[GUARD]`` diagnostic in ``claim_pending_task`` is left
+        # INTACT for everything else — this sweep is for the
+        # dead-parent class only.
+        try:
+            extra = await self._pattern_e_dead_letter_dead_parent_process_reports(
+                min_pending_age_seconds=min_pending_age_seconds,
+            )
+            if extra:
+                reconciled += extra.get("reconciled", 0)
+                details.extend(extra.get("details", []))
+        except Exception as e:
+            logger.error(
+                f"reconcile_drift_states: Pattern (e) check failed: {e}",
+                exc_info=True,
+            )
+
+        # Final tally — recount from `details` so the summary line
+        # reflects patterns (a/b/d/e) accurately. Pattern (c) is
+        # log-only — ``stuck_instance_log`` entries land in `details`
+        # but are intentionally excluded from the `reconciled` count
+        # (the recovery path cannot correct stuck-alive instances).
+        reconciled = sum(
+            1 for d in details if d.get("pattern") in (
+                "P1_dead_instance",
+                "F10_zombie_task",
+                "orphan_pending_terminal_job",
+                "dead_parent_pending_process_report",
+            )
+        )
+
+        msg = (
+            f"reconcile_drift_states: complete — "
+            f"reconciled={reconciled}, "
+            f"details={len(details)}"
+        )
+        if reconciled == 0 and not details:
+            logger.debug(msg)
+        else:
+            logger.info(msg)
+        return {"reconciled": reconciled, "details": details}
+
+    async def _pattern_e_dead_letter_dead_parent_process_reports(
+        self,
+        *,
+        min_pending_age_seconds: int,
+    ) -> dict | None:
+        """Pattern (e) async wrapper — delegates to a sync sweep body
+        via ``asyncio.to_thread`` so the long-lived ``engine.begin()``
+        transaction does not block the event loop on the first real
+        stranded row.
+
+        The full sweep predicate, the companion ``report_injections``
+        DELETE, and the ``DeadLetterTurn`` mirror reconcile all live
+        in :meth:`_pattern_e_dead_letter_sweep_sync` (the F1
+        production-path seam). The async wrapper is a thin bridge
+        that resolves the engine from ``self._task_repository`` and
+        surfaces the result shape (``None`` when nothing was
+        dead-lettered, ``{reconciled, details}`` otherwise) to the
+        caller (``reconcile_drift_states``).
+        """
+        engine = self._task_repository.engine if self._task_repository else None
+        if engine is None:
+            logger.debug(
+                "_pattern_e_dead_letter_dead_parent_process_reports: "
+                "task_repository not wired; pattern (e) skipped"
+            )
+            return None
+
+        try:
+            return await asyncio.to_thread(
+                self._pattern_e_dead_letter_sweep_sync,
+                engine,
+                self._task_repository,
+                min_pending_age_seconds,
+            )
+        except Exception as e:
+            logger.error(
+                f"reconcile_drift_states: Pattern (e) check failed: {e}",
+                exc_info=True,
+            )
+            return None
+
+    def _pattern_e_dead_letter_sweep_sync(
+        self,
+        engine,
+        task_repository,
+        min_pending_age_seconds: int,
+    ) -> dict | None:
+        """Pattern (e) sync body — F1 production-path seam.
+
+        Walks the dead-parent ``process_report`` candidate set and
+        dead-letters each row in a single ``engine.begin()``
+        transaction. Three correctness invariants preserved:
+
+          * F1 (a): the entire SELECT + per-row UPDATE + companion
+            DELETE + named transition lives inside ONE
+            ``engine.begin()`` — the mirror reconcile therefore
+            JOINS this transaction (the named transition's
+            ``_reconcile()`` is called with ``connection=conn`` so
+            ``reconcile_turn_mirror`` writes against the same
+            engine). Pre-fix, ``_reconcile()`` opened its own
+            ``engine.begin()`` inside the sweep's open txn, which
+            self-deadlocked on PG (no ``lock_timeout``) and silently
+            lost the reconcile on file SQLite (``OperationalError``
+            after busy-timeout, swallowed by the per-row except).
+          * F1 (b): the long sync SQL runs on a worker thread via
+            ``asyncio.to_thread`` in the async wrapper — the event
+            loop cannot block on ``engine.begin()``.
+          * F1 (c): the sweep predicate and the EXISTS-in-WHERE
+            revive-race closure are unchanged from the verified
+            shape — only the reconcile-threading was wrong.
+
+        The companion ``report_injections`` DELETE is scoped to a
+        single row per dead-lettered Task (the
+        ``report_message_id == task.message_id`` lookup is exact).
+        The named transition's ``reconcile_turn_mirror`` is the
+        SOLE completion authority for the 8-mirror set; this
+        sweep never touches ``job_queue_items`` directly (plan §C6
+        invariant).
+
+        Returns ``None`` when nothing was dead-lettered; otherwise a
+        ``{reconciled, details}`` dict for the caller to merge into
+        its ``reconcile_drift_states`` summary.
+        """
+        from daemon.repositories.task.models import TaskStatus, TaskType
+        from daemon.repositories.instance.models import InstanceStatus
+        from daemon.services.turn_transitions import DeadLetterTurn
+
+        threshold = datetime.now(timezone.utc) - timedelta(
+            seconds=min_pending_age_seconds
+        )
+
+        reconciled = 0
+        details: list[dict] = []
+
+        with engine.begin() as conn:
+            # 1. Candidate SELECT — scope-strict (R3) on
+            # ``process_report`` type, status='pending', age threshold,
+            # and the parent-status EXISTS folded in (closes the
+            # revive race — TOCTOU window between this read and the
+            # write below).
+            candidates = conn.execute(
+                text("""
+                    SELECT t.id, t.work_id, t.message_id, t.instance_id
+                    FROM task t
+                    WHERE t.status = :status_pending
+                      AND t.task_type = :process_report_type
+                      AND t.created_at <= :threshold
+                      AND (
+                          NOT EXISTS (
+                              SELECT 1 FROM instances i
+                              WHERE i.instance_id = t.instance_id
+                          )
+                          OR EXISTS (
+                              SELECT 1 FROM instances i
+                              WHERE i.instance_id = t.instance_id
+                                AND i.status = :status_terminated
+                          )
+                      )
+                """),
+                {
+                    "status_pending": TaskStatus.PENDING.value,
+                    "process_report_type": TaskType.PROCESS_REPORT.value,
+                    "threshold": threshold,
+                    "status_terminated": InstanceStatus.TERMINATED.value,
+                },
+            ).fetchall()
+
+            for row in candidates:
+                task_id, work_id, message_id, instance_id = row
+                # 2. Atomic UPDATE with EXISTS-in-WHERE — closes the
+                # revive race. A concurrent revive that transitioned
+                # the parent out of TERMINATED would flip this
+                # UPDATE to rowcount 0 (no match), and we skip the
+                # dead-letter; Pattern (a) / (d) handle the row on
+                # the next cycle.
+                update_result = conn.execute(
+                    text("""
+                        UPDATE task
+                        SET status = :status_failed,
+                            completed_at = :now,
+                            error = :reason
+                        WHERE id = :task_id
+                          AND status = :status_pending
+                          AND (
+                              NOT EXISTS (
+                                  SELECT 1 FROM instances i
+                                  WHERE i.instance_id = :instance_id
+                              )
+                              OR EXISTS (
+                                  SELECT 1 FROM instances i
+                                  WHERE i.instance_id = :instance_id
+                                    AND i.status = :status_terminated
+                              )
+                          )
+                    """),
+                    {
+                        "status_failed": TaskStatus.FAILED.value,
+                        "now": datetime.now(timezone.utc),
+                        "reason": "drift_sweep_dead_parent",
+                        "task_id": task_id,
+                        "status_pending": TaskStatus.PENDING.value,
+                        "instance_id": instance_id,
+                        "status_terminated": InstanceStatus.TERMINATED.value,
+                    },
+                )
+                if update_result.rowcount == 0:
+                    # Revive race lost — another actor mutated the
+                    # row since the SELECT. Skip; the next cycle
+                    # picks it up.
+                    continue
+
+                # 3. Companion ReportInjection DELETE (T8 (b) — load-
+                # bearing). No injection terminal state exists; the
+                # ``uq_report_injections_oblig_triple`` partial
+                # index is preserved (only INJECTED / TASK_DELIVERED
+                # partial-unique; PENDING + DELETED are free).
+                if message_id:
+                    conn.execute(
+                        text("""
+                            DELETE FROM report_injections
+                            WHERE report_message_id = :message_id
+                        """),
+                        {"message_id": message_id},
+                    )
+
+                # 4. Named transition + mirror reconcile — the SOLE
+                # completion authority for the 8-mirror set. The
+                # transition's UPDATE will rowcount 0 (no longer
+                # PENDING after step 2), but the mirror reconcile
+                # still fires — that's the canonical path. F1 fix:
+                # ``DeadLetterTurn.run(_SessionAdapter(conn))`` passes
+                # the underlying ``conn`` to ``_reconcile`` so the
+                # mirror reconcile joins THIS transaction (see
+                # ``turn_transitions.py:_StatusTransition._reconcile``
+                # ``connection=`` parameter). Pre-fix, the reconcile
+                # opened a nested ``engine.begin()`` and self-
+                # deadlocked on PG / silently failed on SQLite.
+                if task_repository is not None:
+                    try:
+                        t = DeadLetterTurn(
+                            work_id=work_id,
+                            task_repo=task_repository,
+                            reason="drift_sweep_dead_parent",
+                        )
+                        t.run(_SessionAdapter(conn))
+                        logger.warning(
+                            f"reconcile_drift_states: Pattern (e) "
+                            f"dead-lettered stranded process_report "
+                            f"task {task_id} (work_id="
+                            f"{work_id[:8]}..., instance_id="
+                            f"{instance_id[:8] if instance_id else 'missing'}..., "
+                            f"message_id="
+                            f"{message_id[:8] if message_id else '?'}...); "
+                            f"companion report_injections row "
+                            f"DELETEd (no injection terminal state "
+                            f"exists — AF2 C3); canonical "
+                            f"terminal_reason='failed' (leader D3)"
+                        )
+                        reconciled += 1
+                        details.append({
+                            "pattern": "dead_parent_pending_process_report",
+                            "job_id": None,
+                            "task_id": task_id,
+                            "instance_id": instance_id,
+                            "reason": (
+                                f"PENDING process_report Task older "
+                                f"than {min_pending_age_seconds}s "
+                                f"targeting a TERMINATED/missing "
+                                f"instance — dead-lettered with "
+                                f"canonical 'failed'"
+                            ),
+                        })
+                    except Exception as recon_err:
+                        # Mirror reconcile failure is non-fatal — the
+                        # Task row is already FAILED via the SQL
+                        # UPDATE above. Pattern (a) / (d) safety nets
+                        # catch any orphan on the next cycle.
+                        #
+                        # W6 (governor-council NEEDS-FIXES): surface the
+                        # failure in the sweep's ``details`` payload so
+                        # drift is observable (operators see the
+                        # mirror-reconcile failure count alongside the
+                        # successful count — no longer silently lost).
+                        # Count semantics for successful rows are
+                        # unchanged (``reconciled`` still counts only
+                        # full successes). The ``mirror_reconcile_failed``
+                        # entry is appended below so callers can split
+                        # the two counts.
+                        logger.error(
+                            f"reconcile_drift_states: Pattern (e) "
+                            f"mirror reconcile failed for task "
+                            f"{task_id}: {recon_err}",
+                            exc_info=True,
+                        )
+                        details.append({
+                            "pattern": "mirror_reconcile_failed",
+                            "job_id": None,
+                            "task_id": task_id,
+                            "instance_id": instance_id,
+                            "reason": (
+                                f"Pattern (e) dead-letter succeeded (Task "
+                                f"row FAILED via SQL UPDATE) but the "
+                                f"named transition's mirror reconcile "
+                                f"raised: {type(recon_err).__name__}: "
+                                f"{recon_err}. Mirrors may stay stale "
+                                f"until the next sweep cycle."
+                            ),
+                        })
+
+        # W6 (governor-council NEEDS-FIXES): return the payload whenever
+        # ANY row was processed — even if every row failed mirror
+        # reconcile (the SQL UPDATE still dead-lettered the rows; only
+        # the named transition's mirror reconcile raised). Pre-fix the
+        # `if reconciled == 0: return None` short-circuit swallowed the
+        # failure detail so a sweep where every row failed to
+        # reconcile returned None (operator-invisible drift). Now we
+        # return the payload when there is any details entry — that
+        # way failures are always observable.
+        if reconciled == 0 and not details:
+            return None
         return {"reconciled": reconciled, "details": details}

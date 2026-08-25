@@ -1542,6 +1542,85 @@ def _now_dt_orphan() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# ─── 10. Acceptance (b): pause-side seam test (no mock of adapter) ────────
+
+
+def test_pause_cascade_handles_paused_task_row_through_real_suspend_turn(
+    lifecycle_service, engine, write_guard
+):
+    """Acceptance (b) for the P1 NEEDS-FIXES BLOCKER.
+
+    The blocker was: ``_StatusTransition._reconcile`` unconditionally
+    threads ``connection=connection`` to ``reconcile_turn_mirror``;
+    the duck-typed ``_TransitionTaskRepo`` adapters previously did NOT
+    accept that kwarg, so ``_resume_cascade_db_sync`` — whose
+    ``ResumeTurn.run`` calls ``_reconcile()`` unconditionally — raised
+    ``TypeError: ... unexpected keyword argument 'connection'``.
+
+    The fix added ``**kwargs`` to BOTH ``_TransitionTaskRepo`` adapters
+    (pause + resume). Review softening: the pause-side fix is
+    DEFENSIVE — ``SuspendTurn.run`` never calls ``_reconcile()`` (it
+    is a single guarded UPDATE), so no live ``connection=`` threading
+    exercises the pause adapter's kwarg tolerance during pause. The
+    kwarg contract's regression coverage is resume-side, where
+    ``ResumeTurn.run`` calls ``_reconcile()`` unconditionally (see
+    the resume-side seam tests in this file). This test still
+    exercises the REAL pause cascade end-to-end (no mock of the
+    adapter) with a seed state that mirrors the masked failure mode:
+
+      * Instance is RUNNING with a PAUSED task row (the seam
+        iterates RUNNING tasks; the PAUSED task row in this seed is
+        the cascading-orphan from a prior partial cascade).
+      * Calling ``_pause_cascade_db_sync`` must NOT raise.
+      * The RUNNING task is transitioned RUNNING → PAUSED via the
+        real ``SuspendTurn`` named transition.
+      * The PAUSED task row is left untouched (its ``status='paused'``
+        guard excludes it from the cascade).
+
+    This is acceptance (b): "NEW pause-side end-to-end test driving
+    the REAL ``_pause_cascade_db_sync`` seam (no mocking of the
+    adapter) so this masked class can't regress silently".
+    """
+    iid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
+    # RUNNING task — the cascade target.
+    _seed_task(engine, instance_id=iid, status=TaskStatus.RUNNING.value)
+    # PAUSED task row already present — the cascade must skip it
+    # (its ``status='running'`` guard excludes non-running rows);
+    # the adapter stays kwarg-tolerant (defensive — see docstring).
+    _seed_task(engine, instance_id=iid, status=TaskStatus.PAUSED.value)
+
+    # Drive the REAL helper. On the pause path this cannot hit the
+    # kwarg ``TypeError`` (``SuspendTurn.run`` never calls
+    # ``_reconcile()``) — the adapter's ``**kwargs`` is defensive;
+    # the resume-side seam tests cover the live kwarg threading.
+    result = lifecycle_service._pause_cascade_db_sync(
+        engine,
+        write_guard,
+        tree_ids=[iid],
+        paused_at_iso=datetime.now(timezone.utc).isoformat(),
+        paused_instances_data=[(iid, "developer")],
+    )
+
+    # Cascade completed without raising (the masked TypeError).
+    assert result.updated_ids == [iid]
+
+    # Instance is now PAUSED.
+    instance = _read_instance(engine, iid)
+    assert instance.status == InstanceStatus.PAUSED.value
+
+    # Tasks: the RUNNING task was transitioned to PAUSED by the real
+    # ``SuspendTurn``; the pre-existing PAUSED task row was left
+    # untouched by the cascade guard. Total tasks = 2.
+    tasks = _read_tasks(engine, iid)
+    statuses = sorted(t.status for t in tasks)
+    assert statuses == sorted([
+        TaskStatus.PAUSED.value,
+        TaskStatus.PAUSED.value,
+    ]), (
+        f"expected RUNNING→PAUSED + preserved PAUSED; got {statuses}"
+    )
+
+
 def read_instance_or(engine, instance_id: str) -> dict:
     """Read a single instance row (or empty dict)."""
     with Session(engine) as s:

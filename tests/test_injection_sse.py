@@ -455,6 +455,7 @@ class TestPauseCascadeClearedSSE:
         repo = MagicMock()
         repo.get_tree_root_id = MagicMock(return_value=tree_ids[0] if tree_ids else "root-x")
         repo.get_tree_ids = MagicMock(return_value=tree_ids)
+        repo.get_cascade_tree_ids = MagicMock(return_value=tree_ids)
 
         def _get(node_id):
             meta_dict = per_node_meta.get(node_id)
