@@ -308,3 +308,47 @@ class TestFailedAtStamp:
         assert row.failed_at is None, (
             "completed path must NOT stamp failed_at — only failed does"
         )
+
+
+class TestFinalizeActiveToDoneStamp:
+    """Site 3: ``JobRepository.finalize_active_to_done`` failed branch
+    (``set_values["failed_at"] = now`` when ``terminal_reason == "failed"``).
+
+    T1/T2 cover Site 1 (``_finalize_job_db_sync``); this pins the
+    repository-level finalize path with the same acceptance contract.
+    """
+
+    def test_finalize_active_to_done_failed_branch_stamps_and_row_is_retryable(
+        self, engine: Engine
+    ) -> None:
+        """``terminal_reason='failed'`` finalize stamps failed_at and the
+        row is accepted by the real ``atomic_retry`` API — mirroring T1's
+        assertions through the Site-3 path."""
+        instance_id = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
+        job = _seed_job(engine, instance_id=instance_id)  # admission_state='active'
+
+        finalized = JobRepository(engine).finalize_active_to_done(
+            job_id=job.job_id,
+            derived_status="failed",
+            terminal_reason="failed",
+        )
+        assert finalized is not None
+
+        row = _get_job(engine, job.job_id)
+        assert row is not None
+        assert row.admission_state == "done"
+        assert row.terminal_reason == "failed"
+        assert row.failed_at is not None, (
+            "Site 3: terminal_reason='failed' finalize must stamp failed_at"
+        )
+
+        retried = JobRepository(engine).atomic_retry(
+            job_id=job.job_id,
+            max_retries=3,
+            next_retry_at="2099-01-01T00:00:00+00:00",
+        )
+        assert retried is not None
+        assert retried.admission_state == "queued"
+        assert retried.retry_count == 1
+        assert retried.failed_at is None
+        assert retried.terminal_reason is None
