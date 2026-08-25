@@ -109,6 +109,9 @@ def _direct_children(parent_id: str) -> list[str]:
 # Leader-spawns-tester window raised 60s -> 120s (LLM failover tax
 # compensation, primary down) — mirrors B5's sanctioned raise.
 B3_TESTER_TIMEOUT = 120
+# Tester-spawns-grandchild window raised 60s -> 120s (LLM failover tax
+# compensation, primary down) — same boundary race class.
+B3_GRANDCHILD_TIMEOUT = 120
 
 
 def test_terminate_mid_tree_with_parent_waiting():
@@ -125,7 +128,7 @@ def test_terminate_mid_tree_with_parent_waiting():
 
         # Wait for the tester to spawn the sleeping grandchild.
         grandchild_id: str | None = None
-        deadline = time.time() + SPAWN_TIMEOUT
+        deadline = time.time() + B3_GRANDCHILD_TIMEOUT
         while time.time() < deadline:
             children = _direct_children(tester_id)
             if children:
