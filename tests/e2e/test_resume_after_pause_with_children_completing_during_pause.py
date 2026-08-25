@@ -45,7 +45,6 @@ from tests.e2e.test_e2e_workflows import (
     _resume_instance,
     _send_message,
     _spawn_instance,
-    _wait_for_child_spawned,
 )
 
 logger = logging.getLogger(__name__)
@@ -110,6 +109,26 @@ def _pg_session():
     return Session(engine)
 
 
+def _leader_children(leader_id: str) -> list[str]:
+    """Return ALL direct children of ``leader_id`` via its detail endpoint.
+
+    The shared ``_wait_for_child_spawned`` helper only ever returns
+    ``children[0]``, so an accumulation loop built on it can never
+    collect a second distinct child. Read the full ``children`` list
+    here and guard each id against a ``parent_id`` mismatch.
+    """
+    response = requests.get(f"{API_BASE}/instances/{leader_id}", timeout=30)
+    response.raise_for_status()
+    child_ids = response.json().get("children", []) or []
+    resolved: list[str] = []
+    for child_id in child_ids:
+        detail = requests.get(f"{API_BASE}/instances/{child_id}", timeout=30)
+        detail.raise_for_status()
+        if detail.json().get("parent_id") == leader_id:
+            resolved.append(child_id)
+    return resolved
+
+
 def test_resume_after_pause_with_children_completing_during_pause():
     """B2 acceptance: buffered reports deliver on resume (not before)."""
     leader_id: str | None = None
@@ -123,10 +142,8 @@ def test_resume_after_pause_with_children_completing_during_pause():
         child_ids: list[str] = []
         deadline = time.time() + B2_SPAWN_TIMEOUT
         while len(child_ids) < 2 and time.time() < deadline:
-            child = _wait_for_child_spawned(leader_id, timeout=10)
-            if child and child not in child_ids:
-                child_ids.append(child)
-            else:
+            child_ids = _leader_children(leader_id)
+            if len(child_ids) < 2:
                 time.sleep(POLL_INTERVAL)
         assert len(child_ids) == 2, (
             f"Leader did not spawn 2 children within {B2_SPAWN_TIMEOUT}s "
