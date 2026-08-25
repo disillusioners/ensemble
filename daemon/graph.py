@@ -224,6 +224,166 @@ def _frame_injected_report(content: str) -> str:
     )
 
 
+# ============================================================================
+# Tool-call pairing guard (mid-turn HumanMessage injection safety)
+# ============================================================================
+# Background: OpenAI-compatible gateways reject requests shaped like
+# ``AIMessage(tool_calls=[...])`` followed directly by ``HumanMessage``
+# (error ``2013: tool call result does not follow tool call``). The
+# agent_node appends mid-turn ``HumanMessage`` injections (user messages,
+# skill injections, child report drains) to ``full_messages`` BEFORE the
+# LLM call. If the daemon crashed mid-tool-execution, the persisted
+# state tail IS an ``AIMessage`` with unanswered ``tool_calls`` and NO
+# matching ``ToolMessage`` — appending a ``HumanMessage`` there
+# manufactures an API-invalid history, which is then checkpointed (C2
+# return persists the injected messages) and replayed on every turn.
+#
+# This helper is the surgical fix: BEFORE any ``full_messages.extend``
+# or ``full_messages.append`` that introduces a ``HumanMessage``,
+# inspect the trailing messages. If the tail carries an
+# ``AIMessage(tool_calls=[...])`` without a matching ``ToolMessage``,
+# insert a synthesized placeholder ``ToolMessage`` IMMEDIATELY AFTER
+# that ``AIMessage`` so the history stays structurally valid for the
+# gateway. The placeholder content is honest about the cause (daemon
+# restart / crash) — never fabricated output, never an empty string.
+#
+# Design constraints (intentional, NOT drive-by):
+#   * O(1) happy-path: ONE ``isinstance`` check on the tail. NO full-history
+#     scan — that design was explicitly rejected as too costly on long
+#     conversations.
+#   * Bounded backward walk: capped at ``_TOOL_PAIRING_MAX_TRAVERSAL`` (8)
+#     for safety. The walk stops as soon as it hits a non-AIMessage(tc)
+#     message.
+#   * Dedupe: skip synthesis when a ``ToolMessage`` for the same
+#     ``tool_call_id`` already exists in the trailing window being
+#     examined (handles the AI(tc)→TM→AI(tc)→TM happy path).
+#   * In-place insert: the helper mutates ``messages`` so the synthesized
+#     placeholders flow into the C2 return (and the checkpoint) — the
+#     state is healed permanently at this point.
+
+_TOOL_PAIRING_MAX_TRAVERSAL = 8
+_TOOL_PAIRING_PLACEHOLDER_TEXT = (
+    "[Tool execution interrupted (daemon restart/crash) — result "
+    "unavailable. Re-issue the tool call if still needed.]"
+)
+
+
+def _ensure_tool_result_pairing(
+    messages: list[BaseMessage],
+    instance_short: str = "",
+) -> list[ToolMessage]:
+    """Synthesize placeholder ``ToolMessage``s for trailing unanswered
+    ``tool_calls`` so a subsequent ``HumanMessage`` injection does not
+    produce an API-invalid history.
+
+    OpenAI-compatible gateways reject ``AIMessage(tool_calls=[...])``
+    immediately followed by ``HumanMessage`` (error code ``2013``).
+    This helper inspects the trailing messages and, for every
+    ``AIMessage`` with non-empty ``tool_calls`` that lacks a matching
+    ``ToolMessage``, inserts a placeholder ``ToolMessage`` IMMEDIATELY
+    AFTER the ``AIMessage``. The placeholders flow into the
+    caller-supplied list in-place (so the LLM-bound ``full_messages``
+    is healed for this request) AND are returned (so the caller can
+    include them in the C2 ``messages`` return to heal the checkpoint
+    permanently — otherwise the next turn would re-encounter the same
+    bad tail).
+
+    The walk is bounded (``_TOOL_PAIRING_MAX_TRAVERSAL``) and short-
+    circuits on the happy path (one ``isinstance`` check on the tail).
+
+    Args:
+        messages: The ``full_messages`` list the caller is about to
+            extend/append a ``HumanMessage`` to. Mutated in place.
+        instance_short: Short instance id (``<first-segment-of-uuid>``)
+            for the WARNING log. Empty string is accepted (used by
+            unit tests).
+
+    Returns:
+        The list of placeholder ``ToolMessage``s synthesized and
+        inserted (in the order they appear in ``messages``). Empty on
+        the happy path (no trailing unanswered ``tool_calls``). The
+        caller MUST persist these via the C2 return so the healed
+        state survives the checkpoint.
+    """
+    if not messages:
+        return []
+
+    # O(1) happy-path: only proceed when the tail itself is an AIMessage
+    # carrying tool_calls. NO full-history scan — that pattern was
+    # explicitly rejected as too costly.
+    tail = messages[-1]
+    if not (isinstance(tail, AIMessage) and getattr(tail, "tool_calls", None)):
+        return []
+
+    # Walk backward over trailing AIMessage(tc) blocks; stop on the
+    # first non-AIMessage(tc) message OR when we hit the safety bound.
+    ai_indices: list[int] = []
+    end_bound = max(0, len(messages) - _TOOL_PAIRING_MAX_TRAVERSAL)
+    i = len(messages) - 1
+    while i >= end_bound:
+        msg = messages[i]
+        if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
+            ai_indices.append(i)
+            i -= 1
+        else:
+            break
+
+    if not ai_indices:
+        return []
+
+    # Reverse to left-to-right order so we preserve block order
+    # (AI1, results1, AI2, results2, ..., then HumanMessages).
+    ai_indices.reverse()
+    leftmost_idx = ai_indices[0]
+
+    # Dedupe: collect tool_call_ids already represented by a ToolMessage
+    # in the trailing window we are about to heal.
+    existing_tool_call_ids: set[str] = set()
+    for m in messages[leftmost_idx:]:
+        if isinstance(m, ToolMessage) and m.tool_call_id:
+            existing_tool_call_ids.add(m.tool_call_id)
+
+    synthesized: list[ToolMessage] = []
+    total_shift = 0
+    for orig_idx in ai_indices:
+        # ``orig_idx + total_shift`` accounts for earlier inserts that
+        # pushed subsequent AIMessage(tc) blocks rightward.
+        ai_msg = messages[orig_idx + total_shift]
+        tool_calls = ai_msg.tool_calls or []
+        block_synthesized: list[ToolMessage] = []
+        for tc in tool_calls:
+            # ``tc`` is a dict with keys ``id``, ``name``, ``args``,
+            # ``type`` (langchain_core contract). Defensive: handle the
+            # rare non-dict gracefully.
+            tc_id = tc.get("id") if isinstance(tc, dict) else None
+            if not tc_id:
+                continue
+            if tc_id in existing_tool_call_ids:
+                continue
+            tc_name = tc.get("name", "") if isinstance(tc, dict) else ""
+            tm = ToolMessage(
+                content=_TOOL_PAIRING_PLACEHOLDER_TEXT,
+                tool_call_id=tc_id,
+                name=tc_name,
+            )
+            existing_tool_call_ids.add(tc_id)
+            block_synthesized.append(tm)
+        if block_synthesized:
+            insert_at = orig_idx + total_shift + 1
+            messages[insert_at:insert_at] = block_synthesized
+            total_shift += len(block_synthesized)
+            synthesized.extend(block_synthesized)
+
+    if synthesized:
+        logger.warning(
+            f"[ToolPairing] Synthesized {len(synthesized)} placeholder "
+            f"tool result(s) for instance {instance_short} — tail had "
+            f"unanswered tool_calls before HumanMessage injection"
+        )
+
+    return synthesized
+
+
 class ReportInjectionSlot:
     """Duck-typed handle around the DB-backed report-injection queue.
 
@@ -2693,6 +2853,13 @@ def create_agent_node(
         # handler (C3) can re-append ALL of them after a checkpoint
         # re-read, and so the return value (C2) persists the full inbox.
         injected_msgs: list[HumanMessage] = []
+        # Tool-call pairing guard accumulator: any placeholder
+        # ``ToolMessage`` synthesized by ``_ensure_tool_result_pairing``
+        # (see the injection sites below) is collected here so the C2
+        # return persists them in the checkpoint — otherwise the
+        # poisoned state tail (unanswered ``AIMessage(tool_calls)``
+        # after a daemon restart) would replay forever.
+        pairing_synthesized_msgs: list[ToolMessage] = []
         if injection_slot is not None:
             pending_list = injection_slot.get(instance_id)
             if pending_list:
@@ -2705,6 +2872,18 @@ def create_agent_node(
                             additional_kwargs={"injected_message": True},
                         )
                     )
+                # Tool-call pairing guard: if the persisted state tail is an
+                # AIMessage with unanswered tool_calls (e.g. the daemon
+                # crashed mid-tool-execution), synthesize honest placeholder
+                # ToolMessages BEFORE we append HumanMessages below. Without
+                # this, the resulting history shape is rejected by
+                # OpenAI-compatible gateways with `2013: tool call result
+                # does not follow tool call` and the instance tips into
+                # permanent error — the poisoned history is checkpointed and
+                # replayed on every turn.
+                pairing_synthesized_msgs.extend(
+                    _ensure_tool_result_pairing(full_messages, instance_short)
+                )
                 # Append ALL injected messages to the LLM-bound list.
                 full_messages.extend(injected_msgs)
 
@@ -2839,6 +3018,19 @@ def create_agent_node(
                 report_content = report.get("content", "") if isinstance(report, dict) else ""
                 if not report_content:
                     continue
+                # Tool-call pairing guard: same rationale as the
+                # user/skill injection site above. A report drain that
+                # appends a HumanMessage directly after an unanswered
+                # AIMessage(tool_calls) produces an API-invalid history.
+                # The helper inserts honest placeholder ToolMessages
+                # IMMEDIATELY AFTER the offending AIMessage before the
+                # HumanMessage is appended below. We accumulate the
+                # synthesized messages in ``pairing_synthesized_msgs``
+                # so they flow into the C2 return and heal the
+                # checkpoint permanently.
+                pairing_synthesized_msgs.extend(
+                    _ensure_tool_result_pairing(full_messages, instance_short)
+                )
                 report_msg = HumanMessage(
                     content=_frame_injected_report(report_content),
                     additional_kwargs={"injected_message": True},
@@ -2970,6 +3162,16 @@ def create_agent_node(
         if injected_report_msgs and not any(
             injected_report_msgs[0] is m for m in full_messages
         ):
+            # Tool-call pairing guard (C3 re-append path): the loop-
+            # breaker repair above may have rebuilt ``full_messages``
+            # from ``state['messages']`` and dropped the synthesized
+            # placeholders we inserted at the original injection site.
+            # Re-arm the guard so the rebuilt tail does not reintroduce
+            # the API-invalid ``AIMessage(tc) → HumanMessage`` shape
+            # when the report messages are re-appended below.
+            pairing_synthesized_msgs.extend(
+                _ensure_tool_result_pairing(full_messages, instance_short)
+            )
             full_messages = full_messages + injected_report_msgs
 
         # Context Injection Restructure — Phase 3 / B1 fix: re-append
@@ -3155,8 +3357,22 @@ def create_agent_node(
         # user-injection, before the response) so child reports drained
         # into a live parent turn survive crash recovery and show up in
         # GET /messages history — same C2 rationale as the user-injection.
-        if injected_msgs or injected_report_msgs:
+        #
+        # Tool-pairing placeholders (``pairing_synthesized_msgs``) are
+        # persisted FIRST so the checkpoint order mirrors the LLM-bound
+        # order (``full_messages``) exactly: every synthesized
+        # ``ToolMessage`` appears IMMEDIATELY AFTER its parent
+        # ``AIMessage(tool_calls)`` in the persisted history, healing
+        # the poisoned tail permanently. Without this, the next turn
+        # would re-encounter the same unanswered ``AIMessage(tc)`` and
+        # re-trigger the 2013 gateway error indefinitely.
+        if (
+            injected_msgs
+            or injected_report_msgs
+            or pairing_synthesized_msgs
+        ):
             persisted: list[BaseMessage] = []
+            persisted.extend(pairing_synthesized_msgs)
             persisted.extend(injected_msgs)
             persisted.extend(injected_report_msgs)
             persisted.append(response)
