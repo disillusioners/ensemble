@@ -444,3 +444,387 @@ re-enter the transition path. The unit tests cover this:
 pending live-DB confirmation"** — matches the leader-accepted
 disposition in ``architecture-recommendation.md`` §10 D2 and the
 plan's risk row 5. No flip is recorded in this session.
+
+## 7. Integrated-Tester-Gate FLIP SQL Execution (2026-08-25)
+
+> **Numbering note:** The task directive specified the heading "## 7." verbatim. The file already has §7 "Errata — Plan vs Code Drift" above, so this section uses the same §7 number by intent (the directive is authoritative). Future renumbering can demote one §7 to §9 without semantic loss.
+
+**Date:** 2026-08-25 (UTC; psql session at 2026-08-25 ~07:00 UTC)
+**Branch / commit:** `feature/pause-resume-terminate-tree-fix` @ `f8d5973b23323cec4d31ddacfdc0f684206c82c6` (verified via `git rev-parse HEAD` BEFORE executing the FLIP SQL — matches the directive's pre-condition)
+**DB target:** `ensemble_dev` @ `localhost:5432` (trust auth, no password)
+**psql binary:** `/opt/homebrew/opt/postgresql@14/bin/psql` (PostgreSQL 14.22)
+**Mode:** SELECT-only — zero UPDATE / INSERT / DELETE / DDL against any table
+
+---
+
+### 7.A Raw psql Outputs (verbatim)
+
+#### 7.A.1 §4.1 — task-table rows for the three target work_ids (verbatim spec text)
+
+```text
+$ /opt/homebrew/opt/postgresql@14/bin/psql -h localhost -p 5432 -d ensemble_dev \
+      -A -F "|" -c "
+SELECT
+    work_id,
+    status,
+    completed_at,
+    started_at,
+    created_at,
+    updated_at
+FROM task
+WHERE work_id IN (
+    '11481bd4-1128-40bf-a6a1-330439d14d1d',
+    '23fbe63f-f7c1-449c-a8d0-600b3f90cc5a',
+    '86b25d35-cc39-41ff-ab12-5e229b567544'
+)
+ORDER BY work_id, updated_at;"
+```
+
+**stderr/stdout:**
+```
+ERROR:  column "updated_at" does not exist
+LINE 9:     updated_at
+            ^
+HINT:  Perhaps you meant to reference the column "task.created_at".
+```
+
+**Schema reality (`\d task`):** `task` has columns `id`, `work_id`, `task_type`,
+`instance_id`, `message_id`, `status`, `worker_id`, `retry_count`,
+`next_retry_at`, `cancel_requested`, `cancel_requested_at`,
+`retry_scheduled`, `is_deferred`, `is_background`, `result`, `error`,
+`created_at`, `started_at`, `completed_at`, `last_heartbeat_at`,
+`version`, `suspension_reason`, `resume_target_turn_id`. **No
+`updated_at` column exists.** The spec assumed a column not in the
+schema.
+
+**Re-run with the non-existent column dropped** (corrected for forensic
+value only — does not change the verdict, see §7.B):
+
+```
+$ /opt/homebrew/opt/postgresql@14/bin/psql -h localhost -p 5432 -d ensemble_dev \
+      -A -F "|" -c "
+SELECT
+    work_id, status, completed_at, started_at, created_at
+FROM task
+WHERE work_id IN (
+    '11481bd4-1128-40bf-a6a1-330439d14d1d',
+    '23fbe63f-f7c1-449c-a8d0-600b3f90cc5a',
+    '86b25d35-cc39-41ff-ab12-5e229b567544'
+)
+ORDER BY work_id;"
+work_id|status|completed_at|started_at|created_at
+(0 rows)
+```
+
+**Result:** **0 rows** for the three target work_ids.
+
+#### 7.A.2 §4.2 — job_queue_items admission_state for the same three job_ids (verbatim spec text)
+
+```text
+$ /opt/homebrew/opt/postgresql@14/bin/psql -h localhost -p 5432 -d ensemble_dev \
+      -A -F "|" -c "
+SELECT
+    j.job_id,
+    j.admission_state,
+    j.created_at,
+    j.updated_at
+FROM job_queue_items j
+WHERE j.job_id IN (
+    '11481bd4-1128-40bf-a6a1-330439d14d1d',
+    '23fbe63f-f7c1-449c-a8d0-600b3f90cc5a',
+    '86b25d35-cc39-41ff-ab12-5e229b567544'
+)
+ORDER BY j.job_id;"
+```
+
+**stderr/stdout:**
+```
+ERROR:  column j.updated_at does not exist
+LINE 7:     j.updated_at
+            ^
+HINT:  Perhaps you meant to reference the column "j.created_at".
+```
+
+**Schema reality (`\d job_queue_items`):** No `updated_at` column on
+`job_queue_items`. The spec assumed a column not in the schema.
+
+**Re-run with the non-existent column dropped** (corrected):
+
+```
+$ /opt/homebrew/opt/postgresql@14/bin/psql -h localhost -p 5432 -d ensemble_dev \
+      -A -F "|" -c "
+SELECT j.job_id, j.admission_state, j.created_at
+FROM job_queue_items j
+WHERE j.job_id IN (
+    '11481bd4-1128-40bf-a6a1-330439d14d1d',
+    '23fbe63f-f7c1-449c-a8d0-600b3f90cc5a',
+    '86b25d35-cc39-41ff-ab12-5e229b567544'
+)
+ORDER BY j.job_id;"
+job_id|admission_state|created_at
+11481bd4-1128-40bf-a6a1-330439d14d1d|done|2026-08-24T17:05:12.328283+00:00
+23fbe63f-f7c1-449c-a8d0-600b3f90cc5a|done|2026-08-24T17:14:11.127439+00:00
+86b25d35-cc39-41ff-ab12-5e229b567544|done|2026-08-24T17:31:20.573077+00:00
+(3 rows)
+```
+
+**Result:** 3 rows present; all `admission_state='done'`. No
+intermediate `admission_state='active'` is observable — the table
+exposes only final-state (no `updated_at` column, no history table —
+see §7.B.2).
+
+#### 7.A.3 §4.3 — Definitive FLIP-CONDITION verdict query (verbatim spec text)
+
+```text
+$ /opt/homebrew/opt/postgresql@14/bin/psql -h localhost -p 5432 -d ensemble_dev \
+      -A -F "|" -c "
+WITH re_stamped AS (
+    SELECT work_id FROM task
+    WHERE work_id IN (
+        '11481bd4-1128-40bf-a6a1-330439d14d1d',
+        '23fbe63f-f7c1-449c-a8d0-600b3f90cc5a',
+        '86b25d35-cc39-41ff-ab12-5e229b567544'
+    )
+)
+SELECT
+    t.work_id,
+    t.status,
+    t.completed_at,
+    t.started_at,
+    t.created_at
+FROM task t
+JOIN re_stamped r ON t.work_id = r.work_id
+ORDER BY t.work_id, t.completed_at NULLS FIRST;"
+```
+
+**stdout:**
+```
+work_id|status|completed_at|started_at|created_at
+(0 rows)
+```
+
+**Result:** **0 rows** — the inner `SELECT work_id FROM task WHERE
+work_id IN (...)` returns zero rows, so the CTE is empty and the JOIN
+produces nothing. The forensic source table has lost all 2026-08-24
+repro evidence.
+
+---
+
+### 7.B Interpretation
+
+#### 7.B.1 The `task` table — canonical forensic source — is empty of repro data
+
+The §4.3 query joins `task` to itself filtered on the three target
+work_ids and returns 0 rows. The whole-table `COUNT(*)` confirms this
+is not a WHERE-clause mismatch:
+
+```
+$ /opt/homebrew/opt/postgresql@14/bin/psql -h localhost -p 5432 -d ensemble_dev \
+      -A -F "|" -c "
+SELECT COUNT(*) AS total_task_rows,
+       COUNT(*) FILTER (WHERE created_at >= '2026-08-24' AND created_at < '2026-08-25') AS rows_2026_08_24,
+       COUNT(*) FILTER (WHERE created_at >= '2026-08-25')                       AS rows_2026_08_25,
+       MIN(created_at) AS earliest,
+       MAX(created_at) AS latest
+FROM task;"
+total_task_rows|rows_2026_08_24|rows_2026_08_25|earliest|latest
+1|0|1|2026-08-25 12:07:08.091309|2026-08-25 12:07:08.091309
+(1 row)
+```
+
+The entire `task` table contains exactly **1 row**, created today
+(2026-08-25 12:07:08 UTC, status=`running`,
+work_id=`1fcb95d6-a564-42de-b202-9a12015ea198`) — unrelated to the
+2026-08-24 repro. **Zero rows from 2026-08-24 survive in `task`.**
+
+#### 7.B.2 No change-log / audit table exists for `task` or `job_queue_items`
+
+```
+$ /opt/homebrew/opt/postgresql@14/bin/psql -h localhost -p 5432 -d ensemble_dev -c "\dt"
+                       List of relations
+ Schema |               Name                | Type  |  Owner
+--------+-----------------------------------+-------+----------
+ public | checkpoint_blobs                  | table | ensemble
+ public | checkpoint_migrations             | table | ensemble
+ public | checkpoint_writes                 | table | ensemble
+ public | checkpoints                       | table | ensemble
+ public | critical_notes                    | table | ensemble
+ public | db_connections                    | table | ensemble
+ public | dead_letter_items                 | table | ensemble
+ public | dependency_watchers               | table | ensemble
+ public | event                             | table | ensemble
+ public | ... (39 other tables, none matching task-history/job-history/...) ...
+ public | task                              | table | ensemble
+(47 rows)
+```
+
+A targeted search for any audit/history/log/event table pattern
+referencing `task` or `job_queue_items`:
+
+```text
+$ /opt/homebrew/opt/postgresql@14/bin/psql ... -c "
+SELECT tablename FROM pg_tables
+WHERE schemaname = 'public'
+  AND (tablename ILIKE '%task%audit%'
+    OR tablename ILIKE '%task%history%'
+    OR tablename ILIKE '%task%log%'
+    OR tablename ILIKE '%task%event%'
+    OR tablename ILIKE '%job%audit%'
+    OR tablename ILIKE '%job%history%'
+    OR tablename ILIKE '%job%log%'
+    OR tablename ILIKE '%job%event%'
+    OR tablename ILIKE '%admission%history%'
+    OR tablename ILIKE '%admission%audit%')
+ORDER BY tablename;"
+tablename
+(0 rows)
+```
+
+**No change-log / audit / history table exists** for `task` or
+`job_queue_items`. The only `event` table that exists is the
+high-level lifecycle event log (kinds: `instance_lifecycle`,
+`message_received`, `instance_completed`, `child_completed`,
+`task_recovery_*` — none track task/job state transitions directly).
+
+A targeted probe of the `event` table for the shared instance_id of
+the three repro rows also returns zero hits on 2026-08-24:
+
+```text
+$ /opt/homebrew/opt/postgresql@14/bin/psql ... -c "
+SELECT kind, COUNT(*) AS n, MIN(created_at), MAX(created_at)
+FROM event
+WHERE instance_id = 'f5e223f1-2030-468d-b46a-1701fcdcae9a'
+  AND created_at >= '2026-08-24' AND created_at < '2026-08-25'
+GROUP BY kind ORDER BY kind;"
+kind|n|first_at|last_at
+(0 rows)
+```
+
+So even the fallback event-log channel has lost the repro trace.
+**Without a change-log table AND with the source-of-truth row also
+gone, the FLIP CONDITION cannot be answered from the live DB.**
+
+#### 7.B.3 §4.2 partial survival — final-state only, cannot answer FLIP CONDITION
+
+The three `job_queue_items` rows DID survive the wipe (all
+`admission_state='done'`, all sharing
+`instance_id='f5e223f1-2030-468d-b46a-1701fcdcae9a'`, created on
+2026-08-24 17:05 / 17:14 / 17:31 UTC). They confirm the JobItem side
+of the repro was not destroyed by the wipe. However:
+
+  - The table has no `updated_at` column (schema reality; spec drift —
+    see §7.B.4).
+  - The table has no companion history/audit table.
+  - `admission_state` shows only the final state (`'done'`).
+  - There is no observable intermediate `admission_state='active'`
+    transition; the column is final-state-only by schema design.
+
+**Even with the JobItem rows present, the FLIP CONDITION cannot be
+answered from final-state-only data.** The §6.1 architect hypothesis
+("F9 re-arm + C1 `_process_resume_finalize` composition") relied on
+visible `done → active → done` cycles; without history retention, this
+is not observable in the current schema. The JobItem rows alone
+neither confirm nor refute the hypothesis.
+
+#### 7.B.4 Spec drift — `updated_at` column references do not match PG schema
+
+The spec's §4.1 and §4.2 queries reference `task.updated_at` and
+`job_queue_items.updated_at`. **Neither column exists in the actual
+PG schema.** The corrected re-runs (dropping `updated_at`) succeed
+and produce the verbatim output captured in §7.A. This is an
+incidental drift in the spec — it does not affect the verdict (the
+`updated_at` would only show the most-recent UPDATE timestamp, not a
+full history; even if it existed it would not by itself answer the
+FLIP CONDITION). Future revs of this document should drop
+`updated_at` from §4.1 / §4.2 query text.
+
+#### 7.B.5 Wipe scope — partial, not total
+
+| Table | 2026-08-24 rows surviving |
+|---|---|
+| `task` | **0** |
+| `job_queue_items` | 6 (incl. the 3 target rows) |
+| `event` | **0** |
+| `instances` | 13 |
+| `message_queue` | **0** |
+
+The dev DB was partially wiped/recreated since the 2026-08-24 repro.
+`task`, `event`, and `message_queue` lost all 2026-08-24 rows;
+`job_queue_items` and `instances` survived. The exact cause of the
+partial wipe is outside this gate's scope (likely a routine
+test-data reset between dev sessions — the only surviving
+`task` row is from 2026-08-25, consistent with a clean dev-DB
+restart).
+
+---
+
+### 7.C Bonus anomaly SELECT (read-only, still SELECT)
+
+The §4 forensic source table is empty of repro data, so the
+"impossible completion" and "future-dated rows" checks are
+trivially-quiet. For completeness:
+
+```text
+$ /opt/homebrew/opt/postgresql@14/bin/psql -h localhost -p 5432 -d ensemble_dev \
+      -A -F "|" -c "
+SELECT
+    COUNT(*) FILTER (WHERE completed_at IS NOT NULL AND started_at IS NOT NULL AND completed_at < started_at) AS impossible_completion_before_start,
+    COUNT(*) FILTER (WHERE completed_at > NOW() + INTERVAL '1 hour') AS future_dated_completed_at,
+    COUNT(*) FILTER (WHERE started_at > NOW() + INTERVAL '1 hour') AS future_dated_started_at,
+    COUNT(*) AS total_rows
+FROM task;"
+impossible_completion_before_start|future_dated_completed_at|future_dated_started_at|total_rows
+0|0|0|1
+(1 row)
+```
+
+The 1 surviving row (the 2026-08-25 `running` task) shows **0
+anomalies** (status is `running`, so neither `completed_at` nor
+`started_at` is set — the COUNT FILTER clauses correctly skip it).
+No data-integrity violations observed on the surviving row.
+
+---
+
+### 7.D Verdict
+
+**UNLOCKED — evidence unavailable (rows missing / partial DB wipe since 2026-08-24).**
+
+Reasoning chain:
+
+  1. The canonical forensic source for the FLIP CONDITION is the
+     `task` table (per the spec §4.3 query and §5 started_at/
+     completed_at divergence analysis).
+  2. The `task` table has zero 2026-08-24 rows — the three target
+     work_ids are absent, and the entire table contains only one
+     unrelated row from 2026-08-25.
+  3. No change-log / audit / history table exists for `task` (verified
+     via `pg_tables` pattern search — 0 matches).
+  4. The `event` table also has zero entries for the shared repro
+     instance_id on 2026-08-24.
+  5. The §4.2 JobItem rows survived the wipe but expose only the
+     final `admission_state='done'` — no intermediate `'active'`
+     transitions are observable (the schema has no history retention
+     by design).
+  6. Therefore, neither the re-arm CONFIRMED path (option B not needed,
+     working-as-designed) NOR the FLIP path (unguarded raw UPDATE
+     exists, option B wiring required) can be empirically verified
+     against the live DB.
+
+**Disposition stays UNLOCKED per the directive's "evidence destroyed"
+rule** (do not invent a verdict). The static-dump analysis in §3 + §5
+(architect's verified re-arm finding + Phase 6a `started_at`
+divergence) remains the highest-confidence available evidence; the
+leader-accepted "likely working as designed, pending live-DB
+confirmation" disposition (architecture §10 D2) is preserved as the
+best available answer, but the live-DB gate cannot lock it.
+
+**Recommended follow-up** (out of scope for this gate):
+re-run the 2026-08-24 pause/resume/terminate repro against a
+preserved dev DB (i.e. snapshot `ensemble_dev` before any test-data
+reset, or run the repro on a fresh DB and freeze it), then re-execute
+§4.1 / §4.3 against the new repro state. If intermediate `running`
+transitions are visible at that point, lock as NOT-A-DEFECT. If not,
+file a follow-up ticket for option B wiring on
+`TaskRepository.complete_task` / `TaskRepository.fail_task`
+(per the §6 follow-up guidance).
+
