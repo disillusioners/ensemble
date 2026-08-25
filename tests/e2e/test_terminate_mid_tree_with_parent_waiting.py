@@ -59,7 +59,10 @@ pytestmark = [
 TREE_MESSAGE = (
     "ask tester to investigate something; tester must spawn 1 worker "
     "child that runs a bash sleep of 480 seconds before reporting; do not "
-    "finish until tester and its child have fully reported back"
+    "finish until tester and its child have fully reported back. If any "
+    "child is terminated, treat its termination report as final and "
+    "finish immediately — do not spawn replacement or investigation "
+    "children."
 )
 
 

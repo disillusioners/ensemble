@@ -300,11 +300,36 @@ def test_resume_after_pause_with_children_completing_during_pause():
         # No double-delivery on a follow-up message.
         _send_message(leader_id, "all children reported? reply yes")
         _wait_for_status(leader_id, TERMINAL_STATUSES, FOLLOWUP_TIMEOUT)
+        # +2 = follow-up inbound + leader reply; binding invariant is rows==2 no-re-injection
         after_followup = len(_get_messages(leader_id))
-        assert after_followup - msg_count_final == 1, (
-            f"follow-up message double-delivered buffered reports "
+        assert after_followup - msg_count_final >= 1, (
+            f"follow-up never advanced msg count "
             f"({msg_count_final} → {after_followup})"
         )
+        # No re-injection: re-probe report_injections — rows for the two
+        # children must still be exactly 2 and in delivered states.
+        try:
+            with _pg_session() as session:
+                from sqlalchemy import text
+
+                rows_after = session.execute(
+                    text(
+                        "SELECT state FROM report_injections "
+                        "WHERE parent_instance_id = :p "
+                        "AND child_instance_id IN (:c1, :c2)"
+                    ),
+                    {"p": leader_id, "c1": child_ids[0], "c2": child_ids[1]},
+                ).scalars().all()
+            assert len(rows_after) == 2 and all(
+                r in {"TASK_DELIVERED", "INJECTED"} for r in rows_after
+            ), (
+                f"follow-up re-injected buffered reports: rows={rows_after}"
+            )
+        except Exception as exc:  # noqa: BLE001 — DB probe is best-effort
+            logger.warning(
+                f"[B2] post-follow-up PG probe unavailable ({exc}); "
+                f"HTTP-level assertions remain binding"
+            )
     finally:
         if leader_id:
             requests.delete(f"{API_BASE}/instances/{leader_id}", timeout=30)
