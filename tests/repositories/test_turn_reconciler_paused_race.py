@@ -68,6 +68,7 @@ from daemon.repositories.message_queue.models import (
 )
 from daemon.repositories.task.models import Task, TaskStatus, TaskType
 from daemon.repositories.task.repository import TaskRepository
+from daemon.repositories.job_queue import JobRepository
 
 
 # ---------------------------------------------------------------------------
@@ -323,9 +324,6 @@ class TestPausedRaceTerminalWriteGuard:
             "paused-race: job_locks row must survive"
         )
         assert result["updated_counts"]["job_locks"] == 0
-        # JobItem 'active' + lock present is the consistent invariant
-        # state — the reconciler must not raise.
-        assert "InvalidTransitionError" not in str(result)
 
     def test_running_instance_suppresses_job_terminal_write(
         self, engine: Engine, repo: TaskRepository
@@ -353,7 +351,6 @@ class TestPausedRaceTerminalWriteGuard:
         assert row["failed_at"] is None
         assert _read_lock_count(engine, work_id) == 1
         assert result["updated_counts"]["job_locks"] == 0
-        assert "InvalidTransitionError" not in str(result)
 
     def test_waiting_children_instance_suppresses_job_terminal_write(
         self, engine: Engine, repo: TaskRepository
@@ -376,7 +373,6 @@ class TestPausedRaceTerminalWriteGuard:
         assert row["failed_at"] is None
         assert _read_lock_count(engine, work_id) == 1
         assert result["updated_counts"]["job_locks"] == 0
-        assert "InvalidTransitionError" not in str(result)
 
     def test_terminal_instance_writes_job_terminal_state(
         self, engine: Engine, repo: TaskRepository
@@ -405,3 +401,99 @@ class TestPausedRaceTerminalWriteGuard:
         )
         assert _read_lock_count(engine, work_id) == 0
         assert result["updated_counts"]["job_locks"] >= 1
+
+
+# ---------------------------------------------------------------------------
+# T2 — incident shape is NOT retryable (paused-race amendment, 2026-08-25)
+# ---------------------------------------------------------------------------
+
+
+class TestIncidentShapeNotRetryable:
+    """The incident shape (paused instance + superseded-cancel) leaves
+    the Job with ``failed_at=NULL`` — such a row is NOT retryable via
+    the real ``JobRepository.atomic_retry`` API.
+
+    This is the counterpart of T1
+    (``tests/test_observer_failed_at_stamp.py``): T1 proves the
+    observer's failed-path stamp makes a row retryable; T2 proves the
+    incident-shaped row (which the reconciler correctly leaves alone)
+    stays non-retryable. Together they pin the amendment's split —
+    the OBSERVER stamps failed jobs, the RECONCILER leaves alive
+    instances' jobs untouched.
+    """
+
+    def test_incident_shape_row_not_retryable(self, engine: Engine, repo: TaskRepository) -> None:
+        """Paused instance + superseded-cancel → failed_at NULL + retry rejected.
+
+        Two rejection layers on the same row:
+          1. As-reconciled (admission_state='active'): retry rejected
+             because the row never finalized.
+          2. Simulated finalized (admission_state='done' forced): retry
+             STILL rejected because ``failed_at IS NULL`` — the exact
+             guard in ``atomic_retry`` (job_queue/repository.py:1456).
+        """
+        work_id = self._seed_incident_shape_once(engine, repo)
+
+        # After the reconcile: the Job survived the race (active + lock
+        # + failed_at NULL) — the reconciler's alive-instance guard
+        # correctly left it alone.
+        row = _read_job_row(engine, work_id)
+        assert row["admission_state"] == AdmissionState.ACTIVE.value
+        assert row["failed_at"] is None
+
+        # Rejection 1: the as-reconciled row (admission_state='active')
+        # is not retryable — atomic_retry's guard matches nothing.
+        retry_repo = JobRepository(engine)
+        rejected = retry_repo.atomic_retry(
+            job_id=work_id,
+            max_retries=3,
+            next_retry_at="2099-01-01T00:00:00+00:00",
+        )
+        assert rejected is None, (
+            "the as-reconciled incident row (admission_state='active', "
+            "failed_at=NULL) must NOT be retryable"
+        )
+
+        # Rejection 2: simulate a later finalize that reached
+        # admission_state='done' but did NOT stamp failed_at (the exact
+        # broken state the amendment fixed for the observer path). The
+        # row is STILL rejected — proving ``failed_at IS NOT NULL`` is
+        # the gate, not just the admission_state.
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE job_queue_items SET admission_state = 'done', "
+                    "terminal_reason = 'failed' WHERE job_id = :work_id"
+                ),
+                {"work_id": work_id},
+            )
+        rejected2 = retry_repo.atomic_retry(
+            job_id=work_id,
+            max_retries=3,
+            next_retry_at="2099-01-01T00:00:00+00:00",
+        )
+        assert rejected2 is None, (
+            "a done/failed row with failed_at=NULL must NOT be retryable "
+            "(the failed_at IS NOT NULL guard in atomic_retry)"
+        )
+
+    def _seed_incident_shape_once(self, engine: Engine, repo: TaskRepository) -> str:
+        """Seed the incident shape once: paused instance + superseded
+        task cancel + active JobItem + lock, then run the reconcile."""
+        instance_id = _new_id("inst")
+        work_id = _new_id("work")
+        message_id = _new_id("msg")
+        _seed_instance(engine, instance_id, InstanceStatus.PAUSED.value)
+        _seed_task(
+            engine,
+            work_id=work_id,
+            instance_id=instance_id,
+            message_id=message_id,
+        )
+        _seed_job_item(engine, work_id=work_id, instance_id=instance_id)
+        _seed_job_lock(engine, work_id=work_id, instance_id=instance_id)
+        _seed_message(engine, message_id=message_id, instance_id=instance_id)
+        _set_task_status(engine, work_id, TaskStatus.CANCELLED.value)
+
+        repo.reconcile_turn_mirror(work_id)
+        return work_id

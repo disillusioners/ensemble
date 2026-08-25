@@ -1889,6 +1889,16 @@ class JobFeedbackObserver:
                         to_status="failed",
                         completed_at=datetime.now(timezone.utc).isoformat(),
                         error_message=f"Job finalization failed: {e}",
+                        # failed_at stamp (paused-race amendment,
+                        # 2026-08-25): the W3 fail-safe IS the failed
+                        # path (``to_status='failed'``), so it always
+                        # stamps — mirrors ``JobRepository.fail_job``'s
+                        # kwarg pattern. ``failed_at`` flows through
+                        # ``atomic_transition``'s ``extra_updates``
+                        # unchanged (not in ``_REMOVED_JOB_COLUMNS``),
+                        # keeping the row retryable via
+                        # ``atomic_retry``.
+                        failed_at=datetime.now(timezone.utc).isoformat(),
                     )
                     logger.info(
                         f"Observer: fail-safe transitioned job "
@@ -3274,6 +3284,22 @@ class JobFeedbackObserver:
                 # terminate cascade; that path lives in
                 # ``instance_lifecycle._terminate_instance_db_sync``).
                 update_values["terminal_reason"] = to_status
+                # failed_at stamp (paused-race amendment, 2026-08-25):
+                # the reconciler's terminal-write guard now suppresses
+                # the ``job_queue_items`` CASE branches for alive
+                # instances (paused/running/waiting_children), which
+                # removed the only live writer of ``failed_at`` — a
+                # failed task on a RUNNING instance ended
+                # done/'failed'/failed_at=NULL and atomic_retry (which
+                # requires ``failed_at IS NOT NULL``) rejected it. The
+                # OBSERVER knows failed-vs-cancelled (the reconciler
+                # did not): stamp ``failed_at`` on the FAILED branch
+                # ONLY — cancelled finalizes keep NULL per retry
+                # semantics (cancelled rows are not retryable).
+                # ``now`` follows this file's ISO-string convention
+                # (``JobItem.failed_at`` is a TEXT column).
+                if to_status == "failed":
+                    update_values["failed_at"] = now
 
                 # Finalize-on-completion fallback: snapshot the
                 # previous ``admission_state`` BEFORE the UPDATE so
