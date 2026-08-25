@@ -13,12 +13,6 @@ from langchain_core.messages import BaseMessageChunk
 from langchain_core.runnables import RunnableLambda
 from langchain_core.runnables.config import RunnableConfig
 from langchain_core.messages.ai import AIMessageChunk, UsageMetadata
-# W-1 fix (quick-fix): ChatGenerationChunk is constructed by
-# ``ThinkingChatOpenAI._convert_chunk_to_generation_chunk`` (streaming decode
-# path) but was never imported — every streamed response raised
-# ``NameError`` after the request went out. Latent since 37f39c8b; activated
-# for every call site by the streaming=True default (CF 125s 524 fix).
-# Regression guard: tests/unit/test_llm_streaming_wire_verify.py (V1/V2/V3/V6b).
 from langchain_core.outputs import ChatGenerationChunk
 from typing import Any, ClassVar, Mapping, Optional, cast
 from dataclasses import dataclass, field
@@ -2128,6 +2122,22 @@ def clean_llm_config(cfg: dict) -> dict:
     must pass ``streaming=False`` explicitly — that value is preserved
     verbatim. Embedding sites are routed through a different code path
     (``openai.OpenAI(...).embeddings.create(...)``) and never streamed.
+
+    Streaming usage (token counts)
+    ------------------------------
+    When ``streaming=True`` is in effect, this function also injects
+    ``stream_usage=True`` unless the caller has set it explicitly. The
+    LangChain kwarg controls the wire-level ``stream_options`` field:
+    ``{"include_usage": true}`` requests that the backend include a final
+    ``usage`` chunk in the SSE stream (otherwise many OpenAI-compatible
+    backends omit usage and ``usage_metadata`` comes back ``None``).
+    Without this injection — i.e. when callers set their own
+    ``base_url`` / custom ``http_client`` — langchain-openai never sends
+    the ``stream_options`` block and usage is silently lost on spec-
+    compliant backends. We default it ON so ``usage_metadata`` is
+    populated end-to-end. Sites that need to opt out (cost / metering)
+    pass ``stream_usage=False`` explicitly — that value is preserved
+    verbatim, mirroring the ``streaming`` opt-out pattern.
     """
     cleaned = {
         k: v
@@ -2140,11 +2150,9 @@ def clean_llm_config(cfg: dict) -> dict:
     # sets ``stream: True`` on the wire payload (see
     # ``BaseChatOpenAI._get_request_payload`` which serializes
     # ``"stream": self.streaming``). Streaming is the SINGLE knob for the
-    # wire-level flag — no separate ``stream_options`` plumbing is needed
-    # because ``_stream`` only enables ``stream_options`` when
-    # ``stream_usage`` is truthy (token-usage metadata), which we don't
-    # request; usage is captured at end-of-stream in the final chunk by
-    # default for OpenAI-compatible backends.
+    # wire-level flag; the ``stream_usage`` injection below controls
+    # whether the wire carries ``stream_options: {"include_usage": true}``
+    # so the backend emits a usage chunk in the SSE stream.
     if "streaming" not in cleaned:
         # Pull from the class-level default rather than hardcoding True
         # so operator knobs (OPENAI_STREAMING=false) take effect end-to-end
@@ -2153,6 +2161,13 @@ def clean_llm_config(cfg: dict) -> dict:
         # (daemon/__main__.py + daemon/api.py) — mirror of the
         # reasoning_echo_disabled_models propagation pattern.
         cleaned["streaming"] = ThinkingChatOpenAI.default_streaming
+    # W1 fix: inject stream_usage=True alongside the streaming default so
+    # langchain-openai emits ``stream_options: {"include_usage": true}`` on
+    # the wire. Without this, backends that only send usage on explicit
+    # request (the OpenAI spec default) leave ``usage_metadata`` as None.
+    # Respect explicit caller opt-outs (stream_usage=False).
+    if "stream_usage" not in cleaned:
+        cleaned["stream_usage"] = True
     return cleaned
 
 

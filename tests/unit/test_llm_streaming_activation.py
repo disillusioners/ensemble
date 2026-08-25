@@ -38,9 +38,11 @@ callers see identical final results.
 
 from __future__ import annotations
 
+import json
 import os
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
@@ -217,6 +219,50 @@ class TestLLMConfigStreamingField:
         finally:
             os.environ.pop("OPENAI_STREAMING", None)
 
+    def test_env_var_empty_string_falls_back_to_true(self):
+        """S1 fix: ``OPENAI_STREAMING=""`` (empty) — survives shell
+        interpolation patterns like ``${OPENAI_STREAMING:-true}`` when
+        operators paste a bare ``OPENAI_STREAMING=`` line into ``.env``
+        — must coerce to the default (True) instead of crashing pydantic
+        bool parsing at boot."""
+        os.environ["OPENAI_STREAMING"] = ""
+        try:
+            from daemon.config import LLMConfig
+
+            cfg = LLMConfig()
+            assert cfg.streaming is True, (
+                "OPENAI_STREAMING=\"\" must coerce to True (default) — "
+                "see S1 (empty-guard validator mirrors the "
+                "reasoning_echo_disabled_models precedent)"
+            )
+        finally:
+            os.environ.pop("OPENAI_STREAMING", None)
+
+    def test_yaml_null_streaming_falls_back_to_true(self):
+        """S1 fix: ``streaming:`` (YAML null) — operators delete the
+        value but leave the key — must coerce to the default (True)
+        instead of None propagating into LLMConfig and crashing
+        downstream pydantic bool checks."""
+        from daemon.config import LLMConfig
+
+        cfg = LLMConfig.model_validate({"streaming": None})
+        assert cfg.streaming is True, (
+            "YAML-null streaming must coerce to True (default) — see S1"
+        )
+
+    def test_explicit_streaming_false_passes_through(self):
+        """S1 guard verification: explicit False must still pass through
+        as False — the empty-guard validator must NOT silently override
+        a deliberate opt-out (mirror of the streaming False case in
+        ``TestCleanLlmConfigStreamingDefault``)."""
+        from daemon.config import LLMConfig
+
+        cfg = LLMConfig.model_validate({"streaming": False})
+        assert cfg.streaming is False, (
+            "explicit streaming=False must pass through the S1 validator "
+            "unchanged — empty-guard is only for empty/None, not False"
+        )
+
 
 # ---------------------------------------------------------------------------
 # End-to-end wiring — class var propagates to clean_llm_config + wire payload
@@ -354,3 +400,218 @@ class TestFacadeWithStreamingClient:
         # inside LangChain's invoke). Mock returns the same shape.
         assert result.content == "aggregated"
         mock_client.invoke.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Real end-to-end SSE round-trip — wires config → ChatOpenAI → invoke → AIMessage
+# ---------------------------------------------------------------------------
+
+
+def _sse_chunk(delta, finish_reason=None, usage=None,
+               model="test-model", cid="chatcmpl-e2e-1"):
+    """One OpenAI-compatible chat.completion.chunk in raw wire dict form."""
+    c = {
+        "id": cid,
+        "object": "chat.completion.chunk",
+        "created": 1735689600,
+        "model": model,
+        "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
+    }
+    if usage is not None:
+        c["usage"] = usage
+    return c
+
+
+def _sse_frame_bytes(chunks):
+    """SSE wire format: ``data: {...}\\n\\n`` per event, ``data: [DONE]\\n\\n`` terminator.
+    CRITICAL: frames separated by \n\n (NOT single \\n) — single-newline frames
+    produce a misleading JSONDecodeError instead of the real decode error.
+    """
+    out = []
+    for c in chunks:
+        out.append("data: " + json.dumps(c, separators=(",", ":")) + "\n\n")
+    out.append("data: [DONE]\n\n")
+    return "".join(out).encode("utf-8")
+
+
+class TestStreamingInvokeEndToEnd:
+    """REAL end-to-end SSE round-trip on the production chokepoint.
+
+    Closes the gap that let C1 (missing ``ChatGenerationChunk`` import)
+    ship green: the config-level suite never sent bytes through an HTTP
+    transport, never fed SSE-shaped bytes through the streaming decode
+    path, and never ran ``.invoke()`` end-to-end. This class does all
+    three, against an in-process ``httpx.MockTransport`` (no network,
+    no ports).
+
+    The flow exercises the EXACT production paths:
+      clean_llm_config → ThinkingChatOpenAI(**cfg) → httpx.MockTransport
+      → real OpenAI-compatible SSE → _stream() → _convert_chunk_to_generation_chunk
+      → chunk aggregation → AIMessage.
+
+    The handler captures the serialized POST body — the true wire boundary —
+    so we can assert ``stream: true`` was sent. SSE frames use
+    ``data: {...}\\n\\n`` (the \n\n separator is the council-confirmed gotcha).
+    """
+
+    # Fixed fixtures (deliberately deterministic; ordering is part of the
+    # semantic claim — reasoning fragments must aggregate in delta order).
+    _REASONING_FRAGMENT_A = "User greeted; I should "
+    _REASONING_FRAGMENT_B = "call the weather tool."
+    _CONTENT_FRAGMENT_A = "Let me "
+    _CONTENT_FRAGMENT_B = "check."
+    _TOOL_NAME = "get_weather"
+    _TOOL_ARGS = {"city": "Hanoi", "unit": "c"}
+    _TOOL_ID = "call_e2e_1"
+    _USAGE = {"prompt_tokens": 12, "completion_tokens": 34, "total_tokens": 46}
+
+    @pytest.fixture
+    def wire_tap(self):
+        """Build the SSE stream fixture + capture-only handler."""
+
+        class _Tap:
+            def __init__(self):
+                self.bodies: list[dict] = []
+
+        tap = _Tap()
+
+        # Build SSE chunks — must include:
+        #   - reasoning_content across ≥2 chunks (different fragments)
+        #   - content across ≥2 chunks
+        #   - ONE tool_call streamed as partial chunks
+        #       (id+name on first chunk, argument fragments across ≥2 chunks)
+        #   - final chunk carrying usage
+        #   - finish_reason on the last content/tool chunk
+        tool_args_json = json.dumps(self._TOOL_ARGS, separators=(",", ":"))
+        # Split into ≥2 fragments (council requires ≥2 — we use 3).
+        arg_fragments = [
+            tool_args_json[: tool_args_json.index('"Hanoi"') + len('"Hanoi"')],
+            tool_args_json[tool_args_json.index('"Hanoi"') + len('"Hanoi"'):],
+        ]
+
+        sse_chunks = [
+            # 1) role + first reasoning fragment
+            _sse_chunk({"role": "assistant", "reasoning_content":
+                        self._REASONING_FRAGMENT_A}),
+            # 2) second reasoning fragment
+            _sse_chunk({"reasoning_content": self._REASONING_FRAGMENT_B}),
+            # 3) first content fragment
+            _sse_chunk({"content": self._CONTENT_FRAGMENT_A}),
+            # 4) second content fragment
+            _sse_chunk({"content": self._CONTENT_FRAGMENT_B}),
+            # 5) tool-call first chunk: id + name + first arg fragment
+            _sse_chunk({"tool_calls": [{
+                "index": 0,
+                "id": self._TOOL_ID,
+                "type": "function",
+                "function": {
+                    "name": self._TOOL_NAME,
+                    "arguments": arg_fragments[0],
+                },
+            }]}),
+            # 6) tool-call second chunk: remaining arg fragments
+            _sse_chunk({"tool_calls": [{
+                "index": 0,
+                "function": {"arguments": arg_fragments[1]},
+            }]}),
+            # 7) final chunk: finish_reason + usage
+            _sse_chunk({}, finish_reason="stop", usage=self._USAGE),
+        ]
+
+        def handler(request):
+            tap.bodies.append(json.loads(request.content))
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "text/event-stream"},
+                content=_sse_frame_bytes(sse_chunks),
+                request=request,
+            )
+
+        tap.handler = handler
+        return tap
+
+    @pytest.fixture
+    def llm_and_client(self, wire_tap):
+        """Construct the REAL ThinkingChatOpenAI through the REAL
+        ``clean_llm_config`` chokepoint, with the mock transport injected
+        as ``http_client`` (the way ensemble wires custom clients)."""
+        from daemon.graph import ThinkingChatOpenAI, clean_llm_config
+
+        client = httpx.Client(
+            transport=httpx.MockTransport(wire_tap.handler),
+            base_url="https://llm.test.local/v1",
+        )
+        cfg = {
+            "model": "test-model",
+            "api_key": "test-key",
+            "base_url": "https://llm.test.local/v1",
+            "http_client": client,
+        }
+        cleaned = clean_llm_config(cfg)
+        llm = ThinkingChatOpenAI(**cleaned)
+        yield llm, client
+        client.close()
+
+    def test_real_invoke_round_trip_aggregates_all_features(
+        self, llm_and_client, wire_tap,
+    ):
+        """End-to-end SSE round-trip: invoke() must aggregate the SSE
+        stream into an AIMessage carrying (a) content (b) reasoning_content
+        (c) one fully-assembled tool_call (d) usage_metadata, AND the
+        outgoing POST body must carry ``stream: true`` on the wire."""
+        llm, _ = llm_and_client
+        result = llm.invoke([HumanMessage(content="hi")])
+
+        # (a) aggregated content
+        assert isinstance(result.content, str), (
+            f"AIMessage.content must be the concatenated content string; "
+            f"got {type(result.content).__name__}"
+        )
+        assert self._CONTENT_FRAGMENT_A + self._CONTENT_FRAGMENT_B in result.content, (
+            "aggregated content must contain both fragments in delta order"
+        )
+
+        # (b) reasoning_content preserved in additional_kwargs
+        assert "reasoning_content" in result.additional_kwargs, (
+            "streaming path must preserve reasoning_content in "
+            "additional_kwargs — see graph.py::_convert_delta_to_message_chunk"
+        )
+        assert result.additional_kwargs["reasoning_content"] == (
+            self._REASONING_FRAGMENT_A + self._REASONING_FRAGMENT_B
+        ), "reasoning_content must concatenate fragments in delta order"
+
+        # (c) tool_calls assembled with parsed args
+        tool_calls = result.tool_calls
+        assert len(tool_calls) == 1, (
+            f"expected exactly one tool_call (reassembled from partial "
+            f"chunks); got {len(tool_calls)}"
+        )
+        tc = tool_calls[0]
+        assert tc["name"] == self._TOOL_NAME, (
+            f"tool_call name must survive the id+name-on-first-chunk + "
+            f"args-across-subsequent-chunks assembly; got {tc['name']!r}"
+        )
+        assert tc["id"] == self._TOOL_ID, (
+            f"tool_call id must come from the first chunk; got {tc['id']!r}"
+        )
+        assert tc["args"] == self._TOOL_ARGS, (
+            f"tool_call args must parse back to the original dict; "
+            f"got {tc['args']!r}"
+        )
+
+        # (d) usage_metadata populated — requires W1 (stream_usage=True)
+        # If this assertion fails after C1 lands, that's the W1 signal.
+        assert result.usage_metadata is not None, (
+            "usage_metadata must be populated from the streamed usage "
+            "chunk — requires W1 (stream_usage=True injection in "
+            "clean_llm_config) so langchain emits "
+            "stream_options: {include_usage: true}"
+        )
+
+        # Wire payload: outgoing POST body must carry stream: true
+        assert wire_tap.bodies, "transport handler received no requests"
+        payload = wire_tap.bodies[-1]
+        assert payload.get("stream") is True, (
+            f"outgoing POST body must carry stream: true (CF-125s fix); "
+            f"got stream={payload.get('stream')!r}"
+        )

@@ -189,7 +189,11 @@ def _patch_langchain_constructor(module, wire: WireLog):
         # SDK path expects SSE-format chunks; without this opt-out the
         # mock is rejected with "No generations found in stream".
         # Production defaults streaming ON via clean_llm_config; that
-        # wire-format path is exercised in test_llm_streaming_activation.py.
+        # wire-format path is exercised end-to-end in
+        # test_llm_streaming_activation.py (request-side ``stream: true``
+        # wire payload + the ``TestStreamingInvokeEndToEnd`` SSE round-
+        # trip invoke test that aggregates content / reasoning /
+        # tool_calls / usage_metadata from a real-shaped chunk stream).
         kwargs["streaming"] = False
         return real(*args, **kwargs)
 

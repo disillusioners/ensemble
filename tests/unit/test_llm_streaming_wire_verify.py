@@ -63,11 +63,15 @@ chunks through ``_stream``. Tests below use ``_invoke_or_w1`` so that:
 Once the one-line import fix lands in production code, every ``W-1`` guard
 becomes a no-op and the semantic assertions behind it engage automatically.
 
-⚠ FINDING W-2 (V5) — ``OPENAI_STREAMING=""`` (empty string) does NOT fall
-back to the default; pydantic-settings raises ``ValidationError`` (bool
-parsing of ''). An operator shipping an empty ``OPENAI_STREAMING=`` line in
-``.env`` gets a boot-time config crash, not default-on streaming. The test
-below documents the ACTUAL behavior (see ``test_v5_empty_string_*``).
+⚠ FINDING W-2 (V5) — FIXED by S1 (``_coerce_streaming_empty_to_default``)
+--------------------------------------------------------------------------------
+``OPENAI_STREAMING=""`` (empty string) and a bare YAML ``streaming:`` (None)
+used to crash daemon boot with a pydantic ``ValidationError`` (bool parsing
+of ''). S1 adds a ``field_validator("streaming", mode="before")`` that
+coerces both to ``True`` (the default), so ``.env`` lines with empty values
+and stripped YAML keys now fall back to the streaming-on default instead of
+failing the daemon at config load. The test below documents the NEW
+behavior (see ``test_v5_empty_string_coerces_to_true``).
 """
 
 from __future__ import annotations
@@ -79,7 +83,6 @@ from types import SimpleNamespace
 import httpx
 import pytest
 from langchain_core.messages import HumanMessage
-from pydantic import ValidationError
 
 PROXY_BASE_URL = "https://llm.test.local/v1"
 
@@ -348,9 +351,21 @@ class TestV1WireFlag:
                 "clean_llm_config-constructed LLM (Cloudflare ~125s 524 fix)"
             )
             assert tap.last["model"] == "test-model"
-            # A real streaming request must NOT request stream_options unless
-            # stream_usage was enabled (production does not enable it).
-            assert tap.last.get("stream_options") is None
+            # W1 fix: clean_llm_config now injects ``stream_usage=True`` for any
+            # default-constructed LLM (unless the caller passes it explicitly),
+            # so langchain-openai serializes the wire-level ``stream_options``
+            # block requesting the backend to emit a final usage chunk.
+            # Without this injection, OpenAI-spec-compliant backends omit
+            # ``usage`` from the SSE stream entirely and ``usage_metadata``
+            # comes back as None — silent token-count loss. Assert the exact
+            # shape langchain-openai emits (``stream_options.include_usage``
+            # must be True).
+            assert tap.last.get("stream_options") == {"include_usage": True}, (
+                "default clean_llm_config must inject stream_usage=True so the "
+                "wire carries stream_options: {include_usage: True} (W1 fix); "
+                "backends that omit usage on the SSE stream would otherwise "
+                "leave usage_metadata=None end-to-end"
+            )
 
             if w1 is not None:
                 _fail_w1(w1)
@@ -615,23 +630,40 @@ class TestV5EnvCoercion:
         monkeypatch.delenv("OPENAI_STREAMING", raising=False)
         assert LLMConfig().streaming is True
 
-    def test_v5_empty_string_actual_behavior_is_validation_error(self, monkeypatch):
-        """FINDING W-2 — documented ACTUAL behavior, not the assumed one.
+    def test_v5_empty_string_coerces_to_true(self, monkeypatch):
+        """S1 fix — ``OPENAI_STREAMING=""`` (empty string) now coerces to
+        the default (``True``) instead of raising ``ValidationError``.
 
-        The verification brief expected ``OPENAI_STREAMING=""`` to fall back
-        to the default (True). It does NOT: LLMConfig uses plain
-        pydantic-settings (no ``env_ignore_empty``), so '' fails bool
-        parsing and raises ValidationError. Consequence: an empty
-        ``OPENAI_STREAMING=`` line in .env crashes the daemon at config
-        load instead of silently defaulting. Requires developer attention
-        (either set env_ignore_empty=True on LLMConfig or document the
-        failure mode).
+        Pre-S1, an empty ``OPENAI_STREAMING=`` line in ``.env`` (a common
+        operator foot-gun: paste-the-key-then-fill-the-value-later) crashed
+        daemon boot at config load. ``LLMConfig._coerce_streaming_empty_to_default``
+        (``daemon/config.py``, ``field_validator("streaming", mode="before")``)
+        short-circuits empty / whitespace strings and ``None`` (YAML null
+        from a stripped ``streaming:`` key) to ``True``. Real bools and
+        pydantic-parseable strings (``"true"`` / ``"false"`` / ``"1"`` /
+        ``"0"``) pass through untouched.
         """
         from daemon.config import LLMConfig
 
         monkeypatch.setenv("OPENAI_STREAMING", "")
-        with pytest.raises(ValidationError):
-            LLMConfig()
+        cfg = LLMConfig()
+        assert cfg.streaming is True, (
+            "S1 validator must coerce OPENAI_STREAMING='' to the default "
+            "(True); the .env-empty foot-gun must no longer crash daemon boot"
+        )
+
+    def test_v5_none_yaml_key_coerces_to_true(self):
+        """S1 also covers the YAML-null case: a stripped ``streaming:`` key
+        arrives at the validator as ``None`` (pydantic-settings default for a
+        missing key). It must coerce to ``True`` rather than fail bool parsing
+        on the subsequent path. Constructed directly because ``monkeypatch``
+        cannot synthesize a YAML-key-None from an env var."""
+        from daemon.config import LLMConfig
+
+        cfg = LLMConfig.model_validate({"streaming": None})
+        assert cfg.streaming is True, (
+            "S1 validator must coerce streaming=None (YAML null) to the default"
+        )
 
 
 # ---------------------------------------------------------------------------

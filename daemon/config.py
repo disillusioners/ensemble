@@ -173,6 +173,40 @@ class LLMConfig(BaseSettings):
         ),
     )
 
+    @field_validator("streaming", mode="before")
+    @classmethod
+    def _coerce_streaming_empty_to_default(cls, value: Any) -> Any:
+        """Coerce empty-string / YAML-null ``streaming`` to the default (True).
+
+        Precedent: ``base_url_backup`` empty-guard at
+        ``_coerce_base_url_backup_empty_to_none`` and the
+        ``reasoning_echo_disabled_models`` empty-guard in
+        ``_parse_reasoning_echo_disabled_models`` (both coerce ``""`` /
+        whitespace to a sensible default instead of crashing pydantic
+        bool parsing).
+
+        ``OPENAI_STREAMING=""`` survives the ``${OPENAI_STREAMING:-true}``
+        shell interpolation in some operator ``.env`` files (where an
+        empty value pastes through without a substitution), and YAML
+        files may carry a bare ``streaming:`` (None) when the operator
+        deletes the value but leaves the key. Pydantic-settings raises
+        ``ValidationError`` on bool parsing of an empty string and a
+        missing-YAML-key default is None — both crash daemon boot.
+
+        Rules:
+
+        - ``""`` / whitespace → ``True`` (default)
+        - ``None`` (YAML null) → ``True`` (default)
+        - ``True`` / ``False`` → pass through unchanged
+        - ``"true"`` / ``"false"`` / ``"1"`` / ``"0"`` → pydantic handles
+          (delegated to bool coercion after our guard)
+        """
+        if value is None:
+            return True
+        if isinstance(value, str) and not value.strip():
+            return True
+        return value
+
     @field_validator("reasoning_echo_disabled_models", mode="before")
     @classmethod
     def _parse_reasoning_echo_disabled_models(cls, value: Any) -> Any:

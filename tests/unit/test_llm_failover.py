@@ -1228,9 +1228,12 @@ class TestF1BackupKwargNeverReachesConstructor:
             "max_retries": 0,
             # Opt out of streaming (production defaults ON — see
             # clean_llm_config). These tests verify kwarg-strip /
-            # build wiring; the streaming payload shape is exercised
-            # in test_llm_streaming_activation.py with the wire-level
-            # ``_get_request_payload`` assertion.
+            # build wiring; the streaming flag is asserted at the wire
+            # boundary in test_llm_streaming_activation.py
+            # (``TestWirePayloadStreamFlag`` + the SSE round-trip in
+            # ``TestStreamingInvokeEndToEnd`` — content / reasoning /
+            # tool-call / usage_metadata aggregation, ``stream: true``
+            # on the outgoing POST body).
             "streaming": False,
         }
 
