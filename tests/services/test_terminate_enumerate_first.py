@@ -490,18 +490,28 @@ async def test_w5_terminate_calls_bus_cancel_exactly_once():
     from daemon.services.instance_lifecycle import InstanceLifecycleService
     from daemon.services.dependency_bus import DependencyBus
 
-    # Build a real DependencyBus with a spy ``cancel_for_target``.
+    # Build a real DependencyBus with spies on BOTH the legacy cancel
+    # and the Phase 2 fire method (task 2.3 reworked the helper's body
+    # from cancel to fire-with-outcome — the W5 exactly-once intent is
+    # preserved by spying the terminate-path bus surface).
     from unittest.mock import MagicMock as _MagicMock
     from daemon.repositories.dependency_bus.repository import DependencyWatcherRepository
     bus = DependencyBus(DependencyWatcherRepository(engine=_MagicMock()))
     cancel_call_count = 0
+    fire_call_count = 0
 
     async def spy_cancel_for_target(target_instance_id):
         nonlocal cancel_call_count
         cancel_call_count += 1
         return 0
 
+    async def spy_fire_for_terminated_target(target_instance_id, outcome):
+        nonlocal fire_call_count
+        fire_call_count += 1
+        return []
+
     bus.cancel_for_target = spy_cancel_for_target
+    bus.fire_for_terminated_target = spy_fire_for_terminated_target
     set_dependency_bus(bus)
 
     try:
@@ -547,14 +557,33 @@ async def test_w5_terminate_calls_bus_cancel_exactly_once():
 
         await real("w5-root")
 
-        # W5 assertion: bus.cancel_for_target invoked EXACTLY ONCE
-        # (pre-fix the count was 2; post-collapse it is 1). The helper
-        # is the SOLE call site.
+        # W5 assertion (Phase 2 task 2.3 + P2-fix-cycle-1 review F1):
+        # the terminate path invokes the bus helper exactly once per
+        # instance (the W5 collapse removed the duplicated step 7.8 +
+        # step 8.5 call surface). The helper body invokes TWO bus
+        # methods on disjoint row sets:
+        #   * ``fire_for_terminated_target`` — UP-side rows (the
+        #     waiting parents) are FIRED-with-outcome
+        #     (``Outcome(status='terminated')``).
+        #   * ``cancel_for_target`` — DOWN-side rows (the terminated
+        #     instance's own watches on its children) are CANCELLED
+        #     (review F1 mitigation — pre-F1 these rows dangled as
+        #     PENDING orphans mid-session, blocking a mid-session
+        #     REVIVE's count_pending_for_target_sync gate).
+        # Each method is called exactly once. Pre-fix the cancel
+        # count was 2 (step 7.8 inline + step 8.5 helper);
+        # post-collapse it is 1 (helper composition).
+        assert fire_call_count == 1, (
+            f"W5 regression: bus.fire_for_terminated_target must be "
+            f"called exactly once per terminated instance (the W5 "
+            f"collapse removed the duplicated step 7.8 + step 8.5 "
+            f"surfaces); got {fire_call_count}"
+        )
         assert cancel_call_count == 1, (
-            f"W5 regression: bus.cancel_for_target must be called "
-            f"exactly once per terminated instance (the W5 collapse "
-            f"removed the duplicated step 7.8 + step 8.5 surfaces); "
-            f"got {cancel_call_count}"
+            f"Phase 2 task 2.3 + review F1: the helper composition "
+            f"calls bus.cancel_for_target exactly once per terminated "
+            f"instance (DOWN-side drain — disjoint from the fire's "
+            f"UP-side row set); got {cancel_call_count}"
         )
     finally:
         # Restore the bus singleton to avoid polluting other tests.

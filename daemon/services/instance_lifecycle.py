@@ -1,6 +1,7 @@
 """Instance lifecycle service for managing instance creation and termination."""
 
 import asyncio
+import json
 import logging
 import re
 import time
@@ -26,7 +27,7 @@ from ..repositories.message_queue.models import MessageQueue, MessageStatus, Mes
 from ..repositories.task.models import SuspensionReason, Task, TaskStatus
 from ..write_pause_guard import WriteGuardSession
 from .cancellation import CancellationService
-from .dependency_bus import get_dependency_bus
+from .dependency_bus import Outcome, get_dependency_bus
 from .event_publisher import EventPublisherService
 from .job_queue_service import DemandState, TERMINAL_CANCEL_STATUSES, TERMINAL_STATUSES
 from .language_utils import get_language_preference, is_auto_language
@@ -46,41 +47,144 @@ logger = logging.getLogger(__name__)
 
 
 async def _cancel_bus_watchers_for(manager: "InstanceManager", instance_id: str, op: str) -> None:
-    """Cancel PENDING DependencyBus watchers targeting ``instance_id``.
+    """Fire PENDING DependencyBus watchers waiting on ``instance_id``.
 
-    Called from :meth:`InstanceLifecycleService.pause_instance_cascade`
-    and :meth:`InstanceLifecycleService.terminate_instance` after the
-    DB status transition has committed. Cancels PENDING watchers so
-    an in-flight child task does not deliver a FollowUp onto a
-    paused/terminated parent. No-op when the bus singleton is
-    missing (the bus is the only completion mechanism).
+    Phase 2 (pause-resume-terminate-tree-fix, task 2.3 — B3 fix,
+    §D Rev 2.1): this helper's body was patched UNCONDITIONALLY from
+    ``bus.cancel_for_target`` (PENDING→CANCELLED, DOWN-side only) to
+    ``bus.fire_for_terminated_target`` (PENDING→FIRED with
+    ``Outcome(status='terminated')``, UP propagation). The terminated
+    instance's waiting parents get their
+    ``count_pending_for_target_sync`` gates cleared via the FIRED
+    transition and each receives the fired FollowUp — the parent's
+    completion obligation survives the mid-tree terminate instead of
+    hanging on a ghost child forever.
+
+    Review F1 (2026-08-24, DOWN-side regression): the unconditional
+    fire-only swap left the DOWN-side rows (where the TERMINATED
+    instance is the TARGET — its own watches on its children) as
+    PENDING. After ``_terminate_instance_db_sync`` deletes the
+    terminated instance's task rows those rows become orphans
+    (``source_task_id`` dangling; ``_sweep_orphan_watchers`` only runs
+    at ``bus.start()``). A mid-session REVIVE of the terminated
+    instance would then count those orphans in
+    ``count_pending_for_target_sync(revived_id)`` and block the
+    completion gate indefinitely.
+
+    Mitigation (reviewer's recommended composable fix): AFTER
+    ``fire_for_terminated_target``, call
+    ``bus.cancel_for_target(instance_id)`` to drain the leftover
+    DOWN-side PENDING rows. The two methods match DISJOINT row sets
+    (UP via ``metadata.child_id``; DOWN via ``target_instance_id``),
+    so composition is exactly-once-safe — both use the guarded
+    ``transition_state`` (``WHERE state = 'PENDING'`` UPDATE); the
+    second method's guarded UPDATE no-ops on rows already terminal
+    via the first. ``fire`` runs FIRST so the UP-side rows land as
+    FIRED-with-outcome; the DOWN-side rows then transition PENDING
+    → CANCELLED. Failure handling mirrors the pre-fix shape:
+    log + swallow (a bus failure must not fail the terminate path).
+
+    No ``op`` branching: the currently-reachable call graph for this
+    helper is terminate-only (pause-side ``cancel_for_target``
+    invocation was removed pre-Phase-2 — evidence at
+    ``pause_instance_cascade``'s "DEPENDENCY-BUS WATCHERS ARE
+    PRESERVED ON PAUSE" comment, Phase 2 Decision 2, 2026-06-25).
+    ``op`` is a logging-only field.
+
+    For each fired FollowUp: enqueue onto the waiting parent's queue
+    via ``manager.enqueue_message`` (JAFP-preserved — the internal
+    MessageQueue/Task seam, NO JobItem creation), then stamp the
+    FIRED row's ``enqueued_at`` via
+    ``bus.mark_enqueued_by_source_target`` (the C1 dedup marker —
+    once stamped, a future restart's ``_recover_fired_unsent`` will
+    not re-deliver it). Failure handling mirrors the pre-fix shape:
+    log + swallow (a bus failure must not fail the terminate path).
 
     Args:
         manager: The InstanceManager facade.
-        instance_id: The parent instance ID whose watchers should be
-            cancelled.
-        op: One of ``"pause"`` / ``"terminate"`` — used in the log
-            line for traceability.
+        instance_id: The terminated instance ID whose waiting
+            parents' watchers should be fired (UP) and whose own
+            DOWN-side watches should be cancelled.
+        op: Logging-only operation tag (e.g. ``"terminate_instance"``).
     """
     bus = get_dependency_bus()
     if bus is None:
         logger.debug(
             f"instance_lifecycle.{op}: bus singleton is None — "
-            f"skipping cancel_for_target "
+            f"skipping fire_for_terminated_target "
             f"(target={instance_id[:8]}...)"
         )
         return
+    try:
+        fired = await bus.fire_for_terminated_target(
+            instance_id, Outcome(status="terminated")
+        )
+        for fu in fired:
+            # JAFP: manager.enqueue_message creates NO JobItem — the
+            # internal MessageQueue + Task seam is the bus's delivery
+            # contract (pause/terminate paths never write JobItems).
+            await manager.enqueue_message(
+                instance_id=fu.target_instance_id,
+                message=fu.message,
+                source=fu.source,
+                metadata=dict(fu.metadata),
+            )
+            # Per-FollowUp stamp (keyed by the row's source_task_id —
+            # surfaced in the FollowUp metadata by
+            # fire_for_terminated_target). Best-effort per row: a
+            # stamp failure leaves the row un-stamped so a restart's
+            # _recover_fired_unsent re-delivers it (the downstream
+            # parent path is idempotent via the tri-state guards).
+            source_task_id = fu.metadata.get("source_task_id")
+            if source_task_id:
+                try:
+                    await bus.mark_enqueued_by_source_target(
+                        source_task_id, fu.target_instance_id
+                    )
+                except Exception as stamp_err:
+                    logger.debug(
+                        f"instance_lifecycle.{op}: stamp failed "
+                        f"(non-fatal) for source_task="
+                        f"{str(source_task_id)[:8]}..., "
+                        f"target={fu.target_instance_id[:8]}...: "
+                        f"{stamp_err}"
+                    )
+        if fired:
+            logger.info(
+                f"instance_lifecycle.{op}: fired {len(fired)} "
+                f"dependency watcher(s) waiting on "
+                f"{instance_id[:8]}... (outcome=terminated)"
+            )
+    except Exception as e:
+        logger.warning(
+            f"instance_lifecycle.{op}: bus.fire_for_terminated_target "
+            f"failed for {instance_id[:8]}... "
+            f"({type(e).__name__}: {e})"
+        )
+
+    # Review F1 — DOWN-side row drain. AFTER the UP-side fire, drain
+    # the DOWN-side PENDING rows where this instance was the TARGET
+    # (its own watches on its children). These rows' source_task_id
+    # references the terminated instance's own Task rows — which
+    # ``_terminate_instance_db_sync`` deletes — so without this drain
+    # they become orphaned PENDING rows mid-session (the
+    # ``_sweep_orphan_watchers`` cleanup only runs at bus.start()).
+    # Fire-then-cancel is exactly-once-safe (disjoint row sets +
+    # guarded transition_state). Best-effort: failure here is logged
+    # and swallowed — a bus failure must not fail the terminate path.
     try:
         cancelled = await bus.cancel_for_target(instance_id)
         if cancelled > 0:
             logger.info(
                 f"instance_lifecycle.{op}: cancelled {cancelled} "
-                f"dependency watcher(s) for {instance_id[:8]}..."
+                f"down-side dependency watcher(s) for "
+                f"{instance_id[:8]}..."
             )
     except Exception as e:
         logger.warning(
             f"instance_lifecycle.{op}: bus.cancel_for_target failed "
-            f"for {instance_id[:8]}... ({type(e).__name__}: {e})"
+            f"for {instance_id[:8]}... "
+            f"({type(e).__name__}: {e})"
         )
 
 
@@ -1814,13 +1918,12 @@ class InstanceLifecycleService:
                             f"({type(e).__name__}: {e})"
                         )
 
-                # 7.8. Cancel PENDING DependencyBus watchers targeting the
-                # terminated instance. The bus replaces the CorrelationManager
-                # as the SOLE completion authority (Phase 5, 2026-06-23): its
-                # ``cancel_for_target`` transitions the watcher rows to
-                # CANCELLED so the child's terminal event no-ops on the
-                # cancel path. Without this, an in-flight child task would
-                # deliver a FollowUp onto a dead parent.
+                # 7.8. Fire PENDING DependencyBus watchers waiting on the
+                # terminated instance (UP propagation). The bus replaces the
+                # CorrelationManager as the SOLE completion authority (Phase 5,
+                # 2026-06-23). Pre-P2 this step CANCELLED the terminated
+                # instance's own watchers (target-side, DOWN only) — the
+                # waiting parents' gates never cleared (B3 ghost-child wait).
                 #
                 # W5 (governor-council NEEDS-FIXES): collapsed into the
                 # ``_cancel_bus_watchers_for`` helper at :48-84. Pre-fix,
@@ -1829,6 +1932,20 @@ class InstanceLifecycleService:
                 # behavior change, but the duplicate call surface was
                 # easy to misread. The helper owns the cancel contract;
                 # both step 7.8 and step 8.5 are now single-call.
+                #
+                # Task 2.3 (Phase 2, §D Rev 2.1): the helper body now
+                # fires-with-outcome (PENDING→FIRED,
+                # ``Outcome(status='terminated')``) instead of cancelling.
+                # The pre-existing direct ``bus.cancel_for_target``
+                # duplicate call (folded into the helper by the P1 W5
+                # collapse — the two terminate paths converged there)
+                # is now part of the helper's DOWN-side drain (review
+                # F1): ``fire_for_terminated_target`` FIRST (UP side),
+                # then ``cancel_for_target`` (DOWN side). The two
+                # methods match disjoint row sets (UP via
+                # ``metadata.child_id``; DOWN via
+                # ``target_instance_id``) so the composition is
+                # exactly-once-safe.
                 await _cancel_bus_watchers_for(
                     self._manager, instance_id, "terminate_instance"
                 )
@@ -2444,6 +2561,13 @@ class InstanceLifecycleService:
         # completed→revived cycle is still enumerated. One-line swap;
         # P2 owns the resume-handle/watcher fixes in this same function
         # but does NOT touch this line. Dispatcher-arbitrated merge order.
+        #
+        # AF3 RESOLVED (Phase 2, 2026-08-24): P2's changes in this
+        # function have landed — the compaction hook call below now
+        # threads the live event loop into the deliver-before-compact
+        # two-pass (task 2.4) and the Task SELECT guard (task 2.5)
+        # lives in ``_resume_cascade_db_sync``. The enumeration line
+        # above remains P1-owned and untouched, per the arbitration.
         tree_ids = repo.get_cascade_tree_ids(root_id)
         if not tree_ids:
             logger.warning(f"No tree found for instance {instance_id[:8]}...")
@@ -2549,6 +2673,11 @@ class InstanceLifecycleService:
                     await asyncio.to_thread(
                         self._compact_fired_watchers_for_paused,
                         resumed_node_id,
+                        # Phase 2 task 2.4: pass the CURRENT loop so the
+                        # deliver-pass bridge targets the live event
+                        # loop (manager._loop can be None/stale on
+                        # cold paths).
+                        loop=asyncio.get_running_loop(),
                     )
                 except Exception as compact_err:
                     # Defensive: the helper already catches its own
@@ -3772,63 +3901,184 @@ status=InstanceStatus.IDLE.value,
             agent_ids_by_instance=agent_ids_by_instance,
         )
 
-    def _compact_fired_watchers_for_paused(self, instance_id: str) -> int:
-        """Delete FIRED ``dependency_watchers`` rows for a paused instance.
+    def _compact_fired_watchers_for_paused(
+        self, instance_id: str, *, loop: "asyncio.AbstractEventLoop | None" = None
+    ) -> int:
+        """Deliver buffered FIRED FollowUps, then compact stale ones.
 
-        Phase 2 (pause/resume redesign, 2026-06-25) — Decision 3 (C3):
-        bound the unbounded growth that would otherwise accumulate in
-        ``dependency_watchers`` during a long partial-tree pause.
+        Phase 2 (pause-resume-terminate-tree-fix, task 2.4 — B2 fix,
+        two-pass cutoff per architect §3.3, Rev 2.1 W2/W3 reframing).
 
-        Background — why we need this:
+        Pass 1 (DELIVER): every FIRED row where ``enqueued_at IS NULL
+        AND fired_at <= now()`` — ALL buffered rows, NO grace (a child
+        that completed 30s before resume must NOT be silently
+        stranded by the 60s grace). Per row: re-enqueue the FollowUp
+        via ``manager.enqueue_message`` (the internal MessageQueue +
+        Task seam — JAFP preserved, NO JobItem creation), then
+        IMMEDIATELY stamp ``enqueued_at`` via
+        ``mark_enqueued_by_source_target``. The per-row stamp is
+        LOAD-BEARING: the DELETE's ``enqueued_at IS NOT NULL``
+        predicate is the durability guarantee — a stamped row survives
+        the DELETE by construction; an unstamped row is caught next
+        cycle (the next resume's Pass 1, or process restart's
+        ``_recover_fired_unsent``).
 
-          Phase 2's Decision 2 KEEPS PENDING watchers in PENDING state
-          when an instance pauses. While the parent is paused, child
-          tasks may still complete; their terminal events fire the
-          ``DependencyBus`` which atomically transitions PENDING rows
-          to FIRED (with ``fired_at`` set). PROCESS_REPORT delivery is
-          blocked by the per-instance pause gate in
-          ``claim_pending_task``, so the FIRED FollowUp payloads just
-          accumulate. A long pause (hours) on a parent with N children
-          can produce up to N FIRED rows per pause cycle — repeated
-          pauses compound the count.
+        Pass 2 (DELETE): the original 60s-grace DELETE, unchanged
+        (``enqueued_at IS NOT NULL AND fired_at <= cutoff``).
 
-          On resume, the bus delivers the queued FollowUps. Once the
-          FollowUp has been enqueued (``enqueued_at`` stamped) and the
-          PROCESS_REPORT task has completed, the FIRED row is no longer
-          needed — keeping it serves only diagnostics.
+        Ordering + early-abort (Rev 2.1 W2 — a single transaction
+        spanning both passes is NOT implementable because
+        ``manager.enqueue_message`` owns its own session):
 
-        Strategy — what this method does:
+        * Pass 1 executes strictly BEFORE Pass 2.
+        * ANY enqueue failure (exception OR
+          ``asyncio.CancelledError`` — explicitly caught because it
+          is a ``BaseException``, not an ``Exception``) aborts the
+          cascade before Pass 2 begins. A single failed FollowUp
+          must not silently allow the DELETE to reap the whole
+          buffered set.
+        * Failures are logged and swallowed — delivery/compaction is
+          hygiene on the resume path and must not crash resume.
 
-          Conservative first cut: delete FIRED watchers whose
-          ``fired_at`` is older than a small grace window AND whose
-          ``enqueued_at`` is non-null (i.e., the FollowUp was already
-          delivered to the parent's message queue). The grace window
-          avoids racing a delivery that is still in flight.
-
-          This method is INTENDED to be wired into the resume path
-          (Phase 3) — it is registered here as part of Phase 2 so the
-          surface is stable. The default cutoff is 60 seconds since
-          ``fired_at`` (covers normal delivery latency + jittered
-          backoff) and the default ``enqueued_at IS NOT NULL`` clause
-          ensures we never compact a FollowUp that has not yet been
-          handed to ``manager.enqueue_message``.
+        Sync→async bridge (binding, W2 (d)): this method runs SYNC
+        (invoked via ``asyncio.to_thread`` from the resume cascade)
+        but ``manager.enqueue_message`` is async. Each enqueue is
+        bridged via ``asyncio.run_coroutine_threadsafe`` onto the
+        manager's event loop (precedent:
+        ``ReportDeliveryRecoveryService._try_revive_terminal_parent``
+        and ``_schedule_explicit_handle_resume``); the resulting
+        ``concurrent.futures.Future`` is awaited with a bounded
+        timeout and a future-raised exception triggers the
+        early-abort.
 
         Args:
             instance_id: The instance whose FIRED watchers should be
-                compacted.
+                delivered + compacted.
+            loop: The manager's event loop for the bridge. ``None``
+                (production resume-cascade callers may pass it
+                explicitly) falls back to ``manager._loop`` and then
+                ``asyncio.get_running_loop()`` (which is the modern
+                API; ``asyncio.get_event_loop()`` is deprecated when
+                no loop is running).
 
         Returns:
-            Number of watcher rows deleted. Zero is a valid result
-            (no FIRED watchers, or all are within the grace window /
-            not yet enqueued).
+            Number of watcher rows deleted by Pass 2. Zero is valid
+            (nothing buffered, everything fresh, or early-abort).
         """
-        # Compute the cutoff once on the caller's thread so the SQL
-        # uses a parameterised ISO timestamp (dialect-portable).
+        # Compute the cutoffs once on the caller's thread so the SQL
+        # uses parameterised ISO timestamps (dialect-portable).
         from datetime import datetime as _dt, timedelta as _td, timezone as _tz
 
+        from ..repositories.dependency_bus.repository import (
+            DependencyWatcherRepository,
+        )
+        from .dependency_bus import FollowUp
+
+        now_iso = _dt.now(_tz.utc).isoformat()
         cutoff_iso = (_dt.now(_tz.utc) - _td(seconds=60)).isoformat()
+        fired_state = DependencyWatcherState.FIRED.value
+
+        # ── Resolve the destination loop for the sync→async bridge ──
+        dest_loop = loop
+        if dest_loop is None:
+            dest_loop = getattr(self._manager, "_loop", None)
+        if dest_loop is None or dest_loop.is_closed():
+            # ``get_running_loop`` is the modern API; ``get_event_loop``
+            # is deprecated for the "no running loop" case (raises
+            # DeprecationWarning on 3.12+) and returns a different
+            # semantics outside a running loop. The bridge target
+            # must be a loop that's already running on the manager's
+            # event-loop thread; if we can't find one we fall back
+            # to skipping Pass 1 (rows survive to next cycle) —
+            # Pass 2 (DELETE) still runs because it does not need
+            # the bridge. Legacy sync-test callers without ``loop=``
+            # (e.g. ``tests/unit/test_pause_flow_redesign.py:555``)
+            # exercise Pass 2 only.
+            try:
+                dest_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                dest_loop = None
+        if dest_loop is None or dest_loop.is_closed():
+            logger.warning(
+                "_compact_fired_watchers_for_paused: no live event "
+                "loop for delivery bridge — skipping deliver pass "
+                f"for {instance_id[:8]}... (rows survive to next "
+                f"cycle); running Pass 2 (DELETE) only"
+            )
+            dest_loop = None  # signal Pass 1 to no-op
+
+        repo = DependencyWatcherRepository(self._manager.engine)
 
         try:
+            # ── Pass 1 (DELIVER) — no grace, per-row stamp ──────────
+            # Skipped when no event loop available (legacy callers,
+            # sync-test paths). Buffered rows survive to the next
+            # Pass 1 cycle.
+            if dest_loop is not None:
+                with self._manager.engine.connect() as conn:
+                    buffered = conn.execute(
+                        text(
+                            "SELECT watch_id, source_task_id, "
+                            "       target_instance_id, follow_up_payload "
+                            "FROM dependency_watchers "
+                            "WHERE target_instance_id = :instance_id "
+                            "  AND state = :fired_state "
+                            "  AND enqueued_at IS NULL "
+                            "  AND fired_at <= :now_iso"
+                        ),
+                        {
+                            "instance_id": instance_id,
+                            "fired_state": fired_state,
+                            "now_iso": now_iso,
+                        },
+                    ).mappings().all()
+
+                delivered = 0
+                for row in buffered:
+                    payload = row["follow_up_payload"]
+                    if isinstance(payload, str):
+                        # Raw Core SELECT returns the JSONB column as its
+                        # serialized text form (the ORM-level JSONB type
+                        # deserialization does not apply to text() SQL).
+                        payload = json.loads(payload)
+                    fu = FollowUp.from_payload(payload)
+                    # Bridge the async enqueue onto the manager's loop and
+                    # capture the result via the concurrent Future — an
+                    # enqueue failure (exception OR CancelledError)
+                    # propagates here and triggers the early-abort below.
+                    future = asyncio.run_coroutine_threadsafe(
+                        self._manager.enqueue_message(
+                            instance_id=fu.target_instance_id,
+                            message=fu.message,
+                            source=fu.source,
+                            metadata=dict(fu.metadata),
+                        ),
+                        dest_loop,
+                    )
+                    future.result(timeout=8.0)
+                    # LOAD-BEARING per-row stamp — immediately after the
+                    # successful enqueue. Once stamped, the row survives
+                    # the DELETE by construction and a future restart's
+                    # _recover_fired_unsent will not re-deliver it.
+                    repo.mark_enqueued_by_source_target(
+                        row["source_task_id"],
+                        row["target_instance_id"],
+                        None,
+                    )
+                    delivered += 1
+                    logger.info(
+                        "_compact_fired_watchers_for_paused: delivered "
+                        f"buffered FollowUp for paused instance "
+                        f"{instance_id[:8]}... "
+                        f"(source_task={str(row['source_task_id'])[:8]}..., "
+                        f"target={row['target_instance_id'][:8]}...)"
+                    )
+
+            # ── Pass 2 (DELETE) — the original 60s-grace pass ────────
+            # Runs strictly AFTER Pass 1. Reached ONLY when every
+            # buffered row above was enqueued + stamped (early-abort
+            # above otherwise). Pass 2 does NOT need the event-loop
+            # bridge — it's a plain SQL DELETE.
             with self._manager.engine.begin() as conn:
                 result = conn.execute(
                     text(
@@ -3840,25 +4090,29 @@ status=InstanceStatus.IDLE.value,
                     ),
                     {
                         "instance_id": instance_id,
-                        "fired_state": DependencyWatcherState.FIRED.value,
+                        "fired_state": fired_state,
                         "cutoff_iso": cutoff_iso,
                     },
                 )
                 deleted = int(getattr(result, "rowcount", 0) or 0)
                 if deleted > 0:
                     logger.debug(
-                        f"_compact_fired_watchers_for_paused: deleted "
+                        "_compact_fired_watchers_for_paused: deleted "
                         f"{deleted} FIRED watcher(s) for paused instance "
                         f"{instance_id[:8]}..."
                     )
                 return deleted
-        except Exception as e:
-            # Compaction is a hygiene operation, never a correctness one.
-            # A failure here must not propagate (would crash resume).
+        except (Exception, asyncio.CancelledError) as e:
+            # Early-abort (binding): any enqueue failure aborts BEFORE
+            # Pass 2 begins — the buffered set survives to the next
+            # cycle (next resume's Pass 1 or restart's
+            # _recover_fired_unsent). Delivery/compaction is hygiene
+            # on the resume path; the failure is logged and swallowed.
             logger.warning(
-                f"_compact_fired_watchers_for_paused: failed for "
+                f"_compact_fired_watchers_for_paused: early-abort for "
                 f"{instance_id[:8]}... ({type(e).__name__}: {e}); "
-                f"leaving FIRED watchers in place"
+                f"Pass 2 (DELETE) not entered — FIRED rows survive to "
+                f"next cycle"
             )
             return 0
 
@@ -3978,7 +4232,45 @@ status=InstanceStatus.IDLE.value,
                     "SELECT id, work_id "
                     "FROM task "
                     "WHERE instance_id IN :tree_ids "
-                    "  AND status = :paused_status"
+                    "  AND status = :paused_status "
+                    # Phase 2 task 2.5 (W1, Rev 2.1) — cancel-during-
+                    # pause drift guard: a TASK-OWNED JobItem in ANY
+                    # non-deleted state means the JobItem lane owns the
+                    # resume decision. ``deleted_at IS NULL`` is
+                    # load-bearing — a soft-deleted JobItem does NOT
+                    # own the resume decision.
+                    #
+                    # ``job_type <> 'message'`` is the W1 qualifier the
+                    # plan task text named ("a task-owning JobItem")
+                    # but the prior implementation dropped: per JAFP,
+                    # message-type JobItems are pure mirrors of the
+                    # Task row (created by ``enqueue_message_job``;
+                    # the Task lifecycle owns their visibility) and
+                    # never re-drive the resume decision (the
+                    # WorkerPool re-claim path drives both Task and
+                    # its mirror atomically — see the P1 JAFP hard
+                    # invariant). Holding a Task PAUSED because its
+                    # mirror exists would block the P1 c171a289
+                    # PAUSED→PENDING semantic the full-chain test
+                    # pins (and the c171a289 QUARANTINE.md-documented
+                    # test family).
+                    #
+                    # The drift residue that motivated W1 (a JobItem
+                    # cancelled during the pause, producing a
+                    # ``(JobItem CANCELLED, Task PENDING)`` row no
+                    # lane recovered) ONLY applies to TASK-owned
+                    # lanes. message-type mirrors cannot reach that
+                    # state by design. Tests in
+                    # ``tests/unit/services/test_resume_cascade_drift_guard.py``
+                    # were updated alongside this fix to use
+                    # ``job_type='task'`` so they exercise the
+                    # actual residue class.
+                    "  AND NOT EXISTS ("
+                    "    SELECT 1 FROM job_queue_items "
+                    "    WHERE job_queue_items.job_id = task.work_id "
+                    "      AND job_queue_items.deleted_at IS NULL"
+                    "      AND job_queue_items.job_type <> 'message'"
+                    "  )"
                 ).bindparams(bindparam("tree_ids", expanding=True)),
                 {
                     "tree_ids": tree_ids,

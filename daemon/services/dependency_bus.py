@@ -79,7 +79,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as dataclass_replace
 from datetime import datetime, timezone
 from typing import Any
 
@@ -1096,6 +1096,174 @@ class DependencyBus:
             extra={"completion_delivery_path": "bus"},
         )
         return count
+
+    async def fire_for_terminated_target(
+        self, target_instance_id: str, outcome: Outcome
+    ) -> list[FollowUp]:
+        """Fire all PENDING watchers waiting on ``target_instance_id``.
+
+        Phase 2 (pause-resume-terminate-tree-fix, task 2.2 — B3 fix).
+        Called from the terminate path (via the
+        ``instance_lifecycle._cancel_bus_watchers_for`` helper) when an
+        instance is terminated. Sibling of :meth:`cancel_for_target`:
+        instead of cancelling the watchers the terminated instance
+        REGISTERED (target-side, DOWN propagation), this method FIRES
+        the watchers waiting ON the terminated instance (source-side,
+        UP propagation) so every waiting parent's
+        ``count_pending_for_target_sync`` gate clears and completion
+        fires with a terminal outcome instead of hanging on a ghost
+        child forever.
+
+        Matching is by ``follow_up_payload.metadata.child_id`` (the key
+        ``send_message`` stamps when the watcher is registered), NOT by
+        ``source_task_id`` — the terminate path runs post-commit, after
+        the terminated instance's ``task`` rows are deleted, so a
+        tasks-table join would find nothing. The payload key survives.
+
+        Each transitioned FollowUp carries
+        ``metadata["child_outcome"] = "terminated"`` (additive key
+        only — architect decision Q2: encode the outcome in the
+        FollowUp payload, never a 4th watcher state) plus
+        ``metadata["source_task_id"]`` (the row's task key — the
+        terminate-path caller needs it to stamp
+        ``mark_enqueued_by_source_target`` after enqueueing; opaque
+        audit context per the FollowUp contract).
+
+        Exactly-once is the same primitive every emit path uses:
+        :meth:`DependencyWatcherRepository.transition_state` is a
+        guarded ``WHERE state = 'PENDING'`` UPDATE, so a concurrent
+        :meth:`emit_terminal` on the same source task (the natural
+        completion racing the terminate) yields ``rowcount == 0`` for
+        the loser — the FollowUp is delivered exactly once regardless
+        of which side wins.
+
+        ``outcome.status == "terminated"`` is a documented value of
+        :class:`Outcome` and does not trip either of the codebase's
+        two ``outcome.status == "error"`` branches — no per-parent
+        error signal is set by this method (a terminated child is not
+        an error).
+
+        Per-task lock: each matched watcher's ``source_task_id`` lock
+        is acquired individually (mirroring
+        :meth:`emit_terminal_for_child_instance`) so a concurrent
+        task-keyed :meth:`emit_terminal` on the same source task is
+        serialized against our transition — the loser's
+        ``transition_state`` returns ``rowcount == 0`` and skips.
+
+        Args:
+            target_instance_id: The TERMINATED instance id (the target
+                of the termination operation). Matched against the
+                watchers' ``follow_up_payload.metadata.child_id``.
+            outcome: The terminal outcome. ``Outcome(status='terminated')``
+                from the terminate path; logged only (the FollowUp
+                carries the ``child_outcome`` metadata key).
+
+        Returns:
+            The list of FollowUps atomically transitioned from PENDING
+            to FIRED by this call (each stamped with the
+            ``child_outcome`` metadata). The caller enqueues each onto
+            the waiting parent's queue and stamps ``enqueued_at`` via
+            :meth:`mark_enqueued_by_source_target`. Empty list when no
+            PENDING watchers were waiting on the terminated instance
+            or a concurrent emit already fired them.
+        """
+        pending_rows = await asyncio.to_thread(
+            self._repo.fetch_pending_for_child_instance, target_instance_id
+        )
+
+        if not pending_rows:
+            logger.debug(
+                f"bus fire_for_terminated_target: target="
+                f"{target_instance_id[:8]}, outcome={outcome.status}, "
+                f"no pending watchers",
+                extra={"completion_delivery_path": "bus"},
+            )
+            return []
+
+        fired: list[FollowUp] = []
+        fired_at = self._now_iso()
+        fired_state = DependencyWatcherState.FIRED.value
+
+        for row in pending_rows:
+            task_id = row.source_task_id
+            # Serialize against a concurrent task-keyed emit_terminal
+            # on the same source task (same lock discipline as
+            # emit_terminal_for_child_instance) so the cache pop below
+            # cannot race a concurrent emit's transition.
+            lock = await self._get_lock(task_id)
+            async with lock:
+                transitioned = await asyncio.to_thread(
+                    self._repo.transition_state,
+                    row.watch_id,
+                    fired_state,
+                    fired_at,
+                )
+                if not transitioned:
+                    # rowcount == 0 — a concurrent emit_terminal
+                    # already fired this watcher (or the orphan sweep
+                    # cancelled it). Skip: exactly-once delivery.
+                    logger.debug(
+                        f"bus fire_for_terminated_target: "
+                        f"watch_id={row.watch_id[:8]} already terminal "
+                        f"(skipped, no double-deliver)",
+                        extra={"completion_delivery_path": "bus"},
+                    )
+                    continue
+                fu = FollowUp.from_payload(row.follow_up_payload)
+                # Q2 (Rev 2.1): additive metadata keys only — the
+                # outcome is encoded in the FollowUp payload, not a
+                # 4th watcher state. ``source_task_id`` is the row's
+                # task key the terminate-path caller needs for the
+                # post-enqueue mark_enqueued_by_source_target stamp.
+                enriched_meta = {
+                    **fu.metadata,
+                    "child_outcome": outcome.status,
+                    "source_task_id": task_id,
+                }
+                fu = dataclass_replace(fu, metadata=enriched_meta)
+                # Persist the enriched payload onto the FIRED row so
+                # downstream lookups (task 2.13 —
+                # fetch_child_outcome_for_fired) can surface the
+                # marker into the parent-LLM-visible report payload.
+                # Best-effort: a failure leaves the row's original
+                # payload (the marker is additive, never load-bearing
+                # for delivery).
+                try:
+                    await asyncio.to_thread(
+                        self._repo.update_follow_up_payload,
+                        row.watch_id,
+                        fu.to_payload(),
+                    )
+                except Exception as enrich_err:
+                    logger.debug(
+                        f"bus fire_for_terminated_target: payload "
+                        f"enrichment persist failed (non-fatal) for "
+                        f"watch_id={row.watch_id[:8]}: {enrich_err}",
+                        extra={"completion_delivery_path": "bus"},
+                    )
+                fired.append(fu)
+                # Pop the cache entry for this task — its PENDING
+                # watcher(s) are now FIRED (or were already fired by a
+                # concurrent emit). Mirrors emit_terminal's cache-pop
+                # epilogue; a later watch() re-creates the entry.
+                self._pending.pop(task_id, None)
+                logger.info(
+                    f"bus fire_for_terminated_target fired: "
+                    f"target={target_instance_id[:8]}, "
+                    f"watch_id={row.watch_id[:8]}, "
+                    f"parent={fu.target_instance_id[:8]}, "
+                    f"outcome={outcome.status}",
+                    extra={"completion_delivery_path": "bus"},
+                )
+
+        logger.info(
+            f"bus fire_for_terminated_target: "
+            f"target={target_instance_id[:8]}, "
+            f"outcome={outcome.status}, "
+            f"pending_rows={len(pending_rows)}, fired={len(fired)}",
+            extra={"completion_delivery_path": "bus"},
+        )
+        return fired
 
     async def cancel_for_source(self, source_task_id: str) -> int:
         """Cancel all PENDING watchers keyed on ``source_task_id``.

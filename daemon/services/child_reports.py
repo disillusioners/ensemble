@@ -1522,6 +1522,45 @@ Provide a concise summary:"""
             logger.warning(f"No assistant content found for instance {instance_id[:8]}..., using empty content for completion check")
             last_content = "[No response content]"  # Proceed with empty content — state transition must still happen
 
+        # ─── Phase 2 task 2.13 (W4) — child_outcome payload surfacing ───
+        # If the bus FIRED this child's watcher with a terminal
+        # outcome marker (``FollowUp.metadata["child_outcome"]`` —
+        # set by ``fire_for_terminated_target`` on the terminate
+        # path), copy it into the report content so the parent's
+        # LLM can distinguish terminated from errored from completed
+        # and take the right follow-up action. ADDITIVE field only:
+        # the marker is appended to the content; existing payload
+        # fields are untouched, and a missing marker (row compacted
+        # 60s after delivery, or bus unwired) changes nothing.
+        from .dependency_bus import get_dependency_bus as _get_bus_t13
+
+        _bus_t13 = _get_bus_t13()
+        if _bus_t13 is not None:
+            try:
+                _child_outcome = await asyncio.to_thread(
+                    _bus_t13._repo.fetch_child_outcome_for_fired,
+                    instance_id,
+                )
+                if _child_outcome and "child_outcome:" not in (last_content or ""):
+                    last_content = (
+                        f"{last_content or ''}\n\n"
+                        f"[child_outcome: {_child_outcome}]"
+                    ).lstrip("\n")
+                    logger.info(
+                        f"_process_child_completion_and_notify_parent: "
+                        f"surfaced child_outcome={_child_outcome} marker "
+                        f"for child {instance_id[:8]}... into the report "
+                        f"payload (task 2.13 W4)"
+                    )
+            except Exception as marker_err:
+                # Additive, best-effort — never block the completion
+                # path on the marker lookup.
+                logger.debug(
+                    f"_process_child_completion_and_notify_parent: "
+                    f"child_outcome lookup failed (non-fatal) for "
+                    f"{instance_id[:8]}...: {marker_err}"
+                )
+
         # MAJOR A fix (re-arm safety net, 2026-06-22; Phase 1 bus
         # migration 2026-06-23): wrap the ``asyncio.to_thread`` call in
         # the per-parent ``asyncio.Lock`` when the bus is wired. After
