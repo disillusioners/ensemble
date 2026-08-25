@@ -2984,7 +2984,7 @@ Provide a concise summary:"""
                     # and the leaked SAVEPOINT relied on close-time cleanup.
                     #
                     # Constructor-failure window: the ``ReportInjection(...)``
-                    # constructor call (lines 2741-2747) is INSIDE the
+                    # constructor call (~line 2959) is INSIDE the
                     # ``try`` block, so the broadened ``except Exception``
                     # catches it and triggers ``nested.rollback()``. The
                     # window is closed.

@@ -56,37 +56,37 @@
 
 ---
 
-## E4. P2 unit-test aggregate: 38 passed across 8 shipper files (scope-anchored) · 🟡 paperwork
+## E4. P2 unit-test aggregate: 41 passed across 8 shipper files (scope-anchored) · 🟡 paperwork
 
 **Source:** P2 closure-council report, reconciled with the committed
 test inventory in this session (2026-08-25).
 
 **Finding (scope-anchored, committed artifacts as authority):** the
 P2 unit-test aggregate across the **8 P2-shipped files** is
-**38 tests passed**, with the per-file breakdown anchored to the
+**41 tests passed**, with the per-file breakdown anchored to the
 committed ``def test_*`` counts in each file:
 
 | File (under `tests/unit/services/`) | Tests |
 |---|---|
 | `test_child_outcome_payload_surfacing.py` | 5 |
-| `test_compact_fired_watchers_deliver_before_compact.py` | 10 |
+| `test_compact_fired_watchers_deliver_before_compact.py` | 13 |
 | `test_dependency_bus_fire_for_terminated.py` | 6 |
 | `test_parent_completion_idempotency_terminated.py` | 2 |
 | `test_resume_cascade_drift_guard.py` | 6 |
 | `test_revive_non_replay.py` | 2 |
 | `test_terminate_downside_row_drain.py` | 4 |
 | `test_terminate_path_coverage_fire_with_outcome.py` | 3 |
-| **Total (8 files)** | **38** |
+| **Total (8 files)** | **41** |
 
-Sum: 5+10+6+2+6+2+4+3 = **38** (verified against the committed
+Sum: 5+13+6+2+6+2+4+3 = **41** (verified against the committed
 ``def test_*`` count in each file at 2026-08-25). The previously-cited
 "35/35" / "34 across 6 files" framings are **superseded** — the
-38-across-8-files figure is the scope-anchored reality, with each
+41-across-8-files figure is the scope-anchored reality, with each
 per-file count reproducible by `grep -cE '^\s*(async )?def test_'
 <file>`.
 
 **Action:** No plan edit. Future readers reconciling the P2 test
-count should use **38 across 8 files** as the canonical P2 unit-test
+count should use **41 across 8 files** as the canonical P2 unit-test
 aggregate, not the older 35/35 or 34/6 figures.
 
 ---
@@ -188,7 +188,7 @@ sites), not the claim-flavoured summaries.
 | E1  | 🟡        | Task-table re-stamp surface (B7b)          | FT-002 addendum; no plan edit                                          |
 | E2  | 🟡        | B6 NOT-REPRODUCIBLE on HEAD                | FT-004 filed; no plan edit                                             |
 | E3  | 🟢        | B5 Files-Touched + wire shape + composition| 9 tests not 8; no plan edit                                            |
-| E4  | 🟡        | P2 unit-test aggregate                     | **38 across 8 files** (scope-anchored, committed `def test_*` count)  |
+| E4  | 🟡        | P2 unit-test aggregate                     | **41 across 8 files** (scope-anchored, committed `def test_*` count)  |
 | E5  | 🟢        | Stale 3-tuple annotation + mock             | Out of scope (tidier cleanup candidate); no plan edit                  |
 | E6  | 🟢        | phase2-plan.md Rev 2.2 overstatement        | ✅ In-place correction applied by W-C.c                                |
 | E7  | 🟢        | Claims-vs-reality addendum                 | (a) b7b "11 tests" → 10; (b) probe1.md "5/1 sites" → 12 measured; no code impact |

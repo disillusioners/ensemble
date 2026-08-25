@@ -1204,7 +1204,10 @@ class JobRecoveryService:
             )
 
         # Final tally — recount from `details` so the summary line
-        # reflects all patterns (a/b/c/d/e) accurately.
+        # reflects patterns (a/b/d/e) accurately. Pattern (c) is
+        # log-only — ``stuck_instance_log`` entries land in `details`
+        # but are intentionally excluded from the `reconciled` count
+        # (the recovery path cannot correct stuck-alive instances).
         reconciled = sum(
             1 for d in details if d.get("pattern") in (
                 "P1_dead_instance",

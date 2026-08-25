@@ -1155,8 +1155,12 @@ class DependencyBus:
                 of the termination operation). Matched against the
                 watchers' ``follow_up_payload.metadata.child_id``.
             outcome: The terminal outcome. ``Outcome(status='terminated')``
-                from the terminate path; logged only (the FollowUp
-                carries the ``child_outcome`` metadata key).
+                from the terminate path; ``outcome.status`` is
+                consumed three ways: enriched into the FollowUp's
+                ``metadata["child_outcome"]`` key, suffixed onto
+                the FollowUp message text as
+                ``[child_outcome: <status>]`` (Blocker 2 round 2),
+                and emitted in the structured log lines.
 
         Returns:
             The list of FollowUps atomically transitioned from PENDING
