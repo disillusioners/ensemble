@@ -13,6 +13,13 @@ from langchain_core.messages import BaseMessageChunk
 from langchain_core.runnables import RunnableLambda
 from langchain_core.runnables.config import RunnableConfig
 from langchain_core.messages.ai import AIMessageChunk, UsageMetadata
+# W-1 fix (quick-fix): ChatGenerationChunk is constructed by
+# ``ThinkingChatOpenAI._convert_chunk_to_generation_chunk`` (streaming decode
+# path) but was never imported — every streamed response raised
+# ``NameError`` after the request went out. Latent since 37f39c8b; activated
+# for every call site by the streaming=True default (CF 125s 524 fix).
+# Regression guard: tests/unit/test_llm_streaming_wire_verify.py (V1/V2/V3/V6b).
+from langchain_core.outputs import ChatGenerationChunk
 from typing import Any, ClassVar, Mapping, Optional, cast
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
