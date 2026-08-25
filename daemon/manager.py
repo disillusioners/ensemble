@@ -7950,6 +7950,7 @@ class InstanceManager:
         instance_id: str,
         *,
         suspension_reason: str | None = None,
+        cascade_to_root: bool = True,
     ) -> dict:
         """Pause an instance and cascade to all children (soft pause).
 
@@ -7962,6 +7963,16 @@ class InstanceManager:
             suspension_reason: Optional reason persisted on suspended task
                 turns. ``None`` preserves the lifecycle service's existing
                 ``paused_external`` default.
+            cascade_to_root: When ``True`` (default), walk up to the tree
+                root so the WHOLE tree pauses — the long-standing behavior
+                used by ``/pause`` and the 5 internal callers
+                (``instance_messaging.py:1119, :3748``,
+                ``watchover_service.py:1004, :1470``, and this manager
+                facade). When ``False``, pause only the target subtree
+                rooted at ``instance_id`` — used by ``/stop``. Both
+                branches flow through the lifecycle service's
+                ``get_cascade_tree_ids`` wrapper so P1's
+                ``ENSEMBLE_CASCADE_LINEAGE`` kill-switch is honored.
 
         Returns:
             Dict with:
@@ -7971,6 +7982,7 @@ class InstanceManager:
         return await self._lifecycle_service.pause_instance_cascade(
             instance_id,
             suspension_reason=suspension_reason,
+            cascade_to_root=cascade_to_root,
         )
 
     async def resume_instance_cascade(self, instance_id: str) -> dict:

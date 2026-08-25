@@ -2342,6 +2342,7 @@ class InstanceLifecycleService:
         instance_id: str,
         *,
         suspension_reason: str | None = None,
+        cascade_to_root: bool = True,
     ) -> dict:
         """Pause an instance and cascade to all children (soft pause).
 
@@ -2357,6 +2358,18 @@ class InstanceLifecycleService:
         collapses all node updates into ONE transaction so a crash
         either pauses the entire tree or none of it.
 
+        B5 fix: ``cascade_to_root=True`` (default) keeps the long-standing
+        whole-tree semantics used by ``/pause`` and the 5 internal callers
+        (``instance_messaging.py:1119, :3748``, ``watchover_service.py:1004,
+        :1470``, manager facade ``manager.py:7948``); ``False`` pauses only
+        the target subtree rooted at ``instance_id`` (used by ``/stop``).
+        Both branches enumerate via ``repo.get_cascade_tree_ids(...)`` so
+        P1's ``ENSEMBLE_CASCADE_LINEAGE`` kill-switch is honored
+        end-to-end. **Do NOT default-flip ``cascade_to_root`` to ``False``**
+        — the 5 internal callers rely on the default True whole-tree
+        behavior; flipping the default would silently break messaging /
+        watchover / facade pause semantics.
+
         Args:
             instance_id: The ID of the instance to pause.
             suspension_reason: Optional turn suspension discriminator. When
@@ -2370,20 +2383,34 @@ class InstanceLifecycleService:
         """
         repo = self._manager._instance_repository
 
-        # 1. Find root of the tree
-        root_id = repo.get_tree_root_id(instance_id)
-        if root_id is None:
-            # Fall back to instance_id itself if not found
-            root_id = instance_id
+        # 1. Resolve the cascade root. ``cascade_to_root=True`` (default
+        # — /pause and the 5 internal callers) walks up to the tree
+        # root so the WHOLE tree pauses; ``cascade_to_root=False``
+        # (/stop) pauses only the target subtree rooted at
+        # ``instance_id``. Both branches funnel through P1's
+        # ``get_cascade_tree_ids`` wrapper so the
+        # ``ENSEMBLE_CASCADE_LINEAGE`` kill-switch is honored
+        # end-to-end (no raw ``get_tree_ids`` call from this code path).
+        if cascade_to_root:
+            # 1a. Find root of the tree
+            root_id = repo.get_tree_root_id(instance_id)
+            if root_id is None:
+                # Fall back to instance_id itself if not found
+                root_id = instance_id
+            # 2a. Get ALL node IDs in the tree.
+            # P1 (phase1-plan.md T2): switched from transient ``get_tree_ids``
+            # to ``get_cascade_tree_ids`` so descendants that completed,
+            # errored, or were revived mid-cascade (B1 — pause does not
+            # cascade DOWN) are still enumerated. Classification block at
+            # :2094-2102 (skip PAUSED + TERMINAL_STATUSES into ``skipped_ids``)
+            # is unchanged.
+            tree_ids = repo.get_cascade_tree_ids(root_id)
+        else:
+            # 1b/2b. Target-subtree enumeration — use ``instance_id``
+            # as the cascade root directly. Same wrapper as the True
+            # branch; do NOT call raw ``get_tree_ids`` here either.
+            tree_ids = repo.get_cascade_tree_ids(instance_id)
 
-        # 2. Get ALL node IDs in the tree.
-        # P1 (phase1-plan.md T2): switched from transient ``get_tree_ids``
-        # to ``get_cascade_tree_ids`` so descendants that completed,
-        # errored, or were revived mid-cascade (B1 — pause does not
-        # cascade DOWN) are still enumerated. Classification block at
-        # :2094-2102 (skip PAUSED + TERMINAL_STATUSES into ``skipped_ids``)
-        # is unchanged.
-        tree_ids = repo.get_cascade_tree_ids(root_id)
         if not tree_ids:
             logger.warning(f"No tree found for instance {instance_id[:8]}...")
             return {"paused_ids": [], "skipped_ids": [instance_id]}
@@ -4149,18 +4176,62 @@ status=InstanceStatus.IDLE.value,
                         # warning) logs and aborts before the
                         # stamp + Pass 2.
                         cancelled_ok = future.cancel()
-                        logger.warning(
+                        if cancelled_ok:
+                            # Cancel succeeded — the scheduled
+                            # coroutine has not committed its
+                            # enqueue. Early-abort Pass 1 BEFORE
+                            # the stamp so the row stays
+                            # un-stamped, visible to the next
+                            # Pass 1 cycle (which will deliver
+                            # + stamp). This closes the
+                            # duplicate-wake window: a re-enqueue
+                            # would only happen if the row got
+                            # stamped AND the underlying
+                            # coroutine eventually completed,
+                            # creating a duplicate
+                            # ``MessageQueue`` row for the
+                            # parent.
+                            logger.warning(
+                                "_compact_fired_watchers_for_paused: "
+                                "8s bridge timeout for buffered "
+                                f"FollowUp to paused instance "
+                                f"{instance_id[:8]}... — "
+                                f"future.cancel()=True; aborting "
+                                f"Pass 1 before stamp (row "
+                                f"survives to next cycle)"
+                            )
+                            # Re-raise so the outer except
+                            # (Exception, CancelledError) below
+                            # catches this and short-circuits
+                            # Pass 2.
+                            raise
+                        # cancelled_ok is False — the future
+                        # already completed and the enqueue has
+                        # already committed (a duplicate
+                        # ``MessageQueue`` row was created for
+                        # the parent). Falling through to the
+                        # stamp is the safe choice: the row's
+                        # ``enqueued_at IS NOT NULL`` predicate
+                        # is the durability guarantee, and the
+                        # dedup invariant on the ``message_queue``
+                        # claim lane prevents the parent from
+                        # receiving the same report twice. We
+                        # log at INFO so the duplicate-enqueue
+                        # is observable without aborting the
+                        # compact.
+                        logger.info(
                             "_compact_fired_watchers_for_paused: "
                             "8s bridge timeout for buffered "
                             f"FollowUp to paused instance "
-                            f"{instance_id[:8]}... — future.cancel()="
-                            f"{cancelled_ok}; aborting Pass 1 before "
-                            f"stamp (row survives to next cycle)"
+                            f"{instance_id[:8]}... — "
+                            f"future.cancel()=False (future "
+                            f"already completed, enqueue "
+                            f"committed before timeout); "
+                            f"falling through to stamp "
+                            f"(dedup via message_queue "
+                            f"claim lane preserves "
+                            f"exactly-once)"
                         )
-                        # Re-raise so the outer except (Exception,
-                        # CancelledError) below catches this and
-                        # short-circuits Pass 2.
-                        raise
                     # LOAD-BEARING per-row stamp — immediately after the
                     # successful enqueue. Once stamped, the row survives
                     # the DELETE by construction and a future restart's

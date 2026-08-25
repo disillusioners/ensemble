@@ -337,9 +337,7 @@ Permanently terminate an instance and all its children. Cannot be resumed.
 
 ### Stop Instance (Deprecated)
 
-> **⚠️ Deprecated**: `POST /instances/{instance_id}/stop` is deprecated. Use `POST /instances/{instance_id}/pause` instead.
-
-The stop endpoint is an alias for pause that exists for backward compatibility.
+Pauses the target instance and its descendants (subtree). Use `POST /pause` for whole-tree pause.
 
 ### Get Message History
 

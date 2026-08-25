@@ -563,18 +563,26 @@ async def test_pause_instance_endpoint_exists(client, mock_manager):
 
 @pytest.mark.asyncio
 async def test_stop_instance_deprecated_alias(client, mock_manager):
-    """Test that deprecated POST /instances/{instance_id}/stop delegates to pause logic."""
-    # Instance exists - should return same result as /pause endpoint
+    """Test deprecated POST /instances/{instance_id}/stop subtree-pause contract.
+
+    B5 (phase3-plan Rev 2.1): ``/stop`` was rewired from delegating to
+    ``pause_instance`` (whole-tree re-root) to calling
+    ``manager.pause_instance_cascade(instance_id, cascade_to_root=False)``
+    directly — SUBTREE semantics. The deprecated endpoint now pauses only
+    the target instance and its descendants; ``/pause`` keeps whole-tree
+    semantics (default ``cascade_to_root=True``).
+    """
+    # Instance exists - /stop returns the subtree cascade result.
     mock_manager.get_instance.return_value = AsyncMock()
 
-    # Mock cascade pause with children
+    # Mock cascade pause with subtree target + one descendant (no root).
     mock_manager.pause_instance_cascade = AsyncMock(return_value={
         "paused_ids": ["test-instance", "child-1"],
         "skipped_ids": []
     })
 
     response = await client.post("/instances/test-instance/stop")
-    
+
     assert response.status_code == 200
     data = response.json()
     assert data["paused"] == True
@@ -583,8 +591,13 @@ async def test_stop_instance_deprecated_alias(client, mock_manager):
     assert data["paused_ids"] == ["test-instance", "child-1"]
     assert data["skipped_ids"] == []
 
-    # Verify pause_instance_cascade was called (proves delegation to pause logic)
-    mock_manager.pause_instance_cascade.assert_called_once_with("test-instance")
+    # B5 contract: /stop passes cascade_to_root=False (subtree only).
+    # The previous assertion ``("test-instance")`` pinned the OLD
+    # whole-tree delegation contract — see phase3-plan §B5 + the canonical
+    # contract tests in tests/unit/routers/test_stop_instance_subtree.py.
+    mock_manager.pause_instance_cascade.assert_called_once_with(
+        "test-instance", cascade_to_root=False
+    )
 
 
 # ==================== Resume Instance Tests ====================
