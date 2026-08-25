@@ -1198,7 +1198,18 @@ class TestF1BackupKwargNeverReachesConstructor:
         """Mirror ``InstanceLifecycle._build_llm_config``'s dict shape
         (daemon/services/instance_lifecycle.py) + the header merge from
         ``build_instance_graph`` — the exact production pipeline that
-        feeds ``build_instance_llms``."""
+        feeds ``build_instance_llms``.
+
+        ``streaming=False`` is explicit because this test uses a raw
+        JSON ``httpx.MockTransport`` response shape; the Cloudflare
+        ~125s 524 fix defaults streaming ON in production
+        (``clean_llm_config`` injects True when absent), but these F1
+        regression tests are about kwarg-strip / build wiring, NOT
+        streaming behavior — the in-memory httpx mock returns a JSON
+        chat.completion body that the streaming SDK path would reject
+        as no-SSE-format. Opting out keeps the mock surface flat and
+        isolates the property under test.
+        """
         from daemon.graph import build_instance_graph  # noqa: F401  (shape doc)
         return {
             "base_url": self.PRIMARY,
@@ -1215,6 +1226,12 @@ class TestF1BackupKwargNeverReachesConstructor:
             # both as first-class constructor kwargs):
             "http_client": http_client,
             "max_retries": 0,
+            # Opt out of streaming (production defaults ON — see
+            # clean_llm_config). These tests verify kwarg-strip /
+            # build wiring; the streaming payload shape is exercised
+            # in test_llm_streaming_activation.py with the wire-level
+            # ``_get_request_payload`` assertion.
+            "streaming": False,
         }
 
     def _invoke(self, handler, backup_set, **build_kwargs):
@@ -1316,6 +1333,12 @@ class TestF1BackupKwargNeverReachesConstructor:
             "model": "gpt-test",
             "temperature": 0.3,
             "default_headers": {"x-proxy-app": "ensemble"},
+            # Opt out of streaming: this test uses a raw JSON
+            # httpx.MockTransport response shape. The streaming SDK path
+            # expects SSE-format chunks; production defaults streaming
+            # ON (clean_llm_config injects True) and that path is
+            # exercised in test_llm_streaming_activation.py.
+            "streaming": False,
         }
         llm_config = clean_llm_config(llm_config)
         llm = ThinkingChatOpenAI(
@@ -1797,6 +1820,11 @@ class TestVisionControllerSeparation:
             "default_headers": {"x-proxy-app": "ensemble"},
             "http_client": client,
             "max_retries": 0,
+            # Opt out of streaming: this test uses raw JSON mock
+            # responses (httpx.MockTransport). Streaming SDK expects
+            # SSE-format chunks; production defaults streaming ON
+            # (clean_llm_config injects True when absent).
+            "streaming": False,
         }
         llm_tools, llm_std = build_instance_llms(
             llm_config_with_headers=cfg,

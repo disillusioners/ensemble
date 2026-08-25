@@ -147,6 +147,32 @@ class LLMConfig(BaseSettings):
         ),
     )
 
+    # Stream the chat-completion response on the wire (Cloudflare 524 fix).
+    # When True, every LangChain ``ChatOpenAI`` constructed through
+    # ``daemon.graph.clean_llm_config`` sends ``stream: True`` to the
+    # OpenAI-compatible backend, so chunked bytes flow back through the
+    # Cloudflare proxy before its ~125s anycast read timeout can kill the
+    # connection with zero response. LangChain's ``invoke()`` aggregates
+    # the chunks back into the same ``AIMessage`` (content / tool_calls /
+    # usage / reasoning_content all preserved), so callers see identical
+    # final results. Default ON; operators can flip to False for debugging
+    # or for backends that mis-handle streaming. Raw-SDK chat sites in
+    # ``daemon/services/skill_{search,evolution}_service.py`` are NOT yet
+    # wired for streaming (deferred — see commit message); they continue to
+    # send non-streaming POSTs regardless of this flag. Embedding calls are
+    # never streamed (the embeddings endpoint has no streaming surface).
+    # Override via OPENAI_STREAMING env var. Precedent for the
+    # OPENAI_REASONING_ECHO_DISABLED_MODELS denylist-style config chain.
+    streaming: bool = Field(
+        default=True,
+        description=(
+            "Send chat completions with stream: True on the wire so the "
+            "connection survives Cloudflare's ~125s anycast proxy read "
+            "timeout. LangChain invoke() aggregates chunks into the same "
+            "AIMessage; callers see identical results. Default True."
+        ),
+    )
+
     @field_validator("reasoning_echo_disabled_models", mode="before")
     @classmethod
     def _parse_reasoning_echo_disabled_models(cls, value: Any) -> Any:

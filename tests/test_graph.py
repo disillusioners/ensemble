@@ -39,10 +39,22 @@ class TestCleanLlmConfig:
         assert original["model_vision"] == "gpt-4o-mini"
 
     def test_clean_llm_config_without_model_vision(self):
-        """clean_llm_config should work fine if model_vision is already absent."""
-        from daemon.graph import clean_llm_config
+        """clean_llm_config should work fine if model_vision is already absent.
+
+        Note: ``clean_llm_config`` also injects ``streaming`` (the class-
+        level ``ThinkingChatOpenAI.default_streaming``) when the key is
+        absent — see the CF-125s 524 fix. Asserting exact dict equality
+        would break that injection; assert original-key survival instead,
+        plus the streaming default.
+        """
+        from daemon.graph import ThinkingChatOpenAI, clean_llm_config
 
         original = {"model": "gpt-4o", "api_key": "sk-test"}
         cleaned = clean_llm_config(original)
-        assert cleaned == original
+        # All original keys survive (model_vision absent — no strip to verify)
+        assert cleaned["model"] == "gpt-4o"
+        assert cleaned["api_key"] == "sk-test"
+        # Streaming default injected from class var (operators flip via
+        # OPENAI_STREAMING=false, propagated to the class var at startup).
+        assert cleaned["streaming"] is ThinkingChatOpenAI.default_streaming
         assert cleaned is not original  # Should be a new dict

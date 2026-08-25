@@ -184,6 +184,13 @@ def _patch_langchain_constructor(module, wire: WireLog):
     def _injected(*args: Any, **kwargs: Any):
         kwargs["http_client"] = wire.http_client()
         kwargs["max_retries"] = 0
+        # Opt out of streaming: this helper injects httpx.MockTransport
+        # which returns raw JSON chat.completion bodies. The streaming
+        # SDK path expects SSE-format chunks; without this opt-out the
+        # mock is rejected with "No generations found in stream".
+        # Production defaults streaming ON via clean_llm_config; that
+        # wire-format path is exercised in test_llm_streaming_activation.py.
+        kwargs["streaming"] = False
         return real(*args, **kwargs)
 
     return patch.object(target, "ThinkingChatOpenAI", side_effect=_injected)
