@@ -1,0 +1,114 @@
+# GATE_SUITES.txt — Phase 1 gate-suite manifest (single source of truth).
+# ── W5 gate-run record (post PR1-review fix package) ──────────────────────
+# Date: 2026-08-25 (UTC) | Branch: feature/langgraph-checkpoint-perf |
+# HEAD: 7a94162b + uncommitted PR1-review fix package (W1-W11 + 5
+# suggestions; commit handled separately after re-review).
+# Result: 23/23 files GREEN — 282 passed / 0 failed / 0 skipped, 38.7s total.
+# Method: one pytest subprocess per file (uv run pytest <file> -o addopts=,
+# which strips the default 'not integration' marker filter; 600s/file cap).
+#
+# File                                                          P   F   S   dur(s)
+# tests/e2e/test_pause_resume_unchanged.py                         1   0   0    1.9
+# tests/unit/test_pause_resume_root.py                            18   0   0    1.7
+# tests/integration/test_pause_race_resume_flow.py                 1   0   0    1.7
+# tests/integration/test_pause_race_resume_drain.py                1   0   0    1.7
+# tests/integration/test_pause_race_resume_reenqueue.py            1   0   0    1.9
+# tests/integration/test_pause_race_enqueue_resume_flow.py         1   0   0    1.7
+# tests/integration/test_pause_race_window_held.py                 1   0   0    1.9
+# tests/integration/test_pause_race_window_held_enqueue.py         1   0   0    1.9
+# tests/e2e/test_full_chain_turn_reconciler.py                     3   0   0    1.8
+# tests/repositories/test_turn_reconciler.py                      23   0   0    1.9
+# tests/repositories/test_turn_reconciler_paused_race.py           5   0   0    1.5
+# tests/integration/test_multi_turn_resume.py                      3   0   0    1.7
+# tests/integration/test_crash_recovery_paused.py                 10   0   0    1.8
+# tests/unit/test_turn_handle_transitions.py                      21   0   0    1.8
+# tests/unit/test_paused_auto_resume_fallback.py                   5   0   0    1.6
+# tests/unit/test_terminal_reason_mirror_set_regression.py         1   0   0    1.0
+# tests/services/test_instance_messaging_compaction_guard.py       8   0   0    1.4
+# tests/unit/test_compaction.py                                   61   0   0    1.5
+# tests/integration/test_compaction_e2e.py                         3   0   0    1.9
+# tests/integration/test_api_messages.py                           7   0   0    1.7
+# tests/test_persistence.py                                       20   0   0    1.5
+# tests/unit/persistence/test_checkpoint_perf_logging.py          18   0   0    1.4
+# tests/test_maintenance.py                                       69   0   0    1.8
+#
+# Non-manifest companions also green post-fix:
+# tests/integration/test_messages_response_fixture_capture.py  1 passed (drift-check mode)
+# tests/integration/test_no_saver_imports_in_routers.py      6 passed (Flag A, W9 AST scan)
+#
+# Spec: .agents/shared/planning/langgraph-checkpoint-perf/phase1-plan.md
+# line 96 + risk line 201. PR1 (C4) creates this file; PR2/PR3/PR4 re-run
+# the enumeration gate (tests/integration/gate_suites/test_gate_suite_pause_resume.py)
+# and may append entries; entries are never silently removed.
+#
+# Format: one path per line, relative to the repo root. '#' starts a comment.
+#
+# The plan's original gate filenames were PLACEHOLDERS — most do not exist
+# verbatim (no tests/integration/test_pause_resume.py, no test_8_mirror_tables.py,
+# etc.). Per the plan's own instruction ("exact filenames verified during
+# implementation; if a filename is missing, replace with the canonical path
+# for that gate"), each gate CONCEPT is mapped below to the canonical
+# existing file(s), verified green on the PR1 branch (2026-08-25).
+#
+# ── Gate concept: pause/resume ──
+# Canonical pause/resume no-drift suite (named-transition wrappers):
+tests/e2e/test_pause_resume_unchanged.py
+# Root-instance pause/resume:
+tests/unit/test_pause_resume_root.py
+# Paused-race regression family (f5e4b79a lineage) — resume flows:
+tests/integration/test_pause_race_resume_flow.py
+tests/integration/test_pause_race_resume_drain.py
+tests/integration/test_pause_race_resume_reenqueue.py
+tests/integration/test_pause_race_enqueue_resume_flow.py
+tests/integration/test_pause_race_window_held.py
+tests/integration/test_pause_race_window_held_enqueue.py
+#
+# ── Gate concept: turn-reconciler ──
+# Full-chain end-to-end (claim → process → pause → resume → answer → complete):
+tests/e2e/test_full_chain_turn_reconciler.py
+# reconcile_turn_mirror(work_id) repository suite — also the canonical
+# 8-mirror-tables unit suite (see its docstring) + idempotency tests:
+tests/repositories/test_turn_reconciler.py
+# Paused-race guard for the reconciler:
+tests/repositories/test_turn_reconciler_paused_race.py
+#
+# ── Gate concept: interrupt / human-approval / is_retry resume-from-checkpoint ──
+# (no verbatim interrupt/human-approval suites exist; the canonical
+#  resume-from-checkpoint coverage lives in these files — checkpoint-based
+#  multi-turn resume, crash-recovery-while-paused, turn-handle transitions,
+#  and auto-resume fallback)
+tests/integration/test_multi_turn_resume.py
+tests/integration/test_crash_recovery_paused.py
+tests/unit/test_turn_handle_transitions.py
+tests/unit/test_paused_auto_resume_fallback.py
+#
+# ── Gate concept: 8 mirror tables ──
+# tests/repositories/test_turn_reconciler.py (above) is the canonical
+#  per-mirror-table suite. Terminal-reason mirror-set regression:
+tests/unit/test_terminal_reason_mirror_set_regression.py
+#
+# ── Gate concept: aupdate_state idempotent ──
+# Compaction guard (aupdate_state compaction sites) + compaction unit +
+# real-graph compaction e2e (aupdate_state against real AsyncSqliteSaver):
+tests/services/test_instance_messaging_compaction_guard.py
+tests/unit/test_compaction.py
+tests/integration/test_compaction_e2e.py
+#
+# ── Gate concept: get_messages lifecycle ──
+# GET /messages API contract + get_instance_messages unit + PR1 perf logging:
+tests/integration/test_api_messages.py
+tests/test_persistence.py
+tests/unit/persistence/test_checkpoint_perf_logging.py
+#
+# ── Gate concept: checkpoint maintenance (prune / cleanup) ──
+# Canonical maintenance-job suite (CheckpointCleanupJob operations A-D,
+# history cap, per-thread prune + the PR1 timing/log-line wrap):
+tests/test_maintenance.py
+#
+# ── Excluded (verified pre-existing failures on the clean tree, 2026-08-25;
+#     NOT gate-suite members — reported to the dispatcher in the PR1 report) ──
+# tests/integration/test_cold_resume_ttl.py            2 pre-existing FAILs (clean tree)
+# tests/unit/test_question_deferred_pause_edge_cases.py 1 pre-existing FAIL (clean tree)
+# tests/integration/test_pause_race_w7_jobitem_skip.py  1 pre-existing FAIL (clean tree)
+# tests/e2e/test_pause_during_report_*.py               3 quarantined FAILs (.agents/tester/QUARANTINE.md)
+# tests/e2e/test_resume_after_pause_with_children_completing_during_pause.py — requires live daemon (skipif)
