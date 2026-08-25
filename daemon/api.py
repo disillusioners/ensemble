@@ -231,6 +231,15 @@ async def lifespan(app: FastAPI):
         f"[Config] reasoning_echo_disabled_models={ThinkingChatOpenAI.reasoning_echo_disabled_models} "
         f"(models matching these patterns will NOT echo reasoning_content; all others echo)"
     )
+    # Wire the OPENAI_STREAMING operator knob (CF-125s 524 fix). The
+    # chokepoint ``clean_llm_config`` reads this class var when callers
+    # don't pass an explicit streaming flag — see daemon/graph.py.
+    ThinkingChatOpenAI.default_streaming = bool(config.llm.streaming)
+    daemon_logger.info(
+        f"[Config] default_streaming={ThinkingChatOpenAI.default_streaming} "
+        f"(clean_llm_config injects streaming={ThinkingChatOpenAI.default_streaming} "
+        f"when callers don't pass an explicit flag; OPENAI_STREAMING env var controls it)"
+    )
 
     # Warn-once if the removed allowlist env var is still set (no-op when
     # load_config already emitted it)

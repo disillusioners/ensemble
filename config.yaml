@@ -34,6 +34,17 @@ llm:
   # or JSON array). Default: [].
   reasoning_echo_disabled_models: ${OPENAI_REASONING_ECHO_DISABLED_MODELS:-}
 
+  # Stream chat completions on the wire (Cloudflare ~125s 524 fix).
+  # When True (default), every LangChain ChatOpenAI constructed via
+  # daemon.graph.clean_llm_config sends `stream: True` to the backend so
+  # chunked bytes flow back through the Cloudflare proxy before its anycast
+  # read timeout can kill a silent POST with zero response. LangChain
+  # invoke() aggregates chunks into the same AIMessage; callers see
+  # identical final results. Embedding calls are never streamed. Raw-SDK
+  # chat sites are NOT yet wired for streaming (deferred).
+  # Override via OPENAI_STREAMING env var (true / false). Default: true.
+  streaming: ${OPENAI_STREAMING:-true}
+
   # Models allowed as instance model overrides at spawn time. Case-insensitive
   # exact match against the override model name; a match against ANY entry
   # is sufficient. Empty list = all models allowed (no restriction).

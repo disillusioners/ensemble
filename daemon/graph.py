@@ -13,6 +13,7 @@ from langchain_core.messages import BaseMessageChunk
 from langchain_core.runnables import RunnableLambda
 from langchain_core.runnables.config import RunnableConfig
 from langchain_core.messages.ai import AIMessageChunk, UsageMetadata
+from langchain_core.outputs import ChatGenerationChunk
 from typing import Any, ClassVar, Mapping, Optional, cast
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -1787,6 +1788,16 @@ class ThinkingChatOpenAI(ChatOpenAI):
     # every model echoes.
     reasoning_echo_disabled_models: ClassVar[list[str]] = []
 
+    # Default streaming flag for ``clean_llm_config`` (CF-125s 524 fix).
+    # The daemon sets this from ``LLMConfig.streaming`` at startup
+    # (see ``daemon/__main__.py`` and ``daemon/api.py``), BEFORE any
+    # instance is created. Default ON; operators flip to False via
+    # ``OPENAI_STREAMING=false``. Sites that want non-streaming for a
+    # specific reason pass ``streaming=False`` explicitly in their config
+    # dict — that value is preserved verbatim (clean_llm_config only
+    # injects the default when the key is absent).
+    default_streaming: ClassVar[bool] = True
+
     def _should_echo_reasoning(self) -> bool:
         """Return True if reasoning_content echo is enabled for the current model.
 
@@ -2072,7 +2083,7 @@ class ThinkingChatOpenAI(ChatOpenAI):
 
 
 def clean_llm_config(cfg: dict) -> dict:
-    """Strip non-kwarg keys before passing to ThinkingChatOpenAI(**cfg).
+    """Strip non-kwarg keys and inject the streaming default.
 
     Two daemon-internal keys are removed:
 
@@ -2095,12 +2106,69 @@ def clean_llm_config(cfg: dict) -> dict:
       construction sites (graph.py vision/standard/watcher/loop-repair,
       compaction, title_generation, keyword_extraction, child_reports,
       watcher_context_builder) — every site must route through here.
+
+    Streaming default (CF 125s 524 fix)
+    ----------------------------------
+    If the caller did NOT set ``streaming`` explicitly, this function
+    injects ``streaming=True`` so every LangChain ``ChatOpenAI`` (and
+    ``ThinkingChatOpenAI``) constructed through here sends ``stream: True``
+    on the wire to the OpenAI-compatible backend. Cloudflare's anycast
+    proxy kills silent POSTs that produce no response bytes for ~125s with
+    a 524; streaming keeps bytes flowing so the connection survives.
+    LangChain's ``invoke()`` aggregates the chunks back into the same
+    ``AIMessage`` (content / tool_calls / usage / reasoning_content all
+    preserved), so callers see identical final results. A site that
+    WANTS non-streaming for a specific reason (debugging, exotic backend)
+    must pass ``streaming=False`` explicitly — that value is preserved
+    verbatim. Embedding sites are routed through a different code path
+    (``openai.OpenAI(...).embeddings.create(...)``) and never streamed.
+
+    Streaming usage (token counts)
+    ------------------------------
+    When ``streaming=True`` is in effect, this function also injects
+    ``stream_usage=True`` unless the caller has set it explicitly. The
+    LangChain kwarg controls the wire-level ``stream_options`` field:
+    ``{"include_usage": true}`` requests that the backend include a final
+    ``usage`` chunk in the SSE stream (otherwise many OpenAI-compatible
+    backends omit usage and ``usage_metadata`` comes back ``None``).
+    Without this injection — i.e. when callers set their own
+    ``base_url`` / custom ``http_client`` — langchain-openai never sends
+    the ``stream_options`` block and usage is silently lost on spec-
+    compliant backends. We default it ON so ``usage_metadata`` is
+    populated end-to-end. Sites that need to opt out (cost / metering)
+    pass ``stream_usage=False`` explicitly — that value is preserved
+    verbatim, mirroring the ``streaming`` opt-out pattern.
     """
-    return {
+    cleaned = {
         k: v
         for k, v in cfg.items()
         if k not in ("model_vision", "base_url_backup")
     }
+    # CF-125s 524 fix: default streaming ON if caller didn't opt in/out.
+    # The LangChain ``streaming`` kwarg is a Pydantic field on
+    # ``BaseChatOpenAI`` (``streaming: bool = False``) — passing it here
+    # sets ``stream: True`` on the wire payload (see
+    # ``BaseChatOpenAI._get_request_payload`` which serializes
+    # ``"stream": self.streaming``). Streaming is the SINGLE knob for the
+    # wire-level flag; the ``stream_usage`` injection below controls
+    # whether the wire carries ``stream_options: {"include_usage": true}``
+    # so the backend emits a usage chunk in the SSE stream.
+    if "streaming" not in cleaned:
+        # Pull from the class-level default rather than hardcoding True
+        # so operator knobs (OPENAI_STREAMING=false) take effect end-to-end
+        # at every construction site that routes through this chokepoint.
+        # The class var is set from LLMConfig.streaming at daemon startup
+        # (daemon/__main__.py + daemon/api.py) — mirror of the
+        # reasoning_echo_disabled_models propagation pattern.
+        cleaned["streaming"] = ThinkingChatOpenAI.default_streaming
+    # W1 fix: inject stream_usage=True alongside the streaming default so
+    # langchain-openai emits ``stream_options: {"include_usage": true}`` on
+    # the wire. Without this, backends that only send usage on explicit
+    # request (the OpenAI spec default) leave ``usage_metadata`` as None.
+    # Respect explicit caller opt-outs (stream_usage=False).
+    if "stream_usage" not in cleaned:
+        cleaned["stream_usage"] = True
+    return cleaned
 
 
 class SessionState(MessagesState):

@@ -147,6 +147,66 @@ class LLMConfig(BaseSettings):
         ),
     )
 
+    # Stream the chat-completion response on the wire (Cloudflare 524 fix).
+    # When True, every LangChain ``ChatOpenAI`` constructed through
+    # ``daemon.graph.clean_llm_config`` sends ``stream: True`` to the
+    # OpenAI-compatible backend, so chunked bytes flow back through the
+    # Cloudflare proxy before its ~125s anycast read timeout can kill the
+    # connection with zero response. LangChain's ``invoke()`` aggregates
+    # the chunks back into the same ``AIMessage`` (content / tool_calls /
+    # usage / reasoning_content all preserved), so callers see identical
+    # final results. Default ON; operators can flip to False for debugging
+    # or for backends that mis-handle streaming. Raw-SDK chat sites in
+    # ``daemon/services/skill_{search,evolution}_service.py`` are NOT yet
+    # wired for streaming (deferred — see commit message); they continue to
+    # send non-streaming POSTs regardless of this flag. Embedding calls are
+    # never streamed (the embeddings endpoint has no streaming surface).
+    # Override via OPENAI_STREAMING env var. Precedent for the
+    # OPENAI_REASONING_ECHO_DISABLED_MODELS denylist-style config chain.
+    streaming: bool = Field(
+        default=True,
+        description=(
+            "Send chat completions with stream: True on the wire so the "
+            "connection survives Cloudflare's ~125s anycast proxy read "
+            "timeout. LangChain invoke() aggregates chunks into the same "
+            "AIMessage; callers see identical results. Default True."
+        ),
+    )
+
+    @field_validator("streaming", mode="before")
+    @classmethod
+    def _coerce_streaming_empty_to_default(cls, value: Any) -> Any:
+        """Coerce empty-string / YAML-null ``streaming`` to the default (True).
+
+        Precedent: ``base_url_backup`` empty-guard at
+        ``_coerce_base_url_backup_empty_to_none`` and the
+        ``reasoning_echo_disabled_models`` empty-guard in
+        ``_parse_reasoning_echo_disabled_models`` (both coerce ``""`` /
+        whitespace to a sensible default instead of crashing pydantic
+        bool parsing).
+
+        ``OPENAI_STREAMING=""`` survives the ``${OPENAI_STREAMING:-true}``
+        shell interpolation in some operator ``.env`` files (where an
+        empty value pastes through without a substitution), and YAML
+        files may carry a bare ``streaming:`` (None) when the operator
+        deletes the value but leaves the key. Pydantic-settings raises
+        ``ValidationError`` on bool parsing of an empty string and a
+        missing-YAML-key default is None — both crash daemon boot.
+
+        Rules:
+
+        - ``""`` / whitespace → ``True`` (default)
+        - ``None`` (YAML null) → ``True`` (default)
+        - ``True`` / ``False`` → pass through unchanged
+        - ``"true"`` / ``"false"`` / ``"1"`` / ``"0"`` → pydantic handles
+          (delegated to bool coercion after our guard)
+        """
+        if value is None:
+            return True
+        if isinstance(value, str) and not value.strip():
+            return True
+        return value
+
     @field_validator("reasoning_echo_disabled_models", mode="before")
     @classmethod
     def _parse_reasoning_echo_disabled_models(cls, value: Any) -> Any:
