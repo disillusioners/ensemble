@@ -3254,6 +3254,23 @@ def create_agent_node(
             updated_state = await graph.aget_state(thread_config)
             compact_messages = [SystemMessage(content=system_prompt)] + updated_state.values.get('messages', [])
 
+            # Tool-call pairing guard (CLE retry path): ``aget_state``
+            # returns the pre-fix poisoned checkpoint tail
+            # (unanswered ``AIMessage(tool_calls)``) when the first
+            # attempt blew up on ``ContextLengthExceededError`` and the
+            # reactive compaction rebuilt state without re-running the
+            # pairing guard. Synthesize placeholder ``ToolMessage``s
+            # BEFORE any ``HumanMessage`` injections are appended below
+            # so the retry sees an API-valid history. The placeholders
+            # are also accumulated into ``pairing_synthesized_msgs`` so
+            # the C2 return (see ~:3369) persists them — healing the
+            # checkpoint permanently. Without this, the next turn would
+            # re-encounter the same poisoned tail and re-trigger the
+            # 2013 gateway error indefinitely.
+            pairing_synthesized_msgs.extend(
+                _ensure_tool_result_pairing(compact_messages, instance_short)
+            )
+
             # C3: Reactive compaction re-append — the injected messages
             # live only in the local ``full_messages`` list above (they
             # have NOT been persisted to the checkpoint via
