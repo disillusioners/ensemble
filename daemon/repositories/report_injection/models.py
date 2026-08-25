@@ -118,7 +118,7 @@ class ReportInjectionState(str, enum.Enum):
     # from INJECTED / TASK_DELIVERED (which would falsely signal
     # delivery). Stored verbatim — the storage layer is
     # case-sensitive (C1). Terminal.
-    FAILED = "failed"
+    FAILED = "FAILED"
 
 
 class ReportInjection(SQLModel, table=True):

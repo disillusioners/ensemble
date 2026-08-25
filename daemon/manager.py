@@ -7196,13 +7196,10 @@ class InstanceManager:
             consistency is preserved (the row references the now-
             failed message).
           * The injection row's ``state`` is transitioned to a
-            dead-letter terminal marker via UPDATE — no injection
-            terminal state exists (INJECTED / TASK_DELIVERED
-            would falsely signal delivery), so a sentinel
-            ``state='failed'`` literal is used (model permits any
-            string for ``state`` — ``ReportInjectionState`` enum
-            covers the live states, the dead-letter terminal is
-            a free-form string per plan §T8 (b) rationale).
+            dead-letter terminal marker via UPDATE — the
+            ``ReportInjectionState.FAILED`` sentinel (INJECTED /
+            TASK_DELIVERED would falsely signal delivery; see the
+            enum member comment in models.py, plan §T8 (b)).
           * Returns ``{"shape": "dead_parent_skip", ...}`` so the
             caller suppresses re-entry (the parent cascade path
             is invalid for a dead parent).
@@ -7291,12 +7288,7 @@ class InstanceManager:
                 .values(
                     report_message_id=report_message_id,
                     content=content,
-                    state="failed",  # dead-letter sentinel; see
-                                    # ReportInjectionState comment
-                                    # in models.py — the live
-                                    # states are PENDING / INJECTED /
-                                    # TASK_DELIVERED; "failed" is
-                                    # the dead-letter terminal marker.
+                    state=ReportInjectionState.FAILED.value,  # dead-letter sentinel
                 )
             )
             logger.info(
