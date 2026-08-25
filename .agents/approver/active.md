@@ -1,8 +1,8 @@
 # Approver Active State
 
-Plan: Auto-Restart / Auto-Upgrade System Architecture (auto-restart-upgrade)
-Slug: auto-restart-upgrade
+Plan: Pause/Resume/Terminate Tree Propagation Fix (pause-resume-terminate-tree-fix)
+Slug: pause-resume-terminate-tree-fix
 Iteration: 001
 Status: APPROVED
-Started: 2026-08-15T21:40:44Z
-Last Verdict: APPROVED (iteration 001)
+Started: 2026-08-24T19:46:19Z
+Last Verdict: APPROVED (iteration 001, 2026-08-24)
