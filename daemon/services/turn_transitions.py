@@ -560,8 +560,12 @@ class RetryTurn(_Transition):
 
     The parent Task transitions to 'cancelled' (it is being superseded);
     a fresh child Task is INSERTed with the next-retry state. All 8
-    mirrors are reconciled for both work_ids so the parent reaches
-    terminal state and the child reaches the pending-armed state.
+    mirrors are reconciled for both work_ids; the parent TASK reaches
+    'cancelled'. The parent job_queue_items terminal write is NOT done
+    here for a non-terminal instance — the reconciler's alive-instance
+    guard (paused/running/waiting_children) defers it to the observer's
+    finalize, which stamps failed_at so the row stays retryable. The
+    child reaches the pending-armed state.
 
     Caller owns the conditional UPDATE-with-guard (the race gate that
     prevents duplicate retry children); this transition executes the
@@ -668,9 +672,12 @@ class RetryTurn(_Transition):
         )
 
         # 3. Reconcile both turns' mirrors (8 mirrors each via the
-        #    Increment-1 reconciler). Parent mirrors reach terminal
-        #    state; child mirrors get armed (job_queue_items queued,
-        #    message_queue ready, job_locks acquired, etc.).
+        #    Increment-1 reconciler). The parent TASK mirror reaches
+        #    'cancelled'; the job_queue_items terminal write defers to
+        #    the observer's finalize when the instance is non-terminal
+        #    (alive-instance guard); child mirrors get armed
+        #    (job_queue_items queued, message_queue ready, job_locks
+        #    acquired, etc.).
         if self.task_repo and hasattr(self.task_repo, "reconcile_turn_mirror"):
             self.task_repo.reconcile_turn_mirror(self.parent_work_id, session)
             self.task_repo.reconcile_turn_mirror(self.child_work_id, session)

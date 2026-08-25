@@ -1595,6 +1595,16 @@ SET admission_state = 'queued',
         # — pre-7c rows keep their NULL).
         if terminal_reason is not None:
             set_values["terminal_reason"] = terminal_reason
+        # failed_at stamp (paused-race amendment, 2026-08-25): mirror
+        # of the observer's Step-1 stamp. The reconciler's alive-
+        # instance guard suppressed the only other live writer of
+        # ``failed_at``; a ``terminal_reason='failed'`` finalize must
+        # stamp it so ``atomic_retry`` (which requires
+        # ``failed_at IS NOT NULL``) accepts the row. FAILED only —
+        # 'completed'/'cancelled'/'aborted' finalizes keep NULL
+        # (not retryable).
+        if terminal_reason == "failed":
+            set_values["failed_at"] = now
 
         with SQLModelSession(self.engine) as session:
             stmt = (

@@ -453,7 +453,7 @@ class TestJobQueueItems:
         instance_id = _new_id("inst")
         work_id = _new_id("work")
         message_id = _new_id("msg")
-        _seed_instance(engine, instance_id)
+        _seed_instance(engine, instance_id, InstanceStatus.COMPLETED.value)
         _seed_task(
             engine,
             work_id=work_id,
@@ -581,7 +581,7 @@ class TestJobLocks:
         instance_id = _new_id("inst")
         work_id = _new_id("work")
         message_id = _new_id("msg")
-        _seed_instance(engine, instance_id)
+        _seed_instance(engine, instance_id, InstanceStatus.COMPLETED.value)
         _seed_task(
             engine,
             work_id=work_id,
@@ -1235,7 +1235,7 @@ class TestInvariantCheck:
         instance_id = _new_id("inst")
         work_id = _new_id("work")
         message_id = _new_id("msg")
-        _seed_instance(engine, instance_id)
+        _seed_instance(engine, instance_id, InstanceStatus.COMPLETED.value)
         _seed_task(
             engine,
             work_id=work_id,
@@ -1327,7 +1327,7 @@ class TestWaitingChildrenGuard:
     def test_non_waiting_children_transitions_jobitem_to_done(
         self, engine: Engine, repo: TaskRepository
     ) -> None:
-        """Terminal Task + ``instances.status='running'`` → JobItem transitions to 'done'.
+        """Terminal Task + ``instances.status='completed'`` → JobItem transitions to 'done'.
 
         The control case for the WAITING_CHILDREN exception: with
         a normal instance status, the terminal Task's JobItem must
@@ -1336,7 +1336,7 @@ class TestWaitingChildrenGuard:
         instance_id = _new_id("inst")
         work_id = _new_id("work")
         message_id = _new_id("msg")
-        _seed_instance(engine, instance_id, InstanceStatus.RUNNING.value)
+        _seed_instance(engine, instance_id, InstanceStatus.COMPLETED.value)
         _seed_task(
             engine,
             work_id=work_id,

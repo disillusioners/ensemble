@@ -769,6 +769,21 @@ class TaskRepository:
                 "status_running": TaskStatus.RUNNING.value,
                 "status_paused": TaskStatus.PAUSED.value,
                 "status_waiting_children": InstanceStatus.WAITING_CHILDREN.value,
+                # Paused-race guard (Inc 2026-08-24 "resume stamps live
+                # Job cancelled"): during ``resume_processing_job``,
+                # ``cancel_task`` on the superseded task fires this
+                # reconciliation post-commit while the parent instance is
+                # still ``paused`` (or already flipped back to ``running``
+                # before the replacement task is scheduled via the outbox).
+                # Alive-but-transitioning instance statuses suppress the
+                # terminal job write exactly like ``waiting_children``
+                # (D13); only terminal instance statuses let it through.
+                # Bound from ``InstanceStatus`` — these compare against
+                # ``instances.status``, unlike the ``TaskStatus``-sourced
+                # ``status_running``/``status_paused`` above which guard
+                # task-liveness predicates.
+                "instance_status_paused": InstanceStatus.PAUSED.value,
+                "instance_status_running": InstanceStatus.RUNNING.value,
             }
             snapshot_guard = """
                 (:task_exists = false OR EXISTS (
@@ -784,7 +799,11 @@ class TaskRepository:
                             WHEN :terminal AND NOT EXISTS (
                                 SELECT 1 FROM instances i
                                 WHERE i.instance_id = :task_instance_id
-                                  AND i.status = :status_waiting_children
+                                  AND i.status IN (
+                                      :status_waiting_children,
+                                      :instance_status_paused,
+                                      :instance_status_running
+                                  )
                             ) THEN 'done'
                             ELSE admission_state
                         END,
@@ -792,7 +811,11 @@ class TaskRepository:
                             WHEN :terminal AND NOT EXISTS (
                                 SELECT 1 FROM instances i
                                 WHERE i.instance_id = :task_instance_id
-                                  AND i.status = :status_waiting_children
+                                  AND i.status IN (
+                                      :status_waiting_children,
+                                      :instance_status_paused,
+                                      :instance_status_running
+                                  )
                             ) THEN :terminal_reason
                             ELSE terminal_reason
                         END,
@@ -801,7 +824,11 @@ class TaskRepository:
                                  AND NOT EXISTS (
                                      SELECT 1 FROM instances i
                                      WHERE i.instance_id = :task_instance_id
-                                       AND i.status = :status_waiting_children
+                                       AND i.status IN (
+                                           :status_waiting_children,
+                                           :instance_status_paused,
+                                           :instance_status_running
+                                       )
                                  )
                             THEN COALESCE(failed_at, CAST(CURRENT_TIMESTAMP AS TEXT))
                             ELSE failed_at
@@ -820,7 +847,11 @@ class TaskRepository:
                       AND NOT EXISTS (
                           SELECT 1 FROM instances i
                           WHERE i.instance_id = :task_instance_id
-                            AND i.status = :status_waiting_children
+                            AND i.status IN (
+                                :status_waiting_children,
+                                :instance_status_paused,
+                                :instance_status_running
+                            )
                       )
                 """),
                 params,

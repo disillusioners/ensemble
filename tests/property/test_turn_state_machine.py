@@ -491,6 +491,20 @@ def _force_task_status(
         )
 
 
+def _force_instance_status(
+    engine: Engine, instance_id: str, status: str
+) -> None:
+    """Update the Instance status directly via raw SQL (D13 terminal step)."""
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "UPDATE instances SET status = :status "
+                "WHERE instance_id = :instance_id"
+            ),
+            {"status": status, "instance_id": instance_id},
+        )
+
+
 # ---------------------------------------------------------------------------
 # Invariant helpers (read-side)
 # ---------------------------------------------------------------------------
@@ -1400,6 +1414,15 @@ class TestDirectedScenarios:
             state_machine_engine, wid, TaskStatus.COMPLETED.value
         )
         result = task_repo.reconcile_turn_mirror(wid)
+
+        # 5. Instance reaches terminal status — D13 suppresses the terminal
+        # JobItem write while the instance is alive-but-transitioning.
+        _force_instance_status(
+            state_machine_engine,
+            meta["instance_id"],
+            InstanceStatus.COMPLETED.value,
+        )
+        task_repo.reconcile_turn_mirror(wid)
 
         # All 8 mirrors must be consistent with terminal status.
         assert result["snapshot_status"] == TaskStatus.COMPLETED.value
