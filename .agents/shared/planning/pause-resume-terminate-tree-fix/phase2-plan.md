@@ -496,9 +496,42 @@ is via:
     `claim_for_injection` (the natural idempotency mechanism).
 
 The pair deduplicates to exactly-one delivery to the parent.
-Unit-test pins: `test_compact_fired_watchers_deliver_before_compact.py
-::test_h_blocker1_chain_paused_parent_no_stamp_then_resume_heals`
-exercises the full paused→child-completes→resume chain.
+
+**Unit-test coverage (post-P2-closure fast-follow, 2026-08-24):**
+
+* **Compact side (resume Pass 1 → stamp → Pass 2 DELETE):**
+  `test_compact_fired_watchers_deliver_before_compact.py
+  ::test_h_blocker1_chain_paused_parent_no_stamp_then_resume_heals`
+  pins the COMPACT half of the chain. It drives `bus.emit_terminal`
+  to fire the watcher (PENDING→FIRED) and then hand-rolls the
+  un-stamped precondition via a SQL `UPDATE` before invoking
+  `_compact_fired_watchers_for_paused`. **It does NOT exercise the
+  C1 stamp-gate itself** — the un-stamped state is asserted via the
+  hand-rolled UPDATE, not by driving the production
+  `_emit_terminal_via_bus` stamping seam. The compact half is the
+  natural-completion path's resume-cycle observable shape
+  (stamped-and-delivered row → Pass 2 reaps it → no double-
+  delivery on a second resume cycle).
+
+* **Stamping side (the `_parent_status == "paused"` gate inside
+  `_emit_terminal_via_bus`):** P2 closure fast-follow W-C.a added
+  `test_child_outcome_payload_surfacing.py
+  ::test_iii_stamp_gate_held_for_paused_parent` and
+  `::test_iv_stamp_gate_not_held_for_running_parent`. These drive
+  the REAL stamping seam — the production
+  `ChildReportsService._emit_terminal_via_bus` helper against a
+  real `DependencyBus` + a real `SQLModelInstanceRepository` —
+  with a PAUSED parent (asserts `enqueued_at` stays NULL — gate
+  HELD) and a RUNNING parent (asserts `enqueued_at` is set — gate
+  NOT HELD). Together they pin both halves of the gate's
+  contract; a revert (gate always trips or never trips) is
+  caught. The earlier pin referencing the pre-existing
+  `test_child_outcome_payload_surfacing.py` suite for stamp-gate
+  coverage was a false pin — that suite covered the Round 2
+  Blocker 2 `[child_outcome: terminated]` marker, NOT the
+  parent-paused stamp gate. W-C.b corrected the
+  `test_compact_fired_watchers_deliver_before_compact.py::test_h`
+  comment to repoint at the new W-C.a tests.
 
 **Why NOT option (b) widen-predicate:** the
 `enqueued_at IS NOT NULL` predicate in Pass 2's DELETE

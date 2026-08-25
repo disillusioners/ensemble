@@ -451,24 +451,44 @@ class ChildReportsService:
         # (claimed / already_delivered / missing); there is exactly-one
         # delivery to the parent.
         for fu in fired:
-            # Parent-liveness gate: skip the stamp when the parent is
-            # PAUSED so resume's Pass 1 selects this row. A
-            # best-effort lookup — on failure we fall back to the
-            # pre-fix behaviour (stamp unconditionally) so a DB
-            # hiccup cannot strand the row by the OPPOSITE failure
-            # mode (an un-stamped row whose Pass 1 selection later
-            # fails for any reason).
+            # Phase 2 round 2 (2026-08-24, Blocker 1) parent-liveness
+            # stamp-gate: skip the stamp when the parent is PAUSED so
+            # resume's Pass 1 selects this row.
+            #
+            # Trade-off is FAIL-OPEN by design: when the status
+            # lookup itself fails (a DB hiccup, a transient
+            # ``_instance_repository.get`` error, or the parent row
+            # being None — deleted/never-existed), we fall through
+            # to the stamp and treat the lookup result as
+            # "not paused". The opposite choice — fail-closed,
+            # skipping the stamp on ANY lookup failure — would
+            # block the FIRED row behind the status-lookup
+            # availability: a stuck lookup leaves the row
+            # un-stamped AND stuck, with no visible progress to a
+            # restart's ``_recover_fired_unsent`` (it cannot
+            # distinguish "parent paused" from "lookup failed").
+            # The acceptable cost is a POSSIBLE OVER-FIRE: a row
+            # may be stamped for a parent that was actually paused
+            # when the lookup failed, leaving resume's Pass 1 to
+            # miss this row. The durable ``report_injections`` row
+            # (created by ``_process_child_completion_and_notify_parent``
+            # at ~:2864-2875) is the backstop — the ~10-15 min
+            # ``report_delivery_recovery`` Lane 3/4 sweep eventually
+            # delivers it via ``claim_for_injection``, exactly-once
+            # guarded. Fail-open therefore trades a possible
+            # LATE delivery (the Lane 3/4 sweep) for not deadlocking
+            # the FIRED row behind transient lookup failures. The
+            # P2 round 2 council verdict locked this trade-off —
+            # it is the parent-liveness dead-letter sibling of the
+            # ``_cancel_bus_watchers_for`` WARNING 1 dead-letter
+            # at ``instance_lifecycle.py:138-194``.
             _parent_status = None
             try:
                 # ``_instance_repository.get`` is a sync SQLModel
-                # read (matches the precedent at :1572 below) — wrap
-                # in ``asyncio.to_thread`` so the event loop is not
-                # blocked. A best-effort lookup — on failure we fall
-                # back to the pre-fix behaviour (stamp
-                # unconditionally) so a DB hiccup cannot strand the
-                # row by the OPPOSITE failure mode (an un-stamped
-                # row whose Pass 1 selection later fails for any
-                # reason).
+                # read (matches the precedent at :1572 below) —
+                # wrap in ``asyncio.to_thread`` so the event loop
+                # is not blocked. Best-effort — see the fail-open
+                # trade-off note above.
                 _parent = await asyncio.to_thread(
                     self._instance_repository.get,
                     fu.target_instance_id,
@@ -477,10 +497,16 @@ class ChildReportsService:
                     _parent.status if _parent is not None else None
                 )
             except Exception as gate_err:
+                # Fail-open branch — see the trade-off comment
+                # above. We log at DEBUG so a lookup hiccup is
+                # observable without aborting the stamp loop, and
+                # leave ``_parent_status = None`` so the gate does
+                # not trip (``None != "paused"`` falls through to
+                # the stamp).
                 logger.debug(
                     f"_emit_terminal_via_bus: parent-status gate "
-                    f"lookup failed (non-fatal, falling back to "
-                    f"unconditional stamp) for "
+                    f"lookup failed (non-fatal, fail-open — "
+                    f"proceeding with stamp) for "
                     f"{fu.target_instance_id[:8]}...: {gate_err}"
                 )
             if _parent_status == "paused":

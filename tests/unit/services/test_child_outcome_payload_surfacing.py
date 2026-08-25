@@ -63,6 +63,9 @@ from daemon.repositories.dependency_bus.repository import (
     DependencyWatcherRepository,
 )
 from daemon.repositories.instance.models import Instance, InstanceStatus
+from daemon.repositories.instance.repository import (
+    SQLModelInstanceRepository,
+)
 from daemon.repositories.message_queue.models import MessageQueue
 from daemon.services.dependency_bus import (
     DependencyBus,
@@ -363,6 +366,347 @@ async def test_ii_two_consecutive_enqueues_byte_identical(engine, bus):
             f"(no field drift). cycle_1={msg_1!r}, cycle_2={msg_2!r}"
         )
         assert "[child_outcome: terminated]" in msg_2
+    finally:
+        set_dependency_bus(None)
+        await bus.stop()
+
+
+# ─── P2 closure fast-follow (W-C.a) ─ stamp-gate driven through the REAL seam ─
+#
+# P2 fast-follow W-C.a closes a coverage gap from the P2 round 2
+# verification: the existing test_h
+# (``test_compact_fired_watchers_deliver_before_compact.py::test_h_blocker1_chain_paused_parent_no_stamp_then_resume_heals``)
+# drives ``bus.emit_terminal`` directly and then *simulates* the
+# Blocker 1 stamp-skip by asserting the row is un-stamped after a
+# hand-rolled UPDATE. That covers the compact side but not the
+# production stamping seam itself: ``ChildReportsService._emit_terminal_via_bus``
+# is the helper that contains the actual ``_parent_status == "paused"``
+# gate. A regression that removes the gate would still pass test_h
+# (the test never exercises the gate).
+#
+# The two tests below drive the REAL stamping path: the production
+# helper ``service._emit_terminal_via_bus`` reads
+# ``_instance_repository.get(parent).status`` and decides whether to
+# stamp ``enqueued_at``. A revert of the gate would stamp a
+# PAUSED-parent row (the round-2 live-repro frozen msg-count
+# defect), and a corrupted gate (always-trips) would leave
+# RUNNING-parent rows un-stamped (the duplicate-delivery defect).
+
+
+def _build_child_reports_service_for_stamp_gate(engine):
+    """Build a ``ChildReportsService`` wired to a REAL ``SQLModelInstanceRepository``.
+
+    The helper is constructed via ``__new__`` to skip ``__init__``
+    (which would touch the real manager / engine). The mock
+    manager exposes ``enqueue_message`` as an ``AsyncMock`` (the
+    helper does not call it, but the attribute must exist because
+    the manager facade's contract); ``_instance_repository`` is the
+    REAL repo, so ``service._instance_repository.get(parent)``
+    reads the actual ``instances.status`` row (the production
+    stamping seam — exactly what we want to test).
+    """
+    from daemon.services.child_reports import ChildReportsService
+
+    manager = MagicMock(name="InstanceManager")
+    manager.enqueue_message = AsyncMock(name="enqueue_message")
+    manager._instance_repository = SQLModelInstanceRepository(engine)
+
+    service = ChildReportsService.__new__(ChildReportsService)
+    service._manager = manager
+    service._events_service = None
+    return service
+
+
+def _seed_parent_instance(engine: Engine, status: str) -> str:
+    """Seed a parent instance row for the stamp-gate tests."""
+    iid = f"parent-{uuid.uuid4().hex[:8]}"
+    now = _now_iso()
+    with Session(engine) as s:
+        s.add(
+            Instance(
+                instance_id=iid,
+                agent_id="tester",
+                agent_dir="/tmp/agents/tester",
+                agent_name="tester",
+                parent_id=None,
+                project_id="test-project",
+                status=status,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        s.commit()
+    return iid
+
+
+def _read_dependency_watcher_enqueued_at(engine: Engine, source_task_id: str):
+    """Read the watcher row's stamped state by ``source_task_id``."""
+    with engine.connect() as conn:
+        return conn.execute(
+            text(
+                "SELECT state, enqueued_at FROM dependency_watchers "
+                "WHERE source_task_id = :tid"
+            ),
+            {"tid": source_task_id},
+        ).mappings().first()
+
+
+@pytest.mark.asyncio
+async def test_iii_stamp_gate_held_for_paused_parent(engine, bus):
+    """W-C.a PAUSED-parent: stamp-gate HELD → ``enqueued_at`` stays NULL.
+
+    Drives the REAL stamping path through
+    ``ChildReportsService._emit_terminal_via_bus``. The helper
+    reads ``_instance_repository.get(parent).status`` and skips the
+    stamp when the parent is ``PAUSED`` (the Round 2 Blocker 1
+    fix). A revert of the gate — or a typo that swaps ``"paused"``
+    for another status — would stamp the row and break the resume
+    Pass 1 selection (``enqueued_at IS NULL`` predicate). This test
+    pins the gate held.
+    """
+    set_dependency_bus(bus)
+    try:
+        await bus.start()
+        parent = _seed_parent_instance(
+            engine, status=InstanceStatus.PAUSED.value
+        )
+        service = _build_child_reports_service_for_stamp_gate(engine)
+
+        # Register the watcher (the production shape —
+        # ``bus.watch`` writes the watcher row the helper later
+        # fires via ``bus.emit_terminal``).
+        await bus.watch(
+            "task-WC-PAUSED",
+            FollowUp(
+                target_instance_id=parent,
+                message="[dependency_bus] child child-PAUSED completed",
+                source=f"internal_agent:{parent}",
+                metadata={
+                    "kind": "child_complete",
+                    "child_id": "child-PAUSED",
+                    "parent_id": parent,
+                    "message_id": "msg-PAUSED",
+                },
+            ),
+        )
+
+        # Real-flow drive: the production helper reads the parent
+        # status from the DB and skips the stamp. A hand-rolled
+        # assertion on the row is the binding acceptance — the
+        # gate is INSIDE the helper, so the only observable
+        # difference between "gate held" and "gate reverted" is
+        # the post-call ``enqueued_at`` value.
+        await service._emit_terminal_via_bus(
+            task_id="task-WC-PAUSED", status="completed"
+        )
+
+        row = _read_dependency_watcher_enqueued_at(
+            engine, "task-WC-PAUSED"
+        )
+        assert row is not None, "watcher row must exist after emit"
+        assert row["state"] == "FIRED", (
+            "Blocker 1 chain: the watcher row must be FIRED after "
+            "the emit (the PENDING→FIRED transition is the bus's "
+            "guarded update; the stamp is a SEPARATE later step)"
+        )
+        assert row["enqueued_at"] is None, (
+            "W-C.a PAUSED-parent acceptance: stamp-gate HELD means "
+            "the row stays un-stamped when the parent is PAUSED. "
+            "If ``enqueued_at`` is NOT NULL, the gate was either "
+            "removed, the status check returned the wrong value, "
+            "or the lookup failed (fail-open branch — see the "
+            "W-A comment for the trade-off)."
+        )
+    finally:
+        set_dependency_bus(None)
+        await bus.stop()
+
+
+@pytest.mark.asyncio
+async def test_iv_stamp_gate_not_held_for_running_parent(engine, bus):
+    """W-C.a RUNNING-parent: stamp-gate NOT HELD → ``enqueued_at`` IS NOT NULL.
+
+    Counterpart to ``test_iii``: a non-PAUSED parent (RUNNING) MUST
+    get the stamp after the emit. A corrupted gate that always
+    trips (e.g. swapped ``!=`` for ``==``, or hardcoded skip) would
+    leave this row un-stamped and break the ``_recover_fired_unsent``
+    restart-time dedup — a restart would re-deliver an already-
+    delivered FollowUp. This test pins the inverse half of the
+    gate's contract.
+    """
+    set_dependency_bus(bus)
+    try:
+        await bus.start()
+        parent = _seed_parent_instance(
+            engine, status=InstanceStatus.RUNNING.value
+        )
+        service = _build_child_reports_service_for_stamp_gate(engine)
+
+        await bus.watch(
+            "task-WC-RUNNING",
+            FollowUp(
+                target_instance_id=parent,
+                message="[dependency_bus] child child-RUNNING completed",
+                source=f"internal_agent:{parent}",
+                metadata={
+                    "kind": "child_complete",
+                    "child_id": "child-RUNNING",
+                    "parent_id": parent,
+                    "message_id": "msg-RUNNING",
+                },
+            ),
+        )
+
+        await service._emit_terminal_via_bus(
+            task_id="task-WC-RUNNING", status="completed"
+        )
+
+        row = _read_dependency_watcher_enqueued_at(
+            engine, "task-WC-RUNNING"
+        )
+        assert row is not None, "watcher row must exist after emit"
+        assert row["state"] == "FIRED", (
+            "W-C.a RUNNING-parent: watcher must be FIRED after emit "
+            "(PENDING→FIRED is the bus's guarded update)"
+        )
+        assert row["enqueued_at"] is not None, (
+            "W-C.a RUNNING-parent acceptance: stamp-gate NOT HELD "
+            "for a non-PAUSED parent — the stamp must run, setting "
+            "``enqueued_at`` to a non-NULL timestamp. If NULL, the "
+            "gate is over-tripping (would break the "
+            "``_recover_fired_unsent`` restart-time dedup — a "
+            "restart would re-deliver an already-delivered FollowUp)."
+        )
+    finally:
+        set_dependency_bus(None)
+        await bus.stop()
+
+
+# ─── P2 closure fast-follow (W-D) — terminate enqueue leg with verbatim marker ─
+#
+# P2 fast-follow W-D pins the enqueue leg of the terminate path
+# that was previously only hand-simulated in the
+# ``test_i_terminate_fire_helper_enqueue_marker_in_message`` test
+# above. That test simulates the helper by writing a MessageQueue
+# row by hand — it does NOT drive ``_cancel_bus_watchers_for``
+# directly. The risk surface: a future refactor that drops the
+# ``fu.message`` argument (or replaces it with a sanitized
+# version) would silently strip the ``[child_outcome: terminated]``
+# marker. This test invokes the REAL helper with an
+# ``AsyncMock`` ``enqueue_message`` and asserts the VERBATIM
+# ``message`` kwarg passed to the enqueue carries the marker —
+# exactly what the parent LLM will read via ``MessageQueue.content``.
+
+
+@pytest.mark.asyncio
+async def test_v_cancel_bus_watchers_for_enqueues_verbatim_fu_message(
+    engine, bus
+):
+    """W-D acceptance: ``_cancel_bus_watchers_for`` enqueues the
+    ``fu.message`` text verbatim — marker included.
+
+    Drives the REAL helper against a registered watcher + a
+    mock manager whose ``enqueue_message`` is an ``AsyncMock``.
+    The accept-or-reject check is on the EXACT ``message`` kwarg
+    the helper passes to ``manager.enqueue_message`` — the
+    ``[child_outcome: terminated]`` suffix MUST be present (the
+    Round 2 Blocker 2 fix).
+
+    This test was previously hand-simulated in
+    ``test_i_terminate_fire_helper_enqueue_marker_in_message``
+    via a hand-written MessageQueue row. The hand-simulation does
+    NOT pin the helper itself — a refactor that drops or
+    sanitizes the ``fu.message`` argument would slip past that
+    test. This test pins the helper directly.
+
+    The parent instance is seeded RUNNING so the dead-letter
+    branch (WARNING 1 at ``instance_lifecycle.py:138-194``) does
+    not trip — the enqueue must reach the manager mock.
+    """
+    from daemon.services.instance_lifecycle import (
+        _cancel_bus_watchers_for,
+    )
+
+    set_dependency_bus(bus)
+    try:
+        await bus.start()
+
+        parent = _seed_parent_instance(
+            engine, status=InstanceStatus.RUNNING.value
+        )
+        child = f"child-{uuid.uuid4().hex[:8]}"
+        # Register a watcher keyed on the child instance id (the
+        # ``fire_for_terminated_target`` matcher keys on
+        # ``metadata.child_id`` — see dependency_bus.py:1117-1121).
+        await bus.watch(
+            "task-WD-1",
+            FollowUp(
+                target_instance_id=parent,
+                message="[dependency_bus] child X completed for message msg-X",
+                source=f"internal_agent:{parent}",
+                metadata={
+                    "kind": "child_complete",
+                    "child_id": child,
+                    "parent_id": parent,
+                    "message_id": "msg-X",
+                },
+            ),
+        )
+
+        # Mock manager with AsyncMock enqueue + real instance
+        # repository (the dead-letter liveness check needs it).
+        manager = MagicMock(name="InstanceManager")
+        manager.enqueue_message = AsyncMock(
+            name="enqueue_message", return_value={"message_id": "m-WD"}
+        )
+        manager._instance_repository = SQLModelInstanceRepository(engine)
+
+        # Drive the REAL helper. The op tag is logging-only.
+        await _cancel_bus_watchers_for(
+            manager, child, op="terminate_unit_test"
+        )
+
+        # Acceptance: enqueue called exactly once with the
+        # VERBATIM ``fu.message`` text — including the
+        # ``[child_outcome: terminated]`` suffix stamped at the
+        # Round 2 Blocker 2 fire site (``dependency_bus.py:1255-1261``).
+        manager.enqueue_message.assert_awaited_once()
+        call = manager.enqueue_message.await_args
+        assert call is not None, (
+            "W-D: ``manager.enqueue_message`` MUST be awaited "
+            "exactly once during ``_cancel_bus_watchers_for`` for "
+            "a single-watcher terminate shape"
+        )
+        assert call.kwargs["instance_id"] == parent, (
+            f"W-D: enqueue target must be the parent "
+            f"(got {call.kwargs['instance_id']!r}, "
+            f"expected {parent!r})"
+        )
+        enqueued_message = call.kwargs["message"]
+        assert "[child_outcome: terminated]" in enqueued_message, (
+            "W-D acceptance: the ``message`` kwarg passed to "
+            "``manager.enqueue_message`` MUST carry the "
+            "``[child_outcome: terminated]`` marker — the parent "
+            "LLM consumes this text via ``MessageQueue.content`` "
+            "during its next turn. Marker MISSING means the "
+            "Blocker 2 fix's suffix step was dropped, sanitized, "
+            "or replaced with a metadata-only enrichment "
+            "(pre-Round-2 behaviour, dead code on the terminate "
+            f"path). Actual message: {enqueued_message!r}"
+        )
+        # Exact-byte pin: the pre-existing message body survives
+        # AND the marker is appended with the exact envelope
+        # (``\\n\\n[child_outcome: terminated]`` — see
+        # ``dependency_bus.py:1259``). Refactors that change the
+        # envelope format must update this assertion.
+        assert enqueued_message == (
+            "[dependency_bus] child X completed for message msg-X"
+            "\n\n[child_outcome: terminated]"
+        ), (
+            f"W-D verbatim pin: the helper MUST enqueue the "
+            f"exact FollowUp text including the marker suffix. "
+            f"Got: {enqueued_message!r}"
+        )
     finally:
         set_dependency_bus(None)
         await bus.stop()

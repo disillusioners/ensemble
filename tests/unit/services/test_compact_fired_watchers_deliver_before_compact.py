@@ -738,9 +738,23 @@ async def test_h_blocker1_chain_paused_parent_no_stamp_then_resume_heals(
         # transition the natural-completion path uses) and then
         # simulate the C1 stamp behaviour by asserting the row is
         # left UN-stamped (the Blocker 1 invariant). The integration
-        # of the C1 stamp-gate into ``_emit_terminal_via_bus`` is
-        # verified by the round 2 chain tests in
-        # ``test_child_outcome_payload_surfacing.py``.
+        # of the C1 stamp-gate into ``_emit_terminal_via_bus`` —
+        # i.e., the actual ``_parent_status == "paused"`` gate
+        # being HELD on a PAUSED parent and NOT HELD on a RUNNING
+        # parent — is verified by the W-C.a tests added in the
+        # P2 closure fast-follow:
+        # ``tests/unit/services/test_child_outcome_payload_surfacing.py
+        # ::test_iii_stamp_gate_held_for_paused_parent`` and
+        # ``::test_iv_stamp_gate_not_held_for_running_parent``.
+        # Those tests drive the REAL stamping seam (the
+        # production ``ChildReportsService._emit_terminal_via_bus``
+        # helper, not a hand-rolled SQL UPDATE) and would catch a
+        # revert of the gate. (The earlier cross-reference to this
+        # same file at ``test_child_outcome_payload_surfacing.py``
+        # for stamp-gate coverage was a false pin — that file's
+        # pre-P2-closure tests covered the Round 2 Blocker 2
+        # ``[child_outcome: terminated]`` marker, NOT the
+        # parent-paused stamp gate.)
         fired = await bus.emit_terminal(
             "task-B1", Outcome(status="completed")
         )
