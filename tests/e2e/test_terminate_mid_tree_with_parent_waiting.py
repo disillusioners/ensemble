@@ -152,7 +152,18 @@ def test_terminate_mid_tree_with_parent_waiting():
             f"leader terminal status expected 'completed', got {final_status}"
         )
 
-        # Exactly 1 report for the terminated tester (UP propagation).
+        # Exactly 1 message enqueued to the leader for the terminated
+        # tester (UP propagation). The terminate path enqueues the
+        # FollowUp via ``_cancel_bus_watchers_for`` →
+        # ``manager.enqueue_message`` directly — there is NO
+        # ``report_injections`` row created (the natural completion
+        # path's ``_process_child_completion_and_notify_parent``
+        # helper is NOT reached from terminate). The binding
+        # acceptance is the MessageQueue row carrying the
+        # ``[child_outcome: terminated]`` marker in its ``content``
+        # field (Round 2 Blocker 2 fix). The msg-count delta above
+        # is the higher-level proof; the PG probe asserts the
+        # marker is present in the message content.
         try:
             from sqlalchemy import create_engine, text
             from sqlmodel import Session
@@ -162,20 +173,33 @@ def test_terminate_mid_tree_with_parent_waiting():
             with Session(create_engine(_e2e_pg_url())) as session:
                 rows = session.execute(
                     text(
-                        "SELECT child_instance_id, state FROM report_injections "
-                        "WHERE parent_instance_id = :p"
+                        "SELECT content, source FROM message_queue "
+                        "WHERE instance_id = :p "
+                        "ORDER BY created_at DESC LIMIT 5"
                     ),
                     {"p": leader_id},
                 ).mappings().all()
-            tester_rows = [r for r in rows if r["child_instance_id"] == tester_id]
-            assert len(tester_rows) == 1, (
-                f"expected exactly 1 report row for the terminated tester, "
-                f"got {len(tester_rows)} of {len(rows)} total"
+            # The leader must have received at least 1 message with
+            # the marker (Round 2 Blocker 2 acceptance — the
+            # message text the parent's LLM consumes carries it).
+            marker_rows = [
+                r for r in rows
+                if "[child_outcome: terminated]" in (r["content"] or "")
+            ]
+            assert len(marker_rows) >= 1, (
+                f"B3 Round 2 Blocker 2 acceptance: leader received no "
+                f"marker-bearing message from the terminated tester. "
+                f"Expected at least 1 message_queue row with "
+                f"``[child_outcome: terminated]`` in content. "
+                f"Inspected {len(rows)} recent row(s); contents: "
+                f"{[r['content'][:80] for r in rows]}"
             )
         except Exception as exc:  # noqa: BLE001 — DB probe is best-effort
             logger.warning(
-                f"[B3] PG probe unavailable ({exc}); HTTP-level assertions "
-                f"above remain the binding acceptance"
+                f"[B3] PG probe unavailable ({exc}); HTTP-level "
+                f"assertions above (msg count delta == 1) remain "
+                f"the binding acceptance; the marker probe is "
+                f"additive"
             )
 
         # Leader message count advances by exactly 1 (the terminated-

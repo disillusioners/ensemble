@@ -388,3 +388,139 @@ This revision applies the correction list from reviewer council `2bb126df` (verd
 - All OUT-of-scope items (B1/B4/B5/B6/B7/SSE) preserved verbatim.
 - No new states on `DependencyWatcherState` — Q2's metadata-encoding alternative chosen over 4th-state schema.
 - Bracketed erratum at `architecture-recommendation.md:185` is **appended**, not a rewrite — the architect's original text is preserved with the erratum as a clearly-marked note below it.
+
+---
+
+## Rev 2.2 Errata (2026-08-24 — Round 2 council dfa8a149)
+
+The Round 2 council (verdict `dfa8a149`, 2026-08-24) returned
+NEEDS-FIXES after reachability re-trace. Three errata notes
+follow — each is binding for the Round 2 implementation; the
+implementation commit documents them in code (see
+`child_reports.py:404-498` and `dependency_bus.py:1223-1263` for
+the binding changes).
+
+### (i) T2.5 narrowing acceptance (deviation-1) — binding
+
+The T2.5 guard in `_resume_cascade_db_sync` was narrowed (Rev 2.1
+W1) to::
+
+    AND NOT EXISTS (
+      SELECT 1 FROM job_queue_items
+      WHERE job_queue_items.job_id = task.work_id
+        AND job_queue_items.deleted_at IS NULL
+        AND job_queue_items.job_type <> 'message'
+    )
+
+The `job_type <> 'message'` qualifier was the ACCEPTED
+deviation-1 from the previous round (council review dfa8a149,
+unanimous). JAFP: message-type JobItems are pure mirrors of the
+Task row, created by `enqueue_message_job`; the Task lifecycle
+owns their visibility. The WorkerPool re-claim drives both Task
+and its message-type mirror atomically, so holding a Task PAUSED
+because its mirror exists would block the
+`PAUSED→PENDING` semantic that the P1 c171a289 full-chain test
+pins. The qualifier excludes the JAFP pure-mirror lane from the
+guard — a regression-pin test (`test_resume_cascade_drift_guard.py
+::test_f_message_type_jobitem_task_flips_pending`) is the binding
+acceptance that future re-widening must not break.
+
+### (ii) Task 2.13 real location — fire/enqueue site, NOT graph.py
+
+Task 2.13's `child_outcome` marker MUST land at the SOURCE
+(`fire_for_terminated_target` in `dependency_bus.py:1255-1263`,
+suffixing `fu.message` with `[child_outcome: <status>]` before
+the payload is persisted), NOT in `graph.py` or in the
+`child_reports._process_child_completion_and_notify_parent`
+marker-lookup block (`child_reports.py:1525-1561`). The latter
+block is reached ONLY from natural completion paths
+(`manager.py:6399`/`:8922` + completion sweep `:6543`) — NEVER
+from terminate. The terminate path reaches the parent via
+`_cancel_bus_watchers_for` → `manager.enqueue_message` directly,
+with no `_process_child_completion_and_notify_parent` call.
+Pre-Round-2 code enriched metadata only (`dataclass_replace`
+on the frozen FollowUp) which is invisible to the parent-LLM-
+visible content. The marker MUST therefore land in the FollowUp's
+`message` text at the source.
+
+The `child_reports.py:1525-1561` lookup block is PRESERVED for
+the natural-completion path (where `_process_child_completion_and_notify_parent`
+creates the `report_injections` row that the LLM injects); it is
+harmless there. It is dead code on the terminate path by design.
+
+### (iii) Stamped-strand modeling error + Blocker-1 fix option (a)
+
+The Rev 2 plan modeled the C1 stamp as conditional on a CRASH
+window between `fire_for_terminated_target` and
+`mark_enqueued_by_source_target` — the assumption was that
+`enqueued_at IS NULL` only arose when the process crashed
+mid-stamp. The pre-fix code at `child_reports.py:423-441`
+stamps UNCONDITIONALLY: every fired FollowUp gets the stamp
+whether or not the parent is paused. Live repro (the 2026-08-24
+stranded rows) confirmed BOTH strand shapes are producible, and
+the unconditional stamp makes the stamped strand the
+production reality — not the modeled crash-only shape.
+
+**Blocker-1 fix option chosen: (a) — gate the C1 stamp on
+parent-not-paused.** The stamp is now conditional on
+`fu.target_instance_id` not being in the `PAUSED` state. Stamp
+semantics become honest: `enqueued_at` means "delivered via the
+normal enqueue path". Rows fired while the parent is paused
+stay un-stamped → resume's Pass 1 selects them, re-enqueues
+each FollowUp via `manager.enqueue_message`, and stamps
+immediately after the successful enqueue. Pass 2 DELETEs by
+the unchanged `enqueued_at IS NOT NULL` predicate — the
+DELETE safety predicate is preserved EXACTLY (the row
+population entering the predicate shifts, but the predicate
+text is unchanged).
+
+**Composition check (exactly-once delivery):** With C1 un-stamping
+for paused parents, the durable `report_injections` row
+(created by `_process_child_completion_and_notify_parent` at
+`child_reports.py:2864-2875`) AND the Pass-1 FollowUp enqueue
+BOTH exist for the same child-completion event. The dedup
+is via:
+
+  * The `uq_report_injections_oblig_triple` partial unique
+    index (defined in
+    `daemon/migrations/versions/20260819_000001_report_injections_deferred_marker.sql:114`)
+    — INSERTs into `report_injections` deduplicate by the
+    triple.
+  * The `claim_for_injection` guarded `WHERE state='PENDING'`
+    UPDATE on `report_injection` rows
+    (`daemon/repositories/report_injection/repository.py:886`) —
+    the second claim returns `[]`, no double-injection.
+  * The Pass-1 enqueue creates a fresh `MessageQueue` + `Task`
+    pair for the parent; when the parent's turn runs, it
+    drains the PENDING `report_injections` row via
+    `claim_for_injection` (the natural idempotency mechanism).
+
+The pair deduplicates to exactly-one delivery to the parent.
+Unit-test pins: `test_compact_fired_watchers_deliver_before_compact.py
+::test_h_blocker1_chain_paused_parent_no_stamp_then_resume_heals`
+exercises the full paused→child-completes→resume chain.
+
+**Why NOT option (b) widen-predicate:** the
+`enqueued_at IS NOT NULL` predicate in Pass 2's DELETE
+(`instance_lifecycle.py:4159`) is the durability guarantee.
+Widening it to `enqueued_at IS NOT NULL OR <other>` would
+break the invariant that a stamped row was delivered. Option
+(b) would require also widening the `_recover_fired_unsent`
+predicate (`dependency_bus.py:1554-1606`) and the
+`_recover_fired_unsent` restart-time dedup. Option (a) keeps
+the predicates unchanged.
+
+**Why NOT option (c) stamp-after-enqueue:** the C1 stamp is
+called inside `_emit_terminal_via_bus` (an async helper
+reached from `_process_child_completion_and_notify_parent`'s
+`emit_terminal` call); the actual message enqueue for the
+natural-completion path happens elsewhere
+(`_process_child_completion_and_notify_parent`'s
+`MessageQueue`/`Task` INSERT). Reordering C1 to stamp-after-
+enqueue in `_emit_terminal_via_bus` would require moving the
+stamp into a helper that the natural-completion path also
+calls — a structural change that breaks the JAFP invariant
+(manager.enqueue_message creates NO JobItem) by introducing
+a new helper. Option (a) is the minimum-surface fix.
+
+

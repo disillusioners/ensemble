@@ -324,3 +324,75 @@ def test_e_soft_deleted_jobitem_task_flips_pending(
 
     assert _read_task_status(engine, task_id) == TaskStatus.PENDING.value
     assert task_id in result.resumed_task_ids
+
+
+# ─── (f) Phase 2 round 2 deviation-1 regression pin ──────────────────────────
+
+
+def test_f_message_type_jobitem_task_flips_pending(
+    lifecycle_service, engine, write_guard
+):
+    """Regression pin for the accepted deviation-1 narrowing.
+
+    The ``_resume_cascade_db_sync`` Task SELECT was narrowed (Rev 2.1
+    W1 + accepted deviation-1) to::
+
+        AND NOT EXISTS (
+          SELECT 1 FROM job_queue_items
+          WHERE job_queue_items.job_id = task.work_id
+            AND job_queue_items.deleted_at IS NULL
+            AND job_queue_items.job_type <> 'message'
+        )
+
+    The ``job_type <> 'message'`` qualifier means a MESSAGE-TYPE
+    JobItem does NOT own the resume decision — the Task flips
+    PAUSED→PENDING even though a non-deleted message-type JobItem
+    row exists for the work_id. This pins the accepted narrowing
+    against future re-widening (e.g. someone dropping the qualifier
+    "to be safe" and re-introducing the (JobItem CANCELLED, Task
+    PENDING) residue the W1 fix closed for TASK-owned lanes).
+
+    JAFP rationale: message-type JobItems are pure mirrors of the
+    Task row (created by ``enqueue_message_job``; the Task lifecycle
+    owns their visibility) and never re-drive the resume decision.
+    The WorkerPool re-claim drives both Task and its message-type
+    mirror atomically, so holding the Task PAUSED because its
+    message-type mirror exists would block the
+    ``PAUSED→PENDING`` semantic that the P1 c171a289 full-chain test
+    pins (and the c171a289 QUARANTINE.md-documented test family).
+
+    Acceptance: Task flips PAUSED→PENDING. Without the ``job_type
+    <> 'message'`` qualifier the guard would block the flip — the
+    test pins that the qualifier is present in the production SQL.
+    """
+    iid = _seed_paused_instance(engine)
+    task_id, work_id = _seed_paused_task(engine, iid)
+    # Seed a non-deleted message-type JobItem — the qualifier
+    # excludes this from the guard, so the flip MUST proceed. We
+    # use QUEUED admission state (NOT active) so the
+    # ``reconcile_turn_mirror`` invariant — which fires for any
+    # flipped task and checks that ``admission_state='active'``
+    # matches a corresponding ``job_locks`` row — does not raise
+    # on a missing lock. JAFP message-type mirrors skip the lock
+    # acquisition (PG trigger at ``daemon/migrations/``) so
+    # seeding one in ACTIVE state would falsely trigger the
+    # invariant. The qualifier excludes message-type JobItems
+    # regardless of admission state.
+    _seed_jobitem(
+        engine,
+        instance_id=iid,
+        work_id=work_id,
+        admission_state=AdmissionState.QUEUED.value,
+        job_type="message",
+    )
+
+    result = _run_resume(lifecycle_service, engine, write_guard, iid)
+
+    assert _read_task_status(engine, task_id) == TaskStatus.PENDING.value, (
+        "Phase 2 deviation-1 regression: a non-deleted message-type "
+        "JobItem must NOT block the PAUSED→PENDING flip — the "
+        "accepted narrowing ``job_type <> 'message'`` excludes it. "
+        "If this assertion fires, the qualifier was dropped (or "
+        "the seed's job_type drifted) — re-pin before merging."
+    )
+    assert task_id in result.resumed_task_ids

@@ -1,6 +1,7 @@
 """Instance lifecycle service for managing instance creation and termination."""
 
 import asyncio
+import concurrent.futures
 import json
 import logging
 import re
@@ -119,7 +120,78 @@ async def _cancel_bus_watchers_for(manager: "InstanceManager", instance_id: str,
         fired = await bus.fire_for_terminated_target(
             instance_id, Outcome(status="terminated")
         )
+        # Import the canonical terminal-status set + status module so
+        # the dead-letter liveness check uses the same authority as
+        # every other consumer. Best-effort — if the import fails the
+        # liveness gate is conservatively disabled (enqueue proceeds
+        # as before; the dead-letter path is the additive layer, not
+        # a behavior change).
+        try:
+            from .job_queue_service import TERMINAL_STATUSES
+        except Exception as import_err:
+            logger.debug(
+                f"instance_lifecycle.{op}: TERMINAL_STATUSES import "
+                f"failed — disabling parent-liveness dead-letter "
+                f"({type(import_err).__name__}: {import_err})"
+            )
+            TERMINAL_STATUSES = frozenset()  # gate disabled
         for fu in fired:
+            # Phase 2 round 2 (2026-08-24, WARNING 1): parent-liveness
+            # dead-letter. If the parent (fu.target_instance_id) is
+            # ALREADY in a terminal state when terminate fires the
+            # watchers, enqueueing creates a MessageQueue/Task on a
+            # dead instance — the parent's turn never runs, the
+            # report_injections row never drains, and the
+            # dependency_watchers row stays stamped-but-undelivered
+            # until a restart's _recover_fired_unsent notices. The
+            # dead-letter path SKIPS the enqueue and logs the cause.
+            #
+            # The watcher row itself is already FIRED (committed by
+            # ``fire_for_terminated_target`` above); no further state
+            # transition is needed on the row — the row is already
+            # in a terminal state and a future Pass 1 / Pass 2 will
+            # compact it. The dead-letter therefore just skips the
+            # enqueue + emits a structured log carrying the
+            # canonical reason 'failed' (matching DeadLetterTurn
+            # convention at ``turn_transitions.py:457-471``).
+            #
+            # Composes with P1's DeadLetterTurn / pattern (e)
+            # machinery by EXTENDING it: the watcher-layer
+            # transition is already terminal; the dead-letter
+            # extension only blocks the message enqueue. No
+            # restructure.
+            _dead_letter_parent = False
+            try:
+                _parent_meta = (
+                    manager._instance_repository.get(fu.target_instance_id)
+                )
+                if (
+                    _parent_meta is not None
+                    and _parent_meta.status in TERMINAL_STATUSES
+                ):
+                    _dead_letter_parent = True
+            except Exception as liveness_err:
+                # FAIL-OPEN on lookup failure — better to deliver
+                # the message to a possibly-dead parent than to
+                # strand an obligation. The dead-letter path is
+                # purely an optimization; the parent's
+                # MessageQueue/Task just gets cleaned up by the
+                # next GC cycle if the parent is truly dead.
+                logger.debug(
+                    f"instance_lifecycle.{op}: parent-liveness "
+                    f"lookup failed (non-fatal, proceeding with "
+                    f"enqueue) for {fu.target_instance_id[:8]}...: "
+                    f"{liveness_err}"
+                )
+            if _dead_letter_parent:
+                logger.info(
+                    f"instance_lifecycle.{op}: dead-lettering "
+                    f"dependency watcher for terminated child — "
+                    f"parent {fu.target_instance_id[:8]}... is "
+                    f"already terminal "
+                    f"(reason='failed', per WARNING 1 fix)"
+                )
+                continue
             # JAFP: manager.enqueue_message creates NO JobItem — the
             # internal MessageQueue + Task seam is the bus's delivery
             # contract (pause/terminate paths never write JobItems).
@@ -4055,7 +4127,40 @@ status=InstanceStatus.IDLE.value,
                         ),
                         dest_loop,
                     )
-                    future.result(timeout=8.0)
+                    try:
+                        future.result(timeout=8.0)
+                    except concurrent.futures.TimeoutError:
+                        # Phase 2 round 2 (2026-08-24, WARNING 2):
+                        # the 8s bridge timeout leaves the scheduled
+                        # coroutine alive on the destination loop —
+                        # duplicate-wake risk (the coroutine eventually
+                        # completes its enqueue and creates a Task
+                        # row, but a subsequent Pass 1 cycle would
+                        # observe the still-un-stamped row and enqueue
+                        # AGAIN, double-delivering to the parent).
+                        # ``future.cancel()`` best-effort cancels the
+                        # underlying asyncio task; returns False if
+                        # the task already finished, in which case the
+                        # enqueue has already committed — we treat
+                        # that as success (the stamp proceeds) so the
+                        # row's DELETE-safety is preserved. The
+                        # early-abort path (cancel returned True OR
+                        # the timeout still fires the structured
+                        # warning) logs and aborts before the
+                        # stamp + Pass 2.
+                        cancelled_ok = future.cancel()
+                        logger.warning(
+                            "_compact_fired_watchers_for_paused: "
+                            "8s bridge timeout for buffered "
+                            f"FollowUp to paused instance "
+                            f"{instance_id[:8]}... — future.cancel()="
+                            f"{cancelled_ok}; aborting Pass 1 before "
+                            f"stamp (row survives to next cycle)"
+                        )
+                        # Re-raise so the outer except (Exception,
+                        # CancelledError) below catches this and
+                        # short-circuits Pass 2.
+                        raise
                     # LOAD-BEARING per-row stamp — immediately after the
                     # successful enqueue. Once stamped, the row survives
                     # the DELETE by construction and a future restart's

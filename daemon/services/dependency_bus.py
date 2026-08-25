@@ -1220,7 +1220,47 @@ class DependencyBus:
                     "child_outcome": outcome.status,
                     "source_task_id": task_id,
                 }
-                fu = dataclass_replace(fu, metadata=enriched_meta)
+                # Phase 2 round 2 (2026-08-24, Blocker 2): suffix the
+                # MESSAGE TEXT with the ``[child_outcome: terminated]``
+                # marker too. The pre-fix code only enriched metadata
+                # (``dataclass_replace`` on the frozen dataclass),
+                # which is invisible to the parent-LLM-visible
+                # content — the message the parent's turn actually
+                # consumes came from the watcher registration's
+                # pre-built ``[dependency_bus] child X completed...``
+                # text, which carried NO outcome marker. The marker
+                # lookup block in
+                # ``_process_child_completion_and_notify_parent``
+                # (``child_reports.py:1525-1561``) is reached ONLY
+                # from natural completion paths
+                # (``manager.py:6399``/``:8922``) and completion sweep
+                # (``:6543``) — NEVER from terminate. This suffix
+                # stamps the marker at the SOURCE so the message
+                # text the parent's turn consumes carries it,
+                # regardless of which delivery path (Pass 1 of the
+                # resume compact, ``_cancel_bus_watchers_for`` direct
+                # enqueue) reaches the parent.
+                #
+                # Idempotent: the lookup block in
+                # ``_process_child_completion_and_notify_parent``
+                # checks ``"child_outcome:" not in (last_content or "")``
+                # BEFORE appending — a duplicate append cannot
+                # happen because we only mutate ``fu.message`` here
+                # (and the lookup block guards on natural completion
+                # only, where ``fu.message`` is never read).
+                #
+                # Format parity: matches the
+                # ``[child_outcome: <value>]`` envelope produced by
+                # the lookup block (``child_reports.py:1544-1548``).
+                _marker = f"[child_outcome: {outcome.status}]"
+                if _marker not in (fu.message or ""):
+                    fu = dataclass_replace(
+                        fu,
+                        message=f"{fu.message}\n\n{_marker}",
+                        metadata=enriched_meta,
+                    )
+                else:
+                    fu = dataclass_replace(fu, metadata=enriched_meta)
                 # Persist the enriched payload onto the FIRED row so
                 # downstream lookups (task 2.13 —
                 # fetch_child_outcome_for_fired) can surface the

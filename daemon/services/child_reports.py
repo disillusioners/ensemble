@@ -420,12 +420,77 @@ class ChildReportsService:
         # finalization leaves the row un-stamped → next restart
         # retries the finalization (idempotent). See the comment
         # block above for the full invariant.
+        # Phase 2 round 2 (2026-08-24, Blocker 1): the stamp is now
+        # gated on the parent NOT being paused. The pre-fix code
+        # stamped ``enqueued_at`` UNCONDITIONALLY at fire time, which
+        # left stamped rows invisible to
+        # ``_compact_fired_watchers_for_paused``'s Pass 1
+        # (``enqueued_at IS NULL`` predicate) — a paused parent's
+        # buffered FollowUps were stranded until the ~10-15 min
+        # ``report_delivery_recovery`` Lane 3/4 sweep picked them up.
+        #
+        # Stamp semantics are now HONEST: ``enqueued_at`` means
+        # "delivered via the normal enqueue path". Rows fired while
+        # the parent is paused stay un-stamped, so resume's Pass 1
+        # selects them, re-enqueues each FollowUp, and stamps
+        # immediately after the successful enqueue. Pass 2 then
+        # DELETEs by the unchanged ``enqueued_at IS NOT NULL``
+        # predicate. The DELETE safety predicate is preserved
+        # EXACTLY — only the row population entering the predicate
+        # shifts (the un-stamped rows are the ones the production
+        # delivery loop just stamped).
+        #
+        # Composition with the durable ``report_injections`` row
+        # (created in ``_process_child_completion_and_notify_parent``
+        # at ~:2864-2875): Pass 1's ``manager.enqueue_message`` call
+        # creates a fresh ``MessageQueue`` + ``Task`` for the parent
+        # — when the parent's turn runs it drains the PENDING
+        # ``report_injections`` row via ``claim_for_injection`` (the
+        # natural idempotency mechanism, guarded ``WHERE state='PENDING'``
+        # UPDATE). The pair is deduplicated by the tri-state guards
+        # (claimed / already_delivered / missing); there is exactly-one
+        # delivery to the parent.
         for fu in fired:
-            # Best-effort stamp; failure here must not abort the
-            # loop (the finalization has already run for this target
-            # above — leaving the row un-stamped means a future
-            # restart will safely retry the finalization, which is
-            # idempotent).
+            # Parent-liveness gate: skip the stamp when the parent is
+            # PAUSED so resume's Pass 1 selects this row. A
+            # best-effort lookup — on failure we fall back to the
+            # pre-fix behaviour (stamp unconditionally) so a DB
+            # hiccup cannot strand the row by the OPPOSITE failure
+            # mode (an un-stamped row whose Pass 1 selection later
+            # fails for any reason).
+            _parent_status = None
+            try:
+                # ``_instance_repository.get`` is a sync SQLModel
+                # read (matches the precedent at :1572 below) — wrap
+                # in ``asyncio.to_thread`` so the event loop is not
+                # blocked. A best-effort lookup — on failure we fall
+                # back to the pre-fix behaviour (stamp
+                # unconditionally) so a DB hiccup cannot strand the
+                # row by the OPPOSITE failure mode (an un-stamped
+                # row whose Pass 1 selection later fails for any
+                # reason).
+                _parent = await asyncio.to_thread(
+                    self._instance_repository.get,
+                    fu.target_instance_id,
+                )
+                _parent_status = (
+                    _parent.status if _parent is not None else None
+                )
+            except Exception as gate_err:
+                logger.debug(
+                    f"_emit_terminal_via_bus: parent-status gate "
+                    f"lookup failed (non-fatal, falling back to "
+                    f"unconditional stamp) for "
+                    f"{fu.target_instance_id[:8]}...: {gate_err}"
+                )
+            if _parent_status == "paused":
+                logger.debug(
+                    f"_emit_terminal_via_bus: skipping C1 stamp — "
+                    f"parent {fu.target_instance_id[:8]}... is "
+                    f"PAUSED (resume's Pass 1 will deliver the "
+                    f"FollowUp + stamp; per Blocker 1 fix)"
+                )
+                continue
             try:
                 # ``enqueued_at`` is the C1 dedup marker — once
                 # stamped, ``_recover_fired_unsent`` won't return
