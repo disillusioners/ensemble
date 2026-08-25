@@ -57,7 +57,7 @@ pytestmark = [
 # 3-level tree: leader → tester → grandchild(s) with a long sleep so the
 # terminate lands mid-stream while the leader is still waiting.
 TREE_MESSAGE = (
-    "ask tester to investigate something; tester must spawn 1 developer "
+    "ask tester to investigate something; tester must spawn 1 worker "
     "child that runs a bash sleep of 480 seconds before reporting; do not "
     "finish until tester and its child have fully reported back"
 )

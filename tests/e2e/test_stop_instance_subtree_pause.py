@@ -141,10 +141,14 @@ def _wait_for_status(
 # ---------------------------------------------------------------------------
 
 TREE_MESSAGE = (
-    "ask tester to investigate something; tester must spawn 1 developer "
+    "ask tester to investigate something; tester must spawn 1 worker "
     "child that runs a bash sleep of 60 seconds before reporting; do not "
     "finish until tester and its child have fully reported back"
 )
+
+# Grandchild spawn-wait raised 60s -> 120s (LLM failover tax compensation,
+# primary down) — mirrors B2's sanctioned raise; same one-defect rationale.
+B5_GRANDCHILD_TIMEOUT = 120
 
 
 def _wait_for_grandchild(parent_id: str, timeout: int) -> str | None:
@@ -222,7 +226,7 @@ def test_stop_pauses_target_subtree_then_pause_pauses_whole_tree():
         tester_id = _wait_for_child_spawned(leader_id, timeout=SPAWN_TIMEOUT)
         assert tester_id, "leader did not spawn a tester child in time"
 
-        worker_id = _wait_for_grandchild(tester_id, timeout=SPAWN_TIMEOUT)
+        worker_id = _wait_for_grandchild(tester_id, timeout=B5_GRANDCHILD_TIMEOUT)
         assert worker_id, "tester did not spawn the sleeping worker in time"
         logger.info(
             f"[B5] tree ready: leader={leader_id[:8]} "
