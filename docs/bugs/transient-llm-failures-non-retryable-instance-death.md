@@ -1,7 +1,7 @@
 # Bug: Transient LLM/Proxy Failures Classified Non-Retryable — Instance Death Cascade
 
 **Date:** 2026-08-26
-**Status:** Open
+**Status:** Open — RC2/RC3 being resolved proxy-side (ultimate routing made transparent); RC1 (classifier) still needs the client fix
 **Severity:** High (94% of instance ERROR deaths in a 7-day window; causes replacement storms during provider outages)
 **Affected versions:** Current (`latest` as of 2026-08-26); symptoms start 2026-08-19 (proxy ultimate-model routing rollout)
 **Related:** [`docs/retry-architecture.md`](../retry-architecture.md) (§9, gap #6/7) · [`docs/plans/rate-limit-episode-parking.md`](../plans/rate-limit-episode-parking.md) (DRAFT — does not cover these channels) · commit `d4b7b8a4` (payload logging, first step)
@@ -69,6 +69,13 @@ shape.
 
 ### RC2 — Ultimate-model escalation defeats the L1 budget (timing)
 
+> **Resolution planned proxy-side (2026-08-26, proxy owner):** the proxy will be updated
+> so ultimate-model responses are injected as normal-model responses — ultimate routing
+> becomes fully transparent on the client side. Once deployed, RC2 (escalation timing,
+> cost inversion, same-hash resume), the channel-#2 terminal error
+> (`ultimate_model_retry_exhausted`), and RC3's dual body shapes are all removed at the
+> source. Client-side items below remain relevant only until the proxy update ships.
+
 Proxy behavior (confirmed by owner): 1st request on a message-hash fails → remembered;
 2nd identical → counted; 3rd identical → routed to the high-cost ultimate model (which
 itself gets max 2 attempts). The openai SDK default `max_retries=2` (never overridden on
@@ -107,10 +114,11 @@ commit `d4b7b8a4` (INFO-level `repr(response)[:300]` at the guard raise site,
    - `ultimate_model_retry_exhausted` ValueError (intercept in
      `ThinkingChatOpenAI._create_chat_result`, re-raise typed) as retryable/transient.
    Converts 44/47 historical fatalities into L1 retries.
-2. **RC2:** set `max_retries=0` on the `ThinkingChatOpenAI` construction choke point so
-   only tenacity (real backoff spacing) retries — **requires confirming the proxy hash
-   counter decays**; if it never decays, the escalation trigger must change proxy-side
-   (windowed counting, or don't count rate-limit failures).
+2. **RC2:** ~~set `max_retries=0` on the `ThinkingChatOpenAI` construction choke point~~ —
+   being resolved proxy-side (ultimate routing transparent, see RC2 note above). After the
+   proxy update ships, remove the channel-#2 interception from fix 1; before it ships, the
+   client-side workaround (`max_retries=0` so only tenacity's real backoff retries)
+   remains available but depends on proxy hash-counter decay.
 3. **RC3:** pattern-match the str-body `MalformedLLMResponseError` payloads (evidence
    accumulating via `d4b7b8a4`) and map exhausted/rate-limit payloads to the episode path
    instead of blind retry.
