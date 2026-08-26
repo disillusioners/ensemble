@@ -19,6 +19,17 @@ These tests lock in the contract introduced by the Phase 1 changes:
   * INFO logging on every successful send (Task 3b, §7 #8).
   * Eligibility-set constant is hoisted to ``daemon.constants`` —
     exactly ONE definition site, THREE consumers (test k).
+  * Review 377b0a8f fix 1: sends bearing ``load_skill`` route via
+    ENQUEUE even for injection-eligible targets (the ``<meta>`` tag
+    parser lives only in the enqueue pipeline; queue-busy guard
+    retained, as before).
+  * Review 377b0a8f fix 2: sends bearing a non-empty ``context``
+    route via ENQUEUE even for injection-eligible targets
+    (``set_injection`` has no metadata channel; ``task_context``
+    rides ``enqueue_message(metadata=...)``).
+  * Green: the exhaustive-enum parametrization is DERIVED from the
+    real ``InstanceStatus`` enum; the terminal-status set is hoisted
+    to ``daemon.constants.TERMINAL_INSTANCE_STATUSES``.
 
 Most tests build the real ``send_message`` closure by patching out
 the heavy ``create_instance_tools`` factory helpers (mirrors the
@@ -144,6 +155,19 @@ def _get_send_message_tool(manager: MagicMock):
     )
 
 
+def _instance_status_values() -> list[str]:
+    """All ``InstanceStatus`` enum values, derived from the enum itself.
+
+    ``TestExhaustiveEnumRouting`` parametrizes over this so a newly
+    added enum member is AUTOMATICALLY covered — the previous hardcoded
+    ten-value list would have silently skipped an eleventh member while
+    the class docstring claimed it would "fail loudly".
+    """
+    from daemon.repositories.instance.models import InstanceStatus
+
+    return [s.value for s in InstanceStatus]
+
+
 # ---------------------------------------------------------------------------
 # Task 1 / Audit — confirm baseline state
 # ---------------------------------------------------------------------------
@@ -164,6 +188,29 @@ class TestAuditBaseline:
         from daemon.constants import INJECTION_ELIGIBLE_STATUSES
 
         assert INJECTION_ELIGIBLE_STATUSES == frozenset({"running", "waiting_children"})
+
+    def test_terminal_instance_statuses_constant_exists(self):
+        """Green fix (review follow-up): the terminal-status set is
+        hoisted to ``daemon.constants`` as
+        ``TERMINAL_INSTANCE_STATUSES`` — sibling of
+        ``INJECTION_ELIGIBLE_STATUSES``; the module-local
+        ``_TERMINAL_STATUSES`` frozenset in ``daemon/tools/instance.py``
+        is gone, and the routing helper consumes the hoisted constant.
+        """
+        import daemon.tools.instance as instance_tools
+        from daemon.constants import TERMINAL_INSTANCE_STATUSES
+
+        assert TERMINAL_INSTANCE_STATUSES == frozenset(
+            {"completed", "terminated", "error", "failed"}
+        )
+        assert not hasattr(instance_tools, "_TERMINAL_STATUSES"), (
+            "The module-local _TERMINAL_STATUSES frozenset must be gone — "
+            "use daemon.constants.TERMINAL_INSTANCE_STATUSES instead"
+        )
+        assert (
+            instance_tools.TERMINAL_INSTANCE_STATUSES
+            is TERMINAL_INSTANCE_STATUSES
+        )
 
     def test_ensure_tool_result_pairing_call_site_anchored(self):
         """Verify ``graph.py:2892-2894`` still hosts the single pairing
@@ -696,6 +743,209 @@ class TestWaitingChildrenInjection:
 
 
 # ---------------------------------------------------------------------------
+# Review 377b0a8f finding 1 — load_skill forces the enqueue pipeline
+# ---------------------------------------------------------------------------
+
+
+class TestEnqueueOverrideForLoadSkill:
+    """FIX 1 (review 377b0a8f): a send bearing ``load_skill`` routes
+    via ENQUEUE even when the target is injection-eligible (RUNNING /
+    WAITING_CHILDREN).
+
+    The ``<meta>`` tag parser (``extract_load_skill``,
+    ``daemon/services/instance_messaging.py:2234``) lives ONLY in the
+    enqueue pipeline; the injection drain (``daemon/graph.py``) builds
+    a plain HumanMessage. Without the override the tag lands as raw
+    garbage text in the target's live turn AND the skill never loads.
+    The override restores exact pre-Phase-1 behavior for the
+    load_skill case (queue-busy guard included, as before). Plain
+    sends without load_skill keep the new injection routing.
+    """
+
+    @pytest.mark.parametrize("status", ["running", "waiting_children"])
+    async def test_load_skill_routes_via_enqueue_not_injection(self, status):
+        with patch(
+            "daemon.tools.instance._check_team_membership",
+            return_value=None,
+        ):
+            manager = _make_manager(status=status)
+            send_message = _get_send_message_tool(manager)
+
+            result = await send_message.coroutine(
+                "target-id", "please review", load_skill="unit-test"
+            )
+
+        # Enqueue path taken; set_injection NEVER called — the raw
+        # <meta> tag cannot land in a live turn via the injection FIFO.
+        manager.enqueue_message.assert_awaited_once()
+        manager.set_injection.assert_not_called()
+        # The tag is honored: it rides the enqueued payload for the
+        # enqueue pipeline's parser (extract_load_skill).
+        enqueued_message = manager.enqueue_message.await_args.kwargs["message"]
+        assert '<meta>{"load_skill": "unit-test"}</meta>' in enqueued_message
+        # Pre-Phase-1 result text for the enqueue path.
+        assert "Message queued and sent to target-id" in result
+        assert "Message injected into" not in result
+
+    async def test_load_skill_keeps_queue_busy_guard(self):
+        """The override restores pre-Phase-1 behavior INCLUDING the
+        queue-busy guard: a load_skill send to a RUNNING target with a
+        busy queue is rejected (guard fires), not injected."""
+        with patch(
+            "daemon.tools.instance._check_team_membership",
+            return_value=None,
+        ):
+            manager = _make_manager(status="running")
+            manager.get_queue_stats = AsyncMock(
+                return_value={"pending_count": 5, "processing_count": 2}
+            )
+            send_message = _get_send_message_tool(manager)
+
+            result = await send_message.coroutine(
+                "target-id", "hi", load_skill="unit-test"
+            )
+
+        manager.get_queue_stats.assert_awaited_once()
+        manager.set_injection.assert_not_called()
+        manager.enqueue_message.assert_not_called()
+        assert "already has a message in progress" in result
+
+    async def test_whitespace_load_skill_still_injects(self):
+        """Boundary: a whitespace-only ``load_skill`` appends no tag and
+        must NOT force the enqueue path — the send behaves like a plain
+        send and takes the injection branch for a RUNNING target."""
+        with patch(
+            "daemon.tools.instance._check_team_membership",
+            return_value=None,
+        ):
+            manager = _make_manager(status="running")
+            send_message = _get_send_message_tool(manager)
+
+            result = await send_message.coroutine(
+                "target-id", "hi", load_skill="   "
+            )
+
+        manager.set_injection.assert_called_once()
+        manager.enqueue_message.assert_not_called()
+        # No <meta> tag was appended to the injected content.
+        injected_message = manager.set_injection.call_args.args[1]
+        assert "<meta>" not in injected_message
+        assert "Message injected into running target" in result
+
+    async def test_load_skill_paused_still_rejects_verbatim(self):
+        """The override never weakens the PAUSED reject: PAUSED +
+        load_skill returns the verbatim R-O1 text with no dispatch."""
+        with patch(
+            "daemon.tools.instance._check_team_membership",
+            return_value=None,
+        ):
+            manager = _make_manager(status="paused")
+            send_message = _get_send_message_tool(manager)
+
+            result = await send_message.coroutine(
+                "target-id", "hi", load_skill="unit-test"
+            )
+
+        expected = (
+            "Instance 'target-id' is PAUSED. Paused instances cannot "
+            "receive messages; delivery is rejected to respect the pause "
+            "(operator/lifecycle intent). Wait for it to be resumed via "
+            "the API/UI, or proceed with other work."
+        )
+        assert result == expected
+        manager.set_injection.assert_not_called()
+        manager.enqueue_message.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Review 377b0a8f finding 2 — context forces the enqueue pipeline
+# ---------------------------------------------------------------------------
+
+
+class TestEnqueueOverrideForContext:
+    """FIX 2 (review 377b0a8f): a send bearing a non-empty ``context``
+    routes via ENQUEUE even when the target is injection-eligible.
+
+    ``task_context`` rides ``enqueue_message(metadata=...)``;
+    ``set_injection`` (manager.py) stores ``{content, timestamp}``
+    only — no metadata channel. Without the override the context is
+    silently dropped on the injection branch.
+    """
+
+    @pytest.mark.parametrize("status", ["running", "waiting_children"])
+    async def test_context_routes_via_enqueue_with_metadata(self, status):
+        with patch(
+            "daemon.tools.instance._check_team_membership",
+            return_value=None,
+        ):
+            manager = _make_manager(status=status)
+            send_message = _get_send_message_tool(manager)
+
+            result = await send_message.coroutine(
+                "target-id", "please review", context={"files": ["a.py"]}
+            )
+
+        # Enqueue path taken; set_injection NEVER called.
+        manager.enqueue_message.assert_awaited_once()
+        manager.set_injection.assert_not_called()
+        # The context survived: task_context metadata carries the
+        # formatted [SYSTEM CONTEXT: Task Context] block.
+        metadata = manager.enqueue_message.await_args.kwargs.get("metadata")
+        assert metadata is not None, (
+            "context-bearing send must thread metadata['task_context']"
+        )
+        assert "[SYSTEM CONTEXT: Task Context]" in metadata["task_context"]
+        # Pre-Phase-1 result text for the enqueue path.
+        assert "Message queued and sent to target-id" in result
+        assert "Message injected into" not in result
+
+    async def test_load_skill_and_context_combined_route_via_enqueue(self):
+        """Both enqueue-only params on one send: the enqueue path carries
+        the meta tag in the payload AND the task_context in metadata."""
+        with patch(
+            "daemon.tools.instance._check_team_membership",
+            return_value=None,
+        ):
+            manager = _make_manager(status="running")
+            send_message = _get_send_message_tool(manager)
+
+            result = await send_message.coroutine(
+                "target-id",
+                "please review",
+                load_skill="unit-test",
+                context={"notes": "see plan"},
+            )
+
+        manager.enqueue_message.assert_awaited_once()
+        manager.set_injection.assert_not_called()
+        kwargs = manager.enqueue_message.await_args.kwargs
+        assert '<meta>{"load_skill": "unit-test"}</meta>' in kwargs["message"]
+        assert "[SYSTEM CONTEXT: Task Context]" in kwargs["metadata"][
+            "task_context"
+        ]
+        assert "Message queued and sent to target-id" in result
+
+    async def test_empty_context_dict_still_injects(self):
+        """Boundary: ``context={}`` carries nothing to deliver — the
+        override must NOT fire; the plain send takes the injection
+        branch for a RUNNING target."""
+        with patch(
+            "daemon.tools.instance._check_team_membership",
+            return_value=None,
+        ):
+            manager = _make_manager(status="running")
+            send_message = _get_send_message_tool(manager)
+
+            result = await send_message.coroutine(
+                "target-id", "hi", context={}
+            )
+
+        manager.set_injection.assert_called_once()
+        manager.enqueue_message.assert_not_called()
+        assert "Message injected into running target" in result
+
+
+# ---------------------------------------------------------------------------
 # Test e-bis — ENQUEUE-PARITY else-branch for IDLE / WAITING / QUEUED
 # ---------------------------------------------------------------------------
 
@@ -734,17 +984,16 @@ class TestExhaustiveEnumRouting:
     """Test e-bis exhaustiveness assertion: every state in the
     ``InstanceStatus`` enum maps to exactly one of the five routing
     branches (injection / enqueue-revive / enqueue / paused / not-found).
-    If a future enum value is added, this test fails loudly — that's
-    the point.
+
+    The parametrization is DERIVED from the real ``InstanceStatus``
+    enum (``_instance_status_values``), so a future enum value is
+    automatically covered and fails loudly if it maps to ``None`` or
+    an unknown branch — that's the point.
     """
 
     @pytest.mark.parametrize(
         "enum_value",
-        [
-            "idle", "running", "waiting", "paused",
-            "completed", "error", "terminated",
-            "queued", "waiting_children", "failed",
-        ],
+        _instance_status_values(),
     )
     def test_each_enum_value_maps_to_known_branch(self, enum_value):
         from daemon.tools.instance import _route_send_message

@@ -215,3 +215,24 @@ INJECTION_ELIGIBLE_STATUSES: frozenset[str] = frozenset({
     "running",
     "waiting_children",
 })
+
+# Terminal instance statuses — companion to ``INJECTION_ELIGIBLE_STATUSES``
+# above. The four instance statuses that ``send_message``'s routing helper
+# (``daemon/tools/instance.py::_route_send_message``) maps to the
+# terminal-revive branch: ``enqueue_message`` dispatches via the shared
+# ``_prepare_enqueued_message`` path, which reactivates the instance.
+# Previously this set lived as a module-local ``_TERMINAL_STATUSES``
+# frozenset in ``daemon/tools/instance.py``; it is hoisted here for the
+# same fork-prevention reason as ``INJECTION_ELIGIBLE_STATUSES`` — one
+# canonical home for routing-relevant status sets, so future consumers
+# (routers, tools, lifecycle) import instead of re-declaring.
+#
+# Values mirror ``InstanceStatus`` (daemon/repositories/instance/models.py):
+# COMPLETED, TERMINATED, ERROR, FAILED. Kept as raw strings so
+# ``daemon.constants`` stays dependency-free.
+TERMINAL_INSTANCE_STATUSES: frozenset[str] = frozenset({
+    "completed",
+    "terminated",
+    "error",
+    "failed",
+})

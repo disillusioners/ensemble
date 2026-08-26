@@ -10,7 +10,7 @@ from langchain_core.tools import tool, BaseTool
 from pydantic import BaseModel, Field, model_validator
 from sqlmodel import Session
 
-from daemon.constants import INJECTION_ELIGIBLE_STATUSES
+from daemon.constants import INJECTION_ELIGIBLE_STATUSES, TERMINAL_INSTANCE_STATUSES
 
 if TYPE_CHECKING:
     from daemon.repositories.project.repository import SQLModelProjectRepository
@@ -639,13 +639,13 @@ def _is_null_workdir(value: str | None) -> bool:
 #     ``_resolve_instance_id`` not-found behavior. The tool returns a
 #     friendly "Instance '<id>' not found; no message dispatched." string
 #     and NEITHER ``set_injection`` NOR ``enqueue_message`` is called.
-
-_TERMINAL_STATUSES: frozenset[str] = frozenset({
-    "completed",
-    "terminated",
-    "error",
-    "failed",
-})
+#
+# The status sets above are hoisted constants (single canonical home):
+#   * ``INJECTION_ELIGIBLE_STATUSES`` — shared with the HTTP route
+#     (``daemon/routers/messages.py``) and ``job_inject``
+#     (``daemon/tools/job_queue.py``).
+#   * ``TERMINAL_INSTANCE_STATUSES`` — the terminal-revive set (was a
+#     module-local ``_TERMINAL_STATUSES`` frozenset before the hoist).
 
 
 def _route_send_message(
@@ -723,7 +723,7 @@ def _route_send_message(
     # (``daemon/services/instance_messaging.py:1522-1540``). Tool result
     # text uses ``prior_status`` for the "Instance was X — revived ..."
     # prefix.
-    if prior_status in _TERMINAL_STATUSES:
+    if prior_status in TERMINAL_INSTANCE_STATUSES:
         return ("enqueue-revive", prior_status)
 
     # Enqueue-parity branch — IDLE / WAITING / QUEUED (and any future
@@ -1762,6 +1762,12 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
             pairing safety is preserved by the existing
             ``_ensure_tool_result_pairing`` guard at
             ``daemon/graph.py:2893`` — no new guard site is added.
+            EXCEPTION: a send bearing ``load_skill`` or a non-empty
+            ``context`` routes via ENQUEUE even for these statuses —
+            both parameters are enqueue-pipeline-only (the ``<meta>``
+            tag parser and the ``metadata`` channel live in
+            ``enqueue_message``'s pipeline) and would be lost or land
+            as raw tag text on the injection branch.
           * ``COMPLETED`` / ``TERMINATED`` / ``ERROR`` / ``FAILED`` →
             REVIVE + ENQUEUE. All four terminal states flow through the
             shared ``_prepare_enqueued_message`` path
@@ -1804,7 +1810,10 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
                 tag is appended to the message so the skill is
                 injected into the recipient's context for clean 1:1
                 attribution. Omit or pass None for backward-compatible
-                behavior (no meta-tag appended).
+                behavior (no meta-tag appended). Sends bearing
+                ``load_skill`` always dispatch via the enqueue
+                pipeline (the only path with a meta-tag parser) —
+                even when the target is injection-eligible.
             context: Optional structured context dict to inject before
                 the task message. Keys are free-form (suggested:
                 'files', 'notes', 'plan_ref', 'conventions'). Values
@@ -1813,6 +1822,9 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
                 block and injected as a separate HumanMessage BEFORE
                 the task message. Omit or pass None for
                 backward-compatible behavior (no context injected).
+                Sends bearing a non-empty ``context`` always dispatch
+                via the enqueue pipeline (the only path with a
+                metadata channel for the context block).
 
         Returns:
             A human-readable status string. The shape varies by
@@ -1860,12 +1872,23 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         if not message or not message.strip():
             return "Message content is empty; nothing to send."
 
-        # ── load_skill sugar: append <meta> tag before enqueue ─────────────
-        # This is purely syntactic sugar. The existing meta-tag parser
-        # (daemon/services/skill_meta_parser.py) and injection pipeline
-        # (daemon/services/instance_messaging.py) consume the tag. We do NOT
-        # touch those modules — we only generate the tag string here.
-        if load_skill is not None and str(load_skill).strip():
+        # ── load_skill sugar: append <meta> tag before dispatch ────────────
+        # This is purely syntactic sugar. The ONLY consumer of the tag is
+        # the ENQUEUE pipeline: ``extract_load_skill``
+        # (daemon/services/instance_messaging.py:2234) parses it inside
+        # the enqueued-dispatch machinery. The Phase 1 injection branch
+        # (``manager.set_injection`` → graph drain) builds a plain
+        # HumanMessage with NO meta-tag parsing — a tag landing there
+        # would appear as raw garbage text in the target's live turn and
+        # the skill would never load. Sends bearing ``load_skill``
+        # therefore override injection routing and take the enqueue path
+        # (see the enqueue-only parameter override at the routing call
+        # site below). We do NOT touch the parser module — we only
+        # generate the tag string here.
+        load_skill_requested = (
+            load_skill is not None and str(load_skill).strip() != ""
+        )
+        if load_skill_requested:
             _payload = json.dumps({"load_skill": str(load_skill).strip()})
             message = message + f"\n<meta>{_payload}</meta>"
 
@@ -1874,6 +1897,11 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         # `_process_message_with_tracking` via the messaging pipeline.
         # We store it in message_metadata so it survives the async
         # dispatch (tool → enqueue → DB → task_processor → pipeline).
+        # NOTE: this channel is ENQUEUE-ONLY — ``set_injection``
+        # (manager.py) stores ``{content, timestamp}`` with no metadata
+        # field, so a context-bearing send MUST NOT take the injection
+        # branch (the context would be silently dropped). See the
+        # enqueue-only parameter override at the routing call site.
         task_context_text: str | None = None
         if context is not None:
             # Reject non-dict ``context`` with a clear error string instead
@@ -1941,6 +1969,30 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
             return f"Instance '{instance_id}' not found; no message dispatched."
 
         routed_via, prior_status = route_result
+
+        # ── Enqueue-only parameter override (review 377b0a8f, fix 1 + 2) ──
+        # ``load_skill`` and ``context`` only work on the ENQUEUE pipeline:
+        #   * ``load_skill``: the ``<meta>`` tag parser
+        #     (``extract_load_skill``, instance_messaging.py:2234) runs in
+        #     the enqueue pipeline only. On the injection branch the tag
+        #     would land as raw garbage text in the target's live turn AND
+        #     the skill would never load.
+        #   * ``context``: ``task_context`` rides
+        #     ``enqueue_message(metadata=...)``; ``set_injection``
+        #     (manager.py) stores ``{content, timestamp}`` only — no
+        #     metadata channel — so the context would be silently dropped.
+        # A send bearing EITHER parameter therefore routes via ENQUEUE
+        # even when the target is injection-eligible (RUNNING /
+        # WAITING_CHILDREN). This restores exact pre-Phase-1 behavior for
+        # these two cases (queue-busy guard included, as before); plain
+        # sends without either parameter keep the new injection routing.
+        # The routing helper's return contract is unchanged — the
+        # override lives here, at the call site, deliberately AFTER the
+        # helper so the helper stays a pure status → route mapping.
+        if routed_via == "injection" and (
+            load_skill_requested or task_context_text is not None
+        ):
+            routed_via = "enqueue"
 
         # ── PAUSED reject (Task 5, R-O1 verbatim) ──────────────────────────
         # Architect §2-O1 verdict: REJECT (do NOT auto-resume). The user
@@ -2092,6 +2144,11 @@ status at the moment of invocation:
     live turn on the next ``agent_node`` pass. Tool-pairing safety is
     preserved by the existing ``_ensure_tool_result_pairing`` guard at
     ``daemon/graph.py:2893`` — no new guard site is added.
+    EXCEPTION: a send bearing ``load_skill`` or a non-empty ``context``
+    routes via ENQUEUE even for these statuses — both parameters are
+    enqueue-pipeline-only (the ``<meta>`` tag parser and the
+    ``metadata`` channel live in ``enqueue_message``'s pipeline) and
+    would be lost or land as raw tag text on the injection branch.
 
   * ``COMPLETED`` / ``TERMINATED`` / ``ERROR`` / ``FAILED`` → REVIVE +
     ENQUEUE via the shared ``_prepare_enqueued_message`` path
@@ -2133,7 +2190,10 @@ Args:
         a ``<meta>{"load_skill": "<name>"}</meta>`` tag is appended to
         the message so the skill is injected into the recipient's
         context for clean 1:1 attribution. Omit or pass None for
-        backward-compatible behavior (no meta-tag appended).
+        backward-compatible behavior (no meta-tag appended). Sends
+        bearing ``load_skill`` always dispatch via the enqueue
+        pipeline (the only path with a meta-tag parser) — even when
+        the target is injection-eligible.
     context: Optional structured context dict to inject before the
         task message. Keys are free-form (suggested: 'files',
         'notes', 'plan_ref', 'conventions'). Values may be lists or
@@ -2141,6 +2201,9 @@ Args:
         ``[SYSTEM CONTEXT: Task Context]`` block and injected as a
         separate HumanMessage BEFORE the task message. Omit or pass
         None for backward-compatible behavior (no context injected).
+        Sends bearing a non-empty ``context`` always dispatch via the
+        enqueue pipeline (the only path with a metadata channel for
+        the context block).
 
 Returns:
     A human-readable status string. The shape varies by routing
