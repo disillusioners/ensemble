@@ -335,7 +335,8 @@ async def get_instance_messages(
         # searchable in dev even when the instance has no persisted messages
         # yet (the frontend polls /messages after instance creation). Pass
         # 0 for alist_count because the alist walk below is intentionally
-        # skipped on this early-return — observed value, not hardcoded.
+        # skipped on this early-return — 0 by absence (walk skipped), not
+        # an observed walk count.
         log_messages_api(
             instance_id,
             int((time.perf_counter() - t0) * 1000),

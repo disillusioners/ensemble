@@ -1,36 +1,54 @@
 # GATE_SUITES.txt — Phase 1 gate-suite manifest (single source of truth).
-# ── W5 gate-run record (post PR1-review fix package) ──────────────────────
-# Date: 2026-08-25 (UTC) | Branch: feature/langgraph-checkpoint-perf |
-# HEAD: 7a94162b + uncommitted PR1-review fix package (W1-W11 + 5
-# suggestions; commit handled separately after re-review).
-# Result: 23/23 files GREEN — 282 passed / 0 failed / 0 skipped, 38.7s total.
-# Method: one pytest subprocess per file (uv run pytest <file> -o addopts=,
-# which strips the default 'not integration' marker filter; 600s/file cap).
+# ── Enumeration record (regenerated post-amend — PR1 closure) ─────────────
+# Date: 2026-08-26 (UTC) | Branch: feature/langgraph-checkpoint-perf |
+# HEAD: 0db1a76842341ffd9b37923e63ef73def9ec3b43 (amended PR1 commit,
+# review-verified). Supersedes the pre-amend W5 record, which cited
+# "7a94162b + uncommitted PR1-review fix package" — its counts predated
+# the amend.
+# Method (collection-only; replicates the W5 method in a clean git
+# worktree pinned at the HEAD sha above — main tree untouched): one
+# pytest subprocess per file — uv run pytest <file> -o addopts=
+# --collect-only -q -p no:cacheprovider --no-header — which strips the
+# default 'not integration' marker filter. Cross-checked with one
+# aggregate collect-only subprocess over all 23 paths (the gate-runner
+# method): identical total.
+# Result: 23/23 files collect — 283 tests total (282 pre-amend; sole
+# per-file delta: tests/unit/persistence/test_checkpoint_perf_logging.py
+# 18 → 19). Execution provenance: W5 gate run 2026-08-25 — 23/23 files
+# GREEN, 0 failed / 0 skipped, 38.7s total; dur(s) below is from that
+# run (for the perf-logging row it predates the added 19th test).
+# NOTE — capture-suite marker: tests/integration/test_messages_response_
+# fixture_capture.py carries `pytestmark = integration` AT THIS COMMIT,
+# so under default addopts it needs an explicit `-m integration` to be
+# collected (verified 2026-08-26: 1 collected with the flag; 0 collected,
+# 1 deselected without). The PR1-closure follow-up removes the marker so
+# bare pytest collects it by default.
 #
-# File                                                          P   F   S   dur(s)
-# tests/e2e/test_pause_resume_unchanged.py                         1   0   0    1.9
-# tests/unit/test_pause_resume_root.py                            18   0   0    1.7
-# tests/integration/test_pause_race_resume_flow.py                 1   0   0    1.7
-# tests/integration/test_pause_race_resume_drain.py                1   0   0    1.7
-# tests/integration/test_pause_race_resume_reenqueue.py            1   0   0    1.9
-# tests/integration/test_pause_race_enqueue_resume_flow.py         1   0   0    1.7
-# tests/integration/test_pause_race_window_held.py                 1   0   0    1.9
-# tests/integration/test_pause_race_window_held_enqueue.py         1   0   0    1.9
-# tests/e2e/test_full_chain_turn_reconciler.py                     3   0   0    1.8
-# tests/repositories/test_turn_reconciler.py                      23   0   0    1.9
-# tests/repositories/test_turn_reconciler_paused_race.py           5   0   0    1.5
-# tests/integration/test_multi_turn_resume.py                      3   0   0    1.7
-# tests/integration/test_crash_recovery_paused.py                 10   0   0    1.8
-# tests/unit/test_turn_handle_transitions.py                      21   0   0    1.8
-# tests/unit/test_paused_auto_resume_fallback.py                   5   0   0    1.6
-# tests/unit/test_terminal_reason_mirror_set_regression.py         1   0   0    1.0
-# tests/services/test_instance_messaging_compaction_guard.py       8   0   0    1.4
-# tests/unit/test_compaction.py                                   61   0   0    1.5
-# tests/integration/test_compaction_e2e.py                         3   0   0    1.9
-# tests/integration/test_api_messages.py                           7   0   0    1.7
-# tests/test_persistence.py                                       20   0   0    1.5
-# tests/unit/persistence/test_checkpoint_perf_logging.py          18   0   0    1.4
-# tests/test_maintenance.py                                       69   0   0    1.8
+# N = tests collected at HEAD (2026-08-26); dur(s) = W5 run (2026-08-25).
+# File                                                           N  dur(s)
+# tests/e2e/test_pause_resume_unchanged.py                        1   1.9
+# tests/unit/test_pause_resume_root.py                           18   1.7
+# tests/integration/test_pause_race_resume_flow.py                1   1.7
+# tests/integration/test_pause_race_resume_drain.py               1   1.7
+# tests/integration/test_pause_race_resume_reenqueue.py           1   1.9
+# tests/integration/test_pause_race_enqueue_resume_flow.py        1   1.7
+# tests/integration/test_pause_race_window_held.py                1   1.9
+# tests/integration/test_pause_race_window_held_enqueue.py        1   1.9
+# tests/e2e/test_full_chain_turn_reconciler.py                    3   1.8
+# tests/repositories/test_turn_reconciler.py                     23   1.9
+# tests/repositories/test_turn_reconciler_paused_race.py          5   1.5
+# tests/integration/test_multi_turn_resume.py                     3   1.7
+# tests/integration/test_crash_recovery_paused.py                10   1.8
+# tests/unit/test_turn_handle_transitions.py                     21   1.8
+# tests/unit/test_paused_auto_resume_fallback.py                  5   1.6
+# tests/unit/test_terminal_reason_mirror_set_regression.py        1   1.0
+# tests/services/test_instance_messaging_compaction_guard.py      8   1.4
+# tests/unit/test_compaction.py                                  61   1.5
+# tests/integration/test_compaction_e2e.py                        3   1.9
+# tests/integration/test_api_messages.py                          7   1.7
+# tests/test_persistence.py                                      20   1.5
+# tests/unit/persistence/test_checkpoint_perf_logging.py         19   1.4
+# tests/test_maintenance.py                                      69   1.8
 #
 # Non-manifest companions also green post-fix:
 # tests/integration/test_messages_response_fixture_capture.py  1 passed (drift-check mode)

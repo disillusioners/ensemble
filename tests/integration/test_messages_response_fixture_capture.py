@@ -83,9 +83,6 @@ import aiosqlite
 import pytest
 
 
-pytestmark = pytest.mark.integration
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Restore the real langgraph modules (root conftest mocks them for unit tests)
 # ─────────────────────────────────────────────────────────────────────────────
