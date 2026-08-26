@@ -10,6 +10,8 @@ from langchain_core.tools import tool, BaseTool
 from pydantic import BaseModel, Field, model_validator
 from sqlmodel import Session
 
+from daemon.constants import INJECTION_ELIGIBLE_STATUSES
+
 if TYPE_CHECKING:
     from daemon.repositories.project.repository import SQLModelProjectRepository
     from daemon.registry import AgentRegistry
@@ -587,6 +589,147 @@ def _is_null_workdir(value: str | None) -> bool:
     if value is None:
         return True
     return str(value).strip().lower() in ("", "null", "none")
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 (agent-instance-tools) — ``send_message`` routing helper
+# ---------------------------------------------------------------------------
+#
+# Why a helper instead of inlining the dispatch logic in ``send_message``:
+#
+#   * The tool needs to make a single routing decision based on the target's
+#     status at the moment of invocation (D11 — status-at-routing is the
+#     source of truth). Extracting the dispatch into a pure helper makes
+#     the routing table testable in isolation (test e-bis exhaustively
+#     enumerates all 10 enum states) and prevents future copy-paste.
+#   * The eligibility set is shared with the HTTP route
+#     (``daemon/routers/messages.py``) and ``job_inject``
+#     (``daemon/tools/job_queue.py``) via the hoisted
+#     ``daemon.constants.INJECTION_ELIGIBLE_STATUSES``. The helper imports
+#     that constant directly — no third fork.
+#
+# Status taxonomy (verified at implementation time):
+#
+#   INJECTION-ELIGIBLE (helper returns ``"injection"``):
+#     RUNNING, WAITING_CHILDREN  →  ``Manager.set_injection(...)``.
+#
+#   TERMINAL-REVIVE (helper returns ``"enqueue-revive"``):
+#     COMPLETED, TERMINATED, ERROR, FAILED  →  ``Manager.enqueue_message``
+#     which dispatches via the shared ``_prepare_enqueued_message`` path
+#     (``daemon/services/instance_messaging.py:1522-1540``). That helper
+#     already flips the status to RUNNING and emits the
+#     "Reactivating terminal instance ... (was X)" log line. The agent-tool
+#     layer simply notes the prior status in the tool result text so the
+#     calling LLM can reason about the transition.
+#
+#   ENQUEUE-PARITY (helper returns ``"enqueue"``):
+#     IDLE, WAITING, QUEUED (and any other non-eligible non-terminal
+#     state — defends against future enum additions). Same
+#     ``Manager.enqueue_message(...)`` call as today.
+#
+#   PAUSED (helper returns ``"paused"``):
+#     PAUSED  →  the tool returns the verbatim R-O1 rejection text from
+#     ``decisions.md``. NO enqueue, NO inject, NO auto-resume. The user
+#     API auto-resumes PAUSED targets (``daemon/routers/messages.py:204``
+#     + ``messages.py:211-329``) — the agent-tool path deliberately does
+#     NOT inherit that branch (architect §2-O1 R-O1 verdict).
+#
+#   NOT-FOUND (helper returns ``None``):
+#     ``manager.get_instance_info(...)`` raised ``KeyError`` — the existing
+#     ``_resolve_instance_id`` not-found behavior. The tool returns a
+#     friendly "Instance '<id>' not found; no message dispatched." string
+#     and NEITHER ``set_injection`` NOR ``enqueue_message`` is called.
+
+_TERMINAL_STATUSES: frozenset[str] = frozenset({
+    "completed",
+    "terminated",
+    "error",
+    "failed",
+})
+
+
+def _route_send_message(
+    manager: "InstanceManager",
+    target_instance_id: str,
+) -> tuple[str, str] | None:
+    """Decide how ``send_message`` should dispatch to ``target_instance_id``.
+
+    The dispatch decision is made ONCE, based on the target's status at
+    the moment of invocation (D11). Subsequent status changes are handled
+    by downstream logic (revive, FIFO drain, pause, terminate).
+
+    Args:
+        manager: The InstanceManager facade. We use
+            ``manager.get_instance_info(target_instance_id).get("status")``
+            (D14) — NOT ``manager._instance_repository.get(...)`` reach-ins
+            (the pattern job_inject uses at ``job_queue.py:1783`` is
+            explicitly FORBIDDEN here).
+        target_instance_id: The target instance ID.
+
+    Returns:
+        A ``(routed_via, prior_status)`` tuple, or ``None`` if the target
+        is not routable (i.e. ``manager.get_instance_info(...)`` raised
+        ``KeyError``). ``routed_via`` is one of:
+          * ``"injection"`` — RUNNING / WAITING_CHILDREN. The caller should
+            invoke ``manager.set_injection(target_instance_id, message)``
+            and DROP the queue-busy guard (status is the source of truth
+            per D11).
+          * ``"enqueue-revive"`` — terminal state (COMPLETED / TERMINATED /
+            ERROR / FAILED). The caller should invoke
+            ``manager.enqueue_message(...)`` (which already revives the
+            instance via ``_prepare_enqueued_message``); the tool result
+            text should prepend "Instance was {prior_status} — revived and
+            message dispatched." The queue-busy guard STAYS — it
+            serializes terminal-revives against in-flight child reports.
+          * ``"enqueue"`` — non-eligible non-terminal state (IDLE /
+            WAITING / QUEUED + future additions). Same as the pre-Phase 1
+            behavior. The queue-busy guard STAYS.
+          * ``"paused"`` — PAUSED. The caller returns the verbatim R-O1
+            rejection text and does NOT enqueue / inject.
+
+        ``prior_status`` is the target's status string at the moment of
+        routing — surfaced so the tool result can communicate it back to
+        the calling LLM (e.g. "Instance was completed — revived ...").
+    """
+    try:
+        info = manager.get_instance_info(target_instance_id)
+    except KeyError:
+        # Delta-fix #1: not-found / typo'd instance_id. Mirror the
+        # existing ``_resolve_instance_id`` not-found behavior — the
+        # tool layer returns a friendly error and NEITHER ``set_injection``
+        # NOR ``enqueue_message`` is called.
+        return None
+
+    prior_status = info.get("status")
+    # Defensive: if the dict is missing ``status`` (e.g. an instance row
+    # in an inconsistent state), treat it as not-found so the caller
+    # reports a clean error instead of silently falling through to a
+    # branch that does not match the dict's actual shape.
+    if not isinstance(prior_status, str) or not prior_status:
+        return None
+
+    # PAUSED — explicit pre-check before the eligibility/terminal tests
+    # so the rejection text can use the verbatim R-O1 wording. (Architect
+    # §2-O1 R-O1 verdict: REJECT, not auto-resume.)
+    if prior_status == "paused":
+        return ("paused", prior_status)
+
+    # Injection branch — RUNNING / WAITING_CHILDREN.
+    if prior_status in INJECTION_ELIGIBLE_STATUSES:
+        return ("injection", prior_status)
+
+    # Terminal-revive branch — all four terminal states flow through the
+    # existing ``_prepare_enqueued_message`` revive path
+    # (``daemon/services/instance_messaging.py:1522-1540``). Tool result
+    # text uses ``prior_status`` for the "Instance was X — revived ..."
+    # prefix.
+    if prior_status in _TERMINAL_STATUSES:
+        return ("enqueue-revive", prior_status)
+
+    # Enqueue-parity branch — IDLE / WAITING / QUEUED (and any future
+    # non-eligible non-terminal additions). Same ``enqueue_message`` path
+    # as the pre-Phase 1 behavior.
+    return ("enqueue", prior_status)
 
 
 async def _resolve_instance_id(
@@ -1606,24 +1749,117 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
             ),
         ] = None,
     ) -> str:
-        """Send a message to another instance's input queue. Use tool_help("send_message") for details.
+        """Send a message to another instance.
+
+        Phase 1 (agent-instance-tools): the tool now routes the
+        message through the same delivery machinery as the user-facing
+        HTTP API based on the target's status at the moment of
+        invocation:
+
+          * ``RUNNING`` / ``WAITING_CHILDREN`` → INJECTION
+            (``manager.set_injection(...)``). The message lands in the
+            target's live turn on the next ``agent_node`` pass. Tool
+            pairing safety is preserved by the existing
+            ``_ensure_tool_result_pairing`` guard at
+            ``daemon/graph.py:2893`` — no new guard site is added.
+          * ``COMPLETED`` / ``TERMINATED`` / ``ERROR`` / ``FAILED`` →
+            REVIVE + ENQUEUE. All four terminal states flow through the
+            shared ``_prepare_enqueued_message`` path
+            (``daemon/services/instance_messaging.py:1522-1540``); the
+            tool result pre-pends ``"Instance was {prior_status} —
+            revived and message dispatched."``
+          * ``IDLE`` / ``WAITING`` / ``QUEUED`` (and any other
+            non-eligible non-terminal state) → ENQUEUE parity with the
+            pre-Phase 1 behavior.
+          * ``PAUSED`` → REJECT. The agent-tool path deliberately does
+            NOT auto-resume (architect §2-O1 R-O1 verdict). The
+            ``messages`` HTTP route auto-resumes PAUSED targets — that
+            asymmetry is intentional (human authority resumes; agent
+            sends wait). No ``resume_instance`` reference (no such
+            tool exists; only ``Manager.pause_instance_cascade`` /
+            ``Manager.resume_instance_cascade`` are operator/lifecycle
+            methods).
+
+        Empty / whitespace-only content is rejected before routing
+        (Task 2c, §7 #7) — a blank message injected into a live turn
+        wastes an LLM turn. The trim-check mirrors S4 at
+        ``daemon/routers/messages.py:181-188``.
+
+        Ordering semantics (W5, architect §2-O4 R-O4):
+            Delivery is FIFO but may interleave with concurrent senders — do not assume order between injection and enqueue. Injections land before child reports in the same wake-up turn.
+
+        Stranding-race exposure (R-O2 verbatim, leader decision b):
+            In-flight injected messages share the same pause / clear /
+            crash loss profile as the user messages API. The tool
+            result for the injection branch surfaces this caveat
+            verbatim — see the post-dispatch text returned for that
+            branch.
 
         Args:
             instance_id: The ID of the target instance.
-            message: The message content to send.
-            load_skill: Optional skill name (e.g. 'unit-test'). When provided, a
-                ``<meta>{"load_skill": "<name>"}</meta>`` tag is appended to the
-                message so the skill is injected into the recipient's context for
-                clean 1:1 attribution. Omit or pass None for backward-compatible
+            message: The message content to send. Must be non-empty
+                after stripping whitespace.
+            load_skill: Optional skill name (e.g. 'unit-test'). When
+                provided, a ``<meta>{"load_skill": "<name>"}</meta>``
+                tag is appended to the message so the skill is
+                injected into the recipient's context for clean 1:1
+                attribution. Omit or pass None for backward-compatible
                 behavior (no meta-tag appended).
-            context: Optional structured context dict to inject before the
-                task message. Keys are free-form (suggested: 'files',
-                'notes', 'plan_ref', 'conventions'). Values may be lists or
-                strings. When provided and non-empty, formatted into a
-                ``[SYSTEM CONTEXT: Task Context]`` block and injected as a
-                separate HumanMessage BEFORE the task message. Omit or pass
-                None for backward-compatible behavior (no context injected).
+            context: Optional structured context dict to inject before
+                the task message. Keys are free-form (suggested:
+                'files', 'notes', 'plan_ref', 'conventions'). Values
+                may be lists or strings. When provided and non-empty,
+                formatted into a ``[SYSTEM CONTEXT: Task Context]``
+                block and injected as a separate HumanMessage BEFORE
+                the task message. Omit or pass None for
+                backward-compatible behavior (no context injected).
+
+        Returns:
+            A human-readable status string. The shape varies by
+            routing branch:
+              * ``"Message content is empty; nothing to send."``
+                (trim-check reject — no dispatch).
+              * ``"Instance '<id>' not found; no message dispatched."``
+                (not-found — no dispatch).
+              * ``"Instance '<id>' is PAUSED. …"`` (PAUSED reject —
+                no dispatch; full text in ``_full_doc_``).
+              * ``"Message injected into {prior_status} target. …"``
+                (injection; includes the R-O2 W3 stranding caveat).
+              * ``"Instance was {prior_status} — revived and message
+                dispatched. Message queued and sent to <id>. …"``
+                (terminal-revive).
+              * ``"Message queued and sent to <id>. …"`` (enqueue
+                parity — IDLE / WAITING / QUEUED / future additions).
+
+        Example outputs::
+
+            # trim-check reject:
+            "Message content is empty; nothing to send."
+
+            # injection (RUNNING / WAITING_CHILDREN):
+            "Message injected into running target. The next agent_node
+            cycle will deliver it to the live turn.
+
+            Note: if the target is paused or the daemon restarts before
+            delivery, an in-flight injected message may be dropped
+            (pause-loss parity with the user messages API)."
+
+            # terminal revive (COMPLETED / TERMINATED / ERROR / FAILED):
+            "Instance was completed — revived and message dispatched.
+            Message queued and sent to <id>. The completion report …"
+
+            # PAUSED reject (no dispatch):
+            "Instance '<id>' is PAUSED. Paused instances cannot receive messages; delivery is rejected to respect the pause (operator/lifecycle intent). Wait for it to be resumed via the API/UI, or proceed with other work."
         """
+        # ── Trim-check (Task 2c, §7 #7) ─────────────────────────────────────
+        # Mirrors S4 at ``daemon/routers/messages.py:181-188``. Applies to
+        # ALL paths (injection, terminal-revive, enqueue-parity) so a
+        # caller typo never produces a wasted LLM turn. Returns BEFORE
+        # routing so the W3 stranding note / PAUSED text / revival log
+        # are NOT mixed with a trim-check rejection.
+        if not message or not message.strip():
+            return "Message content is empty; nothing to send."
+
         # ── load_skill sugar: append <meta> tag before enqueue ─────────────
         # This is purely syntactic sugar. The existing meta-tag parser
         # (daemon/services/skill_meta_parser.py) and injection pipeline
@@ -1692,23 +1928,90 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
             if membership_error is not None:
                 return f"ERROR: {membership_error}"
 
-        # Check if instance is terminated or errored
-        # NOTE: `to_dict()` returns the live status field, NOT a `terminated`
-        # boolean (the old `instance_info.get("terminated")` guard was always
-        # false because that key doesn't exist, so dead instances were never
-        # rejected). Status is stored as the enum's string value.
-        from ..repositories.instance.models import InstanceStatus
-        instance_info = target_info
-        if instance_info.get("status") in (
-            InstanceStatus.TERMINATED.value,
-            InstanceStatus.ERROR.value,
-        ):
+        # ── Phase 1 routing decision (Tasks 2 + 3) ─────────────────────────
+        # The routing helper is the single source of truth for the
+        # dispatch decision. It uses ``manager.get_instance_info(iid)``
+        # (D14 — NO ``_instance_repository`` reach-in) and returns
+        # ``None`` for not-found (mirrors the existing
+        # ``_resolve_instance_id`` not-found behavior, delta-fix #1).
+        route_result = _route_send_message(manager, instance_id)
+        if route_result is None:
+            # Delta-fix #1: not-found / typo'd instance_id. Friendly
+            # error, NO ``set_injection`` / ``enqueue_message`` called.
+            return f"Instance '{instance_id}' not found; no message dispatched."
+
+        routed_via, prior_status = route_result
+
+        # ── PAUSED reject (Task 5, R-O1 verbatim) ──────────────────────────
+        # Architect §2-O1 verdict: REJECT (do NOT auto-resume). The user
+        # API auto-resumes PAUSED targets — the agent-tool path
+        # deliberately does NOT inherit that branch (human authority
+        # resumes; agent sends wait). The text MUST match decisions.md
+        # R-O1 verbatim; test c asserts it.
+        if routed_via == "paused":
             return (
-                f"ERROR: Instance '{instance_id}' is terminated/errored "
-                f"(status={instance_info.get('status')}). Cannot send message."
+                f"Instance '{instance_id}' is PAUSED. Paused instances "
+                f"cannot receive messages; delivery is rejected to "
+                f"respect the pause (operator/lifecycle intent). Wait "
+                f"for it to be resumed via the API/UI, or proceed with "
+                f"other work."
             )
 
-        # Check if there's already a message in progress (pending or processing)
+        # ── Injection branch (Task 3, R-O3 + R-O4) ─────────────────────────
+        # RUNNING / WAITING_CHILDREN → ``manager.set_injection(...)``.
+        # Tool-pairing safety is preserved by the existing
+        # ``_ensure_tool_result_pairing`` guard at
+        # ``daemon/graph.py:2893`` — NO new guard site is added (D3).
+        # The queue-busy guard is DROPPED for this branch (D11 / R-O3 —
+        # status is the source of truth; a status change after the
+        # routing decision is handled by downstream logic).
+        if routed_via == "injection":
+            entry = manager.set_injection(instance_id, message)
+            # Task 3b: provenance INFO logging at the call site. v1
+            # mitigation for injection anonymity (R-LEADER deferred the
+            # ``set_injection(..., source=None)`` + drain-stamps
+            # ``additional_kwargs["source"]`` work to §8 follow-ups).
+            # The structured fields are populated via ``extra=`` so the
+            # log line is greppable as ``event="agent_send_message"``.
+            logger.info(
+                "agent_send_message routed via injection",
+                extra={
+                    "event": "agent_send_message",
+                    "caller_iid": current_instance_id,
+                    "target_iid": instance_id,
+                    "routed_via": "injection",
+                    "prior_status": prior_status,
+                    "content_len": len(message),
+                    "source": f"internal_agent:{current_instance_id}",
+                },
+            )
+            # R-O2 (leader decision b) — the injection-path success
+            # result MUST include the W3 stranding sentence verbatim
+            # (or an equivalent covering the same three facts:
+            # pause-loss parity, daemon-restart loss, in-flight
+            # delivery caveat). This composes with the PAUSED-reject
+            # text in R-O1 — both texts MUST ship together; an
+            # implementer cannot ship one without the other (test c +
+            # test f).
+            return (
+                f"Message injected into {prior_status} target. "
+                f"The next agent_node cycle will deliver it to the "
+                f"live turn.\n\n"
+                f"Note: if the target is paused or the daemon "
+                f"restarts before delivery, an in-flight injected "
+                f"message may be dropped (pause-loss parity with the "
+                f"user messages API)."
+            )
+
+        # ── Enqueue branch (terminal-revive OR non-eligible non-terminal)
+        # Tasks 3 + 4: terminal-revive flows through the existing
+        # ``_prepare_enqueued_message`` path — no explicit
+        # ERROR/TERMINATED rejection at the tool layer (D2). The tool
+        # result pre-pends the prior-status text for the revive branch
+        # so the calling agent can reason about the transition.
+        # The queue-busy guard STAYS for both sub-branches (D11 /
+        # R-O3) — it serializes terminal-revives against in-flight
+        # child reports.
         stats = await manager.get_queue_stats(instance_id)
         if stats["pending_count"] > 0 or stats["processing_count"] > 0:
             return (
@@ -1731,6 +2034,21 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         )
         message_id = result.message_id
 
+        # Task 3b: provenance INFO logging at the call site (mirrors the
+        # injection branch above; see the comment there for context).
+        logger.info(
+            "agent_send_message routed via enqueue",
+            extra={
+                "event": "agent_send_message",
+                "caller_iid": current_instance_id,
+                "target_iid": instance_id,
+                "routed_via": routed_via,  # "enqueue" or "enqueue-revive"
+                "prior_status": prior_status,
+                "content_len": len(message),
+                "source": f"internal_agent:{current_instance_id}",
+            },
+        )
+
         # Register a DependencyBus watcher so the parent is revived when
         # the child completes. Shared with ``convene_council`` /
         # ``convene_council_with_skill`` (any async spawn+enqueue that
@@ -1743,8 +2061,18 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         if watcher_error is not None:
             return watcher_error
 
+        # Terminal-revive prefix (Task 4). All four terminal states
+        # flow through the same ``enqueue_message`` path; only the
+        # prefix text differs.
+        prefix = (
+            f"Instance was {prior_status} — revived and message dispatched. "
+            if routed_via == "enqueue-revive"
+            else ""
+        )
+
         return (
-            f"Message queued and sent to {instance_id}. The completion report "
+            prefix
+            + f"Message queued and sent to {instance_id}. The completion report "
             f"will be delivered to you automatically as a new message that "
             f"resumes your turn the moment the child finishes — do not poll or "
             f"sleep waiting for it. You may continue other work (spawn more "
@@ -1752,21 +2080,60 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
             f"have nothing left to do, end your turn and the report will arrive "
             f"on its own."
         )
-    
-    send_message._full_doc_ = """Send a message to another instance's input queue.
 
-The message is queued and processed asynchronously. The target
-instance will process the message and send a completion report
-back if it's a child instance.
+    send_message._full_doc_ = """Send a message to another instance.
+
+Phase 1 (agent-instance-tools) routes the message through the same
+delivery machinery as the user-facing HTTP API, based on the target's
+status at the moment of invocation:
+
+  * ``RUNNING`` / ``WAITING_CHILDREN`` → INJECTION via
+    ``Manager.set_injection(...)``. The message lands in the target's
+    live turn on the next ``agent_node`` pass. Tool-pairing safety is
+    preserved by the existing ``_ensure_tool_result_pairing`` guard at
+    ``daemon/graph.py:2893`` — no new guard site is added.
+
+  * ``COMPLETED`` / ``TERMINATED`` / ``ERROR`` / ``FAILED`` → REVIVE +
+    ENQUEUE via the shared ``_prepare_enqueued_message`` path
+    (``daemon/services/instance_messaging.py:1522-1540``). The tool
+    result pre-pends ``"Instance was {prior_status} — revived and
+    message dispatched."``
+
+  * ``IDLE`` / ``WAITING`` / ``QUEUED`` (and any other non-eligible
+    non-terminal state) → ENQUEUE parity with the pre-Phase 1
+    behavior.
+
+  * ``PAUSED`` → REJECT. The agent-tool path deliberately does NOT
+    auto-resume (architect §2-O1 R-O1 verdict). The ``messages`` HTTP
+    route auto-resumes PAUSED targets — that asymmetry is intentional
+    (human authority resumes; agent sends wait). No ``resume_instance``
+    reference (no such tool exists; only ``Manager.pause_instance_cascade``
+    / ``Manager.resume_instance_cascade`` are operator/lifecycle
+    methods).
+
+Empty / whitespace-only content is rejected before routing (Task 2c,
+§7 #7) — a blank message injected into a live turn wastes an LLM
+turn. The trim-check mirrors S4 at
+``daemon/routers/messages.py:181-188``.
+
+Ordering semantics (W5, architect §2-O4 R-O4):
+    Delivery is FIFO but may interleave with concurrent senders — do not assume order between injection and enqueue. Injections land before child reports in the same wake-up turn.
+
+Stranding-race exposure (R-O2 verbatim, leader decision b):
+    In-flight injected messages share the same pause / clear /
+    crash loss profile as the user messages API. The tool result for
+    the injection branch surfaces this caveat verbatim — see the
+    post-dispatch text returned for that branch.
 
 Args:
-    instance_id: The ID of the target instance to send the message to
-    message: The message content to send
+    instance_id: The ID of the target instance.
+    message: The message content to send. Must be non-empty after
+        stripping whitespace.
     load_skill: Optional skill name (e.g. 'unit-test'). When provided,
-        a ``<meta>{"load_skill": "<name>"}</meta>`` tag is appended to the
-        message so the skill is injected into the recipient's context for
-        clean 1:1 attribution. Omit or pass None for backward-compatible
-        behavior (no meta-tag appended).
+        a ``<meta>{"load_skill": "<name>"}</meta>`` tag is appended to
+        the message so the skill is injected into the recipient's
+        context for clean 1:1 attribution. Omit or pass None for
+        backward-compatible behavior (no meta-tag appended).
     context: Optional structured context dict to inject before the
         task message. Keys are free-form (suggested: 'files',
         'notes', 'plan_ref', 'conventions'). Values may be lists or
@@ -1776,7 +2143,45 @@ Args:
         None for backward-compatible behavior (no context injected).
 
 Returns:
-    The message_id for tracking (queue is async, response comes later)
+    A human-readable status string. The shape varies by routing
+    branch:
+      * ``"Message content is empty; nothing to send."``
+        (trim-check reject — no dispatch).
+      * ``"Instance '<id>' not found; no message dispatched."``
+        (not-found — no dispatch).
+      * ``"Instance '<id>' is PAUSED. …"`` (PAUSED reject —
+        no dispatch; full text below).
+      * ``"Message injected into {prior_status} target. …"``
+        (injection; includes the R-O2 W3 stranding caveat).
+      * ``"Instance was {prior_status} — revived and message
+        dispatched. Message queued and sent to <id>. …"``
+        (terminal-revive).
+      * ``"Message queued and sent to <id>. …"`` (enqueue parity).
+
+Example outputs::
+
+    # trim-check reject:
+    "Message content is empty; nothing to send."
+
+    # injection (RUNNING / WAITING_CHILDREN):
+    "Message injected into running target. The next agent_node cycle
+    will deliver it to the live turn.
+
+    Note: if the target is paused or the daemon restarts before
+    delivery, an in-flight injected message may be dropped
+    (pause-loss parity with the user messages API)."
+
+    # terminal revive (COMPLETED / TERMINATED / ERROR / FAILED):
+    "Instance was completed — revived and message dispatched. Message
+    queued and sent to <id>. The completion report will be delivered
+    to you automatically as a new message that resumes your turn the
+    moment the child finishes — do not poll or sleep waiting for it.
+    You may continue other work (spawn more children, send more
+    messages, etc.) in the meantime; when you have nothing left to
+    do, end your turn and the report will arrive on its own."
+
+    # PAUSED reject (no dispatch):
+    "Instance '<id>' is PAUSED. Paused instances cannot receive messages; delivery is rejected to respect the pause (operator/lifecycle intent). Wait for it to be resumed via the API/UI, or proceed with other work."
 """
     
     @register_tool_category("instance")

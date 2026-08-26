@@ -182,8 +182,16 @@ class TestSendMessageTaskRepoGuard:
     async def test_send_message_error_mentions_unavailable_coordination(self):
         """The ERROR string should explicitly say parent-child coordination
         is unavailable so the LLM understands it is not a transient error.
+
+        Phase 1 (agent-instance-tools): RUNNING / WAITING_CHILDREN now
+        route through the injection path (``manager.set_injection``),
+        which does NOT register a child-completion watcher (no Task /
+        JobItem is created for the injection — the live turn absorbs the
+        message). The ``_task_repo`` guard only fires for the enqueue
+        branch (IDLE / WAITING / QUEUED / terminal-revive). Use IDLE here
+        so the C1 guard is exercised end-to-end.
         """
-        manager = _make_manager(status="running", task_repo=None)
+        manager = _make_manager(status="idle", task_repo=None)
         send_message = _get_send_message_tool(manager)
 
         result = await send_message.coroutine("child-1", "go")
@@ -242,22 +250,42 @@ class TestSendMessageTaskRepoGuard:
         )
 
     async def test_send_message_guard_runs_after_status_check(self):
-        """Order check: the status guard must fire BEFORE the task_repo
-        guard. A terminated target with a missing ``_task_repo`` should be
-        rejected on the status check, not the C1 guard — proving the
-        guards are positioned correctly.
+        """Order check: the routing-helper classification must happen
+        BEFORE the task_repo guard fires.
+
+        Phase 1 (agent-instance-tools) updated the ordering contract:
+          * IDLE / terminal-revive / non-eligible non-terminal: the
+            routing helper classifies, the queue-busy guard runs (if
+            applicable), ``enqueue_message`` runs, then the C1 task_repo
+            guard fires if needed.
+          * RUNNING / WAITING_CHILDREN: the routing helper classifies
+            and routes via ``set_injection`` — no task_repo guard (the
+            injection path does NOT register a child-completion
+            watcher).
+          * PAUSED: routing helper returns ``"paused"`` → reject.
+            task_repo guard is irrelevant.
+
+        We exercise the enqueue branch (IDLE) so the ordering check
+        remains meaningful: the routing-helper classification must
+        happen BEFORE the C1 guard fires (i.e. the C1 guard fires only
+        AFTER ``enqueue_message`` was attempted). With task_repo=None,
+        the C1 guard returns the missing-``_task_repo`` ERROR string
+        — that proves the guard is positioned correctly in the
+        enqueue-branch flow.
         """
-        manager = _make_manager(status="terminated", task_repo=None)
+        manager = _make_manager(status="idle", task_repo=None)
         send_message = _get_send_message_tool(manager)
 
-        result = await send_message.coroutine("dead-id", "hello")
+        result = await send_message.coroutine("idle-id", "hello")
 
-        # Status guard fires first → terminated error, NOT the task_repo error.
         assert isinstance(result, str)
         assert result.startswith("ERROR")
-        assert "terminated" in result.lower(), (
-            f"Status guard should fire first; got: {result!r}"
-        )
-        assert "_task_repo" not in result, (
-            f"Task-repo guard should not have fired; got: {result!r}"
+        # The C1 guard fires AFTER ``enqueue_message`` — i.e. the
+        # _task_repo-missing error is the surface error. The status
+        # guard does NOT fire here (IDLE is not injection-eligible and
+        # not terminal, so the routing helper returns ``"enqueue"`` and
+        # we proceed to enqueue + C1 guard).
+        assert "_task_repo" in result, (
+            f"C1 guard should fire on the enqueue branch with missing "
+            f"_task_repo; got: {result!r}"
         )

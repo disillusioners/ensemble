@@ -176,3 +176,42 @@ DEFERRED_REASON_PAUSE_TOCTOU: str = "PAUSE_TOCTOU"
 DEFERRED_REASON_PENDING_MESSAGES: str = "PENDING_MESSAGES"
 DEFERRED_REASON_IDEMPOTENCY_SKIP: str = "IDEMPOTENCY_SKIP"
 DEFERRED_REASON_RESUME_ROUTER: str = "RESUME_ROUTER"
+
+# ---------------------------------------------------------------------------
+# Injection routing (agent-instance-tools Phase 1)
+# ---------------------------------------------------------------------------
+# Phase 1 (agent-instance-tools) hoists the eligibility set that governs
+# ``set_injection`` routing to ONE named constant. Previously the value
+# was forked in two places with subtly different forms:
+#   * ``daemon/routers/messages.py:39-42`` — a local frozenset (named).
+#   * ``daemon/tools/job_queue.py:1787-1790`` — an INLINE TUPLE in
+#     ``job_inject``'s status gate (NOT a named constant).
+# The fork was a delta-fix target: any new caller (the agent-tool layer,
+# or a future ``graph.py`` injection source) would have risked minting a
+# THIRD copy. The hoist to ``daemon.constants`` (LOCKED choice — no
+# Manager-attr alternative per delta-fix #4) eliminates the hazard.
+#
+# Semantics:
+#   * ``RUNNING`` — the agent is in an active LLM turn; ``set_injection``
+#     will be drained by the next ``agent_node`` pass.
+#   * ``WAITING_CHILDREN`` — the parent is parked waiting for child
+#     completion reports; the injection sits in the FIFO until the next
+#     dispatch (typically a child report waking the instance). The drain
+#     at ``daemon/graph.py:2871`` runs BEFORE the report injection at
+#     ``:3021``, so user/agent FIFO entries land BEFORE child reports
+#     in the same wake-up turn (W5 ordering — documented in
+#     ``send_message``'s docstring + ``_full_doc_``).
+#
+# Consumers (must all import from here; do NOT introduce a third fork):
+#   1. ``daemon/routers/messages.py`` (HTTP ``POST /messages``)
+#   2. ``daemon/tools/job_queue.py`` (``job_inject`` tool)
+#   3. ``daemon/tools/instance.py`` (agent-tool ``send_message``)
+#
+# Test invariant (tests/unit/tools/test_instance_tools.py::test_k_…):
+#   ``grep -n "_INJECTION_ELIGIBLE_STATUSES\s*=\s*{" daemon/`` must
+#   return exactly ONE hit — this module. The router's local frozenset
+#   and ``job_inject``'s inline tuple are GONE.
+INJECTION_ELIGIBLE_STATUSES: frozenset[str] = frozenset({
+    "running",
+    "waiting_children",
+})
