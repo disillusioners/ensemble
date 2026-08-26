@@ -424,7 +424,7 @@ class TestFixtureCaptureRoundTrip:
 
     The FRESH-RUN equality half of that round-trip lives in the
     integration test itself (which owns the harness and now asserts
-    on-disk == fresh capture, all 4 variants — W1/W11). This unit-level
+    on-disk == fresh capture, all variants — W1/W11). This unit-level
     companion only validates the on-disk artifact is structurally sound:
     a list of variant entries, each carrying a list of message dicts —
     so a future PR3 fixture-driven response-shape test can rely on it
@@ -467,7 +467,10 @@ class TestFixtureCaptureRoundTrip:
             "fixture must be the v2 schema: {'_meta': …, 'variants': […]} "
             "(the message list per variant)"
         )
-        assert len(data["variants"]) == 4, "fixture must carry exactly 4 variants"
+        assert len(data["variants"]) == 6, (
+            "fixture must carry exactly 6 variants "
+            "(4 persisted-shape + 2 synthetic-layer)"
+        )
         # S3 — provenance header records the library versions the fixture
         # was captured under.
         packages = data["_meta"]["packages"]

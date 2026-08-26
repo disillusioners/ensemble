@@ -1,7 +1,7 @@
 {
   "_meta": {
     "schema": "get_instance_messages_pre_phase1:v2",
-    "captured": "2026-08-25",
+    "captured": "2026-08-26",
     "branch": "feature/langgraph-checkpoint-perf",
     "code_path": "pre-C1 (alist walk present) \u2014 daemon/persistence.py::get_instance_messages",
     "packages": {
@@ -123,6 +123,44 @@
       ],
       "observed_alist_count": 1,
       "bytes_estimate": 28
+    },
+    {
+      "variant_id": "empty_history",
+      "messages": [],
+      "observed_alist_count": 0,
+      "bytes_estimate": 0
+    },
+    {
+      "variant_id": "synthetic_system",
+      "messages": [
+        {
+          "message_id": "synthetic-system-v6-synth",
+          "type": "system",
+          "role": "system",
+          "content": "<str:93>",
+          "thinking": null,
+          "thinking_extracted": null,
+          "tool_calls": null,
+          "images": null,
+          "created_at": "__TIMESTAMP_NORMALIZED__",
+          "instance_id": "v6-synth",
+          "is_synthetic": true
+        },
+        {
+          "message_id": "v6-human",
+          "type": "human",
+          "role": "user",
+          "content": "<str:5>",
+          "thinking": null,
+          "thinking_extracted": null,
+          "tool_calls": null,
+          "images": null,
+          "created_at": "__TIMESTAMP_NORMALIZED__",
+          "instance_id": "v6-synth"
+        }
+      ],
+      "observed_alist_count": 1,
+      "bytes_estimate": 5
     }
   ]
 }
