@@ -17,7 +17,7 @@ Contract (post W1/W11 rework)
   MISSING file fails the test (never skips — S1). The package-version
   header (``_meta.packages``) is compared too, so a fixture captured
   under different langgraph/langchain versions fails loud (S3).
-* Reproducibility is asserted for ALL 4 variants (double capture,
+* Reproducibility is asserted for ALL variants (double capture,
   structural equality), not just one (W1).
 
 Provenance
@@ -30,17 +30,41 @@ Provenance
 * **Code path under test**: the CURRENT (pre-C1) ``get_instance_messages``
   on the raw saver (the read path GET /messages delegates to via
   ``InstanceMessagingService.get_messages`` → ``daemon.persistence``).
-  ``manager=None`` so no synthetic system prompt is injected — the
-  captured shape is the PERSISTED shape only (the synthetic layer is
-  additive and already covered by tests/integration/test_api_messages.py).
+  Variants 1-4 pass ``manager=None`` so no synthetic system prompt is
+  injected — their captured shape is the PERSISTED shape only (the
+  synthetic layer is additive and also covered by
+  tests/integration/test_api_messages.py). Variants 5-6 ARM the
+  synthetic layer (see below) so the fixture also freezes the
+  synthetic-message schema contract before the PR3 read flip.
 * **State injection**: ``graph.aupdate_state(config, {"messages": [...]})``
   per variant. No real LLM — the test injects checkpoint state directly,
   which avoids LLM nondeterminism while still exercising the real saver.
-* **Variants** (4, per plan line 95):
+* **Variants** (6 — the 4 original per plan line 95, plus the 2
+  synthetic-layer adds from the PR3 carry-over follow-up):
     1. id-less HumanMessage
     2. multimodal HumanMessage with image content blocks
     3. AIMessage with tool_calls
     4. AIMessage with thinking/reasoning_content
+    5. EMPTY persisted history (no checkpoint at all) with the manager
+       ARMED — freezes the frontend-polls-after-creation contract: the
+       response is ``[]`` (the empty-path early return fires BEFORE
+       synthetic injection, so no synthetic system message is emitted
+       for an empty history) and no ``[/Messages]`` observation line is
+       produced (alist_count is 0 by absence).
+    6. One persisted HumanMessage + ARMED manager — freezes the
+       synthetic system message key set: ``message_id`` pattern
+       ``synthetic-system-<instance_id>``, ``type``/``role``
+       ``"system"``, ``is_synthetic=True``, full standard key set,
+       inserted at index 0.
+* **Synthetic-layer arming (variants 5-6)**: the manager is a
+  ``MagicMock`` and the two reconstruction helpers
+  (``daemon.persistence._resolve_instance_message_context`` → ``None``
+  and ``daemon.persistence._reconstruct_full_system_prompt`` → a fixed
+  stub prompt + fixed ``instance_created_at``) are patched around the
+  ``get_instance_messages`` call — the same patch targets as
+  tests/integration/test_api_messages.py. This keeps the capture
+  hermetic (no live manager/instance/repos needed) AND deterministic
+  (the stub prompt length and the fixed timestamp are literals).
 * **Determinism normalization** (per plan risk table line 200):
   capture only message METADATA: ids, role, content-types, tool_call
   structure, message order. ``created_at`` is replaced with a sentinel
@@ -52,7 +76,7 @@ Provenance
   the two in-memory captures are structurally equal, then compares the
   first capture against the on-disk fixture.
 * **File schema** (v2): ``{"_meta": {…provenance + package versions…},
-  "variants": [ …the 4 variant entries… ]}``.
+  "variants": [ …the 6 variant entries… ]}``.
 * **Captured**: 2026-08-25, branch ``feature/langgraph-checkpoint-perf``
   (PR1 working tree), pre-C1 code path (alist walk present).
 
@@ -81,6 +105,7 @@ from typing import Any
 
 import aiosqlite
 import pytest
+from unittest.mock import MagicMock, patch
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -259,11 +284,25 @@ async def _capture_variant(
     *,
     variant_id: str,
     thread_id: str,
-    messages_to_inject: list[Any],
+    messages_to_inject: list[Any] | None,
     tmp_db_path: Path,
     caplog,
+    manager: Any | None = None,
+    synthetic_system_prompt: str | None = None,
 ) -> VariantCapture:
-    """Run one variant and capture (normalized response, alist_count)."""
+    """Run one variant and capture (normalized response, alist_count).
+
+    ``messages_to_inject=None`` skips ``aupdate_state`` entirely so the
+    thread has NO checkpoint (the empty-history scenario).
+
+    ``synthetic_system_prompt`` arms the synthetic layer hermetically:
+    the two reconstruction helpers in ``daemon.persistence`` are patched
+    around the ``get_instance_messages`` call (same patch targets as
+    tests/integration/test_api_messages.py) so a plain ``MagicMock``
+    manager yields a deterministic stub system prompt. ``None`` (the
+    default for the original 4 variants) leaves the synthetic layer
+    disarmed — behavior identical to before this extension.
+    """
     AsyncSqliteSaver = _get_real_async_sqlite_saver()
 
     # Real saver on a temp DB — guarantees a real alist walk.
@@ -276,10 +315,12 @@ async def _capture_variant(
         config = {"configurable": {"thread_id": thread_id}}
 
         # Inject state — creates checkpoint tuples via the real saver.
-        await graph.aupdate_state(
-            config,
-            {"messages": messages_to_inject},
-        )
+        # None → no injection → no checkpoint at all (empty history).
+        if messages_to_inject is not None:
+            await graph.aupdate_state(
+                config,
+                {"messages": messages_to_inject},
+            )
 
         # PR1 (C4) observation: the pre-C1 code path still walks alist.
         # get_instance_messages is imported lazily (post-restore) so it
@@ -288,7 +329,27 @@ async def _capture_variant(
 
         caplog.clear()
         with caplog.at_level(logging.INFO, logger="daemon.checkpoint_perf"):
-            messages = await get_instance_messages(saver, thread_id, manager=None)
+            if synthetic_system_prompt is not None:
+                # Arm the synthetic layer (variants 5-6). The fixed
+                # stub prompt + fixed instance_created_at keep the
+                # captured shape deterministic across runs.
+                with patch(
+                    "daemon.persistence._resolve_instance_message_context",
+                    return_value=None,
+                ), patch(
+                    "daemon.persistence._reconstruct_full_system_prompt",
+                    return_value=(
+                        synthetic_system_prompt,
+                        datetime(2026, 8, 25, tzinfo=timezone.utc),
+                    ),
+                ):
+                    messages = await get_instance_messages(
+                        saver, thread_id, manager=manager
+                    )
+            else:
+                messages = await get_instance_messages(
+                    saver, thread_id, manager=manager
+                )
 
         # Find the [/Messages] line and parse alist_count + bytes from it.
         alist_count = 0
@@ -425,6 +486,80 @@ async def _variant_ai_thinking(tmp_db_path: Path, caplog):
     )
 
 
+# Deterministic stub the patched _reconstruct_full_system_prompt returns.
+# A fixed literal (not derived from anything volatile) so the normalized
+# content marker ``<str:N>`` is stable across runs.
+_SYNTHETIC_STUB_PROMPT = (
+    "You are a stub agent for the frozen fixture.\n\n"
+    "## Rule\nStub rules.\n\n## Workflow\nStub workflow."
+)
+
+
+def _armed_manager_stub() -> Any:
+    """A ``MagicMock`` standing in for the real InstanceManager.
+
+    The synthetic layer is armed by patching the two reconstruction
+    helpers (see ``_capture_variant``), so the mock only needs to be
+    non-None — the real code paths that would touch manager internals
+    never run. Mirrors the manager stub pattern in
+    tests/integration/test_api_messages.py.
+    """
+    return MagicMock()
+
+
+async def _variant_empty_history(tmp_db_path: Path, caplog):
+    """Variant 5: EMPTY persisted history with the synthetic layer ARMED.
+
+    The frontend-polls-after-creation scenario: no checkpoint exists for
+    the thread (``aupdate_state`` is skipped — nothing was ever
+    dispatched). The manager is armed (the patched reconstructors WOULD
+    return a system prompt), freezing the pre-flip truth that
+    ``get_instance_messages`` returns ``[]`` on the empty path BEFORE
+    synthetic injection — the synthetic system message is NOT emitted
+    for an empty history, and the alist walk is skipped entirely (the
+    ``state is None`` early return produces no ``[/Messages]``
+    observation line; alist_count is 0 by absence, not an observed
+    walk).
+    """
+    return await _capture_variant(
+        variant_id="empty_history",
+        thread_id="v5-empty",
+        messages_to_inject=None,  # no aupdate_state → no checkpoint at all
+        tmp_db_path=tmp_db_path,
+        caplog=caplog,
+        manager=_armed_manager_stub(),
+        synthetic_system_prompt=_SYNTHETIC_STUB_PROMPT,
+    )
+
+
+async def _variant_synthetic_system(tmp_db_path: Path, caplog):
+    """Variant 6: synthetic system message key-set freeze (manager armed).
+
+    One persisted HumanMessage + the armed manager: the response carries
+    the synthetic system message at index 0 with its full key set —
+    ``message_id`` pattern ``synthetic-system-<instance_id>`` (the
+    instance-id portion stays literal per this file's masking scheme:
+    test-chosen thread ids are deterministic literals like
+    ``v1-idless``; only generated UUIDs get sentinelized),
+    ``type``/``role`` ``"system"``, ``is_synthetic=True``, plus the
+    standard serialized fields. This is the synthetic-layer schema
+    contract the PR3 read flip must preserve.
+    """
+    from langchain_core.messages import HumanMessage
+
+    return await _capture_variant(
+        variant_id="synthetic_system",
+        thread_id="v6-synth",
+        messages_to_inject=[
+            HumanMessage(content="Hello", id="v6-human"),
+        ],
+        tmp_db_path=tmp_db_path,
+        caplog=caplog,
+        manager=_armed_manager_stub(),
+        synthetic_system_prompt=_SYNTHETIC_STUB_PROMPT,
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # The test
 # ─────────────────────────────────────────────────────────────────────────────
@@ -453,6 +588,11 @@ def _sanitize_variant_for_write(cap: VariantCapture) -> dict[str, Any]:
         "v3-ai-toolcall",
         "v4-human",
         "v4-ai-think",
+        # Variant 6: the persisted message id and the synthetic system
+        # message id (deterministic — derived from the literal thread id
+        # "v6-synth", so it stays literal like the other test-chosen ids).
+        "v6-human",
+        "synthetic-system-v6-synth",
     }
     out_messages = []
     for m in cap.messages:
@@ -513,13 +653,15 @@ def _fixture_meta() -> dict[str, Any]:
 async def _capture_all_variants(
     db_dir: Path, caplog, db_suffix: str = ""
 ) -> list[dict[str, Any]]:
-    """Run all 4 variants on fresh DBs → sanitized fixture entries."""
+    """Run all 6 variants on fresh DBs → sanitized fixture entries."""
     caps = []
     for variant_fn, db_stem in [
         (_variant_id_less, "v1"),
         (_variant_multimodal, "v2"),
         (_variant_ai_tool_calls, "v3"),
         (_variant_ai_thinking, "v4"),
+        (_variant_empty_history, "v5"),
+        (_variant_synthetic_system, "v6"),
     ]:
         caplog.clear()
         cap = await variant_fn(db_dir / f"{db_stem}{db_suffix}.db", caplog)
@@ -531,8 +673,8 @@ async def _capture_all_variants(
 async def test_messages_response_fixture_capture(fixture_path, tmp_path, caplog):
     """Capture fresh → (regenerate | drift-check) → reproducibility (W1/W11).
 
-    1. Capture all 4 variants fresh, in-memory (real AsyncSqliteSaver).
-    2. Reproducibility: capture ALL 4 a second time (fresh DBs) and
+    1. Capture all 6 variants fresh, in-memory (real AsyncSqliteSaver).
+    2. Reproducibility: capture ALL 6 a second time (fresh DBs) and
        assert the normalized shapes are structurally equal — not just
        one representative variant as before.
     3. Disk contract:
@@ -547,7 +689,7 @@ async def test_messages_response_fixture_capture(fixture_path, tmp_path, caplog)
     db_dir = tmp_path / "dbs"
     db_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── (1) Fresh capture, all 4 variants ──────────────────────────────────
+    # ── (1) Fresh capture, all 6 variants ──────────────────────────────────
     fixture_variants = await _capture_all_variants(db_dir, caplog)
 
     # ── (2) Reproducibility: double capture, structural equality ──────────
@@ -611,7 +753,7 @@ async def test_messages_response_fixture_capture(fixture_path, tmp_path, caplog)
     # ── ASSERTIONS on the (written or loaded) variants ─────────────────────
     # (a) Fixture is valid with the expected top-level shape.
     assert isinstance(parsed_variants, list)
-    assert len(parsed_variants) == 4  # exactly 4 variants
+    assert len(parsed_variants) == 6  # 4 persisted-shape + 2 synthetic-layer
 
     # Every captured message is a dict and carries message_id (the frontend
     # anchor contract). id-less variant falls back to a UUID at serialization,
@@ -630,10 +772,42 @@ async def test_messages_response_fixture_capture(fixture_path, tmp_path, caplog)
             assert "content" in msg  # normalized sentinel, but always present
             assert "instance_id" in msg
 
+    # (b) Synthetic-layer contract (variants 5-6). The empty-history
+    # variant must be the empty envelope []; the armed variant must
+    # carry the synthetic system message at index 0 with the full key
+    # set. These are schema assertions on the captured shape — the
+    # pre-flip contract PR3 must preserve.
+    by_id = {entry["variant_id"]: entry for entry in parsed_variants}
+    assert by_id["empty_history"]["messages"] == [], (
+        "EMPTY-path contract: no checkpoint → GET /messages returns [] "
+        "(synthetic injection does NOT fire on the empty path)"
+    )
+    synth_messages = by_id["synthetic_system"]["messages"]
+    assert len(synth_messages) == 2, (
+        f"synthetic_system variant expected 2 messages "
+        f"(synthetic system + persisted human), got {len(synth_messages)}"
+    )
+    synthetic_msg = synth_messages[0]
+    assert synthetic_msg["message_id"] == "synthetic-system-v6-synth"
+    assert synthetic_msg["type"] == "system"
+    assert synthetic_msg["role"] == "system"
+    assert synthetic_msg["is_synthetic"] is True
+    assert synthetic_msg["instance_id"] == "v6-synth"
+    # Full standard key set present on the synthetic entry.
+    assert set(synthetic_msg.keys()) == {
+        "message_id", "type", "role", "content", "thinking",
+        "thinking_extracted", "tool_calls", "images", "created_at",
+        "instance_id", "is_synthetic",
+    }
+    # The persisted message follows, bare (no is_synthetic key).
+    assert "is_synthetic" not in synth_messages[1]
+    assert synth_messages[1]["message_id"] == "v6-human"
+
     # (c) Observed alist_count baseline — REPORTED to the test log. The
     # dispatcher reads this from the test output and reports it upward
-    # for the production gate. Each variant should produce ≥1 checkpoint
-    # tuple (aupdate_state writes at least one checkpoint).
+    # for the production gate. Variants with persisted messages produce
+    # ≥1 checkpoint tuple (aupdate_state writes at least one); the
+    # empty-history variant produces none by design.
     print("\n[Fixture Capture] pre-C1 alist_count baseline per variant:")
     for entry in parsed_variants:
         print(
@@ -643,10 +817,21 @@ async def test_messages_response_fixture_capture(fixture_path, tmp_path, caplog)
             f"messages={len(entry['messages'])}"
         )
 
-    # (d) Sanity: alist_count is at least 1 per variant (aupdate_state wrote
-    # at least one checkpoint). This is the pre-C1 baseline the production
-    # gate compares against (post-C1 the count collapses to 0 by absence).
+    # (d) Sanity: alist_count baseline per variant. Variants with
+    # persisted messages observe >=1 (aupdate_state wrote at least one
+    # checkpoint). The EMPTY variant is the exception by contract: the
+    # ``state is None`` early return skips the alist walk entirely, so
+    # alist_count is 0 by absence (and no [/Messages] line is emitted
+    # on that path). This is the pre-C1 baseline the production gate
+    # compares against (post-C1 the count collapses to 0 by absence).
     for entry in parsed_variants:
+        if entry["variant_id"] == "empty_history":
+            assert entry["observed_alist_count"] == 0, (
+                f"Variant {entry['variant_id']} observed alist_count="
+                f"{entry['observed_alist_count']} — expected 0 (no "
+                "checkpoint → alist walk skipped by absence)"
+            )
+            continue
         assert entry["observed_alist_count"] >= 1, (
             f"Variant {entry['variant_id']} observed alist_count="
             f"{entry['observed_alist_count']} — expected >=1 since "
