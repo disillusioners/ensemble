@@ -1,33 +1,39 @@
 # GATE_SUITES.txt — Phase 1 gate-suite manifest (single source of truth).
-# ── Enumeration record (regenerated post-amend — PR2 closure) ─────────────
+# ── Enumeration record (regenerated — PR3 flip) ─────────────────────────────
 # Date: 2026-08-26 (UTC) | Branch: feature/langgraph-checkpoint-perf |
-# HEAD: fa31a52089d87dd79959f2642ba65044ac9f3153 (PR2 commit, C2
-# message_metadata side table + MessageTapSlot, 19 files). Supersedes
-# the PR1-closure record at 0db1a76842341ffd9b37923e63ef73def9ec3b43 —
-# PR2 added 7 new gate suites that ARE the PR2 exit gates (liveness
-# both-ids, first-appearance ordering, AST 4-site placement, etc.,
-# per phase1-plan.md §Sequencing).
-# Method (collection-only; replicates the PR1-closure method in a clean
+# HEAD: dbfbf81250cc7defb0813827a3a90fbdcd90d861 (PR3 flip commit, C1
+# read flip — aget-only + metadata timestamps). Supersedes the PR2-closure
+# record at fa31a52089d87dd79959f2642ba65044ac9f3153 (regen commit
+# c42a8bf5) — PR3 added 3 new gate suites that ARE the PR3 exit gates
+# (C1 read-flip: no-alist proof, response-shape schema freeze, lifecycle
+# wiring pin), per phase1-plan.md §Sequencing.
+# Method (collection-only; replicates the PR1/PR2-closure method in a clean
 # git worktree pinned at the HEAD sha above — main tree untouched):
 # one pytest subprocess per file — uv run pytest <file> -o addopts=
 # --collect-only -q -p no:cacheprovider --no-header — which strips the
 # default 'not integration' marker filter. Cross-checked with one
-# aggregate collect-only subprocess over all 30 paths (the gate-runner
-# method): identical total (344).
-# Result: 30/30 files collect — 344 tests total (283 PR1-closure baseline;
-# sole PR2 delta: +7 suites / +61 tests). The 23 pre-existing suites are
-# byte-identical to the PR1-closure record (counts unchanged at 283, no
-# PR2 edits). Execution provenance — pre-existing 23: W5 gate run
-# 2026-08-25 (dur(s) below for those rows); new 7: PR2 acceptance run
-# 2026-08-26 — 7/7 files GREEN, 0 failed / 0 skipped, durations per file
-# in order below: 1.02 / 0.82 / 0.78 / 0.87 / 0.70 / 4.70 / 1.11 s.
+# aggregate collect-only subprocess over all 33 paths (the gate-runner
+# method): identical total (366).
+# Result: 33/33 files collect — 366 tests total (344 PR2-closure baseline;
+# sole PR3 delta: +3 suites / +22 tests). The 30 existing suites are
+# byte-identical to the PR2-closure record (counts unchanged at 344,
+# incl. test_checkpoint_perf_logging.py: 3 tests evolved in PR3, count
+# stayed 19 — re-verified). Execution provenance — existing 30: PR3
+# acceptance run 2026-08-26 — 344/344 GREEN across the 30 suites (dur(s)
+# below unchanged: W5 gate run 2026-08-25 for the pre-existing 23, PR2
+# acceptance run 2026-08-26 for the 7 PR2 rows); new 3: PR3 manifest-regen
+# run 2026-08-26 (this regen, clean worktree at the sha above) — 3/3
+# files GREEN, 0 failed / 0 skipped, durations per file in order below:
+# 0.56 / 1.12 / 0.90 s.
 # NOTE — capture-suite marker: tests/integration/test_messages_response_
 # fixture_capture.py — the `pytestmark = integration` marker WAS removed
 # in commit 603c9eb8 (PR1-closure), so bare pytest collects it by
-# default (verified 2026-08-26: 1 collected, 0 deselected).
+# default (re-verified at dbfbf812, 2026-08-26: 1 collected, 0
+# deselected). Not a manifest row — non-manifest companion.
 #
 # N = tests collected at HEAD (2026-08-26); dur(s) = W5 run 2026-08-25 for
-# pre-existing 23, PR2 acceptance run 2026-08-26 for the 7 new PR2 rows.
+# the pre-existing 23, PR2 acceptance run 2026-08-26 for the 7 PR2 rows,
+# PR3 manifest-regen run 2026-08-26 for the 3 new PR3 rows.
 # File                                                           N  dur(s)
 # tests/e2e/test_pause_resume_unchanged.py                        1   1.9
 # tests/unit/test_pause_resume_root.py                           18   1.7
@@ -59,6 +65,9 @@
 # tests/unit/repositories/test_message_metadata_paused_question_flow.py  3   0.70
 # tests/integration/test_message_metadata_hook_placement.py      10   4.70
 # tests/integration/test_message_metadata_liveness.py             3   1.11
+# tests/unit/persistence/test_get_instance_messages_no_alist.py  16   0.56
+# tests/integration/test_get_instance_messages_response_shape_frozen_fixture.py  2   1.12
+# tests/integration/test_message_metadata_lifecycle_wiring.py     4   0.90
 #
 # Non-manifest companions also green post-fix:
 # tests/integration/test_messages_response_fixture_capture.py  1 passed (drift-check mode)
@@ -155,6 +164,23 @@ tests/integration/test_message_metadata_hook_placement.py
 # End-to-end liveness — message_metadata first-appearance ordering matches
 # message-list ordering through the full pipeline (3 tests):
 tests/integration/test_message_metadata_liveness.py
+#
+# ── Gate concept: C1 read-flip exit gates (PR3) ──
+# No-alist proof — get_instance_messages reads timestamps via one indexed
+# message_metadata get_for_thread (to_thread bridge), never alist history
+# enumeration; 4 size variants (10/100/1000/10000) with the mock saver
+# recording every call — alist never appears (16 tests):
+tests/unit/persistence/test_get_instance_messages_no_alist.py
+# Schema freeze — GET /messages response shape byte-checked against the
+# PR1-captured frozen fixture (extended pre-flip, 5d928d51) on the
+# POST-C1 read path: real AsyncSqliteSaver + real metadata repo per
+# variant — the binding contract (2 tests):
+tests/integration/test_get_instance_messages_response_shape_frozen_fixture.py
+# Lifecycle wiring pin — both graph-build paths (spawn_instance +
+# _restore_instance) pass message_tap_slot + compaction_tap_slot to
+# build_instance_graph; dropping either silently empties the side table
+# (4 tests):
+tests/integration/test_message_metadata_lifecycle_wiring.py
 #
 # ── Excluded (verified pre-existing failures on the clean tree, 2026-08-25;
 #     NOT gate-suite members — reported to the dispatcher in the PR1 report) ──
