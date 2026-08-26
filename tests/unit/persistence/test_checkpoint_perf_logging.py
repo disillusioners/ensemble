@@ -231,10 +231,26 @@ class _AlistAsyncIterator:
 
 @pytest.mark.asyncio
 class TestGetInstanceMessagesObservedAlistCount:
-    """The observed ``alist_count`` from a real saver walk lands in the log."""
+    """Post-C1: the alist walk is GONE — the observed count is 0 even
+    when the saver's ``alist`` is armed with tuples.
+
+    These tests were the PR1 (C4) observed-count baseline tests; Phase 1
+    C1 (PR3) flipped the read path to aget-only + message_metadata
+    enrichment, so the contract they pin is now the COLLAPSE: the
+    [/Messages] line reads ``alist_count=0`` on the messages>0 path and
+    ``saver.alist`` is NEVER invoked (asserted via ``assert_not_called``
+    on an armed mock — the walk machinery is still attached, the flip
+    simply never touches it).
+    """
 
     async def test_get_instance_messages_logs_observed_alist_count(self, caplog):
-        """Mock saver alist yields N tuples → log line shows alist_count=N."""
+        """Armed mock alist (3 tuples) is NEVER called → log shows alist_count=0.
+
+        Pre-C1 this test asserted ``alist_count=3`` (the observed walk);
+        post-C1 the same armed saver must read 0 — the disappearance is
+        the invariant, and the armed-but-uncalled mock proves it is a
+        real flip, not a stubbed-away walk.
+        """
         from langchain_core.messages import HumanMessage
 
         from daemon.persistence import get_instance_messages
@@ -244,7 +260,8 @@ class TestGetInstanceMessagesObservedAlistCount:
             "channel_values": {"messages": [HumanMessage(content="hi", id="msg-u1")]},
             "ts": "2026-08-25T00:00:00+00:00",
         })
-        # N=3 checkpoint tuples — must be the OBSERVED value the log reports.
+        # N=3 checkpoint tuples ARMED on the mock — post-C1 the flip must
+        # never consume them.
         mock_checkpointer.alist = MagicMock(return_value=_AlistAsyncIterator(3))
 
         with caplog.at_level(logging.INFO, logger="daemon.checkpoint_perf"):
@@ -253,10 +270,13 @@ class TestGetInstanceMessagesObservedAlistCount:
         # Sanity: the messages path worked.
         assert len(msgs) == 1
 
-        # The [/Messages] line carries alist_count=3 (the OBSERVED value).
+        # THE FLIP: the armed alist was never invoked.
+        mock_checkpointer.alist.assert_not_called()
+
+        # The [/Messages] line carries alist_count=0 (post-C1 collapse).
         matching = [r for r in caplog.records if "[/Messages]" in r.message]
         assert len(matching) == 1, [r.message for r in caplog.records]
-        assert "alist_count=3" in matching[0].message
+        assert "alist_count=0" in matching[0].message
 
     async def test_get_instance_messages_zero_messages_emits_log(self, caplog):
         """Empty channel still emits a single [/Messages] line for observability."""
@@ -268,33 +288,37 @@ class TestGetInstanceMessagesObservedAlistCount:
             "channel_values": {"messages": []},
             "ts": "2026-08-25T00:00:00+00:00",
         })
+        mock_checkpointer.alist = MagicMock(return_value=_AlistAsyncIterator(1))
 
         with caplog.at_level(logging.INFO, logger="daemon.checkpoint_perf"):
             msgs = await get_instance_messages(mock_checkpointer, "test-empty")
 
         assert msgs == []
+        mock_checkpointer.alist.assert_not_called()
         matching = [r for r in caplog.records if "[/Messages]" in r.message]
         assert len(matching) == 1
         assert "messages=0" in matching[0].message
         assert "alist_count=0" in matching[0].message
 
-    async def test_get_instance_messages_alist_op_emits_on_walk_exception(self, caplog):
-        """W2 symmetry: a raising alist walk still emits the ``op=alist``
-        timing line (try/finally around the walk), and the exception
-        propagates unchanged to the caller.
+    async def test_get_instance_messages_raising_alist_never_invoked(self, caplog):
+        """Post-C1 (replaces the pre-C1 W2 walk-exception test): a saver
+        whose ``alist`` raises is never touched — the call SUCCEEDS and
+        emits no ``op=alist`` timing line.
+
+        Pre-C1 the walk could fail mid-iteration and the W2 finally-block
+        still emitted ``op=alist``. Post-C1 there is no walk, so a
+        poisoned alist is simply dead code on the saver: the read path
+        must complete normally.
         """
         from langchain_core.messages import HumanMessage
 
         from daemon.persistence import get_instance_messages
 
         class _RaisingAlist(_AlistAsyncIterator):
-            """Yields one tuple, then raises — simulates a saver failure
-            mid-walk (before StopAsyncIteration)."""
+            """Raises on first ``__anext__`` — would kill a pre-C1 walk."""
 
             async def __anext__(self):
-                if self.index == 1:
-                    raise RuntimeError("alist walk boom")
-                return await super().__anext__()
+                raise RuntimeError("alist walk boom")
 
         mock_checkpointer = MagicMock(name="Checkpointer")
         mock_checkpointer.aget = AsyncMock(return_value={
@@ -304,14 +328,14 @@ class TestGetInstanceMessagesObservedAlistCount:
         mock_checkpointer.alist = MagicMock(return_value=_RaisingAlist(3))
 
         with caplog.at_level(logging.INFO, logger="daemon.checkpoint_perf"):
-            # The walk exception must NOT be swallowed by the finally block.
-            with pytest.raises(RuntimeError, match="alist walk boom"):
-                await get_instance_messages(mock_checkpointer, "test-alist-raise")
+            # Post-C1 the poisoned alist is never awaited — no raise.
+            msgs = await get_instance_messages(mock_checkpointer, "test-alist-raise")
 
-        # Despite the exception the op=alist timing line was emitted.
+        assert len(msgs) == 1
+        mock_checkpointer.alist.assert_not_called()
+        # No op=alist timing line exists anywhere in the record stream.
         alist_lines = [r for r in caplog.records if "op=alist" in r.message]
-        assert len(alist_lines) == 1, [r.message for r in caplog.records]
-        assert "duration_ms=" in alist_lines[0].message
+        assert alist_lines == [], [r.message for r in caplog.records]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
