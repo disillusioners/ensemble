@@ -1,5 +1,10 @@
 """Phase 1 (agent-instance-tools) tests for ``send_message`` routing.
 
+Suite layout: 18 classes, one per Phase-1 contract surface, kept
+single-file for diff-review locality. A future split into
+``test_instance_tools_routing.py`` + ``test_instance_tools_guards.py``
++ ``test_instance_tools_docs.py`` is a ticketed follow-up; not done here.
+
 These tests lock in the contract introduced by the Phase 1 changes:
 
   * ``_route_send_message`` is the single source of truth for the
@@ -45,114 +50,45 @@ from __future__ import annotations
 
 import logging
 import subprocess
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 
+# Module-level: derive the repo root once. The test file lives at
+# ``tests/unit/tools/test_instance_tools.py``, so
+# ``parents[0]=tests/unit/tools/``, ``parents[1]=tests/unit/``,
+# ``parents[2]=tests/``, ``parents[3]=<repo-root>``. Several source-scan
+# tests use this constant so the suite stays portable across machines
+# and CI (no hardcoded absolute checkout paths).
+REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
 # ---------------------------------------------------------------------------
-# Helpers — manager fixture and tool-builder
+# Helpers — manager fixture and tool-builder (shared with the two
+# tests/tools/ suites via ``tests.helpers.send_message_fixtures``)
 # ---------------------------------------------------------------------------
 
-
-def _patch_heavy_helpers():
-    """Disable the heavy ``create_instance_tools`` factory helpers (RAG,
-    knowledge, MCP, project, job, mother, OpenCode, DB, infra, context)
-    so only the instance-management tools (spawn/send/terminate/list/get)
-    are built.
-
-    NOTE: ``_check_team_membership`` is patched at the test-method level
-    (the ``with patch(...)`` block wraps each coroutine) so the team
-    membership gate stays open for the full call duration — see
-    ``tests/tools/test_send_message_status_guard.py`` for the same
-    pattern.
-    """
-    return [
-        patch("daemon.tools.instance.is_rag_enabled", return_value=False),
-        patch("daemon.tools.instance.create_rag_tools", return_value=[]),
-        patch("daemon.tools.instance.create_knowledge_tools", return_value=[]),
-        patch("daemon.tools.instance.create_inner_soul_tool", return_value=MagicMock()),
-        patch("daemon.tools.instance.create_access_memory_tool", return_value=MagicMock()),
-        patch("daemon.tools.instance.create_project_tools", return_value=[]),
-        patch("daemon.tools.instance.create_job_tools_if_available", return_value=[]),
-        patch("daemon.tools.instance.create_help_tool", return_value=MagicMock()),
-        patch("daemon.tools.instance.create_critical_notes_tools", return_value=[]),
-        patch("daemon.tools.instance.create_project_history_tools", return_value=[]),
-        patch("daemon.tools.instance.create_opencode_tools", return_value=[]),
-        patch("daemon.tools.instance.create_db_tools", return_value=[]),
-        patch("daemon.tools.instance.create_infra_tools", return_value=[]),
-        patch("daemon.tools.instance.create_context_tools", return_value=[]),
-        patch("daemon.tools.instance._load_mcp_tools", return_value=[]),
-        patch("daemon.tools.instance.scan_tools_for_full_docs"),
-        patch("daemon.tools.instance._apply_tool_filter", side_effect=lambda tools, *a, **kw: tools),
-    ]
+from tests.helpers.send_message_fixtures import (
+    get_send_message_tool as _get_send_message_tool,
+    patch_heavy_helpers as _patch_heavy_helpers,
+)
 
 
 def _make_manager(*, status: str) -> MagicMock:
     """Build a mock manager wired for the Phase 1 ``send_message`` tool.
 
-    The manager exposes:
-      * ``get_instance`` (async) — succeeds so ``_resolve_instance_id``
-        passes.
-      * ``get_instance_info`` — returns ``{"status": status, "agent_id":
-        "developer"}``.
-      * ``get_queue_stats`` (async) — returns empty counts (idle queue).
-      * ``enqueue_message`` (async) — succeeds (the enqueue path).
-      * ``set_injection`` (sync) — succeeds (the injection path; Phase 1
-        RUNNING / WAITING_CHILDREN targets route through here).
-      * ``get_injection_count`` (sync) — returns 1.
+    Extends the shared baseline (``tests.helpers.send_message_fixtures.
+    make_send_message_manager``) with ``get_injection_count`` (read by
+    the WAITING_CHILDREN injection path that some classes in this suite
+    exercise — e.g. ``TestWaitingChildrenInjection``).
     """
-    manager = MagicMock()
+    from tests.helpers.send_message_fixtures import make_send_message_manager
 
-    async def _get_instance(instance_id):
-        return MagicMock(instance_id=instance_id)
-
-    manager.get_instance = _get_instance
-    manager.find_near_instance = MagicMock(return_value=[])
-    manager.get_instance_info = MagicMock(
-        return_value={"status": status, "agent_id": "developer"}
-    )
-    manager.get_queue_stats = AsyncMock(
-        return_value={"pending_count": 0, "processing_count": 0}
-    )
-    manager.enqueue_message = AsyncMock(
-        return_value=MagicMock(message_id="msg-abc-123")
-    )
-    manager.enqueue_message_job = MagicMock(
-        return_value=MagicMock(message_id="msg-abc-123")
-    )
-    manager.set_injection = MagicMock(
-        return_value={"content": "stub", "timestamp": "2026-08-26T00:00:00Z"}
-    )
+    manager = make_send_message_manager(status=status)
     manager.get_injection_count = MagicMock(return_value=1)
-    manager._instance_repository = MagicMock()
-    manager._instance_repository.get = MagicMock(return_value=None)
-    manager.engine = MagicMock()
-    manager.write_guard = MagicMock()
-    manager._live_hub = MagicMock()
     return manager
-
-
-def _get_send_message_tool(manager: MagicMock):
-    """Build the instance tools and return the ``send_message`` tool."""
-    from daemon.tools.instance import create_instance_tools
-
-    patches = _patch_heavy_helpers()
-    for p in patches:
-        p.start()
-    try:
-        tools = create_instance_tools(manager, "parent-instance", "developer")
-    finally:
-        for p in reversed(patches):
-            p.stop()
-
-    for t in tools:
-        if getattr(t, "name", None) == "send_message":
-            return t
-    raise RuntimeError(
-        "send_message tool not found in create_instance_tools output; "
-        f"got {[getattr(t, 'name', None) for t in tools]}"
-    )
 
 
 def _instance_status_values() -> list[str]:
@@ -238,10 +174,7 @@ class TestAuditBaseline:
         ``todo_manager.py``); the invariant is that ONLY
         ``manager.set_injection`` writes to ``_pending_injections``.
         """
-        from pathlib import Path
-
-        repo = Path("/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble")
-        manager_src = (repo / "daemon" / "manager.py").read_text()
+        manager_src = (REPO_ROOT / "daemon" / "manager.py").read_text()
         # The append-to-queue site is in set_injection (the single
         # writer). Look for it directly.
         assert "queue.append(entry)" in manager_src, (
@@ -255,7 +188,7 @@ class TestAuditBaseline:
         # ``_pending_injections[..] = [...] .append(`` or
         # ``_pending_injections.get(`` followed by ``.append(`` —
         # this catches writers even if the variable is named ``queue``.
-        for f in (repo / "daemon").rglob("*.py"):
+        for f in (REPO_ROOT / "daemon").rglob("*.py"):
             if "__pycache__" in str(f):
                 continue
             text = f.read_text()
@@ -271,7 +204,7 @@ class TestAuditBaseline:
                         # Must be in manager.py AND in set_injection.
                         if f.name != "manager.py":
                             raise AssertionError(
-                                f"{f.relative_to(repo)}:{ln} has a "
+                                f"{f.relative_to(REPO_ROOT)}:{ln} has a "
                                 f"_pending_injections.append( site — "
                                 f"single-writer invariant violated"
                             )
@@ -345,7 +278,7 @@ class TestKConstantUniqueness:
                 "INJECTION_ELIGIBLE_STATUSES.*=.*frozenset({",
                 "daemon/",
             ],
-            cwd="/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble",
+            cwd=str(REPO_ROOT),
             text=True,
         )
         py_lines = [
@@ -374,9 +307,7 @@ class TestKConstantUniqueness:
         bulletproof against multi-line / parenthesized imports.
         """
         import ast
-        from pathlib import Path
 
-        repo = Path("/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble")
         consumers: set[str] = set()
         candidates = [
             "daemon/routers/messages.py",
@@ -384,7 +315,7 @@ class TestKConstantUniqueness:
             "daemon/tools/instance.py",
         ]
         for rel_path in candidates:
-            path = repo / rel_path
+            path = REPO_ROOT / rel_path
             tree = ast.parse(path.read_text())
             for node in ast.walk(tree):
                 if isinstance(node, ast.ImportFrom):
@@ -985,11 +916,41 @@ class TestExhaustiveEnumRouting:
     ``InstanceStatus`` enum maps to exactly one of the five routing
     branches (injection / enqueue-revive / enqueue / paused / not-found).
 
-    The parametrization is DERIVED from the real ``InstanceStatus``
-    enum (``_instance_status_values``), so a future enum value is
-    automatically covered and fails loudly if it maps to ``None`` or
-    an unknown branch — that's the point.
+    Two locks here:
+
+      1. The parametrization is DERIVED from the real
+         ``InstanceStatus`` enum (``_instance_status_values``), so a
+         future enum value is automatically covered — that's the
+         parametrization lock.
+      2. The mapping below (``_STATUS_TO_ROUTE``) is the explicit
+         source-of-truth for the EXPECTED route per enum value. A
+         value missing from the mapping fails the parametrized test
+         (``KeyError`` on lookup); a mapping key not in the enum
+         fails the ``test_status_to_route_mapping_is_exhaustive``
+         assertion below. No silent fallthrough: every enum value
+         must have a declared route.
     """
+
+    # Explicit enum-value → expected route mapping. Mirrors
+    # ``_route_send_message`` in ``daemon/tools/instance.py``. A new
+    # enum value with no entry here FAILS the parametrized test; an
+    # entry here with no enum value FAILS the exhaustive check.
+    _STATUS_TO_ROUTE: dict[str, str] = {
+        # INJECTION_ELIGIBLE_STATUSES (D13 / LOCKED choice).
+        "running": "injection",
+        "waiting_children": "injection",
+        # TERMINAL_INSTANCE_STATUSES (revive branch).
+        "completed": "enqueue-revive",
+        "terminated": "enqueue-revive",
+        "error": "enqueue-revive",
+        "failed": "enqueue-revive",
+        # Non-eligible non-terminal states — enqueue catch-all.
+        "idle": "enqueue",
+        "waiting": "enqueue",
+        "queued": "enqueue",
+        # PAUSED — explicit pre-check (R-O1).
+        "paused": "paused",
+    }
 
     @pytest.mark.parametrize(
         "enum_value",
@@ -997,6 +958,15 @@ class TestExhaustiveEnumRouting:
     )
     def test_each_enum_value_maps_to_known_branch(self, enum_value):
         from daemon.tools.instance import _route_send_message
+
+        # The enum value MUST appear in the explicit mapping.
+        assert enum_value in self._STATUS_TO_ROUTE, (
+            f"Enum value {enum_value!r} has no entry in "
+            f"_STATUS_TO_ROUTE — every InstanceStatus must declare its "
+            f"expected route. Add it to TestExhaustiveEnumRouting."
+            f"_STATUS_TO_ROUTE to fix."
+        )
+        expected_route = self._STATUS_TO_ROUTE[enum_value]
 
         manager = MagicMock()
         manager.get_instance_info = MagicMock(return_value={"status": enum_value})
@@ -1007,13 +977,35 @@ class TestExhaustiveEnumRouting:
             f"a known branch"
         )
         routed_via, prior_status = result
-        # Exactly one of the five branches.
-        assert routed_via in {
-            "injection", "enqueue-revive", "enqueue", "paused",
-        }, (
-            f"Unknown routed_via={routed_via!r} for status={enum_value!r}"
+        # Exact-route assertion (not a membership check).
+        assert routed_via == expected_route, (
+            f"Enum value {enum_value!r} routes via {routed_via!r}; "
+            f"_STATUS_TO_ROUTE declares {expected_route!r}. "
+            f"Update _STATUS_TO_ROUTE OR fix _route_send_message."
         )
         assert prior_status == enum_value
+
+    def test_status_to_route_mapping_is_exhaustive(self):
+        """The explicit ``_STATUS_TO_ROUTE`` mapping MUST have EXACTLY
+        the same keys as the ``InstanceStatus`` enum — no extra keys
+        (e.g. a typo or a deprecated status string) and no missing
+        keys (every enum value is declared)."""
+        from daemon.repositories.instance.models import InstanceStatus
+
+        enum_values = {s.value for s in InstanceStatus}
+        mapping_keys = set(self._STATUS_TO_ROUTE.keys())
+
+        missing = enum_values - mapping_keys
+        extra = mapping_keys - enum_values
+
+        assert not missing, (
+            f"_STATUS_TO_ROUTE is missing these enum values: "
+            f"{sorted(missing)}"
+        )
+        assert not extra, (
+            f"_STATUS_TO_ROUTE has keys not in InstanceStatus enum: "
+            f"{sorted(extra)}"
+        )
 
     async def test_routing_helper_has_no_silent_fallthrough(self):
         """The routing helper is EXHAUSTIVE — it has no `else: pass` /
@@ -1057,6 +1049,18 @@ class TestW3StrandingNote:
     the other.
     """
 
+    # Full R-O2 W3 stranding sentence. MUST match byte-for-byte the
+    # runtime return in ``_send_message_impl`` (injection branch) —
+    # the f-string concat at
+    # ``daemon/tools/instance.py`` lines 2052-2055 produces exactly
+    # this string. The test asserts this sentence appears VERBATIM in
+    # the injection result (not a substring / fragment).
+    _W3_STRANDING_SENTENCE = (
+        "Note: if the target is paused or the daemon restarts before "
+        "delivery, an in-flight injected message may be dropped "
+        "(pause-loss parity with the user messages API)."
+    )
+
     async def test_injection_result_includes_w3_stranding_sentence(self):
         with patch(
             "daemon.tools.instance._check_team_membership",
@@ -1067,22 +1071,29 @@ class TestW3StrandingNote:
 
             result = await send_message.coroutine("target-id", "hi")
 
-        # The W3 stranding sentence is in the result.
-        assert "Note: if the target is paused or the daemon restarts" in result, (
-            f"Injection result must include W3 stranding sentence; got: {result!r}"
+        # Full verbatim sentence MUST appear in the result. This is a
+        # strict equality-of-sentence-within-result check — the prior
+        # substring containment was loose and would have passed if any
+        # fragment of the sentence survived.
+        assert self._W3_STRANDING_SENTENCE in result, (
+            f"Injection result must include the FULL verbatim W3 "
+            f"stranding sentence; got: {result!r}\n"
+            f"expected (verbatim): {self._W3_STRANDING_SENTENCE!r}"
         )
-        # The three key facts (pause-loss parity, daemon restart loss,
-        # in-flight delivery caveat) are present.
-        assert "pause-loss parity with the user messages API" in result
-        assert "in-flight injected message may be dropped" in result
 
-    async def test_paused_reject_includes_w5_pairing_reference(self):
+    async def test_paused_reject_and_w3_texts_compose(self):
         """The PAUSED reject does NOT include the W3 sentence (the
         message is rejected, not delivered). But the result IS a
         verbatim copy of the R-O1 text — same sentence structure that
-        appears in the plan and in decisions.md. The two texts compose
-        via the implementation: both must ship together; the test
-        asserts the PAUSED text is correct."""
+        appears in the plan and in decisions.md.
+
+        This test composes with ``test_injection_result_includes_w3_
+        stranding_sentence`` above: both texts MUST ship together; an
+        implementer cannot ship one without the other. The previous
+        name (``test_paused_reject_includes_w5_pairing_reference``)
+        was a mislabel — the test asserts R-O1 PAUSED-reject text,
+        not a W5 reference; the W5 reference was about tool-result
+        pairing, which is exercised elsewhere."""
         with patch(
             "daemon.tools.instance._check_team_membership",
             return_value=None,
@@ -1096,61 +1107,151 @@ class TestW3StrandingNote:
 
 
 # ---------------------------------------------------------------------------
-# Test g — W4 RUNNING→terminal FIFO survives
+# Test g — W4 FIFO clearing is locked to allowlisted lifecycle contexts
 # ---------------------------------------------------------------------------
 
 
 class TestW4TerminalSurvive:
     """Test g: W4 benign-survival semantic — RUNNING→terminal transition
-    with populated FIFO is NOT cleared. The FIFO persists and is drained
-    on the next agent_node cycle (e.g. after a subsequent revive).
+    with populated FIFO is NOT cleared by ad-hoc code in a status-update
+    path. The FIFO persists and is drained on the next agent_node cycle
+    (e.g. after a subsequent revive).
+
+    Locked invariant (source-scan):
+      Every ``clear_injection(...)`` call site and every direct
+      ``self._pending_injections.clear()`` / ``.pop(...)`` mutation
+      in the lifecycle / manager modules MUST live inside one of the
+      allowlisted functions below. A NEW clear added to any other
+      function — e.g. inside a status-update handler, a revive path,
+      or a terminal-status branch — FAILS this test. That's the
+      regression-prevention intent; the previous MagicMock-based test
+      did not exercise any production code and silently passed when the
+      invariant broke.
     """
 
-    def test_terminal_transition_does_not_clear_pending_injections(self):
-        """``InstanceManager._pending_injections`` is a RAM dict that is
-        NOT touched by terminal transitions. Only the pause path
-        (``clear_injection(node_id)`` at ``instance_lifecycle.py:2501``),
-        ``clear_all`` (lifecycle.py:3383-3384), and the TTL sweep
-        (manager.py:3542-3570) clear entries."""
-        # We verify the architectural property by inspecting the
-        # terminal-transition code paths — none of them touch
-        # ``_pending_injections``.
-        from daemon.services import instance_lifecycle
+    # Allowlist — functions where ``_pending_injections`` clearing is
+    # intentional and documented. Adding a clear to a NEW function
+    # (e.g. ``_complete_instance_cleanup``) will fail this test.
+    _ALLOWED_CLEAR_FUNCS = frozenset({
+        # Lifecycle module:
+        "pause_instance_cascade",     # pause path (D8 / R-O1)
+        "clear_all_instances",        # full clear_all
+        "terminate_instance",         # pre-DB cleanup (W1: injected
+                                       # HumanMessages are
+                                       # checkpoint-persisted; only
+                                       # the RAM queue is dropped)
+        # Manager module:
+        "clear_injection",            # the method definition itself
+                                       # (canonical clearer)
+        "_cleanup_instance_state",    # centralized cleanup helper
+                                       # (TTL-evict + delete_project
+                                       # route through here)
+        "_cleanup_stale_injections",  # TTL/sweep eviction
+    })
 
-        # ``clear_injection`` is a public method on the manager; the
-        # FIFO dict is private. The terminal transition path does not
-        # call ``clear_injection`` (only the pause path does).
-        # We can't easily mock the full lifecycle service, so we just
-        # assert the property that ``InstanceStatus.COMPLETED.value``
-        # is NOT a key in any ``clear_injections_for_status`` helper
-        # (no such helper exists — terminal transitions preserve the
-        # FIFO).
-        lifecycle_src = open(instance_lifecycle.__file__).read()
-        # The pause path explicitly clears; the terminal-revive path
-        # (reactivating a COMPLETED instance) does NOT clear.
-        # Spot-check: the clear path is gated on PAUSED, not on any
-        # terminal state.
-        assert "PAUSED" in lifecycle_src or "paused" in lifecycle_src
+    def test_clear_injection_only_in_allowed_lifecycle_contexts(self):
+        """Source-scan lock for ``_pending_injections`` clearing sites.
 
-    def test_pending_injections_survives_status_change_to_terminal(self):
-        """Direct FIFO-level test: populate ``_pending_injections`` on a
-        mock manager, then "transition" the target to COMPLETED. The
-        FIFO entry MUST still be there (W4 benign-survival)."""
-        manager = _make_manager(status="running")
-        # Populate the FIFO directly (mock the manager's internal
-        # _pending_injections attribute).
-        manager._pending_injections = {
-            "target-id": [
-                {"content": "first", "timestamp": "2026-08-26T00:00:00Z"},
-                {"content": "second", "timestamp": "2026-08-26T00:00:01Z"},
-            ],
-        }
-        # Now the status transitions to completed (W4 setup).
-        manager.get_instance_info = MagicMock(return_value={"status": "completed"})
-        # The FIFO is untouched — neither lifecycle pause nor terminal
-        # transition clears it.
-        assert "target-id" in manager._pending_injections
-        assert len(manager._pending_injections["target-id"]) == 2
+        Mirrors the architectural pattern of
+        ``test_set_injection_is_only_FIFO_writer``: walk the source
+        AST of ``daemon/services/instance_lifecycle.py`` and
+        ``daemon/manager.py``; for each top-level function OR class
+        method, find every ``clear_injection(...)`` call OR every
+        ``self._pending_injections.{clear,pop}(...)`` attribute
+        call; assert each site lives inside an allowlisted function.
+        """
+        import ast
+
+        def iter_callable_defs(tree: ast.AST):
+            """Yield every FunctionDef / AsyncFunctionDef reachable
+            at the top level or inside top-level ClassDef blocks.
+            Module-level helpers AND class methods both qualify."""
+            for node in tree.body:
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    yield node
+                elif isinstance(node, ast.ClassDef):
+                    for sub in node.body:
+                        if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                            yield sub
+
+        def find_clear_sites(path: Path):
+            """Yield (func_name, lineno, snippet) for each clear call
+            inside any walked function body.
+
+            Detects three call shapes:
+              1. ``clear_injection(...)``           — bare-name call
+              2. ``self.clear_injection(...)``      — attribute on self
+              3. ``self._manager.clear_injection(...)`` — attribute
+                 chain via ``_manager`` on self
+            And the direct mutation shapes:
+              4. ``self._pending_injections.clear(...)``
+              5. ``self._pending_injections.pop(...)``
+            """
+            tree = ast.parse(path.read_text())
+            for func_node in iter_callable_defs(tree):
+                for sub in ast.walk(func_node):
+                    if not isinstance(sub, ast.Call):
+                        continue
+                    f = sub.func
+                    # Build the attribute chain (innermost name first).
+                    chain_names: list[str] = []
+                    if isinstance(f, ast.Attribute):
+                        cur = f.value
+                        while isinstance(cur, ast.Attribute):
+                            chain_names.append(cur.attr)
+                            cur = cur.value
+                        if isinstance(cur, ast.Name):
+                            chain_names.append(cur.id)
+                    # Case 1: ``clear_injection(...)`` — bare-name call.
+                    if isinstance(f, ast.Name) and f.id == "clear_injection":
+                        yield (func_node.name, sub.lineno, "clear_injection(...)")
+                        continue
+                    # Cases 2/3: ``self.clear_injection(...)`` or
+                    # ``self._manager.clear_injection(...)``.
+                    if (
+                        isinstance(f, ast.Attribute)
+                        and f.attr == "clear_injection"
+                        and "self" in chain_names
+                    ):
+                        yield (func_node.name, sub.lineno, "<chain>.clear_injection(...)")
+                        continue
+                    # Cases 4/5: ``self._pending_injections.clear/pop(...)``
+                    if (
+                        isinstance(f, ast.Attribute)
+                        and f.attr in {"clear", "pop"}
+                        and "self" in chain_names
+                        and "_pending_injections" in chain_names
+                    ):
+                        yield (
+                            func_node.name,
+                            sub.lineno,
+                            f"_pending_injections.{f.attr}(...)",
+                        )
+
+        violations: list[str] = []
+        for rel in (
+            "daemon/services/instance_lifecycle.py",
+            "daemon/manager.py",
+        ):
+            for func_name, lineno, snippet in find_clear_sites(REPO_ROOT / rel):
+                if func_name not in self._ALLOWED_CLEAR_FUNCS:
+                    violations.append(
+                        f"{rel}:{lineno} in {func_name}() — {snippet}"
+                    )
+
+        assert not violations, (
+            "_pending_injections clearing MUST only happen inside "
+            "allowlisted lifecycle/manager functions "
+            "(see TestW4TerminalSurvive._ALLOWED_CLEAR_FUNCS):\n  "
+            + "\n  ".join(sorted(self._ALLOWED_CLEAR_FUNCS))
+            + "\n\nViolations found:\n  "
+            + "\n  ".join(violations)
+            + (
+                "\n\nIf the new clear site is intentional, add the "
+                "function name to _ALLOWED_CLEAR_FUNCS and document "
+                "why terminal/status-update paths must clear here."
+            )
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1171,7 +1272,7 @@ class TestJAFPCompliance:
         in comments)."""
         result = subprocess.check_output(
             ["grep", "-c", "JobItem", "daemon/tools/instance.py"],
-            cwd="/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble",
+            cwd=str(REPO_ROOT),
             text=True,
         ).strip()
         count = int(result)

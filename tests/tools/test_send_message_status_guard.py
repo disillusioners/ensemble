@@ -31,145 +31,19 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 
-def _patch_heavy_helpers():
-    """Return a stack of ``unittest.mock.patch`` context managers that disable
-    the heavy ``create_instance_tools`` factory helpers (RAG, knowledge, MCP,
-    project, job, mother, OpenCode, DB, infra, context) so only the
-    instance-management tools (spawn/send/terminate/list/get) are built.
-
-    NOTE: ``_check_team_membership`` is patched at the test-method level
-    (the `with patch(...)` block wraps the whole test), NOT here. The
-    helper-stack patches are torn down BEFORE ``send_message.coroutine``
-    runs (in ``_get_send_message_tool``), so anything patched here would
-    be inactive at call time. The team-membership patch must remain
-    active for the duration of the coroutine — hence the test-method
-    level ``with`` block.
-    """
-    from unittest.mock import patch
-
-    return [
-        patch("daemon.tools.instance.is_rag_enabled", return_value=False),
-        patch("daemon.tools.instance.create_rag_tools", return_value=[]),
-        patch("daemon.tools.instance.create_knowledge_tools", return_value=[]),
-        patch("daemon.tools.instance.create_inner_soul_tool", return_value=MagicMock()),
-        patch("daemon.tools.instance.create_access_memory_tool", return_value=MagicMock()),
-        patch("daemon.tools.instance.create_project_tools", return_value=[]),
-        patch("daemon.tools.instance.create_job_tools_if_available", return_value=[]),
-        patch("daemon.tools.instance.create_help_tool", return_value=MagicMock()),
-        patch("daemon.tools.instance.create_critical_notes_tools", return_value=[]),
-        patch("daemon.tools.instance.create_project_history_tools", return_value=[]),
-        patch("daemon.tools.instance.create_opencode_tools", return_value=[]),
-        patch("daemon.tools.instance.create_db_tools", return_value=[]),
-        patch("daemon.tools.instance.create_infra_tools", return_value=[]),
-        patch("daemon.tools.instance.create_context_tools", return_value=[]),
-        patch("daemon.tools.instance._load_mcp_tools", return_value=[]),
-        patch("daemon.tools.instance.scan_tools_for_full_docs"),
-        patch("daemon.tools.instance._apply_tool_filter", side_effect=lambda tools, *a, **kw: tools),
-    ]
+from tests.helpers.send_message_fixtures import (
+    get_send_message_tool as _get_send_message_tool,
+    make_send_message_manager as _make_manager,
+    patch_heavy_helpers as _patch_heavy_helpers,
+)
 
 
-def _make_manager(*, status: str) -> MagicMock:
-    """Build a mock manager wired for ``send_message`` with a given status.
-
-    The manager exposes:
-      * ``get_instance`` (async) — succeeds so ``_resolve_instance_id`` passes.
-      * ``get_instance_info`` — returns ``{"status": status, "agent_id": ...}``
-        (the contract the production code reads).
-      * ``get_queue_stats`` (async) — returns empty counts.
-      * ``enqueue_message`` (async) — succeeds (the enqueue path).
-      * ``set_injection`` — succeeds (the injection path; Phase 1 RUNNING /
-        WAITING_CHILDREN targets route through here).
-
-    Production ``send_message`` (daemon/tools/instance.py) routes based on
-    target status:
-      * RUNNING / WAITING_CHILDREN → ``manager.set_injection(...)``.
-      * COMPLETED / TERMINATED / ERROR / FAILED → ``manager.enqueue_message``
-        (revive path via ``_prepare_enqueued_message``).
-      * IDLE / WAITING / QUEUED → ``manager.enqueue_message(...)``.
-      * PAUSED → reject (no dispatch).
-
-    Tests must mock ``enqueue_message`` as ``AsyncMock`` (awaiting a
-    plain ``MagicMock`` raises ``TypeError: object MagicMock can't be
-    used in 'await' expression``).
-    """
-    manager = MagicMock()
-
-    # _resolve_instance_id calls get_instance (async) and find_near_instance.
-    async def _get_instance(instance_id):
-        return MagicMock(instance_id=instance_id)
-
-    manager.get_instance = _get_instance
-    manager.find_near_instance = MagicMock(return_value=[])  # no fuzzy matches
-
-    # The fix reads status from get_instance_info.
-    manager.get_instance_info = MagicMock(
-        return_value={"status": status, "agent_id": "developer"}
-    )
-
-    # Live-instance path: no in-flight messages, enqueue succeeds.
-    manager.get_queue_stats = AsyncMock(
-        return_value={"pending_count": 0, "processing_count": 0}
-    )
-    # ``send_message`` dispatches via ``enqueue_message`` (NOT
-    # ``enqueue_message_job``). The legacy ``enqueue_message_job``
-    # attribute is intentionally NOT called by the tool — the
-    # JobItem-mirror path is reserved for external/public entry points.
-    # Keep it on the manager as a MagicMock so any straggling code that
-    # reads it doesn't accidentally invoke the real implementation, but
-    # do not assert against it.
-    manager.enqueue_message = AsyncMock(
-        return_value=MagicMock(message_id="msg-abc-123")
-    )
-    manager.enqueue_message_job = MagicMock(
-        return_value=MagicMock(message_id="msg-abc-123")
-    )
-    # Phase 1 (agent-instance-tools): RUNNING / WAITING_CHILDREN targets
-    # route through ``manager.set_injection(...)`` — a synchronous call
-    # that appends to the RAM injection FIFO. We mock it as a regular
-    # MagicMock returning the appended entry shape (matches
-    # ``manager.set_injection`` contract).
-    manager.set_injection = MagicMock(
-        return_value={"content": "stub", "timestamp": "2026-08-26T00:00:00Z"}
-    )
-    manager.get_injection_count = MagicMock(return_value=1)
-    # Real code path also touches _instance_repository for the waiting_for
-    # increment (only when target.parent_id == current_instance_id). To keep
-    # the live test deterministic, return None so the increment is skipped.
-    manager._instance_repository = MagicMock()
-    manager._instance_repository.get = MagicMock(return_value=None)
-    manager.engine = MagicMock()
-    manager.write_guard = MagicMock()
-    # Live-hub and correlation-manager hooks the production code touches.
-    manager._live_hub = MagicMock()
-    return manager
-
-
-def _get_send_message_tool(manager: MagicMock):
-    """Build the instance tools and return the ``send_message`` tool object.
-
-    The tool object exposes a ``.coroutine`` attribute that is the actual
-    async function decorated by ``@tool``. Invoking it directly bypasses
-    Pydantic schema validation (we already know our inputs are valid).
-    """
-    from daemon.tools.instance import create_instance_tools
-
-    patches = _patch_heavy_helpers()
-    for p in patches:
-        p.start()
-    try:
-        tools = create_instance_tools(manager, "parent-instance", "developer")
-    finally:
-        for p in reversed(patches):
-            p.stop()
-
-    # Find the send_message tool by name.
-    for t in tools:
-        if getattr(t, "name", None) == "send_message":
-            return t
-    raise RuntimeError(
-        "send_message tool not found in create_instance_tools output; "
-        f"got {[getattr(t, 'name', None) for t in tools]}"
-    )
+# The ``_make_manager`` alias above is retained for call-site locality
+# (every test in this file uses ``_make_manager(status="...")``). See
+# ``tests/helpers/send_message_fixtures.py`` for the shared baseline
+# (``make_send_message_manager``) — the only attribute this suite adds
+# beyond the baseline is the docstring contract above, which documents
+# the routing rules ``send_message`` enforces.
 
 
 # =============================================================================

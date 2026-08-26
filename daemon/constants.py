@@ -2,6 +2,12 @@
 
 All magic numbers in the codebase are consolidated here for discoverability
 and maintainability. Constants are organized by category.
+
+Leaf-module invariant: this module imports NOTHING. Constants are raw
+Python literals (strings, ints, floats, frozensets, dicts) so consumers
+can ``from daemon.constants import …`` without pulling in a dependency
+chain. If you find yourself reaching for an import here, hoist the value
+into a non-constants module and reference it from there.
 """
 
 # ── Projects ────────────────────────────────────────────────────────────────────
@@ -177,9 +183,7 @@ DEFERRED_REASON_PENDING_MESSAGES: str = "PENDING_MESSAGES"
 DEFERRED_REASON_IDEMPOTENCY_SKIP: str = "IDEMPOTENCY_SKIP"
 DEFERRED_REASON_RESUME_ROUTER: str = "RESUME_ROUTER"
 
-# ---------------------------------------------------------------------------
-# Injection routing (agent-instance-tools Phase 1)
-# ---------------------------------------------------------------------------
+# ── Injection routing (agent-instance-tools Phase 1) ────────────────────────────
 # Phase 1 (agent-instance-tools) hoists the eligibility set that governs
 # ``set_injection`` routing to ONE named constant. Previously the value
 # was forked in two places with subtly different forms:
@@ -228,8 +232,12 @@ INJECTION_ELIGIBLE_STATUSES: frozenset[str] = frozenset({
 # (routers, tools, lifecycle) import instead of re-declaring.
 #
 # Values mirror ``InstanceStatus`` (daemon/repositories/instance/models.py):
-# COMPLETED, TERMINATED, ERROR, FAILED. Kept as raw strings so
-# ``daemon.constants`` stays dependency-free.
+# COMPLETED, TERMINATED, ERROR, FAILED. Naming convention: inline docstrings
+# above status-set constants list the enum NAMES in UPPERCASE for readability
+# (matching the enum definition), while the constant VALUES are lowercase
+# strings — the runtime vocabulary ``send_message``'s routing helper
+# compares against. Kept as raw strings so ``daemon.constants`` stays
+# dependency-free.
 TERMINAL_INSTANCE_STATUSES: frozenset[str] = frozenset({
     "completed",
     "terminated",

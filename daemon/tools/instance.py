@@ -1,4 +1,13 @@
-"""Instance management tools for multi-agent orchestration."""
+"""Instance management tools for multi-agent orchestration.
+
+Module size: 2719 lines — sits in the 1000-3000 band because routing
+logic (``_route_send_message``, ``_make_workdir_aware``,
+``_make_instance_id_aware``) and the tool-factory
+(``create_instance_tools`` + its per-tool wrappers) are co-located here
+for diff-review locality. A structural split into
+``daemon/tools/instance_routing.py`` + ``daemon/tools/instance_factory.py``
+is a ticketed follow-up; not done here.
+"""
 
 import asyncio
 import json
@@ -2018,7 +2027,7 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         # status is the source of truth; a status change after the
         # routing decision is handled by downstream logic).
         if routed_via == "injection":
-            entry = manager.set_injection(instance_id, message)
+            manager.set_injection(instance_id, message)
             # Task 3b: provenance INFO logging at the call site. v1
             # mitigation for injection anonymity (R-LEADER deferred the
             # ``set_injection(..., source=None)`` + drain-stamps

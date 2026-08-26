@@ -35,8 +35,8 @@ router = APIRouter(prefix="/instances", tags=["instances-messages"])
 # the single shared vocabulary in ``daemon.services.work_status`` so
 # this router does not carry its own status map.
 
-# Statuses that route through the RAM injection slot (Phase 2 / Task 3).
-# Phase 1 (agent-instance-tools): the eligibility set was hoisted to
+# Statuses that route through the RAM injection slot — Phase 1
+# (agent-instance-tools): the eligibility set was hoisted to
 # ``daemon.constants.INJECTION_ELIGIBLE_STATUSES`` to eliminate the
 # previous fork (this router had a local frozenset; ``job_inject`` had
 # an inline tuple). Both consumers now import from the same place —
