@@ -1,37 +1,41 @@
 # GATE_SUITES.txt — Phase 1 gate-suite manifest (single source of truth).
-# ── Enumeration record (regenerated — PR4 blob-prune closure) ─────────────
+# ── Enumeration record (regenerated — PR4 external-review critical fix) ─
 # Date: 2026-08-26 (UTC) | Branch: feature/langgraph-checkpoint-perf |
-# HEAD: f89ccacc7bedd517895357128fde6270ff0f7e23 (PR4 commit, C3
-# reference-aware checkpoint_blobs prune). Supersedes the PR3-flip record
-# at dbfbf81250cc7defb0813827a3a90fbdcd90d861 (regen commit 80c84219) —
-# PR4 added 4 new gate suites that ARE the PR4 exit gates (C3 blob-prune:
-# direct anti-join PG SQL, maintenance service prune, real-saver binding
-# gate, restore-rehearsal roundtrip), per phase1-plan.md §Sequencing.
-# The 4 new rows were appended in the PR4 commit itself (in the C3
-# blob-prune section below the table); the table rows stay as committed
-# (33 entries, 366 tests — unchanged from PR3).
-# Method (collection-only; replicates the PR1/PR2/PR3 method in a clean
-# git worktree pinned at the HEAD sha above — main tree untouched):
-# one pytest subprocess per file — uv run pytest <file> -o addopts=
-# --collect-only -q -p no:cacheprovider --no-header — which strips the
-# default 'not integration' marker filter. Cross-checked with one
-# aggregate collect-only subprocess over all 37 paths (the gate-runner
-# method): identical total (409).
-# Result: 37/37 files collect — 409 tests total (366 PR3 baseline; sole
-# PR4 delta: +4 suites / +43 tests). The 33 table suites are byte-
-# identical to the PR3-flip record (counts unchanged at 366). Note the
-# 4 rows were appended in the PR4 commit itself; this header re-stamp
-# is the closure regen. Execution provenance — existing 33 (table):
-# PR4 acceptance run 2026-08-26 (366 across them, 0 failed — dur(s)
-# unchanged from PR3); new 4 (C3 section): PR4 implementer runs
-# 2026-08-26 — 4/4 files GREEN, 0 failed / 0 skipped, durations per
-# file in order below: 1.26 / 0.73 / 2.43 / 1.07 s. The binding gate
-# (checkpoint_prune_real_saver) was additionally re-run independently
-# by the data-safety reviewer (7/7, 2.43s).
+# HEAD: 7a7998fe52a189af0b462e3ec2dae68e4bfa4100 (PR4 external-review
+# critical fix — serializable wrap + retraction + race tests). Supersedes
+# the PR4-closure record at f89ccacc7bedd517895357128fde6270ff0f7e23
+# (regen commit e3c69b48) — the fix added 2 new tests to the binding
+# gate (TestRealSaverRaceWindow: test_preexisting_referenced_blobs_
+# survive_traffic_and_prune_byte_equal; TestRealSaverSerializableRetry:
+# test_real_40001_aborts_delete_then_retry_completes), taking the
+# binding-gate row 7→9. The 33 table rows and the other 3 C3-blob-prune
+# rows stay as committed (unchanged from the PR4-closure record).
+# Method (collection-only; replicates the PR1/PR2/PR3/PR4-closure
+# method in a clean git worktree pinned at the HEAD sha above — main
+# tree untouched): one pytest subprocess per file — uv run pytest <file>
+# -o addopts= --collect-only -q -p no:cacheprovider --no-header — which
+# strips the default 'not integration' marker filter. Cross-checked
+# with one aggregate collect-only subprocess over all 37 paths (the
+# gate-runner method): identical total (411).
+# Result: 37/37 files collect — 411 tests total (409 prior + 2 new
+# race-window/retry tests in the binding gate). The 33 table suites
+# are byte-identical to the PR4-closure record (counts unchanged at
+# 366); of the 4 C3-blob-prune rows, 3 unchanged (test_direct_anti_join
+# 11, test_maintenance_prune_direct_anti_join 24, checkpoint_prune_
+# restore_rehearsal 1) and 1 changed (checkpoint_prune_real_saver 7→9).
+# PR4-closure delta was +4 suites / +43 tests; this regen delta is +0
+# suites / +2 tests on top of that. Execution provenance — existing 33
+# (table): unchanged from PR4-closure (366 across them, 0 failed — dur(s)
+# unchanged from PR4-closure); other 3 C3 suites (anti-join, maintenance
+# prune, restore-rehearsal): unchanged from PR4-closure run 2026-08-26;
+# binding gate (the CHANGED row): 9/9 GREEN on real PG 14.22 — implementer
+# ×4 consecutive runs 2026-08-26 (3.06 / 3.03 / 2.64 / 2.66 s) +
+# independent reviewer re-review targeted run 3.36 s (verdict SATISFIED,
+# 0 findings).
 # NOTE — capture-suite marker: tests/integration/test_messages_response_
 # fixture_capture.py — the `pytestmark = integration` marker WAS removed
 # in commit 603c9eb8 (PR1-closure), so bare pytest collects it by
-# default (re-verified at f89ccacc, 2026-08-26: 1 collected, 0
+# default (re-verified at 7a7998fe, 2026-08-26: 1 collected, 0
 # deselected). Not a manifest row — non-manifest companion.
 #
 # N = tests collected at HEAD (2026-08-26); dur(s) = W5 run 2026-08-25 for
@@ -204,8 +208,15 @@ tests/unit/services/test_maintenance_prune_direct_anti_join.py
 # write→retention→dry-run→destructive→aget/resume reconstruction,
 # _DeltaSnapshot chains via real aput, zero-refs fail-safe with
 # destructive armed, concurrent aput safety, process-restart
-# reconstruction, dry-run report shape, SQLite no-op WARNING. BLOCKS
-# PR4 merge AND destructive enable; PG skip is NOT green (7 tests):
+# reconstruction, dry-run report shape, SQLite no-op WARNING, plus the
+# PR4-critical-fix add-ons: TestRealSaverRaceWindow
+# (test_preexisting_referenced_blobs_survive_traffic_and_prune_byte_equal)
+# and TestRealSaverSerializableRetry
+# (test_real_40001_aborts_delete_then_retry_completes). BLOCKS PR4
+# merge AND destructive enable; PG skip is NOT green. Post-fix
+# (7a7998fe): 9/9 GREEN on real PG 14.22 — implementer ×4 consecutive
+# runs 2026-08-26 (3.06 / 3.03 / 2.64 / 2.66 s) + independent reviewer
+# re-review targeted run 3.36 s (9 tests):
 tests/integration/checkpoint_prune_real_saver.py
 # Automated restore-rehearsal roundtrip — backup table → destructive
 # prune → restore (ON CONFLICT DO NOTHING) → BYTE-equality on md5 of
