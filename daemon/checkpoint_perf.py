@@ -163,3 +163,47 @@ def invariant_check_no_alist() -> None:
         f"[CheckpointPerf] INVARIANT VIOLATION: alist invoked on request path post-C1; "
         f"see roadmap §6 (Phase 1 gate #2). The expected value is 0 (by absence)."
     )
+
+
+def log_blob_prune(
+    thread_id: str,
+    dry_run: bool,
+    deleted: int,
+    refs_seen: int,
+    *,
+    skipped_reason: str | None = None,
+    observed_blob_count: int = 0,
+    bytes_freed: int = 0,
+) -> None:
+    """Gated emit for the C3 reference-aware blob-prune observation lines (PR4).
+
+    One line per (thread_id, checkpoint_ns) candidate the prune walks —
+    emitted by ``daemon/services/checkpoint_prune.py`` for all four
+    outcomes:
+
+    * normal dry-run:  ``dry_run=1 deleted=<would_delete>
+      bytes=<bytes_would_free> refs_seen=<n> observed_blob_count=<n>``
+      (``deleted`` carries the WOULD-DELETE count, not actual deletions);
+    * normal destructive: same line with ``dry_run=0`` and real counts;
+    * fail-safe skip: ``skipped_reason=ZERO_REFS_FAIL_SAFE`` and
+      ``deleted=0`` — zero refs on a thread that HAS remaining
+      checkpoints means ``channel_versions`` extraction is broken
+      (schema drift / unexpected shape); the prune refuses to delete
+      anything for that thread;
+    * cap skip: ``skipped_reason=MAX_REFS_EXCEEDED``.
+
+    Suppressed when ``CHECKPOINT_PERF_LOGS`` is falsy, matching the other
+    C4 emitters.
+    """
+    if not _logs_enabled():
+        return
+    line = (
+        f"[CheckpointPerf] op=blob_prune "
+        f"thread={thread_id[:8] if thread_id else '?'} "
+        f"dry_run={1 if dry_run else 0} deleted={deleted} "
+        f"bytes={bytes_freed} refs_seen={refs_seen} "
+        f"observed_blob_count={observed_blob_count}"
+    )
+    if skipped_reason:
+        line += f" skipped_reason={skipped_reason}"
+    logger.info(line)
