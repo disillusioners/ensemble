@@ -17,11 +17,13 @@ from .message_processing_pipeline import (
     ProcessingResult,
 )
 from daemon.cancellation import CancellationToken, OperationCancelledError
+from daemon.llm_error_classifier import UsageLimitError
 from daemon.repositories.message_queue.models import MessageStatus
 from daemon.repositories.task.models import TaskType
 from daemon.services.message_processing_errors import (
     handle_message_processing_error,
 )
+from daemon.services.usage_limit_schedule import clear_usage_limit_first_seen
 from daemon.services.work_notifier import notify_work_watchers
 
 if TYPE_CHECKING:
@@ -418,6 +420,30 @@ class ProcessMessageProcessor(BaseProcessor):
             logger.info(
                 f"Task {task.id} paused (instance {task.instance_id[:8]}...)"
             )
+            raise
+        except UsageLimitError:
+            # Dedicated usage-limit deferral path
+            # (docs/plans/usage-limit-deferral-path.md W3): a typed
+            # quota-window error is a STAGE-2 error (the classifier
+            # raises it inside the LLM call — i.e. work_fn, OUTSIDE the
+            # pipeline's internal post-processing try), so without this
+            # carve-out the generic ``except Exception`` below would run
+            # the FULL report cascade (DB error event, lifecycle
+            # status="error" event, ``_send_error_report``, parent
+            # envelope, ``consecutive_failures`` bump) on EVERY in-window
+            # deferral (~26×/episode) before the worker seam ever sees
+            # the exception. Re-raise UNTOUCHED — the worker seam owns
+            # the episode decision (anchor/deadline are worker-seam
+            # state; this carve-out contains no policy).
+            #
+            # STAGE-BOUNDARY INVARIANT (review rev3 §3.3): this works
+            # ONLY because LLM classification happens in work_fn /
+            # stage 2. An error raised inside the pipeline's stages 3-6
+            # rides ``result.error`` and the cascade fires INSIDE the
+            # pipeline (``message_processing_pipeline`` post-processing
+            # except), where no carve-out can help. A future stage
+            # refactor must not move LLM classification into stages 3-6
+            # without re-deriving this path.
             raise
         except Exception as e:
             # Work_fn / gate error: the pipeline did NOT run
@@ -818,6 +844,11 @@ class ProcessMessageProcessor(BaseProcessor):
         instance_manager = self._manager
         counts = self._contention_counts
         last_info = self._last_info_at
+        # W6 — instance repo handle for the usage-limit anchor clear on
+        # success (soft-fail inside the helper; captured here so the
+        # callback closes over a plain local, same pattern as the
+        # watcher-notify handles above).
+        instance_repo = getattr(instance_manager, "_instance_repository", None)
 
         async def on_success(result: ProcessingResult) -> None:
             # Phase 2 Batch 2 — atomically transition the task, then
@@ -854,6 +885,17 @@ class ProcessMessageProcessor(BaseProcessor):
                 await self._record_metrics_for_task(
                     task, succeeded=True
                 )
+
+            # W6 — usage-limit anchor clear (success ENDS the episode):
+            # a successful turn means the quota window lifted; remove
+            # ``usage_limit_first_seen_at`` so the next quota hit on
+            # this instance starts a FRESH window (set-once is
+            # per-episode). Unconditional + soft-fail — deleting an
+            # absent key is a no-op on both dialects, and clearing
+            # must never break a finalize.
+            await asyncio.to_thread(
+                clear_usage_limit_first_seen, instance_repo, instance_id
+            )
 
         async def on_error(result: ProcessingResult) -> None:
             # The pipeline already ran ``handle_message_processing_error``

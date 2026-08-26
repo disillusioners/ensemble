@@ -1124,8 +1124,11 @@ class TestPhase5Fixes:
         recovered2 = recovery.recover_stale_tasks()
         assert recovered2 == 0
         
-        # No additional messages should have been failed
-        assert len(mock_message_repo.failed_messages) == 1  # Only from first run
+        # No messages failed at all: the successful recovery created a
+        # retry child that INHERITS this message_id — failing it under
+        # the live child would strand it (usage-limit-deferral-path
+        # §2.2; the message-fail is scoped to terminal recoveries).
+        assert len(mock_message_repo.failed_messages) == 0
     
     def test_recovered_count_only_increments_for_acted_tasks(self, repository):
         """FIX: W4 — recovered_count only increments for tasks actually acted upon.

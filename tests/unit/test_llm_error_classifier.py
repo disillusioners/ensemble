@@ -12,10 +12,13 @@ from daemon.llm_error_classifier import (
     TransientAPIError,
     TransientLLMError,
     ContextLengthExceededError,
+    UsageLimitError,
     classify_llm_errors,
     configure_transient_channel_patterns,
+    configure_usage_limit_patterns,
     make_llm_retry_strategy,
     reset_transient_channel_patterns,
+    reset_usage_limit_patterns,
 )
 from daemon.response_validation import LLMResponseValidationError
 
@@ -1024,10 +1027,12 @@ class TestIndexErrorHandler:
 
 @pytest.fixture(autouse=False)
 def restore_default_patterns():
-    """Reset the transient-channel pattern state around each test that
-    overrides it (isolation — pattern config is module-global)."""
+    """Reset the transient-channel AND usage-limit pattern state around
+    each test that overrides it (isolation — pattern config is
+    module-global)."""
     yield
     reset_transient_channel_patterns()
+    reset_usage_limit_patterns()
 
 
 def _bare_api_error(message: str) -> openai.APIError:
@@ -1153,17 +1158,19 @@ class TestTransientChannelClassification:
 
     # --- Regression tests: must stay NON-retryable ---
 
-    def test_2056_token_plan_terminal_blocklist_hit(self):
-        """2056 quota shape: 'usage limit' blocklist hit → non-retryable,
-        unchanged (blocklist has mandatory precedence)."""
+    def test_2056_token_plan_typed_usage_limit(self):
+        """2056 quota shape: typed UsageLimitError at attempt 1
+        (usage-limit-deferral-path W1). Still TERMINAL — never wrapped
+        transient, never fast-retried; the blocklist's mandatory-
+        precedence intent is preserved via the typing."""
         original = _bare_api_error(
             "Token Plan usage limit reached for model group (2056)"
         )
 
-        with pytest.raises(openai.APIError) as exc_info:
+        with pytest.raises(UsageLimitError) as exc_info:
             self._classified_llm(original).invoke([])
 
-        assert exc_info.value is original
+        assert exc_info.value.original is original
         assert not isinstance(exc_info.value, TransientLLMError)
 
     def test_2013_invalid_params_terminal(self):
@@ -1220,10 +1227,12 @@ class TestTransientChannelClassification:
     # --- Blocklist precedence (plan test 3) ---
 
     def test_blocklist_overrides_allowlist(self):
-        """Synthetic message matching BOTH lists → non-retryable."""
+        """Synthetic message matching BOTH lists → terminal, now typed
+        UsageLimitError (usage-limit typing runs BEFORE the
+        allowlist/blocklist flow; still never wrapped transient)."""
         both = _bare_api_error("all models rate limited because usage limit exceeded")
 
-        with pytest.raises(openai.APIError) as exc_info:
+        with pytest.raises(UsageLimitError) as exc_info:
             self._classified_llm(both).invoke([])
 
         assert not isinstance(exc_info.value, TransientLLMError)
@@ -1231,17 +1240,17 @@ class TestTransientChannelClassification:
     def test_blocklist_also_guards_valueerror_channel(self):
         """Blocklist precedence extends to the ValueError channel: a
         200-body proxy dict embedding quota wording alongside an
-        allowlisted substring stays terminal (defense against
-        externally-influenced detail text)."""
+        allowlisted substring stays terminal — typed UsageLimitError
+        (usage-limit typing before the transient pattern match)."""
         poisoned = ValueError(
             "{'detail': 'usage limit exceeded; ultimate_model_retry_exhausted', "
             "'type': 'ultimate_model_retry_exhausted'}"
         )
 
-        with pytest.raises(ValueError) as exc_info:
+        with pytest.raises(UsageLimitError) as exc_info:
             self._classified_llm(poisoned).invoke([])
 
-        assert exc_info.value is poisoned
+        assert exc_info.value.original is poisoned
         assert not isinstance(exc_info.value, TransientLLMError)
 
     # --- Ordering (plan test 4): subclass handlers keep precedence ---
@@ -1549,3 +1558,148 @@ class TestTransientChannelConfig:
         assert cfg.transient_remote_protocol_retryable == (
             DEFAULT_TRANSIENT_CHANNEL_PATTERNS.remote_protocol_retryable
         )
+
+
+class TestUsageLimitClassification:
+    """Quota-window typing through classify_llm_errors
+    (docs/plans/usage-limit-deferral-path.md W1 — typing, ordering,
+    disable switch, disjointness)."""
+
+    def _classified_llm(self, exc):
+        mock_llm = MagicMock()
+        mock_llm.invoke.side_effect = exc
+        return classify_llm_errors(mock_llm)
+
+    def test_2056_typed_at_attempt_1_no_fast_retries(self):
+        """Typing: corpus 2056 shape raises UsageLimitError on the very
+        first classification — no tenacity fast-retry membership."""
+        original = _bare_api_error(
+            "Token Plan usage limit reached for model group (2056)"
+        )
+
+        with pytest.raises(UsageLimitError) as exc_info:
+            self._classified_llm(original).invoke([])
+
+        assert exc_info.value.original is original
+        assert "usage limit" in str(exc_info.value).lower()
+
+    def test_valueerror_channel_quota_text_typed(self):
+        """Quota text riding a 200-body ValueError (the cc753c2f §review
+        guard shape) types identically to the bare-APIError channel."""
+        original = ValueError(
+            "{'code': 429, 'detail': 'Token Plan usage limit reached'}"
+        )
+
+        with pytest.raises(UsageLimitError) as exc_info:
+            self._classified_llm(original).invoke([])
+
+        assert exc_info.value.original is original
+
+    def test_typing_precedes_transient_allowlist(self):
+        """Ordering: a message matching BOTH the transient allowlist and
+        the usage-limit patterns types UsageLimitError — never wrapped
+        transient (the wrap sites check usage-limit FIRST)."""
+        original = _bare_api_error(
+            "All models rate limited due to Token Plan usage limit"
+        )
+
+        with pytest.raises(UsageLimitError) as exc_info:
+            self._classified_llm(original).invoke([])
+
+        assert not isinstance(exc_info.value, TransientLLMError)
+
+    def test_invalid_params_2013_stays_untyped_terminal(self):
+        """Disjointness regression: the bad-params shape (corpus 2013)
+        is an untyped terminal re-raise — a genuine bug must never
+        enter the 6h auto-retry episode."""
+        original = _bare_api_error(
+            "invalid params, tool call result does not follow tool call (2013)"
+        )
+
+        with pytest.raises(openai.APIError) as exc_info:
+            self._classified_llm(original).invoke([])
+
+        assert exc_info.value is original
+        assert not isinstance(exc_info.value, UsageLimitError)
+        assert not isinstance(exc_info.value, TransientLLMError)
+
+    def test_not_transient_or_timeout_member(self):
+        """UsageLimitError is in NEITHER retry set — the predicate never
+        retries it (terminal at L1 by design)."""
+        assert UsageLimitError not in TRANSIENT_EXCEPTIONS
+        assert UsageLimitError not in TIMEOUT_EXCEPTIONS
+
+    def test_empty_pattern_list_disables_typed_wrapper(self, restore_default_patterns):
+        """Additive-off switch: an explicitly-empty usage_limit_patterns
+        reverts quota shapes to the untyped terminal blocklist
+        re-raise."""
+        configure_usage_limit_patterns(patterns=[])
+        original = _bare_api_error("Token Plan usage limit reached (2056)")
+
+        with pytest.raises(openai.APIError) as exc_info:
+            self._classified_llm(original).invoke([])
+
+        assert exc_info.value is original
+        assert not isinstance(exc_info.value, UsageLimitError)
+
+    def test_configure_overrides_and_reset_restores(self, restore_default_patterns):
+        from daemon.llm_error_classifier import _matches_usage_limit
+
+        configure_usage_limit_patterns(patterns=["monthly quota burn"])
+        assert _matches_usage_limit("Monthly Quota BURN hit")
+        assert not _matches_usage_limit("Token Plan usage limit reached")
+
+        reset_usage_limit_patterns()
+        assert _matches_usage_limit("Token Plan usage limit reached")
+        assert not _matches_usage_limit("monthly quota burn hit")
+
+    def test_queue_config_usage_limit_patterns_csv_and_default(self):
+        """QueueConfig accepts the same CSV/JSON/YAML list forms; the
+        default derives from the classifier's canonical tuple."""
+        from daemon.config import QueueConfig
+        from daemon.llm_error_classifier import DEFAULT_USAGE_LIMIT_PATTERNS
+
+        cfg = QueueConfig(usage_limit_patterns="token plan, usage limit")
+        assert cfg.usage_limit_patterns == ["token plan", "usage limit"]
+
+        default_cfg = QueueConfig()
+        assert default_cfg.usage_limit_patterns == list(DEFAULT_USAGE_LIMIT_PATTERNS)
+
+    def test_queue_config_rejects_bad_params_overlap(self):
+        """A usage-limit pattern that substring-matches the corpus-2013
+        bad-params shape would type a genuine bug into the 6h
+        auto-retry episode — the config load must fail."""
+        from daemon.config import QueueConfig
+
+        with pytest.raises(ValueError, match="disjoint"):
+            QueueConfig(usage_limit_patterns=["invalid params"])
+
+    def test_load_config_pushes_usage_limit_patterns(self, restore_default_patterns, tmp_path):
+        """load_config wires the yaml usage_limit_patterns into the
+        classifier module (same convention as the transient bundle)."""
+        from daemon.config import load_config
+        import daemon.llm_error_classifier as lec
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "llm:\n  base_url: http://t/v1\n"
+            "queue:\n"
+            "  usage_limit_patterns: ['custom quota window']\n"
+        )
+        load_config(str(config_file))
+
+        assert lec._usage_limit_patterns == ("custom quota window",)
+
+    def test_load_config_empty_patterns_disable_wrapper(self, restore_default_patterns, tmp_path):
+        from daemon.config import load_config
+        import daemon.llm_error_classifier as lec
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "llm:\n  base_url: http://t/v1\n"
+            "queue:\n"
+            "  usage_limit_patterns: []\n"
+        )
+        load_config(str(config_file))
+
+        assert lec._usage_limit_patterns == ()

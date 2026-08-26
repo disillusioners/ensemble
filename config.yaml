@@ -139,9 +139,17 @@ queue:
   #     without a deploy.
   transient_valueerror_patterns: ['no generations found', 'ultimate_model_retry_exhausted']
   #   C3 kill-switch: httpx.RemoteProtocolError (peer closed mid-body,
-  #     'incomplete chunked read', 7 events) retryable. Flip to false to
-  #     stop a broken-endpoint retry loop without a redeploy.
+  #   'incomplete chunked read', 7 events) retryable. Flip to false to
+  #   stop a broken-endpoint retry loop without a redeploy.
   transient_remote_protocol_retryable: true
+  # Quota-window shapes typed as UsageLimitError
+  # (docs/plans/usage-limit-deferral-path.md): terminal at L1, the
+  # dedicated deferral path (worker seam) owns recovery — anchor +
+  # 6h deadline + fixed wake schedule (services.usage_limit_* below).
+  #   MUST stay disjoint from bad-params shapes ('invalid params',
+  #   corpus 2013) — validated at load. Empty list disables the typed
+  #   wrapper (quota shapes revert to the untyped terminal re-raise).
+  usage_limit_patterns: ['token plan', 'usage limit']
 
 # Context Compaction Settings
 compaction:
@@ -180,6 +188,21 @@ services:
   #   30s gives a long-running graph time to flush its final checkpoint
   #   token before the recovery sweeper force-cancels and creates a retry.
   stale_task_cancel_grace_seconds: 30
+  # Dedicated usage-limit deferral path
+  # (docs/plans/usage-limit-deferral-path.md): quota-window errors
+  # ('Token Plan usage limit reached', corpus 2056) defer on a fixed
+  # schedule inside a 6h horizon instead of terminal-failing at L1.
+  #   The window is the RETRY horizon, not a timeout — attempts still
+  #   fail in seconds; patience lives between tasks.
+  usage_limit_window_seconds: 21600  # 6h horizon from first sighting
+  #   Wake schedule steps: 3m → 5m → 10m, then the 15m cap repeats
+  #   until the deadline. Elapsed-derived from the persisted anchor —
+  #   restarts resume the window, not restart it.
+  usage_limit_retry_delays_seconds: [180, 300, 600, 900]
+  #   Per-wake jitter (± fraction of the slot step; clamped to never
+  #   schedule into the past) so a herd of quota-hit instances
+  #   doesn't wake on identical slots.
+  usage_limit_retry_jitter_fraction: 0.1
   # graph_timeout_minutes: Hard timeout for LangGraph execution (MainLoopBridge).
   #   This is the safety net if the graph hangs indefinitely. Bumped from
   #   55 to 120 min so long-running tasks (e.g. multi-phase refactors that

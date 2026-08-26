@@ -52,7 +52,20 @@ class DirectWriteError(RuntimeError):
 
 
 class TaskRepository:
-    """Repository for Task CRUD operations with atomic claiming."""
+    """Repository for Task CRUD operations with atomic claiming.
+
+    ``retry_count`` consumer audit (usage-limit-deferral-path, review
+    rev3 §1.2): the task-lane retry-budget gates live ONLY in
+    ``schedule_retry`` / ``force_cancel_and_schedule_retry`` (both
+    parameterized with ``bypass_retry_budget``) and the Python-side
+    stale-recovery diagnostic at ``stale_task_recovery.py``
+    (unreachable for live usage-limit episodes — the bypass path
+    returns a child, so the force-cancel-returned-None branch is never
+    episode-shaped). The worker claim path is gate-free by design
+    (``next_retry_at``-based). The job-queue / message-queue /
+    blueprint ``retry_count`` columns live on separate tables and are
+    unaffected by task-lane bypass growth (~26/episode).
+    """
 
     def __init__(self, engine: Engine, on_pending_task: Callable[[], None] | None = None):
         """Initialize repository with a database engine.
@@ -2881,6 +2894,9 @@ class TaskRepository:
         max_retries: int,
         backoff_base: int = 60,
         backoff_max: int = 3600,
+        *,
+        next_retry_at: datetime | None = None,
+        bypass_retry_budget: bool = False,
     ) -> Task | None:
         """Phase 5 (DQ increment3-plan §5.7 / §6.5 / §9 Phase 5):
         thin wrapper around the ``RetryTurn`` named transition.
@@ -2918,9 +2934,32 @@ class TaskRepository:
         ``failed`` (when the worker already reported outcome) are
         excluded — a terminal task must never get a retry child.
 
+        Deadline-bounded caller parameters
+        (docs/plans/usage-limit-deferral-path.md W2; the dedicated
+        usage-limit path passes both, every other caller passes
+        neither — byte-identical defaults):
+
+        * ``next_retry_at`` — explicit schedule override. When provided,
+          the ``2**retry_count`` exponential backoff derivation is
+          SKIPPED and the child is stamped with the caller's timestamp
+          (the usage-limit W5 schedule).
+        * ``bypass_retry_budget`` — drop ONLY the
+          ``retry_count < :max_retries`` term from the gate UPDATE's
+          WHERE. The ``retry_scheduled = false`` double-retry guard and
+          the status guard STAY — concurrency safety is not
+          negotiable. ``retry_count`` still increments monotonically on
+          the child (observability; the episode grows ~26/episode — the
+          consumer audit lives in the plan's risk table).
+
         Returns the new retry task, or None if no retry was scheduled.
         """
         retry_task = None
+
+        # Deadline-bounded deferral (usage-limit path): drop ONLY the
+        # budget term; the double-retry and status guards stay.
+        budget_term = (
+            "" if bypass_retry_budget else "AND retry_count < :max_retries"
+        )
 
         with self.engine.begin() as conn:
             # Atomic UPDATE-with-guard: the race condition gate. The
@@ -2933,8 +2972,22 @@ class TaskRepository:
             # false/true). `cancelled` is included so the orphan-recovery
             # path (CANCELLED + retry_scheduled=false) can schedule a
             # retry child; see method docstring.
+            gate_params: dict[str, object] = {
+                "task_id": task_id,
+                # One binding serves BOTH the SET clause and the
+                # WHERE IN entry (the original code's single-key shape).
+                "status_cancelled": TaskStatus.CANCELLED.value,
+                "cancel_requested_true": True,
+                "retry_scheduled_true": True,
+                "retry_scheduled_false": False,
+                "status_running": TaskStatus.RUNNING.value,
+                "status_failed": TaskStatus.FAILED.value,
+                "now": datetime.now(timezone.utc),
+            }
+            if not bypass_retry_budget:
+                gate_params["max_retries"] = max_retries
             parent_row = conn.execute(
-                text("""
+                text(f"""
                     UPDATE task
                     SET status = :status_cancelled,
                         cancel_requested = :cancel_requested_true,
@@ -2943,22 +2996,11 @@ class TaskRepository:
                         retry_scheduled = :retry_scheduled_true
                     WHERE id = :task_id
                       AND retry_scheduled = :retry_scheduled_false
-                      AND retry_count < :max_retries
+                      {budget_term}
                       AND status IN (:status_running, :status_failed, :status_cancelled)
                     RETURNING *
                 """),
-                {
-                    "task_id": task_id,
-                    "status_cancelled": TaskStatus.CANCELLED.value,
-                    "cancel_requested_true": True,
-                    "retry_scheduled_true": True,
-                    "retry_scheduled_false": False,
-                    "max_retries": max_retries,
-                    "status_running": TaskStatus.RUNNING.value,
-                    "status_failed": TaskStatus.FAILED.value,
-                    "status_cancelled": TaskStatus.CANCELLED.value,
-                    "now": datetime.now(timezone.utc),
-                },
+                gate_params,
             ).fetchone()
 
             if parent_row is None:
@@ -2973,18 +3015,24 @@ class TaskRepository:
             current_retry_count = parent_row.retry_count
             new_retry_count = current_retry_count + 1
 
-            # Calculate exponential backoff. The ``2 ** current_retry_count``
-            # delay is capped at ``backoff_max`` so a long-running retry
-            # chain doesn't produce multi-day delays.
+            # Calculate the child's next_retry_at. Default: exponential
+            # backoff — the ``2 ** current_retry_count`` delay is capped
+            # at ``backoff_max`` so a long-running retry chain doesn't
+            # produce multi-day delays. Deadline-bounded callers
+            # (usage-limit W5) pass an explicit schedule derived from
+            # the episode anchor instead.
             now = datetime.now(timezone.utc)
-            delay_seconds = min(
-                backoff_base * (2 ** current_retry_count),
-                backoff_max,
-            )
-            next_retry_at = now + timedelta(seconds=delay_seconds)
+            if next_retry_at is not None:
+                scheduled_at = next_retry_at
+            else:
+                delay_seconds = min(
+                    backoff_base * (2 ** current_retry_count),
+                    backoff_max,
+                )
+                scheduled_at = now + timedelta(seconds=delay_seconds)
             next_retry_at_str = (
-                next_retry_at.strftime("%Y-%m-%dT%H:%M:%S.%f")
-                + next_retry_at.strftime("%z")
+                scheduled_at.strftime("%Y-%m-%dT%H:%M:%S.%f")
+                + scheduled_at.strftime("%z")
             )
 
             # Mint fresh child work_id. Reusing the parent's work_id
@@ -3297,6 +3345,9 @@ class TaskRepository:
         reason: str,
         backoff_base: int = 60,
         backoff_max: int = 3600,
+        *,
+        next_retry_at: datetime | None = None,
+        bypass_retry_budget: bool = False,
     ) -> Task | None:
         """Phase 4b.14 (DQ increment3-plan §5.7 / §6.5 / §9 Phase 4b):
         thin wrapper around ``RetryTurn`` (with the parent ``error``
@@ -3337,6 +3388,19 @@ class TaskRepository:
         gated on ``UPDATE.rowcount == 1`` inside the same
         ``engine.begin()`` transaction.
 
+        Deadline-bounded caller parameters
+        (docs/plans/usage-limit-deferral-path.md W2/W8 — identical
+        contract to ``schedule_retry``; used by stale recovery when the
+        instance has a LIVE usage-limit anchor, so a bypass-grown
+        ``retry_count`` neither closes the gate nor burns up to 60 min
+        of the episode window on the ``2**retry_count`` backoff cap):
+
+        * ``next_retry_at`` — explicit schedule override (the usage-limit
+          W5 schedule; skips the exponential backoff derivation).
+        * ``bypass_retry_budget`` — drop ONLY the
+          ``retry_count < :max_retries`` term from the gate UPDATE's
+          WHERE; the double-retry and status guards stay.
+
         Returns the new retry task, or None if the parent is missing,
         already has ``retry_scheduled=True``, has
         ``retry_count >= max_retries``, or is not in
@@ -3346,12 +3410,32 @@ class TaskRepository:
         now = datetime.now(timezone.utc)
         parent_error = f"Force cancelled: {reason}"
 
+        # Deadline-bounded deferral (usage-limit path via stale recovery
+        # W8): drop ONLY the budget term; the double-retry and status
+        # guards stay.
+        budget_term = (
+            "" if bypass_retry_budget else "AND retry_count < :max_retries"
+        )
+
         with self.engine.begin() as conn:
             # Force-cancel parent and set retry_scheduled guard in a
             # single atomic UPDATE. Only one concurrent caller wins the
             # row update; the rest see rowcount=0 and return None.
+            gate_params: dict[str, object] = {
+                "task_id": task_id,
+                "status_cancelled": TaskStatus.CANCELLED.value,
+                "cancel_requested_true": True,
+                "now": now,
+                "error": parent_error,
+                "retry_scheduled_true": True,
+                "retry_scheduled_false": False,
+                "status_running": TaskStatus.RUNNING.value,
+                "status_failed": TaskStatus.FAILED.value,
+            }
+            if not bypass_retry_budget:
+                gate_params["max_retries"] = max_retries
             parent_row = conn.execute(
-                text("""
+                text(f"""
                     UPDATE task
                     SET status = :status_cancelled,
                         cancel_requested = :cancel_requested_true,
@@ -3361,22 +3445,11 @@ class TaskRepository:
                         retry_scheduled = :retry_scheduled_true
                     WHERE id = :task_id
                       AND retry_scheduled = :retry_scheduled_false
-                      AND retry_count < :max_retries
+                      {budget_term}
                       AND status IN (:status_running, :status_failed)
                     RETURNING *
                 """),
-                {
-                    "task_id": task_id,
-                    "status_cancelled": TaskStatus.CANCELLED.value,
-                    "cancel_requested_true": True,
-                    "now": now,
-                    "error": parent_error,
-                    "retry_scheduled_true": True,
-                    "retry_scheduled_false": False,
-                    "max_retries": max_retries,
-                    "status_running": TaskStatus.RUNNING.value,
-                    "status_failed": TaskStatus.FAILED.value,
-                },
+                gate_params,
             ).fetchone()
 
             if parent_row is None:
@@ -3390,16 +3463,21 @@ class TaskRepository:
             current_retry_count = parent_row.retry_count
             new_retry_count = current_retry_count + 1
 
-            # Calculate backoff (same exponential formula as
-            # ``schedule_retry``).
-            delay_seconds = min(
-                backoff_base * (2 ** current_retry_count),
-                backoff_max,
-            )
-            next_retry_at = now + timedelta(seconds=delay_seconds)
+            # Calculate the child's next_retry_at. Default: same
+            # exponential formula as ``schedule_retry``. Deadline-bounded
+            # callers (usage-limit W5 via stale recovery W8) pass an
+            # explicit schedule derived from the episode anchor instead.
+            if next_retry_at is not None:
+                scheduled_at = next_retry_at
+            else:
+                delay_seconds = min(
+                    backoff_base * (2 ** current_retry_count),
+                    backoff_max,
+                )
+                scheduled_at = now + timedelta(seconds=delay_seconds)
             next_retry_at_str = (
-                next_retry_at.strftime("%Y-%m-%dT%H:%M:%S.%f")
-                + next_retry_at.strftime("%z")
+                scheduled_at.strftime("%Y-%m-%dT%H:%M:%S.%f")
+                + scheduled_at.strftime("%z")
             )
 
             # Mint fresh child work_id.

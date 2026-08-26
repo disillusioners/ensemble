@@ -11,7 +11,11 @@ import openai
 import pytest
 from unittest.mock import MagicMock
 
-from daemon.llm_error_classifier import TransientAPIError, TransientLLMError
+from daemon.llm_error_classifier import (
+    TransientAPIError,
+    TransientLLMError,
+    UsageLimitError,
+)
 from daemon.services.llm_failover import _classify_raw_sdk_exceptions
 
 
@@ -50,13 +54,18 @@ class TestFacadeParityBareAPIError:
         assert isinstance(raised, TransientLLMError)
         assert raised.kind == "timeout_body"
 
-    def test_2056_token_plan_stays_terminal(self):
-        """Quota shape — blocklist precedence preserved in the facade."""
+    def test_2056_token_plan_typed_usage_limit(self):
+        """Quota shape — typed UsageLimitError at the facade
+        (usage-limit-deferral-path W1 facade parity: same helper, same
+        typing as the hot path). The facade does NOT retry it — the
+        surface is typed for logs; secondary sites' generic
+        ``except Exception`` fallbacks still match (type-swap audited)."""
         original = _bare_api_error("Token Plan usage limit reached (2056)")
 
         raised = _run_classified(lambda: (_ for _ in ()).throw(original))
 
-        assert raised is original
+        assert isinstance(raised, UsageLimitError)
+        assert raised.original is original
         assert not isinstance(raised, TransientLLMError)
 
 
@@ -128,13 +137,15 @@ class TestFacadeParityValueError:
 
     def test_blocklist_guards_valueerror_channel(self):
         """Blocklist precedence on the ValueError channel — a 200-body
-        dict embedding quota wording stays terminal through the facade
-        too (same shared helper as the hot path)."""
+        dict embedding quota wording stays TERMINAL through the facade
+        (now typed as UsageLimitError, same as the hot path; never
+        wrapped transient)."""
         poisoned = ValueError(
             "{'detail': 'usage limit exceeded', 'type': 'ultimate_model_retry_exhausted'}"
         )
 
         raised = _run_classified(lambda: (_ for _ in ()).throw(poisoned))
 
-        assert raised is poisoned
+        assert isinstance(raised, UsageLimitError)
+        assert raised.original is poisoned
         assert not isinstance(raised, TransientLLMError)

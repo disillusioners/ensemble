@@ -21,7 +21,10 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 # defaults (no import cycle: llm_error_classifier only imports
 # .response_validation / httpx / openai / langchain_core). QueueConfig
 # field defaults DERIVE from this bundle — never a second copy.
-from .llm_error_classifier import DEFAULT_TRANSIENT_CHANNEL_PATTERNS
+from .llm_error_classifier import (
+    DEFAULT_TRANSIENT_CHANNEL_PATTERNS,
+    DEFAULT_USAGE_LIMIT_PATTERNS,
+)
 
 from .constants import (
     CHECKPOINT_TTL_HOURS,
@@ -474,12 +477,32 @@ class QueueConfig(BaseSettings):
             "redeploy."
         ),
     )
+    # Quota-window shapes typed as UsageLimitError
+    # (docs/plans/usage-limit-deferral-path.md W1/W7). Checked BEFORE
+    # the allowlist/blocklist flow on both non-status channels; the
+    # dedicated deferral path (worker seam) owns recovery. MUST stay
+    # disjoint from bad-params shapes — validated at load time. An
+    # explicitly-EMPTY list disables the typed wrapper entirely
+    # (additive-off switch: quota shapes revert to the untyped terminal
+    # blocklist re-raise).
+    usage_limit_patterns: Annotated[list[str], NoDecode] = Field(
+        default=list(DEFAULT_USAGE_LIMIT_PATTERNS),
+        description=(
+            "Message substrings typed as UsageLimitError (provider "
+            "quota windows — 'Token Plan usage limit reached', corpus "
+            "2056). Terminal at L1; the dedicated deferral path owns "
+            "recovery. Must NOT match bad-params shapes ('invalid "
+            "params', corpus 2013) — validated. Empty disables the "
+            "typed wrapper."
+        ),
+    )
 
     @field_validator(
         "transient_apierror_allowlist",
         "transient_apierror_timeout_patterns",
         "transient_apierror_blocklist",
         "transient_valueerror_patterns",
+        "usage_limit_patterns",
         mode="before",
     )
     @classmethod
@@ -510,6 +533,34 @@ class QueueConfig(BaseSettings):
                 f"of queue.transient_apierror_allowlist; stray entries: "
                 f"{stray}. Add them to the allowlist or remove them from "
                 f"the timeout patterns."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_usage_limit_disjoint_from_bad_params(self) -> "QueueConfig":
+        """Usage-limit patterns must never match bad-params shapes.
+
+        A pattern that substring-matches the corpus-2013 bad-params
+        message ("invalid params, tool call result does not follow tool
+        call") would type a GENUINE BUG as ``UsageLimitError`` and push
+        it into a 6 h auto-retry episode — the exact false-positive the
+        dedicated path must never commit. Hard requirement
+        (usage-limit-deferral-path W1/W7): fail the config load instead.
+        """
+        bad_params_shape = (
+            "invalid params, tool call result does not follow tool call (2013)"
+        )
+        overlapping = [
+            p
+            for p in self.usage_limit_patterns
+            if p.lower() in bad_params_shape.lower()
+        ]
+        if overlapping:
+            raise ValueError(
+                f"queue.usage_limit_patterns must stay disjoint from the "
+                f"bad-params shapes ('invalid params', corpus 2013); these "
+                f"entries would type a genuine bug into the 6h usage-limit "
+                f"auto-retry: {overlapping}. Remove them."
             )
         return self
 
@@ -607,6 +658,45 @@ class ServicesConfig(BaseSettings):
     task_retry_backoff_max: int = Field(
         default=3600,
         description="Maximum delay between retries (seconds). Default: 1 hour."
+    )
+    # Dedicated usage-limit deferral path timing
+    # (docs/plans/usage-limit-deferral-path.md W7). The window is the
+    # RETRY HORIZON (anchor + deadline), not a timeout value — attempts
+    # still fail in ~seconds; patience lives between tasks.
+    usage_limit_window_seconds: int = Field(
+        default=21600,
+        description=(
+            "Usage-limit episode horizon in seconds from the first "
+            "quota sighting (anchor). 6h default — quota windows reset "
+            "on the provider's schedule. Inside the window deferrals "
+            "are budget-free; past it the episode terminalizes with "
+            "exactly one report."
+        ),
+    )
+    usage_limit_retry_delays_seconds: list[int] = Field(
+        default=[180, 300, 600, 900],
+        description=(
+            "Usage-limit wake schedule step delays in seconds "
+            "(3m, 5m, 10m; the final entry is the repeating cap "
+            "beyond the listed slots). Elapsed-derived from the "
+            "anchor, so restarts resume the window instead of "
+            "restarting it."
+        ),
+    )
+    # NOTE: unlike the queue pattern lists (where an explicitly-empty
+    # list means "disable"), an EMPTY delay list is NOT a valid disable
+    # switch — the schedule function requires non-empty positive
+    # delays, and an empty list would strand quota-hit tasks RUNNING
+    # with no retry and no terminal. Disabling the whole path is done
+    # via queue.usage_limit_patterns: []. Validated below.
+    usage_limit_retry_jitter_fraction: float = Field(
+        default=0.1,
+        description=(
+            "Per-wake jitter for the usage-limit schedule, as a "
+            "fraction of the slot's step delay (herd decoupling). "
+            "The result is clamped to never schedule before "
+            "now + 30s."
+        ),
     )
     stale_task_cancel_grace_seconds: int = Field(
         default=30,
@@ -797,6 +887,33 @@ class ServicesConfig(BaseSettings):
             "message and skips the retry. Set to 0 to disable."
         ),
     )
+
+    @field_validator("usage_limit_retry_delays_seconds")
+    @classmethod
+    def _validate_usage_limit_delays(cls, v: list[int]) -> list[int]:
+        """Usage-limit wake delays must be non-empty and positive.
+
+        ``next_usage_limit_retry_at`` hard-requires this; an empty or
+        non-positive list must fail AT LOAD, not strand quota-hit tasks
+        RUNNING forever inside the never-raise worker handler (and
+        break the stale sweep's episode-kwargs derivation the same
+        way). Note this list has NO empty-disables semantics — the
+        path's kill-switch is ``queue.usage_limit_patterns: []``.
+        """
+        if not v:
+            raise ValueError(
+                "services.usage_limit_retry_delays_seconds must be a "
+                "non-empty list of positive seconds. To disable the "
+                "usage-limit deferral path entirely, set "
+                "queue.usage_limit_patterns: [] instead."
+            )
+        bad = [d for d in v if not isinstance(d, int) or isinstance(d, bool) or d <= 0]
+        if bad:
+            raise ValueError(
+                f"services.usage_limit_retry_delays_seconds entries must "
+                f"be positive integers; invalid: {bad}."
+            )
+        return v
 
 
 class JobSystemConfig(BaseSettings):
@@ -1394,6 +1511,17 @@ def load_config(config_path: str | None = None) -> Config:
         apierror_blocklist=config.queue.transient_apierror_blocklist,
         valueerror_patterns=config.queue.transient_valueerror_patterns,
         remote_protocol_retryable=config.queue.transient_remote_protocol_retryable,
+    )
+
+    # Quota-window typing patterns (usage-limit-deferral-path W1/W7) —
+    # same config-driven single-source-of-truth convention, installed
+    # beside the transient-channel bundle so a runtime reload swaps both
+    # atomically-independently. An explicitly-empty list disables the
+    # typed wrapper (pure pass-through to the blocklist flow).
+    from .llm_error_classifier import configure_usage_limit_patterns
+
+    configure_usage_limit_patterns(
+        patterns=config.queue.usage_limit_patterns,
     )
 
     return config

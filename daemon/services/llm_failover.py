@@ -222,7 +222,9 @@ from ..llm_error_classifier import (
     FailoverController,
     TransientAPIError,
     TransientLLMError,
+    UsageLimitError,
     _matches_transient_valueerror,
+    _matches_usage_limit,
     classify_llm_errors,
     classify_transient_apierror_body,
     derive_ha_attempt_ceiling,
@@ -302,6 +304,16 @@ def _classify_raw_sdk_exceptions(fn: Callable[[], T]) -> Callable[[], T]:
             # is the SAME shared helper the hot path uses (one
             # kind-routing implementation, never duplicated); misses
             # re-raise unmodified.
+            #
+            # Quota-window typing FIRST (usage-limit-deferral-path W1
+            # facade parity): a secondary-site quota hit surfaces as
+            # UsageLimitError. The facade does NOT retry it — the
+            # secondary sites' graceful-fallback ``except Exception``
+            # blocks (audited: skill_search / skill_embedding /
+            # skill_evolution all catch generically) still match, so
+            # only the surfaced TYPE changes.
+            if _matches_usage_limit(str(e)):
+                raise UsageLimitError(e) from e
             wrapper = classify_transient_apierror_body(e)
             if wrapper is not None:
                 raise wrapper from e
@@ -309,7 +321,10 @@ def _classify_raw_sdk_exceptions(fn: Callable[[], T]) -> Callable[[], T]:
         except ValueError as e:
             # 200-body proxy error dicts / zero-chunk SSE streams.
             # Same pattern list as the hot path; genuine data bugs
-            # re-raise unmodified.
+            # re-raise unmodified. Quota-window typing FIRST, same as
+            # the bare-APIError branch above.
+            if _matches_usage_limit(str(e)):
+                raise UsageLimitError(e) from e
             if _matches_transient_valueerror(str(e)):
                 raise TransientLLMError("value_error_body", e) from e
             raise

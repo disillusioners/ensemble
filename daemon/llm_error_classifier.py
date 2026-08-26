@@ -202,6 +202,75 @@ def reset_transient_channel_patterns() -> None:
     _transient_patterns = DEFAULT_TRANSIENT_CHANNEL_PATTERNS
 
 
+# ---------------------------------------------------------------------------
+# Usage-limit (quota-window) typing
+# (docs/plans/usage-limit-deferral-path.md work unit 1).
+#
+# Quota shapes ("Token Plan usage limit reached", corpus event 2056) are
+# TERMINAL at L1 by design — the quota window resets on the provider's
+# schedule, so second-scale retries are futile. Until now they were an
+# untyped blocklist re-raise; the dedicated deferral path needs them
+# TYPED so the worker seam can implement usage-limit policy (anchor,
+# 6 h deadline, fixed wake schedule) without pattern-matching again.
+#
+# The wrapper fires BEFORE the allowlist/blocklist logic on BOTH
+# non-status channels (bare APIError bodies and 200-body ValueErrors) —
+# quota hits are a strict subset of today's blocklist hits, so ordering
+# the check first preserves every other shape byte-identically.
+#
+# Config-driven like the transient channels: ``queue.usage_limit_patterns``
+# (config.yaml) is pushed here via ``configure_usage_limit_patterns`` by
+# ``load_config``. An EMPTY list disables the typed wrapper entirely
+# (additive-off switch — quota shapes revert to the untyped blocklist
+# re-raise).
+#
+# DISJOINTNESS (hard requirement): these patterns must never match the
+# bad-params shapes ("invalid params", corpus 2013) — a genuine bug must
+# not enter a 6 h auto-retry episode. Enforced at QueueConfig validation.
+# ---------------------------------------------------------------------------
+
+# Canonical defaults — QueueConfig field defaults derive from this tuple.
+DEFAULT_USAGE_LIMIT_PATTERNS: tuple[str, ...] = (
+    "token plan",
+    "usage limit",
+)
+
+# Active pattern state — the defaults until load_config overrides.
+_usage_limit_patterns = DEFAULT_USAGE_LIMIT_PATTERNS
+
+
+def configure_usage_limit_patterns(
+    patterns: list[str] | tuple[str, ...] | None = None,
+) -> None:
+    """Override the quota-window (usage-limit) pattern list.
+
+    Called by ``daemon.config.load_config`` with the
+    ``queue.usage_limit_patterns`` list (config.yaml). Only a non-None
+    value is applied; an explicitly-EMPTY list disables the typed
+    wrapper (quota shapes fall back to the untyped terminal blocklist
+    re-raise). Installed via a single global assignment so concurrent
+    classifications never see a torn view during a runtime reload.
+
+    Args:
+        patterns: Message substrings typed as ``UsageLimitError``.
+    """
+    global _usage_limit_patterns
+    if patterns is None:
+        return
+    _usage_limit_patterns = _normalize_patterns(patterns)
+
+
+def reset_usage_limit_patterns() -> None:
+    """Restore the corpus-derived module defaults (test helper)."""
+    global _usage_limit_patterns
+    _usage_limit_patterns = DEFAULT_USAGE_LIMIT_PATTERNS
+
+
+def _matches_usage_limit(msg: str) -> bool:
+    """Case-insensitive substring test for quota-window message shapes."""
+    return _any_substring(_usage_limit_patterns, msg.lower())
+
+
 def _any_substring(patterns: tuple[str, ...], lowered_msg: str) -> bool:
     """Case-insensitive substring match of any pattern against a lowered message."""
     return any(p in lowered_msg for p in patterns)
@@ -288,6 +357,28 @@ class TransientLLMError(Exception):
         self.kind = kind
         self.original = original
         super().__init__(f"Transient LLM error ({kind}): {original}")
+
+
+class UsageLimitError(Exception):
+    """Provider quota exhaustion (token plan / usage limit windows).
+
+    Terminal at L1 by design — the window resets on the provider's
+    schedule, so second-scale retries are futile. The worker seam
+    routes it into the dedicated deferral path (deadline-bounded
+    re-dispatch); see docs/plans/usage-limit-deferral-path.md.
+
+    Deliberately NOT a ``TRANSIENT_EXCEPTIONS`` / ``TIMEOUT_EXCEPTIONS``
+    member — tenacity never retries it, and the task-processor W3
+    carve-out keeps it out of the stage-2 report cascade so the worker
+    seam owns the episode decision.
+
+    Wraps the original exception (``.original``) so the terminal report
+    can carry the provider's original error text.
+    """
+
+    def __init__(self, original: BaseException):
+        self.original = original
+        super().__init__(f"Usage limit (quota window): {original}")
 
 
 class ContextLengthExceededError(Exception):
@@ -859,8 +950,16 @@ def classify_llm_errors(llm_with_tools: Any) -> RunnableLambda:
             # verified) or it shadows them. The wrap decision lives in
             # the shared ``classify_transient_apierror_body`` helper
             # (also used by the L2 facade — one kind-routing
-            # implementation); misses re-raise (quota / bad-params
-            # shapes stay terminal, guarded by the mandatory blocklist).
+            # implementation); misses re-raise (bad-params shapes stay
+            # terminal, guarded by the mandatory blocklist).
+            #
+            # Quota-window check FIRST (usage-limit-deferral-path W1):
+            # quota hits are a subset of today's blocklist hits, so
+            # typing them before the allowlist/blocklist flow preserves
+            # every other shape byte-identically.
+            if _matches_usage_limit(str(e)):
+                logger.error(f"[LLM] Usage limit (quota window) — typed terminal, deferral path takes over: {_truncate_error(e)}")
+                raise UsageLimitError(e) from e
             wrapper = classify_transient_apierror_body(e)
             if wrapper is not None:
                 logger.warning(f"[LLM] Transient API error (bare, pattern-matched), will retry: {_truncate_error(e)}")
@@ -901,6 +1000,14 @@ def classify_llm_errors(llm_with_tools: Any) -> RunnableLambda:
             # bug re-raises unchanged (non-retryable). Note
             # LLMResponseValidationError (also a ValueError subclass,
             # if it is one) is handled by its own earlier branch.
+            #
+            # Quota-window check FIRST (usage-limit-deferral-path W1):
+            # the cc753c2f §review guard proved quota text can ride
+            # 200-body dicts — the same typing as the bare-APIError
+            # channel, before the transient pattern match.
+            if _matches_usage_limit(str(e)):
+                logger.error(f"[LLM] Usage limit in 200-body (ValueError channel) — typed terminal, deferral path takes over: {_truncate_error(e)}")
+                raise UsageLimitError(e) from e
             if _matches_transient_valueerror(str(e)):
                 logger.warning(f"[LLM] Transient error body (ValueError, pattern-matched), will retry: {_truncate_error(e)}")
                 raise TransientLLMError("value_error_body", e) from e

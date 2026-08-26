@@ -1143,6 +1143,116 @@ class SQLModelInstanceRepository:
             row = conn.execute(stmt).fetchone()
         return int(row[0]) if row else 0
 
+    def get_metadata_value(self, instance_id: str, key: str) -> Any | None:
+        """Read ONE top-level metadata key without hydrating the row.
+
+        Targeted single-key accessor for hot paths (e.g. the usage-limit
+        episode anchor, read on every quota sighting) where a full
+        ``get()`` — entire instances row plus the whole metadata JSON
+        document — is pure overhead. Dialect-aware:
+
+        * PostgreSQL: ``metadata ->> :key`` (text extraction).
+        * SQLite:     ``json_extract(metadata, :path)``.
+
+        Returns ``None`` when the row is missing, the column is NULL,
+        or the key is absent — callers that need to distinguish must
+        use ``get()``.
+
+        Type note: extracted TEXT is re-parsed to restore JSON types
+        (numbers, containers). Boolean fidelity is NOT guaranteed on
+        SQLite (``json_extract`` returns JSON ``true`` as integer 1) —
+        use ``get()`` when ``is True``/``is False`` identity matters.
+        """
+        with SQLModelSession(self.engine) as db_session:
+            dialect = (
+                db_session.bind.dialect.name
+                if db_session.bind is not None
+                else "sqlite"
+            )
+            if dialect == "postgresql":
+                stmt = text(
+                    "SELECT metadata ->> :key FROM instances "
+                    "WHERE instance_id = :instance_id"
+                )
+                params: dict[str, Any] = {"key": key, "instance_id": instance_id}
+            else:
+                stmt = text(
+                    "SELECT json_extract(metadata, :path) FROM instances "
+                    "WHERE instance_id = :instance_id"
+                )
+                params = {"path": f"$.{key}", "instance_id": instance_id}
+            row = db_session.execute(stmt, params).fetchone()
+            if row is None:
+                return None
+            value = row[0]
+            if value is None:
+                return None
+            # The extraction returns TEXT; restore the JSON type when the
+            # stored value was not itself a string (numbers, booleans,
+            # JSON containers). A cheap re-parse keeps the return contract
+            # identical to ``instance_metadata.get(key)``.
+            try:
+                return json.loads(value)
+            except (TypeError, ValueError):
+                return value
+
+    def delete_metadata_if_present(self, instance_id: str, key: str) -> bool:
+        """Conditionally delete one metadata key — no write when absent.
+
+        Variant of :meth:`delete_metadata` for hot-path clears (e.g. the
+        usage-limit anchor on every successful task): the WHERE clause
+        carries a key-presence predicate (PostgreSQL ``metadata ? :key``,
+        SQLite ``json_type(metadata, :path) IS NOT NULL``) so an absent
+        key matches ZERO rows — no UPDATE, no ``updated_at`` bump, no
+        rewrite of the JSON document, no post-commit refresh SELECT.
+
+        Returns:
+            ``True`` when a row was matched and the key deleted;
+            ``False`` when the instance or the key is absent (no-op).
+        """
+        with SQLModelSession(self.engine) as db_session:
+            dialect = (
+                db_session.bind.dialect.name
+                if db_session.bind is not None
+                else "sqlite"
+            )
+            now = datetime.now(timezone.utc).isoformat()
+
+            if dialect == "postgresql":
+                update_sql = text(
+                    """
+                    UPDATE instances
+                    SET metadata = metadata - :key,
+                        updated_at = :now
+                    WHERE instance_id = :instance_id
+                      AND metadata ? :key
+                    """
+                )
+                params = {
+                    "key": key,
+                    "now": now,
+                    "instance_id": instance_id,
+                }
+            else:
+                update_sql = text(
+                    """
+                    UPDATE instances
+                    SET metadata = json_remove(metadata, :path),
+                        updated_at = :now
+                    WHERE instance_id = :instance_id
+                      AND json_type(metadata, :path) IS NOT NULL
+                    """
+                )
+                params = {
+                    "path": f"$.{key}",
+                    "now": now,
+                    "instance_id": instance_id,
+                }
+
+            result = db_session.execute(update_sql, params)
+            db_session.commit()
+            return bool(result.rowcount)
+
     def find_instances_with_metadata_key(
         self, key: str, value: Any
     ) -> list[Instance]:

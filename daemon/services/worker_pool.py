@@ -8,11 +8,24 @@ import logging
 import re
 import threading
 import time
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from daemon.cancellation import CancellationReason, OperationCancelledError
 from daemon.constants import MAX_ERROR_LEN
+from daemon.llm_error_classifier import UsageLimitError
 from .main_loop_bridge import MainLoopBridge
+from .usage_limit_schedule import (
+    DEFAULT_USAGE_LIMIT_RETRY_DELAYS_SECONDS,
+    DEFAULT_USAGE_LIMIT_RETRY_JITTER_FRACTION,
+    DEFAULT_USAGE_LIMIT_WINDOW_SECONDS,
+    clear_usage_limit_first_seen,
+    next_usage_limit_retry_at,
+    read_usage_limit_first_seen,
+    usage_limit_deadline,
+    usage_limit_in_window,
+    write_usage_limit_first_seen,
+)
 from .work_notifier import notify_work_watchers
 
 if TYPE_CHECKING:
@@ -185,6 +198,13 @@ class Worker(threading.Thread):
         timeout_grace_seconds: float = 30.0,
         work_resolver=None,  # WorkResolverService — Phase 2 Batch 2 notification
         watcher_repo=None,  # JobWatcherRepository — Phase 2 Batch 2 notification
+        usage_limit_window_seconds: float = DEFAULT_USAGE_LIMIT_WINDOW_SECONDS,
+        usage_limit_retry_delays_seconds: tuple[float, ...] | list[float] = (
+            DEFAULT_USAGE_LIMIT_RETRY_DELAYS_SECONDS
+        ),
+        usage_limit_retry_jitter_fraction: float = (
+            DEFAULT_USAGE_LIMIT_RETRY_JITTER_FRACTION
+        ),
     ):
         """Initialize a worker thread.
 
@@ -215,6 +235,13 @@ class Worker(threading.Thread):
                 the notify call.
             watcher_repo: Optional JobWatcherRepository — Phase 2
                 Batch 2 terminal-notification claim.
+            usage_limit_window_seconds: Usage-limit episode horizon
+                (dedicated deferral path — see
+                ``_handle_usage_limit``); 6 h default.
+            usage_limit_retry_delays_seconds: Usage-limit wake
+                schedule steps (3m/5m/10m/15m-cap default).
+            usage_limit_retry_jitter_fraction: Per-wake jitter
+                fraction for the usage-limit schedule.
         """
         super().__init__(daemon=True)
         self.worker_id = worker_id
@@ -225,6 +252,10 @@ class Worker(threading.Thread):
         self._max_retries = max_retries
         self._retry_backoff_base = retry_backoff_base
         self._retry_backoff_max = retry_backoff_max
+        # Dedicated usage-limit deferral path knobs (W4/W5).
+        self._usage_limit_window_seconds = usage_limit_window_seconds
+        self._usage_limit_retry_delays = tuple(usage_limit_retry_delays_seconds)
+        self._usage_limit_retry_jitter_fraction = usage_limit_retry_jitter_fraction
         self._stop_event = threading.Event()
         self._tasks_claimed = 0
         self._tasks_completed = 0
@@ -575,6 +606,23 @@ class Worker(threading.Thread):
             # Task stays in RUNNING state — no failure, no retry
             return
 
+        except UsageLimitError as e:
+            # Dedicated usage-limit deferral path
+            # (docs/plans/usage-limit-deferral-path.md W4): the worker
+            # seam owns the episode decision. The task processor's W3
+            # carve-out kept the stage-2 report cascade from firing; this
+            # branch implements usage-limit POLICY (anchor, deadline,
+            # fixed wake schedule, budget-free deferrals) on the reused
+            # retry machinery. Placement: AFTER the cancellation
+            # handlers, BEFORE the generic failure lane —
+            # ``_handle_usage_limit`` returns normally on in-window
+            # deferrals, so ``_handle_task_failure`` never fires.
+            # MUST NOT raise out of this block (rev2 §3.3): a raise here
+            # escapes the sibling ``except Exception`` below and
+            # surfaces as an unexpected error attributed to the wrong
+            # cause — the handler soft-fails internally.
+            self._handle_usage_limit(task, e)
+
         except Exception as e:
             # Other error — decide retry vs permanent fail
             error_msg = _truncate_error(str(e))
@@ -828,6 +876,167 @@ class Worker(threading.Thread):
                     error=f"Task cancelled: {reason.value}",
                 )
     
+    def _handle_usage_limit(self, task: "Task", err: UsageLimitError) -> None:
+        """Dedicated usage-limit deferral path — the episode decision owner.
+
+        Called ONLY from the ``except UsageLimitError`` branch of
+        :meth:`_process_with_timeout` (docs/plans/usage-limit-
+        deferral-path.md W4-W6). All usage-limit POLICY lives here:
+
+        1. Anchor (set-once per episode): read
+           ``usage_limit_first_seen_at`` from instance metadata; absent
+           → stamp ``now`` (persisted BEFORE any branching — crash-safe
+           monotonic clock). Soft-fail: on a failed read/write the
+           degenerate ``first_seen = now`` applies.
+        2. In-window → defer: ``schedule_retry`` with the W5 schedule
+           and ``bypass_retry_budget=True`` (budget-free deferrals;
+           ``retry_count`` still grows for observability), then release
+           the dependency-bus watchers for the cancelled parent (H1 —
+           mirrors the TIMEOUT lane's post-incident fix). Per-attempt
+           observables are ONE log line, nothing else: no report, no
+           instance ERROR, no message FAILED, no hierarchy deletion, no
+           error event (the W3 carve-out held the stage-2 cascade).
+        3. Past-deadline → the episode's ONE report, SELF-COMPOSED and
+           race-gated: the ENTIRE terminal composition (parent notify +
+           watcher notify + anchor clear) fires only when ``fail_task``
+           WON its status-guard race (returned non-None). A lost race
+           means another actor terminalized or re-childed the task
+           (W8's recovery child, an operator cancel) and reporting here
+           would zombie-kill a live episode or double-report.
+        4. Success inside the window clears the anchor silently (W6,
+           in the pipeline success callback — not here).
+
+        This method MUST NOT raise (review rev2 §3.3): an exception
+        escaping the ``except UsageLimitError`` block propagates past
+        the sibling ``except Exception`` handler and surfaces as an
+        unexpected error attributed to the wrong cause. The whole
+        policy body is wrapped; anchor reads/writes inside are
+        individually soft-fail.
+        """
+        try:
+            self._usage_limit_episode_decide(task, err)
+        except Exception as e:  # noqa: BLE001 — handler must never raise
+            logger.error(
+                f"Worker {self.worker_id}: usage-limit handler failed for "
+                f"task {task.id} (instance={task.instance_id[:8]}...): "
+                f"{type(e).__name__}: {e}",
+                exc_info=True,
+            )
+
+    def _usage_limit_episode_decide(
+        self, task: "Task", err: UsageLimitError
+    ) -> None:
+        """Policy body of :meth:`_handle_usage_limit` (never raises)."""
+        task_repo = self._task_processor._task_repo
+        try:
+            manager = self._task_processor._manager
+        except AttributeError:
+            manager = None
+        instance_repo = (
+            getattr(manager, "_instance_repository", None)
+            if manager is not None
+            else None
+        )
+
+        now = datetime.now(timezone.utc)
+
+        # 1. Anchor — set-once per episode, soft-fail (degenerate:
+        #    a failed read/write collapses to ``first_seen = now``,
+        #    i.e. a fresh window; the next attempt re-reads).
+        first_seen = read_usage_limit_first_seen(instance_repo, task.instance_id)
+        if first_seen is None:
+            first_seen = now
+            write_usage_limit_first_seen(instance_repo, task.instance_id, now)
+
+        # Shared boundary predicate (usage_limit_schedule) — the same
+        # one stale recovery's liveness gate uses, so the two consumers
+        # cannot drift on the boundary semantics.
+        deadline = usage_limit_deadline(first_seen, self._usage_limit_window_seconds)
+
+        # 2. In-window → defer (budget-free, W5 schedule).
+        if usage_limit_in_window(first_seen, now, self._usage_limit_window_seconds):
+            next_wake = next_usage_limit_retry_at(
+                first_seen,
+                now,
+                delays=self._usage_limit_retry_delays,
+                jitter_fraction=self._usage_limit_retry_jitter_fraction,
+            )
+            retry_task = task_repo.schedule_retry(
+                task_id=task.id,
+                max_retries=self._max_retries,
+                next_retry_at=next_wake,
+                bypass_retry_budget=True,
+            )
+            if retry_task is None:
+                # Gate closed — a concurrent retry-creating actor won
+                # (e.g. W8's anchor-gated recovery child, in which case
+                # the episode is STILL ALIVE via that child) or the task
+                # met a genuinely terminal fate (operator cancel).
+                # Someone else decided; we stay silent — composing the
+                # terminal here would zombie-kill the episode.
+                logger.info(
+                    f"Worker {self.worker_id}: usage-limit deferral for "
+                    f"task {task.id} skipped — retry gate closed by "
+                    f"another actor; episode continues elsewhere"
+                )
+                return
+            # Bus-watcher release (review §3.1 / H1): without it the
+            # bus's PENDING watcher keyed on the original
+            # ``source_task_id`` strands the parent in
+            # ``waiting_children`` forever (production incident
+            # 2026-06-26). F6 covers the DB ``job_watchers``; this
+            # covers the in-memory dependency bus.
+            self._cancel_bus_watchers_for_task(task.id, retry_task.id)
+            logger.info(
+                f"Worker {self.worker_id}: usage-limit deferral for task "
+                f"{task.id} (instance={task.instance_id[:8]}..., attempt "
+                f"{retry_task.retry_count}) — next wake "
+                f"{next_wake.isoformat()}, deadline {deadline.isoformat()}"
+            )
+            return
+
+        # 3. Past-deadline → the episode's ONE report: self-composed,
+        #    race-gated on the ``fail_task`` outcome. The TIMEOUT
+        #    precedent fires the parent notify unconditionally because
+        #    no other caller can re-child its task; THIS path can lose
+        #    the task to W8's recovery child or an operator cancel, so
+        #    the stronger gate applies (review rev2 §2.1).
+        error_text = (
+            f"usage_limit_deadline: window exceeded "
+            f"({int(self._usage_limit_window_seconds)}s from first sighting "
+            f"{first_seen.isoformat()}); original provider error: "
+            f"{_truncate_error(str(err.original))}"
+        )
+        failed_task = task_repo.fail_task(task.id, error_text)
+        if failed_task is None:
+            # LOST the race — the episode is not ours to report.
+            logger.info(
+                f"Worker {self.worker_id}: usage-limit terminal for task "
+                f"{task.id} skipped — fail_task guard lost to another "
+                f"actor; no report composed"
+            )
+            return
+        self._notify_parent_of_failure(
+            instance_id=task.instance_id,
+            error=(
+                f"Usage limit window exceeded (quota episode since "
+                f"{first_seen.isoformat()}): {_truncate_error(str(err.original))}"
+            ),
+            error_type="usage_limit_deadline",
+            message_id=task.message_id,
+        )
+        self._schedule_work_notification(failed_task, "failed", error=error_text)
+        # Terminal ENDS the episode — clear the anchor so a later quota
+        # hit on a re-used instance gets a FRESH window (W6 clear-site
+        # 2) and W8's bypass does not over-reach on the stale anchor.
+        clear_usage_limit_first_seen(instance_repo, task.instance_id)
+        self._tasks_failed += 1
+        logger.warning(
+            f"Worker {self.worker_id}: task {task.id} permanently failed — "
+            f"usage-limit window exceeded (first sighting "
+            f"{first_seen.isoformat()})"
+        )
+
     def _handle_task_failure(self, task: "Task", error: str) -> None:
         """Handle task failure — schedule retry or permanent fail."""
         # For now: fail permanently. Retry-on-error is a separate feature.
@@ -992,6 +1201,13 @@ class WorkerPool:
         timeout_grace_seconds: float = 30.0,
         work_resolver=None,  # WorkResolverService — Phase 2 Batch 2 notification
         watcher_repo=None,  # JobWatcherRepository — Phase 2 Batch 2 notification
+        usage_limit_window_seconds: float = DEFAULT_USAGE_LIMIT_WINDOW_SECONDS,
+        usage_limit_retry_delays_seconds: tuple[float, ...] | list[float] = (
+            DEFAULT_USAGE_LIMIT_RETRY_DELAYS_SECONDS
+        ),
+        usage_limit_retry_jitter_fraction: float = (
+            DEFAULT_USAGE_LIMIT_RETRY_JITTER_FRACTION
+        ),
     ):
         """Initialize the worker pool.
 
@@ -1018,6 +1234,13 @@ class WorkerPool:
             watcher_repo: Optional JobWatcherRepository — Phase 2 Batch 2
                 terminal-notification claim. Same nullability contract
                 as ``work_resolver``.
+            usage_limit_window_seconds: Usage-limit episode horizon
+                (dedicated deferral path — see
+                ``Worker._handle_usage_limit``); 6 h default.
+            usage_limit_retry_delays_seconds: Usage-limit wake schedule
+                steps (3m/5m/10m/15m-cap default).
+            usage_limit_retry_jitter_fraction: Per-wake jitter fraction
+                for the usage-limit schedule.
         """
         self._task_processor = task_processor
         self._num_workers = num_workers
@@ -1027,6 +1250,12 @@ class WorkerPool:
         self._retry_backoff_max = retry_backoff_max
         self._heartbeat_interval_seconds = heartbeat_interval_seconds
         self._timeout_grace_seconds = timeout_grace_seconds
+        # Dedicated usage-limit deferral path knobs (W4/W5/W7).
+        self._usage_limit_window_seconds = usage_limit_window_seconds
+        self._usage_limit_retry_delays_seconds = tuple(
+            usage_limit_retry_delays_seconds
+        )
+        self._usage_limit_retry_jitter_fraction = usage_limit_retry_jitter_fraction
         # Phase 2 Batch 2 — notification dependencies for the four
         # worker-side terminal sites (``complete_task`` /
         # ``fail_task`` / ``cancel_task`` at ``_handle_cancellation``
@@ -1145,6 +1374,13 @@ class WorkerPool:
                 timeout_grace_seconds=self._timeout_grace_seconds,
                 work_resolver=self._work_resolver,
                 watcher_repo=self._watcher_repo,
+                usage_limit_window_seconds=self._usage_limit_window_seconds,
+                usage_limit_retry_delays_seconds=(
+                    self._usage_limit_retry_delays_seconds
+                ),
+                usage_limit_retry_jitter_fraction=(
+                    self._usage_limit_retry_jitter_fraction
+                ),
             )
             worker.start()
             self._workers.append(worker)

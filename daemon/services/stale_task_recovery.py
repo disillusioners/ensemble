@@ -11,6 +11,13 @@ from typing import Callable, TYPE_CHECKING
 from daemon.repositories.instance.models import InstanceStatus
 from daemon.repositories.task.models import TaskStatus
 from daemon.services.job_state_machine import InvalidTransitionError
+from daemon.services.usage_limit_schedule import (
+    DEFAULT_USAGE_LIMIT_RETRY_DELAYS_SECONDS,
+    DEFAULT_USAGE_LIMIT_RETRY_JITTER_FRACTION,
+    DEFAULT_USAGE_LIMIT_WINDOW_SECONDS,
+    live_usage_limit_first_seen,
+    next_usage_limit_retry_at,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +93,13 @@ class StaleTaskRecovery:
         work_resolver=None,  # Phase 2 Batch 2 — WorkResolverService for terminal notif routing
         watcher_repo=None,  # Phase 2 Batch 2 — JobWatcherRepository for terminal notif claim
         watchover_terminate_grace_seconds: int = DEFAULT_WATCHOVER_TERMINATE_GRACE_SECONDS,
+        usage_limit_window_seconds: float = DEFAULT_USAGE_LIMIT_WINDOW_SECONDS,
+        usage_limit_retry_delays_seconds: tuple[float, ...] | list[float] = (
+            DEFAULT_USAGE_LIMIT_RETRY_DELAYS_SECONDS
+        ),
+        usage_limit_retry_jitter_fraction: float = (
+            DEFAULT_USAGE_LIMIT_RETRY_JITTER_FRACTION
+        ),
     ):
         """Initialize stale task recovery.
         
@@ -112,6 +126,15 @@ class StaleTaskRecovery:
                 ``watchover_pending_termination`` marker before the background
                 sweep may trigger its termination cascade. Defaults to 60 seconds
                 to avoid racing the normal post-graph consumer.
+            usage_limit_window_seconds: Usage-limit episode horizon (W8).
+                When a stale task's instance has a LIVE usage-limit
+                anchor, the force-cancel retry bypasses the retry-count
+                budget and wakes on the episode schedule — see
+                ``_usage_limit_episode_kwargs``.
+            usage_limit_retry_delays_seconds: Episode wake schedule steps
+                (W5; shared with the worker seam).
+            usage_limit_retry_jitter_fraction: Per-wake jitter fraction
+                (W5; shared with the worker seam).
         """
         self._task_repo = task_repository
         self._message_repo = message_repository
@@ -137,6 +160,12 @@ class StaleTaskRecovery:
         self._watchover_terminate_grace_seconds = max(
             0, int(watchover_terminate_grace_seconds)
         )
+        # Usage-limit episode timing (W8) — mirrors the worker seam's
+        # knobs so a recovery child wakes on the SAME schedule the
+        # worker would have derived.
+        self._usage_limit_window_seconds = usage_limit_window_seconds
+        self._usage_limit_retry_delays = tuple(usage_limit_retry_delays_seconds)
+        self._usage_limit_retry_jitter_fraction = usage_limit_retry_jitter_fraction
     
     def start(self) -> None:
         """Start the background recovery thread."""
@@ -192,6 +221,68 @@ class StaleTaskRecovery:
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=timezone.utc)
         return parsed.astimezone(timezone.utc)
+
+    def _usage_limit_episode_kwargs(self, instance_id: str | None) -> dict:
+        """Keyword overrides for force-cancel retries of usage-limit episodes (W8).
+
+        The hole this closes: a daemon crash while a usage-limit
+        deferral attempt was RUNNING leaves a stale RUNNING task with a
+        bypass-grown ``retry_count``. The default
+        ``force_cancel_and_schedule_retry`` gate
+        (``retry_count < max_retries``) would return None and recovery
+        would PERMANENTLY fail the task mid-window — the episode dies
+        with a generic stale message instead of surviving to its
+        deadline.
+
+        The LIVE instance anchor (present AND inside the episode window)
+        is exactly the "deadline-bounded caller" proof: it is
+        instance-scoped, so the gate cannot over-reach (a non-episode
+        stale task is unaffected — returns ``{}``, byte-identical
+        default-budget behavior). When live, the retry bypasses the
+        budget AND wakes on the W5 episode schedule — without the
+        explicit ``next_retry_at`` the child would inherit the
+        ``2**retry_count`` backoff, which with a bypass-grown count
+        caps at ``backoff_max`` (3600 s) and burns up to 60 min of the
+        6 h window per recovery event (review rev3 §3.1).
+
+        Only the two force-cancel callsites use this — the plain
+        ``schedule_retry`` recovery callsites are unreachable for
+        episode shapes (episode parents are CANCELLED with
+        ``retry_scheduled = true`` atomically with the child insert, so
+        the C2 check and the orphan finder both skip them); blanket-
+        threading the bypass through them would weaken the
+        gate-cannot-over-reach scoping (review rev2 §3.1). Related
+        invariant (review rev3 §3.5): the Python-side budget gate below
+        (``retry_count >= max_retries`` in the force-cancel-returned-
+        None else) stays unreachable for live episodes because the
+        bypass path returns a child — do not "fix" it into a retry
+        path.
+
+        Returns:
+            ``{"next_retry_at": <dt>, "bypass_retry_budget": True}``
+            when the instance has a live usage-limit anchor, else
+            ``{}`` (defaults, byte-identical to pre-W8 behavior).
+        """
+        instance_repo = getattr(
+            self._instance_manager, "_instance_repository", None
+        )
+        if instance_repo is None:
+            return {}
+        first_seen = live_usage_limit_first_seen(
+            instance_repo,
+            instance_id,
+            window_seconds=self._usage_limit_window_seconds,
+        )
+        if first_seen is None:
+            return {}
+        now = datetime.now(timezone.utc)
+        wake_at = next_usage_limit_retry_at(
+            first_seen,
+            now,
+            delays=self._usage_limit_retry_delays,
+            jitter_fraction=self._usage_limit_retry_jitter_fraction,
+        )
+        return {"next_retry_at": wake_at, "bypass_retry_budget": True}
 
     def _sweep_watchover_terminate_markers(self) -> int:
         """Schedule cascades for stale persistent watchover termination intents.
@@ -362,15 +453,26 @@ class StaleTaskRecovery:
                 
                 # FIX: W4 — Track whether we actually took action
                 task_acted_upon = False
-                
+                # usage-limit-deferral-path §2.2 — a retry child INHERITS
+                # the parent's ``message_id``; failing the message under
+                # a live child would strand it (the pipeline's claim is
+                # best-effort on non-READY and stage-4 ``complete()``
+                # requires processing status). Message-failing is scoped
+                # to TERMINAL recoveries only (the fail_task branches).
+                retry_child_created = False
+
                 if current.status == TaskStatus.RUNNING.value:
                     # Task still running after grace period — force cancel + retry atomically
+                    # usage-limit-deferral-path W8: a LIVE episode anchor
+                    # proves this is a deadline-bounded caller — bypass
+                    # the retry budget and wake on the episode schedule.
                     retry_task = self._task_repo.force_cancel_and_schedule_retry(
                         task_id=task.id,
                         max_retries=self._max_retries,
                         reason=f"Stale task force-cancelled (>{self._threshold_minutes}min)",
                         backoff_base=self._retry_backoff_base,
                         backoff_max=self._retry_backoff_max,
+                        **self._usage_limit_episode_kwargs(task.instance_id),
                     )
 
                     # Additive reconciler pass (Site 3: timeout). Runs
@@ -413,6 +515,7 @@ class StaleTaskRecovery:
                         self._log_recovery_event(task, "force_cancelled_and_retried",
                                                    retry_task_id=retry_task.id)
                         task_acted_upon = True
+                        retry_child_created = True
                         # Notify the bus that the cancelled task is gone so
                         # parent-side watchers (registered against the cancelled
                         # ``source_task_id``) are released. See
@@ -485,6 +588,7 @@ class StaleTaskRecovery:
                             self._log_recovery_event(task, "retry_scheduled_by_recovery",
                                                        retry_task_id=retry_task.id)
                             task_acted_upon = True
+                            retry_child_created = True
                             # Bus cancel: same reason as the force-cancel branch
                             # above. The Worker cancelled the task but didn't
                             # notify the bus; without this call the parent-side
@@ -527,8 +631,14 @@ class StaleTaskRecovery:
                                     f"after {self._max_retries} retries",
                                 )
 
-                # FIX: W6 — Only fail the associated message if we actually acted upon the task
-                if task_acted_upon and task.message_id:
+                # FIX: W6 — Only fail the associated message if we actually acted upon the task.
+                # usage-limit-deferral-path §2.2 — TERMINAL recoveries only: a retry
+                # child inherits the same ``message_id``, so failing the message
+                # while the child is pending would strand it FAILED for good (the
+                # pipeline's stage-1.5 claim is best-effort on non-READY; stage-4
+                # ``complete()`` requires processing status). Applies to episodes
+                # AND ordinary TIMEOUT recoveries — same inherited-message shape.
+                if task_acted_upon and not retry_child_created and task.message_id:
                     try:
                         self._message_repo.fail(
                             task.message_id,
@@ -654,15 +764,19 @@ class StaleTaskRecovery:
             
             for task in stale_tasks:
                 try:
-                    # Force cancel + retry in single transaction
+                    # Force cancel + retry in single transaction.
+                    # usage-limit-deferral-path W8: a LIVE episode anchor
+                    # proves this is a deadline-bounded caller — bypass
+                    # the retry budget and wake on the episode schedule.
                     retry_task = self._task_repo.force_cancel_and_schedule_retry(
                         task_id=task.id,
                         max_retries=self._max_retries,
                         reason="Startup recovery: worker crash",
                         backoff_base=self._retry_backoff_base,
                         backoff_max=self._retry_backoff_max,
+                        **self._usage_limit_episode_kwargs(task.instance_id),
                     )
-                    
+
                     if retry_task:
                         logger.info(
                             f"Startup recovery: task {task.id} → retry {retry_task.id}"
@@ -677,6 +791,7 @@ class StaleTaskRecovery:
                         self._notify_bus_of_cancel_and_retry(
                             task.id, retry_task.id, origin="startup_stale_running"
                         )
+                        recovered += 1
                     else:
                         failed_task = self._task_repo.fail_task(
                             task.id,
@@ -686,9 +801,37 @@ class StaleTaskRecovery:
                             f"Startup recovery: task {task.id} permanently failed"
                         )
                         self._log_recovery_event(task, "startup_permanently_failed")
-                        # Phase 2 Batch 2 — fire watcher notification
-                        # only if the atomic fail_task returned non-None.
+                        recovered += 1
+                        # Notify parent — PERMANENT-FAIL branch ONLY
+                        # (usage-limit-deferral-path §2.1 fix, review
+                        # rev3): this callback sits at the sibling level
+                        # in the pre-fix code, firing a spurious
+                        # permanent-failure report (child ERROR +
+                        # hierarchy cleanup via
+                        # ``manager._on_stale_task_permanent_failure``)
+                        # on EVERY successfully-retried task — including
+                        # an anchor-gated usage-limit recovery whose
+                        # episode is still LIVE via its child (the
+                        # rev2 §2.1 zombie-kill class). Gated on
+                        # ``failed_task is not None`` per the Phase 2
+                        # Batch 2 convention: a lost status-guard race
+                        # means another actor terminalized the task and
+                        # owns the report.
                         if failed_task is not None:
+                            if self._on_task_permanently_failed:
+                                try:
+                                    self._on_task_permanently_failed(
+                                        task.instance_id,
+                                        f"Startup recovery: max retries ({self._max_retries}) exceeded",
+                                        task.message_id,
+                                    )
+                                except Exception as cb_err:
+                                    logger.error(
+                                        f"Failed to notify parent of permanent task failure "
+                                        f"(instance={task.instance_id[:8]}..., error={cb_err})"
+                                    )
+                            # Phase 2 Batch 2 — fire watcher notification
+                            # only if the atomic fail_task returned non-None.
                             self._schedule_work_notification(
                                 failed_task,
                                 "failed",
@@ -696,21 +839,6 @@ class StaleTaskRecovery:
                                 f"({self._max_retries}) exceeded",
                             )
 
-                    recovered += 1
-                    # NEW: Notify parent
-                    if self._on_task_permanently_failed:
-                        try:
-                            self._on_task_permanently_failed(
-                                task.instance_id,
-                                f"Startup recovery: max retries ({self._max_retries}) exceeded",
-                                task.message_id,
-                            )
-                        except Exception as cb_err:
-                            logger.error(
-                                f"Failed to notify parent of permanent task failure "
-                                f"(instance={task.instance_id[:8]}..., error={cb_err})"
-                            )
-                    
                 except Exception as e:
                     logger.error(f"Startup recovery failed for task {task.id}: {e}")
         

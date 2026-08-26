@@ -5650,6 +5650,13 @@ class InstanceManager:
             on_task_permanently_failed=self._on_stale_task_permanent_failure,
             on_task_cancelled_and_retried=self._on_stale_task_cancelled_and_retried,
             instance_manager=self,
+            usage_limit_window_seconds=svc.usage_limit_window_seconds,
+            usage_limit_retry_delays_seconds=(
+                svc.usage_limit_retry_delays_seconds
+            ),
+            usage_limit_retry_jitter_fraction=(
+                svc.usage_limit_retry_jitter_fraction
+            ),
         )
         # FIX: C3 — Assign BEFORE calling recover_on_startup() so _stale_recovery is set
         # even if recover_on_startup() raises an exception
@@ -5846,6 +5853,13 @@ class InstanceManager:
             retry_backoff_base=svc.task_retry_backoff_base,
             retry_backoff_max=svc.task_retry_backoff_max,
             heartbeat_interval_seconds=svc.task_heartbeat_interval_seconds,
+            usage_limit_window_seconds=svc.usage_limit_window_seconds,
+            usage_limit_retry_delays_seconds=(
+                svc.usage_limit_retry_delays_seconds
+            ),
+            usage_limit_retry_jitter_fraction=(
+                svc.usage_limit_retry_jitter_fraction
+            ),
         )
         self._worker_pool.start()
         

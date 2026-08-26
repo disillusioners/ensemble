@@ -276,3 +276,63 @@ class TestConcurrentMetadataWrites:
             assert final.instance_metadata.get(f"k_{i}") == i
         # Title present.
         assert final.instance_metadata.get("title") == "Auto Title"
+
+
+# =============================================================================
+# Targeted single-key accessors (usage-limit deferral path)
+# =============================================================================
+
+
+class TestGetMetadataValue:
+    """``get_metadata_value`` — single-key read without row hydration."""
+
+    def test_reads_string_value(self, repo):
+        _create(repo)
+        repo.set_metadata("test-instance", "anchor", "2026-08-27T00:00:00+00:00")
+        assert (
+            repo.get_metadata_value("test-instance", "anchor")
+            == "2026-08-27T00:00:00+00:00"
+        )
+
+    def test_restores_non_string_json_types(self, repo):
+        _create(repo)
+        repo.set_metadata("test-instance", "count", 5)
+        repo.set_metadata("test-instance", "flag", True)
+        assert repo.get_metadata_value("test-instance", "count") == 5
+        # SQLite json_extract returns JSON true as integer 1 — documented
+        # type quirk of the targeted accessor (the anchor is a string).
+        assert repo.get_metadata_value("test-instance", "flag") in (1, True)
+
+    def test_missing_key_and_missing_instance_return_none(self, repo):
+        _create(repo)
+        assert repo.get_metadata_value("test-instance", "absent") is None
+        assert repo.get_metadata_value("no-such-instance", "anchor") is None
+
+    def test_null_metadata_column_returns_none(self, repo):
+        _create(repo)
+        assert repo.get_metadata_value("test-instance", "any") is None
+
+
+class TestDeleteMetadataIfPresent:
+    """``delete_metadata_if_present`` — conditional delete, no write on miss."""
+
+    def test_deletes_present_key_and_returns_true(self, repo):
+        _create(repo)
+        repo.set_metadata("test-instance", "anchor", "x")
+        repo.set_metadata("test-instance", "sibling", "y")
+
+        assert repo.delete_metadata_if_present("test-instance", "anchor") is True
+        assert repo.get_metadata_value("test-instance", "anchor") is None
+        # Sibling untouched.
+        assert repo.get_metadata_value("test-instance", "sibling") == "y"
+
+    def test_absent_key_is_zero_row_noop(self, repo):
+        _create(repo)
+        before = repo.get("test-instance")
+        assert repo.delete_metadata_if_present("test-instance", "absent") is False
+        after = repo.get("test-instance")
+        # No updated_at bump on the no-op path.
+        assert before.updated_at == after.updated_at
+
+    def test_missing_instance_returns_false(self, repo):
+        assert repo.delete_metadata_if_present("no-such-instance", "k") is False
