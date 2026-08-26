@@ -1,5 +1,7 @@
 """LLM error classification utilities for retry handling and context overflow detection."""
 
+from __future__ import annotations
+
 import logging
 import re
 from dataclasses import dataclass
