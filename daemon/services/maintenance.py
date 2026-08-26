@@ -350,11 +350,14 @@ class MaintenanceService:
 class CheckpointCleanupJob:
     """Job that cleans up orphaned and expired checkpoint data.
 
-    This job runs 4 cleanup operations in sequence:
+    This job runs 5 cleanup operations in sequence:
     (A) Delete checkpoint threads with no matching instance (orphans)
     (B) Delete checkpoint data for expired terminal instances
     (C) Enforce max_instance_history cap on terminal instances
     (D) Prune per-thread checkpoints to CHECKPOINT_MAX_PER_THREAD
+    (E) Reference-aware checkpoint_blobs prune (Phase 1 C3 — dry-run by
+        default, PostgreSQL-only, isolated so blob-bucket failures can
+        never affect A-D)
 
     Error Handling:
     - Each operation is wrapped in its own try/except.
@@ -407,7 +410,7 @@ class CheckpointCleanupJob:
         self._ui_prefs_repo = ui_prefs_repo
 
     async def execute(self) -> None:
-        """Run all 4 checkpoint cleanup operations.
+        """Run all 5 checkpoint cleanup operations.
 
         Each operation runs independently with its own error handling.
         Failures are logged but do not prevent subsequent operations.
@@ -446,6 +449,17 @@ class CheckpointCleanupJob:
 
         # Operation D: Prune per-thread checkpoints
         await self._prune_per_thread_checkpoints()
+
+        # Operation E (Phase 1 C3): reference-aware checkpoint_blobs prune.
+        # Isolated per the plan — a failure in the blob bucket must NEVER
+        # break the retention prune above (which has already completed)
+        # or any subsequent maintenance cycle. prune_unreferenced_blobs
+        # itself never raises; this belt-and-braces wrapper guarantees
+        # the isolation even if that contract regresses.
+        try:
+            await self._prune_unreferenced_blobs()
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Unreferenced blob prune operation failed: {e}")
 
         logger.info("Checkpoint cleanup job completed")
 
@@ -770,6 +784,33 @@ class CheckpointCleanupJob:
                 deleted=observed_total_deleted,
                 duration_ms=int((time.perf_counter() - t0) * 1000),
             )
+
+    async def _prune_unreferenced_blobs(self) -> None:
+        """(E) Phase 1 C3 — reference-aware checkpoint_blobs prune (dry-run default).
+
+        Deletes blobs whose (channel, version) is not referenced by
+        ``checkpoint->'channel_versions'`` of any REMAINING checkpoint row
+        in the same (thread_id, checkpoint_ns) — the direct anti-join
+        (decision D1: no reference-table machinery). The algorithm, the
+        zero-refs fail-safe, and the destructive env-flag gate all live in
+        ``daemon/services/checkpoint_prune.py`` (single owner per the C3
+        file table); this wrapper only delegates to it.
+
+        Conservative ladder: DRY-RUN ONLY by default (reports would-delete
+        counts + bytes, deletes nothing). The destructive arm requires
+        BOTH ``CHECKPOINT_BLOB_PRUNE_DRY_RUN=0`` AND
+        ``CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE=1`` and is structurally
+        unreachable otherwise (see checkpoint_prune module docstring).
+        PostgreSQL-only — no-ops with a WARNING on SQLite backends.
+
+        Candidates are enumerated via ``find_all_thread_ns_pairs`` (D21) —
+        ALL (thread_id, checkpoint_ns) pairs, NOT
+        ``find_excess_checkpoint_groups`` whose HAVING clause would skip
+        single-checkpoint threads.
+        """
+        from daemon.services.checkpoint_prune import prune_unreferenced_blobs
+
+        await prune_unreferenced_blobs(self._checkpointer)
 
     # ── Helper Methods ─────────────────────────────────────────────────────────
 
