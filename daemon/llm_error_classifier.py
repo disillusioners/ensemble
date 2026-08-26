@@ -2,6 +2,7 @@
 
 import logging
 import re
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -42,6 +43,216 @@ def _truncate_error(error: Exception | str, max_len: int = MAX_ERROR_LEN) -> str
     return error_str
 
 
+# ---------------------------------------------------------------------------
+# Non-status transient-channel pattern matching
+# (docs/plans/transient-channel-retry-widening.md work units 2/3/7).
+#
+# Four production fatality channels arrive without a retryable HTTP
+# status code: bare ``openai.APIError`` bodies (relayed rate-limit /
+# timeout text), 200-body ``ValueError`` shapes (proxy error dicts,
+# zero-chunk SSE streams), and mid-stream ``httpx.RemoteProtocolError``.
+# The classifier pattern-matches message text and wraps hits in
+# TransientLLMError. Patterns are case-insensitive substrings; defaults
+# come from the 2026-08-19→26 fatality corpus
+# (docs/bugs/transient-llm-failures-non-retryable-instance-death.md).
+#
+# Config-driven: ``daemon.config.load_config`` pushes the ``queue:``
+# pattern lists here via ``configure_transient_channel_patterns`` — edit
+# config.yaml to widen/narrow/disable without a code change. An EMPTY
+# allowlist disables the branch entirely (pure pass-through — the
+# additive-off switch).
+#
+# SINGLE SOURCE OF DEFAULTS: ``DEFAULT_TRANSIENT_CHANNEL_PATTERNS`` is
+# the canonical corpus-derived default bundle. ``daemon.config
+# .QueueConfig`` derives its field defaults from it (never a second
+# copy), and config.yaml entries are pure operator overrides — note
+# that REMOVING a key from config.yaml reverts to these built-in
+# defaults; disabling requires an explicit empty/trimmed list.
+#
+# Atomicity: the active state is ONE frozen bundle swapped in a single
+# global assignment, so a runtime ``load_config`` reload (e.g. the
+# keyword-extraction service) can never leave a reader with a torn
+# old-blocklist/new-allowlist view mid-classification.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class TransientChannelPatterns:
+    """Immutable non-status transient-channel pattern set.
+
+    Swapped atomically (single global assignment) by
+    ``configure_transient_channel_patterns``.
+    """
+
+    # C1 — bare openai.APIError messages treated as transient.
+    apierror_allowlist: tuple[str, ...] = (
+        "all models rate limited",       # 21 events — proxy all-upstreams 429
+        "context deadline exceeded",     # 2 events — relayed upstream timeout
+    )
+    # Timeout-body subset of the allowlist: these route to the 3-attempt
+    # timeout budget (kind='timeout_body') instead of the 10-attempt
+    # transient budget — each attempt can cost the upstream's full
+    # timeout, and docs/retry-architecture.md §5 warns about wall-clock
+    # amplification. QueueConfig validates subset ⊆ allowlist.
+    apierror_timeout_patterns: tuple[str, ...] = (
+        "context deadline exceeded",
+    )
+    # Mandatory-severity blocklist: an allowlist hit + blocklist hit →
+    # NON-retryable — enforced on BOTH the bare-APIError and the
+    # ValueError channels. Protects quota shapes ("Token Plan usage
+    # limit reached", corpus event 2056) that share wording families
+    # with allowlist entries, including when quota text is embedded in
+    # a 200-body proxy error dict. Auth shapes are unreachable here by
+    # design — auth errors arrive as APIStatusError and are caught at
+    # the status branch.
+    apierror_blocklist: tuple[str, ...] = (
+        "token plan",
+        "usage limit",
+        "invalid params",
+    )
+    # C2/C4 — ValueError body shapes from LangChain parsing of 200-body
+    # proxy errors / zero-chunk SSE streams.
+    # ``ultimate_model_retry_exhausted`` is proxy-dependent: disable it
+    # by setting an explicit trimmed list in config.yaml once the
+    # proxy's ultimate-routing transparency update ships (bug doc RC2).
+    valueerror_patterns: tuple[str, ...] = (
+        "no generations found",              # 4 events — zero-chunk SSE
+        "ultimate_model_retry_exhausted",    # 8 events — proxy 200-body dict
+    )
+    # C3 — httpx.RemoteProtocolError retryability gate (peer closed
+    # mid-body). Membership in the retry set is CONDITIONAL on this
+    # flag (like IndexError-on-backup), giving operators a config
+    # kill-switch without a redeploy.
+    remote_protocol_retryable: bool = True
+
+
+# Canonical defaults — QueueConfig field defaults derive from this bundle.
+DEFAULT_TRANSIENT_CHANNEL_PATTERNS = TransientChannelPatterns()
+
+# Active pattern state — the defaults until load_config overrides.
+_transient_patterns = DEFAULT_TRANSIENT_CHANNEL_PATTERNS
+
+
+def _normalize_patterns(patterns: list[str] | tuple[str, ...]) -> tuple[str, ...]:
+    """Strip, lowercase, and drop empties from a pattern list."""
+    return tuple(p.strip().lower() for p in patterns if p.strip())
+
+
+def configure_transient_channel_patterns(
+    apierror_allowlist: list[str] | tuple[str, ...] | None = None,
+    apierror_timeout_patterns: list[str] | tuple[str, ...] | None = None,
+    apierror_blocklist: list[str] | tuple[str, ...] | None = None,
+    valueerror_patterns: list[str] | tuple[str, ...] | None = None,
+    remote_protocol_retryable: bool | None = None,
+) -> None:
+    """Override the non-status transient-channel patterns.
+
+    Called by ``daemon.config.load_config`` with the ``queue:`` pattern
+    lists (config.yaml). Only the values passed as non-None are
+    overridden; an explicitly-empty allowlist/pattern list disables the
+    corresponding classifier branch (pure pass-through). The new state
+    is built from the current one and installed via a SINGLE global
+    assignment — concurrent classification attempts always see one
+    internally-consistent bundle (no torn reads during a runtime
+    config reload).
+
+    Args:
+        apierror_allowlist: Bare-APIError transient message substrings.
+        apierror_timeout_patterns: Subset routed to the timeout budget.
+        apierror_blocklist: Mandatory-precedence terminal substrings.
+        valueerror_patterns: ValueError-body transient substrings.
+        remote_protocol_retryable: Whether RemoteProtocolError retries.
+    """
+    global _transient_patterns
+    current = _transient_patterns
+    _transient_patterns = TransientChannelPatterns(
+        apierror_allowlist=(
+            _normalize_patterns(apierror_allowlist)
+            if apierror_allowlist is not None
+            else current.apierror_allowlist
+        ),
+        apierror_timeout_patterns=(
+            _normalize_patterns(apierror_timeout_patterns)
+            if apierror_timeout_patterns is not None
+            else current.apierror_timeout_patterns
+        ),
+        apierror_blocklist=(
+            _normalize_patterns(apierror_blocklist)
+            if apierror_blocklist is not None
+            else current.apierror_blocklist
+        ),
+        valueerror_patterns=(
+            _normalize_patterns(valueerror_patterns)
+            if valueerror_patterns is not None
+            else current.valueerror_patterns
+        ),
+        remote_protocol_retryable=(
+            remote_protocol_retryable
+            if remote_protocol_retryable is not None
+            else current.remote_protocol_retryable
+        ),
+    )
+
+
+def reset_transient_channel_patterns() -> None:
+    """Restore the corpus-derived module defaults (test helper)."""
+    global _transient_patterns
+    _transient_patterns = DEFAULT_TRANSIENT_CHANNEL_PATTERNS
+
+
+def _any_substring(patterns: tuple[str, ...], lowered_msg: str) -> bool:
+    """Case-insensitive substring match of any pattern against a lowered message."""
+    return any(p in lowered_msg for p in patterns)
+
+
+def _matches_transient_apierror(msg: str) -> bool:
+    """Bare-APIError transient test: allowlist hit AND NOT blocklist hit.
+
+    The blocklist has mandatory precedence — a message matching both is
+    non-retryable (quota / bad-params shapes stay terminal even when
+    they share wording with an allowlist entry).
+    """
+    lowered = msg.lower()
+    if _any_substring(_transient_patterns.apierror_blocklist, lowered):
+        return False
+    return _any_substring(_transient_patterns.apierror_allowlist, lowered)
+
+
+def _matches_timeout_body(msg: str) -> bool:
+    """Whether a bare-APIError message is a relayed upstream timeout body."""
+    return _any_substring(
+        _transient_patterns.apierror_timeout_patterns, msg.lower()
+    )
+
+
+def _matches_transient_valueerror(msg: str) -> bool:
+    """ValueError-body transient test (200-body proxy errors, empty SSE).
+
+    Same mandatory blocklist precedence as the bare-APIError channel: a
+    proxy 200-body dict embedding quota wording alongside an allowlisted
+    substring stays terminal.
+    """
+    lowered = msg.lower()
+    if _any_substring(_transient_patterns.apierror_blocklist, lowered):
+        return False
+    return _any_substring(_transient_patterns.valueerror_patterns, lowered)
+
+
+def classify_transient_apierror_body(e: BaseException) -> TransientLLMError | None:
+    """Shared bare-APIError wrap decision for the hot path AND the L2 facade.
+
+    Returns the ``TransientLLMError`` wrapper when the message pattern-
+    matches (blocklist precedence enforced), else ``None`` (terminal,
+    re-raise unchanged). ``kind`` is computed only on an allowlist hit.
+    Single implementation so kind-routing cannot drift between
+    ``classify_llm_errors`` and ``_classify_raw_sdk_exceptions``.
+    """
+    if not _matches_transient_apierror(str(e)):
+        return None
+    kind = "timeout_body" if _matches_timeout_body(str(e)) else "api_error_body"
+    return TransientLLMError(kind, e)
+
+
 class TransientAPIError(Exception):
     """Wrapper for APIStatusError with retryable status codes.
     
@@ -54,6 +265,27 @@ class TransientAPIError(Exception):
         self.original = original
         self.status_code = original.status_code
         super().__init__(f"Transient API error: {original.status_code} — {original}")
+
+
+class TransientLLMError(Exception):
+    """Transient failure delivered through a non-status channel (bare
+    APIError message, 200-body ValueError, stream shape). Wrapping makes
+    it a TRANSIENT_EXCEPTIONS member so L1 tenacity / L2 failover treat
+    it like any transient error.
+
+    The ``kind`` field carries the budget category consumed by the
+    retry predicate: ``'api_error_body'`` / ``'value_error_body'`` →
+    transient; ``'timeout_body'`` → timeout (see RetryByCategory).
+    Deliberately NOT a subclass of TransientAPIError — its ctor
+    requires an APIStatusError and ``.status_code``.
+
+    See docs/plans/transient-channel-retry-widening.md.
+    """
+
+    def __init__(self, kind: str, original: BaseException):
+        self.kind = kind
+        self.original = original
+        super().__init__(f"Transient LLM error ({kind}): {original}")
 
 
 class ContextLengthExceededError(Exception):
@@ -108,10 +340,26 @@ class MalformedLLMResponseError(Exception):
 TRANSIENT_EXCEPTIONS: tuple[type[Exception], ...] = (
     # Wrapper exception from classifier for retryable status codes
     TransientAPIError,
+    # Wrapper exception from classifier for NON-status transient channels
+    # (bare APIError message patterns, 200-body ValueError shapes).
+    # Membership is the only lever for the transient budget; the single
+    # deviation is kind='timeout_body', which RetryByCategory routes to
+    # the timeout budget (see RetryByCategory.__call__).
+    TransientLLMError,
     # Raw socket errors (proxy restarts) — not wrapped by OpenAI SDK
     ConnectionResetError,
     BrokenPipeError,
     ConnectionAbortedError,
+    # NOTE: httpx.RemoteProtocolError (peer closed mid-body, "incomplete
+    # chunked read") is intentionally NOT an unconditional member. Its
+    # retryability is CONDITIONAL on the config gate
+    # ``TransientChannelPatterns.remote_protocol_retryable`` (default on)
+    # — see RetryByCategory.__call__, which treats it as transient only
+    # while the gate is on. Same pattern as IndexError-on-backup: a
+    # config kill-switch without a redeploy. The broader ProtocolError /
+    # TransportError parents stay out regardless — a stray ConnectError
+    # is already covered by APIConnectionError, and over-broad parents
+    # risk making broken-endpoint loops burn the full budget.
     # OpenAI exceptions that DON'T get wrapped (from lower-level HTTP client)
     openai.APIConnectionError,
     # Response validation failure from Phase 1
@@ -437,7 +685,20 @@ def make_llm_retry_strategy(
             # IMPORTANT: Check timeout FIRST since APITimeoutError inherits
             # from APIConnectionError (in TRANSIENT_EXCEPTIONS). Without this
             # ordering, timeouts would be misclassified as transient errors.
-            if isinstance(exception, TIMEOUT_EXCEPTIONS):
+            #
+            # TransientLLMError(kind='timeout_body') joins the timeout
+            # check here: relayed upstream timeouts ("context deadline
+            # exceeded") each cost the upstream's full timeout, so
+            # budgeting them as transient (10 attempts) would amplify
+            # wall-clock exactly the way docs/retry-architecture.md §5
+            # warns about. This is the SINGLE documented predicate
+            # deviation from "membership is the only lever"
+            # (plan work unit 2a) — budget/backoff/ceiling wiring is
+            # otherwise untouched.
+            if isinstance(exception, TIMEOUT_EXCEPTIONS) or (
+                isinstance(exception, TransientLLMError)
+                and exception.kind == "timeout_body"
+            ):
                 counts["timeout"] += 1
                 return self._decide_after_count(
                     category="timeout",
@@ -459,6 +720,15 @@ def make_llm_retry_strategy(
                 failover_controller is not None
                 and failover_controller.is_configured
                 and isinstance(exception, IndexError)
+            ) or (
+                # C3 gate: httpx.RemoteProtocolError (peer closed mid-body)
+                # is transient ONLY while the config gate is on
+                # (``queue.transient_remote_protocol_retryable`` in
+                # config.yaml, default True). Gives operators a kill-switch
+                # for a broken-endpoint retry loop without a redeploy —
+                # see the TRANSIENT_EXCEPTIONS comment block.
+                isinstance(exception, httpx.RemoteProtocolError)
+                and _transient_patterns.remote_protocol_retryable
             ):
                 counts["transient"] += 1
                 return self._decide_after_count(
@@ -577,6 +847,24 @@ def classify_llm_errors(llm_with_tools: Any) -> RunnableLambda:
             # Proxy returned non-JSON (HTML error page) — transient
             logger.warning(f"[LLM] Response validation error (proxy issue), will retry: {_truncate_error(e)}")
             raise
+        except openai.APIError as e:
+            # Bare APIError — no status code channel (C1 corpus channel:
+            # relayed "All models rate limited" / "context deadline
+            # exceeded" bodies). PLACEMENT IS LOAD-BEARING: this branch
+            # must come AFTER every APIError-subclass handler above
+            # (BadRequestError, APIStatusError, APITimeoutError,
+            # APIConnectionError, APIResponseValidationError — MRO
+            # verified) or it shadows them. The wrap decision lives in
+            # the shared ``classify_transient_apierror_body`` helper
+            # (also used by the L2 facade — one kind-routing
+            # implementation); misses re-raise (quota / bad-params
+            # shapes stay terminal, guarded by the mandatory blocklist).
+            wrapper = classify_transient_apierror_body(e)
+            if wrapper is not None:
+                logger.warning(f"[LLM] Transient API error (bare, pattern-matched), will retry: {_truncate_error(e)}")
+                raise wrapper from e
+            logger.error(f"[LLM] Non-retryable API error: {_truncate_error(e)}")
+            raise
         except MalformedLLMResponseError as e:
             # Provider returned a response body of an unexpected type
             # (e.g. a bare JSON string instead of a ChatCompletion
@@ -602,6 +890,28 @@ def classify_llm_errors(llm_with_tools: Any) -> RunnableLambda:
                 f"[LLM] Malformed LLM response (IndexError, likely empty "
                 f"choices array): {_truncate_error(e)}"
             )
+            raise
+        except ValueError as e:
+            # 200-body proxy errors / stream aggregation shapes (C2/C4
+            # corpus channels): LangChain parses a proxy error dict or
+            # a zero-chunk SSE stream into a ValueError. Only
+            # pattern-matched messages become retryable; a genuine data
+            # bug re-raises unchanged (non-retryable). Note
+            # LLMResponseValidationError (also a ValueError subclass,
+            # if it is one) is handled by its own earlier branch.
+            if _matches_transient_valueerror(str(e)):
+                logger.warning(f"[LLM] Transient error body (ValueError, pattern-matched), will retry: {_truncate_error(e)}")
+                raise TransientLLMError("value_error_body", e) from e
+            raise
+        except httpx.RemoteProtocolError as e:
+            # Peer closed the connection mid-body ("peer closed
+            # connection without sending complete message body
+            # (incomplete chunked read)") — C3 corpus channel.
+            # Retryability is CONDITIONAL on the config gate
+            # (``remote_protocol_retryable``, default on) and decided by
+            # the retry predicate, so the wording stays
+            # condition-neutral — the classifier only classifies.
+            logger.warning(f"[LLM] Remote protocol error (peer closed connection mid-body): {_truncate_error(e)}")
             raise
         except Exception as e:
             logger.error(f"[LLM] Unexpected error (will not retry): {type(e).__name__}: {_truncate_error(e)}")

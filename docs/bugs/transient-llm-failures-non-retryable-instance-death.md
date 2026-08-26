@@ -1,10 +1,10 @@
 # Bug: Transient LLM/Proxy Failures Classified Non-Retryable — Instance Death Cascade
 
 **Date:** 2026-08-26
-**Status:** Open — RC2/RC3 being resolved proxy-side (ultimate routing made transparent); RC1 (classifier) still needs the client fix
+**Status:** Fixed (RC1) 2026-08-27 — classifier widening implemented ([plan](../plans/transient-channel-retry-widening.md)); RC2 resolved proxy-side (ultimate routing made transparent); RC3 deferred (no samples, see plan §6)
 **Severity:** High (94% of instance ERROR deaths in a 7-day window; causes replacement storms during provider outages)
 **Affected versions:** Current (`latest` as of 2026-08-26); symptoms start 2026-08-19 (proxy ultimate-model routing rollout)
-**Related:** [`docs/retry-architecture.md`](../retry-architecture.md) (§9, gap #6/7) · [`docs/plans/rate-limit-episode-parking.md`](../plans/rate-limit-episode-parking.md) (DRAFT — does not cover these channels) · [`docs/plans/transient-channel-retry-widening.md`](../plans/transient-channel-retry-widening.md) (DRAFT — implements fix 1) · commit `d4b7b8a4` (payload logging, first step)
+**Related:** [`docs/retry-architecture.md`](../retry-architecture.md) (§9, gap #6/7) · [`docs/plans/rate-limit-episode-parking.md`](../plans/rate-limit-episode-parking.md) (DRAFT — does not cover these channels) · [`docs/plans/transient-channel-retry-widening.md`](../plans/transient-channel-retry-widening.md) (IMPLEMENTED 2026-08-27 — implements fix 1) · commit `d4b7b8a4` (payload logging, first step)
 
 ---
 
@@ -134,6 +134,9 @@ commit `d4b7b8a4` (INFO-level `repr(response)[:300]` at the guard raise site,
 
 - Fatal-error extraction: `grep "handle_message_processing_error" ensemble.log*` (47 events).
 - Non-retry funnel: `grep "Unexpected error (will not retry)" ensemble.log*`.
+  **Post-fix (2026-08-27):** non-matching bare `APIError`s now log
+  `[LLM] Non-retryable API error` instead — extraction must grep BOTH strings:
+  `grep -E "Unexpected error \(will not retry\)|Non-retryable API error" ensemble.log*`.
 - Storm window: Aug 26 06:51:26–06:54:39, 15 events, all `All models rate limited`.
 - SDK sub-second retry bursts: e.g. Aug 26 11:56:55–11:57:03, 22:04–22:06.
 - Escalation incidents: `ultimate_model_retry_exhausted` × 10 lines per event (classifier →

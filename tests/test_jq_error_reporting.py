@@ -248,6 +248,28 @@ class TestClassifyErrorType:
     def test_default_is_execution_error(self):
         assert _classify_error_type(Exception("mystery")) == "execution_error"
 
+    def test_transient_llm_error_is_transient_error(self):
+        """Plan work unit 6 (docs/plans/transient-channel-retry-widening.md):
+        an exhausted TransientLLMError maps to transient_error (same type
+        the TransientAPIError path produces) so parents see
+        transient_error/warning instead of invalid_data/execution_error."""
+        from daemon.llm_error_classifier import TransientLLMError
+
+        result = _classify_error_type(
+            TransientLLMError("api_error_body", Exception("All models rate limited"))
+        )
+        assert result == "transient_error"
+
+    def test_transient_llm_error_valueerror_kind_not_invalid_data(self):
+        """A wrapped ValueError body must NOT fall into the generic
+        invalid_data ValueError branch — the wrapper type wins."""
+        from daemon.llm_error_classifier import TransientLLMError
+
+        result = _classify_error_type(
+            TransientLLMError("value_error_body", ValueError("no generations found"))
+        )
+        assert result == "transient_error"
+
 
 # ── 2. Shared helper unit tests ────────────────────────────────────────────────
 

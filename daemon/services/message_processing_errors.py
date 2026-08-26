@@ -136,6 +136,15 @@ def _classify_error_type(e: Exception) -> str:
     if exc_name == "TransientAPIError":
         return "transient_error"
 
+    # Non-status transient channels (bare APIError pattern-match,
+    # 200-body ValueError, stream shape — plan work unit 6,
+    # docs/plans/transient-channel-retry-widening.md). Same type the
+    # TransientAPIError path produces so parents see
+    # transient_error/warning after L1 exhaustion instead of
+    # invalid_data/execution_error.
+    if exc_name == "TransientLLMError":
+        return "transient_error"
+
     # Infrastructure / processing errors (Category C from error catalog)
     if isinstance(e, KeyError):
         return "instance_not_found"

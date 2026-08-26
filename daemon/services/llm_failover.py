@@ -221,7 +221,10 @@ from tenacity import (
 from ..llm_error_classifier import (
     FailoverController,
     TransientAPIError,
+    TransientLLMError,
+    _matches_transient_valueerror,
     classify_llm_errors,
+    classify_transient_apierror_body,
     derive_ha_attempt_ceiling,
     is_retryable_status_code,
     make_llm_retry_strategy,
@@ -255,6 +258,14 @@ def _classify_raw_sdk_exceptions(fn: Callable[[], T]) -> Callable[[], T]:
     errors are not special-cased here — the caller decides whether
     they're catastrophic (rare in secondary sites) or absorbs them
     via the existing ``except`` graceful-fallback block.
+
+    Non-status transient-channel parity (plan work unit 5,
+    ``docs/plans/transient-channel-retry-widening.md``): bare
+    ``openai.APIError`` bodies and ``ValueError`` body shapes are
+    pattern-matched with the SAME helpers/lists as the hot-path
+    classifier (imported — never duplicated), wrapping hits in
+    ``TransientLLMError``. The facade's 45s wall-clock cap still
+    bounds every secondary site regardless of retryability.
     """
     def _wrapped() -> T:
         # All non-``APIStatusError`` exceptions propagate untouched:
@@ -264,9 +275,11 @@ def _classify_raw_sdk_exceptions(fn: Callable[[], T]) -> Callable[[], T]:
         # they take the non-retryable re-raise above (none of those
         # statuses are in RETRYABLE_STATUS_CODES). Connection /
         # timeout errors (``APIConnectionError`` / ``APITimeoutError``)
-        # are NOT APIStatusError subclasses — they pass straight
-        # through here and are matched by the predicate's
-        # TRANSIENT_EXCEPTIONS / TIMEOUT_EXCEPTIONS sets directly.
+        # are NOT APIStatusError — the explicit branches below pass
+        # them straight through to the predicate's TRANSIENT_EXCEPTIONS
+        # / TIMEOUT_EXCEPTIONS sets, BEFORE the bare-APIError pattern
+        # branch (both are APIError subclasses — ordering preserved
+        # from the hot-path classifier).
         try:
             return fn()
         except openai.APIStatusError as e:
@@ -280,6 +293,26 @@ def _classify_raw_sdk_exceptions(fn: Callable[[], T]) -> Callable[[], T]:
             if is_retryable_status_code(e.status_code):
                 raise TransientAPIError(e) from e
             raise  # Non-retryable status — pass through.
+        except openai.APITimeoutError:
+            raise  # ⊂ APIConnectionError ⊂ APIError — timeout budget, unchanged.
+        except openai.APIConnectionError:
+            raise  # ⊂ APIError — transient budget, unchanged.
+        except openai.APIError as e:
+            # Bare APIError — no status code channel. The wrap decision
+            # is the SAME shared helper the hot path uses (one
+            # kind-routing implementation, never duplicated); misses
+            # re-raise unmodified.
+            wrapper = classify_transient_apierror_body(e)
+            if wrapper is not None:
+                raise wrapper from e
+            raise
+        except ValueError as e:
+            # 200-body proxy error dicts / zero-chunk SSE streams.
+            # Same pattern list as the hot path; genuine data bugs
+            # re-raise unmodified.
+            if _matches_transient_valueerror(str(e)):
+                raise TransientLLMError("value_error_body", e) from e
+            raise
     return _wrapped
 
 

@@ -10,8 +10,12 @@ from daemon.llm_error_classifier import (
     TRANSIENT_EXCEPTIONS,
     TIMEOUT_EXCEPTIONS,
     TransientAPIError,
+    TransientLLMError,
     ContextLengthExceededError,
     classify_llm_errors,
+    configure_transient_channel_patterns,
+    make_llm_retry_strategy,
+    reset_transient_channel_patterns,
 )
 from daemon.response_validation import LLMResponseValidationError
 
@@ -1016,3 +1020,532 @@ class TestIndexErrorHandler:
         # The exact exception class and message must propagate.
         assert exc_info.type is IndexError
         assert "list index out of range" in str(exc_info.value)
+
+
+@pytest.fixture(autouse=False)
+def restore_default_patterns():
+    """Reset the transient-channel pattern state around each test that
+    overrides it (isolation — pattern config is module-global)."""
+    yield
+    reset_transient_channel_patterns()
+
+
+def _bare_api_error(message: str) -> openai.APIError:
+    """Construct a bare openai.APIError (no status code channel)."""
+    return openai.APIError(message, request=httpx.Request("POST", "http://t/v1"), body=None)
+
+
+class TestTransientLLMError:
+    """Tests for the TransientLLMError wrapper (plan work unit 1)."""
+
+    def test_creation_stores_kind_and_original(self):
+        """TransientLLMError stores kind and the original exception."""
+        original = _bare_api_error("All models rate limited")
+
+        error = TransientLLMError("api_error_body", original)
+
+        assert error.kind == "api_error_body"
+        assert error.original is original
+        assert "api_error_body" in str(error)
+        assert "All models rate limited" in str(error)
+
+    def test_is_transient_exceptions_member(self):
+        """Membership in TRANSIENT_EXCEPTIONS is the L1/L2 lever — the
+        predicate counts members as transient (except kind='timeout_body',
+        routed to the timeout budget by RetryByCategory)."""
+        assert TransientLLMError in TRANSIENT_EXCEPTIONS
+
+    def test_not_subclass_of_transient_api_error(self):
+        """Must NOT subclass TransientAPIError (its ctor requires an
+        APIStatusError and .status_code)."""
+        assert not issubclass(TransientLLMError, TransientAPIError)
+
+    def test_remote_protocol_error_retryability_is_config_gated(self):
+        """C3: httpx.RemoteProtocolError is NOT an unconditional
+        TRANSIENT_EXCEPTIONS member — retryability is gated on
+        ``remote_protocol_retryable`` (default on), giving operators a
+        config kill-switch without a redeploy (same pattern as
+        IndexError-on-backup)."""
+        assert httpx.RemoteProtocolError not in TRANSIENT_EXCEPTIONS
+
+    def test_broader_httpx_parents_not_added(self):
+        """Over-broad parents (ProtocolError / TransportError) must NOT be
+        members — a broken-endpoint loop would burn the full budget."""
+        assert httpx.ProtocolError not in TRANSIENT_EXCEPTIONS
+        assert httpx.TransportError not in TRANSIENT_EXCEPTIONS
+
+
+class TestTransientChannelClassification:
+    """C1–C4 corpus channels through classify_llm_errors (plan units 2–4).
+
+    Corpus: docs/bugs/transient-llm-failures-non-retryable-instance-death.md
+    (44 transient-with-zero-retries instance deaths, 2026-08-19→26).
+    """
+
+    def _classified_llm(self, exc):
+        mock_llm = MagicMock()
+        mock_llm.invoke.side_effect = exc
+        return classify_llm_errors(mock_llm)
+
+    # --- Channel tests (C1–C4): must wrap as TransientLLMError ---
+
+    def test_c1_all_models_rate_limited_wrapped_transient(self):
+        """C1 (21 events): relayed rate-limit body → TransientLLMError,
+        transient category."""
+        original = _bare_api_error("All models rate limited")
+
+        with pytest.raises(TransientLLMError) as exc_info:
+            self._classified_llm(original).invoke([])
+
+        assert exc_info.value.kind == "api_error_body"
+        assert exc_info.value.original is original
+
+    def test_c1_relayed_timeout_routes_to_timeout_kind(self):
+        """C1 (2 events): relayed 'context deadline exceeded' → wrapped with
+        kind='timeout_body' so the predicate budgets it as a timeout."""
+        original = _bare_api_error(
+            "context deadline exceeded (Client.Timeout exceeded while awaiting headers)"
+        )
+
+        with pytest.raises(TransientLLMError) as exc_info:
+            self._classified_llm(original).invoke([])
+
+        assert exc_info.value.kind == "timeout_body"
+
+    def test_c2_ultimate_model_retry_exhausted_valueerror_wrapped(self):
+        """C2 (8 events): 200-body proxy dict parsed as ValueError →
+        wrapped transient."""
+        original = ValueError(
+            "{'code': 'exhausted', 'detail': 'no model succeeded', "
+            "'type': 'ultimate_model_retry_exhausted'}"
+        )
+
+        with pytest.raises(TransientLLMError) as exc_info:
+            self._classified_llm(original).invoke([])
+
+        assert exc_info.value.kind == "value_error_body"
+        assert exc_info.value.original is original
+
+    def test_c4_no_generations_found_wrapped(self):
+        """C4 (4 events): zero-chunk SSE stream → ValueError wrapped."""
+        with pytest.raises(TransientLLMError) as exc_info:
+            self._classified_llm(ValueError("No generations found in stream.")).invoke([])
+
+        assert exc_info.value.kind == "value_error_body"
+
+    def test_c3_remote_protocol_error_re_raised_for_predicate(self):
+        """C3 (7 events): RemoteProtocolError re-raised unchanged — a
+        TRANSIENT_EXCEPTIONS member, so the predicate retries it."""
+        original = httpx.RemoteProtocolError(
+            "peer closed connection without sending complete message body "
+            "(incomplete chunked read)"
+        )
+
+        with pytest.raises(httpx.RemoteProtocolError) as exc_info:
+            self._classified_llm(original).invoke([])
+
+        assert exc_info.value is original
+
+    def test_pattern_match_is_case_insensitive(self):
+        """Allowlist matching is case-insensitive substring."""
+        with pytest.raises(TransientLLMError):
+            self._classified_llm(_bare_api_error("ALL MODELS RATE LIMITED")).invoke([])
+
+    # --- Regression tests: must stay NON-retryable ---
+
+    def test_2056_token_plan_terminal_blocklist_hit(self):
+        """2056 quota shape: 'usage limit' blocklist hit → non-retryable,
+        unchanged (blocklist has mandatory precedence)."""
+        original = _bare_api_error(
+            "Token Plan usage limit reached for model group (2056)"
+        )
+
+        with pytest.raises(openai.APIError) as exc_info:
+            self._classified_llm(original).invoke([])
+
+        assert exc_info.value is original
+        assert not isinstance(exc_info.value, TransientLLMError)
+
+    def test_2013_invalid_params_terminal(self):
+        """2013 bad-params shape: no allowlist hit → non-retryable,
+        unchanged."""
+        original = _bare_api_error(
+            "invalid params, tool call result does not follow tool call (2013)"
+        )
+
+        with pytest.raises(openai.APIError) as exc_info:
+            self._classified_llm(original).invoke([])
+
+        assert exc_info.value is original
+
+    def test_non_pattern_bare_api_error_terminal(self):
+        """Any other bare APIError message → non-retryable, unchanged."""
+        original = _bare_api_error("something novel and terminal")
+
+        with pytest.raises(openai.APIError) as exc_info:
+            self._classified_llm(original).invoke([])
+
+        assert exc_info.value is original
+
+    def test_generic_value_error_stays_terminal(self):
+        """Genuine data-bug ValueError must NOT become retryable."""
+        original = ValueError("genuine data bug")
+
+        with pytest.raises(ValueError) as exc_info:
+            self._classified_llm(original).invoke([])
+
+        assert exc_info.value is original
+        assert not isinstance(exc_info.value, TransientLLMError)
+
+    def test_attribute_error_stays_terminal(self):
+        """AttributeError (generic bug shape) — unchanged, non-retryable."""
+        with pytest.raises(AttributeError):
+            self._classified_llm(AttributeError("'str' object has no attribute 'model_dump'")).invoke([])
+
+    def test_context_length_exceeded_not_shadowed(self):
+        """BadRequestError context-length must still classify as
+        ContextLengthExceededError — the new APIError branch must not
+        shadow earlier subclass handlers."""
+        mock_response = MagicMock()
+        mock_response.status_code = 400
+        original = openai.BadRequestError(
+            "Error: context_length_exceeded",
+            response=mock_response,
+            body=None,
+        )
+
+        with pytest.raises(ContextLengthExceededError):
+            self._classified_llm(original).invoke([])
+
+    # --- Blocklist precedence (plan test 3) ---
+
+    def test_blocklist_overrides_allowlist(self):
+        """Synthetic message matching BOTH lists → non-retryable."""
+        both = _bare_api_error("all models rate limited because usage limit exceeded")
+
+        with pytest.raises(openai.APIError) as exc_info:
+            self._classified_llm(both).invoke([])
+
+        assert not isinstance(exc_info.value, TransientLLMError)
+
+    def test_blocklist_also_guards_valueerror_channel(self):
+        """Blocklist precedence extends to the ValueError channel: a
+        200-body proxy dict embedding quota wording alongside an
+        allowlisted substring stays terminal (defense against
+        externally-influenced detail text)."""
+        poisoned = ValueError(
+            "{'detail': 'usage limit exceeded; ultimate_model_retry_exhausted', "
+            "'type': 'ultimate_model_retry_exhausted'}"
+        )
+
+        with pytest.raises(ValueError) as exc_info:
+            self._classified_llm(poisoned).invoke([])
+
+        assert exc_info.value is poisoned
+        assert not isinstance(exc_info.value, TransientLLMError)
+
+    # --- Ordering (plan test 4): subclass handlers keep precedence ---
+
+    @pytest.mark.parametrize("make_exc", [
+        # (label, factory) — each subclass must hit its OWN branch, not
+        # the bare-APIError pattern branch.
+        lambda: openai.APITimeoutError(request=MagicMock()),
+        lambda: openai.APIConnectionError(message="Connection failed", request=MagicMock()),
+    ])
+    def test_subclass_handlers_precede_bare_apierror_branch(self, make_exc):
+        """APITimeoutError / APIConnectionError must pass through
+        unchanged (their own handlers, timeout/transient semantics)."""
+        original = make_exc()
+
+        with pytest.raises(type(original)) as exc_info:
+            self._classified_llm(original).invoke([])
+
+        assert exc_info.value is original
+        assert not isinstance(exc_info.value, TransientLLMError)
+
+    def test_api_response_validation_error_not_shadowed(self):
+        """APIResponseValidationError (direct APIError subclass — MRO
+        verified) must hit its own retryable handler, NOT the bare-APIError
+        branch (plan review §2.1 — placement is load-bearing)."""
+        request = httpx.Request("POST", "http://t/v1")
+        response = httpx.Response(502, text="<html>Bad Gateway</html>", request=request)
+        original = openai.APIResponseValidationError(
+            response=response, body=None, message="Failed to parse response"
+        )
+
+        with pytest.raises(openai.APIResponseValidationError) as exc_info:
+            self._classified_llm(original).invoke([])
+
+        assert exc_info.value is original
+        assert not isinstance(exc_info.value, TransientLLMError)
+
+    def test_429_status_error_still_transient_api_error(self):
+        """Status-channel 429 keeps its TransientAPIError wrapper — the
+        new branches change nothing for the status path."""
+        mock_response = MagicMock()
+        mock_response.status_code = 429
+        original = openai.APIStatusError("Rate limit", response=mock_response, body=None)
+
+        with pytest.raises(TransientAPIError) as exc_info:
+            self._classified_llm(original).invoke([])
+
+        assert exc_info.value.status_code == 429
+
+    # --- Log-anchor change (plan review §3.2) ---
+
+    def test_non_matching_bare_apierror_log_anchor(self, caplog):
+        """Non-matching bare APIError logs '[LLM] Non-retryable API error'
+        (the new evidence anchor — bug-doc extraction must grep both
+        this and the legacy 'Unexpected error (will not retry)'})."""
+        with caplog.at_level("ERROR", logger="daemon.llm_error_classifier"):
+            with pytest.raises(openai.APIError):
+                self._classified_llm(_bare_api_error("novel terminal")).invoke([])
+
+        assert any(
+            "[LLM] Non-retryable API error" in r.getMessage()
+            for r in caplog.records
+        )
+
+
+class TestTransientChannelPredicate:
+    """RetryByCategory budget routing for TransientLLMError kinds
+    (plan unit 2a / tests 1 and 4a)."""
+
+    def _make_mock_retry_state(self, exception, attempt_number=1):
+        from tenacity import RetryCallState
+
+        outcome = MagicMock()
+        outcome.exception.return_value = exception
+        retry_state = MagicMock(spec=RetryCallState)
+        retry_state.outcome = outcome
+        retry_state.attempt_number = attempt_number
+        return retry_state
+
+    def test_timeout_body_consumes_timeout_budget(self):
+        """kind='timeout_body' consumes the 3-attempt timeout budget, not
+        the 10-attempt transient budget (wall-clock amplification guard)."""
+        strategy = make_llm_retry_strategy(transient_max=10, timeout_max=3)
+        error = TransientLLMError("timeout_body", Exception("context deadline exceeded"))
+
+        results = [strategy(self._make_mock_retry_state(error, n)) for n in range(1, 5)]
+        # timeout_max=3 → True while count < 3, False from count 3 on
+        assert results == [True, True, False, False]
+
+    def test_api_error_body_consumes_transient_budget(self):
+        """kind='api_error_body' consumes the transient budget."""
+        strategy = make_llm_retry_strategy(transient_max=3, timeout_max=1)
+        error = TransientLLMError("api_error_body", Exception("rate limited"))
+
+        results = [strategy(self._make_mock_retry_state(error, n)) for n in range(1, 5)]
+        assert results == [True, True, False, False]
+
+    def test_value_error_body_consumes_transient_budget(self):
+        """kind='value_error_body' consumes the transient budget."""
+        strategy = make_llm_retry_strategy(transient_max=2, timeout_max=1)
+        error = TransientLLMError("value_error_body", ValueError("no generations"))
+
+        results = [strategy(self._make_mock_retry_state(error, n)) for n in range(1, 4)]
+        assert results == [True, False, False]
+
+    def test_remote_protocol_error_counts_transient(self):
+        """C3 gate (default on): RemoteProtocolError increments the
+        transient counter (drives L2 failover slice)."""
+        strategy = make_llm_retry_strategy(transient_max=2, timeout_max=5)
+        error = httpx.RemoteProtocolError("incomplete chunked read")
+
+        # transient_max=2 → True while count < 2, False from count 2 on
+        assert strategy(self._make_mock_retry_state(error, 1)) is True
+        assert strategy(self._make_mock_retry_state(error, 2)) is False
+        assert strategy(self._make_mock_retry_state(error, 3)) is False
+
+    def test_remote_protocol_error_kill_switch(
+        self, restore_default_patterns
+    ):
+        """C3 gate (off): with remote_protocol_retryable=False the same
+        exception is non-retryable — the config kill-switch."""
+        configure_transient_channel_patterns(remote_protocol_retryable=False)
+        strategy = make_llm_retry_strategy(transient_max=5, timeout_max=5)
+        error = httpx.RemoteProtocolError("incomplete chunked read")
+
+        assert strategy(self._make_mock_retry_state(error, 1)) is False
+
+    def test_timeout_kind_drives_failover_swap(self):
+        """timeout_body attempts drive the timeout primary-slice cap —
+        with a configured backup, reaching PRIMARY_TIMEOUT_MAX swaps."""
+        from daemon.llm_error_classifier import PRIMARY_TIMEOUT_MAX, FailoverController
+
+        controller = MagicMock(spec=FailoverController)
+        controller.is_configured = True
+        strategy = make_llm_retry_strategy(
+            transient_max=10, timeout_max=3, failover_controller=controller
+        )
+        error = TransientLLMError("timeout_body", Exception("context deadline exceeded"))
+
+        # Exhaust the primary timeout slice → swap fires
+        for n in range(1, PRIMARY_TIMEOUT_MAX + 1):
+            assert strategy(self._make_mock_retry_state(error, n)) is True
+        controller.swap_to_backup.assert_called_once()
+        controller.reset_to_primary.assert_called_once()  # attempt-1 reset
+
+
+class TestTransientChannelEndToEnd:
+    """Spirit check (plan test 7): the Aug-26 06:51 storm shape exhausts
+    the full transient budget under Retrying instead of dying on
+    attempt 1."""
+
+    def test_storm_shape_yields_full_transient_budget(self):
+        """A fake invoke raising bare APIError('All models rate limited')
+        runs 10 attempts (1 + 9 retries) under Retrying, not 1."""
+        from tenacity import Retrying, wait_fixed
+
+        calls = {"n": 0}
+
+        def _storm(*args, **kwargs):
+            calls["n"] += 1
+            raise _bare_api_error("All models rate limited")
+
+        mock_llm = MagicMock()
+        mock_llm.invoke.side_effect = _storm
+        classified = classify_llm_errors(mock_llm)
+
+        retrying = Retrying(
+            stop=stop_after_attempt_10(),
+            wait=wait_fixed(0),
+            retry=make_llm_retry_strategy(transient_max=10, timeout_max=3),
+            reraise=True,
+        )
+        with pytest.raises(TransientLLMError):
+            retrying(classified.invoke, [])
+
+        assert calls["n"] == 10
+
+    def test_disabled_allowlist_kills_after_attempt_1(self, restore_default_patterns):
+        """The additive-off switch: an empty allowlist disables the branch —
+        the same storm shape dies on attempt 1 again (pre-plan behavior)."""
+        from tenacity import Retrying, wait_fixed
+
+        configure_transient_channel_patterns(apierror_allowlist=[])
+        calls = {"n": 0}
+
+        def _storm(*args, **kwargs):
+            calls["n"] += 1
+            raise _bare_api_error("All models rate limited")
+
+        mock_llm = MagicMock()
+        mock_llm.invoke.side_effect = _storm
+        classified = classify_llm_errors(mock_llm)
+
+        retrying = Retrying(
+            stop=stop_after_attempt_10(),
+            wait=wait_fixed(0),
+            retry=make_llm_retry_strategy(transient_max=10, timeout_max=3),
+            reraise=True,
+        )
+        with pytest.raises(openai.APIError):
+            retrying(classified.invoke, [])
+
+        assert calls["n"] == 1
+
+
+def stop_after_attempt_10():
+    from tenacity import stop_after_attempt
+
+    return stop_after_attempt(10)
+
+
+class TestTransientChannelConfig:
+    """Pattern configuration (plan work unit 7 / test 6)."""
+
+    def test_configure_overrides_and_reset_restores(self, restore_default_patterns):
+        from daemon.llm_error_classifier import _matches_transient_apierror
+
+        configure_transient_channel_patterns(
+            apierror_allowlist=["custom outage"],
+            valueerror_patterns=["custom body"],
+        )
+        assert _matches_transient_apierror("Custom OUTAGE happened")
+        assert not _matches_transient_apierror("All models rate limited")
+
+        reset_transient_channel_patterns()
+        assert _matches_transient_apierror("All models rate limited")
+        assert not _matches_transient_apierror("custom outage happened")
+
+    def test_empty_allowlist_disables_branch(self, restore_default_patterns):
+        from daemon.llm_error_classifier import _matches_transient_apierror
+
+        configure_transient_channel_patterns(apierror_allowlist=[])
+        assert not _matches_transient_apierror("all models rate limited")
+
+    def test_queue_config_csv_and_json_list_forms(self):
+        """QueueConfig accepts CSV / JSON-array strings and YAML lists."""
+        from daemon.config import QueueConfig
+
+        cfg = QueueConfig(
+            transient_apierror_allowlist="all models rate limited, context deadline exceeded",
+            transient_apierror_timeout_patterns='["context deadline exceeded"]',
+            transient_apierror_blocklist=["token plan", " usage limit "],
+            transient_valueerror_patterns="",
+        )
+        assert cfg.transient_apierror_allowlist == ["all models rate limited", "context deadline exceeded"]
+        assert cfg.transient_apierror_timeout_patterns == ["context deadline exceeded"]
+        assert cfg.transient_apierror_blocklist == ["token plan", "usage limit"]
+        assert cfg.transient_valueerror_patterns == []
+
+    def test_queue_config_defaults_match_corpus(self):
+        """Defaults ship with the corpus patterns (config-removable)."""
+        from daemon.config import QueueConfig
+
+        cfg = QueueConfig()
+        assert "all models rate limited" in cfg.transient_apierror_allowlist
+        assert "context deadline exceeded" in cfg.transient_apierror_timeout_patterns
+        assert "token plan" in cfg.transient_apierror_blocklist
+        assert "ultimate_model_retry_exhausted" in cfg.transient_valueerror_patterns
+
+    def test_load_config_pushes_patterns_into_classifier(self, restore_default_patterns, tmp_path):
+        """load_config wires the yaml lists into the classifier module."""
+        from daemon.config import load_config
+        import daemon.llm_error_classifier as lec
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "llm:\n  base_url: http://t/v1\n"
+            "queue:\n"
+            "  transient_apierror_allowlist: ['custom yaml pattern']\n"
+            "  transient_apierror_timeout_patterns: []\n"
+            "  transient_valueerror_patterns: []\n"
+            "  transient_remote_protocol_retryable: false\n"
+        )
+        load_config(str(config_file))
+
+        assert lec._transient_patterns.apierror_allowlist == ("custom yaml pattern",)
+        assert lec._transient_patterns.valueerror_patterns == ()
+        assert lec._transient_patterns.remote_protocol_retryable is False
+
+    def test_queue_config_rejects_timeout_pattern_missing_from_allowlist(self):
+        """A timeout pattern not in the allowlist would silently consume
+        the 10-attempt transient budget at up to 660s per attempt — the
+        config load must fail instead."""
+        from daemon.config import QueueConfig
+
+        with pytest.raises(ValueError, match="subset"):
+            QueueConfig(
+                transient_apierror_allowlist=["all models rate limited"],
+                transient_apierror_timeout_patterns=["context deadline exceeded"],
+            )
+
+    def test_queue_config_defaults_derive_from_classifier_bundle(self):
+        """Single-sourcing: QueueConfig defaults ARE the classifier's
+        canonical corpus bundle — no second copy to drift."""
+        from daemon.config import QueueConfig
+        from daemon.llm_error_classifier import DEFAULT_TRANSIENT_CHANNEL_PATTERNS
+
+        cfg = QueueConfig()
+        assert cfg.transient_apierror_allowlist == list(
+            DEFAULT_TRANSIENT_CHANNEL_PATTERNS.apierror_allowlist
+        )
+        assert cfg.transient_valueerror_patterns == list(
+            DEFAULT_TRANSIENT_CHANNEL_PATTERNS.valueerror_patterns
+        )
+        assert cfg.transient_remote_protocol_retryable == (
+            DEFAULT_TRANSIENT_CHANNEL_PATTERNS.remote_protocol_retryable
+        )

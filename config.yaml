@@ -103,6 +103,45 @@ queue:
   #
   # Non-retryable errors (401 auth, 403 forbidden, 400 bad request):
   #   These fail immediately with no retries — retrying won't fix them.
+  #
+  # Non-status transient-channel pattern matching
+  # (docs/plans/transient-channel-retry-widening.md):
+  #   NOTE: entries below are operator overrides of the built-in
+  #   corpus-derived defaults — REMOVING a key reverts to the defaults;
+  #   disabling requires an explicit empty/trimmed list.
+  #   allowlist: bare openai.APIError messages treated as transient
+  #     (timeout-body patterns below route to the 3-attempt timeout
+  #     budget; other hits to the 10-attempt transient budget).
+  #     Corpus: 'All models rate limited' — 21 events 2026-08-19→26,
+  #     instance deaths on attempt 1 of 10 (bug doc RC1/C1).
+  transient_apierror_allowlist: ['all models rate limited', 'context deadline exceeded']
+  #   Timeout-body subset of the allowlist — relayed upstream timeouts
+  #     ('context deadline exceeded', 2 events, bug doc C1). Each
+  #     attempt can cost the upstream's full timeout, so they consume
+  #     the 3-attempt timeout budget, not the 10-attempt transient one.
+  #     Validated at load: must be a subset of the allowlist above.
+  transient_apierror_timeout_patterns: ['context deadline exceeded']
+  #   blocklist: mandatory precedence over the allowlist — enforced on
+  #     BOTH the bare-APIError and the ValueError channels (quota /
+  #     bad-params shapes stay terminal even inside 200-body proxy
+  #     dicts). Corpus: 'Token Plan usage limit reached' (2056) shares
+  #     wording families with allowlist entries. Auth shapes are
+  #     unreachable here by design — auth errors arrive as
+  #     APIStatusError and are caught at the status branch — so they
+  #     are NOT listed.
+  transient_apierror_blocklist: ['token plan', 'usage limit', 'invalid params']
+  #   ValueError-body patterns (200-body proxy errors, empty SSE
+  #     stream). Corpus: 'No generations found in stream.' (4 events,
+  #     C4) and ultimate_model_retry_exhausted dict bodies (8 events,
+  #     C2). The latter is proxy-dependent: disable it by setting an
+  #     explicit trimmed list once the proxy's ultimate-routing
+  #     transparency update ships (bug doc RC2) — config-removable
+  #     without a deploy.
+  transient_valueerror_patterns: ['no generations found', 'ultimate_model_retry_exhausted']
+  #   C3 kill-switch: httpx.RemoteProtocolError (peer closed mid-body,
+  #     'incomplete chunked read', 7 events) retryable. Flip to false to
+  #     stop a broken-endpoint retry loop without a redeploy.
+  transient_remote_protocol_retryable: true
 
 # Context Compaction Settings
 compaction:

@@ -129,7 +129,8 @@ There is **no wall-clock cap** on this hot path (see the L2 asymmetry note below
 ### Retryable classification
 
 - Retryable statuses — `RETRYABLE_STATUS_CODES` (`daemon/llm_error_classifier.py:20`): `{429, 500, 502, 503, 504, 520, 521, 522, 523, 524}`.
-- `TRANSIENT_EXCEPTIONS` (`daemon/llm_error_classifier.py:108-138`): `TransientAPIError`, `ConnectionResetError`, `BrokenPipeError`, `ConnectionAbortedError`, `openai.APIConnectionError`, `LLMResponseValidationError`, `MalformedLLMResponseError`, `openai.APIResponseValidationError`; plus `IndexError` **only** when HA is configured (`:459-461`).
+- `TRANSIENT_EXCEPTIONS` (`daemon/llm_error_classifier.py`): `TransientAPIError`, `TransientLLMError`, `ConnectionResetError`, `BrokenPipeError`, `ConnectionAbortedError`, `openai.APIConnectionError`, `LLMResponseValidationError`, `MalformedLLMResponseError`, `openai.APIResponseValidationError`; plus `IndexError` **only** when HA is configured, and `httpx.RemoteProtocolError` **only** while `queue.transient_remote_protocol_retryable` is true (default on — config kill-switch).
+- **Non-status transient channels** (gap #10 fix, 2026-08-27 — [`plans/transient-channel-retry-widening.md`](plans/transient-channel-retry-widening.md)): bare `openai.APIError` and 200-body `ValueError` messages are pattern-matched (config-driven allowlist/blocklist under `queue:` in `config.yaml`, blocklist enforced on both channels) and wrapped as `TransientLLMError` via the shared `classify_transient_apierror_body` helper (one kind-routing implementation for hot path and facade); `kind='timeout_body'` (relayed `context deadline exceeded`) routes to the timeout budget inside `RetryByCategory` — the single documented predicate deviation. Defaults are single-sourced from `DEFAULT_TRANSIENT_CHANNEL_PATTERNS`; `QueueConfig` validates timeout patterns ⊆ allowlist.
 - Non-retryable by design: `BadRequestError` (its context-length variant is diverted to reactive compaction at `daemon/graph.py:3219-3260`) and generic `AttributeError`.
 - `MalformedLLMResponseError` is raised by the `ThinkingChatOpenAI` type-guard at `daemon/graph.py:2001-2002` (class at `:1927`); it joins the post-compaction exhaustion catch at `daemon/graph.py:3340-3341`.
 
@@ -283,7 +284,7 @@ Post-exhaustion cascade: instance `ERROR` → misleading `RECOVERY_GUIDANCE_HINT
 7. **`RECOVERY_GUIDANCE_HINT` fires on all error types** — wrong advice during provider-wide outages (confirmed replacement storm: 15 instances in 4 min, Aug 26 06:51–06:54 — see [`bugs/transient-llm-failures-non-retryable-instance-death.md`](bugs/transient-llm-failures-non-retryable-instance-death.md)).
 8. **RetryScheduler default-off** — even Lane A needs the operator to enable the waker.
 9. **Stale-anchor warning for future readers** — the type-guard is now `daemon/graph.py:2001-2002` (not `:1826`); the exhaustion catch is `:3340-3341` (not `:3045`).
-10. **Non-status transient channels all non-retryable** — bare `openai.APIError`, 200-body `ultimate_model_retry_exhausted`, empty SSE stream, `RemoteProtocolError`/`ReadTimeout` die in the classifier generic branch with zero L1 retries (bug doc above, RC1); proxy ultimate-model escalation collapses the effective L1 budget to ~1 attempt (RC2).
+10. ~~**Non-status transient channels all non-retryable**~~ — **RESOLVED 2026-08-27** ([`plans/transient-channel-retry-widening.md`](plans/transient-channel-retry-widening.md)): bare `openai.APIError`, 200-body `ValueError`, empty SSE stream, and `RemoteProtocolError` now classify retryable at L1 (pattern-matched, config-removable; relayed timeouts route to the timeout budget). Proxy ultimate-model escalation (RC2) is resolved proxy-side. Residual: amplified request volume (~10× per invoke) during provider-wide outages until the parking plan lands.
 
 ---
 
@@ -291,7 +292,7 @@ Post-exhaustion cascade: instance `ERROR` → misleading `RECOVERY_GUIDANCE_HINT
 
 - [`docs/bugs/transient-llm-failures-non-retryable-instance-death.md`](bugs/transient-llm-failures-non-retryable-instance-death.md) — fatality corpus (47 events, 2026-08-19→26): why instances actually become ERROR, root causes RC1–RC3, fix proposal.
 - [`docs/plans/rate-limit-episode-parking.md`](plans/rate-limit-episode-parking.md) — DRAFT plan that fills the structural gap (§1, §9). Do not treat as implemented.
-- [`docs/plans/transient-channel-retry-widening.md`](plans/transient-channel-retry-widening.md) — DRAFT plan fixing gap #10 at L1: makes the four non-status transient channels (bare `APIError`, 200-body `ValueError`, `RemoteProtocolError`, stream-empty) retryable via pattern-matched classification.
+- [`docs/plans/transient-channel-retry-widening.md`](plans/transient-channel-retry-widening.md) — IMPLEMENTED 2026-08-27 (was gap #10, now resolved): makes the four non-status transient channels (bare `APIError`, 200-body `ValueError`, `RemoteProtocolError`, stream-empty) retryable via pattern-matched classification.
 - [`docs/retry-architecture-review.md`](retry-architecture-review.md) — historical two-layer review (2026-03-15); predates the current four-layer layout.
 - [`docs/retry-proposal.md`](retry-proposal.md), [`docs/task-timeout-retry-design.md`](task-timeout-retry-design.md) — earlier design notes in the same area.
 - [`docs/job-queue.md`](job-queue.md) — job-queue surface reference.

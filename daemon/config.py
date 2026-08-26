@@ -17,6 +17,12 @@ import yaml
 from pydantic import Field, ConfigDict, model_validator, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+# Single source of truth for the non-status transient-channel pattern
+# defaults (no import cycle: llm_error_classifier only imports
+# .response_validation / httpx / openai / langchain_core). QueueConfig
+# field defaults DERIVE from this bundle — never a second copy.
+from .llm_error_classifier import DEFAULT_TRANSIENT_CHANNEL_PATTERNS
+
 from .constants import (
     CHECKPOINT_TTL_HOURS,
     CHECKPOINT_CLEANUP_INTERVAL_HOURS,
@@ -388,6 +394,124 @@ class QueueConfig(BaseSettings):
     llm_retry_transient_attempts: int = Field(default=10)  # ~17 min total retry time
     # Timeout errors: each attempt costs up to request_timeout (660s = 11 min)
     llm_retry_timeout_attempts: int = Field(default=3)
+
+    # Non-status transient-channel pattern matching
+    # (docs/plans/transient-channel-retry-widening.md work unit 7).
+    # Case-insensitive substring match against the exception message.
+    # Applied by ``load_config`` pushing these into
+    # ``daemon.llm_error_classifier.configure_transient_channel_patterns``.
+    # NoDecode + field_validator accepts CSV ("a,b") or JSON ('["a","b"]')
+    # from env vars (QUEUE_TRANSIENT_APIERROR_ALLOWLIST, ...) and YAML
+    # lists. An explicitly-EMPTY allowlist/pattern list disables the
+    # corresponding classifier branch (additive-off switch).
+    #
+    # DEFAULTS ARE DERIVED from the classifier's canonical corpus bundle
+    # (``DEFAULT_TRANSIENT_CHANNEL_PATTERNS``) — config.yaml entries are
+    # pure operator overrides. Note: REMOVING a key from config.yaml
+    # reverts to the built-in defaults; disabling requires an explicit
+    # empty/trimmed list.
+    #
+    # allowlist: bare openai.APIError messages treated as transient.
+    #   Timeout-body patterns (below) route to the 3-attempt timeout
+    #   budget; other hits to the 10-attempt transient budget.
+    transient_apierror_allowlist: Annotated[list[str], NoDecode] = Field(
+        default=list(DEFAULT_TRANSIENT_CHANNEL_PATTERNS.apierror_allowlist),
+        description=(
+            "Bare openai.APIError message substrings classified transient "
+            "(relayed rate-limit / upstream-timeout bodies from the proxy). "
+            "Blocklist entries take mandatory precedence. Empty disables "
+            "the branch (pure pass-through)."
+        ),
+    )
+    # timeout patterns: subset of the allowlist whose hits consume the
+    # timeout budget (each attempt can cost the upstream's full timeout —
+    # docs/retry-architecture.md §5 wall-clock amplification guard).
+    # Validated at load time: must be a subset of the allowlist.
+    transient_apierror_timeout_patterns: Annotated[list[str], NoDecode] = Field(
+        default=list(DEFAULT_TRANSIENT_CHANNEL_PATTERNS.apierror_timeout_patterns),
+        description=(
+            "Allowlist subset routed to the timeout retry budget "
+            "(kind='timeout_body'). Must be a subset of "
+            "transient_apierror_allowlist (validated)."
+        ),
+    )
+    # blocklist: mandatory precedence over the allowlist — quota /
+    # bad-params shapes stay terminal, on BOTH the bare-APIError and the
+    # ValueError channels. Auth shapes are unreachable here by design
+    # (auth errors arrive as APIStatusError, caught at the status
+    # branch) so they are NOT listed.
+    transient_apierror_blocklist: Annotated[list[str], NoDecode] = Field(
+        default=list(DEFAULT_TRANSIENT_CHANNEL_PATTERNS.apierror_blocklist),
+        description=(
+            "Message substrings that force non-retryable even when an "
+            "allowlist/pattern entry also matches (mandatory precedence, "
+            "applied to both the bare-APIError and ValueError channels). "
+            "Protects quota shapes like 'Token Plan usage limit reached'."
+        ),
+    )
+    # ValueError-body patterns: 200-body proxy errors and zero-chunk
+    # SSE streams parsed by LangChain into ValueError.
+    transient_valueerror_patterns: Annotated[list[str], NoDecode] = Field(
+        default=list(DEFAULT_TRANSIENT_CHANNEL_PATTERNS.valueerror_patterns),
+        description=(
+            "ValueError message substrings classified transient "
+            "(200-body proxy error dicts, zero-chunk SSE streams). "
+            "'ultimate_model_retry_exhausted' is proxy-dependent — "
+            "disable it by setting an explicit trimmed list once the "
+            "proxy transparency update ships. Empty disables the branch."
+        ),
+    )
+    # C3 kill-switch: whether httpx.RemoteProtocolError (peer closed
+    # mid-body) is retryable. Membership in the retry set is conditional
+    # on this flag — the config lever the pattern channels' empty-list
+    # switches already provide for their siblings.
+    transient_remote_protocol_retryable: bool = Field(
+        default=DEFAULT_TRANSIENT_CHANNEL_PATTERNS.remote_protocol_retryable,
+        description=(
+            "Whether httpx.RemoteProtocolError (peer closed connection "
+            "mid-body, incomplete chunked read) is retryable. Flip to "
+            "false to stop a broken-endpoint retry loop without a "
+            "redeploy."
+        ),
+    )
+
+    @field_validator(
+        "transient_apierror_allowlist",
+        "transient_apierror_timeout_patterns",
+        "transient_apierror_blocklist",
+        "transient_valueerror_patterns",
+        mode="before",
+    )
+    @classmethod
+    def _parse_transient_channel_patterns(cls, value: Any) -> Any:
+        """Accept CSV / JSON-array strings and YAML lists for the
+        non-status transient-channel pattern fields."""
+        return _parse_csv_or_json_list(value)
+
+    @model_validator(mode="after")
+    def _validate_timeout_patterns_subset(self) -> "QueueConfig":
+        """Timeout-body patterns must be a subset of the allowlist.
+
+        A relayed-timeout pattern present in the allowlist but missing
+        here would silently consume the 10-attempt transient budget at
+        up to request_timeout (660s) per attempt on the uncapped hot
+        path — the exact wall-clock amplification the timeout budget
+        exists to prevent. Fail the config load instead.
+        """
+        allowlist = {p.lower() for p in self.transient_apierror_allowlist}
+        stray = [
+            p
+            for p in self.transient_apierror_timeout_patterns
+            if p.lower() not in allowlist
+        ]
+        if stray:
+            raise ValueError(
+                f"queue.transient_apierror_timeout_patterns must be a subset "
+                f"of queue.transient_apierror_allowlist; stray entries: "
+                f"{stray}. Add them to the allowlist or remove them from "
+                f"the timeout patterns."
+            )
+        return self
 
 
 class AgentsConfig(BaseSettings):
@@ -1251,7 +1375,28 @@ def load_config(config_path: str | None = None) -> Config:
         config_dict["vscode"] = processed_config["vscode"]
 
     # Create and validate config
-    return Config(**config_dict)
+    config = Config(**config_dict)
+
+    # Push the non-status transient-channel pattern lists into the
+    # classifier module (docs/plans/transient-channel-retry-widening.md
+    # work unit 7) so the classifier and the L2 facade share one
+    # config-driven source of truth. Lazy import to avoid any import
+    # cycle at module load; load_config is called rarely (startup /
+    # tests), so the call cost is negligible. The install is a SINGLE
+    # atomic bundle assignment, so runtime reloads (keyword extraction
+    # calls load_config) can never leave a mid-classification reader
+    # with a torn old/new pattern view.
+    from .llm_error_classifier import configure_transient_channel_patterns
+
+    configure_transient_channel_patterns(
+        apierror_allowlist=config.queue.transient_apierror_allowlist,
+        apierror_timeout_patterns=config.queue.transient_apierror_timeout_patterns,
+        apierror_blocklist=config.queue.transient_apierror_blocklist,
+        valueerror_patterns=config.queue.transient_valueerror_patterns,
+        remote_protocol_retryable=config.queue.transient_remote_protocol_retryable,
+    )
+
+    return config
 
 
 # Convenience function for getting the config

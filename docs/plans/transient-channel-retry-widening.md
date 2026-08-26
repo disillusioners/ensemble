@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| **Status** | DRAFT — Review complete, all findings incorporated ([review](transient-channel-retry-widening-review.md), 2026-08-26: §2.1 insertion-point fix applied; §3.1 resolved as timeout-category routing; §3.2–3.4 and §4 addressed). Ready for implementation. |
+| **Status** | IMPLEMENTED 2026-08-27 — all 8 work units landed (review findings incorporated 2026-08-26: §2.1 insertion-point fix applied; §3.1 resolved as timeout-category routing; §3.2–3.4 and §4 addressed). Acceptance verified by targeted test packs (classifier / facade parity / error-report / config). |
 | **Goal** | Make the four non-status-code transient failure channels (bare `openai.APIError`, 200-body `ValueError` shapes, mid-stream `httpx.RemoteProtocolError`, relayed upstream timeouts) retryable at L1, so the configured 10-attempt transient budget actually runs instead of dying at attempt 1. Genuine terminal errors (quota, bad params, auth) stay byte-identically non-retryable. |
 | **Scope** | MEDIUM — single coder. Spans `daemon/llm_error_classifier.py` (exception + branches + `TRANSIENT_EXCEPTIONS`), `daemon/services/llm_failover.py` (`_classify_raw_sdk_exceptions` parity), `daemon/services/message_processing_errors.py` (error-type mapping), `daemon/config.py` + `config.yaml` (pattern lists), targeted tests. |
 | **Risk** | Pattern false-positives making genuine bugs retryable (bounded by allowlist + blocklist + regression tests); interaction with the parking plan's `ProviderRateLimitError` (keep disjoint — see §6). |
