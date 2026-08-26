@@ -155,7 +155,40 @@ Hold the backup ≥ 7 days after the first destructive cycle.
 **Single-process only:** arm the flags ONLY while a single daemon process
 serves the database — no blue-green/overlap windows. A stale in-flight
 writer from another process could commit a checkpoint referencing a blob
-deleted in the overlap window.
+deleted in the overlap window. **Honest scope of this rule:** it
+mitigates the CROSS-process variant of the race. It does NOT by itself
+eliminate the intra-process window described below — that window exists
+even with exactly one daemon process.
+
+**Residual intra-process race disclosure (PR4 external review, 2026-08-26).**
+The DEFAULT `AsyncPostgresSaver` path on PG14+ (psycopg autocommit +
+pipeline) commits each `aput`'s blob upsert and checkpoint upsert as
+SEPARATE implicit transactions — a µs-scale gap
+(`langgraph-checkpoint-postgres` `aio.py:82`, `aio.py:280-304`; the
+non-pipeline fallback at `aio.py:393-399` IS atomic, but it is not the
+path this daemon runs). If the prune's anti-join DELETE takes its
+snapshot inside that gap — even single-process, because the maintenance
+task and graph turns share the process — it can see the new blob
+without the checkpoint row referencing it and delete the blob; every
+subsequent `aget` then silently reconstructs WITHOUT that channel. The
+idle gate is a PRECONDITION, not a lock: it makes this overlap rare, not
+impossible. Recovery is the step-6 backup (restore + count + liveness
+checks below).
+
+**DB-level hardening shipped with this disclosure:** the destructive
+DELETE now runs inside a SERIALIZABLE transaction with bounded retry
+(`daemon/checkpoint_adapter.py::delete_blobs_anti_join`,
+`CHECKPOINT_BLOB_PRUNE_DELETE_RETRIES`). When PostgreSQL's SSI detects
+a dangerous structure involving the DELETE (SQLSTATE 40001) or a
+deadlock (40P01), the DELETE aborts and is retried on a fresh snapshot,
+on which the now-visible referencing checkpoint row rescues its blob —
+one side aborts, the prune yields and re-evaluates. Verified
+empirically on PG 14.22 that this abort-and-retry works when SSI's
+two-edge condition holds. **Equally verified: a lone READ COMMITTED
+aput racing the DELETE does NOT trip SSI** (a single rw-out-edge is not
+a dangerous structure), so the µs-gap window above is narrowed and
+conflict-covered, not eliminated — the §6 backup remains the recovery
+of record. Do not arm destructive without it.
 
 ```bash
 export CHECKPOINT_BLOB_PRUNE_DRY_RUN=0
