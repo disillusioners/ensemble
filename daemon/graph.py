@@ -1999,6 +1999,14 @@ class ThinkingChatOpenAI(ChatOpenAI):
         # Valid: a dict, or any object exposing model_dump() (pydantic
         # BaseModel / SDK response objects).
         if not isinstance(response, dict) and not hasattr(response, "model_dump"):
+            try:
+                payload_len = len(response)
+            except TypeError:
+                payload_len = -1
+            logger.info(
+                f"[LLM] Malformed response payload (type={type(response).__name__}, "
+                f"len={payload_len}): {repr(response)[:300]}"
+            )
             raise MalformedLLMResponseError(response)
 
         result = super()._create_chat_result(response, generation_info)
