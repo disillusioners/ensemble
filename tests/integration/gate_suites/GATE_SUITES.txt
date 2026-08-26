@@ -1,30 +1,33 @@
 # GATE_SUITES.txt — Phase 1 gate-suite manifest (single source of truth).
-# ── Enumeration record (regenerated post-amend — PR1 closure) ─────────────
+# ── Enumeration record (regenerated post-amend — PR2 closure) ─────────────
 # Date: 2026-08-26 (UTC) | Branch: feature/langgraph-checkpoint-perf |
-# HEAD: 0db1a76842341ffd9b37923e63ef73def9ec3b43 (amended PR1 commit,
-# review-verified). Supersedes the pre-amend W5 record, which cited
-# "7a94162b + uncommitted PR1-review fix package" — its counts predated
-# the amend.
-# Method (collection-only; replicates the W5 method in a clean git
-# worktree pinned at the HEAD sha above — main tree untouched): one
-# pytest subprocess per file — uv run pytest <file> -o addopts=
+# HEAD: fa31a52089d87dd79959f2642ba65044ac9f3153 (PR2 commit, C2
+# message_metadata side table + MessageTapSlot, 19 files). Supersedes
+# the PR1-closure record at 0db1a76842341ffd9b37923e63ef73def9ec3b43 —
+# PR2 added 7 new gate suites that ARE the PR2 exit gates (liveness
+# both-ids, first-appearance ordering, AST 4-site placement, etc.,
+# per phase1-plan.md §Sequencing).
+# Method (collection-only; replicates the PR1-closure method in a clean
+# git worktree pinned at the HEAD sha above — main tree untouched):
+# one pytest subprocess per file — uv run pytest <file> -o addopts=
 # --collect-only -q -p no:cacheprovider --no-header — which strips the
 # default 'not integration' marker filter. Cross-checked with one
-# aggregate collect-only subprocess over all 23 paths (the gate-runner
-# method): identical total.
-# Result: 23/23 files collect — 283 tests total (282 pre-amend; sole
-# per-file delta: tests/unit/persistence/test_checkpoint_perf_logging.py
-# 18 → 19). Execution provenance: W5 gate run 2026-08-25 — 23/23 files
-# GREEN, 0 failed / 0 skipped, 38.7s total; dur(s) below is from that
-# run (for the perf-logging row it predates the added 19th test).
+# aggregate collect-only subprocess over all 30 paths (the gate-runner
+# method): identical total (344).
+# Result: 30/30 files collect — 344 tests total (283 PR1-closure baseline;
+# sole PR2 delta: +7 suites / +61 tests). The 23 pre-existing suites are
+# byte-identical to the PR1-closure record (counts unchanged at 283, no
+# PR2 edits). Execution provenance — pre-existing 23: W5 gate run
+# 2026-08-25 (dur(s) below for those rows); new 7: PR2 acceptance run
+# 2026-08-26 — 7/7 files GREEN, 0 failed / 0 skipped, durations per file
+# in order below: 1.02 / 0.82 / 0.78 / 0.87 / 0.70 / 4.70 / 1.11 s.
 # NOTE — capture-suite marker: tests/integration/test_messages_response_
-# fixture_capture.py carries `pytestmark = integration` AT THIS COMMIT,
-# so under default addopts it needs an explicit `-m integration` to be
-# collected (verified 2026-08-26: 1 collected with the flag; 0 collected,
-# 1 deselected without). The PR1-closure follow-up removes the marker so
-# bare pytest collects it by default.
+# fixture_capture.py — the `pytestmark = integration` marker WAS removed
+# in commit 603c9eb8 (PR1-closure), so bare pytest collects it by
+# default (verified 2026-08-26: 1 collected, 0 deselected).
 #
-# N = tests collected at HEAD (2026-08-26); dur(s) = W5 run (2026-08-25).
+# N = tests collected at HEAD (2026-08-26); dur(s) = W5 run 2026-08-25 for
+# pre-existing 23, PR2 acceptance run 2026-08-26 for the 7 new PR2 rows.
 # File                                                           N  dur(s)
 # tests/e2e/test_pause_resume_unchanged.py                        1   1.9
 # tests/unit/test_pause_resume_root.py                           18   1.7
@@ -49,6 +52,13 @@
 # tests/test_persistence.py                                      20   1.5
 # tests/unit/persistence/test_checkpoint_perf_logging.py         19   1.4
 # tests/test_maintenance.py                                      69   1.8
+# tests/unit/repositories/test_message_metadata_repository.py    16   1.02
+# tests/unit/services/test_message_tap_slot.py                    20   0.82
+# tests/unit/repositories/test_message_tap_to_repo_liveness.py    7   0.78
+# tests/unit/repositories/test_message_metadata_revive_stability.py  2   0.87
+# tests/unit/repositories/test_message_metadata_paused_question_flow.py  3   0.70
+# tests/integration/test_message_metadata_hook_placement.py      10   4.70
+# tests/integration/test_message_metadata_liveness.py             3   1.11
 #
 # Non-manifest companions also green post-fix:
 # tests/integration/test_messages_response_fixture_capture.py  1 passed (drift-check mode)
@@ -122,6 +132,29 @@ tests/unit/persistence/test_checkpoint_perf_logging.py
 # Canonical maintenance-job suite (CheckpointCleanupJob operations A-D,
 # history cap, per-thread prune + the PR1 timing/log-line wrap):
 tests/test_maintenance.py
+#
+# ── Gate concept: message_metadata side table + MessageTapSlot (PR2 exit gates) ──
+# Repository contract (model + dual-driver shape + idempotent first-write
+# upsert + get_for_thread + thread-isolated reinsert + composite-PK +
+# ix_message_metadata_thread index round-trip — 16 tests):
+tests/unit/repositories/test_message_metadata_repository.py
+# MessageTapSlot (RemoveMessage filter + id dedup + asyncio.to_thread
+# bridge + silent-safe failure path — 20 tests):
+tests/unit/services/test_message_tap_slot.py
+# Tap → repository liveness round-trip (writes via tap surface reach the
+# repo's get_for_thread — both-ids parity — 7 tests):
+tests/unit/repositories/test_message_tap_to_repo_liveness.py
+# Revive stability — message_metadata survives instance revival (2 tests):
+tests/unit/repositories/test_message_metadata_revive_stability.py
+# Paused-question-flow — tap + repo work through pause/resume/answer
+# transitions without losing rows (3 tests):
+tests/unit/repositories/test_message_metadata_paused_question_flow.py
+# AST placement — exactly 4 tap call sites, no tools_node tap, no 5th tap
+# (parametrized AST scan, 10 tests):
+tests/integration/test_message_metadata_hook_placement.py
+# End-to-end liveness — message_metadata first-appearance ordering matches
+# message-list ordering through the full pipeline (3 tests):
+tests/integration/test_message_metadata_liveness.py
 #
 # ── Excluded (verified pre-existing failures on the clean tree, 2026-08-25;
 #     NOT gate-suite members — reported to the dispatcher in the PR1 report) ──
