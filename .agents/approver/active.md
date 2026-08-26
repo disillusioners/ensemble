@@ -1,8 +1,8 @@
 # Approver Active State
 
-Plan: Pause/Resume/Terminate Tree Propagation Fix (pause-resume-terminate-tree-fix)
-Slug: pause-resume-terminate-tree-fix
+Plan: LangGraph Checkpoint Persistence Performance — Phase 1 (langgraph-checkpoint-perf)
+Slug: langgraph-checkpoint-perf
 Iteration: 001
 Status: APPROVED
-Started: 2026-08-24T19:46:19Z
-Last Verdict: APPROVED (iteration 001, 2026-08-24)
+Started: 2026-08-25T21:50:00Z
+Last Verdict: APPROVED (iteration 001, 2026-08-25)
