@@ -2,10 +2,10 @@
 
 | Field | Value |
 |---|---|
-| **Status** | DRAFT — Pending Team Review. Date: 2026-08-27. Approach decision REOPENED (§1a: A=ERROR-but-silent [specified], B=alive-idle, C=dedicated `PARKED` state). |
-| **Goal** | Quota exhaustion shapes (`Token Plan usage limit reached` / `usage limit` — currently terminal-at-attempt-1 via the transient-channel blocklist) become a distinct **usage_limit episode**: the turn aborts fast at L1 (no futile second-scale retries), the instance fails to `ERROR` as today but **the parent error report is suppressed** (no `RECOVERY_GUIDANCE_HINT`), the job is parked and re-dispatched on the proven ERROR→RUNNING revive path on a fixed schedule **3 min → 5 min → 10 min → 15 min (15 min cap)** until **first-sighting + configurable window (default 6 h)**. Exactly ONE report per episode: success (normal completion) or terminal `usage_limit_deadline` at the 6 h deadline (user-adjudicated 2026-08-27: "ERROR-but-silent"). |
-| **Scope** | MEDIUM-LARGE — single coder. Depends on the episode machinery of [`rate-limit-episode-parking.md`](rate-limit-episode-parking.md) (DRAFT, not yet implemented — see §7 sequencing). Spans `daemon/llm_error_classifier.py` (typed wrapper, pattern list), `daemon/services/message_processing_errors.py` (error-type), `daemon/services/error_reporting.py` (envelope suppression for in-window episodes), the parking plan's Phase B/C seams (observer branch, episode columns, scheduler scoping, revive), `daemon/config.py` + `config.yaml`, targeted tests. |
-| **Risk** | Shared-machinery drift with the parking plan (two episode kinds, one seam); `terminal_reason` enum addition vs `_derive_legacy_status` / `reconcile_turn_mirror` MIRROR_SET (same as parking §9); detection false-positives parking genuine bugs for 6 h; instance sits `ERROR` for up to 6 h — must verify no reaper/stale-recovery touches it. |
+| **Status** | DRAFT — Pending Team Review. Date: 2026-08-27. **Approach D (dedicated deferral path on reused RetryTurn machinery) ADJUDICATED by user 2026-08-27 — specified in [`usage-limit-deferral-path.md`](usage-limit-deferral-path.md).** Alternatives retained in §1a for the record: A=ERROR-but-silent, B=alive-idle, C=dedicated `PARKED` state. |
+| **Goal** | Quota exhaustion shapes (`Token Plan usage limit reached` / `usage limit` — currently terminal-at-attempt-1 via the transient-channel blocklist) become a **system-level cancellation-class failure** that rides the production timeout/retry lane (RetryTurn): the turn aborts fast at L1 (no futile second-scale retries), **no error report and no `ERROR` state per attempt — instance + job state intact** — and the task is re-dispatched from checkpoint on a fixed schedule **3 min → 5 min → 10 min → 15 min (15 min cap)** until **first-sighting + configurable window (default 6 h)**. Exactly ONE report per episode: success (normal completion) or terminal `usage_limit_deadline` at the deadline. The 6 h is the **retry horizon** (deadline-bounded, `max_retries`-free) — NOT a per-task `TimeoutMonitor` extension. |
+| **Scope** | SMALL-MEDIUM — single coder. **INDEPENDENT of the parking plan** (no job-queue migration, no observer branch, no scheduler scoping — §7). Spans `daemon/llm_error_classifier.py` (typed wrapper, pattern list — shared unit 1), instance-metadata anchor (unit 2), a `UsageLimitError` catch at the task seam routing into `schedule_retry` with a deadline-bounded schedule (`daemon/services/task_processor.py`, `daemon/services/worker_pool.py`, `daemon/services/turn_transitions.py`), `daemon/config.py` + `config.yaml`, targeted tests. |
+| **Risk** | `max_retries` bypass semantics (deadline-bounded deferrals — same adjudication as parking decision 1, but on the L3 lane that currently hard-caps at 3); `retry_count` grows ~26/episode (audit consumers); verify the job is NOT finalized and the instance does NOT go `ERROR` while a retry is scheduled (the TIMEOUT lane's contract — must hold for the programmatic path too); detection false-positives auto-retrying a genuine bug for 6 h (bounded: terminal report at deadline carries the original error). |
 | **Evidence** | Corpus event 2056 `Token Plan usage limit reached` (1 instance death, [`docs/bugs/transient-llm-failures-non-retryable-instance-death.md`](../bugs/transient-llm-failures-non-retryable-instance-death.md)); today classified terminal by the blocklist installed in commit `cc753c2f`. Quota windows are per-account and reset on the provider's schedule — waiting IS the correct recovery, unlike bad-params. |
 | **Related** | [`rate-limit-episode-parking.md`](rate-limit-episode-parking.md) (provider-outage episodes — machinery donor, §7) · [`transient-channel-retry-widening.md`](transient-channel-retry-widening.md) (IMPLEMENTED — the blocklist this plan types) · [`docs/retry-architecture.md`](../retry-architecture.md) §6/§7/§9 (L3/L4, episode comparison) |
 
@@ -22,25 +22,48 @@ run for days; the correct behavior is **bounded patience**: abort the turn fast,
 SAME work from checkpoint every few minutes, recover when the provider resets the window,
 and only die (distinctly) after 6 h without recovery.
 
-**Adjudicated design (user, 2026-08-27): ERROR-but-silent — Approach A below.** Decision
-REOPENED for multi-approach planning the same day: §1a compares three approaches for the
-instance's state during the episode; §2 onward specifies **A** (the current default).
-Phase A (classifier + anchor), the schedule (unit 5), the migration (unit 6), and the
-scheduler wake (unit 7) are IDENTICAL across all three — the approaches differ only in
-Phase B (state + reporting + park seam) and the wake dispatch path.
+**Adjudicated design (user, 2026-08-27): Approach D — dedicated deferral path, reused
+machinery.** A fourth,
+simpler approach was raised in review: quota exhaustion is a *system-level* condition, so
+handle it like the system already handles "work that cannot proceed right now but should
+resume" — the TIMEOUT lane. That lane is production-proven (`TimeoutMonitor` →
+`OperationCancelledError(TIMEOUT)` → `_handle_cancellation` → `schedule_retry` at
+`worker_pool.py:484-499,662`; bus-watcher rebinding at `:627-660` hardened by the
+2026-06-26 production incident) and — uniquely among the lanes — it retries a task
+**without** error-reporting the parent or ERROR-ing the instance. §1a compares all four;
+§2 specifies D. Units 1-2 (classifier, anchor) and 5 (schedule) are shared verbatim from
+the earlier drafts; D deletes the parking machinery (job columns, observer branch,
+scheduler scoping, envelope suppression, new instance state) entirely.
 
 ### 1a. Approaches under consideration
 
-| | **A. ERROR-but-silent** (current default) | **B. Alive-idle** (early branch) | **C. Dedicated state** (`InstanceStatus.PARKED`) |
-|---|---|---|---|
-| Instance during episode | `ERROR` (unchanged cascade) | settles alive (idle), error-report lane skipped | new state `parked` — alive-but-not-schedulable |
-| Parent sees | nothing per attempt; PARKED notice (job_id) | same | same, plus an honest status |
-| Wake dispatch | proven ERROR→RUNNING revive | new "dispatch to live instance" path | `PARKED`→`RUNNING` (revive set extension) |
-| Park seam | observer lane (shared w/ parking unit 5) | message-error seam (early branch) | message-error seam (observer doesn't fire — instance not dead) |
-| New machinery | envelope suppression only | suppression + alive-settle path | enum value + transition sites + membership decision at every status enumeration |
-| Blast radius | small | medium | **large**: ~169 status-literal sites daemon-wide + frontend; each needs a "dead or alive?" decision; a forgotten site is a subtle bug (reaper kills parked instance, list filters hide it, watchdog times it out) |
-| Falsifiable risk | something reaps `ERROR` mid-window | "turn failed, instance stays alive" has no precedent settle path | membership drift across the 169 sites; frontend/API enum churn |
-| Est. effort on top of shared units | ~0.5 day | ~1 day | ~2–3 days (audit-heavy) |
+| | **D. Dedicated deferral path** (reused machinery — ADJUDICATED) | **A. ERROR-but-silent** | **B. Alive-idle** | **C. Dedicated state** (`InstanceStatus.PARKED`) |
+|---|---|---|---|---|
+| Instance during episode | normal RUNNING↔idle cycling per attempt (RetryTurn contract) | `ERROR` (unchanged cascade) | settles alive (idle), error-report lane skipped | new state `parked` — alive-but-not-schedulable |
+| Parent sees | nothing per attempt (cancellation is silent — no suppression code needed) | nothing per attempt; PARKED notice (job_id) | same | same, plus an honest status |
+| Re-dispatch | existing retry-task claim path (`next_retry_at` → worker claim; `is_retry=True` checkpoint resume) | ERROR→RUNNING revive via scoped RetryScheduler | new "dispatch to live instance" path | `PARKED`→`RUNNING` (revive set extension) |
+| Retry seam | `UsageLimitError` catch at the task seam → `schedule_retry` (deadline-bounded) | observer lane (shared w/ parking unit 5) | message-error seam (early branch) | message-error seam (observer doesn't fire — instance not dead) |
+| New machinery | typed exception + one catch branch + schedule/deadline parameterization + `max_retries` bypass | envelope suppression + parking machinery | suppression + alive-settle path + parking machinery | enum value + transition sites + membership decisions at every status enumeration + parking machinery |
+| Blast radius | tiny: classifier + one seam + config | small + parking machinery | medium + parking machinery | **large**: ~169 status-literal sites daemon-wide + frontend + parking machinery |
+| Parking-plan dependency | **none** | hard (§7) | hard (§7) | hard (§7) |
+| Falsifiable risk | L3 `max_retries=3` contract must not silently re-kill at attempt 4; job must not finalize mid-episode | something reaps `ERROR` mid-window | "turn failed, instance stays alive" has no precedent settle path | membership drift across the 169 sites; frontend/API enum churn |
+| Est. effort | **~0.5-1 day** | ~1+ day (with parking) | ~1-2 days (with parking) | ~2-3 days (audit-heavy, with parking) |
+
+**D — dedicated deferral path on reused machinery (adjudicated; fully specified in
+[`usage-limit-deferral-path.md`](usage-limit-deferral-path.md)).** The insight: everything the
+earlier approaches built by hand — silent parent, intact instance, checkpoint resume,
+scheduled re-dispatch — already exists as production RetryTurn (L3) MACHINERY. D does not
+"join the timeout lane"; it builds a **new usage-limit path** (typed error → dedicated
+worker-seam handler → anchor/deadline/schedule policy) whose every primitive —
+`schedule_retry`'s gate+transition+mirrors, F6 watcher migration, claim, `is_retry`
+checkpoint resume — is reused code, parameterized not forked. Policy is new; machinery is
+proven. The "6 h" is realized as the **retry horizon**: per-attempt `TimeoutMonitor`
+stays at 125 min and is never approached (attempts fail in ~seconds); the window lives in
+the anchor + deadline check. What D explicitly does NOT do: extend the per-task timeout
+and sleep in-turn — see the rejection below. Tradeoffs accepted: `retry_count` grows
+~26/episode (budget-free by adjudication, but any consumer assuming ≤ `max_retries` must
+be audited); the reused primitive gains a second caller with different budget semantics
+(parameterized, never copied).
 
 **A — ERROR-but-silent (specified in §2).** Instance fails `ERROR` as today; parent
 envelope suppressed in-window; one report per episode (success or 6 h terminal). Smallest
@@ -68,11 +91,14 @@ API enums. Semantically the honest one — and the only approach whose failure m
 **compile-time-visible missing case** in exhaustive sets, vs A/B's silent drift. Cost:
 the audit is the work.
 
-What must NOT happen (rejected up front): in-turn patience. Waits of 3–15 min × up to 6 h
-inside one tenacity cycle would hold the worker and the graph turn for hours —
-`task_timeout_minutes=125` (`daemon/config.py:467`) forbids it, checkpoints would not
-progress, and the turn would produce no observable state. Patience lives at the
-**episode/job lane** (parking-plan architecture), not L1.
+What must NOT happen (rejected up front): **in-turn sleeping** — extending the 125-min
+`TimeoutMonitor` to 6 h and sleeping 3-15 min between in-graph retries. It would hold a
+bounded-pool worker per sleeping task for hours ("workers are single-threaded per pool"
+— `worker_pool.py:703-705`); quota outages are account-wide, so N quota-hit instances
+would sleep-exhaust the pool and starve ALL other task processing. Checkpoints also
+wouldn't progress and the turn would show no activity. The per-attempt timeout stays
+125 min — D's patience lives between tasks (the retry schedule), never inside one.
+(In-agent retry loops stay rejected too — LoopDetector threshold-3 forbids them.)
 
 ## 2. Design
 
@@ -88,13 +114,14 @@ Same three phases as the parking plan — **A** detect & anchor, **B** classify 
 class UsageLimitError(Exception):
     """Provider quota exhaustion (token plan / usage limit windows).
     Terminal at L1 by design — the window resets on the provider's
-    schedule, so second-scale retries are futile. The episode lane
-    (job parking) owns recovery; see docs/plans/usage-limit-window-recovery.md."""
+    schedule, so second-scale retries are futile. The task seam routes
+    it into the RetryTurn lane (deadline-bounded re-dispatch); see
+    docs/plans/usage-limit-window-recovery.md."""
 ```
 
 NOT a member of `TRANSIENT_EXCEPTIONS` / `TIMEOUT_EXCEPTIONS` — the fast-abort semantics
 of today's blocklist are preserved byte-identically. New pattern list
-`usage_limit_patterns` (config, unit 6), default `['token plan', 'usage limit']` —
+`usage_limit_patterns` (config, §4), default `['token plan', 'usage limit']` —
 **disjoint from `invalid params`** (2013), which stays an untyped terminal re-raise: a
 genuine bad-params bug must never enter a 6 h episode. Detection helper
 `_matches_usage_limit(msg)` checked in the bare-`APIError` branch BEFORE the transient
@@ -110,7 +137,66 @@ episode); **clear on successful LLM response**. The 6 h clock is per-instance
 ("from the first time the instance gets the usage limit"). Mirrors parking unit 2
 (`rate_limit_first_seen_at`) — one mechanism, two keys.
 
-### Phase B — Classify & park (observer seam, report suppressed)
+### Phase B (Approach D — adjudicated) — dedicated path at the worker seam
+
+**Authoritative spec: [`usage-limit-deferral-path.md`](usage-limit-deferral-path.md) W1-W8
+(revised 2026-08-27 per its review).** The summary below is synced to that revision; on
+any divergence, the detail plan wins.
+
+**3. Two-part catch keeps the error out of every report path.** (a) A carve-out in
+`task_processor.process` BEFORE the generic `except Exception` (`:422`): `except
+UsageLimitError: raise` — without it the stage-2 cascade (`handle_message_processing_error`
+→ error event, lifecycle `status="error"`, `_send_error_report`) fires on EVERY deferral
+before the worker seam sees the exception (review blocker §2.1). (b) The dedicated entry
+point in `_process_with_timeout` (`worker_pool.py:484-588`): `except UsageLimitError` →
+`_handle_usage_limit` — the worker seam owns the episode decision (anchor/deadline are
+worker-seam state). Net per-attempt observables: none — no `_send_error_report`, no
+instance `ERROR`, no message `FAILED`, no hierarchy deletion, no error event. By two
+constructions, not one.
+
+**4. Deadline check + `schedule_retry` with a usage-limit schedule.** In that handler:
+- Read/stamp the anchor (unit 2). `now < first_seen + window` → call the existing
+  `schedule_retry` machinery (`daemon/repositories/task/repository.py:2878-3054`) with
+  the unit-5 schedule via keyword-only params (`next_retry_at`, `bypass_retry_budget`)
+  — parameterized, never forked; the retry task is claimed by the NORMAL worker claim
+  path (no RetryScheduler scoping, no revive — `is_retry=True` gives checkpoint resume,
+  `task_processor.py:352`). **Then release the dependency-bus watchers**
+  (`_cancel_bus_watchers_for_task`, as the TIMEOUT lane does at `worker_pool.py:782`) —
+  F6 migrates the DB `job_watchers`, but the in-memory bus watchers strand the parent in
+  `waiting_children` without this call (review H1). The job is not finalized (task not
+  terminal) and the instance returns to its normal between-tasks state — the RetryTurn
+  contract, already production-proven for TIMEOUT.
+- `now ≥ deadline` → **TERMINAL, self-composed and RACE-GATED** (review rev2 §2.1:
+  `_handle_task_failure` has no parent notification / `error_type` param — that
+  mechanism does not exist; and the fallthrough must never report on a live episode):
+  `fail_task` first — if it returns `None` (lost the guard race to a concurrent
+  terminalization OR a concurrent retry-child creator, e.g. W8's recovery child),
+  log-and-return with NO report; on race-won: `_notify_parent_of_failure(
+  error_type='usage_limit_deadline')` + watcher notify + clear anchor — the composition
+  the `max_retries_exceeded` path uses (`worker_pool.py:795-800`), with a stronger gate
+  than its precedent (the usage-limit path has another re-childing actor). The ONLY
+  error report of the episode.
+- **Budget bypass:** usage-limit deferrals do NOT consume L3 `max_retries` (default 3)
+  — deadline-bounded instead (identical adjudication to parking decision 1, moved to
+  the L3 lane); the bypass drops only the `retry_count < max_retries` SQL term
+  (`repository.py:2946`), concurrency guards stay. `retry_count` still increments
+  monotonically (~26/episode) for observability, and BOTH episode ends (success
+  finalize and race-won terminal) clear the anchor (unit 2) — a later quota hit starts
+  a fresh window. **Stale recovery** gets the same
+  bypass anchor-gated (a mid-attempt crash must not let stale sweeps permanently fail
+  the episode — detail plan W8, review M1; force-cancel callsites only, see W8
+  coverage scope).
+
+**4'. What D deletes from the earlier drafts:** unit 4a/4b (envelope suppression,
+observer park branch), unit 6 (job-queue migration — the anchor lives in instance
+metadata), unit 7 (scheduler scoping), the revive path (unit 8's ERROR→RUNNING), and all
+of Approach C's state machinery. One seam, one schedule, one deadline.
+
+**5. Schedule (unit 5, unchanged):** delays `[180, 300, 600, 900]` (15 min cap beyond),
+cumsum-derived `next_retry_at = first_seen + smallest cumsum > elapsed`, ±10 % jitter,
+deadline `first_seen + 21600 s`. Crash-safe from the anchor alone.
+
+### Phase B (Approach A alternative — superseded by D, retained for the record)
 
 **3. Error-type mapping.** `_classify_error_type`:
 `UsageLimitError` → `error_type='usage_limit'` (a first-sighting type, not an exhaustion
@@ -153,7 +239,8 @@ the window persists, so cumulative-vs-per-attempt-backoff are equivalent; elapse
 derivation survives daemon restarts with no extra column. Add ±10 % jitter on each wake
 (herd protection, parking unit 7 rationale).
 
-**6. Migration (if parking plan not yet landed).** Episode columns on `job_queue_items`
+**6. Migration — N/A under D** (no job-queue columns; the anchor lives in instance
+metadata). The text below applied to A/B/C only: Episode columns on `job_queue_items`
 generalized to parking's shape plus a kind discriminator:
 `episode_kind TEXT NULL` (`'provider_outage' | 'usage_limit'`),
 `episode_first_seen_at TEXT NULL`, `episode_deadline_at TEXT NULL`. If the parking plan
@@ -161,18 +248,18 @@ lands first with its `first_rate_limit_at`/`rate_limit_deadline_at` columns, mig
 the generalized triple in THIS plan (one migration, both kinds). `atomic_retry` must not
 clear them; success finalize, DLQ replay, and manual retry DO (fresh episode — decision 5).
 
-### Phase C — Re-dispatch on existing machinery
+### Phase C — Re-dispatch (D: existing claim path; A: units below)
 
-**7. Scoped scheduler wake.** RetryScheduler wakes usage-limit-parked jobs under the
-same scoped auto-enable as parking unit 7 (global default-off semantics unchanged for
-ordinary retries).
+**7. D — nothing to build.** The retry task created by unit 4 carries `next_retry_at`;
+the normal worker claim path picks it up when due (the same machinery that dispatches
+TIMEOUT retries today). No RetryScheduler scoping, no revive, no wake code.
 
-**8. Revive rides the checkpoint-resume path.** Wake → job dispatch → `send_message`
-revive (ERROR→RUNNING, `instance_messaging.py:1486-1510`) → `is_retry=True` → checkpoint
-resume (`task_processor.py:352`). Window still closed → L1 aborts on attempt 1 with
-`UsageLimitError` → instance back to `ERROR`, report suppressed again, re-park at the
-next schedule slot. Window lifted → turn completes → clear anchor + episode columns
-atomically in success finalize (parking unit 8).
+**7-A/8-A (Approach A alternative — superseded by D).** Scoped RetryScheduler wake;
+`send_message` revive (ERROR→RUNNING, `instance_messaging.py:1486-1510`) → `is_retry=True`
+→ checkpoint resume (`task_processor.py:352`). Window still closed → L1 aborts on
+attempt 1 with `UsageLimitError` → instance back to `ERROR`, report suppressed again,
+re-park at the next schedule slot. Window lifted → turn completes → clear anchor +
+episode columns atomically in success finalize (parking unit 8).
 
 ```mermaid
 flowchart TD
@@ -182,21 +269,24 @@ flowchart TD
     (cc753c2f, unchanged)"}
     U -->|yes| W["UsageLimitError — typed TERMINAL at L1
     abort attempt 1, zero fast retries"]
-    W --> F["instance → ERROR (as today), message FAILED
-    BUT parent envelope + hint SUPPRESSED
+    W --> F["task_processor carve-out (W3): raise untouched
+    + worker seam handler — no report cascade,
+    no instance ERROR, job not finalized
     anchor usage_limit_first_seen_at (set-once)"]
     F --> C{"now < first_seen + 6h?"}
-    C -->|yes| P["PARK: requeue, next = +3m/+5m/+10m/+15m…
-    PARKED notice carries job_id (hierarchy row deleted)
-    retry_count untouched"]
-    P --> S["scheduler wake → send_message revive
-    (ERROR→RUNNING) → is_retry=True → checkpoint resume"]
+    C -->|yes| P["schedule_retry (parameterized):
+    new task, next_retry_at = +3m/+5m/+10m/+15m…
+    max_retries NOT consumed (deadline-bounded)
+    + bus-watcher release (H1)"]
+    P --> S["worker claim when due → is_retry=True
+    → checkpoint resume (existing path)"]
     S --> Q{"window lifted?"}
-    Q -->|yes| OK["turn completes → clear anchor + episode
-    columns → continue running"]
+    Q -->|yes| OK["turn completes → clear anchor
+    → normal success — no report ever"]
     Q -->|no| W
-    C -->|no| T["TERMINAL: terminal_reason='usage_limit_deadline'
-    critical report, DLQ-eligible"]
+    C -->|no| T["TERMINAL (self-composed): fail_task +
+    _notify_parent_of_failure('usage_limit_deadline')
+    — the ONLY report of the episode"]
     style OK fill:#dfd,stroke:#0a0
     style T fill:#fdd,stroke:#c00
 ```
@@ -206,82 +296,89 @@ flowchart TD
 - **L1/L2 for everything else: byte-identical.** Quota shapes were already terminal at
   attempt 1 (blocklist); they still are — now typed. `invalid params`, auth, context-length,
   all transient channels: untouched.
-- **Error-report lane / instance state machine: untouched for everything else.** The
-  early branch fires only on `error_type=='usage_limit'`; every other error cascades
-  exactly as today (instance `ERROR`, report, hint).
-- **`max_retries` (L3/L4): untouched** — episode deferrals are deadline-bounded and
-  budget-free.
+- **Error-report lane / instance state machine: untouched, period.** D never enters them
+  for usage-limit (W3 carve-out + W4 handler); every other error cascades exactly as
+  today (instance `ERROR`, report, hint).
+- **L3 TIMEOUT retries: byte-identical.** `schedule_retry` and
+  `force_cancel_and_schedule_retry` gain keyword parameters (schedule, budget bypass)
+  with defaults preserving today's behavior; ordinary timeout retries still honor
+  `max_retries` and the `2^n` backoff.
+- **L4 job queue / observer / scheduler: untouched.**
 - **Facade secondary sites:** they receive the typed `UsageLimitError` and keep their
-  existing graceful-fallback behavior — no 6 h episodes for keyword/title/embedding calls.
-- **Pause/resume, stale-recovery, compaction, LoopBreaker: untouched by construction.**
+  existing graceful-fallback behavior — no 6 h episodes for keyword/title/embedding calls
+  (type-swap audited, detail plan W1).
+- **Pause/resume, compaction, LoopBreaker: untouched by construction.** Stale recovery
+  gains ONLY the anchor-gated bypass (detail plan W8) — non-episode behavior
+  byte-identical.
 
 ## 4. Config
 
 Patterns in `QueueConfig` (single home for LLM-retry classification patterns — the
-`cc753c2f` convention), episode timing in `JobSystemConfig` (parking-plan home):
+`cc753c2f` convention); episode timing under `services:` beside the worker knobs
+(`task_timeout_minutes` et al.) — **authoritative form in the detail plan W7**:
 
 ```yaml
 queue:
   # Quota-window shapes typed as UsageLimitError (terminal at L1; the
-  # episode lane owns recovery). MUST stay disjoint from bad-params shapes.
+  # dedicated deferral path owns recovery). MUST stay disjoint from bad-params shapes.
   usage_limit_patterns: ['token plan', 'usage limit']
 
-job_system:
-  usage_limit_window_seconds: 21600      # 6h max patience from first sighting
+services:
+  usage_limit_window_seconds: 21600      # 6h horizon from first sighting
   usage_limit_retry_delays_seconds: [180, 300, 600, 900]  # 15min cap
   usage_limit_retry_jitter_fraction: 0.1
 ```
 
 ## 5. Acceptance criteria
 
+**Authoritative list: detail plan §5.** Summary, synced to the review revision:
+
 1. 2056 corpus shape → `UsageLimitError` at attempt 1 (no fast retries); `invalid params`
    (2013) stays untyped terminal (regression); all `cc753c2f` tests green unmodified.
-2. First sighting inside window → job parked (queued + `next_retry_at` = next schedule
-   slot), parked notice sent, standard error report suppressed, `retry_count` unchanged,
-   **instance NOT `ERROR` (stays alive), message NOT `FAILED`, hierarchy row intact, no
-   parent error envelope**.
-3. Wake → revive → checkpoint resume; persistent window re-parks at the NEXT slot
-   (schedule advances by elapsed time, not by re-stamping).
-4. Success after episode clears anchor + episode columns; a later quota hit starts a
-   fresh 6 h window.
-5. `now ≥ deadline` → `terminal_reason='usage_limit_deadline'`, critical envelope,
-   `_derive_legacy_status` + MIRROR_SET verified.
-6. Anchor survives daemon restart; schedule derivation is stateless from
-   `episode_first_seen_at` (crash-safety test).
-7. Config parsing: list forms; empty `usage_limit_patterns` disables the typed wrapper
+2. In-window sighting → **no `_send_error_report` call, no DB error event, no lifecycle
+   `status="error"` event** (W3 carve-out held — stage-2 cascade did not run;
+   `consecutive_failures` not bumped), instance NOT `ERROR`, message NOT `FAILED`,
+   hierarchy row intact, job NOT finalized; a retry task exists with `next_retry_at` =
+   next schedule slot; `max_retries` not consumed (4th deferral still schedules).
+3. Retry task claimed when due → `is_retry=True` → checkpoint resume; persistent window
+   re-schedules at the NEXT slot (schedule advances by elapsed time, not re-stamping).
+4. **Both watcher kinds:** DB `job_watchers` migrate parent→child (F6) AND
+   dependency-bus watchers release per deferral; a watching parent is notified exactly
+   once, on the episode's terminal outcome.
+5. Success after episode clears the anchor; a later quota hit starts a fresh 6 h window.
+6. `now ≥ deadline` → **`_notify_parent_of_failure` called exactly once across the whole
+   episode** with `error_type='usage_limit_deadline'` (self-composed terminal: fail_task
+   + notify + watcher notify); no per-attempt reports ever sent.
+7. Crash-safety, both windows: restart while parked (anchor + pending retry survive,
+   deadline from persisted anchor) AND crash mid-attempt (stale recovery retries WITH
+   the anchor-gated bypass — episode survives, no generic permanent-fail).
+8. Config parsing: list forms; empty `usage_limit_patterns` disables the typed wrapper
    (additive-off switch).
+9. TIMEOUT-lane regression: ordinary timeout retries (`max_retries`, backoff), stale
+   recovery on non-episode tasks, and the pause/cancel lanes byte-identical.
 
 ## 6. Risks
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| Approach decision (§1a) — A/B/C diverge on state semantics and park seam | High | Decide BEFORE implementation; the chosen approach's Phase B + wake path replaces §2 units 4/8 verbatim; shared units (1-3, 5-7) are approach-invariant |
-| (A) something reaps `ERROR` instances mid-window (stale-recovery, janitors) | Medium | Audit reapers for `ERROR` handling before landing A; parked job + episode columns make re-park idempotent |
-| (C) membership drift across ~169 status-literal sites + frontend | Medium | Grep-audit checklist in §1a; exhaustive-match tests on ALIVE/DEAD/revive sets; frontend enum update in the same PR |
-| Two episode kinds drift on shared seams (park + provider-outage) | Medium | One observer branch keyed by `episode_kind`; schedule/window parameterized per kind; shared tests |
-| Detection false-positive parks a genuine bug for 6 h | Medium | Narrow default patterns; `invalid params` explicitly excluded; parked notice carries the original error; DLQ/manual retry = fresh episode |
-| `terminal_reason` enum vs canonical map / MIRROR_SET | High | Same verification as parking §9; additive-only; legacy-derivation test |
-| Elapsed-based schedule re-parks too eagerly after long GC/pause | Low | Fail-fast attempts make re-park cheap; next slot is monotonic (never before `cumsum[k]`) |
-| Parking plan not landed → this plan carries the machinery | Medium | §7 sequencing decision made up front |
+| (D) `retry_count < max_retries` guard (SQL, `repository.py:2946` and `force_cancel…` `:3364`) silently re-kills the episode at attempt 4 | High | `bypass_retry_budget` drops only that term in BOTH methods; acceptance test drives ≥4 deferrals in-window; W8 closes the stale-recovery variant |
+| (D) W3 carve-out ordering regresses under future refactor | Medium | Carve-out has its own test (no-cascade assertions); inline comment names the invariant |
+| (D) Bus watchers strand on deferral → parent stuck in `waiting_children` | High if missed | `_cancel_bus_watchers_for_task` per deferral (as TIMEOUT lane, `worker_pool.py:782`); acceptance test 4 asserts both watcher kinds |
+| (D) `retry_count` grows ~26/episode — consumers assuming ≤ `max_retries` | Medium | Grep-audit `retry_count` readers (claim path verified gate-free, `repository.py:1189`); document monotonic-with-bypass |
+| (D) detection false-positive auto-retries a genuine bug for 6 h | Medium | Narrow default patterns; `invalid params` explicitly excluded; terminal report carries the original error; empty pattern list = additive-off |
+| (D) facade type-swap breaks type-specific `except` at secondary sites | Medium | W1 audit + facade typed-surface test |
+| `schedule_retry` parameterization drifts from the TIMEOUT caller | Medium | Keyword-only, behavior-preserving defaults; golden-path snapshot test; never copy the implementation |
+| Herd: all instances wake on the same slots | Low | ±10 % jitter per wake (unit 5) |
+| Parking plan later lands with observer-lane parking for provider outages | Low | D and parking coexist (different lanes, different triggers); parking may adopt D's pattern later — its §7 call, not this plan's |
 
-## 7. Sequencing decision (needs review)
+## 7. Sequencing — RESOLVED by D
 
-The parking plan is DRAFT/LARGE and not implemented. Two options:
-
-- **(a) Land parking first, this plan second (recommended).** Parking delivers the
-  episode machinery (columns, park branch, scheduler scoping, dispatch) battle-tested;
-  this plan then adds a second kind: small diff, one migration already generalized.
-  Approach-dependent caveat: **A** shares parking's observer seam verbatim (no fork);
-  **B/C** park at the message-error seam (instance not dead → observer never fires) —
-  if B or C is chosen, the parking plan should adopt the same early branch (it also
-  removes its observer-lane stranding for episode jobs), or the two kinds fork on this
-  axis explicitly, keyed by `episode_kind`. Never fork silently.
-- **(b) This plan first, generalized from the start.** Buys quota recovery sooner but
-  couples it to unproven machinery and forces the parking plan to retrofit onto
-  `episode_kind`.
-
-Recommend (a). If quota recovery is more urgent than provider-outage recovery, swap the
-ORDER but keep the shared machinery — never fork it.
+D has **no dependency on the parking plan**: it touches the classifier, one task-seam
+branch, `schedule_retry` parameterization, and config. Land it independently on
+`latest`. The parking plan (provider-outage episodes) remains free to proceed on its
+observer-lane design — or, preferably, to adopt D's task-seam + RetryTurn pattern for
+its own kind, in which case its job-queue machinery shrinks the same way this plan's
+did. That convergence is a future decision for the parking plan, not a blocker here.
 
 ## 8. Open questions (non-blocking)
 
@@ -289,19 +386,20 @@ ORDER but keep the shared machinery — never fork it.
   it could shorten the first delay — needs payload samples).
 - Per-model-group quota discrimination (corpus has one shape; patterns are the lever).
 - Whether a usage-limit hit on a job-less turn (no processing job attached) should also
-  park — under A this is the observer lane's `job_id=none` asymmetry (parking plan §2);
-  under B/C the handler's own lane. Revisit with the parking plan's Lane-B fix.
-- (C only) naming: `PARKED` vs `WAITING_QUOTA` vs reusing the existing `WAITING`
-  semantics ("active but no in-flight work") — `WAITING` is tempting but overloaded
-  (user-input waiting); a distinct value keeps episode accounting greppable.
+  defer — D's seam is the task lane, which exists for job-less messages too; likely
+  yes for free, but verify the job-absent finalize path stays quiet during deferrals.
+- Observability: an optional informational notice (queue watchers / parent) at first
+  park — D sends nothing per attempt by design; decide whether one heads-up is wanted.
+- (A/B/C, if ever re-adjudicated) naming for C: `PARKED` vs `WAITING_QUOTA` vs reusing
+  `WAITING` — `WAITING` is overloaded (user-input waiting); a distinct value keeps
+  episode accounting greppable.
 
 ## 9. Implementation notes
 
-- Branch off `latest` after (or coordinating with) `feature/rate-limit-episode-parking`;
-  check for stale partial branches first (house convention).
-- `uv sync`; targeted tests: classifier typing + regressions, the chosen approach's
-  Phase B branch (A: observer park/terminal + envelope suppression; B: early-branch
-  skip + alive settle; C: `PARKED` transitions + ALIVE/DEAD/revive membership),
-  stateless schedule derivation, config forms, revive-clears-state.
-- Single coder; on top of landed parking machinery: A ~1 day, B ~1-2 days, C ~2-3 days
-  (audit-heavy); LARGE if carrying the parking machinery (§7b).
+- Branch off `latest` — no coordination with `feature/rate-limit-episode-parking`
+  needed (§7); still check for stale partial branches first (house convention).
+- **Authoritative implementation spec: [`usage-limit-deferral-path.md`](usage-limit-deferral-path.md)**
+  (W1-W8, revised 2026-08-27 per its review; landing order there §9).
+- Single coder; **~1-1.5 days** (D, review delta included: task-processor carve-out,
+  bus-watcher release, stale-recovery bypass). A/B/C effort figures in §1a assumed the
+  parking machinery as a prerequisite — retained for the record only.
