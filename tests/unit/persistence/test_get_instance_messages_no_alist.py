@@ -158,6 +158,12 @@ class TestZeroAlist:
         assert [c[0] for c in saver.method_calls] == ["aget"]
         # The enrichment lookup fired once for this thread.
         assert repo.calls == ["thr-flip"]
+        # Converse (PR3 review): repo resolved — the degradation
+        # warning must NOT fire on the armed/happy path.
+        assert not [
+            r.message for r in caplog.records
+            if "message_metadata_repo missing/None" in r.message
+        ]
 
     async def test_zero_alist_calls_without_msgs_repo(self):
         """``manager=None`` → EXPLICIT-DEGRADATION (plan §C1): no repo,
@@ -174,19 +180,30 @@ class TestZeroAlist:
         # Degradation: state.ts for every message.
         assert all(m["created_at"] == STATE_TS for m in out)
 
-    async def test_manager_without_repo_attribute_degrades(self):
+    async def test_manager_without_repo_attribute_degrades(self, caplog):
         """A manager that does NOT expose ``message_metadata_repo``
         (pre-PR2 manager shape, or a stripped stub) degrades the same
-        way — the getattr-None-guard is the accepted degradation."""
+        way — the getattr-None-guard is the accepted degradation, and
+        (PR3 external review) it is WARNED, not silent."""
         messages = _make_messages(3)
         saver = _make_saver(messages)
         manager = SimpleNamespace()  # no message_metadata_repo
 
-        out = await get_instance_messages(saver, "thr-attr", manager=manager)
+        with caplog.at_level(logging.WARNING, logger="daemon.persistence"):
+            out = await get_instance_messages(saver, "thr-attr", manager=manager)
 
         assert len(out) == 3
         saver.alist.assert_not_called()
         assert all(m["created_at"] == STATE_TS for m in out)
+        # Degradation is warned exactly once: cause + fallback named,
+        # instance identified ("thr-attr" is 8 chars — stable under
+        # the [:8] truncation in the log formatter).
+        warns = [
+            r.message for r in caplog.records
+            if "message_metadata_repo missing/None" in r.message
+        ]
+        assert len(warns) == 1, [r.message for r in caplog.records]
+        assert "state.ts" in warns[0] and "thr-attr" in warns[0]
 
     async def test_empty_state_returns_empty_and_never_touches_alist(self):
         """No checkpoint at all (``aget → None``) → ``[]`` before any

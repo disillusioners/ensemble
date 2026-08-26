@@ -403,6 +403,18 @@ async def get_instance_messages(
                 f"falling back to state.ts timestamps: {exc}"
             )
             metadata = {}
+    else:
+        # PR3 external review — the None-guard short-circuit used to
+        # degrade SILENTLY: messages>0 with no resolvable repo (manager
+        # is None, or the manager shape lacks ``message_metadata_repo``)
+        # stamps every timestamp from state.ts with no trace. Warn once
+        # per call so a mis-wired manager stays observable — a single
+        # concise line, no rate-limiter (per review scope).
+        logger.warning(
+            f"get_instance_messages: message_metadata_repo missing/None "
+            f"for {instance_id[:8] if instance_id else '?'} — "
+            f"all timestamps fall back to state.ts"
+        )
     msg_timestamps: dict[str, str] = {
         mid: ts for mid, (ts, _seq) in metadata.items()
     }

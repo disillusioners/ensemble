@@ -84,9 +84,9 @@ first-write-wins from the ``ON CONFLICT DO NOTHING`` PK constraint
 guarantees re-taps don't add rows), but a message whose node return
 never completed may have a tap row with no checkpoint to join to.
 
-This is benign once the PR3 read path joins ``message_metadata`` to
-the checkpoint walk (side-table is an ENRICHMENT lookup, not the
-authoritative source — extra rows are simply never joined). No
+This is benign once the PR3 read path joins ``message_metadata`` at
+the aget-only serialization loop (side-table = enrichment, never
+authoritative — extra rows are simply never joined). No
 real-time reader depends on side-table exhaustiveness. PR3-era
 reviewers should NOT flag over-records as a bug; under-records (a
 checkpoint message with no tap row) would be a bug, over-records
