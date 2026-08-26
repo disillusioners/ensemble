@@ -20,9 +20,12 @@ The raw_saver property provides access to the underlying saver for LangGraph
 operations (aget, aput, etc.) that are not covered by this adapter.
 """
 
+import asyncio
 import logging
 from abc import ABC, abstractmethod
 from typing import Any
+
+from daemon.constants import CHECKPOINT_BLOB_PRUNE_DELETE_RETRIES
 
 logger = logging.getLogger(__name__)
 
@@ -196,6 +199,14 @@ class CheckpointerAdapter(ABC):
         version) is NOT referenced by ``channel_versions`` of ANY
         remaining checkpoint row in the SAME (thread_id, checkpoint_ns),
         and returns ``(deleted_count, bytes_freed)``.
+
+        The PostgreSQL implementation runs the DELETE inside an explicit
+        SERIALIZABLE transaction with bounded retry on SQLSTATE 40001 /
+        40P01 (budget: ``CHECKPOINT_BLOB_PRUNE_DELETE_RETRIES``); on
+        exhaustion it logs ERROR, skips the pair and returns ``(0, 0)``
+        — isolation-family failures never raise into maintenance. The
+        dry-run arm (``count_blobs_anti_join``) stays READ COMMITTED:
+        a read-only report has no concurrency hazard to defend against.
 
         DANGER — data-destroying. The ONLY sanctioned call site is behind
         the structural gate ``blob_prune_destructive_enabled()`` in
@@ -632,6 +643,10 @@ class PostgresCheckpointerAdapter(CheckpointerAdapter):
         Returns ``(would_delete_count, bytes_would_free)``. Uses the same
         ``_BLOB_ANTI_JOIN_PREDICATE`` as the destructive arm so the two
         can never disagree. Contains no DELETE statement.
+
+        Deliberately stays READ COMMITTED (no SERIALIZABLE wrap): a
+        read-only report cannot lose data, so there is no hazard to
+        defend against — only the destructive arm needs the wrap.
         """
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -654,21 +669,130 @@ class PostgresCheckpointerAdapter(CheckpointerAdapter):
         (thread_id, checkpoint_ns). Returns ``(deleted_count,
         bytes_freed)`` via ``DELETE ... RETURNING OCTET_LENGTH(blob)``.
 
+        The DELETE runs inside an explicit SERIALIZABLE transaction with
+        bounded retry on SQLSTATE 40001 (serialization_failure) / 40P01
+        (deadlock_detected) — see the wrap rationale block at the method
+        body. Retry budget: ``CHECKPOINT_BLOB_PRUNE_DELETE_RETRIES``
+        (daemon/constants.py); on exhaustion the pair is SKIPPED with an
+        ERROR log and ``(0, 0)`` returned — this method never raises an
+        isolation-family failure into the maintenance loop (Operation E's
+        never-raise contract).
+
         DANGER — data-destroying. The only sanctioned call site is behind
         the structural gate in ``daemon/services/checkpoint_prune.py``
         (``blob_prune_destructive_enabled()``); with the env flags off no
         call path reaches this method.
         """
-        async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                "DELETE FROM checkpoint_blobs b WHERE"
-                + _BLOB_ANTI_JOIN_PREDICATE
-                + " RETURNING OCTET_LENGTH(blob) AS n",
-                thread_id,
-                checkpoint_ns,
-            )
-            bytes_freed = sum(int(r["n"]) for r in rows if r["n"] is not None)
-            return (len(rows), bytes_freed)
+        # ── SERIALIZABLE wrap rationale (PR4 external-review CRITICAL #1) ──
+        #
+        # HAZARD: the DEFAULT AsyncPostgresSaver path on PG14+ (psycopg
+        # autocommit + pipeline; aio.py:82 + aio.py:280-304) commits the
+        # blob upsert and the checkpoint upsert as SEPARATE implicit
+        # transactions — a µs-scale gap in which a concurrent reader can
+        # see the blob but not the checkpoint row referencing it. (The
+        # non-pipeline fallback IS atomic — aio.py:393-399.) If this
+        # DELETE's snapshot lands in that gap, the anti-join sees the new
+        # blob as unreferenced and deletes it, leaving every later aget to
+        # silently reconstruct WITHOUT that channel. The idle gate in the
+        # maintenance service is a PRECONDITION, not a lock — it narrows
+        # but does not eliminate the window.
+        #
+        # WHAT THE WRAP DOES: under SERIALIZABLE, the DELETE's read-set
+        # (checkpoints rows of the pair) vs a racing writer's write-set
+        # (checkpoint row insert/update) forms a rw-antidependency; when
+        # PostgreSQL's SSI detects a dangerous structure (two consecutive
+        # rw-antidependency edges) involving this transaction, it aborts
+        # exactly one side with SQLSTATE 40001 — and this side is the one
+        # that can afford to yield: the retry re-acquires a pool
+        # connection (fresh snapshot), re-evaluates the UNCHANGED
+        # predicate, and the now-visible referencing checkpoint row
+        # rescues its blob. Deadlocks (SQLSTATE 40P01) get the same
+        # retry. Verified empirically on PG 14.22: a real 40001 fired
+        # mid-DELETE when a second serializable participant supplied the
+        # second rw-edge, and the retried delete spared the referenced
+        # blob (see tests/integration/checkpoint_prune_real_saver.py::
+        # TestRealSaverSerializableRetry).
+        #
+        # HONEST LIMIT (also verified empirically on PG 14.22, same
+        # session): the µs-gap interleaving with ONLY the READ COMMITTED
+        # aput as the racer does NOT trip SSI — a lone rw-out-edge is not
+        # a dangerous structure and READ COMMITTED reads never register
+        # in the SSI graph, so the delete can commit through the gap. The
+        # wrap therefore hardens the conflict classes SSI actually
+        # detects (deadlocks; any second serializable participant — e.g.
+        # overlapping prune cycles or future serializable writers); the
+        # residual single-racer window remains bounded by the idle-gate
+        # precondition + the §6 backup
+        # (docs/runbooks/checkpoint-blob-prune-restore.md). Do NOT
+        # restate this wrap as eliminating the race.
+        retries_left = CHECKPOINT_BLOB_PRUNE_DELETE_RETRIES
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                # Same connection discipline as adelete_thread: acquire a
+                # pool connection per attempt (a fresh connection ⇒ fresh
+                # snapshot on retry) and let asyncpg's transaction context
+                # issue BEGIN ISOLATION LEVEL SERIALIZABLE … COMMIT/ROLLBACK.
+                async with self._pool.acquire() as conn:
+                    async with conn.transaction(isolation="serializable"):
+                        rows = await conn.fetch(
+                            "DELETE FROM checkpoint_blobs b WHERE"
+                            + _BLOB_ANTI_JOIN_PREDICATE
+                            + " RETURNING OCTET_LENGTH(blob) AS n",
+                            thread_id,
+                            checkpoint_ns,
+                        )
+                bytes_freed = sum(
+                    int(r["n"]) for r in rows if r["n"] is not None
+                )
+                return (len(rows), bytes_freed)
+            except Exception as exc:
+                # Duck-typed on the SQLSTATE so the check holds for any
+                # driver exposing .sqlstate (asyncpg's SerializationError /
+                # DeadlockDetectedError both do) without importing asyncpg
+                # at module scope — this module must stay importable on
+                # SQLite-only installs.
+                sqlstate = getattr(exc, "sqlstate", None)
+                if sqlstate not in ("40001", "40P01"):
+                    # Not an isolation-family failure — propagate to the
+                    # service's per-pair catch (its never-raise contract
+                    # lives THERE; this method only converts retryable
+                    # isolation failures into skip-not-raise).
+                    raise
+                if retries_left <= 0:
+                    # Exhausted: SKIP the pair — zero rows deleted, never
+                    # raise. Skipping is the SAFE direction (blobs survive;
+                    # the next maintenance cycle retries in 15 min).
+                    logger.error(
+                        "[CheckpointPerf] blob_prune "
+                        "SERIALIZABLE_RETRY_EXHAUSTED thread=%s ns=%s — "
+                        "anti-join DELETE aborted with SQLSTATE %s on all "
+                        "%d attempts; skipping pair, zero rows deleted "
+                        "(safe direction; next maintenance cycle retries)",
+                        thread_id[:8],
+                        checkpoint_ns,
+                        sqlstate,
+                        attempt,
+                    )
+                    return (0, 0)
+                retries_left -= 1
+                backoff_s = 0.05 * (2 ** (attempt - 1))
+                logger.warning(
+                    "[CheckpointPerf] blob_prune "
+                    "serializable_retry thread=%s ns=%s attempt=%d "
+                    "sqlstate=%s (%s); retrying in %.0fms with a fresh "
+                    "snapshot",
+                    thread_id[:8],
+                    checkpoint_ns,
+                    attempt,
+                    sqlstate,
+                    "serialization_failure"
+                    if sqlstate == "40001"
+                    else "deadlock_detected",
+                    backoff_s * 1000,
+                )
+                await asyncio.sleep(backoff_s)
 
     async def close(self) -> None:
         """Close the asyncpg pool and the saver's psycopg connection.

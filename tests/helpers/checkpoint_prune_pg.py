@@ -172,3 +172,70 @@ async def real_pg_checkpointer(dbname: str, dsn: str):
             await pool.close()
     finally:
         await saver_conn.close()
+
+
+@asynccontextmanager
+async def real_pg_checkpointer_separate_pools(dbname: str, dsn: str):
+    """Production-TOPOLOGY variant for the concurrency tests: TWO pools.
+
+    The single-pool harness above puts the prune (the adapter's
+    destructive DELETE) and every test-side read/staging query on ONE
+    asyncpg pool. Real deployments never look like that: the prune runs
+    on the maintenance pool connection while OTHER database actors
+    (here: the test's staging, verification and the serializable partner
+    transaction used to force a real 40001) hold different connections.
+    Concurrency behavior — SSI conflict registration, deadlocks, retry
+    interleavings — depends on cross-CONNECTION overlap, not on which
+    pool object owns the connections, so the race-window tests run
+    against this two-pool topology instead.
+
+    Construction per side is identical to
+    ``daemon/persistence.py::create_postgres_checkpointer`` (psycopg
+    autocommit + ``prepare_threshold=0`` + ``dict_row`` → saver +
+    ``setup()``; ``asyncpg.create_pool(dsn, min_size=1, max_size=5)`` →
+    adapter), which is exactly how the daemon builds its single
+    saver-conn-vs-asyncpg-pool stack.
+
+    Yields ``(saver, prune_pool, prune_adapter, verify_pool,
+    verify_adapter)``; everything is closed on exit.
+    """
+    import asyncpg
+    import psycopg
+    from psycopg.rows import dict_row
+
+    from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
+    from daemon.checkpoint_adapter import PostgresCheckpointerAdapter
+
+    saver_conn = await psycopg.AsyncConnection.connect(
+        dsn,
+        autocommit=True,
+        prepare_threshold=0,
+        row_factory=dict_row,
+    )
+    try:
+        saver = AsyncPostgresSaver(conn=saver_conn)
+        await saver.setup()
+        prune_pool = None
+        verify_pool = None
+        try:
+            prune_pool = await asyncpg.create_pool(dsn, min_size=1, max_size=5)
+            verify_pool = await asyncpg.create_pool(dsn, min_size=1, max_size=5)
+            yield (
+                saver,
+                prune_pool,
+                PostgresCheckpointerAdapter(saver, prune_pool),
+                verify_pool,
+                PostgresCheckpointerAdapter(saver, verify_pool),
+            )
+        finally:
+            # Close in reverse dependency order; each close is best-effort
+            # so a failure on one does not leak the other.
+            for pool in (verify_pool, prune_pool):
+                if pool is not None:
+                    try:
+                        await pool.close()
+                    except Exception:  # pragma: no cover — teardown safety
+                        pass
+    finally:
+        await saver_conn.close()

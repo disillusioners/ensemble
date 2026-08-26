@@ -26,10 +26,41 @@ Coverage (phase1-plan.md §C3 + §9 mapping):
   * fail-safe zero-refs: schema-drifted thread → ERROR log + ZERO rows
     deleted even with destructive armed;
   * concurrent aput during a destructive prune → the new checkpoint's
-    blob is preserved (atomic blob+checkpoint commit makes the
-    anti-join concurrency-safe);
+    blob is preserved (RETRACTED atomicity claim — see the retraction
+    note below: aput on the DEFAULT PG14+ pipeline path commits blob and
+    checkpoint as SEPARATE implicit transactions; safety here rests on
+    the idle-gate precondition + §6 backup + the SERIALIZABLE
+    abort-and-retry wrap on the destructive DELETE, which closes the
+    conflict classes SSI actually detects);
+  * SERIALIZABLE retry path: a REAL SQLSTATE-40001 abort of the
+    destructive DELETE (staged via a second serializable transaction —
+    no mocks) is retried on a fresh snapshot and completes;
+  * race window, both directions: pre-existing referenced blobs survive
+    interleaved multi-turn aput traffic + a destructive prune
+    BYTE-EQUAL, and the concurrently-written new blob survives too;
   * dry-run default deletes NOTHING (blob rows byte-identical);
   * SQLite backend no-ops with a WARNING.
+
+RETRACTION (PR4 external review, 2026-08-26 — CRITICAL #1): this file
+previously claimed aput is "atomic" and used that as the safety
+argument for the concurrent tests. That claim is FACTUALLY FALSE for
+the DEFAULT path: on PG14+ the saver uses psycopg autocommit + pipeline
+(langgraph-checkpoint-postgres aio.py:82 + aio.py:280-304), where the
+blob upsert and the checkpoint upsert commit as SEPARATE implicit
+transactions — a µs-scale gap in which a reader can see the blob
+without the checkpoint row that references it. Only the non-pipeline
+fallback is atomic (aio.py:393-399 wraps both upserts in one
+``conn.transaction()``). The honest safety argument is now: COMMON-CASE
+safe (the maintenance idle gate makes overlapping aputs rare — a
+PRECONDITION, not a lock); the residual µs-window TOCTOU is bounded by
+that idle-gate precondition + the §6 backup
+(docs/runbooks/checkpoint-blob-prune-restore.md) + the SERIALIZABLE
+wrap on the destructive DELETE (daemon/checkpoint_adapter.py), which
+converts the conflict classes SSI actually detects (SQLSTATE 40001 /
+40P01) into abort-and-retry on a fresh snapshot. The wrap does NOT
+eliminate the single-READ-COMMITTED-racer window — verified
+empirically on PG 14.22 (a lone rw-out-edge is not a dangerous
+structure); do not restate it as such.
 """
 from __future__ import annotations
 
@@ -110,6 +141,26 @@ async def stack(pg_db):
     name, dsn = pg_db
     async with real_pg_checkpointer(name, dsn) as (saver, pool, adapter):
         yield saver, pool, adapter
+
+
+@pytest.fixture
+async def race_stack(pg_db):
+    """Two-pool production topology (PR4 review fold: warnings → tests).
+
+    Saver (psycopg conn) + TWO independent asyncpg pools — the prune runs
+    on one, test staging/verification and the serializable partner
+    transaction on the other — mirroring how real deployments spread the
+    prune and other DB actors across connections. See
+    ``tests/helpers/checkpoint_prune_pg.py::
+    real_pg_checkpointer_separate_pools``.
+    """
+    from tests.helpers.checkpoint_prune_pg import (
+        real_pg_checkpointer_separate_pools,
+    )
+
+    name, dsn = pg_db
+    async with real_pg_checkpointer_separate_pools(name, dsn) as stack:
+        yield stack
 
 
 @pytest.fixture
@@ -526,9 +577,25 @@ class TestRealSaverConcurrentAput:
         self, saver, adapter, monkeypatch
     ):
         """While a destructive prune runs, a concurrent real aput writes a
-        new checkpoint + blob. The new blob MUST survive (aput commits the
-        blob and its referencing checkpoint atomically, so the anti-join
-        either sees both or neither — never a referenced blob alone)."""
+        new checkpoint + blob. The new blob MUST survive.
+
+        RETRACTED claim (PR4 external review CRITICAL #1): this test's
+        docstring used to say aput "commits the blob and its referencing
+        checkpoint atomically, so the anti-join either sees both or
+        neither — never a referenced blob alone". That is FALSE on the
+        DEFAULT PG14+ path: psycopg autocommit + pipeline commits the
+        blob upsert and the checkpoint upsert as SEPARATE implicit
+        transactions (aio.py:82, aio.py:280-304); only the non-pipeline
+        fallback is atomic (aio.py:393-399). What this test actually
+        proves is the COMMON-CASE overlap: when the aput's checkpoint
+        row is visible before the prune's DELETE takes its snapshot (or
+        the blob is not yet visible at all), the anti-join is safe —
+        either it sees both halves or neither. The residual µs-gap
+        interleaving (blob committed, checkpoint not yet) is NOT covered
+        by this assertion; it is bounded by the idle-gate precondition +
+        the §6 backup + the SERIALIZABLE abort-and-retry wrap, and the
+        byte-equality direction is covered by
+        TestRealSaverRaceWindow below."""
         from langgraph.checkpoint.serde.types import _DeltaSnapshot
         from daemon.services.checkpoint_prune import prune_unreferenced_blobs
 
@@ -553,7 +620,9 @@ class TestRealSaverConcurrentAput:
 
         _arm_destructive(monkeypatch)
         # Fire the prune and, concurrently, a REAL aput of a fresh snapshot
-        # checkpoint (new blob + new referencing row, one atomic commit).
+        # checkpoint (new blob + new referencing row — TWO separate implicit
+        # commits on the default pipeline path; see the retraction note in
+        # the module docstring).
         vnew = "00000000000000000000000000000009.0000000000000009"
         head_id = (await adapter.get_checkpoint_ids(T, "", 1))[0]
         new_cid = "ffffffffffffffffffffffffffffffff"  # sorts after all existing ids
@@ -592,6 +661,255 @@ class TestRealSaverConcurrentAput:
         fresh = head.checkpoint["channel_values"].get("fresh_state")
         from langgraph.checkpoint.serde.types import _DeltaSnapshot as _DS
         assert isinstance(fresh, _DS) and fresh.value == {"live": True}
+
+
+class TestRealSaverRaceWindow:
+    """Race-window coverage, direction 2 (PR4 review warnings fold).
+
+    The pre-existing concurrent test only asserts the NEW blob survives
+    (direction 1). This class asserts the OTHER direction: blobs that
+    were referenced BEFORE the prune and stay referenced survive a
+    destructive prune interleaved with multi-turn, multi-channel aput
+    traffic — BYTE-EQUAL. This is the shape that would surface a µs-gap
+    deletion: under the default PG14+ pipeline path each aput commits
+    blob and checkpoint as SEPARATE implicit transactions, so real
+    traffic overlapping the DELETE genuinely exercises the window (not a
+    theoretical interleaving).
+
+    HONESTY NOTE: if this test ever FAILS on blob byte-equality or on
+    the final reconstruction assertion, the residual µs-gap race fired
+    for real — the SERIALIZABLE wrap only converts the conflict classes
+    SSI detects (SQLSTATE 40001/40P01); the single-READ-COMMITTED-racer
+    window is bounded, not eliminated, by the idle-gate precondition +
+    §6 backup (see the module docstring retraction). Restore from the
+    backup and consult
+    docs/runbooks/checkpoint-blob-prune-restore.md §7.
+    """
+
+    async def test_preexisting_referenced_blobs_survive_traffic_and_prune_byte_equal(
+        self, race_stack, monkeypatch
+    ):
+        from daemon.services.checkpoint_prune import prune_unreferenced_blobs
+
+        saver, _prune_pool, prune_adapter, _verify_pool, verify_adapter = (
+            race_stack
+        )
+        graph = build_graph(saver)
+        T = "race-window-thread"
+        config = {"configurable": {"thread_id": T}}
+        from langchain_core.messages import HumanMessage
+
+        # 1) Seed 8 REAL turns — messages + notes channels, both
+        #    non-primitive → both persisted as checkpoint_blobs rows.
+        for i in range(8):
+            await graph.ainvoke(
+                {"messages": [HumanMessage(f"seed-{i}")]}, config
+            )
+
+        # 2) Retention prune (keep newest 2) — orphans blobs for the
+        #    destructive pass while leaving a REFERENCED set that must
+        #    never lose a byte.
+        keep = set(await prune_adapter.get_checkpoint_ids(T, "", 2))
+        await prune_adapter.delete_checkpoints_excluding(T, "", keep)
+        await prune_adapter.delete_writes_excluding(T, "", keep)
+
+        refs = await referenced_versions(verify_adapter, T)
+        fp_all = await blob_fingerprint(verify_adapter, T)
+        preexisting_referenced = {f for f in fp_all if f[:2] in refs}
+        orphans = {f[:2] for f in fp_all} - refs
+        assert orphans, "retention must orphan blobs for the destructive pass"
+        assert preexisting_referenced, "referenced blob set must be non-empty"
+
+        values_before = await state_values(graph, T)
+        n_notes_before = len(values_before["notes"])
+        n_msgs_before = len(values_before["messages"])
+
+        # 3) Destructive prune CONCURRENT with 10 more real turns —
+        #    multi-turn, multi-channel aput traffic overlapping the
+        #    DELETE (asyncio.gather, the file's established pattern).
+        _arm_destructive(monkeypatch)
+
+        async def traffic():
+            for i in range(10):
+                await graph.ainvoke(
+                    {"messages": [HumanMessage(f"race-{i}")]}, config
+                )
+
+        prune_task = asyncio.create_task(
+            prune_unreferenced_blobs(prune_adapter)
+        )
+        traffic_task = asyncio.create_task(traffic())
+        summary, _ = await asyncio.gather(prune_task, traffic_task)
+
+        assert summary.dry_run is False
+        assert summary.total_deleted == len(orphans), (
+            "exactly the retention-orphaned rows must die under traffic "
+            "(no more, no fewer)"
+        )
+
+        # 4) DIRECTION 2 — BYTE-EQUALITY: every pre-existing referenced
+        #    blob (channel, version, type, md5) survives unchanged.
+        fp_after = await blob_fingerprint(verify_adapter, T)
+        assert preexisting_referenced <= fp_after, (
+            "pre-existing referenced blobs must survive the interleaved "
+            "prune BYTE-EQUAL"
+        )
+
+        # 5) DIRECTION 1 reinforcement — versions FIRST REFERENCED by the
+        #    traffic (messages/notes are blob-backed here) resolve to
+        #    live blob rows afterwards.
+        refs_after = await referenced_versions(verify_adapter, T)
+        fp_pairs = {f[:2] for f in fp_after}
+        new_blob_refs = {
+            r for r in (refs_after - refs) if r[0] in ("messages", "notes")
+        }
+        assert new_blob_refs, "traffic must introduce new referenced versions"
+        assert new_blob_refs <= fp_pairs, (
+            "every traffic-written blob-backed version must still have "
+            "its blob row"
+        )
+
+        # 6) End-state detector — aget reconstructs the FULL history. A
+        #    blob lost to the µs-gap race would silently drop channel
+        #    content here (the constructible loss of the PR4 review).
+        values_after = await state_values(graph, T)
+        assert len(values_after["messages"]) == n_msgs_before + 20
+        assert len(values_after["notes"]) == n_notes_before + 10
+        assert messages_snapshot(values_after)[:n_msgs_before] == (
+            messages_snapshot(values_before)
+        )
+
+
+class TestRealSaverSerializableRetry:
+    """Drive the SERIALIZABLE retry path with a REAL SQLSTATE-40001 abort.
+
+    No mocks and no error injection: a second SERIALIZABLE transaction
+    (on a separate pool connection — the production topology fixture)
+    supplies the second rw-edge of the SSI dangerous structure, so
+    PostgreSQL ITSELF aborts the prune's wrapped DELETE mid-statement
+    ("canceled on identification as a pivot"). The adapter must catch
+    it, retry on a fresh snapshot, and complete the delete. This is the
+    exact mechanism verified empirically on PG 14.22 during the fix
+    (probe scripts; see the wrap rationale comment in
+    daemon/checkpoint_adapter.py).
+    """
+
+    async def test_real_40001_aborts_delete_then_retry_completes(
+        self, race_stack, caplog
+    ):
+        saver, prune_pool, prune_adapter, verify_pool, verify_adapter = (
+            race_stack
+        )
+        T, NS = "serializable-retry-thread", ""
+
+        # Seed via the VERIFY pool (staging ≠ prune connections): one
+        # checkpoint row (referencing only 'other' — no blob for it) plus
+        # two ORPHAN blob rows. PK order matters: 'a_chan' sorts before
+        # 'z_chan', so the DELETE processes + locks a_chan first, then
+        # parks on z_chan's row lock (held open by the partner below).
+        async with verify_pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO checkpoints "
+                "(thread_id, checkpoint_ns, checkpoint_id, type, checkpoint, metadata) "
+                "VALUES ($1, $2, $3, NULL, $4::jsonb, '{}'::jsonb)",
+                T,
+                NS,
+                str(uuid.uuid4()),
+                json.dumps(
+                    {
+                        "v": 1,
+                        "id": str(uuid.uuid4()),
+                        "ts": "2026-08-26T00:00:00Z",
+                        "channel_values": {},
+                        "channel_versions": {"other": "v0"},
+                        "versions_seen": {},
+                    }
+                ),
+            )
+            await conn.execute(
+                "INSERT INTO checkpoint_blobs "
+                "(thread_id, checkpoint_ns, channel, version, type, blob) "
+                "VALUES ($1, $2, 'a_chan', 'va', 'msgpack', $3)",
+                T,
+                NS,
+                b"\x01" * 100,
+            )
+            await conn.execute(
+                "INSERT INTO checkpoint_blobs "
+                "(thread_id, checkpoint_ns, channel, version, type, blob) "
+                "VALUES ($1, $2, 'z_chan', 'vz', 'msgpack', $3)",
+                T,
+                NS,
+                b"\x02" * 50,
+            )
+
+        async with verify_pool.acquire() as partner_conn:
+            # Partner = second SERIALIZABLE participant.
+            #   (i)   read the blob rows — registers the in-edge donor
+            #         (it reads rows the prune's DELETE is about to write);
+            #   (ii)  UPDATE z_chan — takes the row lock the DELETE will
+            #         park on; transaction stays OPEN.
+            partner_tx = partner_conn.transaction(isolation="serializable")
+            await partner_tx.start()
+            await partner_conn.fetch(
+                "SELECT channel, version FROM checkpoint_blobs "
+                "WHERE thread_id = $1",
+                T,
+            )
+            await partner_conn.execute(
+                "UPDATE checkpoint_blobs SET blob = blob "
+                "WHERE thread_id = $1 AND channel = 'z_chan'",
+                T,
+            )
+
+            # Prune: attempt 1 begins its SERIALIZABLE txn on the PRUNE
+            # pool, reads checkpoints (the out-edge seed), deletes +
+            # locks a_chan, then BLOCKS on z_chan — deterministically
+            # parked mid-statement with its read-set already registered.
+            with caplog.at_level(
+                logging.WARNING, logger="daemon.checkpoint_adapter"
+            ):
+                delete_task = asyncio.create_task(
+                    prune_adapter.delete_blobs_anti_join(T, NS)
+                )
+                await asyncio.sleep(0.3)
+
+                # Complete the dangerous structure: the partner now
+                # writes the prune's read-set (checkpoints) and COMMITS.
+                # Both rw-edges exist with the partner on the committed
+                # side ⇒ SSI aborts the parked DELETE with 40001 the
+                # moment it resumes writing.
+                await partner_conn.execute(
+                    "UPDATE checkpoints SET metadata = '{\"p\":1}' "
+                    "WHERE thread_id = $1",
+                    T,
+                )
+                await partner_tx.commit()
+
+                deleted, freed = await delete_task
+
+        # The RETRY completed the delete: both orphans gone, bytes right
+        # (attempt 1 was rolled back — a_chan restored — then re-deleted
+        # with a fresh snapshot).
+        assert deleted == 2, "retry must delete both orphan rows"
+        assert freed == 150
+
+        async with verify_pool.acquire() as conn:
+            n = await conn.fetchval(
+                "SELECT COUNT(*) FROM checkpoint_blobs WHERE thread_id = $1",
+                T,
+            )
+        assert n == 0, "no orphan rows may remain after the retried delete"
+
+        # The retry WARNING proves attempt 1 really aborted (vs the
+        # delete merely running once after the partner released).
+        retry_lines = [
+            r.getMessage()
+            for r in caplog.records
+            if "serializable_retry" in r.getMessage()
+        ]
+        assert retry_lines, "attempt-1 abort must surface as a retry WARNING"
+        assert "sqlstate=40001" in retry_lines[0]
 
 
 class TestRealSaverDryRunReport:
