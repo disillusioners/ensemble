@@ -2,122 +2,132 @@
 
 | Field | Value |
 |---|---|
-| **Date** | 2026-08-27 — **REV2** (review of the REVISED plan; supersedes the rev1 verdict below) |
-| **Document reviewed** | [`docs/plans/usage-limit-deferral-path.md`](usage-limit-deferral-path.md) (DRAFT — REVISED 2026-08-27, incorporating rev1) |
-| **Cross-referenced** | [`docs/plans/usage-limit-window-recovery.md`](usage-limit-window-recovery.md) (parent, adjudication §1a) · `daemon/llm_error_classifier.py` · `daemon/repositories/task/repository.py` · `daemon/services/worker_pool.py` · `daemon/services/task_processor.py` · `daemon/services/message_processing_errors.py` · `daemon/services/stale_task_recovery.py` · `daemon/services/llm_failover.py` · `daemon/repositories/instance/repository.py` · `daemon/config.py` · `config.yaml` — all anchors re-verified read-only 2026-08-27 (rev2 pass) |
-| **Verdict (rev2)** | **Approve with one required change.** All rev1 findings (both blockers §2.1/§2.2, H1 §3.1, M1 §3.2, minors §4.1-4.5) are correctly incorporated — verified against code, not just against the revision notes. One NEW required change: the W4.2 terminal composition fires `_notify_parent_of_failure` unconditionally, and the W4.2d gate-closed fallthrough can emit the episode's ONE report while the episode is still alive (§2.1 below). Three minors (§3). |
+| **Date** | 2026-08-27 — **REV3** (independent pass over the REVISED plan; supersedes the rev2 verdict below) |
+| **Document reviewed** | [`docs/plans/usage-limit-deferral-path.md`](usage-limit-deferral-path.md) (DRAFT — REVISED 2026-08-27 rev2, incorporating rev1+rev2) |
+| **Cross-referenced** | [`docs/plans/usage-limit-window-recovery.md`](usage-limit-window-recovery.md) (parent, adjudication §1a) · `daemon/llm_error_classifier.py` · `daemon/repositories/task/repository.py` · `daemon/services/worker_pool.py` · `daemon/services/task_processor.py` · `daemon/services/message_processing_errors.py` · `daemon/services/message_processing_pipeline.py` (stage boundaries — NEW this pass) · `daemon/services/stale_task_recovery.py` (**post-retry action blocks `:399-540`, `:640-793` — NEW this pass**) · `daemon/manager.py:4118-4137` (`_on_stale_task_permanent_failure` callback — NEW) · `daemon/services/llm_failover.py` · `daemon/repositories/instance/repository.py` · `daemon/config.py` · `config.yaml` — all anchors re-verified read-only 2026-08-27 (rev3 pass) |
+| **Verdict (rev3)** | **Approve with required changes.** The rev2 required change (§2.1 race-gated terminal) and all three rev2 minors are correctly incorporated — verified against code, not the revision notes. Two NEW required changes, both in a region **neither prior pass examined**: stale recovery's *post-retry* actions. §2.1 🔴 startup recovery reports permanent failure for successfully-RETRIED tasks (misindented notify at `stale_task_recovery.py:699-712` — fires `_send_error_report` on a live episode, the rev2 §2.1 zombie-kill re-entering through this door); §2.2 🔴 the grace sweep fails the episode's message on a successful anchor-gated recovery (`:531-536` — the recovery child inherits the now-FAILED `message_id`). Five minors (§3). |
+| **Verdict (rev2, superseded)** | Approve with one required change — §2.1 (gate the terminal composition on `fail_task` outcome; fix the W4.2d fallthrough). Minors §3.1-3.3. All rev1 findings verified incorporated (§1.1); anchors re-verified (§1.2). |
 | **Verdict (rev1, superseded)** | Approve with required changes — two blockers (stage-2 cascade §2.1; nonexistent terminal mechanism §2.2), one high (bus-watcher stranding §3.1), one medium (stale-recovery crash window §3.2), five minors. All now verified incorporated. |
 
 ---
 
-## 1. Verified correct (rev2 — incorporation matrix + anchor re-verification)
+## 1. Verified correct (rev3 — incorporation matrix + anchor re-verification)
 
-### 1.1 Rev1 findings → revision, all verified against code
+### 1.1 Rev2 findings → revision, all verified against code
 
-| Rev1 finding | Revision | Verification |
+| Rev2 finding | Revision | Verification |
 |---|---|---|
-| §2.1 🔴 stage-2 cascade fires before the worker seam | W3 carve-out (`except UsageLimitError: raise`) placed before the generic `except Exception` | The cascade is exactly as rev1 described: `task_processor.py:422-453` runs `handle_message_processing_error` (`:432`) + `_record_metrics_for_task(succeeded=False)` (`:452`). The carve-out placement, its "no policy, unconditional re-raise" scoping, the invariant-2 restatement ("two constructions"), and its dedicated test (§5.2) are all correct. |
-| §2.2 🔴 deadline terminal mechanism did not exist | W4.2 self-composed terminal (`fail_task` + `_notify_parent_of_failure('usage_limit_deadline')` + watcher notify) | `_handle_task_failure` (`worker_pool.py:831-842`) still has no parent notification — the re-spec was necessary. The composition mirrors the `max_retries_exceeded` precedent (`:795-800`) correctly; `_notify_parent_of_failure` (`:590-625`) routes `manager._send_error_report` with `error_type` as required. Accepted-alternative note (window-aware carve-out) correctly documented as rejected. (But see §2.1 below for a guard gap in the new composition.) |
-| §3.1 H1 bus-watcher stranding | W4.2b — `_cancel_bus_watchers_for_task(task.id, retry_task.id)` after every successful deferral | Helper confirmed at `worker_pool.py:627-660`; TIMEOUT lane's own release at `:782`; production-incident rationale carried into the plan. Test 4 extended to both watcher kinds with deferral notifications counted in "exactly once" — correct. |
-| §3.2 M1 stale recovery kills mid-window episode | W8 — bypass threaded through `force_cancel_and_schedule_retry`, set when the instance has a live anchor (review option 1) | Guard confirmed at `repository.py:3364`; recovery callsites confirmed at `stale_task_recovery.py:368/:658` (force) and `:474/:727` (plain). Test 7b added; risk-table row retired. (See §3.1 for a coverage-clarity nit.) |
-| §4.1 timing keys under `queue:` | Moved to `services:` beside `task_timeout_minutes` (`config.yaml:169-191`, read `svc.*` at `daemon/manager.py:5841-5849`) | Correct; patterns stay in `queue:` (right — `QueueConfig` is the `cc753c2f` pattern home, `_parse_csv_or_json_list` at `config.py:478-489`). |
-| §4.2 facade type-swap | W1 audit + facade typed-surface test | Incorporated; graceful-fallback counts unchanged. |
-| §4.3 anchor nit (`:755` not `:666`) | Fixed (`worker_pool.py:755` inside `_handle_cancellation`, entry `:662`) | Confirmed accurate. |
-| §4.4 beyond-last-slot contract edge | W5 explicit extension-by-900s spec + docstring requirement + test-plan line | Correct and testable. |
-| §4.5 "DLQ-eligible" wording | Test 5 reworded to terminal-report parity with the TIMEOUT lane | Correct — the task/worker lane never DLQs. |
+| §2.1 🔴 terminal composition unguard-raced / W4.2d fallthrough reports on a live episode | W4.2 gates the ENTIRE composition (parent notify + watcher notify + anchor clear) on `fail_task(...) is not None`; gate-closed fallthrough is log-and-return with the W8-recovery-child rationale spelled out | The pseudocode, the "stronger gate than its TIMEOUT precedent" argument (`worker_pool.py:795-800` fires parent notify unconditionally — verified), and acceptance test 5's race-LOST + gate-closed-with-live-episode cases are all present and correct. The `_handle_task_failure`-has-no-parent-notify constraint (`worker_pool.py:831-842`) re-verified — the self-composed terminal remains the only mechanism. |
+| §3.1 W8 coverage sentence missing | "Coverage scope (review rev2 §3.1 — deliberately NOT all four callsites)" paragraph | Verified against code: episode parents are CANCELLED with `retry_scheduled = true` atomically with the child insert (gate UPDATE + `RetryTurn.run` in one `engine.begin()`, `repository.py:2925-3036`), the C2 skip is at `stale_task_recovery.py:468`, and `find_orphaned_cancelled_tasks` (`repository.py:3472-3482`) also excludes `retry_scheduled = true` rows — the plain `schedule_retry` callsites (`:474/:727`) are indeed unreachable for episode shapes. The do-NOT-blanket-thread instruction is explicit. |
+| §3.2 anchor lifecycle at terminal unspecified | W6 clear-site 2 (terminal composition clears the anchor, soft-fail); risk-table row; test 6 reconciled to set-once-per-episode with BOTH ends clearing | Present and consistent across W4.2 pseudocode, W6, §5.6, and the risk table. |
+| §3.3 handler robustness | W4 preamble (soft-fail anchor read/write, `first_seen = now` degenerate) + §7 handler-robustness test | Present; the uncaught-out-of-the-except-block rationale matches Python semantics (sibling `except Exception` at `:578` does not catch handler raises). |
 
-### 1.2 Anchors re-verified (rev2 pass)
+### 1.2 Anchors re-verified (rev3 pass)
 
-- `schedule_retry` is `daemon/repositories/task/repository.py:2878-3054`; gate UPDATE's `retry_count < :max_retries` term at `:2946` is a **separate WHERE line** from `retry_scheduled = false` (`:2945`) and the status guard (`:2947`) — W2's drop-only-that-term change remains well-formed. Backoff derivation at `:2976-2988`; F6 watcher migration inside `RetryTurn` (step 5, `:3020-3036`).
-- Claim eligibility `next_retry_at IS NULL OR next_retry_at <= :now_str` with **no** `retry_count` gate — `repository.py:1189` — bypass-grown counts still claimable.
-- `_process_with_timeout` except chain: `except TimeoutError` `worker_pool.py:514-521`, generic `except Exception` `:578` — W4's insertion point (after TimeoutError, before generic) is correct.
-- Classifier: blocklist `llm_error_classifier.py:108-112` (`token plan`, `usage limit`, `invalid params`); bare-`APIError` branch `:850-867`; `ValueError` branch `:894-905`. Usage-limit patterns ⊂ blocklist, so check-before-blocklist ordering preserves all other shapes byte-identically; `invalid params` stays untyped terminal.
-- `is_retry = task.retry_count > 0 or original_resume_mode` — `task_processor.py:352` — checkpoint resume rides the inherited `message_id`, exactly the TIMEOUT lane's behavior.
-- Metadata helpers `set_metadata` / `delete_metadata` — `daemon/repositories/instance/repository.py:1204` / `:1380` — usable from the worker thread; JSONB survives restart.
-- `task_timeout_minutes` default 125.0 at `daemon/config.py:590`; `WorkerPool(...)` wiring at `daemon/manager.py:5841-5849`; `max_retries` default 3 (`worker_pool.py:181` area, constructor).
-- Parent plan §1a adjudication (Approach D) exists as cross-referenced; D's scope is independent of the parking plan.
-- Schedule math: cumsum 180/480/1080/1980 then +900 — ~26 wakes in 21600 s; ±10 % jitter (max ±90 s) cannot overlap the 900 s slot spacing.
+- Gate UPDATE's three terms on separate WHERE lines — `repository.py:2945` (`retry_scheduled = false`), `:2946` (`retry_count < :max_retries`), `:2947` (status IN) — W2's drop-only-that-term change remains well-formed. Same shape in `force_cancel_and_schedule_retry` at `:3362-3365`.
+- Claim eligibility `next_retry_at IS NULL OR next_retry_at <= :now_str` with no `retry_count` gate — `repository.py:1189` — bypass-grown counts still claimable.
+- `_process_with_timeout` except chain: `except TimeoutError` `worker_pool.py:514-521`, generic `except Exception` `:578` — W4's insertion point correct. `_notify_parent_of_failure` (`:590-625`) accepts `error_type` + `message_id`; `_cancel_bus_watchers_for_task` (`:627-660`) and the TIMEOUT lane's release (`:782`) as described.
+- Classifier: blocklist `llm_error_classifier.py:108-112`; bare-`APIError` branch `:850-867`; `ValueError` branch `:894-905` — both accept the check-before-blocklist ordering; `_normalize_patterns` (`:136-138`) reusable for `usage_limit_patterns`.
+- **Stage-2 boundary (new verification):** the execution gate / work_fn runs OUTSIDE the pipeline's internal post-processing try (`message_processing_pipeline.py:432-437` vs `:450`) — a `UsageLimitError` from the LLM call inside work_fn propagates as an exception to `task_processor.process`'s outer try, where the W3 carve-out (`task_processor.py:422` insertion point, before the generic `except Exception`) re-raises it untouched. The carve-out mechanism is sound. (But see §3.3 for the stages-3-6 invariant note.)
+- Metadata helpers `set_metadata` / `delete_metadata` — `daemon/repositories/instance/repository.py:1204` / `:1380` — sync, dialect-aware, usable from the worker thread.
+- `is_retry = task.retry_count > 0 or original_resume_mode` — `task_processor.py:352`; `_build_callbacks` success side (`:822-856`) accepts the W6 anchor-clear insertion.
+- `ServicesConfig` timing knobs at `daemon/config.py:590-610`; `WorkerPool(...)` wiring at `daemon/manager.py:5841-5849` — W7's placement beside `task_timeout_minutes` correct.
+- `retry_count` consumer audit (performed this pass — closes the plan's §6 grep-audit risk row): task-lane budget gates are only `repository.py:2946`/`:3364` (both handled by W2/W8) and the Python-side `stale_task_recovery.py:428` (see §3.5); claim path gate-free (`:1189`); job-queue, message-queue, and blueprint `retry_count` columns live on separate tables — unaffected by task-lane bypass growth.
 
-## 2. Required before implementation (rev2)
+## 2. Required before implementation (rev3)
 
-### 2.1 🔴 W4.2 terminal composition: `_notify_parent_of_failure` is unguard-raced, and the W4.2d fallthrough can report while the episode is still alive
+Both findings are in stale recovery's **post-retry action blocks** — the code that runs AFTER `force_cancel_and_schedule_retry` returns. Rev1 §3.2 and rev2 §3.1 examined the recovery *callsites* (which retry method, with which flags); neither pass examined what recovery does next. W8 routes the usage-limit episode through exactly this code, so it is now load-bearing for acceptance test 7b.
 
-Two connected defects in the new (correctly self-composed) terminal branch:
+### 2.1 🔴 Startup recovery reports permanent failure for successfully-RETRIED tasks (`stale_task_recovery.py:699-712`)
 
-**(a) The report is not gated on the `fail_task` race outcome.** The plan's own
-precedent — the `max_retries_exceeded` path it cites (`worker_pool.py:795-808`) —
-gates the **watcher notify** on `failed_task is not None` (the atomic repo write
-proving we won the status guard race; the Phase 2 Batch 2 convention, docstring at
-`:844-866`), but fires `_notify_parent_of_failure` unconditionally. W4.2's pseudocode
-copies that shape (`if failed_task is not None` guards only the watcher notify,
-plan §W4.2 lines 205-206). For the TIMEOUT lane the unconditional parent notify is
-defensible (the lane just observed `schedule_retry` return None — the episode IS
-over). The usage-limit path adds a caller of that notify that the TIMEOUT lane does
-not have: the W4.2d fallthrough.
+In `recover_on_startup` Phase A (stale RUNNING → force-cancel + retry), `recovered += 1` and the
+`_on_task_permanently_failed` callback sit at the **sibling level** of `if retry_task:` / `else:` —
+the notify fires on EVERY task, including those whose retry child was just successfully created.
+Contrast the grace sweep (`:441`, inside the else) and orphan Phase B (`:757`, inside the else),
+which place it correctly.
 
-**(b) W4.2d's fallthrough justification is only half-true.** "safe: something else
-already decided the task's fate" covers terminal fates (operator cancel, concurrent
-failure). But `schedule_retry` also returns None when the gate's `retry_scheduled =
-false` term loses to a **concurrent retry-creating** actor — e.g. the stale
-sweeper's anchor-gated `force_cancel_and_schedule_retry` (W8, `stale_task_recovery.py:368/:658`)
-creating a recovery child for this very task. In that shape the fallthrough fires
-`fail_task` (returns None — task is CANCELLED with a live child), then
-`_notify_parent_of_failure('usage_limit_deadline')` anyway, and `_send_error_report`
-performs child → ERROR + hierarchy cleanup **on an episode that continues via the
-recovery child**. Exactly-once is violated and the episode is zombie-killed — the
-same class of bug rev1 §2.2 closed, re-entering through the fallthrough door.
+The callback routes `manager._on_stale_task_permanent_failure` (`manager.py:4118-4137`) →
+`_send_error_report(error_type='stale_task_failure')` → child ERROR + hierarchy cleanup + parent
+envelope. On the exact test-7b scenario — mid-episode crash → restart → Phase A force-cancel WITH
+the W8 bypass → recovery child created, episode saved — the parent nonetheless receives a
+permanent-failure report and the child instance is killed **while the episode continues via the
+recovery child**. This is rev2 §2.1's zombie-kill (a report on a live episode) re-entering through
+a door neither prior pass opened. It is also a pre-existing bug: every successful TIMEOUT
+crash-recovery today emits a spurious permanent-failure report.
 
-**Fix (one line of spec):** gate the *entire* terminal composition — parent notify
-included — on `fail_task(task.id, ...) is not None`; when `fail_task` returns None
-(including the W4.2d fallthrough), log one line and return. Extend acceptance
-test 5: assert `_notify_parent_of_failure` is NOT called when `fail_task` loses the
-race (add the gate-closed-with-live-episode case beside the existing gate-closed
-test in §7 "Worker seam").
+**Fix:** move the notify into the `else` (permanent-fail) branch, gated on
+`failed_task is not None` per the Phase 2 Batch 2 convention. Acceptance test 7b must assert NO
+parent report on the successful-recovery path. (Plan impact: W8 gains one sentence; the fix
+itself is an indentation change in recovery code the plan already touches.)
 
-## 3. Minor (rev2 — address before or at merge)
+### 2.2 🔴 Grace sweep fails the episode's message on a successful anchor-gated recovery (`stale_task_recovery.py:531-540`)
 
-1. **W8 coverage sentence missing.** The hole (plan §W8) names four recovery
-   callsites; the decision threads bypass only through
-   `force_cancel_and_schedule_retry` (`:368/:658`). That is **correct** — episode
-   parents are CANCELLED with `retry_scheduled = true` (cancel + child insert is one
-   transaction), so the C2 `retry_scheduled` check (`stale_task_recovery.py:468`)
-   skips them and the plain `schedule_retry` callsites (`:474/:727`) are unreachable
-   for episode shapes — but the plan should say so. Without the sentence an
-   implementer will blanket-thread the bypass through all four callsites, weakening
-   the "gate cannot over-reach" argument the anchor scoping is designed to make.
-2. **Anchor lifecycle at terminal unspecified.** W6 clears the anchor only on the
-   success callback; W4.1 is set-once. A deadline-terminal episode therefore leaves
-   `usage_limit_first_seen_at` set forever. If the instance is ever re-used
-   (restart, recovery, manual resume), the next quota hit reads the stale anchor,
-   computes `elapsed > window`, and goes instantly terminal — no fresh 6 h window —
-   and W8's bypass over-reaches on the stale anchor. Specify: the terminal
-   composition (W4.2) clears the anchor (soft-fail, same as W6's clear); reconcile
-   test 6's "anchor re-stamped" wording with W4.1's set-once semantics (set-once
-   *per episode*, where terminal ends the episode).
-3. **Handler robustness.** `_handle_usage_limit` is invoked from inside the
-   `except UsageLimitError` block in `_process_with_timeout`; an exception raised by
-   the handler itself (e.g. the anchor metadata write fails) propagates out of the
-   except block — the sibling `except Exception` at `:578` does NOT catch it, and
-   the worker loop sees an unexpected error attributed to the wrong cause. Spec
-   soft-fail for the anchor read/write (log-and-proceed with `first_seen = now` as
-   the degenerate case) so the handler cannot raise.
+`task_acted_upon` is set for the force-cancelled-AND-RETRIED branch (`:415`), so the W6 message
+guard `if task_acted_upon and task.message_id: message_repo.fail(...)` marks the message FAILED
+while the recovery child — which inherits the same `message_id` (`schedule_retry`'s child_kwargs,
+`repository.py:3006`) — is pending. The pipeline's stage-1.5 claim is best-effort on a non-READY
+message and stage-4 `complete()` requires processing status (the pipeline's own comments,
+`message_processing_pipeline.py:413-424`), so the message stays FAILED even after the window lifts
+and the retry succeeds. This contradicts acceptance test 2 ("message NOT `failed`") and test 7b
+("episode survives") — the episode's observables are NOT zero across a crash.
 
-## 4. Summary (rev2)
+**Fix:** skip the message-fail when a retry child was created (scope it to terminal recoveries
+only). Arguably the correct shape for TIMEOUT recoveries too — same inherited-message structure.
+Assert in test 7b: message status intact after anchor-gated recovery.
 
-The revision did everything rev1 asked and did it correctly — the incorporation
-matrix above was verified against code, not just against the plan's change notes,
-and every anchor still resolves. The new required change is narrow and ironic: the
-W4.2d "safe fallthrough" added during revision re-opens the exact rev1 §2.2 bug
-class (a report on a live episode) because the self-composed terminal — unlike its
-TIMEOUT precedent — has a caller that reaches it while the episode may still be
-running. Gate the whole composition on the `fail_task` race outcome, add the two
-spec sentences (§3.1 coverage, §3.2 anchor-at-terminal) and the soft-fail note
-(§3.3), and this is ready for implementation.
+## 3. Minor (rev3 — address before or at merge)
+
+1. **Recovery child wakes on exponential backoff, not the W5 schedule.**
+   `force_cancel_and_schedule_retry` keeps the `2**retry_count` derivation
+   (`repository.py:3395-3399`); with bypass-grown `retry_count` (~26) the delay caps at
+   `backoff_max` (3600 s) — a crash burns up to **60 min** of the 6 h window per recovery event.
+   W8 already reads the anchor for the bypass; derive `next_retry_at` via the W5 function
+   (thread the `next_retry_at` param through `force_cancel_and_schedule_retry` as well) or state
+   the accepted dead time in the plan.
+2. **W5 jitter can schedule into the past.** An early-jittered wake still has
+   `elapsed < cumsum[k]` → the same slot is re-selected → re-rolled negative jitter can land
+   before `now` → immediate re-attempt (~2 wakes per slot; the "~26 wake-ups" count and
+   wall-clock monotonicity both soften). Clamp `next_retry_at ≥ now + floor` or use one-sided
+   additive jitter.
+3. **Stages-3-6 invariant unstated.** A `UsageLimitError` raised inside the pipeline's internal
+   try (`message_processing_pipeline.py:515-526`) would ride `result.error` — the cascade fires
+   inside the pipeline and the W3 carve-out cannot help. Unreachable today (the classifier raises
+   inside the LLM call, i.e. work_fn/stage 2 — verified §1.2); add one sentence naming that
+   invariant so a future stage refactor doesn't silently break it.
+4. **Landing order (§9).** W7 (config keys) lands last, but W1's patterns are config-driven —
+   correct only if W1 uses module defaults until W7 lands. Land W7's `usage_limit_patterns`
+   plumbing together with W1, or state the interim-defaults assumption.
+5. **`stale_task_recovery.py:428` Python-side budget gate.** Unreachable for live episodes
+   (a RUNNING task never carries `retry_scheduled = true`, and the gate sits in the
+   `force_cancel → None` else where `retry_count >= max_retries` is the expected cause — but with
+   the W8 bypass, `retry_count` can exceed `max_retries` on this path with the gate-closed cause
+   being `retry_scheduled`, making the `:428` branch misdiagnose). The plan's W8 anchor-gating
+   makes the bypass path return a child, so `:428` stays unreachable for episodes — worth one
+   sentence in W8 stating the invariant (and §3.5's audit note above).
+
+## 4. Summary (rev3)
+
+The revision did everything rev2 asked and did it correctly — the race-gated terminal composition
+is now exactly-once under every race outcome the reviewer can construct at the worker seam. Rev3's
+two required changes are both in stale recovery's post-retry actions, a region neither prior pass
+examined because W8 only recently made it load-bearing: a misindented parent-notify that reports
+permanent failure for successfully-retried startup recoveries (§2.1 — the zombie-kill class again,
+pre-existing and now on the episode's critical path), and the W6 message-fail guard marking the
+inherited message FAILED under a live recovery child (§2.2). Both fixes are small (a re-indent, a
+gate on retry-child creation, two test-7b assertions) and sit in files the plan already touches;
+the 1-1.5 day estimate holds. Fix those, take the five minors, and this is ready for
+implementation.
 
 ---
 
 ## Revision history
 
+- **rev3 (2026-08-27):** Approve with required changes — §2.1 (startup-recovery notify fires on
+  successful retries — misindent at `stale_task_recovery.py:699-712`) and §2.2 (message-fail on
+  successful anchor-gated recovery, `:531-540`). Minors §3.1-3.5 (recovery-child schedule, W5
+  jitter past-scheduling, stages-3-6 invariant, landing order, `:428` invariant note). All rev2
+  findings verified incorporated (§1.1); anchors re-verified incl. pipeline stage boundaries and
+  recovery post-retry blocks (§1.2); `retry_count` consumer audit closed (§1.2 last bullet).
 - **rev2 (2026-08-27):** Approve with one required change — §2.1 (gate the terminal
   composition on `fail_task` outcome; fix the W4.2d fallthrough). Minors §3.1-3.3.
   All rev1 findings verified incorporated (§1.1); anchors re-verified (§1.2).

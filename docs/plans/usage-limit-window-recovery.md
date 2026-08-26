@@ -182,10 +182,15 @@ constructions, not one.
   (`repository.py:2946`), concurrency guards stay. `retry_count` still increments
   monotonically (~26/episode) for observability, and BOTH episode ends (success
   finalize and race-won terminal) clear the anchor (unit 2) — a later quota hit starts
-  a fresh window. **Stale recovery** gets the same
-  bypass anchor-gated (a mid-attempt crash must not let stale sweeps permanently fail
-  the episode — detail plan W8, review M1; force-cancel callsites only, see W8
-  coverage scope).
+  a fresh window. **Stale recovery** gets the same bypass AND the W5 schedule,
+  anchor-gated (a mid-attempt crash must not let stale sweeps permanently fail the
+  episode, nor wake the recovery child on the 3600 s backoff cap — detail plan W8,
+  reviews M1 + rev3 §3.1; force-cancel callsites only, see W8 coverage scope) — plus
+  two REQUIRED post-retry fixes in the same code (review rev3 §2.1/§2.2): the startup
+  Phase A notify misindent (fires a spurious permanent-failure report on every
+  successful crash-recovery — pre-existing, also hits TIMEOUT today) and the
+  grace-sweep message-fail under a live recovery child (marks the inherited
+  `message_id` FAILED while the episode continues).
 
 **4'. What D deletes from the earlier drafts:** unit 4a/4b (envelope suppression,
 observer park branch), unit 6 (job-queue migration — the anchor lives in instance
@@ -351,7 +356,8 @@ services:
    + notify + watcher notify); no per-attempt reports ever sent.
 7. Crash-safety, both windows: restart while parked (anchor + pending retry survive,
    deadline from persisted anchor) AND crash mid-attempt (stale recovery retries WITH
-   the anchor-gated bypass — episode survives, no generic permanent-fail).
+   the anchor-gated bypass + W5 schedule — episode survives, no generic permanent-fail,
+   **no spurious parent report (rev3 §2.1 fix), message intact (rev3 §2.2 fix)**).
 8. Config parsing: list forms; empty `usage_limit_patterns` disables the typed wrapper
    (additive-off switch).
 9. TIMEOUT-lane regression: ordinary timeout retries (`max_retries`, backoff), stale
