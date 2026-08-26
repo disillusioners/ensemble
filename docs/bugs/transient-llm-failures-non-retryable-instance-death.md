@@ -4,7 +4,7 @@
 **Status:** Open — RC2/RC3 being resolved proxy-side (ultimate routing made transparent); RC1 (classifier) still needs the client fix
 **Severity:** High (94% of instance ERROR deaths in a 7-day window; causes replacement storms during provider outages)
 **Affected versions:** Current (`latest` as of 2026-08-26); symptoms start 2026-08-19 (proxy ultimate-model routing rollout)
-**Related:** [`docs/retry-architecture.md`](../retry-architecture.md) (§9, gap #6/7) · [`docs/plans/rate-limit-episode-parking.md`](../plans/rate-limit-episode-parking.md) (DRAFT — does not cover these channels) · commit `d4b7b8a4` (payload logging, first step)
+**Related:** [`docs/retry-architecture.md`](../retry-architecture.md) (§9, gap #6/7) · [`docs/plans/rate-limit-episode-parking.md`](../plans/rate-limit-episode-parking.md) (DRAFT — does not cover these channels) · [`docs/plans/transient-channel-retry-widening.md`](../plans/transient-channel-retry-widening.md) (DRAFT — implements fix 1) · commit `d4b7b8a4` (payload logging, first step)
 
 ---
 
@@ -104,6 +104,8 @@ commit `d4b7b8a4` (INFO-level `repr(response)[:300]` at the guard raise site,
 `daemon/graph.py:2001-2008`); no hits yet as of 2026-08-26 22:06.
 
 ## Fix proposal (priority order)
+
+> **Implementation plan:** [`docs/plans/transient-channel-retry-widening.md`](../plans/transient-channel-retry-widening.md) (DRAFT 2026-08-26) covers fix 1 and the RC3 deferral; fix 2 is resolved proxy-side (see RC2 note).
 
 1. **RC1 (widest impact):** classify transient shapes in the classifier — add branches
    mapping to `TransientAPIError` (or `ProviderRateLimitError` per the parking plan):

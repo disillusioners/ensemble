@@ -291,6 +291,7 @@ Post-exhaustion cascade: instance `ERROR` → misleading `RECOVERY_GUIDANCE_HINT
 
 - [`docs/bugs/transient-llm-failures-non-retryable-instance-death.md`](bugs/transient-llm-failures-non-retryable-instance-death.md) — fatality corpus (47 events, 2026-08-19→26): why instances actually become ERROR, root causes RC1–RC3, fix proposal.
 - [`docs/plans/rate-limit-episode-parking.md`](plans/rate-limit-episode-parking.md) — DRAFT plan that fills the structural gap (§1, §9). Do not treat as implemented.
+- [`docs/plans/transient-channel-retry-widening.md`](plans/transient-channel-retry-widening.md) — DRAFT plan fixing gap #10 at L1: makes the four non-status transient channels (bare `APIError`, 200-body `ValueError`, `RemoteProtocolError`, stream-empty) retryable via pattern-matched classification.
 - [`docs/retry-architecture-review.md`](retry-architecture-review.md) — historical two-layer review (2026-03-15); predates the current four-layer layout.
 - [`docs/retry-proposal.md`](retry-proposal.md), [`docs/task-timeout-retry-design.md`](task-timeout-retry-design.md) — earlier design notes in the same area.
 - [`docs/job-queue.md`](job-queue.md) — job-queue surface reference.
