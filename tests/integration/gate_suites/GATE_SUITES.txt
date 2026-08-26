@@ -1,39 +1,43 @@
 # GATE_SUITES.txt — Phase 1 gate-suite manifest (single source of truth).
-# ── Enumeration record (regenerated — PR3 flip) ─────────────────────────────
+# ── Enumeration record (regenerated — PR4 blob-prune closure) ─────────────
 # Date: 2026-08-26 (UTC) | Branch: feature/langgraph-checkpoint-perf |
-# HEAD: dbfbf81250cc7defb0813827a3a90fbdcd90d861 (PR3 flip commit, C1
-# read flip — aget-only + metadata timestamps). Supersedes the PR2-closure
-# record at fa31a52089d87dd79959f2642ba65044ac9f3153 (regen commit
-# c42a8bf5) — PR3 added 3 new gate suites that ARE the PR3 exit gates
-# (C1 read-flip: no-alist proof, response-shape schema freeze, lifecycle
-# wiring pin), per phase1-plan.md §Sequencing.
-# Method (collection-only; replicates the PR1/PR2-closure method in a clean
+# HEAD: f89ccacc7bedd517895357128fde6270ff0f7e23 (PR4 commit, C3
+# reference-aware checkpoint_blobs prune). Supersedes the PR3-flip record
+# at dbfbf81250cc7defb0813827a3a90fbdcd90d861 (regen commit 80c84219) —
+# PR4 added 4 new gate suites that ARE the PR4 exit gates (C3 blob-prune:
+# direct anti-join PG SQL, maintenance service prune, real-saver binding
+# gate, restore-rehearsal roundtrip), per phase1-plan.md §Sequencing.
+# The 4 new rows were appended in the PR4 commit itself (in the C3
+# blob-prune section below the table); the table rows stay as committed
+# (33 entries, 366 tests — unchanged from PR3).
+# Method (collection-only; replicates the PR1/PR2/PR3 method in a clean
 # git worktree pinned at the HEAD sha above — main tree untouched):
 # one pytest subprocess per file — uv run pytest <file> -o addopts=
 # --collect-only -q -p no:cacheprovider --no-header — which strips the
 # default 'not integration' marker filter. Cross-checked with one
-# aggregate collect-only subprocess over all 33 paths (the gate-runner
-# method): identical total (366).
-# Result: 33/33 files collect — 366 tests total (344 PR2-closure baseline;
-# sole PR3 delta: +3 suites / +22 tests). The 30 existing suites are
-# byte-identical to the PR2-closure record (counts unchanged at 344,
-# incl. test_checkpoint_perf_logging.py: 3 tests evolved in PR3, count
-# stayed 19 — re-verified). Execution provenance — existing 30: PR3
-# acceptance run 2026-08-26 — 344/344 GREEN across the 30 suites (dur(s)
-# below unchanged: W5 gate run 2026-08-25 for the pre-existing 23, PR2
-# acceptance run 2026-08-26 for the 7 PR2 rows); new 3: PR3 manifest-regen
-# run 2026-08-26 (this regen, clean worktree at the sha above) — 3/3
-# files GREEN, 0 failed / 0 skipped, durations per file in order below:
-# 0.56 / 1.12 / 0.90 s.
+# aggregate collect-only subprocess over all 37 paths (the gate-runner
+# method): identical total (409).
+# Result: 37/37 files collect — 409 tests total (366 PR3 baseline; sole
+# PR4 delta: +4 suites / +43 tests). The 33 table suites are byte-
+# identical to the PR3-flip record (counts unchanged at 366). Note the
+# 4 rows were appended in the PR4 commit itself; this header re-stamp
+# is the closure regen. Execution provenance — existing 33 (table):
+# PR4 acceptance run 2026-08-26 (366 across them, 0 failed — dur(s)
+# unchanged from PR3); new 4 (C3 section): PR4 implementer runs
+# 2026-08-26 — 4/4 files GREEN, 0 failed / 0 skipped, durations per
+# file in order below: 1.26 / 0.73 / 2.43 / 1.07 s. The binding gate
+# (checkpoint_prune_real_saver) was additionally re-run independently
+# by the data-safety reviewer (7/7, 2.43s).
 # NOTE — capture-suite marker: tests/integration/test_messages_response_
 # fixture_capture.py — the `pytestmark = integration` marker WAS removed
 # in commit 603c9eb8 (PR1-closure), so bare pytest collects it by
-# default (re-verified at dbfbf812, 2026-08-26: 1 collected, 0
+# default (re-verified at f89ccacc, 2026-08-26: 1 collected, 0
 # deselected). Not a manifest row — non-manifest companion.
 #
 # N = tests collected at HEAD (2026-08-26); dur(s) = W5 run 2026-08-25 for
 # the pre-existing 23, PR2 acceptance run 2026-08-26 for the 7 PR2 rows,
-# PR3 manifest-regen run 2026-08-26 for the 3 new PR3 rows.
+# PR3 manifest-regen run 2026-08-26 for the 3 PR3 rows, PR4 implementer
+# runs 2026-08-26 for the 4 new PR4 rows.
 # File                                                           N  dur(s)
 # tests/e2e/test_pause_resume_unchanged.py                        1   1.9
 # tests/unit/test_pause_resume_root.py                           18   1.7
