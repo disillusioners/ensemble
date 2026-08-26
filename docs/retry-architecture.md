@@ -5,7 +5,7 @@
 | **Date** | 2026-08-26 |
 | **Status** | Snapshot of current behavior. The companion plan doc is cross-referenced but **not yet implemented**. |
 | **Evidence** | All `file:line` anchors verified read-only by investigation on 2026-08-26. Code may drift — re-verify anchors before relying on them. |
-| **Related** | [`docs/plans/rate-limit-episode-parking.md`](plans/rate-limit-episode-parking.md) (DRAFT, 2026-08-26 — fills the structural gap described here) · [`docs/retry-architecture-review.md`](retry-architecture-review.md) (historical review, 2026-03-15) |
+| **Related** | [`docs/plans/rate-limit-episode-parking.md`](plans/rate-limit-episode-parking.md) (DRAFT, 2026-08-26 — fills the structural gap described here) · [`docs/retry-architecture-review.md`](retry-architecture-review.md) (historical review, 2026-03-15) · [`docs/bugs/transient-llm-failures-non-retryable-instance-death.md`](bugs/transient-llm-failures-non-retryable-instance-death.md) (2026-08-26 fatality corpus: 47 instance-ERROR events over 7 days, 94% transient-with-zero-retries, proxy ultimate-model escalation) |
 
 ---
 
@@ -242,6 +242,8 @@ The `'rate_limit'` error-type branch (`daemon/services/message_processing_errors
 
 Post-exhaustion cascade: instance `ERROR` → misleading `RECOVERY_GUIDANCE_HINT` during a provider-wide outage (the advice "waiting never works, revive once, spawn replacement" is precisely wrong then; it historically caused replacement storms) → the job strands on the observer lane.
 
+> 📋 **Measured reality (2026-08-26):** the fatality corpus in [`docs/bugs/transient-llm-failures-non-retryable-instance-death.md`](bugs/transient-llm-failures-non-retryable-instance-death.md) shows the dominant fatal shapes **never reach the 429 branch at all** — the proxy delivers rate-limit exhaustion via bare `openai.APIError` (no status code), 200-body `ultimate_model_retry_exhausted` `ValueError`, empty SSE streams (`No generations found in stream.`), and mid-stream `RemoteProtocolError` — all classified non-retryable by the classifier's generic branch (`llm_error_classifier.py:606`), 44/47 instance deaths with zero retries. Additionally the proxy's ultimate-model escalation (3rd identical request by message hash — reached in ~2 s by the openai SDK's default sub-second retries inside one tenacity attempt) collapses the effective L1 budget from 10 attempts to ~1. The parking plan's detection (status-code body matching only) must be widened to these channels; see the bug doc's fix proposal.
+
 ### Comparison
 
 | Aspect | Today | Parking plan ([DRAFT 2026-08-26](plans/rate-limit-episode-parking.md), 5 decision points approved, **not implemented**) |
@@ -278,14 +280,16 @@ Post-exhaustion cascade: instance `ERROR` → misleading `RECOVERY_GUIDANCE_HINT
 4. **Transient-attempt default ambiguity** — `daemon/config.py:388` = 10 vs the `daemon/graph.py:3590` fallback = 8 (drift trap).
 5. **Wall-clock asymmetry** — facade 45s cap; hot path uncapped (bounded only by the 125-min task timeout).
 6. **Dead `'rate_limit'` error-type branch** + no `Retry-After` honoring + no 429-specific backoff.
-7. **`RECOVERY_GUIDANCE_HINT` fires on all error types** — wrong advice during provider-wide outages.
+7. **`RECOVERY_GUIDANCE_HINT` fires on all error types** — wrong advice during provider-wide outages (confirmed replacement storm: 15 instances in 4 min, Aug 26 06:51–06:54 — see [`bugs/transient-llm-failures-non-retryable-instance-death.md`](bugs/transient-llm-failures-non-retryable-instance-death.md)).
 8. **RetryScheduler default-off** — even Lane A needs the operator to enable the waker.
 9. **Stale-anchor warning for future readers** — the type-guard is now `daemon/graph.py:2001-2002` (not `:1826`); the exhaustion catch is `:3340-3341` (not `:3045`).
+10. **Non-status transient channels all non-retryable** — bare `openai.APIError`, 200-body `ultimate_model_retry_exhausted`, empty SSE stream, `RemoteProtocolError`/`ReadTimeout` die in the classifier generic branch with zero L1 retries (bug doc above, RC1); proxy ultimate-model escalation collapses the effective L1 budget to ~1 attempt (RC2).
 
 ---
 
 ## Related documents
 
+- [`docs/bugs/transient-llm-failures-non-retryable-instance-death.md`](bugs/transient-llm-failures-non-retryable-instance-death.md) — fatality corpus (47 events, 2026-08-19→26): why instances actually become ERROR, root causes RC1–RC3, fix proposal.
 - [`docs/plans/rate-limit-episode-parking.md`](plans/rate-limit-episode-parking.md) — DRAFT plan that fills the structural gap (§1, §9). Do not treat as implemented.
 - [`docs/retry-architecture-review.md`](retry-architecture-review.md) — historical two-layer review (2026-03-15); predates the current four-layer layout.
 - [`docs/retry-proposal.md`](retry-proposal.md), [`docs/task-timeout-retry-design.md`](task-timeout-retry-design.md) — earlier design notes in the same area.
