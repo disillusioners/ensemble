@@ -24,6 +24,15 @@ A deliberate contract change (RUNNING targets: enqueue → injection) broke 2 pr
 - Family-level QUARANTINE rows (not per-test) keep the ledger manageable when the count is 45+.
 - `git worktree` base-verification makes "pre-existing" claims cheap and evidence-backed instead of hand-wavy.
 
+## 4. Recurrence log (updated 2026-08-27)
+
+The behavior-change-vs-frozen-assertion pattern has now produced the sole merge blocker on **three consecutive branches**:
+1. Phase 1: RUNNING→injection reroute broke `enqueue_message` assertions (2 tests).
+2. Phase 2: post-patch real-factory call on a MagicMock-contaminated list polluted the `_tool_metadata` singleton (1 test).
+3. quick-wins: `source=` kwarg added to the `set_injection` call site broke exact-match `assert_called_once_with` (2 tests — the SAME two tests from #1, already updated once).
+
+**Standing remedy for the dev hand-off checklist**: on ANY call-contract change (new kwarg, changed refusal text, rerouted method), run `grep -rn "assert_called_once_with\|assert_any_call" tests/ | grep <seam-name>` and update every exact-match assertion in the same commit. Exact-match mock asserts are contract pins — they MUST travel with the contract.
+
 ## 4. Unguarded second lookup after a guarded first (split-cache race pattern)
 
 `_resolve_instance_id` guards `get_instance` (async, ValueError → friendly), but a later UNGUARDED `get_instance_info` (sync, KeyError) at the CR-2 gate crashes on the cache-hit/store-miss race. Pattern: every manager lookup after the first existence check needs the same try/except if the contract promises friendly errors — the first guard does NOT cover later lookups. Caught only by a behavioral probe that deliberately desynchronized the two mocks (get_instance succeeds, get_instance_info raises). Unit mocks usually keep both consistent → suite stays green while the race exists.
