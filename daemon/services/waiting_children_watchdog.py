@@ -22,9 +22,12 @@ This service is the safety net. Every ``interval_seconds`` (default
    for the rationale (avoid the psycopg 7h skew).
 3. Skips ``paused`` children (those are NOT hung — they are awaiting
    a user/system decision and the parent must NOT be nagged).
-4. Skips ``paused`` parents entirely — ``set_injection`` rejects
-   PAUSED targets by design, so attempting injection is wasted work
-   that would log a spurious error.
+4. Skips ``paused`` parents entirely — the send-message tool layer
+   rejects send-to-PAUSED (``daemon/tools/instance.py`` via
+   ``_route_send_message``), so we skip the pre-scan to avoid
+   parking a notice in a paused parent's FIFO until resume.
+   ``set_injection`` itself has no status guard; the rejection
+   lives one layer up in the agent-tool router, not here.
 5. For each (parent, child) pair in a new "hang episode", injects a
    terse, directive notice into the parent via
    :meth:`InstanceManager.set_injection` with provenance
@@ -90,7 +93,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
 from typing import Any
 
 from daemon.repositories.instance.models import InstanceStatus
@@ -221,13 +223,6 @@ class WaitingChildrenWatchdog:
         interval_seconds: Seconds between scans. Default 3600 = 1h.
         hang_threshold_seconds: Strictly-greater-than threshold for
             hang detection. Default 3600 = 1h.
-        now_fn: Optional clock hook for tests. Defaults to
-            ``asyncio.get_running_loop`` time via ``loop.time()``.
-            Tests inject a callable that returns a monotonic float.
-        loop_fn: Optional loop accessor for tests. Defaults to
-            ``asyncio.get_running_loop``. The two hooks are kept
-            separate so a test can drive ``now_fn`` deterministically
-            without owning an event loop.
 
     Anti-spam invariant: ``_notified`` (a ``set`` of
     ``(parent_id, child_id)`` tuples) records every pair currently in
@@ -353,6 +348,19 @@ class WaitingChildrenWatchdog:
         # SQL result are NOT re-notified because they're already
         # in the set.
         currently_hung_pairs: set[tuple[str, str]] = set()
+        # Parents whose scan completed cleanly this tick
+        # (``get(P)`` returned non-None, status was not PAUSED,
+        # and ``list_hung_children_for_parent`` did not raise).
+        # Only pairs whose parent is in this set participate in
+        # the episode-end sweep below. Pairs for parents whose
+        # scan failed or hit a transient error stay in
+        # ``_notified`` unchanged — a failed scan MUST NOT
+        # silently clear the cooldown, which would otherwise
+        # violate the anti-spam invariant (the next healthy tick
+        # would re-notify without any real episode change).
+        # Documented invariant — pinned by
+        # ``TestEpisodeEndScanErrorPreservesCooldown``.
+        scanned_ok: set[str] = set()
 
         for parent_id in parent_ids:
             stats["parents_scanned"] += 1
@@ -368,10 +376,24 @@ class WaitingChildrenWatchdog:
                 if parent is None:
                     # Parent disappeared between enumeration and
                     # per-parent scan (terminal transition + delete).
-                    # Skip silently; nothing to notify.
+                    # Skip silently; nothing to notify. The parent
+                    # is NOT added to ``scanned_ok`` so any prior
+                    # ``_notified`` entries for it stay untouched —
+                    # we cannot conclude the episode ended when the
+                    # row is missing; a fresh row with the same id
+                    # could in theory reappear.
                     continue
                 if parent.status == InstanceStatus.PAUSED.value:
                     stats["parents_skipped_paused"] += 1
+                    # Parent is PAUSED. The send-message tool layer
+                    # rejects send-to-PAUSED, so the FIFO would
+                    # back up with a parked notice until the next
+                    # resume — worse than useless. Do NOT add to
+                    # ``scanned_ok``: a pair for this parent in
+                    # ``_notified`` stays put, and the parent must
+                    # transition back to WAITING_CHILDREN (the
+                    # ``list_waiting_children_parents`` filter) for
+                    # the next tick to consider it again.
                     continue
 
                 # Step 2b: SQL-side hang detection.
@@ -386,6 +408,12 @@ class WaitingChildrenWatchdog:
                     currently_hung_pairs.add((parent_id, child_id))
 
                 if not hung:
+                    # No hung children this tick. We still mark the
+                    # parent ``scanned_ok`` so any prior pair in
+                    # ``_notified`` for this parent is allowed to
+                    # clear at episode-end — the child has reached
+                    # terminal or paused and the episode truly ended.
+                    scanned_ok.add(parent_id)
                     continue
 
                 # Step 2c: anti-spam filter. Only notify (parent,
@@ -399,6 +427,7 @@ class WaitingChildrenWatchdog:
                     if (parent_id, child_id) not in self._notified
                 ]
                 if not new_pairs:
+                    scanned_ok.add(parent_id)
                     continue
 
                 notice = _build_hang_notice(
@@ -420,6 +449,7 @@ class WaitingChildrenWatchdog:
                 for child_id, _age in new_pairs:
                     self._notified.add((parent_id, child_id))
                 stats["notices_injected"] += 1
+                scanned_ok.add(parent_id)
 
                 logger.info(
                     f"[Watchdog] Injected hang notice into parent "
@@ -435,13 +465,29 @@ class WaitingChildrenWatchdog:
                     exc_info=True,
                 )
                 # Per-parent isolation — continue to next parent.
+                # Crucially: this parent is NOT added to
+                # ``scanned_ok``, so any prior pair in ``_notified``
+                # for it is preserved across the episode-end sweep
+                # below. A transient scan error MUST NOT silently
+                # clear the cooldown — the next healthy tick would
+                # re-notify without a real episode change.
                 continue
 
         # Episode-end detection: any pair in the cooldown set that
+        # belongs to a parent whose scan succeeded this tick AND
         # is NOT in the freshly-computed ``currently_hung_pairs``
-        # has ended (terminal or paused). Drop them so the watchdog
-        # can re-notify on a future live episode.
-        ended_pairs = self._notified - currently_hung_pairs
+        # has ended (terminal or paused). Drop those so the
+        # watchdog can re-notify on a future live episode. Pairs
+        # whose parent failed or was skipped (PAUSED) this tick
+        # stay in ``_notified`` unchanged — we have no fresh
+        # signal for them, so we must not conclude the episode
+        # ended. This is the documented anti-spam invariant.
+        ended_pairs = {
+            (parent_id, child_id)
+            for parent_id, child_id in self._notified
+            if parent_id in scanned_ok
+            and (parent_id, child_id) not in currently_hung_pairs
+        }
         if ended_pairs:
             self._notified -= ended_pairs
             logger.info(
@@ -525,12 +571,3 @@ __all__ = [
     "WaitingChildrenWatchdog",
     "run_waiting_children_watchdog_loop",
 ]
-
-
-# ─── Type annotation hooks (kept here for forward-ref resolution) ─────
-# The ``Awaitable`` / ``Callable`` imports above are unused by the
-# runtime but document the contract for downstream test mocks that
-# inject alternative collaborators (e.g. an async-manager shim). They
-# satisfy the lint rule against unused imports without polluting the
-# module namespace with implementation-specific stubs.
-_ = (Awaitable, Callable)

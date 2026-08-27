@@ -2140,8 +2140,12 @@ class SQLModelInstanceRepository:
         )
 
         # Dialect switch on age expression — same pattern as
-        # ``_build_zombie_scan_stmt`` above. SQLite ships with
-        # ``julianday``; PG accepts ``EXTRACT(EPOCH FROM ...)``.
+        # ``daemon/services/readiness.py`` at lines 100-107
+        # (``_QUEUE_MAX_AGE_SQL_POSTGRES`` / ``_QUEUE_MAX_AGE_SQL_SQLITE``).
+        # SQLite ships with ``julianday``; PG accepts
+        # ``EXTRACT(EPOCH FROM ...)``. The local ``_build_zombie_scan_sql``
+        # builds a NOT-EXISTS join skeleton, NOT an age expression,
+        # so it is NOT the right precedent here.
         if is_pg:
             age_expr = "EXTRACT(EPOCH FROM (now() - last_activity_at))"
         else:

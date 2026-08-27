@@ -681,6 +681,109 @@ class TestRunOnceErrorIsolation:
 
 
 @pytest.mark.asyncio
+class TestEpisodeEndScanErrorPreservesCooldown:
+    """Anti-spam invariant: a transient per-parent scan error MUST
+    NOT silently clear the cooldown.
+
+    Regression target: prior behavior treated every parent absent
+    from the freshly-computed ``currently_hung_pairs`` as an
+    episode-end candidate. A parent whose ``list_hung_children_for_parent``
+    raises was therefore wrongly considered "no longer hung" and
+    its pairs were silently cleared from ``_notified``. The next
+    healthy tick would then re-notify with no real episode change,
+    violating the documented anti-spam invariant (one notice per
+    parent/child episode). The fix tracks a ``scanned_ok`` set of
+    parents whose scan completed cleanly and only allows pair
+    clearance for those parents.
+
+    Test scenario (per brief):
+
+    1. Establish cooldown — tick 1 (healthy) injects a notice for
+       parent ``P`` / child ``C``.
+    2. Tick N — ``list_hung_children_for_parent`` raises
+       ``RuntimeError`` for parent ``P`` only. The tick records
+       ``errors += 1``, but ``(P, C)`` MUST stay in the cooldown
+       set (NOT silently cleared).
+    3. Tick N+1 — repo back to healthy. The watchdog MUST NOT
+       re-notify: ``set_injection`` call count is still 1, and the
+       cooldown set still holds ``(P, C)``.
+    """
+
+    async def test_transient_scan_error_preserves_cooldown_across_ticks(
+        self, repo, manager, make_instance
+    ) -> None:
+        parent = make_instance(
+            status=InstanceStatus.WAITING_CHILDREN,
+            instance_id="parent-flaky",
+        )
+        child_id = make_instance(
+            status=InstanceStatus.RUNNING,
+            parent_id=parent,
+            age_seconds=4000,
+            instance_id="child-flaky",
+        )
+
+        w = WaitingChildrenWatchdog(
+            repo, manager, interval_seconds=3600, hang_threshold_seconds=3600
+        )
+
+        # Tick 1 (healthy): establishes the cooldown. (P, C) is in
+        # the cooldown set; ``set_injection`` called once.
+        stats1 = await w.run_once()
+        assert stats1["notices_injected"] == 1
+        assert stats1["errors"] == 0
+        assert manager.set_injection.call_count == 1
+        assert (parent, child_id) in w.notified_episodes
+
+        # Inject a transient scan error for parent ``parent`` only.
+        # Subsequent calls to ``list_hung_children_for_parent`` with
+        # ``parent_id == parent`` raise; calls for any other parent
+        # delegate to the original. ``inject_failures`` is a flag so
+        # the test can restore the healthy repo at tick N+1.
+        original = repo.list_hung_children_for_parent
+        state = {"inject_failures": True}
+
+        def flaky_list_hung(*args: Any, **kwargs: Any):
+            if (
+                state["inject_failures"]
+                and kwargs.get("parent_id") == parent
+            ):
+                raise RuntimeError("simulated transient DB blip")
+            return original(*args, **kwargs)
+
+        repo.list_hung_children_for_parent = flaky_list_hung  # type: ignore[method-assign]
+
+        # Tick N (failing): the scan for parent raises and is
+        # caught by the per-parent try/except. The cooldown set
+        # MUST still hold ``(P, C)`` — the fix's invariant.
+        stats_n = await w.run_once()
+        assert stats_n["parents_scanned"] == 1
+        assert stats_n["errors"] == 1
+        assert stats_n["notices_injected"] == 0
+        # Cooldown preserved — the regression target.
+        assert (parent, child_id) in w.notified_episodes, (
+            "transient scan error must NOT clear cooldown"
+        )
+        # And no spurious re-notify on the failing tick.
+        assert manager.set_injection.call_count == 1
+
+        # Restore the repo to healthy — tick N+1 sees fresh data.
+        state["inject_failures"] = False
+
+        # Tick N+1 (healthy): repo is back. The cooldown set
+        # still holds ``(P, C)``; ``list_hung_children_for_parent``
+        # returns the same hung child. The watchdog MUST NOT
+        # re-notify because ``(P, C)`` is still in the set.
+        stats_n_plus_1 = await w.run_once()
+        assert stats_n_plus_1["parents_scanned"] == 1
+        assert stats_n_plus_1["errors"] == 0
+        # No new notice — the whole point of the regression guard.
+        assert manager.set_injection.call_count == 1
+        # Cooldown set still populated (episode has not actually ended).
+        assert (parent, child_id) in w.notified_episodes
+
+
+@pytest.mark.asyncio
 class TestRunOnceDisabled:
     """Disabled flag → loop returns immediately, no scan."""
 
