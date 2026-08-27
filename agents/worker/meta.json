@@ -9,7 +9,7 @@
   "skill_injection": true,
   "no_force_explore": true,
   "llm_models": [
-    {"model": "agentic", "weight": 25},
+    {"model": "coding2", "weight": 25},
     {"model": "coding", "weight": 75}
   ],
   "recursion_limit_multiplier": 7,

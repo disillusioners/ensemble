@@ -16,7 +16,7 @@
     "heuristic_match_shared_md_files": true
   },
   "llm_models": [
-    {"model": "agentic", "weight": 25},
+    {"model": "coding2", "weight": 25},
     {"model": "coding", "weight": 75}
   ],
   "recursion_limit_multiplier": 7
