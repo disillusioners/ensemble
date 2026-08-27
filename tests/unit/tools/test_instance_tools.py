@@ -485,6 +485,55 @@ class TestNotFoundInstanceId:
             f"got: {result!r}"
         )
 
+    async def test_split_cache_race_returns_friendly_error(self):
+        """Split-cache race defense: ``_resolve_instance_id`` (async)
+        succeeds, but ``manager.get_instance_info(...)`` (sync, in-memory
+        cache) raises ``KeyError`` — instance.py:1959 wraps the unguarded
+        ``get_instance_info`` call with the SAME friendly not-found text
+        the routing helper uses (delta-fix #1 contract on the
+        CR-2 membership-gate path).
+
+        Without the guard a raw ``KeyError`` propagates to the agent
+        instead of the friendly not-found text — tester CR-2 race
+        probe (RESULTS §1).
+        """
+        manager = _make_manager(status="running")
+
+        # ``_resolve_instance_id`` path (async, in-memory cache hit)
+        # succeeds — split-cache race: this happens to return a row.
+        async def _get_instance_succeeds(iid):
+            return MagicMock(instance_id=iid)
+
+        manager.get_instance = _get_instance_succeeds
+        manager.find_near_instance = MagicMock(return_value=[])
+
+        # ``get_instance_info`` (sync) raises ``KeyError`` — the
+        # lifecycle store evicted the row between the two lookups.
+        def _get_instance_info_raises(iid):
+            raise KeyError(iid)
+
+        manager.get_instance_info = _get_instance_info_raises
+
+        with patch(
+            "daemon.tools.instance._check_team_membership",
+            return_value=None,
+        ):
+            send_message = _get_send_message_tool(manager)
+
+            result = await send_message.coroutine("vanished-id", "hello")
+
+        # Full-sentence friendly not-found text — verbatim match to the
+        # string the routing-helper not-found branch uses at
+        # instance.py:1978. No raw ``KeyError`` leaks to the agent.
+        assert isinstance(result, str)
+        assert "vanished-id" in result
+        assert "not found" in result.lower()
+        assert "no message dispatched" in result
+        # Delta-fix #1: NEITHER ``set_injection`` NOR
+        # ``enqueue_message`` called.
+        manager.set_injection.assert_not_called()
+        manager.enqueue_message.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # Test b — Revive from each terminal state (Task 4, D2)

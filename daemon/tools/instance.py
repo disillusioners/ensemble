@@ -1956,7 +1956,20 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         # membership check). ``agent_id`` may be missing on the dict
         # when the instance row is incomplete; default to "" so the
         # check fails closed.
-        target_info = manager.get_instance_info(instance_id)
+        # Split-cache race defense: ``_resolve_instance_id`` (async)
+        # succeeded above, but ``get_instance_info`` (sync, in-memory
+        # cache hit) can still raise ``KeyError`` when the lifecycle
+        # store evicts the row between the two lookups. Mirror the
+        # routing helper's not-found branch (instance.py:703-710) and
+        # return the SAME friendly text the not-found branch already
+        # uses at instance.py:1978 — delta-fix #1 contract on this
+        # path (NEITHER ``set_injection`` NOR ``enqueue_message``
+        # called). Without this guard a raw ``KeyError`` leaks to the
+        # calling agent (tester CR-2 race probe).
+        try:
+            target_info = manager.get_instance_info(instance_id)
+        except KeyError:
+            return f"Instance '{instance_id}' not found; no message dispatched."
         target_agent_id = target_info.get("agent_id", "") or ""
         if target_agent_id:
             membership_error = _check_team_membership(
