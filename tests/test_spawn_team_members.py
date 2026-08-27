@@ -1350,7 +1350,9 @@ class TestSendMessageTeamMembersGate:
         # ``enqueue_message`` is NOT called (no load_skill / context
         # override fires the enqueue-override at instance.py:2001).
         manager.set_injection.assert_called_once_with(
-            "target-leader-id", "please execute task X"
+            "target-leader-id",
+            "please execute task X",
+            source="internal_agent:parent-instance-id",
         )
         manager.enqueue_message.assert_not_called()
 
@@ -1414,7 +1416,11 @@ class TestSendMessageTeamMembersGate:
             f"membership layer; existence check is the boundary); "
             f"got: {result!r}"
         )
-        manager.set_injection.assert_called_once_with("target-id", "hello")
+        manager.set_injection.assert_called_once_with(
+            "target-id",
+            "hello",
+            source="internal_agent:parent-instance-id",
+        )
         manager.enqueue_message.assert_not_called()
 
     async def test_send_message_denied_message_does_not_pollute_queue(self):
