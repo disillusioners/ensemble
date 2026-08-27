@@ -1328,9 +1328,12 @@ class TestSendMessageTeamMembersGate:
 
         Happy path for the canonical PM delegation: PM has
         ``team_members: ["leader"]``, so messaging a leader
-        instance must proceed to ``enqueue_message``. This is the
-        primary use case for the v2 PM (deep review added it to
-        unblock leader dispatch).
+        instance proceeds through ``manager.set_injection`` — Phase 1
+        routing for ``status="running"`` + plain content (no
+        ``load_skill`` / ``context`` override) lands on the
+        injection branch at ``daemon/tools/instance.py:2029``.
+        This is the primary use case for the v2 PM (deep review
+        added it to unblock leader dispatch).
         """
         manager = _make_send_message_manager(target_agent_id="leader")
         send = _get_send_message_tool(manager, caller_agent_id="project-manager")
@@ -1343,11 +1346,13 @@ class TestSendMessageTeamMembersGate:
         assert not result.startswith("ERROR"), (
             f"PM → leader must succeed; got: {result!r}"
         )
-        # enqueue_message was called with the target's instance_id.
-        manager.enqueue_message.assert_called_once()
-        call_kwargs = manager.enqueue_message.call_args.kwargs
-        assert call_kwargs["instance_id"] == "target-leader-id"
-        assert call_kwargs["message"] == "please execute task X"
+        # Phase 1 routing: status="running" + plain content → set_injection.
+        # ``enqueue_message`` is NOT called (no load_skill / context
+        # override fires the enqueue-override at instance.py:2001).
+        manager.set_injection.assert_called_once_with(
+            "target-leader-id", "please execute task X"
+        )
+        manager.enqueue_message.assert_not_called()
 
     async def test_send_message_blocks_leader_to_pm(self):
         """leader → project-manager is denied.
@@ -1384,6 +1389,11 @@ class TestSendMessageTeamMembersGate:
         instance exists. Pin this branch so a future refactor
         that adds an empty-string ``_check_team_membership`` call
         is an explicit, tested decision.
+
+        With ``status="running"`` + plain content, Phase 1
+        routing lands on ``manager.set_injection`` at
+        ``daemon/tools/instance.py:2029``; ``enqueue_message`` is
+        NOT called.
         """
         manager = _make_send_message_manager(target_agent_id="")
         # Strip the "agent_id" key entirely — matches the "incomplete row" case.
@@ -1396,14 +1406,16 @@ class TestSendMessageTeamMembersGate:
             instance_id="target-id", message="hello"
         )
 
-        # Gate is skipped → enqueue_message runs.
+        # Gate is skipped → Phase 1 routing runs (RUNNING + plain
+        # content → set_injection at instance.py:2029).
         assert isinstance(result, str)
         assert not result.startswith("ERROR"), (
             f"Empty agent_id must skip the gate (fail-open at the "
             f"membership layer; existence check is the boundary); "
             f"got: {result!r}"
         )
-        manager.enqueue_message.assert_called_once()
+        manager.set_injection.assert_called_once_with("target-id", "hello")
+        manager.enqueue_message.assert_not_called()
 
     async def test_send_message_denied_message_does_not_pollute_queue(self):
         """A denied ``send_message`` must NOT advance past

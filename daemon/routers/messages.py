@@ -8,7 +8,12 @@ from typing import Any, AsyncGenerator
 
 from fastapi import APIRouter, HTTPException, Request, Response
 
-from daemon.constants import SSE_PING_INTERVAL, SSE_QUEUE_MAXSIZE, SSE_TIMEOUT_S
+from daemon.constants import (
+    INJECTION_ELIGIBLE_STATUSES,
+    SSE_PING_INTERVAL,
+    SSE_QUEUE_MAXSIZE,
+    SSE_TIMEOUT_S,
+)
 from daemon.models import ErrorCodes, ErrorResponse, MessageCreate, MessageResponse
 from daemon.repositories.instance.models import InstanceStatus
 from daemon.services.live_event_hub import LiveEventHub
@@ -30,16 +35,19 @@ router = APIRouter(prefix="/instances", tags=["instances-messages"])
 # the single shared vocabulary in ``daemon.services.work_status`` so
 # this router does not carry its own status map.
 
-
-# Statuses that route through the RAM injection slot (Phase 2 / Task 3).
+# Statuses that route through the RAM injection slot — Phase 1
+# (agent-instance-tools): the eligibility set was hoisted to
+# ``daemon.constants.INJECTION_ELIGIBLE_STATUSES`` to eliminate the
+# previous fork (this router had a local frozenset; ``job_inject`` had
+# an inline tuple). Both consumers now import from the same place —
+# no third fork possible. See ``daemon/constants.py`` for the full
+# rationale and the LOCKED-choice rationale.
+#
+# Semantics reminder:
 # RUNNING — the agent is in an active LLM turn; set injection so the
 # agent_node picks it up on its next pull-and-clear step.
 # WAITING_CHILDREN — parent is parked waiting for child completion
 # reports; the slot survives until the next agent turn resumes.
-_INJECTION_ELIGIBLE_STATUSES = frozenset({
-    InstanceStatus.RUNNING.value,
-    InstanceStatus.WAITING_CHILDREN.value,
-})
 
 
 def _get_manager(request: Request) -> Any:
@@ -340,7 +348,7 @@ async def send_message(
     # GONE — no replacement ever happens. The new lifecycle is
     # ``injection_pending`` (one per message) → ``injection_consumed``
     # (one, for all messages) when the agent picks up the queue.
-    if current_status in _INJECTION_ELIGIBLE_STATUSES:
+    if current_status in INJECTION_ELIGIBLE_STATUSES:
         live_hub = _get_live_hub(request)
 
         # W5: stream_message with custom event_type — no new method

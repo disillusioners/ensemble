@@ -556,6 +556,148 @@ class TestGetTreeIdsPermanent:
         # root's tree. This test just ensures no infinite loop.
         assert isinstance(result, list)
 
+    def test_traversal_depth_cap_fires_at_256_with_warning_logged(
+        self, repo: SQLModelInstanceRepository, caplog
+    ):
+        """W5 — pre-merge security-council batch.
+
+        Companion to ``test_traversal_cap_silently_truncates_at_depth_256``
+        (which uses the in-memory StaticPool fixture). This test pins
+        the same cap behavior on a **file-backed SQLite** database per
+        the project lesson (StaticPool in-transaction can corrupt writes
+        on interleaved sessions; see ``docs/agent-prompt-writing-guide.md``
+        §"Multi-edit/write-tool verification discipline"). File-backed
+        SQLite is the production-like pattern; both engines must agree
+        on the cap behavior.
+
+        Build a chain that clearly exceeds the cap (260 nodes total:
+        root + 259 descendants, depths 0..259) so the cap fires AND the
+        deepest 3 nodes are excluded (one WARN logged, exactly-once).
+        """
+        import logging
+
+        caplog.set_level(
+            logging.WARNING,
+            logger="daemon.repositories.instance.repository",
+        )
+
+        # 260 nodes in a chain: root → n1 → n2 → ... → n259.
+        _create_instance(repo, "root")
+        prev_id = "root"
+        for i in range(1, 260):
+            cur_id = f"n{i}"
+            _create_instance(repo, cur_id, parent_id=prev_id)
+            prev_id = cur_id
+
+        result = repo.get_tree_ids_permanent("root")
+
+        # Cap is 256 iterations; visited = root + 256 descendants = 257.
+        assert len(result) == 257, (
+            f"W5: expected 257 visited nodes at depth cap; got {len(result)}"
+        )
+        # Root is always first.
+        assert result[0] == "root"
+        # The deepest 3 nodes (n257, n258, n259) MUST be excluded —
+        # the cap fired.
+        assert "n256" in result
+        assert "n257" not in result
+        assert "n258" not in result
+        assert "n259" not in result
+
+        # Exactly one traversal-cap WARN logged (for/else clause fires
+        # once when the loop exhausts the cap with a non-empty frontier).
+        warning_records = [
+            r for r in caplog.records
+            if "traversal depth cap" in r.message and r.levelno == logging.WARNING
+        ]
+        assert len(warning_records) == 1, (
+            f"W5: expected exactly one traversal-cap WARN; got "
+            f"{len(warning_records)}"
+        )
+        # The WARN diagnostic names the cap + a non-zero unvisited
+        # frontier count (for a linear chain the cap leaves the deepest
+        # visited node's child in the frontier — 1 unvisited here).
+        assert "_MAX_TRAVERSAL_DEPTH=256" in warning_records[0].message, (
+            f"W5: WARN message must name the cap; got "
+            f"{warning_records[0].message!r}"
+        )
+        assert "unvisited frontier nodes" in warning_records[0].message, (
+            f"W5: WARN message must mention unvisited frontier; got "
+            f"{warning_records[0].message!r}"
+        )
+
+
+def test_w5_traversal_depth_cap_on_file_backed_sqlite(tmp_path, caplog):
+    """W5 (file-backed) — same cap behavior, exercised on a tmp_path
+    SQLite file (NOT StaticPool in-memory).
+
+    Rationale (project lesson): StaticPool + WriteGuardSession +
+    dependency_bus repo sessions interleaved inside one open
+    transaction can corrupt writes. Production uses Postgres; this
+    file-backed test is the closest SQLite analog. The in-memory
+    ``repo`` fixture above (StaticPool) is fine for unit-level shape
+    checks but should NOT be the only cap-pin — production parity
+    matters for the cap's safety guarantee.
+
+    Build a chain that clearly exceeds the cap (260 nodes total:
+    root + 259 descendants, depths 0..259) so the cap fires AND the
+    deepest 3 nodes are excluded (one WARN logged, exactly-once).
+    """
+    import logging
+    from pathlib import Path
+
+    from sqlalchemy import create_engine
+    from sqlmodel import SQLModel
+
+    db_path = Path(tmp_path) / "w5_depth_cap.sqlite"
+    engine = create_engine(f"sqlite:///{db_path}")
+    SQLModel.metadata.create_all(engine)
+    try:
+        file_repo = SQLModelInstanceRepository(engine)
+
+        caplog.set_level(
+            logging.WARNING,
+            logger="daemon.repositories.instance.repository",
+        )
+
+        # 260 nodes in a chain: root → n1 → n2 → ... → n259.
+        file_repo.create(instance_id="root", agent_id="a", agent_dir="./a")
+        prev_id = "root"
+        for i in range(1, 260):
+            cur_id = f"n{i}"
+            file_repo.create(
+                instance_id=cur_id, agent_id="a",
+                agent_dir="./a", parent_id=prev_id,
+            )
+            prev_id = cur_id
+
+        result = file_repo.get_tree_ids_permanent("root")
+
+        # Cap is 256 iterations; visited = root + 256 descendants = 257.
+        assert len(result) == 257, (
+            f"W5 (file-backed): expected 257 visited nodes at depth cap; "
+            f"got {len(result)}"
+        )
+        assert result[0] == "root"
+        assert "n256" in result
+        assert "n257" not in result
+        assert "n258" not in result
+        assert "n259" not in result
+
+        # Exactly one traversal-cap WARN logged.
+        warning_records = [
+            r for r in caplog.records
+            if "traversal depth cap" in r.message and r.levelno == logging.WARNING
+        ]
+        assert len(warning_records) == 1, (
+            f"W5 (file-backed): expected exactly one traversal-cap WARN; "
+            f"got {len(warning_records)}"
+        )
+    finally:
+        engine.dispose()
+        if db_path.exists():
+            db_path.unlink()
+
 
 # =============================================================================
 # P1 (phase1-plan.md T1) — get_cascade_tree_ids wrapper

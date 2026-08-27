@@ -74,6 +74,7 @@ Cases covered (mapped to the dispatcher's required scenarios):
 
 from __future__ import annotations
 
+import pytest
 from langchain_core.messages import (
     AIMessage,
     HumanMessage,
@@ -551,3 +552,298 @@ class TestPlaceholderText:
         assert "interrupted" in text or "restart" in text or "crash" in text
         # NOT an empty string.
         assert text.strip() != ""
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 (agent-instance-tools) — agent-tool-triggered injection path
+# ---------------------------------------------------------------------------
+#
+# Phase 1 routes agent-tool sends to RUNNING / WAITING_CHILDREN targets
+# through ``Manager.set_injection(...)`` — the SAME RAM-only FIFO the
+# user-facing API uses (``daemon/routers/messages.py:348`` →
+# ``Manager._pending_injections``). The agent-tool layer does NOT
+# create a new injection site; it piggybacks on the single delivery
+# point at ``agent_node`` (``daemon/graph.py:2871-2911``).
+#
+# The existing 16-case regression suite (Cases 1-7 above) exercises
+# the user-API injection path. Phase 1 cases a / a-bis extend the
+# suite to cover the agent-tool-triggered injection path AND the
+# concurrent-source single-pass guard (R-O7 lock-in).
+#
+# We do NOT re-test the helper itself here (the helper is a pure
+# stateless scan); we test the integration contract: when an
+# agent-tool send populates the FIFO with an in-flight unanswered
+# tool_call's tail, the same pairing guard at
+# ``daemon/graph.py:2893`` heals the checkpoint exactly as it does
+# for user-API injections.
+#
+# These tests are intentionally STATELESS (Cases 1-7 pattern): they
+# exercise ``_ensure_tool_result_pairing`` directly with hand-crafted
+# message lists that mirror the agent-tool injection scenario. No
+# InstanceManager / graph / LLM is needed.
+
+
+class TestAgentToolInjectionPairing:
+    """Phase 1 / Test a — tool-pairing regression for the agent-tool
+    injection path.
+
+    The agent-tool ``send_message`` tool routes RUNNING /
+    WAITING_CHILDREN targets through ``manager.set_injection(...)``
+    which is the same FIFO the user API uses. The drain at
+    ``daemon/graph.py:2871-2911`` runs ``_ensure_tool_result_pairing``
+    at :2893 — the SAME guard site. This class proves the agent-tool
+    trigger path exercises the SAME delivery point and guard as the
+    user API, with parametrized tool_call shapes / ids.
+    """
+
+    @pytest.mark.parametrize(
+        "tool_call_id,tool_name",
+        [
+            ("call_user_001", "bash"),
+            ("call_user_abc-123", "edit_file"),
+            ("call_user_LONG_ID_with_underscores_and-dashes", "read_file"),
+        ],
+    )
+    def test_agent_tool_injection_path_heals_checkpoint(
+        self, tool_call_id, tool_name
+    ):
+        """The agent-tool-triggered injection path exercises the SAME
+        pairing guard as the user API. Setup: a target instance has an
+        in-flight unanswered tool_call (no matching ToolMessage yet).
+        The agent-tool injects a new HumanMessage into the FIFO. The
+        guard synthesizes a placeholder ToolMessage so the history
+        stays structurally valid for the gateway.
+        """
+        ai = AIMessage(
+            content="",
+            tool_calls=[_tc(tool_call_id, tool_name)],
+        )
+        # The message history at the moment of agent-tool injection:
+        # a tail AIMessage carrying the in-flight tool_call, plus the
+        # simulated agent-tool-injected HumanMessage. We add the HM
+        # AFTER the guard runs (mirrors the production sequence:
+        # guard runs at :2893, then HumanMessage appended at :2896).
+        msgs = [
+            SystemMessage(content="sys"),
+            HumanMessage(content="hi"),
+            ai,
+        ]
+        synthesized = _ensure_tool_result_pairing(msgs)
+        # Simulate the agent-tool injection: append a HumanMessage
+        # AFTER the guard runs.
+        msgs.extend(
+            [HumanMessage(content="agent_tool_injection")]
+        )
+
+        # The guard synthesizes exactly one placeholder ToolMessage
+        # for the in-flight tool_call_id.
+        assert len(synthesized) == 1
+        assert synthesized[0].tool_call_id == tool_call_id
+        assert synthesized[0].name == tool_name
+        assert synthesized[0].content == _TOOL_PAIRING_PLACEHOLDER_TEXT
+        # Order: SystemMessage, HumanMessage('hi'), AIMessage,
+        # ToolMessage(placeholder), HumanMessage('agent_tool_injection').
+        assert isinstance(msgs[2], AIMessage)
+        assert isinstance(msgs[3], ToolMessage)
+        assert msgs[3].tool_call_id == tool_call_id
+        assert msgs[3].name == tool_name
+        assert isinstance(msgs[4], HumanMessage)
+        assert msgs[4].content == "agent_tool_injection"
+
+    def test_agent_tool_injection_with_existing_tool_message_dedupes(self):
+        """If the same tool_call_id already has a ToolMessage in the
+        trailing window, the guard MUST NOT synthesize a duplicate
+        (the existing_tool_call_ids dedupe at
+        ``daemon/graph.py:341-344, 361-362`` is the single source of
+        truth).
+
+        Setup: target has an answered tool_call (AI + TM), THEN a
+        SECOND unanswered tool_call (another AI without TM). Agent-tool
+        injection appends a HumanMessage. The guard synthesizes ONLY
+        for the unanswered second call.
+        """
+        # First tool_call — answered (AI + TM)
+        ai1 = AIMessage(
+            content="",
+            tool_calls=[_tc("call_answered", "bash")],
+        )
+        tm1 = ToolMessage(
+            content="real result",
+            tool_call_id="call_answered",
+            name="bash",
+        )
+        # Second tool_call — unanswered (just AI, no TM)
+        ai2 = AIMessage(
+            content="",
+            tool_calls=[_tc("call_unanswered", "edit_file")],
+        )
+        msgs = [
+            SystemMessage(content="sys"),
+            HumanMessage(content="hi"),
+            ai1,
+            tm1,
+            ai2,
+        ]
+        synthesized = _ensure_tool_result_pairing(msgs)
+        msgs.extend([HumanMessage(content="agent_tool_injection")])
+
+        # Only ``call_unanswered`` gets synthesized — ``call_answered``
+        # already has its ToolMessage.
+        synthesized_ids = {tm.tool_call_id for tm in synthesized}
+        assert synthesized_ids == {"call_unanswered"}, (
+            f"Guard should NOT synthesize for answered tool_call_id; "
+            f"got synthesized_ids={synthesized_ids}"
+        )
+        # Order: SM, HM, AI1, TM(answered), AI2, TM(unanswered),
+        # HM(agent_tool_injection).
+        assert msgs[5].tool_call_id == "call_unanswered"
+
+
+class TestConcurrentSourceSinglePassGuard:
+    """Phase 1 / Test a-bis — concurrent-source single-pass guard test.
+
+    Two injections land in the SAME drain cycle (user-API inject +
+    agent-tool inject, both sources populating the FIFO before the
+    next ``agent_node``). The single drain consumes both messages in
+    one batch; ``_ensure_tool_result_pairing`` runs ONCE on the
+    batch; synthesized ToolMessages dedupe via
+    ``existing_tool_call_ids`` (``daemon/graph.py:341-344, 361-362``)
+    so only ONE placeholder is produced.
+
+    This locks the O7-by-construction guarantee (architect §2-O7
+    R-O7) into the test suite. R-O7 flipped the verdict from
+    "unlikely" to "cannot occur" because the drain is single-pass per
+    ``agent_node`` entry — the second drain sees a resolved tail
+    (synthesized ToolMessages persisted via C2 return), and the
+    guard's O(1) happy-path check skips.
+    """
+
+    def test_user_api_and_agent_tool_injections_in_same_drain(self):
+        """Two injections from different sources land in the same
+        drain cycle. Setup: target has an in-flight tool_call. User
+        API injects message A; agent tool injects message B before the
+        next drain. Both messages are processed in ONE drain pass."""
+        ai = AIMessage(
+            content="",
+            tool_calls=[_tc("call_concurrent", "bash")],
+        )
+        msgs = [
+            SystemMessage(content="sys"),
+            HumanMessage(content="hi"),
+            ai,
+        ]
+        # The guard runs ONCE on the batch — both injected messages
+        # are part of the same drain.
+        synthesized = _ensure_tool_result_pairing(msgs)
+
+        # Simulate the drain: append BOTH injected messages in one
+        # batch (user-API A first, then agent-tool B).
+        msgs.extend(
+            [
+                HumanMessage(content="user_api_injection_A"),
+                HumanMessage(content="agent_tool_injection_B"),
+            ]
+        )
+
+        # The guard synthesizes EXACTLY ONE placeholder ToolMessage.
+        # If the guard ran twice, we'd see duplicates.
+        assert len(synthesized) == 1, (
+            f"Guard must run ONCE on the batch; got {len(synthesized)} "
+            f"synthesized messages (would indicate double-synthesis)"
+        )
+        assert synthesized[0].tool_call_id == "call_concurrent"
+        # Order: SM, HM, AI, TM(placeholder), HM(user_api_A),
+        # HM(agent_tool_B).
+        assert msgs[3].tool_call_id == "call_concurrent"
+        assert msgs[4].content == "user_api_injection_A"
+        assert msgs[5].content == "agent_tool_injection_B"
+
+    def test_concurrent_sources_share_single_guard_pass(self):
+        """R-O7 lock-in (architect §2-O7): the drain is single-pass per
+        ``agent_node`` entry, so multiple sources (user API + agent
+        tool) in the SAME FIFO batch share ONE guard pass with
+        ``existing_tool_call_ids`` dedupe (``daemon/graph.py:341-344,
+        361-362``).
+
+        Concretely: a single ``_ensure_tool_result_pairing`` call on a
+        batch containing multiple HumanMessages (one per injection
+        source) produces EXACTLY ONE synthesized ToolMessage per
+        unanswered tool_call_id — NOT one per HumanMessage. This is
+        the property that prevents double-synthesis when the FIFO
+        batch contains N concurrent injections.
+        """
+        # Two concurrent injections land in the same FIFO batch.
+        # Tail: an in-flight AIMessage(tool_calls=[call_race]) with NO
+        # matching ToolMessage. The two injected HumanMessages are
+        # processed in ONE drain pass.
+        ai = AIMessage(content="", tool_calls=[_tc("call_race", "bash")])
+        msgs = [
+            SystemMessage(content="sys"),
+            HumanMessage(content="hi"),
+            ai,
+        ]
+        # The guard runs ONCE on the batch — both injected messages
+        # are part of the same drain.
+        synthesized = _ensure_tool_result_pairing(msgs)
+        msgs.extend(
+            [
+                HumanMessage(content="user_api_injection_A"),
+                HumanMessage(content="agent_tool_injection_B"),
+            ]
+        )
+
+        # Exactly ONE placeholder per unanswered tool_call_id. Two
+        # HumanMessages do NOT produce two placeholders.
+        synthesized_ids = [tm.tool_call_id for tm in synthesized]
+        assert synthesized_ids.count("call_race") == 1, (
+            f"Single drain pass must synthesize exactly ONE placeholder "
+            f"per tool_call_id; got {synthesized_ids.count('call_race')} "
+            f"for call_race"
+        )
+        assert len(synthesized) == 1, (
+            f"Expected exactly 1 synthesized ToolMessage; got {len(synthesized)}. "
+            f"Multiple would indicate double-synthesis across the drain batch."
+        )
+
+    def test_synthesized_tool_message_blocks_double_synthesis(self):
+        """After drain #1 persists the synthesized ToolMessage (via
+        the C2 return at ``daemon/graph.py:3386-3397``), drain #2 sees
+        the resolved tail. The guard's walk stops at the synthesized
+        ToolMessage (a non-AI(tc) message in the trailing window) and
+        does NOT re-synthesize.
+
+        This is the O(1) happy-path short-circuit (Cases 3 + 7 in the
+        existing 16-case suite). Phase 1's agent-tool injection path
+        relies on this: each agent_node entry has ONE drain, and that
+        drain's synthesized ToolMessages become the persisted tail —
+        the next drain's guard skips (no double-synthesis possible).
+        """
+        # After drain #1: tail has the synthesized ToolMessage for
+        # call_once. The guard walks backward from the tail and stops
+        # at the non-AI(tc) ToolMessage (Case 3 pattern: tail already
+        # answered).
+        ai = AIMessage(content="", tool_calls=[_tc("call_once", "bash")])
+        tm_synth = ToolMessage(
+            content=_TOOL_PAIRING_PLACEHOLDER_TEXT,
+            tool_call_id="call_once",
+            name="bash",
+        )
+        msgs = [
+            SystemMessage(content="sys"),
+            HumanMessage(content="hi"),
+            ai,
+            tm_synth,
+            HumanMessage(content="drain_1_result"),
+        ]
+
+        # Drain #2: the trailing window starts at the HumanMessage
+        # (drain_1_result), which is NOT an AI(tc). The guard's
+        # happy-path O(1) check skips — NO synthesis.
+        synthesized = _ensure_tool_result_pairing(msgs)
+
+        assert synthesized == [], (
+            f"Guard must NOT re-synthesize for an already-answered "
+            f"tool_call_id; got {synthesized}"
+        )
+        # And the list is unchanged.
+        assert msgs[4].content == "drain_1_result"

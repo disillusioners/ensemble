@@ -11,7 +11,7 @@
     "heuristic_match_shared_md_files": true
   },
   "tools": {
-    "allow": ["instance", "self", "project", "help", "image", "knowledge", "mcp", "critical_notes", "project_history", "shared_meta_kv", "question"]
+    "allow": ["instance", "subtree_messages", "self", "project", "help", "image", "knowledge", "mcp", "critical_notes", "project_history", "shared_meta_kv", "question"]
   },
   "team_members": ["planner", "developer", "reviewer", "tidier", "approver", "architect", "tester", "giter", "devops", "explorer", "wanderer", "kb-writer", "doc-writer"]
 }

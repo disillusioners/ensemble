@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from ._tool_registry import register_tool_category
 from ._truncate import truncate_dict_result
 from daemon import constants
+from daemon.constants import INJECTION_ELIGIBLE_STATUSES
 from daemon.repositories.instance.models import InstanceStatus
 from daemon.repositories.job_queue.models import AdmissionState
 from daemon.repositories.job_queue.watcher_models import ALL_TERMINAL_STATES
@@ -1784,10 +1785,7 @@ def create_job_tools(
             if instance_meta is None:
                 return {"error": f"Instance {instance_id} not found"}
 
-            if instance_meta.status not in (
-                InstanceStatus.RUNNING.value,
-                InstanceStatus.WAITING_CHILDREN.value,
-            ):
+            if instance_meta.status not in INJECTION_ELIGIBLE_STATUSES:
                 return {
                     "error": (
                         f"Instance is {instance_meta.status} — job_inject "
