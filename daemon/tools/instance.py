@@ -923,6 +923,28 @@ def _validate_subtree_target(
     return True, manager.get_tree_ids_permanent(resolved_target)
 
 
+_SUBTREE_CONTEXT_INJECTION_PREFIX = "[SYSTEM CONTEXT:"
+
+# Cap on the max_instances input clamp. Above this we silently clamp to
+# 100 (matches the truncation-warning copy and is the documented ceiling).
+_SUBTREE_MAX_INSTANCES_CAP = 100
+# Cap on the limit input clamp. Above this we silently clamp to 500.
+# Distinct from max_instances — limit is per-message, max_instances is
+# per-subtree-instance.
+_SUBTREE_LIMIT_CAP = 500
+# Cap on rendered tool name (chars). Long names are truncated + ellipsis.
+# Distinct from the joined `tools=` summary string cap below — applies
+# both to the ``[name]`` in ``_summarize_tool_message`` (full mode) and
+# to the joined list in summary/full modes.
+_SUBTREE_TOOL_NAME_MAX_CHARS = 64
+# Cap on the joined ``tools=`` / ``(tools: ...)`` summary string. When
+# the joined tool-call names exceed this many chars, we truncate the
+# joined string + append an ellipsis. Defense-in-depth against an
+# assistant message with many/long tool_call names flooding the token
+# budget.
+_SUBTREE_TOOLS_JOINED_MAX_CHARS = 200
+
+
 def _filter_subtree_messages(
     msgs: list[dict],
     *,
@@ -936,11 +958,33 @@ def _filter_subtree_messages(
         ``role=="system"`` message — synthetic context tokens must never
         leak to a parent, and a descendant's real system prompt is
         persona-privileged and not shareable.
+      * Persisted ``[SYSTEM CONTEXT: …]``-prefixed user-role context
+        injections (pre-merge security-council batch W1, INTERIM):
+        ``serialize_message`` (``daemon/utils.py:158-170``) currently
+        strips the original ``injected_message`` / ``context_kind``
+        markers, so checkpointed context-injection HumanMessages persist
+        with ``role="user"`` and a literal ``[SYSTEM CONTEXT: …]`` prefix
+        on the persisted content. Without this check they would pass the
+        D12 descendant filter and leak descendant-injected snippets to
+        the parent. We drop them via a literal-prefix match on the
+        persisted content (no trimming/normalizing — avoids false-
+        positive drops of legitimate user messages that merely quote
+        the marker mid-text). FULL FIX (thread
+        ``injected_message`` / ``context_kind`` through
+        ``serialize_message`` and filter on the structured marker) is a
+        deferred follow-up — see ``decisions.md`` D12 addendum and the
+        recon reason (8+ ``serialize_message`` call sites across
+        ``persistence.py`` / ``graph.py`` / ``instance_messaging.py``;
+        ``graph.py`` + ``instance_messaging.py`` are FROZEN by the
+        Phase 2 plan, so the threading is not contained in this batch).
       * When ``is_descendant=False`` (the caller itself), keep
         ``role=="system"`` messages authored by the caller — the
         caller's own system prompt is part of its context. The
         synthetic-context/system entries are still dropped (they are
-        never meant to be quoted back at the caller).
+        never meant to be quoted back at the caller). The
+        ``[SYSTEM CONTEXT: …]`` prefix check is NOT applied to the
+        caller — the caller's own injections are its own context and
+        must remain visible to it.
       * The ``role`` value MUST be one of the canonical lowercase
         names (``user``/``assistant``/``tool``/``system``) per
         ``daemon/utils.py:96``. ``"human"`` and ``"ai"`` will not match
@@ -974,6 +1018,17 @@ def _filter_subtree_messages(
             if role == "system":
                 # Descendant's real system prompt is persona-privileged.
                 continue
+            # W1 (INTERIM) — persisted context-injection user-role
+            # messages: see docstring above. Literal-prefix match ONLY,
+            # no trim/normalize, to avoid false-positive drops of legit
+            # user messages that quote the marker mid-text.
+            if role == "user":
+                content = m.get("content")
+                if (
+                    isinstance(content, str)
+                    and content.startswith(_SUBTREE_CONTEXT_INJECTION_PREFIX)
+                ):
+                    continue
 
         out.append(m)
     return out
@@ -985,8 +1040,14 @@ def _summarize_tool_message(m: dict) -> str:
     Per Phase 2 §4: ToolMessage → ``name + first 100 chars of args``.
     The tool-output ``content`` field is intentionally omitted — it is
     the raw tool response and would otherwise dominate the token budget.
+
+    Pre-merge security-council batch W3: the tool ``name`` is capped at
+    ``_SUBTREE_TOOL_NAME_MAX_CHARS`` chars + ``"…"`` ellipsis when
+    longer, so a misconfigured 200-char tool name cannot dominate the
+    rendered line.
     """
     name = m.get("name") or m.get("tool_name") or "tool"
+    name = _truncate_tool_name(name)
     args = m.get("args") or m.get("arguments") or ""
     if not isinstance(args, str):
         args = str(args)
@@ -994,6 +1055,39 @@ def _summarize_tool_message(m: dict) -> str:
     if len(args) > _SUBTREE_TOOL_ARGS_MAX_CHARS:
         args_snippet = args_snippet + "…"
     return f"[{name}] {args_snippet}"
+
+
+def _truncate_tool_name(name: str) -> str:
+    """Cap a tool name at ``_SUBTREE_TOOL_NAME_MAX_CHARS`` chars.
+
+    Returns the original string unchanged when already within the cap.
+    Used by both ``_summarize_tool_message`` (full mode ``[name]``) and
+    any future site that surfaces a tool-call name in the rendered
+    output.
+    """
+    if not isinstance(name, str):
+        name = str(name)
+    if len(name) <= _SUBTREE_TOOL_NAME_MAX_CHARS:
+        return name
+    return name[:_SUBTREE_TOOL_NAME_MAX_CHARS] + "…"
+
+
+def _truncate_tool_call_names(names: list[str]) -> str:
+    """Join a list of tool-call names, cap at
+    ``_SUBTREE_TOOLS_JOINED_MAX_CHARS`` chars + ``"…"``.
+
+    Each individual name is first capped via ``_truncate_tool_name``
+    so a single very-long name cannot consume the entire budget. The
+    joined string is then capped so a message with many tool calls
+    cannot dominate the rendered output.
+
+    Returns an empty string when ``names`` is empty.
+    """
+    truncated = [_truncate_tool_name(n) for n in names]
+    joined = ",".join(truncated)
+    if len(joined) <= _SUBTREE_TOOLS_JOINED_MAX_CHARS:
+        return joined
+    return joined[:_SUBTREE_TOOLS_JOINED_MAX_CHARS] + "…"
 
 
 def _render_subtree_message(
@@ -1014,34 +1108,18 @@ def _render_subtree_message(
     role = m.get("role") or "unknown"
     created_at = m.get("created_at") or ""
 
-    if summary:
-        content = m.get("content") or ""
-        if not isinstance(content, str):
-            content = str(content)
-        preview = content[:_SUBTREE_SUMMARY_CONTENT_MAX_CHARS]
-        if len(content) > _SUBTREE_SUMMARY_CONTENT_MAX_CHARS:
-            preview = preview + "…"
-        tool_call_names = [
-            (tc.get("name") or "tool")
-            for tc in (m.get("tool_calls") or [])
-            if isinstance(tc, dict)
-        ]
-        parts = [f"[{role}]"]
-        if created_at:
-            parts.append(f"({created_at})")
-        if tool_call_names:
-            parts.append("tools=" + ",".join(tool_call_names))
-        if preview:
-            parts.append(preview)
-        return " ".join(parts)
-
-    # Full-content mode.
-    # Defense-in-depth: a ToolMessage MUST be redacted regardless of
-    # how the role was stamped on the dict. The canonical path stamps
-    # ``role == "tool"`` (daemon/utils.py:96 maps ``msg.type`` ``"tool"``
-    # to ``"tool"``), but a non-canonical / missing role MUST still
-    # trigger redaction when tool markers are present — otherwise a
-    # raw tool output could leak into the token budget.
+    # Defense-in-depth: a tool-marker message MUST be redacted regardless
+    # of whether summary mode is on (pre-merge security-council batch W2).
+    # The canonical path stamps ``role == "tool"`` (``daemon/utils.py:96``
+    # maps ``msg.type`` ``"tool"`` to ``"tool"``), but a non-canonical /
+    # missing role MUST still trigger redaction when tool markers are
+    # present — otherwise a raw tool output could leak into the token
+    # budget. Previously this check only ran in the FULL-mode branch
+    # below, so ``summary=True`` would render the raw content preview for
+    # tool-marker messages with non-canonical roles. Hoisted ABOVE the
+    # summary branch so both modes route tool-like messages through
+    # redaction (summary preview of a tool-marker message shows the
+    # redacted preview, not raw content).
     if (
         role == "tool"
         or m.get("type") == "tool"
@@ -1050,6 +1128,30 @@ def _render_subtree_message(
     ):
         return _summarize_tool_message(m)
 
+    if summary:
+        content = m.get("content") or ""
+        if not isinstance(content, str):
+            content = str(content)
+        preview = content[:_SUBTREE_SUMMARY_CONTENT_MAX_CHARS]
+        if len(content) > _SUBTREE_SUMMARY_CONTENT_MAX_CHARS:
+            preview = preview + "…"
+        tool_call_names = _truncate_tool_call_names(
+            [
+                (tc.get("name") or "tool")
+                for tc in (m.get("tool_calls") or [])
+                if isinstance(tc, dict)
+            ]
+        )
+        parts = [f"[{role}]"]
+        if created_at:
+            parts.append(f"({created_at})")
+        if tool_call_names:
+            parts.append("tools=" + tool_call_names)
+        if preview:
+            parts.append(preview)
+        return " ".join(parts)
+
+    # Full-content mode.
     content = m.get("content") or ""
     if not isinstance(content, str):
         content = str(content)
@@ -1057,13 +1159,15 @@ def _render_subtree_message(
     if len(content) > _SUBTREE_CONTENT_MAX_CHARS:
         snippet = snippet + "…"
     line = f"[{role}] {snippet}"
-    tool_call_names = [
-        (tc.get("name") or "tool")
-        for tc in (m.get("tool_calls") or [])
-        if isinstance(tc, dict)
-    ]
+    tool_call_names = _truncate_tool_call_names(
+        [
+            (tc.get("name") or "tool")
+            for tc in (m.get("tool_calls") or [])
+            if isinstance(tc, dict)
+        ]
+    )
     if tool_call_names:
-        line += f" (tools: {', '.join(tool_call_names)})"
+        line += f" (tools: {tool_call_names})"
     return line
 
 
@@ -2545,6 +2649,10 @@ Example outputs::
     ) -> str:
         """Query messages across the caller's subtree. Read-only. Use tool_help("subtree_messages") for details."""
         # ── 1. Validate args ────────────────────────────────────────
+        # Negative values are hard errors (clear invalid input). Values
+        # above the clamps below are SILENTLY clamped to the cap — this
+        # is documented in ``_full_doc_`` and matches the truncation
+        # warning copy at step 6 below.
         if limit < 0:
             return (
                 "ERROR: subtree_messages: limit must be >= 0 "
@@ -2565,6 +2673,19 @@ Example outputs::
                 "ERROR: subtree_messages: cap_first_N_per_instance "
                 f"must be >= 0 (got {cap_first_N_per_instance})."
             )
+        # W4 — input upper-bound clamps (silent, not errors). The
+        # truncation warning at step 6 promises "<= 100" for
+        # ``max_instances``; the helper enforces it here so the warning
+        # is literally true against the working cap.
+        if max_instances > _SUBTREE_MAX_INSTANCES_CAP:
+            max_instances = _SUBTREE_MAX_INSTANCES_CAP
+        if limit > _SUBTREE_LIMIT_CAP:
+            limit = _SUBTREE_LIMIT_CAP
+        # ``limit=0`` is the explicit "no rows" sentinel — emit the
+        # per-instance block headers + filter/pagination metadata, but
+        # return zero message rows. This is distinct from ``offset`` past
+        # the end (which emits a "offset past end" warning); ``limit=0``
+        # is a clean, expected query for "just show me the structure".
 
         filters = filters or {}
         if not isinstance(filters, dict):
@@ -2639,7 +2760,14 @@ Example outputs::
         # Sort the subtree by instance_id so the subset returned is
         # stable across calls (otherwise dict/set iteration order would
         # differ between Python sessions).
-        sorted_subtree = sorted(subtree_ids)
+        # S1 (pre-merge security-council batch): prioritize the caller
+        # so it ALWAYS survives the cap slice. A pure lexicographic
+        # ``sorted()`` can push the caller off the end of the slice when
+        # the caller_id sorts after the cap-many sibling ids (the
+        # 100-instance fixture in tests/unit/tools/test_instance_tools.py
+        # triggered this). The composite key ``(x != caller, x)`` puts
+        # caller (False=0) first; the rest are tied and sort by ``x``.
+        sorted_subtree = sorted(subtree_ids, key=lambda x: (x != current_instance_id, x))
         truncated_by_cap = len(sorted_subtree) > max_instances
         working_set = sorted_subtree[:max_instances]
 
@@ -2730,12 +2858,20 @@ Example outputs::
         # today may not correspond to the same messages tomorrow.
         # This is documented behavior, NOT a bug; agents MUST re-query
         # after a compaction if they need stable pagination.
+        # W4 — ``limit=0`` is the explicit "no rows" sentinel: emit
+        # the per-instance block headers + filter/pagination metadata,
+        # but return zero message rows. ``limit>0`` applies the global
+        # cap; ``limit==0`` produces an empty window (distinct from
+        # ``offset`` past the end, which emits the "offset past end"
+        # warning below).
         total_collected = len(collected)
-        end = offset + limit if limit > 0 else None
-        if end is None:
-            window = collected[offset:]
+        if limit > 0:
+            end = offset + limit
         else:
-            window = collected[offset:end]
+            # ``limit == 0`` (the sentinel) → empty window. Negative
+            # values are rejected at step 1.
+            end = offset
+        window = collected[offset:end]
 
         has_more = (offset + len(window)) < total_collected
         if offset > 0 and not window:
@@ -2763,6 +2899,12 @@ Example outputs::
         # ── 7. Render per-instance blocks (job_messages style) ──────
         # Group by instance_id for human readability. Sort by
         # instance_id for stable output.
+        # W4 — ``limit=0`` is the explicit "no rows" sentinel: emit
+        # the per-instance block headers for EVERY working-set
+        # instance (so the structure is visible to the caller), with
+        # zero message lines under each. Non-zero limit: same as
+        # before — only instances that contributed messages get a
+        # block.
         per_instance: dict[str, list[dict]] = {}
         for iid, m in window:
             per_instance.setdefault(iid, []).append(m)
@@ -2784,10 +2926,18 @@ Example outputs::
             f"messages={len(window)} of {total_collected} collected"
         )
 
-        for iid in sorted(per_instance.keys()):
+        # W4 — ``limit=0`` sentinel: render headers for the entire
+        # working set, not just instances with messages. Use ``set``
+        # union so we get both populated-block instances AND empty-
+        # working-set instances (limit=0 case).
+        render_keys: set[str] = set(per_instance.keys())
+        if limit == 0:
+            render_keys |= set(working_set)
+
+        for iid in sorted(render_keys):
             block_lines.append("")
             block_lines.append(f"=== instance_id: {iid} ===")
-            for m in per_instance[iid]:
+            for m in per_instance.get(iid, []):
                 block_lines.append(_render_subtree_message(m, summary=summary))
 
         output = "\n".join(block_lines)
@@ -2851,15 +3001,37 @@ messages), the tool DROPS at retrieval time:
   * every ``is_synthetic=True`` message (the per-turn context rebuild
     emitted by ``GET /messages``);
   * every ``message_id`` prefixed ``synthetic-system-`` /
-    ``synthetic-context-`` (``daemon/persistence.py:437, 669``); and
+    ``synthetic-context-`` (``daemon/persistence.py:437, 669``);
   * every REAL ``role="system"`` message authored by the descendant
     (descendant system prompts are persona-privileged and not
-    shareable).
+    shareable);
+  * every persisted ``[SYSTEM CONTEXT: …]``-prefixed ``role="user"``
+    context-injection HumanMessage authored by the descendant. The
+    ``[SYSTEM CONTEXT: …]`` block is emitted as a HumanMessage at the
+    descendant's turn-injection seam (``daemon/graph.py``); however,
+    ``serialize_message`` (``daemon/utils.py:158-170``) currently
+    strips the original ``injected_message`` / ``context_kind``
+    markers, so the persisted content carries a literal ``[SYSTEM
+    CONTEXT: …]`` prefix with no other discriminator. Without this
+    check the descendant's context block would pass the D12 filter and
+    leak to the parent. The check is a literal-prefix match on the
+    persisted content (no trimming/normalizing) — legitimate user
+    messages that quote the marker mid-text are NOT dropped. This is
+    the INTERIM fix (pre-merge security-council batch W1). The full
+    fix — threading ``injected_message`` / ``context_kind`` through
+    ``serialize_message`` and filtering on the structured marker — is
+    a deferred follow-up (see ``decisions.md`` D12 addendum); the
+    threading is not contained in this batch because
+    ``serialize_message`` has 8+ call sites across ``persistence.py``
+    / ``graph.py`` / ``instance_messaging.py`` and ``graph.py`` +
+    ``instance_messaging.py`` are FROZEN by the Phase 2 plan.
 
 The filter happens at retrieval time — not in the formatter — so
 synthetic token costs never reach the agent. When the resolved target
 == caller, the caller's own system messages are KEPT (they are part of
-the caller's own context).
+the caller's own context). The ``[SYSTEM CONTEXT: …]`` prefix check is
+NOT applied to the caller — the caller's own context injections are
+its own context and must remain visible to it.
 
 Read path
 ---------
@@ -2914,16 +3086,28 @@ Token safety
   * Per-message content (full mode) is truncated to 200 chars + ellipsis.
   * ``ToolMessage`` is redacted to ``[tool_name] <first 100 chars of args>``
     — the raw tool-output ``content`` is OMITTED (it would otherwise
-    dominate the token budget).
+    dominate the token budget). The tool ``name`` itself is capped at
+    64 chars + ellipsis (``_SUBTREE_TOOL_NAME_MAX_CHARS``), and the
+    joined ``tools=…`` / ``(tools: …)`` summary string is capped at
+    200 chars + ellipsis (``_SUBTREE_TOOLS_JOINED_MAX_CHARS``) so a
+    misconfigured long tool name or a message with many tool calls
+    cannot dominate the rendered line (pre-merge security-council
+    batch W3).
   * Per-instance cap: ``max_instances=20`` (default). When the subtree
-    exceeds the cap, the first 20 instances by ``instance_id`` sort are
-    returned + a warning.
+    exceeds the cap, the first 20 instances (caller FIRST, then
+    lexicographic by ``instance_id`` — caller is never pushed off the
+    slice by lexicographic ordering) are returned + a warning. The
+    caller is prioritized via the composite sort key
+    ``(x != caller, x)`` (S1).
   * Output ceiling: ~8000 chars. Tail-truncated with a warning; reduce
     ``limit``, lower ``max_instances``, or set ``summary=True`` to fit.
   * ``summary=True`` mode (default False) emits ONLY
     ``[role] (created_at) tools=… <first 80 chars of content>`` per
     message — drops tool-output content and reduces output budget
-    ~80% versus full mode.
+    ~80% versus full mode. Defense-in-depth: tool-marker messages
+    (non-canonical role + ``type="tool"`` / ``tool_call_id`` /
+    ``_call_id``) are redacted via ``_summarize_tool_message`` even in
+    summary mode — the redacted preview, not the raw content (W2).
 
 Args:
     target_instance_id: Root of subtree to query. ``None`` = caller's
@@ -2934,11 +3118,16 @@ Args:
         "tool" | "system"`` (``daemon/utils.py:96``) — ``"human"`` and
         ``"ai"`` are NOT accepted.
     limit: Global message cap across the merged collection
-        (default 50).
+        (default 50). Values above ``_SUBTREE_LIMIT_CAP=500`` are
+        silently clamped to 500 (W4). Negative values are an ERROR.
+        ``limit=0`` is the explicit "no rows" sentinel — emit the
+        per-instance block headers + filter/pagination metadata, but
+        return zero message rows.
     offset: Global offset across the merged collection (default 0).
-    max_instances: Total instance cap (default 20). Subtree beyond the
-        cap is silently truncated (sorted by instance_id); a warning
-        surfaces in the output.
+    max_instances: Total instance cap (default 20). Values above
+        ``_SUBTREE_MAX_INSTANCES_CAP=100`` are silently clamped to 100
+        (W4); the truncation-warning copy "(<= 100)" is literally
+        true against the working cap. Non-positive values are an ERROR.
     cap_first_N_per_instance: When > 0, take only the first N messages
         per instance before global pagination (default 0 = no
         per-instance cap).

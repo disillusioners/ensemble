@@ -2366,6 +2366,103 @@ class TestD12SyntheticExclusion:
         # only keeps 200 chars; full payload is 5000 chars).
         assert synthetic_payload[:250] not in synth_result
 
+    # -----------------------------------------------------------------
+    # Pre-merge security-council batch W1 — INTERIM fix for the
+    # persisted ``[SYSTEM CONTEXT: …]``-prefixed user-role context
+    # injection leak. ``serialize_message`` strips
+    # ``injected_message`` / ``context_kind`` markers, so checkpointed
+    # context-injection HumanMessages persist with ``role="user"`` and
+    # a literal ``[SYSTEM CONTEXT: …]`` prefix. Without this check they
+    # would pass the D12 descendant filter and leak descendant-injected
+    # snippets to the parent.
+    # -----------------------------------------------------------------
+
+    @pytest.mark.timeout(10)
+    async def test_descendant_system_context_prefix_user_dropped(self):
+        """Persisted ``[SYSTEM CONTEXT: …]``-prefixed user-role context
+        injection on a descendant MUST be dropped (W1 INTERIM)."""
+        manager = _make_subtree_manager(
+            subtree_ids=["parent-instance", "i-child-1"],
+            messages_by_iid={
+                "parent-instance": [_user_msg("caller-msg", iid="parent-instance")],
+                "i-child-1": [
+                    # Persisted context-injection HumanMessage: role=user,
+                    # is_synthetic=False (stripped by serialize_message),
+                    # content has the literal prefix.
+                    _user_msg(
+                        "[SYSTEM CONTEXT: Task Context]\n## Foo\nbar",
+                        iid="i-child-1",
+                    ),
+                    # A LEGITIMATE user message on the descendant — must
+                    # still pass through.
+                    _user_msg("real-user-msg", iid="i-child-1"),
+                ],
+            },
+        )
+        tool = _get_subtree_messages_tool(manager)
+
+        result = await tool.coroutine()
+
+        # W1: persisted context-injection user-role message MUST NOT
+        # appear in descendant result.
+        assert "SYSTEM CONTEXT" not in result
+        # The legitimate user message DOES appear.
+        assert "real-user-msg" in result
+
+    @pytest.mark.timeout(10)
+    async def test_caller_system_context_prefix_user_kept(self):
+        """Counter-test (W1): the SAME-shaped message on the CALLER's
+        own instance is KEPT (the caller's own injections are its own
+        context)."""
+        manager = _make_subtree_manager(
+            subtree_ids=["parent-instance"],
+            messages_by_iid={
+                "parent-instance": [
+                    # Same shape as the descendant test above, but on
+                    # the caller (target == caller).
+                    _user_msg(
+                        "[SYSTEM CONTEXT: Task Context]\n## Caller's own context",
+                        iid="parent-instance",
+                    ),
+                ],
+            },
+        )
+        tool = _get_subtree_messages_tool(manager)
+
+        result = await tool.coroutine()  # target=None → caller
+
+        # Caller's own context injection IS visible to it.
+        assert "SYSTEM CONTEXT" in result
+        assert "Caller's own context" in result
+
+    @pytest.mark.timeout(10)
+    async def test_user_message_quoting_marker_mid_text_kept(self):
+        """W1 false-positive guard: a legitimate user message that
+        CONTAINS ``[SYSTEM CONTEXT:`` mid-text (NOT prefix) MUST be
+        KEPT. The prefix check is literal-start-of-content; trimming
+        / normalizing is intentionally NOT applied to avoid this
+        false-positive drop class."""
+        manager = _make_subtree_manager(
+            subtree_ids=["parent-instance", "i-child-1"],
+            messages_by_iid={
+                "parent-instance": [_user_msg("caller-msg", iid="parent-instance")],
+                "i-child-1": [
+                    # Quote of the marker mid-text — NOT a prefix.
+                    _user_msg(
+                        "the user wrote: \"[SYSTEM CONTEXT: foo]\" earlier",
+                        iid="i-child-1",
+                    ),
+                ],
+            },
+        )
+        tool = _get_subtree_messages_tool(manager)
+
+        result = await tool.coroutine()
+
+        # Legitimate user message quoting the marker MUST be kept.
+        assert "the user wrote" in result
+        assert "earlier" in result
+
 
 # ---------------------------------------------------------------------------
 # e. Pagination + caps
@@ -2401,7 +2498,17 @@ class TestPaginationAndCaps:
 
     @pytest.mark.timeout(10)
     async def test_global_pagination_on_200_message_instance(self):
-        """Single instance with 200 messages; global offset/limit."""
+        """Single instance with 200 messages; global offset/limit.
+
+        Pre-merge security-council batch S1 (caller-first sort):
+        ``working_set`` orders the caller FIRST, so the caller's single
+        ``p`` message occupies slot 0 of the merged collection and the
+        first page therefore carries 1 caller message + 49 i-big
+        messages (NOT 50 i-big). Subsequent pages shift accordingly.
+        The mock returns the SAME ``subtree_ids`` for both authz AND
+        target-subtree lookups (a known mock limitation), so the
+        caller's instance appears in the target's "subtree" here.
+        """
         big_msgs = [
             _user_msg(f"msg-{i:03d}", iid="i-big", ts=f"2026-08-26T00:0{i//60}:{i%60:02d}Z")
             for i in range(200)
@@ -2415,26 +2522,30 @@ class TestPaginationAndCaps:
         )
         tool = _get_subtree_messages_tool(manager)
 
-        # First page.
+        # First page (S1: caller at slot 0; 49 i-big messages in slots
+        # 1..49). msg-049 is now in the SECOND page.
         result_p0 = await tool.coroutine(target_instance_id="i-big", limit=50, offset=0)
+        assert "p" in result_p0  # S1: caller's message is on the first page
         assert "msg-000" in result_p0
-        assert "msg-049" in result_p0
+        assert "msg-048" in result_p0  # S1: 49th i-big msg (last in window)
+        assert "msg-049" not in result_p0  # S1: moved to next page
         assert "msg-050" not in result_p0
 
-        # Second page.
+        # Second page (S1: starts at slot 50 = msg-049).
         result_p1 = await tool.coroutine(target_instance_id="i-big", limit=50, offset=50)
-        assert "msg-050" in result_p1
-        assert "msg-099" in result_p1
+        assert "msg-049" in result_p1
+        assert "msg-098" in result_p1  # S1: last in second page
+        assert "msg-099" not in result_p1
         assert "msg-000" not in result_p1
 
-        # Truly past-the-end → empty body + warning.
-        result_p3 = await tool.coroutine(target_instance_id="i-big", limit=50, offset=200)
-        # No message bodies are rendered.
+        # Past-the-end → empty body + warning. Total collected = 1
+        # (caller) + 200 (i-big) = 201 messages. offset=300 is past
+        # the end.
+        result_p3 = await tool.coroutine(target_instance_id="i-big", limit=50, offset=300)
         assert "msg-000" not in result_p3
         assert "msg-150" not in result_p3
         assert "msg-199" not in result_p3
-        # The compaction-style warning text is appended.
-        assert "offset=200" in result_p3
+        assert "offset=300" in result_p3
 
     @pytest.mark.timeout(10)
     async def test_cap_first_N_per_instance(self):
@@ -2460,6 +2571,112 @@ class TestPaginationAndCaps:
         assert "u4" in result
         assert "u5" not in result
         assert "u9" not in result
+
+    # -----------------------------------------------------------------
+    # Pre-merge security-council batch W4 — input upper-bound clamps
+    # (silent, not errors) + limit=0 semantics + negative-value
+    # errors. The truncation-warning copy "(<= 100)" is now literally
+    # true against the working cap.
+    # -----------------------------------------------------------------
+
+    @pytest.mark.timeout(10)
+    async def test_max_instances_clamped_to_100(self):
+        """W4: ``max_instances=500`` is silently clamped to 100; the
+        cap-slice still fires (asserted via get_messages call count)."""
+        subtree = ["parent-instance"] + [f"i-{i:03d}" for i in range(199)]
+        # Pre-populate ALL 200 so a broken cap would yield 200 calls.
+        messages = {
+            iid: [_assistant_msg(f"m-{iid}", iid=iid)] for iid in subtree
+        }
+        manager = _make_subtree_manager(subtree_ids=subtree, messages_by_iid=messages)
+        tool = _get_subtree_messages_tool(manager)
+
+        await tool.coroutine(max_instances=500)
+
+        # Clamp fired: 100 reads, NOT 200.
+        assert manager.get_messages.call_count == 100, (
+            f"W4: max_instances=500 must clamp to 100; got "
+            f"{manager.get_messages.call_count}"
+        )
+
+    @pytest.mark.timeout(10)
+    async def test_limit_clamped_to_500(self):
+        """W4: ``limit=99999`` is silently clamped to 500; the cap-slice
+        still fires (asserted via the messages= metadata line). The
+        8000-char output ceiling truncates the body, so we check the
+        metadata header (which renders first and survives the
+        truncation) plus a boundary check on the working set."""
+        # Build a single instance with 600 messages; limit=99999 should
+        # clamp to 500 → 500 messages in the window (NOT 99999, NOT
+        # 600).
+        big_msgs = [
+            _user_msg(
+                f"msg-{i:04d}",
+                iid="i-big",
+                ts=f"2026-08-26T00:{i//60:02d}:{i%60:02d}Z",
+            )
+            for i in range(600)
+        ]
+        manager = _make_subtree_manager(
+            subtree_ids=["parent-instance", "i-big"],
+            messages_by_iid={
+                "parent-instance": [_user_msg("p", iid="parent-instance")],
+                "i-big": big_msgs,
+            },
+        )
+        tool = _get_subtree_messages_tool(manager)
+
+        result = await tool.coroutine(target_instance_id="i-big", limit=99999)
+
+        # The clamp cut at 500 — verified via the metadata header line
+        # (rendered first; survives the ceiling truncation). Total
+        # collected = 1 caller + 600 i-big = 601 messages.
+        assert "messages=500" in result, (
+            f"W4: limit=99999 must clamp to 500; metadata should say "
+            f"'messages=500'; got first 200 chars: {result[:200]!r}"
+        )
+        assert "of 601 collected" in result, (
+            f"W4: total should be 601 (1 caller + 600 i-big); got "
+            f"first 200 chars: {result[:200]!r}"
+        )
+
+    @pytest.mark.timeout(10)
+    async def test_limit_zero_emits_headers_zero_rows(self):
+        """W4: ``limit=0`` is the explicit "no rows" sentinel — emit the
+        per-instance block headers + filter/pagination metadata, but
+        return zero message rows."""
+        manager = _make_subtree_manager(
+            subtree_ids=["parent-instance", "i-c"],
+            messages_by_iid={
+                "parent-instance": [_user_msg("parent-msg", iid="parent-instance")],
+                "i-c": [_user_msg("child-msg", iid="i-c")],
+            },
+        )
+        tool = _get_subtree_messages_tool(manager)
+
+        result = await tool.coroutine(target_instance_id="i-c", limit=0)
+
+        # Per-instance block headers ARE present (the structure).
+        assert "=== instance_id: i-c ===" in result
+        # messages= line reports zero rows.
+        assert "messages=0" in result
+        # But the message content itself does NOT appear.
+        assert "parent-msg" not in result
+        assert "child-msg" not in result
+
+    @pytest.mark.timeout(10)
+    async def test_negative_limit_is_error(self):
+        """W4: negative ``limit`` is a clean ERROR string (matches the
+        existing negative-offset / negative-cap_first_N_per_instance
+        behavior)."""
+        manager = _make_subtree_manager(subtree_ids=["parent-instance"])
+        tool = _get_subtree_messages_tool(manager)
+
+        result = await tool.coroutine(limit=-5)
+
+        assert result.startswith("ERROR: subtree_messages: ")
+        assert "limit" in result
+        assert "-5" in result
 
 
 # ---------------------------------------------------------------------------
@@ -2605,6 +2822,144 @@ class TestTokenSafety:
         assert "hello world" in result
         assert "hi back" in result
 
+    # -----------------------------------------------------------------
+    # Pre-merge security-council batch W2 — redaction symmetry. The
+    # tool-marker detection (``role == "tool"`` /
+    # ``type == "tool"`` / ``tool_call_id`` / ``_call_id``) MUST fire in
+    # BOTH full and summary mode; previously it only fired in full mode
+    # so summary=True would render raw content for tool-marker messages
+    # with non-canonical roles.
+    # -----------------------------------------------------------------
+
+    @pytest.mark.timeout(10)
+    async def test_summary_mode_redacts_tool_marker_non_canonical_role(self):
+        """W2: ``summary=True`` on a tool-marker message with a
+        non-canonical role MUST still route through redaction. The
+        summary preview shows the redacted preview, NOT raw content."""
+        leaky_msg = _tool_msg(
+            "leaky_search",
+            '{"q":"short-args"}',
+            iid="parent-instance",
+        )
+        leaky_msg["role"] = "function"  # non-canonical — must not bypass redaction
+        leaky_msg["tool_call_id"] = "call_abc123"
+        leaky_msg["content"] = "RAW-LARGE-TOOL-OUTPUT-" + ("X" * 500)
+
+        manager = _make_subtree_manager(
+            subtree_ids=["parent-instance"],
+            messages_by_iid={
+                "parent-instance": [leaky_msg],
+            },
+        )
+        tool = _get_subtree_messages_tool(manager)
+
+        result = await tool.coroutine(summary=True)
+
+        # W2 invariant: summary preview shows the REDACTED form
+        # ``[leaky_search] {args}`` and NEVER the raw content.
+        assert "[leaky_search]" in result
+        # The raw content MUST NOT appear anywhere in the summary output.
+        assert "RAW-LARGE-TOOL-OUTPUT" not in result
+        assert ("X" * 100) not in result
+
+    # -----------------------------------------------------------------
+    # Pre-merge security-council batch W3 — unbounded name fields. The
+    # rendered tool name is capped at 64 chars + "…", and the joined
+    # ``tools=…`` / ``(tools: …)`` summary string is capped at 200 chars
+    # + "…". Applies at all three render sites.
+    # -----------------------------------------------------------------
+
+    @pytest.mark.timeout(10)
+    async def test_tool_name_capped_at_64_chars_in_full_mode(self):
+        """W3: a 200-char tool name is truncated to 64+ellipsis in full
+        mode (``_summarize_tool_message``)."""
+        long_name = "n" * 200
+        manager = _make_subtree_manager(
+            subtree_ids=["parent-instance"],
+            messages_by_iid={
+                "parent-instance": [
+                    _tool_msg(long_name, '{"q":"x"}', iid="parent-instance"),
+                ],
+            },
+        )
+        tool = _get_subtree_messages_tool(manager)
+
+        result = await tool.coroutine()
+
+        # Full 200-char name MUST NOT appear.
+        assert long_name not in result
+        # Truncation marker present (the 64-char prefix of n's + "…").
+        assert "…" in result
+        # Find the ``[name]`` block: 64 n's + ellipsis inside brackets.
+        truncated = "[" + ("n" * 64) + "…]"
+        assert truncated in result
+
+    @pytest.mark.timeout(10)
+    async def test_tool_name_capped_at_64_chars_in_summary_mode(self):
+        """W3: tool-marker redaction in summary mode also caps the name
+        (W2 hoisted the redaction path; W3 caps its output)."""
+        long_name = "n" * 200
+        leaky_msg = _tool_msg(
+            long_name, '{"q":"x"}', iid="parent-instance",
+        )
+        leaky_msg["content"] = "RAW-OUTPUT-" + ("X" * 200)
+
+        manager = _make_subtree_manager(
+            subtree_ids=["parent-instance"],
+            messages_by_iid={
+                "parent-instance": [leaky_msg],
+            },
+        )
+        tool = _get_subtree_messages_tool(manager)
+
+        result = await tool.coroutine(summary=True)
+
+        # Full 200-char name MUST NOT appear.
+        assert long_name not in result
+        # Truncation marker present.
+        assert "…" in result
+        # Raw output MUST NOT appear (W2 + W3 together).
+        assert "RAW-OUTPUT" not in result
+
+    @pytest.mark.timeout(10)
+    async def test_joined_tool_call_names_capped_at_200_chars(self):
+        """W3: an assistant message with many/long ``tool_calls`` joins
+        into a string capped at 200 chars + ``"…"``."""
+        long_tool = "t" * 80
+        # 5 tool calls × 80 chars + 4 commas = 404 chars joined.
+        tool_calls = [
+            {"name": long_tool, "arguments": "{}"} for _ in range(5)
+        ]
+        assistant_msg = {
+            "message_id": "m-many-tools",
+            "type": "ai",
+            "role": "assistant",
+            "content": "ok",
+            "thinking": None,
+            "thinking_extracted": None,
+            "tool_calls": tool_calls,
+            "images": None,
+            "created_at": "2026-08-26T00:00:00Z",
+            "instance_id": "parent-instance",
+        }
+
+        manager = _make_subtree_manager(
+            subtree_ids=["parent-instance"],
+            messages_by_iid={
+                "parent-instance": [assistant_msg],
+            },
+        )
+        tool = _get_subtree_messages_tool(manager)
+
+        result = await tool.coroutine()
+
+        # The un-truncated joined string (404 chars worth of 80-char t's
+        # separated by commas) MUST NOT appear.
+        joined_untruncated = ",".join([long_tool] * 5)
+        assert joined_untruncated not in result
+        # Truncation marker present (joined list overflowed the 200 cap).
+        assert "…" in result
+
 
 # ---------------------------------------------------------------------------
 # g. Performance / fixture
@@ -2691,7 +3046,15 @@ class TestPerformanceFixture:
     @pytest.mark.timeout(10)
     async def test_100_instance_fuzz_asserts_exactly_20_get_messages(self):
         """100-instance subtree → cap slices to first 20 → EXACTLY 20
-        get_messages calls (NOT 100, NOT 0)."""
+        get_messages calls (NOT 100, NOT 0). Pre-merge security-council
+        batch S1: caller is prioritized via the composite sort key
+        ``(x != caller, x)`` so it always survives the cap slice; the
+        first 20 returned are caller + first 19 children sorted
+        lexicographically (``i-000`` … ``i-018``). Without S1, a pure
+        ``sorted()`` would push ``parent-instance`` off the slice
+        because ``"parent-instance" > "i-018"`` lexicographically —
+        this test would still see 20 calls but the CALLER would be
+        missing from the working set."""
         subtree = ["parent-instance"] + [f"i-{i:03d}" for i in range(99)]
         # Pre-populate messages for ALL 100 so the test would have
         # failed with 100 calls if the cap were broken.
@@ -2703,10 +3066,19 @@ class TestPerformanceFixture:
 
         await tool.coroutine()
 
-        # Exactly 20: parent + first 19 children.
+        # Exactly 20: caller (parent-instance, prioritized via S1) + first
+        # 19 children sorted lexicographically (``i-000`` … ``i-018``).
         assert manager.get_messages.call_count == 20, (
             f"Expected EXACTLY 20 get_messages calls under "
             f"max_instances=20 cap; got {manager.get_messages.call_count}."
+        )
+        # S1 invariant: caller was queried (lexicographic sort would
+        # have skipped it because ``parent-instance`` > ``i-018``).
+        assert manager.get_messages.call_args_list[0].args == (
+            "parent-instance",
+        ), (
+            f"S1: caller must be first in working_set; got "
+            f"{manager.get_messages.call_args_list[0].args!r}"
         )
 
 
