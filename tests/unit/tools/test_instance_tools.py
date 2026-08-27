@@ -15,6 +15,11 @@ These tests lock in the contract introduced by the Phase 1 changes:
     via the shared ``_prepare_enqueued_message`` path
     (Task 4 / D2). Tool result pre-pends ``"Instance was X — revived
     and message dispatched."``
+  * Quick-win #7 revive-once guard: the SECOND agent-tool revive of
+    the same child is refused with spawn-a-replacement guidance
+    (mechanical ``RECOVERY_GUIDANCE_HINT`` bound, in-memory counter on
+    the manager); the user-API revive path is neither counted nor
+    blocked (``TestReviveOnceGuard``).
   * IDLE / WAITING / QUEUED → enqueue parity (Task 3 e-bis).
   * PAUSED → REJECT (Task 5, R-O1 — NO auto-resume, NO
     ``resume_instance`` reference).
@@ -576,6 +581,318 @@ class TestTerminalRevive:
         assert call_kwargs["instance_id"] == "target-id"
         assert call_kwargs["message"] == "hello"
         assert call_kwargs["source"] == "internal_agent:parent-instance"
+
+
+# ---------------------------------------------------------------------------
+# Quick-win #7 — Revive-once guard for agent-tool-initiated revives
+# ---------------------------------------------------------------------------
+
+# The exact refusal string the tool returns on a SECOND agent-tool
+# revive attempt (single-string, child id interpolated). Locked here so
+# the phrasing mirrors RECOVERY_GUIDANCE_HINT semantics verbatim.
+_REVIVE_REFUSAL_TEMPLATE = (
+    "Refused: Instance '{iid}' has already been revived once and "
+    "failed again. Spawn a replacement instance instead."
+)
+
+
+class TestReviveOnceGuard:
+    """Quick-win #7: ``RECOVERY_GUIDANCE_HINT``
+    (``daemon/services/error_reporting.py``) bounds child revives to
+    AT MOST ONE via the agent tool; a second attempt is REFUSED with
+    spawn-a-replacement guidance and dispatches nothing. The bound is
+    enforced by an in-memory cumulative counter on the manager
+    (``_agent_tool_revive_counts``), keyed by child instance id —
+    agent-tool path ONLY; the user-API revive path neither increments
+    it nor is blocked by it.
+    """
+
+    async def test_t1_first_agent_tool_revive_granted(self):
+        """T1: first agent-tool revive of a terminal child succeeds —
+        counter 0→1, child revived, message dispatched."""
+        with patch(
+            "daemon.tools.instance._check_team_membership",
+            return_value=None,
+        ):
+            manager = _make_manager(status="error")
+            send_message = _get_send_message_tool(manager)
+
+            result = await send_message.coroutine("child-1", "continue")
+
+        # Revived + dispatched via the shared enqueue path.
+        assert (
+            "Instance was error — revived and message dispatched." in result
+        ), f"Expected revival prefix; got: {result!r}"
+        manager.enqueue_message.assert_awaited_once()
+        manager.set_injection.assert_not_called()
+        # Counter incremented exactly once, for this child.
+        manager.note_agent_tool_revive.assert_called_once_with("child-1")
+        assert manager.get_agent_tool_revive_count("child-1") == 1
+
+    async def test_t2_second_agent_tool_revive_refused(self):
+        """T2: the SECOND agent-tool revive attempt is refused with the
+        guidance message; child NOT revived again; message NOT
+        dispatched."""
+        with patch(
+            "daemon.tools.instance._check_team_membership",
+            return_value=None,
+        ):
+            manager = _make_manager(status="error")
+            send_message = _get_send_message_tool(manager)
+
+            first = await send_message.coroutine("child-1", "continue")
+            assert "revived and message dispatched" in first
+            manager.enqueue_message.assert_awaited_once()
+
+            # Child failed again — still terminal for the second attempt.
+            manager.enqueue_message.reset_mock()
+            second = await send_message.coroutine("child-1", "continue again")
+
+        # Refusal mirrors the hint's semantics, verbatim shape.
+        assert second == _REVIVE_REFUSAL_TEMPLATE.format(iid="child-1"), (
+            f"Expected revive-once refusal; got: {second!r}"
+        )
+        # NOT dispatched, NOT injected.
+        manager.enqueue_message.assert_not_awaited()
+        manager.set_injection.assert_not_called()
+        # Refusal does not consume/increment anything further.
+        manager.note_agent_tool_revive.assert_called_once_with("child-1")
+        assert manager.get_agent_tool_revive_count("child-1") == 1
+
+    async def test_t3_counter_survives_across_tool_invocations(self):
+        """T3: the counter lives on the manager, so it survives across
+        SEPARATE tool invocations (fresh tool closures) within the same
+        daemon/manager lifetime — and is per-child."""
+        with patch(
+            "daemon.tools.instance._check_team_membership",
+            return_value=None,
+        ):
+            manager = _make_manager(status="failed")
+            tool_one = _get_send_message_tool(manager)
+            tool_two = _get_send_message_tool(manager)
+
+            first = await tool_one.coroutine("child-9", "continue")
+            assert "revived and message dispatched" in first
+
+            # Different tool invocation, same manager → same counter.
+            second = await tool_two.coroutine("child-9", "continue")
+            assert second == _REVIVE_REFUSAL_TEMPLATE.format(iid="child-9")
+
+            # A DIFFERENT child is unaffected — the counter is per-child.
+            other = await tool_two.coroutine("child-10", "continue")
+            assert "revived and message dispatched" in other
+            assert manager.get_agent_tool_revive_count("child-10") == 1
+
+    async def test_t4_user_api_revive_not_counted_not_blocked(self):
+        """T4: the user-API revive authority does NOT increment the
+        counter and is NOT blocked by it — even after an agent-tool
+        revive was already refused for the same child. The user-API
+        path (``_prepare_enqueued_message``) calls
+        ``manager.enqueue_message`` directly with no guard interposed;
+        this test simulates exactly that call."""
+        with patch(
+            "daemon.tools.instance._check_team_membership",
+            return_value=None,
+        ):
+            manager = _make_manager(status="error")
+            send_message = _get_send_message_tool(manager)
+
+            first = await send_message.coroutine("child-1", "continue")
+            assert "revived and message dispatched" in first
+            refused = await send_message.coroutine("child-1", "continue")
+            assert "already been revived once" in refused
+
+            # Simulate the user-API revive: direct enqueue_message call
+            # (what the service layer does), no agent-tool guard.
+            manager.note_agent_tool_revive.reset_mock()
+            await manager.enqueue_message(
+                instance_id="child-1",
+                message="user says continue",
+                source="api",
+            )
+
+        # NOT blocked: the enqueue went through despite the refusal.
+        assert manager.enqueue_message.await_count >= 1
+        # NOT counted: the user-API send never touches the counter.
+        manager.note_agent_tool_revive.assert_not_called()
+        assert manager.get_agent_tool_revive_count("child-1") == 1
+
+    def test_t4_service_layer_revive_path_has_no_counter_hookup(self):
+        """T4 (construction guarantee): the shared service-layer revive
+        path must contain NO reference to the counter symbols — the
+        user-API revive is uncounted and unblocked by construction, not
+        by convention."""
+        src = (
+            REPO_ROOT / "daemon" / "services" / "instance_messaging.py"
+        ).read_text(encoding="utf-8")
+        for symbol in (
+            "note_agent_tool_revive",
+            "get_agent_tool_revive_count",
+            "_agent_tool_revive_counts",
+        ):
+            assert symbol not in src, (
+                f"instance_messaging.py must not reference {symbol!r} — "
+                f"the revive-once guard is agent-tool-path only"
+            )
+
+    async def test_t5_busy_queue_rejection_does_not_consume_revive_budget(self):
+        """W2 (review-warning lock): the queue-busy guard sits BEFORE
+        the revive-once guard, so a busy-queue rejection must NOT
+        consume the child's revive budget. Two-step demonstration:
+
+          Step 1: terminal child + busy queue → busy-rejection text;
+                  counter UNTOUCHED (note_agent_tool_revive not called,
+                  get_agent_tool_revive_count == 0); no dispatch.
+          Step 2: same child, queue now idle → FIRST revive granted
+                  (counter 0→1, message dispatched).
+
+        This locks the ordering invariant "a busy-queue rejection never
+        consumes revive budget" — without it, a transient busy queue
+        could silently burn the one allowed revive on a no-op enqueue.
+        Same busy-queue shape as ``TestEnqueueOverrideForLoadSkill::
+        test_load_skill_keeps_queue_busy_guard``."""
+        with patch(
+            "daemon.tools.instance._check_team_membership",
+            return_value=None,
+        ):
+            manager = _make_manager(status="error")
+            # Step 1 — busy queue. Overrides the fixture's idle counts.
+            manager.get_queue_stats = AsyncMock(
+                return_value={"pending_count": 5, "processing_count": 2}
+            )
+            send_message = _get_send_message_tool(manager)
+
+            refused = await send_message.coroutine("child-1", "continue")
+
+        # Busy-queue rejection fired — NOT the revive-once refusal.
+        # The counter check was never reached because the busy-queue
+        # guard short-circuited first.
+        assert "already has a message in progress" in refused, (
+            f"Expected busy-queue rejection; got: {refused!r}"
+        )
+        # Counter UNTOUCHED: the busy-queue rejection sits BEFORE the
+        # revive-once guard, so the budget is preserved.
+        manager.note_agent_tool_revive.assert_not_called()
+        assert manager.get_agent_tool_revive_count("child-1") == 0
+        # No dispatch happened — busy-queue guard returns BEFORE
+        # enqueue_message is even attempted.
+        manager.enqueue_message.assert_not_awaited()
+        # Reset call tracking so step 2 assertions are clean.
+        manager.note_agent_tool_revive.reset_mock()
+        manager.enqueue_message.reset_mock()
+
+        # Step 2 — same child, queue now IDLE. First revive is granted
+        # (the budget survived the prior busy rejection).
+        with patch(
+            "daemon.tools.instance._check_team_membership",
+            return_value=None,
+        ):
+            manager.get_queue_stats = AsyncMock(
+                return_value={"pending_count": 0, "processing_count": 0}
+            )
+            send_message = _get_send_message_tool(manager)
+
+            granted = await send_message.coroutine("child-1", "continue")
+
+        # Counter 0→1, message dispatched via the enqueue-revive branch.
+        assert (
+            "Instance was error — revived and message dispatched."
+            in granted
+        ), f"Expected revival prefix; got: {granted!r}"
+        manager.note_agent_tool_revive.assert_called_once_with("child-1")
+        assert manager.get_agent_tool_revive_count("child-1") == 1
+        manager.enqueue_message.assert_awaited_once()
+
+    def test_refusal_text_documented_in_docstring_and_full_doc(self):
+        """Spec quick-win #7: the guard is documented in the tool's
+        ``_full_doc_`` (and docstring — D10 parity): in-memory counter,
+        daemon-restart reset, agent-tool-path-only, refusal shape."""
+        from daemon.tools.instance import create_instance_tools
+
+        patches = _patch_heavy_helpers()
+        for p in patches:
+            p.start()
+        try:
+            tools = create_instance_tools(
+                _make_manager(status="idle"), "parent-instance", "developer"
+            )
+        finally:
+            for p in reversed(patches):
+                p.stop()
+
+        send_message_tool = next(
+            t for t in tools if getattr(t, "name", None) == "send_message"
+        )
+        # Normalize whitespace: the docs line-wrap the phrases, but the
+        # runtime refusal string is single-line and locked exactly by
+        # ``test_t2_second_agent_tool_revive_refused``.
+        docstring = " ".join(send_message_tool.description.split())
+        full_doc = " ".join(send_message_tool._full_doc_.split())
+
+        for phrase in (
+            "Refused: ",
+            "has already been revived once and failed again",
+            "Spawn a replacement instance instead",
+        ):
+            assert phrase in docstring, (
+                f"Docstring must document the revive-once guard "
+                f"({phrase!r}); got: {docstring[:300]!r}"
+            )
+            assert phrase in full_doc, (
+                f"_full_doc_ must document the revive-once guard "
+                f"({phrase!r}); got: {full_doc[:300]!r}"
+            )
+        # The v1 caveats are documented too (in-memory / restart-reset /
+        # agent-tool path only).
+        for caveat in (
+            "in-memory cumulative counter",
+            "daemon restart resets it",
+            "agent-tool path",
+        ):
+            assert caveat in full_doc, (
+                f"_full_doc_ must document guard caveat {caveat!r}"
+            )
+
+    def test_provenance_documented_in_docstring_and_full_doc(self):
+        """Quick-win #1 (D10 parity): the injection provenance marker
+        is documented in BOTH the docstring and ``_full_doc_`` —
+        ``internal_agent:<caller_instance_id>`` source on the
+        downstream HumanMessage for agent-tool sends; no ``source``
+        for user-API sends (back-compat)."""
+        from daemon.tools.instance import create_instance_tools
+
+        patches = _patch_heavy_helpers()
+        for p in patches:
+            p.start()
+        try:
+            tools = create_instance_tools(
+                _make_manager(status="idle"), "parent-instance", "developer"
+            )
+        finally:
+            for p in reversed(patches):
+                p.stop()
+
+        send_message_tool = next(
+            t for t in tools if getattr(t, "name", None) == "send_message"
+        )
+        # Normalize whitespace: the docs line-wrap the phrases.
+        docstring = " ".join(send_message_tool.description.split())
+        full_doc = " ".join(send_message_tool._full_doc_.split())
+
+        for phrase in (
+            "Provenance (quick-win #1)",
+            "internal_agent:<caller_instance_id>",
+            'HumanMessage.additional_kwargs["source"]',
+            "user-API injected sends carry no",
+        ):
+            assert phrase in docstring, (
+                f"Docstring must document injection provenance "
+                f"({phrase!r}); got: {docstring[:300]!r}"
+            )
+            assert phrase in full_doc, (
+                f"_full_doc_ must document injection provenance "
+                f"({phrase!r}); got: {full_doc[:300]!r}"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -3340,6 +3657,41 @@ class TestRegistration:
             f"agents/leader/meta.json tools.allow must contain "
             f"'subtree_messages'; got: {allow}"
         )
+
+    @pytest.mark.timeout(10)
+    def test_planner_and_tester_resolve_subtree_messages_via_registry(self):
+        """Quick-win #4: planner and tester opt into ``subtree_messages``.
+
+        Unlike the leader sanity test above (raw file read), this goes
+        through the production meta resolution path: a real
+        ``AgentRegistry`` discovery of the repo ``agents/`` tree, then
+        ``get_version()`` with the ``get_resolved()`` fallback — the
+        resolution convention from the Version Tag Tool Resolution fix
+        (all meta lookups MUST use ``get_version()`` first).
+        """
+        from daemon.registry import AgentRegistry
+
+        agents_dir = REPO_ROOT / "agents"
+        assert agents_dir.is_dir(), f"agents/ not found at {agents_dir}"
+
+        registry = AgentRegistry(agents_dir)
+        registry.discover()
+
+        for agent_id in ("planner", "tester"):
+            # Production resolution convention: get_version() first,
+            # get_resolved() fallback.
+            meta = registry.get_version(agent_id) or registry.get_resolved(
+                agent_id
+            )
+            assert meta is not None, (
+                f"{agent_id} was not discovered from the real agents/ tree"
+            )
+            allow = (meta.tools.allow if meta.tools is not None else None) or []
+            assert "subtree_messages" in allow, (
+                f"agents/{agent_id}/meta.json tools.allow must contain "
+                f"'subtree_messages' (resolved via get_version/"
+                f"get_resolved); got: {allow}"
+            )
 
     @pytest.mark.timeout(10)
     def test_aget_state_regression_guard(self):

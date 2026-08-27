@@ -1201,12 +1201,17 @@ class TestJobContinueTool:
         # ``JobRepository.find_processing_message_jobs_by_instance`` —
         # that method is removed (no MESSAGE ``JobItem`` rows post-D13).
         # The DB-level concurrency gate now lives on
-        # ``TaskRepository.has_inflight_task(instance_id)``, returning
-        # True when ANY PENDING or RUNNING ``task`` row exists for the
-        # instance. Default to False so happy-path tests pass; tests
+        # ``TaskRepository.has_instance_busy(instance_id)``, returning
+        # True when ANY PENDING, RUNNING, or PAUSED ``task`` row exists
+        # for the instance. ``has_inflight_task`` is kept on the mock
+        # for backwards-compat with any straggling call site (the
+        # production method is still defined; only the gate-consumer
+        # has moved to ``has_instance_busy`` post-Bug-1 2026-08-12).
+        # Both default to False so happy-path tests pass; tests
         # exercising the gate override the return value explicitly.
         task_repo = MagicMock()
         task_repo.has_inflight_task = MagicMock(return_value=False)
+        task_repo.has_instance_busy = MagicMock(return_value=False)
         manager._task_repo = task_repo
         return manager
 
@@ -1254,11 +1259,11 @@ class TestJobContinueTool:
         # No in-flight Task rows for this instance (Phase 2.5 gate).
         # The legacy ``find_processing_message_jobs_by_instance`` mock
         # on ``job_service._repository`` is gone — the gate moved to
-        # ``TaskRepository.has_inflight_task`` (Task 2.5.8). The default
-        # fixture value (False) already satisfies the happy path; this
-        # line is explicit so the intent is visible next to the legacy
-        # mock that used to live here.
-        mock_manager._task_repo.has_inflight_task = MagicMock(return_value=False)
+        # ``TaskRepository.has_instance_busy`` (Task 2.5.8 + Bug-1 fix
+        # 2026-08-12). The default fixture value (False) already
+        # satisfies the happy path; this line is explicit so the intent
+        # is visible next to the legacy mock that used to live here.
+        mock_manager._task_repo.has_instance_busy = MagicMock(return_value=False)
         # Instance is healthy
         instance = self._make_instance(status=instance_status)
         mock_manager._instance_repository.get = MagicMock(return_value=instance)
@@ -1498,7 +1503,7 @@ class TestJobContinueTool:
         instance = self._make_instance(status="running")
         mock_manager._instance_repository.get = MagicMock(return_value=instance)
         # Phase 2.5 gate: a Task is already driving this instance.
-        mock_manager._task_repo.has_inflight_task = MagicMock(return_value=True)
+        mock_manager._task_repo.has_instance_busy = MagicMock(return_value=True)
 
         result = await job_continue.ainvoke({
             "old_job_id": "old-job-1",
@@ -1512,6 +1517,244 @@ class TestJobContinueTool:
         # Phase 5 rename: production calls ``enqueue_message_job``.
         mock_manager.enqueue_message_job.assert_not_awaited()
 
+    # ─────────────────────────────────────────────────────────────────
+    # W1 — job_continue's FAILED branch is bound by the manager's
+    # revive-once guard (quick-win #7). COMPLETED-continue is
+    # DELIBERATELY EXCLUDED — the designed give-more-work continue
+    # flow on a successful child, not a failure revive.
+    #
+    # Refusal wording matches ``daemon/tools/instance.py``'s
+    # terminal-revive refusal verbatim — locked at the spec level so
+    # the agent-facing guidance is identical across the two paths.
+    # ─────────────────────────────────────────────────────────────────
+
+    def _wire_revive_guard(self, mock_manager, *, count: int):
+        """Wire ``get_agent_tool_revive_count`` / ``note_agent_tool_revive`` mocks.
+
+        Sets ``get_agent_tool_revive_count`` to return ``count`` and
+        returns the ``note_agent_tool_revive`` mock so tests can assert
+        call counts. Mirrors the sync ``note_agent_tool_revive`` API
+        (no await needed — see ``daemon/manager.py:2519``).
+        """
+        mock_manager.get_agent_tool_revive_count = MagicMock(return_value=count)
+        mock_manager.note_agent_tool_revive = MagicMock(return_value=count + 1)
+        return mock_manager.note_agent_tool_revive
+
+    def _make_failed_old_job(self, *, instance_id="inst-1", status="failed"):
+        """Build a terminal-failed record (the W1 entry point).
+
+        ``record.kind == "job"`` so production follows the
+        ``get_job`` soft-delete branch (mirrors ``_make_old_job`` in
+        the concurrency-gate test); ``record.status`` is the canonical
+        ``work_status`` value used by the terminal-state check
+        (``work_status.is_terminal`` accepts ``"failed"``).
+        """
+        record = _make_work_record(
+            "old-job-1", kind="job", status=status,
+            instance_id=instance_id, project_id="proj-1", agent_id="developer",
+        )
+        old_job = self._make_old_job(status=status, instance_id=instance_id)
+        return record, old_job
+
+    @pytest.mark.asyncio
+    async def test_w1_t1_first_failed_continue_succeeds_and_increments(
+        self, mock_services, mock_manager, tools
+    ):
+        """W1-T1: first FAILED-continue succeeds; counter 0→1; revive proceeds.
+
+        The terminal job's instance is in FAILED — the only path the
+        W1 guard consults. ``get_agent_tool_revive_count`` returns 0
+        (no prior revive), so the refusal check passes; ``enqueue``
+        fires and the post-enqueue increment bumps the counter to 1.
+        This is the once-bound semantics in its happy form: the first
+        FAILED-continue is granted exactly as the prior behavior would
+        have granted it.
+        """
+        from daemon.manager import AsyncMessageResult
+
+        job_service, _, _ = mock_services
+        job_continue = tools[12]
+
+        record, old_job = self._make_failed_old_job()
+        job_service.get_work = AsyncMock(return_value=record)
+        job_service.get_job = AsyncMock(return_value=old_job)
+        # Instance is FAILED — the only status the W1 guard cares about.
+        instance = self._make_instance(status="failed")
+        mock_manager._instance_repository.get = MagicMock(return_value=instance)
+        # No live Task driving this instance (gate is closed).
+        mock_manager._task_repo.has_inflight_task = MagicMock(return_value=False)
+        # W1 guard: counter is 0 (first FAILED-continue of this child).
+        note_mock = self._wire_revive_guard(mock_manager, count=0)
+        # Phase 5 cutover: ``manager.enqueue_message_job`` returns an
+        # ``AsyncMessageResult`` with the new ``job_id``.
+        mock_manager.enqueue_message_job = AsyncMock(return_value=AsyncMessageResult(
+            message_id="msg-1",
+            instance_id="inst-1",
+            status="queued",
+            job_id="new-job-1",
+        ))
+
+        result = await job_continue.ainvoke({
+            "old_job_id": "old-job-1",
+            "message": "Retry the FAILED work",
+        })
+
+        assert "error" not in result, (
+            f"first FAILED-continue must succeed (counter is 0); got {result!r}"
+        )
+        assert result["new_job_id"] == "new-job-1"
+        assert result["instance_id"] == "inst-1"
+        # Enqueue fired exactly once (the happy-path baseline).
+        mock_manager.enqueue_message_job.assert_awaited_once()
+        # Guard consulted with the right instance id (5c refusal check).
+        mock_manager.get_agent_tool_revive_count.assert_called_once_with("inst-1")
+        # Counter incremented AFTER the successful enqueue (6b,
+        # matches W2/Polish#1 ordering convention in instance.py).
+        note_mock.assert_called_once_with("inst-1")
+
+    @pytest.mark.asyncio
+    async def test_w1_t2_second_failed_continue_refused_with_guidance(
+        self, mock_services, mock_manager, tools
+    ):
+        """W1-T2: second FAILED-continue refused with same guidance message.
+
+        The first FAILED-continue (W1-T1) consumed the budget — counter
+        is now 1. The second FAILED-continue of the same child is
+        refused BEFORE ``enqueue_message_job`` is awaited, mirroring
+        ``send_message``'s terminal-revive refusal wording. The
+        guidance message is the same string the send_message path
+        returns — locked at the spec level so the agent-facing
+        guidance is identical across both paths.
+        """
+        from daemon.manager import AsyncMessageResult
+
+        job_service, _, _ = mock_services
+        job_continue = tools[12]
+
+        record, old_job = self._make_failed_old_job()
+        job_service.get_work = AsyncMock(return_value=record)
+        job_service.get_job = AsyncMock(return_value=old_job)
+        instance = self._make_instance(status="failed")
+        mock_manager._instance_repository.get = MagicMock(return_value=instance)
+        # No live Task — gate is closed; the W1 refusal must fire here,
+        # NOT a "has a task still in flight" rejection.
+        mock_manager._task_repo.has_inflight_task = MagicMock(return_value=False)
+        # W1 guard: counter is already 1 (a prior FAILED-continue
+        # consumed the budget). The next FAILED-continue is the second
+        # attempt — the once-bound kicks in.
+        self._wire_revive_guard(mock_manager, count=1)
+        # Enqueue is set up but MUST NOT be called — the refusal
+        # short-circuits before the messaging call (5c placement).
+        mock_manager.enqueue_message_job = AsyncMock(return_value=AsyncMessageResult(
+            message_id="msg-NEVER",
+            instance_id="inst-1",
+            status="queued",
+            job_id="new-job-NEVER",
+        ))
+
+        result = await job_continue.ainvoke({
+            "old_job_id": "old-job-1",
+            "message": "Retry the FAILED work again",
+        })
+
+        assert "error" in result, (
+            f"second FAILED-continue must be refused by the once-bound; got {result!r}"
+        )
+        # Wording matches ``send_message``'s refusal verbatim — the
+        # agent-facing guidance must be identical across paths.
+        # (Same string as ``daemon/tools/instance.py`` terminal-revive
+        # refusal — locked at the spec level.)
+        expected = (
+            "Refused: Instance 'inst-1' has already been revived once and "
+            "failed again. Spawn a replacement instance instead."
+        )
+        assert result["error"] == expected, (
+            f"second FAILED-continue refusal must match send_message's wording; "
+            f"got {result['error']!r}, expected {expected!r}"
+        )
+        # Critical: the refused continue must NOT enqueue (5c
+        # short-circuit sits BEFORE enqueue_message_job).
+        mock_manager.enqueue_message_job.assert_not_awaited()
+        # Guard consulted (the refusal check fired with count >= 1).
+        mock_manager.get_agent_tool_revive_count.assert_called_once_with("inst-1")
+        # Counter was NOT incremented (refusal returns before the 6b
+        # increment — the budget was already consumed by the first call).
+        mock_manager.note_agent_tool_revive.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_w1_t3_completed_continue_is_not_counted(
+        self, mock_services, mock_manager, tools
+    ):
+        """W1-T3: COMPLETED-continue is EXCLUDED — multiple calls all succeed.
+
+        The designed give-more-work continue flow on a successful
+        child: a COMPLETED instance has NOT failed; the
+        ``job_continue`` against it is a follow-up turn, not a failure
+        revive. The W1 guard DELIBERATELY excludes COMPLETED — neither
+        the refusal check nor the post-enqueue increment runs on this
+        path. We assert the contract by issuing THREE successive
+        COMPLETED-continues against the same instance and confirming:
+          * every call returns a successful ``new_job_id``;
+          * ``enqueue_message_job`` is awaited three times;
+          * the guard ``get_agent_tool_revive_count`` was NEVER
+            consulted (COMPLETED never enters the guard);
+          * the counter ``note_agent_tool_revive`` was NEVER called
+            (the budget was not consumed by give-more-work).
+        """
+        from daemon.manager import AsyncMessageResult
+
+        job_service, _, _ = mock_services
+        job_continue = tools[12]
+
+        # COMPLETED job + COMPLETED instance — the EXCLUDED give-more-work
+        # path. The W1 guard's ``InstanceStatus.FAILED.value`` branch
+        # does not fire here, so neither refusal check nor increment runs.
+        record = _make_work_record(
+            "old-job-1", kind="job", status="completed",
+            instance_id="inst-1", project_id="proj-1", agent_id="developer",
+        )
+        old_job = self._make_old_job(status="completed", instance_id="inst-1")
+        job_service.get_work = AsyncMock(return_value=record)
+        job_service.get_job = AsyncMock(return_value=old_job)
+        instance = self._make_instance(status="completed")
+        mock_manager._instance_repository.get = MagicMock(return_value=instance)
+        mock_manager._task_repo.has_inflight_task = MagicMock(return_value=False)
+        # Even if the manager exposes the guard methods, COMPLETED must
+        # never reach them — wire the mocks with a sentinel to detect
+        # accidental calls.
+        mock_manager.get_agent_tool_revive_count = MagicMock(return_value=99)
+        mock_manager.note_agent_tool_revive = MagicMock()
+        mock_manager.enqueue_message_job = AsyncMock(side_effect=lambda **kw: AsyncMessageResult(
+            message_id="msg-x",
+            instance_id="inst-1",
+            status="queued",
+            job_id=f"new-job-{kw.get('message', '')[:4]}",
+        ))
+
+        results = []
+        for i in range(3):
+            r = await job_continue.ainvoke({
+                "old_job_id": "old-job-1",
+                "message": f"Follow-up turn {i}",
+            })
+            results.append(r)
+
+        # All three COMPLETED-continues succeeded.
+        for i, result in enumerate(results):
+            assert "error" not in result, (
+                f"COMPLETED-continue #{i} must succeed (excluded from guard); "
+                f"got {result!r}"
+            )
+            assert "new_job_id" in result
+        # Enqueue fired three times — every continue dispatched.
+        assert mock_manager.enqueue_message_job.await_count == 3
+        # CRITICAL: the guard's counter check was NEVER consulted on
+        # the COMPLETED path. If the implementation regresses and starts
+        # wiring the guard unconditionally, this assertion fails loud.
+        mock_manager.get_agent_tool_revive_count.assert_not_called()
+        # And the increment was NEVER called either — the give-more-work
+        # flow does not consume the once-bound budget.
+        mock_manager.note_agent_tool_revive.assert_not_called()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 2 (Batch 4a) — resolver-routed tool tests
@@ -2342,8 +2585,14 @@ class TestJobContinueResolverAware:
         # id. See ``mock_manager`` fixture in TestJobContinueTool for
         # the same fix.
         manager.enqueue_message_job = AsyncMock()
+        # Phase 2.5 (Task 2.5.8 + Bug-1 2026-08-12): the DB-level
+        # concurrency gate is ``has_instance_busy`` (PENDING + RUNNING
+        # + PAUSED task rows for the instance). ``has_inflight_task``
+        # is kept on the mock for backwards-compat. Both default to
+        # False so the happy-path resolver tests pass.
         task_repo = MagicMock()
         task_repo.has_inflight_task = MagicMock(return_value=False)
+        task_repo.has_instance_busy = MagicMock(return_value=False)
         manager._task_repo = task_repo
         return job_service, manager
 

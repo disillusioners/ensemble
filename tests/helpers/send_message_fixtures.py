@@ -86,6 +86,10 @@ def make_send_message_manager(*, status: str) -> MagicMock:
         for external/public entry points).
       * ``set_injection`` (sync) — succeeds (the injection path; Phase 1
         RUNNING / WAITING_CHILDREN targets route through here).
+      * ``get_agent_tool_revive_count`` / ``note_agent_tool_revive``
+        (sync) — quick-win #7 revive-once guard, backed by a REAL
+        per-manager dict (first agent-tool revive granted, second
+        refused) with MagicMock call tracking.
       * Plus infra attributes the production code touches in the
         post-enqueue path: ``_instance_repository``, ``engine``,
         ``write_guard``, ``_live_hub``.
@@ -117,6 +121,24 @@ def make_send_message_manager(*, status: str) -> MagicMock:
     manager.engine = MagicMock()
     manager.write_guard = MagicMock()
     manager._live_hub = MagicMock()
+
+    # Quick-win #7 (revive-once guard): REAL in-memory counter wired
+    # behind the two manager methods the agent-tool ``send_message``
+    # terminal-revive branch consults. Fresh dict per manager (fresh
+    # per test) mirrors the production ``InstanceManager`` lifetime:
+    # the first agent-tool revive of a child is granted (0→1), the
+    # second is refused. ``MagicMock`` wrappers keep call tracking so
+    # tests can assert increment/no-increment per path.
+    revive_counts: dict[str, int] = {}
+
+    def _note_revive(instance_id: str) -> int:
+        revive_counts[instance_id] = revive_counts.get(instance_id, 0) + 1
+        return revive_counts[instance_id]
+
+    manager.get_agent_tool_revive_count = MagicMock(
+        side_effect=lambda iid: revive_counts.get(iid, 0)
+    )
+    manager.note_agent_tool_revive = MagicMock(side_effect=_note_revive)
     return manager
 
 

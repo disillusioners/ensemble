@@ -680,6 +680,17 @@ class InstanceManager:
         # ``_context_skill_results`` and ``_skill_search_message_counts``.
         self._explicit_skill_loaded: set[str] = set()
 
+        # Quick-win #7 (revive-once guard): per-child cumulative counter
+        # of AGENT-TOOL-initiated terminal revives, keyed by the CHILD
+        # instance id. RAM-only — a daemon restart resets it (accepted
+        # v1 limitation). Incremented ONLY via
+        # :meth:`note_agent_tool_revive`, which is called solely from
+        # the agent-tool ``send_message`` terminal-revive branch
+        # (``daemon/tools/instance.py``); the user-API revive path
+        # (``daemon/services/instance_messaging.py``) never touches it.
+        # Full contract on the accessor methods below.
+        self._agent_tool_revive_counts: dict[str, int] = {}
+
         # NEW: EventBus for hybrid event delivery (DB + streaming)
 
         # NEW: Source repository for source config and session mapping management
@@ -2339,7 +2350,12 @@ class InstanceManager:
 
     _INJECTION_TTL_SECONDS = 3600  # 1h — orphaned sweep window (S1)
 
-    def set_injection(self, instance_id: str, content: str) -> dict[str, str]:
+    def set_injection(
+        self,
+        instance_id: str,
+        content: str,
+        source: str | None = None,
+    ) -> dict[str, str]:
         """Append a pending user message to the RAM injection queue.
 
         Append-list semantics: a second ``set_injection`` for the same
@@ -2347,17 +2363,39 @@ class InstanceManager:
         existing entry. The agent_node consumes ALL queued messages on
         its next LLM call, in FIFO order (oldest first).
 
+        Quick-win #1 (S scope) — provenance ``source`` parameter: when
+        set, the value is carried through the FIFO and stamped onto the
+        drained ``HumanMessage.additional_kwargs["source"]`` at the
+        graph drain site (``daemon/graph.py``) so the recipient's
+        context can show the message's origin (e.g.,
+        ``"internal_agent:<caller_instance_id>"``). When ``None``
+        (default) the entry dict is byte-identical to the pre-quick-win
+        shape — no ``"source"`` key is added, and the downstream
+        ``HumanMessage.additional_kwargs`` is unchanged.
+
         Args:
             instance_id: Target instance.
             content: The user message text to inject on the next LLM call.
+            source: Optional provenance marker carried onto the
+                downstream ``HumanMessage``. Typical value:
+                ``"internal_agent:<caller_instance_id>"``. ``None``
+                (default) preserves byte-identical pre-quick-win
+                behavior.
 
         Returns:
-            The newly appended entry as ``{"content": str, "timestamp": str}``.
+            The newly appended entry as ``{"content": str, "timestamp": str}``,
+            plus ``"source"`` when provided.
         """
-        entry = {
+        entry: dict[str, str] = {
             "content": content,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
+        if source is not None:
+            # Quick-win #1: provenance marker. Conditionally attached so
+            # the entry dict stays byte-identical to the pre-quick-win
+            # shape when ``source is None`` — required by the
+            # back-compat contract.
+            entry["source"] = source
         queue = self._pending_injections.get(instance_id)
         if queue is None:
             queue = []
@@ -2428,6 +2466,94 @@ class InstanceManager:
         if queue is None:
             return None
         return list(queue)
+
+    # ------------------------------------------------------------------
+    # Quick-win #7 — revive-once guard for agent-tool-initiated revives
+    # ------------------------------------------------------------------
+    # ``RECOVERY_GUIDANCE_HINT`` (``daemon/services/error_reporting.py``)
+    # tells parent agents: revive a failed child AT MOST ONCE via a
+    # "continue" send; if it fails again, spawn a replacement. That bound
+    # used to be LLM-enforced only. This counter makes it MECHANICAL on
+    # the agent-tool paths: the callers of :meth:`note_agent_tool_revive`
+    # are (1) the terminal-revive branch in ``daemon/tools/instance.py``
+    # (``send_message`` against a COMPLETED / TERMINATED / ERROR / FAILED
+    # target), and (2) the FAILED branch of ``job_continue`` in
+    # ``daemon/tools/job_queue.py`` — both agent-tool revives of a
+    # terminal child. The user-API revive path
+    # (``_prepare_enqueued_message`` in
+    # ``daemon/services/instance_messaging.py``) is a DIFFERENT authority
+    # — it must never increment this counter and is never blocked by it.
+    #
+    # ``job_continue`` COMPLETED-continue is DELIBERATELY EXCLUDED — it
+    # is the designed give-more-work continue flow on a successful child,
+    # not a failure revive, so it neither increments nor is blocked by
+    # this guard. FAILED-continue DOES count against the once-bound and
+    # is refused on the second attempt with the same wording as
+    # ``send_message``'s refusal (W1).
+
+    def get_agent_tool_revive_count(self, instance_id: str) -> int:
+        """Return the cumulative agent-tool revive count for ``instance_id``.
+
+        Contract (quick-win #7):
+          * IN-MEMORY ONLY — no DB persistence; a daemon restart resets
+            every counter to zero (accepted v1 limitation).
+          * AGENT-TOOL PATH ONLY — the count is bumped exclusively by
+            :meth:`note_agent_tool_revive`, invoked from the agent-tool
+            revives (``send_message`` terminal-revive in
+            ``daemon/tools/instance.py`` AND the FAILED branch of
+            ``job_continue`` in ``daemon/tools/job_queue.py`` — both
+            W1 callers). User-API revives do not touch it.
+          * CUMULATIVE per child — no episode reset: a child revived once
+            that errored again after working is exactly the
+            spawn-a-replacement case the guard exists to force.
+
+        Args:
+            instance_id: The CHILD instance id (the revive target).
+
+        Returns:
+            The number of agent-tool revives already granted for the
+            child; ``0`` when none (or after a daemon restart).
+        """
+        return self._agent_tool_revive_counts.get(instance_id, 0)
+
+    def note_agent_tool_revive(self, instance_id: str) -> int:
+        """Increment the agent-tool revive counter; return the new count.
+
+        Called from the agent-tool revive call sites at the moment a
+        terminal child is about to be revived and dispatched:
+          * ``send_message`` terminal-revive branch
+            (``daemon/tools/instance.py``) — COMPLETED / TERMINATED /
+            ERROR / FAILED targets.
+          * ``job_continue`` FAILED branch
+            (``daemon/tools/job_queue.py``) — FAILED targets only
+            (W1; COMPLETED-continue is excluded — designed give-more-work
+            flow, not a failure revive).
+        The shared service-layer revive path
+        (``daemon/services/instance_messaging.py``) must NEVER call
+        this; user-API revives stay uncounted and unblocked.
+          * IN-MEMORY ONLY — daemon restart resets the counter (v1).
+          * CUMULATIVE per child — never reset on success, completion,
+            or a later terminal transition.
+
+        Like the ``_pending_injections`` helpers these methods are
+        synchronous and ``await``-free, relying on cooperative
+        single-thread asyncio for atomicity — do not call them from a
+        thread pool.
+
+        Args:
+            instance_id: The CHILD instance id being revived.
+
+        Returns:
+            The new cumulative count (``1`` for the first granted
+            revive, ``2`` for a second grant, ...).
+        """
+        count = self._agent_tool_revive_counts.get(instance_id, 0) + 1
+        self._agent_tool_revive_counts[instance_id] = count
+        logger.info(
+            f"[ReviveGuard] Agent-tool revive #{count} granted for "
+            f"instance {instance_id[:8]}..."
+        )
+        return count
 
     # ------------------------------------------------------------------
     # Context Injection Restructure — Phase 3 (B2 fix)
