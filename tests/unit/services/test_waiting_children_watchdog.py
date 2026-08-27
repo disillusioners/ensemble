@@ -5,12 +5,25 @@ Covers the watchdog contract end-to-end:
 * Threshold boundary exactness — child at ``threshold-1`` seconds is
   NOT hung, child at ``threshold+epsilon`` IS hung (the repo helper
   uses ``age > threshold``).
-* Healthy tree (children active recently) → no-op, no injection.
-* PAUSED parent → skipped, ``set_injection`` NOT called.
+* Hang predicate exclusions — ``paused`` AND ``waiting_children``
+  children are never counted hung (parking does not refresh
+  ``last_activity_at``; nudging would duplicate live work).
+* Healthy tree (children active recently) → no-op, no delivery.
+* PAUSED parent → skipped, ``enqueue_message`` NOT called.
 * Notice content + provenance — the ``source`` kwarg IS stamped onto
-  the injected message.
-* Anti-spam — once per (parent, child, episode); episode reset when
-  the child reaches terminal OR becomes paused.
+  the durable ``MessageQueue`` row (the enqueue path's provenance
+  home) plus the structured ``message_metadata`` audit dict.
+* **ACCEPTANCE (pure hang)** — a single hung child, NO sibling
+  termination, NO external message: the notice travels the REAL
+  wake path (``InstanceMessagingService.enqueue_message`` →
+  ``_prepare_enqueued_message``: MessageQueue + Task rows, WC→RUNNING
+  flip, worker-pool ``notify_work``). The parent is observably woken.
+* Anti-spam — once per (parent, child, episode); episode reset via
+  the scan sweep (child terminal/paused/resumed), the parent-left-WC
+  purge, and the child-terminal purge (independent of scan success).
+* Dialect parity — the PostgreSQL ``EXTRACT(EPOCH ...)`` branch and
+  the SQLite ``julianday`` branch of the hang SQL are
+  compile-checked / render-verified without a PG server.
 * Disabled flag → loop returns immediately, no scan.
 * Per-parent error isolation — one parent's scan raising does not
   block processing of others.
@@ -22,30 +35,33 @@ Covers the watchdog contract end-to-end:
   + the post-cycle sleep; we patch ``asyncio.sleep`` so the test
   finishes in milliseconds, not hours).
 
-REGRESSION: the watchdog's notice flows through ``set_injection`` to
-the graph drain site where ``_ensure_tool_result_pairing`` guards
-against poisoned tool-call tails. We do NOT duplicate that coverage
-here — ``tests/unit/graph/test_injection_tool_pairing.py`` is the
-authoritative guard for the drain. The watchdog itself only writes
-to ``set_injection``; the regression is pinned via the targeted
-test pair specified in the brief.
+REGRESSION: v1 delivered the notice via ``manager.set_injection`` —
+a RAM FIFO append that NEVER wakes a quiesced WAITING_CHILDREN
+parent (no Task, no status flip, no ``notify_work``); the notice
+stranded and was TTL-deleted ~1h later (deep-review 2026-08-27,
+range 85ae6e72..fe076043, REJECTED). The delivery primitive is now
+``enqueue_message`` — the house wake path. The pure-hang acceptance
+test below is the test that would have caught the v1 defect.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
+from sqlalchemy.dialects import postgresql, sqlite as sqlite_dialect
 from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel
 
 from daemon.repositories.instance.models import Instance, InstanceStatus
 from daemon.repositories.instance.repository import SQLModelInstanceRepository
+from daemon.repositories.message_queue.models import MessageQueue
+from daemon.repositories.task.models import Task, TaskStatus
+from daemon.services.instance_messaging import InstanceMessagingService
 from daemon.services.waiting_children_watchdog import (
     WATCHDOG_SOURCE,
     WaitingChildrenWatchdog,
@@ -78,15 +94,17 @@ def repo(engine) -> SQLModelInstanceRepository:
 
 
 @pytest.fixture
-def manager() -> MagicMock:
-    """A mock manager that records ``set_injection`` calls.
+def manager() -> AsyncMock:
+    """An async mock manager that records ``enqueue_message`` calls.
 
-    Uses ``MagicMock`` (not ``AsyncMock``) because ``set_injection``
-    is sync in the production manager — the drain site is in the
-    asyncio LangGraph node, but the FIFO append itself is sync.
+    Uses ``AsyncMock`` because the production delivery call is
+    ``await manager.enqueue_message(...)`` — the waking path that
+    writes the MessageQueue + Task rows and flips the parked parent
+    to RUNNING. The pure-hang acceptance test replaces this mock
+    with the REAL ``InstanceMessagingService``.
     """
-    m = MagicMock()
-    m.set_injection = MagicMock()
+    m = AsyncMock()
+    m.enqueue_message = AsyncMock()
     return m
 
 
@@ -292,6 +310,44 @@ class TestListHungChildrenBoundary:
         hung = repo.list_hung_children_for_parent(parent, 3600)
         assert hung == []
 
+    def test_waiting_children_child_excluded_even_when_old(
+        self, repo, make_instance
+    ) -> None:
+        """A child parked in WAITING_CHILDREN is not hung — it is
+        blocked on ITS children (waiting by design), and parking
+        does not refresh ``last_activity_at`` so the age predicate
+        would otherwise misread it as hung. Nudging the grandparent
+        to revive/replace it duplicates a still-working subtree —
+        the same duplicate-work hazard the paused exclusion avoids,
+        one level down (deep-review warning 1)."""
+        parent = make_instance(status=InstanceStatus.WAITING_CHILDREN)
+        make_instance(
+            status=InstanceStatus.WAITING_CHILDREN,
+            parent_id=parent,
+            age_seconds=24 * 3600,  # very old — still not hung
+        )
+        hung = repo.list_hung_children_for_parent(parent, 3600)
+        assert hung == []
+
+    async def test_waiting_children_child_excluded_in_watchdog_run(
+        self, repo, manager, make_instance
+    ) -> None:
+        """End-to-end: a WC-parked child alone does NOT trigger a
+        notice — the watchdog stays silent for a legitimately
+        waiting subtree."""
+        parent = make_instance(status=InstanceStatus.WAITING_CHILDREN)
+        make_instance(
+            status=InstanceStatus.WAITING_CHILDREN,
+            parent_id=parent,
+            age_seconds=24 * 3600,
+        )
+        w = WaitingChildrenWatchdog(
+            repo, manager, interval_seconds=3600, hang_threshold_seconds=3600
+        )
+        stats = await w.run_once()
+        assert stats["notices_enqueued"] == 0
+        manager.enqueue_message.assert_not_called()
+
     def test_completed_child_excluded_even_when_old(
         self, repo, make_instance
     ) -> None:
@@ -363,18 +419,18 @@ class TestRunOnceHealthyTree:
         assert stats == {
             "parents_scanned": 1,
             "parents_skipped_paused": 0,
-            "notices_injected": 0,
+            "notices_enqueued": 0,
             "errors": 0,
         }
-        manager.set_injection.assert_not_called()
+        manager.enqueue_message.assert_not_called()
         assert w.notified_episodes == frozenset()
 
 
 @pytest.mark.asyncio
 class TestRunOnceNoticeAndProvenance:
-    """Notice content + provenance."""
+    """Notice content + provenance on the enqueue (waking) path."""
 
-    async def test_set_injection_called_with_source_and_notice(
+    async def test_enqueue_message_called_with_source_and_notice(
         self, repo, manager, make_instance
     ) -> None:
         parent = make_instance(status=InstanceStatus.WAITING_CHILDREN)
@@ -388,22 +444,26 @@ class TestRunOnceNoticeAndProvenance:
         )
         await w.run_once()
 
-        assert manager.set_injection.call_count == 1
-        kwargs = manager.set_injection.call_args.kwargs
-        positional = manager.set_injection.call_args.args
-        # First positional is parent_id; second is content; kwarg source.
-        assert positional[0] == parent
-        assert "[system:watchdog]" in positional[1]
-        assert child_id[:8] in positional[1]
-        # source MUST be the watchdog marker.
-        assert kwargs.get("source") == WATCHDOG_SOURCE
-        assert kwargs.get("source") == "system:watchdog"
+        assert manager.enqueue_message.call_count == 1
+        kwargs = manager.enqueue_message.call_args.kwargs
+        assert kwargs["instance_id"] == parent
+        assert "[system:watchdog]" in kwargs["message"]
+        assert child_id[:8] in kwargs["message"]
+        # source MUST be the watchdog marker — the durable
+        # MessageQueue-row provenance on the enqueue path.
+        assert kwargs["source"] == WATCHDOG_SOURCE
+        assert kwargs["source"] == "system:watchdog"
+        # System priority lane + structured audit metadata.
+        assert kwargs["priority"] == 0
+        assert kwargs["metadata"]["watchdog_notice"] is True
+        assert kwargs["metadata"]["hang_threshold_seconds"] == 3600
+        assert kwargs["metadata"]["hung_children"][0]["child_id"] == child_id
 
     async def test_source_stamped_even_when_multiple_hung(
         self, repo, manager, make_instance
     ) -> None:
         """All children in a single notice share the same source —
-        the source is per-INJECTION, not per-child."""
+        the source is per-ENQUEUE, not per-child."""
         parent = make_instance(status=InstanceStatus.WAITING_CHILDREN)
         for _ in range(3):
             make_instance(
@@ -415,14 +475,15 @@ class TestRunOnceNoticeAndProvenance:
             repo, manager, interval_seconds=3600, hang_threshold_seconds=3600
         )
         await w.run_once()
-        assert manager.set_injection.call_count == 1
-        kwargs = manager.set_injection.call_args.kwargs
-        assert kwargs.get("source") == WATCHDOG_SOURCE
+        assert manager.enqueue_message.call_count == 1
+        kwargs = manager.enqueue_message.call_args.kwargs
+        assert kwargs["source"] == WATCHDOG_SOURCE
+        assert len(kwargs["metadata"]["hung_children"]) == 3
 
 
 @pytest.mark.asyncio
 class TestRunOncePausedParent:
-    """PAUSED parent → skipped, no ``set_injection`` call."""
+    """PAUSED parent → skipped, no ``enqueue_message`` call."""
 
     async def test_paused_parent_skipped_even_with_hung_children(
         self, repo, manager, make_instance
@@ -441,7 +502,7 @@ class TestRunOncePausedParent:
         # Parent not enumerated in the first place (filter is on
         # status == WAITING_CHILDREN).
         assert stats["parents_scanned"] == 0
-        manager.set_injection.assert_not_called()
+        manager.enqueue_message.assert_not_called()
 
     async def test_parent_transitioned_to_paused_between_enum_and_scan(
         self, repo, manager, make_instance, monkeypatch
@@ -486,7 +547,7 @@ class TestRunOncePausedParent:
         stats = await w.run_once()
         assert stats["parents_scanned"] == 1
         assert stats["parents_skipped_paused"] == 1
-        manager.set_injection.assert_not_called()
+        manager.enqueue_message.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -507,12 +568,12 @@ class TestRunOnceCooldown:
         )
         # Tick 1: notify.
         stats1 = await w.run_once()
-        assert stats1["notices_injected"] == 1
+        assert stats1["notices_enqueued"] == 1
         # Tick 2: same episode — no re-notify.
         stats2 = await w.run_once()
-        assert stats2["notices_injected"] == 0
-        # ``set_injection`` was called exactly once across both ticks.
-        assert manager.set_injection.call_count == 1
+        assert stats2["notices_enqueued"] == 0
+        # ``enqueue_message`` was called exactly once across both ticks.
+        assert manager.enqueue_message.call_count == 1
         # Cooldown set holds the (parent, child) pair.
         assert len(w.notified_episodes) == 1
 
@@ -532,7 +593,7 @@ class TestRunOnceCooldown:
         )
         # Tick 1: notify.
         await w.run_once()
-        assert manager.set_injection.call_count == 1
+        assert manager.enqueue_message.call_count == 1
 
         # Child completes — episode ends.
         with repo.engine.begin() as conn:
@@ -543,7 +604,7 @@ class TestRunOnceCooldown:
             )
         # Tick 2: no hung children → no notify, cooldown clears.
         await w.run_once()
-        assert manager.set_injection.call_count == 1
+        assert manager.enqueue_message.call_count == 1
         assert w.notified_episodes == frozenset()
 
         # Child comes back (e.g. revived) and is hung again.
@@ -560,7 +621,109 @@ class TestRunOnceCooldown:
             )
         # Tick 3: new episode → re-notify.
         await w.run_once()
-        assert manager.set_injection.call_count == 2
+        assert manager.enqueue_message.call_count == 2
+
+    async def test_parent_leaving_wc_purges_pairs_and_reentry_notifies_fresh(
+        self, repo, manager, make_instance
+    ) -> None:
+        """Parent-side episode boundary (deep-review warning 2).
+
+        Parent exits WAITING_CHILDREN while the child stays hung →
+        the (P, C) pair is dropped from the cooldown (the notified
+        episode belonged to the previous WC stay). A later WC
+        re-entry must be able to notify FRESH — pre-fix, the pair
+        stranded in ``_notified`` forever and re-entry got nothing.
+        """
+        parent = make_instance(
+            status=InstanceStatus.WAITING_CHILDREN,
+            instance_id="parent-exit",
+        )
+        make_instance(
+            status=InstanceStatus.RUNNING,
+            parent_id=parent,
+            age_seconds=4000,
+            instance_id="child-still-hung",
+        )
+        w = WaitingChildrenWatchdog(
+            repo, manager, interval_seconds=3600, hang_threshold_seconds=3600
+        )
+        # Tick 1: notify; pair lands in cooldown.
+        await w.run_once()
+        assert manager.enqueue_message.call_count == 1
+        assert w.notified_episodes == frozenset({(parent, "child-still-hung")})
+
+        # Parent leaves WC (e.g. an external message or report woke
+        # it) — child stays hung.
+        with repo.engine.begin() as conn:
+            conn.execute(
+                Instance.__table__.update()
+                .where(Instance.instance_id == parent)
+                .values(status=InstanceStatus.RUNNING.value)
+            )
+        # Tick 2: parent no longer enumerated → purge drops the pair.
+        stats2 = await w.run_once()
+        assert stats2["notices_enqueued"] == 0
+        assert w.notified_episodes == frozenset()
+
+        # Parent re-enters WC (still waiting on the same hung child).
+        with repo.engine.begin() as conn:
+            conn.execute(
+                Instance.__table__.update()
+                .where(Instance.instance_id == parent)
+                .values(status=InstanceStatus.WAITING_CHILDREN.value)
+            )
+        # Tick 3: fresh notice fires — re-entry is a new episode.
+        stats3 = await w.run_once()
+        assert stats3["notices_enqueued"] == 1
+        assert manager.enqueue_message.call_count == 2
+
+    async def test_child_terminal_purges_pair_even_when_parent_scan_errors(
+        self, repo, manager, make_instance
+    ) -> None:
+        """Child-terminal purge is independent of scan success
+        (deep-review "also required" clause).
+
+        The child terminates via a path the watchdog's own scan never
+        observes (here: the parent's scan raises every tick). The
+        pair must still clear so a future episode can re-notify —
+        pre-fix only the scan-driven sweep could clear it, and a
+        permanently-failing scan would strand the pair forever.
+        """
+        parent = make_instance(
+            status=InstanceStatus.WAITING_CHILDREN,
+            instance_id="parent-stuck",
+        )
+        child_id = make_instance(
+            status=InstanceStatus.RUNNING,
+            parent_id=parent,
+            age_seconds=4000,
+            instance_id="child-recovering",
+        )
+        w = WaitingChildrenWatchdog(
+            repo, manager, interval_seconds=3600, hang_threshold_seconds=3600
+        )
+        await w.run_once()
+        assert (parent, child_id) in w.notified_episodes
+
+        # Parent's scan now fails every tick (simulated DB blip).
+        def failing_list_hung(*args: Any, **kwargs: Any):
+            raise RuntimeError("simulated persistent DB blip")
+
+        repo.list_hung_children_for_parent = failing_list_hung  # type: ignore[method-assign]
+
+        # Child terminates (e.g. terminated by an operator).
+        with repo.engine.begin() as conn:
+            conn.execute(
+                Instance.__table__.update()
+                .where(Instance.instance_id == child_id)
+                .values(status=InstanceStatus.TERMINATED.value)
+            )
+        # Tick: scan raises (errors=1) but the child-terminal purge
+        # STILL drops the pair — the purge is DB-read-backed and
+        # independent of per-parent scan success.
+        stats = await w.run_once()
+        assert stats["errors"] == 1
+        assert w.notified_episodes == frozenset()
 
     async def test_only_new_hung_children_notified_in_same_tick(
         self, repo, manager, make_instance
@@ -583,8 +746,8 @@ class TestRunOnceCooldown:
             repo, manager, interval_seconds=3600, hang_threshold_seconds=3600
         )
         await w.run_once()
-        assert manager.set_injection.call_count == 1
-        first_call_content = manager.set_injection.call_args.args[1]
+        assert manager.enqueue_message.call_count == 1
+        first_call_content = manager.enqueue_message.call_args.kwargs["message"]
         assert old_child[:8] in first_call_content
 
         # New child appears, also hung — distinct prefix so the
@@ -598,8 +761,8 @@ class TestRunOnceCooldown:
         await w.run_once()
         # Tick fires again (new child is new pair), but content
         # only includes the new child (old one is in cooldown).
-        assert manager.set_injection.call_count == 2
-        second_call_content = manager.set_injection.call_args.args[1]
+        assert manager.enqueue_message.call_count == 2
+        second_call_content = manager.enqueue_message.call_args.kwargs["message"]
         assert new_child[:8] in second_call_content
         # Old child NOT re-listed in this tick's notice (the
         # old child is in the cooldown set so ``new_pairs``
@@ -655,10 +818,10 @@ class TestRunOnceErrorIsolation:
         stats = await w.run_once()
         assert stats["parents_scanned"] == 2
         assert stats["errors"] == 1
-        # The good parent still got an injection.
-        assert manager.set_injection.call_count == 1
+        # The good parent still got its notice.
+        assert manager.enqueue_message.call_count == 1
         # Confirm we notified the good parent, not the failing one.
-        assert manager.set_injection.call_args.args[0] == good_parent
+        assert manager.enqueue_message.call_args.kwargs["instance_id"] == good_parent
 
     async def test_enumeration_failure_counted_not_raised(
         self, repo, manager, make_instance
@@ -675,7 +838,7 @@ class TestRunOnceErrorIsolation:
         assert stats == {
             "parents_scanned": 0,
             "parents_skipped_paused": 0,
-            "notices_injected": 0,
+            "notices_enqueued": 0,
             "errors": 1,
         }
 
@@ -705,7 +868,7 @@ class TestEpisodeEndScanErrorPreservesCooldown:
        ``errors += 1``, but ``(P, C)`` MUST stay in the cooldown
        set (NOT silently cleared).
     3. Tick N+1 — repo back to healthy. The watchdog MUST NOT
-       re-notify: ``set_injection`` call count is still 1, and the
+       re-notify: ``enqueue_message`` call count is still 1, and the
        cooldown set still holds ``(P, C)``.
     """
 
@@ -728,11 +891,11 @@ class TestEpisodeEndScanErrorPreservesCooldown:
         )
 
         # Tick 1 (healthy): establishes the cooldown. (P, C) is in
-        # the cooldown set; ``set_injection`` called once.
+        # the cooldown set; ``enqueue_message`` called once.
         stats1 = await w.run_once()
-        assert stats1["notices_injected"] == 1
+        assert stats1["notices_enqueued"] == 1
         assert stats1["errors"] == 0
-        assert manager.set_injection.call_count == 1
+        assert manager.enqueue_message.call_count == 1
         assert (parent, child_id) in w.notified_episodes
 
         # Inject a transient scan error for parent ``parent`` only.
@@ -759,13 +922,13 @@ class TestEpisodeEndScanErrorPreservesCooldown:
         stats_n = await w.run_once()
         assert stats_n["parents_scanned"] == 1
         assert stats_n["errors"] == 1
-        assert stats_n["notices_injected"] == 0
+        assert stats_n["notices_enqueued"] == 0
         # Cooldown preserved — the regression target.
         assert (parent, child_id) in w.notified_episodes, (
             "transient scan error must NOT clear cooldown"
         )
         # And no spurious re-notify on the failing tick.
-        assert manager.set_injection.call_count == 1
+        assert manager.enqueue_message.call_count == 1
 
         # Restore the repo to healthy — tick N+1 sees fresh data.
         state["inject_failures"] = False
@@ -778,7 +941,7 @@ class TestEpisodeEndScanErrorPreservesCooldown:
         assert stats_n_plus_1["parents_scanned"] == 1
         assert stats_n_plus_1["errors"] == 0
         # No new notice — the whole point of the regression guard.
-        assert manager.set_injection.call_count == 1
+        assert manager.enqueue_message.call_count == 1
         # Cooldown set still populated (episode has not actually ended).
         assert (parent, child_id) in w.notified_episodes
 
@@ -791,7 +954,7 @@ class TestRunOnceDisabled:
         self, repo, manager, make_instance
     ) -> None:
         # Even with parents + hung children present, a disabled
-        # watchdog must NOT call set_injection and must NOT touch
+        # watchdog must NOT call enqueue_message and must NOT touch
         # the repo.
         parent = make_instance(status=InstanceStatus.WAITING_CHILDREN)
         make_instance(
@@ -810,10 +973,10 @@ class TestRunOnceDisabled:
         assert stats == {
             "parents_scanned": 0,
             "parents_skipped_paused": 0,
-            "notices_injected": 0,
+            "notices_enqueued": 0,
             "errors": 0,
         }
-        manager.set_injection.assert_not_called()
+        manager.enqueue_message.assert_not_called()
 
 
 # ─── Loop scheduler tests (mocks time, no real sleep) ───────────────────────
@@ -971,14 +1134,257 @@ class TestLoopScheduler:
             )
         assert call_count["value"] == 2
 
+# ─── Terminal-id helper (cooldown purge backing query) ─────────────────────
 
-# ─── Async manager fixture (for ad-hoc scenarios) ──────────────────────────
+
+class TestListTerminalInstanceIds:
+    """``list_terminal_instance_ids`` — the DB read behind the
+    child-terminal cooldown purge."""
+
+    def test_returns_only_terminal_subset(self, repo, make_instance) -> None:
+        completed = make_instance(status=InstanceStatus.COMPLETED)
+        errored = make_instance(status=InstanceStatus.ERROR)
+        terminated = make_instance(status=InstanceStatus.TERMINATED)
+        failed = make_instance(status=InstanceStatus.FAILED)
+        running = make_instance(status=InstanceStatus.RUNNING)
+        waiting = make_instance(status=InstanceStatus.WAITING_CHILDREN)
+        paused = make_instance(status=InstanceStatus.PAUSED)
+
+        result = repo.list_terminal_instance_ids(
+            [completed, errored, terminated, failed, running, waiting, paused]
+        )
+        assert result == {completed, errored, terminated, failed}
+
+    def test_missing_ids_absent_from_result(self, repo) -> None:
+        """A missing row cannot be concluded terminal — the purge
+        keeps cooldown entries for ids it cannot see."""
+        assert repo.list_terminal_instance_ids(["no-such-id"]) == set()
+
+    def test_empty_input_short_circuits(self, repo) -> None:
+        assert repo.list_terminal_instance_ids([]) == set()
 
 
-@pytest.fixture
-def async_manager() -> Iterator[AsyncMock]:
-    """An ``AsyncMock`` manager — handy for forward-compat tests if
-    a future refactor makes ``set_injection`` async. Currently
-    unused by the test bodies but kept for documentation."""
-    am = AsyncMock()
-    yield am
+# ─── ACCEPTANCE: pure-hang wake via the real enqueue path ──────────────────
+
+
+class TestWakeDeliveryAcceptance:
+    """The test that would have caught the v1 defect.
+
+    Scenario (deep-review "MANDATORY acceptance test"): ONE hung
+    child, NO sibling termination, NO external message. The notice
+    must reach the parked parent through the REAL wake path —
+    ``manager.enqueue_message`` → ``_prepare_enqueued_message`` —
+    not through a mock of the watchdog's own collaborators.
+
+    Wiring: the watchdog's ``manager`` collaborator is the REAL
+    ``InstanceMessagingService`` bound to the test SQLite engine
+    via a minimal manager stub (engine + write guard + worker-pool
+    recorder). Everything on the delivery path that touches durable
+    state — the MessageQueue + Task + Event trio, the
+    WAITING_CHILDREN → RUNNING flip, the ``last_activity_at`` /
+    ``version`` bump, the worker-pool ``notify_work`` wake — runs
+    real production code. The only fakes are the RAM-side manager
+    attributes the enqueue path reads (guard/hub/pool), none of
+    which decide whether the parent is woken.
+    """
+
+    @staticmethod
+    def _build_real_messaging(engine):
+        """Real ``InstanceMessagingService`` on a minimal manager stub."""
+
+        class _WorkerPoolRecorder:
+            notify_calls: list[bool] = []
+
+            def notify_work(self) -> None:
+                self.notify_calls.append(True)
+
+        class _NotShuttingDown:
+            is_shutting_down = False
+
+        stub_manager = MagicMock()
+        stub_manager.engine = engine
+        stub_manager.write_guard = MagicMock()
+        stub_manager._deferred_question_pause = {}
+        stub_manager._job_queue_service = MagicMock()
+        stub_manager._live_hub = MagicMock()
+        stub_manager._live_hub.stream_status_change = AsyncMock()
+        pool = _WorkerPoolRecorder()
+        stub_manager._worker_pool = pool
+        service = InstanceMessagingService(
+            manager=stub_manager,
+            cancellation_service=_NotShuttingDown(),
+        )
+        return service, stub_manager, pool
+
+    async def test_pure_hang_notice_wakes_parked_parent(
+        self, repo, engine, make_instance
+    ) -> None:
+        parent = make_instance(
+            status=InstanceStatus.WAITING_CHILDREN,
+            instance_id="parent-parked",
+        )
+        make_instance(
+            status=InstanceStatus.RUNNING,  # hung: never terminates
+            parent_id=parent,
+            age_seconds=4000,  # > 1h threshold
+            instance_id="child-wedged",
+        )
+        service, stub_manager, pool = self._build_real_messaging(engine)
+
+        w = WaitingChildrenWatchdog(
+            repo, service, interval_seconds=3600, hang_threshold_seconds=3600
+        )
+        stats = await w.run_once()
+
+        assert stats["notices_enqueued"] == 1
+        assert stats["errors"] == 0
+
+        # (1) The parent is OBSERVABLY woken: WAITING_CHILDREN →
+        #     RUNNING in the DB (the flip only the enqueue path
+        #     performs — set_injection never touches status).
+        parent_row = repo.get(parent)
+        assert parent_row is not None
+        assert parent_row.status == InstanceStatus.RUNNING.value
+
+        # (2) The notice landed in the parent's durable message
+        #     stream: a READY MessageQueue row carrying the notice
+        #     and the provenance that survives the enqueue path.
+        with repo.engine.connect() as conn:
+            # NOTE: MessageQueue.message_metadata maps to the DB
+            # column ``metadata``; the .label() re-keys the result
+            # row back to the attribute name for clean access.
+            msg_row = conn.execute(
+                select(
+                    MessageQueue.message_id,
+                    MessageQueue.source,
+                    MessageQueue.content,
+                    MessageQueue.message_metadata.label("message_metadata"),
+                    MessageQueue.priority,
+                ).where(MessageQueue.instance_id == parent)
+            ).one()
+            task_row = conn.execute(
+                select(
+                    Task.status,
+                    Task.instance_id,
+                    Task.task_type,
+                ).where(Task.message_id == msg_row.message_id)
+            ).one()
+        assert msg_row.source == "system:watchdog"
+        assert "[system:watchdog]" in msg_row.content
+        assert "child-wedged"[:8] in msg_row.content
+        assert msg_row.message_metadata["watchdog_notice"] is True
+        assert msg_row.message_metadata["hung_children"][0]["child_id"] == (
+            "child-wedged"
+        )
+        assert msg_row.priority == 0
+
+        # (3) A dispatchable Task claims the message — the row a
+        #     WorkerPool worker claims to run the parent's turn.
+        assert task_row.status == TaskStatus.PENDING.value
+        assert task_row.instance_id == parent
+
+        # (4) The worker pool was actually notified (the wake signal
+        #     that ends the quiesced park).
+        assert pool.notify_calls == [True]
+
+        # (5) Regression guard: nothing was parked in the RAM
+        #     injection FIFO (the v1 primitive that never woke).
+        stub_manager.set_injection.assert_not_called()
+
+    async def test_pure_hang_second_tick_no_duplicate_notice(
+        self, repo, engine, make_instance
+    ) -> None:
+        """Cooldown holds on the waking path: the second tick does
+        not enqueue a second notice for the same hung episode."""
+        parent = make_instance(
+            status=InstanceStatus.WAITING_CHILDREN,
+            instance_id="parent-parked-2",
+        )
+        make_instance(
+            status=InstanceStatus.RUNNING,
+            parent_id=parent,
+            age_seconds=4000,
+            instance_id="child-wedged-2",
+        )
+        service, _stub, pool = self._build_real_messaging(engine)
+        w = WaitingChildrenWatchdog(
+            repo, service, interval_seconds=3600, hang_threshold_seconds=3600
+        )
+        # Tick 1 wakes the parent (WC → RUNNING). Tick 2 therefore
+        # does not even enumerate it — and MUST NOT enqueue again.
+        await w.run_once()
+        first_wakes = len(pool.notify_calls)
+        assert first_wakes == 1
+        stats2 = await w.run_once()
+        assert stats2["notices_enqueued"] == 0
+        assert len(pool.notify_calls) == 1
+
+
+# ─── Dialect parity: PG EXTRACT(EPOCH) vs SQLite julianday ─────────────────
+
+
+class TestHungChildrenSqlDialectParity:
+    """Compile-check / render-verify BOTH dialect branches of the
+    hang-detection SQL (deep-review warning 4).
+
+    The suite's engines are SQLite-only while PostgreSQL is the
+    production primary — the PG branch would otherwise ship
+    completely unexecuted. Pattern: dialect-specific SQL rendered
+    through the dialect's compiler (mirrors the readiness.py
+    constants split at ``daemon/services/readiness.py:100-107``).
+    """
+
+    def _shared_predicate_asserts(self, rendered: str) -> None:
+        for terminal in ("completed", "error", "terminated", "failed"):
+            assert f"'{terminal}'" in rendered
+        assert "status != 'paused'" in rendered
+        assert "status != 'waiting_children'" in rendered
+        assert "last_activity_at IS NOT NULL" in rendered
+        # Bind placeholders survive compilation under the target
+        # dialect's paramstyle (named ``:x`` before compilation,
+        # ``%(x)s`` for psycopg, ``?`` for SQLite qmark).
+        assert (
+            ":parent_id" in rendered
+            or "%(parent_id)s" in rendered
+            or "?" in rendered
+        )
+        assert (
+            ":threshold_seconds" in rendered
+            or "%(threshold_seconds)s" in rendered
+            or "?" in rendered
+        )
+
+    def test_postgres_branch_compiles_and_renders_extract_epoch(self):
+        sql = SQLModelInstanceRepository._build_hung_children_sql("postgresql")
+        rendered = str(sql.compile(dialect=postgresql.dialect()))
+        assert "EXTRACT(EPOCH FROM (now() - last_activity_at))" in rendered
+        assert "julianday" not in rendered
+        # Strictly-greater-than age predicate against the bind.
+        # psycopg paramstyle renders named binds as ``%(name)s``.
+        assert (
+            "EXTRACT(EPOCH FROM (now() - last_activity_at))"
+            " > %(threshold_seconds)s" in rendered
+        )
+        assert "%(parent_id)s" in rendered
+        self._shared_predicate_asserts(rendered)
+
+    def test_sqlite_branch_compiles_and_renders_julianday(self):
+        sql = SQLModelInstanceRepository._build_hung_children_sql("sqlite")
+        rendered = str(sql.compile(dialect=sqlite_dialect.dialect()))
+        assert "(julianday('now') - julianday(last_activity_at)) * 86400" in rendered
+        assert "EXTRACT" not in rendered
+        # qmark paramstyle renders binds positionally as ``?``.
+        assert (
+            "(julianday('now') - julianday(last_activity_at))"
+            " * 86400 > ?" in rendered
+        )
+        self._shared_predicate_asserts(rendered)
+
+    def test_unknown_dialect_falls_back_to_sqlite_branch(self):
+        """Anything that is not PostgreSQL renders the SQLite
+        expression — the repository's production switch is
+        ``engine.dialect.name == 'postgresql'``."""
+        sql = SQLModelInstanceRepository._build_hung_children_sql("mysql")
+        rendered = str(sql.compile(dialect=sqlite_dialect.dialect()))
+        assert "julianday" in rendered
+        assert "EXTRACT" not in rendered

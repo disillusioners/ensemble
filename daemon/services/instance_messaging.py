@@ -2288,7 +2288,25 @@ class InstanceMessagingService:
                 message_source.startswith("internal_report:") or
                 message_source.startswith("internal_error_report:")
             )
-            if is_internal_report:
+            # System-origin infrastructure messages (``system:*``,
+            # e.g. the waiting-children watchdog's
+            # ``system:watchdog`` hang notice) resolve their dispatch
+            # source the SAME way internal reports do — look up the
+            # instance's original external source — instead of
+            # stamping themselves into ``original_source``. Without
+            # this guard a watchdog notice to a parent that never had
+            # an external message would (a) pollute
+            # ``instances.instance_metadata.original_source`` with
+            # ``system:watchdog`` and (b) send every progressive AI
+            # chunk of the woken turn to the source dispatcher under
+            # a bogus ``system:watchdog`` target (harmless no-op, but
+            # log noise + wrong semantics). With it, a
+            # telegram-originated parent still dispatches to telegram
+            # after a watchdog wake, and an api-originated parent
+            # simply has no external dispatch (``source`` without a
+            # real adapter).
+            is_system_origin = message_source.startswith("system:")
+            if is_internal_report or is_system_origin:
                 # This is an internal message (completion report, error report, etc.)
                 # Retrieve the original external source from instance metadata.
                 # Wrap the sync DB read in ``asyncio.to_thread`` to keep the
@@ -2298,7 +2316,13 @@ class InstanceMessagingService:
                 )
                 if instance_meta is not None and instance_meta.instance_metadata is not None:
                     dispatch_source = instance_meta.instance_metadata.get("original_source")
-                if not dispatch_source:
+                if not dispatch_source and is_internal_report:
+                    # Missing original_source is only noteworthy for a
+                    # genuine internal report (something external
+                    # SHOULD have preceded it). A system-origin notice
+                    # (``system:*``) to an instance with no external
+                    # history simply has no external dispatch target —
+                    # expected, not a warning.
                     logger.warning(
                         f"No original_source found for instance {instance_id[:8]}... "
                         f"(message_source={message_source})"

@@ -13,6 +13,7 @@ from typing import Any
 from sqlalchemy import bindparam, case, delete as sql_delete, func, literal, not_, or_, String, text
 from sqlalchemy import cast as sa_cast
 from sqlalchemy.engine import Engine
+from sqlalchemy.sql.elements import TextClause
 from sqlmodel import Session as SQLModelSession, select, col
 
 from .models import Instance, InstanceHierarchy, InstanceStatus
@@ -2059,6 +2060,15 @@ class SQLModelInstanceRepository:
     # one waits for the user's resume. So the helper applies an
     # additional ``status != 'paused'`` filter on top of the
     # ``NOT IN (terminal_set)`` predicate.
+    #
+    # ``waiting_children`` is excluded for the same reason one level
+    # down: a child parked in WAITING_CHILDREN is itself blocked on
+    # ITS children's completion reports — it is not wedged, it is
+    # waiting by design, and parking does NOT refresh
+    # ``last_activity_at``. Counting such a child as hung would nudge
+    # the grandparent to revive/replace a subtree that is still
+    # legitimately working — the exact duplicate-work hazard the
+    # paused exclusion exists to avoid, applied recursively.
     _WAITING_CHILDREN_HUNG_TERMINAL_SET: tuple[str, ...] = (
         "completed",
         "error",
@@ -2081,6 +2091,49 @@ class SQLModelInstanceRepository:
             ).all()
             return list(rows)
 
+    @staticmethod
+    def _build_hung_children_sql(dialect_name: str) -> TextClause:
+        """Build the hung-children SQL for ``dialect_name``.
+
+        Extracted from :meth:`list_hung_children_for_parent` so the
+        PostgreSQL branch can be compile-checked / render-verified in
+        unit tests without a PG server (the suite's engines are
+        SQLite-only while PG is the production primary). Mirrors the
+        readiness.py dialect-constant pattern
+        (``_QUEUE_MAX_AGE_SQL_POSTGRES`` / ``_QUEUE_MAX_AGE_SQL_SQLITE``
+        at ``daemon/services/readiness.py:100-107``).
+
+        Args:
+            dialect_name: ``self.engine.dialect.name`` — only the
+                ``"postgresql"`` / everything-else (SQLite) split
+                matters here.
+
+        Returns:
+            A ``text()`` clause with the ``:parent_id`` /
+            ``:threshold_seconds`` binds. Callers own execution.
+        """
+        if dialect_name == "postgresql":
+            age_expr = "EXTRACT(EPOCH FROM (now() - last_activity_at))"
+        else:
+            age_expr = (
+                "(julianday('now') - julianday(last_activity_at)) * 86400"
+            )
+        terminal_csv = ", ".join(
+            f"'{s}'" for s in SQLModelInstanceRepository._WAITING_CHILDREN_HUNG_TERMINAL_SET
+        )
+        return text(f"""
+            SELECT instance_id AS child_id,
+                   {age_expr} AS age_seconds
+              FROM instances
+             WHERE parent_id = :parent_id
+               AND status NOT IN ({terminal_csv})
+               AND status != 'paused'
+               AND status != 'waiting_children'
+               AND last_activity_at IS NOT NULL
+               AND {age_expr} > :threshold_seconds
+             ORDER BY age_seconds DESC
+        """)
+
     def list_hung_children_for_parent(
         self,
         parent_id: str,
@@ -2099,6 +2152,11 @@ class SQLModelInstanceRepository:
           (``completed`` / ``error`` / ``terminated`` / ``failed``).
           ``paused`` is DELIBERATELY excluded — a paused child is the
           canonical "not hung" case and the parent must NOT be nagged.
+          ``waiting_children`` is excluded the same way — a child
+          parked on ITS children is waiting by design (parking does
+          not refresh ``last_activity_at``), and counting it hung
+          would push the grandparent into duplicating a still-working
+          subtree.
         * ``EXTRACT(EPOCH FROM (now() - last_activity_at))`` (PG) or
           ``(julianday('now') - julianday(last_activity_at)) * 86400``
           (SQLite) is strictly greater than ``threshold_seconds``.
@@ -2134,30 +2192,16 @@ class SQLModelInstanceRepository:
                 f"threshold_seconds must be >= 0; got {threshold_seconds!r}"
             )
 
-        is_pg = self.engine.dialect.name == "postgresql"
-        terminal_csv = ", ".join(
-            f"'{s}'" for s in self._WAITING_CHILDREN_HUNG_TERMINAL_SET
-        )
-
-        # Dialect switch on age expression — same pattern as
+        # Dialect switch on the age expression — same pattern as
         # ``daemon/services/readiness.py`` at lines 100-107
         # (``_QUEUE_MAX_AGE_SQL_POSTGRES`` / ``_QUEUE_MAX_AGE_SQL_SQLITE``).
         # SQLite ships with ``julianday``; PG accepts
         # ``EXTRACT(EPOCH FROM ...)``. The local ``_build_zombie_scan_sql``
         # builds a NOT-EXISTS join skeleton, NOT an age expression,
-        # so it is NOT the right precedent here.
-        if is_pg:
-            age_expr = "EXTRACT(EPOCH FROM (now() - last_activity_at))"
-        else:
-            age_expr = (
-                "(julianday('now') - julianday(last_activity_at)) * 86400"
-            )
-
-        # Single SQL statement — no hydration, no Python-side filtering.
-        # ``age_seconds`` is returned as a FLOAT (PG) or REAL (SQLite),
-        # both of which SQLAlchemy yields as ``float`` for the driver
-        # rows we read via ``db_session.exec`` (house pattern from the
-        # drift reconciler's age predicates).
+        # so it is NOT the right precedent here. The SQL text lives
+        # in :meth:`_build_hung_children_sql` so the PG branch is
+        # dialect-parity-testable without a PG server (the unit suite
+        # only runs SQLite while PG is the production primary).
         #
         # ``status != 'paused'`` filter: ``paused`` is technically
         # non-terminal (not in the ``_WAITING_CHILDREN_HUNG_TERMINAL_SET``
@@ -2170,17 +2214,16 @@ class SQLModelInstanceRepository:
         # also means an episode ENDS cleanly when a child is paused
         # — the cooldown set is cleared and a future non-paused
         # episode can re-notify.
-        sql = text(f"""
-            SELECT instance_id AS child_id,
-                   {age_expr} AS age_seconds
-              FROM instances
-             WHERE parent_id = :parent_id
-               AND status NOT IN ({terminal_csv})
-               AND status != 'paused'
-               AND last_activity_at IS NOT NULL
-               AND {age_expr} > :threshold_seconds
-             ORDER BY age_seconds DESC
-        """)
+        #
+        # ``status != 'waiting_children'`` filter: the same hazard one
+        # level down. A child parked in WAITING_CHILDREN is blocked on
+        # its own children — not wedged — and parking does NOT refresh
+        # ``last_activity_at``, so the age predicate would misread it
+        # as hung. Nudging this parent to revive/replace that child
+        # would duplicate a subtree that is still working. Documented
+        # at the class constant above (mirrors the paused-exclusion
+        # pattern).
+        sql = self._build_hung_children_sql(self.engine.dialect.name)
         with SQLModelSession(self.engine) as db_session:
             rows = db_session.exec(
                 sql,
@@ -2190,3 +2233,39 @@ class SQLModelInstanceRepository:
                 },
             ).all()
         return [(row.child_id, float(row.age_seconds)) for row in rows]
+
+    def list_terminal_instance_ids(self, instance_ids: list[str]) -> set[str]:
+        """Return the subset of ``instance_ids`` whose status is terminal.
+
+        Terminal set mirrors ``_WAITING_CHILDREN_HUNG_TERMINAL_SET``
+        (``completed`` / ``error`` / ``terminated`` / ``failed``).
+        Used by the WAITING_CHILDREN watchdog's per-tick cooldown
+        purge: a (parent, child) pair whose child reached a terminal
+        status via ANY path must have its notified-episode cooldown
+        cleared — not only via the watchdog's own scan of that parent
+        (a scan that errored, or a parent that left WAITING_CHILDREN,
+        would otherwise strand the pair in the cooldown set forever).
+
+        Args:
+            instance_ids: Candidate ids. Duplicates are fine; the
+                result is a set. Empty list short-circuits to an
+                empty set (no SQL emitted).
+
+        Returns:
+            Set of the input ids that are currently terminal. Ids
+            that do not exist in the table are simply absent from
+            the result (a missing row cannot be concluded terminal —
+            callers keep their cooldown entries for those).
+        """
+        if not instance_ids:
+            return set()
+        with SQLModelSession(self.engine) as db_session:
+            rows = db_session.exec(
+                select(Instance.instance_id).where(
+                    Instance.instance_id.in_(instance_ids),
+                    Instance.status.in_(
+                        list(self._WAITING_CHILDREN_HUNG_TERMINAL_SET)
+                    ),
+                )
+            ).all()
+            return set(rows)

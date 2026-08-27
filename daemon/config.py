@@ -888,22 +888,28 @@ class ServicesConfig(BaseSettings):
     )
     waiting_children_watchdog_interval_seconds: int = Field(
         default=3600,
+        ge=1,
         description=(
             "How often the WAITING_CHILDREN hang watchdog runs (seconds). "
             "Default 3600 = 1 hour. Lower = more responsive to genuine "
-            "hangs but more DB scans. Override via "
+            "hangs but more DB scans. Must be >= 1 (0 would spin the "
+            "loop); rejected at config validation. Override via "
             "SERVICES_WAITING_CHILDREN_WATCHDOG_INTERVAL_SECONDS env var."
         ),
     )
     waiting_children_watchdog_hang_threshold_seconds: int = Field(
         default=3600,
+        ge=0,
         description=(
             "A non-terminal child whose last_activity_at is older than "
             "this (strictly greater than) is considered hung. Age is "
             "computed SQL-side via EXTRACT(EPOCH FROM (now()-col)) on "
             "PostgreSQL and julianday() on SQLite to avoid psycopg "
-            "session-local-time skew. Default 3600 = 1 hour. Override "
-            "via SERVICES_WAITING_CHILDREN_WATCHDOG_HANG_THRESHOLD_SECONDS "
+            "session-local-time skew. Default 3600 = 1 hour; 0 means "
+            "any measurable age counts (test scenarios). Must be >= 0; "
+            "negative values are rejected at config validation. "
+            "Override via "
+            "SERVICES_WAITING_CHILDREN_WATCHDOG_HANG_THRESHOLD_SECONDS "
             "env var."
         ),
     )

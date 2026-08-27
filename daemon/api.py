@@ -503,41 +503,61 @@ async def lifespan(app: FastAPI):
     # Issue #8 — WAITING_CHILDREN hang watchdog. Periodic asyncio
     # loop that detects parents stuck in WAITING_CHILDREN because a
     # child is hung (non-terminal AND last_activity_at older than the
-    # hang threshold) and injects a guidance notice into the parent
-    # via manager.set_injection with provenance "system:watchdog".
-    # Mirrors the lifespan-task pattern of the drift reconciler above
+    # hang threshold) and delivers a guidance notice to the parent
+    # via manager.enqueue_message (the WAKING path: MessageQueue +
+    # Task rows, WC→RUNNING flip, worker-pool notify — a RAM
+    # set_injection append never reaches a parked parent; deep-review
+    # 2026-08-27) with provenance "system:watchdog". Mirrors the
+    # lifespan-task pattern of the drift reconciler above
     # (asyncio.create_task + cancel/await on shutdown). Disabled when
     # ``config.services.waiting_children_watchdog_enabled`` is False —
     # the loop function returns immediately in that case.
+    #
+    # Boot hardening (deep-review warning 3): the config Fields carry
+    # ``ge=1`` / ``ge=0`` so invalid env values are rejected at
+    # config validation with a precise message. The try/except below
+    # is the belt-and-suspenders layer: ANY residual construction
+    # failure disables the watchdog with an ERROR log instead of
+    # crashing the already-half-booted daemon (a background safety
+    # net must never take the daemon down at boot).
     from daemon.services.waiting_children_watchdog import (
         WaitingChildrenWatchdog,
         run_waiting_children_watchdog_loop,
     )
-    watchdog_instance_repo = SQLModelInstanceRepository(engine=manager.engine)
-    waiting_children_watchdog = WaitingChildrenWatchdog(
-        instance_repository=watchdog_instance_repo,
-        manager=manager,
-        enabled=config.services.waiting_children_watchdog_enabled,
-        interval_seconds=config.services.waiting_children_watchdog_interval_seconds,
-        hang_threshold_seconds=config.services.waiting_children_watchdog_hang_threshold_seconds,
-    )
-    if waiting_children_watchdog.enabled:
-        waiting_children_watchdog_task = asyncio.create_task(
-            run_waiting_children_watchdog_loop(
-                waiting_children_watchdog,
-                interval_seconds=waiting_children_watchdog.interval_seconds,
-            ),
-            name="waiting-children-watchdog",
+    try:
+        watchdog_instance_repo = SQLModelInstanceRepository(engine=manager.engine)
+        waiting_children_watchdog = WaitingChildrenWatchdog(
+            instance_repository=watchdog_instance_repo,
+            manager=manager,
+            enabled=config.services.waiting_children_watchdog_enabled,
+            interval_seconds=config.services.waiting_children_watchdog_interval_seconds,
+            hang_threshold_seconds=config.services.waiting_children_watchdog_hang_threshold_seconds,
         )
-        app.state.waiting_children_watchdog_task = waiting_children_watchdog_task
-        logger.info(
-            f"Waiting-children watchdog started: "
-            f"interval={waiting_children_watchdog.interval_seconds}s, "
-            f"hang_threshold={waiting_children_watchdog.hang_threshold_seconds}s"
+    except Exception as watchdog_boot_exc:
+        app.state.waiting_children_watchdog_task = None
+        logger.error(
+            f"Waiting-children watchdog DISABLED — construction failed: "
+            f"{watchdog_boot_exc}",
+            exc_info=True,
         )
     else:
-        app.state.waiting_children_watchdog_task = None
-        logger.info("Waiting-children watchdog disabled by config")
+        if waiting_children_watchdog.enabled:
+            waiting_children_watchdog_task = asyncio.create_task(
+                run_waiting_children_watchdog_loop(
+                    waiting_children_watchdog,
+                    interval_seconds=waiting_children_watchdog.interval_seconds,
+                ),
+                name="waiting-children-watchdog",
+            )
+            app.state.waiting_children_watchdog_task = waiting_children_watchdog_task
+            logger.info(
+                f"Waiting-children watchdog started: "
+                f"interval={waiting_children_watchdog.interval_seconds}s, "
+                f"hang_threshold={waiting_children_watchdog.hang_threshold_seconds}s"
+            )
+        else:
+            app.state.waiting_children_watchdog_task = None
+            logger.info("Waiting-children watchdog disabled by config")
 
     # Reconcile terminal watches — notify watchers for jobs that already reached terminal state
     reconciled = await job_queue_service.reconcile_terminal_watches()
