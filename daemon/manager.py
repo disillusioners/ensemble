@@ -680,6 +680,17 @@ class InstanceManager:
         # ``_context_skill_results`` and ``_skill_search_message_counts``.
         self._explicit_skill_loaded: set[str] = set()
 
+        # Quick-win #7 (revive-once guard): per-child cumulative counter
+        # of AGENT-TOOL-initiated terminal revives, keyed by the CHILD
+        # instance id. RAM-only — a daemon restart resets it (accepted
+        # v1 limitation). Incremented ONLY via
+        # :meth:`note_agent_tool_revive`, which is called solely from
+        # the agent-tool ``send_message`` terminal-revive branch
+        # (``daemon/tools/instance.py``); the user-API revive path
+        # (``daemon/services/instance_messaging.py``) never touches it.
+        # Full contract on the accessor methods below.
+        self._agent_tool_revive_counts: dict[str, int] = {}
+
         # NEW: EventBus for hybrid event delivery (DB + streaming)
 
         # NEW: Source repository for source config and session mapping management
@@ -2428,6 +2439,77 @@ class InstanceManager:
         if queue is None:
             return None
         return list(queue)
+
+    # ------------------------------------------------------------------
+    # Quick-win #7 — revive-once guard for agent-tool-initiated revives
+    # ------------------------------------------------------------------
+    # ``RECOVERY_GUIDANCE_HINT`` (``daemon/services/error_reporting.py``)
+    # tells parent agents: revive a failed child AT MOST ONCE via a
+    # "continue" send; if it fails again, spawn a replacement. That bound
+    # used to be LLM-enforced only. This counter makes it MECHANICAL —
+    # but ONLY on the agent-tool ``send_message`` path: the sole caller
+    # of :meth:`note_agent_tool_revive` is the terminal-revive branch in
+    # ``daemon/tools/instance.py``. The user-API revive path
+    # (``_prepare_enqueued_message`` in
+    # ``daemon/services/instance_messaging.py``) is a DIFFERENT authority
+    # — it must never increment this counter and is never blocked by it.
+
+    def get_agent_tool_revive_count(self, instance_id: str) -> int:
+        """Return the cumulative agent-tool revive count for ``instance_id``.
+
+        Contract (quick-win #7):
+          * IN-MEMORY ONLY — no DB persistence; a daemon restart resets
+            every counter to zero (accepted v1 limitation).
+          * AGENT-TOOL PATH ONLY — the count is bumped exclusively by
+            :meth:`note_agent_tool_revive`, invoked solely from the
+            agent-tool ``send_message`` terminal-revive branch. User-API
+            revives do not touch it.
+          * CUMULATIVE per child — no episode reset: a child revived once
+            that errored again after working is exactly the
+            spawn-a-replacement case the guard exists to force.
+
+        Args:
+            instance_id: The CHILD instance id (the revive target).
+
+        Returns:
+            The number of agent-tool revives already granted for the
+            child; ``0`` when none (or after a daemon restart).
+        """
+        return self._agent_tool_revive_counts.get(instance_id, 0)
+
+    def note_agent_tool_revive(self, instance_id: str) -> int:
+        """Increment the agent-tool revive counter; return the new count.
+
+        Called ONLY from the agent-tool ``send_message`` terminal-revive
+        branch (``daemon/tools/instance.py``) at the moment a
+        COMPLETED / TERMINATED / ERROR / FAILED target is about to be
+        revived and dispatched. Contract:
+          * IN-MEMORY ONLY — daemon restart resets the counter (v1).
+          * AGENT-TOOL PATH ONLY — the shared service-layer revive path
+            (``daemon/services/instance_messaging.py``) must NEVER call
+            this; user-API revives stay uncounted and unblocked.
+          * CUMULATIVE per child — never reset on success, completion,
+            or a later terminal transition.
+
+        Like the ``_pending_injections`` helpers these methods are
+        synchronous and ``await``-free, relying on cooperative
+        single-thread asyncio for atomicity — do not call them from a
+        thread pool.
+
+        Args:
+            instance_id: The CHILD instance id being revived.
+
+        Returns:
+            The new cumulative count (``1`` for the first granted
+            revive, ``2`` for a second grant, ...).
+        """
+        count = self._agent_tool_revive_counts.get(instance_id, 0) + 1
+        self._agent_tool_revive_counts[instance_id] = count
+        logger.info(
+            f"[ReviveGuard] Agent-tool revive #{count} granted for "
+            f"instance {instance_id[:8]}..."
+        )
+        return count
 
     # ------------------------------------------------------------------
     # Context Injection Restructure — Phase 3 (B2 fix)
