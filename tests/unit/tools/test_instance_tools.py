@@ -591,8 +591,8 @@ class TestTerminalRevive:
 # revive attempt (single-string, child id interpolated). Locked here so
 # the phrasing mirrors RECOVERY_GUIDANCE_HINT semantics verbatim.
 _REVIVE_REFUSAL_TEMPLATE = (
-    "Instance '{iid}' has already been revived once and failed again. "
-    "Reviving again is discouraged — spawn a replacement instance instead."
+    "Refused: Instance '{iid}' has already been revived once and "
+    "failed again. Spawn a replacement instance instead."
 )
 
 
@@ -735,6 +735,74 @@ class TestReviveOnceGuard:
                 f"the revive-once guard is agent-tool-path only"
             )
 
+    async def test_t5_busy_queue_rejection_does_not_consume_revive_budget(self):
+        """W2 (review-warning lock): the queue-busy guard sits BEFORE
+        the revive-once guard, so a busy-queue rejection must NOT
+        consume the child's revive budget. Two-step demonstration:
+
+          Step 1: terminal child + busy queue → busy-rejection text;
+                  counter UNTOUCHED (note_agent_tool_revive not called,
+                  get_agent_tool_revive_count == 0); no dispatch.
+          Step 2: same child, queue now idle → FIRST revive granted
+                  (counter 0→1, message dispatched).
+
+        This locks the ordering invariant "a busy-queue rejection never
+        consumes revive budget" — without it, a transient busy queue
+        could silently burn the one allowed revive on a no-op enqueue.
+        Same busy-queue shape as ``TestEnqueueOverrideForLoadSkill::
+        test_load_skill_keeps_queue_busy_guard``."""
+        with patch(
+            "daemon.tools.instance._check_team_membership",
+            return_value=None,
+        ):
+            manager = _make_manager(status="error")
+            # Step 1 — busy queue. Overrides the fixture's idle counts.
+            manager.get_queue_stats = AsyncMock(
+                return_value={"pending_count": 5, "processing_count": 2}
+            )
+            send_message = _get_send_message_tool(manager)
+
+            refused = await send_message.coroutine("child-1", "continue")
+
+        # Busy-queue rejection fired — NOT the revive-once refusal.
+        # The counter check was never reached because the busy-queue
+        # guard short-circuited first.
+        assert "already has a message in progress" in refused, (
+            f"Expected busy-queue rejection; got: {refused!r}"
+        )
+        # Counter UNTOUCHED: the busy-queue rejection sits BEFORE the
+        # revive-once guard, so the budget is preserved.
+        manager.note_agent_tool_revive.assert_not_called()
+        assert manager.get_agent_tool_revive_count("child-1") == 0
+        # No dispatch happened — busy-queue guard returns BEFORE
+        # enqueue_message is even attempted.
+        manager.enqueue_message.assert_not_awaited()
+        # Reset call tracking so step 2 assertions are clean.
+        manager.note_agent_tool_revive.reset_mock()
+        manager.enqueue_message.reset_mock()
+
+        # Step 2 — same child, queue now IDLE. First revive is granted
+        # (the budget survived the prior busy rejection).
+        with patch(
+            "daemon.tools.instance._check_team_membership",
+            return_value=None,
+        ):
+            manager.get_queue_stats = AsyncMock(
+                return_value={"pending_count": 0, "processing_count": 0}
+            )
+            send_message = _get_send_message_tool(manager)
+
+            granted = await send_message.coroutine("child-1", "continue")
+
+        # Counter 0→1, message dispatched via the enqueue-revive branch.
+        assert (
+            "Instance was error — revived and message dispatched."
+            in granted
+        ), f"Expected revival prefix; got: {granted!r}"
+        manager.note_agent_tool_revive.assert_called_once_with("child-1")
+        assert manager.get_agent_tool_revive_count("child-1") == 1
+        manager.enqueue_message.assert_awaited_once()
+
     def test_refusal_text_documented_in_docstring_and_full_doc(self):
         """Spec quick-win #7: the guard is documented in the tool's
         ``_full_doc_`` (and docstring — D10 parity): in-memory counter,
@@ -762,8 +830,9 @@ class TestReviveOnceGuard:
         full_doc = " ".join(send_message_tool._full_doc_.split())
 
         for phrase in (
+            "Refused: ",
             "has already been revived once and failed again",
-            "spawn a replacement instance instead",
+            "Spawn a replacement instance instead",
         ):
             assert phrase in docstring, (
                 f"Docstring must document the revive-once guard "

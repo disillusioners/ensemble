@@ -2208,9 +2208,9 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
               * ``"Instance was {prior_status} — revived and message
                 dispatched. Message queued and sent to <id>. …"``
                 (terminal-revive).
-              * ``"Instance '<id>' has already been revived once and
-                failed again. Reviving again is discouraged — spawn a
-                replacement instance instead."`` (revive-once refusal
+              * ``"Refused: Instance '<id>' has already been revived
+                once and failed again. Spawn a replacement instance
+                instead."`` (revive-once refusal
                 — second agent-tool revive attempt; no dispatch).
               * ``"Message queued and sent to <id>. …"`` (enqueue
                 parity — IDLE / WAITING / QUEUED / future additions).
@@ -2234,9 +2234,8 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
 
             # revive-once refusal (SECOND agent-tool revive attempt —
             # no dispatch; spawn a replacement instead):
-            "Instance '<id>' has already been revived once and failed
-            again. Reviving again is discouraged — spawn a replacement
-            instance instead."
+            "Refused: Instance '<id>' has already been revived once
+            and failed again. Spawn a replacement instance instead."
 
             # PAUSED reject (no dispatch):
             "Instance '<id>' is PAUSED. Paused instances cannot receive messages; delivery is rejected to respect the pause (operator/lifecycle intent). Wait for it to be resumed via the API/UI, or proceed with other work."
@@ -2487,18 +2486,21 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         # The user-API revive path (daemon/services/instance_messaging.py)
         # is a different authority — it neither increments the counter nor
         # is blocked by it (spec quick-win #7, agent-tool-path-only).
-        # The guard sits AFTER the queue-busy guard deliberately: a
-        # busy-queue rejection must not consume the child's revive budget
-        # (no revive happened), so the counter increments only when the
-        # revive+dispatch is actually about to proceed.
+        # ORDERING (W2 + Polish#1): the refusal check sits AFTER the
+        # queue-busy guard deliberately (a busy queue must not consume the
+        # revive budget), and the counter increment sits AFTER the
+        # successful ``enqueue_message`` call deliberately — an enqueue
+        # failure must not consume the revive grant either. Both guards
+        # leave the counter at zero on a given attempt; the FIRST revive
+        # is the meaningful one and is recorded only once the dispatch
+        # has actually gone through.
         if routed_via == "enqueue-revive":
             if manager.get_agent_tool_revive_count(instance_id) >= 1:
                 return (
-                    f"Instance '{instance_id}' has already been revived once and "
-                    f"failed again. Reviving again is discouraged — spawn a "
+                    f"Refused: Instance '{instance_id}' has already "
+                    f"been revived once and failed again. Spawn a "
                     f"replacement instance instead."
                 )
-            manager.note_agent_tool_revive(instance_id)
 
         # Enqueue the message via worker pool (creates MessageQueue + Task atomically).
         # send_message is ALWAYS agent-to-agent (internal orchestration) and
@@ -2512,6 +2514,13 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
             source=f"internal_agent:{current_instance_id}",
             metadata={"task_context": task_context_text} if task_context_text else None,
         )
+
+        # Counter increment AFTER successful enqueue_message (Polish#1) —
+        # the agent-tool revive grant is only consumed when the dispatch
+        # has actually happened. A transient ``enqueue_message`` exception
+        # above leaves the child eligible for a future revive attempt.
+        if routed_via == "enqueue-revive":
+            manager.note_agent_tool_revive(instance_id)
         message_id = result.message_id
 
         # Task 3b: provenance INFO logging at the call site (mirrors the
@@ -2659,9 +2668,9 @@ Returns:
       * ``"Instance was {prior_status} — revived and message
         dispatched. Message queued and sent to <id>. …"``
         (terminal-revive).
-      * ``"Instance '<id>' has already been revived once and failed
-        again. Reviving again is discouraged — spawn a replacement
-        instance instead."`` (revive-once refusal — second
+      * ``"Refused: Instance '<id>' has already been revived once
+        and failed again. Spawn a replacement instance instead."``
+        (revive-once refusal — second
         agent-tool revive attempt; no dispatch).
       * ``"Message queued and sent to <id>. …"`` (enqueue parity).
 
@@ -2689,9 +2698,8 @@ Example outputs::
 
     # revive-once refusal (SECOND agent-tool revive attempt — no
     # dispatch; spawn a replacement instead):
-    "Instance '<id>' has already been revived once and failed
-    again. Reviving again is discouraged — spawn a replacement
-    instance instead."
+    "Refused: Instance '<id>' has already been revived once
+    and failed again. Spawn a replacement instance instead."
 
     # PAUSED reject (no dispatch):
     "Instance '<id>' is PAUSED. Paused instances cannot receive messages; delivery is rejected to respect the pause (operator/lifecycle intent). Wait for it to be resumed via the API/UI, or proceed with other work."

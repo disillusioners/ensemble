@@ -258,6 +258,18 @@ Args:
 Returns:
     Dictionary with old_job_id, instance_id, message_id, new_job_id, status.
 
+Note (revive-once guard — W1): a ``job_continue`` whose target instance
+status is FAILED counts as an agent-tool-initiated revival and is bound
+by the manager's revive-once guard (quick-win #7). The first
+FAILED-continue of an instance is granted and increments the per-child
+counter; the SECOND FAILED-continue is refused with the same wording as
+``send_message``'s terminal-revive refusal ("Refused: Instance '<id>'
+has already been revived once and failed again. Spawn a replacement
+instance instead."). The COMPLETED-continue path is DELIBERATELY
+EXCLUDED — it is the designed give-more-work continue flow on a
+successful child, not a failure revive, so it neither increments nor
+is blocked by the guard.
+
 Example:
     job_continue(
         old_job_id="job_abc123",
@@ -992,6 +1004,52 @@ def create_job_tools(
                 if has_inflight:
                     return {"error": f"Instance {instance_id} has a task still in flight — wait for it to complete first"}
 
+            # 5b. Revive-once guard (W1, FAILED branch only).
+            #    ``RECOVERY_GUIDANCE_HINT`` (daemon/services/error_reporting.py)
+            #    bounds child revives to AT MOST ONE, then
+            #    spawn-a-replacement — previously LLM-enforced only. The
+            #    COMPLETED branch of ``job_continue`` is DELIBERATELY
+            #    EXCLUDED — it is the designed give-more-work continue
+            #    flow on a successful child, not a failure revive — so
+            #    it neither increments nor is blocked by the guard. ONLY
+            #    the FAILED branch counts against the once-bound: the
+            #    FIRST FAILED-continue of an instance is granted (counter
+            #    0→1, message dispatched); the SECOND is refused with
+            #    the same wording as ``send_message``'s terminal-revive
+            #    refusal, mirroring ``RECOVERY_GUIDANCE_HINT`` semantics.
+            #    The refusal returns BEFORE ``enqueue_message_job`` so a
+            #    refused continue dispatches NOTHING; the counter
+            #    increment sits AFTER ``enqueue_message_job`` deliberately
+            #    (matches the W2/Polish#1 convention in
+            #    ``daemon/tools/instance.py``) — a transient enqueue
+            #    failure leaves the child eligible for a future attempt.
+            #    Sits AFTER the in-flight Task gate deliberately: a
+            #    busy-queue rejection must not consume the child's
+            #    revive budget (no revive happened).
+
+            # 5c. Revive-once guard — REFUSAL CHECK (W1, FAILED branch only).
+            #     Companion to the 5b comment + the 6b increment below.
+            #     Sits AFTER the in-flight Task gate deliberately (a
+            #     busy-queue rejection must not consume the revive budget
+            #     — no revive happened) and BEFORE ``enqueue_message_job``
+            #     (the refused continue dispatches NOTHING — same shape
+            #     as ``send_message``'s terminal-revive refusal).
+            #     COMPLETED-continue never reaches this check: the
+            #     give-more-work flow is excluded from the guard. The
+            #     refusal wording is the same string
+            #     ``daemon/tools/instance.py`` returns on its second
+            #     agent-tool revive attempt — locked at the spec level so
+            #     the agent-facing guidance is identical across paths.
+            if instance_meta.status == InstanceStatus.FAILED.value:
+                if manager.get_agent_tool_revive_count(instance_id) >= 1:
+                    return {
+                        "error": (
+                            f"Refused: Instance '{instance_id}' has already "
+                            f"been revived once and failed again. Spawn a "
+                            f"replacement instance instead."
+                        )
+                    }
+
             # 6. Send message via the inline message-Job path (Phase 5 cutover) — creates
             # a JobItem mirror alongside the Task row so ``new_job_id`` below
             # is a real JobItem. The legacy flag-checked dispatcher and the
@@ -1003,6 +1061,17 @@ def create_job_tools(
                 # empty-caller fallback — "api" is in USER_ORIGIN_SOURCES.
                 source=f"agent:{caller_agent_id}" if caller_agent_id else "internal_agent:unknown",
             )
+
+            # 6b. Counter increment AFTER successful enqueue_message_job
+            #     (W1, ordering convention from W2/Polish#1 in
+            #     ``daemon/tools/instance.py``) — the FAILED-branch
+            #     revive grant is only consumed when the dispatch has
+            #     actually happened. COMPLETED-continue never reaches
+            #     this increment; it is the excluded give-more-work
+            #     flow. A transient ``enqueue_message_job`` exception
+            #     above leaves the child eligible for a future attempt.
+            if instance_meta.status == InstanceStatus.FAILED.value:
+                manager.note_agent_tool_revive(instance_id)
 
             # 7. Return new job_id (provided by AsyncMessageResult)
             return {

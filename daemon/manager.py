@@ -2473,13 +2473,23 @@ class InstanceManager:
     # ``RECOVERY_GUIDANCE_HINT`` (``daemon/services/error_reporting.py``)
     # tells parent agents: revive a failed child AT MOST ONCE via a
     # "continue" send; if it fails again, spawn a replacement. That bound
-    # used to be LLM-enforced only. This counter makes it MECHANICAL —
-    # but ONLY on the agent-tool ``send_message`` path: the sole caller
-    # of :meth:`note_agent_tool_revive` is the terminal-revive branch in
-    # ``daemon/tools/instance.py``. The user-API revive path
+    # used to be LLM-enforced only. This counter makes it MECHANICAL on
+    # the agent-tool paths: the callers of :meth:`note_agent_tool_revive`
+    # are (1) the terminal-revive branch in ``daemon/tools/instance.py``
+    # (``send_message`` against a COMPLETED / TERMINATED / ERROR / FAILED
+    # target), and (2) the FAILED branch of ``job_continue`` in
+    # ``daemon/tools/job_queue.py`` — both agent-tool revives of a
+    # terminal child. The user-API revive path
     # (``_prepare_enqueued_message`` in
     # ``daemon/services/instance_messaging.py``) is a DIFFERENT authority
     # — it must never increment this counter and is never blocked by it.
+    #
+    # ``job_continue`` COMPLETED-continue is DELIBERATELY EXCLUDED — it
+    # is the designed give-more-work continue flow on a successful child,
+    # not a failure revive, so it neither increments nor is blocked by
+    # this guard. FAILED-continue DOES count against the once-bound and
+    # is refused on the second attempt with the same wording as
+    # ``send_message``'s refusal (W1).
 
     def get_agent_tool_revive_count(self, instance_id: str) -> int:
         """Return the cumulative agent-tool revive count for ``instance_id``.
@@ -2488,9 +2498,11 @@ class InstanceManager:
           * IN-MEMORY ONLY — no DB persistence; a daemon restart resets
             every counter to zero (accepted v1 limitation).
           * AGENT-TOOL PATH ONLY — the count is bumped exclusively by
-            :meth:`note_agent_tool_revive`, invoked solely from the
-            agent-tool ``send_message`` terminal-revive branch. User-API
-            revives do not touch it.
+            :meth:`note_agent_tool_revive`, invoked from the agent-tool
+            revives (``send_message`` terminal-revive in
+            ``daemon/tools/instance.py`` AND the FAILED branch of
+            ``job_continue`` in ``daemon/tools/job_queue.py`` — both
+            W1 callers). User-API revives do not touch it.
           * CUMULATIVE per child — no episode reset: a child revived once
             that errored again after working is exactly the
             spawn-a-replacement case the guard exists to force.
@@ -2507,14 +2519,19 @@ class InstanceManager:
     def note_agent_tool_revive(self, instance_id: str) -> int:
         """Increment the agent-tool revive counter; return the new count.
 
-        Called ONLY from the agent-tool ``send_message`` terminal-revive
-        branch (``daemon/tools/instance.py``) at the moment a
-        COMPLETED / TERMINATED / ERROR / FAILED target is about to be
-        revived and dispatched. Contract:
+        Called from the agent-tool revive call sites at the moment a
+        terminal child is about to be revived and dispatched:
+          * ``send_message`` terminal-revive branch
+            (``daemon/tools/instance.py``) — COMPLETED / TERMINATED /
+            ERROR / FAILED targets.
+          * ``job_continue`` FAILED branch
+            (``daemon/tools/job_queue.py``) — FAILED targets only
+            (W1; COMPLETED-continue is excluded — designed give-more-work
+            flow, not a failure revive).
+        The shared service-layer revive path
+        (``daemon/services/instance_messaging.py``) must NEVER call
+        this; user-API revives stay uncounted and unblocked.
           * IN-MEMORY ONLY — daemon restart resets the counter (v1).
-          * AGENT-TOOL PATH ONLY — the shared service-layer revive path
-            (``daemon/services/instance_messaging.py``) must NEVER call
-            this; user-API revives stay uncounted and unblocked.
           * CUMULATIVE per child — never reset on success, completion,
             or a later terminal transition.
 
