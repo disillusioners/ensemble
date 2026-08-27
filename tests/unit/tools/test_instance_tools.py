@@ -784,6 +784,47 @@ class TestReviveOnceGuard:
                 f"_full_doc_ must document guard caveat {caveat!r}"
             )
 
+    def test_provenance_documented_in_docstring_and_full_doc(self):
+        """Quick-win #1 (D10 parity): the injection provenance marker
+        is documented in BOTH the docstring and ``_full_doc_`` —
+        ``internal_agent:<caller_instance_id>`` source on the
+        downstream HumanMessage for agent-tool sends; no ``source``
+        for user-API sends (back-compat)."""
+        from daemon.tools.instance import create_instance_tools
+
+        patches = _patch_heavy_helpers()
+        for p in patches:
+            p.start()
+        try:
+            tools = create_instance_tools(
+                _make_manager(status="idle"), "parent-instance", "developer"
+            )
+        finally:
+            for p in reversed(patches):
+                p.stop()
+
+        send_message_tool = next(
+            t for t in tools if getattr(t, "name", None) == "send_message"
+        )
+        # Normalize whitespace: the docs line-wrap the phrases.
+        docstring = " ".join(send_message_tool.description.split())
+        full_doc = " ".join(send_message_tool._full_doc_.split())
+
+        for phrase in (
+            "Provenance (quick-win #1)",
+            "internal_agent:<caller_instance_id>",
+            'HumanMessage.additional_kwargs["source"]',
+            "user-API injected sends carry no",
+        ):
+            assert phrase in docstring, (
+                f"Docstring must document injection provenance "
+                f"({phrase!r}); got: {docstring[:300]!r}"
+            )
+            assert phrase in full_doc, (
+                f"_full_doc_ must document injection provenance "
+                f"({phrase!r}); got: {full_doc[:300]!r}"
+            )
+
 
 # ---------------------------------------------------------------------------
 # Test c — PAUSED branch (Task 5, R-O1 verbatim)
