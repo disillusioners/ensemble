@@ -2350,7 +2350,12 @@ class InstanceManager:
 
     _INJECTION_TTL_SECONDS = 3600  # 1h — orphaned sweep window (S1)
 
-    def set_injection(self, instance_id: str, content: str) -> dict[str, str]:
+    def set_injection(
+        self,
+        instance_id: str,
+        content: str,
+        source: str | None = None,
+    ) -> dict[str, str]:
         """Append a pending user message to the RAM injection queue.
 
         Append-list semantics: a second ``set_injection`` for the same
@@ -2358,17 +2363,39 @@ class InstanceManager:
         existing entry. The agent_node consumes ALL queued messages on
         its next LLM call, in FIFO order (oldest first).
 
+        Quick-win #1 (S scope) — provenance ``source`` parameter: when
+        set, the value is carried through the FIFO and stamped onto the
+        drained ``HumanMessage.additional_kwargs["source"]`` at the
+        graph drain site (``daemon/graph.py``) so the recipient's
+        context can show the message's origin (e.g.,
+        ``"internal_agent:<caller_instance_id>"``). When ``None``
+        (default) the entry dict is byte-identical to the pre-quick-win
+        shape — no ``"source"`` key is added, and the downstream
+        ``HumanMessage.additional_kwargs`` is unchanged.
+
         Args:
             instance_id: Target instance.
             content: The user message text to inject on the next LLM call.
+            source: Optional provenance marker carried onto the
+                downstream ``HumanMessage``. Typical value:
+                ``"internal_agent:<caller_instance_id>"``. ``None``
+                (default) preserves byte-identical pre-quick-win
+                behavior.
 
         Returns:
-            The newly appended entry as ``{"content": str, "timestamp": str}``.
+            The newly appended entry as ``{"content": str, "timestamp": str}``,
+            plus ``"source"`` when provided.
         """
-        entry = {
+        entry: dict[str, str] = {
             "content": content,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
+        if source is not None:
+            # Quick-win #1: provenance marker. Conditionally attached so
+            # the entry dict stays byte-identical to the pre-quick-win
+            # shape when ``source is None`` — required by the
+            # back-compat contract.
+            entry["source"] = source
         queue = self._pending_injections.get(instance_id)
         if queue is None:
             queue = []

@@ -2116,6 +2116,10 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
             pairing safety is preserved by the existing
             ``_ensure_tool_result_pairing`` guard at
             ``daemon/graph.py:2893`` — no new guard site is added.
+            Provenance (quick-win #1): agent-tool injected sends carry
+            an ``internal_agent:<caller_instance_id>`` marker on the
+            downstream ``HumanMessage.additional_kwargs["source"]``;
+            user-API injected sends carry no ``source`` (back-compat).
             EXCEPTION: a send bearing ``load_skill`` or a non-empty
             ``context`` routes via ENQUEUE even for these statuses —
             both parameters are enqueue-pipeline-only (the ``<meta>``
@@ -2405,7 +2409,18 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         # status is the source of truth; a status change after the
         # routing decision is handled by downstream logic).
         if routed_via == "injection":
-            manager.set_injection(instance_id, message)
+            # Quick-win #1 (S scope): stamp the agent-tool caller
+            # provenance onto the FIFO entry so the drain site can carry
+            # it onto ``HumanMessage.additional_kwargs["source"]``. The
+            # user-API call site (``daemon/routers/messages.py``) is
+            # untouched and continues to call ``set_injection`` without
+            # ``source`` (default ``None``) → byte-identical pre-quick-win
+            # behavior for that path.
+            manager.set_injection(
+                instance_id,
+                message,
+                source=f"internal_agent:{current_instance_id}",
+            )
             # Task 3b: provenance INFO logging at the call site. v1
             # mitigation for injection anonymity (R-LEADER deferred the
             # ``set_injection(..., source=None)`` + drain-stamps

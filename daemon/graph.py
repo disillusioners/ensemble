@@ -2872,12 +2872,25 @@ def create_agent_node(
             pending_list = injection_slot.get(instance_id)
             if pending_list:
                 # Build a HumanMessage for each pending entry — FIFO order.
+                # Quick-win #1 (S scope): if the FIFO entry carries an
+                # optional ``source`` (e.g. ``"internal_agent:<caller_iid>"``
+                # from the agent-tool ``send_message`` injection branch),
+                # propagate it onto ``HumanMessage.additional_kwargs["source"]``
+                # so the recipient's context can show the message's origin.
+                # When no entry carries ``source`` the conditional add keeps
+                # ``additional_kwargs`` byte-identical to the pre-quick-win
+                # shape (``{"injected_message": True}`` only) — required by
+                # the back-compat contract.
                 for entry in pending_list:
                     content = entry.get("content", "")
+                    extra_kwargs: dict[str, Any] = {"injected_message": True}
+                    entry_source = entry.get("source")
+                    if entry_source is not None:
+                        extra_kwargs["source"] = entry_source
                     injected_msgs.append(
                         HumanMessage(
                             content=content,
-                            additional_kwargs={"injected_message": True},
+                            additional_kwargs=extra_kwargs,
                         )
                     )
                 # Tool-call pairing guard: if the persisted state tail is an
@@ -2905,9 +2918,24 @@ def create_agent_node(
                         f"for instance {instance_short} — continuing"
                     )
 
+                # Quick-win #1 (S scope) — provenance log enhancement:
+                # surface a representative ``source=`` on the drain INFO
+                # log when any FIFO entry carries one. Multi-entry mixed
+                # sources are rare in practice; we surface the first
+                # source we encounter (FIFO order) for forensic clarity.
+                # When NO entry carries ``source`` the log line is
+                # byte-identical to the pre-quick-win shape — required by
+                # the back-compat contract.
+                source_tag = ""
+                for entry in pending_list:
+                    entry_source = entry.get("source")
+                    if entry_source is not None:
+                        source_tag = f" source={entry_source}"
+                        break
+
                 logger.info(
                     f"[Injection] Pulled {len(injected_msgs)} pending "
-                    f"message(s) for {instance_short}"
+                    f"message(s) for {instance_short}{source_tag}"
                 )
 
                 # Phase 3 / Task 7 (W5): finalize the SSE emissions at the

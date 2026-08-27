@@ -18,6 +18,7 @@ contract in isolation.
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -566,3 +567,178 @@ class TestSSEPlaceholder:
         )
 
         assert len(result["messages"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# Quick-win #1 (S scope) — provenance ``source`` parameter for
+# ``Manager.set_injection``. The FIFO entry's ``"source"`` key is
+# propagated onto the drained ``HumanMessage.additional_kwargs["source"]``
+# at the agent_node drain site. The default (``source`` not in the
+# entry) keeps the message bytes byte-identical to the pre-quick-win
+# shape (no ``"source"`` key added).
+# ---------------------------------------------------------------------------
+
+
+class TestInjectionSourceProvenance:
+    """Quick-win #1: provenance ``source`` on the agent_node drain site.
+
+    Verifies the three SPEC test cases (T1, T2, T3):
+
+      * T1 — an entry carrying ``source="internal_agent:<id>"`` produces
+        a drained ``HumanMessage`` whose
+        ``additional_kwargs["source"] == "internal_agent:<id>"``.
+      * T2 — an entry WITHOUT ``source`` produces a drained
+        ``HumanMessage`` whose ``additional_kwargs`` does NOT contain a
+        ``"source"`` key (byte-identical to pre-quick-win).
+      * T3 — the drain INFO log surfaces the source value when present.
+    """
+
+    @pytest.mark.asyncio
+    async def test_t1_source_in_entry_propagates_to_drained_human_message(self):
+        """T1: source=``"internal_agent:<id>"`` on the FIFO entry lands
+        on ``HumanMessage.additional_kwargs["source"]`` after the
+        agent_node consumes the slot. Also verifies the message is
+        returned via C2 (persisted in the checkpoint) and is what the
+        LLM was called with.
+        """
+        src = "internal_agent:caller-uuid-1"
+        slot = _StubInjectionSlot(initial={
+            "iid-1": [
+                {
+                    "content": "hello from caller",
+                    "timestamp": "2026-01-01T00:00:00+00:00",
+                    "source": src,
+                },
+            ],
+        })
+        agent_node, llm = _make_agent(injection_slot=slot)
+
+        result = await agent_node(
+            {"messages": []},
+            config={"configurable": {"thread_id": "iid-1"}},
+        )
+
+        # The drained message is appended to the LLM input and is the
+        # first message in the C2 return list (C2 persists the full
+        # inbox via add_messages).
+        sent_to_llm = llm.calls[0]
+        # LLM input is [System, injected HumanMessage]
+        assert isinstance(sent_to_llm[1], HumanMessage)
+        assert sent_to_llm[1].content == "hello from caller"
+        # The provenance marker is carried on additional_kwargs.
+        assert (sent_to_llm[1].additional_kwargs or {}).get("source") == src
+        # The legacy injected_message flag is still set.
+        assert (sent_to_llm[1].additional_kwargs or {}).get("injected_message") is True
+
+        # C2 return: same message persisted for the checkpoint.
+        assert len(result["messages"]) == 2
+        persisted = result["messages"][0]
+        assert isinstance(persisted, HumanMessage)
+        assert (persisted.additional_kwargs or {}).get("source") == src
+
+    @pytest.mark.asyncio
+    async def test_t2_no_source_in_entry_drains_with_no_source_key(self):
+        """T2: default (no source on the entry) drains a message with NO
+        ``"source"`` key in ``additional_kwargs`` — byte-identical to
+        the pre-quick-win shape. Asserts the exact
+        ``additional_kwargs`` dict so any inadvertent ``"source"`` key
+        addition (even with value ``None``) is caught.
+        """
+        slot = _StubInjectionSlot(initial={
+            "iid-1": [{"content": "plain user msg", "timestamp": "ts"}],
+        })
+        agent_node, llm = _make_agent(injection_slot=slot)
+
+        result = await agent_node(
+            {"messages": []},
+            config={"configurable": {"thread_id": "iid-1"}},
+        )
+
+        sent_to_llm = llm.calls[0]
+        # The injected message is appended to the LLM input.
+        assert isinstance(sent_to_llm[1], HumanMessage)
+        assert sent_to_llm[1].content == "plain user msg"
+
+        # Byte-identical back-compat: ``additional_kwargs`` has exactly
+        # one key (``"injected_message"``) — no ``"source"`` key, even
+        # with value ``None``.
+        assert sent_to_llm[1].additional_kwargs == {"injected_message": True}
+        # Explicit assertions to make the back-compat intent obvious if
+        # someone later refactors the dict literal to include a default
+        # ``"source": None``.
+        assert "source" not in (sent_to_llm[1].additional_kwargs or {})
+
+        # C2 return carries the same byte-identical message.
+        persisted = result["messages"][0]
+        assert isinstance(persisted, HumanMessage)
+        assert persisted.additional_kwargs == {"injected_message": True}
+        assert "source" not in (persisted.additional_kwargs or {})
+
+    @pytest.mark.asyncio
+    async def test_t3_enhanced_drain_log_includes_source_value(self, caplog):
+        """T3: when an entry carries ``source=...``, the drain INFO log
+        surfaces it as a `` source=<value>`` suffix. Uses pytest's
+        built-in ``caplog`` fixture (project's standard log-capture
+        pattern — see ``tests/unit/tools/test_instance_tools.py``).
+        """
+        src = "internal_agent:caller-uuid-2"
+        slot = _StubInjectionSlot(initial={
+            "iid-1": [
+                {
+                    "content": "msg with provenance",
+                    "timestamp": "2026-01-01T00:00:00+00:00",
+                    "source": src,
+                },
+            ],
+        })
+        agent_node, _ = _make_agent(injection_slot=slot)
+
+        with caplog.at_level(logging.INFO, logger="daemon.graph"):
+            await agent_node(
+                {"messages": []},
+                config={"configurable": {"thread_id": "iid-1"}},
+            )
+
+        pull_records = [
+            r for r in caplog.records
+            if r.name == "daemon.graph"
+            and "[Injection] Pulled" in r.getMessage()
+        ]
+        assert len(pull_records) == 1, (
+            f"Expected exactly one '[Injection] Pulled' log line; got "
+            f"{[r.getMessage() for r in pull_records]}"
+        )
+        assert src in pull_records[0].getMessage()
+        # The suffix shape is `` source=<value>`` (single space prefix).
+        assert f" source={src}" in pull_records[0].getMessage()
+
+    @pytest.mark.asyncio
+    async def test_t2_log_line_is_byte_identical_when_no_source(self, caplog):
+        """T2 companion: the drain INFO log is byte-identical to the
+        pre-quick-win shape when no entry carries ``source`` (no
+        `` source=...`` suffix appended). Locks the back-compat log
+        contract independently from the message-bytes assertion in T2.
+        """
+        slot = _StubInjectionSlot(initial={
+            "iid-1": [{"content": "plain user msg", "timestamp": "ts"}],
+        })
+        agent_node, _ = _make_agent(injection_slot=slot)
+
+        with caplog.at_level(logging.INFO, logger="daemon.graph"):
+            await agent_node(
+                {"messages": []},
+                config={"configurable": {"thread_id": "iid-1"}},
+            )
+
+        pull_records = [
+            r for r in caplog.records
+            if r.name == "daemon.graph"
+            and "[Injection] Pulled" in r.getMessage()
+        ]
+        assert len(pull_records) == 1, (
+            f"Expected exactly one '[Injection] Pulled' log line; got "
+            f"{[r.getMessage() for r in pull_records]}"
+        )
+        msg = pull_records[0].getMessage()
+        # No `` source=`` suffix when no entry carries one.
+        assert "source=" not in msg
