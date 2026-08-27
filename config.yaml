@@ -223,6 +223,18 @@ services:
   #   orphan-retry chain. Set to 0 to disable.
   graph_timeout_minutes: 120
 
+  # WAITING_CHILDREN hang watchdog (issue #8). Detects parents stuck in
+  # WAITING_CHILDREN because a child is hung (non-terminal AND
+  # last_activity_at older than the hang threshold) and injects a
+  # guidance notice into the parent so the LangGraph turn can pick a
+  # remediation (inspect via subtree_messages, one-shot revive, spawn
+  # a replacement, or escalate). Conservative defaults (1h cadence,
+  # 1h threshold) — quiet, infrequent background sweep that only fires
+  # on genuine stalls. Disable globally with enabled=false.
+  waiting_children_watchdog_enabled: ${SERVICES_WAITING_CHILDREN_WATCHDOG_ENABLED:-true}
+  waiting_children_watchdog_interval_seconds: ${SERVICES_WAITING_CHILDREN_WATCHDOG_INTERVAL_SECONDS:-3600}
+  waiting_children_watchdog_hang_threshold_seconds: ${SERVICES_WAITING_CHILDREN_WATCHDOG_HANG_THRESHOLD_SECONDS:-3600}
+
 # Job System Settings
 job_system:
   job_retry_scheduler_enabled: null  # null/empty = disabled. Set to true to enable background retry polling.

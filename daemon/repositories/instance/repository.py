@@ -2035,3 +2035,154 @@ class SQLModelInstanceRepository:
             )
             db_session.commit()
             return result.rowcount
+
+    # --------------------------------------------------------
+    # WAITING_CHILDREN WATCHDOG HELPERS (issue #8)
+    # --------------------------------------------------------
+    # The watchdog (daemon/services/waiting_children_watchdog.py)
+    # needs two SQL-side primitives — both use dialect-aware age
+    # computation to avoid the psycopg session-local-time skew (the
+    # ``last_activity_at`` column is timezone-naive; reading it back
+    # via a +07 PG session would shift the value by 7h).
+
+    # Hang = child non-terminal AND age(last_activity_at) > threshold.
+    # The terminal set mirrors ``_TERMINAL_STATUSES_FOR_ZOMBIE_SCAN``:
+    # ``completed``, ``error``, ``terminated``, ``failed``.
+    #
+    # Design note — ``paused`` is NOT in the terminal set above, BUT
+    # we still exclude paused children via the application-side
+    # filter in ``list_hung_children_for_parent`` (see comment
+    # there). A paused child is NOT "hung" by intent — a user or
+    # system operator has paused it explicitly and is the canonical
+    # decision-maker. Nudging the parent to "spawn a replacement"
+    # would silently create a duplicate child while the paused
+    # one waits for the user's resume. So the helper applies an
+    # additional ``status != 'paused'`` filter on top of the
+    # ``NOT IN (terminal_set)`` predicate.
+    _WAITING_CHILDREN_HUNG_TERMINAL_SET: tuple[str, ...] = (
+        "completed",
+        "error",
+        "terminated",
+        "failed",
+    )
+
+    def list_waiting_children_parents(self) -> list[str]:
+        """Return ``instance_id``s for instances currently in ``WAITING_CHILDREN``.
+
+        Cheap status-only enumeration — no instance hydration needed; the
+        watchdog only walks children of these IDs, and a per-parent
+        hydration would be wasted work for parents with no live children.
+        """
+        with SQLModelSession(self.engine) as db_session:
+            rows = db_session.exec(
+                select(Instance.instance_id).where(
+                    Instance.status == InstanceStatus.WAITING_CHILDREN.value
+                )
+            ).all()
+            return list(rows)
+
+    def list_hung_children_for_parent(
+        self,
+        parent_id: str,
+        threshold_seconds: int,
+    ) -> list[tuple[str, float]]:
+        """Return ``[(child_id, age_seconds), ...]`` for hung children of ``parent_id``.
+
+        A child is "hung" iff ALL of the following hold:
+
+        * ``child.parent_id == parent_id`` (walks the PERMANENT
+          ``instances.parent_id`` record, not the transient
+          ``instance_hierarchy`` working set — a child that completed
+          and was swept from the hierarchy is still in the permanent
+          record, and a hung child by definition has not completed).
+        * ``child.status`` is NOT in the terminal set
+          (``completed`` / ``error`` / ``terminated`` / ``failed``).
+          ``paused`` is DELIBERATELY excluded — a paused child is the
+          canonical "not hung" case and the parent must NOT be nagged.
+        * ``EXTRACT(EPOCH FROM (now() - last_activity_at))`` (PG) or
+          ``(julianday('now') - julianday(last_activity_at)) * 86400``
+          (SQLite) is strictly greater than ``threshold_seconds``.
+          Age is computed SQL-side (per house pattern in
+          ``daemon/repositories/task/repository.py``) to avoid the
+          7h psycopg session-local skew that bites naive
+          ``datetime.now(tz.utc) - row.last_activity_at`` reads on PG
+          deployments running in a non-UTC session.
+
+        ``last_activity_at IS NULL`` rows are skipped by the SQL
+        predicate (they evaluate NULL, never True, under ``>``).
+        Such rows indicate an instance that was never heartbeated
+        after creation — extremely rare in production but possible
+        during the warm-up window. The watchdog will catch them on a
+        later tick after ``last_activity_at`` is populated.
+
+        Args:
+            parent_id: The parent instance ID (must already be known
+                to be in ``WAITING_CHILDREN``; the caller is
+                responsible for that filter — keeps this helper single-
+                purpose and cheap).
+            threshold_seconds: Strictly-greater-than threshold. A
+                child whose age equals the threshold exactly is NOT
+                considered hung; only strictly older ages count.
+
+        Returns:
+            List of ``(child_id, age_seconds)`` tuples. Empty when no
+            children are hung. Ordered by age DESC (oldest first) so
+            the watchdog can pick the worst offenders first.
+        """
+        if threshold_seconds < 0:
+            raise ValueError(
+                f"threshold_seconds must be >= 0; got {threshold_seconds!r}"
+            )
+
+        is_pg = self.engine.dialect.name == "postgresql"
+        terminal_csv = ", ".join(
+            f"'{s}'" for s in self._WAITING_CHILDREN_HUNG_TERMINAL_SET
+        )
+
+        # Dialect switch on age expression — same pattern as
+        # ``_build_zombie_scan_stmt`` above. SQLite ships with
+        # ``julianday``; PG accepts ``EXTRACT(EPOCH FROM ...)``.
+        if is_pg:
+            age_expr = "EXTRACT(EPOCH FROM (now() - last_activity_at))"
+        else:
+            age_expr = (
+                "(julianday('now') - julianday(last_activity_at)) * 86400"
+            )
+
+        # Single SQL statement — no hydration, no Python-side filtering.
+        # ``age_seconds`` is returned as a FLOAT (PG) or REAL (SQLite),
+        # both of which SQLAlchemy yields as ``float`` for the driver
+        # rows we read via ``db_session.exec`` (house pattern from the
+        # drift reconciler's age predicates).
+        #
+        # ``status != 'paused'`` filter: ``paused`` is technically
+        # non-terminal (not in the ``_WAITING_CHILDREN_HUNG_TERMINAL_SET``
+        # above), but a paused child is NOT "hung" — it is awaiting a
+        # user/system decision and the parent must NOT be nagged. The
+        # brief's literal "non-terminal" definition would include
+        # ``paused``; we exclude it as a deliberate design choice
+        # (documented at the class constant above and in the
+        # watchdog's module docstring). An exclusion of ``paused``
+        # also means an episode ENDS cleanly when a child is paused
+        # — the cooldown set is cleared and a future non-paused
+        # episode can re-notify.
+        sql = text(f"""
+            SELECT instance_id AS child_id,
+                   {age_expr} AS age_seconds
+              FROM instances
+             WHERE parent_id = :parent_id
+               AND status NOT IN ({terminal_csv})
+               AND status != 'paused'
+               AND last_activity_at IS NOT NULL
+               AND {age_expr} > :threshold_seconds
+             ORDER BY age_seconds DESC
+        """)
+        with SQLModelSession(self.engine) as db_session:
+            rows = db_session.exec(
+                sql,
+                params={
+                    "parent_id": parent_id,
+                    "threshold_seconds": float(threshold_seconds),
+                },
+            ).all()
+        return [(row.child_id, float(row.age_seconds)) for row in rows]

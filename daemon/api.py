@@ -499,6 +499,46 @@ async def lifespan(app: FastAPI):
         f"min_pending_age={min_pending_age}s"
     )
 
+    # ─────────────────────────────────────────────────────────────
+    # Issue #8 — WAITING_CHILDREN hang watchdog. Periodic asyncio
+    # loop that detects parents stuck in WAITING_CHILDREN because a
+    # child is hung (non-terminal AND last_activity_at older than the
+    # hang threshold) and injects a guidance notice into the parent
+    # via manager.set_injection with provenance "system:watchdog".
+    # Mirrors the lifespan-task pattern of the drift reconciler above
+    # (asyncio.create_task + cancel/await on shutdown). Disabled when
+    # ``config.services.waiting_children_watchdog_enabled`` is False —
+    # the loop function returns immediately in that case.
+    from daemon.services.waiting_children_watchdog import (
+        WaitingChildrenWatchdog,
+        run_waiting_children_watchdog_loop,
+    )
+    watchdog_instance_repo = SQLModelInstanceRepository(engine=manager.engine)
+    waiting_children_watchdog = WaitingChildrenWatchdog(
+        instance_repository=watchdog_instance_repo,
+        manager=manager,
+        enabled=config.services.waiting_children_watchdog_enabled,
+        interval_seconds=config.services.waiting_children_watchdog_interval_seconds,
+        hang_threshold_seconds=config.services.waiting_children_watchdog_hang_threshold_seconds,
+    )
+    if waiting_children_watchdog.enabled:
+        waiting_children_watchdog_task = asyncio.create_task(
+            run_waiting_children_watchdog_loop(
+                waiting_children_watchdog,
+                interval_seconds=waiting_children_watchdog.interval_seconds,
+            ),
+            name="waiting-children-watchdog",
+        )
+        app.state.waiting_children_watchdog_task = waiting_children_watchdog_task
+        logger.info(
+            f"Waiting-children watchdog started: "
+            f"interval={waiting_children_watchdog.interval_seconds}s, "
+            f"hang_threshold={waiting_children_watchdog.hang_threshold_seconds}s"
+        )
+    else:
+        app.state.waiting_children_watchdog_task = None
+        logger.info("Waiting-children watchdog disabled by config")
+
     # Reconcile terminal watches — notify watchers for jobs that already reached terminal state
     reconciled = await job_queue_service.reconcile_terminal_watches()
     if reconciled > 0:
@@ -936,6 +976,27 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 logger.warning(f"Drift reconciler shutdown error: {e}")
         app.state.drift_reconciler_task = None
+
+    # Stop the WAITING_CHILDREN hang watchdog (issue #8). Same
+    # cancel/await pattern as the drift reconciler above. The task
+    # is None when the watchdog was disabled at startup; ``getattr``
+    # with a default keeps the shutdown branch safe even if the
+    # task was never created (e.g. a partial startup failure before
+    # the watchdog block ran).
+    watchdog_task = getattr(
+        app.state, "waiting_children_watchdog_task", None
+    )
+    if watchdog_task is not None and not watchdog_task.done():
+        watchdog_task.cancel()
+        try:
+            await watchdog_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.warning(
+                f"Waiting-children watchdog shutdown error: {e}"
+            )
+    app.state.waiting_children_watchdog_task = None
 
     # --- VS Code Server shutdown ---
     # Stop the code-server process BEFORE the manager shuts down
