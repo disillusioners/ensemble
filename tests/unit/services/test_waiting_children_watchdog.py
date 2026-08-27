@@ -52,11 +52,13 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from pydantic import ValidationError
 from sqlalchemy import create_engine, select
 from sqlalchemy.dialects import postgresql, sqlite as sqlite_dialect
 from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel
 
+from daemon.config import ServicesConfig
 from daemon.repositories.instance.models import Instance, InstanceStatus
 from daemon.repositories.instance.repository import SQLModelInstanceRepository
 from daemon.repositories.message_queue.models import MessageQueue
@@ -251,6 +253,71 @@ class TestConstructor:
             repo, manager, hang_threshold_seconds=0
         )
         assert w.hang_threshold_seconds == 0
+
+
+# ─── Config ge-bounds (council round-2 W3) ──────────────────────────────────
+
+
+class TestConfigGeBounds:
+    """Pydantic ``ge`` bounds on the watchdog's ``ServicesConfig`` fields.
+
+    Council round-2 W3 correction (2026-08-27): the bounds fire at
+    ``Settings`` INSTANTIATION — the exact layer ``load_config()``
+    uses (``Config(**config_dict)`` → the ``ServicesConfig``
+    BaseSettings model reads its ``SERVICES_``-prefixed env source),
+    called at ``config = load_config()`` near the top of the
+    lifespan in ``daemon/api.py`` — BEFORE and OUTSIDE the watchdog
+    wiring try/except. An out-of-range env value therefore ABORTS
+    BOOT with a pydantic ValidationError: deliberate fail-fast, NOT
+    a disable-with-ERROR-log. The lifespan try/except covers
+    construction-time failures only.
+
+    These tests pin the ACTUAL behavior so a regression into a
+    silent disable (or a shifted validation point) cannot land
+    unnoticed.
+    """
+
+    ENV_INTERVAL = "SERVICES_WAITING_CHILDREN_WATCHDOG_INTERVAL_SECONDS"
+    ENV_THRESHOLD = (
+        "SERVICES_WAITING_CHILDREN_WATCHDOG_HANG_THRESHOLD_SECONDS"
+    )
+
+    def test_interval_zero_aborts_at_settings_instantiation(
+        self, monkeypatch
+    ) -> None:
+        # ge=1 on the interval field: 0 would spin the loop, so it
+        # must be rejected — at Settings instantiation, i.e. boot.
+        monkeypatch.setenv(self.ENV_INTERVAL, "0")
+        with pytest.raises(ValidationError) as excinfo:
+            ServicesConfig()
+        msg = str(excinfo.value)
+        assert "greater_than_equal" in msg
+        assert "waiting_children_watchdog_interval_seconds" in msg
+
+    def test_negative_threshold_aborts_at_settings_instantiation(
+        self, monkeypatch
+    ) -> None:
+        # ge=0 on the threshold field: negative values are rejected
+        # at Settings instantiation, i.e. boot.
+        monkeypatch.setenv(self.ENV_THRESHOLD, "-1")
+        with pytest.raises(ValidationError) as excinfo:
+            ServicesConfig()
+        msg = str(excinfo.value)
+        assert "greater_than_equal" in msg
+        assert "waiting_children_watchdog_hang_threshold_seconds" in msg
+
+    def test_valid_bounds_load_succeeds(self, monkeypatch) -> None:
+        # The floors themselves are valid: interval=1 (ge=1 floor)
+        # and threshold=0 (ge=0 floor) must load cleanly.
+        monkeypatch.setenv(self.ENV_INTERVAL, "1")
+        monkeypatch.setenv(self.ENV_THRESHOLD, "0")
+        services = ServicesConfig()
+        assert (
+            services.waiting_children_watchdog_interval_seconds == 1
+        )
+        assert (
+            services.waiting_children_watchdog_hang_threshold_seconds == 0
+        )
 
 
 # ─── Repository helper boundary tests (SQLite) ──────────────────────────────

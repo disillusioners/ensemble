@@ -46,7 +46,12 @@ This service is the safety net. Every ``interval_seconds`` (default
    Cooldown resets run INDEPENDENTLY of the per-parent scan (see
    "Episode boundaries" below) so a pair can never strand in the
    set forever. The cooldown is per-process; a daemon restart
-   resets it. This is an accepted v1 limitation.
+   resets it. This is an accepted v1 limitation. Restart note
+   (council round-2): with ``discard_on_startup`` the startup
+   ``clear_all(preserve_in_flight=True)`` may sweep a committed-
+   but-undrained notice (its Task is PENDING, not running/paused);
+   combined with the in-memory cooldown reset, the worst case is
+   ≤1 interval of re-delay before the next tick re-notifies.
 
 **Delivery primitive — ``enqueue_message`` (the waking path).**
 The notice MUST wake the parked parent. ``set_injection`` is a RAM
@@ -520,6 +525,16 @@ class WaitingChildrenWatchdog:
                 )
                 # Stamp the cooldown set BEFORE moving on so a
                 # crash mid-loop does not double-notify on retry.
+                # At-least-once caveat (council round-2 note): the
+                # stamp happens AFTER the ``enqueue_message`` above
+                # has committed, so a post-commit raise in the
+                # delivery tail (inside enqueue_message after its
+                # transaction, or between the enqueue and this
+                # stamp) skips the stamp and the next tick
+                # re-enqueues → a duplicate notice. Narrow window;
+                # notice content is advisory, so a duplicate is
+                # benign. Delivery is at-least-once, not
+                # exactly-once.
                 for child_id, _age in new_pairs:
                     self._notified.add((parent_id, child_id))
                 stats["notices_enqueued"] += 1
@@ -580,6 +595,14 @@ class WaitingChildrenWatchdog:
         # while the child stays hung (deep-review warning 2). Runs
         # even when the parent's own scan failed this tick or in an
         # earlier tick — the enumeration itself is the fresh signal.
+        #
+        # Deliberate behavior (on record, council round-2): a parent
+        # that re-parks on the SAME hung child (exits
+        # WAITING_CHILDREN, then returns while the child stays hung)
+        # WILL be re-notified on the next tick — bounded at 1 notice
+        # per interval. Episodes end when the parent leaves the
+        # waiting state; the parent-side boundary IS the episode
+        # boundary, by design.
         still_waiting = set(parent_ids)
         departed_parent_pairs = {
             pair for pair in self._notified if pair[0] not in still_waiting

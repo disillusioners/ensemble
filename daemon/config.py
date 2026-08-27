@@ -893,7 +893,10 @@ class ServicesConfig(BaseSettings):
             "How often the WAITING_CHILDREN hang watchdog runs (seconds). "
             "Default 3600 = 1 hour. Lower = more responsive to genuine "
             "hangs but more DB scans. Must be >= 1 (0 would spin the "
-            "loop); rejected at config validation. Override via "
+            "loop); out-of-range values FAIL FAST AT BOOT — pydantic "
+            "ValidationError raised at Settings instantiation inside "
+            "load_config(), before the lifespan wiring (deliberate "
+            "fail-fast, not a runtime disable). Override via "
             "SERVICES_WAITING_CHILDREN_WATCHDOG_INTERVAL_SECONDS env var."
         ),
     )
@@ -907,8 +910,10 @@ class ServicesConfig(BaseSettings):
             "PostgreSQL and julianday() on SQLite to avoid psycopg "
             "session-local-time skew. Default 3600 = 1 hour; 0 means "
             "any measurable age counts (test scenarios). Must be >= 0; "
-            "negative values are rejected at config validation. "
-            "Override via "
+            "negative values FAIL FAST AT BOOT — pydantic ValidationError "
+            "raised at Settings instantiation inside load_config(), "
+            "before the lifespan wiring (deliberate fail-fast, not a "
+            "runtime disable). Override via "
             "SERVICES_WAITING_CHILDREN_WATCHDOG_HANG_THRESHOLD_SECONDS "
             "env var."
         ),

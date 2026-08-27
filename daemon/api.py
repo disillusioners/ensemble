@@ -513,13 +513,19 @@ async def lifespan(app: FastAPI):
     # ``config.services.waiting_children_watchdog_enabled`` is False —
     # the loop function returns immediately in that case.
     #
-    # Boot hardening (deep-review warning 3): the config Fields carry
-    # ``ge=1`` / ``ge=0`` so invalid env values are rejected at
-    # config validation with a precise message. The try/except below
-    # is the belt-and-suspenders layer: ANY residual construction
-    # failure disables the watchdog with an ERROR log instead of
-    # crashing the already-half-booted daemon (a background safety
-    # net must never take the daemon down at boot).
+    # Boot semantics (deep-review warning 3; council round-2 W3
+    # correction — doc-only): the interval/threshold bounds are
+    # enforced at CONFIG VALIDATION — ``ge=1`` / ``ge=0`` fire at
+    # ``Settings`` instantiation inside ``load_config()`` (the
+    # ``config = load_config()`` call near the top of this lifespan),
+    # which runs BEFORE and OUTSIDE the try/except below. Invalid env
+    # values therefore FAIL FAST and ABORT BOOT with a pydantic
+    # ValidationError — deliberate, council-approved behavior, NOT a
+    # disable-with-log. The try/except covers construction-time
+    # failures ONLY (repo / watchdog ctor); it disables the watchdog
+    # with an ERROR log instead of crashing the already-half-booted
+    # daemon, and can never see a config-bounds violation because
+    # those crash earlier.
     from daemon.services.waiting_children_watchdog import (
         WaitingChildrenWatchdog,
         run_waiting_children_watchdog_loop,
