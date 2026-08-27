@@ -826,6 +826,236 @@ _TOOL_INHERITED_ATTRS = (
 )
 
 
+# ---------------------------------------------------------------------------
+# Phase 2 (agent-instance-tools) — ``subtree_messages`` helpers + constants
+# ---------------------------------------------------------------------------
+#
+# The subtree query is authorization-scoped to the caller's own subtree via
+# a SINGLE chokepoint: ``_validate_subtree_target``. The helper calls the
+# leader-approved facade method ``manager.get_tree_ids_permanent(...)`` —
+# the tool layer MUST NOT reach into ``manager._instance_repository``
+# directly (D14 / R-D14). ``get_tree_ids_permanent`` itself walks the
+# permanent ``parent_id`` lineage (NOT the transient ``instance_hierarchy``
+# working set), Python-side BFS, depth-capped at 256. See
+# ``daemon/repositories/instance/repository.py:428-492``.
+
+# Canonical role names exposed to the LLM-facing API — see
+# ``daemon/utils.py:96``. The LangChain class names ``"human"`` /
+# ``"ai"`` are NOT accepted by ``subtree_messages`` ``filters.role`` —
+# they fail every filter call. Tests pin all four canonical names.
+
+_SUBTREE_CANONICAL_ROLES = frozenset({"user", "assistant", "tool", "system"})
+
+# Per-instance content truncation cap (full-mode messages).
+_SUBTREE_CONTENT_MAX_CHARS = 200
+# ToolMessage args redaction cap.
+_SUBTREE_TOOL_ARGS_MAX_CHARS = 100
+# Summary-mode content preview cap.
+_SUBTREE_SUMMARY_CONTENT_MAX_CHARS = 80
+# Hard ceiling on total output bytes; tail-truncated with a warning.
+_SUBTREE_OUTPUT_CEILING_CHARS = 8000
+
+
+def _validate_subtree_target(
+    manager: "InstanceManager",
+    caller_instance_id: str,
+    target_instance_id: str | None,
+) -> tuple[bool, list[str]]:
+    """Validate ``target_instance_id`` is in the caller's subtree.
+
+    Calls ``manager.get_tree_ids_permanent(caller_instance_id)`` — the
+    leader-approved facade seam that delegates to
+    ``InstanceRepository.get_tree_ids_permanent`` (Python-side BFS over
+    ``parent_id``, depth-capped 256). The tool layer MUST NOT call
+    ``manager._instance_repository`` directly (D14); this helper IS the
+    only authorization chokepoint.
+
+    Args:
+        manager: The InstanceManager facade.
+        caller_instance_id: The instance invoking the tool (its
+            ``parent_id`` lineage defines the subtree).
+        target_instance_id: The subtree root. ``None`` resolves to the
+            caller's OWN subtree (no root-walk — per §7 #13). An empty
+            string is rejected as malformed.
+
+    Returns:
+        ``(allowed, queried_subtree_ids)``:
+          * ``allowed=True`` — the target is in the caller's subtree; the
+            second element is the QUERIED subtree — i.e. the target's own
+            subtree (target + every descendant) when ``target ≠ caller``,
+            or the caller's subtree when ``target is caller / None``.
+            Iterating the queried subtree is what satisfies the
+            ``target=grandchild → grandchild's messages only`` case in
+            phase2-plan.md §Test Plan (a).
+          * ``allowed=False`` — the target is missing, malformed, or
+            outside the caller's subtree; the second element is the
+            caller's subtree (empty when the caller itself is missing).
+    """
+    if not caller_instance_id:
+        return False, []
+
+    if target_instance_id is not None and not str(target_instance_id).strip():
+        # Empty string treated as malformed — same as not-found, but
+        # with an explicit guard so the tool layer can produce a clean
+        # error message instead of letting an empty string match.
+        return False, manager.get_tree_ids_permanent(caller_instance_id)
+
+    caller_subtree = manager.get_tree_ids_permanent(caller_instance_id)
+    if not caller_subtree:
+        # Caller itself is missing from the permanent record — caller
+        # has no observable subtree.
+        return False, []
+
+    # ``target_instance_id=None`` → caller's own subtree (no root-walk).
+    resolved_target = target_instance_id or caller_instance_id
+    if resolved_target not in caller_subtree:
+        return False, caller_subtree
+
+    # Authz passed. The queried set is the TARGET's own subtree, not
+    # the caller's whole tree — this is what makes
+    # ``subtree_messages(target=grandchild_id)`` return only grandchild's
+    # messages instead of every descendant in the caller's tree.
+    # Both calls go through the facade (D14 / R-D14). When target IS the
+    # caller, ``caller_subtree`` already IS the target's subtree — we
+    # reuse it instead of calling the facade a second time.
+    if resolved_target == caller_instance_id:
+        return True, caller_subtree
+    return True, manager.get_tree_ids_permanent(resolved_target)
+
+
+def _filter_subtree_messages(
+    msgs: list[dict],
+    *,
+    is_descendant: bool,
+) -> list[dict]:
+    """Apply the D12 synthetic-message filter to a per-instance message list.
+
+    Phase 2 §3b (D12):
+      * When ``is_descendant=True`` (any descendant of the caller), drop
+        every ``is_synthetic=True`` message AND every real
+        ``role=="system"`` message — synthetic context tokens must never
+        leak to a parent, and a descendant's real system prompt is
+        persona-privileged and not shareable.
+      * When ``is_descendant=False`` (the caller itself), keep
+        ``role=="system"`` messages authored by the caller — the
+        caller's own system prompt is part of its context. The
+        synthetic-context/system entries are still dropped (they are
+        never meant to be quoted back at the caller).
+      * The ``role`` value MUST be one of the canonical lowercase
+        names (``user``/``assistant``/``tool``/``system``) per
+        ``daemon/utils.py:96``. ``"human"`` and ``"ai"`` will not match
+        any filter but will pass-through for non-filtered reads.
+
+    Args:
+        msgs: The list of serialized message dicts from
+            ``manager.get_messages(iid)``.
+        is_descendant: True iff the source instance is a descendant of
+            the caller (target != caller).
+
+    Returns:
+        The filtered message list. Original order preserved.
+    """
+    out: list[dict] = []
+    for m in msgs:
+        # Synthetic markers — both the dict key AND the message_id
+        # prefix (per persistence.py:437, 669). The prefix check is
+        # belt-and-suspenders; the dict key is the authoritative one.
+        if m.get("is_synthetic") is True:
+            continue
+        mid = m.get("message_id") or ""
+        if (
+            isinstance(mid, str)
+            and (mid.startswith("synthetic-system-") or mid.startswith("synthetic-context-"))
+        ):
+            continue
+
+        if is_descendant:
+            role = m.get("role")
+            if role == "system":
+                # Descendant's real system prompt is persona-privileged.
+                continue
+
+        out.append(m)
+    return out
+
+
+def _summarize_tool_message(m: dict) -> str:
+    """Build the ToolMessage redaction preview used in full mode.
+
+    Per Phase 2 §4: ToolMessage → ``name + first 100 chars of args``.
+    The tool-output ``content`` field is intentionally omitted — it is
+    the raw tool response and would otherwise dominate the token budget.
+    """
+    name = m.get("name") or m.get("tool_name") or "tool"
+    args = m.get("args") or m.get("arguments") or ""
+    if not isinstance(args, str):
+        args = str(args)
+    args_snippet = args[:_SUBTREE_TOOL_ARGS_MAX_CHARS]
+    if len(args) > _SUBTREE_TOOL_ARGS_MAX_CHARS:
+        args_snippet = args_snippet + "…"
+    return f"[{name}] {args_snippet}"
+
+
+def _render_subtree_message(
+    m: dict,
+    *,
+    summary: bool,
+) -> str:
+    """Render one message for the ``subtree_messages`` output string.
+
+    Args:
+        m: Serialized message dict from ``manager.get_messages(iid)``.
+        summary: When True, emit metadata-only (instance_id, agent_id,
+            role, created_at, tool_call_names, content preview).
+
+    Returns:
+        A single line (or short block) representing the message.
+    """
+    role = m.get("role") or "unknown"
+    created_at = m.get("created_at") or ""
+
+    if summary:
+        content = m.get("content") or ""
+        if not isinstance(content, str):
+            content = str(content)
+        preview = content[:_SUBTREE_SUMMARY_CONTENT_MAX_CHARS]
+        if len(content) > _SUBTREE_SUMMARY_CONTENT_MAX_CHARS:
+            preview = preview + "…"
+        tool_call_names = [
+            (tc.get("name") or "tool")
+            for tc in (m.get("tool_calls") or [])
+            if isinstance(tc, dict)
+        ]
+        parts = [f"[{role}]"]
+        if created_at:
+            parts.append(f"({created_at})")
+        if tool_call_names:
+            parts.append("tools=" + ",".join(tool_call_names))
+        if preview:
+            parts.append(preview)
+        return " ".join(parts)
+
+    # Full-content mode.
+    if role == "tool":
+        return _summarize_tool_message(m)
+
+    content = m.get("content") or ""
+    if not isinstance(content, str):
+        content = str(content)
+    snippet = content[:_SUBTREE_CONTENT_MAX_CHARS]
+    if len(content) > _SUBTREE_CONTENT_MAX_CHARS:
+        snippet = snippet + "…"
+    line = f"[{role}] {snippet}"
+    tool_call_names = [
+        (tc.get("name") or "tool")
+        for tc in (m.get("tool_calls") or [])
+        if isinstance(tc, dict)
+    ]
+    if tool_call_names:
+        line += f" (tools: {', '.join(tool_call_names)})"
+    return line
+
+
 def _rebuild_structured_tool(tool, wrapped_func) -> "StructuredTool":
     """Rebuild a StructuredTool preserving metadata attributes.
 
@@ -2268,7 +2498,442 @@ Example outputs::
     # PAUSED reject (no dispatch):
     "Instance '<id>' is PAUSED. Paused instances cannot receive messages; delivery is rejected to respect the pause (operator/lifecycle intent). Wait for it to be resumed via the API/UI, or proceed with other work."
 """
-    
+
+    # ──────────────────────────────────────────────────────────────────
+    # Phase 2 (agent-instance-tools) — ``subtree_messages`` read-only
+    # subtree query. Registered in the ``instance`` category so
+    # ``tools.allow: ["subtree_messages"]`` (narrow opt-in) OR
+    # ``tools.allow: ["instance"]`` (whole-category) both grant access.
+    # The default args mirror ``job_messages`` (job_queue.py:1447-1503)
+    # for consistency across the tool surface.
+    #
+    # Authorization: ``_validate_subtree_target`` is the SINGLE
+    # chokepoint — it calls ``manager.get_tree_ids_permanent(...)`` (the
+    # leader-approved facade seam) and returns a ``(allowed, subtree_ids)``
+    # tuple. The tool layer MUST NOT reach into
+    # ``manager._instance_repository`` directly (D14).
+    #
+    # Reads: ``await manager.get_messages(iid)`` per subtree instance —
+    # the canonical saver-based read (NOT the older graph-state path).
+    # Per-instance errors are caught and warned; the whole query never
+    # fails on a single bad instance.
+    #
+    # D12 (synthetic exclusion) is applied at RETRIEVAL time (not in the
+    # formatter) so synthetic token costs never reach the agent.
+    # ──────────────────────────────────────────────────────────────────
+    @register_tool_category("instance")
+    @tool
+    async def subtree_messages(
+        target_instance_id: str | None = None,
+        filters: dict | None = None,
+        limit: int = 50,
+        offset: int = 0,
+        max_instances: int = 20,
+        cap_first_N_per_instance: int = 0,
+        summary: bool = False,
+    ) -> str:
+        """Query messages across the caller's subtree. Read-only. Use tool_help("subtree_messages") for details."""
+        # ── 1. Validate args ────────────────────────────────────────
+        if limit < 0:
+            return (
+                "ERROR: subtree_messages: limit must be >= 0 "
+                f"(got {limit})."
+            )
+        if offset < 0:
+            return (
+                "ERROR: subtree_messages: offset must be >= 0 "
+                f"(got {offset})."
+            )
+        if max_instances <= 0:
+            return (
+                "ERROR: subtree_messages: max_instances must be > 0 "
+                f"(got {max_instances})."
+            )
+        if cap_first_N_per_instance < 0:
+            return (
+                "ERROR: subtree_messages: cap_first_N_per_instance "
+                f"must be >= 0 (got {cap_first_N_per_instance})."
+            )
+
+        filters = filters or {}
+        if not isinstance(filters, dict):
+            return (
+                "ERROR: subtree_messages: filters must be a dict "
+                f"(got {type(filters).__name__})."
+            )
+
+        # Canonical role filter — reject ``"human"``/``"ai"`` and other
+        # non-canonical names per Phase 2 §7 #4. ``"system"`` is
+        # allowed at the filter level but is heavily pruned at retrieval
+        # time by the D12 helper (real descendant system messages are
+        # dropped; caller's own system messages are kept).
+        role_filter = filters.get("role")
+        if role_filter is not None and role_filter != "":
+            if role_filter not in _SUBTREE_CANONICAL_ROLES:
+                return (
+                    "ERROR: subtree_messages: filters.role must be one "
+                    "of "
+                    f"{sorted(_SUBTREE_CANONICAL_ROLES)} "
+                    f"(canonical lowercase per daemon/utils.py:96), "
+                    f"got {role_filter!r}. The pre-serialization names "
+                    "'human' and 'ai' are NOT accepted."
+                )
+
+        child_filter = filters.get("child_instance_id")
+        if child_filter is not None and not isinstance(child_filter, str):
+            return (
+                "ERROR: subtree_messages: filters.child_instance_id "
+                f"must be a string, got {type(child_filter).__name__}."
+            )
+
+        status_filter = filters.get("status")
+        if status_filter is not None and not isinstance(status_filter, str):
+            return (
+                "ERROR: subtree_messages: filters.status must be a "
+                f"string, got {type(status_filter).__name__}."
+            )
+
+        # Combined-filter semantics: child_instance_id + target
+        # together is an error UNLESS equal (the target-as-its-own-
+        # descendant edge case where target == child_instance_id).
+        if (
+            child_filter is not None
+            and target_instance_id is not None
+            and child_filter != target_instance_id
+        ):
+            return (
+                "ERROR: subtree_messages: filters.child_instance_id "
+                f"({child_filter!r}) and target_instance_id "
+                f"({target_instance_id!r}) must be equal when both are "
+                "set."
+            )
+
+        # ── 2. Resolve subtree (single authz chokepoint) ─────────────
+        allowed, subtree_ids = _validate_subtree_target(
+            manager, current_instance_id, target_instance_id
+        )
+        if not allowed:
+            return (
+                "ERROR: subtree_messages: target_instance_id "
+                f"{target_instance_id!r} is not in the caller's "
+                "subtree, or the caller has no observable lineage. "
+                "The tool can only read messages from instances the "
+                "caller spawned (caller + descendants)."
+            )
+
+        # Resolve the canonical target: None → caller.
+        resolved_target = target_instance_id or current_instance_id
+
+        # ── 3. Cap enforcement: first N by instance_id sort ─────────
+        # Sort the subtree by instance_id so the subset returned is
+        # stable across calls (otherwise dict/set iteration order would
+        # differ between Python sessions).
+        sorted_subtree = sorted(subtree_ids)
+        truncated_by_cap = len(sorted_subtree) > max_instances
+        working_set = sorted_subtree[:max_instances]
+
+        # ── 4. Status filter: gather via Semaphore(5) gather ────────
+        status_map: dict[str, str | None] = {}
+        if status_filter is not None:
+            status_sem = asyncio.Semaphore(5)
+
+            async def _fetch_status(iid: str) -> tuple[str, str | None]:
+                async with status_sem:
+                    try:
+                        info = manager.get_instance_info(iid)
+                    except Exception as e:  # KeyError + defsive
+                        logger.warning(
+                            "subtree_messages: get_instance_info(%s) "
+                            "failed: %s: %s",
+                            iid, type(e).__name__, e,
+                        )
+                        return iid, None
+                    if not isinstance(info, dict):
+                        return iid, None
+                    return iid, info.get("status")
+
+            status_results = await asyncio.gather(
+                *[_fetch_status(iid) for iid in working_set]
+            )
+            status_map = dict(status_results)
+
+            working_set = [
+                iid for iid in working_set
+                if status_map.get(iid) == status_filter
+            ]
+
+        # ── 5. Per-instance read loop (get_messages once per iid) ───
+        collected: list[tuple[str, dict]] = []  # (instance_id, msg)
+        for iid in working_set:
+            is_descendant = iid != current_instance_id
+            try:
+                msgs = await manager.get_messages(iid)
+            except Exception as e:
+                logger.warning(
+                    "subtree_messages: get_messages(%s) failed: %s: %s",
+                    iid, type(e).__name__, e,
+                )
+                continue
+            if not isinstance(msgs, list):
+                msgs = []
+
+            # D12 exclusion at retrieval time (per §3b).
+            msgs = _filter_subtree_messages(msgs, is_descendant=is_descendant)
+
+            # Role filter applied AFTER D12 so callers that filter
+            # for "system" on their OWN subtree still see something
+            # (the caller's system prompt is kept by D12).
+            if role_filter is not None and role_filter != "":
+                msgs = [m for m in msgs if m.get("role") == role_filter]
+
+            # child_instance_id filter (instant — we already keyed by iid).
+            if child_filter is not None and child_filter != "":
+                if iid != child_filter:
+                    continue
+
+            # Per-instance breadth cap (cap_first_N_per_instance > 0):
+            # take the first N per instance BEFORE global pagination
+            # (matches job_messages behavior at job_queue.py).
+            if cap_first_N_per_instance > 0 and len(msgs) > cap_first_N_per_instance:
+                msgs = msgs[:cap_first_N_per_instance]
+
+            for m in msgs:
+                collected.append((iid, m))
+
+        # ── 6. Global pagination across merged collection ───────────
+        # Compaction is destructive — pre-compaction messages are
+        # replaced by ``RemoveMessage`` sentinels + a SystemMessage
+        # summary (daemon/compaction.py:1036-1070). Offsets returned
+        # today may not correspond to the same messages tomorrow.
+        # This is documented behavior, NOT a bug; agents MUST re-query
+        # after a compaction if they need stable pagination.
+        total_collected = len(collected)
+        end = offset + limit if limit > 0 else None
+        if end is None:
+            window = collected[offset:]
+        else:
+            window = collected[offset:end]
+
+        has_more = (offset + len(window)) < total_collected
+        if offset > 0 and not window:
+            warning_lines = [
+                f"WARNING: offset={offset} is past the end of the "
+                f"current collection ({total_collected} messages). "
+                "This is often caused by a compaction event between "
+                "queries — re-query with offset=0 to see the current "
+                "state."
+            ]
+        elif has_more:
+            warning_lines = []
+        else:
+            warning_lines = []
+
+        if truncated_by_cap:
+            warning_lines.append(
+                f"WARNING: subtree has {len(sorted_subtree)} "
+                f"instances; only the first {max_instances} (sorted "
+                "by instance_id) were queried. Increase max_instances "
+                "(<= 100) to inspect the rest, or split the query "
+                "across multiple targets."
+            )
+
+        # ── 7. Render per-instance blocks (job_messages style) ──────
+        # Group by instance_id for human readability. Sort by
+        # instance_id for stable output.
+        per_instance: dict[str, list[dict]] = {}
+        for iid, m in window:
+            per_instance.setdefault(iid, []).append(m)
+
+        block_lines: list[str] = []
+        block_lines.append(
+            f"subtree_messages(target={resolved_target!r}, "
+            f"limit={limit}, offset={offset}, "
+            f"max_instances={max_instances}, "
+            f"cap_first_N_per_instance={cap_first_N_per_instance}, "
+            f"summary={summary}, "
+            f"filters={filters!r})"
+        )
+        block_lines.append(
+            f"subtree_size={len(sorted_subtree)} "
+            f"(returned {len(working_set)} after caps/filter)"
+        )
+        block_lines.append(
+            f"messages={len(window)} of {total_collected} collected"
+        )
+
+        for iid in sorted(per_instance.keys()):
+            block_lines.append("")
+            block_lines.append(f"=== instance_id: {iid} ===")
+            for m in per_instance[iid]:
+                block_lines.append(_render_subtree_message(m, summary=summary))
+
+        output = "\n".join(block_lines)
+
+        # ── 8. Output ceiling with tail-truncate + warning ──────────
+        if len(output) > _SUBTREE_OUTPUT_CEILING_CHARS:
+            truncated_at = _SUBTREE_OUTPUT_CEILING_CHARS
+            output = (
+                output[:truncated_at]
+                + "\n\n[output truncated at "
+                f"{_SUBTREE_OUTPUT_CEILING_CHARS} chars; "
+                "reduce limit, lower max_instances, or set "
+                "summary=True to fit.]"
+            )
+            warning_lines.append(
+                "Output exceeded the "
+                f"{_SUBTREE_OUTPUT_CEILING_CHARS}-char ceiling "
+                "and was tail-truncated."
+            )
+
+        if warning_lines:
+            output = output + "\n\n" + "\n".join(warning_lines)
+
+        return output
+
+    subtree_messages._full_doc_ = """Query messages across the caller's subtree (read-only).
+
+Phase 2 (agent-instance-tools): a parent agent can introspect the
+conversation history of every instance it spawned (children,
+grandchildren, great-grandchildren, …), strictly scoped to its own
+subtree. Useful for post-mortem review of a delegated plan, audit of a
+multi-step workflow, or surface-rendering the context a descendant was
+operating under.
+
+Authorization
+-------------
+
+The tool can ONLY read messages from instances in the CALLER'S subtree.
+Subtree is defined by a Python-side BFS over ``instances.parent_id``
+(permanent lineage — survives completion, error, terminate, revive;
+``daemon/repositories/instance/repository.py:428-492``, depth-capped
+256). The ``instance_hierarchy`` working set is NOT consulted — it is
+transient and gets drained at terminate / child_reports / error paths.
+
+  * ``target_instance_id=None`` → caller's OWN subtree (no root-walk).
+  * ``target_instance_id=`` some descendant → that descendant's subtree.
+  * ``target_instance_id`` outside the caller's subtree → permission
+    error.
+
+This is the AUTHORIZATION — there is no separate per-instance ACL.
+Cross-subtree queries are rejected at retrieval time. The tool layer
+calls the leader-approved facade ``Manager.get_tree_ids_permanent(...)``
+— it MUST NOT reach into ``manager._instance_repository`` directly (D14).
+
+Synthetic-message exclusion (D12, §3b)
+---------------------------------------
+
+When the resolved target ≠ caller (i.e. reading a descendant's
+messages), the tool DROPS at retrieval time:
+
+  * every ``is_synthetic=True`` message (the per-turn context rebuild
+    emitted by ``GET /messages``);
+  * every ``message_id`` prefixed ``synthetic-system-`` /
+    ``synthetic-context-`` (``daemon/persistence.py:437, 669``); and
+  * every REAL ``role="system"`` message authored by the descendant
+    (descendant system prompts are persona-privileged and not
+    shareable).
+
+The filter happens at retrieval time — not in the formatter — so
+synthetic token costs never reach the agent. When the resolved target
+== caller, the caller's own system messages are KEPT (they are part of
+the caller's own context).
+
+Read path
+---------
+
+Each subtree instance is read ONCE via ``await manager.get_messages(iid)``
+(the canonical saver-based read; ``daemon/routers/instances.py:1422-1489``
+and ``daemon/tools/job_queue.py:1470`` ride the same path). The thread
+config is built inside ``get_instance_messages``
+(``daemon/persistence.py:309``). The older graph-state path is
+explicitly NOT used here — that API does not exist; this tool reads via
+the saver/checkpoint machinery only (regression guard against the
+broken API reappearing).
+(regression guard).
+
+Per-instance errors are caught and warned; the whole query never fails
+because one descendant has a missing / corrupt checkpoint.
+
+Status filter
+-------------
+
+When ``filters.status`` is set, the tool calls
+``manager.get_instance_info(iid)`` per working-set instance under
+``asyncio.Semaphore(5)``. The N× call fan-out is acceptable for v1
+(no bulk ``get_many_by_ids()`` exists in the facade today).
+
+Pagination
+----------
+
+  * ``limit`` (default 50) — GLOBAL cap across the merged collection
+    (NOT per-instance), matching ``job_messages``
+    (``daemon/tools/job_queue.py:1447-1503``).
+  * ``offset`` (default 0) — GLOBAL offset across the merged collection.
+  * ``cap_first_N_per_instance`` (default 0) — when > 0, take only the
+    first N messages from each instance BEFORE global pagination. Useful
+    for breadth-first sampling.
+
+KNOWN LIMITATION — compaction offset instability:
+
+  Context compaction (``daemon/compaction.py:1036-1070``) is
+  destructive: pre-compaction messages are replaced by ``RemoveMessage``
+  sentinels + a SystemMessage summary. ``offset/limit`` returned today
+  may not correspond to the same messages tomorrow. Agents MUST re-query
+  with ``offset=0`` after observing unexpected pagination behavior.
+
+Token safety
+------------
+
+  * Per-message content (full mode) is truncated to 200 chars + ellipsis.
+  * ``ToolMessage`` is redacted to ``[tool_name] <first 100 chars of args>``
+    — the raw tool-output ``content`` is OMITTED (it would otherwise
+    dominate the token budget).
+  * Per-instance cap: ``max_instances=20`` (default). When the subtree
+    exceeds the cap, the first 20 instances by ``instance_id`` sort are
+    returned + a warning.
+  * Output ceiling: ~8000 chars. Tail-truncated with a warning; reduce
+    ``limit``, lower ``max_instances``, or set ``summary=True`` to fit.
+  * ``summary=True`` mode (default False) emits ONLY
+    ``[role] (created_at) tools=… <first 80 chars of content>`` per
+    message — drops tool-output content and reduces output budget
+    ~80% versus full mode.
+
+Args:
+    target_instance_id: Root of subtree to query. ``None`` = caller's
+        own subtree (no root-walk).
+    filters: ``{"role": str, "child_instance_id": str, "status": str}``.
+        All three keys are optional; combined with AND semantics. Roles
+        MUST be the canonical lowercase ``"user" | "assistant" |
+        "tool" | "system"`` (``daemon/utils.py:96``) — ``"human"`` and
+        ``"ai"`` are NOT accepted.
+    limit: Global message cap across the merged collection
+        (default 50).
+    offset: Global offset across the merged collection (default 0).
+    max_instances: Total instance cap (default 20). Subtree beyond the
+        cap is silently truncated (sorted by instance_id); a warning
+        surfaces in the output.
+    cap_first_N_per_instance: When > 0, take only the first N messages
+        per instance before global pagination (default 0 = no
+        per-instance cap).
+    summary: When True, emit metadata-only mode (default False).
+
+Returns:
+    A human-readable string of per-instance blocks (matches the
+    ``job_messages`` output style). Warnings are appended at the end
+    (compaction-instability notice, cap truncation, output-ceiling
+    truncation). On permission error (target outside subtree, missing
+    caller lineage), returns an ``ERROR: subtree_messages: ...`` line —
+    no partial output, no leak.
+
+Example outputs::
+
+    subtree_messages(target=None, limit=10, summary=True)
+
+    subtree_messages(target='i-grandchild-7', filters={"role": "assistant"})
+
+    subtree_messages(target=None, filters={"child_instance_id": "i-child-3"})
+"""
+
     @register_tool_category("instance")
     @tool
     async def terminate_instance(instance_id: str) -> dict:
@@ -2386,6 +3051,7 @@ Returns:
         terminate_instance,
         list_instances,
         get_instance_info,
+        subtree_messages,           # Phase 2: read-only subtree query (opt-in)
         # Self-modification tool
         inner_soul,
         # Memory access tool

@@ -9339,6 +9339,32 @@ class InstanceManager:
         """
         return await self._messaging_service.get_messages(instance_id)
 
+    def get_tree_ids_permanent(self, caller_instance_id: str) -> list[str]:
+        """Get the caller's permanent subtree lineage (caller + descendants).
+
+        Phase 2 (agent-instance-tools, ``subtree_messages`` tool) uses
+        this facade to authorize subtree queries without reaching into
+        ``manager._instance_repository`` from the tool layer (D14 — the
+        Manager is the facade; tool code calls through it).
+
+        Walks ``instances.parent_id`` (permanent — survives completion,
+        error, terminate, revive) rather than the transient
+        ``instance_hierarchy`` working set. Python-side BFS, depth-capped
+        at ``_MAX_TRAVERSAL_DEPTH = 256``. Trees beyond the cap are
+        WARN-logged inside the repository and the visited set returned
+        as-is.
+
+        Args:
+            caller_instance_id: The instance ID whose subtree to enumerate
+                (caller + every descendant reachable via permanent
+                ``parent_id`` lineage).
+
+        Returns:
+            The list of instance IDs in the caller's subtree, root first.
+            Empty list when the caller is not found.
+        """
+        return self._instance_repository.get_tree_ids_permanent(caller_instance_id)
+
     def clear_all_instances(self) -> int:
         """Clear all instances from memory and database.
 
