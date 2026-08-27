@@ -7,7 +7,7 @@
   "version": "1.0.0",
   "innate_skills": ["opencode", "chart", "todo"],
   "tools": {
-    "allow": ["bash", "proc", "filesystem", "time", "self", "help", "image", "knowledge", "mcp", "context", "shared_meta_kv", "blueprint"]
+    "allow": ["bash", "proc", "filesystem", "time", "subtree_messages", "self", "help", "image", "knowledge", "mcp", "context", "shared_meta_kv", "blueprint"]
   },
   "team_members": ["explorer"]
 }

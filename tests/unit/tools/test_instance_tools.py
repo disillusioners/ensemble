@@ -3342,6 +3342,41 @@ class TestRegistration:
         )
 
     @pytest.mark.timeout(10)
+    def test_planner_and_tester_resolve_subtree_messages_via_registry(self):
+        """Quick-win #4: planner and tester opt into ``subtree_messages``.
+
+        Unlike the leader sanity test above (raw file read), this goes
+        through the production meta resolution path: a real
+        ``AgentRegistry`` discovery of the repo ``agents/`` tree, then
+        ``get_version()`` with the ``get_resolved()`` fallback — the
+        resolution convention from the Version Tag Tool Resolution fix
+        (all meta lookups MUST use ``get_version()`` first).
+        """
+        from daemon.registry import AgentRegistry
+
+        agents_dir = REPO_ROOT / "agents"
+        assert agents_dir.is_dir(), f"agents/ not found at {agents_dir}"
+
+        registry = AgentRegistry(agents_dir)
+        registry.discover()
+
+        for agent_id in ("planner", "tester"):
+            # Production resolution convention: get_version() first,
+            # get_resolved() fallback.
+            meta = registry.get_version(agent_id) or registry.get_resolved(
+                agent_id
+            )
+            assert meta is not None, (
+                f"{agent_id} was not discovered from the real agents/ tree"
+            )
+            allow = (meta.tools.allow if meta.tools is not None else None) or []
+            assert "subtree_messages" in allow, (
+                f"agents/{agent_id}/meta.json tools.allow must contain "
+                f"'subtree_messages' (resolved via get_version/"
+                f"get_resolved); got: {allow}"
+            )
+
+    @pytest.mark.timeout(10)
     def test_aget_state_regression_guard(self):
         """Regression guard: ``aget_state`` MUST NOT appear in the new
         tool code. The plan's exit-criterion grep."""
