@@ -593,6 +593,15 @@ class ContextCompactor:
             "default_headers": {
                 "x-proxy-app": "ensemble",
                 "x-proxy-interleaved-thinking": "True",
+                # X-LLMProxy-Buffer-Response: sent by default; omitted
+                # entirely (never "false") when buffer_response_header is
+                # disabled in the config dict. Default-on for dicts
+                # lacking the key (older configs).
+                **(
+                    {"X-LLMProxy-Buffer-Response": "true"}
+                    if llm_config.get("buffer_response_header", True)
+                    else {}
+                ),
             },
         }
     

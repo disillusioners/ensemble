@@ -45,6 +45,16 @@ llm:
   # Override via OPENAI_STREAMING env var (true / false). Default: true.
   streaming: ${OPENAI_STREAMING:-true}
 
+  # Outbound X-LLMProxy-Buffer-Response: true request header on every
+  # chat-completion request that carries the proxy identity headers
+  # (x-proxy-app / x-proxy-interleaved-thinking). Asks the proxy to
+  # buffer the response. Default true (header sent). Set false to omit
+  # the header entirely — it is never sent with the literal value
+  # "false" (a present-but-false header may be misread by the proxy).
+  # Override via OPENAI_BUFFER_RESPONSE_HEADER env var (true / false).
+  # Default: true.
+  buffer_response_header: ${OPENAI_BUFFER_RESPONSE_HEADER:-true}
+
   # Models allowed as instance model overrides at spawn time. Case-insensitive
   # exact match against the override model name; a match against ANY entry
   # is sufficient. Empty list = all models allowed (no restriction).

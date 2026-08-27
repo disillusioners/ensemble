@@ -910,6 +910,10 @@ class InstanceLifecycleService:
             "model_vision": self._config.llm.model_vision,
             "temperature": self._config.llm.temperature,
             "request_timeout": self._config.llm.request_timeout,
+            # Proxy-buffering header opt-out — consumed by the graph
+            # builder's ``default_headers`` site and stripped again by
+            # ``clean_llm_config`` (same pattern as ``base_url_backup``).
+            "buffer_response_header": self._config.llm.buffer_response_header,
         }
         # The caller has already done the resolution. We just slot the
         # resolved model in. RNG never fires here.

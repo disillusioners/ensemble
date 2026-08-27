@@ -369,6 +369,14 @@ async def extract_keywords(
             "default_headers": {
                 "x-proxy-app": "ensemble",
                 "x-proxy-interleaved-thinking": "True",
+                # X-LLMProxy-Buffer-Response: sent by default; omitted
+                # entirely (never "false") when disabled in LLMConfig
+                # (OPENAI_BUFFER_RESPONSE_HEADER=false).
+                **(
+                    {"X-LLMProxy-Buffer-Response": "true"}
+                    if config.llm.buffer_response_header
+                    else {}
+                ),
             },
         }
         # F1: clean at constructor only — facade needs the RAW dict.

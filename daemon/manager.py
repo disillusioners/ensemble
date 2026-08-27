@@ -385,6 +385,11 @@ class InstanceManager:
                     "model_vision": self.config.llm.model_vision,
                     "temperature": self.config.llm.temperature,
                     "request_timeout": self.config.llm.request_timeout,
+                    # Proxy-buffering header opt-out — consumed by the
+                    # compactor's ``default_headers`` site and stripped
+                    # again by ``clean_llm_config`` (same pattern as
+                    # ``base_url_backup``).
+                    "buffer_response_header": self.config.llm.buffer_response_header,
                 },
             )
             logger.info(

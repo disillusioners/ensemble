@@ -2253,7 +2253,7 @@ class ThinkingChatOpenAI(ChatOpenAI):
 def clean_llm_config(cfg: dict) -> dict:
     """Strip non-kwarg keys and inject the streaming default.
 
-    Two daemon-internal keys are removed:
+    Three daemon-internal keys are removed:
 
     - ``model_vision`` — used for vision routing decisions but not a valid
       LangChain/ChatOpenAI parameter.
@@ -2274,6 +2274,14 @@ def clean_llm_config(cfg: dict) -> dict:
       construction sites (graph.py vision/standard/watcher/loop-repair,
       compaction, title_generation, keyword_extraction, child_reports,
       watcher_context_builder) — every site must route through here.
+    - ``buffer_response_header`` — the proxy-buffering header opt-out flag
+      (``LLMConfig.buffer_response_header`` / OPENAI_BUFFER_RESPONSE_HEADER).
+      It is consumed by the inline ``default_headers`` sites (graph.py,
+      compaction.py, title_generation.py, keyword_extraction.py,
+      child_reports.py×2) BEFORE this function strips it — same
+      consumed-then-stripped pattern as ``base_url_backup``. Letting it
+      leak would hit the same ``model_kwargs`` transfer and crash every
+      invoke with an unexpected-kwarg ``TypeError``.
 
     Streaming default (CF 125s 524 fix)
     ----------------------------------
@@ -2310,7 +2318,7 @@ def clean_llm_config(cfg: dict) -> dict:
     cleaned = {
         k: v
         for k, v in cfg.items()
-        if k not in ("model_vision", "base_url_backup")
+        if k not in ("model_vision", "base_url_backup", "buffer_response_header")
     }
     # CF-125s 524 fix: default streaming ON if caller didn't opt in/out.
     # The LangChain ``streaming`` kwarg is a Pydantic field on
@@ -5522,12 +5530,20 @@ def build_instance_graph(
             assembly (backward-compatible default — legacy agents
             keep their system-prompt-baked context).
     """
-    # Add proxy headers (x-proxy-app + x-proxy-interleaved-thinking) to all LLM requests
+    # Add proxy headers (x-proxy-app + x-proxy-interleaved-thinking) to all LLM requests.
+    # X-LLMProxy-Buffer-Response: sent by default; omitted entirely (never
+    # "false") when buffer_response_header is disabled in the config dict.
+    # Default-on even for config dicts that lack the key (older configs).
     llm_config_with_headers = {
         **llm_config,
         "default_headers": {
             "x-proxy-app": "ensemble",
             "x-proxy-interleaved-thinking": "True",
+            **(
+                {"X-LLMProxy-Buffer-Response": "true"}
+                if llm_config.get("buffer_response_header", True)
+                else {}
+            ),
         },
     }
 

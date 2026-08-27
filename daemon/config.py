@@ -216,6 +216,46 @@ class LLMConfig(BaseSettings):
             return True
         return value
 
+    # Outbound proxy-buffering header opt-out. When True (default), every
+    # LLM chat-completion request that carries the proxy identity headers
+    # (``x-proxy-app`` / ``x-proxy-interleaved-thinking`` — the inline
+    # ``default_headers`` sites in graph.py, compaction.py,
+    # title_generation.py, keyword_extraction.py, and child_reports.py×2)
+    # ALSO sends ``X-LLMProxy-Buffer-Response: true`` asking the proxy to
+    # buffer the response. Set OPENAI_BUFFER_RESPONSE_HEADER=false to omit
+    # the header entirely — the key is ABSENT, never sent as the literal
+    # string "false" (a present-but-false header may be misread by the
+    # proxy).
+    # Override via OPENAI_BUFFER_RESPONSE_HEADER env var. Mirrors the
+    # ``streaming`` flag directly above.
+    buffer_response_header: bool = Field(
+        default=True,
+        description=(
+            "Send the X-LLMProxy-Buffer-Response: true request header on "
+            "every chat-completion request that carries the proxy identity "
+            "headers, so the proxy buffers the response. Default True; set "
+            "OPENAI_BUFFER_RESPONSE_HEADER=false to omit the header "
+            "entirely (never sent as 'false')."
+        ),
+    )
+
+    @field_validator("buffer_response_header", mode="before")
+    @classmethod
+    def _coerce_buffer_response_header_empty_to_default(cls, value: Any) -> Any:
+        """Coerce empty-string / YAML-null to the default (True).
+
+        Mirrors ``_coerce_streaming_empty_to_default`` above: an empty
+        ``OPENAI_BUFFER_RESPONSE_HEADER=""`` pasting through the
+        ``${OPENAI_BUFFER_RESPONSE_HEADER:-true}`` interpolation or a bare
+        YAML ``buffer_response_header:`` (None) would otherwise crash
+        daemon boot on pydantic bool parsing.
+        """
+        if value is None:
+            return True
+        if isinstance(value, str) and not value.strip():
+            return True
+        return value
+
     @field_validator("reasoning_echo_disabled_models", mode="before")
     @classmethod
     def _parse_reasoning_echo_disabled_models(cls, value: Any) -> Any:
