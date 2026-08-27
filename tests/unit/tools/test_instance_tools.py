@@ -2178,8 +2178,11 @@ class TestFilterBehavior:
         assert "c2" in result
         assert "[assistant] c1" not in result
         assert "[user] parent-msg" not in result
-        # status filter does call get_instance_info per working-set.
-        manager.get_instance_info.assert_called()
+        # status filter calls get_instance_info EXACTLY once per
+        # working-set instance (3 in this fixture) under the gather —
+        # pins one-status-call-per-instance and guards against
+        # double-fetch / fan-out regressions.
+        assert manager.get_instance_info.call_count == 3
 
     @pytest.mark.timeout(10)
     async def test_combined_filters_AND_semantics(self):
@@ -2516,6 +2519,47 @@ class TestTokenSafety:
         assert "…" in result
 
     @pytest.mark.timeout(10)
+    async def test_tool_marker_message_redacted_without_canonical_role(self):
+        """Defense-in-depth: a message with tool markers
+        (``tool_call_id`` / ``type=="tool"``) but a non-canonical role
+        MUST still be redacted. Otherwise a leaked message carrying
+        tool output could overflow the token budget."""
+        # Build a message that LOOKS like a tool message but has its
+        # ``role`` stripped to a non-canonical value (e.g. a buggy
+        # serializer). The marker keys ``type="tool"`` and
+        # ``tool_call_id`` are still present.
+        leaky_msg = _tool_msg(
+            "leaky_search",
+            '{"q":"short-args"}',
+            iid="parent-instance",
+        )
+        leaky_msg["role"] = "function"  # non-canonical — must not bypass redaction
+        # ``type == "tool"`` and ``tool_call_id`` (set via ``_tool_msg``
+        # via name+args hash; we add tool_call_id explicitly here)
+        leaky_msg["tool_call_id"] = "call_abc123"
+        leaky_msg["content"] = "RAW-LARGE-TOOL-OUTPUT-" + ("X" * 500)
+
+        manager = _make_subtree_manager(
+            subtree_ids=["parent-instance"],
+            messages_by_iid={
+                "parent-instance": [leaky_msg],
+            },
+        )
+        tool = _get_subtree_messages_tool(manager)
+
+        result = await tool.coroutine()
+
+        # Redaction still fires — ``[leaky_search]`` name+args form
+        # appears (NOT the raw content).
+        assert "[leaky_search]" in result
+        # The raw content MUST NOT appear anywhere in the output.
+        assert "RAW-LARGE-TOOL-OUTPUT" not in result
+        assert ("X" * 100) not in result
+        # The non-canonical role label itself is harmless to print,
+        # but its raw content MUST be gone.
+        assert "[function]" not in result or "RAW-LARGE-TOOL-OUTPUT" not in result
+
+    @pytest.mark.timeout(10)
     async def test_output_ceiling_tail_truncate(self):
         """Huge output → tail truncated + ceiling warning."""
         subtree = ["parent-instance"] + [f"i-{i:02d}" for i in range(15)]
@@ -2590,29 +2634,59 @@ class TestPerformanceFixture:
     @pytest.mark.timeout(10)
     async def test_per_instance_error_skipped_remaining_returned(self):
         """One descendant raises in ``get_messages`` → skip + warn; the
-        rest still come back."""
+        rest still come back.
+
+        Verifies the partial-failure path: ONLY ``i-broken`` fails;
+        the other two instances still surface their messages in the
+        result. A uniform side_effect (raising on EVERY call) would
+        only exercise the all-fail path; this test must exercise the
+        partial-failure branch to guard against future regressions
+        where one bad descendant silently takes down the whole query.
+        """
         subtree = ["parent-instance", "i-ok", "i-broken"]
+        working_msgs = {
+            "parent-instance": [_user_msg("p", iid="parent-instance")],
+            "i-ok": [_assistant_msg("c-ok", iid="i-ok")],
+            # ``i-broken`` intentionally absent from ``messages_by_iid``
+            # — the per-iid side effect overrides this for that one id.
+        }
         manager = _make_subtree_manager(
             subtree_ids=subtree,
-            messages_by_iid={
-                "parent-instance": [_user_msg("p", iid="parent-instance")],
-                "i-ok": [_assistant_msg("c-ok", iid="i-ok")],
-                # "i-broken" key absent → fallback returns [] (NOT an
-                # exception). Use the dedicated ``get_messages_side_effect``
-                # path by giving ALL instances the same exception.
-            },
-            get_messages_side_effect=KeyError("simulated missing checkpoint"),
+            messages_by_iid=working_msgs,
         )
+
+        # Per-iid side effect: raise ONLY for ``i-broken``. All other
+        # instances fall through to the default fixture behavior (which
+        # returns ``list(messages_by_iid.get(iid, []))``).
+        original_side_effect = manager.get_messages.side_effect
+
+        async def _per_iid_side_effect(iid):
+            if iid == "i-broken":
+                raise KeyError("simulated missing checkpoint")
+            return await original_side_effect(iid)
+
+        manager.get_messages = AsyncMock(side_effect=_per_iid_side_effect)
+
         tool = _get_subtree_messages_tool(manager)
 
-        # With the side_effect raised on every call, every instance
-        # fails — output is empty but no exception propagates.
         result = await tool.coroutine()
 
         # No exception bubbled out.
         assert isinstance(result, str)
-        # The 3 calls all happened, all warned.
+        # All three reads happened (one per subtree member) — failure
+        # is reported per-instance, NOT via early termination.
         assert manager.get_messages.call_count == 3
+        # The two working instances' messages DO appear in the result.
+        assert "p" in result
+        assert "c-ok" in result
+        # The broken instance contributed no message (its only message
+        # would have been something distinctive — none exists here, so
+        # the negative assertion is "no error markers leak either").
+        assert "ERROR" not in result
+        # Sanity: the parent's user msg + the OK child's assistant msg
+        # are both rendered, proving the partial-failure branch is real.
+        assert "[user] p" in result
+        assert "[assistant] c-ok" in result
 
     @pytest.mark.timeout(10)
     async def test_100_instance_fuzz_asserts_exactly_20_get_messages(self):

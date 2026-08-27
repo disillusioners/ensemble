@@ -1036,7 +1036,18 @@ def _render_subtree_message(
         return " ".join(parts)
 
     # Full-content mode.
-    if role == "tool":
+    # Defense-in-depth: a ToolMessage MUST be redacted regardless of
+    # how the role was stamped on the dict. The canonical path stamps
+    # ``role == "tool"`` (daemon/utils.py:96 maps ``msg.type`` ``"tool"``
+    # to ``"tool"``), but a non-canonical / missing role MUST still
+    # trigger redaction when tool markers are present — otherwise a
+    # raw tool output could leak into the token budget.
+    if (
+        role == "tool"
+        or m.get("type") == "tool"
+        or m.get("tool_call_id") is not None
+        or m.get("_call_id") is not None
+    ):
         return _summarize_tool_message(m)
 
     content = m.get("content") or ""
@@ -2639,6 +2650,14 @@ Example outputs::
 
             async def _fetch_status(iid: str) -> tuple[str, str | None]:
                 async with status_sem:
+                    # ``await asyncio.sleep(0)`` yields control to the
+                    # event loop so the ``Semaphore(5)`` actually
+                    # interleaves concurrent status fetches — without
+                    # it, a purely sync body acquires+releases in the
+                    # same tick and the semaphore is decorative.
+                    # Behavior-neutral: does not change correctness or
+                    # output; only makes the concurrency limit real.
+                    await asyncio.sleep(0)
                     try:
                         info = manager.get_instance_info(iid)
                     except Exception as e:  # KeyError + defsive
@@ -2665,6 +2684,15 @@ Example outputs::
         # ── 5. Per-instance read loop (get_messages once per iid) ───
         collected: list[tuple[str, dict]] = []  # (instance_id, msg)
         for iid in working_set:
+            # child_instance_id filter BEFORE the read so filtered-out
+            # instances are NEVER read. The EXACTLY-one-read-per-
+            # remaining-instance property holds for the post-filter
+            # working set, not the pre-filter one — see the docstring
+            # "Read path" section below for the full invariant.
+            if child_filter is not None and child_filter != "":
+                if iid != child_filter:
+                    continue
+
             is_descendant = iid != current_instance_id
             try:
                 msgs = await manager.get_messages(iid)
@@ -2685,11 +2713,6 @@ Example outputs::
             # (the caller's system prompt is kept by D12).
             if role_filter is not None and role_filter != "":
                 msgs = [m for m in msgs if m.get("role") == role_filter]
-
-            # child_instance_id filter (instant — we already keyed by iid).
-            if child_filter is not None and child_filter != "":
-                if iid != child_filter:
-                    continue
 
             # Per-instance breadth cap (cap_first_N_per_instance > 0):
             # take the first N per instance BEFORE global pagination
@@ -2849,7 +2872,11 @@ config is built inside ``get_instance_messages``
 explicitly NOT used here — that API does not exist; this tool reads via
 the saver/checkpoint machinery only (regression guard against the
 broken API reappearing).
-(regression guard).
+
+When ``filters.child_instance_id`` is set, the membership check runs
+BEFORE ``get_messages`` so filtered-out instances are never read —
+the EXACTLY-one-read-per-remaining-instance property holds for the
+post-filter working set, not the pre-filter one.
 
 Per-instance errors are caught and warned; the whole query never fails
 because one descendant has a missing / corrupt checkpoint.
