@@ -3206,6 +3206,13 @@ class TestRegistration:
             "daemon.tools.help._get_allowed_tools",
             return_value=sentinel_allowed,
         ):
+            # Filter MagicMock-contaminated entries before they reach
+            # the real create_help_tool. Without this guard, patch
+            # teardown in the builder block above can leave MagicMock
+            # objects in ``tools``, and scan_tools_for_full_docs will
+            # write MagicMock-keyed entries into the module-level
+            # ``_tool_metadata`` singleton, poisoning downstream tests.
+            tools = [t for t in tools if not isinstance(t, MagicMock)]
             help_tool = create_help_tool(tools, agent_id="leader")
             # ``tool_help`` is a sync tool — call it directly (no
             # ``.coroutine`` attribute).
