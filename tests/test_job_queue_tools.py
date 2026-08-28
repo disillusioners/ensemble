@@ -163,8 +163,8 @@ class TestJobCreateTool:
         assert call_kwargs["source"] == "agent:test-agent"
 
     @pytest.mark.asyncio
-    async def test_job_create_explicit_source_not_overridden(self, mock_services):
-        """Edge case: When source is explicitly set to 'manual', it should NOT be overridden."""
+    async def test_job_create_explicit_source_overridden_by_anti_forgery(self, mock_services):
+        """P2.3 B3.5 anti-forgery: caller-supplied source='manual' IS overridden to 'agent:<caller>' (unconditional derivation — NIT-7 deprecates-and-ignores the source param; closes F2 forging seam)."""
         job_service, _, _ = mock_services
         tools = create_job_tools(job_service, mock_services[1], mock_services[2], agent_id="test-agent")
         job_create = tools[0]
@@ -179,9 +179,9 @@ class TestJobCreateTool:
             "source": "manual",
         })
 
-        # Verify source was NOT overridden (stays as 'manual')
+        # Verify source WAS overridden (P2.3 B3.5 unconditional derivation)
         call_kwargs = job_service.enqueue.call_args.kwargs
-        assert call_kwargs["source"] == "manual"
+        assert call_kwargs["source"] == "agent:test-agent"
 
     @pytest.mark.asyncio
     async def test_job_create_watch_registered_before_enqueue(self, mock_services):
