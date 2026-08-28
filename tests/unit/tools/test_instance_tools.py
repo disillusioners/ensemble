@@ -2684,29 +2684,58 @@ class TestD12SyntheticExclusion:
         assert synthetic_payload[:250] not in synth_result
 
     # -----------------------------------------------------------------
-    # Pre-merge security-council batch W1 — INTERIM fix for the
-    # persisted ``[SYSTEM CONTEXT: …]``-prefixed user-role context
-    # injection leak. ``serialize_message`` strips
-    # ``injected_message`` / ``context_kind`` markers, so checkpointed
-    # context-injection HumanMessages persist with ``role="user"`` and
-    # a literal ``[SYSTEM CONTEXT: …]`` prefix. Without this check they
-    # would pass the D12 descendant filter and leak descendant-injected
-    # snippets to the parent.
+    # W1 INTERIM RESOLUTION (this batch). The descendant filter no
+    # longer matches on a literal ``[SYSTEM CONTEXT: …]`` content
+    # prefix — it matches on the structured ``injected_message=True``
+    # marker surfaced by ``daemon.utils.serialize_message``. Every
+    # context-injection HumanMessage construction site (context
+    # builders, task-context injection, FIFO drain, report drain)
+    # stamps ``injected_message=True`` in ``additional_kwargs``; the
+    # structured marker is therefore authoritative. Legacy pre-W1
+    # checkpoints that pre-date the marker scheme are not present in
+    # the active deployment — see decisions.md D12 addendum
+    # RESOLUTION for the data-flow evidence.
     # -----------------------------------------------------------------
 
+    def _injected_user_msg(
+        self,
+        content: str,
+        *,
+        iid: str = "i-child-1",
+        ts: str = "2026-08-26T00:00:00Z",
+        context_kind: str = "task_context",
+        source: str | None = None,
+    ) -> dict:
+        """Build a serialized user-role context-injection dict that
+        mimics what ``get_instance_messages`` returns AFTER the W1
+        ``serialize_message`` fix: the ``injected_message`` marker
+        flows through (no longer stripped) and ``context_kind`` /
+        ``source`` are surfaced when present on the source message.
+        """
+        d = _user_msg(content, iid=iid, ts=ts)
+        d["injected_message"] = True
+        if context_kind:
+            d["context_kind"] = context_kind
+        if source:
+            d["source"] = source
+        return d
+
     @pytest.mark.timeout(10)
-    async def test_descendant_system_context_prefix_user_dropped(self):
-        """Persisted ``[SYSTEM CONTEXT: …]``-prefixed user-role context
-        injection on a descendant MUST be dropped (W1 INTERIM)."""
+    async def test_descendant_injected_context_user_dropped(self):
+        """W1 STRUCTURED FILTER — descendant's persisted context-
+        injection HumanMessage (with ``injected_message=True``
+        surfaced via ``serialize_message``) MUST be dropped from
+        the descendant result.
+        """
         manager = _make_subtree_manager(
             subtree_ids=["parent-instance", "i-child-1"],
             messages_by_iid={
                 "parent-instance": [_user_msg("caller-msg", iid="parent-instance")],
                 "i-child-1": [
-                    # Persisted context-injection HumanMessage: role=user,
-                    # is_synthetic=False (stripped by serialize_message),
-                    # content has the literal prefix.
-                    _user_msg(
+                    # Persisted context-injection HumanMessage: the
+                    # W1 structured marker is set, so the descendant
+                    # filter drops it.
+                    self._injected_user_msg(
                         "[SYSTEM CONTEXT: Task Context]\n## Foo\nbar",
                         iid="i-child-1",
                     ),
@@ -2727,17 +2756,19 @@ class TestD12SyntheticExclusion:
         assert "real-user-msg" in result
 
     @pytest.mark.timeout(10)
-    async def test_caller_system_context_prefix_user_kept(self):
-        """Counter-test (W1): the SAME-shaped message on the CALLER's
-        own instance is KEPT (the caller's own injections are its own
-        context)."""
+    async def test_caller_injected_context_user_kept(self):
+        """Counter-test (W1): the SAME-shaped injected message on the
+        CALLER's own instance is KEPT (the caller's own injections are
+        its own context — the structured filter is gated by
+        ``is_descendant=True``).
+        """
         manager = _make_subtree_manager(
             subtree_ids=["parent-instance"],
             messages_by_iid={
                 "parent-instance": [
                     # Same shape as the descendant test above, but on
                     # the caller (target == caller).
-                    _user_msg(
+                    self._injected_user_msg(
                         "[SYSTEM CONTEXT: Task Context]\n## Caller's own context",
                         iid="parent-instance",
                     ),
@@ -2756,15 +2787,18 @@ class TestD12SyntheticExclusion:
     async def test_user_message_quoting_marker_mid_text_kept(self):
         """W1 false-positive guard: a legitimate user message that
         CONTAINS ``[SYSTEM CONTEXT:`` mid-text (NOT prefix) MUST be
-        KEPT. The prefix check is literal-start-of-content; trimming
-        / normalizing is intentionally NOT applied to avoid this
-        false-positive drop class."""
+        KEPT. The structured filter discriminates on the
+        ``injected_message`` flag, not on the content prefix — the
+        false-positive risk that motivated the INTERIM's
+        ``no-trim / no-normalize`` rule is eliminated.
+        """
         manager = _make_subtree_manager(
             subtree_ids=["parent-instance", "i-child-1"],
             messages_by_iid={
                 "parent-instance": [_user_msg("caller-msg", iid="parent-instance")],
                 "i-child-1": [
-                    # Quote of the marker mid-text — NOT a prefix.
+                    # Quote of the marker mid-text — NOT a prefix AND
+                    # no structured marker (regular user content).
                     _user_msg(
                         "the user wrote: \"[SYSTEM CONTEXT: foo]\" earlier",
                         iid="i-child-1",
@@ -2779,6 +2813,83 @@ class TestD12SyntheticExclusion:
         # Legitimate user message quoting the marker MUST be kept.
         assert "the user wrote" in result
         assert "earlier" in result
+
+    @pytest.mark.timeout(10)
+    async def test_unmarked_system_context_prefix_descendant_kept_after_W1(self):
+        """W1 RESOLUTION witness test — documents the explicit
+        behavior change vs the W1 INTERIM. The literal-prefix check
+        has been REMOVED, so a descendant message that has the
+        ``[SYSTEM CONTEXT: ...]`` content prefix but DOES NOT carry
+        the structured ``injected_message=True`` marker is now KEPT
+        in the descendant result.
+
+        Rationale: every ``[SYSTEM CONTEXT: ...]`` construction site
+        in the daemon stamps the structured marker. A descendant
+        message that lacks the marker but has the literal content
+        prefix is therefore either (a) a legitimate user message that
+        quotes the prefix for some reason, or (b) legacy data that
+        pre-dates the marker scheme (not present in active
+        deployment per the D12 addendum RESOLUTION evidence). In
+        either case, the structured marker is the authoritative
+        signal — the filter no longer falls back to a content-prefix
+        match.
+        """
+        manager = _make_subtree_manager(
+            subtree_ids=["parent-instance", "i-child-1"],
+            messages_by_iid={
+                "parent-instance": [_user_msg("caller-msg", iid="parent-instance")],
+                "i-child-1": [
+                    # Same shape as the W1 INTERIM test fixture — a
+                    # user-role message with the literal prefix — but
+                    # WITHOUT the structured marker. The W1
+                    # INTERIM-prefix check would have dropped this.
+                    # The W1 structured filter KEEPS it.
+                    _user_msg(
+                        "[SYSTEM CONTEXT: Legacy prefix]\n## Old data",
+                        iid="i-child-1",
+                    ),
+                ],
+            },
+        )
+        tool = _get_subtree_messages_tool(manager)
+
+        result = await tool.coroutine()
+
+        # W1 RESOLUTION: the unmarked message is KEPT (the literal
+        # prefix is no longer a filter criterion).
+        assert "SYSTEM CONTEXT" in result
+        assert "Legacy prefix" in result
+
+    @pytest.mark.timeout(10)
+    async def test_descendant_injected_with_source_dropped(self):
+        """W1 source provenance — a descendant's injected HumanMessage
+        (``injected_message=True`` + ``source="internal_report:..."``)
+        MUST still be dropped by the descendant filter even though it
+        carries the provenance marker. The structured filter does not
+        care about ``source``; only ``injected_message`` matters for
+        the descendant-leak guard.
+        """
+        manager = _make_subtree_manager(
+            subtree_ids=["parent-instance", "i-child-1"],
+            messages_by_iid={
+                "parent-instance": [_user_msg("caller-msg", iid="parent-instance")],
+                "i-child-1": [
+                    self._injected_user_msg(
+                        "[SYSTEM CONTEXT: Task Context]\n## child report",
+                        iid="i-child-1",
+                        source="internal_report:i-child-1",
+                    ),
+                ],
+            },
+        )
+        tool = _get_subtree_messages_tool(manager)
+
+        result = await tool.coroutine()
+
+        # Even with provenance source, the structured-marker filter
+        # drops it from the descendant view.
+        assert "child report" not in result
+        assert "internal_report" not in result
 
 
 # ---------------------------------------------------------------------------

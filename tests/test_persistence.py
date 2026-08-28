@@ -767,3 +767,92 @@ class TestGetInstanceMessagesHumanMessagesContext:
         )
         serialized_noisy = serialize_message(noisy_msg)
         assert "context_kind" not in serialized_noisy
+
+    @pytest.mark.asyncio
+    async def test_serialize_message_surfaces_injected_message_marker(self):
+        """W1 INTERIM RESOLUTION — ``serialize_message`` MUST surface
+        ``injected_message`` from ``additional_kwargs`` as an ADDITIVE
+        top-level key. Plain messages without the marker MUST NOT
+        acquire a spurious ``injected_message`` key.
+        """
+        from daemon.utils import serialize_message
+        from langchain_core.messages import HumanMessage
+
+        # Injected HumanMessage — must surface ``injected_message``.
+        injected_msg = HumanMessage(
+            content="injected user turn",
+            additional_kwargs={"injected_message": True},
+        )
+        serialized_inj = serialize_message(injected_msg)
+        assert serialized_inj["injected_message"] is True
+
+        # Plain HumanMessage — MUST NOT acquire the field.
+        plain_msg = HumanMessage(content="just a normal turn")
+        serialized_plain = serialize_message(plain_msg)
+        assert "injected_message" not in serialized_plain
+
+    @pytest.mark.asyncio
+    async def test_serialize_message_surfaces_source_marker(self):
+        """W1 INTERIM RESOLUTION — ``serialize_message`` MUST surface
+        ``source`` from ``additional_kwargs`` as an ADDITIVE top-level
+        key when non-empty. Plain messages MUST NOT acquire the field.
+        """
+        from daemon.utils import serialize_message
+        from langchain_core.messages import HumanMessage
+
+        # Injected HumanMessage with provenance source.
+        inj_with_source = HumanMessage(
+            content="injected from internal agent",
+            additional_kwargs={
+                "injected_message": True,
+                "source": "internal_agent:caller-iid-xyz",
+            },
+        )
+        serialized = serialize_message(inj_with_source)
+        assert serialized["injected_message"] is True
+        assert serialized["source"] == "internal_agent:caller-iid-xyz"
+
+        # Report-style source.
+        report_msg = HumanMessage(
+            content="child report",
+            additional_kwargs={
+                "injected_message": True,
+                "source": "internal_report:child-iid-abc",
+            },
+        )
+        serialized_report = serialize_message(report_msg)
+        assert serialized_report["source"] == "internal_report:child-iid-abc"
+
+        # Plain HumanMessage — MUST NOT acquire the field.
+        plain_msg = HumanMessage(content="just a normal turn")
+        serialized_plain = serialize_message(plain_msg)
+        assert "source" not in serialized_plain
+
+    @pytest.mark.asyncio
+    async def test_serialize_message_surfaces_all_three_markers_together(self):
+        """W1 — all three additive keys flow through when present.
+        Verifies the canonical contract:
+          * ``injected_message``: bool (preserved verbatim)
+          * ``context_kind``: str enum
+          * ``source``: str provenance tag
+        Together they identify the message as an injected context block
+        with a specific kind and provenance — exactly what GET /messages
+        + D12 filter need.
+        """
+        from daemon.utils import serialize_message
+        from langchain_core.messages import HumanMessage
+
+        msg = HumanMessage(
+            content="[SYSTEM CONTEXT: Task Context]\n## Foo",
+            additional_kwargs={
+                "injected_message": True,
+                "context_kind": "task_context",
+                "source": "internal_agent:caller-iid",
+            },
+        )
+        serialized = serialize_message(msg)
+
+        assert serialized["injected_message"] is True
+        assert serialized["context_kind"] == "task_context"
+        assert serialized["source"] == "internal_agent:caller-iid"
+        assert serialized["role"] == "user"

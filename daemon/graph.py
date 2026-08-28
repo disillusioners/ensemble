@@ -3053,6 +3053,17 @@ def create_agent_node(
         # deliver them as separate graph turns. The
         # ``additional_kwargs={"injected_message": True}`` flag mirrors
         # the user-injection path so compaction preserves them (C3).
+        # W1 INTERIM RESOLUTION — when the drain entry carries a
+        # ``child_instance_id`` (W1 batch on
+        # ``report_injection/repository.py:claim_for_injection``), the
+        # agent_node ALSO stamps ``source="internal_report:<child_iid>"``
+        # onto ``additional_kwargs`` so GET /messages / SSE / report
+        # framing can render the report's provenance. Matches the
+        # FIFO-drain convention at ``:2894-2897``. When the drain entry
+        # does not carry ``child_instance_id`` (legacy callers),
+        # ``additional_kwargs`` stays byte-identical to the pre-W1
+        # ``{"injected_message": True}`` shape — required by the
+        # back-compat contract on the LangChain checkpoint write.
         injected_report_msgs: list[HumanMessage] = []
         if report_injection_slot is not None:
             drained = await asyncio.to_thread(
@@ -3075,9 +3086,33 @@ def create_agent_node(
                 pairing_synthesized_msgs.extend(
                     _ensure_tool_result_pairing(full_messages, instance_short)
                 )
+                # W1 INTERIM RESOLUTION — surface the structured
+                # ``source`` provenance alongside ``injected_message``
+                # so GET /messages can render the report's origin.
+                # The drain returns ``child_instance_id`` (W1 batch);
+                # the source string follows the
+                # ``internal_report:<child_iid>`` convention used by
+                # the message_queue bookkeeping (see
+                # repository.py:671-672 source_expr). When the drain
+                # entry is missing ``child_instance_id`` (legacy pre-
+                # W1 callers) the additional_kwargs shape stays
+                # byte-identical to the pre-W1
+                # ``{"injected_message": True}`` contract.
+                report_extra_kwargs: dict[str, Any] = {
+                    "injected_message": True,
+                }
+                report_child_iid = (
+                    report.get("child_instance_id")
+                    if isinstance(report, dict)
+                    else None
+                )
+                if report_child_iid:
+                    report_extra_kwargs["source"] = (
+                        f"internal_report:{report_child_iid}"
+                    )
                 report_msg = HumanMessage(
                     content=_frame_injected_report(report_content),
-                    additional_kwargs={"injected_message": True},
+                    additional_kwargs=report_extra_kwargs,
                 )
                 full_messages.append(report_msg)
                 injected_report_msgs.append(report_msg)

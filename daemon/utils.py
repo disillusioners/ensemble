@@ -178,15 +178,56 @@ def serialize_message(msg, tool_outputs: dict | None = None, message_id: str | N
         "created_at": _extract_timestamp(msg),
     }
 
-    # Phase 4: surface ``context_kind`` so the frontend can style
-    # synthetic context messages (project / shared_context / skills)
-    # differently from regular user messages. Only added when present
-    # in ``additional_kwargs`` — keeps the dict shape backward
-    # compatible for messages that were never tagged as context.
+    # W1 INTERIM RESOLUTION — surface the durable markers from
+    # ``additional_kwargs`` so consumers (GET /messages, SSE, report
+    # framing, ``subtree_messages``) see the same provenance /
+    # context-kind / source metadata that is already checkpointed on
+    # the LangChain message. All keys are ADDITIVE (present only when
+    # set on the source message) — preserves the byte-identical shape
+    # for messages that were never tagged as injected.
+    #
+    # Marker contract (write-side, construction-time):
+    #   * ``injected_message`` — bool. Stamped on every injection-site
+    #     HumanMessage (agent_node FIFO drain, report drain, context
+    #     builders, task-context injection). Survives the checkpoint
+    #     round-trip inside ``additional_kwargs``.
+    #   * ``context_kind`` — str enum (e.g. ``"project"``,
+    #     ``"shared_context"``, ``"skills"``, ``"task_context"``,
+    #     ``"blueprint"``, ``"auto_load_skills"``,
+    #     ``"project_scope_guide"``). Set alongside ``injected_message``
+    #     on every context builder / task-context site. Already
+    #     surfaced in Phase 4 CHANGE 1 (kept verbatim here).
+    #   * ``source`` — str provenance tag (e.g. ``"api"``,
+    #     ``"internal_agent:<caller_iid>"``, ``"telegram:user:1"``).
+    #     Set on the FIFO entry at queue-time and propagated to the
+    #     drained HumanMessage at ``daemon/graph.py:2894-2897``.
+    #     Surfaces here so GET /messages shows the message's origin
+    #     when it was injected via a non-user-API path.
+    #
+    # Read-side / write-time verdict: serialization happens at READ
+    # time (this function is called by ``get_instance_messages``,
+    # SSE echoes, and report framing — NEVER on checkpoint-write).
+    # Markers therefore survive any existing checkpoint written
+    # AFTER the marker scheme was adopted (Phase 4 CHANGE 1 for
+    # ``context_kind``; ``injected_message`` predates it per
+    # ``daemon/compaction.py:73`` ``_is_injected_message``; ``source``
+    # is the Quick-Win #1 stamp at graph.py:2894). Clean additive
+    # wiring is back-compat-safe.
     additional_kwargs = getattr(msg, 'additional_kwargs', None) or {}
+    injected_message = additional_kwargs.get("injected_message")
+    if injected_message is not None:
+        # Surface as the same bool the LangChain message carries
+        # (true / false / a truthy/falsy value). Preserves the
+        # exact wire shape downstream consumers (e.g. the
+        # ``subtree_messages`` D12 structured filter) compare
+        # against.
+        serialized["injected_message"] = injected_message
     context_kind = additional_kwargs.get("context_kind")
     if context_kind:
         serialized["context_kind"] = context_kind
+    source = additional_kwargs.get("source")
+    if source:
+        serialized["source"] = source
 
     return serialized
 
