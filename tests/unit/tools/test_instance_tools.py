@@ -3849,3 +3849,922 @@ class TestRegistration:
             "Manager.get_tree_ids_permanent must delegate to "
             "self._instance_repository.get_tree_ids_permanent"
         )
+
+
+# ---------------------------------------------------------------------------
+# #5 (agent-instance-tools follow-up) — ``subtree_status`` tests
+# ---------------------------------------------------------------------------
+#
+# One call = whole-subtree OVERVIEW (one short row per instance),
+# replacing N× get_instance_info calls. Mirrors the subtree_messages
+# helpers/classes layout above:
+#
+#   (a) subtree scoping — caller sees own subtree only; instances
+#       outside the subtree NEVER appear
+#   (b) cross-subtree rejection (target param offered, reusing
+#       _validate_subtree_target semantics)
+#   (c) correctness — statuses, relative-age rendering (helper unit
+#       tests + tool-level fresh/minutes/hours/days/None), pending
+#       counts match seeded data
+#   (d) caller-first ordering; default cap 50; hard clamp 200;
+#       truncation notice when rows exceed the cap
+#   (e) status_filter — exact case-insensitive matching; 'all' default
+#   (f) registration for leader/planner/tester via the PRODUCTION seam
+#       (AgentRegistry discover + get_version()/get_resolved()
+#       fallback), resolve_tool_filter narrow opt-in, KNOWN_TOOL_NAMES
+#   (g) token-budget sanity — cap-sized row input stays within a
+#       stated char bound
+#   (h) read-only guarantee — only read-only manager methods are
+#       invoked; the pending-count query is ONE batched call
+# ---------------------------------------------------------------------------
+
+from datetime import datetime, timedelta, timezone as _tz_utc  # noqa: E402
+
+
+def _make_subtree_status_manager(
+    *,
+    subtree_ids: list[str] | None = None,
+    infos_by_iid: dict[str, dict] | None = None,
+    pending_by_iid: dict[str, int] | None = None,
+    get_info_side_effect: Exception | None = None,
+) -> MagicMock:
+    """Build a mock manager pre-wired for ``subtree_status``.
+
+    Default caller is ``"parent-instance"`` (matches the shared
+    fixture convention in the subtree_messages helpers above).
+
+    Args:
+        subtree_ids: The list ``manager.get_tree_ids_permanent(caller)``
+            should return. Defaults to ``["parent-instance"]``.
+        infos_by_iid: Per-instance dict returned by
+            ``manager.get_instance_info(iid)`` (status / agent_name /
+            agent_id / last_activity_at). Missing keys → a minimal
+            running row.
+        pending_by_iid: The dict ``manager.count_pending_tasks_by_instance``
+            should return (mirrors the real grouped-count contract:
+            zero-count instances omitted by the repository).
+        get_info_side_effect: If provided, ``get_instance_info`` raises
+            this exception for EVERY call (per-instance error-skip test).
+
+    Returns:
+        A ``MagicMock`` whose ``get_tree_ids_permanent``,
+        ``get_instance_info``, and ``count_pending_tasks_by_instance``
+        stubs are pre-wired.
+    """
+    manager = MagicMock()
+    if subtree_ids is None:
+        subtree_ids = ["parent-instance"]
+    if infos_by_iid is None:
+        infos_by_iid = {}
+    if pending_by_iid is None:
+        pending_by_iid = {}
+
+    manager.get_tree_ids_permanent = MagicMock(return_value=list(subtree_ids))
+
+    def _get_info(iid):
+        if get_info_side_effect is not None:
+            raise get_info_side_effect
+        info = dict(infos_by_iid.get(iid) or {})
+        info.setdefault("status", "running")
+        info.setdefault("agent_id", "developer")
+        return info
+
+    manager.get_instance_info = MagicMock(side_effect=_get_info)
+
+    # Real repository contract: grouped count returns ONLY instances
+    # with count > 0 (GROUP BY omits empty groups).
+    manager.count_pending_tasks_by_instance = MagicMock(
+        return_value={k: v for k, v in pending_by_iid.items() if v}
+    )
+
+    # Mimic the Phase 1 manager shape so ``create_instance_tools``
+    # builds without exploding during factory wiring.
+    manager._instance_repository = MagicMock()
+    manager.engine = MagicMock()
+    manager.write_guard = MagicMock()
+    manager._live_hub = MagicMock()
+    return manager
+
+
+def _get_subtree_status_tool(manager: MagicMock):
+    """Build the instance tools and return the ``subtree_status`` tool.
+
+    Same factory-helper patching convention as
+    ``_get_subtree_messages_tool`` above.
+    """
+    from daemon.tools.instance import create_instance_tools
+
+    patches = _patch_heavy_helpers()
+    for p in patches:
+        p.start()
+    try:
+        tools = create_instance_tools(manager, "parent-instance", "developer")
+    finally:
+        for p in reversed(patches):
+            p.stop()
+
+    for t in tools:
+        if getattr(t, "name", None) == "subtree_status":
+            return t
+    raise RuntimeError(
+        "subtree_status tool not found in create_instance_tools output; "
+        f"got {[getattr(t, 'name', None) for t in tools]}"
+    )
+
+
+def _iso(dt: datetime) -> str:
+    """ISO-8601 string for an aware datetime (test helper)."""
+    return dt.isoformat()
+
+
+# ---------------------------------------------------------------------------
+# a/b. Subtree scoping — accept + cross-subtree rejection
+# ---------------------------------------------------------------------------
+
+
+class TestSubtreeStatusScoping:
+    """(a) caller sees own subtree only; (b) cross-subtree rejected."""
+
+    @pytest.mark.timeout(10)
+    async def test_own_subtree_rows_only_outside_never_appear(self):
+        """Rows come from get_tree_ids_permanent output ONLY — an
+        instance outside the caller's subtree (one that merely exists
+        in the infos map) NEVER appears in the output."""
+        caller_subtree = ["parent-instance", "i-child-1", "i-child-2"]
+        manager = _make_subtree_status_manager(
+            subtree_ids=caller_subtree,
+            infos_by_iid={
+                "parent-instance": {"agent_name": "worker"},
+                "i-child-1": {"agent_name": "coder", "status": "completed"},
+                # OUTSIDE the subtree — present in the infos map but
+                # NOT in subtree_ids; must never be read or rendered.
+                "i-outsider": {"agent_name": "stranger", "status": "error"},
+            },
+        )
+        tool = _get_subtree_status_tool(manager)
+
+        result = await tool.coroutine()
+
+        assert "ERROR" not in result
+        assert "i-child-" in result  # short form renders
+        assert "stranger" not in result
+        assert "i-outsider" not in result
+        # The outsider was never even read.
+        read_iids = [
+            c.args[0] for c in manager.get_instance_info.call_args_list
+        ]
+        assert "i-outsider" not in read_iids
+        assert set(read_iids) == set(caller_subtree)
+
+    @pytest.mark.timeout(10)
+    async def test_target_descendant_returns_its_own_subtree(self):
+        """``target=grandchild`` reports the grandchild's subtree —
+        the queried set is the TARGET's subtree, not the caller's."""
+        manager = _make_subtree_status_manager(
+            subtree_ids=[
+                "parent-instance", "i-child-1", "i-gc-1", "i-gc-2",
+            ],
+        )
+        # First facade call: caller authz (returns caller subtree).
+        # Second: target subtree resolution.
+        manager.get_tree_ids_permanent = MagicMock(
+            side_effect=[
+                ["parent-instance", "i-child-1", "i-gc-1", "i-gc-2"],
+                ["i-child-1", "i-gc-1", "i-gc-2"],
+            ]
+        )
+        manager.get_instance_info = MagicMock(
+            side_effect=lambda iid: {
+                "status": "running", "agent_id": "worker",
+                "agent_name": iid,
+            }
+        )
+        tool = _get_subtree_status_tool(manager)
+
+        result = await tool.coroutine(target_instance_id="i-child-1")
+
+        assert "ERROR" not in result
+        assert "parent-instance" not in result  # caller NOT in target subtree
+        assert "i-gc-1"[:8] in result
+        assert "i-gc-2"[:8] in result
+
+    @pytest.mark.timeout(10)
+    async def test_cross_subtree_target_rejected(self):
+        """(b) A target outside the caller's subtree → clear ERROR
+        refusal via the shared _validate_subtree_target chokepoint."""
+        manager = _make_subtree_status_manager(
+            subtree_ids=["parent-instance", "i-child-1"],
+        )
+        tool = _get_subtree_status_tool(manager)
+
+        result = await tool.coroutine(target_instance_id="i-elsewhere")
+
+        assert result.startswith("ERROR: subtree_status:")
+        assert "not in the caller's subtree" in result
+        # No rows were read for the refused query.
+        manager.get_instance_info.assert_not_called()
+
+    @pytest.mark.timeout(10)
+    async def test_empty_string_target_rejected(self):
+        """Empty-string target is malformed → refused (same semantics
+        as subtree_messages: empty ≠ None)."""
+        manager = _make_subtree_status_manager(
+            subtree_ids=["parent-instance"],
+        )
+        tool = _get_subtree_status_tool(manager)
+
+        result = await tool.coroutine(target_instance_id="")
+
+        assert result.startswith("ERROR: subtree_status:")
+        manager.get_instance_info.assert_not_called()
+
+    @pytest.mark.timeout(10)
+    async def test_missing_caller_lineage_rejected(self):
+        """Caller absent from the permanent record → no observable
+        lineage → clear refusal."""
+        manager = _make_subtree_status_manager(subtree_ids=[])
+        tool = _get_subtree_status_tool(manager)
+
+        result = await tool.coroutine()
+
+        assert result.startswith("ERROR: subtree_status:")
+        assert "no observable lineage" in result
+
+
+# ---------------------------------------------------------------------------
+# c. Correctness — statuses, relative ages, pending counts
+# ---------------------------------------------------------------------------
+
+
+class TestRelativeAgeRendering:
+    """Unit tests for ``_render_relative_age`` (exact boundaries)."""
+
+    def test_scheme_boundaries(self):
+        from daemon.tools.instance import _render_relative_age
+
+        now = datetime(2026, 8, 28, 18, 0, 0, tzinfo=_tz_utc.utc)
+        cases = [
+            (None, "-"),
+            ("", "-"),
+            ("not-a-timestamp", "-"),
+            (_iso(now - timedelta(seconds=1)), "now"),
+            (_iso(now - timedelta(seconds=59)), "now"),
+            (_iso(now - timedelta(seconds=60)), "1m"),
+            (_iso(now - timedelta(minutes=14)), "14m"),
+            (_iso(now - timedelta(minutes=59, seconds=59)), "59m"),
+            (_iso(now - timedelta(hours=1)), "1h"),
+            (_iso(now - timedelta(hours=2)), "2h"),
+            (_iso(now - timedelta(hours=23, minutes=59)), "23h"),
+            (_iso(now - timedelta(hours=24)), "1d"),
+            (_iso(now - timedelta(days=3)), "3d"),
+            # Clock skew — future timestamps clamp to "now".
+            (_iso(now + timedelta(minutes=5)), "now"),
+        ]
+        for ts, expected in cases:
+            got = _render_relative_age(ts, now=now)
+            assert got == expected, f"{ts!r}: got {got!r}, want {expected!r}"
+
+    def test_naive_timestamp_interpreted_as_utc(self):
+        """``Instance.last_activity_at`` is stored timezone-NAIVE UTC
+        (repository.py:2046) — naive input must not shift the age."""
+        from daemon.tools.instance import _render_relative_age
+
+        now = datetime(2026, 8, 28, 18, 0, 0, tzinfo=_tz_utc.utc)
+        naive = (now - timedelta(minutes=5)).replace(tzinfo=None).isoformat()
+        assert _render_relative_age(naive, now=now) == "5m"
+
+
+class TestSubtreeStatusRows:
+    """(c) Row correctness: statuses, ages, pending counts, caps."""
+
+    @pytest.mark.timeout(10)
+    async def test_rows_carry_status_age_pending(self):
+        now = datetime.now(_tz_utc.utc)
+        manager = _make_subtree_status_manager(
+            subtree_ids=[
+                "parent-instance", "i-fresh", "i-minutes", "i-hours",
+                "i-days", "i-unknown",
+            ],
+            infos_by_iid={
+                "parent-instance": {
+                    "agent_name": "worker", "status": "running",
+                    "last_activity_at": _iso(now - timedelta(seconds=20)),
+                },
+                "i-fresh": {
+                    "agent_name": "coder", "status": "idle",
+                    "last_activity_at": _iso(now - timedelta(seconds=45)),
+                },
+                "i-minutes": {
+                    "agent_name": "tester", "status": "completed",
+                    "last_activity_at": _iso(now - timedelta(minutes=14)),
+                },
+                "i-hours": {
+                    "agent_name": "reviewer", "status": "error",
+                    "last_activity_at": _iso(now - timedelta(hours=2)),
+                },
+                "i-days": {
+                    "agent_name": "planner", "status": "terminated",
+                    "last_activity_at": _iso(now - timedelta(days=3)),
+                },
+                "i-unknown": {
+                    "agent_name": "wanderer", "status": "waiting_children",
+                    "last_activity_at": None,
+                },
+            },
+            pending_by_iid={"i-minutes": 3, "i-fresh": 1},
+        )
+        tool = _get_subtree_status_tool(manager)
+
+        result = await tool.coroutine()
+
+        lines = [ln for ln in result.splitlines() if ln.strip()]
+        rows = {
+            ln[:8].strip(): ln for ln in lines[3:]
+        }
+        # Statuses rendered verbatim.
+        assert any("running" in ln for ln in rows.values())
+        assert any("waiting_children" in ln for ln in rows.values())
+        # Relative ages.
+        row_fresh = rows["i-fresh"]
+        assert " now" in row_fresh and " 1" in row_fresh, row_fresh
+        assert "14m" in rows["i-minute"]
+        assert " 2h" in rows["i-hours"]
+        assert " 3d" in rows["i-days"]
+        assert "  -" in rows["i-unknow"]
+        # Pending counts match the seeded map (missing → 0).
+        assert rows["i-minute"].rstrip().endswith("3"), rows["i-minute"]
+        assert rows["i-fresh"].rstrip().endswith("1"), rows["i-fresh"]
+        assert rows["i-hours"].rstrip().endswith("0"), rows["i-hours"]
+
+    @pytest.mark.timeout(10)
+    async def test_agent_name_capped_at_24_chars(self):
+        long_name = "a" * 40
+        manager = _make_subtree_status_manager(
+            subtree_ids=["parent-instance"],
+            infos_by_iid={
+                "parent-instance": {
+                    "agent_name": long_name, "status": "running",
+                },
+            },
+        )
+        tool = _get_subtree_status_tool(manager)
+
+        result = await tool.coroutine()
+
+        row = result.splitlines()[3]
+        cell = row[10:10 + 24]
+        assert len(cell) == 24
+        assert cell.endswith("…")
+        assert cell.startswith("a" * 23)
+        assert "a" * 25 not in result
+
+    @pytest.mark.timeout(10)
+    async def test_agent_falls_back_to_agent_id(self):
+        manager = _make_subtree_status_manager(
+            subtree_ids=["parent-instance"],
+            infos_by_iid={
+                "parent-instance": {
+                    "agent_name": None, "agent_id": "the-agent-id",
+                    "status": "running",
+                },
+            },
+        )
+        tool = _get_subtree_status_tool(manager)
+
+        result = await tool.coroutine()
+
+        assert "the-agent-id" in result
+
+    @pytest.mark.timeout(10)
+    async def test_bad_instance_row_skipped_not_fatal(self):
+        """One bad instance (get_instance_info raises) is skipped +
+        WARN-logged; the rest of the overview still renders."""
+        calls = {"n": 0}
+
+        def _info(iid):
+            calls["n"] += 1
+            if iid == "i-broken":
+                raise KeyError("Instance not found: i-broken")
+            return {"status": "running", "agent_id": "developer"}
+
+        manager = _make_subtree_status_manager(
+            subtree_ids=["parent-instance", "i-broken", "i-ok"],
+        )
+        manager.get_instance_info = MagicMock(side_effect=_info)
+        tool = _get_subtree_status_tool(manager)
+
+        result = await tool.coroutine()
+
+        assert "ERROR" not in result
+        assert "returned 2 after caps/filter" in result  # broken row omitted
+        assert calls["n"] == 3
+
+    @pytest.mark.timeout(10)
+    async def test_pending_count_query_failure_degrades_to_zero(self):
+        """A failing batched count query degrades every row to
+        pending=0 with a warning — the overview never crashes."""
+        manager = _make_subtree_status_manager(
+            subtree_ids=["parent-instance"],
+        )
+        manager.count_pending_tasks_by_instance = MagicMock(
+            side_effect=RuntimeError("db unavailable")
+        )
+        tool = _get_subtree_status_tool(manager)
+
+        result = await tool.coroutine()
+
+        assert "ERROR" not in result
+        assert result.splitlines()[3].rstrip().endswith("0")
+
+
+# ---------------------------------------------------------------------------
+# d. Ordering + caps
+# ---------------------------------------------------------------------------
+
+
+class TestSubtreeStatusOrderingAndCaps:
+    """(d) caller-first ordering; default cap 50; hard clamp 200;
+    truncation notice."""
+
+    @staticmethod
+    def _wide_manager(n_children: int) -> MagicMock:
+        ids = ["parent-instance"] + [f"i-child-{i:03d}" for i in range(n_children)]
+        return _make_subtree_status_manager(
+            subtree_ids=ids,
+            infos_by_iid={
+                iid: {"status": "running", "agent_name": "worker"}
+                for iid in ids
+            },
+        )
+
+    @pytest.mark.timeout(10)
+    async def test_caller_row_leads_despite_lexicographic_position(self):
+        """S1 lesson: composite key (x != caller, x) — the caller
+        leads even though 'parent-instance' sorts AFTER 'i-child-*'."""
+        manager = self._wide_manager(3)
+        tool = _get_subtree_status_tool(manager)
+
+        result = await tool.coroutine()
+
+        rows = [ln for ln in result.splitlines()[3:] if ln.strip()]
+        assert rows[0].startswith("parent-i"), rows[0]
+        # Rest are stable id order.
+        rest = [ln[:8].strip() for ln in rows[1:]]
+        assert rest == sorted(rest)
+
+    @pytest.mark.timeout(10)
+    async def test_default_cap_50_plus_truncation_notice(self):
+        """60-instance subtree, default args → 50 rows + an explicit
+        truncation WARNING naming the true subtree size."""
+        manager = self._wide_manager(60)
+        tool = _get_subtree_status_tool(manager)
+
+        result = await tool.coroutine()
+
+        rows = [
+            ln for ln in result.splitlines()[3:]
+            if ln.strip() and not ln.startswith("WARNING")
+        ]
+        assert len(rows) == 50
+        assert "returned 50 after caps/filter" in result
+        assert "subtree has 61 instances" in result
+        assert "WARNING" in result
+        # Caller survived the cap slice.
+        assert rows[0].startswith("parent-i")
+
+    @pytest.mark.timeout(10)
+    async def test_hard_clamp_at_200(self):
+        """max_instances=500 (> hard clamp 200) is silently clamped:
+        a 250-instance subtree yields exactly 200 rows."""
+        manager = self._wide_manager(250)
+        tool = _get_subtree_status_tool(manager)
+
+        result = await tool.coroutine(max_instances=500)
+
+        rows = [
+            ln for ln in result.splitlines()[3:]
+            if ln.strip() and not ln.startswith("WARNING")
+        ]
+        assert len(rows) == 200
+        assert "subtree has 251 instances" in result
+
+    @pytest.mark.timeout(10)
+    async def test_nonpositive_max_instances_is_an_error(self):
+        manager = self._wide_manager(1)
+        tool = _get_subtree_status_tool(manager)
+
+        result = await tool.coroutine(max_instances=0)
+
+        assert result.startswith("ERROR: subtree_status: max_instances")
+        result = await tool.coroutine(max_instances=-5)
+        assert result.startswith("ERROR: subtree_status: max_instances")
+
+    @pytest.mark.timeout(10)
+    async def test_no_truncation_notice_when_under_cap(self):
+        manager = self._wide_manager(10)
+        tool = _get_subtree_status_tool(manager)
+
+        result = await tool.coroutine()
+
+        assert "WARNING" not in result
+
+
+# ---------------------------------------------------------------------------
+# e. status_filter
+# ---------------------------------------------------------------------------
+
+
+class TestSubtreeStatusFilter:
+    """(e) exact, case-insensitive matching; 'all' default."""
+
+    @pytest.mark.timeout(10)
+    async def test_filter_matching_rows_only(self):
+        manager = _make_subtree_status_manager(
+            subtree_ids=["parent-instance", "i-run-1", "i-run-2", "i-done"],
+            infos_by_iid={
+                "parent-instance": {"status": "idle"},
+                "i-run-1": {"status": "running", "agent_name": "a"},
+                "i-run-2": {"status": "waiting_children", "agent_name": "b"},
+                "i-done": {"status": "completed", "agent_name": "c"},
+            },
+        )
+        tool = _get_subtree_status_tool(manager)
+
+        result = await tool.coroutine(status_filter="running")
+
+        assert "returned 1 after caps/filter" in result
+        assert "completed" not in result
+        assert "waiting_children" not in result
+
+    @pytest.mark.timeout(10)
+    async def test_filter_is_case_insensitive(self):
+        manager = _make_subtree_status_manager(
+            subtree_ids=["parent-instance", "i-run-1"],
+            infos_by_iid={
+                "parent-instance": {"status": "running"},
+                "i-run-1": {"status": "completed"},
+            },
+        )
+        tool = _get_subtree_status_tool(manager)
+
+        result = await tool.coroutine(status_filter="RUNNING")
+
+        assert "returned 1 after caps/filter" in result
+
+    @pytest.mark.timeout(10)
+    async def test_filter_all_returns_everything(self):
+        manager = _make_subtree_status_manager(
+            subtree_ids=["parent-instance", "i-run-1", "i-done"],
+            infos_by_iid={
+                "parent-instance": {"status": "running"},
+                "i-run-1": {"status": "waiting_children"},
+                "i-done": {"status": "completed"},
+            },
+        )
+        tool = _get_subtree_status_tool(manager)
+
+        result = await tool.coroutine()  # default status_filter='all'
+
+        assert "returned 3 after caps/filter" in result
+
+    @pytest.mark.timeout(10)
+    async def test_filter_no_match_renders_placeholder(self):
+        manager = _make_subtree_status_manager(
+            subtree_ids=["parent-instance"],
+            infos_by_iid={"parent-instance": {"status": "running"}},
+        )
+        tool = _get_subtree_status_tool(manager)
+
+        result = await tool.coroutine(status_filter="paused")
+
+        assert "returned 0 after caps/filter" in result
+        assert "(no matching instances)" in result
+
+    @pytest.mark.timeout(10)
+    async def test_non_string_filter_is_an_error(self):
+        manager = _make_subtree_status_manager()
+        tool = _get_subtree_status_tool(manager)
+
+        result = await tool.coroutine(status_filter=123)
+
+        assert result.startswith("ERROR: subtree_status: status_filter")
+
+
+# ---------------------------------------------------------------------------
+# f. Registration
+# ---------------------------------------------------------------------------
+
+
+class TestSubtreeStatusRegistration:
+    """(f) tool presence, docs, resolve_tool_filter, meta.json opt-ins
+    for leader/planner/tester via the PRODUCTION resolution seam."""
+
+    @pytest.mark.timeout(10)
+    def test_subtree_status_in_tool_list(self):
+        manager = _make_subtree_status_manager()
+        tool = _get_subtree_status_tool(manager)
+
+        assert tool is not None
+        assert tool.name == "subtree_status"
+
+    @pytest.mark.timeout(10)
+    def test_full_doc_non_empty_and_documents_contract(self):
+        manager = _make_subtree_status_manager()
+        tool = _get_subtree_status_tool(manager)
+
+        full_doc = getattr(tool, "_full_doc_", None)
+        assert isinstance(full_doc, str) and full_doc.strip()
+        for concept in ("subtree", "status_filter", "pending", "read-only"):
+            assert concept in full_doc.lower(), concept
+
+    @pytest.mark.timeout(10)
+    def test_tool_help_returns_subtree_status_doc(self):
+        """``tool_help("subtree_status")`` returns the full doc (the
+        help tool reads ``_full_doc_``); not the not-found notice."""
+        from daemon.tools.help import create_help_tool
+
+        manager = _make_subtree_status_manager()
+        patches = _patch_heavy_helpers()
+        for p in patches:
+            p.start()
+        try:
+            from daemon.tools.instance import create_instance_tools
+            tools = create_instance_tools(manager, "parent-instance", "developer")
+        finally:
+            for p in reversed(patches):
+                p.stop()
+
+        sentinel_allowed = {
+            "subtree_status", "send_message", "spawn_instance",
+            "tool_help", "bash",
+        }
+        with patch(
+            "daemon.tools.help._get_allowed_tools",
+            return_value=sentinel_allowed,
+        ):
+            tools = [t for t in tools if not isinstance(t, MagicMock)]
+            help_tool = create_help_tool(tools, agent_id="leader")
+            result = (
+                help_tool.func("subtree_status")
+                if hasattr(help_tool, "func")
+                else help_tool("subtree_status")
+            )
+
+        assert isinstance(result, str)
+        assert "subtree" in result.lower()
+        assert "not found" not in result.lower()
+
+    @pytest.mark.timeout(10)
+    def test_narrow_opt_in_resolves_only_subtree_status(self):
+        """``tools.allow: ["subtree_status"]`` resolves the tool via
+        ``resolve_tool_filter`` WITHOUT granting sibling tools."""
+        from pathlib import Path
+
+        from daemon.registry import AgentMetadata, ToolFilter
+        from daemon.tools.instance import resolve_tool_filter
+
+        meta = AgentMetadata(
+            id="leader",
+            name="Leader",
+            description="test",
+            path=Path("/tmp/leader"),
+            team_members=[],
+            tools=ToolFilter(allow=["subtree_status"], deny=[]),
+        )
+        categories = {
+            "instance": [
+                "spawn_instance", "send_message", "terminate_instance",
+                "list_instances", "get_instance_info",
+                "subtree_messages", "subtree_status",
+            ],
+        }
+
+        resolved = resolve_tool_filter(
+            allow=meta.tools.allow, deny=meta.tools.deny,
+            tool_categories=categories,
+        )
+        assert resolved is not None
+        assert "subtree_status" in resolved
+        # Narrow opt-in: sibling instance tools NOT granted.
+        assert "subtree_messages" not in resolved
+        assert "spawn_instance" not in resolved
+
+    @pytest.mark.timeout(10)
+    def test_known_tool_names_contains_subtree_status(self):
+        """The frozen-binary static fallback universe carries the new
+        tool name (exact-match-assert sweep for the registry contract)."""
+        from daemon.tools._tool_registry import KNOWN_TOOL_NAMES
+
+        assert "subtree_status" in KNOWN_TOOL_NAMES
+
+    @pytest.mark.timeout(10)
+    def test_leader_planner_tester_opt_in_via_production_seam(self):
+        """All THREE opt-in agents carry ``subtree_status`` in
+        ``tools.allow``, resolved through the production seam: real
+        ``AgentRegistry`` discovery of the repo ``agents/`` tree +
+        ``get_version()`` with ``get_resolved()`` fallback (the
+        Version Tag Tool Resolution convention — no mocking around
+        it)."""
+        from daemon.registry import AgentRegistry
+
+        agents_dir = REPO_ROOT / "agents"
+        assert agents_dir.is_dir()
+
+        registry = AgentRegistry(agents_dir)
+        registry.discover()
+
+        for agent_id in ("leader", "planner", "tester"):
+            meta = registry.get_version(agent_id) or registry.get_resolved(
+                agent_id
+            )
+            assert meta is not None, (
+                f"{agent_id} was not discovered from the real agents/ tree"
+            )
+            allow = (meta.tools.allow if meta.tools is not None else None) or []
+            assert "subtree_status" in allow, (
+                f"agents/{agent_id}/meta.json tools.allow must contain "
+                f"'subtree_status' (resolved via get_version/get_resolved); "
+                f"got: {allow}"
+            )
+
+    @pytest.mark.timeout(10)
+    def test_manager_facade_method_exists_and_delegates(self):
+        """The ONE additive facade method exists, is additive-shaped
+        (single list arg), and delegates to ``_task_repo`` (D14 — the
+        tool layer never reaches into the repository)."""
+        import inspect
+
+        from daemon.manager import InstanceManager
+
+        assert hasattr(InstanceManager, "count_pending_tasks_by_instance")
+        method = InstanceManager.count_pending_tasks_by_instance
+        params = [
+            p for p in inspect.signature(method).parameters if p != "self"
+        ]
+        assert params == ["instance_ids"], params
+
+        src = inspect.getsource(method)
+        assert "count_pending_by_instance_ids" in src
+        # D14: no direct reach-in from the facade into unrelated repos.
+        assert "_instance_repository" not in src
+
+
+# ---------------------------------------------------------------------------
+# g. Token-budget sanity
+# ---------------------------------------------------------------------------
+
+
+class TestSubtreeStatusTokenBudget:
+    """(g) Output size is bounded even at the hard clamp cap."""
+
+    @pytest.mark.timeout(10)
+    async def test_cap_sized_output_within_stated_bound(self):
+        """200 rows (hard clamp) with WORST-CASE cells (24-char agent
+        names, longest status, 3-digit pending) stay within the
+        documented bound: header slack + <= 66 chars/row, and under
+        the defense-in-depth ceiling constant."""
+        from daemon.tools.instance import (
+            _SUBTREE_STATUS_OUTPUT_CEILING_CHARS,
+        )
+
+        n = 200
+        ids = ["parent-instance"] + [f"i-child-{i:03d}" for i in range(n - 1)]
+        manager = _make_subtree_status_manager(
+            subtree_ids=ids,
+            infos_by_iid={
+                iid: {
+                    "status": "waiting_children",  # longest canonical value
+                    "agent_name": "x" * 24,        # capped cell width
+                    "last_activity_at": _iso(
+                        datetime.now(_tz_utc.utc) - timedelta(days=9)
+                    ),
+                }
+                for iid in ids
+            },
+            pending_by_iid={iid: 999 for iid in ids},
+        )
+        tool = _get_subtree_status_tool(manager)
+
+        result = await tool.coroutine(max_instances=10_000)  # clamps to 200
+
+        lines = result.splitlines()
+        assert len(lines) >= 200
+        # Stated bound: 3 header lines + one row each, <= 66 chars/row
+        # (8 iid + 2 + 24 agent + 1 + 16 status + 1 + 4 age + 2 + 3
+        # pending + slack), plus the truncation WARNING block.
+        row_lines = lines[3:3 + 200]
+        for ln in row_lines:
+            assert len(ln) <= 66, f"row exceeds 66-char budget: {ln!r}"
+        bound = 3 * 120 + 200 * 66 + 400  # header + rows + warning slack
+        assert len(result) <= bound, (
+            f"output {len(result)} chars exceeds stated bound {bound}"
+        )
+        assert len(result) <= _SUBTREE_STATUS_OUTPUT_CEILING_CHARS
+
+    @pytest.mark.timeout(10)
+    async def test_no_message_content_ever_read(self):
+        """Token-cheap by construction: the tool NEVER calls
+        ``get_messages`` (no message content enters the output)."""
+        manager = _make_subtree_status_manager(
+            subtree_ids=["parent-instance", "i-child-1"],
+        )
+        manager.get_messages = AsyncMock(return_value=[])
+        tool = _get_subtree_status_tool(manager)
+
+        result = await tool.coroutine()
+
+        manager.get_messages.assert_not_called()
+        assert len(result) < 2000  # tiny subtree → tiny output
+
+
+# ---------------------------------------------------------------------------
+# h. Read-only guarantee
+# ---------------------------------------------------------------------------
+
+
+class TestSubtreeStatusReadOnly:
+    """(h) The tool mutates nothing: only read-only manager methods
+    are invoked; the pending count is ONE batched call."""
+
+    @pytest.mark.timeout(10)
+    async def test_only_read_only_manager_methods_invoked(self):
+        """After the tool runs, every manager call recorded (beyond
+        factory-time wiring) is one of the three read-only seams:
+        get_tree_ids_permanent / get_instance_info /
+        count_pending_tasks_by_instance."""
+        manager = _make_subtree_status_manager(
+            subtree_ids=["parent-instance", "i-child-1", "i-child-2"],
+        )
+        tool = _get_subtree_status_tool(manager)
+
+        # Snapshot factory-time calls so only tool-time calls count.
+        before = list(manager.method_calls)
+        await tool.coroutine()
+        after = list(manager.method_calls)
+
+        delta = [c[0] for c in after[len(before):]]
+        allowed = {
+            "get_tree_ids_permanent",
+            "get_instance_info",
+            "count_pending_tasks_by_instance",
+        }
+        assert set(delta) <= allowed, (
+            f"subtree_status invoked non-read-only manager methods: "
+            f"{sorted(set(delta) - allowed)}"
+        )
+
+    @pytest.mark.timeout(10)
+    async def test_no_enqueue_or_dispatch_side_effects(self):
+        """Explicit negative assertions on the mutation surfaces the
+        instance-tools family could reach (enqueue, injection,
+        spawn, job dispatch)."""
+        manager = _make_subtree_status_manager(
+            subtree_ids=["parent-instance", "i-child-1"],
+        )
+        tool = _get_subtree_status_tool(manager)
+
+        await tool.coroutine()
+
+        manager.enqueue_message.assert_not_called()
+        manager.enqueue_message_job.assert_not_called()
+        manager.set_injection.assert_not_called()
+        manager.spawn_instance.assert_not_called()
+        manager.terminate_instance.assert_not_called()
+        manager.pause_instance_cascade.assert_not_called()
+
+    @pytest.mark.timeout(10)
+    async def test_pending_counts_are_one_batched_call(self):
+        """50 rows → EXACTLY ONE count query carrying all 50 ids —
+        never N per-instance count queries."""
+        ids = ["parent-instance"] + [f"i-child-{i:03d}" for i in range(49)]
+        manager = _make_subtree_status_manager(
+            subtree_ids=ids,
+            infos_by_iid={
+                iid: {"status": "running", "agent_name": "w"}
+                for iid in ids
+            },
+        )
+        tool = _get_subtree_status_tool(manager)
+
+        await tool.coroutine()
+
+        manager.count_pending_tasks_by_instance.assert_called_once()
+        called_with = (
+            manager.count_pending_tasks_by_instance.call_args.args[0]
+        )
+        assert set(called_with) == set(ids)
+        assert len(called_with) == 50
+
+    @pytest.mark.timeout(10)
+    async def test_empty_result_makes_no_count_query(self):
+        """Zero rows after filtering → the batched count query is
+        skipped entirely (no empty-list DB round-trip)."""
+        manager = _make_subtree_status_manager(
+            subtree_ids=["parent-instance"],
+            infos_by_iid={"parent-instance": {"status": "running"}},
+        )
+        tool = _get_subtree_status_tool(manager)
+
+        await tool.coroutine(status_filter="paused")
+
+        manager.count_pending_tasks_by_instance.assert_not_called()

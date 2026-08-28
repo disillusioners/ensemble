@@ -661,6 +661,7 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "spawn_councilor",
     "spawn_instance",
     "subtree_messages",
+    "subtree_status",
     "system_config",
     "system_env",
     "system_health",

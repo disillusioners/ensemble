@@ -2506,6 +2506,60 @@ class TestTaskStats:
         assert counts["running"] == 0
         assert counts["completed"] == 1
 
+    def test_count_pending_by_instance_ids_grouped(
+        self, repository, engine
+    ):
+        """#5 subtree_status read model: ONE grouped query returns
+        per-instance PENDING counts; non-pending statuses and
+        out-of-list instances are excluded; zero-count instances are
+        OMITTED (the tool uses ``dict.get(iid, 0)``)."""
+        # i1: two pending; i2: one pending; i3: none pending.
+        repository.create(
+            task_type=TaskType.PROCESS_MESSAGE.value, instance_id="i1"
+        )
+        repository.create(
+            task_type=TaskType.PROCESS_MESSAGE.value, instance_id="i1"
+        )
+        repository.create(
+            task_type=TaskType.PROCESS_MESSAGE.value, instance_id="i2"
+        )
+        # i3's only task is RUNNING — not pending (raw-SQL seed so no
+        # claim-order ambiguity from the FIFO claim path).
+        _create_task_with_status(
+            engine,
+            instance_id="i3",
+            status=TaskStatus.RUNNING.value,
+        )
+        # i4 has a COMPLETED task — invisible to a pending count.
+        _create_task_with_status(
+            engine,
+            instance_id="i4",
+            status=TaskStatus.COMPLETED.value,
+        )
+
+        counts = repository.count_pending_by_instance_ids(
+            ["i1", "i2", "i3", "i4"]
+        )
+
+        assert counts == {"i1": 2, "i2": 1}
+
+    def test_count_pending_by_instance_ids_empty_input(self, repository):
+        """Empty input short-circuits to {} with no DB round-trip."""
+        assert repository.count_pending_by_instance_ids([]) == {}
+
+    def test_count_pending_by_instance_ids_dedupes_input(
+        self, repository
+    ):
+        """Duplicate ids in the input are collapsed by the GROUP BY —
+        counts stay stable."""
+        repository.create(
+            task_type=TaskType.PROCESS_MESSAGE.value, instance_id="i1"
+        )
+        counts = repository.count_pending_by_instance_ids(
+            ["i1", "i1", "i1"]
+        )
+        assert counts == {"i1": 1}
+
 
 class TestTaskDeletion:
     """Tests for task deletion."""

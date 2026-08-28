@@ -12,6 +12,7 @@ is a ticketed follow-up; not done here.
 import asyncio
 import json
 import logging
+from datetime import datetime, timezone
 from functools import partial
 from typing import TYPE_CHECKING, Annotated, Any, Callable
 
@@ -951,6 +952,111 @@ _SUBTREE_TOOL_NAME_MAX_CHARS = 64
 # assistant message with many/long tool_call names flooding the token
 # budget.
 _SUBTREE_TOOLS_JOINED_MAX_CHARS = 200
+
+# ---------------------------------------------------------------------------
+# ``subtree_status`` (#5, agent-instance-tools follow-up) — constants
+# ---------------------------------------------------------------------------
+#
+# One call = whole-subtree OVERVIEW (one short row per instance), as a
+# token-cheap replacement for N× get_instance_info calls when a parent
+# just wants to know who is alive/working/stuck in its subtree. No
+# message content is read or rendered — the subtree_messages tool
+# remains the drill-down for that.
+
+# Default instance cap. Statuses are one short row each (vs
+# subtree_messages' per-message blocks), hence a higher default than
+# that tool's 20.
+_SUBTREE_STATUS_DEFAULT_MAX_INSTANCES = 50
+# Hard clamp on the subtree_status max_instances input (silent clamp
+# above, error at <= 0 — mirrors the subtree_messages W4 convention).
+_SUBTREE_STATUS_MAX_INSTANCES_CAP = 200
+# Agent-name column cap (chars). Longer names truncate + ellipsis.
+_SUBTREE_STATUS_AGENT_MAX_CHARS = 24
+# Status column width — ``waiting_children`` (16) is the longest
+# canonical InstanceStatus value.
+_SUBTREE_STATUS_STATUS_WIDTH = 16
+# Defense-in-depth output ceiling for subtree_status. The column caps
+# make the deterministic bound ~64 chars/row × <= 200 rows + a short
+# header (< 14k), so the ceiling only fires on drifted/adversarial
+# input; tail-truncate + warning, mirroring subtree_messages step 8.
+_SUBTREE_STATUS_OUTPUT_CEILING_CHARS = 16000
+
+
+def _render_relative_age(
+    iso_ts: str | None,
+    *,
+    now: datetime | None = None,
+) -> str:
+    """Render an ISO timestamp as a compact relative age.
+
+    Scheme (token-cheap by design):
+
+      * ``None`` / unparseable / not a str → ``"-"`` (unknown).
+      * age < 60s → ``"now"`` (``last_activity_at`` is refreshed per
+        activity since W1, so an active instance renders fresh).
+      * < 60m → ``"<N>m"`` (e.g. ``14m``)
+      * < 24h → ``"<N>h"`` (e.g. ``2h``)
+      * >= 24h → ``"<N>d"`` (e.g. ``3d``)
+
+    Negative ages (clock skew between app hosts) clamp to ``"now"`` —
+    a negative age is never rendered. ``Instance.last_activity_at``
+    is stored timezone-NAIVE UTC (see
+    ``daemon/repositories/instance/repository.py:2046``); naive input
+    is interpreted as UTC, aware input is compared directly.
+
+    Args:
+        iso_ts: The ISO-8601 timestamp string (or ``None``).
+        now: Injection seam for tests; defaults to
+            ``datetime.now(timezone.utc)``.
+
+    Returns:
+        The rendered age string.
+    """
+    if not iso_ts or not isinstance(iso_ts, str):
+        return "-"
+    try:
+        parsed = datetime.fromisoformat(iso_ts)
+    except ValueError:
+        return "-"
+    if now is None:
+        now = datetime.now(timezone.utc)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    delta = now - parsed
+    seconds = delta.total_seconds()
+    if seconds < 60:
+        # Includes negative ages (clock skew) — clamp to "now".
+        return "now"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m"
+    if seconds < 86400:
+        return f"{int(seconds // 3600)}h"
+    return f"{int(seconds // 86400)}d"
+
+
+def _render_subtree_status_agent_cell(info: dict) -> str:
+    """Render the agent column for one ``subtree_status`` row.
+
+    Prefers ``agent_name`` (the human label), falling back to
+    ``agent_id`` (always present on Instance rows). Capped at
+    ``_SUBTREE_STATUS_AGENT_MAX_CHARS`` chars with a ``…`` truncation
+    marker, matching the subtree_messages renderer convention.
+
+    Args:
+        info: The ``manager.get_instance_info(iid)`` dict.
+
+    Returns:
+        The capped agent string (never longer than the cap).
+    """
+    raw = info.get("agent_name") or info.get("agent_id") or "?"
+    agent = str(raw)
+    if len(agent) > _SUBTREE_STATUS_AGENT_MAX_CHARS:
+        keep = _SUBTREE_STATUS_AGENT_MAX_CHARS - 1
+        agent = agent[:keep] + "…"
+    return agent
+
 
 
 def _filter_subtree_messages(
@@ -3243,6 +3349,279 @@ Example outputs::
     subtree_messages(target=None, filters={"child_instance_id": "i-child-3"})
 """
 
+    # ──────────────────────────────────────────────────────────────────
+    # #5 (agent-instance-tools follow-up) — ``subtree_status`` read-only
+    # token-cheap subtree OVERVIEW. One call replaces N×
+    # get_instance_info when a parent just needs who-is-in-what-state
+    # across its subtree. Registered in the ``instance`` category so
+    # ``tools.allow: ["subtree_status"]`` (narrow opt-in) OR
+    # ``tools.allow: ["instance"]`` (whole-category) both grant access.
+    #
+    # Authorization: SAME single chokepoint as subtree_messages —
+    # ``_validate_subtree_target`` → ``manager.get_tree_ids_permanent``
+    # (D14: no tool-layer reach-ins into repositories).
+    #
+    # Reads: per-instance metadata via ``manager.get_instance_info``
+    # (N× small PK reads, the documented v1 fan-out precedent from
+    # subtree_messages' status filter — no bulk facade exists) + ONE
+    # batched pending-count query via the additive facade
+    # ``manager.count_pending_tasks_by_instance`` (grouped GROUP BY —
+    # never N per-instance count queries).
+    #
+    # No message content is read; ``get_messages`` /
+    # ``serialize_message`` are NOT involved (token-cheap is the point).
+    # ──────────────────────────────────────────────────────────────────
+    @register_tool_category("instance")
+    @tool
+    async def subtree_status(
+        target_instance_id: str | None = None,
+        status_filter: str = "all",
+        max_instances: int = _SUBTREE_STATUS_DEFAULT_MAX_INSTANCES,
+    ) -> str:
+        """One-call, read-only overview of the caller's subtree. Use tool_help("subtree_status") for details."""
+        # ── 1. Validate args ────────────────────────────────────────
+        # Mirrors the subtree_messages convention: hard errors for
+        # structurally invalid input, SILENT clamp above the hard cap.
+        if max_instances <= 0:
+            return (
+                "ERROR: subtree_status: max_instances must be > 0 "
+                f"(got {max_instances})."
+            )
+        if not isinstance(status_filter, str):
+            return (
+                "ERROR: subtree_status: status_filter must be a string "
+                f"(got {type(status_filter).__name__})."
+            )
+        if max_instances > _SUBTREE_STATUS_MAX_INSTANCES_CAP:
+            max_instances = _SUBTREE_STATUS_MAX_INSTANCES_CAP
+
+        # ── 2. Resolve subtree (single authz chokepoint) ────────────
+        allowed, subtree_ids = _validate_subtree_target(
+            manager, current_instance_id, target_instance_id
+        )
+        if not allowed:
+            return (
+                "ERROR: subtree_status: target_instance_id "
+                f"{target_instance_id!r} is not in the caller's "
+                "subtree, or the caller has no observable lineage. "
+                "The tool can only report on instances the caller "
+                "spawned (caller + descendants)."
+            )
+        resolved_target = target_instance_id or current_instance_id
+
+        # ── 3. Cap: caller-first, then stable id order (S1 lesson) ──
+        # Composite key (x != caller, x) so the caller row ALWAYS
+        # leads (and survives the cap slice); the rest sort by id.
+        sorted_subtree = sorted(
+            subtree_ids, key=lambda x: (x != current_instance_id, x)
+        )
+        truncated_by_cap = len(sorted_subtree) > max_instances
+        working_set = sorted_subtree[:max_instances]
+
+        # ── 4. Per-instance metadata read (skip + warn on error) ────
+        # One PK read per working-set instance via the facade — the
+        # documented N× v1 precedent (subtree_messages status filter);
+        # a bad instance never fails the whole overview.
+        rows: list[tuple[str, dict]] = []
+        for iid in working_set:
+            try:
+                info = manager.get_instance_info(iid)
+            except Exception as e:  # KeyError + defensive
+                logger.warning(
+                    "subtree_status: get_instance_info(%s) failed: "
+                    "%s: %s",
+                    iid, type(e).__name__, e,
+                )
+                continue
+            if not isinstance(info, dict):
+                continue
+            rows.append((iid, info))
+
+        # ── 5. status_filter: exact, case-insensitive ───────────────
+        # Match semantics are deliberately simple: lowercased EXACT
+        # equality against the canonical status string (e.g.
+        # "running", "waiting_children"). ``"all"`` (default) disables
+        # filtering. Applied AFTER the cap (mirrors the
+        # subtree_messages cap-then-filter ordering) — increase
+        # max_instances or drill into a target when the cap hides
+        # matching rows.
+        if status_filter.lower() != "all":
+            wanted = status_filter.lower()
+            rows = [
+                (iid, info)
+                for iid, info in rows
+                if str(info.get("status") or "").lower() == wanted
+            ]
+
+        # ── 6. ONE batched pending-count query ──────────────────────
+        pending_map: dict[str, int] = {}
+        if rows:
+            try:
+                pending_map = manager.count_pending_tasks_by_instance(
+                    [iid for iid, _ in rows]
+                )
+            except Exception as e:
+                logger.warning(
+                    "subtree_status: count_pending_tasks_by_instance "
+                    "failed: %s: %s",
+                    type(e).__name__, e,
+                )
+                pending_map = {}
+
+        # ── 7. Render compact table ─────────────────────────────────
+        now = datetime.now(timezone.utc)
+        header_lines = [
+            f"subtree_status(target={resolved_target!r}, "
+            f"status_filter={status_filter!r}, "
+            f"max_instances={max_instances})",
+            f"subtree_size={len(sorted_subtree)} "
+            f"(returned {len(rows)} after caps/filter)",
+            f"{'iid':<8}  {'agent':<{_SUBTREE_STATUS_AGENT_MAX_CHARS}} "
+            f"{'status':<{_SUBTREE_STATUS_STATUS_WIDTH}} "
+            f"{'age':>4}  pending",
+        ]
+        row_lines: list[str] = []
+        for iid, info in rows:
+            agent = _render_subtree_status_agent_cell(info)
+            status = str(info.get("status") or "unknown")
+            age = _render_relative_age(info.get("last_activity_at"), now=now)
+            pending = pending_map.get(iid, 0)
+            row_lines.append(
+                f"{iid[:8]:<8}  {agent:<{_SUBTREE_STATUS_AGENT_MAX_CHARS}} "
+                f"{status:<{_SUBTREE_STATUS_STATUS_WIDTH}} "
+                f"{age:>4}  {pending}"
+            )
+        if not row_lines:
+            row_lines.append("(no matching instances)")
+
+        output = "\n".join(header_lines + row_lines)
+
+        # ── 8. Truncation notice + output ceiling (defense) ─────────
+        warning_lines: list[str] = []
+        if truncated_by_cap:
+            warning_lines.append(
+                f"WARNING: subtree has {len(sorted_subtree)} "
+                f"instances; only the first {max_instances} (caller "
+                "first, then instance_id order) were reported. No "
+                "pagination in v1 — re-query with a "
+                "target_instance_id to inspect a specific "
+                "descendant's subtree."
+            )
+        if len(output) > _SUBTREE_STATUS_OUTPUT_CEILING_CHARS:
+            output = (
+                output[:_SUBTREE_STATUS_OUTPUT_CEILING_CHARS]
+                + "\n\n[output truncated at "
+                f"{_SUBTREE_STATUS_OUTPUT_CEILING_CHARS} chars; "
+                "lower max_instances to fit.]"
+            )
+            warning_lines.append(
+                "Output exceeded the "
+                f"{_SUBTREE_STATUS_OUTPUT_CEILING_CHARS}-char ceiling "
+                "and was tail-truncated."
+            )
+
+        if warning_lines:
+            output = output + "\n\n" + "\n".join(warning_lines)
+
+        return output
+
+    subtree_status._full_doc_ = """One-call, read-only overview of the caller's subtree (#5).
+
+Token-cheap coordination primitive: ONE tool call returns a compact,
+table-like row per instance (caller + every descendant) — replacing
+N× get_instance_info calls when a parent just needs to see who is
+running / waiting / stuck in its subtree. No message content is ever
+read or rendered (use ``subtree_messages`` to drill into history).
+
+Authorization
+-------------
+
+Same single chokepoint as ``subtree_messages``: the tool can ONLY
+report on instances in the CALLER'S subtree, enumerated via the
+facade ``Manager.get_tree_ids_permanent(...)`` (permanent
+``parent_id`` lineage, Python-side BFS, depth-capped 256 — see
+``daemon/repositories/instance/repository.py:428-492``). The tool
+layer never touches repositories directly (D14).
+
+  * ``target_instance_id=None`` → caller's OWN subtree (default).
+  * ``target_instance_id=`` some descendant → that descendant's
+    subtree (drill-down; also the remedy when the instance cap
+    truncates a large subtree).
+  * ``target_instance_id`` outside the caller's subtree → clear
+    ``ERROR: subtree_status: ...`` refusal, no partial output.
+
+Row format
+----------
+
+    <iid[:8]>  <agent (<=24 chars)>  <status>  <age>  <pending>
+
+  * ``iid`` — first 8 chars of the instance_id (house short form).
+  * ``agent`` — ``agent_name`` (fallback ``agent_id``), capped at 24
+    chars with a ``…`` truncation marker.
+  * ``status`` — canonical lowercase InstanceStatus (e.g. ``running``,
+    ``waiting_children``, ``completed``).
+  * ``age`` — RELATIVE age of ``last_activity_at``: ``now`` (< 60s;
+    refreshed per activity), ``14m`` (< 60m), ``2h`` (< 24h), ``3d``
+    (older). ``-`` when unknown/None.
+  * ``pending`` — count of PENDING tasks for that instance (queued
+    work that will wake it), from ONE batched grouped query via
+    ``Manager.count_pending_tasks_by_instance``. The ``task`` table
+    is the read model — agent-to-agent dispatch (``send_message`` →
+    ``enqueue_message``) creates Task rows directly (no job-queue
+    mirror row), so ``job_queue_items`` would miss agent-sent work
+    entirely.
+
+Ordering, caps, filter
+----------------------
+
+  * Rows are ordered CALLER-FIRST, then stable instance_id order
+    (sort key ``(x != caller, x)`` — the subtree_messages S1 lesson).
+  * ``max_instances`` (default 50) caps rows; values above 200 are
+    silently clamped to 200 (statuses are one short row each, hence
+    the higher cap vs subtree_messages' 100). NO pagination in v1 —
+    a truncation WARNING names the true subtree size and points at
+    the target drill-down.
+  * ``status_filter`` (default ``"all"``): lowercased EXACT match
+    against the canonical status string (e.g. ``"RUNNING"`` matches
+    ``running``). Applied AFTER the cap (subtree_messages ordering
+    precedent) — when a filtered query returns fewer rows than
+    expected, increase ``max_instances`` or drill into a target.
+
+Read-only guarantee
+-------------------
+
+The tool performs no state mutation: no enqueue, no dispatch, no
+status writes, no lock acquisition. Per-instance metadata errors are
+skipped + WARN-logged (the row is omitted); the whole overview never
+fails on one bad instance. Output is bounded: each row is capped by
+its column widths (~64 chars), with a defense-in-depth 16000-char
+tail-truncation ceiling.
+
+Args:
+    target_instance_id: Root of the subtree to report on. ``None`` =
+        the caller's own subtree (default).
+    status_filter: ``"all"`` (default) or a canonical status string;
+        matching is EXACT after lowercasing both sides (documented
+        simple semantics — no fuzzy/prefix matching).
+    max_instances: Row cap (default 50). ``<= 0`` is an ERROR;
+        values above 200 are silently clamped to 200.
+
+Returns:
+    A compact plain-text table (header block + one row per instance),
+    with WARNING lines appended when the cap truncated the subtree or
+    the output ceiling fired. On permission error (target outside the
+    caller's subtree, missing caller lineage) returns an
+    ``ERROR: subtree_status: ...`` line — no partial output, no leak.
+
+Example outputs::
+
+    subtree_status()
+
+    subtree_status(status_filter="running")
+
+    subtree_status(target_instance_id="i-branch-a", max_instances=200)
+"""
+
     @register_tool_category("instance")
     @tool
     async def terminate_instance(instance_id: str) -> dict:
@@ -3361,6 +3740,7 @@ Returns:
         list_instances,
         get_instance_info,
         subtree_messages,           # Phase 2: read-only subtree query (opt-in)
+        subtree_status,             # #5: read-only subtree overview (opt-in)
         # Self-modification tool
         inner_soul,
         # Memory access tool
