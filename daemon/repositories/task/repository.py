@@ -2217,7 +2217,7 @@ class TaskRepository:
         read-side window up to ~5 min showed ``pending=N`` while
         actionable work was 0. The ``NOT EXISTS`` clause below
         mirrors the terminal predicate in
-        ``has_active_pending_non_deferred_work`` at
+        ``has_active_non_deferred_work`` at
         ``repository.py:2443-2448`` — same correlation key
         (``job_queue_items.job_id = task.work_id``) and same
         terminal-state set (``DONE``, ``DEAD``). Tasks with NO paired
@@ -2252,7 +2252,7 @@ class TaskRepository:
             return {}
         # Terminal-job orphan guard — see docstring above. The
         # correlated ``NOT EXISTS`` is the same predicate the sibling
-        # ``has_active_pending_non_deferred_work`` uses (repository.py:
+        # ``has_active_non_deferred_work`` uses (repository.py:
         # 2443-2448): match by ``job_id == work_id``, restrict to
         # terminal ``admission_state`` (``DONE`` / ``DEAD``), and
         # ignore soft-deleted JobItem rows. Tasks whose paired

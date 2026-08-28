@@ -2738,12 +2738,43 @@ class TestTaskStats:
     def test_count_pending_by_instance_ids_terminal_jobitem_for_other_instance_doesnt_suppress(
         self, repository, engine
     ):
-        """Cross-instance isolation: a terminal JobItem for a
-        DIFFERENT instance's Task must not suppress the count for
-        the instance we are querying. The guard correlates by
-        ``job_id = task.work_id``, not by ``instance_id``; pinning
-        this prevents a future "shortcut on instance_id" refactor
-        from accidentally cross-suppressing counts.
+        """Cross-instance isolation (asymmetric fixture, review note 2):
+        a terminal JobItem for instance ``inst-other`` must NOT suppress
+        the count for instance ``inst-target``, AND a non-terminal
+        JobItem for ``inst-target`` MUST let it through.
+
+        Shape:
+
+        * ``inst-target`` — pending Task whose paired JobItem
+          (same ``job_id``/``work_id``) is NON-terminal
+          (``admission_state='active'``, ``deleted_at IS NULL``). The
+          guard's NOT EXISTS subquery is FALSE for this Task (the
+          paired row exists and is not terminal), so the guard does
+          not fire and the Task counts → 1.
+        * ``inst-other`` — pending Task whose paired JobItem is
+          TERMINAL (``admission_state='done'``). The NOT EXISTS
+          subquery is TRUE for this Task (terminal paired row exists),
+          so the guard fires and the Task is suppressed → omitted
+          from the result.
+
+        Expected: ``{"inst-target": 1}``. Three failure modes this
+        pin rejects:
+
+        * pre-fix code (no NOT EXISTS guard): both counted →
+          ``{"inst-target": 1, "inst-other": 1}``;
+        * over-suppressing guard (e.g. correlated on instance_id
+          instead of ``work_id``, or any-terminal-JobItem trigger):
+          both suppressed → ``{}``;
+        * cross-instance-bleeding guard (guard present but the
+          terminal predicate fails to fire on ``inst-other``'s paired
+          row): both counted → ``{"inst-target": 1, "inst-other": 1}``.
+
+        The asymmetric shape — non-terminal on one side, terminal on
+        the other — is what lets the three failure modes produce
+        three distinct outcomes. A symmetric fixture (both terminal)
+        would let the over-suppressing and bleeding guards collapse
+        to the same ``{}`` output and the trap would not actually
+        pin cross-instance isolation.
         """
         from datetime import datetime, timezone
         from sqlmodel import Session as _SQLModelSession
@@ -2751,10 +2782,6 @@ class TestTaskStats:
         from daemon.repositories.instance.models import Instance as _Instance
 
         now = datetime.now(timezone.utc).isoformat()
-        # Two distinct (Task, JobItem) pairs. Both have terminal
-        # JobItems. The instance we query is ``inst-target``; the
-        # terminal JobItem in ``inst-other`` must NOT suppress
-        # ``inst-target``'s count.
         target_task = _create_task_with_status(
             engine,
             task_type=TaskType.PROCESS_MESSAGE.value,
@@ -2767,6 +2794,14 @@ class TestTaskStats:
             instance_id="inst-other",
             status=TaskStatus.PENDING.value,
         )
+        # Sanity: both Tasks are genuinely ``pending`` — the upstream
+        # status assertions are what makes ``count_pending`` the
+        # correct filter; if either row were e.g. ``running``, the
+        # ``Task.status == 'pending'`` predicate would drop it before
+        # the NOT EXISTS guard ever runs, and the test would be
+        # measuring the wrong filter, not the guard.
+        assert target_task.status == TaskStatus.PENDING.value
+        assert other_task.status == TaskStatus.PENDING.value
         with _SQLModelSession(engine) as session:
             session.add(_Instance(
                 instance_id="inst-target",
@@ -2780,13 +2815,34 @@ class TestTaskStats:
                 agent_dir="agents/leader",
                 status="running",
             ))
-            # Terminal JobItem for OTHER's Task — should not affect
-            # the count for TARGET.
+            # Non-terminal JobItem for TARGET — paired by ``job_id ==
+            # target_task.work_id`` (``work_id`` IS the
+            # JobItem.correlation key). Guard sees this row but its
+            # ``admission_state`` is not terminal, so NOT EXISTS is
+            # FALSE for this Task and it COUNTS.
+            session.add(JobItem(
+                job_id=target_task.work_id,
+                agent_id="leader",
+                agent_dir="agents/leader",
+                message="target-active",
+                source="api",
+                admission_state=AdmissionState.ACTIVE.value,
+                job_type="message",
+                instance_id="inst-target",
+                job_metadata={"message_id": "m-target"},
+                created_at=now,
+                priority=0,
+                retry_count=0,
+            ))
+            # Terminal JobItem for OTHER — paired by ``job_id ==
+            # other_task.work_id``. Guard sees this row, its
+            # ``admission_state`` is ``done``, NOT EXISTS is TRUE for
+            # this Task and it is SUPPRESSED.
             session.add(JobItem(
                 job_id=other_task.work_id,
                 agent_id="leader",
                 agent_dir="agents/leader",
-                message="other",
+                message="other-done",
                 source="api",
                 admission_state=AdmissionState.DONE.value,
                 job_type="message",
@@ -2796,35 +2852,22 @@ class TestTaskStats:
                 priority=0,
                 retry_count=0,
             ))
-            # Also seed a terminal JobItem for TARGET's Task — this
-            # IS supposed to suppress TARGET's count.
-            session.add(JobItem(
-                job_id=target_task.work_id,
-                agent_id="leader",
-                agent_dir="agents/leader",
-                message="target",
-                source="api",
-                admission_state=AdmissionState.DONE.value,
-                job_type="message",
-                instance_id="inst-target",
-                job_metadata={"message_id": "m-target"},
-                created_at=now,
-                priority=0,
-                retry_count=0,
-            ))
             session.commit()
 
-        # TARGET has a paired terminal JobItem → guard suppresses → 0.
-        # OTHER has a paired terminal JobItem → guard suppresses → 0.
-        # The query returns no rows for either instance, proving
-        # neither instance's terminal JobItem bled into the other.
+        # TARGET's paired JobItem is non-terminal → guard does NOT
+        # fire → TARGET counts as 1.
+        # OTHER's paired JobItem is terminal → guard fires → OTHER
+        # is suppressed → omitted from the result.
+        # Result is exactly {"inst-target": 1} — distinct from all
+        # three failure modes documented above.
         counts = repository.count_pending_by_instance_ids(
             ["inst-target", "inst-other"]
         )
-        assert counts == {}, (
-            f"cross-instance terminal JobItems MUST NOT suppress "
-            f"the OTHER instance's count: counts={counts!r}; "
-            f"expected {{}}"
+        assert counts == {"inst-target": 1}, (
+            f"asymmetric cross-instance isolation: TARGET's "
+            f"non-terminal JobItem MUST let it through (counts=1), "
+            f"OTHER's terminal JobItem MUST suppress it (counts=0 / "
+            f"omitted); expected {{'inst-target': 1}}; got {counts!r}"
         )
 
 
