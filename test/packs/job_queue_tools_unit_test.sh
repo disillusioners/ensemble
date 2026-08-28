@@ -21,10 +21,6 @@ cd "$PROJECT_DIR"
 # QUARANTINE.md (2026-08-20): 4 pre-existing TestJobContinue* failures, orthogonal to job-tools ACL change
 timeout 120s .venv/bin/pytest \
   tests/test_job_queue_tools.py \
-  --deselect tests/test_job_queue_tools.py::TestJobContinueTool::test_job_continue_happy_path \
-  --deselect tests/test_job_queue_tools.py::TestJobContinueResolverAware::test_job_continue_from_task_work_id \
-  --deselect tests/test_job_queue_tools.py::TestJobContinueResolverAware::test_job_continue_from_job_work_id \
-  --deselect tests/test_job_queue_tools.py::TestJobContinueResolverAware::test_job_continue_task_kind_skips_deleted_check \
   --tb=short -q 2>&1
 
 EXIT_CODE=$?
