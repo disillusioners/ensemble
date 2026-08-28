@@ -71,7 +71,16 @@ class _RealLangGraph:
             if key in sys.modules:
                 del sys.modules[key]
         # Also clear daemon modules so they re-bind to the real
-        # LangGraph on the next import inside the test.
+        # LangGraph on the next import inside the test. Snapshot them
+        # FIRST: __exit__ restores the SAME identities instead of
+        # deleting — deletion splits module identity for later
+        # patch("daemon.persistence.X") calls (collected test modules
+        # hold from-import bindings to the originals).
+        self._saved_daemon_modules = {
+            k: sys.modules[k]
+            for k in _DAEMON_KEYS_TO_REIMPORT
+            if k in sys.modules
+        }
         for key in _DAEMON_KEYS_TO_REIMPORT:
             if key in sys.modules:
                 del sys.modules[key]
@@ -84,11 +93,14 @@ class _RealLangGraph:
                 del sys.modules[key]
         for key, mod in self._original_modules.items():
             sys.modules[key] = mod
-        # Drop the daemon cache too — the next unit test will pick up
-        # the mock-backed daemon on its next import.
+        # Restore the ORIGINAL daemon module objects (same identities)
+        # so later patch("daemon.persistence...") calls hit the object
+        # the collected test modules bind to. Keys absent at __enter__
+        # are dropped (fresh mock-backed import on next use).
         for key in _DAEMON_KEYS_TO_REIMPORT:
-            if key in sys.modules:
-                del sys.modules[key]
+            sys.modules.pop(key, None)
+        for key, mod in self._saved_daemon_modules.items():
+            sys.modules[key] = mod
         return False
 
 
