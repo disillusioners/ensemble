@@ -2560,6 +2560,273 @@ class TestTaskStats:
         )
         assert counts == {"i1": 1}
 
+    def test_count_pending_by_instance_ids_excludes_terminal_job_orphans(
+        self, repository, engine
+    ):
+        """Reviewer Finding 1 (2026-08-28): the ``NOT EXISTS`` guard
+        closes the terminal-job orphan drift window. JobItem terminal
+        writes (``cancel_job`` → ``_finalize_terminal`` and
+        ``_finalize_job_db_sync``) update ONLY ``job_queue_items``;
+        the paired Task stays ``pending`` until the drift reconciler
+        runs (60s loop, ``min_pending_age_seconds=300``). Without the
+        guard, ``count_pending_by_instance_ids`` would count the
+        orphan and ``subtree_status`` would show ``pending=N`` while
+        actionable work was 0.
+
+        Fixture pin: the seeded Task MUST remain ``pending`` (proven
+        by an upfront raw-SQL re-read of the row). If the fixture
+        ever flipped to a terminal status, this test would silently
+        pass on the (now-irrelevant) zero count — defeating the
+        guard-pinning intent.
+        """
+        from datetime import datetime, timezone
+        from sqlmodel import Session as _SQLModelSession
+        from daemon.repositories.job_queue.models import JobItem, AdmissionState
+        from daemon.repositories.instance.models import Instance as _Instance
+
+        now = datetime.now(timezone.utc).isoformat()
+        # Seed a paired (Task, JobItem) where the JobItem is already
+        # terminal (DONE) but the Task is still 'pending'. Direct
+        # SQLModelSession inserts mirror the production terminal-write
+        # drift shape: JobItem updated, Task not touched.
+        task = _create_task_with_status(
+            engine,
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            instance_id="inst-orphan",
+            status=TaskStatus.PENDING.value,
+        )
+        # Sanity-check the fixture: the Task row is genuinely still
+        # 'pending' (proves the test pins the guard, not the fixture).
+        assert task.status == TaskStatus.PENDING.value, (
+            f"fixture invariant: seeded Task must remain pending, "
+            f"got {task.status!r}"
+        )
+        with _SQLModelSession(engine) as session:
+            session.add(_Instance(
+                instance_id="inst-orphan",
+                agent_id="leader",
+                agent_dir="agents/leader",
+                status="running",
+            ))
+            session.add(JobItem(
+                # ``work_id`` is the correlation key the guard matches
+                # against (``_qi.job_id = t.work_id``).
+                job_id=task.work_id,
+                agent_id="leader",
+                agent_dir="agents/leader",
+                message="orphan",
+                source="api",
+                # Terminal admission_state — the guard's exact filter.
+                admission_state=AdmissionState.DONE.value,
+                job_type="message",
+                instance_id="inst-orphan",
+                job_metadata={"message_id": "m-orphan"},
+                created_at=now,
+                priority=0,
+                retry_count=0,
+            ))
+            session.commit()
+
+        # Pre-fix value would have been >= 1 (the orphan Task is
+        # still 'pending'). With the guard, the count is 0.
+        counts = repository.count_pending_by_instance_ids(["inst-orphan"])
+        assert counts == {}, (
+            f"terminal-job orphan MUST NOT be counted (guard regression): "
+            f"counts={counts!r}; expected {{}}"
+        )
+
+    def test_count_pending_by_instance_ids_window_closes_instantly_pre_reconcile(
+        self, repository, engine
+    ):
+        """Document the window semantics (reviewer Finding 4 docstring).
+
+        Before the guard, the read-side drift window stretched from
+        ``cancel_job`` (which writes ONLY ``job_queue_items``) until
+        the drift reconciler's next pass (60s loop, but only for
+        tasks older than ``min_pending_age_seconds=300`` = 5 min).
+        Up to ~5 min: ``subtree_status`` showed ``pending=N`` while
+        actionable work was 0.
+
+        With the guard, the read-side window closes instantly: any
+        paired JobItem that has reached a terminal ``admission_state``
+        is excluded from the pending count at the very next read.
+        The reconciler remains the writer-side cleanup (the orphan
+        Task row eventually gets marked terminal on the next
+        reconcile pass), but readers no longer see the stale number.
+
+        This test is the structural assertion of that contract:
+        a Task whose paired JobItem was terminalized THIS instant
+        (no reconcile has run) is invisible to ``subtree_status``.
+        """
+        from datetime import datetime, timezone
+        from sqlmodel import Session as _SQLModelSession
+        from daemon.repositories.job_queue.models import JobItem, AdmissionState
+        from daemon.repositories.instance.models import Instance as _Instance
+
+        now = datetime.now(timezone.utc).isoformat()
+        task = _create_task_with_status(
+            engine,
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            instance_id="inst-window",
+            status=TaskStatus.PENDING.value,
+        )
+        # Just-created Task — no reconciler pass has run yet, so
+        # the writer-side cleanup hasn't fired. The guard alone
+        # must close the read-side window.
+        assert task.created_at  # raw-SQL _create_task_with_status sets this
+        with _SQLModelSession(engine) as session:
+            session.add(_Instance(
+                instance_id="inst-window",
+                agent_id="leader",
+                agent_dir="agents/leader",
+                status="running",
+            ))
+            session.add(JobItem(
+                job_id=task.work_id,
+                agent_id="leader",
+                agent_dir="agents/leader",
+                message="window",
+                source="api",
+                # DEAD (not just DONE) — covers the OTHER terminal
+                # bucket the guard filters on (terminal-state set
+                # is ``DONE`` ∪ ``DEAD``).
+                admission_state=AdmissionState.DEAD.value,
+                job_type="message",
+                instance_id="inst-window",
+                job_metadata={"message_id": "m-window"},
+                created_at=now,
+                priority=0,
+                retry_count=0,
+            ))
+            session.commit()
+
+        counts = repository.count_pending_by_instance_ids(["inst-window"])
+        assert counts == {}, (
+            f"read-side window MUST close instantly (no reconcile "
+            f"needed): counts={counts!r}; expected {{}}"
+        )
+
+    def test_count_pending_by_instance_ids_no_jobitem_still_counts(
+        self, repository
+    ):
+        """Trap pin (reviewer Finding 4): a Task with NO paired
+        JobItem MUST still count. This is the JAFP direct-dispatch
+        shape: ``send_message`` → ``enqueue_message`` creates a
+        Task row directly with no JobItem mirror (only the 4 public
+        entry points create JobItems — see the docstring on
+        ``count_pending_by_instance_ids``).
+
+        ``NOT EXISTS`` against ``job_queue_items`` with no matching
+        row returns TRUE, which means the row PASSES the guard.
+        Without this pin, a future "always-suppress when JobItem
+        table is referenced" refactor would silently drop agent-to-
+        agent work from ``subtree_status``.
+        """
+        task = repository.create(
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            instance_id="inst-nojob",
+        )
+        # Sanity: only one row exists, and it has no JobItem mirror.
+        assert task.work_id  # every Task has a work_id
+        # No JobItem seeded → guard's NOT EXISTS is true → counted.
+        counts = repository.count_pending_by_instance_ids(["inst-nojob"])
+        assert counts == {"inst-nojob": 1}, (
+            f"no-JobItem Task MUST still count (JAFP trap): "
+            f"counts={counts!r}; expected {{'inst-nojob': 1}}"
+        )
+
+    def test_count_pending_by_instance_ids_terminal_jobitem_for_other_instance_doesnt_suppress(
+        self, repository, engine
+    ):
+        """Cross-instance isolation: a terminal JobItem for a
+        DIFFERENT instance's Task must not suppress the count for
+        the instance we are querying. The guard correlates by
+        ``job_id = task.work_id``, not by ``instance_id``; pinning
+        this prevents a future "shortcut on instance_id" refactor
+        from accidentally cross-suppressing counts.
+        """
+        from datetime import datetime, timezone
+        from sqlmodel import Session as _SQLModelSession
+        from daemon.repositories.job_queue.models import JobItem, AdmissionState
+        from daemon.repositories.instance.models import Instance as _Instance
+
+        now = datetime.now(timezone.utc).isoformat()
+        # Two distinct (Task, JobItem) pairs. Both have terminal
+        # JobItems. The instance we query is ``inst-target``; the
+        # terminal JobItem in ``inst-other`` must NOT suppress
+        # ``inst-target``'s count.
+        target_task = _create_task_with_status(
+            engine,
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            instance_id="inst-target",
+            status=TaskStatus.PENDING.value,
+        )
+        other_task = _create_task_with_status(
+            engine,
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            instance_id="inst-other",
+            status=TaskStatus.PENDING.value,
+        )
+        with _SQLModelSession(engine) as session:
+            session.add(_Instance(
+                instance_id="inst-target",
+                agent_id="leader",
+                agent_dir="agents/leader",
+                status="running",
+            ))
+            session.add(_Instance(
+                instance_id="inst-other",
+                agent_id="leader",
+                agent_dir="agents/leader",
+                status="running",
+            ))
+            # Terminal JobItem for OTHER's Task — should not affect
+            # the count for TARGET.
+            session.add(JobItem(
+                job_id=other_task.work_id,
+                agent_id="leader",
+                agent_dir="agents/leader",
+                message="other",
+                source="api",
+                admission_state=AdmissionState.DONE.value,
+                job_type="message",
+                instance_id="inst-other",
+                job_metadata={"message_id": "m-other"},
+                created_at=now,
+                priority=0,
+                retry_count=0,
+            ))
+            # Also seed a terminal JobItem for TARGET's Task — this
+            # IS supposed to suppress TARGET's count.
+            session.add(JobItem(
+                job_id=target_task.work_id,
+                agent_id="leader",
+                agent_dir="agents/leader",
+                message="target",
+                source="api",
+                admission_state=AdmissionState.DONE.value,
+                job_type="message",
+                instance_id="inst-target",
+                job_metadata={"message_id": "m-target"},
+                created_at=now,
+                priority=0,
+                retry_count=0,
+            ))
+            session.commit()
+
+        # TARGET has a paired terminal JobItem → guard suppresses → 0.
+        # OTHER has a paired terminal JobItem → guard suppresses → 0.
+        # The query returns no rows for either instance, proving
+        # neither instance's terminal JobItem bled into the other.
+        counts = repository.count_pending_by_instance_ids(
+            ["inst-target", "inst-other"]
+        )
+        assert counts == {}, (
+            f"cross-instance terminal JobItems MUST NOT suppress "
+            f"the OTHER instance's count: counts={counts!r}; "
+            f"expected {{}}"
+        )
+
 
 class TestTaskDeletion:
     """Tests for task deletion."""
