@@ -923,7 +923,15 @@ def _validate_subtree_target(
     return True, manager.get_tree_ids_permanent(resolved_target)
 
 
-_SUBTREE_CONTEXT_INJECTION_PREFIX = "[SYSTEM CONTEXT:"
+# W1 INTERIM RESOLUTION — the literal-prefix check is removed.
+# See ``_filter_subtree_messages`` docstring + decisions.md D12
+# addendum for the structured-marker migration. The
+# ``[SYSTEM CONTEXT: ...]`` content string is no longer consulted by
+# the descendant filter: every ``[SYSTEM CONTEXT: ...]`` message is
+# constructed with the ``injected_message=True`` marker (see
+# ``daemon.services.context_messages._make_context_message`` and
+# ``daemon.services.instance_messaging`` task-context injection),
+# and the structured marker is the authoritative signal.
 
 # Cap on the max_instances input clamp. Above this we silently clamp to
 # 100 (matches the truncation-warning copy and is the documented ceiling).
@@ -952,39 +960,37 @@ def _filter_subtree_messages(
 ) -> list[dict]:
     """Apply the D12 synthetic-message filter to a per-instance message list.
 
-    Phase 2 §3b (D12):
+    Phase 2 §3b (D12), W1 INTERIM RESOLUTION:
       * When ``is_descendant=True`` (any descendant of the caller), drop
         every ``is_synthetic=True`` message AND every real
         ``role=="system"`` message — synthetic context tokens must never
         leak to a parent, and a descendant's real system prompt is
         persona-privileged and not shareable.
-      * Persisted ``[SYSTEM CONTEXT: …]``-prefixed user-role context
-        injections (pre-merge security-council batch W1, INTERIM):
-        ``serialize_message`` (``daemon/utils.py:158-170``) currently
-        strips the original ``injected_message`` / ``context_kind``
-        markers, so checkpointed context-injection HumanMessages persist
-        with ``role="user"`` and a literal ``[SYSTEM CONTEXT: …]`` prefix
-        on the persisted content. Without this check they would pass the
-        D12 descendant filter and leak descendant-injected snippets to
-        the parent. We drop them via a literal-prefix match on the
-        persisted content (no trimming/normalizing — avoids false-
-        positive drops of legitimate user messages that merely quote
-        the marker mid-text). FULL FIX (thread
-        ``injected_message`` / ``context_kind`` through
-        ``serialize_message`` and filter on the structured marker) is a
-        deferred follow-up — see ``decisions.md`` D12 addendum and the
-        recon reason (8+ ``serialize_message`` call sites across
-        ``persistence.py`` / ``graph.py`` / ``instance_messaging.py``;
-        ``graph.py`` + ``instance_messaging.py`` are FROZEN by the
-        Phase 2 plan, so the threading is not contained in this batch).
+      * W1 STRUCTURED FILTER — drop every descendant message whose
+        ``injected_message=True`` is surfaced by
+        ``daemon.utils.serialize_message`` (utils.py:181-209, W1 batch).
+        This catches the persisted ``[SYSTEM CONTEXT: …]`` HumanMessages
+        WITHOUT a literal-prefix content match, eliminating the
+        false-positive risk of the W1 INTERIM prefix check dropping
+        legitimate user messages that quote ``"[SYSTEM CONTEXT:"`` mid-
+        text. Primary filter; no fallback to a content-prefix check.
+      * The literal-prefix fallback (W1 INTERIM
+        ``_SUBTREE_CONTEXT_INJECTION_PREFIX``) is REMOVED per the D12
+        addendum removal criterion (decisions.md:146). Every
+        ``[SYSTEM CONTEXT: ...]`` construction site
+        (``context_messages._make_context_message``,
+        task-context injection at ``instance_messaging``, agent_node
+        user-injection FIFO drain, report-injection drain) stamps
+        ``injected_message=True`` in ``additional_kwargs`` — the
+        structured marker is therefore authoritative.
       * When ``is_descendant=False`` (the caller itself), keep
         ``role=="system"`` messages authored by the caller — the
         caller's own system prompt is part of its context. The
         synthetic-context/system entries are still dropped (they are
-        never meant to be quoted back at the caller). The
-        ``[SYSTEM CONTEXT: …]`` prefix check is NOT applied to the
-        caller — the caller's own injections are its own context and
-        must remain visible to it.
+        never meant to be quoted back at the caller). The structured
+        ``injected_message`` filter is ALSO not applied to the caller —
+        the caller's own injections are its own context and must remain
+        visible to it.
       * The ``role`` value MUST be one of the canonical lowercase
         names (``user``/``assistant``/``tool``/``system``) per
         ``daemon/utils.py:96``. ``"human"`` and ``"ai"`` will not match
@@ -1018,17 +1024,15 @@ def _filter_subtree_messages(
             if role == "system":
                 # Descendant's real system prompt is persona-privileged.
                 continue
-            # W1 (INTERIM) — persisted context-injection user-role
-            # messages: see docstring above. Literal-prefix match ONLY,
-            # no trim/normalize, to avoid false-positive drops of legit
-            # user messages that quote the marker mid-text.
-            if role == "user":
-                content = m.get("content")
-                if (
-                    isinstance(content, str)
-                    and content.startswith(_SUBTREE_CONTEXT_INJECTION_PREFIX)
-                ):
-                    continue
+            # W1 STRUCTURED FILTER — descendant's injected-context
+            # messages (system, task_context, blueprint, etc.) MUST
+            # not leak to the parent. ``serialize_message`` surfaces
+            # the structured ``injected_message`` marker from
+            # ``additional_kwargs`` (utils.py W1 batch). Strict
+            # ``is True`` so a future ``injected_message=False`` opt-
+            # out is respected without changing filter semantics.
+            if m.get("injected_message") is True:
+                continue
 
         out.append(m)
     return out
@@ -3097,32 +3101,30 @@ messages), the tool DROPS at retrieval time:
     (descendant system prompts are persona-privileged and not
     shareable);
   * every persisted ``[SYSTEM CONTEXT: …]``-prefixed ``role="user"``
-    context-injection HumanMessage authored by the descendant. The
-    ``[SYSTEM CONTEXT: …]`` block is emitted as a HumanMessage at the
-    descendant's turn-injection seam (``daemon/graph.py``); however,
-    ``serialize_message`` (``daemon/utils.py:158-170``) currently
-    strips the original ``injected_message`` / ``context_kind``
-    markers, so the persisted content carries a literal ``[SYSTEM
-    CONTEXT: …]`` prefix with no other discriminator. Without this
-    check the descendant's context block would pass the D12 filter and
-    leak to the parent. The check is a literal-prefix match on the
-    persisted content (no trimming/normalizing) — legitimate user
-    messages that quote the marker mid-text are NOT dropped. This is
-    the INTERIM fix (pre-merge security-council batch W1). The full
-    fix — threading ``injected_message`` / ``context_kind`` through
-    ``serialize_message`` and filtering on the structured marker — is
-    a deferred follow-up (see ``decisions.md`` D12 addendum); the
-    threading is not contained in this batch because
-    ``serialize_message`` has 8+ call sites across ``persistence.py``
-    / ``graph.py`` / ``instance_messaging.py`` and ``graph.py`` +
-    ``instance_messaging.py`` are FROZEN by the Phase 2 plan.
+    context-injection HumanMessage authored by the descendant. W1
+    INTERIM RESOLUTION — the descendant filter now drops these via
+    the structured ``injected_message=True`` marker surfaced by
+    ``daemon.utils.serialize_message`` (W1 batch, utils.py:181-209).
+    Every ``[SYSTEM CONTEXT: …]`` block is emitted as a HumanMessage
+    at the descendant's turn-injection seam
+    (``daemon/graph.py`` agent_node FIFO drain + report drain,
+    ``daemon/services/context_messages._make_context_message``, and
+    ``daemon/services/instance_messaging`` task-context injection) —
+    all stamp ``injected_message=True`` in ``additional_kwargs``. The
+    literal-prefix content match that this docstring described as the
+    INTERIM fix is REMOVED (the W1 deferred follow-up is now
+    complete; see ``decisions.md`` D12 addendum removal-criterion
+    disposition). The structured marker also eliminates the false-
+    positive risk where legitimate user messages that quote
+    ``"[SYSTEM CONTEXT:"`` mid-text were at risk of being dropped by
+    a future prefix-rewriter / normalize step.
 
 The filter happens at retrieval time — not in the formatter — so
 synthetic token costs never reach the agent. When the resolved target
 == caller, the caller's own system messages are KEPT (they are part of
-the caller's own context). The ``[SYSTEM CONTEXT: …]`` prefix check is
-NOT applied to the caller — the caller's own context injections are
-its own context and must remain visible to it.
+the caller's own context). The structured ``injected_message`` filter
+is also NOT applied to the caller — the caller's own context
+injections are its own context and must remain visible to it.
 
 Read path
 ---------

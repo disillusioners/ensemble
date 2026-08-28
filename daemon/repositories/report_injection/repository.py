@@ -864,10 +864,14 @@ class ReportInjectionRepository:
                 should be drained.
 
         Returns:
-            A list of ``{"content": str, "report_message_id": str}``
-            dicts for every row transitioned to ``INJECTED``, in
-            insertion order (oldest first). Empty list when no pending
-            reports exist for the parent.
+            A list of ``{"content": str, "report_message_id": str,
+            "child_instance_id": str}`` dicts for every row transitioned
+            to ``INJECTED``, in insertion order (oldest first). Empty
+            list when no pending reports exist for the parent. The
+            ``child_instance_id`` key (W1 batch) lets the agent_node
+            drain stamp ``source="internal_report:<child_iid>"`` onto
+            the injected HumanMessage — matching the FIFO-drain
+            provenance pattern at ``daemon/graph.py:2894-2897``.
         """
         now_iso = self._now_iso()
         with Session(self.engine) as session:
@@ -889,6 +893,15 @@ class ReportInjectionRepository:
                     ReportInjection.content,
                     ReportInjection.report_message_id,
                     ReportInjection.created_at,
+                    # W1 INTERIM RESOLUTION — surface child_instance_id so
+                    # the drain consumer (graph.py agent_node report
+                    # drain) can stamp the canonical
+                    # ``internal_report:<child_iid>`` provenance source
+                    # onto the report HumanMessage. The data is already
+                    # on the row (it's the foreign key that ties the
+                    # report to its child); returning it adds zero
+                    # query cost.
+                    ReportInjection.child_instance_id,
                 )
             )
             claimed = list(session.execute(stmt).all())
@@ -915,8 +928,19 @@ class ReportInjectionRepository:
             # timestamp (TEXT); lexicographic sort is chronological for
             # same-format ISO strings.
             claimed.sort(key=lambda r: r.created_at)
+            # W1 INTERIM RESOLUTION — surface ``child_instance_id`` on
+            # each drained row so the graph.py agent_node report drain
+            # can stamp ``source="internal_report:<child_iid>"`` on the
+            # injected HumanMessage (matches the FIFO-drain convention
+            # at ``daemon/graph.py:2894-2897``). Additive: existing
+            # consumers that only inspect ``content`` /
+            # ``report_message_id`` continue to work unchanged.
             drained = [
-                {"content": r.content, "report_message_id": r.report_message_id}
+                {
+                    "content": r.content,
+                    "report_message_id": r.report_message_id,
+                    "child_instance_id": r.child_instance_id,
+                }
                 for r in claimed
             ]
 

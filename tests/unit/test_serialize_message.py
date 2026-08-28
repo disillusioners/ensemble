@@ -461,6 +461,200 @@ class TestSerializeMessageToolCalls:
 
 
 # ============================================================================
+# Test serialize_message() — W1 marker surfacing
+#
+# Verifies the additive wiring added by the W1 INTERIM RESOLUTION batch
+# (this commit). ``serialize_message`` now surfaces ``injected_message``,
+# ``context_kind``, and ``source`` from ``additional_kwargs`` as ADDITIVE
+# top-level keys. Plain messages that never carried the markers keep the
+# legacy dict shape (no spurious keys).
+# ============================================================================
+
+
+class TestSerializeMessageW1MarkerSurfacing:
+    """W1 batch — additive surfacing of durable markers.
+
+    Contract (see ``daemon/utils.py:181-209``):
+      * ``injected_message`` — surfaced when present in
+        ``additional_kwargs`` (any truthy/falsy value preserved verbatim).
+      * ``context_kind`` — surfaced when non-empty
+        ``additional_kwargs["context_kind"]``.
+      * ``source`` — surfaced when non-empty
+        ``additional_kwargs["source"]``.
+      * Plain messages that never tagged ``additional_kwargs`` keep the
+        legacy dict shape — NO spurious keys.
+
+    The contract is additive — existing API consumers continue to see the
+    same messages they always have. New keys appear ONLY when the source
+    LangChain message carried the marker at construction time.
+    """
+
+    def test_plain_human_message_has_no_marker_keys(self):
+        """A vanilla ``HumanMessage`` MUST NOT acquire spurious
+        ``injected_message`` / ``context_kind`` / ``source`` keys —
+        additive contract preserves the legacy shape for messages that
+        were never tagged as injected.
+        """
+        from daemon.utils import serialize_message
+
+        msg = HumanMessage(content="just a normal turn")
+        result = serialize_message(msg)
+
+        assert "injected_message" not in result
+        assert "context_kind" not in result
+        assert "source" not in result
+        # Legacy keys still present.
+        assert result["role"] == "user"
+        assert result["content"] == "just a normal turn"
+
+    def test_context_message_surfaces_context_kind_only(self):
+        """A context builder's HumanMessage (with both markers set)
+        surfaces ONLY the keys that are non-empty — same back-compat
+        pattern as the pre-W1 ``context_kind`` surfacing at
+        ``daemon/utils.py:181-189`` (Phase 4 CHANGE 1).
+        """
+        from daemon.utils import serialize_message
+
+        msg = HumanMessage(
+            content="[SYSTEM CONTEXT: Skills]\n\nbody",
+            additional_kwargs={
+                "injected_message": True,
+                "context_kind": "skills",
+            },
+        )
+        result = serialize_message(msg)
+
+        # Both structured markers flow through.
+        assert result["injected_message"] is True
+        assert result["context_kind"] == "skills"
+        # No source on a vanilla context message.
+        assert "source" not in result
+
+    def test_injected_message_marker_surfaced_alone(self):
+        """The user-injection FIFO drain (``daemon/graph.py:2894``)
+        stamps ``{"injected_message": True}`` when no ``source`` is
+        present on the FIFO entry. The serialized output mirrors this
+        exactly — ``injected_message=True`` and NO ``source`` key
+        (additive contract: the key is omitted, not nulled).
+        """
+        from daemon.utils import serialize_message
+
+        msg = HumanMessage(
+            content="injected user msg",
+            additional_kwargs={"injected_message": True},
+        )
+        result = serialize_message(msg)
+
+        assert result["injected_message"] is True
+        assert "context_kind" not in result
+        assert "source" not in result
+
+    def test_source_marker_surfaced_with_injected_message(self):
+        """The user-injection FIFO drain with a non-null ``source``
+        stamps ``{"injected_message": True, "source": "..."}``. The
+        serialized output surfaces BOTH keys — GET /messages can now
+        render the originating caller's provenance.
+        """
+        from daemon.utils import serialize_message
+
+        msg = HumanMessage(
+            content="injected from internal agent",
+            additional_kwargs={
+                "injected_message": True,
+                "source": "internal_agent:abc123",
+            },
+        )
+        result = serialize_message(msg)
+
+        assert result["injected_message"] is True
+        assert result["source"] == "internal_agent:abc123"
+        assert "context_kind" not in result
+
+    def test_internal_report_source_round_trips(self):
+        """The report-injection drain (W1 batch at
+        ``daemon/graph.py:3080-3092``) stamps
+        ``source="internal_report:<child_iid>"`` alongside
+        ``injected_message``. The serialized output surfaces both.
+        """
+        from daemon.utils import serialize_message
+
+        msg = HumanMessage(
+            content="child report body",
+            additional_kwargs={
+                "injected_message": True,
+                "source": "internal_report:child-instance-xyz",
+            },
+        )
+        result = serialize_message(msg)
+
+        assert result["injected_message"] is True
+        assert result["source"] == "internal_report:child-instance-xyz"
+
+    def test_source_without_injected_message_is_surfaced(self):
+        """A message that carries ``source`` but NOT ``injected_message``
+        (e.g. a future user-API first-arrival enrichment) still gets
+        ``source`` surfaced. The two keys are independent additive
+        channels.
+        """
+        from daemon.utils import serialize_message
+
+        msg = HumanMessage(
+            content="enriched first-arrival",
+            additional_kwargs={"source": "telegram:user:42"},
+        )
+        result = serialize_message(msg)
+
+        assert result["source"] == "telegram:user:42"
+        assert "injected_message" not in result
+        assert "context_kind" not in result
+
+    def test_empty_string_marker_values_are_omitted(self):
+        """Empty-string ``context_kind`` / ``source`` are treated as
+        absent — additive contract skips falsy values to avoid
+        meaningless empty-string keys in the wire payload.
+        """
+        from daemon.utils import serialize_message
+
+        msg = HumanMessage(
+            content="empty markers",
+            additional_kwargs={
+                "injected_message": True,
+                "context_kind": "",
+                "source": "",
+            },
+        )
+        result = serialize_message(msg)
+
+        assert result["injected_message"] is True
+        assert "context_kind" not in result
+        assert "source" not in result
+
+    def test_no_additional_kwargs_attribute_omits_all(self):
+        """Defensive: a message object without an ``additional_kwargs``
+        attribute (custom BaseMessage subclass) gets no marker keys —
+        ``getattr(msg, 'additional_kwargs', None) or {}`` short-circuits
+        cleanly without AttributeError.
+        """
+        from daemon.utils import serialize_message
+
+        # Build a bare object that mimics LangChain BaseMessage without
+        # the additional_kwargs attribute.
+        class BareMessage:
+            type = "user"
+            id = "bare-1"
+            content = "bare content"
+            tool_calls = []
+
+        result = serialize_message(BareMessage())
+
+        assert result["role"] == "user"
+        assert result["content"] == "bare content"
+        assert "injected_message" not in result
+        assert "context_kind" not in result
+        assert "source" not in result
+
+
+# ============================================================================
 # Test get_next_sequence()
 # ============================================================================
 
