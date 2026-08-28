@@ -9,7 +9,7 @@ from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
-from sqlalchemy import delete as sql_delete, func, text
+from sqlalchemy import delete as sql_delete, exists, func, literal, text
 from sqlalchemy.engine import Engine
 from sqlmodel import Session as SQLModelSession, select, col
 
@@ -2186,6 +2186,103 @@ class TaskRepository:
                 Task.status == TaskStatus.PENDING.value
             )
             return db_session.exec(stmt).one()
+
+    def count_pending_by_instance_ids(
+        self, instance_ids: list[str]
+    ) -> dict[str, int]:
+        """Grouped count of PENDING tasks per instance — ONE batched query.
+
+        Backs the ``subtree_status`` tool (#5, agent-instance-tools
+        follow-up): the tool needs pending-work counts for every
+        instance in a caller's subtree and MUST NOT issue N
+        per-instance queries — this is the single GROUP BY read.
+
+        Read model choice: agent-to-agent dispatch (``send_message`` →
+        ``enqueue_message``, ``instance_messaging.py:1472``) inserts
+        Task rows directly (D13 — Task is the dispatch primitive)
+        WITHOUT JobItems, and JobItem.instance_id is bound at enqueue
+        time (``instance_messaging.py:2060-2077`` →
+        ``job_queue_service.py:803-815``), not at claim time. The
+        ``task`` table is therefore the authoritative pending-work
+        read model for subtree overviews;
+        ``job_queue_items`` would miss agent-to-agent sends entirely
+        (JAFP: only the 4 public entry points create JobItems).
+
+        Terminal-job orphan guard (reviewer Finding 1, 2026-08-28):
+        JobItem terminal-write paths (``JobQueueService.cancel_job`` →
+        ``_finalize_terminal``, and ``_finalize_job_db_sync``) update
+        ONLY ``job_queue_items``; the paired Task stays ``pending``
+        until the drift reconciler runs (60s loop,
+        ``min_pending_age_seconds=300``). Without this guard the
+        read-side window up to ~5 min showed ``pending=N`` while
+        actionable work was 0. The ``NOT EXISTS`` clause below
+        mirrors the terminal predicate in
+        ``has_active_non_deferred_work`` at
+        ``repository.py:2443-2448`` — same correlation key
+        (``job_queue_items.job_id = task.work_id``) and same
+        terminal-state set (``DONE``, ``DEAD``). Tasks with NO paired
+        JobItem at all — agent-to-agent direct dispatch via
+        ``send_message`` → ``enqueue_message`` (JAFP) — have no
+        matching ``job_queue_items`` row, so ``NOT EXISTS`` is true
+        and they STILL COUNT (they are genuinely claimable). The
+        guard closes the read-side window instantly; the reconciler
+        remains the writer-side cleanup (orphan row eventually
+        marked terminal on the next reconcile pass).
+
+        Only ``status='pending'`` counts. PAUSED tasks belong to a
+        paused instance (the instance's own ``status`` column already
+        surfaces that state to the tool), and RUNNING work is likewise
+        visible via the status column — counting them here would
+        double-report state the overview already shows.
+
+        Read-only: no writes, no transitions, no lock acquisition.
+
+        Args:
+            instance_ids: The instance IDs to group-count. Duplicates
+                are collapsed by the GROUP BY. Instances with zero
+                pending tasks are OMITTED from the result — callers
+                use ``dict.get(iid, 0)``.
+
+        Returns:
+            ``{instance_id: pending_count}`` for instances with a
+            count > 0. Empty input short-circuits to ``{}`` without a
+            DB round-trip.
+        """
+        if not instance_ids:
+            return {}
+        # Terminal-job orphan guard — see docstring above. The
+        # correlated ``NOT EXISTS`` is the same predicate the sibling
+        # ``has_active_non_deferred_work`` uses (repository.py:
+        # 2443-2448): match by ``job_id == work_id``, restrict to
+        # terminal ``admission_state`` (``DONE`` / ``DEAD``), and
+        # ignore soft-deleted JobItem rows. Tasks whose paired
+        # JobItem is still ``QUEUED`` or ``ACTIVE`` are unaffected —
+        # the guard only fires on terminal mirrors, which is the
+        # exact drift window we close. One batched query, no N+1, no
+        # Python-side filtering.
+        terminal_jobitem_subq = (
+            select(literal(1))
+            .where(
+                col(JobItem.job_id) == Task.work_id,
+                col(JobItem.admission_state).in_([
+                    AdmissionState.DONE.value,
+                    AdmissionState.DEAD.value,
+                ]),
+                col(JobItem.deleted_at).is_(None),
+            )
+        )
+        with SQLModelSession(self.engine) as db_session:
+            stmt = (
+                select(Task.instance_id, func.count())
+                .where(
+                    col(Task.instance_id).in_(instance_ids),
+                    Task.status == TaskStatus.PENDING.value,
+                    ~exists(terminal_jobitem_subq),
+                )
+                .group_by(Task.instance_id)
+            )
+            rows = db_session.exec(stmt).all()
+            return {iid: int(count) for iid, count in rows}
 
     def has_pending_tasks_blocked_by_busy_instance(self) -> bool:
         """Return whether pending work is held by an in-flight sibling.
