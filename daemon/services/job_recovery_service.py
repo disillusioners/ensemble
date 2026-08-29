@@ -3247,47 +3247,70 @@ class JobRecoveryService:
         self,
         instance_id: str | None,
     ) -> bool:
-        """Council REJECT 2026-08-29 W1 helper: does the
-        instance have any PENDING or RUNNING ``task`` row?
+        """Council REJECT 2026-08-29 W1 helper (paired-fix
+        2026-08-29 W1 residual): does the instance have any
+        non-terminal ``task`` row that the lineage gate
+        must respect — PENDING, RUNNING, **or PAUSED**?
 
         Sister query to :meth:`_pattern_f_instance_has_pending_tasks`
-        — widened to RUNNING so a live retry child (the
-        ``schedule_retry`` / ``force_cancel_and_schedule_retry`` mint
-        at ``task_repository.py:3261 / :3702`` inserts a fresh
-        ``work_id`` but inherits the parent's ``instance_id`` via
-        ``RetryTurn`` at ``turn_transitions.py:622``) is detectable
-        from the parent's FAILED/CANCELLED branch even after the
-        worker_pool claims it.
+        — widened beyond the PENDING-only bucket so a live
+        retry child (the ``schedule_retry`` /
+        ``force_cancel_and_schedule_retry`` mint at
+        ``task_repository.py:3261 / :3702`` inserts a fresh
+        ``work_id`` but inherits the parent's ``instance_id``
+        via ``RetryTurn`` at ``turn_transitions.py:622``) is
+        detectable from the parent's FAILED/CANCELLED branch
+        even after the worker_pool claims it **and the
+        operator pauses it** (the
+        ``pause_instance_cascade`` → RUNNING→PAUSED sequence
+        at ``instance_lifecycle.py:4172-4178`` produces a
+        narrow window where the retry child is PAUSED, not
+        PENDING/RUNNING).
+
+        The status set is the **canonical busy predicate**
+        via ``TaskRepository.has_instance_busy``
+        (``task_repository.py:543``, the post-2026-08-12
+        concurrency-gate canonical — PENDING + RUNNING +
+        PAUSED). The prior
+        ``TaskRepository.has_inflight_task`` (PENDING +
+        RUNNING only) closed the WAITING-children / crash-
+        recovery questions but missed PAUSED retry children,
+        causing over-finalization of the parent JobItem
+        while the retry child was merely paused (residual
+        (a), gate §7).
 
         The lineage query is intentionally NOT keyed by
-        ``task.work_id``: the parent Task's ``work_id`` equals the
-        JobItem's ``job_id`` (the canonical cross-system linkage
-        per the dispatch contract at ``job_processor``) and the
-        retry child has a DIFFERENT ``work_id`` — so a
-        work_id-only check would miss the retry entirely. The
-        instance_id-keyed query is the minimal, correct join
-        shape.
+        ``task.work_id``: the parent Task's ``work_id``
+        equals the JobItem's ``job_id`` (the canonical
+        cross-system linkage per the dispatch contract at
+        ``job_processor``) and the retry child has a
+        DIFFERENT ``work_id`` — so a work_id-only check
+        would miss the retry entirely. The instance_id-
+        keyed query is the minimal, correct join shape.
 
         Used by the FAILED/CANCELLED terminal-routing branch
-        (:meth:`reconcile_drift_states` Pattern (f), the W1 fix)
-        to skip finalization when a live retry child Task exists
-        on the same instance — finalizing the parent would
-        orphan the retry child (the JobItem mirror flips
-        terminal while the child Task is still driving the
-        graph).
+        (:meth:`reconcile_drift_states` Pattern (f), the W1
+        fix) to skip finalization when a live retry child
+        Task exists on the same instance — finalizing the
+        parent would orphan the retry child (the JobItem
+        mirror flips terminal while the child Task is still
+        driving the graph).
 
         Args:
             instance_id: The instance id to inspect.
 
         Returns:
-            ``True`` if at least one PENDING or RUNNING Task
-            exists for the instance, ``False`` if the instance
-            has no in-flight Tasks (or the repository is not
-            wired). A repository miss is treated as ``False``
-            (no in-flight tasks) — the FAILED/CANCELLED branch
-            already has a finalization path, so a conservative
-            "no retry detected" reading is the right FAIL-SAFE
-            (the next 60s cycle will re-check).
+            ``True`` if at least one PENDING, RUNNING, or
+            PAUSED Task exists for the instance, ``False``
+            if the instance has no such Tasks (only terminal
+            tasks, or none at all). A repository miss or a
+            transient lookup error is treated as ``True``
+            (FAIL-SAFE: skip finalize, leave JobItem active;
+            next 60s cycle retries) — consistent with the
+            sister bus-gate ``_pattern_f_check_bus_pending``
+            (`:3138-3153`, "FAIL-SAFE: skip finalize, leave
+            JobItem active; next 60s cycle retries. Never
+            guess."). Never guess.
         """
         if not instance_id:
             return False
@@ -3295,21 +3318,29 @@ class JobRecoveryService:
             return False
         try:
             return await asyncio.to_thread(
-                self._task_repository.has_inflight_task,
+                self._task_repository.has_instance_busy,
                 instance_id,
             )
         except Exception as lookup_err:
+            # FAIL-SAFE: skip finalize, leave JobItem
+            # active. The next 60s cycle re-checks. This
+            # direction is consistent with the sister
+            # bus-gate ``_pattern_f_check_bus_pending``
+            # (`:3138-3153`, "FAIL-SAFE: skip finalize,
+            # leave JobItem active; next 60s cycle
+            # retries. Never guess.") — the prior
+            # ``return False`` direction (residual (b),
+            # gate §7) over-finalized a live retry child
+            # during transient DB errors.
             logger.warning(
                 f"_pattern_f_instance_has_inflight_task: "
-                f"has_inflight_task raised for "
-                f"{instance_id[:8]}...: {lookup_err}. "
-                f"Treating as no in-flight tasks "
-                f"(next 60s cycle re-checks; the "
-                f"FAILED/CANCELLED branch will fall "
-                f"through to finalize when the lookup "
-                f"recovers)."
+                f"has_instance_busy raised for "
+                f"{instance_id[:8] if instance_id else '?'}...: {lookup_err}. "
+                f"FAIL-SAFE: skipping finalize, leaving "
+                f"JobItem active (next 60s cycle "
+                f"re-checks)."
             )
-            return False
+            return True
 
     def _pattern_f_check_completed_at_age_floor(
         self,
