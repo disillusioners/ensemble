@@ -8,6 +8,8 @@ Snapshot of the stability backlog captured on `latest` @ `4e10980b` (2026-08-29)
 
 ## Context
 
+> **Status update (2026-08-29, post quick-wins #2):** Items 1–6 have **LANDED** — merge `23bcf1df` (send-gate terminal unblock, bus-fire TOCTOU re-purge, buffer mocks family RESOLVED, subtree_status queued/running columns, notify symmetry complete, hasattr probe). Remaining shelf: items 7–12, with item 7 (`system:*` boundary validation) now the recommended next pick, item 8 the next feature-grade item, item 11 still drill-env. Newly backlogged this batch: `messages.py:601-605` dict-attr 500 (pre-existing, masked by mocks); IN-list preservation test; grouped-SELECT query-plan check.
+
 ### Landed this session — six batches, all gates PASS
 
 | # | Batch | Merge commit | Contents |
