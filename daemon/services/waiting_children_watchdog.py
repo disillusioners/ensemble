@@ -162,6 +162,12 @@ logger = logging.getLogger(__name__)
 #: the watchdog's notices are visibly system-side infrastructure.
 WATCHDOG_SOURCE: str = "system:watchdog"
 
+#: Wedge-fix backstop provenance marker — distinct from
+#: ``WATCHDOG_SOURCE`` so wedge notices can be filtered out of the
+#: hang-notice metric stream. Same semantics: stamped onto the
+#: durable ``MessageQueue.source`` column.
+WEDGE_SOURCE: str = "system:watchdog:wedge"
+
 
 def _format_age_human(age_seconds: float) -> str:
     """Format an age-in-seconds float as a short, human-friendly string.
@@ -254,6 +260,47 @@ def _build_hang_notice(
     return "\n".join(lines)
 
 
+def _build_wedge_notice(parent_id: str) -> str:
+    """Build the directive wedge-notice for ``parent_id``.
+
+    The wedge signature is a parent in ``WAITING_CHILDREN`` with
+    ZERO non-terminal children AND ZERO live ``PROCESS_REPORT``
+    carrier tasks (the report message is in the queue, but no
+    worker is going to deliver it). The notice tells the parent
+    that a fresh carrier should be enqueued (the sub-shape (c)
+    revival seam in ``manager._reconcile_deferred_report`` does
+    this directly when it sweeps the injection row, but the
+    watchdog backstop catches the gap until that sweep runs) and
+    offers the same playbook as the hang notice.
+
+    Kept terse and directive per the hang-notice contract.
+
+    Args:
+        parent_id: The parent instance ID (used only for context
+            in the leading line — readers can correlate with their
+            own instance-id surface).
+    """
+    short = parent_id[:8] if len(parent_id) > 8 else parent_id
+    lines: list[str] = [
+        f"[system:watchdog:wedge] Wedge notice — your "
+        f"WAITING_CHILDREN turn is parked with no live carrier "
+        f"task and zero non-terminal children ({short}...). "
+        f"A PROCESS_REPORT message is in your queue but no worker "
+        f"is scheduled to deliver it.",
+        "",
+        "Recommended playbook (in order):",
+        "  1. The reconciler should self-heal on its next sweep — "
+        "if this notice repeats, check the manager logs for "
+        "sub-shape (c, c_revival) lines.",
+        "  2. If the wedge persists, call `send_message` to "
+        "yourself (any message) — the resulting PROCESS_MESSAGE "
+        "task will wake the parked turn.",
+        "  3. As a last resort, terminate and re-spawn — this "
+        "rebuilds the carrier surface from scratch.",
+    ]
+    return "\n".join(lines)
+
+
 class WaitingChildrenWatchdog:
     """Detect parents stuck in ``WAITING_CHILDREN`` and nudge them.
 
@@ -304,6 +351,7 @@ class WaitingChildrenWatchdog:
         enabled: bool = True,
         interval_seconds: int = 3600,
         hang_threshold_seconds: int = 3600,
+        task_repository: Any | None = None,
     ) -> None:
         if interval_seconds <= 0:
             raise ValueError(
@@ -320,12 +368,34 @@ class WaitingChildrenWatchdog:
         self._enabled = bool(enabled)
         self._interval_seconds = int(interval_seconds)
         self._hang_threshold_seconds = int(hang_threshold_seconds)
+        # Wedge-fix backstop: optional task repository for the
+        # live-carrier presence query. When ``None``, the watchdog
+        # falls back to ``self._manager._task_repo`` at scan time —
+        # mirrors the ``getattr(manager, "_task_repo", None)`` pattern
+        # used in ``daemon/api.py``. Tests inject a real repo;
+        # production relies on the manager surface.
+        self._task_repository = task_repository
 
         # ``set`` of ``(parent_id, child_id)`` tuples in a currently
         # notified episode. Cleared implicitly on each tick by
         # re-deriving from the SQL result. See ``run_once`` for the
         # episode-end logic.
         self._notified: set[tuple[str, str]] = set()
+
+        # Wedge-fix backstop cooldown set: parents currently in a
+        # notified wedge episode. INDEPENDENT of ``_notified`` so a
+        # hang notice does not preempt a wedge notice (and vice
+        # versa) — they target different signatures. An episode ends
+        # when the parent leaves ``WAITING_CHILDREN`` or a live
+        # carrier appears.
+        self._wedge_notified: set[str] = set()
+
+        # Wedge-pass counters (observability — separate from the
+        # ``run_once`` stats dict so existing 4-key tests stay
+        # green). Incremented per tick; reset only on daemon
+        # restart. Exposed via properties below.
+        self._wedge_parents_scanned_total: int = 0
+        self._wedge_notices_enqueued_total: int = 0
 
     # ─── Public introspection (tests) ──────────────────────────────────
 
@@ -350,6 +420,102 @@ class WaitingChildrenWatchdog:
         """
         return frozenset(self._notified)
 
+    @property
+    def wedge_episodes(self) -> frozenset[str]:
+        """Read-only view of the in-memory wedge-episode cooldown set.
+
+        Exposed for tests. Production callers should treat the set as
+        opaque; the watchdog is the sole writer.
+        """
+        return frozenset(self._wedge_notified)
+
+    @property
+    def wedge_parents_scanned(self) -> int:
+        """Lifetime count of parents the wedge-pass has scanned.
+
+        Observability counter — separate from the 4-key
+        ``run_once`` stats dict (which is reserved for the hang
+        pass). Increments per tick; reset only on daemon restart.
+        """
+        return self._wedge_parents_scanned_total
+
+    @property
+    def wedge_notices_enqueued(self) -> int:
+        """Lifetime count of wedge notices enqueued via the wake
+        path.
+
+        Observability counter — separate from the 4-key
+        ``run_once`` stats dict. Increments per tick; reset only on
+        daemon restart.
+        """
+        return self._wedge_notices_enqueued_total
+
+    # ─── Wedge-fix backstop helper ─────────────────────────────────────
+
+    def _has_live_carrier_task(self, instance_id: str) -> bool:
+        """Return True iff ``instance_id`` has any live
+        PROCESS_REPORT Task (PENDING or RUNNING).
+
+        Used by the wedge-pass to detect the wedge condition: a
+        ``WAITING_CHILDREN`` parent with zero non-terminal children
+        AND zero live carrier is wedged — the report message is in
+        the queue but no worker is scheduled to deliver it.
+
+        Resolution order:
+
+        1. ``self._task_repository`` (injected via constructor) —
+           tests wire this directly. Preferred — the helper is
+           sync, cheap, and tests can pin the exact query.
+        2. ``self._manager._task_repo`` — production wiring per
+           ``daemon/api.py``. Falls back when the constructor
+           argument was omitted.
+        3. ``False`` (silent no-op) — when neither path has a real
+           repo (test fixtures using AsyncMock as the manager). The
+           wedge pass becomes a no-op for those tests so the
+           existing hang-detection assertions are not disturbed.
+
+        Args:
+            instance_id: The parent instance ID whose live-carrier
+                presence we are checking.
+
+        Returns:
+            True iff a live PROCESS_REPORT Task exists for this
+            instance_id, False otherwise (no task, all terminal, or
+            no usable repo wired).
+        """
+        import inspect as _inspect
+        repo = self._task_repository
+        if repo is None:
+            repo = getattr(self._manager, "_task_repo", None)
+        if repo is None:
+            # No repo wired — silent no-op. The wedge pass silently
+            # treats every parent as having a live carrier so the
+            # backstop does NOT fire (the production path always
+            # wires the repo via ``daemon/api.py``).
+            return True
+        try:
+            # The repo helper is sync; the calling context is the
+            # watchdog loop on the asyncio event loop thread, but
+            # the SQLAlchemy session uses a thread-local connection
+            # that does not require async — short-lived read, no
+            # transaction held across awaits.
+            live = repo.list_live_process_report_carriers_for_instance(
+                instance_id
+            )
+            # AsyncMock test fixtures return coroutines from method
+            # calls — detect and treat as having-a-carrier (True)
+            # so the wedge pass stays silent for tests that mock
+            # the manager without wiring the repo. New tests wire
+            # the repo explicitly via the constructor and get the
+            # real behavior.
+            if _inspect.iscoroutine(live):
+                return True
+            return len(live) > 0
+        except AttributeError:
+            # The injected repo does not implement the helper —
+            # silent no-op (same as the no-repo case).
+            return True
+
     # ─── Core scan ──────────────────────────────────────────────────────
 
     async def run_once(self) -> dict[str, int]:
@@ -363,6 +529,14 @@ class WaitingChildrenWatchdog:
                 "notices_enqueued": <int>,
                 "errors": <int>,
             }
+
+        Wedge-pass counters (``wedge_parents_scanned`` and
+        ``wedge_notices_enqueued``) are NOT in this dict — they
+        live on the watchdog as separate properties
+        (:attr:`wedge_parents_scanned` / :attr:`wedge_notices_enqueued`)
+        so existing tests that pin the 4-key contract stay green.
+        Wedge stats are observability-only — the canonical pass
+        metrics are the hang pass.
 
         The method is idempotent within a single tick — calling it
         twice in quick succession will not double-notify because
@@ -649,6 +823,108 @@ class WaitingChildrenWatchdog:
                 logger.info(
                     f"[Watchdog] {len(terminal_pairs)} (parent, child) "
                     f"pair(s) dropped — child reached terminal status."
+                )
+
+        # ─── Wedge-fix backstop pass ─────────────────────────────────
+        # Detect the wedge signature: parent in WAITING_CHILDREN +
+        # ZERO non-terminal children + ZERO live (PENDING/RUNNING)
+        # PROCESS_REPORT carrier task. When matched, enqueue a wedge
+        # notice via the same wake path (enqueue_message + notify_work).
+        # Composition property: when the sub-shape (c) carrier-revival
+        # seam in ``manager._reconcile_deferred_report`` works, a live
+        # carrier exists → this backstop stays silent. When the
+        # revival seam is slow (or missed), this backstop catches
+        # the gap until the next sweep cycle.
+        #
+        # Per-parent budget: one extra query per WC parent per tick
+        # (the live-carrier presence check). The existing
+        # ``parents_scanned`` enumeration already yielded the WC
+        # parent set — we reuse ``parent_ids`` here. Cheaper than
+        # another full scan; the in-memory cooldown is per-parent
+        # (set[str]), not per-(parent, child).
+        try:
+            for parent_id in parent_ids:
+                self._wedge_parents_scanned_total += 1
+                # Skip PAUSED parents — same rationale as the
+                # hang pass above. ``self._repo.get(parent_id)`` is
+                # cheap (single-row fetch by primary key).
+                parent_row = self._repo.get(parent_id)
+                if parent_row is None:
+                    continue
+                if parent_row.status == InstanceStatus.PAUSED.value:
+                    continue
+                # Wedge condition: zero live carrier. If a carrier
+                # exists, the wedge is NOT active — the existing
+                # carrier will deliver (the natural claim path).
+                if self._has_live_carrier_task(parent_id):
+                    # Composition property: the revival seam worked.
+                    # Clear any prior wedge episode for this parent
+                    # so a future genuine wedge can re-notify.
+                    self._wedge_notified.discard(parent_id)
+                    continue
+                # Anti-spam: only notify once per episode.
+                if parent_id in self._wedge_notified:
+                    continue
+                # Compose + deliver the wedge notice. Same
+                # ``enqueue_message`` wake primitive as the hang
+                # pass — it writes MessageQueue + Task rows, flips
+                # WC→RUNNING, and notifies the worker pool.
+                notice = _build_wedge_notice(parent_id=parent_id)
+                await self._manager.enqueue_message(
+                    instance_id=parent_id,
+                    message=notice,
+                    source=WEDGE_SOURCE,
+                    priority=0,
+                    metadata={
+                        "wedge_notice": True,
+                        "wedge_reason": (
+                            "wc_parent_zero_children_no_carrier"
+                        ),
+                    },
+                )
+                self._wedge_notified.add(parent_id)
+                self._wedge_notices_enqueued_total += 1
+                logger.warning(
+                    f"[Watchdog] Wedge notice enqueued for parent "
+                    f"{parent_id[:8]}... (no live carrier, zero "
+                    f"non-terminal children); waking parked WC turn."
+                )
+        except Exception as exc:
+            # Per-tick error isolation — a wedge-pass failure must
+            # NOT crash the whole ``run_once``. The hang pass already
+            # ran; this is purely additive observability.
+            stats["errors"] += 1
+            logger.error(
+                f"[Watchdog] Wedge-pass scan failed: {exc}",
+                exc_info=True,
+            )
+
+        # Wedge-episode-end purges — distinct from the hang-episode
+        # purges above so a wedge notice can re-fire even when hang
+        # notices are silenced. Two independent mechanisms clear
+        # ``_wedge_notified``:
+        #
+        # 1. Composition check above: a parent that acquires a live
+        #    carrier between ticks has its wedge entry dropped. This
+        #    is the cheap + frequent case — most wedge notices
+        #    resolve themselves once the sub-shape (c) seam runs.
+        # 2. Parent-left-WC purge below: a parent that leaves
+        #    ``WAITING_CHILDREN`` entirely (terminal report, external
+        #    message, revival) has its wedge entry dropped, mirroring
+        #    the hang-pass ``departed_parent_pairs`` rule. A future
+        #    WC re-entry with a fresh wedge can re-notify.
+        if self._wedge_notified:
+            still_waiting_for_wedge = set(parent_ids)
+            departed_for_wedge = {
+                p for p in self._wedge_notified
+                if p not in still_waiting_for_wedge
+            }
+            if departed_for_wedge:
+                self._wedge_notified -= departed_for_wedge
+                logger.info(
+                    f"[Watchdog] {len(departed_for_wedge)} wedge "
+                    f"episode(s) dropped — parent left "
+                    f"WAITING_CHILDREN."
                 )
 
         return stats

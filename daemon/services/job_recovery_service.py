@@ -1070,14 +1070,55 @@ class JobRecoveryService:
 
         for task in orphan_pending:
             try:
+                # ── Wedge-fix: linkage by work_id (NOT instance) ──
+                # Pre-fix this used ``get_by_instance(task.instance_id)``
+                # which returns the MOST RECENT non-deleted JobItem for
+                # the instance. That can be an OLD terminal dispatch
+                # JobItem unrelated to THIS task — and was used as
+                # false evidence to cancel a live PROCESS_REPORT carrier
+                # (JAFP has NO JobItem at all by design), wedging the
+                # waiting_children parent. The JobItem-side
+                # ``job_id`` field IS the canonical cross-system
+                # linkage key (Task.work_id == JobItem.job_id per the
+                # linkage contract); ``get(task.work_id)`` returns the
+                # task's OWN JobItem or ``None`` (JAFP / virtual-job).
+                # A PROCESS_REPORT task whose work_id has no JobItem
+                # → ``job is None`` → early-continue, task untouched.
                 job = await asyncio.to_thread(
-                    self._job_repository.get_by_instance, task.instance_id
+                    self._job_repository.get, task.work_id
                 )
-                # Only catch the case where the JobItem is terminal.
-                # ``active`` JobItems are P1 candidates (handled by
-                # Pattern (a) above); ``None`` JobItems are virtual-
-                # job cases (not drift).
+                # Only catch the case where the Task's OWN JobItem is
+                # terminal. ``active`` JobItems are P1 candidates
+                # (handled by Pattern (a) above); ``None`` JobItems are
+                # virtual-job cases — including all PROCESS_REPORT
+                # carriers per JAFP — and MUST NOT be considered drift.
                 if job is None or job.admission_state != AdmissionState.DONE.value:
+                    continue
+
+                # ── Wedge-fix: alive-instance guard (defense in depth) ──
+                # Even when the linkage lookup is unambiguous (the
+                # Task's OWN JobItem is terminal), a live
+                # ``WAITING_CHILDREN`` parent must NEVER be drift-
+                # cancelled — it is parked on its child carrier and
+                # the cancel would orphan the parent's wake surface.
+                # This mirrors the alive-instance guard Pattern (a)
+                # applies at :791-794 (it cancels only when the
+                # instance is dead; live instances fall into the
+                # log-only branch). Same guard, applied here, so a
+                # stale PENDING task on a live parent is left for the
+                # natural claim path or the watchdog backstop.
+                instance = await asyncio.to_thread(
+                    self._instance_repository.get, task.instance_id
+                )
+                if instance is not None and self._is_instance_alive(
+                    instance.status
+                ):
+                    logger.debug(
+                        f"reconcile_drift_states: Pattern (d) skip — "
+                        f"instance {task.instance_id[:8]}... is alive "
+                        f"(status={instance.status}); task {task.id} "
+                        f"left for natural claim path or watchdog backstop."
+                    )
                     continue
 
                 # Cancel the orphan PENDING task. The atomic UPDATE

@@ -538,6 +538,13 @@ async def lifespan(app: FastAPI):
             enabled=config.services.waiting_children_watchdog_enabled,
             interval_seconds=config.services.waiting_children_watchdog_interval_seconds,
             hang_threshold_seconds=config.services.waiting_children_watchdog_hang_threshold_seconds,
+            # Wedge-fix backstop: inject the manager's task_repo so
+            # the wedge-pass live-carrier query has a real repo to
+            # call. The watchdog also accepts ``getattr(manager,
+            # "_task_repo", None)`` as a fallback, but explicit wiring
+            # is preferred for diagnosability (a missing-repo warning
+            # would be noise in prod).
+            task_repository=getattr(manager, "_task_repo", None),
         )
     except Exception as watchdog_boot_exc:
         app.state.waiting_children_watchdog_task = None
