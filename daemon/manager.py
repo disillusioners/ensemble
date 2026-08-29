@@ -7181,7 +7181,7 @@ class InstanceManager:
                         f"[{source}] reconcile (sub-shape b, message-only): "
                         f"recreated message + task "
                         f"parent={inj.parent_instance_id[:8]}..., "
-                        f"child={child_instance_id[:8]}..."
+                        f"child={child_instance_id[:8]}...; notify_work()"
                     )
                     # Explicit commit — ``_session_scope`` rolls
                     # back uncommitted rows on close. Without this
@@ -7189,6 +7189,17 @@ class InstanceManager:
                     # the session-scope exits and the parent's
                     # processor never sees the report.
                     session.commit()
+                    # Wake the worker pool OUTSIDE the transaction so
+                    # the commit is durable before the pool wakes a
+                    # worker (avoids a race where a worker claims a
+                    # row that hasn't been committed yet). Mirrors
+                    # the c_revival shape at manager.py:7312-7313 and
+                    # the item-5 task_only_create sibling fix at
+                    # manager.py:7247-7255. Council warning W3:
+                    # without this notify the re-created carrier
+                    # waits for the next poll (delay, not wedge).
+                    if self._worker_pool is not None:
+                        self._worker_pool.notify_work()
                     return {
                         "shape": "message_only_recreate",
                         "report_message_id": report_message_id,
@@ -7824,7 +7835,7 @@ class InstanceManager:
                         f"[{source}] reconcile (sub-shape b, message-only): "
                         f"recreated message + task "
                         f"parent={inj.parent_instance_id[:8]}..., "
-                        f"child={child_instance_id[:8]}..."
+                        f"child={child_instance_id[:8]}...; notify_work()"
                     )
                     # Explicit commit — mirror of the sync sibling
                     # above. ``_session_scope`` rolls back on close
@@ -7832,6 +7843,17 @@ class InstanceManager:
                     # disappear and the router's re-entry finds no
                     # deliverable artefact.
                     session.commit()
+                    # Wake the worker pool OUTSIDE the transaction so
+                    # the commit is durable before the pool wakes a
+                    # worker (avoids a race where a worker claims a
+                    # row that hasn't been committed yet). Mirrors
+                    # the c_revival shape at manager.py:7936-7937 and
+                    # the item-5 task_only_create sibling fix at
+                    # manager.py:7890-7898. Council warning W3:
+                    # without this notify the re-created carrier
+                    # waits for the next poll (delay, not wedge).
+                    if self._worker_pool is not None:
+                        self._worker_pool.notify_work()
                     return {
                         "shape": "message_only_recreate",
                         "report_message_id": report_message_id,
