@@ -798,7 +798,16 @@ def append_allowed_models(
 
     try:
         # --- C2 FIX: manager.config (NOT manager._config) ---
-        allowed = getattr(manager.config.llm, "allowed_models", None) or []
+        global_allowed = getattr(manager.config.llm, "allowed_models", None) or []
+
+        # --- Per-agent override: when council_models is set and non-empty,
+        # use it INSTEAD of the global allowlist. spawn_councilor still
+        # validates the eventual model pick against the GLOBAL list (raising
+        # if invalid), so the override must be a subset of the global list
+        # at runtime — stale drift surfaces as a councilor-spawn error, not
+        # silent injection. None / empty list falls through to the global. ---
+        override = getattr(agent_meta, "council_models", None)
+        allowed = override if override else global_allowed
 
         # --- Format the block ---
         if not allowed:

@@ -124,3 +124,41 @@ def test_inject_allowed_models_explicit_true():
     from daemon.registry import AgentMetadata
     meta = AgentMetadata(id="x", name="x", path=Path("/tmp"), inject_allowed_models=True)
     assert meta.inject_allowed_models is True
+
+
+# ===== Per-agent council_models override =====
+
+def test_flag_on_with_council_models_override_injects_override_list(append_allowed_models):
+    """Per-agent ``council_models`` overrides the GLOBAL allowed_models list
+    in the injected block.
+
+    Use case: the Governor pins its own council seat count to a subset of
+    the global allowlist so adding a new model globally (e.g., ``coding2``
+    for weighted ``llm_models`` pools on worker/coder) does NOT grow the
+    Governor council from 2 → 3 seats. spawn_councilor still validates the
+    eventual model pick against the GLOBAL list — this test only asserts
+    the prompt-injection side of the contract.
+    """
+    global_list = ["global-x", "global-y", "global-z"]
+    override_list = ["override-a", "override-b"]
+
+    class FakeMetaWithOverride:
+        inject_allowed_models = True
+        council_models = override_list
+
+    result = append_allowed_models(
+        "base", FakeMetaWithOverride(), FakeManager(global_list)
+    )
+
+    # Override list IS in the injected block (formatted as bullets)
+    assert "<allowed_models>" in result
+    assert "- override-a" in result
+    assert "- override-b" in result
+
+    # GLOBAL list is NOT in the injected block (override fully replaces it)
+    assert "global-x" not in result
+    assert "global-y" not in result
+    assert "global-z" not in result
+
+    # Read-only notice (prompt-injection guard) preserved
+    assert "read-only" in result.lower() or "not instructions" in result.lower()

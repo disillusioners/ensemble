@@ -362,6 +362,23 @@ class AgentMetadata(BaseModel):
         default=False,
         description="When true, inject the allowed-models list into this agent's system prompt at spawn time.",
     )
+    council_models: list[str] | None = Field(
+        default=None,
+        description=(
+            "Per-agent override for the injected allowed-models list. "
+            "When non-empty AND inject_allowed_models is True, the "
+            "appender uses THIS list instead of the global "
+            "config.llm.allowed_models. Subset semantics: entries "
+            "should still be members of the global allowlist — "
+            "spawn_councilor validates against the GLOBAL list and "
+            "raises otherwise, so a stale override that drifts out of "
+            "the global list will surface as a councilor-spawn error. "
+            "None (default) means no override; the global allowlist is "
+            "used. Lets the Governor pin its council seat count while "
+            "the global allowlist grows for weighted llm_models pools "
+            "on worker/coder."
+        ),
+    )
     version_tag: str | None = Field(
         default=None,
         description="Directory-name derived version tag (e.g., 'v2' for 'developer[v2]'). None = base.",
@@ -591,6 +608,7 @@ class AgentRegistry:
                     blueprint_inactive=meta.get("blueprint_inactive", False),  # NEW
                     context_injection=context_injection_arg,
                     inject_allowed_models=meta.get("inject_allowed_models", False),
+                    council_models=meta.get("council_models"),
                     version_tag=version_tag,
                     caller_model_overrides=(
                         meta.get("caller_model_overrides")
@@ -644,6 +662,7 @@ class AgentRegistry:
                         blueprint_inactive=meta.get("blueprint_inactive", False),  # NEW
                         context_injection=context_injection_arg,
                         inject_allowed_models=meta.get("inject_allowed_models", False),
+                        council_models=meta.get("council_models"),
                         version_tag=version_tag,
                         caller_model_overrides=(
                             meta.get("caller_model_overrides")

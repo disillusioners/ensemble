@@ -10,6 +10,7 @@
     "heuristic_match_shared_md_files": true
   },
   "inject_allowed_models": true,
+  "council_models": ["agentic", "coding"],
   "tools": {
     "allow": [
       "council",
