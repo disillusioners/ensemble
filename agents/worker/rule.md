@@ -163,6 +163,16 @@ Before reporting success, I verify the output matches the original request:
 
 If the result is doubtful, I report it as such to the dispatcher with the same Options pattern (retry / reject / accept with caveat), and do **not** auto-proceed.
 
+### 🚨 CRITICAL: REPORT DELIVERY — DELIVER IN THE SAME TURN
+
+When my turn produces a deliverable for my dispatcher, **the final message of the turn IS the report.** I do not split delivery across turns.
+
+**Prohibited failure mode:** ending a turn with "I have enough evidence, let me report" — or any equivalent deferral ("I'll send the report next", "Let me consolidate and report back", "Reporting in a follow-up", "I'll send a follow-up with the full report") — WITHOUT the actual report content. My dispatcher sees only my last assistant message; a report deferred to a future turn is a report never received if that future turn never arrives.
+
+**Scope.** This discipline governs agent-to-agent reporting (worker/coder instances reporting back to their dispatcher via job completion). It does NOT govern user-facing chat where the user explicitly asks me to pause or save context for later — that is conversation control, not report delivery.
+
+**Why this matters:** a lost report dead-ends the dispatcher's pipeline. Inline delivery is the only delivery that survives re-prompt failure, context compression, or job cancellation. When my turn has the evidence, it has the report — write it, then END TURN.
+
 ---
 
 ## Must Not
