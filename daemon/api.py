@@ -485,18 +485,31 @@ async def lifespan(app: FastAPI):
     # ─────────────────────────────────────────────────────────────
     drift_interval = config.services.drift_reconcile_interval_seconds
     min_pending_age = config.services.drift_reconcile_min_pending_age_seconds
+    # Pattern (f) — orphan ACTIVE JobItem recovery
+    # (``.agents/shared/planning/orphan-active-job-recovery/``,
+    # 802095d8 incident). The grace period for Pattern (f1)'s
+    # DEAD finalization — only ACTIVE JobItems with
+    # ``created_at < now - min_orphan_age`` are eligible. The
+    # 15-minute default is wider than the 5-minute P1
+    # grace because Pattern (f1) is a structural-orphan
+    # class (not a stuck-task class) and needs a wider
+    # window to avoid racing with a healthy ``active`` job
+    # whose Task row is still being enqueued.
+    min_orphan_age = config.services.drift_reconcile_min_orphan_age_seconds
     drift_reconciler_task = asyncio.create_task(
         _periodic_drift_reconcile_loop(
             job_recovery=job_recovery,
             interval_seconds=drift_interval,
             min_pending_age_seconds=min_pending_age,
+            min_orphan_age_seconds=min_orphan_age,
         ),
         name="drift-reconciler",
     )
     app.state.drift_reconciler_task = drift_reconciler_task
     logger.info(
         f"Drift reconciler started: interval={drift_interval}s, "
-        f"min_pending_age={min_pending_age}s"
+        f"min_pending_age={min_pending_age}s, "
+        f"min_orphan_age={min_orphan_age}s"
     )
 
     # ─────────────────────────────────────────────────────────────
@@ -1092,6 +1105,7 @@ async def _periodic_drift_reconcile_loop(
     job_recovery: "JobRecoveryService",
     interval_seconds: int,
     min_pending_age_seconds: int,
+    min_orphan_age_seconds: int = 900,
 ) -> None:
     """Periodic asyncio loop driving ``JobRecoveryService.reconcile_drift_states``.
 
@@ -1118,6 +1132,12 @@ async def _periodic_drift_reconcile_loop(
         min_pending_age_seconds: Forwarded to
             ``reconcile_drift_states``. Configurable via
             ``SERVICES_DRIFT_RECONCILE_MIN_PENDING_AGE_SECONDS``.
+        min_orphan_age_seconds: Forwarded to
+            ``reconcile_drift_states`` for Pattern (f1)'s
+            DEAD-finalization grace. Configurable via
+            ``SERVICES_DRIFT_RECONCILE_MIN_ORPHAN_AGE_SECONDS``.
+            Default 900s = 15 minutes (per
+            ``.agents/shared/planning/orphan-active-job-recovery/``).
     """
     # Small startup delay so the first tick fires after the system
     # has stabilized (mirrors MaintenanceService._loop's 60s initial
@@ -1132,6 +1152,7 @@ async def _periodic_drift_reconcile_loop(
         try:
             stats = await job_recovery.reconcile_drift_states(
                 min_pending_age_seconds=min_pending_age_seconds,
+                min_orphan_age_seconds=min_orphan_age_seconds,
             )
             reconciled = stats.get("reconciled", 0)
             if reconciled > 0:

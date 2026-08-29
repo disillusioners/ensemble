@@ -516,6 +516,7 @@ class JobRecoveryService:
     async def reconcile_drift_states(
         self,
         min_pending_age_seconds: int = 300,
+        min_orphan_age_seconds: int = 900,
     ) -> dict[str, Any]:
         """Detect and repair drift between ``job_queue_items`` and ``task``.
 
@@ -562,6 +563,48 @@ class JobRecoveryService:
         ``status='pending'`` UPDATE — RUNNING siblings are not
         touched). Log at WARNING.
 
+        **(f)** Orphan ACTIVE JobItem recovery (Pattern (f) —
+        joined to a-d per the leader-locked design, RCA
+        802095d8). Two sub-shapes:
+
+        * **(f1) active JobItem + NO Task rows + alive/stale
+          instance** → finalize the JobItem to
+          ``admission_state='dead'`` (DEAD, distinct from
+          Pattern (a)'s ``failed`` outcome — the JobItem is
+          structurally orphaned, not retried). The Task
+          absence is the restart-orphan signature: a daemon
+          restart cleared the ``task`` table but left the
+          JobItem row behind, so the JobItem is now
+          ``active`` with nothing to drive it forward. The
+          instance is left untouched (alive, but the
+          JobItem's work is unrecoverable). Lock release
+          follows the F4/F7 contract — scoped per-job via
+          ``release_by_job`` (NOT the buggy
+          ``release_by_instance``). The grace period
+          (default 15min, configurable via
+          ``drift_reconcile_min_orphan_age_seconds``) is
+          applied to ``JobItem.created_at`` (JobItem has no
+          ``updated_at`` column; ``created_at`` is the
+          canonical "age" signal since the JobItem was
+          enqueued at that time and ``active`` rows don't
+          receive regular updates).
+
+        * **(f2) active JobItem + COMPLETED Task** →
+          finalize the JobItem to ``admission_state='done'``
+          (DONE, ``terminal_reason='completed'``), and
+          fire/cancel the dependency watchers via
+          ``JobQueueService.notify_watchers`` (the
+          canonical "fire-then-cancel" pattern used on
+          terminate paths — UP-side fire for waiting
+          parents, DOWN-side cancel for the JobItem's
+          own watches).
+
+        Healthy shapes (active JobItem + pending/running
+        Task) are EXPLICITLY EXCLUDED — encoded as guard
+        clauses, not incidental side effects. A pending or
+        running Task means the JobItem's work is still in
+        flight; Pattern (a) owns that surface.
+
         Args:
             min_pending_age_seconds: Minimum age (seconds) for a
                 PENDING task to be considered drift-eligible. Tasks
@@ -570,6 +613,18 @@ class JobRecoveryService:
                 minutes — long enough to absorb a normal claim
                 cycle, short enough to surface a genuine stuck
                 task within one reconciliation tick).
+            min_orphan_age_seconds: Minimum age (seconds) of an
+                orphan ACTIVE JobItem (active JobItem + no Task
+                rows + alive instance) before Pattern (f1)
+                finalizes it as DEAD. Default 900s = 15 minutes.
+                Configurable via
+                ``DaemonConfig.services.drift_reconcile_min_orphan_age_seconds``.
+                JobItems younger than this grace are left alone
+                to avoid racing with a healthy active job whose
+                Task row is still being enqueued (the
+                "healthy-shape exclusion" contract — encoded as
+                an explicit guard, not an incidental side
+                effect).
 
         Returns:
             Dict summary of the form::
@@ -582,7 +637,12 @@ class JobRecoveryService:
                                   | "P1_alive_instance_log"
                                   | "F10_zombie_task"
                                   | "stuck_instance_log"
-                                  | "orphan_pending_terminal_job",
+                                  | "orphan_pending_terminal_job"
+                                  | "orphan_active_no_task_dead"
+                                  | "orphan_active_completed_task_done"
+                                  | "orphan_active_skipped_healthy_shape"
+                                  | "orphan_active_skipped_grace"
+                                  | "orphan_active_skipped_no_deps",
                             "job_id": str | None,
                             "task_id": int | None,
                             "instance_id": str | None,
@@ -1244,17 +1304,87 @@ class JobRecoveryService:
                 exc_info=True,
             )
 
+        # ── Pattern (f): orphan ACTIVE JobItem recovery ──────────
+        # Leader-locked design (incident 802095d8, RCA-confirmed).
+        # The "restart-orphan" class: a daemon restart cleared the
+        # ``task`` table ("Cleared 737 backlog task(s)") but the
+        # JobItem rows SURVIVED the restart-wipe. Result: an
+        # ``admission_state='active'`` JobItem with no Task rows and
+        # an alive/stale instance. Without this pattern, the JobItem
+        # sits ``active`` forever — the instance is still alive, the
+        # Task observer has nothing to observe, and the defer idle
+        # gate holds forever.
+        #
+        # Two sub-shapes (both leader-locked):
+        #
+        #   (f1) active JobItem + NO Task rows + alive/stale
+        #        instance (older than the grace) → finalize the
+        #        JobItem to ``admission_state='dead'`` (DEAD,
+        #        distinct from Pattern (a)'s ``failed`` outcome —
+        #        the JobItem is structurally orphaned, not
+        #        retried) + release the queue lock scoped per
+        #        job (F4/F7 contract; never
+        #        ``release_by_instance``).
+        #
+        #   (f2) active JobItem + COMPLETED Task → finalize the
+        #        JobItem to ``admission_state='done'`` (DONE,
+        #        ``terminal_reason='completed'``) + fire/cancel
+        #        dependency watchers via
+        #        ``JobQueueService.notify_watchers`` (the
+        #        canonical "fire-then-cancel" pattern used on
+        #        terminate paths).
+        #
+        # Healthy shapes (active JobItem + pending Task, active
+        # JobItem + running Task) are EXPLICITLY EXCLUDED via guard
+        # clauses. The brief is explicit: a pending Task means the
+        # work is awaiting claim (Pattern (a) owns that surface);
+        # a running Task means the work is in flight. Encoding
+        # these as guards (NOT incidental side effects) ensures
+        # the pattern cannot race a healthy work cycle.
+        #
+        # Grace period: ``min_orphan_age_seconds`` (default 900s =
+        # 15 minutes, configurable via
+        # ``DaemonConfig.services.drift_reconcile_min_orphan_age_seconds``).
+        # The age signal is ``JobItem.created_at`` — JobItem has
+        # no ``updated_at`` column; ``created_at`` is the
+        # canonical "age" signal for an active JobItem since the
+        # row was enqueued at that time and ``active`` rows don't
+        # receive regular updates. The boundary semantics are
+        # "strict less-than": an JobItem with
+        # ``created_at == now - min_orphan_age_seconds`` is NOT
+        # matched (mirrors the existing
+        # ``list_pending_tasks_older_than`` contract at
+        # ``task/repository.py:720``: ``created_at < threshold``).
+        try:
+            extra = await self._pattern_f_orphan_active_job_recovery(
+                min_orphan_age_seconds=min_orphan_age_seconds,
+            )
+            if extra:
+                reconciled += extra.get("reconciled", 0)
+                details.extend(extra.get("details", []))
+        except Exception as e:
+            logger.error(
+                f"reconcile_drift_states: Pattern (f) check failed: {e}",
+                exc_info=True,
+            )
+
         # Final tally — recount from `details` so the summary line
-        # reflects patterns (a/b/d/e) accurately. Pattern (c) is
+        # reflects patterns (a/b/d/e/f) accurately. Pattern (c) is
         # log-only — ``stuck_instance_log`` entries land in `details`
         # but are intentionally excluded from the `reconciled` count
         # (the recovery path cannot correct stuck-alive instances).
+        # The four Pattern (f) ``skipped_*`` records are also excluded
+        # from the ``reconciled`` count (they're observability —
+        # log+detail only — the brief says EXPLICIT exclusion
+        # healthy shapes must not become reconciled counts).
         reconciled = sum(
             1 for d in details if d.get("pattern") in (
                 "P1_dead_instance",
                 "F10_zombie_task",
                 "orphan_pending_terminal_job",
                 "dead_parent_pending_process_report",
+                "orphan_active_no_task_dead",
+                "orphan_active_completed_task_done",
             )
         )
 
@@ -1550,3 +1680,710 @@ class JobRecoveryService:
         if reconciled == 0 and not details:
             return None
         return {"reconciled": reconciled, "details": details}
+
+    # ─────────────────────────────────────────────────────────────
+    # Pattern (f) — orphan ACTIVE JobItem recovery (leader-locked)
+    # ─────────────────────────────────────────────────────────────
+
+    async def _pattern_f_orphan_active_job_recovery(
+        self,
+        *,
+        min_orphan_age_seconds: int,
+    ) -> dict | None:
+        """Pattern (f) — detect and repair orphan ACTIVE JobItems.
+
+        Leader-locked design (incident 802095d8, RCA-confirmed).
+        Two sub-shapes are detected and corrected:
+
+        * **(f1) active JobItem + NO Task rows + alive/stale
+          instance** (older than the grace) → finalize to
+          ``admission_state='dead'`` (DEAD, distinct from
+          Pattern (a)'s ``failed`` outcome — the JobItem is
+          structurally orphaned, not retried). Lock release
+          follows the F4/F7 contract — scoped per-job via
+          ``release_by_job`` (NOT the buggy
+          ``release_by_instance``).
+
+        * **(f2) active JobItem + COMPLETED Task** → finalize
+          to ``admission_state='done'``
+          (``terminal_reason='completed'``) and fire/cancel
+          dependency watchers via
+          ``JobQueueService.notify_watchers`` (the
+          canonical "fire-then-cancel" pattern used on
+          terminate paths — UP-side fire for waiting
+          parents, DOWN-side cancel for the JobItem's
+          own watches).
+
+        Healthy shapes (active JobItem + pending Task,
+        active JobItem + running Task) are EXPLICITLY
+        EXCLUDED via guard clauses — encoded as
+        ``continue`` branches with explicit pattern
+        names (``orphan_active_skipped_healthy_shape``)
+        so observability can confirm a misconfigured
+        deploy hasn't accidentally collapsed the guard.
+
+        Grace period: ``min_orphan_age_seconds`` (default
+        900s = 15 minutes, configurable via
+        ``DaemonConfig.services.drift_reconcile_min_orphan_age_seconds``).
+        The age signal is ``JobItem.created_at`` — JobItem
+        has no ``updated_at`` column; ``created_at`` is the
+        canonical "age" signal for an active JobItem since
+        the row was enqueued at that time and ``active``
+        rows don't receive regular updates. Boundary
+        semantics are strict less-than
+        (``created_at < threshold``), matching the existing
+        ``list_pending_tasks_older_than`` contract at
+        ``task/repository.py:720``.
+
+        Per-candidate isolation: one JobItem's failure MUST
+        NOT abort the sweep. Each per-row block is wrapped
+        in its own ``try/except Exception`` so a transient
+        DB blip on one row only loses that row.
+        """
+        if self._job_repository is None:
+            logger.debug(
+                "_pattern_f_orphan_active_job_recovery: "
+                "job_repository not wired; pattern (f) skipped"
+            )
+            return None
+
+        reconciled = 0
+        details: list[dict[str, Any]] = []
+
+        # Resolve threshold once (strict less-than
+        # semantics, mirroring
+        # ``list_pending_tasks_older_than``).
+        threshold = datetime.now(timezone.utc) - timedelta(
+            seconds=min_orphan_age_seconds
+        )
+
+        # Walk the active JobItem candidate set. The set is
+        # the same source ``recover_on_startup`` and Pattern
+        # (c) use (``find_processing_jobs`` — queries
+        # ``admission_state='active' AND deleted_at IS NULL``),
+        # so the candidate scope is consistent across the
+        # recovery service's drift surfaces.
+        try:
+            active_jobs = await asyncio.to_thread(
+                self._job_repository.find_processing_jobs
+            )
+        except Exception as e:
+            logger.error(
+                f"reconcile_drift_states: Pattern (f) failed to "
+                f"list active jobs: {e}",
+                exc_info=True,
+            )
+            return None
+
+        for job in active_jobs:
+            try:
+                # Per-row work is wrapped so a single
+                # failure cannot abort the sweep.
+                job_id = getattr(job, "job_id", None)
+                instance_id = getattr(job, "instance_id", None)
+                if not job_id or not instance_id:
+                    # Without instance_id the alive/terminal
+                    # check is undefined. The startup-
+                    # recovery path handles no-instance
+                    # orphans; here we just skip (the
+                    # next cycle retries).
+                    logger.debug(
+                        f"reconcile_drift_states: Pattern (f) "
+                        f"skip — job "
+                        f"{job_id[:8] if job_id else '?'}... "
+                        f"has no instance_id "
+                        f"(startup-recovery scope)"
+                    )
+                    continue
+
+                # ── Task-side inspection ───────────────
+                # f1 requires "no Task rows" for this
+                # JobItem. f2 requires a COMPLETED Task.
+                # Both use
+                # ``TaskRepository.get_by_work_id`` (the
+                # canonical cross-system linkage key —
+                # Task ``work_id == JobItem.job_id`` per
+                # the dispatch contract, see
+                # ``job_processor``). ``None`` here
+                # means "no Task row"; any other status
+                # is the current Task state.
+                task = None
+                if self._task_repository is not None:
+                    try:
+                        task = await asyncio.to_thread(
+                            self._task_repository.get_by_work_id,
+                            job_id,
+                        )
+                    except Exception as task_lookup_err:
+                        logger.warning(
+                            f"reconcile_drift_states: Pattern (f) "
+                            f"Task lookup failed for job "
+                            f"{job_id[:8]}...: "
+                            f"{task_lookup_err}. "
+                            f"Falling through to skip."
+                        )
+                        task = None
+
+                # ── Healthy-shape exclusion (explicit
+                # guard) ─────────────────────────────
+                # A PENDING Task means the work is
+                # awaiting claim (Pattern (a) owns that
+                # surface). A RUNNING Task means the work
+                # is in flight (Pattern (b) / observer
+                # owns that surface). Both are healthy
+                # shapes and MUST NOT be matched by f1 or
+                # f2. The brief is explicit: "encode as
+                # explicit guards, not incidental side
+                # effects." This is the guard.
+                if task is not None:
+                    task_status = getattr(task, "status", None)
+                    if task_status in (
+                        TaskStatus.PENDING.value,
+                        TaskStatus.RUNNING.value,
+                    ):
+                        details.append({
+                            "pattern": "orphan_active_skipped_healthy_shape",
+                            "job_id": job_id,
+                            "task_id": getattr(task, "id", None),
+                            "instance_id": instance_id,
+                            "reason": (
+                                f"active JobItem with "
+                                f"{task_status!r} Task — "
+                                f"healthy shape excluded "
+                                f"from Pattern (f)"
+                            ),
+                        })
+                        continue
+
+                # ── Sub-shape (f2) — active + COMPLETED
+                # Task ───────────────────────────────
+                # Task finished but the JobItem side was
+                # never finalized. The Task is the
+                # authoritative "this work is done"
+                # signal — the JobItem side is the
+                # lagging observer. Finalize as DONE with
+                # ``terminal_reason='completed'`` and
+                # fire the dependency watchers.
+                if (
+                    task is not None
+                    and task.status == TaskStatus.COMPLETED.value
+                ):
+                    task_id = getattr(task, "id", None)
+                    f2_ok, f2_reason = await self._pattern_f_finalize_done(
+                        job=self._job_repository,
+                        job_queue_service=self._job_queue_service,
+                        job_item=job,
+                        task=task,
+                    )
+                    if f2_ok:
+                        reconciled += 1
+                        details.append({
+                            "pattern": "orphan_active_completed_task_done",
+                            "job_id": job_id,
+                            "task_id": task_id,
+                            "instance_id": instance_id,
+                            "reason": f2_reason,
+                        })
+                        logger.warning(
+                            f"reconcile_drift_states: Pattern (f2) "
+                            f"finalized orphan ACTIVE JobItem "
+                            f"{job_id[:8]}... (task {task_id}, "
+                            f"instance {instance_id[:8]}...) to "
+                            f"DONE — Task was COMPLETED but the "
+                            f"JobItem never transitioned. "
+                            f"Watchers fired/cancelled."
+                        )
+                    else:
+                        # Finalize failed (race,
+                        # concurrent writer, or
+                        # finalization exception).
+                        # Record as a skipped_no_deps
+                        # detail so the operator can see
+                        # the row was observed but not
+                        # corrected.
+                        details.append({
+                            "pattern": "orphan_active_skipped_no_deps",
+                            "job_id": job_id,
+                            "task_id": task_id,
+                            "instance_id": instance_id,
+                            "reason": f2_reason,
+                        })
+                        logger.warning(
+                            f"reconcile_drift_states: Pattern (f2) "
+                            f"could not finalize orphan ACTIVE "
+                            f"JobItem {job_id[:8]}... (task "
+                            f"{task_id}, instance "
+                            f"{instance_id[:8]}...): {f2_reason}"
+                        )
+                    continue
+
+                # ── Sub-shape (f1) — active + NO Task
+                # rows ─────────────────────────────────
+                # No Task row + alive/stale instance +
+                # older than the grace → finalize to
+                # DEAD and release the per-job lock. The
+                # instance MUST be alive (or terminal-
+                # stale — the brief says "alive/stale
+                # instance"). A terminal instance is the
+                # P1-pattern surface (Pattern (a)) and
+                # the startup-recovery path; Pattern
+                # (f1) is specifically the "alive but
+                # structurally orphaned" class. An
+                # alive instance is checked via
+                # ``_is_instance_alive``.
+                instance = None
+                if self._instance_repository is not None:
+                    try:
+                        instance = await asyncio.to_thread(
+                            self._instance_repository.get,
+                            instance_id,
+                        )
+                    except Exception as inst_lookup_err:
+                        logger.warning(
+                            f"reconcile_drift_states: "
+                            f"Pattern (f) Instance lookup "
+                            f"failed for "
+                            f"{instance_id[:8]}...: "
+                            f"{inst_lookup_err}. Falling "
+                            f"through to skip."
+                        )
+                        instance = None
+
+                # If the instance is missing OR
+                # terminal, this is NOT Pattern (f1) —
+                # it's either a startup-recovery case
+                # (orphan instance) or a Pattern (a)
+                # case (P1 dead instance with no Task).
+                # The startup path handles
+                # ``instance_id=None``; Pattern (a)
+                # handles dead instances. Skip — both
+                # surfaces already correct this.
+                if instance is None or self._is_instance_terminal(
+                    getattr(instance, "status", None)
+                ):
+                    details.append({
+                        "pattern": "orphan_active_skipped_no_deps",
+                        "job_id": job_id,
+                        "task_id": None,
+                        "instance_id": instance_id,
+                        "reason": (
+                            f"no Task rows but instance is "
+                            f"{'missing' if instance is None else 'terminal'} "
+                            f"({instance.status if instance else 'n/a'}) — "
+                            f"owned by recover_on_startup / "
+                            f"Pattern (a), not Pattern (f1)"
+                        ),
+                    })
+                    continue
+
+                # If the instance is alive — this is
+                # the genuine f1 candidate. Apply the
+                # grace period: only JobItems with
+                # ``created_at < threshold`` are
+                # eligible. ``JobItem.created_at`` is
+                # the canonical age signal (the model
+                # has no ``updated_at``; the active
+                # JobItem was enqueued at
+                # ``created_at`` and ``active`` rows
+                # don't receive regular updates).
+                job_created = self._parse_job_created_at(
+                    getattr(job, "created_at", None)
+                )
+                if (
+                    job_created is None
+                    or job_created >= threshold
+                ):
+                    # Either the timestamp is
+                    # unparseable (defensive — should
+                    # never happen for rows produced by
+                    # JobRepository.create) or the row
+                    # is inside the grace. Skip with a
+                    # grace detail so the operator can
+                    # see the row was observed.
+                    details.append({
+                        "pattern": "orphan_active_skipped_grace",
+                        "job_id": job_id,
+                        "task_id": None,
+                        "instance_id": instance_id,
+                        "reason": (
+                            f"orphan ACTIVE JobItem (no "
+                            f"Task rows, alive instance) "
+                            f"is within the grace period "
+                            f"(created_at="
+                            f"{job.created_at!r}, "
+                            f"threshold="
+                            f"{threshold.isoformat()}, "
+                            f"grace={min_orphan_age_seconds}s)"
+                            f" — left alone, next cycle "
+                            f"retries"
+                        ),
+                    })
+                    continue
+
+                # f1 confirmed — apply the DEAD
+                # finalization + per-job lock release.
+                f1_ok, f1_reason = await self._pattern_f_finalize_dead(
+                    job=self._job_repository,
+                    lock=self._lock_repository,
+                    job_item=job,
+                )
+                if f1_ok:
+                    reconciled += 1
+                    details.append({
+                        "pattern": "orphan_active_no_task_dead",
+                        "job_id": job_id,
+                        "task_id": None,
+                        "instance_id": instance_id,
+                        "reason": f1_reason,
+                    })
+                    logger.warning(
+                        f"reconcile_drift_states: Pattern (f1) "
+                        f"finalized orphan ACTIVE JobItem "
+                        f"{job_id[:8]}... (no Task rows, "
+                        f"instance {instance_id[:8]}... alive "
+                        f"in {instance.status}) to DEAD — "
+                        f"restart-orphan semantics. Per-job "
+                        f"lock released."
+                    )
+                else:
+                    # Finalize failed (race, concurrent
+                    # writer, missing key parts, etc.).
+                    # Record as a skipped_no_deps detail.
+                    details.append({
+                        "pattern": "orphan_active_skipped_no_deps",
+                        "job_id": job_id,
+                        "task_id": None,
+                        "instance_id": instance_id,
+                        "reason": f1_reason,
+                    })
+                    logger.warning(
+                        f"reconcile_drift_states: Pattern (f1) "
+                        f"could not finalize orphan ACTIVE "
+                        f"JobItem {job_id[:8]}... (instance "
+                        f"{instance_id[:8]}...): {f1_reason}"
+                    )
+            except Exception as per_row_err:
+                logger.error(
+                    f"reconcile_drift_states: Pattern (f) "
+                    f"per-row check failed for job "
+                    f"{getattr(job, 'job_id', '?')}: "
+                    f"{per_row_err}",
+                    exc_info=True,
+                )
+
+        # W6-style payload rule: return whenever any
+        # detail was observed (a sweep where every
+        # candidate was excluded by a guard still
+        # produces details the operator should see).
+        # Matches Pattern (e)'s final return shape.
+        if reconciled == 0 and not details:
+            return None
+        return {"reconciled": reconciled, "details": details}
+
+    @staticmethod
+    def _parse_job_created_at(value):
+        """Defensive parse of ``JobItem.created_at`` (string) into
+        a timezone-aware ``datetime`` for grace-period
+        comparison.
+
+        JobItem stores ``created_at`` as an ISO-8601
+        string (per the model default factory at
+        ``daemon/repositories/job_queue/models.py:349``).
+        A malformed or missing value is a defensive
+        concern — the ``recover_on_startup`` and Pattern
+        (a) paths assume well-formed timestamps; we
+        follow suit and treat unparseable as "no
+        opinion" (``None``) so the caller can skip with
+        the grace guard (safer than silently treating
+        as old).
+
+        Returns ``None`` for unparseable or missing
+        values; otherwise a ``datetime`` with
+        ``tzinfo=timezone.utc``.
+        """
+        if value is None:
+            return None
+        try:
+            parsed = datetime.fromisoformat(str(value))
+        except (TypeError, ValueError):
+            return None
+        if parsed.tzinfo is None:
+            # JobItem stores naive ISO strings in some
+            # code paths; assume UTC for the grace
+            # comparison.
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+
+    async def _pattern_f_finalize_dead(
+        self,
+        *,
+        job,
+        lock,
+        job_item,
+    ) -> tuple[bool, str]:
+        """Apply the f1 DEAD finalization + per-job lock
+        release.
+
+        Two-step transaction-shaped write, both halves
+        scoped to the (project_id, queue_id, job_id)
+        triple so the F4/F7 invariant (no sibling-lock
+        deletion) holds:
+
+        1. Lock release via
+           ``lock_repository.release_by_job`` (NOT
+           ``release_by_instance`` — the buggy
+           sibling-wipe surface). Skipped if any of the
+           three key parts is missing (the legacy
+           fallback is the same; documented in
+           ``_fail_orphaned_job``).
+        2. State flip via
+           ``job_repository.atomic_transition`` (the
+           same seam ``recover_on_startup`` uses for
+           the ``processing -> failed`` finalization).
+           The target state is
+           ``admission_state='dead'`` (the 4-value
+           ``AdmissionState`` vocabulary's
+           dead-letter value — distinct from Pattern
+           (a)'s ``failed`` outcome). On PostgreSQL
+           the
+           ``trg_job_queue_items_active_lock_guard``
+           trigger requires a matching ``job_locks``
+           row, which is exactly what the prior lock
+           release already removed; SQLite is
+           permissive.
+
+        Both halves run on a worker thread via
+        ``asyncio.to_thread`` so the event loop is not
+        blocked. A partial failure (lock released,
+        transition failed, or vice versa) is logged
+        and reported without aborting the sweep. The
+        lock release runs FIRST so a transition
+        failure leaves a leaked slot rather than a
+        wedged slot (the inverse wedge is the more
+        common recovery path on the next cycle —
+        recover_on_startup will sweep a leaked lock
+        cleanly).
+
+        Args:
+            job: The ``JobRepository`` (for
+                ``atomic_transition``).
+            lock: The ``LockRepository`` (for scoped
+                release).
+            job_item: The JobItem SQLModel row.
+
+        Returns:
+            ``(ok, reason)`` tuple. ``ok=True`` means
+            the transition succeeded (or was already
+            terminal, no-op). ``ok=False`` means the
+            transition raised or the JobItem state
+            changed concurrently; ``reason`` is a
+            human-readable string suitable for the
+            detail record.
+        """
+        job_id = getattr(job_item, "job_id", None)
+        project_id = getattr(job_item, "project_id", None)
+        queue_id = getattr(job_item, "queue_id", None)
+        instance_id = getattr(job_item, "instance_id", None)
+
+        # 1. Scoped lock release (F4/F7). Only attempt
+        # when all three key parts are present;
+        # otherwise the release is a safe no-op
+        # (matches the legacy fallback in
+        # ``_fail_orphaned_job``).
+        if project_id and queue_id and job_id and lock is not None:
+            try:
+                released = await asyncio.to_thread(
+                    lock.release_by_job,
+                    project_id,
+                    queue_id,
+                    job_id,
+                )
+                if not released:
+                    # No matching lock row — fine;
+                    # the JobItem was active but the
+                    # slot was already released (e.g.
+                    # a sibling recovery path ran).
+                    # The transition below still runs.
+                    logger.debug(
+                        f"_pattern_f_finalize_dead: no lock row "
+                        f"matched for job {job_id[:8]}... "
+                        f"(project={project_id}, "
+                        f"queue={queue_id}) — transition "
+                        f"proceeds anyway"
+                    )
+            except Exception as lock_err:
+                # Lock release failure must not mask
+                # the transition. Log + continue.
+                logger.error(
+                    f"_pattern_f_finalize_dead: scoped lock "
+                    f"release failed for job "
+                    f"{job_id[:8]}...: {lock_err}"
+                )
+
+        # 2. Active → DEAD transition via the
+        # existing ``atomic_transition`` seam.
+        # ``from_status='active'`` is the canonical
+        # key; ``to_status='dead'`` is the 4-value
+        # ``AdmissionState`` vocabulary's DEAD value.
+        try:
+            now = datetime.now(timezone.utc).isoformat()
+            await asyncio.to_thread(
+                job.atomic_transition,
+                job_id,
+                from_status="active",
+                to_status="dead",
+                completed_at=now,
+                error_message=(
+                    "Pattern (f1) restart-orphan: active "
+                    "JobItem with no Task rows (alive "
+                    "instance) — daemon restart cleared the "
+                    "task table but the JobItem row "
+                    "survived; finalizing to DEAD per "
+                    "RCA 802095d8"
+                ),
+            )
+        except InvalidTransitionError:
+            # Job was already terminal (concurrent
+            # finalize). Expected during recovery —
+            # no error, the row is in the right state
+            # already. Return True so the caller
+            # counts the row as handled.
+            return (
+                True,
+                f"Pattern (f1): job {job_id[:8]}... was "
+                f"already terminal (concurrent finalize); "
+                f"no-op",
+            )
+        except Exception as trans_err:
+            return (
+                False,
+                f"Pattern (f1): transition failed for job "
+                f"{job_id[:8]}...: "
+                f"{type(trans_err).__name__}: {trans_err}",
+            )
+
+        return (
+            True,
+            f"Pattern (f1): active JobItem with no Task "
+            f"rows (alive instance "
+            f"{instance_id[:8] if instance_id else '?'}...)"
+            f" finalized to DEAD after grace "
+            f"({job_id[:8]}...)",
+        )
+
+    async def _pattern_f_finalize_done(
+        self,
+        *,
+        job,
+        job_queue_service,
+        job_item,
+        task,
+    ) -> tuple[bool, str]:
+        """Apply the f2 DONE finalization + dependency-watcher
+        fire/cancel.
+
+        Two-step write:
+
+        1. State flip via
+           ``job_repository.atomic_transition`` (the
+           same seam as f1).
+           ``to_status='completed'`` — the
+           backward-compat ``status`` string. The
+           corresponding
+           ``terminal_reason='completed'`` is implied
+           via the post-Phase-7 seam
+           (``atomic_transition`` doesn't accept
+           ``terminal_reason`` directly; the
+           ``finalize_active_to_done`` repo method is
+           the post-Phase-7 home for
+           ``terminal_reason`` writes — for Pattern
+           (f2) we keep the legacy
+           ``atomic_transition`` shape to match
+           ``recover_on_startup`` /
+           ``_fail_orphaned_job``).
+
+        2. Watcher notify (fire/cancel) via
+           ``JobQueueService.notify_watchers`` — the
+           canonical "fire-then-cancel" pattern used
+           on terminate paths. UP-side rows (waiting
+           parents) FIRE with
+           ``Outcome(status='completed')``; DOWN-side
+           rows (the JobItem's own watches on its
+           children) CANCEL. Best-effort: a notify
+           failure is logged but does NOT roll back
+           the transition (the JobItem is terminal;
+           the watcher's ``_recover_fired_unsent``
+           will pick it up if the notify was lost).
+
+        Returns:
+            ``(ok, reason)`` tuple mirroring
+            :meth:`_pattern_f_finalize_dead`.
+        """
+        job_id = getattr(job_item, "job_id", None)
+        task_id = getattr(task, "id", None)
+        instance_id = getattr(job_item, "instance_id", None)
+
+        # 1. Active → DONE transition.
+        try:
+            now = datetime.now(timezone.utc).isoformat()
+            await asyncio.to_thread(
+                job.atomic_transition,
+                job_id,
+                from_status="active",
+                to_status="completed",
+                completed_at=now,
+                result_summary=(
+                    f"Pattern (f2) completed-task orphan: "
+                    f"Task {task_id} reached COMPLETED but "
+                    f"the JobItem never transitioned; "
+                    f"finalizing to DONE per the "
+                    f"leader-locked design"
+                ),
+            )
+        except InvalidTransitionError:
+            # Job was already terminal — expected
+            # during recovery; no error.
+            return (
+                True,
+                f"Pattern (f2): job {job_id[:8]}... was "
+                f"already terminal (concurrent finalize); "
+                f"no-op",
+            )
+        except Exception as trans_err:
+            return (
+                False,
+                f"Pattern (f2): transition failed for job "
+                f"{job_id[:8]}...: "
+                f"{type(trans_err).__name__}: {trans_err}",
+            )
+
+        # 2. Watcher notify (fire/cancel). Best-effort
+        # — a notify failure must not mask the
+        # successful transition. ``notify_watchers`` is
+        # async; we're in the async wrapper here, so a
+        # direct ``await`` is correct.
+        notify_status = "notify_skipped_no_service"
+        if job_queue_service is not None:
+            try:
+                await job_queue_service.notify_watchers(
+                    job_id, "completed"
+                )
+                notify_status = "notify_completed"
+            except Exception as notify_err:
+                # Best-effort — log + continue.
+                logger.warning(
+                    f"_pattern_f_finalize_done: "
+                    f"notify_watchers failed for "
+                    f"{job_id[:8]}...: {notify_err}"
+                )
+                notify_status = (
+                    f"notify_failed:{type(notify_err).__name__}"
+                )
+
+        return (
+            True,
+            f"Pattern (f2): active JobItem with COMPLETED "
+            f"Task {task_id} (instance "
+            f"{instance_id[:8] if instance_id else '?'}...) "
+            f"finalized to DONE; {notify_status}",
+        )
