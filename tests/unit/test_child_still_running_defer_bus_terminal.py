@@ -334,3 +334,197 @@ class TestDeferPreservesLegitimateDeferral:
         # short-circuit BEFORE that lookup.
         registry.get_version.assert_not_called()
         registry.get_resolved.assert_not_called()
+
+
+# ─── W4 (council review 645a2219): defer double-emit idempotency ────────
+
+
+class TestDeferDoubleEmitIdempotency:
+    """W4 from council review session 645a2219.
+
+    The defer branch in ``_dispatch_post_commit_side_effects`` fires
+    both ``_emit_terminal_via_bus`` (task-keyed) AND
+    ``_emit_terminal_for_child_instance_via_bus`` (corrective
+    ``(parent, child)`` pair). Exactly-once rests on
+    ``DependencyWatcherRepository.transition_state``' guarded
+    ``WHERE state = 'PENDING'`` Core UPDATE — a second call on an
+    already-FIRED watcher is a ``rowcount == 0`` no-op (see
+    ``daemon/repositories/dependency_bus/repository.py:590-664`` and
+    ``daemon/services/dependency_bus.py:551-933`` for the real guard
+    and its bus-level wiring).
+
+    This test pins that contract: dispatching the SAME defer outcome
+    twice in a row (same parent / same child / same task) does NOT
+    double-deliver FollowUps and does NOT raise. The mock return
+    sequence mirrors the real WHERE-state guard:
+
+      * First emit call → ``[follow_up]`` (rowcount=1 → fired).
+      * Second emit call → ``[]`` (rowcount=0 → no-op).
+
+    Without the guard, the second call would also return
+    ``[follow_up]`` and the parent's completion would be reported
+    twice — silently double-delivering the FollowUp enqueue back to
+    the parent. W4 closes exactly this gap.
+    """
+
+    @pytest.mark.asyncio
+    async def test_defer_double_emit_is_idempotent(self):
+        """Dispatching the defer outcome twice does NOT double-deliver.
+
+        Mock layer: the service-level ``_emit_terminal_via_bus`` and
+        ``_emit_terminal_for_child_instance_via_bus`` helpers are
+        stubbed with ``side_effect`` lists whose entries mirror the
+        real bus's ``transition_state`` rowcount — first call returns
+        ``[follow_up]`` (the ``WHERE state = 'PENDING'`` UPDATE
+        succeeded with ``rowcount=1``); second call returns ``[]`` (the
+        ``WHERE state = 'PENDING'`` UPDATE returned ``rowcount=0``
+        because the watcher is already FIRED).
+
+        Assertions:
+
+        * Both helpers awaited exactly twice (once per dispatch).
+        * Both dispatches' kwargs are identical (idempotent target —
+          same parent / child / task).
+        * Cumulative FollowUp delivery = 1 per helper, NOT 2 (the
+          WHERE-state guard short-circuits the second call).
+        * No exception raised on the second dispatch (the dispatch
+          path tolerates the rowcount=0 return silently).
+        """
+        from daemon.services.dependency_bus import FollowUp
+
+        # A single fired FollowUp payload — represents the
+        # ``rowcount=1 → fired`` return for the FIRST call only. The
+        # second call's mock return is ``[]`` (the rowcount=0 no-op),
+        # so the bus only delivers this FollowUp once across the two
+        # dispatches. This mirrors the real ``transition_state``
+        # semantics on the second WHERE-state guard, where
+        # ``rowcount == 0`` skips an already-FIRED row.
+        fired_follow_up = FollowUp(
+            target_instance_id="leader-001",
+            message="[dependency_bus] child wanderer-001 completed",
+            source="dependency_bus",
+            metadata={"child_id": "wanderer-001"},
+        )
+
+        # ``side_effect`` lists are NOT consumed — each ``await mock(...)``
+        # returns the corresponding list in order. First entry =
+        # rowcount=1 (fired), second entry = rowcount=0 (no-op).
+        # Mirrors the real ``transition_state``' guarded
+        # ``WHERE state = 'PENDING'`` UPDATE: first call sees
+        # PENDING → rowcount=1 → returns ``[follow_up]``; second call
+        # sees FIRED → rowcount=0 → returns ``[]``.
+        task_keyed_returns = [[fired_follow_up], []]
+        corrective_returns = [[fired_follow_up], []]
+
+        # ``_task_repo.get_by_message`` is called via ``asyncio.to_thread``
+        # (a sync worker-thread call), so the stub MUST be sync (the
+        # ``to_thread`` wrapper does NOT await coroutines). Mirrors
+        # ``TestDeferFiresBusTerminal.test_defer_fires_task_keyed_bus_emit``.
+        def _fake_get_by_message(message_id):
+            t = MagicMock()
+            t.id = 25935
+            return t
+
+        manager = _make_mock_manager()
+        manager._task_repo = MagicMock()
+        manager._task_repo.get_by_message = _fake_get_by_message
+
+        service = _make_service(manager)
+        # Override the default no-op AsyncMocks from ``_make_service``
+        # with rowcount-simulating mocks. The defer branch fires
+        # both helpers unconditionally; the WHERE-state guard lives
+        # in the bus layer BELOW these helpers, which is what the
+        # rowcount=0 second-call return value simulates.
+        service._emit_terminal_via_bus = AsyncMock(
+            side_effect=task_keyed_returns
+        )
+        service._emit_terminal_for_child_instance_via_bus = AsyncMock(
+            side_effect=corrective_returns
+        )
+
+        result = _make_db_result(
+            "child_still_running_defer",
+            instance_id="wanderer-001",
+            parent_id="leader-001",
+        )
+
+        # First dispatch — fires the parent's PENDING watcher. The
+        # bus's rowcount=1 returns ``[fired_follow_up]`` → the
+        # FollowUp enqueues back to the parent (the natural finalize
+        # path takes over from there via the report Task).
+        await service._dispatch_post_commit_side_effects(
+            result, last_content="body", completed_message_id="msg-current"
+        )
+
+        # Second dispatch on the SAME result — with the WHERE-state
+        # guard in place, the bus returns rowcount=0 → ``[]`` → no
+        # FollowUp enqueued → no double-delivery. Without the guard,
+        # the bus would return ``[fired_follow_up]`` again and the
+        # parent would see the completion reported twice (the silent
+        # bug W4 is closing).
+        await service._dispatch_post_commit_side_effects(
+            result, last_content="body", completed_message_id="msg-current"
+        )
+
+        # Both helpers were awaited exactly twice (once per dispatch).
+        # The defer branch fires both unconditionally; the WHERE-state
+        # guard is enforced by the bus layer BELOW the helpers, which
+        # is what the rowcount=0 second-call return value simulates.
+        assert service._emit_terminal_via_bus.await_count == 2, (
+            f"task-keyed emit must be awaited once per dispatch "
+            f"(2 total); got await_count="
+            f"{service._emit_terminal_via_bus.await_count}"
+        )
+        assert (
+            service._emit_terminal_for_child_instance_via_bus.await_count
+            == 2
+        ), (
+            f"corrective emit must be awaited once per dispatch "
+            f"(2 total); got await_count="
+            f"{service._emit_terminal_for_child_instance_via_bus.await_count}"
+        )
+
+        # Both dispatches targeted the SAME parent / child / task —
+        # the dispatch itself is idempotent at the target level
+        # (NOT just at the bus guard layer). If a refactor changed
+        # the call to target a different parent/child on the second
+        # pass, this assertion would catch it before the guard ever
+        # had a chance to short-circuit.
+        task_keyed_calls = service._emit_terminal_via_bus.call_args_list
+        corrective_calls = (
+            service._emit_terminal_for_child_instance_via_bus.call_args_list
+        )
+        assert task_keyed_calls[0].kwargs == task_keyed_calls[1].kwargs, (
+            "task-keyed emit kwargs must be identical across the two "
+            "dispatches (idempotent target); "
+            f"first={task_keyed_calls[0].kwargs}, "
+            f"second={task_keyed_calls[1].kwargs}"
+        )
+        assert corrective_calls[0].kwargs == corrective_calls[1].kwargs, (
+            "corrective emit kwargs must be identical across the two "
+            "dispatches (idempotent target); "
+            f"first={corrective_calls[0].kwargs}, "
+            f"second={corrective_calls[1].kwargs}"
+        )
+
+        # Cumulative FollowUp delivery: each helper delivered exactly
+        # ONE FollowUp across the two dispatches. The mock's first
+        # return is ``[fired_follow_up]`` (rowcount=1 → fired); the
+        # second return is ``[]`` (rowcount=0 → no-op, matching the
+        # real ``transition_state``' guarded ``WHERE state = 'PENDING'``
+        # UPDATE on an already-FIRED watcher). Cumulative = 1, NOT 2.
+        # This is the W4 idempotency contract the guard enforces.
+        total_task_keyed = sum(len(r) for r in task_keyed_returns)
+        total_corrective = sum(len(r) for r in corrective_returns)
+        assert total_task_keyed == 1, (
+            f"Idempotency violated: task-keyed emit delivered "
+            f"{total_task_keyed} FollowUps across 2 dispatches "
+            f"(expected exactly 1 — the WHERE-state guard must "
+            f"short-circuit the second call to rowcount=0)"
+        )
+        assert total_corrective == 1, (
+            f"Idempotency violated: corrective emit delivered "
+            f"{total_corrective} FollowUps across 2 dispatches "
+            f"(expected exactly 1 — the WHERE-state guard must "
+            f"short-circuit the second call to rowcount=0)"
+        )
