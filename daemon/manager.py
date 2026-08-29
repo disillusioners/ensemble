@@ -9751,6 +9751,54 @@ class InstanceManager:
             return {}
         return task_repo.count_pending_by_instance_ids(instance_ids)
 
+    def count_pending_and_running_tasks_by_instance(
+        self, instance_ids: list[str]
+    ) -> dict[str, dict[str, int]]:
+        """Grouped count of PENDING + RUNNING tasks per instance (read-only, ONE query).
+
+        Backs the ``subtree_status`` tool (#5, agent-instance-tools
+        follow-up; #4 stability-backlog row 4, Finding-3) — one
+        batched GROUP BY over the whole subtree instead of N
+        per-instance lookups, with BOTH buckets surfaced so a busy
+        RUNNING child does not render as 0. Additive facade
+        mirroring the ``count_pending_tasks_by_instance`` / sibling
+        ``get_tree_ids_permanent`` precedent (facade delegating to a
+        repository); the tool layer MUST NOT reach into
+        ``manager._task_repo`` directly (D14).
+
+        Read model: the ``task`` table, not ``job_queue_items`` —
+        agent-to-agent dispatch (``send_message`` → ``enqueue_message``)
+        creates Task rows directly (D13) without JobItems, so the task
+        table is the authoritative pending-work view for subtree
+        overviews. Both ``status='pending'`` (queued) and
+        ``status='running'`` (in-flight) are counted in their
+        respective columns via conditional aggregation in the repo;
+        PAUSED work is excluded (a paused instance is visible via its
+        own ``status`` column).
+
+        Args:
+            instance_ids: The instance IDs to group-count. Empty list →
+                ``{}`` (no DB round-trip).
+
+        Returns:
+            ``{instance_id: {"pending": N, "running": M}}`` for
+            instances with a count > 0 in either bucket; callers use
+            ``dict.get(iid, {"pending": 0, "running": 0})`` for the
+            rest (the repo's GROUP BY omits zero-of-both rows).
+        """
+        task_repo = getattr(self, "_task_repo", None)
+        if task_repo is None:
+            # ``_task_repo`` is wired in setup_worker_pool(); a tool
+            # invocation always runs post-setup, but a partially
+            # initialized manager (early tests) should degrade to
+            # "no pending work known" rather than crash.
+            logger.warning(
+                "count_pending_and_running_tasks_by_instance: "
+                "_task_repo not wired; returning empty counts."
+            )
+            return {}
+        return task_repo.count_pending_and_running_by_instance_ids(instance_ids)
+
     def clear_all_instances(self) -> int:
         """Clear all instances from memory and database.
 

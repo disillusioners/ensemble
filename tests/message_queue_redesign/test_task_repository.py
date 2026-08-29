@@ -2506,14 +2506,68 @@ class TestTaskStats:
         assert counts["running"] == 0
         assert counts["completed"] == 1
 
-    def test_count_pending_by_instance_ids_grouped(
+    def test_count_pending_and_running_by_instance_ids_grouped(
         self, repository, engine
     ):
         """#5 subtree_status read model: ONE grouped query returns
-        per-instance PENDING counts; non-pending statuses and
-        out-of-list instances are excluded; zero-count instances are
-        OMITTED (the tool uses ``dict.get(iid, 0)``)."""
-        # i1: two pending; i2: one pending; i3: none pending.
+        per-instance PENDING + RUNNING counts (stability-backlog
+        row 4 / Finding-3: busy RUNNING child must NOT render as 0).
+        Non-{pending,running} statuses and out-of-list instances are
+        excluded; zero-of-both instances are OMITTED (the tool uses
+        ``dict.get(iid, {"pending": 0, "running": 0})``)."""
+        # i1: two pending, no running
+        repository.create(
+            task_type=TaskType.PROCESS_MESSAGE.value, instance_id="i1"
+        )
+        repository.create(
+            task_type=TaskType.PROCESS_MESSAGE.value, instance_id="i1"
+        )
+        # i2: one pending, one running
+        repository.create(
+            task_type=TaskType.PROCESS_MESSAGE.value, instance_id="i2"
+        )
+        _create_task_with_status(
+            engine,
+            instance_id="i2",
+            status=TaskStatus.RUNNING.value,
+        )
+        # i3: zero pending, one running — Finding-3 trap pin: a
+        # child with ONLY running work must render with running>=1
+        # (the pre-fix tool showed ``pending=0`` and parents misread
+        # it as idle). Raw-SQL seed avoids FIFO claim-order
+        # ambiguity.
+        _create_task_with_status(
+            engine,
+            instance_id="i3",
+            status=TaskStatus.RUNNING.value,
+        )
+        # i4 has a COMPLETED task — invisible to both counts.
+        _create_task_with_status(
+            engine,
+            instance_id="i4",
+            status=TaskStatus.COMPLETED.value,
+        )
+
+        counts = repository.count_pending_and_running_by_instance_ids(
+            ["i1", "i2", "i3", "i4"]
+        )
+
+        assert counts == {
+            "i1": {"pending": 2, "running": 0},
+            "i2": {"pending": 1, "running": 1},
+            "i3": {"pending": 0, "running": 1},
+        }
+
+    def test_count_pending_by_instance_ids_legacy_wrapper(
+        self, repository, engine
+    ):
+        """Legacy ``{iid: pending_count}`` shape is preserved by the
+        backward-compat wrapper (no separate DB round-trip — the
+        wrapper delegates to the new combined query and extracts
+        ``pending``)."""
+        # i1: two pending; i2: one pending + one running; i3: only
+        # running (must be omitted from the legacy shape — zero
+        # pending is the legacy filter).
         repository.create(
             task_type=TaskType.PROCESS_MESSAGE.value, instance_id="i1"
         )
@@ -2523,31 +2577,32 @@ class TestTaskStats:
         repository.create(
             task_type=TaskType.PROCESS_MESSAGE.value, instance_id="i2"
         )
-        # i3's only task is RUNNING — not pending (raw-SQL seed so no
-        # claim-order ambiguity from the FIFO claim path).
+        _create_task_with_status(
+            engine,
+            instance_id="i2",
+            status=TaskStatus.RUNNING.value,
+        )
         _create_task_with_status(
             engine,
             instance_id="i3",
             status=TaskStatus.RUNNING.value,
         )
-        # i4 has a COMPLETED task — invisible to a pending count.
-        _create_task_with_status(
-            engine,
-            instance_id="i4",
-            status=TaskStatus.COMPLETED.value,
-        )
 
         counts = repository.count_pending_by_instance_ids(
-            ["i1", "i2", "i3", "i4"]
+            ["i1", "i2", "i3"]
         )
 
         assert counts == {"i1": 2, "i2": 1}
 
-    def test_count_pending_by_instance_ids_empty_input(self, repository):
+    def test_count_pending_and_running_by_instance_ids_empty_input(
+        self, repository
+    ):
         """Empty input short-circuits to {} with no DB round-trip."""
-        assert repository.count_pending_by_instance_ids([]) == {}
+        assert (
+            repository.count_pending_and_running_by_instance_ids([]) == {}
+        )
 
-    def test_count_pending_by_instance_ids_dedupes_input(
+    def test_count_pending_and_running_by_instance_ids_dedupes_input(
         self, repository
     ):
         """Duplicate ids in the input are collapsed by the GROUP BY —
@@ -2555,12 +2610,17 @@ class TestTaskStats:
         repository.create(
             task_type=TaskType.PROCESS_MESSAGE.value, instance_id="i1"
         )
-        counts = repository.count_pending_by_instance_ids(
+        _create_task_with_status(
+            engine=repository.engine,
+            instance_id="i1",
+            status=TaskStatus.RUNNING.value,
+        )
+        counts = repository.count_pending_and_running_by_instance_ids(
             ["i1", "i1", "i1"]
         )
-        assert counts == {"i1": 1}
+        assert counts == {"i1": {"pending": 1, "running": 1}}
 
-    def test_count_pending_by_instance_ids_excludes_terminal_job_orphans(
+    def test_count_pending_and_running_by_instance_ids_excludes_terminal_job_orphans(
         self, repository, engine
     ):
         """Reviewer Finding 1 (2026-08-28): the ``NOT EXISTS`` guard
@@ -2569,9 +2629,9 @@ class TestTaskStats:
         ``_finalize_job_db_sync``) update ONLY ``job_queue_items``;
         the paired Task stays ``pending`` until the drift reconciler
         runs (60s loop, ``min_pending_age_seconds=300``). Without the
-        guard, ``count_pending_by_instance_ids`` would count the
-        orphan and ``subtree_status`` would show ``pending=N`` while
-        actionable work was 0.
+        guard, the count method would count the orphan and
+        ``subtree_status`` would show ``queued=N`` while actionable
+        work was 0.
 
         Fixture pin: the seeded Task MUST remain ``pending`` (proven
         by an upfront raw-SQL re-read of the row). If the fixture
@@ -2628,14 +2688,20 @@ class TestTaskStats:
             session.commit()
 
         # Pre-fix value would have been >= 1 (the orphan Task is
-        # still 'pending'). With the guard, the count is 0.
-        counts = repository.count_pending_by_instance_ids(["inst-orphan"])
+        # still 'pending'). With the guard, the count is 0 — the
+        # Task is omitted from the grouped result entirely (zero of
+        # both buckets).
+        counts = (
+            repository.count_pending_and_running_by_instance_ids(
+                ["inst-orphan"]
+            )
+        )
         assert counts == {}, (
             f"terminal-job orphan MUST NOT be counted (guard regression): "
             f"counts={counts!r}; expected {{}}"
         )
 
-    def test_count_pending_by_instance_ids_window_closes_instantly_pre_reconcile(
+    def test_count_pending_and_running_by_instance_ids_window_closes_instantly_pre_reconcile(
         self, repository, engine
     ):
         """Document the window semantics (reviewer Finding 4 docstring).
@@ -2644,15 +2710,16 @@ class TestTaskStats:
         ``cancel_job`` (which writes ONLY ``job_queue_items``) until
         the drift reconciler's next pass (60s loop, but only for
         tasks older than ``min_pending_age_seconds=300`` = 5 min).
-        Up to ~5 min: ``subtree_status`` showed ``pending=N`` while
+        Up to ~5 min: ``subtree_status`` showed ``queued=N`` while
         actionable work was 0.
 
         With the guard, the read-side window closes instantly: any
         paired JobItem that has reached a terminal ``admission_state``
-        is excluded from the pending count at the very next read.
-        The reconciler remains the writer-side cleanup (the orphan
-        Task row eventually gets marked terminal on the next
-        reconcile pass), but readers no longer see the stale number.
+        is excluded from the count at the very next read (both
+        ``pending`` AND ``running`` columns are guarded). The
+        reconciler remains the writer-side cleanup (the orphan Task
+        row eventually gets marked terminal on the next reconcile
+        pass), but readers no longer see the stale number.
 
         This test is the structural assertion of that contract:
         a Task whose paired JobItem was terminalized THIS instant
@@ -2700,13 +2767,17 @@ class TestTaskStats:
             ))
             session.commit()
 
-        counts = repository.count_pending_by_instance_ids(["inst-window"])
+        counts = (
+            repository.count_pending_and_running_by_instance_ids(
+                ["inst-window"]
+            )
+        )
         assert counts == {}, (
             f"read-side window MUST close instantly (no reconcile "
             f"needed): counts={counts!r}; expected {{}}"
         )
 
-    def test_count_pending_by_instance_ids_no_jobitem_still_counts(
+    def test_count_pending_and_running_by_instance_ids_no_jobitem_still_counts(
         self, repository
     ):
         """Trap pin (reviewer Finding 4): a Task with NO paired
@@ -2714,7 +2785,7 @@ class TestTaskStats:
         shape: ``send_message`` → ``enqueue_message`` creates a
         Task row directly with no JobItem mirror (only the 4 public
         entry points create JobItems — see the docstring on
-        ``count_pending_by_instance_ids``).
+        ``count_pending_and_running_by_instance_ids``).
 
         ``NOT EXISTS`` against ``job_queue_items`` with no matching
         row returns TRUE, which means the row PASSES the guard.
@@ -2729,13 +2800,20 @@ class TestTaskStats:
         # Sanity: only one row exists, and it has no JobItem mirror.
         assert task.work_id  # every Task has a work_id
         # No JobItem seeded → guard's NOT EXISTS is true → counted.
-        counts = repository.count_pending_by_instance_ids(["inst-nojob"])
-        assert counts == {"inst-nojob": 1}, (
+        counts = (
+            repository.count_pending_and_running_by_instance_ids(
+                ["inst-nojob"]
+            )
+        )
+        assert counts == {
+            "inst-nojob": {"pending": 1, "running": 0}
+        }, (
             f"no-JobItem Task MUST still count (JAFP trap): "
-            f"counts={counts!r}; expected {{'inst-nojob': 1}}"
+            f"counts={counts!r}; expected "
+            f"{{'inst-nojob': {{'pending': 1, 'running': 0}}}}"
         )
 
-    def test_count_pending_by_instance_ids_terminal_jobitem_for_other_instance_doesnt_suppress(
+    def test_count_pending_and_running_by_instance_ids_terminal_jobitem_for_other_instance_doesnt_suppress(
         self, repository, engine
     ):
         """Cross-instance isolation (asymmetric fixture, review note 2):
@@ -2750,24 +2828,24 @@ class TestTaskStats:
           (``admission_state='active'``, ``deleted_at IS NULL``). The
           guard's NOT EXISTS subquery is FALSE for this Task (the
           paired row exists and is not terminal), so the guard does
-          not fire and the Task counts → 1.
+          not fire and the Task counts → 1 in the ``pending`` bucket.
         * ``inst-other`` — pending Task whose paired JobItem is
           TERMINAL (``admission_state='done'``). The NOT EXISTS
           subquery is TRUE for this Task (terminal paired row exists),
           so the guard fires and the Task is suppressed → omitted
           from the result.
 
-        Expected: ``{"inst-target": 1}``. Three failure modes this
-        pin rejects:
+        Expected: ``{"inst-target": {"pending": 1, "running": 0}}``.
+        Three failure modes this pin rejects:
 
         * pre-fix code (no NOT EXISTS guard): both counted →
-          ``{"inst-target": 1, "inst-other": 1}``;
+          ``{"inst-target": {"pending": 1, ...}, "inst-other": {"pending": 1, ...}}``;
         * over-suppressing guard (e.g. correlated on instance_id
           instead of ``work_id``, or any-terminal-JobItem trigger):
           both suppressed → ``{}``;
         * cross-instance-bleeding guard (guard present but the
           terminal predicate fails to fire on ``inst-other``'s paired
-          row): both counted → ``{"inst-target": 1, "inst-other": 1}``.
+          row): both counted → ``{"inst-target": ..., "inst-other": ...}``.
 
         The asymmetric shape — non-terminal on one side, terminal on
         the other — is what lets the three failure modes produce
@@ -2855,19 +2933,24 @@ class TestTaskStats:
             session.commit()
 
         # TARGET's paired JobItem is non-terminal → guard does NOT
-        # fire → TARGET counts as 1.
+        # fire → TARGET counts as pending=1.
         # OTHER's paired JobItem is terminal → guard fires → OTHER
         # is suppressed → omitted from the result.
-        # Result is exactly {"inst-target": 1} — distinct from all
-        # three failure modes documented above.
-        counts = repository.count_pending_by_instance_ids(
-            ["inst-target", "inst-other"]
+        # Result is exactly {"inst-target": {"pending": 1, "running": 0}}
+        # — distinct from all three failure modes documented above.
+        counts = (
+            repository.count_pending_and_running_by_instance_ids(
+                ["inst-target", "inst-other"]
+            )
         )
-        assert counts == {"inst-target": 1}, (
+        assert counts == {
+            "inst-target": {"pending": 1, "running": 0}
+        }, (
             f"asymmetric cross-instance isolation: TARGET's "
             f"non-terminal JobItem MUST let it through (counts=1), "
             f"OTHER's terminal JobItem MUST suppress it (counts=0 / "
-            f"omitted); expected {{'inst-target': 1}}; got {counts!r}"
+            f"omitted); expected {{'inst-target': {{'pending': 1, "
+            f"'running': 0}}}}; got {counts!r}"
         )
 
 
