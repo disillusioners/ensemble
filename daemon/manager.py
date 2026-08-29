@@ -7239,11 +7239,20 @@ class InstanceManager:
                         f"[{source}] reconcile (sub-shape b, task-only): "
                         f"created task "
                         f"parent={inj.parent_instance_id[:8]}..., "
-                        f"child={child_instance_id[:8]}..."
+                        f"child={child_instance_id[:8]}...; notify_work()"
                     )
                     # Same explicit-commit requirement as the
                     # message-only branch above.
                     session.commit()
+                    # Wake the worker pool OUTSIDE the transaction so
+                    # the commit is durable before the pool wakes a
+                    # worker (avoids a race where a worker claims a
+                    # row that hasn't been committed yet). Mirrors
+                    # the c_revival shape at manager.py:7312-7313.
+                    # Backlog row 5: without this notify, delivery
+                    # waits for the next poll (delay, not wedge).
+                    if self._worker_pool is not None:
+                        self._worker_pool.notify_work()
                     return {
                         "shape": "task_only_create",
                         "report_message_id": report_message_id,
@@ -7873,11 +7882,20 @@ class InstanceManager:
                         f"[{source}] reconcile (sub-shape b, task-only): "
                         f"created task "
                         f"parent={inj.parent_instance_id[:8]}..., "
-                        f"child={child_instance_id[:8]}..."
+                        f"child={child_instance_id[:8]}...; notify_work()"
                     )
                     # Same explicit-commit requirement as the
                     # message-only branch above.
                     session.commit()
+                    # Wake the worker pool OUTSIDE the transaction so
+                    # the commit is durable before the pool wakes a
+                    # worker (avoids a race where a worker claims a
+                    # row that hasn't been committed yet). Mirrors
+                    # the c_revival shape at manager.py:7936-7937.
+                    # Backlog row 5: without this notify, delivery
+                    # waits for the next poll (delay, not wedge).
+                    if self._worker_pool is not None:
+                        self._worker_pool.notify_work()
                     return {
                         "shape": "task_only_create",
                         "report_message_id": report_message_id,
