@@ -1965,6 +1965,87 @@ class JobRecoveryService:
                         TaskStatus.FAILED.value,
                         TaskStatus.CANCELLED.value,
                     ):
+                        # ── Council REJECT 2026-08-29 W1
+                        # fix — retry-child lineage
+                        # conjunct ─────────────────────
+                        # ``TaskRepository.get_by_work_id(job_id)``
+                        # only sees the parent Task (the
+                        # retry child minted by
+                        # ``schedule_retry`` /
+                        # ``force_cancel_and_schedule_retry``
+                        # carries a FRESH ``work_id`` —
+                        # ``task_repository.py:3261 / :3702``
+                        # — so a parent-work_id-only
+                        # non-terminal query misses it
+                        # entirely). The retry child
+                        # INHERITS the parent's
+                        # ``instance_id``
+                        # (``task_repository.py:3299 /
+                        # :3719`` — the
+                        # ``RetryTurn`` constructor passes
+                        # ``parent_row.instance_id``),
+                        # so the lineage is keyed by
+                        # ``instance_id``, not work_id.
+                        # A live retry child (PENDING /
+                        # RUNNING) on the same instance
+                        # means the JobItem still has
+                        # live work in flight — finalizing
+                        # the parent orphans the retry
+                        # child (the JobItem mirror flips
+                        # terminal while the child Task
+                        # is still driving the graph).
+                        # Skip this sweep; the next 60s
+                        # cycle retries once the lineage
+                        # quiesces. Reuses the
+                        # ``orphan_active_skipped_*``
+                        # detail family for
+                        # observability symmetry with
+                        # ``skipped_paused`` /
+                        # ``skipped_no_deps``.
+                        retry_live = (
+                            await self._pattern_f_instance_has_inflight_task(
+                                instance_id
+                            )
+                        )
+                        if retry_live:
+                            details.append({
+                                "pattern": "orphan_active_skipped_retry_child_live",
+                                "job_id": job_id,
+                                "task_id": task_id,
+                                "instance_id": instance_id,
+                                "reason": (
+                                    f"active JobItem with "
+                                    f"{task_status!r} parent "
+                                    f"Task {task_id} + a live "
+                                    f"retry child Task "
+                                    f"(PENDING/RUNNING) on "
+                                    f"the same instance "
+                                    f"{instance_id[:8] if instance_id else '?'}... "
+                                    f"— lineage is still "
+                                    f"alive; bare "
+                                    f"finalization would "
+                                    f"orphan the retry "
+                                    f"child. Skipping "
+                                    f"this sweep; next "
+                                    f"60s cycle retries."
+                                ),
+                            })
+                            logger.warning(
+                                f"reconcile_drift_states: Pattern (f) "
+                                f"skip — active JobItem "
+                                f"{job_id[:8]}... has "
+                                f"{task_status!r} parent Task "
+                                f"{task_id} but a live retry "
+                                f"child is still PENDING/RUNNING "
+                                f"on instance "
+                                f"{instance_id[:8] if instance_id else '?'}...; "
+                                f"lineage is not quiescent, "
+                                f"finalizing now would orphan "
+                                f"the retry. Next 60s cycle "
+                                f"retries once the child "
+                                f"terminalises."
+                            )
+                            continue
                         # Route through the
                         # ``_fail_orphaned_job``-style
                         # boundary: lock release +
@@ -3161,6 +3242,74 @@ class JobRecoveryService:
             if getattr(t, "status", None) == TaskStatus.PENDING.value:
                 return True
         return False
+
+    async def _pattern_f_instance_has_inflight_task(
+        self,
+        instance_id: str | None,
+    ) -> bool:
+        """Council REJECT 2026-08-29 W1 helper: does the
+        instance have any PENDING or RUNNING ``task`` row?
+
+        Sister query to :meth:`_pattern_f_instance_has_pending_tasks`
+        — widened to RUNNING so a live retry child (the
+        ``schedule_retry`` / ``force_cancel_and_schedule_retry`` mint
+        at ``task_repository.py:3261 / :3702`` inserts a fresh
+        ``work_id`` but inherits the parent's ``instance_id`` via
+        ``RetryTurn`` at ``turn_transitions.py:622``) is detectable
+        from the parent's FAILED/CANCELLED branch even after the
+        worker_pool claims it.
+
+        The lineage query is intentionally NOT keyed by
+        ``task.work_id``: the parent Task's ``work_id`` equals the
+        JobItem's ``job_id`` (the canonical cross-system linkage
+        per the dispatch contract at ``job_processor``) and the
+        retry child has a DIFFERENT ``work_id`` — so a
+        work_id-only check would miss the retry entirely. The
+        instance_id-keyed query is the minimal, correct join
+        shape.
+
+        Used by the FAILED/CANCELLED terminal-routing branch
+        (:meth:`reconcile_drift_states` Pattern (f), the W1 fix)
+        to skip finalization when a live retry child Task exists
+        on the same instance — finalizing the parent would
+        orphan the retry child (the JobItem mirror flips
+        terminal while the child Task is still driving the
+        graph).
+
+        Args:
+            instance_id: The instance id to inspect.
+
+        Returns:
+            ``True`` if at least one PENDING or RUNNING Task
+            exists for the instance, ``False`` if the instance
+            has no in-flight Tasks (or the repository is not
+            wired). A repository miss is treated as ``False``
+            (no in-flight tasks) — the FAILED/CANCELLED branch
+            already has a finalization path, so a conservative
+            "no retry detected" reading is the right FAIL-SAFE
+            (the next 60s cycle will re-check).
+        """
+        if not instance_id:
+            return False
+        if self._task_repository is None:
+            return False
+        try:
+            return await asyncio.to_thread(
+                self._task_repository.has_inflight_task,
+                instance_id,
+            )
+        except Exception as lookup_err:
+            logger.warning(
+                f"_pattern_f_instance_has_inflight_task: "
+                f"has_inflight_task raised for "
+                f"{instance_id[:8]}...: {lookup_err}. "
+                f"Treating as no in-flight tasks "
+                f"(next 60s cycle re-checks; the "
+                f"FAILED/CANCELLED branch will fall "
+                f"through to finalize when the lookup "
+                f"recovers)."
+            )
+            return False
 
     def _pattern_f_check_completed_at_age_floor(
         self,

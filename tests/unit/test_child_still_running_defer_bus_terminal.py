@@ -49,6 +49,7 @@ report-broadcast paths reserved for ``regular_child_completed``.
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -527,4 +528,156 @@ class TestDeferDoubleEmitIdempotency:
             f"{total_corrective} FollowUps across 2 dispatches "
             f"(expected exactly 1 — the WHERE-state guard must "
             f"short-circuit the second call to rowcount=0)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_transition_state_real_db_idempotency_via_guard(
+        self, tmp_path
+    ):
+        """W4 real-DB second-look: called-twice idempotency through the
+        REAL ``transition_state`` public path.
+
+        Companion to ``test_defer_double_emit_is_idempotent`` above.
+        That test mocks the service-level ``_emit_terminal_via_bus``
+        helpers and the service-level
+        ``_emit_terminal_for_child_instance_via_bus`` helpers, so it
+        CANNOT detect a regression in the REAL
+        ``WHERE state = 'PENDING'`` guard at
+        ``daemon/repositories/dependency_bus/repository.py:647``
+        (``transition_state``). If that guard regresses, the mock-
+        based test still passes — silent false-negative.
+
+        This test exercises ``transition_state`` directly against a
+        file-backed SQLite (the repo convention — see project
+        critical-notes "Multi-edit/write-tool verification
+        discipline"; StaticPool in-memory + interleaved sessions
+        corrupt writes; production PG unaffected). No
+        ``AsyncMock`` / ``MagicMock`` on the asserted path. The
+        only Python boundary crossed is the same
+        ``asyncio.to_thread`` wrapper the bus uses in production
+        (``daemon/services/dependency_bus.py:677-682``).
+
+        Mechanism: insert a PENDING row, call
+        ``transition_state`` twice. With the guard in place:
+
+        * First call: ``WHERE watch_id = :id AND state = 'PENDING'``
+          matches → ``rowcount == 1`` → returns ``True`` (the
+          bus would deliver the FollowUp to the parent).
+        * Second call: ``state`` is now ``FIRED`` → the WHERE
+          predicate fails → ``rowcount == 0`` → returns ``False``
+          (the bus skips — exactly-once delivery).
+
+        Without the guard, the WHERE predicate matches both calls
+        (the watch_id is still there, just FIRED), so both calls
+        return ``True`` and the bus would deliver the FollowUp
+        twice — the silent bug W4 is closing.
+
+        Acceptance: cumulative ``transitioned=True`` count == 1
+        across the two calls; the second call MUST be a no-op.
+        """
+        from sqlmodel import SQLModel, create_engine
+
+        from daemon.repositories.dependency_bus import (
+            DependencyWatcher,
+            DependencyWatcherRepository,
+            DependencyWatcherState,
+        )
+
+        # File-backed SQLite via tmp_path (NOT StaticPool + :memory:).
+        # The bus is single-thread per call (``asyncio.to_thread``
+        # crosses the boundary), but the repo's Session scope
+        # ``with Session(self.engine) as session`` opens a fresh
+        # connection per call — exactly the interleaved-sessions
+        # pattern StaticPool + WriteGuardSession corrupts per the
+        # project's critical-notes convention.
+        db_path = tmp_path / "test_dep_watcher_guard.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        # Register the ``dependency_watchers`` table only — same
+        # minimal-surface choice the existing ``bus_repo`` fixture
+        # in ``tests/test_dependency_bus.py:269-280`` makes.
+        watcher_table = SQLModel.metadata.tables.get(
+            "dependency_watchers"
+        )
+        if watcher_table is not None:
+            watcher_table.create(engine, checkfirst=True)
+
+        repo = DependencyWatcherRepository(engine=engine)
+
+        # Insert a PENDING row — same shape the bus would persist
+        # on a FollowUp-bearing ``send_message`` call. The
+        # ``follow_up_payload`` matches the shape ``FollowUp.to_payload``
+        # produces (see ``daemon/services/dependency_bus.py:162-189``).
+        watcher = DependencyWatcher(
+            watch_id="watch-guard-001",
+            source_task_id="task-001",
+            target_instance_id="parent-001",
+            follow_up_payload={
+                "target_instance_id": "parent-001",
+                "message": "[dependency_bus] child wanderer-001 completed",
+                "source": "dependency_bus",
+                "metadata": {"child_id": "wanderer-001"},
+            },
+        )
+        repo.insert(watcher)
+
+        # Drive through ``transition_state`` via ``asyncio.to_thread``
+        # — the same async-bridge the bus uses in production. NO
+        # ``AsyncMock`` / ``MagicMock`` on this path: real SQL,
+        # real SQLite, real ``rowcount`` from a Core UPDATE.
+        fired_at = repo._now_iso()
+
+        first = await asyncio.to_thread(
+            repo.transition_state,
+            "watch-guard-001",
+            DependencyWatcherState.FIRED.value,
+            fired_at,
+        )
+        second = await asyncio.to_thread(
+            repo.transition_state,
+            "watch-guard-001",
+            DependencyWatcherState.FIRED.value,
+            fired_at,
+        )
+
+        # First call: row was PENDING → ``WHERE state = 'PENDING'``
+        # matches → ``rowcount == 1`` → ``transitioned == True``.
+        # The bus would deliver the FollowUp to the parent on this
+        # call.
+        assert first is True, (
+            f"First transition_state must return True (row was "
+            f"PENDING, WHERE state='PENDING' matched, rowcount=1); "
+            f"got first={first!r}. This means the watch_id does not "
+            f"exist or the fixture is broken."
+        )
+
+        # Second call: row is now FIRED → ``WHERE state = 'PENDING'``
+        # does NOT match → ``rowcount == 0`` → ``transitioned ==
+        # False``. This is the W4 guard in action: the WHERE clause
+        # is the single-statement atomic backpressure primitive that
+        # enforces exactly-once FollowUp delivery. If the guard
+        # regressed (the `.where(state == _PENDING_STATE)` clause at
+        # ``repository.py:647`` is removed), the WHERE predicate
+        # would match BOTH calls and ``second`` would be ``True`` —
+        # the FollowUp would double-deliver to the parent.
+        assert second is False, (
+            f"Second transition_state on an already-FIRED watcher "
+            f"must be a no-op (rowcount=0 — the WHERE state='PENDING' "
+            f"guard filters it out). Got second={second!r}. If "
+            f"second is True, the guard at "
+            f"daemon/repositories/dependency_bus/repository.py:647 "
+            f"has been REMOVED or regressed and the FollowUp would "
+            f"double-deliver to the parent (silent double-fire)."
+        )
+
+        # Cumulative FollowUp-delivery-equivalent count == 1. The
+        # bus would deliver a FollowUp on every ``transition_state``
+        # call that returns True — so two Trues means two
+        # FollowUps, the silent bug. Exactly one True across two
+        # calls IS the W4 idempotency contract.
+        delivered_count = sum(1 for r in (first, second) if r)
+        assert delivered_count == 1, (
+            f"Idempotency violated: transition_state reported a "
+            f"successful transition {delivered_count} times across "
+            f"2 calls (expected exactly 1 — the WHERE state='PENDING' "
+            f"guard must short-circuit the second call)."
         )

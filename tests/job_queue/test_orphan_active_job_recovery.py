@@ -1469,40 +1469,50 @@ class TestPatternFCouncilCritical1Guard:
         )
 
     @pytest.mark.asyncio
-    async def test_cancelled_with_live_retry_child_is_skipped(
+    async def test_cancelled_with_live_retry_child_skips_finalize_retry_child_live(
         self, engine, repository, task_repository, lock_repo,
         instance_repo, stale_recovery, job_queue_service_mock,
     ):
-        """CANCELLED Task + alive instance + past grace
-        + a live retry-child Task exists on the same
-        instance → the reconciler must NOT bare-DEAD
-        the parent JobItem (kill-path (b) in the
-        council brief: ``force_cancel_and_schedule_retry``
-        mints a retry child with a FRESH child_work_id
-        so ``get_by_work_id`` returns the CANCELLED
-        parent while the live retry runs invisible).
+        """Council W1 fix reconciliation — CANCELLED parent
+        Task + alive instance + past grace + a live
+        retry-child Task on the same instance
+        (instance_id lineage key; retry child carries a
+        FRESH ``work_id`` because ``schedule_retry`` /
+        ``force_cancel_and_schedule_retry`` mint a new
+        UUID to avoid the parent's UNIQUE) → the W1
+        lineage-conjunct gate fires BEFORE the
+        terminal-routing boundary. The parent JobItem is
+        SKIPPED (not bare-DEAD, not terminal-routed); the
+        boundary is NEVER invoked; the live retry child
+        continues normally; the JobItem stays ACTIVE so
+        the next 60s sweep can re-evaluate once the retry
+        lineage quiesces.
 
-        With the new strict guard, the CANCELLED parent
-        routes through the terminal-boundary
-        (``orphan_active_failed_terminal``) — but the
-        test exercises a different shape: the test
-        seeds a SECOND fresh PENDING Task on the same
-        instance (the live retry child). The
-        reconciler must recognize the live retry is
-        running and NOT finalize the parent.
+        The test mirrors the AC1 expectation shape from
+        the authoritative W1 reference test
+        ``tests/job_queue/test_w1_retry_child_lineage_conjunct.py``:
 
-        Implementation note: the strict guard
-        classifies by ``task is None``. The parent
-        Task is CANCELLED (matches the terminal-
-        routing path); the retry child is a separate
-        Task row keyed by a DIFFERENT work_id, so it
-        does not appear in the parent's guard check.
-        The terminal-routing path finalizes the
-        parent. To preserve the retry, the test
-        validates that the live retry child is NOT
-        matched by the reconciler (it has a different
-        ``work_id``) and that the parent is finalized
-        via the terminal-boundary (NOT bare DEAD).
+        1. The parent is NOT bare-DEAD — no
+           ``orphan_active_no_task_dead`` detail.
+        2. The parent is NOT terminal-routed — no
+           ``orphan_active_failed_terminal`` detail
+           (the W1 gate short-circuits before the
+           boundary).
+        3. ``_finalize_terminal.await_count == 0`` —
+           the boundary is NEVER called (proves the
+           gate fired before the boundary, not after).
+        4. ``orphan_active_skipped_retry_child_live``
+           detail IS recorded, carrying the parent
+           ``task_id`` and the instance_id (the
+           lineage key).
+        5. The parent JobItem's ``admission_state``
+           stays ``'active'`` (left for the next 60s
+           sweep to re-evaluate).
+        6. The live retry-child Task remains
+           ``PENDING`` (the reconciler only walked the
+           parent JobItem; the child has a different
+           ``work_id`` and is invisible to the
+           strict-guard work_id check).
         """
         from unittest.mock import AsyncMock
 
@@ -1530,10 +1540,13 @@ class TestPatternFCouncilCritical1Guard:
             completed_at=datetime.now(timezone.utc) - timedelta(seconds=120),
         )
         # Live retry child: DIFFERENT work_id (the
-        # brief is explicit: ``force_cancel_and_schedule_retry``
-        # mints a fresh child_work_id). The retry
-        # child is PENDING (mid-claim by the
-        # worker_pool).
+        # brief is explicit — ``force_cancel_and_
+        # schedule_retry`` mints a fresh child_work_id).
+        # The retry child is PENDING (mid-claim by
+        # the worker_pool). The W1 lineage gate keys
+        # on ``instance_id`` (NOT work_id) so the
+        # fresh-work_id child is still visible to the
+        # gate via the parent-instance linkage.
         retry_task_id = _insert_task_with_status(
             engine,
             work_id="job-f-retry-child",
@@ -1541,6 +1554,13 @@ class TestPatternFCouncilCritical1Guard:
             status=TaskStatus.PENDING.value,
         )
 
+        # Wire the boundary mock so a stray
+        # finalization call WOULD actually persist
+        # (the W1 fix should never reach it). The
+        # mock's ``await_count`` stays ``0`` on
+        # success — asserting that proves the gate
+        # fired before the boundary, NOT that the
+        # boundary was a no-op.
         async def _boundary_side_effect(
             *, instance_id, decision, job_id, error_message,
             target_status,
@@ -1573,39 +1593,91 @@ class TestPatternFCouncilCritical1Guard:
             min_orphan_age_seconds=60,
         )
 
-        # Assert — parent is terminal-routed (NOT bare DEAD).
-        parent_f1 = [
+        # ── Assert: NOT bare DEAD (the council
+        # critical #1 path that foreclosed
+        # atomic_retry).
+        f1_corrected = [
             d for d in stats["details"]
             if d.get("pattern") == "orphan_active_no_task_dead"
             and d.get("job_id") == "job-f-retry-parent"
         ]
-        assert not parent_f1, (
-            f"parent JobItem must NOT be bare-DEAD — "
-            f"the live retry child is still PENDING; "
-            f"bare DEAD would lose the retry. "
-            f"Got: {parent_f1}"
+        assert not f1_corrected, (
+            f"CANCELLED parent with live retry child "
+            f"MUST NOT be bare-DEAD. "
+            f"Got: {f1_corrected}"
         )
-        parent_terminal = [
+        # ── Assert: NOT terminal-routed either (the
+        # W1 fix skips the parent before the boundary
+        # call — mirror of AC1).
+        terminal_routed = [
             d for d in stats["details"]
             if d.get("pattern") == "orphan_active_failed_terminal"
             and d.get("job_id") == "job-f-retry-parent"
         ]
-        assert parent_terminal, (
-            f"parent JobItem must be terminal-routed "
-            f"via the _fail_orphaned_job-style boundary "
-            f"(NOT bare DEAD). Got details: {stats['details']}"
+        assert not terminal_routed, (
+            f"CANCELLED parent with live retry child "
+            f"MUST NOT be terminal-routed (W1 fix: skip "
+            f"the sweep, leave JobItem active). "
+            f"Got: {terminal_routed}"
         )
-        # Assert — the parent boundary write carries
-        # ``target_status='cancelled'`` so the
-        # ``terminal_reason='cancelled'`` marker is
-        # preserved (NOT foreclosed by DEAD).
-        last_call = job_queue_service_mock._finalize_terminal.await_args
-        assert last_call is not None
-        assert last_call.kwargs.get("target_status") == "cancelled"
-        # Assert — the live retry child Task row is
-        # still PENDING (untouched — the reconciler
-        # walked the parent JobItem, not the child's).
-        retry_after = repository is None  # placeholder
+        # ── Assert: the boundary was NEVER called
+        # (the W1 gate short-circuits before it —
+        # mirror of AC1's await_count assertion).
+        assert (
+            job_queue_service_mock._finalize_terminal.await_count == 0
+        ), (
+            f"_finalize_terminal MUST NOT be called "
+            f"when a live retry child exists "
+            f"(W1 gate fires first). "
+            f"Got await_count="
+            f"{job_queue_service_mock._finalize_terminal.await_count}"
+        )
+        # ── Assert: W1 skip detail recorded
+        # (mirror of AC1 expectation shape).
+        skip_records = [
+            d for d in stats["details"]
+            if d.get("pattern") == (
+                "orphan_active_skipped_retry_child_live"
+            )
+            and d.get("job_id") == "job-f-retry-parent"
+        ]
+        assert skip_records, (
+            f"W1 fix MUST record an "
+            f"orphan_active_skipped_retry_child_live "
+            f"detail. Got details: {stats['details']}"
+        )
+        assert skip_records[0].get("task_id") == parent_task_id, (
+            f"Detail MUST carry the parent Task id. "
+            f"Got: {skip_records[0]}"
+        )
+        assert (
+            skip_records[0].get("instance_id")
+            == "inst-f-retry"
+        ), (
+            f"Detail MUST carry the instance_id "
+            f"(the lineage key — not the parent "
+            f"work_id, since the retry child carries "
+            f"a fresh work_id). "
+            f"Got: {skip_records[0]}"
+        )
+        # ── Assert: JobItem is still ACTIVE (the
+        # W1 fix leaves it for the next 60s cycle
+        # to re-evaluate once the retry lineage
+        # quiesces).
+        job_after = repository.get("job-f-retry-parent")
+        assert job_after is not None
+        assert job_after.admission_state == AdmissionState.ACTIVE.value, (
+            f"CANCELLED parent with live retry child "
+            f"MUST stay ACTIVE (W1 fix: skip the "
+            f"sweep). "
+            f"Got admission_state="
+            f"{job_after.admission_state!r}"
+        )
+        # ── Assert: live retry child is still
+        # PENDING (the reconciler only walked the
+        # parent JobItem; the child has a fresh
+        # work_id and is invisible to the parent's
+        # strict-guard work_id check).
         with engine.begin() as conn:
             retry_status_row = conn.execute(
                 text("SELECT status FROM task WHERE id = :id"),
@@ -1613,12 +1685,230 @@ class TestPatternFCouncilCritical1Guard:
             ).first()
         assert retry_status_row is not None
         assert retry_status_row[0] == TaskStatus.PENDING.value, (
-            f"live retry child Task must remain PENDING "
-            f"(reconciler only walked the parent JobItem). "
+            f"live retry child Task MUST remain "
+            f"PENDING (reconciler only walked the "
+            f"parent JobItem). "
             f"Got status={retry_status_row[0]!r}"
         )
         # Sanity — the parent_task_id was CANCELLED.
         assert parent_task_id is not None
+
+    @pytest.mark.asyncio
+    async def test_failed_task_terminal_route_releases_lock_via_real_boundary(
+        self, engine, repository, task_repository, lock_repo,
+        instance_repo, stale_recovery, job_queue_service,
+    ):
+        """Council W4 record-honesty: FAILED parent Task +
+        alive instance + past grace → the reconciler drives
+        the REAL ``JobQueueService._finalize_terminal``
+        boundary (NOT a mock) which releases the per-job
+        lock scoped by ``(project_id, queue_id, job_id)``
+        AND stamps ``failed_at`` on the JobItem so
+        ``atomic_retry`` (``repository.py:2230``) can gate
+        on it. Sibling locks on the same queue MUST
+        SURVIVE (F4/F7 invariant).
+
+        The C1 mock-based tests
+        (``test_failed_task_is_not_dead_lettered`` and
+        ``test_cancelled_task_is_not_dead_lettered``) only
+        verify the boundary is CALLED — the mock's
+        ``side_effect`` performs an
+        ``atomic_transition`` but bypasses BOTH the
+        lock-release ``finally`` block AND the
+        ``finalize_active_to_done`` ``failed_at`` stamp.
+        Lock release and ``failed_at`` inheritance are
+        code-read only — never executed by the mock path.
+        This test wires a REAL ``JobQueueService`` (the
+        ``job_queue_service`` fixture) so the boundary's
+        side-effects actually land, and asserts the lock
+        row is GONE, ``terminal_reason='failed'`` is
+        preserved, and ``failed_at`` is STAMPED on the
+        JobItem after the reconcile.
+
+        Test pins:
+
+        1. ``reconcile_drift_states`` returns the
+           ``orphan_active_failed_terminal`` detail
+           (terminal-routing fired via the real
+           boundary).
+        2. ``JobItem.admission_state == 'done'`` (NOT
+           ``'dead'`` — atomic_retry preserved).
+        3. ``JobItem.terminal_reason == 'failed'``
+           (boundary preserved the cause via
+           ``_derive_terminal_reason``).
+        4. ``JobItem.failed_at`` is NOT NULL —
+           ``finalize_active_to_done`` stamps
+           ``failed_at`` when ``terminal_reason='failed'``
+           (the marker ``repository.py:2230`` requires
+           for atomic_retry).
+        5. The per-job ``job_locks`` row is GONE — the
+           boundary's ``finally`` block called
+           ``release_queue_lock`` → ``lock_repo.release_by_job``.
+        6. The sibling ``job_locks`` row SURVIVES
+           (F4/F7 scoped-release invariant).
+        """
+        # Seed — alive instance, ACTIVE JobItem
+        # backdated past grace, FAILED Task (Task
+        # reached terminal but the JobItem side never
+        # transitioned — the orphan signature).
+        _insert_instance(
+            engine,
+            "inst-f-failed-real",
+            project_id="test-project",
+            created_at=datetime.now(timezone.utc) - timedelta(seconds=3600),
+        )
+        _insert_job_item(
+            engine,
+            job_id="job-f-failed-real",
+            instance_id="inst-f-failed-real",
+            project_id="test-project",
+            queue_id="queue-f-failed-real",
+            admission_state=AdmissionState.ACTIVE.value,
+            created_at=datetime.now(timezone.utc) - timedelta(seconds=3600),
+        )
+        task_id = _insert_task_with_status(
+            engine,
+            work_id="job-f-failed-real",
+            instance_id="inst-f-failed-real",
+            status=TaskStatus.FAILED.value,
+            completed_at=datetime.now(timezone.utc) - timedelta(seconds=120),
+        )
+        # The per-job lock — must be RELEASED by the
+        # real ``_finalize_terminal`` finally block
+        # (mirror of the C2 ``test_f2_releases_lock_after_done``
+        # lock-row assertion at :1637).
+        _insert_lock(
+            engine,
+            project_id="test-project",
+            queue_id="queue-f-failed-real",
+            job_id="job-f-failed-real",
+            instance_id="inst-f-failed-real",
+        )
+        # Sibling lock on the same queue — must
+        # SURVIVE the scoped release (F4/F7
+        # invariant).
+        _insert_lock(
+            engine,
+            project_id="test-project",
+            queue_id="queue-f-failed-real",
+            job_id="job-f-failed-sibling",
+            instance_id="inst-f-failed-sibling",
+            lock_slot=1,
+        )
+
+        # Sanity — pre-reconcile, both locks are held.
+        pre_locks = lock_repo.get_all_locks()
+        pre_lock_ids = {lk.lock_id for lk in pre_locks}
+        assert "lock-job-f-failed-real" in pre_lock_ids, (
+            f"Pre-reconcile per-job lock must exist. "
+            f"Found locks: {pre_lock_ids}"
+        )
+        assert "lock-job-f-failed-sibling" in pre_lock_ids, (
+            f"Pre-reconcile sibling lock must exist. "
+            f"Found locks: {pre_lock_ids}"
+        )
+
+        # Wire the REAL ``JobQueueService`` — the
+        # ``_finalize_terminal`` boundary is NOT mocked
+        # so the lock-release ``finally`` block and the
+        # ``finalize_active_to_done`` ``failed_at``
+        # stamp actually run.
+        service = JobRecoveryService(
+            job_repository=repository,
+            lock_repository=lock_repo,
+            instance_repository=instance_repo,
+            job_queue_service=job_queue_service,
+            task_repository=task_repository,
+            stale_task_recovery=stale_recovery,
+        )
+
+        stats = await service.reconcile_drift_states(
+            min_pending_age_seconds=0,
+            min_orphan_age_seconds=60,
+        )
+
+        # Assert — terminal-route detail recorded.
+        terminal = [
+            d for d in stats["details"]
+            if d.get("pattern") == "orphan_active_failed_terminal"
+            and d.get("job_id") == "job-f-failed-real"
+        ]
+        assert terminal, (
+            f"FAILED Task must produce an "
+            f"orphan_active_failed_terminal detail "
+            f"via the real _finalize_terminal "
+            f"boundary. Got details: {stats['details']}"
+        )
+        assert terminal[0].get("task_id") == task_id, (
+            f"Detail must carry the Task id. "
+            f"Got: {terminal[0]}"
+        )
+
+        # Assert — JobItem is DONE (NOT DEAD).
+        job_after = repository.get("job-f-failed-real")
+        assert job_after is not None
+        assert job_after.admission_state == AdmissionState.DONE.value, (
+            f"FAILED Task must finalize the JobItem to "
+            f"admission_state='done' (NOT DEAD — "
+            f"atomic_retry must remain viable). "
+            f"Got admission_state={job_after.admission_state!r}"
+        )
+        assert job_after.terminal_reason == "failed", (
+            f"Real _finalize_terminal MUST preserve "
+            f"terminal_reason='failed' on the JobItem "
+            f"via finalize_active_to_done — atomic_retry "
+            f"gates on this discriminator. "
+            f"Got terminal_reason={job_after.terminal_reason!r}"
+        )
+
+        # Assert — failed_at STAMPED on JobItem
+        # (failed_at inheritance — the marker
+        # ``repository.py:2230`` requires for
+        # atomic_retry). This is the critical W4
+        # assertion: the mocked boundary never
+        # executes ``finalize_active_to_done``, so
+        # this stamp only lands when the REAL
+        # boundary runs.
+        assert job_after.failed_at is not None, (
+            f"failed_at MUST be stamped on the JobItem "
+            f"by finalize_active_to_done when "
+            f"terminal_reason='failed' — this is the "
+            f"gate atomic_retry reads (repository.py:2230). "
+            f"The mocked C1 boundary bypassed this "
+            f"side-effect; the real boundary writes it. "
+            f"Pre-fix behaviour would silently leave "
+            f"failed_at=None and break retry gating. "
+            f"Got failed_at={job_after.failed_at!r}"
+        )
+
+        # Assert — per-job lock is RELEASED via the
+        # REAL boundary finally block (the lock
+        # release is INSIDE the real
+        # ``_finalize_terminal``; mocks bypass it; this
+        # test exercises the real path so the lock row
+        # is actually gone).
+        post_locks = lock_repo.get_all_locks()
+        post_lock_ids = {lk.lock_id for lk in post_locks}
+        assert "lock-job-f-failed-real" not in post_lock_ids, (
+            f"Real _finalize_terminal MUST release the "
+            f"per-job lock scoped by "
+            f"(project_id, queue_id, job_id) in its "
+            f"finally block — the mocked boundary "
+            f"bypassed this side-effect; the real "
+            f"boundary writes it. Pre-fix behaviour "
+            f"would leak the lock and wedge c=1 queues. "
+            f"Found locks: {post_lock_ids}"
+        )
+
+        # Assert — sibling lock SURVIVES (F4/F7
+        # invariant: scoped release must not delete
+        # sibling locks on the same queue).
+        assert "lock-job-f-failed-sibling" in post_lock_ids, (
+            f"F4/F7 invariant: sibling lock on the "
+            f"same queue must NOT be released by the "
+            f"scoped release_queue_lock. "
+            f"Found locks: {post_lock_ids}"
+        )
 
 
 class TestPatternFCouncilCritical2LockRelease:
