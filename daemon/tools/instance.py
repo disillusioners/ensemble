@@ -3621,7 +3621,9 @@ Row format
     correlated ``NOT EXISTS`` on ``job_id == work_id``,
     ``admission_state`` in ``{done, dead}``) closes the drift
     window instantly (reviewer Finding 1, 2026-08-28) — it applies
-    to BOTH counts.
+    to BOTH counts deliberately (RUNNING + a terminal-jobitem is a
+    crash orphan between the job's terminal write and task
+    reconciliation, not a live child).
 
 Ordering, caps, filter
 ----------------------

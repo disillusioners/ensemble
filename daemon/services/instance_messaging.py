@@ -3995,12 +3995,18 @@ class InstanceMessagingService:
         except Exception as filter_exc:
             # FAIL-OPEN: a transient lookup failure must not block
             # sends. The unfiltered counts are returned, matching the
-            # pre-fix behaviour under lookup error.
-            logger.debug(
-                f"get_queue_stats: terminal-status lookup failed "
-                f"(non-fatal, returning unfiltered counts) for "
-                f"{instance_id[:8]}...: "
-                f"{type(filter_exc).__name__}: {filter_exc}"
+            # pre-fix behaviour under lookup error. Elevated from DEBUG
+            # to WARNING on council W1 (2026-08-29): a silent miscount
+            # here silently re-wedges the carrier with zero prod
+            # visibility; the warn level is the only externally-visible
+            # signal that fail-open masked a degraded lookup.
+            logger.warning(
+                "get_queue_stats: terminal-status lookup failed "
+                "(non-fatal, returning unfiltered counts) "
+                "instance_id=%s error=%s: %s",
+                instance_id,
+                type(filter_exc).__name__,
+                filter_exc,
             )
 
         stats = await asyncio.to_thread(self._queue_repository.get_stats, instance_id)

@@ -267,9 +267,10 @@ async def _cancel_bus_watchers_for(manager: "InstanceManager", instance_id: str,
                         fired_items=_enqueued_targets,
                     )
                 except Exception as repurge_err:
-                    logger.debug(
+                    logger.warning(
                         f"instance_lifecycle.{op}: post-fire re-purge "
-                        f"failed (non-fatal) for {instance_id[:8]}...: "
+                        f"failed (non-fatal) — parent={instance_id[:8]}..., "
+                        f"affected_fired_count={len(_enqueued_targets)}: "
                         f"{type(repurge_err).__name__}: {repurge_err}"
                     )
         if fired:
@@ -384,10 +385,11 @@ def _repurge_fired_follow_ups(
             # FAIL-OPEN: a transient lookup failure must not block
             # the terminate path. The dead-letter / watchdog layers
             # are the follow-up.
-            logger.debug(
+            logger.warning(
                 f"instance_lifecycle.{op}: post-fire re-purge status "
-                f"lookup failed (non-fatal, skipping target) for "
-                f"{target_instance_id[:8]}...: "
+                f"lookup failed (non-fatal, skipping target) — "
+                f"target={target_instance_id[:8]}..., "
+                f"affected_message_id_count={len(message_ids)}: "
                 f"{type(liveness_err).__name__}: {liveness_err}"
             )
             continue
@@ -460,10 +462,11 @@ def _repurge_fired_follow_ups(
                 f"op_status={_meta.status})"
             )
         except Exception as purge_err:
-            logger.debug(
+            logger.warning(
                 f"instance_lifecycle.{op}: post-fire re-purge failed "
                 f"(non-fatal) for terminal target "
-                f"{target_instance_id[:8]}...: "
+                f"{target_instance_id[:8]}..., "
+                f"affected_message_id_count={len(message_ids)}: "
                 f"{type(purge_err).__name__}: {purge_err}"
             )
     return purged

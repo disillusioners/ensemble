@@ -2279,7 +2279,10 @@ class TaskRepository:
         and they STILL COUNT (they are genuinely claimable). The
         guard closes the read-side window instantly; the reconciler
         remains the writer-side cleanup (orphan row eventually
-        marked terminal on the next reconcile pass).
+        marked terminal on the next reconcile pass). The guard
+        applies to BOTH buckets deliberately (RUNNING + terminal
+        JobItem = crash orphan between the job's terminal write and
+        task reconciliation, not a live child).
 
         Both ``status='pending'`` (queued) and ``status='running'``
         are counted in their respective columns via conditional
