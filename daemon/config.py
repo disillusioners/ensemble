@@ -865,6 +865,37 @@ class ServicesConfig(BaseSettings):
             "a freshly-enqueued worker. Default 300s = 5 minutes."
         ),
     )
+    # Pattern (f) — orphan ACTIVE JobItem recovery
+    # (``.agents/shared/planning/orphan-active-job-recovery/``,
+    # 802095d8 incident). The ``active`` JobItem that has NO
+    # ``task`` rows AND an alive/stale instance is the
+    # restart-orphan signature: the daemon restart cleared the
+    # ``task`` table but left the JobItem row behind, so the
+    # JobItem is now ``active`` with nothing to drive it forward.
+    # The reconciler Pattern (f1) finalizes such JobItems to
+    # ``admission_state='dead'`` (DEAD) — distinct from
+    # Pattern (a)'s ``failed`` outcome. The 15-minute default
+    # matches the leader's design: long enough to absorb a normal
+    # claim cycle (the existing P1 / Pattern (a) 5-minute default
+    # for stuck PENDING tasks is the tighter window, but orphan
+    # active jobs are a structural-inconsistency class and need a
+    # wider grace to avoid racing with a healthy ``active`` job
+    # that just happens to have a slow Task-side enqueue).
+    drift_reconcile_min_orphan_age_seconds: int = Field(
+        default=900,
+        ge=1,
+        description=(
+            "Minimum age (seconds) of an orphan ACTIVE JobItem "
+            "(active JobItem + no Task rows + alive instance) "
+            "before Pattern (f1) finalizes it as DEAD. JobItems "
+            "younger than this are left alone to avoid racing "
+            "with a healthy active job whose Task row is still "
+            "being enqueued. Default 900s = 15 minutes — wide "
+            "enough to absorb a normal enqueue-to-claim cycle "
+            "but short enough to surface a true restart-orphan "
+            "within one reconciler cycle (5-minute default cadence)."
+        ),
+    )
     # ─── WAITING_CHILDREN hang watchdog (issue #8) ───
     # The watchdog detects parents stuck in WAITING_CHILDREN because a
     # child is hung (non-terminal AND last_activity_at older than the

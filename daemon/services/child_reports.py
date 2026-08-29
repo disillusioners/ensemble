@@ -3390,7 +3390,35 @@ Provide a concise summary:"""
         # ``deferred_waiting_children`` (SSE only) so the UI can reflect
         # the wait state without emitting a duplicate
         # ``child_completed`` lifecycle event to the parent.
+        #
+        # ─── Bus terminal hook (incident 02fb2e01 fix) ──────────────
+        # Pre-fix on base ``b4dbfda2``: this branch emitted SSE ONLY
+        # and skipped ``bus.emit_terminal`` — the parent's PENDING
+        # watcher on this child's task stayed PENDING forever, the
+        # parent's JobItem never finalized, and the leader's
+        # completion-gate wedged in ``waiting_children``. The
+        # corrective (parent, child)-keyed bus emit (commit ``16553972``,
+        # added for the ``regular_child_completed`` outcome) is exactly
+        # the primitive the defer needs: it fires the parent's watcher
+        # by ``(target_instance_id, metadata.child_id)`` regardless of
+        # which task id was the terminal one (multi-turn safe), and
+        # ``transition_state``'s guarded ``WHERE state = 'PENDING'``
+        # Core UPDATE enforces exactly-once — a later
+        # ``regular_child_completed`` turn whose corrective emit lands
+        # on the same watcher is a safe no-op.
+        #
+        # The task-keyed emit on the current task is also added so the
+        # single-turn case (watcher keyed on the current task) is
+        # covered by the same primitive the non-defer path uses. The
+        # defer STILL does NOT update ``Instance.status``, does NOT
+        # create a ``MessageQueue`` ``internal_report:`` row, does NOT
+        # enqueue a ``PROCESS_REPORT`` ``Task`` for the parent, does
+        # NOT call ``CompletionRegistry.complete``, and does NOT
+        # publish a ``child_completed`` lifecycle event — those are
+        # the legitimate-defer preservations tested by
+        # ``tests/unit/test_child_still_running_defer_bus_terminal.py``.
         if outcome == "child_still_running_defer":
+            # Existing SSE: UI reflection of the wait state. Preserved.
             if self._manager._live_hub:
                 try:
                     await self._manager._live_hub.stream_status_change(
@@ -3401,6 +3429,41 @@ Provide a concise summary:"""
                         f"Failed to emit status_change for "
                         f"child_still_running_defer: {e}"
                     )
+
+            # Bus terminal hook — fires the parent's PENDING watcher
+            # so the parent's pending count drops (otherwise the parent
+            # stays wedged in ``waiting_children`` forever; see the
+            # ``child_still_running_defer`` docstring block above for
+            # the full incident analysis). Mirrors the inline pattern
+            # at lines 3516-3570 in the ``regular_child_completed``
+            # branch — same DB-sync helper shape, same exactly-once
+            # guarantee via ``transition_state``'s guarded UPDATE.
+            #
+            # The task-keyed emit fires watchers on the CURRENT task
+            # id (single-turn case). The corrective (parent, child)
+            # emit fires watchers by instance pair (multi-turn case).
+            # Both are unconditionally safe — ``transition_state``
+            # returns rowcount==0 when the watcher is already FIRED,
+            # so a later ``regular_child_completed`` turn's emit is a
+            # no-op.
+            if completed_message_id:
+                _child_task_post = None
+                _task_repo_post = getattr(self._manager, "_task_repo", None)
+                if _task_repo_post is not None:
+                    _child_task_post = await asyncio.to_thread(
+                        _task_repo_post.get_by_message, completed_message_id
+                    )
+                await self._emit_terminal_via_bus(
+                    task_id=getattr(_child_task_post, "id", None),
+                    status="completed",
+                    summary="child_still_running_defer (waiting_children, defer cleared on next turn)",
+                )
+            await self._emit_terminal_for_child_instance_via_bus(
+                parent_instance_id=parent_id,
+                child_instance_id=instance_id,
+                status="completed",
+                summary="child_still_running_defer (corrective multi-turn emit; parent watcher release)",
+            )
             return
 
         # Phase 5: "root_skipped_terminal_job" outcome removed — guard is gone

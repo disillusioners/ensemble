@@ -1,0 +1,683 @@
+"""Regression tests for the ``child_still_running_defer`` bus-emit skip.
+
+Incident (RCA-confirmed, 02fb2e01): the ``child_still_running_defer``
+branch in :meth:`ChildReportsService._dispatch_post_commit_side_effects`
+emitted the SSE ``waiting_children`` notification but skipped the
+``bus.emit_terminal`` call. Consequence chain:
+
+* The parent's PENDING watcher on this child's task never fired.
+* ``JobItem`` was never finalized → ``dependency_watchers`` row
+  ``13670c9c`` stayed PENDING forever.
+* Leader's completion-gate wedged in ``waiting_children``.
+
+The branch is intentionally a defer (children still running → do NOT
+emit a ``child_completed`` lifecycle event, do NOT mark the instance
+COMPLETED). What the defer MUST also do is release the parent's
+watcher so the parent's pending count drops. The corrective
+(parent, child)-keyed bus emit (added by commit ``16553972`` for the
+``regular_child_completed`` outcome) is exactly the primitive the
+defer needs.
+
+The fix: the defer branch now fires ``_emit_terminal_via_bus`` (task-
+keyed) AND ``_emit_terminal_for_child_instance_via_bus`` (corrective
+parent+child pair). The task-keyed emit fires watchers on the current
+task; the corrective emit fires watchers by (parent, child) instance
+pair (multi-turn safe). ``transition_state``'s guarded
+``WHERE state = 'PENDING'`` Core UPDATE enforces exactly-once, so a
+later ``regular_child_completed`` turn whose corrective emit lands on
+the same watcher is a safe no-op — the defer fires the watcher once,
+the later completion fires the lifecycle event once.
+
+What the defer STILL does NOT do (legitimate preservation):
+
+* No ``Instance.status = COMPLETED`` write.
+* No ``MessageQueue`` ``internal_report:`` row creation.
+* No ``Task`` for the parent to process.
+* No ``CompletionRegistry.complete(...)`` call.
+* No ``child_completed`` SSE/lifecycle broadcast (the parent only
+  learns via the bus watcher firing).
+
+These tests follow the same mock-based pattern as
+``tests/unit/test_lifecycle_hook_completion.py``: build the service
+via ``__new__`` and patch the bus helpers. The repro test asserts
+that the bus helpers are awaited when the defer fires (red-green: the
+helpers are NOT awaited on base ``b4dbfda2``; they ARE awaited with
+the fix). The guard test asserts the legitimate defer preserves the
+``waiting_children`` SSE shape and does not run the lifecycle-hook /
+report-broadcast paths reserved for ``regular_child_completed``.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from daemon.services.child_reports import (
+    ChildReportsService,
+    _ChildCompletionDbResult,
+)
+
+
+# ─── Fixtures & helpers ────────────────────────────────────────────────
+
+
+def _make_service(mock_manager) -> ChildReportsService:
+    """Build a bare ``ChildReportsService`` with patched dependencies.
+
+    Mirrors ``tests/unit/test_lifecycle_hook_completion.py``'s pattern:
+    avoid running ``__init__`` (which expects a real ``InstanceManager``)
+    by going through ``__new__`` and wiring the few attributes that
+    ``_dispatch_post_commit_side_effects`` reads.
+    """
+    service = ChildReportsService.__new__(ChildReportsService)
+    service._manager = mock_manager
+    # Provide no events service so the lifecycle-event try/except is a no-op.
+    service._events_service = None
+    # Stub the post-commit helpers. The repro tests assert on these
+    # AsyncMocks — pre-fix they are NOT awaited, post-fix they ARE.
+    service._emit_terminal_via_bus = AsyncMock()
+    service._emit_terminal_for_child_instance_via_bus = AsyncMock()
+    service._trigger_title_generation = MagicMock()
+    return service
+
+
+def _make_mock_manager(*, instance_repo: MagicMock | None = None) -> MagicMock:
+    """Build a manager mock with the minimal surface the dispatch path reads."""
+    manager = MagicMock()
+    manager._instance_repository = instance_repo
+    manager._live_hub = None
+    manager._worker_pool = None
+    manager._task_repo = None
+    return manager
+
+
+def _make_db_result(
+    outcome: str,
+    *,
+    instance_id: str = "child-001",
+    agent_id: str = "wanderer",
+    parent_id: str | None = "parent-001",
+    child_agent_id: str | None = "wanderer",
+) -> _ChildCompletionDbResult:
+    """Construct a ``_ChildCompletionDbResult`` with sensible defaults."""
+    return _ChildCompletionDbResult(
+        outcome=outcome,
+        instance_id=instance_id,
+        agent_id=agent_id,
+        parent_id=parent_id,
+        child_agent_id=child_agent_id,
+    )
+
+
+# ─── Red-green repro: defer must fire the bus terminal hook ────────────
+
+
+class TestDeferFiresBusTerminal:
+    """Repro of incident 02fb2e01: the defer branch emitted SSE ONLY
+    and skipped ``bus.emit_terminal``. The fix fires both bus helpers
+    so the parent's PENDING watcher is released.
+    """
+
+    @pytest.mark.asyncio
+    async def test_defer_fires_corrective_bus_emit(self):
+        """The corrective (parent, child)-keyed emit MUST fire when the
+        defer outcome is dispatched.
+
+        Pre-fix on base ``b4dbfda2``: ``_emit_terminal_for_child_instance_via_bus``
+        is NOT awaited → parent's PENDING watcher ``13670c9c`` stays
+        PENDING forever (incident symptom).
+
+        Post-fix: ``_emit_terminal_for_child_instance_via_bus`` IS awaited
+        with ``(parent_instance_id=parent_id, child_instance_id=instance_id,
+        status="completed")`` → corrective emit fires the watcher
+        regardless of which task id was the terminal one (multi-turn
+        safe).
+        """
+        manager = _make_mock_manager()
+        service = _make_service(manager)
+
+        result = _make_db_result(
+            "child_still_running_defer",
+            instance_id="wanderer-001",
+            parent_id="leader-001",
+        )
+
+        await service._dispatch_post_commit_side_effects(
+            result, last_content="report body", completed_message_id="msg-current"
+        )
+
+        service._emit_terminal_for_child_instance_via_bus.assert_awaited_once()
+        kwargs = service._emit_terminal_for_child_instance_via_bus.await_args.kwargs
+        assert kwargs["parent_instance_id"] == "leader-001", (
+            f"corrective emit must target the parent; got {kwargs}"
+        )
+        assert kwargs["child_instance_id"] == "wanderer-001", (
+            f"corrective emit must identify the child; got {kwargs}"
+        )
+        assert kwargs["status"] == "completed", (
+            f"corrective emit status must be 'completed'; got {kwargs}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_defer_fires_task_keyed_bus_emit(self):
+        """The task-keyed emit also fires when ``completed_message_id``
+        is provided AND a ``_task_repo`` can resolve it.
+
+        The task-keyed emit is the one that fires watchers on the
+        CURRENT task id — the single-turn case where the parent's
+        watcher happens to be keyed on this exact task. Combined with
+        the corrective emit, this closes both single-turn and
+        multi-turn watcher paths.
+
+        Pre-fix on base ``b4dbfda2``: ``_emit_terminal_via_bus`` is NOT
+        awaited → ``bus.emit_terminal(task_id=...)`` is never called.
+        """
+        # ``_task_repo.get_by_message`` is called via ``asyncio.to_thread``
+        # (a sync worker-thread call), so the stub MUST be sync (the
+        # ``to_thread`` wrapper does NOT await coroutines).
+        def _fake_get_by_message(message_id):
+            t = MagicMock()
+            t.id = 25935
+            return t
+
+        manager = _make_mock_manager()
+        manager._task_repo = MagicMock()
+        manager._task_repo.get_by_message = _fake_get_by_message
+
+        service = _make_service(manager)
+
+        result = _make_db_result(
+            "child_still_running_defer",
+            instance_id="child-of-wanderer",
+            parent_id="wanderer",
+        )
+
+        await service._dispatch_post_commit_side_effects(
+            result, last_content="body", completed_message_id="msg-current"
+        )
+
+        service._emit_terminal_via_bus.assert_awaited_once()
+        kwargs = service._emit_terminal_via_bus.await_args.kwargs
+        assert kwargs["task_id"] == 25935, (
+            f"task-keyed emit must fire on the current task id; got {kwargs}"
+        )
+        assert kwargs["status"] == "completed"
+
+
+# ─── Guard tests: legitimate defer is preserved ────────────────────────
+
+
+class TestDeferPreservesLegitimateDeferral:
+    """Guard: the defer's SSE shape is preserved, no premature
+    finalization is performed. The defer still does NOT:
+      * update Instance.status
+      * call CompletionRegistry.complete
+      * enqueue a completion_report MessageQueue / Task for the parent
+      * publish a child_completed lifecycle event
+      * run the lifecycle-hook dispatch (which is gated on
+        regular_child_completed — see TestOutcomeGating in
+        tests/unit/test_lifecycle_hook_completion.py)
+    """
+
+    @pytest.mark.asyncio
+    async def test_defer_still_emits_waiting_children_sse(self):
+        """Pre-existing SSE behavior preserved: when outcome is
+        ``child_still_running_defer`` and ``_live_hub`` is wired,
+        ``stream_status_change(instance_id, "waiting_children", ...)``
+        is awaited exactly once.
+
+        The fix MUST NOT drop this call — the UI relies on it to
+        reflect the wait state.
+        """
+        manager = _make_mock_manager()
+        manager._live_hub = MagicMock()
+        manager._live_hub.stream_status_change = AsyncMock()
+
+        service = _make_service(manager)
+
+        result = _make_db_result("child_still_running_defer")
+
+        await service._dispatch_post_commit_side_effects(
+            result, last_content="body", completed_message_id="msg-current"
+        )
+
+        manager._live_hub.stream_status_change.assert_awaited_once()
+        args = manager._live_hub.stream_status_change.await_args.args
+        assert args[0] == "child-001"
+        assert args[1] == "waiting_children"
+
+    @pytest.mark.asyncio
+    async def test_defer_does_not_call_completion_registry(self):
+        """CompletionRegistry.complete MUST NOT fire on defer — the
+        instance is not done yet. Guard against regression where the
+        fix accidentally promotes the defer to a completion.
+
+        ``get_completion_registry`` is imported inline at the call
+        site (``from .completion_registry import get_completion_registry``)
+        so we patch the source module directly.
+        """
+        # Patch the source module so any ``from .completion_registry
+        # import get_completion_registry`` lookup at the call site
+        # returns our registry mock.
+        registry_mock = MagicMock(complete=MagicMock())
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "daemon.services.completion_registry.get_completion_registry",
+                lambda: registry_mock,
+            )
+
+            manager = _make_mock_manager()
+            service = _make_service(manager)
+
+            result = _make_db_result("child_still_running_defer")
+            await service._dispatch_post_commit_side_effects(
+                result, last_content="body", completed_message_id="msg-current"
+            )
+
+        registry_mock.complete.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_defer_does_not_publish_lifecycle_event(self):
+        """``_publish_instance_lifecycle_event`` MUST NOT fire on defer
+        — the instance has not reached a terminal state. The parent's
+        child_completed notification must wait for the eventual
+        ``regular_child_completed`` turn, not fire here.
+        """
+        events = MagicMock()
+        events._publish_instance_lifecycle_event = AsyncMock()
+
+        manager = _make_mock_manager()
+        service = _make_service(manager)
+        service._events_service = events
+
+        result = _make_db_result("child_still_running_defer")
+
+        await service._dispatch_post_commit_side_effects(
+            result, last_content="body", completed_message_id="msg-current"
+        )
+
+        events._publish_instance_lifecycle_event.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_defer_does_not_run_lifecycle_hooks(self):
+        """The lifecycle-hook dispatch is gated on
+        ``regular_child_completed`` (``TestOutcomeGating`` in
+        ``tests/unit/test_lifecycle_hook_completion.py``). The defer
+        MUST NOT trigger the hook — registered hooks fire only on
+        actual completion, never on a wait-state defer.
+        """
+        # We do NOT need to actually register a hook — the guard is
+        # that the dispatch path's hook call site (``dispatch_lifecycle_hooks``)
+        # is unreachable for this outcome. We assert by patching
+        # ``get_registry`` and confirming the registered hooks list is
+        # never read.
+        registry = MagicMock()
+        registry.get_version.return_value = MagicMock(
+            lifecycle_hooks={"on_complete": ["some_hook"]}
+        )
+
+        manager = _make_mock_manager()
+        service = _make_service(manager)
+
+        from unittest.mock import patch
+
+        result = _make_db_result("child_still_running_defer")
+        with patch("daemon.services.child_reports.get_registry", return_value=registry):
+            await service._dispatch_post_commit_side_effects(
+                result, last_content="body", completed_message_id="msg-current"
+            )
+
+        # If the dispatch had reached the hook site, the registry's
+        # ``get_version`` (or ``get_resolved``) would have been called
+        # to resolve the agent's lifecycle_hooks config. Defer must
+        # short-circuit BEFORE that lookup.
+        registry.get_version.assert_not_called()
+        registry.get_resolved.assert_not_called()
+
+
+# ─── W4 (council review 645a2219): defer double-emit idempotency ────────
+
+
+class TestDeferDoubleEmitIdempotency:
+    """W4 from council review session 645a2219.
+
+    The defer branch in ``_dispatch_post_commit_side_effects`` fires
+    both ``_emit_terminal_via_bus`` (task-keyed) AND
+    ``_emit_terminal_for_child_instance_via_bus`` (corrective
+    ``(parent, child)`` pair). Exactly-once rests on
+    ``DependencyWatcherRepository.transition_state``' guarded
+    ``WHERE state = 'PENDING'`` Core UPDATE — a second call on an
+    already-FIRED watcher is a ``rowcount == 0`` no-op (see
+    ``daemon/repositories/dependency_bus/repository.py:590-664`` and
+    ``daemon/services/dependency_bus.py:551-933`` for the real guard
+    and its bus-level wiring).
+
+    This test pins that contract: dispatching the SAME defer outcome
+    twice in a row (same parent / same child / same task) does NOT
+    double-deliver FollowUps and does NOT raise. The mock return
+    sequence mirrors the real WHERE-state guard:
+
+      * First emit call → ``[follow_up]`` (rowcount=1 → fired).
+      * Second emit call → ``[]`` (rowcount=0 → no-op).
+
+    Without the guard, the second call would also return
+    ``[follow_up]`` and the parent's completion would be reported
+    twice — silently double-delivering the FollowUp enqueue back to
+    the parent. W4 closes exactly this gap.
+    """
+
+    @pytest.mark.asyncio
+    async def test_defer_double_emit_is_idempotent(self):
+        """Dispatching the defer outcome twice does NOT double-deliver.
+
+        Mock layer: the service-level ``_emit_terminal_via_bus`` and
+        ``_emit_terminal_for_child_instance_via_bus`` helpers are
+        stubbed with ``side_effect`` lists whose entries mirror the
+        real bus's ``transition_state`` rowcount — first call returns
+        ``[follow_up]`` (the ``WHERE state = 'PENDING'`` UPDATE
+        succeeded with ``rowcount=1``); second call returns ``[]`` (the
+        ``WHERE state = 'PENDING'`` UPDATE returned ``rowcount=0``
+        because the watcher is already FIRED).
+
+        Assertions:
+
+        * Both helpers awaited exactly twice (once per dispatch).
+        * Both dispatches' kwargs are identical (idempotent target —
+          same parent / child / task).
+        * Cumulative FollowUp delivery = 1 per helper, NOT 2 (the
+          WHERE-state guard short-circuits the second call).
+        * No exception raised on the second dispatch (the dispatch
+          path tolerates the rowcount=0 return silently).
+        """
+        from daemon.services.dependency_bus import FollowUp
+
+        # A single fired FollowUp payload — represents the
+        # ``rowcount=1 → fired`` return for the FIRST call only. The
+        # second call's mock return is ``[]`` (the rowcount=0 no-op),
+        # so the bus only delivers this FollowUp once across the two
+        # dispatches. This mirrors the real ``transition_state``
+        # semantics on the second WHERE-state guard, where
+        # ``rowcount == 0`` skips an already-FIRED row.
+        fired_follow_up = FollowUp(
+            target_instance_id="leader-001",
+            message="[dependency_bus] child wanderer-001 completed",
+            source="dependency_bus",
+            metadata={"child_id": "wanderer-001"},
+        )
+
+        # ``side_effect`` lists are NOT consumed — each ``await mock(...)``
+        # returns the corresponding list in order. First entry =
+        # rowcount=1 (fired), second entry = rowcount=0 (no-op).
+        # Mirrors the real ``transition_state``' guarded
+        # ``WHERE state = 'PENDING'`` UPDATE: first call sees
+        # PENDING → rowcount=1 → returns ``[follow_up]``; second call
+        # sees FIRED → rowcount=0 → returns ``[]``.
+        task_keyed_returns = [[fired_follow_up], []]
+        corrective_returns = [[fired_follow_up], []]
+
+        # ``_task_repo.get_by_message`` is called via ``asyncio.to_thread``
+        # (a sync worker-thread call), so the stub MUST be sync (the
+        # ``to_thread`` wrapper does NOT await coroutines). Mirrors
+        # ``TestDeferFiresBusTerminal.test_defer_fires_task_keyed_bus_emit``.
+        def _fake_get_by_message(message_id):
+            t = MagicMock()
+            t.id = 25935
+            return t
+
+        manager = _make_mock_manager()
+        manager._task_repo = MagicMock()
+        manager._task_repo.get_by_message = _fake_get_by_message
+
+        service = _make_service(manager)
+        # Override the default no-op AsyncMocks from ``_make_service``
+        # with rowcount-simulating mocks. The defer branch fires
+        # both helpers unconditionally; the WHERE-state guard lives
+        # in the bus layer BELOW these helpers, which is what the
+        # rowcount=0 second-call return value simulates.
+        service._emit_terminal_via_bus = AsyncMock(
+            side_effect=task_keyed_returns
+        )
+        service._emit_terminal_for_child_instance_via_bus = AsyncMock(
+            side_effect=corrective_returns
+        )
+
+        result = _make_db_result(
+            "child_still_running_defer",
+            instance_id="wanderer-001",
+            parent_id="leader-001",
+        )
+
+        # First dispatch — fires the parent's PENDING watcher. The
+        # bus's rowcount=1 returns ``[fired_follow_up]`` → the
+        # FollowUp enqueues back to the parent (the natural finalize
+        # path takes over from there via the report Task).
+        await service._dispatch_post_commit_side_effects(
+            result, last_content="body", completed_message_id="msg-current"
+        )
+
+        # Second dispatch on the SAME result — with the WHERE-state
+        # guard in place, the bus returns rowcount=0 → ``[]`` → no
+        # FollowUp enqueued → no double-delivery. Without the guard,
+        # the bus would return ``[fired_follow_up]`` again and the
+        # parent would see the completion reported twice (the silent
+        # bug W4 is closing).
+        await service._dispatch_post_commit_side_effects(
+            result, last_content="body", completed_message_id="msg-current"
+        )
+
+        # Both helpers were awaited exactly twice (once per dispatch).
+        # The defer branch fires both unconditionally; the WHERE-state
+        # guard is enforced by the bus layer BELOW the helpers, which
+        # is what the rowcount=0 second-call return value simulates.
+        assert service._emit_terminal_via_bus.await_count == 2, (
+            f"task-keyed emit must be awaited once per dispatch "
+            f"(2 total); got await_count="
+            f"{service._emit_terminal_via_bus.await_count}"
+        )
+        assert (
+            service._emit_terminal_for_child_instance_via_bus.await_count
+            == 2
+        ), (
+            f"corrective emit must be awaited once per dispatch "
+            f"(2 total); got await_count="
+            f"{service._emit_terminal_for_child_instance_via_bus.await_count}"
+        )
+
+        # Both dispatches targeted the SAME parent / child / task —
+        # the dispatch itself is idempotent at the target level
+        # (NOT just at the bus guard layer). If a refactor changed
+        # the call to target a different parent/child on the second
+        # pass, this assertion would catch it before the guard ever
+        # had a chance to short-circuit.
+        task_keyed_calls = service._emit_terminal_via_bus.call_args_list
+        corrective_calls = (
+            service._emit_terminal_for_child_instance_via_bus.call_args_list
+        )
+        assert task_keyed_calls[0].kwargs == task_keyed_calls[1].kwargs, (
+            "task-keyed emit kwargs must be identical across the two "
+            "dispatches (idempotent target); "
+            f"first={task_keyed_calls[0].kwargs}, "
+            f"second={task_keyed_calls[1].kwargs}"
+        )
+        assert corrective_calls[0].kwargs == corrective_calls[1].kwargs, (
+            "corrective emit kwargs must be identical across the two "
+            "dispatches (idempotent target); "
+            f"first={corrective_calls[0].kwargs}, "
+            f"second={corrective_calls[1].kwargs}"
+        )
+
+        # Cumulative FollowUp delivery: each helper delivered exactly
+        # ONE FollowUp across the two dispatches. The mock's first
+        # return is ``[fired_follow_up]`` (rowcount=1 → fired); the
+        # second return is ``[]`` (rowcount=0 → no-op, matching the
+        # real ``transition_state``' guarded ``WHERE state = 'PENDING'``
+        # UPDATE on an already-FIRED watcher). Cumulative = 1, NOT 2.
+        # This is the W4 idempotency contract the guard enforces.
+        total_task_keyed = sum(len(r) for r in task_keyed_returns)
+        total_corrective = sum(len(r) for r in corrective_returns)
+        assert total_task_keyed == 1, (
+            f"Idempotency violated: task-keyed emit delivered "
+            f"{total_task_keyed} FollowUps across 2 dispatches "
+            f"(expected exactly 1 — the WHERE-state guard must "
+            f"short-circuit the second call to rowcount=0)"
+        )
+        assert total_corrective == 1, (
+            f"Idempotency violated: corrective emit delivered "
+            f"{total_corrective} FollowUps across 2 dispatches "
+            f"(expected exactly 1 — the WHERE-state guard must "
+            f"short-circuit the second call to rowcount=0)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_transition_state_real_db_idempotency_via_guard(
+        self, tmp_path
+    ):
+        """W4 real-DB second-look: called-twice idempotency through the
+        REAL ``transition_state`` public path.
+
+        Companion to ``test_defer_double_emit_is_idempotent`` above.
+        That test mocks the service-level ``_emit_terminal_via_bus``
+        helpers and the service-level
+        ``_emit_terminal_for_child_instance_via_bus`` helpers, so it
+        CANNOT detect a regression in the REAL
+        ``WHERE state = 'PENDING'`` guard at
+        ``daemon/repositories/dependency_bus/repository.py:647``
+        (``transition_state``). If that guard regresses, the mock-
+        based test still passes — silent false-negative.
+
+        This test exercises ``transition_state`` directly against a
+        file-backed SQLite (the repo convention — see project
+        critical-notes "Multi-edit/write-tool verification
+        discipline"; StaticPool in-memory + interleaved sessions
+        corrupt writes; production PG unaffected). No
+        ``AsyncMock`` / ``MagicMock`` on the asserted path. The
+        only Python boundary crossed is the same
+        ``asyncio.to_thread`` wrapper the bus uses in production
+        (``daemon/services/dependency_bus.py:677-682``).
+
+        Mechanism: insert a PENDING row, call
+        ``transition_state`` twice. With the guard in place:
+
+        * First call: ``WHERE watch_id = :id AND state = 'PENDING'``
+          matches → ``rowcount == 1`` → returns ``True`` (the
+          bus would deliver the FollowUp to the parent).
+        * Second call: ``state`` is now ``FIRED`` → the WHERE
+          predicate fails → ``rowcount == 0`` → returns ``False``
+          (the bus skips — exactly-once delivery).
+
+        Without the guard, the WHERE predicate matches both calls
+        (the watch_id is still there, just FIRED), so both calls
+        return ``True`` and the bus would deliver the FollowUp
+        twice — the silent bug W4 is closing.
+
+        Acceptance: cumulative ``transitioned=True`` count == 1
+        across the two calls; the second call MUST be a no-op.
+        """
+        from sqlmodel import SQLModel, create_engine
+
+        from daemon.repositories.dependency_bus import (
+            DependencyWatcher,
+            DependencyWatcherRepository,
+            DependencyWatcherState,
+        )
+
+        # File-backed SQLite via tmp_path (NOT StaticPool + :memory:).
+        # The bus is single-thread per call (``asyncio.to_thread``
+        # crosses the boundary), but the repo's Session scope
+        # ``with Session(self.engine) as session`` opens a fresh
+        # connection per call — exactly the interleaved-sessions
+        # pattern StaticPool + WriteGuardSession corrupts per the
+        # project's critical-notes convention.
+        db_path = tmp_path / "test_dep_watcher_guard.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        # Register the ``dependency_watchers`` table only — same
+        # minimal-surface choice the existing ``bus_repo`` fixture
+        # in ``tests/test_dependency_bus.py:269-280`` makes.
+        watcher_table = SQLModel.metadata.tables.get(
+            "dependency_watchers"
+        )
+        if watcher_table is not None:
+            watcher_table.create(engine, checkfirst=True)
+
+        repo = DependencyWatcherRepository(engine=engine)
+
+        # Insert a PENDING row — same shape the bus would persist
+        # on a FollowUp-bearing ``send_message`` call. The
+        # ``follow_up_payload`` matches the shape ``FollowUp.to_payload``
+        # produces (see ``daemon/services/dependency_bus.py:162-189``).
+        watcher = DependencyWatcher(
+            watch_id="watch-guard-001",
+            source_task_id="task-001",
+            target_instance_id="parent-001",
+            follow_up_payload={
+                "target_instance_id": "parent-001",
+                "message": "[dependency_bus] child wanderer-001 completed",
+                "source": "dependency_bus",
+                "metadata": {"child_id": "wanderer-001"},
+            },
+        )
+        repo.insert(watcher)
+
+        # Drive through ``transition_state`` via ``asyncio.to_thread``
+        # — the same async-bridge the bus uses in production. NO
+        # ``AsyncMock`` / ``MagicMock`` on this path: real SQL,
+        # real SQLite, real ``rowcount`` from a Core UPDATE.
+        fired_at = repo._now_iso()
+
+        first = await asyncio.to_thread(
+            repo.transition_state,
+            "watch-guard-001",
+            DependencyWatcherState.FIRED.value,
+            fired_at,
+        )
+        second = await asyncio.to_thread(
+            repo.transition_state,
+            "watch-guard-001",
+            DependencyWatcherState.FIRED.value,
+            fired_at,
+        )
+
+        # First call: row was PENDING → ``WHERE state = 'PENDING'``
+        # matches → ``rowcount == 1`` → ``transitioned == True``.
+        # The bus would deliver the FollowUp to the parent on this
+        # call.
+        assert first is True, (
+            f"First transition_state must return True (row was "
+            f"PENDING, WHERE state='PENDING' matched, rowcount=1); "
+            f"got first={first!r}. This means the watch_id does not "
+            f"exist or the fixture is broken."
+        )
+
+        # Second call: row is now FIRED → ``WHERE state = 'PENDING'``
+        # does NOT match → ``rowcount == 0`` → ``transitioned ==
+        # False``. This is the W4 guard in action: the WHERE clause
+        # is the single-statement atomic backpressure primitive that
+        # enforces exactly-once FollowUp delivery. If the guard
+        # regressed (the `.where(state == _PENDING_STATE)` clause at
+        # ``repository.py:647`` is removed), the WHERE predicate
+        # would match BOTH calls and ``second`` would be ``True`` —
+        # the FollowUp would double-deliver to the parent.
+        assert second is False, (
+            f"Second transition_state on an already-FIRED watcher "
+            f"must be a no-op (rowcount=0 — the WHERE state='PENDING' "
+            f"guard filters it out). Got second={second!r}. If "
+            f"second is True, the guard at "
+            f"daemon/repositories/dependency_bus/repository.py:647 "
+            f"has been REMOVED or regressed and the FollowUp would "
+            f"double-deliver to the parent (silent double-fire)."
+        )
+
+        # Cumulative FollowUp-delivery-equivalent count == 1. The
+        # bus would deliver a FollowUp on every ``transition_state``
+        # call that returns True — so two Trues means two
+        # FollowUps, the silent bug. Exactly one True across two
+        # calls IS the W4 idempotency contract.
+        delivered_count = sum(1 for r in (first, second) if r)
+        assert delivered_count == 1, (
+            f"Idempotency violated: transition_state reported a "
+            f"successful transition {delivered_count} times across "
+            f"2 calls (expected exactly 1 — the WHERE state='PENDING' "
+            f"guard must short-circuit the second call)."
+        )

@@ -235,3 +235,90 @@ Real P2.2 tool paths end-to-end against FAKE deploy state — proving (a) the 4 
 - **Result**: PASS — 7/7 scenarios, 3 consecutive stable runs (~3s each vs 240s/300s caps); S1 parity 16/16; S2 live-restart refused with all factors satisfied; S3 7 distinct refusal tokens incl. spoofed-origin via real stamping path; S4 3-factor PASS + nonce consumed + replay refused; S5 real-spawn allowlist proof (ENSEMBLE_UPGRADE_LIVE/ENSEMBLE_DEPLOY_LIVE/ENSEMBLE_SELF_ENV/OPENAI_API_KEY/ANTHROPIC_API_KEY/POSTGRES_PASSWORD/POSTGRES_URL/AWS_SECRET_ACCESS_KEY/XDG_CONFIG_HOME/SECRET_POISON_CANARY all stripped; PGPASSWORD present by design per PG* prefix, R-SR09); S6 terminal same-run_id round-trip via shell-twin finalize; S7 guards all green (9797 lsof identical, live-install stat unchanged, sandbox-contained paths, no leaks)
 - **Quick Fixes**: none — no production bugs found; 4 real-behavior observations reported (PG* passthrough → P2.3 ledger; opportunistic GC of dead nonce records at write time — gate TTL is the real guard; Python/shell twin protocol interop confirmed; harness marker-drain note)
 - **Report**: `RESULTS/2026-08-23-p2-2-premerge-verification.md` §3
+
+
+---
+
+## Mock Test: Pattern (f) Kill-Path Matrix (council criticals, real scenarios)
+
+### Metadata
+- **Created**: 2026-08-29
+- **Script**: test/packs/pattern_f_killpath_matrix_test.py (+ .sh wrapper, dual-layer)
+- **Language**: Python (pytest-style, real repos, file-backed SQLite under /tmp)
+- **Status**: PLANNED (gate: feature/orphan-active-job-recovery @ ba39a40e)
+
+### Configuration
+- **Timeout**: internal 240s / outer `timeout 300`
+- **Ports**: none (no daemon, no sockets; SQLite files under /tmp)
+- **Cleanup**: delete /tmp sqlite files on exit; no repo-tracked file modified
+
+### What It Tests
+Recovery machinery that can KILL LIVE WORK — proves the guards don't leak, in real scenarios (real `JobRecoveryService._pattern_f_orphan_active_job_recovery`, real repositories, real lock rows; only manager/LLM-adjacent seams stubbed).
+- (a) PAUSED Task past grace → JobItem stays ACTIVE (`orphan_active_skipped_paused`, job_recovery_service.py:1949), Task resumable PAUSED→PENDING after sweep.
+- (b) FAILED/CANCELLED Task + live retry child (fresh work_id, same instance, PENDING/RUNNING retry task) → stays ACTIVE (`orphan_active_skipped_retry_child_live:2012`); retry completes → next sweep finalizes via boundary (`_pattern_f_finalize_failed_terminal:2907`, NO_RETRY, failed_at, terminal_reason, lock release).
+- (c) healthy waiting_children parent mid-wait → f2 no-finalize. **Per-leg mutation check**: for each leg L (bus_pending:2172-2214/helper:3133, PENDING instance tasks:2220-2237/helper:3188, completed_at 60s floor:2240-2256/helper:3314): construct scenario where L is the ONLY blocking leg → unmutated: skip with L's label; monkeypatch L permissive: finalize occurs (leg is load-bearing, scenario lethal, not vacuously safe).
+- (d) genuine restart-orphan: ACTIVE JobItem + NO Task + created_at past 900s grace (`min_orphan_age_seconds`, config `drift_reconcile_min_orphan_age_seconds`) + instance.created_at mid-mint conjunct satisfied (:2419-2452) → DEAD (`orphan_active_no_task_dead:2475`) + lock row released (triple scope, :2626-2660).
+- (e) f2 lock release on c=1 queue: ACTIVE JobItem A + COMPLETED Task (all 3 legs pass) → DONE + lock released (:2869) → new JobItem B on same queue admits via real claim (no wedge).
+
+### Success Criteria
+- [ ] All 5 scenarios: unmutated guard → correct skip/finalize, DB rows asserted (not just return codes)
+- [ ] (c) each of 3 legs: load-bearing proven (mutation → wrongful finalize observed + documented)
+- [ ] No lock rows leaked in any terminal path; watchers notified after lock release
+
+### Implementation Notes
+- Bind exact symbols from recon (job_recovery_service.py:1731 sweep, :79 floor const, :562/:1800 grace param)
+- Fail-safe leg: bus unavailable → `orphan_active_skipped_bus_unavailable:2177` (negative probe optional)
+
+---
+
+## Mock Test: child_still_running_defer Bus-Emit Fix (02fb2e01)
+
+### Metadata
+- **Created**: 2026-08-29
+- **Script**: test/packs/defer_bus_emit_probe_test.py (+ .sh wrapper, dual-layer)
+- **Language**: Python (real child_reports defer path, real dependency_bus repository, file-backed SQLite)
+- **Status**: PLANNED (gate: feature/orphan-active-job-recovery @ ba39a40e)
+
+### Configuration
+- **Timeout**: internal 180s / outer `timeout 300`
+- **Ports**: none
+
+### What It Tests
+- Exactly-once called-twice: defer outcome fires BOTH emits (task-keyed `_emit_terminal_via_bus` child_reports.py:3456 + corrective `_emit_terminal_for_child_instance_via_bus`:3461); calling the guarded transition twice (`transition_state` WHERE state='PENDING', dependency_bus/repository.py) → second fire rowcount=0, exactly ONE FollowUp delivered (real DB).
+- Legitimate defer → NO emit: real deferral (child genuinely still running) → no bus terminal emit, SSE waiting_children preserved, no completion-registry call.
+- Incident replay 02fb2e01: parent watcher PENDING on child; child task completed; outcome = child_still_running_defer (multi-turn shape) → both emits fire → watcher PENDING→FIRED → parent completion gate released.
+
+### Success Criteria
+- [ ] Called-twice: exactly one delivered FollowUp, one FIRED watcher, no duplicate
+- [ ] Legitimate defer: zero bus emits (assert helper call sites)
+- [ ] Replay: watcher FIRED + parent gate released (dependency cleared / parent completable)
+
+---
+
+## Mock Test: E2E Capstone — 092c5ed3-class Zombie Active JobItems
+
+### Metadata
+- **Created**: 2026-08-29
+- **Script**: test/packs/pattern_f_capstone_test.py (+ .sh wrapper, dual-layer)
+- **Language**: Python (real engine assembly: real drift sweep + real claim path, file-backed SQLite)
+- **Status**: PLANNED (gate: feature/orphan-active-job-recovery @ ba39a40e)
+
+### Configuration
+- **Timeout**: internal 270s / outer `timeout 300`
+- **Ports**: none
+
+### What It Tests
+End-to-end on real engine components (no mocks below repository/service seam): seed zombie ACTIVE JobItems BOTH shapes (shape-1 active+no-Task stale past grace+mid-mint; shape-2 active+COMPLETED-Task old past all 3 legs) + pending watchers + a queued defer-queue job behind the gates → run real `reconcile_drift_states` (job_recovery_service.py:1402 → Pattern (f) sweep) → assert shape-1 DEAD, shape-2 DONE, locks released, watchers fired/notified, gates released, and the queued defer job ADMITS via real claim (real worker claim resolves the wedge — the 092c5ed3 incident class).
+
+### Success Criteria
+- [ ] Both shapes recovered with correct terminal states + lock rows gone
+- [ ] Watchers released; no stranded PENDING rows
+- [ ] Queued defer job admitted by a REAL claim after sweep (no wedge)
+
+### Last Run
+- **Date**: 2026-08-29 (gate, @ ba39a40e)
+- **Kill-path matrix**: PASS 5/5 (per-leg mutation table in RESULTS/2026-08-29-orphan-active-job-recovery-gate.md §2)
+- **Bus-emit probe**: PASS 3/3 (P1 exactly-once real-DB; P2 no premature completion; P3 incident replay, gate released)
+- **Capstone**: PASS 4/4 (both shapes recovered; wedge = defer idle gate 2→0; C admitted via real claim)
+- **Scripts**: test/packs/pattern_f_killpath_matrix_test.{py,sh}, test/packs/defer_bus_emit_probe_test.{py,sh}, test/packs/pattern_f_capstone_test.{py,sh} — all ACTIVE, registered in PACKS.md
+- **Report**: RESULTS/2026-08-29-orphan-active-job-recovery-gate.md
