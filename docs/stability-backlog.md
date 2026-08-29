@@ -170,3 +170,51 @@ Optional 2-row cleanup if reviving wedged tester `77ab8ab2` is ever needed: task
   - `2026-08-28-subtree-status-tool-gate.md` — batch 5, subtree_status (`2ba78315`)
   - `2026-08-29-reconciler-wedge-fix-gate.md` — batch 6, reconciler wedge-fix (`4e10980b`)
 - Decisions: `.agents/shared/planning/agent-instance-tools/decisions.md`
+---
+
+## Newly documented this session
+
+### `subtree_messages` final-message visibility
+
+A child instance's FINAL report message (the verbatim report the dispatcher depends on) is not visible via the `subtree_messages` tool. Ref: agent-instance-tools `subtree_messages`; surfaced during the 2026-08-29 Pattern (f) batch.
+
+### JobFeedbackObserver post-restart empty-queue anomaly
+
+Investigation concluded 2026-08-29; **DISPOSITION: documented, not fixed.**
+
+**Symptom**: After daemon restart, `JobFeedbackObserver` processes 0 events while the `events` table persists `instance_lifecycle` events in the same window. Live-log evidence (`~/agents-ensemble/data/logs/ensemble.log`): `JobFeedbackObserver: waiting for events...` repeated at 5-min cadence (matches `_health_check_interval=300s`, observer.py:324) for ~90 minutes before a brief activity burst at 19:42-19:50. From that point on, `JobFeedbackObserver: no events in 600s` fired at 5-min cadence continuously (~190× in the current log).
+
+**Mechanism observed** (file:line evidence):
+
+- `daemon/services/event_bus.py:155-191` — `EventBus.create_event(...)` persists to DB THEN awaits `_broadcast_to_global(...)`. The two operations share the same coroutine.
+- `daemon/services/event_bus.py:286-307` — `subscribe_all` overwrites `_global_subscribers[subscriber_id]` with a fresh `asyncio.Queue`; old references become orphan.
+- `daemon/services/event_bus.py:317-351` — `_broadcast_to_global` iterates `_global_subscribers.items()` via `list()` snapshot, `queue.put_nowait(event)` per subscriber. `QueueFull` swallowed with WARNING.
+- `daemon/services/job_feedback_observer.py:501-516` — `start()` registers queue via `subscribe_all`, then `asyncio.create_task(self._event_loop())`.
+- `daemon/services/job_feedback_observer.py:579-630` — `_event_loop` `await asyncio.wait_for(self._queue.get(), timeout=300)`.
+- `daemon/services/event_publisher.py:38-73` — sole publisher of `kind=EventKind.INSTANCE_LIFECYCLE`; goes through `event_bus.create_event`.
+- `daemon/manager.py:738` — `self._event_bus = EventBus(...)` set ONCE in `InstanceManager.__init__`; never reassigned in the source tree (verified across grep of `manager.py`, `api.py`).
+
+**Why root cause is NOT clear**:
+
+1. Diagnostic tests `tests/job_queue/test_job_feedback_observer_eventbus_pairing.py` (9 tests, all passing) exercise the real `EventBus` + real `JobFeedbackObserver` end-to-end. The mechanism is deterministic: events go to the queue every time.
+2. The 14 persisted events are not reproducible from any other path — `stale_task_recovery.py:936` writes its own non-`instance_lifecycle` kinds; `message_processing_errors.py:266` is a `kind="error"` fallback for a missing bus.
+3. The 90-minute zero-receipt window after restart is precisely the shape expected if a *second, untracked* `EventBus` were receiving the publishes — but no such second instantiation was found in the source tree.
+
+**Suspected root causes (ranked)**:
+
+1. **Hidden second `EventBus`** (highest): production deploy path may load `_archived/event_bus.py` or instantiate `EventBus` via reflection. Not visible in the static call graph.
+2. **Bus recreation mid-flight**: nothing in source reassigns `manager._event_bus`, but a `_archived` copy or runtime import could.
+3. **`event_repo.create_event` direct path with `kind="instance_lifecycle"`** — ruled out by source search; no path does this.
+4. **Queue overflow** — would produce `WARNING f"Global subscriber job_feedback_observer queue full"` in the log; not seen.
+5. **Slow startup race** — pre-loop backlog would still get drained on first `await self._queue.get()`; cannot explain 0 events over 90 minutes.
+
+**What would disambiguate**:
+
+1. `grep -E "Global subscriber job_feedback_observer queue full" ~/agents-ensemble/data/logs/ensemble*.log` → should return 0; if any hits, hypothesis 4 becomes the root cause.
+2. `SELECT kind, count(*) FROM events WHERE created_at > '<restart time>' GROUP BY kind` — confirm the 14 events all have `kind = 'instance_lifecycle'`. If any other kind persists alongside, hypothesis 3 has merit.
+3. Temporarily add a `logger.debug("_broadcast_to_global put: %s -> %s", subscriber_id, queue)` at `event_bus.py:347` on a canary and re-trigger the symptom; the log would name the exact queue the publish lands on and whether the observer holds it.
+4. Reproduce in a unit test using the **full** `daemon.manager.InstanceManager` import graph (the current tests stub `event_bus=` — the diagnostic gap is exactly that we don't exercise the production wiring order).
+
+**Risk**: A wrong fix here is worse than a documented gap. The observer's 5-site `_finalize_job_db_sync` canonical-writer role (job-queue repo finalize conventions, see critical notes "F9+F16" and "`_finalize_job_db_sync` owner") must not be disturbed by a speculative change to its event-source.
+
+**Acceptance status**: Investigated; no fix proposed. Diagnostic test file: `tests/job_queue/test_job_feedback_observer_eventbus_pairing.py`.
