@@ -246,6 +246,11 @@ def _manager_stub(*, backup: str | None, model: str = "gpt-test") -> SimpleNames
                 model=model,
                 model_title=model,
                 model_keywords=model,
+                # Production reads `self._config.llm.buffer_response_header`
+                # (e.g. title_generation.py:104, child_reports.py:766/:1400).
+                # `LLMConfig.buffer_response_header` defaults to True
+                # (daemon/config.py:231); mirror that here so the fake matches.
+                buffer_response_header=True,
             )
         ),
         _instance_repository=_FakeRepo(),
@@ -319,6 +324,11 @@ class TestZeroBehaviorChangeAllSitesBackupUnset:
                 api_key="test",
                 model="gpt-test",
                 model_keywords="gpt-test",
+                # Production reads `config.llm.buffer_response_header`
+                # (keyword_extraction.py:377). `LLMConfig.buffer_response_header`
+                # defaults to True (daemon/config.py:231); mirror that here so
+                # the fake matches.
+                buffer_response_header=True,
             )
         )
 
@@ -1043,6 +1053,11 @@ class TestMockTransportFailoverBothFamilies:
                 api_key="test",
                 model="gpt-test",
                 model_keywords="gpt-test",
+                # Production reads `config.llm.buffer_response_header`
+                # (keyword_extraction.py:377). `LLMConfig.buffer_response_header`
+                # defaults to True (daemon/config.py:231); mirror that here so
+                # the fake matches.
+                buffer_response_header=True,
             )
         )
 
