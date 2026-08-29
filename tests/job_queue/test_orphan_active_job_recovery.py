@@ -2568,3 +2568,408 @@ class TestPatternFW1MidMintGuard:
         job_after = repository.get("job-f-w1")
         assert job_after is not None
         assert job_after.admission_state == AdmissionState.ACTIVE.value
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Council REJECT 2026-08-29 W1 residual — paired fix ~3 LOC
+# (a) PAUSED retry child on the same instance must be detected by the
+#     W1 lineage gate (helper was on ``has_inflight_task`` = PENDING+RUNNING
+#     only — a PAUSED retry child slipped through and was over-finalized).
+# (b) A transient lookup error on the busy/inflight query must FAIL-SAFE
+#     to SKIP (the helper returned False → proceed-to-finalize, while the
+#     sister bus-gate returns SKIP — inconsistency that can over-finalize
+#     a live retry child during a brief DB error).
+#
+# Both residuals live in one helper:
+# ``daemon/services/job_recovery_service.py`` ::
+# ``_pattern_f_instance_has_inflight_task`` (Pattern (f) W1 gate,
+# call site at the FAILED/CANCELLED terminal-routing branch).
+#
+# Fix is ~3 LOC: swap to ``TaskRepository.has_instance_busy``
+# (PENDING + RUNNING + PAUSED) and flip the ``except Exception`` fail-safe
+# to ``return True`` (SKIP, matching the sister bus-gate).
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestPatternFResidualsPairedFix:
+    """W1 residuals (paired fix): (a) PAUSED retry-child gap,
+    (b) lineage-lookup fail-safe direction.
+
+    Both tests FAIL on ``c6c9dfac`` (pre-fix helper uses
+    ``has_inflight_task`` = PENDING+RUNNING only, plus
+    ``return False`` fail-safe). Both tests PASS after the
+    ~3-LOC paired fix that swaps to ``has_instance_busy`` and
+    flips the ``except`` return to ``True``.
+
+    Reference:
+    - Gate spec §7 (residual adjudication): two 🟠
+      non-blocking residuals on the W1 lineage gate.
+    - Sister helper ``_pattern_f_check_bus_pending`` (the
+      fail-safe reference, returns ``True`` SKIP on lookup
+      error — `:3138-3153`).
+    """
+
+    @pytest.mark.asyncio
+    async def test_failed_parent_with_paused_retry_child_is_skipped(
+        self, engine, repository, task_repository, lock_repo,
+        instance_repo, stale_recovery, job_queue_service_mock,
+    ):
+        """Residual (a) — PAUSED retry-child gap.
+
+        Scenario:
+            - FAILED parent Task (terminal, completed_at backdated).
+            - PAUSED retry-child Task on the SAME instance, FRESH
+              ``work_id`` (``force_cancel_and_schedule_retry`` →
+              ``pause_instance_cascade`` sequence; the worker
+              claimed the retry, then the operator paused the
+              instance — narrow but documented window, see
+              ``instance_lifecycle.py:4172-4178``).
+            - Live retry-child is PAUSED, not PENDING/RUNNING.
+
+        Expected (post-fix):
+            - The W1 lineage gate fires (helper uses
+              ``has_instance_busy`` = PENDING+RUNNING+PAUSED).
+            - Parent JobItem is SKIPPED (stays ACTIVE).
+            - ``_finalize_terminal.await_count == 0`` (boundary
+              is never reached).
+            - ``orphan_active_skipped_retry_child_live`` detail
+              is recorded.
+
+        Pre-fix (c6c9dfac): helper uses ``has_inflight_task``
+        = PENDING+RUNNING only → the PAUSED retry child is
+        invisible → the gate misses → parent JobItem is
+        terminal-routed → boundary called → JobItem flipped
+        to DONE while the live retry-child is still alive
+        on the instance (over-finalization regression).
+        """
+        from unittest.mock import AsyncMock
+
+        _insert_instance(
+            engine,
+            "inst-f-resid-paused",
+            project_id="test-project",
+            created_at=datetime.now(timezone.utc) - timedelta(seconds=3600),
+        )
+        _insert_job_item(
+            engine,
+            job_id="job-f-resid-paused-parent",
+            instance_id="inst-f-resid-paused",
+            project_id="test-project",
+            queue_id="queue-f-resid-paused-parent",
+            admission_state=AdmissionState.ACTIVE.value,
+            created_at=datetime.now(timezone.utc) - timedelta(seconds=3600),
+        )
+        # Parent Task FAILED — completed_at backdated past
+        # the 60s floor so the floor is NOT what saves us.
+        parent_task_id = _insert_task_with_status(
+            engine,
+            work_id="job-f-resid-paused-parent",
+            instance_id="inst-f-resid-paused",
+            status=TaskStatus.FAILED.value,
+            completed_at=datetime.now(timezone.utc) - timedelta(seconds=120),
+        )
+        # Retry child: PAUSED (NOT pending/running — the
+        # narrow window the pre-fix helper missed). FRESH
+        # ``work_id`` (the brief is explicit — schedule_retry
+        # mints a new UUID to avoid the parent's UNIQUE).
+        # Same ``instance_id`` (the lineage key). ``paused``
+        # is the active retry's mid-state after
+        # ``pause_instance_cascade`` flipped RUNNING→PAUSED.
+        retry_task_id = _insert_task_with_status(
+            engine,
+            work_id="job-f-resid-paused-child",
+            instance_id="inst-f-resid-paused",
+            status=TaskStatus.PAUSED.value,
+        )
+
+        # Wire the boundary mock so a stray finalization
+        # call WOULD actually persist (the W1 fix should
+        # never reach it). Mirrors the W1 AC1 convention.
+        async def _boundary_side_effect(
+            *, instance_id, decision, job_id, error_message,
+            target_status,
+        ):
+            now = datetime.now(timezone.utc).isoformat()
+            repository.atomic_transition(
+                job_id,
+                from_status="active",
+                to_status=target_status,
+                completed_at=now,
+                error_message=error_message,
+            )
+            return (job_id, None)
+
+        job_queue_service_mock._finalize_terminal = AsyncMock(
+            side_effect=_boundary_side_effect,
+        )
+
+        service = JobRecoveryService(
+            job_repository=repository,
+            lock_repository=lock_repo,
+            instance_repository=instance_repo,
+            job_queue_service=job_queue_service_mock,
+            task_repository=task_repository,
+            stale_task_recovery=stale_recovery,
+        )
+
+        stats = await service.reconcile_drift_states(
+            min_pending_age_seconds=0,
+            min_orphan_age_seconds=60,
+        )
+
+        # ── Assert: NOT bare DEAD.
+        f1_corrected = [
+            d for d in stats["details"]
+            if d.get("pattern") == "orphan_active_no_task_dead"
+            and d.get("job_id") == "job-f-resid-paused-parent"
+        ]
+        assert not f1_corrected, (
+            f"FAILED parent with PAUSED retry child MUST "
+            f"NOT be bare-DEAD. Got: {f1_corrected}"
+        )
+        # ── Assert: NOT terminal-routed (the W1 fix
+        # skips the parent before the boundary call).
+        terminal_routed = [
+            d for d in stats["details"]
+            if d.get("pattern") == "orphan_active_failed_terminal"
+            and d.get("job_id") == "job-f-resid-paused-parent"
+        ]
+        assert not terminal_routed, (
+            f"FAILED parent with PAUSED retry child MUST "
+            f"NOT be terminal-routed (residual (a) fix: "
+            f"the W1 lineage gate must include PAUSED "
+            f"children). Got: {terminal_routed}"
+        )
+        # ── Assert: the boundary was NEVER called
+        # (the W1 gate short-circuits before it).
+        assert (
+            job_queue_service_mock._finalize_terminal.await_count == 0
+        ), (
+            f"_finalize_terminal MUST NOT be called when "
+            f"a PAUSED retry child exists (W1 gate). "
+            f"Got await_count="
+            f"{job_queue_service_mock._finalize_terminal.await_count}"
+        )
+        # ── Assert: W1 skip detail recorded.
+        skip_records = [
+            d for d in stats["details"]
+            if d.get("pattern") == (
+                "orphan_active_skipped_retry_child_live"
+            )
+            and d.get("job_id") == "job-f-resid-paused-parent"
+        ]
+        assert skip_records, (
+            f"W1 residual (a) fix MUST record an "
+            f"orphan_active_skipped_retry_child_live "
+            f"detail (PAUSED retry child lineage gate). "
+            f"Got details: {stats['details']}"
+        )
+        assert skip_records[0].get("task_id") == parent_task_id, (
+            f"Detail MUST carry the parent Task id. "
+            f"Got: {skip_records[0]}"
+        )
+        assert (
+            skip_records[0].get("instance_id")
+            == "inst-f-resid-paused"
+        ), (
+            f"Detail MUST carry the instance_id. "
+            f"Got: {skip_records[0]}"
+        )
+        # ── Assert: JobItem is still ACTIVE
+        # (left for the next 60s cycle to re-evaluate).
+        job_after = repository.get("job-f-resid-paused-parent")
+        assert job_after is not None
+        assert job_after.admission_state == AdmissionState.ACTIVE.value, (
+            f"FAILED parent with PAUSED retry child MUST "
+            f"stay ACTIVE (residual (a) fix). "
+            f"Got admission_state="
+            f"{job_after.admission_state!r}"
+        )
+        # ── Assert: live retry child is still PAUSED
+        # (the reconciler only walked the parent JobItem;
+        # the retry-child Task is on a different work_id
+        # and was inspected via the lineage query, not
+        # mutated).
+        with engine.begin() as conn:
+            retry_status_row = conn.execute(
+                text("SELECT status FROM task WHERE id = :id"),
+                {"id": retry_task_id},
+            ).first()
+        assert retry_status_row is not None
+        assert retry_status_row[0] == TaskStatus.PAUSED.value, (
+            f"Live retry child Task MUST remain PAUSED "
+            f"(reconciler only walked the parent). "
+            f"Got status={retry_status_row[0]!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_lineage_lookup_error_fails_safe_to_skip(
+        self, engine, repository, task_repository, lock_repo,
+        instance_repo, stale_recovery, job_queue_service_mock,
+        monkeypatch,
+    ):
+        """Residual (b) — lineage-lookup fail-safe direction.
+
+        Scenario:
+            - FAILED parent Task (terminal, completed_at backdated).
+            - Lineage is QUIESCENT (no retry child — AC2-shaped).
+            - ``TaskRepository.has_instance_busy`` (the post-fix
+              helper symbol) raises a transient DB error.
+
+        Expected (post-fix):
+            - The helper's ``except Exception`` branch returns
+              ``True`` (SKIP), consistent with the sister bus-gate
+              ``_pattern_f_check_bus_pending``: "FAIL-SAFE:
+              skip finalize, leave JobItem active; next 60s
+              cycle retries. Never guess." (`:3151-3153`)
+            - Parent JobItem is SKIPPED (stays ACTIVE).
+            - ``_finalize_terminal.await_count == 0``
+              (boundary is never reached).
+            - WARNING is logged (fail-safe observability).
+
+        Pre-fix (c6c9dfac): helper uses ``has_inflight_task`` so
+        the patch on ``has_instance_busy`` is a no-op; helper
+        returns False (no PENDING/RUNNING); proceed to
+        terminal-routing → JobItem flipped to DONE despite the
+        transient error (over-finalization regression).
+        """
+        from unittest.mock import AsyncMock
+
+        _insert_instance(
+            engine,
+            "inst-f-resid-failsafe",
+            project_id="test-project",
+            created_at=datetime.now(timezone.utc) - timedelta(seconds=3600),
+        )
+        _insert_job_item(
+            engine,
+            job_id="job-f-resid-failsafe-parent",
+            instance_id="inst-f-resid-failsafe",
+            project_id="test-project",
+            queue_id="queue-f-resid-failsafe-parent",
+            admission_state=AdmissionState.ACTIVE.value,
+            created_at=datetime.now(timezone.utc) - timedelta(seconds=3600),
+        )
+        # Parent Task FAILED — completed_at backdated past
+        # the 60s floor. QUIESCENT lineage (no retry child).
+        _insert_task_with_status(
+            engine,
+            work_id="job-f-resid-failsafe-parent",
+            instance_id="inst-f-resid-failsafe",
+            status=TaskStatus.FAILED.value,
+            completed_at=datetime.now(timezone.utc) - timedelta(seconds=120),
+        )
+
+        # Simulate a transient DB error on the busy/inflight
+        # query. Patch the POST-FIX symbol
+        # (``has_instance_busy``) so the test is fail-safe
+        # forward: when the helper is fixed to call
+        # ``has_instance_busy`` instead of
+        # ``has_inflight_task``, the patch bites.
+        def _raise_busy(*args, **kwargs):
+            raise RuntimeError(
+                "simulated transient DB error on "
+                "has_instance_busy lineage query"
+            )
+
+        monkeypatch.setattr(
+            task_repository,
+            "has_instance_busy",
+            _raise_busy,
+        )
+
+        # Wire the boundary mock so a stray finalization
+        # call WOULD actually persist (the fail-safe path
+        # must skip BEFORE the boundary is reached).
+        async def _boundary_side_effect(
+            *, instance_id, decision, job_id, error_message,
+            target_status,
+        ):
+            now = datetime.now(timezone.utc).isoformat()
+            repository.atomic_transition(
+                job_id,
+                from_status="active",
+                to_status=target_status,
+                completed_at=now,
+                error_message=error_message,
+            )
+            return (job_id, None)
+
+        job_queue_service_mock._finalize_terminal = AsyncMock(
+            side_effect=_boundary_side_effect,
+        )
+
+        service = JobRecoveryService(
+            job_repository=repository,
+            lock_repository=lock_repo,
+            instance_repository=instance_repo,
+            job_queue_service=job_queue_service_mock,
+            task_repository=task_repository,
+            stale_task_recovery=stale_recovery,
+        )
+
+        stats = await service.reconcile_drift_states(
+            min_pending_age_seconds=0,
+            min_orphan_age_seconds=60,
+        )
+
+        # ── Assert: NOT bare DEAD.
+        f1_corrected = [
+            d for d in stats["details"]
+            if d.get("pattern") == "orphan_active_no_task_dead"
+            and d.get("job_id") == "job-f-resid-failsafe-parent"
+        ]
+        assert not f1_corrected, (
+            f"FAILED parent with transient lookup error "
+            f"MUST NOT be bare-DEAD. Got: {f1_corrected}"
+        )
+        # ── Assert: NOT terminal-routed (the fail-safe
+        # path returns True → SKIP, not False → finalize).
+        terminal_routed = [
+            d for d in stats["details"]
+            if d.get("pattern") == "orphan_active_failed_terminal"
+            and d.get("job_id") == "job-f-resid-failsafe-parent"
+        ]
+        assert not terminal_routed, (
+            f"FAILED parent with transient lookup error "
+            f"MUST NOT be terminal-routed (residual (b) "
+            f"fix: FAIL-SAFE skip, matching the sister "
+            f"bus-gate). Got: {terminal_routed}"
+        )
+        # ── Assert: the boundary was NEVER called
+        # (the FAIL-SAFE path short-circuits before it).
+        assert (
+            job_queue_service_mock._finalize_terminal.await_count == 0
+        ), (
+            f"_finalize_terminal MUST NOT be called when "
+            f"the lineage lookup errored (FAIL-SAFE skip). "
+            f"Got await_count="
+            f"{job_queue_service_mock._finalize_terminal.await_count}"
+        )
+        # ── Assert: W1 skip detail recorded (the
+        # retry-child-live detail family is the canonical
+        # skip reason for the lineage-gate — observable
+        # via the detail record so operators can see the
+        # row was deferred).
+        skip_records = [
+            d for d in stats["details"]
+            if d.get("pattern") == (
+                "orphan_active_skipped_retry_child_live"
+            )
+            and d.get("job_id") == "job-f-resid-failsafe-parent"
+        ]
+        assert skip_records, (
+            f"W1 residual (b) fix MUST record an "
+            f"orphan_active_skipped_retry_child_live "
+            f"detail (FAIL-SAFE skip on lookup error). "
+            f"Got details: {stats['details']}"
+        )
+        # ── Assert: JobItem is still ACTIVE.
+        job_after = repository.get("job-f-resid-failsafe-parent")
+        assert job_after is not None
+        assert job_after.admission_state == AdmissionState.ACTIVE.value, (
+            f"FAILED parent with transient lookup error "
+            f"MUST stay ACTIVE (FAIL-SAFE skip, next 60s "
+            f"cycle retries). Got admission_state="
+            f"{job_after.admission_state!r}"
+        )

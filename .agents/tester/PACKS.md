@@ -833,6 +833,3 @@ Six pack scripts existed on disk but were absent from the tables above (found du
 | vscode_e2e_browser_test | test/packs/vscode_e2e_browser_test.sh (companion .py) | vscode e2e browser flow | Yes (:8079 + code-server) | — | NOT RUN this session |
 
 Note: the pack inventory is also a historical ledger — ~178 table rows reference removed/renamed/logical packs (cleanup debt, tracked in RESULTS/2026-08-24-p2-3-final-verification.md findings).
-erence removed/renamed/logical packs (cleanup debt, tracked in RESULTS/2026-08-24-p2-3-final-verification.md findings).
-in RESULTS/2026-08-24-p2-3-final-verification.md findings).
-6-08-24-p2-3-final-verification.md findings).
