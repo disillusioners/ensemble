@@ -108,7 +108,7 @@ from .cancellation import (
 )
 from .request_registry import ActiveRequestRegistry
 from .compaction import ContextCompactor
-from .constants import WORKER_POOL_SIZE
+from .constants import ALIVE_INSTANCE_STATUSES, WORKER_POOL_SIZE
 from .write_pause_guard import WriteGuardSession, WritePauseGuard
 
 # Worker pool imports (lazy import to avoid circular dependency)
@@ -6902,6 +6902,85 @@ class InstanceManager:
             )
             raise
 
+    # ─── Wedge-fix helpers (sub-shape c carrier revival) ─────────────
+    #
+    # Backing helpers for the sub-shape (c) carrier-revival seam in
+    # :meth:`_reconcile_deferred_report` and its async sibling. Kept as
+    # small, sync-only methods so both sync + async call sites share
+    # the same logic (the async variant off-loads to a thread via
+    # ``asyncio.to_thread``).
+
+    def _has_live_process_report_carrier(
+        self,
+        *,
+        message_id: str,
+    ) -> bool:
+        """Return True iff any PROCESS_REPORT Task for ``message_id``
+        is in a LIVE state (PENDING or RUNNING).
+
+        Used by sub-shape (c) to detect the wedge condition: a READY
+        ``MessageQueue`` row whose PROCESS_REPORT carrier has been
+        CANCELLED (typically by a pre-fix Pattern (d) false-positive).
+        When no live carrier exists AND the parent is alive AND the
+        parent is not dead-terminal (TERMINATED), the seam enqueues
+        a fresh carrier + ``notify_work()`` to wake the WC parent.
+
+        Idempotency: a live carrier means the wedge is NOT active —
+        the existing carrier will deliver, no revival needed.
+
+        Args:
+            message_id: The ``MessageQueue.message_id`` of the report
+                whose carrier presence we are checking.
+
+        Returns:
+            True iff a live PROCESS_REPORT Task exists for this
+            message_id, False otherwise (no task, or all tasks are
+            in a terminal status — CANCELLED / COMPLETED / FAILED).
+        """
+        from sqlmodel import Session as _SQLModelSession, select as _select
+        from .repositories.task.models import (
+            Task as _TaskCarrier,
+            TaskStatus as _TaskStatusCarrier,
+            TaskType as _TaskTypeCarrier,
+        )
+        live_statuses = (
+            _TaskStatusCarrier.PENDING.value,
+            _TaskStatusCarrier.RUNNING.value,
+        )
+        with _SQLModelSession(self.engine) as db_session:
+            stmt = (
+                _select(_TaskCarrier)
+                .where(_TaskCarrier.message_id == message_id)
+                .where(_TaskCarrier.task_type == _TaskTypeCarrier.PROCESS_REPORT.value)
+                .where(_TaskCarrier.status.in_(live_statuses))
+            )
+            return db_session.exec(stmt).first() is not None
+
+    def _is_parent_alive(self, parent_row: Any | None) -> bool:
+        """Return True iff ``parent_row`` is in an alive instance
+        status (``IDLE`` / ``RUNNING`` / ``PAUSED`` / ``QUEUED`` /
+        ``WAITING_CHILDREN``).
+
+        The alive-status set is the canonical
+        ``daemon.constants.ALIVE_INSTANCE_STATUSES`` — same source of
+        truth as
+        ``daemon/services/job_recovery_service.py::_is_instance_alive``
+        (Pattern d Fix 2 — the alive-instance guard that prevents the
+        wedge-fix class from re-opening). A missing parent row
+        (``None``) returns ``False`` (dead-parent path); a TERMINATED
+        parent is dead.
+
+        Args:
+            parent_row: An ``Instance`` ORM row, or ``None`` if the
+                row was missing at read time.
+
+        Returns:
+            True iff the parent is alive, False otherwise.
+        """
+        if parent_row is None:
+            return False
+        return parent_row.status in ALIVE_INSTANCE_STATUSES
+
     def _reconcile_deferred_report(
         self,
         *,
@@ -7170,8 +7249,73 @@ class InstanceManager:
                         "report_message_id": report_message_id,
                     }
 
-                # Sub-shape (c) — both exist; the natural path
-                # delivers. No DB write needed.
+                # Sub-shape (c) — both exist. Normally the natural
+                # path delivers; HOWEVER this is also the wedge-fix
+                # carrier-revival seam. When the existing process_report
+                # Task has been CANCELLED (e.g. by a pre-fix Pattern (d)
+                # false-positive) and the parent is alive in
+                # ``WAITING_CHILDREN``, the message sits READY in the
+                # queue with no carrier to deliver it — the parent
+                # never wakes. Detect this sub-shape (c) wedge and
+                # enqueue a fresh carrier + ``notify_work()``.
+                # Idempotent: if any live (PENDING/RUNNING) carrier
+                # already exists for the message, the wedge is NOT
+                # active — skip silently (the existing carrier will
+                # deliver). The F2 dead-parent guard above already
+                # short-circuits on dead parents; we re-check here so
+                # the revival is bounded to alive parents only.
+                live_carrier_exists = self._has_live_process_report_carrier(
+                    message_id=report_message_id
+                )
+                if (
+                    not live_carrier_exists
+                    and not db_dead_parent
+                    and self._is_parent_alive(parent_row)
+                ):
+                    # Wedge-fix revival: enqueue a fresh PROCESS_REPORT
+                    # carrier (mirrors ``child_reports.py:2843-2852``)
+                    # and wake the worker pool. ``sub_shape=c_revival``
+                    # in the log data makes the seam diagnosable in
+                    # production.
+                    from .repositories.task.models import (
+                        Task as _TaskRevival,
+                        TaskStatus as _TaskStatusRevival,
+                        TaskType as _TaskTypeRevival,
+                    )
+                    fresh_task = _TaskRevival(
+                        task_type=_TaskTypeRevival.PROCESS_REPORT.value,
+                        instance_id=inj.parent_instance_id,
+                        message_id=report_message_id,
+                        status=_TaskStatusRevival.PENDING.value,
+                        created_at=datetime.now(timezone.utc),
+                    )
+                    session.add(fresh_task)
+                    logger.warning(
+                        f"[{source}] reconcile (sub-shape c, "
+                        f"c_revival): no live carrier for message "
+                        f"{report_message_id[:8]}... on alive parent "
+                        f"{inj.parent_instance_id[:8]}...; "
+                        f"enqueued fresh PROCESS_REPORT task + "
+                        f"notify_work(). sub_shape=c_revival, "
+                        f"parent_status="
+                        f"{parent_row.status if parent_row else 'missing'}"
+                    )
+                    # Explicit commit — same constraint as the (b)
+                    # branches above: ``_session_scope`` rolls back on
+                    # close. Without the commit the fresh carrier
+                    # vanishes and the parent's WC turn never wakes.
+                    session.commit()
+                    # Wake the worker pool OUTSIDE the transaction so
+                    # the commit is durable before the pool wakes a
+                    # worker (avoids a race where a worker claims a
+                    # row that hasn't been committed yet).
+                    if self._worker_pool is not None:
+                        self._worker_pool.notify_work()
+                    return {
+                        "shape": "c_revival",
+                        "report_message_id": report_message_id,
+                    }
+
                 logger.info(
                     f"[{source}] reconcile (sub-shape c, both-exist): "
                     f"delivery only "
@@ -7739,8 +7883,63 @@ class InstanceManager:
                         "report_message_id": report_message_id,
                     }
 
-                # Sub-shape (c) — both exist; the natural path
-                # delivers. No DB write needed.
+                # Sub-shape (c) — both exist. Normally the natural
+                # path delivers; HOWEVER this is also the wedge-fix
+                # carrier-revival seam (async variant — see sync
+                # sibling for the full rationale). The async path
+                # off-loads the live-carrier query to a thread so we
+                # do not block the event loop on a session-bound
+                # SQLModelSession (``list_pending_tasks_older_than``
+                # and friends use the same off-load pattern).
+                live_carrier_exists = await asyncio.to_thread(
+                    self._has_live_process_report_carrier,
+                    message_id=report_message_id,
+                )
+                if (
+                    not live_carrier_exists
+                    and not db_dead_parent
+                    and self._is_parent_alive(parent_row)
+                ):
+                    # Wedge-fix revival: enqueue a fresh PROCESS_REPORT
+                    # carrier (mirrors ``child_reports.py:2843-2852``)
+                    # and wake the worker pool. ``sub_shape=c_revival``
+                    # in the log data makes the seam diagnosable in
+                    # production.
+                    from .repositories.task.models import (
+                        Task as _TaskRevival,
+                        TaskStatus as _TaskStatusRevival,
+                        TaskType as _TaskTypeRevival,
+                    )
+                    fresh_task = _TaskRevival(
+                        task_type=_TaskTypeRevival.PROCESS_REPORT.value,
+                        instance_id=inj.parent_instance_id,
+                        message_id=report_message_id,
+                        status=_TaskStatusRevival.PENDING.value,
+                        created_at=datetime.now(timezone.utc),
+                    )
+                    session.add(fresh_task)
+                    logger.warning(
+                        f"[{source}] reconcile (sub-shape c, "
+                        f"c_revival): no live carrier for message "
+                        f"{report_message_id[:8]}... on alive parent "
+                        f"{inj.parent_instance_id[:8]}...; "
+                        f"enqueued fresh PROCESS_REPORT task + "
+                        f"notify_work(). sub_shape=c_revival, "
+                        f"parent_status="
+                        f"{parent_row.status if parent_row else 'missing'}"
+                    )
+                    # Explicit commit — mirror of the sync sibling.
+                    session.commit()
+                    # Wake the worker pool OUTSIDE the transaction so
+                    # the commit is durable before the pool wakes a
+                    # worker.
+                    if self._worker_pool is not None:
+                        self._worker_pool.notify_work()
+                    return {
+                        "shape": "c_revival",
+                        "report_message_id": report_message_id,
+                    }
+
                 logger.info(
                     f"[{source}] reconcile (sub-shape c, both-exist): "
                     f"delivery only "

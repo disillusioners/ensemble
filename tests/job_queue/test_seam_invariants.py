@@ -3015,41 +3015,50 @@ class TestPeriodicDriftReconciler:
         self, engine, repository, task_repository, lock_repo,
         job_queue_service,
     ):
-        """Pattern (d) — orphan PENDING Task on terminal JobItem.
+        """Pattern (d) — orphan PENDING Task on terminal JobItem
+        (T2 wedge-fix regression: genuinely orphaned task).
 
         Scenario: the JobItem has already been finalized to
         ``done`` (e.g. via the retry engine flipping the JobItem
-        to ``done``/``dead``) but a PENDING Task row survives on
-        the same instance. This can occur in:
+        to ``done``/``dead``) but a PENDING Task row whose
+        ``work_id`` matches that JobItem's ``job_id`` survives on a
+        TERMINATED (dead) instance. This is the T2 contract: a
+        genuinely orphaned task whose OWN linkage-key JobItem is
+        terminal on a dead instance MUST still be cancelled by
+        Pattern (d) — the safety net is preserved.
 
-          * Pre-F5 deployments (Pattern (a) skipped the cancel).
-          * Drift scenarios where the JobItem closed without the
-            ``cancel_pending_tasks_for_instance`` (F12) path firing.
-          * Test / migration paths that finalize the JobItem but
-            leave a stray PENDING behind.
+        Setup contract (wedge-fix):
+          * Instance status = TERMINATED (dead — bypasses the new
+            alive-instance guard at Fix 2 so Pattern (d) still
+            cancels).
+          * JobItem with ``job_id="job-f5-orphan"`` and
+            ``admission_state=DONE``.
+          * Task with ``work_id="job-f5-orphan"`` (the SAME UUID as
+            the JobItem's ``job_id`` — this is the linkage-key
+            contract: Task.work_id == JobItem.job_id).
+          * Pre-fix the lookup was per-instance (``get_by_instance``)
+            and matched by accident because the random UUID had no
+            JobItem AND the instance had one. Post-fix the lookup is
+            per-work_id (``get(task.work_id)``) which matches the
+            linkage key exactly. A non-matching random UUID would
+            now fall through (T1 contract) — T2 here proves the
+            safety net is preserved when keys DO match.
 
         F10 only inspects RUNNING tasks (``list_running_tasks`` +
         ``WHERE status='running'`` guard in ``complete_task``) — a
         PENDING task is invisible to it. Without Pattern (d), this
         orphan would leak until ``recover_on_startup`` on the next
         daemon restart.
-
-        Pattern (d) catches the orphan PENDING whose JobItem is
-        ``done`` (any instance state — alive or dead) and cancels
-        it via ``cancel_pending_tasks_for_instance`` (the atomic
-        ``WHERE status='pending'`` UPDATE used by F12).
-
-        Setup: instance RUNNING (alive), JobItem DONE (terminal),
-        PENDING Task with NULL heartbeat on the instance. The
-        instance is alive — this distinguishes Pattern (d) from
-        Pattern (a), which only fires on dead instances.
         """
-        # Arrange — instance alive, JobItem terminal (done), PENDING
-        # task on the instance.
-        _insert_instance(engine, "inst-f5-orphan", project_id="test-project")
-        # Default status is 'running' (alive) — leaves Pattern (a)
-        # alone (alive-instance log-only branch). Pattern (d) is
-        # the only path that catches this orphan.
+        # Arrange — instance DEAD (TERMINATED, bypasses the
+        # wedge-fix alive-instance guard), JobItem terminal (done),
+        # PENDING task with matching work_id.
+        _insert_instance(
+            engine,
+            "inst-f5-orphan",
+            project_id="test-project",
+            status=InstanceStatus.TERMINATED.value,
+        )
 
         _insert_job_item(
             engine,
@@ -3067,6 +3076,12 @@ class TestPeriodicDriftReconciler:
             message_id="msg-f5-orphan",
             status=TaskStatus.PENDING.value,
             is_deferred=False,
+            # Wedge-fix: stamp the Task's work_id with the SAME UUID
+            # as the JobItem's job_id so the linkage-key lookup
+            # (``get(task.work_id)``) returns the JobItem. Pre-fix
+            # the per-instance lookup matched by accident; post-fix
+            # the lookup is exact.
+            work_id="job-f5-orphan",
         )
         # Backdate so the task is drift-eligible with age=0.
         old_time = datetime.now(timezone.utc) - timedelta(seconds=600)
@@ -3094,7 +3109,8 @@ class TestPeriodicDriftReconciler:
             stale_task_recovery=stale_recovery,
         )
 
-        # Sanity — task is PENDING, JobItem is terminal.
+        # Sanity — task is PENDING, JobItem is terminal, instance is
+        # TERMINATED (dead).
         pre_task = task_repository.get(task_id)
         assert pre_task is not None
         assert pre_task.status == TaskStatus.PENDING.value
@@ -3112,8 +3128,7 @@ class TestPeriodicDriftReconciler:
         assert post_task is not None
         assert post_task.status == TaskStatus.CANCELLED.value, (
             f"Pattern (d) MUST cancel the orphan PENDING Task whose "
-            f"JobItem is terminal. Pre-fix the task stayed PENDING "
-            f"indefinitely (F10 only handles RUNNING tasks). Got "
+            f"JobItem is terminal (T2 safety-net contract). Got "
             f"status={post_task.status!r}"
         )
 
@@ -3249,6 +3264,264 @@ class TestPeriodicDriftReconciler:
         assert not orphan_records, (
             f"Pattern (d) must NOT fire on an active JobItem. Got "
             f"orphan_pending_terminal_job records: {orphan_records}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_reconciler_pattern_d_skips_jobitemless_process_report(
+        self, engine, repository, task_repository, lock_repo,
+        job_queue_service,
+    ):
+        """T1 — Wedge-fix regression: a PENDING PROCESS_REPORT Task
+        on a LIVE parent whose ``work_id`` has NO JobItem MUST NOT
+        be cancelled by Pattern (d), even when an OLD terminal
+        dispatch JobItem exists on the same instance.
+
+        The pre-fix bug: ``get_by_instance(task.instance_id)``
+        returned the most-recent JobItem for the instance — which
+        was an OLD terminal dispatch JobItem from a prior
+        ``send_message`` cycle. Pattern (d) used that as false
+        evidence the Task was an orphan, cancelled the live
+        PROCESS_REPORT carrier, and wedged the WAITING_CHILDREN
+        parent (no other wake source: children already terminal,
+        report generated but undeliverable).
+
+        Fix 1 corrects the linkage to ``get(task.work_id)`` — a
+        PROCESS_REPORT Task whose ``work_id`` has no JobItem (JAFP
+        by design — PROCESS_REPORT carriers never create JobItem
+        mirrors) returns ``None`` and the early-continue fires. The
+        live carrier stays claimable.
+
+        Composition property: the surviving PENDING carrier + the
+        parent in ``WAITING_CHILDREN`` = the wedge-fix sub-shape
+        (c) carrier-revival seam has nothing to do (a carrier
+        exists, the wedge is NOT active). The watchdog backstop
+        similarly stays silent (it requires ZERO live carriers to
+        fire).
+
+        Setup: alive WAITING_CHILDREN parent + an OLD terminal
+        dispatch JobItem on the same instance + a fresh PROCESS_REPORT
+        PENDING Task with a random ``work_id`` (no JobItem exists).
+        """
+        # Arrange — instance alive (WAITING_CHILDREN — the canonical
+        # wedge victim), an OLD terminal dispatch JobItem on the
+        # instance, a fresh PROCESS_REPORT PENDING Task whose
+        # ``work_id`` does NOT match any JobItem.
+        _insert_instance(
+            engine,
+            "inst-t1-wedge",
+            project_id="test-project",
+            status=InstanceStatus.WAITING_CHILDREN.value,
+        )
+
+        # OLD terminal dispatch JobItem — the false-evidence source.
+        _insert_job_item(
+            engine,
+            job_id="job-t1-old-dispatch",
+            instance_id="inst-t1-wedge",
+            project_id="test-project",
+            queue_id="queue-t1-old-dispatch",
+            admission_state=AdmissionState.DONE.value,
+            job_metadata={"message_id": "msg-t1-old-dispatch"},
+        )
+
+        # Fresh PROCESS_REPORT Task with random work_id (no JobItem
+        # exists for this UUID — JAFP virtual-job case).
+        from uuid import uuid4 as _uuid4
+        random_work_id = f"random-{_uuid4()}"
+        task_id = _create_task_with_status(
+            engine,
+            instance_id="inst-t1-wedge",
+            message_id="msg-t1-wedge",
+            status=TaskStatus.PENDING.value,
+            is_deferred=False,
+            task_type=TaskType.PROCESS_REPORT.value,
+            work_id=random_work_id,
+        )
+        # Backdate so the task is drift-eligible.
+        old_time = datetime.now(timezone.utc) - timedelta(seconds=600)
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE task SET created_at = :old_time WHERE id = :id"
+                ),
+                {"old_time": old_time, "id": task_id},
+            )
+
+        # Sanity — confirm the setup: terminal JobItem exists on the
+        # instance but Task.work_id has no JobItem linkage.
+        pre_job = repository.get("job-t1-old-dispatch")
+        assert pre_job is not None
+        assert pre_job.admission_state == AdmissionState.DONE.value
+        pre_task = task_repository.get(task_id)
+        assert pre_task is not None
+        assert pre_task.work_id == random_work_id
+        # Confirm ``get(task.work_id)`` returns None (Fix 1 path).
+        pre_job_by_work_id = repository.get(pre_task.work_id)
+        assert pre_job_by_work_id is None, (
+            f"Sanity check: the JobItem-less PROCESS_REPORT Task's "
+            f"work_id should have NO JobItem (JAFP). Got "
+            f"{pre_job_by_work_id!r}"
+        )
+
+        # Wire the recovery service with the full dep triple.
+        instance_repo = SQLModelInstanceRepository(engine=engine)
+        stale_recovery = StaleTaskRecovery(
+            task_repository=task_repository,
+            message_repository=None,
+            event_repository=None,
+        )
+        service = JobRecoveryService(
+            job_repository=repository,
+            lock_repository=lock_repo,
+            instance_repository=instance_repo,
+            job_queue_service=job_queue_service,
+            task_repository=task_repository,
+            stale_task_recovery=stale_recovery,
+        )
+
+        # Act
+        stats = await service.reconcile_drift_states(
+            min_pending_age_seconds=0,
+        )
+
+        # Assert — the PENDING PROCESS_REPORT Task is NOT cancelled.
+        post_task = task_repository.get(task_id)
+        assert post_task is not None
+        assert post_task.status == TaskStatus.PENDING.value, (
+            f"T1 contract: a JobItem-less PROCESS_REPORT Task MUST "
+            f"NOT be cancelled by Pattern (d), even when an OLD "
+            f"terminal dispatch JobItem exists on the same instance. "
+            f"Pre-fix the per-instance lookup returned the OLD JobItem "
+            f"as false evidence and cancelled the live carrier "
+            f"(incident wedge a8677e5c). Got status={post_task.status!r}"
+        )
+
+        # Assert — NO orphan_pending_terminal_job record for the
+        # PROCESS_REPORT Task (Fix 1 early-continue on ``job is None``).
+        orphan_records = [
+            d for d in stats["details"]
+            if d.get("pattern") == "orphan_pending_terminal_job"
+            and d.get("task_id") == task_id
+        ]
+        assert not orphan_records, (
+            f"Pattern (d) must NOT record an orphan for the "
+            f"JobItem-less PROCESS_REPORT Task (Fix 1 early-continue). "
+            f"Got records: {orphan_records}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_reconciler_pattern_d_skips_alive_instance_with_terminal_job(
+        self, engine, repository, task_repository, lock_repo,
+        job_queue_service,
+    ):
+        """T2b (wedge-fix alive-instance guard) — a PENDING Task
+        whose OWN linkage-key JobItem is terminal AND the instance
+        is ALIVE (``WAITING_CHILDREN``) MUST NOT be cancelled by
+        Pattern (d).
+
+        Fix 2: even when the linkage lookup is unambiguous (the
+        Task's OWN JobItem is terminal), a live ``WAITING_CHILDREN``
+        parent must NEVER be drift-cancelled — it is parked on its
+        child carrier and the cancel would orphan the parent's
+        wake surface. The Task is left for the natural claim path
+        or the watchdog backstop.
+
+        Composition property: the T2b scenario (alive parent +
+        terminal own-job) is the EXACT case where the sub-shape (c)
+        carrier-revival seam must fire — the message is in the
+        queue, the carrier got cancelled (presumably by a prior
+        pre-fix drift sweep), and the parent is parked. The
+        wedge-fix revival seam enqueues a fresh carrier +
+        ``notify_work()`` to wake the parent.
+
+        Setup: alive WAITING_CHILDREN parent + JobItem with
+        ``job_id="job-t2b-alive"`` and ``admission_state=DONE`` +
+        PENDING Task with ``work_id="job-t2b-alive"`` (linkage
+        key matches).
+        """
+        # Arrange — instance ALIVE (WAITING_CHILDREN), terminal
+        # JobItem keyed by the same work_id as the Task.
+        _insert_instance(
+            engine,
+            "inst-t2b-alive",
+            project_id="test-project",
+            status=InstanceStatus.WAITING_CHILDREN.value,
+        )
+
+        _insert_job_item(
+            engine,
+            job_id="job-t2b-alive",
+            instance_id="inst-t2b-alive",
+            project_id="test-project",
+            queue_id="queue-t2b-alive",
+            admission_state=AdmissionState.DONE.value,
+            job_metadata={"message_id": "msg-t2b-alive"},
+        )
+
+        task_id = _create_task_with_status(
+            engine,
+            instance_id="inst-t2b-alive",
+            message_id="msg-t2b-alive",
+            status=TaskStatus.PENDING.value,
+            is_deferred=False,
+            task_type=TaskType.PROCESS_REPORT.value,
+            work_id="job-t2b-alive",
+        )
+        # Backdate so the task is drift-eligible.
+        old_time = datetime.now(timezone.utc) - timedelta(seconds=600)
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE task SET created_at = :old_time WHERE id = :id"
+                ),
+                {"old_time": old_time, "id": task_id},
+            )
+
+        # Wire the recovery service with the full dep triple.
+        instance_repo = SQLModelInstanceRepository(engine=engine)
+        stale_recovery = StaleTaskRecovery(
+            task_repository=task_repository,
+            message_repository=None,
+            event_repository=None,
+        )
+        service = JobRecoveryService(
+            job_repository=repository,
+            lock_repository=lock_repo,
+            instance_repository=instance_repo,
+            job_queue_service=job_queue_service,
+            task_repository=task_repository,
+            stale_task_recovery=stale_recovery,
+        )
+
+        # Act
+        stats = await service.reconcile_drift_states(
+            min_pending_age_seconds=0,
+        )
+
+        # Assert — the PENDING Task is NOT cancelled (alive-instance
+        # guard fires).
+        post_task = task_repository.get(task_id)
+        assert post_task is not None
+        assert post_task.status == TaskStatus.PENDING.value, (
+            f"T2b contract: a PENDING Task on an ALIVE "
+            f"WAITING_CHILDREN parent MUST NOT be cancelled by "
+            f"Pattern (d) even when its OWN JobItem is terminal "
+            f"(Fix 2 alive-instance guard). The cancel would orphan "
+            f"the parent's wake surface — the parent is parked on "
+            f"its carrier. Got status={post_task.status!r}"
+        )
+
+        # Assert — NO orphan_pending_terminal_job record for this
+        # task (alive-instance guard short-circuits before the
+        # cancel).
+        orphan_records = [
+            d for d in stats["details"]
+            if d.get("pattern") == "orphan_pending_terminal_job"
+            and d.get("task_id") == task_id
+        ]
+        assert not orphan_records, (
+            f"Pattern (d) must NOT record an orphan for the alive-"
+            f"instance T2b scenario. Got records: {orphan_records}"
         )
 
     @pytest.mark.asyncio

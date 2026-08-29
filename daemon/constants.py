@@ -244,3 +244,52 @@ TERMINAL_INSTANCE_STATUSES: frozenset[str] = frozenset({
     "error",
     "failed",
 })
+
+# Alive instance statuses — companion to ``TERMINAL_INSTANCE_STATUSES``
+# above. The five instance statuses that gate liveness checks across the
+# reconciler/drift-cancel code path:
+#   * ``daemon/manager.py::_is_parent_alive`` (parent-status guard for
+#     cascade resume + sub-shape (c) carrier-revival).
+#   * ``daemon/services/job_recovery_service.py::_is_instance_alive``
+#     (used by drift sweep + ``reconcile_drift_states`` Pattern d Fix 2
+#     — the alive-instance guard that prevents the wedge-fix class from
+#     re-opening).
+#
+# Previously this set had TWO homes (fork hazard — review minor (a) from
+# the wedge-fix batch):
+#   * ``daemon/services/job_recovery_service.py:52-58`` — local
+#     ``_ALIVE_INSTANCE_STATUSES`` set (``InstanceStatus`` enum refs).
+#   * ``daemon/manager.py:_is_parent_alive`` — inline literal set
+#     (same five members, hard-coded).
+# Two copies on a set that gates drift-cancels is a silent-divergence
+# risk: if a future status is added to one copy and not the other, the
+# safety net silently de-syncs and the wedge class re-opens. This
+# constant is the single definition; both consumers import it.
+#
+# Values mirror ``InstanceStatus`` (daemon/repositories/instance/models.py):
+# IDLE, RUNNING, PAUSED, QUEUED, WAITING_CHILDREN. Naming convention:
+# inline docstrings above status-set constants list the enum NAMES in
+# UPPERCASE for readability (matching the enum definition), while the
+# constant VALUES are lowercase strings — the runtime vocabulary both
+# consumers compare against. Kept as raw strings so ``daemon.constants``
+# stays dependency-free.
+#
+# Test invariant (``tests/unit/test_reconciler_wedge_fix.py::
+# TestAliveInstanceStatusesMembership.test_alive_instance_statuses_membership``
+# — the membership pinning test added during the wedge-fix
+# post-merge cleanup): the five members above are byte-identical
+# to the pre-hoist local definition at
+# ``daemon/services/job_recovery_service.py:52-58``. Companion
+# behavioral test (T2b) lives at
+# ``tests/job_queue/test_seam_invariants.py:3413``
+# (``test_reconciler_pattern_d_skips_alive_instance_with_terminal_job``)
+# — it pins the behavior; this test pins the membership. Any new
+# member must be added here AND in any DDL / docs in the same
+# change.
+ALIVE_INSTANCE_STATUSES: frozenset[str] = frozenset({
+    "idle",
+    "running",
+    "paused",
+    "queued",
+    "waiting_children",
+})

@@ -2091,6 +2091,86 @@ class SQLModelInstanceRepository:
             ).all()
             return list(rows)
 
+    def parents_with_non_terminal_children(
+        self, parent_ids: list[str],
+    ) -> set[str]:
+        """Return the subset of ``parent_ids`` that have at least one
+        non-terminal child instance.
+
+        Batched single-query equivalent of the wedge-fix third condition
+        (``zero non-terminal children``) in
+        ``WaitingChildrenWatchdog``'s wedge pass — the inline predicate
+        is the inverse of the third ``NOT EXISTS`` clause at
+        ``_build_zombie_scan_sql``:1083-1087 (W1 anti-join). Same
+        terminal set (``completed`` / ``error`` / ``terminated`` /
+        ``failed``) so a child in any other status is considered
+        ``still in flight``.
+
+        Used by ``WaitingChildrenWatchdog`` to enforce the wedge
+        predicate's third gate in one query for the entire WC-parent
+        set instead of one query per parent. Within the
+        ``≤1-extra-query-per-WC-parent-per-tick`` budget, the batched
+        shape is strictly cheaper: O(1) queries per tick regardless
+        of WC-parent count.
+
+        Empty ``parent_ids`` short-circuits to ``set()`` to avoid an
+        empty ``IN ()`` SQL clause (SQLite + PostgreSQL both reject
+        it).
+
+        Args:
+            parent_ids: Parent ``instance_id`` candidates — typically
+                the result of :meth:`list_waiting_children_parents`.
+
+        Returns:
+            The subset of ``parent_ids`` for whom at least one row in
+            ``instances`` has ``parent_id == p`` AND a non-terminal
+            ``status``. Parents with zero children, or whose children
+            are all terminal, are NOT in the returned set.
+        """
+        if not parent_ids:
+            return set()
+        # Baked terminal CSV — matches the zombie-scan convention at
+        # ``_build_zombie_scan_sql``:1060-1062 (literal list, not
+        # bound parameters — SQLAlchemy's ``expanding`` style is
+        # dialect-fragile inside ``NOT IN`` on SQLite).
+        terminal_csv = ", ".join(
+            f"'{s}'" for s in self._TERMINAL_STATUSES_FOR_ZOMBIE_SCAN
+        )
+        # Expanding bindparam for ``parent_ids`` (safe here — used
+        # inside a top-level ``IN``, NOT inside ``NOT IN``). DISTINCT
+        # collapses parents with multiple non-terminal children to a
+        # single row so the caller can do O(1) ``in`` checks. The
+        # expanding values are bound at statement-build time so the
+        # call site uses the SQLModel 1-arg ``Session.exec(stmt)``
+        # convention (same shape as every other repo method, e.g.
+        # :meth:`list_waiting_children_parents`).
+        stmt = text(
+            f"""
+            SELECT DISTINCT child.parent_id
+            FROM instances child
+            WHERE child.parent_id IN :parent_ids
+              AND child.status NOT IN ({terminal_csv})
+            """
+        ).bindparams(
+            bindparam(
+                "parent_ids",
+                value=list(parent_ids),
+                expanding=True,
+            )
+        )
+        with SQLModelSession(self.engine) as db_session:
+            rows = db_session.exec(stmt).all()
+        # ``Session.exec(text(...)).all()`` returns a list of
+        # ``sqlalchemy.engine.row.Row`` objects — tuple-LIKE (supports
+        # integer indexing) but not ``isinstance(..., tuple)``. Always
+        # pull the first column; ``Row[0]`` gives the scalar.
+        result: set[str] = set()
+        for row in rows:
+            value = row[0]
+            if value is not None:
+                result.add(value)
+        return result
+
     @staticmethod
     def _build_hung_children_sql(dialect_name: str) -> TextClause:
         """Build the hung-children SQL for ``dialect_name``.

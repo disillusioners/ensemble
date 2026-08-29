@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import text
 
+from daemon.constants import ALIVE_INSTANCE_STATUSES
 from daemon.repositories.instance.models import InstanceStatus
 from daemon.repositories.job_queue.models import AdmissionState, Decision
 from daemon.repositories.task.models import TaskStatus
@@ -48,14 +49,11 @@ _TERMINAL_INSTANCE_STATUSES: set[str] = {
     InstanceStatus.FAILED.value,
 }
 
-# Alive instance statuses - instance is still running
-_ALIVE_INSTANCE_STATUSES: set[str] = {
-    InstanceStatus.IDLE.value,
-    InstanceStatus.RUNNING.value,
-    InstanceStatus.PAUSED.value,
-    InstanceStatus.QUEUED.value,
-    InstanceStatus.WAITING_CHILDREN.value,
-}
+# Alive instance statuses - hoisted to ``daemon.constants`` (see
+# ``daemon/constants.py::ALIVE_INSTANCE_STATUSES`` for the canonical home
+# + member documentation). This module imports it as the single source
+# of truth; do NOT re-declare it locally — duplicate definitions are a
+# silent-divergence hazard on a set that gates drift-cancels.
 
 
 class _SessionAdapter:
@@ -167,7 +165,7 @@ class JobRecoveryService:
         """
         if instance_status is None:
             return False
-        return instance_status in _ALIVE_INSTANCE_STATUSES
+        return instance_status in ALIVE_INSTANCE_STATUSES
 
     def _is_instance_terminal(self, instance_status: str | None) -> bool:
         """Check if an instance status indicates a terminal state.
@@ -964,7 +962,7 @@ class JobRecoveryService:
         # ── Pattern (c): stuck instance — log only ───────────────
         # ``active`` JobItem + instance in a non-alive status
         # (PAUSED/WAITING_CHILDREN are alive by definition —
-        # excluded via ``_ALIVE_INSTANCE_STATUSES``). Detect
+        # excluded via ``ALIVE_INSTANCE_STATUSES``). Detect
         # non-PAUSED, non-terminal stuck states and log for
         # operator visibility. The recovery service's
         # ``recover_on_startup`` handles the terminal-instance
@@ -1040,10 +1038,12 @@ class JobRecoveryService:
         # that catches the PENDING orphan specifically.
         #
         # Query: PENDING tasks older than the threshold whose
-        # ``get_by_instance`` JobItem is in admission_state='done'
-        # (which covers ``completed``, ``failed``, ``cancelled``,
-        # ``dead_letter`` per the admission_state mapping in
-        # ``job_state_machine.py``).
+        # ``get(task.work_id)`` JobItem — the canonical linkage-key
+        # lookup that resolves to the Task's OWN JobItem or
+        # ``None`` (JAFP / virtual-job) — is in
+        # ``admission_state='done'`` (which covers ``completed``,
+        # ``failed``, ``cancelled``, ``dead_letter`` per the
+        # admission_state mapping in ``job_state_machine.py``).
         # Action: cancel the PENDING task via
         # ``cancel_pending_tasks_for_instance`` (same atomic
         # WHERE status='pending' guard F12 uses — does NOT touch
@@ -1070,14 +1070,55 @@ class JobRecoveryService:
 
         for task in orphan_pending:
             try:
+                # ── Wedge-fix: linkage by work_id (NOT instance) ──
+                # Pre-fix this used ``get_by_instance(task.instance_id)``
+                # which returns the MOST RECENT non-deleted JobItem for
+                # the instance. That can be an OLD terminal dispatch
+                # JobItem unrelated to THIS task — and was used as
+                # false evidence to cancel a live PROCESS_REPORT carrier
+                # (JAFP has NO JobItem at all by design), wedging the
+                # waiting_children parent. The JobItem-side
+                # ``job_id`` field IS the canonical cross-system
+                # linkage key (Task.work_id == JobItem.job_id per the
+                # linkage contract); ``get(task.work_id)`` returns the
+                # task's OWN JobItem or ``None`` (JAFP / virtual-job).
+                # A PROCESS_REPORT task whose work_id has no JobItem
+                # → ``job is None`` → early-continue, task untouched.
                 job = await asyncio.to_thread(
-                    self._job_repository.get_by_instance, task.instance_id
+                    self._job_repository.get, task.work_id
                 )
-                # Only catch the case where the JobItem is terminal.
-                # ``active`` JobItems are P1 candidates (handled by
-                # Pattern (a) above); ``None`` JobItems are virtual-
-                # job cases (not drift).
+                # Only catch the case where the Task's OWN JobItem is
+                # terminal. ``active`` JobItems are P1 candidates
+                # (handled by Pattern (a) above); ``None`` JobItems are
+                # virtual-job cases — including all PROCESS_REPORT
+                # carriers per JAFP — and MUST NOT be considered drift.
                 if job is None or job.admission_state != AdmissionState.DONE.value:
+                    continue
+
+                # ── Wedge-fix: alive-instance guard (defense in depth) ──
+                # Even when the linkage lookup is unambiguous (the
+                # Task's OWN JobItem is terminal), a live
+                # ``WAITING_CHILDREN`` parent must NEVER be drift-
+                # cancelled — it is parked on its child carrier and
+                # the cancel would orphan the parent's wake surface.
+                # This mirrors the alive-instance guard Pattern (a)
+                # applies at :791-794 (it cancels only when the
+                # instance is dead; live instances fall into the
+                # log-only branch). Same guard, applied here, so a
+                # stale PENDING task on a live parent is left for the
+                # natural claim path or the watchdog backstop.
+                instance = await asyncio.to_thread(
+                    self._instance_repository.get, task.instance_id
+                )
+                if instance is not None and self._is_instance_alive(
+                    instance.status
+                ):
+                    logger.debug(
+                        f"reconcile_drift_states: Pattern (d) skip — "
+                        f"instance {task.instance_id[:8]}... is alive "
+                        f"(status={instance.status}); task {task.id} "
+                        f"left for natural claim path or watchdog backstop."
+                    )
                     continue
 
                 # Cancel the orphan PENDING task. The atomic UPDATE

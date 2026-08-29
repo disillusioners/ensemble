@@ -715,6 +715,48 @@ class TaskRepository:
             )
             return list(db_session.exec(stmt))
 
+    def list_live_process_report_carriers_for_instance(
+        self, instance_id: str
+    ) -> list[Task]:
+        """Return every live PROCESS_REPORT Task for ``instance_id``.
+
+        Wedge-fix backstop helper (waiting_children_watchdog): used
+        to detect the wedge signature — a ``WAITING_CHILDREN``
+        parent with zero non-terminal children AND zero live
+        carrier. Returns the live set so callers can both count and
+        inspect (e.g. distinguish PENDING-with-NULL-heartbeat from
+        RUNNING-with-heartbeat). Cheap read — single indexed
+        lookup on ``instance_id``.
+
+        "Live" = ``status IN ('pending', 'running')``. Terminal
+        statuses (COMPLETED / CANCELLED / FAILED) are excluded —
+        those are the wedge case (carrier was killed but the parent
+        is still parked).
+
+        Args:
+            instance_id: The parent instance ID whose live carriers
+                we are enumerating.
+
+        Returns:
+            List of live PROCESS_REPORT Task rows (possibly empty).
+        """
+        with SQLModelSession(self.engine) as db_session:
+            stmt = (
+                select(Task)
+                .where(Task.instance_id == instance_id)
+                .where(
+                    Task.task_type == TaskType.PROCESS_REPORT.value
+                )
+                .where(
+                    Task.status.in_([
+                        TaskStatus.PENDING.value,
+                        TaskStatus.RUNNING.value,
+                    ])
+                )
+                .order_by(col(Task.created_at).desc())
+            )
+            return list(db_session.exec(stmt))
+
     def reconcile_turn_mirror(
         self, work_id: str, connection: Any | None = None
     ) -> dict[str, Any]:
