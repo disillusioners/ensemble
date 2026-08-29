@@ -3864,8 +3864,9 @@ class TestRegistration:
 #   (b) cross-subtree rejection (target param offered, reusing
 #       _validate_subtree_target semantics)
 #   (c) correctness — statuses, relative-age rendering (helper unit
-#       tests + tool-level fresh/minutes/hours/days/None), pending
-#       counts match seeded data
+#       tests + tool-level fresh/minutes/hours/days/None), queued +
+#       running counts match seeded data (Finding-3 trap pin:
+#       running-only child must NOT render as 0)
 #   (d) caller-first ordering; default cap 50; hard clamp 200;
 #       truncation notice when rows exceed the cap
 #   (e) status_filter — exact case-insensitive matching; 'all' default
@@ -3875,7 +3876,9 @@ class TestRegistration:
 #   (g) token-budget sanity — cap-sized row input stays within a
 #       stated char bound
 #   (h) read-only guarantee — only read-only manager methods are
-#       invoked; the pending-count query is ONE batched call
+#       invoked; the combined queued+running count query is ONE
+#       batched call through the manager facade
+#       (``Manager.count_pending_and_running_tasks_by_instance``)
 # ---------------------------------------------------------------------------
 
 from datetime import datetime, timedelta, timezone as _tz_utc  # noqa: E402
@@ -3885,7 +3888,7 @@ def _make_subtree_status_manager(
     *,
     subtree_ids: list[str] | None = None,
     infos_by_iid: dict[str, dict] | None = None,
-    pending_by_iid: dict[str, int] | None = None,
+    counts_by_iid: dict[str, dict[str, int]] | None = None,
     get_info_side_effect: Exception | None = None,
 ) -> MagicMock:
     """Build a mock manager pre-wired for ``subtree_status``.
@@ -3900,24 +3903,33 @@ def _make_subtree_status_manager(
             ``manager.get_instance_info(iid)`` (status / agent_name /
             agent_id / last_activity_at). Missing keys → a minimal
             running row.
-        pending_by_iid: The dict ``manager.count_pending_tasks_by_instance``
-            should return (mirrors the real grouped-count contract:
-            zero-count instances omitted by the repository).
+        counts_by_iid: The combined-counts dict mirroring the real
+            ``Manager.count_pending_and_running_tasks_by_instance``
+            facade contract (delegating to
+            ``TaskRepository.count_pending_and_running_by_instance_ids``):
+            ``{iid: {"pending": N, "running": M}}``. Rows with BOTH
+            ``pending == 0`` AND ``running == 0`` are OMITTED (the
+            repo's GROUP BY omits zero-of-both groups); the tool
+            defaults to ``{0, 0}`` via ``dict.get`` for the rest.
         get_info_side_effect: If provided, ``get_instance_info`` raises
             this exception for EVERY call (per-instance error-skip test).
 
     Returns:
         A ``MagicMock`` whose ``get_tree_ids_permanent``,
-        ``get_instance_info``, and ``count_pending_tasks_by_instance``
-        stubs are pre-wired.
+        ``get_instance_info``, and
+        ``count_pending_and_running_tasks_by_instance`` stubs are
+        pre-wired. Counts route through the manager facade (D14) so
+        the helper stays consistent with the production read path
+        (and the ``test_only_read_only_manager_methods_invoked``
+        allow-set tight).
     """
     manager = MagicMock()
     if subtree_ids is None:
         subtree_ids = ["parent-instance"]
     if infos_by_iid is None:
         infos_by_iid = {}
-    if pending_by_iid is None:
-        pending_by_iid = {}
+    if counts_by_iid is None:
+        counts_by_iid = {}
 
     manager.get_tree_ids_permanent = MagicMock(return_value=list(subtree_ids))
 
@@ -3931,10 +3943,17 @@ def _make_subtree_status_manager(
 
     manager.get_instance_info = MagicMock(side_effect=_get_info)
 
-    # Real repository contract: grouped count returns ONLY instances
-    # with count > 0 (GROUP BY omits empty groups).
-    manager.count_pending_tasks_by_instance = MagicMock(
-        return_value={k: v for k, v in pending_by_iid.items() if v}
+    # Route counts through the manager facade (D14 — tool layer must
+    # never reach into ``_task_repo`` directly). The combined shape
+    # is ``{iid: {"pending": N, "running": M}}`` — zero-of-both rows
+    # are OMITTED, mirroring the real repo's GROUP BY shape.
+    manager.count_pending_and_running_tasks_by_instance = MagicMock(
+        return_value={
+            iid: dict(counts)
+            for iid, counts in counts_by_iid.items()
+            if counts.get("pending", 0) > 0
+            or counts.get("running", 0) > 0
+        }
     )
 
     # Mimic the Phase 1 manager shape so ``create_instance_tools``
@@ -4138,12 +4157,23 @@ class TestSubtreeStatusRows:
     """(c) Row correctness: statuses, ages, pending counts, caps."""
 
     @pytest.mark.timeout(10)
-    async def test_rows_carry_status_age_pending(self):
+    async def test_rows_carry_status_age_queued_running(self):
+        """Stability-backlog row 4 / Finding-3 trap pin: each row
+        now carries BOTH ``queued`` and ``running`` columns. A child
+        with only RUNNING work (the pre-fix false-idle shape) must
+        render with ``running>=1`` even when ``queued==0``.
+
+        Fixtures: ``i-minute`` has 3 queued + 0 running, ``i-fresh``
+        has 1 queued + 0 running, ``i-busy`` has 0 queued + 2
+        running (the new column is the only signal a parent gets for
+        a busy in-flight child), ``i-hours`` has 0 of both (missing
+        from the grouped result → defaults to 0/0).
+        """
         now = datetime.now(_tz_utc.utc)
         manager = _make_subtree_status_manager(
             subtree_ids=[
-                "parent-instance", "i-fresh", "i-minutes", "i-hours",
-                "i-days", "i-unknown",
+                "parent-instance", "i-fresh", "i-minutes", "i-busy",
+                "i-hours", "i-days", "i-unknown",
             ],
             infos_by_iid={
                 "parent-instance": {
@@ -4158,6 +4188,10 @@ class TestSubtreeStatusRows:
                     "agent_name": "tester", "status": "completed",
                     "last_activity_at": _iso(now - timedelta(minutes=14)),
                 },
+                "i-busy": {
+                    "agent_name": "coder", "status": "running",
+                    "last_activity_at": _iso(now - timedelta(seconds=5)),
+                },
                 "i-hours": {
                     "agent_name": "reviewer", "status": "error",
                     "last_activity_at": _iso(now - timedelta(hours=2)),
@@ -4171,7 +4205,13 @@ class TestSubtreeStatusRows:
                     "last_activity_at": None,
                 },
             },
-            pending_by_iid={"i-minutes": 3, "i-fresh": 1},
+            counts_by_iid={
+                "i-minutes": {"pending": 3, "running": 0},
+                "i-fresh": {"pending": 1, "running": 0},
+                # Finding-3 trap pin: zero queued + non-zero running.
+                "i-busy": {"pending": 0, "running": 2},
+                # i-hours omitted (zero of both → GROUP BY omits).
+            },
         )
         tool = _get_subtree_status_tool(manager)
 
@@ -4181,20 +4221,51 @@ class TestSubtreeStatusRows:
         rows = {
             ln[:8].strip(): ln for ln in lines[3:]
         }
+        # Header carries both column names (exact-match: the v1
+        # ``pending`` header is GONE — see _full_doc_ change).
+        header_line = lines[2]
+        assert "queued" in header_line, header_line
+        assert "running" in header_line, header_line
+        assert "pending" not in header_line, header_line
         # Statuses rendered verbatim.
         assert any("running" in ln for ln in rows.values())
         assert any("waiting_children" in ln for ln in rows.values())
         # Relative ages.
         row_fresh = rows["i-fresh"]
-        assert " now" in row_fresh and " 1" in row_fresh, row_fresh
+        assert " now" in row_fresh, row_fresh
         assert "14m" in rows["i-minute"]
         assert " 2h" in rows["i-hours"]
         assert " 3d" in rows["i-days"]
         assert "  -" in rows["i-unknow"]
-        # Pending counts match the seeded map (missing → 0).
-        assert rows["i-minute"].rstrip().endswith("3"), rows["i-minute"]
-        assert rows["i-fresh"].rstrip().endswith("1"), rows["i-fresh"]
-        assert rows["i-hours"].rstrip().endswith("0"), rows["i-hours"]
+        # BOTH columns match the seeded map; row format is
+        # ``... <age>  <queued>  <running>`` so the row ENDS WITH
+        # the running value. ``i-busy`` is the Finding-3 trap pin:
+        # the running column is the only signal a parent gets.
+        # i-minute: queued=3, running=0 → ends with "      3       0"
+        # (width 6 + width 7, both right-aligned, see tool body).
+        assert rows["i-minute"].rstrip().endswith("       0"), (
+            rows["i-minute"]
+        )
+        assert "      3" in rows["i-minute"], rows["i-minute"]
+        # i-fresh: queued=1, running=0
+        assert rows["i-fresh"].rstrip().endswith("       0"), (
+            rows["i-fresh"]
+        )
+        assert "      1" in rows["i-fresh"], rows["i-fresh"]
+        # i-busy: queued=0, running=2 — the Finding-3 fix in action.
+        assert rows["i-busy"].rstrip().endswith("       2"), (
+            rows["i-busy"]
+        )
+        assert "      0" in rows["i-busy"], rows["i-busy"]
+        # i-hours: zero of both → defaults to {0, 0} via dict.get.
+        assert rows["i-hours"].rstrip().endswith("       0"), (
+            rows["i-hours"]
+        )
+        # i-unknown (waiting_children, no last_activity_at): the
+        # combined count defaults to {0, 0} too.
+        assert rows["i-unknow"].rstrip().endswith("       0"), (
+            rows["i-unknow"]
+        )
 
     @pytest.mark.timeout(10)
     async def test_agent_name_capped_at_24_chars(self):
@@ -4260,21 +4331,27 @@ class TestSubtreeStatusRows:
         assert calls["n"] == 3
 
     @pytest.mark.timeout(10)
-    async def test_pending_count_query_failure_degrades_to_zero(self):
+    async def test_count_query_failure_degrades_to_zero(self):
         """A failing batched count query degrades every row to
-        pending=0 with a warning — the overview never crashes."""
+        ``queued=0 running=0`` with a warning — the overview never
+        crashes. The query now goes through the
+        ``Manager.count_pending_and_running_tasks_by_instance``
+        facade (stability-backlog row 4)."""
         manager = _make_subtree_status_manager(
             subtree_ids=["parent-instance"],
         )
-        manager.count_pending_tasks_by_instance = MagicMock(
-            side_effect=RuntimeError("db unavailable")
+        manager.count_pending_and_running_tasks_by_instance = (
+            MagicMock(side_effect=RuntimeError("db unavailable"))
         )
         tool = _get_subtree_status_tool(manager)
 
         result = await tool.coroutine()
 
         assert "ERROR" not in result
-        assert result.splitlines()[3].rstrip().endswith("0")
+        # New row format ends with ``<running>`` (width 7). With the
+        # query failure, the running cell degrades to 0 → row ends
+        # with ``"       0"`` (7 spaces of padding + "0").
+        assert result.splitlines()[3].rstrip().endswith("       0")
 
 
 # ---------------------------------------------------------------------------
@@ -4469,13 +4546,29 @@ class TestSubtreeStatusRegistration:
 
     @pytest.mark.timeout(10)
     def test_full_doc_non_empty_and_documents_contract(self):
+        """The v2 contract: the doc must mention BOTH ``queued`` and
+        ``running`` (the column names the tool now renders — the v1
+        ``pending`` column was renamed). The doc must still document
+        ``subtree``, ``status_filter``, and the read-only nature.
+
+        Drift guard: the row-format example MUST show ``<queued>``
+        and ``<running>`` (NOT ``<pending>``). Same-commit discipline
+        for the column-name contract change."""
         manager = _make_subtree_status_manager()
         tool = _get_subtree_status_tool(manager)
 
         full_doc = getattr(tool, "_full_doc_", None)
         assert isinstance(full_doc, str) and full_doc.strip()
-        for concept in ("subtree", "status_filter", "pending", "read-only"):
+        for concept in (
+            "subtree", "status_filter", "queued", "running", "read-only",
+        ):
             assert concept in full_doc.lower(), concept
+        # Drift guard: the row-format example MUST NOT show
+        # ``<pending>`` as a column header anymore. The legacy
+        # prose can still mention "PENDING tasks" (lowercase
+        # ``status='pending'`` SQL filter description).
+        assert "<age>  <pending>" not in full_doc
+        assert "<queued>  <running>" in full_doc
 
     @pytest.mark.timeout(10)
     def test_tool_help_returns_subtree_status_doc(self):
@@ -4589,9 +4682,20 @@ class TestSubtreeStatusRegistration:
 
     @pytest.mark.timeout(10)
     def test_manager_facade_method_exists_and_delegates(self):
-        """The ONE additive facade method exists, is additive-shaped
-        (single list arg), and delegates to ``_task_repo`` (D14 — the
-        tool layer never reaches into the repository)."""
+        """The legacy additive facade method (``Manager.count_pending_tasks_by_instance``)
+        still exists, is additive-shaped (single list arg), and
+        delegates to the backward-compat wrapper in
+        ``_task_repo.count_pending_by_instance_ids`` (D14 — the
+        facade never reaches into a sibling repository).
+
+        Architectural note (stability-backlog row 4 / Finding-3):
+        the ``subtree_status`` tool now consumes the COMBINED
+        pending+running facade
+        (``Manager.count_pending_and_running_tasks_by_instance``)
+        instead — see the sibling test below. The legacy pending-only
+        facade is preserved as a backward-compat seam: see
+        ``TaskRepository.count_pending_by_instance_ids`` (the
+        legacy wrapper)."""
         import inspect
 
         from daemon.manager import InstanceManager
@@ -4604,7 +4708,46 @@ class TestSubtreeStatusRegistration:
         assert params == ["instance_ids"], params
 
         src = inspect.getsource(method)
+        # The facade delegates to the repo via the backward-compat
+        # wrapper name. The new combined method
+        # (``count_pending_and_running_by_instance_ids``) is what
+        # the tool consumes via the combined facade.
         assert "count_pending_by_instance_ids" in src
+        # D14: no direct reach-in from the facade into unrelated repos.
+        assert "_instance_repository" not in src
+
+    def test_count_pending_and_running_tasks_by_instance_facade_delegates(self):
+        """Sibling of the legacy facade test above — the combined
+        pending+running facade
+        (``Manager.count_pending_and_running_tasks_by_instance``)
+        exists, is additive-shaped (single ``instance_ids`` arg),
+        and delegates to
+        ``_task_repo.count_pending_and_running_by_instance_ids``
+        (D14: facade never reaches into a sibling repository). The
+        ``subtree_status`` tool routes through this facade.
+
+        Mirrors the legacy test's exact shape (signature scan +
+        source-string delegation check) so the two facades stay
+        structurally identical — a small change here is an
+        easy-to-spot drift signal in the review."""
+        import inspect
+
+        from daemon.manager import InstanceManager
+
+        assert hasattr(
+            InstanceManager, "count_pending_and_running_tasks_by_instance"
+        )
+        method = (
+            InstanceManager.count_pending_and_running_tasks_by_instance
+        )
+        params = [
+            p for p in inspect.signature(method).parameters if p != "self"
+        ]
+        assert params == ["instance_ids"], params
+
+        src = inspect.getsource(method)
+        # The combined facade delegates to the combined repo method.
+        assert "count_pending_and_running_by_instance_ids" in src
         # D14: no direct reach-in from the facade into unrelated repos.
         assert "_instance_repository" not in src
 
@@ -4620,9 +4763,12 @@ class TestSubtreeStatusTokenBudget:
     @pytest.mark.timeout(10)
     async def test_cap_sized_output_within_stated_bound(self):
         """200 rows (hard clamp) with WORST-CASE cells (24-char agent
-        names, longest status, 3-digit pending) stay within the
-        documented bound: header slack + <= 66 chars/row, and under
-        the defense-in-depth ceiling constant."""
+        names, longest status, 3-digit queued + 3-digit running)
+        stay within the documented bound: header slack + <= 73
+        chars/row, and under the defense-in-depth ceiling
+        constant. Stability-backlog row 4 widened the row by ~7
+        chars (added the ``running`` column) — bound bumped from
+        66 → 73 to match."""
         from daemon.tools.instance import (
             _SUBTREE_STATUS_OUTPUT_CEILING_CHARS,
         )
@@ -4641,7 +4787,9 @@ class TestSubtreeStatusTokenBudget:
                 }
                 for iid in ids
             },
-            pending_by_iid={iid: 999 for iid in ids},
+            counts_by_iid={
+                iid: {"pending": 999, "running": 999} for iid in ids
+            },
         )
         tool = _get_subtree_status_tool(manager)
 
@@ -4649,13 +4797,13 @@ class TestSubtreeStatusTokenBudget:
 
         lines = result.splitlines()
         assert len(lines) >= 200
-        # Stated bound: 3 header lines + one row each, <= 66 chars/row
-        # (8 iid + 2 + 24 agent + 1 + 16 status + 1 + 4 age + 2 + 3
-        # pending + slack), plus the truncation WARNING block.
+        # Stated bound: 3 header lines + one row each, <= 73 chars/row
+        # (8 iid + 2 + 24 agent + 1 + 16 status + 1 + 4 age + 2 + 6
+        # queued + 2 + 7 running), plus the truncation WARNING block.
         row_lines = lines[3:3 + 200]
         for ln in row_lines:
-            assert len(ln) <= 66, f"row exceeds 66-char budget: {ln!r}"
-        bound = 3 * 120 + 200 * 66 + 400  # header + rows + warning slack
+            assert len(ln) <= 73, f"row exceeds 73-char budget: {ln!r}"
+        bound = 3 * 120 + 200 * 73 + 400  # header + rows + warning slack
         assert len(result) <= bound, (
             f"output {len(result)} chars exceeds stated bound {bound}"
         )
@@ -4689,9 +4837,17 @@ class TestSubtreeStatusReadOnly:
     @pytest.mark.timeout(10)
     async def test_only_read_only_manager_methods_invoked(self):
         """After the tool runs, every manager call recorded (beyond
-        factory-time wiring) is one of the three read-only seams:
-        get_tree_ids_permanent / get_instance_info /
-        count_pending_tasks_by_instance."""
+        factory-time wiring) is one of the three read-only seams
+        directly invoked on the manager:
+        ``get_tree_ids_permanent`` / ``get_instance_info`` /
+        ``count_pending_and_running_tasks_by_instance``.
+
+        The combined pending+running count query is now routed
+        through the manager facade (D14 — see the comment block
+        above the tool body); the helper pre-wires the facade
+        method so the call surface stays on the manager object. The
+        combined query is asserted separately in
+        ``test_counts_query_is_one_batched_call``."""
         manager = _make_subtree_status_manager(
             subtree_ids=["parent-instance", "i-child-1", "i-child-2"],
         )
@@ -4703,10 +4859,13 @@ class TestSubtreeStatusReadOnly:
         after = list(manager.method_calls)
 
         delta = [c[0] for c in after[len(before):]]
+        # MagicMock records every invoked method name on
+        # ``method_calls``. With the count routed through the
+        # manager facade, the new read-only surface is exactly:
         allowed = {
             "get_tree_ids_permanent",
             "get_instance_info",
-            "count_pending_tasks_by_instance",
+            "count_pending_and_running_tasks_by_instance",
         }
         assert set(delta) <= allowed, (
             f"subtree_status invoked non-read-only manager methods: "
@@ -4733,9 +4892,16 @@ class TestSubtreeStatusReadOnly:
         manager.pause_instance_cascade.assert_not_called()
 
     @pytest.mark.timeout(10)
-    async def test_pending_counts_are_one_batched_call(self):
-        """50 rows → EXACTLY ONE count query carrying all 50 ids —
-        never N per-instance count queries."""
+    async def test_counts_query_is_one_batched_call(self):
+        """50 rows → EXACTLY ONE combined pending+running count query
+        carrying all 50 ids on
+        ``manager.count_pending_and_running_tasks_by_instance`` —
+        never N per-instance count queries. The mock is on the
+        manager facade (the v2 read surface), NOT a direct
+        ``_task_repo`` reach-in; the legacy facade
+        ``manager.count_pending_tasks_by_instance`` (pending-only)
+        is preserved as a backward-compat seam and is NOT invoked
+        by the tool."""
         ids = ["parent-instance"] + [f"i-child-{i:03d}" for i in range(49)]
         manager = _make_subtree_status_manager(
             subtree_ids=ids,
@@ -4748,16 +4914,20 @@ class TestSubtreeStatusReadOnly:
 
         await tool.coroutine()
 
-        manager.count_pending_tasks_by_instance.assert_called_once()
-        called_with = (
-            manager.count_pending_tasks_by_instance.call_args.args[0]
+        count_method = (
+            manager.count_pending_and_running_tasks_by_instance
         )
+        count_method.assert_called_once()
+        called_with = count_method.call_args.args[0]
         assert set(called_with) == set(ids)
         assert len(called_with) == 50
+        # The legacy pending-only facade is preserved for backward
+        # compat but is NOT invoked by the tool.
+        manager.count_pending_tasks_by_instance.assert_not_called()
 
     @pytest.mark.timeout(10)
     async def test_empty_result_makes_no_count_query(self):
-        """Zero rows after filtering → the batched count query is
+        """Zero rows after filtering → the combined count query is
         skipped entirely (no empty-list DB round-trip)."""
         manager = _make_subtree_status_manager(
             subtree_ids=["parent-instance"],
@@ -4767,4 +4937,4 @@ class TestSubtreeStatusReadOnly:
 
         await tool.coroutine(status_filter="paused")
 
-        manager.count_pending_tasks_by_instance.assert_not_called()
+        manager.count_pending_and_running_tasks_by_instance.assert_not_called()

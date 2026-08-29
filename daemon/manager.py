@@ -7181,7 +7181,7 @@ class InstanceManager:
                         f"[{source}] reconcile (sub-shape b, message-only): "
                         f"recreated message + task "
                         f"parent={inj.parent_instance_id[:8]}..., "
-                        f"child={child_instance_id[:8]}..."
+                        f"child={child_instance_id[:8]}...; notify_work()"
                     )
                     # Explicit commit — ``_session_scope`` rolls
                     # back uncommitted rows on close. Without this
@@ -7189,6 +7189,17 @@ class InstanceManager:
                     # the session-scope exits and the parent's
                     # processor never sees the report.
                     session.commit()
+                    # Wake the worker pool OUTSIDE the transaction so
+                    # the commit is durable before the pool wakes a
+                    # worker (avoids a race where a worker claims a
+                    # row that hasn't been committed yet). Mirrors
+                    # the c_revival shape at manager.py:7312-7313 and
+                    # the item-5 task_only_create sibling fix at
+                    # manager.py:7247-7255. Council warning W3:
+                    # without this notify the re-created carrier
+                    # waits for the next poll (delay, not wedge).
+                    if self._worker_pool is not None:
+                        self._worker_pool.notify_work()
                     return {
                         "shape": "message_only_recreate",
                         "report_message_id": report_message_id,
@@ -7239,11 +7250,20 @@ class InstanceManager:
                         f"[{source}] reconcile (sub-shape b, task-only): "
                         f"created task "
                         f"parent={inj.parent_instance_id[:8]}..., "
-                        f"child={child_instance_id[:8]}..."
+                        f"child={child_instance_id[:8]}...; notify_work()"
                     )
                     # Same explicit-commit requirement as the
                     # message-only branch above.
                     session.commit()
+                    # Wake the worker pool OUTSIDE the transaction so
+                    # the commit is durable before the pool wakes a
+                    # worker (avoids a race where a worker claims a
+                    # row that hasn't been committed yet). Mirrors
+                    # the c_revival shape at manager.py:7312-7313.
+                    # Backlog row 5: without this notify, delivery
+                    # waits for the next poll (delay, not wedge).
+                    if self._worker_pool is not None:
+                        self._worker_pool.notify_work()
                     return {
                         "shape": "task_only_create",
                         "report_message_id": report_message_id,
@@ -7815,7 +7835,7 @@ class InstanceManager:
                         f"[{source}] reconcile (sub-shape b, message-only): "
                         f"recreated message + task "
                         f"parent={inj.parent_instance_id[:8]}..., "
-                        f"child={child_instance_id[:8]}..."
+                        f"child={child_instance_id[:8]}...; notify_work()"
                     )
                     # Explicit commit — mirror of the sync sibling
                     # above. ``_session_scope`` rolls back on close
@@ -7823,6 +7843,17 @@ class InstanceManager:
                     # disappear and the router's re-entry finds no
                     # deliverable artefact.
                     session.commit()
+                    # Wake the worker pool OUTSIDE the transaction so
+                    # the commit is durable before the pool wakes a
+                    # worker (avoids a race where a worker claims a
+                    # row that hasn't been committed yet). Mirrors
+                    # the c_revival shape at manager.py:7936-7937 and
+                    # the item-5 task_only_create sibling fix at
+                    # manager.py:7890-7898. Council warning W3:
+                    # without this notify the re-created carrier
+                    # waits for the next poll (delay, not wedge).
+                    if self._worker_pool is not None:
+                        self._worker_pool.notify_work()
                     return {
                         "shape": "message_only_recreate",
                         "report_message_id": report_message_id,
@@ -7873,11 +7904,20 @@ class InstanceManager:
                         f"[{source}] reconcile (sub-shape b, task-only): "
                         f"created task "
                         f"parent={inj.parent_instance_id[:8]}..., "
-                        f"child={child_instance_id[:8]}..."
+                        f"child={child_instance_id[:8]}...; notify_work()"
                     )
                     # Same explicit-commit requirement as the
                     # message-only branch above.
                     session.commit()
+                    # Wake the worker pool OUTSIDE the transaction so
+                    # the commit is durable before the pool wakes a
+                    # worker (avoids a race where a worker claims a
+                    # row that hasn't been committed yet). Mirrors
+                    # the c_revival shape at manager.py:7936-7937.
+                    # Backlog row 5: without this notify, delivery
+                    # waits for the next poll (delay, not wedge).
+                    if self._worker_pool is not None:
+                        self._worker_pool.notify_work()
                     return {
                         "shape": "task_only_create",
                         "report_message_id": report_message_id,
@@ -9732,6 +9772,54 @@ class InstanceManager:
             )
             return {}
         return task_repo.count_pending_by_instance_ids(instance_ids)
+
+    def count_pending_and_running_tasks_by_instance(
+        self, instance_ids: list[str]
+    ) -> dict[str, dict[str, int]]:
+        """Grouped count of PENDING + RUNNING tasks per instance (read-only, ONE query).
+
+        Backs the ``subtree_status`` tool (#5, agent-instance-tools
+        follow-up; #4 stability-backlog row 4, Finding-3) — one
+        batched GROUP BY over the whole subtree instead of N
+        per-instance lookups, with BOTH buckets surfaced so a busy
+        RUNNING child does not render as 0. Additive facade
+        mirroring the ``count_pending_tasks_by_instance`` / sibling
+        ``get_tree_ids_permanent`` precedent (facade delegating to a
+        repository); the tool layer MUST NOT reach into
+        ``manager._task_repo`` directly (D14).
+
+        Read model: the ``task`` table, not ``job_queue_items`` —
+        agent-to-agent dispatch (``send_message`` → ``enqueue_message``)
+        creates Task rows directly (D13) without JobItems, so the task
+        table is the authoritative pending-work view for subtree
+        overviews. Both ``status='pending'`` (queued) and
+        ``status='running'`` (in-flight) are counted in their
+        respective columns via conditional aggregation in the repo;
+        PAUSED work is excluded (a paused instance is visible via its
+        own ``status`` column).
+
+        Args:
+            instance_ids: The instance IDs to group-count. Empty list →
+                ``{}`` (no DB round-trip).
+
+        Returns:
+            ``{instance_id: {"pending": N, "running": M}}`` for
+            instances with a count > 0 in either bucket; callers use
+            ``dict.get(iid, {"pending": 0, "running": 0})`` for the
+            rest (the repo's GROUP BY omits zero-of-both rows).
+        """
+        task_repo = getattr(self, "_task_repo", None)
+        if task_repo is None:
+            # ``_task_repo`` is wired in setup_worker_pool(); a tool
+            # invocation always runs post-setup, but a partially
+            # initialized manager (early tests) should degrade to
+            # "no pending work known" rather than crash.
+            logger.warning(
+                "count_pending_and_running_tasks_by_instance: "
+                "_task_repo not wired; returning empty counts."
+            )
+            return {}
+        return task_repo.count_pending_and_running_by_instance_ids(instance_ids)
 
     def clear_all_instances(self) -> int:
         """Clear all instances from memory and database.

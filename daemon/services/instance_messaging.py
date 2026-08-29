@@ -3952,7 +3952,63 @@ class InstanceMessagingService:
 
         Returns a dict with pending_count, processing_count,
         and oldest_message_age_seconds attributes.
+
+        Quick-Wins #2 — Item 1 (send-gate terminal-instance filter):
+        the in-progress gate in ``daemon/tools/instance.py`` consumes
+        these counts; a stranded carrier on a TERMINATED instance (the
+        2026-08-29 wedged-tester 77ab8ab2 incident) must NOT count
+        toward the gate — otherwise ``send_message``/revive blocks
+        forever ("Pending: 1, Processing: 0"). When the queried
+        instance is in a canonical terminal status, the counts are
+        reported as 0 so the gate passes through to the enqueue path.
+        Uses ``TERMINAL_INSTANCE_STATUSES`` from ``daemon.constants``
+        (the canonical set — completed/terminated/error/failed) so
+        the filter cannot drift from the rest of the codebase.
         """
+        # Terminal-instance short-circuit: a stranded carrier on a
+        # dead instance is not "in progress". Cheap SELECT (PK lookup);
+        # the existing ``get_stats`` query is reserved for live queues.
+        # The missing-instance branch (row absent) also returns zeros —
+        # the gate's first call after a cascade may query an already-
+        # deleted instance and must remain non-blocking.
+        try:
+            from ..constants import TERMINAL_INSTANCE_STATUSES
+
+            _instance_meta = await asyncio.to_thread(
+                self._manager._instance_repository.get, instance_id
+            )
+            if (
+                _instance_meta is not None
+                and _instance_meta.status in TERMINAL_INSTANCE_STATUSES
+            ):
+                logger.debug(
+                    f"get_queue_stats: instance {instance_id[:8]}... is "
+                    f"terminal ({_instance_meta.status}); returning zeros "
+                    f"to keep the send-gate non-blocking "
+                    f"(stranded-carrier quick-win #2)"
+                )
+                return {
+                    "pending_count": 0,
+                    "processing_count": 0,
+                    "oldest_message_age_seconds": None,
+                }
+        except Exception as filter_exc:
+            # FAIL-OPEN: a transient lookup failure must not block
+            # sends. The unfiltered counts are returned, matching the
+            # pre-fix behaviour under lookup error. Elevated from DEBUG
+            # to WARNING on council W1 (2026-08-29): a silent miscount
+            # here silently re-wedges the carrier with zero prod
+            # visibility; the warn level is the only externally-visible
+            # signal that fail-open masked a degraded lookup.
+            logger.warning(
+                "get_queue_stats: terminal-status lookup failed "
+                "(non-fatal, returning unfiltered counts) "
+                "instance_id=%s error=%s: %s",
+                instance_id,
+                type(filter_exc).__name__,
+                filter_exc,
+            )
+
         stats = await asyncio.to_thread(self._queue_repository.get_stats, instance_id)
         return {
             "pending_count": stats["pending_count"],

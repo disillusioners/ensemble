@@ -493,28 +493,31 @@ class WaitingChildrenWatchdog:
             # backstop does NOT fire (the production path always
             # wires the repo via ``daemon/api.py``).
             return True
-        try:
-            # The repo helper is sync; the calling context is the
-            # watchdog loop on the asyncio event loop thread, but
-            # the SQLAlchemy session uses a thread-local connection
-            # that does not require async — short-lived read, no
-            # transaction held across awaits.
-            live = repo.list_live_process_report_carriers_for_instance(
-                instance_id
-            )
-            # AsyncMock test fixtures return coroutines from method
-            # calls — detect and treat as having-a-carrier (True)
-            # so the wedge pass stays silent for tests that mock
-            # the manager without wiring the repo. New tests wire
-            # the repo explicitly via the constructor and get the
-            # real behavior.
-            if _inspect.iscoroutine(live):
-                return True
-            return len(live) > 0
-        except AttributeError:
-            # The injected repo does not implement the helper —
+        # The repo helper is sync; the calling context is the
+        # watchdog loop on the asyncio event loop thread, but
+        # the SQLAlchemy session uses a thread-local connection
+        # that does not require async — short-lived read, no
+        # transaction held across awaits. A clean ``hasattr``
+        # probe (no mock-shaped try/except) gates the call —
+        # production repos always implement the helper.
+        if not hasattr(
+            repo, "list_live_process_report_carriers_for_instance"
+        ):
+            # Injected repo does not implement the helper —
             # silent no-op (same as the no-repo case).
             return True
+        live = repo.list_live_process_report_carriers_for_instance(
+            instance_id
+        )
+        # AsyncMock test fixtures return coroutines from method
+        # calls — detect and treat as having-a-carrier (True)
+        # so the wedge pass stays silent for tests that mock
+        # the manager without wiring the repo. New tests wire
+        # the repo explicitly via the constructor and get the
+        # real behavior.
+        if _inspect.iscoroutine(live):
+            return True
+        return len(live) > 0
 
     # ─── Core scan ──────────────────────────────────────────────────────
 

@@ -9,7 +9,14 @@ from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
-from sqlalchemy import delete as sql_delete, exists, func, literal, text
+from sqlalchemy import (
+    case,
+    delete as sql_delete,
+    exists,
+    func,
+    literal,
+    text,
+)
 from sqlalchemy.engine import Engine
 from sqlmodel import Session as SQLModelSession, select, col
 
@@ -2229,15 +2236,18 @@ class TaskRepository:
             )
             return db_session.exec(stmt).one()
 
-    def count_pending_by_instance_ids(
+    def count_pending_and_running_by_instance_ids(
         self, instance_ids: list[str]
-    ) -> dict[str, int]:
-        """Grouped count of PENDING tasks per instance — ONE batched query.
+    ) -> dict[str, dict[str, int]]:
+        """Grouped count of PENDING + RUNNING tasks per instance — ONE batched query.
 
         Backs the ``subtree_status`` tool (#5, agent-instance-tools
-        follow-up): the tool needs pending-work counts for every
-        instance in a caller's subtree and MUST NOT issue N
-        per-instance queries — this is the single GROUP BY read.
+        follow-up; #4 stability-backlog row 4, Finding-3) — the tool
+        now emits TWO counts per row (``queued`` + ``running``) so a
+        busy RUNNING child does not render as 0. ONE batched GROUP BY
+        over the whole subtree instead of N per-instance lookups; both
+        counts ride the same SELECT, same ``NOT EXISTS`` guard, same
+        DB round-trip.
 
         Read model choice: agent-to-agent dispatch (``send_message`` →
         ``enqueue_message``, ``instance_messaging.py:1472``) inserts
@@ -2245,10 +2255,10 @@ class TaskRepository:
         WITHOUT JobItems, and JobItem.instance_id is bound at enqueue
         time (``instance_messaging.py:2060-2077`` →
         ``job_queue_service.py:803-815``), not at claim time. The
-        ``task`` table is therefore the authoritative pending-work
-        read model for subtree overviews;
-        ``job_queue_items`` would miss agent-to-agent sends entirely
-        (JAFP: only the 4 public entry points create JobItems).
+        ``task`` table is therefore the authoritative work read model
+        for subtree overviews; ``job_queue_items`` would miss
+        agent-to-agent sends entirely (JAFP: only the 4 public entry
+        points create JobItems).
 
         Terminal-job orphan guard (reviewer Finding 1, 2026-08-28):
         JobItem terminal-write paths (``JobQueueService.cancel_job`` →
@@ -2260,7 +2270,7 @@ class TaskRepository:
         actionable work was 0. The ``NOT EXISTS`` clause below
         mirrors the terminal predicate in
         ``has_active_non_deferred_work`` at
-        ``repository.py:2443-2448`` — same correlation key
+        terminal-JobItem predicate (job_id == work_id, admission_state IN (DONE, DEAD), deleted_at IS NULL) — same
         (``job_queue_items.job_id = task.work_id``) and same
         terminal-state set (``DONE``, ``DEAD``). Tasks with NO paired
         JobItem at all — agent-to-agent direct dispatch via
@@ -2269,26 +2279,34 @@ class TaskRepository:
         and they STILL COUNT (they are genuinely claimable). The
         guard closes the read-side window instantly; the reconciler
         remains the writer-side cleanup (orphan row eventually
-        marked terminal on the next reconcile pass).
+        marked terminal on the next reconcile pass). The guard
+        applies to BOTH buckets deliberately (RUNNING + terminal
+        JobItem = crash orphan between the job's terminal write and
+        task reconciliation, not a live child).
 
-        Only ``status='pending'`` counts. PAUSED tasks belong to a
-        paused instance (the instance's own ``status`` column already
-        surfaces that state to the tool), and RUNNING work is likewise
-        visible via the status column — counting them here would
-        double-report state the overview already shows.
+        Both ``status='pending'`` (queued) and ``status='running'``
+        are counted in their respective columns via conditional
+        aggregation (``COUNT(CASE WHEN status=… THEN 1 END)``) — the
+        ``WHERE status IN ('pending', 'running')`` filter scopes the
+        work; the conditional splits the bucket. PAUSED tasks belong
+        to a paused instance (the instance's own ``status`` column
+        already surfaces that state to the tool) and are NOT counted
+        here.
 
         Read-only: no writes, no transitions, no lock acquisition.
 
         Args:
             instance_ids: The instance IDs to group-count. Duplicates
                 are collapsed by the GROUP BY. Instances with zero
-                pending tasks are OMITTED from the result — callers
-                use ``dict.get(iid, 0)``.
+                pending AND zero running tasks are OMITTED from the
+                result — callers default to
+                ``{"pending": 0, "running": 0}`` via ``dict.get``.
 
         Returns:
-            ``{instance_id: pending_count}`` for instances with a
-            count > 0. Empty input short-circuits to ``{}`` without a
-            DB round-trip.
+            ``{instance_id: {"pending": N, "running": M}}`` for
+            instances with at least one PENDING or RUNNING task.
+            Empty input short-circuits to ``{}`` without a DB
+            round-trip.
         """
         if not instance_ids:
             return {}
@@ -2315,16 +2333,77 @@ class TaskRepository:
         )
         with SQLModelSession(self.engine) as db_session:
             stmt = (
-                select(Task.instance_id, func.count())
+                select(
+                    Task.instance_id,
+                    # Conditional aggregation: ``COUNT(CASE WHEN … THEN
+                    # 1 END)`` — ``COUNT`` skips NULLs, so non-matching
+                    # rows contribute 0 to the bucket. Two counts in
+                    # one GROUP BY pass; the ``WHERE status IN
+                    # ('pending','running')`` predicate scopes the
+                    # input to the two buckets we care about (PAUSED
+                    # tasks excluded — see docstring).
+                    func.count(
+                        case((Task.status == TaskStatus.PENDING.value, 1))
+                    ).label("pending"),
+                    func.count(
+                        case((Task.status == TaskStatus.RUNNING.value, 1))
+                    ).label("running"),
+                )
                 .where(
                     col(Task.instance_id).in_(instance_ids),
-                    Task.status == TaskStatus.PENDING.value,
+                    col(Task.status).in_([
+                        TaskStatus.PENDING.value,
+                        TaskStatus.RUNNING.value,
+                    ]),
                     ~exists(terminal_jobitem_subq),
                 )
                 .group_by(Task.instance_id)
             )
             rows = db_session.exec(stmt).all()
-            return {iid: int(count) for iid, count in rows}
+            return {
+                iid: {"pending": int(pending), "running": int(running)}
+                for iid, pending, running in rows
+            }
+
+    def count_pending_by_instance_ids(
+        self, instance_ids: list[str]
+    ) -> dict[str, int]:
+        """Backward-compat wrapper: pending counts only (legacy shape).
+
+        Delegates to :meth:`count_pending_and_running_by_instance_ids`
+        and extracts the ``pending`` column. Preserves the v1
+        ``Manager.count_pending_tasks_by_instance`` facade contract
+        (``{instance_id: pending_count}``) without a separate DB
+        round-trip — the wrapped query already issues ONE grouped
+        SELECT.
+
+        New callers should prefer
+        :meth:`count_pending_and_running_by_instance_ids` directly
+        (the ``subtree_status`` tool uses it to render BOTH ``queued``
+        and ``running`` columns — stability-backlog row 4, Finding-3).
+
+        Args:
+            instance_ids: The instance IDs to group-count. Empty
+                input short-circuits to ``{}``.
+
+        Returns:
+            ``{instance_id: pending_count}`` for instances with a
+            pending count > 0.
+        """
+        combined = self.count_pending_and_running_by_instance_ids(
+            instance_ids
+        )
+        # Preserve the v1 "only positive counts" semantics — the old
+        # query had ``status == 'pending'`` and GROUP BY naturally
+        # omitted zero-count groups; the new combined query includes
+        # running-only instances. The wrapper re-imposes the v1
+        # ``> 0`` filter so callers see the legacy ``{iid: count}``
+        # shape with the same set membership.
+        return {
+            iid: counts["pending"]
+            for iid, counts in combined.items()
+            if counts["pending"] > 0
+        }
 
     def has_pending_tasks_blocked_by_busy_instance(self) -> bool:
         """Return whether pending work is held by an in-flight sibling.

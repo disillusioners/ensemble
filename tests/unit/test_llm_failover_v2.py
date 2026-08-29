@@ -177,6 +177,11 @@ class _FakeManager:
             base_url_backup=BACKUP,
             api_key="test",
             model_title="gpt-test",
+            # Production reads `self._config.llm.buffer_response_header`
+            # (e.g. title_generation.py:104, child_reports.py:766/:1400).
+            # `LLMConfig.buffer_response_header` defaults to True
+            # (daemon/config.py:231); mirror that here so the fake matches.
+            buffer_response_header=True,
         )
     )
     _instance_repository = _FakeRepo()
@@ -1170,6 +1175,11 @@ class TestKeywordExtractionIsFailoverWired:
                     api_key = "test"
                     model = "gpt-test"
                     model_keywords = "gpt-test"
+                    # Production reads `config.llm.buffer_response_header`
+                    # (keyword_extraction.py:377). `LLMConfig.buffer_response_header`
+                    # defaults to True (daemon/config.py:231); mirror that here so
+                    # the fake matches.
+                    buffer_response_header = True
 
             import asyncio
 
@@ -1236,6 +1246,11 @@ class TestChildReportsIsFailoverWired:
                     base_url_backup=BACKUP,
                     api_key="test",
                     model="gpt-test",
+                    # Production reads `self._config.llm.buffer_response_header`
+                    # (e.g. child_reports.py:766, child_reports.py:1400).
+                    # `LLMConfig.buffer_response_header` defaults to True
+                    # (daemon/config.py:231); mirror that here so the fake matches.
+                    buffer_response_header=True,
                 )
             )
             _checkpointer = _FakeCheckpointerAdapter()
@@ -1812,6 +1827,11 @@ class TestPreCleanRebindRegressionPin:
                     base_url_backup=BACKUP,
                     api_key="test",
                     model="gpt-test",
+                    # Production reads `self._config.llm.buffer_response_header`
+                    # (e.g. child_reports.py:766, child_reports.py:1400).
+                    # `LLMConfig.buffer_response_header` defaults to True
+                    # (daemon/config.py:231); mirror that here so the fake matches.
+                    buffer_response_header=True,
                 )
             )
             _checkpointer = _FakeCheckpointerAdapter()

@@ -135,91 +135,143 @@ async def _cancel_bus_watchers_for(manager: "InstanceManager", instance_id: str,
                 f"({type(import_err).__name__}: {import_err})"
             )
             TERMINAL_STATUSES = frozenset()  # gate disabled
-        for fu in fired:
-            # Phase 2 round 2 (2026-08-24, WARNING 1): parent-liveness
-            # dead-letter. If the parent (fu.target_instance_id) is
-            # ALREADY in a terminal state when terminate fires the
-            # watchers, enqueueing creates a MessageQueue/Task on a
-            # dead instance — the parent's turn never runs, the
-            # report_injections row never drains, and the
-            # dependency_watchers row stays stamped-but-undelivered
-            # until a restart's _recover_fired_unsent notices. The
-            # dead-letter path SKIPS the enqueue and logs the cause.
-            #
-            # The watcher row itself is already FIRED (committed by
-            # ``fire_for_terminated_target`` above); no further state
-            # transition is needed on the row — the row is already
-            # in a terminal state and a future Pass 1 / Pass 2 will
-            # compact it. The dead-letter therefore just skips the
-            # enqueue + emits a structured log carrying the
-            # canonical reason 'failed' (matching DeadLetterTurn
-            # convention at ``turn_transitions.py:457-471``).
-            #
-            # Composes with P1's DeadLetterTurn / pattern (e)
-            # machinery by EXTENDING it: the watcher-layer
-            # transition is already terminal; the dead-letter
-            # extension only blocks the message enqueue. No
-            # restructure.
-            _dead_letter_parent = False
-            try:
-                _parent_meta = (
-                    manager._instance_repository.get(fu.target_instance_id)
-                )
-                if (
-                    _parent_meta is not None
-                    and _parent_meta.status in TERMINAL_STATUSES
-                ):
-                    _dead_letter_parent = True
-            except Exception as liveness_err:
-                # FAIL-OPEN on lookup failure — better to deliver
-                # the message to a possibly-dead parent than to
-                # strand an obligation. The dead-letter path is
-                # purely an optimization; the parent's
-                # MessageQueue/Task just gets cleaned up by the
-                # next GC cycle if the parent is truly dead.
-                logger.debug(
-                    f"instance_lifecycle.{op}: parent-liveness "
-                    f"lookup failed (non-fatal, proceeding with "
-                    f"enqueue) for {fu.target_instance_id[:8]}...: "
-                    f"{liveness_err}"
-                )
-            if _dead_letter_parent:
-                logger.info(
-                    f"instance_lifecycle.{op}: dead-lettering "
-                    f"dependency watcher for terminated child — "
-                    f"parent {fu.target_instance_id[:8]}... is "
-                    f"already terminal "
-                    f"(reason='failed', per WARNING 1 fix)"
-                )
-                continue
-            # JAFP: manager.enqueue_message creates NO JobItem — the
-            # internal MessageQueue + Task seam is the bus's delivery
-            # contract (pause/terminate paths never write JobItems).
-            await manager.enqueue_message(
-                instance_id=fu.target_instance_id,
-                message=fu.message,
-                source=fu.source,
-                metadata=dict(fu.metadata),
-            )
-            # Per-FollowUp stamp (keyed by the row's source_task_id —
-            # surfaced in the FollowUp metadata by
-            # fire_for_terminated_target). Best-effort per row: a
-            # stamp failure leaves the row un-stamped so a restart's
-            # _recover_fired_unsent re-delivers it (the downstream
-            # parent path is idempotent via the tri-state guards).
-            source_task_id = fu.metadata.get("source_task_id")
-            if source_task_id:
+        # Quick-Wins #2 — Item 2: collect (target_instance_id,
+        # message_id) tuples for every FollowUp the loop actually
+        # enqueues, so the post-fire re-purge can re-check each
+        # target's status after the enqueue completes (the residual
+        # race window is narrower than a per-iteration pre-enqueue
+        # check; see the post-fire re-purge block below for the
+        # ordering analysis vs the 2026-08-29 incident timeline).
+        _enqueued_targets: list[tuple[str, str]] = []
+        try:
+            for fu in fired:
+                # Phase 2 round 2 (2026-08-24, WARNING 1): parent-liveness
+                # dead-letter. If the parent (fu.target_instance_id) is
+                # ALREADY in a terminal state when terminate fires the
+                # watchers, enqueueing creates a MessageQueue/Task on a
+                # dead instance — the parent's turn never runs, the
+                # report_injections row never drains, and the
+                # dependency_watchers row stays stamped-but-undelivered
+                # until a restart's _recover_fired_unsent notices. The
+                # dead-letter path SKIPS the enqueue and logs the cause.
+                #
+                # The watcher row itself is already FIRED (committed by
+                # ``fire_for_terminated_target`` above); no further state
+                # transition is needed on the row — the row is already
+                # in a terminal state and a future Pass 1 / Pass 2 will
+                # compact it. The dead-letter therefore just skips the
+                # enqueue + emits a structured log carrying the
+                # canonical reason 'failed' (matching DeadLetterTurn
+                # convention at ``turn_transitions.py:457-471``).
+                #
+                # Composes with P1's DeadLetterTurn / pattern (e)
+                # machinery by EXTENDING it: the watcher-layer
+                # transition is already terminal; the dead-letter
+                # extension only blocks the message enqueue. No
+                # restructure.
+                _dead_letter_parent = False
                 try:
-                    await bus.mark_enqueued_by_source_target(
-                        source_task_id, fu.target_instance_id
+                    _parent_meta = (
+                        manager._instance_repository.get(fu.target_instance_id)
                     )
-                except Exception as stamp_err:
+                    if (
+                        _parent_meta is not None
+                        and _parent_meta.status in TERMINAL_STATUSES
+                    ):
+                        _dead_letter_parent = True
+                except Exception as liveness_err:
+                    # FAIL-OPEN on lookup failure — better to deliver
+                    # the message to a possibly-dead parent than to
+                    # strand an obligation. The dead-letter path is
+                    # purely an optimization; the parent's
+                    # MessageQueue/Task just gets cleaned up by the
+                    # next GC cycle if the parent is truly dead.
                     logger.debug(
-                        f"instance_lifecycle.{op}: stamp failed "
-                        f"(non-fatal) for source_task="
-                        f"{str(source_task_id)[:8]}..., "
-                        f"target={fu.target_instance_id[:8]}...: "
-                        f"{stamp_err}"
+                        f"instance_lifecycle.{op}: parent-liveness "
+                        f"lookup failed (non-fatal, proceeding with "
+                        f"enqueue) for {fu.target_instance_id[:8]}...: "
+                        f"{liveness_err}"
+                    )
+                if _dead_letter_parent:
+                    logger.info(
+                        f"instance_lifecycle.{op}: dead-lettering "
+                        f"dependency watcher for terminated child — "
+                        f"parent {fu.target_instance_id[:8]}... is "
+                        f"already terminal "
+                        f"(reason='failed', per WARNING 1 fix)"
+                    )
+                    continue
+                # JAFP: manager.enqueue_message creates NO JobItem — the
+                # internal MessageQueue + Task seam is the bus's delivery
+                # contract (pause/terminate paths never write JobItems).
+                _enq_result = await manager.enqueue_message(
+                    instance_id=fu.target_instance_id,
+                    message=fu.message,
+                    source=fu.source,
+                    metadata=dict(fu.metadata),
+                )
+                # Capture the just-enqueued message_id for the post-fire
+                # re-purge below (stamped only when enqueue succeeded —
+                # a failed enqueue leaves no row to purge, so skipping
+                # the append keeps the re-purge set tight).
+                if _enq_result is not None and getattr(
+                    _enq_result, "message_id", None
+                ):
+                    _enqueued_targets.append(
+                        (fu.target_instance_id, _enq_result.message_id)
+                    )
+                # Per-FollowUp stamp (keyed by the row's source_task_id —
+                # surfaced in the FollowUp metadata by
+                # fire_for_terminated_target). Best-effort per row: a
+                # stamp failure leaves the row un-stamped so a restart's
+                # _recover_fired_unsent re-delivers it (the downstream
+                # parent path is idempotent via the tri-state guards).
+                source_task_id = fu.metadata.get("source_task_id")
+                if source_task_id:
+                    try:
+                        await bus.mark_enqueued_by_source_target(
+                            source_task_id, fu.target_instance_id
+                        )
+                    except Exception as stamp_err:
+                        logger.debug(
+                            f"instance_lifecycle.{op}: stamp failed "
+                            f"(non-fatal) for source_task="
+                            f"{str(source_task_id)[:8]}..., "
+                            f"target={fu.target_instance_id[:8]}...: "
+                            f"{stamp_err}"
+                        )
+        finally:
+            # Quick-Wins #2 — Finding #1 (review): the
+            # post-fire re-purge lives in ``finally`` so
+            # it still runs when ``manager.enqueue_message``
+            # raises mid-loop on iteration N+1 — the
+            # (target, message_id) pairs accumulated in
+            # iterations 1..N are the strand window that the
+            # watchdog would otherwise have to clean up
+            # later. The re-purge is run exactly once per
+            # call (the prior post-loop call site is removed
+            # — this is the only call site). The finally
+            # block does NOT swallow the original exception:
+            # it propagates to the outer
+            # ``except Exception as e:`` that already
+            # handled the bus failure shape before this
+            # wrap. Best-effort: a re-purge failure inside
+            # finally is caught + DEBUG-logged exactly like
+            # the prior post-loop block (a re-purge failure
+            # must never raise out of the terminate path).
+            if fired and _enqueued_targets:
+                try:
+                    _repurge_fired_follow_ups(
+                        manager=manager,
+                        op=op,
+                        fired_items=_enqueued_targets,
+                    )
+                except Exception as repurge_err:
+                    logger.warning(
+                        f"instance_lifecycle.{op}: post-fire re-purge "
+                        f"failed (non-fatal) — parent={instance_id[:8]}..., "
+                        f"affected_fired_count={len(_enqueued_targets)}: "
+                        f"{type(repurge_err).__name__}: {repurge_err}"
                     )
         if fired:
             logger.info(
@@ -258,6 +310,166 @@ async def _cancel_bus_watchers_for(manager: "InstanceManager", instance_id: str,
             f"for {instance_id[:8]}... "
             f"({type(e).__name__}: {e})"
         )
+
+
+def _repurge_fired_follow_ups(
+    manager: "InstanceManager",
+    op: str,
+    fired_items: list[tuple[str, str]],
+) -> int:
+    """Delete just-enqueued MessageQueue + Task rows whose target is terminal.
+
+    Stability Quick-Wins #2 — Item 2 (post-fire re-purge, helper).
+
+    Called from :func:`_cancel_bus_watchers_for` AFTER the bus fire's
+    enqueue loop completes. Re-checks each target instance's status;
+    if it is in a canonical terminal status (per
+    ``daemon.constants.TERMINAL_INSTANCE_STATUSES``), the just-enqueued
+    rows for that target are deleted in the same transaction (mirrors
+    the ``_terminate_instance_db_sync`` cascade at lines 3681-3712).
+
+    Why a post-fire re-purge and not a per-iteration pre-enqueue
+    check: the 2026-08-29 wedged-tester incident ordering
+    ``fire .404 → enqueue .437 → carrier .448 → TERMINATED .453``
+    shows the TERMINATED stamp can land AFTER the carrier task is
+    minted. A pre-enqueue check at .436 would NOT have seen the
+    TERMINATED stamp at .453 — its residual race window spans the
+    entire enqueue. A post-fire re-purge runs once at the end of the
+    fire loop (after the carrier is minted); its residual window is
+    only the interval between the re-purge SELECT and a subsequent
+    TERMINATED stamp — narrower than the per-iteration pre-enqueue
+    window because the re-purge is a single bounded operation.
+
+    Args:
+        manager: The InstanceManager facade (provides
+            ``_instance_repository.get`` for status checks + the
+            shared engine / session for the cascade delete).
+        op: Logging-only operation tag (e.g. ``"terminate_instance"``).
+        fired_items: List of ``(target_instance_id, message_id)``
+            tuples for FollowUps the bus fire's enqueue loop just
+            committed. The message_id is the primary key of
+            ``message_queue`` and is indexed on ``task.message_id``,
+            so the targeted delete is O(1) per row.
+
+    Returns:
+        Number of stranded (MessageQueue + Task) pairs purged. Zero
+        when every enqueue landed on a still-live target. Failures
+        are logged at DEBUG and the helper returns zero — a re-purge
+        failure must not bubble up to the terminate path.
+    """
+    if not fired_items:
+        return 0
+    try:
+        from ..constants import TERMINAL_INSTANCE_STATUSES
+    except Exception as import_err:
+        logger.debug(
+            f"instance_lifecycle.{op}: TERMINAL_INSTANCE_STATUSES "
+            f"import failed — disabling post-fire re-purge "
+            f"({type(import_err).__name__}: {import_err})"
+        )
+        return 0
+
+    # Group message_ids by target instance so we do one status SELECT
+    # per unique target instead of per FollowUp. A parent with two
+    # just-enqueued FollowUps triggers a single SELECT + a single
+    # DELETE batch; the targeted message_id list is the WHERE clause.
+    by_target: dict[str, list[str]] = {}
+    for target_instance_id, message_id in fired_items:
+        by_target.setdefault(target_instance_id, []).append(message_id)
+
+    purged = 0
+    for target_instance_id, message_ids in by_target.items():
+        try:
+            _meta = manager._instance_repository.get(target_instance_id)
+        except Exception as liveness_err:
+            # FAIL-OPEN: a transient lookup failure must not block
+            # the terminate path. The dead-letter / watchdog layers
+            # are the follow-up.
+            logger.warning(
+                f"instance_lifecycle.{op}: post-fire re-purge status "
+                f"lookup failed (non-fatal, skipping target) — "
+                f"target={target_instance_id[:8]}..., "
+                f"affected_message_id_count={len(message_ids)}: "
+                f"{type(liveness_err).__name__}: {liveness_err}"
+            )
+            continue
+        if (
+            _meta is None
+            or _meta.status not in TERMINAL_INSTANCE_STATUSES
+        ):
+            # Live target — leave the just-enqueued rows alone.
+            continue
+
+        # Target flipped terminal since the pre-enqueue check. Purge
+        # the just-enqueued MessageQueue + Task rows in one
+        # transaction (mirrors the cascade delete shape used by
+        # ``_terminate_instance_db_sync`` at lines 3681-3712 — the
+        # task row must NOT survive its backing message row, or a
+        # worker claim raises "Message <UUID> not found in
+        # message_queue for task <N>").
+        try:
+            from sqlalchemy import text
+
+            engine = getattr(manager, "engine", None)
+            if engine is None:
+                logger.debug(
+                    f"instance_lifecycle.{op}: post-fire re-purge "
+                    f"skipped — manager.engine not wired "
+                    f"(target={target_instance_id[:8]}...)"
+                )
+                continue
+            # Build a parameterized IN-list — works on both SQLite
+            # (the unit-test engine) and PostgreSQL (production).
+            # One bind per message_id; same bind names are reused on
+            # both the message_queue delete and the task delete.
+            binds = {f"m{i}": mid for i, mid in enumerate(message_ids)}
+            placeholders = ",".join(f":m{i}" for i in range(len(message_ids)))
+            with engine.begin() as conn:
+                msg_result = conn.execute(
+                    text(
+                        "DELETE FROM message_queue "
+                        f"WHERE message_id IN ({placeholders})"
+                    ),
+                    binds,
+                )
+                msg_deleted = (
+                    msg_result.rowcount
+                    if msg_result.rowcount is not None
+                    else 0
+                )
+                task_result = conn.execute(
+                    text(
+                        "DELETE FROM task "
+                        f"WHERE message_id IN ({placeholders})"
+                    ),
+                    binds,
+                )
+                task_deleted = (
+                    task_result.rowcount
+                    if task_result.rowcount is not None
+                    else 0
+                )
+            # Count purged as min(message_deleted, task_deleted) —
+            # one stranded row = one message + one task. The min
+            # counts what was actually paired; either side off-by-one
+            # is a separate bug, not a re-purge concern.
+            purged += min(msg_deleted, task_deleted)
+            logger.info(
+                f"instance_lifecycle.{op}: post-fire re-purge "
+                f"deleted stranded rows on terminal target "
+                f"{target_instance_id[:8]}... "
+                f"(messages={msg_deleted}, tasks={task_deleted}, "
+                f"op_status={_meta.status})"
+            )
+        except Exception as purge_err:
+            logger.warning(
+                f"instance_lifecycle.{op}: post-fire re-purge failed "
+                f"(non-fatal) for terminal target "
+                f"{target_instance_id[:8]}..., "
+                f"affected_message_id_count={len(message_ids)}: "
+                f"{type(purge_err).__name__}: {purge_err}"
+            )
+    return purged
 
 
 # ── Outbox NamedTuples (WriteGuardSession extraction) ──────────────────────

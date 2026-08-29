@@ -3364,9 +3364,17 @@ Example outputs::
     # Reads: per-instance metadata via ``manager.get_instance_info``
     # (N× small PK reads, the documented v1 fan-out precedent from
     # subtree_messages' status filter — no bulk facade exists) + ONE
-    # batched pending-count query via the additive facade
-    # ``manager.count_pending_tasks_by_instance`` (grouped GROUP BY —
-    # never N per-instance count queries).
+    # batched PENDING + RUNNING count query via
+    # ``manager.count_pending_and_running_tasks_by_instance``
+    # (grouped GROUP BY — never N per-instance count queries).
+    #
+    # The combined pending+running facade is the v2 read surface; the
+    # legacy ``count_pending_tasks_by_instance`` (pending-only) is
+    # preserved as a backward-compat seam. Both facades delegate to
+    # ``TaskRepository`` and degrade to ``{}`` when the repo is
+    # uninitialized (mirrors the pre-v2 D14 reach-in's degradation
+    # path, now routed through the manager facade — stability-backlog
+    # row 4 columns queued/running).
     #
     # No message content is read; ``get_messages`` /
     # ``serialize_message`` are NOT involved (token-cheap is the point).
@@ -3378,7 +3386,7 @@ Example outputs::
         status_filter: str = "all",
         max_instances: int = _SUBTREE_STATUS_DEFAULT_MAX_INSTANCES,
     ) -> str:
-        """One-call, read-only overview of the caller's subtree. Use tool_help("subtree_status") for details."""
+        """One-call, read-only overview of the caller's subtree (per-row: iid / agent / status / age / queued / running). Use tool_help("subtree_status") for details."""
         # ── 1. Validate args ────────────────────────────────────────
         # Mirrors the subtree_messages convention: hard errors for
         # structurally invalid input, SILENT clamp above the hard cap.
@@ -3453,20 +3461,31 @@ Example outputs::
                 if str(info.get("status") or "").lower() == wanted
             ]
 
-        # ── 6. ONE batched pending-count query ──────────────────────
-        pending_map: dict[str, int] = {}
+        # ── 6. ONE batched PENDING + RUNNING count query ───────────
+        # Facade path — see the comment block above. The repo method's
+        # return shape is ``{iid: {"pending": N, "running": M}}``;
+        # instances with zero of both are OMITTED (GROUP BY omits
+        # empty groups), so ``dict.get(iid, {"pending": 0,
+        # "running": 0})`` is the safe default. The facade degrades
+        # to ``{}`` (zero queued / zero running) when the repo is
+        # uninitialized — the tool then renders every row with 0/0
+        # counts (no partial output, no crash).
+        counts_map: dict[str, dict[str, int]] = {}
         if rows:
             try:
-                pending_map = manager.count_pending_tasks_by_instance(
-                    [iid for iid, _ in rows]
+                counts_map = (
+                    manager.count_pending_and_running_tasks_by_instance(
+                        [iid for iid, _ in rows]
+                    )
                 )
             except Exception as e:
                 logger.warning(
-                    "subtree_status: count_pending_tasks_by_instance "
+                    "subtree_status: "
+                    "count_pending_and_running_tasks_by_instance "
                     "failed: %s: %s",
                     type(e).__name__, e,
                 )
-                pending_map = {}
+                counts_map = {}
 
         # ── 7. Render compact table ─────────────────────────────────
         now = datetime.now(timezone.utc)
@@ -3478,18 +3497,27 @@ Example outputs::
             f"(returned {len(rows)} after caps/filter)",
             f"{'iid':<8}  {'agent':<{_SUBTREE_STATUS_AGENT_MAX_CHARS}} "
             f"{'status':<{_SUBTREE_STATUS_STATUS_WIDTH}} "
-            f"{'age':>4}  pending",
+            f"{'age':>4}  {'queued':>6}  {'running':>7}",
         ]
         row_lines: list[str] = []
         for iid, info in rows:
             agent = _render_subtree_status_agent_cell(info)
             status = str(info.get("status") or "unknown")
             age = _render_relative_age(info.get("last_activity_at"), now=now)
-            pending = pending_map.get(iid, 0)
+            # The new combined shape — `queued` and `running` are
+            # both surfaced so a busy RUNNING child does not render
+            # as 0 (stability-backlog row 4, Finding-3). Both columns
+            # default to 0 when the instance is missing from the
+            # grouped result (zero of both → GROUP BY omits).
+            bucket = counts_map.get(
+                iid, {"pending": 0, "running": 0}
+            )
+            queued = int(bucket.get("pending", 0))
+            running = int(bucket.get("running", 0))
             row_lines.append(
                 f"{iid[:8]:<8}  {agent:<{_SUBTREE_STATUS_AGENT_MAX_CHARS}} "
                 f"{status:<{_SUBTREE_STATUS_STATUS_WIDTH}} "
-                f"{age:>4}  {pending}"
+                f"{age:>4}  {queued:>6}  {running:>7}"
             )
         if not row_lines:
             row_lines.append("(no matching instances)")
@@ -3541,7 +3569,12 @@ report on instances in the CALLER'S subtree, enumerated via the
 facade ``Manager.get_tree_ids_permanent(...)`` (permanent
 ``parent_id`` lineage, Python-side BFS, depth-capped 256 — see
 ``daemon/repositories/instance/repository.py:428-492``). The tool
-layer never touches repositories directly (D14).
+layer never touches repositories directly (D14): the combined
+PENDING + RUNNING count query below is routed through the
+``Manager.count_pending_and_running_tasks_by_instance`` facade
+(stability-backlog row 4 columns queued/running), which degrades
+to ``{queued: 0, running: 0}`` per row when the underlying repo is
+uninitialized.
 
   * ``target_instance_id=None`` → caller's OWN subtree (default).
   * ``target_instance_id=`` some descendant → that descendant's
@@ -3553,7 +3586,7 @@ layer never touches repositories directly (D14).
 Row format
 ----------
 
-    <iid[:8]>  <agent (<=24 chars)>  <status>  <age>  <pending>
+    <iid[:8]>  <agent (<=24 chars)>  <status>  <age>  <queued>  <running>
 
   * ``iid`` — first 8 chars of the instance_id (house short form).
   * ``agent`` — ``agent_name`` (fallback ``agent_id``), capped at 24
@@ -3563,13 +3596,34 @@ Row format
   * ``age`` — RELATIVE age of ``last_activity_at``: ``now`` (< 60s;
     refreshed per activity), ``14m`` (< 60m), ``2h`` (< 24h), ``3d``
     (older). ``-`` when unknown/None.
-  * ``pending`` — count of PENDING tasks for that instance (queued
-    work that will wake it), from ONE batched grouped query via
-    ``Manager.count_pending_tasks_by_instance``. The ``task`` table
-    is the read model — agent-to-agent dispatch (``send_message`` →
-    ``enqueue_message``) creates Task rows directly (no job-queue
-    mirror row), so ``job_queue_items`` would miss agent-sent work
-    entirely.
+  * ``queued`` — count of PENDING tasks for that instance (queued
+    work that will wake it on the next dispatch). Right-aligned,
+    width 6.
+  * ``running`` — count of RUNNING tasks for that instance
+    (in-flight work the child is actively processing). Right-aligned,
+    width 7. Stability-backlog row 4 / Finding-3: the ``running``
+    column closes the false-idle gap — a busy child previously
+    rendered ``pending=0`` because pending counts only covered
+    queued work.
+
+    Both counts come from ONE batched grouped query via the
+    ``Manager.count_pending_and_running_tasks_by_instance`` facade
+    (delegating to
+    ``TaskRepository.count_pending_and_running_by_instance_ids``,
+    conditional aggregation: ``COUNT(CASE WHEN status='pending'
+    THEN 1 END)`` paired with the running bucket on the same
+    GROUP BY). The ``task`` table is the read model — agent-to-agent
+    dispatch (``send_message`` → ``enqueue_message``) creates Task
+    rows directly (no job-queue mirror row), so ``job_queue_items``
+    would miss agent-sent work entirely. PAUSED tasks are excluded
+    from both columns (a paused instance is visible via its
+    ``status`` column). The terminal-jobitem orphan guard (the
+    correlated ``NOT EXISTS`` on ``job_id == work_id``,
+    ``admission_state`` in ``{done, dead}``) closes the drift
+    window instantly (reviewer Finding 1, 2026-08-28) — it applies
+    to BOTH counts deliberately (RUNNING + a terminal-jobitem is a
+    crash orphan between the job's terminal write and task
+    reconciliation, not a live child).
 
 Ordering, caps, filter
 ----------------------
@@ -3594,8 +3648,9 @@ The tool performs no state mutation: no enqueue, no dispatch, no
 status writes, no lock acquisition. Per-instance metadata errors are
 skipped + WARN-logged (the row is omitted); the whole overview never
 fails on one bad instance. Output is bounded: each row is capped by
-its column widths (~64 chars), with a defense-in-depth 16000-char
-tail-truncation ceiling.
+its column widths (~73 chars: 8 iid + 2 + 24 agent + 1 + 16 status +
+1 + 4 age + 2 + 6 queued + 2 + 7 running), with a defense-in-depth
+16000-char tail-truncation ceiling.
 
 Args:
     target_instance_id: Root of the subtree to report on. ``None`` =

@@ -41,6 +41,13 @@ def create_mock_config(
     mock_llm.temperature = temperature
     mock_llm.request_timeout = request_timeout
     mock_llm.model_vision = model_vision
+    # `buffer_response_header` is a bool field on `LLMConfig`
+    # (``daemon/config.py:231``, default True). Production reads it at
+    # instance_lifecycle.py:916, title_generation.py:104, child_reports.py:766
+    # and :1400 — `MagicMock(spec=LLMConfig)` does NOT auto-expose pydantic
+    # fields, so set it explicitly to the prod default to keep these mocks
+    # representative of a real config.
+    mock_llm.buffer_response_header = True
 
     mock_limits = MagicMock(spec=LimitsConfig)
     mock_limits.max_instances = 100
