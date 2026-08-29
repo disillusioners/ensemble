@@ -836,13 +836,58 @@ class WaitingChildrenWatchdog:
         # revival seam is slow (or missed), this backstop catches
         # the gap until the next sweep cycle.
         #
-        # Per-parent budget: one extra query per WC parent per tick
-        # (the live-carrier presence check). The existing
-        # ``parents_scanned`` enumeration already yielded the WC
-        # parent set — we reuse ``parent_ids`` here. Cheaper than
-        # another full scan; the in-memory cooldown is per-parent
-        # (set[str]), not per-(parent, child).
+        # Budget per tick: ONE batched query for the children gate
+        # (across all WC parents, via
+        # ``repository.parents_with_non_terminal_children``) + ONE
+        # per-parent carrier check (``_has_live_carrier_task``). The
+        # existing ``parents_scanned`` enumeration already yielded the
+        # WC parent set — we reuse ``parent_ids`` for the children
+        # gate so we do not re-scan. The in-memory cooldown is
+        # per-parent (``set[str]``), not per-(parent, child).
+        #
+        # Why the children gate matters: carriers are ONLY created at
+        # child completion (``daemon/services/child_reports.py:2844-
+        # 2852``). A HEALTHY WC parent waiting on still-running
+        # children has no carrier yet — without the gate the backstop
+        # fires a spurious wedge notice whose playbook recommends
+        # terminate-and-respawn, which would orphan in-flight
+        # children. The gate fires AFTER the PAUSED skip (a paused
+        # parent is filtered out before any extra query) and BEFORE
+        # the carrier check (the cheap per-parent branch), so the
+        # batched query is paid at most once per tick.
         try:
+            # Wedge-fix children gate — single batched query for the
+            # entire WC-parent set. ``parents_with_non_term_children``
+            # returns the subset of WC parents that have at least one
+            # non-terminal child; the wedge predicate requires
+            # ``parent_id NOT IN parents_with_non_term_children`` so a
+            # healthy parent with live children stays silent. Mirrors
+            # the third ``NOT EXISTS`` clause at
+            # ``_build_zombie_scan_sql``:1083-1087 but in the inverse
+            # direction (parents WITH non-terminal children).
+            parents_with_non_term_children: set[str] = set()
+            try:
+                parents_with_non_term_children = (
+                    self._repo.parents_with_non_terminal_children(
+                        list(parent_ids)
+                    )
+                )
+            except Exception as exc:
+                # The children gate is a safety filter, not a load-
+                # bearing data source — on a repo blip, fall back to
+                # ``set()`` (treat every parent as having NO non-
+                # terminal children) so the wedge pass CAN still fire
+                # for genuinely wedged parents. The outer try/except
+                # below handles the ``self._has_live_carrier_task``
+                # branch; this scoped handler keeps the gate itself
+                # from masking a transient SQL hiccup with a
+                # silently-disabled backstop.
+                logger.warning(
+                    f"[Watchdog] Wedge children-gate query failed; "
+                    f"treating all WC parents as zero-non-terminal-"
+                    f"children. exc={exc}"
+                )
+                parents_with_non_term_children = set()
             for parent_id in parent_ids:
                 self._wedge_parents_scanned_total += 1
                 # Skip PAUSED parents — same rationale as the
@@ -853,9 +898,24 @@ class WaitingChildrenWatchdog:
                     continue
                 if parent_row.status == InstanceStatus.PAUSED.value:
                     continue
-                # Wedge condition: zero live carrier. If a carrier
-                # exists, the wedge is NOT active — the existing
-                # carrier will deliver (the natural claim path).
+                # Wedge condition part 3: zero non-terminal children.
+                # A HEALTHY WC parent waiting on live children has no
+                # carrier yet (carriers are created at child
+                # completion, NOT at parent-park time); without this
+                # gate the next check would spuriously fire on a
+                # healthy parent. Batched — the query above paid for
+                # the entire WC-parent set once, not per-parent.
+                if parent_id in parents_with_non_term_children:
+                    # Healthy parent — children still in flight. Drop
+                    # any stale wedge episode so a future genuine
+                    # wedge (after the last child completes) can
+                    # re-notify.
+                    self._wedge_notified.discard(parent_id)
+                    continue
+                # Wedge condition part 1: zero live carrier. If a
+                # carrier exists, the wedge is NOT active — the
+                # existing carrier will deliver (the natural claim
+                # path).
                 if self._has_live_carrier_task(parent_id):
                     # Composition property: the revival seam worked.
                     # Clear any prior wedge episode for this parent

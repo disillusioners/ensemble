@@ -16,8 +16,11 @@ These tests pin the four contracts introduced by the wedge-fix batch:
   sweep with a live carrier stays silent).
 * T4 — Wedge-fix backstop in ``WaitingChildrenWatchdog``: WC parent
   + zero non-terminal children + zero live carrier → wedge notice
-  enqueued via the wake path; WC parent with a live carrier stays
-  silent.
+  enqueued via the wake path. WC parent with a live carrier stays
+  silent (composition property); WC parent with live non-terminal
+  children also stays silent (healthy-parent guard — carriers are
+  only created at child completion, so a parent waiting on
+  in-flight children has no carrier yet and must not be flagged).
 
 A/B evidence pattern: each test must be RED on pre-fix
 (``29898ee2``) and GREEN on the fixed tree (this branch). The
@@ -668,6 +671,91 @@ class TestWedgeBackstop:
         # Exactly ONE total enqueue across both ticks.
         assert manager.enqueue_message.await_count == 1
 
+    @pytest.mark.asyncio
+    async def test_wedge_silent_when_live_children_present(
+        self, engine,
+    ):
+        """T4 healthy-parent guard (wedge-fix children gate): a WC
+        parent with at least one NON-TERMINAL child must NOT fire
+        a wedge notice, even with zero live carrier.
+
+        Carriers are only created at child completion
+        (``daemon/services/child_reports.py:2844-2852``), so a
+        healthy WC parent waiting on still-running children has
+        no carrier yet — without the children gate the backstop
+        would fire a spurious notice whose playbook recommends
+        terminate-and-respawn, which would orphan in-flight
+        children.
+
+        Pre-fix the wedge predicate implemented only 2 of the 3
+        promised conditions (WC parent + no live carrier); the
+        missing ``zero non-terminal children`` gate caused
+        spurious wedge notices. Post-fix this test pins the
+        healthy-parent guard.
+        """
+        from daemon.repositories.instance.models import Instance
+        from daemon.repositories.instance.repository import (
+            SQLModelInstanceRepository,
+        )
+
+        repo = SQLModelInstanceRepository(engine=engine)
+        parent_id = _seed_instance(
+            engine,
+            instance_id="parent-t4-healthy-children",
+            status=InstanceStatus.WAITING_CHILDREN.value,
+        )
+        # Seed a non-terminal RUNNING child whose parent_id
+        # references the WC parent. The wedge-fix children gate
+        # (``repository.parents_with_non_terminal_children``) must
+        # classify this parent as "has non-terminal children" and
+        # the watchdog must stay silent.
+        child_id = "child-t4-healthy-running"
+        with SQLModelSessionLib(engine) as s:
+            s.add(Instance(
+                instance_id=child_id,
+                agent_id="leader",
+                agent_dir="/tmp/leader",
+                agent_name="leader",
+                parent_id=parent_id,
+                status=InstanceStatus.RUNNING.value,
+                version=1,
+                instance_metadata={},
+            ))
+            s.commit()
+
+        # No PROCESS_REPORT carrier is seeded — pre-fix the wedge
+        # predicate would have fired a spurious notice here (WC +
+        # no carrier). Post-fix the children gate silences it
+        # before the carrier check.
+        task_repo = TaskRepository(engine, on_pending_task=lambda: None)
+        manager = AsyncMock()
+        manager.enqueue_message = AsyncMock()
+
+        watchdog = WaitingChildrenWatchdog(
+            instance_repository=repo,
+            manager=manager,
+            interval_seconds=3600,
+            hang_threshold_seconds=3600,
+            task_repository=task_repo,
+        )
+
+        stats = await watchdog.run_once()
+
+        # Assert — NO wedge notice enqueued. The healthy parent
+        # with live children must stay silent; the backstop is
+        # reserved for GENUINE wedges (WC + zero non-terminal
+        # children + zero live carrier).
+        assert manager.enqueue_message.await_count == 0, (
+            f"T4 healthy-parent guard: a WC parent with live "
+            f"non-terminal children must NOT fire a wedge notice "
+            f"(the children gate silences the backstop). Pre-fix "
+            f"this fired because the predicate only checked "
+            f"WC + no-carrier. Got "
+            f"{manager.enqueue_message.await_count} enqueue calls."
+        )
+        assert watchdog.wedge_notices_enqueued == 0
+        assert parent_id not in watchdog.wedge_episodes
+
     def test_wedge_notice_content(self):
         """Sanity — the wedge notice builder produces a directive,
         terse message that names the parent (truncated to 8 chars,
@@ -681,6 +769,64 @@ class TestWedgeBackstop:
         assert "parent-a" in notice
         assert "PROCESS_REPORT" in notice
         assert "playbook" in notice.lower()
+
+
+# ─── T2b alive-status membership pin ──────────────────────────────────────────
+
+
+class TestAliveInstanceStatusesMembership:
+    """Pin the exact membership of
+    ``daemon.constants.ALIVE_INSTANCE_STATUSES``.
+
+    The set is the canonical alive-instance guard used by the
+    manager (``manager.py:6965-6982``) and the reconciler
+    (``job_recovery_service.py:25, 168``). Any drift between the
+    set definition and the consumers breaks the wedge-fix
+    alive-instance guard (T2b), the manager's revive semantics,
+    and the reconciler's Pattern (d) skip path. This test makes
+    drift fail at unit-test time instead of in production.
+
+    Companion to the behavioral T2b at
+    ``tests/job_queue/test_seam_invariants.py:3413``
+    (``test_reconciler_pattern_d_skips_alive_instance_with_terminal_job``):
+    that test pins the BEHAVIOR (alive WC parent + terminal own-
+    linkage JobItem → NOT cancelled), this test pins the MEMBERSHIP
+    (the exact five statuses). Both are needed — the behavioral
+    test could pass with a wrong-but-still-correct subset, and the
+    membership test passes even if the behavior regresses.
+    """
+
+    def test_alive_instance_statuses_membership(self):
+        from daemon.constants import ALIVE_INSTANCE_STATUSES
+
+        assert ALIVE_INSTANCE_STATUSES == frozenset({
+            "idle",
+            "running",
+            "paused",
+            "queued",
+            "waiting_children",
+        }), (
+            f"ALIVE_INSTANCE_STATUSES membership drifted from the "
+            f"pre-hoist local definition. Any change to this set "
+            f"must be made in lockstep with the consumers at "
+            f"manager.py:6965-6982 and job_recovery_service.py:168 "
+            f"(and reflected in the T2b behavioral test at "
+            f"test_seam_invariants.py:3413). Got: "
+            f"{sorted(ALIVE_INSTANCE_STATUSES)}"
+        )
+
+    def test_alive_instance_statuses_is_frozenset(self):
+        """Defensive — the contract is a frozenset, not a mutable
+        set. A consumer-side mutation would silently break the
+        manager's ``status in ALIVE_INSTANCE_STATUSES`` check.
+        """
+        from daemon.constants import ALIVE_INSTANCE_STATUSES
+
+        assert isinstance(ALIVE_INSTANCE_STATUSES, frozenset), (
+            f"ALIVE_INSTANCE_STATUSES must be a frozenset to "
+            f"prevent consumer-side mutation. Got: "
+            f"{type(ALIVE_INSTANCE_STATUSES).__name__}"
+        )
 
 
 # ─── T1 + T2 — Pattern (d) regressions live in test_seam_invariants.py ───────

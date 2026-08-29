@@ -274,11 +274,18 @@ TERMINAL_INSTANCE_STATUSES: frozenset[str] = frozenset({
 # consumers compare against. Kept as raw strings so ``daemon.constants``
 # stays dependency-free.
 #
-# Test invariant (tests/unit/test_reconciler_wedge_fix.py::T2b — the
-# alive-instance guard pinning test): the five members above are
-# byte-identical to the pre-hoist local definition at
-# ``daemon/services/job_recovery_service.py:52-58``. Any new member
-# must be added here AND in any DDL / docs in the same change.
+# Test invariant (``tests/unit/test_reconciler_wedge_fix.py::
+# TestAliveInstanceStatusesMembership.test_alive_instance_statuses_membership``
+# — the membership pinning test added during the wedge-fix
+# post-merge cleanup): the five members above are byte-identical
+# to the pre-hoist local definition at
+# ``daemon/services/job_recovery_service.py:52-58``. Companion
+# behavioral test (T2b) lives at
+# ``tests/job_queue/test_seam_invariants.py:3413``
+# (``test_reconciler_pattern_d_skips_alive_instance_with_terminal_job``)
+# — it pins the behavior; this test pins the membership. Any new
+# member must be added here AND in any DDL / docs in the same
+# change.
 ALIVE_INSTANCE_STATUSES: frozenset[str] = frozenset({
     "idle",
     "running",

@@ -1038,10 +1038,12 @@ class JobRecoveryService:
         # that catches the PENDING orphan specifically.
         #
         # Query: PENDING tasks older than the threshold whose
-        # ``get_by_instance`` JobItem is in admission_state='done'
-        # (which covers ``completed``, ``failed``, ``cancelled``,
-        # ``dead_letter`` per the admission_state mapping in
-        # ``job_state_machine.py``).
+        # ``get(task.work_id)`` JobItem — the canonical linkage-key
+        # lookup that resolves to the Task's OWN JobItem or
+        # ``None`` (JAFP / virtual-job) — is in
+        # ``admission_state='done'`` (which covers ``completed``,
+        # ``failed``, ``cancelled``, ``dead_letter`` per the
+        # admission_state mapping in ``job_state_machine.py``).
         # Action: cancel the PENDING task via
         # ``cancel_pending_tasks_for_instance`` (same atomic
         # WHERE status='pending' guard F12 uses — does NOT touch
