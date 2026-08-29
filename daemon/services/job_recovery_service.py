@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import text
 
+from daemon.constants import ALIVE_INSTANCE_STATUSES
 from daemon.repositories.instance.models import InstanceStatus
 from daemon.repositories.job_queue.models import AdmissionState, Decision
 from daemon.repositories.task.models import TaskStatus
@@ -48,14 +49,11 @@ _TERMINAL_INSTANCE_STATUSES: set[str] = {
     InstanceStatus.FAILED.value,
 }
 
-# Alive instance statuses - instance is still running
-_ALIVE_INSTANCE_STATUSES: set[str] = {
-    InstanceStatus.IDLE.value,
-    InstanceStatus.RUNNING.value,
-    InstanceStatus.PAUSED.value,
-    InstanceStatus.QUEUED.value,
-    InstanceStatus.WAITING_CHILDREN.value,
-}
+# Alive instance statuses - hoisted to ``daemon.constants`` (see
+# ``daemon/constants.py::ALIVE_INSTANCE_STATUSES`` for the canonical home
+# + member documentation). This module imports it as the single source
+# of truth; do NOT re-declare it locally — duplicate definitions are a
+# silent-divergence hazard on a set that gates drift-cancels.
 
 
 class _SessionAdapter:
@@ -167,7 +165,7 @@ class JobRecoveryService:
         """
         if instance_status is None:
             return False
-        return instance_status in _ALIVE_INSTANCE_STATUSES
+        return instance_status in ALIVE_INSTANCE_STATUSES
 
     def _is_instance_terminal(self, instance_status: str | None) -> bool:
         """Check if an instance status indicates a terminal state.
@@ -964,7 +962,7 @@ class JobRecoveryService:
         # ── Pattern (c): stuck instance — log only ───────────────
         # ``active`` JobItem + instance in a non-alive status
         # (PAUSED/WAITING_CHILDREN are alive by definition —
-        # excluded via ``_ALIVE_INSTANCE_STATUSES``). Detect
+        # excluded via ``ALIVE_INSTANCE_STATUSES``). Detect
         # non-PAUSED, non-terminal stuck states and log for
         # operator visibility. The recovery service's
         # ``recover_on_startup`` handles the terminal-instance

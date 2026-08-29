@@ -108,7 +108,7 @@ from .cancellation import (
 )
 from .request_registry import ActiveRequestRegistry
 from .compaction import ContextCompactor
-from .constants import WORKER_POOL_SIZE
+from .constants import ALIVE_INSTANCE_STATUSES, WORKER_POOL_SIZE
 from .write_pause_guard import WriteGuardSession, WritePauseGuard
 
 # Worker pool imports (lazy import to avoid circular dependency)
@@ -6961,11 +6961,14 @@ class InstanceManager:
         status (``IDLE`` / ``RUNNING`` / ``PAUSED`` / ``QUEUED`` /
         ``WAITING_CHILDREN``).
 
-        Mirrors the ``_ALIVE_INSTANCE_STATUSES`` set in
-        ``daemon/services/job_recovery_service.py:52-58`` (defense-
-        in-depth cross-check — the canonical set lives there). A
-        missing parent row (``None``) returns ``False`` (dead-parent
-        path); a TERMINATED parent is dead.
+        The alive-status set is the canonical
+        ``daemon.constants.ALIVE_INSTANCE_STATUSES`` — same source of
+        truth as
+        ``daemon/services/job_recovery_service.py::_is_instance_alive``
+        (Pattern d Fix 2 — the alive-instance guard that prevents the
+        wedge-fix class from re-opening). A missing parent row
+        (``None``) returns ``False`` (dead-parent path); a TERMINATED
+        parent is dead.
 
         Args:
             parent_row: An ``Instance`` ORM row, or ``None`` if the
@@ -6974,16 +6977,9 @@ class InstanceManager:
         Returns:
             True iff the parent is alive, False otherwise.
         """
-        from .repositories.instance.models import InstanceStatus
         if parent_row is None:
             return False
-        return parent_row.status in {
-            InstanceStatus.IDLE.value,
-            InstanceStatus.RUNNING.value,
-            InstanceStatus.PAUSED.value,
-            InstanceStatus.QUEUED.value,
-            InstanceStatus.WAITING_CHILDREN.value,
-        }
+        return parent_row.status in ALIVE_INSTANCE_STATUSES
 
     def _reconcile_deferred_report(
         self,
