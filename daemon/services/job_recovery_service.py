@@ -3213,17 +3213,26 @@ class JobRecoveryService:
         Returns:
             ``True`` if at least one PENDING Task
             exists for the instance, ``False`` if the
-            instance has no PENDING Tasks (or the
-            repository is not wired). A repository
-            miss is treated as ``False`` (no pending
-            tasks) — the candidate gate has other
-            fail-safes (bus + age floor) to catch
-            pathological cases.
+            instance has no PENDING Tasks. The
+            fail-safe direction is ``True`` (skip
+            finalize, leave JobItem active, next
+            drift cycle re-checks) on all
+            fall-through paths — missing
+            ``instance_id``, unwired
+            ``_task_repository``, AND a transient
+            lookup error — consistent with the
+            sister bus-gate ``_pattern_f_check_bus_pending``
+            (`:3138-3153`) and the sister
+            ``_pattern_f_instance_has_inflight_task``
+            below; never guess on a missing input.
+            The candidate gate still has its bus +
+            age-floor checks to catch pathological
+            cases on the genuine data path.
         """
         if not instance_id:
-            return False
+            return True
         if self._task_repository is None:
-            return False
+            return True
         try:
             tasks = await asyncio.to_thread(
                 self._task_repository.get_by_instance,
@@ -3234,10 +3243,11 @@ class JobRecoveryService:
                 f"_pattern_f_instance_has_pending_tasks: "
                 f"get_by_instance raised for "
                 f"{instance_id[:8]}...: {lookup_err}. "
-                f"Treating as no pending tasks (other "
-                f"fail-safes cover pathological cases)."
+                f"FAIL-SAFE: skipping finalize, leaving "
+                f"JobItem active (next drift cycle "
+                f"re-checks)."
             )
-            return False
+            return True
         for t in tasks or []:
             if getattr(t, "status", None) == TaskStatus.PENDING.value:
                 return True
@@ -3306,16 +3316,16 @@ class JobRecoveryService:
             tasks, or none at all). A repository miss or a
             transient lookup error is treated as ``True``
             (FAIL-SAFE: skip finalize, leave JobItem active;
-            next 60s cycle retries) — consistent with the
+            next drift cycle retries) — consistent with the
             sister bus-gate ``_pattern_f_check_bus_pending``
             (`:3138-3153`, "FAIL-SAFE: skip finalize, leave
-            JobItem active; next 60s cycle retries. Never
+            JobItem active; next drift cycle retries. Never
             guess."). Never guess.
         """
         if not instance_id:
-            return False
+            return True
         if self._task_repository is None:
-            return False
+            return True
         try:
             return await asyncio.to_thread(
                 self._task_repository.has_instance_busy,
@@ -3323,11 +3333,11 @@ class JobRecoveryService:
             )
         except Exception as lookup_err:
             # FAIL-SAFE: skip finalize, leave JobItem
-            # active. The next 60s cycle re-checks. This
+            # active. The next drift cycle re-checks. This
             # direction is consistent with the sister
             # bus-gate ``_pattern_f_check_bus_pending``
             # (`:3138-3153`, "FAIL-SAFE: skip finalize,
-            # leave JobItem active; next 60s cycle
+            # leave JobItem active; next drift cycle
             # retries. Never guess.") — the prior
             # ``return False`` direction (residual (b),
             # gate §7) over-finalized a live retry child
@@ -3337,7 +3347,7 @@ class JobRecoveryService:
                 f"has_instance_busy raised for "
                 f"{instance_id[:8] if instance_id else '?'}...: {lookup_err}. "
                 f"FAIL-SAFE: skipping finalize, leaving "
-                f"JobItem active (next 60s cycle "
+                f"JobItem active (next drift cycle "
                 f"re-checks)."
             )
             return True

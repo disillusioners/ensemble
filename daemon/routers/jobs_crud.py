@@ -17,6 +17,10 @@ from daemon.repositories.job_queue.models import (
     _VALID_LEGACY_STATUSES,
 )
 from daemon.constants import DEFAULT_JOB_LIST_LIMIT, MAX_JOB_LIST_LIMIT
+from daemon.constants import (
+    RESERVED_SOURCE_PREFIXES,
+    is_reserved_source,
+)
 from daemon.utils import create_service_dependency, validate_agent_id
 from .schemas import (
     JobCreateRequest,
@@ -265,7 +269,40 @@ async def create_job(
             status_code=400,
             detail={"error": "Invalid agent", "message": str(e)}
         )
-    
+
+    # Stability-backlog item 7 / F2 pre-close: user-supplied ``source``
+    # at the HTTP boundary must not be able to forge an internal
+    # dispatch origin. Internal callers (cascade-resume, watchover,
+    # agent-to-agent ``internal_agent:``, completion-report drain
+    # ``internal_report:``, error-report drain
+    # ``internal_error_report:``, invoke_agent_and_wait
+    # ``internal_invoke_and_wait:``, ``system:*`` infrastructure
+    # notices) stamp these directly via ``manager.enqueue_message`` /
+    # ``service.enqueue`` — they bypass this HTTP body path and are
+    # unaffected. The 422 response shape matches the existing
+    # ``ValidationError`` envelope (line 285-293) so the frontend
+    # treats it like any other Pydantic validation failure. Empty /
+    # None ``source`` falls back to the Pydantic default ``"api"`` so
+    # the legacy contract is preserved.
+    if is_reserved_source(body.source):
+        raise HTTPException(
+            status_code=422,
+            detail=JobValidationError(
+                error="Validation Error",
+                details=[
+                    {
+                        "field": "source",
+                        "message": (
+                            f"Source '{body.source}' is reserved for "
+                            "internal callers and cannot be supplied "
+                            f"via HTTP. Reserved origins: "
+                            f"{sorted(RESERVED_SOURCE_PREFIXES)}."
+                        ),
+                    }
+                ],
+            ).model_dump(),
+        )
+
     # Normalize project_id for defense-in-depth consistency
     normalized_project_id = normalize_project_id(body.project_id)
 
