@@ -2499,6 +2499,59 @@ class InstanceManager:
             return None
         return list(queue)
 
+    def requeue_injections(
+        self,
+        instance_id: str,
+        entries: list[dict[str, str]],
+    ) -> None:
+        """Prepend ``entries`` to the pending injection queue.
+
+        wc-wake-report-integrity (T5): the D2 seam drain closes the
+        get/clear race that pre-existed at the in-graph site 1
+        (``daemon/graph.py:2977-2979``). The drain takes a snapshot
+        via :meth:`get_injection` and then clears via
+        :meth:`clear_injection`. Entries appended by a concurrent
+        :meth:`set_injection` between the snapshot and the clear are
+        observable as ``cleared - pending``; the drain re-appends
+        those via this helper so the FIFO invariant
+        (``clear_injection == drained``) holds across the race
+        window.
+
+        Prepend-order-preserving: if the existing queue already has
+        entries (the racy append landed FIRST), ``entries`` go to the
+        FRONT so the original drain order is restored. If the queue is
+        empty (the racy append landed AFTER the clear), ``entries``
+        simply become the new queue in their original order.
+
+        The empty-input short-circuit preserves the lock-free semantic
+        for the (very common) case where there is no race — a single
+        dict-assign under the GIL is sufficient.
+
+        Args:
+            instance_id: Target instance.
+            entries: A list of FIFO-entry dicts (``content``,
+                ``timestamp``, optional ``source``). Order is preserved
+                on prepend (oldest-first).
+        """
+        if not entries:
+            return
+        existing = self._pending_injections.get(instance_id)
+        if existing is None:
+            # Empty queue — entries become the new queue in order.
+            self._pending_injections[instance_id] = list(entries)
+        else:
+            # Prepend-order-preserving merge. The race window's
+            # concurrent set_injection call landed AFTER our drain's
+            # snapshot but BEFORE our clear, so its entries are in
+            # ``existing`` and the drained entries must be
+            # restored to the FRONT.
+            self._pending_injections[instance_id] = list(entries) + existing
+        logger.info(
+            f"[Injection] Re-queued {len(entries)} entries for instance "
+            f"{instance_id[:8]}... (D2 seam-drain race safeguard, "
+            f"queue_depth={len(self._pending_injections[instance_id])})"
+        )
+
     # ------------------------------------------------------------------
     # Quick-win #7 — revive-once guard for agent-tool-initiated revives
     # ------------------------------------------------------------------

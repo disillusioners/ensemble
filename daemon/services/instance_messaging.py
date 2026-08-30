@@ -310,6 +310,7 @@ def _build_graph_input(
     content: str | list,
     message_id: str,
     persistent_context_msgs: list[HumanMessage] | None = None,
+    prepended_msgs: list[HumanMessage] | None = None,
 ) -> dict[str, list[HumanMessage]]:
     """Build the LangGraph ``graph_input`` dict, prepending the persistent context block.
 
@@ -342,6 +343,22 @@ def _build_graph_input(
     turn — no double-injection because ``agent_node`` no longer
     re-injects skills into ``full_messages``.
 
+    wc-wake-report-integrity (T5): ``prepended_msgs`` is the seam
+    parameter the D2 FIFO-leftover drain flows through. The drain
+    site in ``_process_message_with_tracking`` builds a list of
+    ``HumanMessage`` instances from the parked FIFO (preserving the
+    ``injected_message: True`` marker + optional ``source`` per
+    ``graph.py:2950-2961`` so leftovers ARE injections — the marker
+    is kept so C3 compaction preservation and D12 subtree filtering
+    continue to recognise them as injected traffic). The drain's
+    exact input order: ``[pairing_placeholders?] + persistent_block +
+    leftover_fifo_msgs (oldest-first) + [user_message]`` — see
+    ``test_instance_messaging_seam_drain`` for the positional pin
+    across all four slots. ``prepended_msgs`` defaults to ``None`` so
+    the three existing call sites (``:3402/:3411/:3420``) remain
+    byte-identical; only the new seam-drain call site passes
+    non-``None``.
+
     Args:
         content: The user message content (string or multimodal
             content-block list from ``_build_message_content``).
@@ -355,17 +372,30 @@ def _build_graph_input(
             ``None`` (default) and ``[]`` both mean "no persistent
             block this turn" — every turn after the first, or any
             turn when persistent context is empty.
+        prepended_msgs: Optional list of :class:`HumanMessage` to
+            inject BEFORE the persistent block. Used by the D2
+            seam-drain to thread parked FIFO leftovers into the
+            LLM-bound list for THIS turn (oldest-first, single
+            turn when both leftovers + new message exist). The
+            pairing-placeholder ``ToolMessage``s synthesized by
+            the D1 entry-seam guard (T6) also ride this seam —
+            ``prepended_msgs`` carries both the placeholders AND
+            the FIFO leftovers, in that order. ``None`` (default)
+            and ``[]`` both mean "no prepended messages this
+            turn" — preserves byte-identical behavior for the
+            three existing call sites.
 
     Returns:
         ``{"messages": [...]}`` dict ready for
         ``graph.astream(graph_input, ...)``. With a non-empty
         ``persistent_context_msgs``, the list is
-        ``[persistent_1, ..., persistent_n, user_message]`` — the
-        persistent block sits BEFORE the user message so it appears
-        at the very start of ``state['messages']`` after the first
-        ``add_messages`` reducer pass. With an empty
-        ``persistent_context_msgs``, the list contains ONLY the
-        ``user_message``.
+        ``[prepended, persistent_1, ..., persistent_n, user_message]``.
+        With a non-empty ``prepended_msgs`` and no persistent
+        block, it is ``[prepended_1, ..., user_message]``. With
+        neither, just ``[user_message]``. The pairing
+        placeholders (T6) sit at the head — immediately after the
+        poisoned checkpoint tail — so they precede everything
+        else.
     """
     user_message = HumanMessage(content=content, id=message_id)
     # Hybrid split — prepend the persistent context block BEFORE the
@@ -374,7 +404,16 @@ def _build_graph_input(
     # produces the steady-state second-turn layout ``[user_message]``.
     # Per the 2026-07-29 refactor this block also carries skills.
     persistent = list(persistent_context_msgs or [])
-    return {"messages": persistent + [user_message]}
+    # T5 (wc-wake): prepended_msgs sits BEFORE the persistent block.
+    # The pairing-placeholder ``ToolMessage``s synthesized by the D1
+    # entry-seam guard (T6) also flow through this seam — they MUST
+    # sit at the head (immediately after the poisoned checkpoint
+    # tail) so the order-pin test can verify positional composition
+    # across all four slots. Empty / None ``prepended_msgs``
+    # produces byte-identical pre-T5 output for the three call
+    # sites that do not pass it.
+    prepended = list(prepended_msgs or [])
+    return {"messages": prepended + persistent + [user_message]}
 
 
 def _get_message_event_type(msg: dict) -> str:
@@ -3554,6 +3593,83 @@ class InstanceMessagingService:
                 content, message_id,
                 persistent_context_msgs=persistent_context_msgs or None,
             )
+
+        # ── D2 seam drain (wc-wake-report-integrity, T5) ────────────────────
+        # Parked-FIFO leftovers drain INTO the graph input BEFORE the
+        # new user message — oldest-first, one turn when both exist.
+        # This subsumes the in-graph site 1
+        # (``daemon/graph.py:2937-3005``) for the wake turn (it
+        # finds an empty FIFO on the wake turn → no double-add).
+        # Crash-window parity with site 1 is accepted: a crash
+        # between the clear (line below) and ``graph.astream``
+        # loses the leftovers — same exposure, no new risk.
+        # The drain is flag-INDEPENDENT (no gating; the constant
+        # ``INJECTION_ELIGIBLE_STATUSES`` shrunk to ``{"running"}``
+        # in T2 — but the drain operates on the RAM FIFO which is
+        # also the RUNNING-target lane; under flag OFF a WC-wake
+        # send still lands here via the legacy FIFO injection route
+        # and the drain picks it up the same way).
+        if graph_input is not None:
+            pending_snapshot = self._manager.get_injection(instance_id)
+            leftover_fifo_msgs: list[HumanMessage] = []
+            for entry in pending_snapshot or []:
+                # Mirror graph.py:2950-2961 — preserve the
+                # ``injected_message: True`` marker + optional
+                # ``source`` so leftovers ARE injections (C3
+                # compaction preservation + D12 subtree filter keep
+                # working). The marker is honestly applied because
+                # these are pre-existing injections, not first-class
+                # turn messages.
+                kwargs: dict[str, Any] = {
+                    "injected_message": True,
+                }
+                _src = entry.get("source")
+                if _src:
+                    kwargs["source"] = _src
+                leftover_fifo_msgs.append(
+                    HumanMessage(
+                        content=entry.get("content", ""),
+                        additional_kwargs=kwargs,
+                    )
+                )
+            cleared = self._manager.clear_injection(instance_id)
+            # Requeue safeguard — closes the get/clear race.
+            # Entries present in ``cleared`` but not in
+            # ``pending_snapshot`` were appended mid-drain by a
+            # concurrent ``set_injection`` call; re-append them at
+            # the FRONT so the original FIFO order is preserved.
+            if cleared is not None:
+                snapshot_ids = [e.get("content") for e in pending_snapshot or []]
+                raced = [
+                    e for e in cleared if e.get("content") not in snapshot_ids
+                ]
+                if raced:
+                    self._manager.requeue_injections(instance_id, raced)
+            # Compose the final graph_input: leftovers slot in
+            # BETWEEN the persistent block and the new user_msg,
+            # matching the S4 input-order pin. The pairing-
+            # placeholders (T6) ride the same seam but are appended
+            # at the head by the D1 entry-seam guard.
+            if leftover_fifo_msgs:
+                existing_messages = list(graph_input.get("messages") or [])
+                # The user_message is the LAST entry (sentinel); the
+                # persistent block sits BEFORE it. Leftovers slot
+                # between persistent and user_message: that is,
+                # at index ``len(existing_messages) - 1``.
+                insert_at = max(0, len(existing_messages) - 1)
+                graph_input = {
+                    "messages": (
+                        existing_messages[:insert_at]
+                        + leftover_fifo_msgs
+                        + existing_messages[insert_at:]
+                    ),
+                }
+                logger.info(
+                    f"[Injection] D2 seam-drain: {len(leftover_fifo_msgs)} "
+                    f"parked FIFO entries flowed into graph_input for "
+                    f"instance {instance_id[:8]}... (oldest-first)."
+                )
+        # ── end D2 seam drain ─────────────────────────────────────────────
 
         # Persistent context HumanMessages are graph inputs rather than normal
         # user turns, so they are not seen by the streaming loop's HumanMessage
