@@ -126,9 +126,14 @@ def _resolve_wc_wake_enqueue_enabled() -> bool:
     values additionally fall back to ``False`` with a one-shot WARN
     cached on first access.
 
-    The first resolution also emits a one-shot INFO log via
-    :func:`emit_wc_wake_enqueue_boot_log` if not already emitted by the
-    manager-init path.
+    Caching and the boot-log emission are independent: this function
+    caches ONLY the resolved boolean; the one-shot INFO log naming the
+    resolved state is emitted by :func:`emit_wc_wake_enqueue_boot_log`
+    itself (gated by its own ``_WC_WAKE_ENQUEUE_BOOT_LOG_EMITTED``
+    flag), which is called from ``InstanceManager.__init__``
+    (``daemon/manager.py:740`` — manager-init path). Flipping the env
+    mid-flight has no effect on either: the boolean is cached for the
+    daemon's lifetime, and the log fires exactly once per process.
     """
     global _WC_WAKE_ENQUEUE_ENABLED
     if _WC_WAKE_ENQUEUE_ENABLED is not None:

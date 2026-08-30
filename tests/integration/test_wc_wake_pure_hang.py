@@ -133,6 +133,39 @@ def restore_langgraph_modules():
             sys.modules[key] = original_modules[key]
 
 
+@pytest.fixture(autouse=True)
+def _reset_wc_wake_enqueue_flag_cache():
+    """Reset the WC-wake kill-switch cache around EVERY test in this module.
+
+    W1 completion (2026-08-30 pre-flip batch — 5th flag setter):
+    the ``ENSEMBLE_WC_WAKE_ENQUEUE=1`` tests in this integration
+    module set the env and call
+    ``_reset_wc_wake_enqueue_for_tests()`` — but monkeypatch only
+    restores the ENV at teardown; the resolver's module-global cache
+    stays ``True`` and leaks into later flag-implicit tests (both
+    the cross-file-order and subset-by-name vectors reproduce
+    ``assert 200 == 202`` on the legacy 202 expectation). Clear the
+    cache BEFORE and AFTER every test so each test resolves the flag
+    from the ambient env.
+
+    Integration-module caveat: the autouse ``restore_langgraph_modules``
+    fixture above pops ``daemon.services.instance_messaging`` from
+    ``sys.modules`` so the real graph engine loads with real langgraph.
+    This reset fixture re-imports the module fresh, getting a module
+    whose global starts ``None`` (matching the other three unit-module
+    fixtures — same pattern, same outcome). Module-scoped on purpose —
+    a suite-global autouse in ``tests/conftest.py`` would mask
+    intentional flag-state tests and add overhead everywhere.
+    """
+    from daemon.services.instance_messaging import (
+        _reset_wc_wake_enqueue_for_tests,
+    )
+
+    _reset_wc_wake_enqueue_for_tests()
+    yield
+    _reset_wc_wake_enqueue_for_tests()
+
+
 
 # ---------------------------------------------------------------------------
 # Scripted LLM — the consumption evidence
