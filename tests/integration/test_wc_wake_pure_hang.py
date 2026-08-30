@@ -123,6 +123,33 @@ def restore_langgraph_modules():
         "daemon.services.task_processor",
         "daemon.services.message_processing_pipeline",
         "daemon.services.execution_gate",
+        # Module-identity cache pollution audit (wc-wake-report-integrity
+        # residual, W2 follow-up): any ``daemon.*`` module that holds a
+        # module-level ``from daemon.services.instance_messaging import
+        # _resolve_wc_wake_enqueue_enabled`` binding captures the
+        # ORIGINAL (pre-pop) instance-messaging module's function ref
+        # at pytest-collection time. After ``instance_messaging`` is
+        # popped above, a fresh module loads with ``_WC_WAKE_ENQUEUE_ENABLED
+        # = None`` — but the stale binding in this module's function
+        # ``__globals__`` still resolves through the OLD instance, which
+        # carries a polluted cache (set by an earlier ``ENSEMBLE_WC_WAKE_ENQUEUE=1``
+        # test that monkeypatch-teardown doesn't reach). The first
+        # flag-implicit test in the next file then sees the cached True
+        # and routes through ``enqueue_message`` instead of the legacy
+        # ``set_injection`` (the ``assert 200 == 202`` vector).
+        # Audited call sites (``grep -n "_resolve_wc_wake_enqueue_enabled"
+        # daemon/``):
+        #   daemon/routers/messages.py:19    module-level (← THIS list)
+        #   daemon/tools/job_queue.py:19     module-level (← THIS list)
+        #   daemon/tools/instance.py:863     lazy import INSIDE function
+        #                                    body — each call re-resolves
+        #                                    against sys.modules, so the
+        #                                    post-pop ``instance_messaging``
+        #                                    is picked up automatically.
+        #   daemon/services/instance_messaging.py itself — already
+        #                                    popped above.
+        "daemon.routers.messages",
+        "daemon.tools.job_queue",
     ]:
         sys.modules.pop(mod_name, None)
 
