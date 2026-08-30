@@ -85,8 +85,9 @@ Sprint 1 shipped; the system has since been extended. See the canonical architec
 │  │  (daemon/manager.py)│    │  (daemon/queue.py)  │    │  (scheduler.py)   │ │
 │  │                     │    │                     │    │                   │ │
 │  │  • spawn_instance() │    │  • enqueue()        │    │  • _emit_message()│ │
-│  │  • send_message()  │    │  • dequeue()        │    │  • project_id    │ │
-│  │  • terminate_      │    │  • watchdog         │    │    (optional)     │ │
+│  │  • enqueue_         │    │  • dequeue()        │    │  • project_id    │ │
+│  │    message() ←T6b   │    │  • watchdog         │    │    (optional)     │ │
+│  │  • terminate_       │    │                     │    │                   │ │
 │  │    instance() ←NEW  │    │                     │    │                   │ │
 │  └─────────────────────┘    └─────────────────────┘    └───────────────────┘ │
 │                                                                                  │
