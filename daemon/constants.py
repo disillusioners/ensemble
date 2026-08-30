@@ -559,3 +559,43 @@ REPORT_INTEGRITY_JUNK_REPORT_TOTAL: str = "report_integrity_junk_report_total"
 REPORT_REPAIR_EXCLUDED_AGENTS: frozenset[str] = frozenset(
     {"wanderer", "explorer", "watcher"}
 )
+
+
+# ── wc-wake-report-integrity (Wave 2 — B.S.8 PARTIAL) ────────────────────────
+#
+# Kill-switch registry entries for the Wave-2 report-integrity gates.
+# Both env names are RESERVED at this commit (B.S.1-i PREDICATE-FUNCTION-ONLY).
+# The env bindings (config.py field + ``_resolve_*_enabled()`` helper,
+# mirroring the ``LIMITS_GOVERNOR_RECURSION_GUARD_ENABLED`` precedent at
+# ``daemon/repositories/instance/repository.py:65`` and the
+# ``ENSEMBLE_WC_WAKE_ENQUEUE`` precedent for C1-Q2) land at stage iii
+# (B.S.1-iii / B.S.8 registry test) — that commit also asserts the
+# registry test for BOTH env names, including the reserved-unused (a).
+#
+# Decisions: C2-D2.5 (b) ships in this component; C2-D2.5-FLIP
+# (leader-confirmed 2026-08-30) commits to the enforcement flip
+# after ≤2-week soak or immediately on any silent-death incident;
+# C2-D2.2 ((a) does NOT land initially; WITHDRAWN — subsumed by (c)).
+#
+# ────────────────────────────────────────────────────────────────────────────
+
+# (b) Terminal-child-aware waiting guard (decisions.md C2-D2.5 LOCKED,
+# C2-D2.6 LOCKED, C2-D2.7 LOCKED, C2-D2.8 LOCKED, C2-D2.18 LOCKED).
+# Wave-2 stage-iii (B.S.1-iii) wires the config.py env binding; the
+# default-0 semantics here match the ``LIMITS_GOVERNOR_RECURSION_GUARD_ENABLED``
+# precedent (kill-switch default OFF — the revert path; pre-committed
+# enforcement flip per D2.5-FLIP).
+WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED: str = (
+    "WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED"
+)
+
+# (a) Premature-first-turn guard — RESERVED-UNUSED (decisions.md C2-D2.2
+# LOCKED — (a) does NOT land initially; (a2) WITHDRAWN — subsumed by (c);
+# C2-D2.3 LOCKED — default OFF behind kill-switch; C2-D2.4 LOCKED —
+# first-turn only if ever activated). The env name is reserved so
+# future escalation has a single canonical home and the B.S.8 registry
+# test at stage iii covers BOTH names. NO config binding lands at this
+# commit — the name is a forward declaration only.
+WC_REPORT_INTEGRITY_A_PREMATURE_TURN_GUARD_ENABLED: str = (
+    "WC_REPORT_INTEGRITY_A_PREMATURE_TURN_GUARD_ENABLED"
+)

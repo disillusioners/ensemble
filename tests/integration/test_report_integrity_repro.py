@@ -346,3 +346,162 @@ async def test_silent_death_zero_tool_child_report_is_detectable(
             "CHILD_COMPLETED event must reference the terminal child — the "
             "unnoticed-residue handle the parent never acted on"
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# B.S.1-i — (b)-predicate scenario extension (NR-1 §4.0 Wave-2 row, 2026-08-30).
+#
+# In the same terminal-child-and-unnoticed state the Wave-1 scaffold
+# reproduces above, the (b) predicate (decisions.md C2-D2.7 LOCKED)
+# MUST return NON-EMPTY with the right child + terminal status. The
+# Wave-1 detectability assertions remain intact; this is an
+# additive extension. A healthy sibling path must yield EMPTY —
+# proving the predicate is content-blind (D2.18) and only fires in
+# the incident shape.
+#
+# Wave-1 detectability assertions above are NOT removed; this
+# extension is layered on top per §4.0.
+#
+# Implementation note (hermetic harness): the regular completion
+# path's report-injection INSERT is wrapped in a SAVEPOINT that
+# absorbs concurrent-duplicate IntegrityErrors
+# (``child_reports.py:3003+``); the existing Wave-1 harness does
+# not always land a PENDING row in this fixture because the
+# completion transaction's other dependencies
+# (``instance_hierarchy``, message-queue ordering, etc.) are
+# partial in the hermetic harness. For the (b) predicate scenario
+# we stage the PENDING row EXPLICITLY before the predicate call —
+# this is exactly the durable obligation the predicate reads, and
+# it is the shape ``_process_child_completion_db_sync`` would
+# produce in a live run.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def test_b_predicate_fires_in_unnoticed_state(engine: Engine):
+    """In the repro's terminal-child-and-unnoticed state, the (b)
+    predicate (D2.7 LOCKED) returns NON-EMPTY with the right child
+    and terminal status — the Wave-2 B.S.1-i scenario.
+
+    The scenario: parent declared-waiting → child emitted junk →
+    child COMPLETED → a PENDING ``report_injections`` obligation
+    sits on the durable queue → the parent has not acted. The
+    predicate (D2.7 LOCKED) MUST fire here.
+
+    Coherence: Wave-1 detectability assertions (NR-3 counter + (c)
+    marker + parent-state shape) remain intact above; this test
+    is an additive scenario, not a replacement.
+    """
+    from daemon.repositories.report_injection.repository import (
+        ReportInjectionRepository,
+    )
+    from daemon.services.report_integrity_guard import (
+        evaluate_declared_waiting_violations,
+    )
+
+    parent_id = _seed_parent_declared_waiting(engine)
+    child_id = _seed_child_running(engine, parent_id)
+    history = _junk_checkpoint_history()
+    service = _build_service(engine, history)
+
+    completed_message_id = f"msg-{uuid.uuid4().hex[:8]}"
+
+    # Drive the regular completion path so the (c) marker + counter
+    # asserts above remain intact (Wave-1 detectability surface).
+    with patch(
+        "daemon.services.child_reports.get_instance_messages",
+        new=AsyncMock(return_value=history),
+    ):
+        report_content = await service._get_last_assistant_message(
+            child_id, "worker"
+        )
+
+    result = service._process_child_completion_db_sync(
+        instance_id=child_id,
+        completed_message_id=completed_message_id,
+        last_content=report_content,
+    )
+    assert result.outcome == "regular_child_completed"
+
+    # Stamp the child COMPLETED (the silent-death residue shape) and
+    # stage the PENDING obligation explicitly on the durable row.
+    # In a live run, the regular completion path writes this row
+    # itself (``child_reports.py:3003+``); here we stage it directly
+    # so the predicate evaluates against the exact shape it sees in
+    # production.
+    report_repo = ReportInjectionRepository(engine)
+    with Session(engine) as session:
+        session.execute(
+            sa_update(Instance)
+            .where(Instance.instance_id == child_id)
+            .where(
+                Instance.status.notin_([
+                    InstanceStatus.PAUSED.value,
+                    InstanceStatus.COMPLETED.value,
+                    InstanceStatus.ERROR.value,
+                ])
+            )
+            .values(status=InstanceStatus.COMPLETED.value)
+        )
+        session.commit()
+        report_repo.enqueue(
+            parent_instance_id=parent_id,
+            child_instance_id=child_id,
+            child_message_id=completed_message_id,
+            report_message_id=f"rmsg-{uuid.uuid4().hex[:8]}",
+            content="junk opener body",
+        )
+
+    # (b) PREDICATE — evaluated on the repro's session, the B.S.7
+    # binding contract. The session is the repro's own (StaticPool
+    # shared connection); the predicate reads durable rows on it.
+    with Session(engine) as session:
+        report = evaluate_declared_waiting_violations(session, parent_id)
+
+    # NON-EMPTY with the right child + terminal status (OQ-6).
+    assert report.is_violation is True
+    assert report.count >= 1
+    assert any(
+        d["child_instance_id"] == child_id
+        and d["child_terminal_status"] == InstanceStatus.COMPLETED.value
+        for d in report.pending_with_terminal_child
+    ), (
+        "(b) predicate MUST surface the terminal child with the COMPLETED "
+        "terminal status so stage iii can pick the COMPLETED adjudication "
+        "playbook (OQ-6 disposition, decisions.md bottom)"
+    )
+
+    # Structured return shape — no leakage of message content /
+    # tool_calls (D2.18 content-blind invariant).
+    for detail in report.pending_with_terminal_child:
+        assert set(detail.keys()) == {
+            "injection_id",
+            "child_instance_id",
+            "state",
+            "child_terminal_status",
+        }, (
+            "D2.18 LOCKED: (b) predicate is content-blind — the structured "
+            "return must NOT expose message content or tool_calls"
+        )
+
+
+async def test_b_predicate_dormant_on_healthy_sibling(engine: Engine):
+    """A healthy parent (no rows) → predicate returns EMPTY.
+
+    The (b) predicate's healthy-path invariant (D2.7): EMPTY on
+    every healthy shape. Asserted with a SIBLING parent that has
+    NO report rows and NO watcher rows so the predicate does
+    not over-fire on the live repro's parent.
+    """
+    from daemon.services.report_integrity_guard import (
+        evaluate_declared_waiting_violations,
+    )
+
+    sibling_id = _seed_parent_declared_waiting(engine)  # distinct from the live parent
+
+    with Session(engine) as session:
+        report = evaluate_declared_waiting_violations(session, sibling_id)
+
+    assert report.is_violation is False
+    assert report.count == 0
+    assert report.pending_with_terminal_child == []
+    assert report.fired_unenqueued == []
