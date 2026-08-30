@@ -116,6 +116,8 @@ def _do_chat_call(
     chat_api_key: str | None,
     system_prompt: str,
     user_prompt: str,
+    *,
+    http_client: Any | None = None,
 ) -> Any:
     """Construct a fresh ``openai.OpenAI`` client and run a chat-completion.
 
@@ -130,12 +132,24 @@ def _do_chat_call(
     When failover is inactive, ``current_failover_url()`` returns
     ``None`` and we fall back to ``chat_base_url`` (the chat
     endpoint) — same behavior as pre-v2 (zero behavior change).
+
+    The ``http_client`` kwarg is the seam for outbound request-body
+    gzip compression (``OPENAI_REQUEST_GZIP=true``). When None
+    (default), the openai client uses its built-in default httpx
+    client — byte-identical to the pre-feature wire format. When
+    a gzip-enabled client is provided (built by
+    ``daemon.services.llm_gzip.make_gzip_httpx_client``), every
+    request body the client sends is gzip-compressed and
+    ``Content-Encoding: gzip`` is stamped on the wire.
     """
     url = current_failover_url() or chat_base_url
-    client = openai.OpenAI(
-        api_key=chat_api_key or "",
-        base_url=url or None,
-    )
+    client_kwargs: dict[str, Any] = {
+        "api_key": chat_api_key or "",
+        "base_url": url or None,
+    }
+    if http_client is not None:
+        client_kwargs["http_client"] = http_client
+    client = openai.OpenAI(**client_kwargs)
     return client.chat.completions.create(
         model=chat_model,
         messages=[
@@ -151,6 +165,8 @@ def _do_embed_call(
     embed_base_url: str | None,
     embed_api_key: str | None,
     text: str,
+    *,
+    http_client: Any | None = None,
 ) -> Any:
     """Construct a fresh ``openai.OpenAI`` client and run an embedding call.
 
@@ -163,12 +179,25 @@ def _do_embed_call(
     the chat ``base_url`` is used). Sites configure this via
     ``llm_config["base_url_backup"]`` plumbed through from
     ``daemon/manager.py``.
+
+    The ``http_client`` kwarg is the seam for outbound request-body
+    gzip compression (``OPENAI_REQUEST_GZIP=true``). When None
+    (default), the openai client constructs its own built-in
+    default httpx client (the openai SDK's ``DefaultHttpxClient``)
+    — no gzip wrapping, no ``Content-Encoding`` header, no
+    transport mutation. Embedding request bodies are tiny (one
+    short string) so the savings are small — but the gzip transport
+    is a no-op on bodies that don't shrink under compression, so
+    it's free to apply uniformly.
     """
     url = current_failover_url() or embed_base_url
-    client = openai.OpenAI(
-        api_key=embed_api_key or "",
-        base_url=url or None,
-    )
+    client_kwargs: dict[str, Any] = {
+        "api_key": embed_api_key or "",
+        "base_url": url or None,
+    }
+    if http_client is not None:
+        client_kwargs["http_client"] = http_client
+    client = openai.OpenAI(**client_kwargs)
     return client.embeddings.create(model=embed_model, input=text)
 
 
@@ -309,17 +338,29 @@ class SkillEmbeddingService:
             # each entry reads the current target URL via
             # ``current_failover_url()`` so a swap is observable as a
             # change in the URL passed to ``openai.OpenAI(...)``.
+            #
+            # Opt-in outbound request-body gzip compression — see
+            # ``daemon.services.llm_gzip.resolve_gzip_client`` for the
+            # full rationale (singleton reuse + early-return on the
+            # disabled path keeps flag-OFF behavior byte-identical to
+            # the pre-feature state).
+            from .llm_gzip import resolve_gzip_client
+
             chat_failover_config = {
                 "base_url": chat_base_url,
                 "base_url_backup": self.llm_config.get("base_url_backup"),
                 "api_key": chat_api_key,
             }
+            gzip_http_client = resolve_gzip_client(
+                bool(self.llm_config.get("request_gzip"))
+            )
             chat_callable = lambda: _do_chat_call(
                 chat_model=chat_model,
                 chat_base_url=chat_base_url,
                 chat_api_key=chat_api_key,
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
+                http_client=gzip_http_client,
             )
             response = await asyncio.to_thread(
                 invoke_raw_with_failover,
@@ -377,12 +418,27 @@ class SkillEmbeddingService:
         if not text or not text.strip():
             raise ValueError("Cannot embed empty text")
 
+        # Opt-in outbound request-body gzip compression — see
+        # ``daemon.services.llm_gzip.resolve_gzip_client`` for the
+        # full rationale. Embedding request bodies are small (one
+        # short string); the gzip transport is a no-op on bodies
+        # that don't shrink under compression. The variable is
+        # declared here (BEFORE ``_call_embed`` below) so the closure
+        # captures it eagerly instead of relying on Python's late
+        # binding — same shape as the chat path.
+        from .llm_gzip import resolve_gzip_client
+
+        gzip_embed_client = resolve_gzip_client(
+            bool(self.llm_config.get("request_gzip"))
+        )
+
         def _call_embed() -> Any:
             return _do_embed_call(
                 embed_model=model,
                 embed_base_url=base_url,
                 embed_api_key=api_key,
                 text=text,
+                http_client=gzip_embed_client,
             )
 
         try:
@@ -417,6 +473,9 @@ class SkillEmbeddingService:
                 "base_url_backup": embed_backup,
                 "api_key": api_key,
             }
+            # ``gzip_embed_client`` is resolved eagerly above (before
+            # the ``_call_embed`` closure definition) so the closure
+            # captures it directly — no late-binding surprise.
             embed_callable = lambda: _call_embed()
             response = await asyncio.to_thread(
                 invoke_raw_with_failover,

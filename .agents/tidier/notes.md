@@ -48,3 +48,10 @@
 - Positive anchors: TestAuditBaseline pattern (test-layer re-verification of single-FIFO-writer invariant, test_instance_tools.py:223-277); constants.py fork-history docstring (175-237); helper-purity preserved by keeping load_skill/context override OUT of _route_send_message.
 - LEDGER (structural, deferred): send_message ~450-line soft split (instance.py:1749-2200) into send_message_routing.py; route-vocabulary Literal/Enum hardening + 3 `routed_via == "injection"` sites; InstanceManager TYPE_CHECKING lift ×5 sites; job_queue.py:1564/1721 parallel terminal tuples → TERMINAL_INSTANCE_STATUSES; report_injection/repository.py:150-153 cross-layer set.
 - Exclusions honored: entry var, hardcoded repo paths, W4 tautology (concurrent), S-3 ticket, test_job_queue_tools rot, plan-deferred items — 0 findings on all.
+
+## 2026-08-29 — LLM request gzip (feature/llm-request-gzip, uncommitted), Iteration 001
+- Verdict: ISSUES (non-blocking) — 0 High / 4 Medium / 11 Low. 2 parallel workers (readable-code, static-hygiene), both full reports.
+- Key mediums: 4-way gzip-client resolution-block duplication incl. ~7-line copy-paste comment (skill_{embedding,evolution,search}_service, 4 sites); sync/async builder literal duplication in llm_gzip.py:301-314 vs :333-346; dead MagicMock import (test:58); request_gzip field placement splits LLMConfig field grouping (config.py:259-289).
+- SDK-parity docstring claims verified truthful by BOTH workers independently (values vs code; values vs installed SDK 2.44.0 defaults). Zero stray .bak/.orig in diff dirs (only pre-existing agents/_prompt_system/.../skill.md.bak, out of diff). Settled list honored — 0 violations across both workers.
+- Deferred-to-Reviewer FYIs (prior rounds APPROVED, not reopened): unbounded gzip body memory (OOM surface), httpx re-entry safety of _compress_request_body, singleton lifetime on hot-reload, clean_llm_config partial-override semantics.
+- Pattern: 3+ duplication rule NOT bumped to High when all copies land atomically in one diff, blocks are small + comment-heavy, and drift is only cosmetic so far — future-tense drift risk → Medium with stated reasoning.

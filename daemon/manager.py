@@ -1054,6 +1054,15 @@ class InstanceManager:
                 "model_vision": self.config.llm.model_vision,
                 "temperature": self.config.llm.temperature,
                 "request_timeout": self.config.llm.request_timeout,
+                # Opt-in outbound request-body gzip compression
+                # (``OPENAI_REQUEST_GZIP``). Threaded through the raw
+                # SDK helper factories (skill_search /
+                # skill_embedding / skill_evolution) so they can build
+                # gzip-enabled httpx clients when the operator knob is
+                # on. Default False — no client is attached and the
+                # openai SDK uses its built-in default httpx client
+                # (zero behavior change).
+                "request_gzip": self.config.llm.request_gzip,
             }
             self._skill_embedding_service = SkillEmbeddingService(
                 config=self.config.skill_evolution,

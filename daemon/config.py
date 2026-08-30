@@ -256,6 +256,56 @@ class LLMConfig(BaseSettings):
             return True
         return value
 
+    # Outbound LLM request-body gzip compression (opt-in). When True, the
+    # LLM HTTP clients constructed by ``daemon.graph.clean_llm_config``
+    # AND the raw-SDK ``_do_chat_call`` / ``_do_embed_call`` helpers in
+    # ``daemon/services/{skill_search,skill_evolution,skill_embedding}_service``
+    # use an httpx transport that gzip-compresses the request body and
+    # stamps ``Content-Encoding: gzip`` (Content-Length auto-corrected to
+    # the compressed size). Default DISABLED — when False the code path
+    # runs byte-identical to pre-feature (no custom transport attached,
+    # no headers injected). Response handling is completely untouched
+    # (we never accept-encoding or accept gzip on the response side).
+    #
+    # The proxy must support request-body gzip for this to do anything
+    # useful. The flag only adds the wire-level encoding; operators
+    # enable it via ``OPENAI_REQUEST_GZIP=true`` to shrink outbound
+    # payloads (text-heavy chat-completion bodies typically shrink 5-10x
+    # with gzip). Empty / YAML-null coerces to the default (False) so an
+    # ``OPENAI_REQUEST_GZIP=""`` paste-through or a bare YAML
+    # ``request_gzip:`` key doesn't crash daemon boot on pydantic bool
+    # parsing — same shape as the streaming / buffer-response-header
+    # coercion pattern above.
+    request_gzip: bool = Field(
+        default=False,
+        description=(
+            "Outbound gzip compression of LLM HTTP request bodies. When "
+            "True, request bodies are gzip-compressed on the wire and a "
+            "Content-Encoding: gzip header is stamped (Content-Length "
+            "auto-corrected). Default False (zero behavior change, "
+            "pure passthrough). Override via OPENAI_REQUEST_GZIP env "
+            "var."
+        ),
+    )
+
+    @field_validator("request_gzip", mode="before")
+    @classmethod
+    def _coerce_request_gzip_empty_to_default(cls, value: Any) -> Any:
+        """Coerce empty-string / YAML-null to the default (False).
+
+        Mirrors ``_coerce_streaming_empty_to_default`` /
+        ``_coerce_buffer_response_header_empty_to_default`` above: an
+        empty ``OPENAI_REQUEST_GZIP=""`` pasting through the
+        ``${OPENAI_REQUEST_GZIP:-false}`` interpolation or a bare YAML
+        ``request_gzip:`` (None) would otherwise crash daemon boot on
+        pydantic bool parsing.
+        """
+        if value is None:
+            return False
+        if isinstance(value, str) and not value.strip():
+            return False
+        return value
+
     @field_validator("reasoning_echo_disabled_models", mode="before")
     @classmethod
     def _parse_reasoning_echo_disabled_models(cls, value: Any) -> Any:

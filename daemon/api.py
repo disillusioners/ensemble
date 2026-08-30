@@ -240,6 +240,20 @@ async def lifespan(app: FastAPI):
         f"(clean_llm_config injects streaming={ThinkingChatOpenAI.default_streaming} "
         f"when callers don't pass an explicit flag; OPENAI_STREAMING env var controls it)"
     )
+    # Wire the OPENAI_REQUEST_GZIP operator knob. When True,
+    # ``clean_llm_config`` attaches gzip-enabled httpx clients
+    # (``http_client`` / ``http_async_client``) to the LangChain
+    # ChatOpenAI constructor so every outbound LLM request body is
+    # gzip-compressed on the wire. When False (default) no custom
+    # clients are attached and the code path is byte-identical to
+    # the pre-feature state. See daemon/services/llm_gzip.py for
+    # the transport wrapper.
+    ThinkingChatOpenAI.default_request_gzip = bool(config.llm.request_gzip)
+    daemon_logger.info(
+        f"[Config] default_request_gzip={ThinkingChatOpenAI.default_request_gzip} "
+        f"(clean_llm_config attaches gzip httpx clients when True; "
+        f"OPENAI_REQUEST_GZIP env var controls it)"
+    )
 
     # Warn-once if the removed allowlist env var is still set (no-op when
     # load_config already emitted it)

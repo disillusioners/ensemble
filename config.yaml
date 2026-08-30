@@ -63,6 +63,18 @@ llm:
   # Exact model names only — this is NOT a prefix or substring match.
   allowed_models: ${OPENAI_ALLOWED_MODELS:-agentic,coding}
 
+  # Outbound LLM request-body gzip compression. When True, every
+  # outbound LLM HTTP request body is gzip-compressed and a
+  # Content-Encoding: gzip header is stamped (Content-Length
+  # auto-corrected to the compressed size). Response handling is
+  # completely untouched — we never ask the proxy to gzip responses
+  # (streaming responses are kept as-is for the CF ~125s 524 fix).
+  # When False (default) the code path is byte-identical to the
+  # pre-feature behavior — no custom httpx transport is attached, no
+  # headers are injected. Enable via OPENAI_REQUEST_GZIP=true when
+  # the LLM proxy supports request-body gzip.
+  request_gzip: ${OPENAI_REQUEST_GZIP:-false}
+
 # Server Configuration  
 daemon:
   host: ${HOST:-0.0.0.0}
