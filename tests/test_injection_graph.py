@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -759,8 +760,13 @@ class TestDrainEchoId:
       ``additional_kwargs == {"injected_message": True}`` (byte-identical
       kwargs contract — the id lives on the message, NOT in kwargs).
     * Entry WITHOUT ``echo_id`` (agent-tool ``instance.py:2811`` /
-      ``job_inject`` ``job_queue.py:1868``) → ``id is None`` — byte-
-      identical to the pre-feature shape.
+      ``job_inject`` ``job_queue.py:1868``) — MAJ-1 fix: the drain
+      mints a uuid4 ONCE at HumanMessage construction time so the id
+      is stable across SSE re-emit + GET /messages + reconnect refetch
+      (the FE union-by-id merge can now collapse duplicates). Pre-MAJ-1
+      these entries drained with ``id=None`` and ``serialize_message``
+      re-minted a fresh uuid4 per call, producing duplicate bubbles on
+      reconnect refetch.
     * Coexistence with the quick-win #1 ``source`` kwarg is per-entry.
     """
 
@@ -795,9 +801,18 @@ class TestDrainEchoId:
         assert persisted[0].id == "aabbccdd-1122-4333-8444-556677889900"
 
     @pytest.mark.asyncio
-    async def test_no_echo_id_entry_keeps_id_none(self):
-        """Tool-path back-compat pin: entry without ``echo_id`` drains
-        with ``HumanMessage.id is None``."""
+    async def test_no_echo_id_entry_mints_uuid_in_drain(self):
+        """MAJ-1 fix — tool-path id stability: entry without ``echo_id``
+        mints a uuid4 ONCE in the drain loop. The minted id is BOTH the
+        HumanMessage.id (so the checkpoint + GET /messages surface a
+        stable id) AND the id ``serialize_message`` reuses on the SSE
+        re-emit (so reconnect refetch + FE merge collapse duplicates).
+
+        Pre-MAJ-1: ``id is None`` → ``serialize_message`` minted a fresh
+        uuid at every call → duplicates on refetch.
+        Post-MAJ-1: id is a uuid4 minted once at HumanMessage construction;
+        re-emit message_id == HumanMessage.id == id on subsequent reads.
+        """
         slot = _StubInjectionSlot(initial={
             "iid-1": [{"content": "tool msg", "timestamp": "ts"}],
         })
@@ -810,7 +825,13 @@ class TestDrainEchoId:
 
         drained = llm.calls[0][-1]
         assert isinstance(drained, HumanMessage)
-        assert drained.id is None
+        # MAJ-1: id is no longer None for echo_id-less entries; it's a
+        # uuid4 minted at drain time so the id is stable across the
+        # checkpoint + GET /messages + SSE re-emit.
+        assert drained.id is not None
+        parsed = uuid.UUID(drained.id)  # raises if not a UUID
+        assert parsed.version == 4
+        # additional_kwargs byte-identical contract preserved.
         assert drained.additional_kwargs == {"injected_message": True}
 
     @pytest.mark.asyncio
@@ -841,7 +862,12 @@ class TestDrainEchoId:
         api_hm, tool_hm = llm.calls[0][-2], llm.calls[0][-1]
         assert api_hm.id == "11111111-2222-4333-8444-555555555555"
         assert api_hm.additional_kwargs == {"injected_message": True}
-        assert tool_hm.id is None
+        # MAJ-1: tool-path entry (no echo_id) mints a uuid4 in the drain
+        # loop so the id is stable across SSE re-emit + GET /messages —
+        # NOT ``None`` (the pre-MAJ-1 shape that caused reconnect refetch
+        # duplicate bubbles).
+        assert tool_hm.id is not None
+        assert uuid.UUID(tool_hm.id).version == 4
         assert tool_hm.additional_kwargs == {
             "injected_message": True,
             "source": "internal_agent:caller-1",

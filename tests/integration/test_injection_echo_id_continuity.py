@@ -232,15 +232,21 @@ class TestInjectThenDrainIdContinuity:
         assert user_rows_again[0]["message_id"] == eid
 
     @pytest.mark.asyncio
-    async def test_tool_path_entry_gets_pipeline_minted_id(self):
-        """Tool-path back-compat (entries WITHOUT echo_id): the drain
-        builds ``HumanMessage(id=None)`` (unit-pinned in
-        ``tests/test_injection_graph.py``); under a real compiled graph
-        the ``add_messages`` reducer mints its own uuid for the commit,
-        so the checkpointed message reads back with a pipeline-assigned
-        uuid4 — NOT an id we control. This is the asymmetry the echo_id
-        threading fixes for the user-API path: only echo_id entries
-        give GET /messages an id correlated with the POST-time event.
+    async def test_tool_path_entry_mints_id_in_drain_for_id_stability(self):
+        """MAJ-1 regression — tool-path id stability across the full path.
+
+        Entries WITHOUT ``echo_id`` (agent-tool / job_inject call sites)
+        used to drain with ``HumanMessage.id = None`` → the SSE re-emit
+        minted a fresh uuid4 via ``serialize_message`` AND every GET
+        /messages read minted a DIFFERENT fresh uuid4 → the FE
+        union-by-id merge could not collapse the duplicate bubbles after
+        a reconnect refetch.
+
+        MAJ-1 fix: the drain mints a uuid4 ONCE and stamps it on BOTH the
+        SSE echo HumanMessage AND the LLM-bound HumanMessage (which the
+        checkpoint commit persists). The invariant
+        ``drain re-emit message_id == LLM-bound HumanMessage.id == GET
+        /messages read-back id`` must hold — two emissions, SAME id.
         """
         instance_id = "inst-echo-toolpath"
         entries = [{"content": "from tool", "timestamp": "2026-08-30T00:00:00+00:00"}]
@@ -251,15 +257,53 @@ class TestInjectThenDrainIdContinuity:
             config={"configurable": {"thread_id": instance_id}},
         )
 
+        # ---- Hop 1: LLM-bound HumanMessage.id == a uuid4 minted in drain ----
+        # Pre-MAJ-1 this was ``None``.
+        drained = llm.calls[0][-1]
+        assert isinstance(drained, HumanMessage)
+        assert drained.id is not None
+        minted_id = uuid.UUID(drained.id)  # raises if not a UUID
+        assert minted_id.version == 4
+        assert drained.content == "from tool"
+
+        # ---- Hop 2: SSE re-emit message_id == the SAME minted uuid ----
+        # Pre-MAJ-1 the SSE message_id came from a FRESH uuid minted by
+        # ``serialize_message`` (different from the reducer-minted uuid
+        # that landed in the checkpoint) — the duplicate-bubble bug.
+        user_calls = [
+            c for c in hub.stream_message.await_args_list
+            if c.kwargs.get("event_type") == "user_message"
+        ]
+        assert len(user_calls) == 1
+        sse_payload = user_calls[0].kwargs["message"]
+        # MAJ-1 mint-once-in-drain: SSE message_id == LLM-bound
+        # HumanMessage.id. The FE merge contract requires this equality
+        # so a reconnect refetch + re-emit collapse onto ONE bubble.
+        assert sse_payload["message_id"] == drained.id
+
+        # ---- Hop 3: GET /messages read-back returns the SAME uuid ----
         from daemon.persistence import get_instance_messages
 
         history = await get_instance_messages(checkpointer, instance_id)
         user_rows = [m for m in history if m.get("role") == "user"]
         assert len(user_rows) == 1
-        # The read-back id is a valid uuid minted by the pipeline (reducer
-        # / serializer) — no server-minted POST-time id exists on this path.
-        assert uuid.UUID(user_rows[0]["message_id"]).version == 4
+        # MAJ-1 mint-once-in-drain propagates to the checkpoint commit
+        # (we mutate ``injected_msgs[i].id`` so the LangGraph reducer
+        # sees a non-None id and preserves the minted uuid). GET
+        # /messages now returns the SAME uuid that the SSE re-emit
+        # carried — what the FE merge needs.
+        assert user_rows[0]["message_id"] == drained.id
         assert user_rows[0]["content"] == "from tool"
+
+        # ---- Hop 4: a SECOND GET /messages read returns the SAME id ----
+        # Pre-MAJ-1 this could land on a DIFFERENT uuid (each call to
+        # ``serialize_message`` minted a fresh uuid when the persisted
+        # id was None). The whole point of the fix is that this is now
+        # stable across reads — what lets the FE reconnect refetch
+        # collapse duplicates by id.
+        history_again = await get_instance_messages(checkpointer, instance_id)
+        user_rows_again = [m for m in history_again if m.get("role") == "user"]
+        assert user_rows_again[0]["message_id"] == drained.id
 
 
 # ---------------------------------------------------------------------------

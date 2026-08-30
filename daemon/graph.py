@@ -2961,8 +2961,12 @@ def create_agent_node(
                     # wire by ``langchain_openai`` — the LLM payload and
                     # the ``additional_kwargs`` byte-identical contract
                     # are untouched. Entries without ``echo_id``
-                    # (agent-tool / job_inject call sites) get ``id=None``
-                    # — byte-identical to the pre-feature behavior.
+                    # (agent-tool / job_inject call sites) get their id
+                    # MINTED in the SSE drain loop below (MAJ-1) — for
+                    # now this construction still uses ``id=None`` and
+                    # the drain loop mutates ``injected_msgs[i].id`` to
+                    # the freshly minted uuid so the LLM-bound and the
+                    # SSE echo HumanMessages share the SAME stable id.
                     injected_msgs.append(
                         HumanMessage(
                             content=content,
@@ -3036,8 +3040,18 @@ def create_agent_node(
                 # (preserving order) so the FE renders a user bubble for
                 # each; then ONE ``injection_consumed`` closing the
                 # lifecycle for the whole queue.
-                for entry in pending_list:
+                for i, entry in enumerate(pending_list):
                     if live_hub is None:
+                        # MAJ-1 propagate — still mint + stamp the
+                        # LLM-bound HumanMessage.id even when the SSE
+                        # hub is absent (tests, headless dispatches).
+                        # Without this, the checkpoint would carry
+                        # ``id=None`` → LangGraph reducer mints a
+                        # DIFFERENT uuid → GET /messages id diverges
+                        # from any SSE re-emit that the same drain
+                        # emits (defeats the merge contract).
+                        if entry.get("echo_id") is None and i < len(injected_msgs):
+                            injected_msgs[i].id = str(uuid.uuid4())
                         continue
                     content_echo = entry.get("content", "")
                     try:
@@ -3048,20 +3062,82 @@ def create_agent_node(
                         # a new timestamp) so the FE's id-keyed dedup
                         # collapses the duplicate bubble and the
                         # ``created_at``-sorted list keeps it in send
-                        # position. Entries WITHOUT ``echo_id`` (tool
-                        # paths) keep today's exact behavior: ``id=None``
-                        # → fresh uuid4 in ``serialize_message`` and a
-                        # fresh timestamp. Per-entry semantics only —
-                        # never a global suppression of the re-emit
-                        # (reconnect coverage depends on it).
+                        # position.
+                        #
+                        # MAJ-1 (id-stability for tool-path entries):
+                        # entries WITHOUT ``echo_id`` (agent-tool /
+                        # job_inject call sites) used to drain with
+                        # ``HumanMessage.id is None`` → ``serialize_message``
+                        # minted a fresh uuid4 at re-emit AND another at
+                        # every subsequent GET read. The FE union-by-id
+                        # merge could never collapse those duplicates
+                        # after a reconnect refetch. Fix: mint uuid4
+                        # ONCE in this drain loop, stamp it on the
+                        # HumanMessage (so the checkpoint + GET /messages
+                        # surface the SAME id) AND pass the same id
+                        # through ``serialize_message`` for the re-emit
+                        # (so the SSE payload and the checkpointed
+                        # message share one id — what the FE merge needs).
+                        #
+                        # Preservation invariants:
+                        # * ``BaseMessage.id`` is a constructor attribute
+                        #   NOT serialized to the OpenAI wire by
+                        #   ``langchain_openai`` — the LLM payload is
+                        #   byte-identical.
+                        # * ``additional_kwargs`` untouched — still
+                        #   ``{"injected_message": True}`` (or that plus
+                        #   ``source`` for tool-path entries).
+                        # * Entries WITH ``echo_id`` keep exact pre-fix
+                        #   behavior (thread the existing id; re-emit
+                        #   reuses it + entry timestamp).
+                        # * Timestamp for echo_id-less entries stays a
+                        #   fresh drain-time stamp (NOT the FIFO
+                        #   timestamp) — only the id is now stable.
+                        # * Mint-once-per-drain: the minted uuid is
+                        #   fixed at HumanMessage construction time, so
+                        #   re-emit message_id == HumanMessage.id ==
+                        #   id returned by subsequent GET reads — stable
+                        #   across reconnect refetches.
                         entry_echo_id = entry.get("echo_id")
+                        if entry_echo_id is None:
+                            # Tool-path entry — mint once here so the
+                            # HumanMessage.id is the SAME uuid
+                            # ``serialize_message`` sees on the re-emit
+                            # AND the same uuid we propagate to
+                            # ``injected_msgs[i].id`` so the checkpoint
+                            # commit surfaces this exact id on GET
+                            # /messages (replaces the LangGraph reducer's
+                            # otherwise-different uuid mint).
+                            entry_echo_id = str(uuid.uuid4())
+                            # MAJ-1 propagate — stamp the SAME uuid on
+                            # the LLM-bound HumanMessage so the
+                            # checkpoint + GET /messages id stays in
+                            # sync with the SSE re-emit. Without this,
+                            # the LangGraph ``add_messages`` reducer
+                            # would mint a DIFFERENT uuid on the
+                            # LLM-bound message (its id was None at
+                            # Loop 1 construction) and the GET id
+                            # would diverge from the SSE re-emit id —
+                            # the exact duplicate-bubble bug MAJ-1
+                            # fixes. Bounds: ``i`` is always in range
+                            # because ``injected_msgs`` was built by the
+                            # matching Loop 1 over the same
+                            # ``pending_list``.
+                            if i < len(injected_msgs):
+                                injected_msgs[i].id = entry_echo_id
                         echoed_user_msg = HumanMessage(
                             content=content_echo,
                             id=entry_echo_id,
                         )
                         user_serialized = serialize_message(echoed_user_msg)
                         user_serialized["instance_id"] = instance_id
-                        if entry_echo_id is not None:
+                        # Per-entry timestamp reuse ONLY when the entry
+                        # carried an explicit echo_id (the POST-time
+                        # echo contract). Tool-path entries keep the
+                        # fresh drain-time stamp from ``serialize_message``
+                        # — unchanged.
+                        explicit_echo_id = entry.get("echo_id")
+                        if explicit_echo_id is not None:
                             entry_ts = entry.get("timestamp")
                             if entry_ts is not None:
                                 user_serialized["created_at"] = entry_ts
