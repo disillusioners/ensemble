@@ -133,6 +133,81 @@ def _patch_spawn_downstream():
     ]
 
 
+def _patches():
+    """Module-level helper for the 18-patch factory stack used by the
+    tool-layer fast-fail / child-request-template / spawn_councilor tests.
+
+    Three test classes previously carried a byte-identical ``@staticmethod
+    _patches`` copy of this list; module-level here so future tests can
+    just call it and there's a single source of truth when the tool
+    factory grows another heavy helper.
+
+    The list mirrors ``tests.helpers.send_message_fixtures.patch_heavy_helpers``
+    plus the newer ``create_chart_tools`` patch (added when the chart
+    category became always-on in ``create_instance_tools`` — see
+    ``daemon/tools/instance.py:4099``). Kept module-level rather than
+    folded into ``send_message_fixtures.py`` because adding the chart
+    patch to the shared helper would expand its blast radius across the
+    other ``send_message`` consumer files.
+    """
+    return [
+        patch("daemon.tools.instance.is_rag_enabled", return_value=False),
+        patch("daemon.tools.instance.create_rag_tools", return_value=[]),
+        patch("daemon.tools.instance.create_knowledge_tools", return_value=[]),
+        patch("daemon.tools.instance.create_inner_soul_tool", return_value=MagicMock()),
+        patch(
+            "daemon.tools.instance.create_access_memory_tool",
+            return_value=MagicMock(),
+        ),
+        patch("daemon.tools.instance.create_project_tools", return_value=[]),
+        patch("daemon.tools.instance.create_job_tools_if_available", return_value=[]),
+        patch("daemon.tools.instance.create_help_tool", return_value=MagicMock()),
+        patch("daemon.tools.instance.create_critical_notes_tools", return_value=[]),
+        patch(
+            "daemon.tools.instance.create_project_history_tools",
+            return_value=[],
+        ),
+        patch("daemon.tools.instance.create_opencode_tools", return_value=[]),
+        patch("daemon.tools.instance.create_db_tools", return_value=[]),
+        patch("daemon.tools.instance.create_infra_tools", return_value=[]),
+        patch("daemon.tools.instance.create_context_tools", return_value=[]),
+        patch("daemon.tools.instance.create_chart_tools", return_value=[]),
+        patch("daemon.tools.instance._load_mcp_tools", return_value=[]),
+        patch("daemon.tools.instance.scan_tools_for_full_docs"),
+        patch(
+            "daemon.tools.instance._apply_tool_filter",
+            side_effect=lambda tools, *a, **kw: tools,
+        ),
+    ]
+
+
+def _make_manager(*, allowed_models: list[str]):
+    """Module-level helper for the mock manager used by the tool-layer
+    fast-fail / child-request-template tests.
+
+    Two classes previously carried near-identical ``_make_manager`` copies
+    that differed only in their ``allowed_models`` list; parameterise on
+    that single axis. The elaborate manager setup used by
+    ``TestSpawnCouncilorGovernorBlocked`` (which seeds the DB and binds
+    a real ``SQLModelInstanceRepository``) is intentionally left in-class
+    — it is not a duplicate.
+    """
+    manager = MagicMock()
+    manager.config = MagicMock()
+    manager.config.llm = MagicMock()
+    manager.config.llm.allowed_models = list(allowed_models)
+
+    manager._lifecycle_service = MagicMock()
+    manager._lifecycle_service._resolve_model_override = MagicMock(
+        side_effect=lambda m: m if m else None
+    )
+
+    manager.spawn_instance = MagicMock(
+        return_value=("gov-id", None),
+    )
+    return manager
+
+
 def _enter_spawn_patches(*patches):
     """Enter a list of patches as a context manager (ExitStack)."""
     stack = ExitStack()
@@ -409,52 +484,10 @@ class TestLifecycleGovernorChainGuard:
 class TestToolLayerConveneRefusal:
     """``convene_council`` / ``convene_council_with_skill`` refuse governor callers."""
 
-    @staticmethod
-    def _patches():
-        return [
-            patch("daemon.tools.instance.is_rag_enabled", return_value=False),
-            patch("daemon.tools.instance.create_rag_tools", return_value=[]),
-            patch("daemon.tools.instance.create_knowledge_tools", return_value=[]),
-            patch("daemon.tools.instance.create_inner_soul_tool", return_value=MagicMock()),
-            patch("daemon.tools.instance.create_access_memory_tool", return_value=MagicMock()),
-            patch("daemon.tools.instance.create_project_tools", return_value=[]),
-            patch("daemon.tools.instance.create_job_tools_if_available", return_value=[]),
-            patch("daemon.tools.instance.create_help_tool", return_value=MagicMock()),
-            patch("daemon.tools.instance.create_critical_notes_tools", return_value=[]),
-            patch("daemon.tools.instance.create_project_history_tools", return_value=[]),
-            patch("daemon.tools.instance.create_opencode_tools", return_value=[]),
-            patch("daemon.tools.instance.create_db_tools", return_value=[]),
-            patch("daemon.tools.instance.create_infra_tools", return_value=[]),
-            patch("daemon.tools.instance.create_context_tools", return_value=[]),
-            patch("daemon.tools.instance.create_chart_tools", return_value=[]),
-            patch("daemon.tools.instance._load_mcp_tools", return_value=[]),
-            patch("daemon.tools.instance.scan_tools_for_full_docs"),
-            patch(
-                "daemon.tools.instance._apply_tool_filter",
-                side_effect=lambda tools, *a, **kw: tools,
-            ),
-        ]
-
-    def _make_manager(self):
-        manager = MagicMock()
-        manager.config = MagicMock()
-        manager.config.llm = MagicMock()
-        manager.config.llm.allowed_models = ["gpt-4o", "claude-3-5-sonnet"]
-
-        manager._lifecycle_service = MagicMock()
-        manager._lifecycle_service._resolve_model_override = MagicMock(
-            side_effect=lambda m: m if m else None
-        )
-
-        manager.spawn_instance = MagicMock(
-            return_value=("gov-id", None),
-        )
-        return manager
-
     async def test_convene_council_governor_caller_refused(self):
         """Governor caller hits the tool-layer fast-fail immediately."""
-        manager = self._make_manager()
-        patches = self._patches()
+        manager = _make_manager(allowed_models=["gpt-4o", "claude-3-5-sonnet"])
+        patches = _patches()
         for p in patches:
             p.start()
         try:
@@ -483,8 +516,8 @@ class TestToolLayerConveneRefusal:
 
     async def test_convene_council_with_skill_governor_caller_refused(self):
         """Same refusal for the skill-passthrough variant."""
-        manager = self._make_manager()
-        patches = self._patches()
+        manager = _make_manager(allowed_models=["gpt-4o", "claude-3-5-sonnet"])
+        patches = _patches()
         for p in patches:
             p.start()
         try:
@@ -514,10 +547,10 @@ class TestToolLayerConveneRefusal:
 
     async def test_convene_council_leader_caller_still_allowed(self):
         """Leader caller still passes the tool-layer guard."""
-        manager = self._make_manager()
+        manager = _make_manager(allowed_models=["gpt-4o", "claude-3-5-sonnet"])
         manager.enqueue_message = AsyncMock()
 
-        patches = self._patches()
+        patches = _patches()
         for p in patches:
             p.start()
         try:
@@ -559,53 +592,11 @@ class TestToolLayerConveneRefusal:
 class TestChildRequestTemplateFix:
     """The convening message hands a governor ``spawn_councilor``, not ``convene_council``."""
 
-    @staticmethod
-    def _patches():
-        return [
-            patch("daemon.tools.instance.is_rag_enabled", return_value=False),
-            patch("daemon.tools.instance.create_rag_tools", return_value=[]),
-            patch("daemon.tools.instance.create_knowledge_tools", return_value=[]),
-            patch("daemon.tools.instance.create_inner_soul_tool", return_value=MagicMock()),
-            patch("daemon.tools.instance.create_access_memory_tool", return_value=MagicMock()),
-            patch("daemon.tools.instance.create_project_tools", return_value=[]),
-            patch("daemon.tools.instance.create_job_tools_if_available", return_value=[]),
-            patch("daemon.tools.instance.create_help_tool", return_value=MagicMock()),
-            patch("daemon.tools.instance.create_critical_notes_tools", return_value=[]),
-            patch("daemon.tools.instance.create_project_history_tools", return_value=[]),
-            patch("daemon.tools.instance.create_opencode_tools", return_value=[]),
-            patch("daemon.tools.instance.create_db_tools", return_value=[]),
-            patch("daemon.tools.instance.create_infra_tools", return_value=[]),
-            patch("daemon.tools.instance.create_context_tools", return_value=[]),
-            patch("daemon.tools.instance.create_chart_tools", return_value=[]),
-            patch("daemon.tools.instance._load_mcp_tools", return_value=[]),
-            patch("daemon.tools.instance.scan_tools_for_full_docs"),
-            patch(
-                "daemon.tools.instance._apply_tool_filter",
-                side_effect=lambda tools, *a, **kw: tools,
-            ),
-        ]
-
-    def _make_manager(self):
-        manager = MagicMock()
-        manager.config = MagicMock()
-        manager.config.llm = MagicMock()
-        manager.config.llm.allowed_models = ["gpt-4o"]
-
-        manager._lifecycle_service = MagicMock()
-        manager._lifecycle_service._resolve_model_override = MagicMock(
-            side_effect=lambda m: m if m else None
-        )
-
-        manager.spawn_instance = MagicMock(
-            return_value=("gov-id", None),
-        )
-        return manager
-
     async def test_convene_council_message_names_spawn_councilor(self):
-        manager = self._make_manager()
+        manager = _make_manager(allowed_models=["gpt-4o"])
         manager.enqueue_message = AsyncMock()
 
-        patches = self._patches()
+        patches = _patches()
         for p in patches:
             p.start()
         try:
@@ -647,10 +638,10 @@ class TestChildRequestTemplateFix:
         assert "Convene a council using councilor_agent_id" not in msg
 
     async def test_convene_council_with_skill_message_names_spawn_councilor(self):
-        manager = self._make_manager()
+        manager = _make_manager(allowed_models=["gpt-4o"])
         manager.enqueue_message = AsyncMock()
 
-        patches = self._patches()
+        patches = _patches()
         for p in patches:
             p.start()
         try:
@@ -698,32 +689,6 @@ class TestChildRequestTemplateFix:
 class TestSpawnCouncilorGovernorBlocked:
     """Even with the tool-layer guard, the lifecycle guard catches the path."""
 
-    @staticmethod
-    def _patches():
-        return [
-            patch("daemon.tools.instance.is_rag_enabled", return_value=False),
-            patch("daemon.tools.instance.create_rag_tools", return_value=[]),
-            patch("daemon.tools.instance.create_knowledge_tools", return_value=[]),
-            patch("daemon.tools.instance.create_inner_soul_tool", return_value=MagicMock()),
-            patch("daemon.tools.instance.create_access_memory_tool", return_value=MagicMock()),
-            patch("daemon.tools.instance.create_project_tools", return_value=[]),
-            patch("daemon.tools.instance.create_job_tools_if_available", return_value=[]),
-            patch("daemon.tools.instance.create_help_tool", return_value=MagicMock()),
-            patch("daemon.tools.instance.create_critical_notes_tools", return_value=[]),
-            patch("daemon.tools.instance.create_project_history_tools", return_value=[]),
-            patch("daemon.tools.instance.create_opencode_tools", return_value=[]),
-            patch("daemon.tools.instance.create_db_tools", return_value=[]),
-            patch("daemon.tools.instance.create_infra_tools", return_value=[]),
-            patch("daemon.tools.instance.create_context_tools", return_value=[]),
-            patch("daemon.tools.instance.create_chart_tools", return_value=[]),
-            patch("daemon.tools.instance._load_mcp_tools", return_value=[]),
-            patch("daemon.tools.instance.scan_tools_for_full_docs"),
-            patch(
-                "daemon.tools.instance._apply_tool_filter",
-                side_effect=lambda tools, *a, **kw: tools,
-            ),
-        ]
-
     async def test_spawn_councilor_targeting_governor_hits_lifecycle_guard(
         self, engine, patched_kill_switch
     ):
@@ -766,7 +731,7 @@ class TestSpawnCouncilorGovernorBlocked:
             )
         )
 
-        patches = self._patches()
+        patches = _patches()
         for p in patches:
             p.start()
         try:

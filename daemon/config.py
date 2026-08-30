@@ -473,9 +473,16 @@ class LimitsConfig(BaseSettings):
     # Default ON (matches the locked design decision). The guard refuses to
     # spawn a governor instance when the prospective parent's chain (parent
     # ∪ ancestors) already contains ≥ K governors. K=1 → only one governor
-    # in any chain; K=0 disables. The kill-switch env const
-    # LIMITS_GOVERNOR_RECURSION_GUARD_ENABLED=0 turns it off at boot —
-    # restart-required (matches ENSEMBLE_CASCADE_LINEAGE precedent).
+    # in any chain; K=0 disables.
+    #
+    # Dual-read (decision made): BOTH this YAML field and the env const
+    # ``LIMITS_GOVERNOR_RECURSION_GUARD_ENABLED=0`` are honored; the
+    # Pydantic field is intentionally KEPT — the env resolver
+    # (``_resolve_governor_recursion_guard_enabled`` in
+    # ``daemon.repositories.instance.repository``) reads the override
+    # directly and the call site gates on ``cfg_enabled AND env_enabled``.
+    # Restart-required to pick up a flip from either side (matches the
+    # ``ENSEMBLE_CASCADE_LINEAGE`` precedent).
     governor_recursion_guard_enabled: bool = Field(default=True)
     max_governor_ancestors: int = Field(default=1, ge=0)
 

@@ -23,24 +23,6 @@ from ..repositories.dependency_bus.models import (
     DependencyWatcherState,
 )
 from ..repositories.instance.models import Instance, InstanceHierarchy, InstanceStatus
-
-
-def _resolve_guard_enabled() -> bool:
-    """Local import wrapper for the guard kill-switch resolver.
-
-    The helper lives in ``daemon.repositories.instance.repository`` to
-    colocate it with the rest of the cascade-lineage kill-switch plumbing
-    (mirrors the ``_resolve_cascade_lineage_mode`` pattern). Importing
-    the repository module at module-import time would create a circular
-    import with ``daemon.services.__init__`` (which eagerly imports
-    ``instance_lifecycle``). Lazy import here keeps the module-load
-    cycle intact.
-    """
-    from ..repositories.instance.repository import (
-        _resolve_governor_recursion_guard_enabled,
-    )
-
-    return _resolve_governor_recursion_guard_enabled()
 from ..repositories.job_queue.models import AdmissionState
 from ..repositories.message_queue.models import MessageQueue, MessageStatus, MessageType
 from ..repositories.task.models import SuspensionReason, Task, TaskStatus
@@ -63,6 +45,24 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_guard_enabled() -> bool:
+    """Local import wrapper for the guard kill-switch resolver.
+
+    The helper lives in ``daemon.repositories.instance.repository`` to
+    colocate it with the rest of the cascade-lineage kill-switch plumbing
+    (mirrors the ``_resolve_cascade_lineage_mode`` pattern).
+    """
+    # Lazy import — circular-import breaker. ``daemon.services.__init__``
+    # eagerly imports this module, so importing the repository at module
+    # scope would loop. Keep the import inside the body so an isort/ruff
+    # pass can't reintroduce the cycle.
+    from ..repositories.instance.repository import (
+        _resolve_governor_recursion_guard_enabled,
+    )
+
+    return _resolve_governor_recursion_guard_enabled()
 
 
 async def _cancel_bus_watchers_for(manager: "InstanceManager", instance_id: str, op: str) -> None:
@@ -1389,10 +1389,13 @@ class InstanceLifecycleService:
             )
             env_enabled = _resolve_guard_enabled()
             if k > 0 and cfg_enabled and env_enabled and parent_id:
-                # Resolve instance_repository inline (the local binding is
-                # assigned later in the spawn path — we cannot rely on it
-                # here). Hot-path cost is one attribute lookup, dwarfed by
-                # the DB chain walk below.
+                # Bind the repository handle locally for the guard block.
+                # The spawn path below (line ~1465) introduces a local
+                # ``instance_repository`` alias for the rest of the
+                # function, but that local is not in scope yet at this
+                # guard point — so we keep our own short binding for
+                # the chain walk. Hot-path cost is one attribute lookup,
+                # dwarfed by the DB chain walk below.
                 inst_repo_for_guard = self._manager._instance_repository
                 chain_ids: list[str] = [parent_id]
                 try:

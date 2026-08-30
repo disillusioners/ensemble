@@ -668,20 +668,33 @@ async def invoke_agent_and_wait(
         # Success
         return _return(result.content or "")
 
-    except ValueError as e:
+    except Exception as e:
         # Governor Recursion Guard (2026-08-30): the lifecycle-layer guard
         # raises a multi-line ValueError that carries the chain walk and a
-        # corrective HINT. Catch here so the caller's tool layer surfaces
-        # the full guidance as a readable "Error: ..." string instead of
-        # bubbling up as an opaque traceback. Preserve the full str(e)
-        # verbatim — including newlines and the HINT block.
-        logger_utils.warning(
-            "invoke_agent_and_wait: spawn refused by guard. agent_id=%s error=%s",
-            agent_id,
-            e,
+        # corrective HINT. Scope the catch to the guard predicate — same
+        # substring approach as ``daemon/tools/instance.py`` — so the
+        # guard branch surfaces a readable refusal. Non-guard ValueErrors
+        # ("Agent not found", "Max children limit reached", ...) fall
+        # through to the generic handler below, restoring the pre-batch
+        # NO-BEHAVIOR-CHANGE contract (three of four call sites expect
+        # ``f"Error: {e}"``). The guard's surface text is byte-stable:
+        # matched in the convene_* elif-chains in
+        # ``daemon/tools/instance.py`` (~:1852 and ~:2021) and in this
+        # module's substring check.
+        msg = str(e)
+        is_guard_refusal = (
+            isinstance(e, ValueError)
+            and "Spawn refused" in msg
+            and "governor" in msg.lower()
         )
-        return _return(f"Error: {e}")
-    except Exception as e:
+        if is_guard_refusal:
+            logger_utils.warning(
+                "invoke_agent_and_wait: spawn refused by guard. "
+                "agent_id=%s error=%s",
+                agent_id,
+                e,
+            )
+            return _return(f"Error: {e}")
         logger_utils.error(f"invoke_agent_and_wait failed: {e}", exc_info=True)
         _try_terminate_orphan(manager, instance_id)
         return _return(f"Error: {e}")

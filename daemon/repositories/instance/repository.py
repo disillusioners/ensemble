@@ -73,10 +73,12 @@ def _resolve_governor_recursion_guard_enabled() -> bool:
     Returns:
         ``True`` when the guard is enabled (default — matches the locked
         design decision "guard default ON"), ``False`` when disabled via
-        ``LIMITS_GOVERNOR_RECURSION_GUARD_ENABLED=0``. Any non-``"0"``
-        truthy value also enables (defensive — admins could pass ``"1"``
-        or ``"true"`` to be explicit). Unknown values fall back to the
-        default with a WARN (one-shot, cached on first access).
+        ``LIMITS_GOVERNOR_RECURSION_GUARD_ENABLED=0``. The whitelist of
+        truthy values is exactly ``("1", "true", "yes", "on", "")`` — the
+        empty-string match mirrors the default-resolve path (``raw =
+        os.environ.get(..., "1")`` always returns a string, so an unset
+        env var passes the truthy check). Unknown values fall back to
+        enabled with a WARN (one-shot, cached on first access).
     """
     global _GOVERNOR_RECURSION_GUARD_ENABLED
     if _GOVERNOR_RECURSION_GUARD_ENABLED is not None:
