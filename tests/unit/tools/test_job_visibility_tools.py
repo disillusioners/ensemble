@@ -1071,6 +1071,153 @@ class TestJobInjectTool:
         # The raw exception message must NOT leak.
         assert "SECRET INTERNAL ERROR" not in str(result)
 
+    @pytest.mark.asyncio
+    async def test_job_inject_waiting_children_flag_off_legacy(
+        self, mock_services, mock_manager, job_inject_tool,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """wc-wake-report-integrity (T7 + C1-Q2): WAITING_CHILDREN under
+        flag OFF (default) keeps the legacy FIFO injection route —
+        ``set_injection`` is called, returns ``{status: \"injected\"}``.
+        """
+        from daemon.services.instance_messaging import (
+            _reset_wc_wake_enqueue_for_tests,
+        )
+
+        monkeypatch.setenv("ENSEMBLE_WC_WAKE_ENQUEUE", "0")
+        _reset_wc_wake_enqueue_for_tests()
+
+        job_service, _, _ = mock_services
+
+        root_id = "inject-wc-off"
+        record = _make_work_record(
+            "inject-wc-off", instance_id=root_id, project_id="proj-1",
+            agent_id="developer",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+
+        root = _make_instance(root_id, status="waiting_children")
+        mock_manager._instance_repository.get = MagicMock(return_value=root)
+        mock_manager.set_injection = MagicMock(
+            return_value={"content": "wake", "timestamp": "t"}
+        )
+        mock_manager.get_injection_count = MagicMock(return_value=1)
+
+        result = await job_inject_tool.ainvoke({
+            "job_id": "inject-wc-off",
+            "message": "wake up",
+        })
+
+        # Legacy injection path was taken.
+        assert result["status"] == "injected"
+        mock_manager.set_injection.assert_called_once_with(root_id, "wake up")
+        mock_manager.enqueue_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_job_inject_waiting_children_flag_on_enqueue(
+        self, mock_services, mock_manager, job_inject_tool,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """wc-wake-report-integrity (T7 + LOCKED C1-D3 Option A):
+        WAITING_CHILDREN under flag ON routes through
+        ``manager.enqueue_message`` — durable wake turn. Returns
+        ``{status: \"enqueued\", message_id, queued}``.
+        """
+        from daemon.services.instance_messaging import (
+            _reset_wc_wake_enqueue_for_tests,
+        )
+
+        monkeypatch.setenv("ENSEMBLE_WC_WAKE_ENQUEUE", "1")
+        _reset_wc_wake_enqueue_for_tests()
+
+        job_service, _, _ = mock_services
+
+        root_id = "inject-wc-on"
+        record = _make_work_record(
+            "inject-wc-on", instance_id=root_id, project_id="proj-1",
+            agent_id="developer",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+
+        root = _make_instance(root_id, status="waiting_children")
+        mock_manager._instance_repository.get = MagicMock(return_value=root)
+
+        # Stub enqueue_message (the durable wake path).
+        enqueue_result = MagicMock()
+        enqueue_result.message_id = "msg-wake-1"
+        enqueue_result.queued = True
+        mock_manager.enqueue_message = AsyncMock(return_value=enqueue_result)
+        # has_instance_busy pre-check — no live task.
+        if hasattr(mock_manager, "_task_repo") and mock_manager._task_repo is not None:
+            mock_manager._task_repo.has_instance_busy = MagicMock(return_value=False)
+        else:
+            mock_manager._task_repo = MagicMock()
+            mock_manager._task_repo.has_instance_busy = MagicMock(return_value=False)
+
+        result = await job_inject_tool.ainvoke({
+            "job_id": "inject-wc-on",
+            "message": "wake up",
+        })
+
+        # Enqueue path was taken; set_injection was NOT called.
+        assert result["status"] == "enqueued"
+        assert result["message_id"] == "msg-wake-1"
+        assert result["queued"] is True
+        assert result["job_id"] == "inject-wc-on"
+        assert result["instance_id"] == root_id
+        mock_manager.enqueue_message.assert_awaited_once()
+        kwargs = mock_manager.enqueue_message.await_args.kwargs
+        assert kwargs["instance_id"] == root_id
+        assert kwargs["message"] == "wake up"
+        # Provenance carries the agent-tool caller id.
+        assert kwargs["source"].startswith("internal_agent:")
+        mock_manager.set_injection.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_job_inject_waiting_children_flag_on_busy(
+        self, mock_services, mock_manager, job_inject_tool,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """wc-wake-report-integrity (T7): the ``has_instance_busy``
+        pre-check makes a WC target that already has a queued wake
+        fail fast under flag ON with a clean error.
+        """
+        from daemon.services.instance_messaging import (
+            _reset_wc_wake_enqueue_for_tests,
+        )
+
+        monkeypatch.setenv("ENSEMBLE_WC_WAKE_ENQUEUE", "1")
+        _reset_wc_wake_enqueue_for_tests()
+
+        job_service, _, _ = mock_services
+
+        root_id = "inject-wc-busy"
+        record = _make_work_record(
+            "inject-wc-busy", instance_id=root_id, project_id="proj-1",
+            agent_id="developer",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+
+        root = _make_instance(root_id, status="waiting_children")
+        mock_manager._instance_repository.get = MagicMock(return_value=root)
+
+        # has_instance_busy returns True → busy rejection, NO enqueue.
+        mock_manager._task_repo = MagicMock()
+        mock_manager._task_repo.has_instance_busy = MagicMock(return_value=True)
+        mock_manager.enqueue_message = AsyncMock()
+
+        result = await job_inject_tool.ainvoke({
+            "job_id": "inject-wc-busy",
+            "message": "wake up",
+        })
+
+        assert "error" in result
+        assert "in flight" in result["error"]
+        assert "wait for it to complete" in result["error"]
+        # No enqueue was issued.
+        mock_manager.enqueue_message.assert_not_called()
+        mock_manager.set_injection.assert_not_called()
+
 
 # ─────────────────────────────────────────────────────────────────────────────────
 # TestSystemDefaultProjectCrossProjectAccess
