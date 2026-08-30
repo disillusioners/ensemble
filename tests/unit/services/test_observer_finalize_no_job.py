@@ -34,6 +34,7 @@ Run with::
 
 from __future__ import annotations
 
+import logging
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -49,6 +50,15 @@ from sqlmodel import Session, SQLModel
 from daemon.repositories.instance.models import Instance, InstanceStatus
 from daemon.repositories.job_queue.models import JobItem, JobLock, AdmissionState
 from daemon.repositories.task.models import Task, TaskStatus
+from daemon.repositories.dependency_bus.models import (  # noqa: F401
+    DependencyWatcher,
+    DependencyWatcherState,
+)
+from daemon.repositories.report_injection.models import ReportInjection  # noqa: F401
+from daemon.repositories.report_injection.repository import (
+    ReportInjectionRepository,
+)
+from daemon.services import job_feedback_observer as _observer_module
 from daemon.services.dependency_bus import set_dependency_bus
 from daemon.services.job_feedback_observer import JobFeedbackObserver
 from daemon.write_pause_guard import WritePauseGuard
@@ -434,3 +444,292 @@ class TestObserverFinalizeNoJob:
         assert result.skip is False
         assert result.terminal_status == InstanceStatus.COMPLETED.value
         assert _count_locks(engine, iid) == 0
+
+
+# ─── B.S.1-ii: (b) declared-waiting predicate-attached LOG at the ────────────
+# Step-2 parent-COMPLETED stamp (LOG ONLY, stage ii).
+#
+# Wave 2 wc-wake-report-integrity (decisions.md C2-D2.6/D2.8 LOCKED,
+# phase2-plan §4.2 B.S.1-ii + B.S.6/B.S.7). The Step-2 stamp inside
+# ``_finalize_job_db_sync`` is THE production parent-COMPLETED path
+# (the bus callback re-triggers ``_finalize_job`` on the parent when
+# its last watcher resolves). Per D2.8 the (b) evaluation runs AFTER
+# the in-session bus gate and the in-session tasks gate — ONLY on the
+# both-zero path — and is fail-OPEN LOG ONLY: zero flow disruption.
+
+
+def _seed_terminal_child(
+    engine: Engine, *, parent_id: str
+) -> str:
+    """Insert a terminal (COMPLETED) child Instance linked to parent."""
+    cid = f"child-{uuid.uuid4().hex[:8]}"
+    now_iso = datetime.now(timezone.utc).isoformat()
+    with Session(engine) as s:
+        s.add(
+            Instance(
+                instance_id=cid,
+                agent_id="worker",
+                agent_dir="/tmp/agents/worker",
+                agent_name="worker",
+                project_id="test-project",
+                parent_id=parent_id,
+                status=InstanceStatus.COMPLETED.value,
+                created_at=now_iso,
+                updated_at=now_iso,
+            )
+        )
+        s.commit()
+    return cid
+
+
+def _seed_pending_injection(
+    engine: Engine, *, parent_id: str, child_id: str
+) -> None:
+    """Seed a PENDING report_injections row (the PRIMARY (b) signal)."""
+    ReportInjectionRepository(engine).enqueue(
+        parent_instance_id=parent_id,
+        child_instance_id=child_id,
+        child_message_id=f"msg-{uuid.uuid4().hex[:8]}",
+        report_message_id=f"rmsg-{uuid.uuid4().hex[:8]}",
+        content="junk opener body",
+    )
+
+
+def _guard_records(caplog) -> list:
+    """Captured ``[ReportIntegrityGuard]`` violation records only."""
+    return [
+        r
+        for r in caplog.records
+        if r.levelno >= logging.WARNING
+        and "[ReportIntegrityGuard]" in r.getMessage()
+        and "declared-waiting violation" in r.getMessage()
+    ]
+
+
+class TestObserverFinalizeIntegrityLog:
+    """Stage-ii log behavior at the observer's parent-COMPLETED stamp."""
+
+    def test_incident_shape_logs_at_completed_stamp(
+        self, engine, _wire_bus_mock, caplog
+    ):
+        """Parent stamps COMPLETED while a terminal child's report is
+        PENDING → exactly one [ReportIntegrityGuard] line; stamp intact.
+        """
+        write_guard = WritePauseGuard()
+        observer = _make_observer(engine, write_guard)
+
+        iid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
+        child_id = _seed_terminal_child(engine, parent_id=iid)
+        _seed_pending_injection(engine, parent_id=iid, child_id=child_id)
+
+        with caplog.at_level(
+            logging.WARNING, logger="daemon.services.report_integrity_guard"
+        ):
+            result = observer._finalize_job_db_sync(
+                job_id=None,
+                instance_id=iid,
+                terminal_status=InstanceStatus.COMPLETED.value,
+                result_summary="done",
+                error_message=None,
+            )
+
+        # LOG ONLY — finalization is unchanged.
+        assert result.skip is False
+        assert _read_instance(engine, iid).status == (
+            InstanceStatus.COMPLETED.value
+        ), "LOG ONLY — the stamp must still happen"
+
+        guard = _guard_records(caplog)
+        assert len(guard) == 1, (
+            f"expected exactly one [ReportIntegrityGuard] line, got "
+            f"{[r.getMessage() for r in caplog.records]}"
+        )
+        msg = guard[0].getMessage()
+        assert "[ReportIntegrityGuard]" in msg
+        assert iid in msg, "parent id missing"
+        assert child_id in msg, "terminal child id missing"
+        assert "status=completed" in msg, "child terminal status missing"
+        assert "PRIMARY" in msg
+        assert "observer_finalize_job" in msg, "context tag missing"
+
+    def test_healthy_finalize_is_silent(self, engine, _wire_bus_mock, caplog):
+        """No undelivered obligations → finalization with NO guard log."""
+        write_guard = WritePauseGuard()
+        observer = _make_observer(engine, write_guard)
+
+        iid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
+
+        with caplog.at_level(
+            logging.WARNING, logger="daemon.services.report_integrity_guard"
+        ):
+            result = observer._finalize_job_db_sync(
+                job_id=None,
+                instance_id=iid,
+                terminal_status=InstanceStatus.COMPLETED.value,
+                result_summary="done",
+                error_message=None,
+            )
+
+        assert result.skip is False
+        assert _read_instance(engine, iid).status == (
+            InstanceStatus.COMPLETED.value
+        )
+        assert _guard_records(caplog) == [], (
+            f"healthy path must be silent; got "
+            f"{[r.getMessage() for r in caplog.records]}"
+        )
+
+    def test_error_stamp_does_not_log(self, engine, _wire_bus_mock, caplog):
+        """The (b) question is the parent-COMPLETED stamp: an ERROR
+        finalization must NOT emit the guard line (even with the
+        violation rows present)."""
+        write_guard = WritePauseGuard()
+        observer = _make_observer(engine, write_guard)
+
+        iid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
+        child_id = _seed_terminal_child(engine, parent_id=iid)
+        _seed_pending_injection(engine, parent_id=iid, child_id=child_id)
+
+        with caplog.at_level(
+            logging.WARNING, logger="daemon.services.report_integrity_guard"
+        ):
+            result = observer._finalize_job_db_sync(
+                job_id=None,
+                instance_id=iid,
+                terminal_status=InstanceStatus.ERROR.value,
+                result_summary=None,
+                error_message="boom",
+            )
+
+        assert result.skip is False
+        assert _read_instance(engine, iid).status == InstanceStatus.ERROR.value
+        assert _guard_records(caplog) == []
+
+    def test_early_bus_gate_defer_skips_predicate(
+        self, engine, _wire_bus_mock, monkeypatch, caplog
+    ):
+        """bus_pending > 0 (early gate) → skip=True and (b) NOT evaluated."""
+        write_guard = WritePauseGuard()
+        observer = _make_observer(engine, write_guard)
+
+        iid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
+        child_id = _seed_terminal_child(engine, parent_id=iid)
+        _seed_pending_injection(engine, parent_id=iid, child_id=child_id)
+        observer._bus_count_pending_for_target_sync = lambda _iid: 1
+
+        calls: list[str] = []
+        monkeypatch.setattr(
+            _observer_module,
+            "log_declared_waiting_violations",
+            lambda *a, **k: calls.append(k.get("context_tag", "?")),
+        )
+
+        with caplog.at_level(
+            logging.WARNING, logger="daemon.services.report_integrity_guard"
+        ):
+            result = observer._finalize_job_db_sync(
+                job_id=None,
+                instance_id=iid,
+                terminal_status=InstanceStatus.COMPLETED.value,
+                result_summary=None,
+                error_message=None,
+            )
+
+        assert result.skip is True and result.gate_deferred is True
+        assert _read_instance(engine, iid).status == InstanceStatus.RUNNING.value
+        assert calls == [], (
+            f"(b) must NOT be evaluated when the bus gate short-circuits; "
+            f"got {calls}"
+        )
+        assert _guard_records(caplog) == []
+
+    def test_in_session_bus_gate_defer_skips_predicate(
+        self, engine, _wire_bus_mock, monkeypatch, caplog
+    ):
+        """PENDING watcher row visible to the IN-SESSION bus gate (the
+        early stub says 0) → in-session gate defers and (b) NOT evaluated.
+        Pins the in-session bus gate as prior to (b) (D2.8)."""
+        write_guard = WritePauseGuard()
+        observer = _make_observer(engine, write_guard)
+
+        iid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
+        child_id = _seed_terminal_child(engine, parent_id=iid)
+        _seed_pending_injection(engine, parent_id=iid, child_id=child_id)
+        # Real PENDING watcher row: invisible to the early stub (0), but
+        # the in-session inline COUNT reads the table directly.
+        with Session(engine) as s:
+            s.add(
+                DependencyWatcher(
+                    watch_id=f"watch-{uuid.uuid4().hex[:8]}",
+                    source_task_id=f"task-{uuid.uuid4().hex[:8]}",
+                    target_instance_id=iid,
+                    follow_up_payload={"message": "wake"},
+                    watcher_metadata={"kind": "test"},
+                    created_at=datetime.now(timezone.utc).isoformat(),
+                    state=DependencyWatcherState.PENDING.value,
+                )
+            )
+            s.commit()
+
+        calls: list[str] = []
+        monkeypatch.setattr(
+            _observer_module,
+            "log_declared_waiting_violations",
+            lambda *a, **k: calls.append(k.get("context_tag", "?")),
+        )
+
+        with caplog.at_level(
+            logging.WARNING, logger="daemon.services.report_integrity_guard"
+        ):
+            result = observer._finalize_job_db_sync(
+                job_id=None,
+                instance_id=iid,
+                terminal_status=InstanceStatus.COMPLETED.value,
+                result_summary=None,
+                error_message=None,
+            )
+
+        assert result.skip is True and result.gate_deferred is True
+        assert calls == []
+        assert _guard_records(caplog) == []
+
+    def test_in_session_tasks_gate_defer_skips_predicate(
+        self, engine, _wire_bus_mock, monkeypatch, caplog
+    ):
+        """PENDING task row → in-session tasks gate defers and (b) NOT
+        evaluated (D2.8: tasks gate is prior to (b))."""
+        write_guard = WritePauseGuard()
+        observer = _make_observer(engine, write_guard)
+
+        iid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
+        child_id = _seed_terminal_child(engine, parent_id=iid)
+        _seed_pending_injection(engine, parent_id=iid, child_id=child_id)
+        _seed_task(engine, instance_id=iid, status=TaskStatus.PENDING.value)
+        # Stub the EARLY tasks counter to 0 so the seeded PENDING task is
+        # first seen by the IN-SESSION tasks gate (the real inline COUNT
+        # inside the WriteGuardSession) — pinning the in-session gate as
+        # prior to (b), not just the early one.
+        observer._count_pending_tasks_for_instance_sync = lambda _iid: 0
+
+        calls: list[str] = []
+        monkeypatch.setattr(
+            _observer_module,
+            "log_declared_waiting_violations",
+            lambda *a, **k: calls.append(k.get("context_tag", "?")),
+        )
+
+        with caplog.at_level(
+            logging.WARNING, logger="daemon.services.report_integrity_guard"
+        ):
+            result = observer._finalize_job_db_sync(
+                job_id=None,
+                instance_id=iid,
+                terminal_status=InstanceStatus.COMPLETED.value,
+                result_summary=None,
+                error_message=None,
+            )
+
+        assert result.skip is True and result.gate_deferred is True
+        assert _read_instance(engine, iid).status == InstanceStatus.RUNNING.value
+        assert calls == []
+        assert _guard_records(caplog) == []

@@ -32,6 +32,7 @@ from ..constants import (
     SANITY_FLAG_VERSION,
 )
 from .report_integrity_metrics import record_junk_report
+from .report_integrity_guard import log_declared_waiting_violations
 from .context_messages import _resolve_tree_root_id
 from .lifecycle_hooks import LifecycleHookContext, dispatch_lifecycle_hooks
 from .llm_failover import wrap_langchain_failover
@@ -1138,6 +1139,18 @@ Provide a concise summary:"""
             if parent_pending == 0:
                 # No pending messages, parent is truly complete
                 # Publish lifecycle event to mark job as completed
+                #
+                # B.S.1-ii (stage ii, LOG ONLY): (b) declared-waiting
+                # log at the parent-COMPLETED stamp. D2.8 (LOCKED):
+                # the bus count (is_parent_complete, above) and the
+                # own-queue count (parent_pending) are both zero here —
+                # the both-counts-zero precondition (B.S.7). Fail-OPEN:
+                # the helper never raises into the completion path.
+                log_declared_waiting_violations(
+                    session,
+                    parent.instance_id,
+                    context_tag="child_reports.update_parent_on_child_complete",
+                )
                 parent.status = InstanceStatus.COMPLETED.value
                 parent.updated_at = datetime.now(timezone.utc).isoformat()
                 logger.info(f"Parent {parent.instance_id[:8]}... completed after all children done")
@@ -2197,6 +2210,12 @@ Provide a concise summary:"""
                 # completion that should proceed.
                 from .dependency_bus import get_dependency_bus as _get_bus
                 if _get_bus() is not None:
+                    # D2.8 (LOCKED) defense-in-depth gate ordering:
+                    # bus (fail-CLOSED, same-tx — THIS gate) > tasks
+                    # (fail-OPEN, checked above) > (b) declared-waiting
+                    # (fail-OPEN, LAST — B.S.6/B.S.7). The (b) LOG attach
+                    # at the COMPLETED stamp below runs ONLY when this
+                    # gate and the tasks gate both reported zero.
                     _bus_pending_stmt = (
                         select(func.count())
                         .select_from(DependencyWatcher)
@@ -2424,6 +2443,18 @@ Provide a concise summary:"""
                         parent_id=None,
                     )
 
+                # B.S.1-ii (stage ii, LOG ONLY): (b) declared-waiting
+                # predicate-attached log at the root-COMPLETED stamp.
+                # D2.8 (LOCKED) ordering: bus (fail-CLOSED, same-tx) >
+                # tasks (fail-OPEN) > (b) (fail-OPEN, LAST) — this line
+                # is reached ONLY when every prior gate above reported
+                # zero (both-counts-zero bound, B.S.6/B.S.7). Fail-OPEN:
+                # the helper never raises into the completion path.
+                log_declared_waiting_violations(
+                    session,
+                    instance_id,
+                    context_tag="child_reports.root_completion",
+                )
                 # Defense-in-depth atomic guard: use SQLAlchemy Core
                 # ``UPDATE ... WHERE status NOT IN (...)`` so a pause
                 # cascade that commits PAUSED between the ``session.get``
@@ -3300,6 +3331,23 @@ Provide a concise summary:"""
 
                     if parent_pending == 0:
                         # No pending messages, parent is truly complete
+                        #
+                        # NOTE: dead-code fallback — bus=None raises A8 (RuntimeError) above before reaching here; the helper is attached for symmetry with the production twin in _update_parent_on_child_complete but does not fire in production.
+                        # B.S.1-ii (stage ii, LOG ONLY): (b)
+                        # declared-waiting log at the inlined
+                        # parent-COMPLETED stamp (the in-this-function
+                        # twin of ``_update_parent_on_child_complete``).
+                        # D2.8 (LOCKED): bus count (is_parent_complete)
+                        # and own-queue count (parent_pending) are both
+                        # zero here — both-counts-zero precondition
+                        # (B.S.7). Fail-OPEN.
+                        log_declared_waiting_violations(
+                            session,
+                            parent.instance_id,
+                            context_tag=(
+                                "child_reports.inline_parent_cascade"
+                            ),
+                        )
                         parent.status = InstanceStatus.COMPLETED.value
                         parent.updated_at = datetime.now(timezone.utc).isoformat()
                         logger.info(f"Parent {parent.instance_id[:8]}... completed after all children done")

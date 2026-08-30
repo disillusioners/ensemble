@@ -57,6 +57,7 @@ B.S.1-i landed. The capture is in the Coder Report.
 
 from __future__ import annotations
 
+import logging
 import uuid
 
 import pytest
@@ -88,6 +89,7 @@ from daemon.repositories.report_injection.repository import (
 from daemon.services.report_integrity_guard import (
     DeclaredWaitingViolationReport,
     evaluate_declared_waiting_violations,
+    log_declared_waiting_violations,
 )
 
 
@@ -752,3 +754,176 @@ class TestDependencyBusSameTxVariant:
         assert len(rows) == 1
         assert rows[0]["source_task_id"] == "task-1"
         assert rows[0]["state"] == DependencyWatcherState.FIRED.value
+
+
+# =============================================================================
+# B.S.1-ii — the stage-ii LOG helper (log_declared_waiting_violations)
+# =============================================================================
+
+
+class TestStageIILogHelper:
+    """B.S.1-ii (stage ii, LOG ONLY) — ``log_declared_waiting_violations``.
+
+    Contract under test (phase2-plan §4.2 B.S.1-ii + B.S.7):
+
+    * NON-EMPTY report → ONE structured ``[ReportIntegrityGuard]``
+      WARNING line carrying the context tag (which stamp site), the
+      parent id, the violation count, and per-child detail (child id +
+      terminal status + evidence class PRIMARY / CORROBORATING).
+    * EMPTY report → NO log (zero noise on healthy paths).
+    * EXCEPTION-SAFE fail-OPEN (D2.6 LOCKED): a predicate exception is
+      downgraded to a WARNING ("predicate FAILED … completion
+      proceeds") and the helper RETURNS — it never raises into the
+      completion path, never blocks, never mutates anything.
+    * The helper accepts the caller's session so the evaluation runs
+      INSIDE the completion transaction (B.S.7 same-tx binding).
+    """
+
+    def test_log_fires_in_incident_shape(
+        self,
+        engine: Engine,
+        report_repo: ReportInjectionRepository,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """PRIMARY-signal violation → exactly one structured WARNING."""
+        parent_id = _seed_parent(engine)
+        child_id = _seed_terminal_child(engine, parent_id)
+        _enqueue_pending(report_repo, parent_id=parent_id, child_id=child_id)
+
+        with Session(engine) as session:
+            with caplog.at_level(
+                logging.WARNING, logger="daemon.services.report_integrity_guard"
+            ):
+                ret = log_declared_waiting_violations(
+                    session, parent_id, context_tag="unit.stamp_site"
+                )
+
+        assert ret is None, "LOG-ONLY helper must return None"
+        guard = [
+            r
+            for r in caplog.records
+            if "declared-waiting violation" in r.getMessage()
+        ]
+        assert len(guard) == 1, (
+            f"expected exactly ONE violation line, got {len(guard)}: "
+            f"{[r.getMessage() for r in caplog.records]}"
+        )
+        record = guard[0]
+        assert record.levelno == logging.WARNING
+        msg = record.getMessage()
+        assert "[ReportIntegrityGuard]" in msg, "greppable prefix missing"
+        assert "unit.stamp_site" in msg, "context tag (stamp site) missing"
+        assert parent_id in msg, "parent id missing"
+        assert "count=1" in msg, "violation count missing"
+        assert child_id in msg, "child id missing"
+        assert "status=completed" in msg, (
+            "child terminal status missing (verbatim InstanceStatus value)"
+        )
+        assert "PRIMARY" in msg, "evidence class missing"
+
+    def test_log_carries_corroborating_evidence(
+        self,
+        engine: Engine,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """CORROBORATING-signal violation (FIRED ∧ unenqueued) → detail
+        names the watch + task ids with evidence=CORROBORATING."""
+        parent_id = _seed_parent(engine)
+        _seed_watcher(
+            engine,
+            parent_id=parent_id,
+            source_task_id="task-orphan-1",
+            state=DependencyWatcherState.FIRED.value,
+            enqueued_at=None,
+        )
+
+        with Session(engine) as session:
+            with caplog.at_level(
+                logging.WARNING, logger="daemon.services.report_integrity_guard"
+            ):
+                log_declared_waiting_violations(
+                    session, parent_id, context_tag="unit.stamp_site"
+                )
+
+        guard = [
+            r
+            for r in caplog.records
+            if "declared-waiting violation" in r.getMessage()
+        ]
+        assert len(guard) == 1
+        msg = guard[0].getMessage()
+        assert "CORROBORATING" in msg
+        assert "task-orphan-1" in msg, "source task id missing"
+        assert "count=1" in msg
+        # No PRIMARY evidence exists in this fixture.
+        assert "PRIMARY" not in msg
+
+    def test_silent_on_healthy_path(
+        self,
+        engine: Engine,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """EMPTY report → NO log line at all (zero healthy-path noise)."""
+        parent_id = _seed_parent(engine)
+
+        with Session(engine) as session:
+            with caplog.at_level(
+                logging.WARNING, logger="daemon.services.report_integrity_guard"
+            ):
+                log_declared_waiting_violations(
+                    session, parent_id, context_tag="unit.healthy"
+                )
+
+        assert caplog.records == [], (
+            f"healthy path must be silent; got "
+            f"{[r.getMessage() for r in caplog.records]}"
+        )
+
+    def test_predicate_exception_is_fail_open(
+        self,
+        engine: Engine,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Predicate raises → helper logs a fail-OPEN WARNING and RETURNS.
+
+        The exception must NOT propagate into the completion path
+        (D2.6 LOCKED) and no violation line may be emitted.
+        """
+        import daemon.services.report_integrity_guard as rig_module
+
+        def _boom(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("db connection lost (simulated)")
+
+        monkeypatch.setattr(
+            rig_module, "evaluate_declared_waiting_violations", _boom
+        )
+
+        with Session(engine) as session:
+            with caplog.at_level(
+                logging.WARNING, logger="daemon.services.report_integrity_guard"
+            ):
+                # Must NOT raise.
+                ret = log_declared_waiting_violations(
+                    session, "parent-panic", context_tag="unit.fail_open"
+                )
+
+        assert ret is None
+        failed = [
+            r for r in caplog.records if "predicate FAILED" in r.getMessage()
+        ]
+        assert len(failed) == 1, (
+            f"expected one fail-OPEN warning, got "
+            f"{[r.getMessage() for r in caplog.records]}"
+        )
+        assert failed[0].levelno == logging.WARNING
+        msg = failed[0].getMessage()
+        assert "fail-OPEN" in msg or "fail-OPEN".lower() in msg.lower()
+        assert "RuntimeError" in msg, "exception type must be named"
+        assert "db connection lost" in msg, "exception detail must be named"
+        assert "unit.fail_open" in msg, "context tag must survive the failure"
+        assert not [
+            r
+            for r in caplog.records
+            if "declared-waiting violation" in r.getMessage()
+        ], "a failed predicate must NOT produce a violation line"

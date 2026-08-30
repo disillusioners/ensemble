@@ -66,6 +66,9 @@ from daemon.repositories.dependency_bus.models import DependencyWatcher, Depende
 from daemon.services.dependency_bus import get_dependency_bus
 from daemon.services.job_queue_service import DemandState, JobQueueService
 from daemon.services.job_state_machine import InvalidTransitionError
+from daemon.services.report_integrity_guard import (
+    log_declared_waiting_violations,
+)
 from daemon.write_pause_guard import WriteGuardSession
 
 if TYPE_CHECKING:
@@ -3130,6 +3133,12 @@ class JobFeedbackObserver:
                     "gate — invalid state. The bus must be initialized "
                     "(see ADR-011)."
                 )
+            # D2.8 (LOCKED) defense-in-depth gate ordering for this
+            # finalization path: bus (fail-CLOSED, same-tx — THIS
+            # in-session gate) > tasks (fail-OPEN, the F14 in-session
+            # gate below) > (b) declared-waiting (fail-OPEN, LAST —
+            # B.S.6/B.S.7). The (b) LOG attach at the Step-2 COMPLETED
+            # stamp runs ONLY when both gates here reported zero.
             _bus_pending_stmt = (
                 select(func.count())
                 .select_from(DependencyWatcher)
@@ -3458,6 +3467,25 @@ class JobFeedbackObserver:
             else:
                 parent_id = instance.parent_id
                 agent_id = instance.agent_id
+                # B.S.1-ii (stage ii, LOG ONLY): (b) declared-waiting
+                # predicate-attached log at the parent-COMPLETED stamp —
+                # THE production parent-completion path (the bus
+                # callback re-triggers _finalize_job when the parent's
+                # last watcher resolves). D2.8 (LOCKED) ordering: the
+                # in-session bus gate and the F14 in-session tasks gate
+                # above both reported zero on this path, so (b) runs
+                # LAST on the both-counts-zero window (B.S.6/B.S.7).
+                # COMPLETED-only: the (b) question is a parent
+                # *completing* while a terminal child's report is
+                # undelivered — an ERROR finalization is a different
+                # adjudication. Fail-OPEN: the helper never raises into
+                # the finalization path (D2.6).
+                if terminal_status == InstanceStatus.COMPLETED.value:
+                    log_declared_waiting_violations(
+                        session,
+                        instance_id,
+                        context_tag="observer_finalize_job",
+                    )
                 instance.status = terminal_status
                 instance.updated_at = now
                 instance.last_activity_at = now_dt

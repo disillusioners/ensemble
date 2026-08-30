@@ -1,12 +1,14 @@
 """B.S.1-i — (b) terminal-child-aware waiting PREDICATE.
 
 Wave 2 of ``wc-wake-report-integrity`` (decisions.md C2-D2.7 LOCKED
-2026-08-30, phase2-plan §4.2). This module is the **predicate
-function only** — no behavior change anywhere. No call site in
-this codebase invokes :func:`evaluate_declared_waiting_violations`
-yet; stages ii (log-attach at the COMPLETED stamp sites) and iii
-(flag-gated enforcement with the pre-committed flip per D2.5-FLIP)
-land as separate commits by later coders.
+2026-08-30, phase2-plan §4.2). This module holds the **predicate
+function** (:func:`evaluate_declared_waiting_violations`) and — since
+B.S.1-ii — the stage-ii **LOG-ONLY helper**
+(:func:`log_declared_waiting_violations`) that completion-stamp sites
+call to surface violations. No enforcement, no notice injection, no
+config flag: the helper's ONLY observable effect is one WARNING log
+line. Stage iii (flag-gated enforcement with the pre-committed flip
+per D2.5-FLIP) lands as a separate commit by a later coder.
 
 Why a separate module:
 
@@ -245,7 +247,114 @@ def evaluate_declared_waiting_violations(
     )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# B.S.1-ii — stage-ii LOG helper (the only stage-ii observable effect)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Greppable prefix for every guard line. The stage-ii soak (≤2 weeks,
+# D2.5-FLIP) correlates violations across stamp sites by grepping THIS
+# prefix, so it must never be reworded casually.
+_LOG_PREFIX = "[ReportIntegrityGuard]"
+
+
+def log_declared_waiting_violations(
+    session: Session,
+    parent_instance_id: str,
+    *,
+    context_tag: str,
+    engine: "Engine | None" = None,
+) -> None:
+    """Stage-ii LOG-ONLY attach for the (b) declared-waiting predicate.
+
+    Evaluates :func:`evaluate_declared_waiting_violations` on the
+    CALLER-PROVIDED ``session`` (B.S.7 same-tx binding: the read runs
+    INSIDE the completion transaction, so the soak validates the REAL
+    predicate position) and, when the report is NON-EMPTY, emits ONE
+    structured WARNING log line.
+
+    This is the entire stage-ii contract: **LOG ONLY**. No injection,
+    no status write, no enqueue, no flag read, no metric, no mutation
+    of any kind — the ONLY observable effect is the log line. Stage
+    iii (flag-gated enforcement, pre-committed flip per D2.5-FLIP) is
+    a later coder's commit and will consume the same structured
+    report.
+
+    Line shape (greppable, one line per stamp-site evaluation)::
+
+        [ReportIntegrityGuard] declared-waiting violation at
+        <context_tag>: parent=<id> count=<n> detail=[child=<id>
+        status=<terminal> evidence=PRIMARY; watch=<id>
+        task=<id> evidence=CORROBORATING]
+
+    ``context_tag`` names the stamp site (e.g.
+    ``"child_reports.root_completion"``, ``"observer_finalize_job"``)
+    so soak analysis can attribute a firing to the exact completion
+    path.
+
+    Fail-OPEN policy (D2.6 LOCKED): the predicate call is wrapped in
+    ``try / except`` — on ANY exception the helper emits a WARNING
+    (predicate failed, completion proceeds) and RETURNS. It never
+    raises into the completion path, never blocks, never mutates
+    anything. Healthy paths (EMPTY report) emit NOTHING.
+
+    Args:
+        session: The caller's open session (the completion
+            transaction). Owned by the caller — never committed,
+            rolled back, or closed here.
+        parent_instance_id: The parent whose completion is being
+            stamped.
+        context_tag: Which stamp site is evaluating (free-form short
+            string; include it verbatim in soak greps).
+        engine: Optional engine override forwarded to the predicate;
+            defaults to the predicate's own ``session.get_bind()``
+            fallback.
+    """
+    try:
+        report = evaluate_declared_waiting_violations(
+            session, parent_instance_id, engine=engine
+        )
+    except Exception as exc:  # noqa: BLE001 — fail-OPEN (D2.6): never raise into completion
+        logger.warning(
+            "%s predicate FAILED at %s for parent=%s — fail-OPEN, "
+            "completion proceeds: %s: %s",
+            _LOG_PREFIX,
+            context_tag,
+            parent_instance_id,
+            type(exc).__name__,
+            exc,
+        )
+        return
+
+    if not report.is_violation:
+        # Healthy path — zero noise.
+        return
+
+    details: list[str] = []
+    for row in report.pending_with_terminal_child:
+        details.append(
+            f"child={row.get('child_instance_id')} "
+            f"status={row.get('child_terminal_status')} "
+            f"state={row.get('state')} evidence=PRIMARY"
+        )
+    for row in report.fired_unenqueued:
+        details.append(
+            f"watch={row.get('watch_id')} "
+            f"task={row.get('source_task_id')} "
+            f"state={row.get('state')} evidence=CORROBORATING"
+        )
+
+    logger.warning(
+        "%s declared-waiting violation at %s: parent=%s count=%d detail=[%s]",
+        _LOG_PREFIX,
+        context_tag,
+        parent_instance_id,
+        report.count,
+        "; ".join(details),
+    )
+
+
 __all__ = [
     "DeclaredWaitingViolationReport",
     "evaluate_declared_waiting_violations",
+    "log_declared_waiting_violations",
 ]

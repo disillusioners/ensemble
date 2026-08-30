@@ -46,7 +46,11 @@ from daemon.repositories.message_queue.models import (  # noqa: F401
     MessageStatus,
     MessageType,
 )
+from daemon.repositories.report_injection.models import ReportInjection  # noqa: F401  (SQLModel.metadata)
+from daemon.repositories.report_injection.repository import ReportInjectionRepository
 from daemon.repositories.task.models import Task  # noqa: F401
+from daemon.repositories.task.models import TaskStatus
+from daemon.services import child_reports as _child_reports_module
 from daemon.services.child_reports import ChildReportsService
 from daemon.services.dependency_bus import DependencyBus, set_dependency_bus
 from daemon.write_pause_guard import WritePauseGuard
@@ -1811,3 +1815,277 @@ class TestSanityConstantsRegistry:
                 os.environ.pop("REPORT_REPAIR_EXCLUDED_AGENTS", None)
             else:
                 os.environ["REPORT_REPAIR_EXCLUDED_AGENTS"] = old
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# B.S.1-ii — (b) declared-waiting predicate-attached LOG at the
+# root-COMPLETED stamp site (LOG ONLY, stage ii).
+#
+# Wave 2 wc-wake-report-integrity (decisions.md C2-D2.6/D2.8 LOCKED,
+# phase2-plan §4.2 B.S.1-ii + B.S.6/B.S.7). The ONLY observable effect
+# is the greppable ``[ReportIntegrityGuard]`` WARNING line — status
+# writes, gates, and outcomes are UNCHANGED. Per D2.8 (LOCKED) the
+# (b) evaluation is the LAST gate: it runs ONLY on the path where the
+# bus gate (fail-CLOSED, same-tx inline COUNT) AND the pending-tasks
+# gate (fail-OPEN) both reported zero — never on a short-circuit.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _seed_pending_injection(
+    engine,
+    *,
+    parent_id: str,
+    child_id: str,
+) -> None:
+    """Seed a PENDING report_injections row for (parent, terminal child).
+
+    This is the PRIMARY signal of the (b) declared-waiting predicate —
+    the parent owes a delivery to itself for a child that already
+    reached a terminal state.
+    """
+    ReportInjectionRepository(engine).enqueue(
+        parent_instance_id=parent_id,
+        child_instance_id=child_id,
+        child_message_id=f"msg-{uuid.uuid4().hex[:8]}",
+        report_message_id=f"rmsg-{uuid.uuid4().hex[:8]}",
+        content="junk opener body",
+    )
+
+
+def _guard_records(caplog) -> list:
+    """Return the captured ``[ReportIntegrityGuard]`` violation records."""
+    import logging as _logging
+
+    return [
+        r
+        for r in caplog.records
+        if r.levelno >= _logging.WARNING
+        and "[ReportIntegrityGuard]" in r.getMessage()
+        and "declared-waiting violation" in r.getMessage()
+    ]
+
+
+class TestReportIntegrityGuardStageIILog:
+    """Stage-ii log behavior at the root-completion stamp site."""
+
+    def test_incident_shape_logs_at_root_completion(
+        self, engine, caplog
+    ):
+        """Root completes while a terminal child's report is PENDING →
+        exactly one [ReportIntegrityGuard] line; stamp UNCHANGED."""
+        import logging
+
+        service = _build_child_reports_service(engine)
+        root_id = _seed_root_instance(engine)
+        child_id = _seed_child_instance(
+            engine, parent_id=root_id, status=InstanceStatus.COMPLETED.value
+        )
+        _seed_pending_injection(engine, parent_id=root_id, child_id=child_id)
+
+        with caplog.at_level(
+            logging.WARNING, logger="daemon.services.report_integrity_guard"
+        ):
+            result = service._process_child_completion_db_sync(
+                instance_id=root_id,
+                completed_message_id="msg-different-id",
+                last_content="assistant text",
+            )
+
+        # Zero flow disruption: the completion path is IDENTICAL.
+        assert result.outcome == "root_completed"
+        with Session(engine) as session:
+            inst = session.get(Instance, root_id)
+            assert inst.status == InstanceStatus.COMPLETED.value, (
+                "LOG ONLY — the stamp must still happen"
+            )
+
+        guard = _guard_records(caplog)
+        assert len(guard) == 1, (
+            f"expected exactly one [ReportIntegrityGuard] line, got "
+            f"{[r.getMessage() for r in caplog.records]}"
+        )
+        msg = guard[0].getMessage()
+        assert root_id in msg, "parent (root) id missing"
+        assert child_id in msg, "terminal child id missing"
+        assert "PRIMARY" in msg, "evidence class missing"
+        assert "root_completion" in msg, "context tag missing"
+        assert "count=1" in msg
+
+    def test_healthy_root_completion_is_silent(self, engine, caplog):
+        """Delivered (claimed) injection → root completes with NO log."""
+        import logging
+
+        service = _build_child_reports_service(engine)
+        root_id = _seed_root_instance(engine)
+        child_id = _seed_child_instance(
+            engine, parent_id=root_id, status=InstanceStatus.COMPLETED.value
+        )
+        _seed_pending_injection(engine, parent_id=root_id, child_id=child_id)
+        # Normal delivery consumed the obligation (PENDING → INJECTED).
+        ReportInjectionRepository(engine).claim_for_injection(root_id)
+
+        with caplog.at_level(
+            logging.WARNING, logger="daemon.services.report_integrity_guard"
+        ):
+            result = service._process_child_completion_db_sync(
+                instance_id=root_id,
+                completed_message_id="msg-different-id",
+                last_content="assistant text",
+            )
+
+        assert result.outcome == "root_completed"
+        assert _guard_records(caplog) == [], (
+            f"healthy path must be silent; got "
+            f"{[r.getMessage() for r in caplog.records]}"
+        )
+
+    def test_bus_gate_short_circuit_skips_predicate(
+        self, engine, monkeypatch, caplog
+    ):
+        """bus_pending > 0 → the bus gate short-circuits and (b) is NOT
+        evaluated (D2.8 ordering + hot-path bound): no helper call, no
+        log — even though the violation rows exist."""
+        import logging
+
+        service = _build_child_reports_service(engine)
+        root_id = _seed_root_instance(engine)
+        child_id = _seed_child_instance(
+            engine, parent_id=root_id, status=InstanceStatus.COMPLETED.value
+        )
+        _seed_pending_injection(engine, parent_id=root_id, child_id=child_id)
+        # PENDING watcher → the bus gate defers the completion.
+        _seed_dependency_watcher(
+            engine,
+            target_instance_id=root_id,
+            state=DependencyWatcherState.PENDING.value,
+        )
+
+        helper_calls: list[str] = []
+        monkeypatch.setattr(
+            _child_reports_module,
+            "log_declared_waiting_violations",
+            lambda *a, **k: helper_calls.append(k.get("context_tag", "?")),
+        )
+
+        with caplog.at_level(
+            logging.WARNING, logger="daemon.services.report_integrity_guard"
+        ):
+            result = service._process_child_completion_db_sync(
+                instance_id=root_id,
+                completed_message_id="msg-different-id",
+                last_content="assistant text",
+            )
+
+        assert result.outcome == "deferred_waiting_children"
+        assert helper_calls == [], (
+            "(b) must NOT be evaluated when the bus gate short-circuits "
+            f"(D2.8); helper was called with {helper_calls}"
+        )
+        assert _guard_records(caplog) == []
+
+    def test_tasks_gate_short_circuit_skips_predicate(
+        self, engine, monkeypatch, caplog
+    ):
+        """pending_tasks > 0 → the tasks gate short-circuits and (b) is
+        NOT evaluated (D2.8 ordering): no helper call, no log."""
+        import logging
+
+        service = _build_child_reports_service(engine)
+        root_id = _seed_root_instance(engine)
+        child_id = _seed_child_instance(
+            engine, parent_id=root_id, status=InstanceStatus.COMPLETED.value
+        )
+        _seed_pending_injection(engine, parent_id=root_id, child_id=child_id)
+        # PENDING task for the root → the pending-tasks gate defers.
+        with Session(engine) as session:
+            session.add(
+                Task(
+                    task_type="process_report",
+                    instance_id=root_id,
+                    status=TaskStatus.PENDING.value,
+                    created_at=datetime.now(timezone.utc),
+                )
+            )
+            session.commit()
+
+        helper_calls: list[str] = []
+        monkeypatch.setattr(
+            _child_reports_module,
+            "log_declared_waiting_violations",
+            lambda *a, **k: helper_calls.append(k.get("context_tag", "?")),
+        )
+
+        with caplog.at_level(
+            logging.WARNING, logger="daemon.services.report_integrity_guard"
+        ):
+            result = service._process_child_completion_db_sync(
+                instance_id=root_id,
+                completed_message_id="msg-different-id",
+                last_content="assistant text",
+            )
+
+        assert result.outcome == "deferred_waiting_children"
+        assert helper_calls == [], (
+            "(b) must NOT be evaluated when the tasks gate short-circuits "
+            f"(D2.8); helper was called with {helper_calls}"
+        )
+        assert _guard_records(caplog) == []
+
+    def test_predicate_evaluates_last_only_on_both_zero(
+        self, engine, monkeypatch, caplog
+    ):
+        """ORDERING (B.S.6/B.S.7 share, stage-ii portion): (b) evaluates
+        LAST and ONLY when both prior gates report zero.
+
+        Instrumented sequence: the pending-tasks gate probe appends
+        ``tasks_gate``; the (b) helper probe appends ``(b):<tag>``. On
+        the both-zero path the (b) probe must fire exactly once, AFTER
+        the tasks gate (the bus gates passed — outcome root_completed
+        and no bus-defer logs). On every short-circuit the (b) probe
+        must never fire (pinned by the two tests above).
+        """
+        import logging
+
+        service = _build_child_reports_service(engine)
+        root_id = _seed_root_instance(engine)
+        child_id = _seed_child_instance(
+            engine, parent_id=root_id, status=InstanceStatus.COMPLETED.value
+        )
+        _seed_pending_injection(engine, parent_id=root_id, child_id=child_id)
+
+        order: list[str] = []
+        real_count = ChildReportsService._count_actionable_pending_tasks
+
+        def _count_spy(self, session, instance_id):
+            order.append("tasks_gate")
+            return real_count(self, session, instance_id)
+
+        monkeypatch.setattr(
+            ChildReportsService, "_count_actionable_pending_tasks", _count_spy
+        )
+        monkeypatch.setattr(
+            _child_reports_module,
+            "log_declared_waiting_violations",
+            lambda session, pid, **k: order.append(
+                f"(b):{k.get('context_tag', '?')}"
+            ),
+        )
+
+        with caplog.at_level(
+            logging.WARNING, logger="daemon.services.report_integrity_guard"
+        ):
+            result = service._process_child_completion_db_sync(
+                instance_id=root_id,
+                completed_message_id="msg-different-id",
+                last_content="assistant text",
+            )
+
+        # Both prior gates reported zero → (b) ran exactly once, LAST.
+        # (outcome == root_completed is itself the both-zero proof: any
+        # bus/tasks short-circuit returns a deferred outcome instead of
+        # reaching the stamp — see the two skip tests above.)
+        assert result.outcome == "root_completed"
+        assert order == ["tasks_gate", "(b):child_reports.root_completion"], (
+            f"(b) must evaluate LAST and only on the both-zero path; "
+            f"got {order}"
+        )
