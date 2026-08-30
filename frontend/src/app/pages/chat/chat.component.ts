@@ -9,6 +9,11 @@ import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatDialog, MatDialogModule } from '@angular/material/dialog';
 import { ApiService } from '../../services/api.service';
 import { SseService } from '../../services/sse.service';
+import {
+  mergeMessagesById,
+  makeProvisionalMessage,
+  evictPendingByAge,
+} from '../../services/message-merge.util';
 import { TabStateService } from '../../services/tab-state.service';
 import { WorkspaceOverlayService } from '../../services/workspace-overlay.service';
 import { InstancesViewStateService } from '../../services/instances-view-state.service';
@@ -128,6 +133,15 @@ export class ChatComponent implements OnInit, OnDestroy {
    *  duplicate submissions from double Enter / double click. */
   private readonly SEND_COOLDOWN_MS = 3000;
   private lastSendTime = 0;
+
+  /**
+   * Wall-clock TTL for provisional pending messages (message-display-latency
+   * §4.3 item 11). Multi-minute agent turns are normal, so the bar is set
+   * to 10 minutes — short enough to eventually clear stuck entries, long
+   * enough that a legitimate in-flight turn doesn't lose its bubble.
+   * Eviction runs lazily on every merge / refetch (no background timer).
+   */
+  private readonly PENDING_TTL_MS = 10 * 60 * 1000;
 
   readonly agents = signal<Agent[]>([]);
   readonly currentInstanceId = signal<string | null>(null);
@@ -361,6 +375,17 @@ export class ChatComponent implements OnInit, OnDestroy {
     // with the currently-open instance (race: user switched tabs while
     // an SSE channel was still resolving) drop the message so it cannot
     // bleed into the new instance's UI.
+    //
+    // Merge contract (message-display-latency §4.3 item 9): union-by-id
+    // upsert via ``mergeMessagesById`` (centralized in
+    // ``message-merge.util`` so the REST refetch path uses the exact
+    // same logic). The merge is idempotent so duplicate SSE deliveries
+    // (POST-time echo + drain-time re-emit on the same id) collapse
+    // onto the single provisional bubble without producing a duplicate.
+    //
+    // Lazy TTL eviction runs on every merge so we don't need a
+    // background timer — pending entries that have aged past 10 minutes
+    // get dropped whenever any other signal touches the list.
     effect(() => {
       const sseMessages = this.sseService.messages();
       if (sseMessages.length === 0) return;
@@ -371,26 +396,52 @@ export class ChatComponent implements OnInit, OnDestroy {
       );
       if (filtered.length === 0) return;
 
-      // Merge: upsert SSE messages into existing list.
-      this.messages.update(existing => {
-        const result = [...existing];
-        for (const msg of filtered) {
-          const idx = result.findIndex(m => m.message_id === msg.message_id);
-          if (idx >= 0) {
-            // Shallow merge: top-level fields from SSE win, but any local-only
-            // top-level fields are preserved. Note this REPLACES reference
-            // fields (e.g. tool_calls) wholesale with SSE's copy — that is
-            // intentional so patched tool_call outputs flow through.
-            result[idx] = { ...result[idx], ...msg };
-          } else {
-            result.push(msg);
-          }
-        }
-        // Sort by created_at
-        result.sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
-        return result;
-      });
+      // Merge: upsert SSE messages into existing list using the shared
+      // utility. Top-level fields from SSE win on conflict; the
+      // ``pending`` flag is cleared when the incoming copy is not itself
+      // pending (server-side copies are never provisional). Local-only
+      // entries are preserved verbatim.
+      this.messages.update(existing =>
+        evictPendingByAge(
+          mergeMessagesById(existing, filtered),
+          this.PENDING_TTL_MS,
+          Date.now(),
+        )
+      );
       this.isSending.set(false);
+    }, { allowSignalWrites: true });
+
+    // Reconnect catch-up (message-display-latency §4.3 item 10): the SSE
+    // service bumps ``refetchRequest`` whenever a connection-level error
+    // is followed by a fresh ``connected`` event. Here we react by
+    // running a merge-mode REST refetch against the active instance —
+    // the union-by-id merge inside ``loadInstanceMessages`` is idempotent
+    // so a second refetch right after a successful reconnect is a no-op
+    // for messages the SSE channel already delivered, but it picks up
+    // anything LiveEventHub dropped (zero connections / QueueFull) while
+    // the channel was down.
+    effect(() => {
+      // Read the trigger counter so the effect re-runs on each bump.
+      const tick = this.sseService.refetchRequest();
+      if (tick === 0) return;
+      const activeInstanceId = this.viewState.activeInstanceId();
+      if (!activeInstanceId) return;
+      this.loadInstanceMessages(activeInstanceId, { merge: true });
+    }, { allowSignalWrites: true });
+
+    // Terminal-status pending purge (message-display-latency §4.3 item 11
+    // second half): when the instance transitions to a terminal status,
+    // any provisional pending entries cannot possibly resolve — drop
+    // them. The trigger is bumped by the SSE ``status_change`` listener
+    // (terminal statuses only); the actual mutation happens here because
+    // the chat component owns the visible ``messages`` signal.
+    effect(() => {
+      const tick = this.sseService.pendingPurgeRequest();
+      if (tick === 0) return;
+      this.messages.update(existing => {
+        const filtered = existing.filter(m => !m.pending);
+        return filtered.length === existing.length ? existing : filtered;
+      });
     }, { allowSignalWrites: true });
 
     // Fallback: Reset isSending if streaming stopped but isSending is still true
@@ -997,8 +1048,19 @@ export class ChatComponent implements OnInit, OnDestroy {
    * UI has the current state (including any saved comments) ready before or
    * shortly after SSE connect — the next `todo_update` event will reconcile
    * any drift either way.
+   *
+   * ``mode``: ``'replace'`` (default) wipes the local message list and seeds
+   * it with the server's view. Used on initial instance load and instance
+   * switch — there's nothing useful in the local list to preserve.
+   * ``'merge'`` upserts by ``message_id`` and preserves local-only pending
+   * / provisional entries (message-display-latency §4.3 item 9). Used by
+   * the reconnect catch-up effect so a refetch mid-pending never wipes
+   * the user's just-rendered optimistic bubble.
    */
-  private loadInstanceMessages(instanceId: string): void {
+  private loadInstanceMessages(
+    instanceId: string,
+    options: { merge?: boolean } = {},
+  ): void {
     this.api.getMessages(instanceId).subscribe({
       next: (messages) => {
         // R3 / W2: bail when the user hid the overlay or switched
@@ -1008,9 +1070,25 @@ export class ChatComponent implements OnInit, OnDestroy {
         if (!this.visible() || this.viewState.activeInstanceId() !== instanceId) {
           return;
         }
-        console.log('[Chat] Loaded', messages.length, 'messages from API');
+        console.log('[Chat] Loaded', messages.length, 'messages from API (mode:', options.merge ? 'merge' : 'replace', ')');
         const viewModels = messages.map(m => this.toViewModel(m));
-        this.messages.set(viewModels);
+        if (options.merge) {
+          // Union-by-id merge — never wipe local-only provisional entries.
+          // The shared ``mergeMessagesById`` helper enforces the same
+          // contract as the SSE mirror effect, so a refetch that lands
+          // before the drain-time SSE echo doesn't lose the optimistic
+          // bubble. Eviction runs in the same pass so a stuck pending
+          // entry ages out on every refetch.
+          this.messages.update(existing =>
+            evictPendingByAge(
+              mergeMessagesById(existing, viewModels),
+              this.PENDING_TTL_MS,
+              Date.now(),
+            )
+          );
+        } else {
+          this.messages.set(viewModels);
+        }
       },
       error: (err) => {
         // Same staleness guard for the error path.
@@ -1018,7 +1096,9 @@ export class ChatComponent implements OnInit, OnDestroy {
           return;
         }
         console.warn('[Chat] Failed to load messages:', err);
-        this.messages.set([]);
+        if (!options.merge) {
+          this.messages.set([]);
+        }
       },
       complete: () => {
         // R3 / W2: the SSE channel is the most consequential side
@@ -1148,7 +1228,7 @@ export class ChatComponent implements OnInit, OnDestroy {
     // Clear any previous error
     this.sendError.set(null);
     this.isSending.set(true);
-    
+
     this.api.sendMessage(instance.instance_id, payload.content, payload.images, payload.queue_id).subscribe({
       // Both 200 (PAUSED auto-resume / IDLE enqueue) and 202 (RUNNING /
       // WAITING_CHILDREN injection acceptance) are 2xx and fire `next` by
@@ -1167,6 +1247,45 @@ export class ChatComponent implements OnInit, OnDestroy {
           this.queuedMessage.set({ content: payload.content });
         } else {
           this.queuedMessage.set(null);
+        }
+
+        // Optimistic append (message-display-latency §4.3 item 12).
+        // Cover both routing paths with a single branch: when the POST
+        // response carries a ``message_id``, render the user's bubble
+        // immediately. The id-keyed dedup on the SSE side (POST-time
+        // echo + drain-time re-emit collapse onto the same row) plus
+        // the union-by-id refetch merge guarantee we never produce a
+        // duplicate — even if the SSE echo arrives within the same
+        // tick. When ``message_id`` is absent (old backend / PAUSED
+        // ``None`` case) we degrade to today's render-on-echo flow and
+        // do NOT append locally.
+        //
+        // We intentionally do NOT ship a content-matching reconciler
+        // (deliberately out of scope per design §9.7): the server id
+        // is authoritative and the POST response is the canonical
+        // confirmation for the send-before-SSE-connect race.
+        const newId = response.message_id;
+        if (newId) {
+          const provisional = makeProvisionalMessage({
+            messageId: newId,
+            content: payload.content,
+            createdAt: response.created_at,
+            instanceId: instance.instance_id,
+            images: payload.images,
+          });
+          this.messages.update(existing =>
+            evictPendingByAge(
+              mergeMessagesById(existing, [provisional]),
+              this.PENDING_TTL_MS,
+              Date.now(),
+            )
+          );
+          // The optimistic bubble is the user's confirmation that the
+          // message landed — the SSE echo / drain re-emit will clear
+          // the ``pending`` flag via the merge helper. Reset the
+          // sending flag now so the input is immediately interactive;
+          // the user-visible state is the bubble, not a spinner.
+          this.isSending.set(false);
         }
       },
       error: (err) => {

@@ -84,6 +84,11 @@ const mockSseService = {
   isStreaming: signal(false),
   latestError: signal<any>(null),
   todos: signal<any[]>([]),
+  // Reconnect-refetch + pending-purge triggers (message-display-latency
+  // §4.3 items 10 + 11). The real service bumps these on SSE events; in
+  // tests they're plain signals tests can drive directly.
+  refetchRequest: signal<number>(0),
+  pendingPurgeRequest: signal<number>(0),
   connect: jest.fn(),
   disconnect: jest.fn(),
   clearEvents: jest.fn(),
