@@ -507,3 +507,55 @@ def is_reserved_source(source: str | None) -> bool:
 #     ``tests/unit/routers/test_source_reservation.py::
 #     TestReservedSourcePrefixesConstant::
 #     test_helper_is_deliberately_case_sensitive``.
+
+
+# ── Report Integrity (wc-wake-report-integrity Wave 1) ────────────────────────
+
+# (c) Passive report-sanity marker (C2-D2.9 LOCKED, DESCRIPTIVE-ONLY).
+# Appended to TERMINAL completion reports whose source history shows zero
+# tool-call evidence in a short history (see
+# ``ChildReportsService._is_zero_tool_short_history``). Byte-for-byte
+# pinned by ``tests/unit/services/test_child_reports.py::
+# TestSanityConstantsRegistry`` — the directive half ("treat as interim,
+# not completion") deliberately lives in (d) prompt guidance, NEVER here.
+REPORT_SANITY_MARKER: str = "[REPORT SANITY: zero tool-call evidence in source history]"
+
+# Separately-versioned rollback seam for the (c) marker (ruling S8; mirror
+# ``LIMITS_GOVERNOR_RECURSION_GUARD_ENABLED`` precedent). The marker appends
+# only while this equals 1: bumping to 0 (or any future value, e.g. 2)
+# SUPPRESSES the marker while leaving the code paths live — no revert
+# needed if the marker ever breaks downstream consumers. Bump rationale
+# belongs in CHANGELOG.md next to the code change.
+SANITY_FLAG_VERSION: int = 1
+
+# NR-3 junk-rate metric name (Prometheus-style). Counter is observability
+# only — it never changes report content. Increment site:
+# ``ChildReportsService._get_last_assistant_message_raw`` (BEFORE the
+# skip_repair and report_repair.enabled short-circuits so ALL terminal
+# completions count); sink seam: ``daemon/services/report_integrity_metrics``.
+REPORT_INTEGRITY_JUNK_REPORT_TOTAL: str = "report_integrity_junk_report_total"
+
+# NR-2 (C2-D2.15 LOCKED): the ONE source of truth for agent IDs whose
+# completion reports are exempt from report repair AND from the (c) sanity
+# marker. ``ReportRepairConfig.repair_excluded_agents`` derives its default
+# from this frozenset; the documented env override
+# (``REPORT_REPAIR_EXCLUDED_AGENTS``, comma-separated — REPLACES the set)
+# remains the per-deployment escape hatch.
+#
+# Members are text-only-by-design agents whose short, zero-tool-call
+# reports are legitimate work products, NOT silent-death evidence:
+#   * ``wanderer`` / ``explorer`` — exploration agents; naturally concise
+#     final reports (original 2026-08-11 spec).
+#   * ``watcher`` — included at NR-2 landing (evidence-based call):
+#     ``agents/watcher/meta.json`` has ``tools.allow: []`` — it STRUCTURALLY
+#     cannot emit tool_calls, so the zero-evidence predicate would match
+#     100% of its reports; its verdict output is text-only by design.
+#     (Today no daemon code path spawns watcher instances — the watchover
+#     flow invokes it as an inline single-call LLM evaluator — so this
+#     entry is defensive; it becomes load-bearing the moment a watcher
+#     instance rides the report path.) Third text-only-by-design member ⇒
+#     D2.15/OQ-1 re-open trigger (generic per-agent opt-out) is now MET —
+#     flagged to the component owner, NOT built here.
+REPORT_REPAIR_EXCLUDED_AGENTS: frozenset[str] = frozenset(
+    {"wanderer", "explorer", "watcher"}
+)

@@ -25,7 +25,13 @@ from ..repositories.dependency_bus.models import DependencyWatcher, DependencyWa
 from ..repositories.report_injection.models import ReportInjection, ReportInjectionState
 from ..registry import get_registry
 from ..write_pause_guard import WriteGuardSession
-from ..constants import DEFERRED_REASON_IDEMPOTENCY_SKIP, DEFERRED_REASON_PENDING_MESSAGES
+from ..constants import (
+    DEFERRED_REASON_IDEMPOTENCY_SKIP,
+    DEFERRED_REASON_PENDING_MESSAGES,
+    REPORT_SANITY_MARKER,
+    SANITY_FLAG_VERSION,
+)
+from .report_integrity_metrics import record_junk_report
 from .context_messages import _resolve_tree_root_id
 from .lifecycle_hooks import LifecycleHookContext, dispatch_lifecycle_hooks
 from .llm_failover import wrap_langchain_failover
@@ -1246,8 +1252,9 @@ Provide a concise summary:"""
             agent_id: The agent ID (e.g., "developer", "leader"). Also
                 drives the exclusion check in the raw call: when
                 ``agent_id`` is in ``report_repair.repair_excluded_agents``
-                (default: ``{"wanderer", "explorer"}``), repair is
-                skipped.
+                (default derives from
+                ``daemon.constants.REPORT_REPAIR_EXCLUDED_AGENTS``), repair
+                is skipped and the (c) sanity marker is suppressed.
             skip_repair: When True, propagate to the raw call so the
                 truncation check + LLM repair + combine fallback are
                 all skipped. Used by interim paths (e.g.,
@@ -1504,12 +1511,29 @@ Provide a concise summary:"""
                 trigger repair on the same message.
             agent_id: Optional agent ID for the exclusion check. When
                 the agent_id is in ``report_repair.repair_excluded_agents``
-                (default: ``{"wanderer", "explorer"}``), repair is
-                skipped — exploration agents naturally produce short,
-                legitimately-concise reports and repairing them wastes
-                LLM time and corrupts the report with hallucinated
-                content. ``None`` means "unknown agent" — repair runs
-                (safe default).
+                (default derives from
+                ``daemon.constants.REPORT_REPAIR_EXCLUDED_AGENTS``), repair
+                is skipped and the (c) sanity marker is suppressed —
+                text-only-by-design agents (wanderer, explorer, watcher)
+                naturally produce short, legitimately-concise reports and
+                repairing them wastes LLM time and corrupts the report
+                with hallucinated content. ``None`` means "unknown agent"
+                — repair runs (safe default).
+
+                Wave-1 (wc-wake-report-integrity) behavior added here:
+                  * NR-3 — when the returned message has zero tool-call
+                    evidence in a short history, the
+                    ``report_integrity_junk_report_total`` counter
+                    increments BEFORE the ``skip_repair`` and
+                    ``report_repair.enabled`` short-circuits so ALL
+                    terminal completions count (observability only).
+                  * (c) — on the TERMINAL path (``skip_repair=False``),
+                    the same low-evidence shape appends the
+                    DESCRIPTIVE-ONLY ``REPORT_SANITY_MARKER`` to the
+                    returned content (suppressed for excluded agents or
+                    when ``SANITY_FLAG_VERSION != 1``). Interim callers
+                    never carry the marker, and the terminal path marks
+                    exactly once.
 
         Returns:
             The raw assistant message content, or None if not found.
@@ -1542,29 +1566,63 @@ Provide a concise summary:"""
         # — both were running repair, wasting ~19s of LLM time and
         # discarding both outputs. Interim callers MUST pass
         # ``skip_repair=True`` so repair runs only on the terminal path.
+
+        # --- Report-integrity instruments (NR-3 counter + (c) marker) ---
+        # Shared low-evidence predicate, computed ONCE (C2-D2.18 LOCKED:
+        # work signal = last assistant message's ``tool_calls`` empty;
+        # width = exactly the ``_is_likely_truncated_report`` short-circuit
+        # input per C2-NR-4 CONFIRMED). The exclusion read stays on the
+        # config (its default derives from the shared NR-2 constant, so
+        # env overrides still apply — one source of truth = the constant).
+        report_repair_cfg = self._config.report_repair
+        excluded = report_repair_cfg.repair_excluded_agents
+        agent_excluded = agent_id is not None and agent_id in excluded
+        low_evidence = self._is_zero_tool_short_history(last, assistant_msgs)
+
+        # NR-3 junk-rate counter — placed BEFORE the ``skip_repair`` and
+        # ``report_repair.enabled`` short-circuits (§6 adjustment,
+        # 2026-08-30) so ALL terminal completions count, not only
+        # repair-eligible ones. Observability only — never changes content.
+        if low_evidence:
+            record_junk_report(instance_id=instance_id, agent_id=agent_id)
+
+        # (c) Passive report-sanity marker (C2-D2.9 LOCKED, DESCRIPTIVE-ONLY).
+        # TERMINAL path only: interim ``skip_repair=True`` callers (the
+        # in-progress notification path) must NOT carry it, and the
+        # terminal path marks exactly once via this single suffix.
+        # ``SANITY_FLAG_VERSION`` is the rollback seam — any value other
+        # than 1 suppresses the marker while the code stays live.
+        sanity_suffix = ""
+        if (
+            low_evidence
+            and not skip_repair
+            and not agent_excluded
+            and SANITY_FLAG_VERSION == 1
+        ):
+            sanity_suffix = f"\n\n{REPORT_SANITY_MARKER}"
+
         if skip_repair:
             return last_content
 
         # --- Repair disable short-circuit ---
         # S4: Config has ``default_factory`` for ``report_repair`` — always
         # present, no need for ``getattr`` defensive guard.
-        report_repair_cfg = self._config.report_repair
         if not report_repair_cfg.enabled:
-            return last_content  # happy path, skip repair entirely
+            return last_content + sanity_suffix  # happy path, skip repair entirely
 
         # --- Agent exclusion check ---
         # 2026-08-11: exploration agents (wanderer, explorer) produce
         # short, intentionally-concise reports. Repairing them wastes
         # LLM time and can corrupt the report with hallucinated content.
-        # The exclusion set is configured via REPORT_REPAIR_EXCLUDED_AGENTS;
-        # default is {"wanderer", "explorer"}.
-        excluded = report_repair_cfg.repair_excluded_agents
-        if agent_id is not None and agent_id in excluded:
+        # The exclusion set is configured via REPORT_REPAIR_EXCLUDED_AGENTS
+        # (default derives from ``daemon.constants.REPORT_REPAIR_EXCLUDED_AGENTS``
+        # — NR-2 lift; watcher included since 2026-08-30).
+        if agent_excluded:
             logger.info(
                 f"[ReportRepairer] Skipping repair for instance {instance_id[:8]}... "
                 f"agent_id={agent_id!r} (in repair_excluded_agents)"
             )
-            return last_content
+            return last_content + sanity_suffix
 
         # --- Truncation check ---
         # ``lookback_messages`` controls the slice passed to both the
@@ -1575,7 +1633,7 @@ Provide a concise summary:"""
         lookback = report_repair_cfg.lookback_messages
         recent = assistant_msgs[-lookback:] if len(assistant_msgs) >= lookback else assistant_msgs
         if not self._is_likely_truncated_report(recent, ratio=report_repair_cfg.size_ratio_threshold):
-            return last_content  # happy path — sizes are similar
+            return last_content + sanity_suffix  # happy path — sizes are similar
 
         logger.info(
             f"[ReportRepairer] Unhappy path triggered for instance {instance_id[:8]}... "
@@ -1588,12 +1646,37 @@ Provide a concise summary:"""
         )
         if repaired and repaired.strip():
             logger.info(f"[ReportRepairer] LLM repair succeeded for instance {instance_id[:8]}...")
-            return repaired.strip()
+            return repaired.strip() + sanity_suffix
 
         # --- Fallback: combine messages ---
         logger.info(f"[ReportRepairer] Using combine-fallback for instance {instance_id[:8]}...")
         combined = self._combine_messages(recent)
-        return combined if combined.strip() else last_content
+        return (combined if combined.strip() else last_content) + sanity_suffix
+
+    @staticmethod
+    def _is_zero_tool_short_history(last_msg: dict, assistant_msgs: list[dict]) -> bool:
+        """True when the report shows the ZERO-EVIDENCE junk shape.
+
+        Shape (C2-D2.18 LOCKED — the work signal): the LAST assistant
+        message has no tool calls, AND the content-bearing assistant
+        history is short (fewer than 2 messages) — exactly the input where
+        ``_is_likely_truncated_report`` short-circuits
+        (``len(messages) < 2 → False``) per C2-NR-4 CONFIRMED. The NR-4
+        pin test
+        (``tests/unit/services/test_child_reports.py::
+        TestMarkerPredicatePinnedToTruncationShortCircuit``) enforces that
+        boundary — widening the width would mark legitimate multi-message
+        reports and duplicate the (c) signal.
+
+        ``tool_calls`` absent / ``None`` / ``[]`` all count as zero
+        evidence (``serialize_message`` emits ``[]`` for tool-less AIMessages).
+
+        Consumers: the NR-3 junk counter and the (c) report-sanity marker
+        in ``_get_last_assistant_message_raw``. Observability only.
+        """
+        if last_msg.get("tool_calls"):
+            return False
+        return len(assistant_msgs) < 2
 
     async def _process_child_completion_and_notify_parent(self, instance_id: str, completed_message_id: str) -> None:
         """Check if child instance is done and send completion report to parent.

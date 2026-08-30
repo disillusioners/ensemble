@@ -583,7 +583,17 @@ class TestGetLastAssistantMessageRaw:
 
     @pytest.mark.asyncio
     async def test_single_message_returns_it(self):
-        """Only one assistant message → returns it (no truncation possible)."""
+        """Only one assistant message → returns it (no truncation possible).
+
+        Wave-1 (c) marker (2026-08-30): a single zero-tool-call assistant
+        message IS the low-evidence shape, so the terminal-path fetch now
+        appends the DESCRIPTIVE-ONLY ``REPORT_SANITY_MARKER`` (the content
+        is preserved as the prefix). Pinned here so the envelope change is
+        explicit — mirror test: ``tests/unit/services/test_child_reports.py::
+        TestReportSanityMarker``.
+        """
+        from daemon.constants import REPORT_SANITY_MARKER
+
         messages = [_assistant_msg("only message")]
         service = _make_service()
 
@@ -594,7 +604,7 @@ class TestGetLastAssistantMessageRaw:
         ):
             result = await service._get_last_assistant_message_raw("test-instance-id")
 
-        assert result == "only message"
+        assert result == f"only message\n\n{REPORT_SANITY_MARKER}"
         mock_llm_class.assert_not_called()
 
     @pytest.mark.asyncio
@@ -1255,9 +1265,17 @@ class TestConfigDefaults:
         assert cfg.size_ratio_threshold == 5.0
 
     def test_repair_excluded_agents_default(self):
-        """Spec (2026-08-11): default excludes ``{"wanderer", "explorer"}``."""
+        """Spec (2026-08-11) + NR-2 lift (2026-08-30): the default derives
+        from the shared constant
+        ``daemon.constants.REPORT_REPAIR_EXCLUDED_AGENTS`` — original
+        ``{"wanderer", "explorer"}`` plus ``watcher`` (tools.allow=[] ⇒
+        structurally zero tool-call evidence; text-only verdicts by
+        design)."""
+        from daemon.constants import REPORT_REPAIR_EXCLUDED_AGENTS
+
         cfg = ReportRepairConfig()
-        assert cfg.repair_excluded_agents == {"wanderer", "explorer"}
+        assert cfg.repair_excluded_agents == set(REPORT_REPAIR_EXCLUDED_AGENTS)
+        assert cfg.repair_excluded_agents == {"wanderer", "explorer", "watcher"}
 
     def test_repair_excluded_agents_overridable(self):
         """Repair-excluded set can be overridden via constructor."""

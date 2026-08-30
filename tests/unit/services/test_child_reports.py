@@ -1329,3 +1329,485 @@ class TestNaturalCompletionRacingRecoveredMarker:
                 f"status={child_row.status!r}."
             )
 
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Wave 1 — wc-wake-report-integrity (NR-2 / NR-3 / (c) / NR-4)
+#
+# Report-integrity instruments per phase2-plan §3.3 + §4.0 (Seq-AB Wave 1):
+#   * (c)  passive DESCRIPTIVE-ONLY report-sanity marker (C2-D2.9 LOCKED).
+#   * NR-3 junk-rate counter ``report_integrity_junk_report_total``,
+#     incremented BEFORE both repair short-circuits (§6 adjustment).
+#   * NR-2 shared exclusion constant ``REPORT_REPAIR_EXCLUDED_AGENTS``
+#     (C2-D2.15 LOCKED) — ``watcher`` included at landing (evidence:
+#     ``agents/watcher/meta.json`` ``tools.allow == []`` ⇒ structurally
+#     zero tool-call evidence; text-only verdicts by design).
+#   * NR-4 pin: the marker fires on EXACTLY the input where
+#     ``_is_likely_truncated_report`` short-circuits (C2-NR-4 CONFIRMED —
+#     keep the short-circuit NARROW).
+#
+# The raw-fetch helpers mirror ``_make_service`` in
+# ``tests/unit/test_report_repair.py`` (``__new__`` + mock manager), with
+# tool_calls-aware message dicts.
+# ─────────────────────────────────────────────────────────────────────────────
+
+SANITY_MARKER_LITERAL = "[REPORT SANITY: zero tool-call evidence in source history]"
+
+
+def _make_report_fetch_service(*, messages: list[dict] | None = None, report_repair=None):
+    """Build a bare ChildReportsService for ``_get_last_assistant_message*``.
+
+    The mock manager exposes a real ``Config`` (so ``report_repair``
+    defaults derive from the shared constant) and a mock checkpointer
+    adapter; ``get_instance_messages`` is patched per-test to return
+    ``messages``.
+    """
+    from daemon.config import Config
+
+    manager = MagicMock(name="InstanceManager")
+    config = Config()
+    if report_repair is not None:
+        config.report_repair = report_repair
+    manager.config = config
+    checkpointer_adapter = MagicMock(name="CheckpointerAdapter")
+    checkpointer_adapter.raw_saver = MagicMock(name="RawSaver")
+    manager._checkpointer = checkpointer_adapter
+    # Stable prefix: no instance row → no instance_name in the prefix.
+    manager._instance_repository = MagicMock()
+    manager._instance_repository.get = MagicMock(return_value=None)
+
+    service = ChildReportsService.__new__(ChildReportsService)
+    service._manager = manager
+    service._events_service = None
+    service._pending_report_messages = messages or []
+    return service
+
+
+def _msg_user(content: str) -> dict:
+    return {"role": "user", "content": content}
+
+
+def _msg_assistant(content: str, tool_calls: list | None = None) -> dict:
+    """Assistant message dict; ``tool_calls=None`` → zero-tool evidence."""
+    return {
+        "role": "assistant",
+        "content": content,
+        "tool_calls": [] if tool_calls is None else tool_calls,
+    }
+
+
+def _tool_call(name: str = "bash", call_id: str = "call_1") -> dict:
+    return {"name": name, "args": {}, "id": call_id, "type": "tool_call"}
+
+
+def _junk_history(opener: str = "I'll take a look at this now.") -> list[dict]:
+    """The silent-death shape: one human task + one zero-tool no-work opener.
+
+    Same history family as the 11-hop premature-completion chain
+    (phase2-plan §1 / technical-analysis §"11-Hop Premature-Completion
+    Chain"): the child's ONLY assistant turn is a no-tool opener.
+    """
+    return [
+        _msg_user("Investigate the flaky queue test and report back"),
+        _msg_assistant(opener),
+    ]
+
+
+def _patch_fetch(messages: list[dict]):
+    """Patch the checkpoint fetch inside child_reports."""
+    from unittest.mock import AsyncMock, patch
+
+    return patch(
+        "daemon.services.child_reports.get_instance_messages",
+        new=AsyncMock(return_value=messages),
+    )
+
+
+def _reset_junk_counter() -> None:
+    """Zero the NR-3 counter for a clean per-test delta."""
+    from daemon.services import report_integrity_metrics as rim
+
+    rim.reset_junk_report_total()
+
+
+class TestReportSanityMarker:
+    """(c) passive report-sanity marker — D2.9 LOCKED (descriptive-only).
+
+    Fires on TERMINAL reports from low-evidence histories (last assistant
+    message has zero tool calls AND fewer than 2 content-bearing assistant
+    messages — exactly the ``_is_likely_truncated_report`` short-circuit
+    input, C2-NR-4). Never on interim (``skip_repair=True``) fetches;
+    never for excluded agents (NR-2 constant).
+    """
+
+    async def test_marker_present_on_zero_tool_short_history_terminal_report(self):
+        """Terminal report from the junk shape carries the marker verbatim."""
+        from daemon.constants import REPORT_SANITY_MARKER
+
+        service = _make_report_fetch_service(messages=_junk_history())
+        with _patch_fetch(service._pending_report_messages):
+            raw = await service._get_last_assistant_message_raw(
+                "test-instance-id", agent_id="worker"
+            )
+        assert raw is not None
+        assert SANITY_MARKER_LITERAL in raw, (
+            "terminal zero-tool short-history report must carry the "
+            "descriptive-only sanity marker (D2.9)"
+        )
+        assert raw.startswith("I'll take a look at this now."), (
+            "marker is additive — original content preserved as the prefix"
+        )
+        assert "treat as interim" not in raw, (
+            "marker is DESCRIPTIVE-ONLY — the directive half lives in (d) "
+            "prompt guidance, never in the marker (D2.9)"
+        )
+        from daemon.constants import REPORT_SANITY_MARKER
+
+        assert REPORT_SANITY_MARKER == SANITY_MARKER_LITERAL
+
+    async def test_marker_composes_into_parent_report_once(self):
+        """The wrapper (prefix + concat) carries the marker exactly once."""
+        service = _make_report_fetch_service(messages=_junk_history())
+        with _patch_fetch(service._pending_report_messages):
+            report = await service._get_last_assistant_message("test-instance-id", "worker")
+        assert report is not None
+        assert SANITY_MARKER_LITERAL in report
+        assert report.count(SANITY_MARKER_LITERAL) == 1, (
+            "terminal path must mark exactly once (no duplication across "
+            "prefix/concat)"
+        )
+
+    async def test_marker_absent_on_tool_bearing_last_message(self):
+        """Tool evidence in the last assistant message ⇒ no marker."""
+        messages = [
+            _msg_user("do the task"),
+            _msg_assistant("done", tool_calls=[_tool_call()]),
+        ]
+        service = _make_report_fetch_service(messages=messages)
+        with _patch_fetch(messages):
+            raw = await service._get_last_assistant_message_raw(
+                "test-instance-id", agent_id="worker"
+            )
+        assert raw == "done"
+        assert SANITY_MARKER_LITERAL not in raw
+
+    async def test_marker_absent_on_long_history_with_zero_tool_last(self):
+        """Zero-tool LAST message but ≥2 assistant messages ⇒ no marker.
+
+        The truncation check is IN PLAY at this width (short-circuit does
+        not govern) — the marker must not widen past it (C2-NR-4).
+        """
+        messages = [
+            _msg_user("task"),
+            _msg_assistant("investigated the queue"),
+            _msg_assistant("found the flaky test"),
+        ]
+        service = _make_report_fetch_service(messages=messages)
+        with _patch_fetch(messages):
+            raw = await service._get_last_assistant_message_raw(
+                "test-instance-id", agent_id="worker"
+            )
+        assert raw == "found the flaky test"
+        assert SANITY_MARKER_LITERAL not in raw
+
+    async def test_marker_absent_for_excluded_agents(self):
+        """Excluded agents (NR-2 constant, watcher included) are never marked."""
+        for agent_id in ("wanderer", "explorer", "watcher"):
+            service = _make_report_fetch_service(messages=_junk_history())
+            with _patch_fetch(service._pending_report_messages):
+                raw = await service._get_last_assistant_message_raw(
+                    "test-instance-id", agent_id=agent_id
+                )
+            assert raw == "I'll take a look at this now.", (
+                f"excluded agent {agent_id!r} must get the bare content"
+            )
+            assert SANITY_MARKER_LITERAL not in raw, (
+                f"excluded agent {agent_id!r} must NOT carry the marker"
+            )
+
+    async def test_marker_absent_on_interim_skip_repair_fetch(self):
+        """``skip_repair=True`` (interim in-progress path) never marks."""
+        service = _make_report_fetch_service(messages=_junk_history())
+        with _patch_fetch(service._pending_report_messages):
+            raw = await service._get_last_assistant_message_raw(
+                "test-instance-id", skip_repair=True, agent_id="worker"
+            )
+        assert raw == "I'll take a look at this now."
+        assert SANITY_MARKER_LITERAL not in raw
+
+
+class TestJunkReportCounter:
+    """NR-3 junk-rate counter ``report_integrity_junk_report_total``.
+
+    §6 adjustment (2026-08-30): the increment sits BEFORE the
+    ``skip_repair`` short-circuit AND the ``report_repair.enabled``
+    short-circuit so ALL terminal completions count, not only
+    repair-eligible ones.
+    """
+
+    async def test_counter_increments_on_terminal_zero_tool_short_history(self):
+        _reset_junk_counter()
+        try:
+            service = _make_report_fetch_service(messages=_junk_history())
+            with _patch_fetch(service._pending_report_messages):
+                await service._get_last_assistant_message_raw(
+                    "test-instance-id", agent_id="worker"
+                )
+            from daemon.services.report_integrity_metrics import get_junk_report_total
+
+            assert get_junk_report_total() == 1
+        finally:
+            _reset_junk_counter()
+
+    async def test_counter_increments_with_repair_disabled(self):
+        """Repair disabled ⇒ the enabled short-circuit must not eat the count."""
+        _reset_junk_counter()
+        try:
+            from daemon.config import ReportRepairConfig
+
+            service = _make_report_fetch_service(
+                messages=_junk_history(),
+                report_repair=ReportRepairConfig(enabled=False),
+            )
+            with _patch_fetch(service._pending_report_messages):
+                await service._get_last_assistant_message_raw(
+                    "test-instance-id", agent_id="worker"
+                )
+            from daemon.services.report_integrity_metrics import get_junk_report_total
+
+            assert get_junk_report_total() == 1, (
+                "counter must increment BEFORE the report_repair.enabled "
+                "short-circuit (§6 placement)"
+            )
+        finally:
+            _reset_junk_counter()
+
+    async def test_counter_increments_on_skip_repair_fetch(self):
+        """skip_repair=True fetch still counts (before-skip_repair placement).
+
+        Proves the §6 adjustment: the increment precedes the skip_repair
+        short-circuit, so interim fetches of the junk shape count too —
+        ALL fetches of the shape are observed.
+        """
+        _reset_junk_counter()
+        try:
+            service = _make_report_fetch_service(messages=_junk_history())
+            with _patch_fetch(service._pending_report_messages):
+                await service._get_last_assistant_message_raw(
+                    "test-instance-id", skip_repair=True, agent_id="worker"
+                )
+            from daemon.services.report_integrity_metrics import get_junk_report_total
+
+            assert get_junk_report_total() == 1
+        finally:
+            _reset_junk_counter()
+
+    async def test_counter_not_incremented_on_tool_bearing_history(self):
+        _reset_junk_counter()
+        try:
+            messages = [
+                _msg_user("do the task"),
+                _msg_assistant("done", tool_calls=[_tool_call()]),
+            ]
+            service = _make_report_fetch_service(messages=messages)
+            with _patch_fetch(messages):
+                service._get_last_assistant_message_raw(
+                    "test-instance-id", agent_id="worker"
+                )
+            from daemon.services.report_integrity_metrics import get_junk_report_total
+
+            assert get_junk_report_total() == 0
+        finally:
+            _reset_junk_counter()
+
+    async def test_counter_not_incremented_on_long_history(self):
+        _reset_junk_counter()
+        try:
+            messages = [
+                _msg_user("task"),
+                _msg_assistant("investigated the queue"),
+                _msg_assistant("found the flaky test"),
+            ]
+            service = _make_report_fetch_service(messages=messages)
+            with _patch_fetch(messages):
+                service._get_last_assistant_message_raw(
+                    "test-instance-id", agent_id="worker"
+                )
+            from daemon.services.report_integrity_metrics import get_junk_report_total
+
+            assert get_junk_report_total() == 0
+        finally:
+            _reset_junk_counter()
+
+
+class TestMarkerPredicatePinnedToTruncationShortCircuit:
+    """NR-4 / C2-NR-4 CONFIRMED: keep the truncation short-circuit NARROW.
+
+    The marker must fire on EXACTLY the input where
+    ``_is_likely_truncated_report`` short-circuits
+    (``child_reports.py`` ``len(messages) < 2 → False``) — widening would
+    break legitimate multi-message reports and duplicate the marker's
+    signal. This test pins the boundary.
+    """
+
+    @staticmethod
+    async def _fire(service_messages: list[dict], agent_id: str = "worker") -> bool:
+        service = _make_report_fetch_service(messages=service_messages)
+        with _patch_fetch(service_messages):
+            raw = await service._get_last_assistant_message_raw(
+                "pin-instance", agent_id=agent_id
+            )
+        return raw is not None and SANITY_MARKER_LITERAL in raw
+
+    async def test_fires_on_single_assistant_message_where_short_circuit_governs(self):
+        """1 content-bearing assistant message + zero tools ⇒ short-circuit
+        input ⇒ marker fires; the truncation check itself CANNOT flag this
+        width (``len < 2 → False``) no matter the content."""
+        history = _junk_history()
+        assistant_msgs = [
+            m for m in history
+            if m.get("role") == "assistant" and (m.get("content", "") or "").strip()
+        ]
+        assert len(assistant_msgs) < 2, "fixture must be the short-circuit width"
+        # The short-circuit: single-message input is never "truncated".
+        huge_single = [{"role": "assistant", "content": "word " * 500}]
+        assert ChildReportsService._is_likely_truncated_report(huge_single) is False
+        assert ChildReportsService._is_likely_truncated_report(assistant_msgs) is False
+        # And exactly there, the marker fires.
+        assert await self._fire(history) is True
+
+    async def test_does_not_fire_once_history_exits_the_short_circuit(self):
+        """2 zero-tool assistant messages ⇒ short-circuit released (the
+        ratio check governs) ⇒ marker absent — even though the last
+        message is still zero-tool. This is the anti-widening boundary."""
+        history = [
+            _msg_user("task"),
+            _msg_assistant("started looking"),
+            _msg_assistant("nothing found yet"),
+        ]
+        assistant_msgs = [
+            m for m in history
+            if m.get("role") == "assistant" and (m.get("content", "") or "").strip()
+        ]
+        assert len(assistant_msgs) >= 2, "fixture must exit the short-circuit"
+        assert await self._fire(history) is False
+
+    async def test_tool_evidence_never_fires_regardless_of_width(self):
+        """The zero-tool half of the predicate is independent of width."""
+        assert await self._fire(
+            [_msg_user("t"), _msg_assistant("d", tool_calls=[_tool_call()])]
+        ) is False
+        assert await self._fire(
+            [
+                _msg_user("t"),
+                _msg_assistant("a"),
+                _msg_assistant("d", tool_calls=[_tool_call()]),
+            ]
+        ) is False
+
+
+class TestSanityConstantsRegistry:
+    """S8 registry pins (mirror ``LIMITS_GOVERNOR_RECURSION_GUARD_ENABLED``
+    precedent): the Wave-1 constants are pinned — renaming or deleting any
+    of them fails this module."""
+
+    def test_sanity_flag_version_pinned(self):
+        import daemon.constants as constants
+
+        assert hasattr(constants, "SANITY_FLAG_VERSION"), (
+            "SANITY_FLAG_VERSION must exist in daemon/constants.py — it is "
+            "the separately-versioned rollback seam for the (c) marker "
+            "(bumping to 0/2 suppresses the marker while code stays live)"
+        )
+        assert constants.SANITY_FLAG_VERSION == 1
+
+    def test_sanity_marker_text_pinned_byte_for_byte(self):
+        import daemon.constants as constants
+
+        assert hasattr(constants, "REPORT_SANITY_MARKER")
+        assert constants.REPORT_SANITY_MARKER == SANITY_MARKER_LITERAL
+
+    def test_report_repair_excluded_agents_constant_pinned(self):
+        import daemon.constants as constants
+
+        assert hasattr(constants, "REPORT_REPAIR_EXCLUDED_AGENTS")
+        assert isinstance(constants.REPORT_REPAIR_EXCLUDED_AGENTS, frozenset)
+        assert constants.REPORT_REPAIR_EXCLUDED_AGENTS == frozenset(
+            {"wanderer", "explorer", "watcher"}
+        ), (
+            "NR-2: the shared constant is the ONE source of truth; watcher "
+            "included (tools.allow=[] ⇒ structurally zero tool-call evidence)"
+        )
+
+    def test_junk_metric_name_pinned(self):
+        import daemon.constants as constants
+
+        assert hasattr(constants, "REPORT_INTEGRITY_JUNK_REPORT_TOTAL")
+        assert constants.REPORT_INTEGRITY_JUNK_REPORT_TOTAL == (
+            "report_integrity_junk_report_total"
+        )
+
+    def test_config_default_derives_from_constant(self):
+        """NR-2: config default_factory derives from the shared constant."""
+        from daemon.config import ReportRepairConfig
+        from daemon.constants import REPORT_REPAIR_EXCLUDED_AGENTS
+
+        assert ReportRepairConfig().repair_excluded_agents == set(
+            REPORT_REPAIR_EXCLUDED_AGENTS
+        )
+
+    def test_env_override_replaces_set_comma_separated(self):
+        """NR-2: the documented ``REPORT_REPAIR_EXCLUDED_AGENTS`` env var
+        (comma-separated) REPLACES the default set — operators can add AND
+        remove (e.g. drop ``watcher``) without a code change."""
+        import os
+
+        from daemon.config import ReportRepairConfig
+
+        old = os.environ.get("REPORT_REPAIR_EXCLUDED_AGENTS")
+        os.environ["REPORT_REPAIR_EXCLUDED_AGENTS"] = "gamma,custom-agent"
+        try:
+            assert ReportRepairConfig().repair_excluded_agents == {
+                "gamma",
+                "custom-agent",
+            }
+        finally:
+            if old is None:
+                os.environ.pop("REPORT_REPAIR_EXCLUDED_AGENTS", None)
+            else:
+                os.environ["REPORT_REPAIR_EXCLUDED_AGENTS"] = old
+
+    def test_env_override_accepts_json_list_and_spaces(self):
+        import os
+
+        from daemon.config import ReportRepairConfig
+
+        old = os.environ.get("REPORT_REPAIR_EXCLUDED_AGENTS")
+        try:
+            os.environ["REPORT_REPAIR_EXCLUDED_AGENTS"] = '["wanderer"]'
+            assert ReportRepairConfig().repair_excluded_agents == {"wanderer"}
+            os.environ["REPORT_REPAIR_EXCLUDED_AGENTS"] = "gamma, custom "
+            assert ReportRepairConfig().repair_excluded_agents == {"gamma", "custom"}
+        finally:
+            if old is None:
+                os.environ.pop("REPORT_REPAIR_EXCLUDED_AGENTS", None)
+            else:
+                os.environ["REPORT_REPAIR_EXCLUDED_AGENTS"] = old
+
+    def test_env_override_empty_string_means_no_exclusions(self):
+        """Empty env string → EMPTY set (explicit "no exclusions"), never
+        the default — mirrors ``reasoning_echo_disabled_models`` precedent
+        (empty env string parses to ``[]``, never ``[""]``)."""
+        import os
+
+        from daemon.config import ReportRepairConfig
+
+        old = os.environ.get("REPORT_REPAIR_EXCLUDED_AGENTS")
+        os.environ["REPORT_REPAIR_EXCLUDED_AGENTS"] = ""
+        try:
+            assert ReportRepairConfig().repair_excluded_agents == set()
+        finally:
+            if old is None:
+                os.environ.pop("REPORT_REPAIR_EXCLUDED_AGENTS", None)
+            else:
+                os.environ["REPORT_REPAIR_EXCLUDED_AGENTS"] = old

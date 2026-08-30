@@ -8121,8 +8121,9 @@ class InstanceManager:
             agent_id: The agent ID (e.g., "developer", "leader"). Also
                 drives the exclusion check in the raw call: when
                 ``agent_id`` is in ``report_repair.repair_excluded_agents``
-                (default: ``{"wanderer", "explorer"}``), repair is
-                skipped.
+                (default derives from
+                ``daemon.constants.REPORT_REPAIR_EXCLUDED_AGENTS``), repair
+                is skipped and the (c) sanity marker is suppressed.
             skip_repair: When True, propagate to the raw call so the
                 truncation check + LLM repair + combine fallback are
                 all skipped. Used by interim paths (e.g.,
@@ -8160,8 +8161,10 @@ class InstanceManager:
                 with the terminal completion path.
             agent_id: Optional agent ID for the exclusion check. When
                 ``agent_id`` is in
-                ``report_repair.repair_excluded_agents`` (default:
-                ``{"wanderer", "explorer"}``), repair is skipped.
+                ``report_repair.repair_excluded_agents`` (default
+                derives from
+                ``daemon.constants.REPORT_REPAIR_EXCLUDED_AGENTS``), repair
+                is skipped.
                 ``None`` means "unknown agent" — repair runs (safe default).
 
         Returns:

@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Annotated, Any, Callable, Dict
 
 import yaml
-from pydantic import Field, ConfigDict, model_validator, field_validator
+from pydantic import AliasChoices, Field, ConfigDict, model_validator, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 # Single source of truth for the non-status transient-channel pattern
@@ -31,6 +31,7 @@ from .constants import (
     CHECKPOINT_CLEANUP_INTERVAL_HOURS,
     MAX_INSTANCE_HISTORY,
     MAINTENANCE_CHECK_INTERVAL_MINUTES,
+    REPORT_REPAIR_EXCLUDED_AGENTS,
 )
 
 logger = logging.getLogger(__name__)
@@ -1411,22 +1412,60 @@ class ReportRepairConfig(BaseSettings):
     catching mid-sentence truncation.
     """
 
-    model_config = SettingsConfigDict(env_prefix="REPORT_REPAIR_")
+    model_config = SettingsConfigDict(env_prefix="REPORT_REPAIR_", populate_by_name=True)
 
     enabled: bool = Field(default=True, description="Enable unhappy-path report repair")
     # Factor-5 accuracy guard (was 2.0 pre-2026-08-11). Intentional short
     # reports (e.g., governor's 36-word final message after a 143-word
     # prior turn) are NOT repaired — only mid-sentence truncation is.
     size_ratio_threshold: float = Field(default=5.0, ge=1.0, description="Word-count ratio (earlier/last) that triggers repair")
-    # Agent IDs whose reports are NEVER repaired. Exploration agents
-    # (wanderer, explorer) naturally produce short, legitimately-concise
-    # reports — repairing them wastes LLM time and corrupts the report
-    # with hallucinated content. Override via REPORT_REPAIR_EXCLUDED_AGENTS
-    # env var (comma-separated) to add or remove IDs.
-    repair_excluded_agents: set[str] = Field(
-        default_factory=lambda: {"wanderer", "explorer"},
-        description="Agent IDs whose reports are never repaired (exploration agents naturally produce short reports)",
+    # Agent IDs whose reports are NEVER repaired (and never carry the (c)
+    # sanity marker). The default DERIVES from the shared constant
+    # ``daemon.constants.REPORT_REPAIR_EXCLUDED_AGENTS`` (NR-2 lift,
+    # C2-D2.15 LOCKED) — one source of truth; text-only-by-design agents
+    # (wanderer, explorer, watcher) belong there, documented at the
+    # constant. Override via the REPORT_REPAIR_EXCLUDED_AGENTS env var
+    # (comma-separated, REPLACES the set — add or remove IDs, e.g. drop
+    # ``watcher``). NR-2 fix note: the env name was previously dead —
+    # ``env_prefix`` + the field name resolved to
+    # ``REPORT_REPAIR_REPAIR_EXCLUDED_AGENTS`` (silently ignored), and
+    # ``set[str]`` env parsing was JSON-only (comma strings crashed).
+    # ``NoDecode`` + the ``_parse_repair_excluded_agents`` validator +
+    # ``validation_alias`` make the documented name work; empty string →
+    # empty set (explicit "no exclusions", mirroring
+    # ``reasoning_echo_disabled_models``).
+    repair_excluded_agents: Annotated[set[str], NoDecode] = Field(
+        default_factory=lambda: set(REPORT_REPAIR_EXCLUDED_AGENTS),
+        validation_alias=AliasChoices(
+            "REPORT_REPAIR_EXCLUDED_AGENTS", "repair_excluded_agents"
+        ),
+        description="Agent IDs whose reports are never repaired (text-only-by-design agents naturally produce short zero-tool reports)",
     )
+
+    @field_validator("repair_excluded_agents", mode="before")
+    @classmethod
+    def _parse_repair_excluded_agents(cls, value: Any) -> Any:
+        """Accept comma-separated strings (and JSON arrays) from env / YAML.
+
+        Delegates to ``_parse_csv_or_json_list`` for the shared parsing
+        logic; the ``NoDecode`` annotation prevents pydantic-settings from
+        auto-JSON-decoding env values, so we handle both forms here:
+          - ``"gamma,delta"`` → ``{"gamma", "delta"}``
+          - ``'["gamma"]'`` → ``{"gamma"}``
+          - ``{"gamma"}`` / ``["gamma"]`` → passthrough → set
+          - ``""`` or whitespace → empty set (explicit "no exclusions")
+
+        Env format example::
+
+            REPORT_REPAIR_EXCLUDED_AGENTS="wanderer,explorer"
+        """
+        if isinstance(value, (set, frozenset)):
+            return set(value)
+        parsed = _parse_csv_or_json_list(value)
+        if isinstance(parsed, list):
+            return set(parsed)
+        return parsed
+
     # W2: tighter default timeout (30s instead of 120s) — repair should be
     # fast; on timeout we fall back to combine. 120s is excessive given the
     # prompt is bounded to recent messages.
