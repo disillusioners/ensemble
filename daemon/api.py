@@ -182,7 +182,7 @@ async def lifespan(app: FastAPI):
     """
     # Import services here to avoid circular imports
     from daemon.manager import InstanceManager
-    from daemon.config import load_config, warn_deprecated_reasoning_echo_env
+    from daemon.config import load_config, warn_deprecated_allowed_models_env, warn_deprecated_reasoning_echo_env
     from daemon.services.job_queue_service import JobQueueService
     from daemon.services.job_lock_manager import JobLockManager
     from daemon.services.job_processor import JobProcessor

@@ -17,7 +17,7 @@ warnings.filterwarnings(
 import uvicorn
 from pathlib import Path
 
-from .config import load_config, warn_deprecated_reasoning_echo_env
+from .config import load_config, warn_deprecated_allowed_models_env, warn_deprecated_reasoning_echo_env
 
 # ── Process exit-code contract (Auto-Restart ADR-010/011) ─────────────────
 # The launcher (Phase 1) maps exit codes to restart policy:
