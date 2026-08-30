@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from langchain_core.callbacks import BaseCallbackHandler
-from langchain_core.messages import HumanMessage, RemoveMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, ToolMessage
 from sqlmodel import Session
 
 from ..cancellation import CancellationToken
@@ -304,6 +304,186 @@ def _dedup_merge_skill_ids(
         INJECTED_SKILLS_METADATA_KEY,
         merged,
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# D1 entry-seam pairing tail-guard (wc-wake-report-integrity, T6)
+# ─────────────────────────────────────────────────────────────────────────────
+# Closes the pre-existing poisoned-tail → LangGraph 2013 exposure at the
+# enqueue-seam boundary. The in-graph guard
+# (``daemon.graph._ensure_tool_result_pairing`` at graph.py:271-384)
+# runs at the ``agent_node`` drain sites AFTER ``astream`` is invoked
+# — too late for the LLM call that the gateway is about to reject.
+# The seam guard runs at the enqueue seam (after the three
+# ``_build_graph_input`` sites converge, before ``graph.astream``),
+# reads the checkpoint state via ``graph.aget_state``, and prepends
+# synthesized ``ToolMessage`` placeholders (R1 deterministic ids) to
+# ``graph_input['messages']`` so the LLM-bound list is structurally
+# valid before the gateway sees it. LangGraph's ``add_messages``
+# reducer then commits the healed tail to the checkpoint in the same
+# superstep as the new turn.
+#
+# Flag-INDEPENDENT (always active, no gating) per the dispatch directive.
+# Same O(1) happy-path tail check as the in-graph helper; cost is one
+# ``aget_state`` read per enqueued turn + bounded walk — measured-cheap,
+# optimization seam documented in case profiling flags it later.
+
+
+async def _heal_poisoned_checkpoint_tail(
+    graph: "CompiledStateGraph",
+    config: dict,
+    graph_input: dict | None,
+    instance_short: str = "",
+) -> list[ToolMessage]:
+    """Prepend synthesized ``ToolMessage`` placeholders to
+    ``graph_input['messages']`` when the checkpoint tail is poisoned.
+
+    wc-wake-report-integrity (T6, D1): the helper reads the current
+    checkpoint state via ``graph.aget_state(config)``, tail-checks it
+    the same way ``daemon.graph._ensure_tool_result_pairing`` does
+    (O(1) happy path, bounded backward walk), and prepends synthesized
+    placeholders to ``graph_input['messages']`` so the LLM-bound list
+    is structurally valid. ``add_messages`` then commits the healed
+    tail to the checkpoint in the same superstep as the new turn —
+    no separate ``aupdate_state`` round-trip.
+
+    The synthesized placeholders carry the SAME R1 deterministic id
+    format (``pairing-synth-{tc_id}``) as the in-graph helper, so a
+    re-heal across the seam + in-graph dedup chain is idempotent
+    (``add_messages`` dedups by id).
+
+    Args:
+        graph: The compiled LangGraph for this instance.
+        config: LangGraph config dict (carries ``thread_id``).
+        graph_input: The LLM-bound dict being prepared for
+            ``graph.astream``. **MUTATED IN PLACE** — placeholders
+            are prepended to ``graph_input['messages']``. Pass
+            ``None`` to short-circuit (silent-resume branch).
+        instance_short: Short instance id (``<first-segment-of-uuid>``)
+            for the WARNING log. Empty string is accepted.
+
+    Returns:
+        The list of placeholder ``ToolMessage``s synthesized and
+        prepended (in the order they appear in ``graph_input['messages']``).
+        Empty on the happy path (no trailing unanswered ``tool_calls``)
+        or on ``graph_input=None`` (silent-resume short-circuit).
+
+    Note:
+        The inspection core is intentionally NOT pulled from the
+        in-graph helper directly (no cross-module import) — this
+        helper is a state-aware checkpoint reader, not a
+        list-mutator. The bounded walk's O(1) happy path and the
+        deduplication rules mirror ``_ensure_tool_result_pairing``:
+        if the tail is not an ``AIMessage`` carrying ``tool_calls``,
+        return ``[]``. If it is, walk backward over trailing
+        ``AIMessage(tc)`` blocks (bounded by the same 8-message
+        window), dedupe against existing ``tool_call_id``s in the
+        trailing window, and synthesize one ``ToolMessage`` per
+        unanswered ``tool_call_id``.
+    """
+    if graph_input is None:
+        # S5 / architect correction 2: the ``:3407`` silent-resume
+        # branch sets ``graph_input = None`` (pure checkpoint resume
+        # — silent mode or no content). The seam heal/prepend MUST
+        # SKIP a None graph_input: that path injects no new
+        # mid-turn HumanMessage at the seam and is already covered
+        # by the in-graph pairing guard (graph.py:2971 / :3145).
+        return []
+
+    # Read the checkpoint state. Pattern already used in this file
+    # at :925 (``_maybe_compact_context``).
+    state = await graph.aget_state(config)
+    if state is None:
+        return []
+
+    # ``state.values`` is dict-like. Defensive fallback for the rare
+    # mock / alternative state shape that returns None for ``values``
+    # or lacks a ``messages`` key.
+    messages: list | None = None
+    values = getattr(state, "values", None)
+    if isinstance(values, dict):
+        messages = values.get("messages")
+    if not messages:
+        return []
+
+    # O(1) happy path: only proceed when the tail itself is an
+    # AIMessage carrying tool_calls. NO full-history scan — that
+    # pattern was explicitly rejected in the in-graph helper as too
+    # costly (mirrors ``daemon/graph.py:311-316``).
+    tail = messages[-1]
+    if not (isinstance(tail, AIMessage) and getattr(tail, "tool_calls", None)):
+        return []
+
+    # Walk backward over trailing AIMessage(tc) blocks; stop on the
+    # first non-AIMessage(tc) message OR when we hit the safety
+    # bound (mirrors ``daemon/graph.py:318-329``).
+    ai_indices: list[int] = []
+    end_bound = max(0, len(messages) - 8)  # _TOOL_PAIRING_MAX_TRAVERSAL=8
+    i = len(messages) - 1
+    while i >= end_bound:
+        msg = messages[i]
+        if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
+            ai_indices.append(i)
+            i -= 1
+        else:
+            break
+    if not ai_indices:
+        return []
+
+    ai_indices.reverse()
+    leftmost_idx = ai_indices[0]
+
+    # Dedupe against existing ToolMessages in the trailing window.
+    existing_tool_call_ids: set[str] = set()
+    for m in messages[leftmost_idx:]:
+        if isinstance(m, ToolMessage) and m.tool_call_id:
+            existing_tool_call_ids.add(m.tool_call_id)
+
+    synthesized: list[ToolMessage] = []
+    for orig_idx in ai_indices:
+        ai_msg = messages[orig_idx]
+        tool_calls = ai_msg.tool_calls or []
+        for tc in tool_calls:
+            tc_id = tc.get("id") if isinstance(tc, dict) else None
+            if not tc_id or tc_id in existing_tool_call_ids:
+                continue
+            tc_name = tc.get("name", "") if isinstance(tc, dict) else ""
+            # R1 deterministic id (mirrors graph.py:364-368) — same
+            # id format so a re-heal across the seam + in-graph
+            # dedup chain is idempotent.
+            tm = ToolMessage(
+                content=(
+                    "[Tool execution interrupted (daemon restart/crash) — "
+                    "result unavailable. Re-issue the tool call if still "
+                    "needed.]"
+                ),
+                tool_call_id=tc_id,
+                name=tc_name,
+                id=f"pairing-synth-{tc_id}",
+            )
+            existing_tool_call_ids.add(tc_id)
+            synthesized.append(tm)
+
+    if not synthesized:
+        return []
+
+    # Prepend to ``graph_input['messages']`` so the LLM-bound list is
+    # structurally valid before ``graph.astream``. The D1 seam
+    # places placeholders at the HEAD — the poisoned checkpoint
+    # tail sits at the head of the persisted state, so the
+    # placeholders must immediately follow it for the gateway to
+    # accept the LLM call.
+    existing_messages = list(graph_input.get("messages") or [])
+    graph_input["messages"] = synthesized + existing_messages
+
+    logger.warning(
+        f"[ToolPairing] D1 entry-seam: synthesized {len(synthesized)} "
+        f"placeholder tool result(s) for instance {instance_short} — "
+        f"checkpoint tail had unanswered tool_calls before enqueue "
+        f"turn build."
+    )
+
+    return synthesized
 
 
 def _build_graph_input(
@@ -3763,6 +3943,25 @@ class InstanceMessagingService:
         # version after ``astream`` completes.
         _deferred_msg_ids: set[str] = set()
 
+        # ── D1 entry-seam pairing tail-guard (T6, S5) ────────────────────
+        # Read the checkpoint state via ``graph.aget_state(config)`` and
+        # prepend synthesized ``ToolMessage`` placeholders to
+        # ``graph_input['messages']`` when the checkpoint tail is
+        # poisoned. ``add_messages`` then commits the healed tail to the
+        # checkpoint in the same superstep as the new turn — no separate
+        # ``aupdate_state`` round-trip. Cost: one ``aget_state`` read per
+        # enqueued turn + O(1) tail check.
+        #
+        # The helper short-circuits on ``graph_input is None`` (the
+        # silent-resume branch :3407 injects no new mid-turn HumanMessage
+        # at the seam; the in-graph pairing guard already covers it).
+        # Flag-INDEPENDENT — always active regardless of the
+        # ``ENSEMBLE_WC_WAKE_ENQUEUE`` kill-switch.
+        if graph_input is not None:
+            await _heal_poisoned_checkpoint_tail(
+                graph, config, graph_input, instance_id[:8],
+            )
+
         # Stream through graph execution
         # Register task for cancellation tracking INSIDE try block to prevent leaks
         # if CancelledError is raised during _maybe_compact_context
@@ -3774,7 +3973,7 @@ class InstanceMessagingService:
                 self._manager._graph_tasks[instance_id] = current_task
                 task_registered = True
                 logger.debug(f"Registered graph task for instance {instance_id[:8]}...")
-            
+
             async with self._llm_semaphore:
                 async for event in graph.astream(graph_input, config, stream_mode=["updates"]):
                     # Unpack tuple: (mode, data)
