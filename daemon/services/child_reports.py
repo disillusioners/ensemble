@@ -1602,10 +1602,19 @@ Provide a concise summary:"""
         else:
             messages = []
 
+        # Collect ALL assistant messages (unfiltered) for the tool-evidence
+        # half of the low-evidence predicate (W1 council fix, 2026-08-30).
+        # ``content=""`` ASSISTANT messages carry ``tool_calls`` — they are
+        # the canonical pure tool-call AIMessage shape — and MUST count as
+        # tool evidence even though the width filter below drops them.
+        # Filter ordering was the W1 defect: the tool-evidence half used to
+        # inherit this filter and lost the work signal.
+        all_assistant_msgs = [m for m in messages if m.get("role") == "assistant"]
+
         # Collect real assistant messages with content (chronological)
         assistant_msgs = [
-            m for m in messages
-            if m.get("role") == "assistant" and (m.get("content", "") or "").strip()
+            m for m in all_assistant_msgs
+            if (m.get("content", "") or "").strip()
         ]
         if not assistant_msgs:
             return None
@@ -1631,7 +1640,9 @@ Provide a concise summary:"""
         report_repair_cfg = self._config.report_repair
         excluded = report_repair_cfg.repair_excluded_agents
         agent_excluded = agent_id is not None and agent_id in excluded
-        low_evidence = self._is_zero_tool_short_history(last, assistant_msgs)
+        low_evidence = self._is_zero_tool_short_history(
+            last, assistant_msgs, all_assistant_msgs
+        )
 
         # NR-3 junk-rate counter — placed BEFORE the ``skip_repair`` and
         # ``report_repair.enabled`` short-circuits (§6 adjustment,
@@ -1708,7 +1719,11 @@ Provide a concise summary:"""
         return (combined if combined.strip() else last_content) + sanity_suffix
 
     @staticmethod
-    def _is_zero_tool_short_history(last_msg: dict, assistant_msgs: list[dict]) -> bool:
+    def _is_zero_tool_short_history(
+        last_msg: dict,
+        assistant_msgs: list[dict],
+        all_assistant_msgs: list[dict] | None = None,
+    ) -> bool:
         """True when the report shows the ZERO-EVIDENCE junk shape.
 
         Shape (C2-D2.18 LOCKED — the work signal): the LAST assistant
@@ -1722,14 +1737,37 @@ Provide a concise summary:"""
         boundary — widening the width would mark legitimate multi-message
         reports and duplicate the (c) signal.
 
+        W1 amendment (council, 2026-08-30): the tool-evidence half now
+        scans UNFILTERED assistant messages (``all_assistant_msgs``) for
+        any ``tool_calls``. ``content=""`` ASSISTANT messages carry
+        ``tool_calls`` (canonical pure tool-call AIMessage shape) and must
+        count as tool evidence even though the width filter drops them.
+        Without this fix a legitimate minimal-tool history
+        ``[task] → [AIMessage(tool_calls=[…], content="")] → [final text]``
+        was marked ``low_evidence=True`` ⇒ marker falsely fired, NR-3
+        counter inflated, (d) parents spuriously re-verified.
+
+        The WIDTH half (``len(assistant_msgs) < 2``, content-bearing only)
+        is unchanged — C2-NR-4 remains LOAD-BEARING for the boundary.
+
         ``tool_calls`` absent / ``None`` / ``[]`` all count as zero
         evidence (``serialize_message`` emits ``[]`` for tool-less AIMessages).
 
         Consumers: the NR-3 junk counter and the (c) report-sanity marker
         in ``_get_last_assistant_message_raw``. Observability only.
         """
-        if last_msg.get("tool_calls"):
+        # Back-compat: callers that pre-date the W1 amendment pass only
+        # ``(last_msg, assistant_msgs)``. Fall back to the width-only scan
+        # so legacy behavior is preserved where ``all_assistant_msgs`` is
+        # unavailable.
+        if all_assistant_msgs is None:
+            all_assistant_msgs = assistant_msgs
+        # W1: tool-evidence half scans UNFILTERED assistant messages —
+        # any assistant message with tool calls ⇒ tool evidence present.
+        if any(m.get("tool_calls") for m in all_assistant_msgs):
             return False
+        # Width half: content-bearing assistant count < 2 — unchanged
+        # per C2-NR-4 (TestMarkerPredicatePinnedToTruncationShortCircuit).
         return len(assistant_msgs) < 2
 
     async def _process_child_completion_and_notify_parent(self, instance_id: str, completed_message_id: str) -> None:

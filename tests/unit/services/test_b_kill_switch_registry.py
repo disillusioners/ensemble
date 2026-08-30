@@ -19,12 +19,22 @@ pins the resolver truthiness; this module pins the NAME REGISTRY):
     is RESERVED-UNUSED (C2-D2.2/D2.3 LOCKED): it is wired to NOTHING —
     no config field consumes it and the only ``daemon/`` occurrence of
     the string is its constants.py declaration.
-  * **Split-versioning independence** (ruling S8 + D2.9): suppressing
-    the Wave-1 (c) marker via ``SANITY_FLAG_VERSION != 1`` does NOT
-    affect the (d) prompt-side guidance consumption — the prompt
-    guidance is static agent-file text, independent of the marker
-    constant; and NO code path in the guard/notice module reads
-    ``SANITY_FLAG_VERSION`` (source-scan assert).
+  * **Split-versioning independence** (ruling S8 + D2.9, refined by
+    S1 council follow-up, 2026-08-30): suppressing the Wave-1 (c)
+    marker via ``SANITY_FLAG_VERSION != 1`` does NOT affect the (d)
+    prompt-side guidance consumption — the prompt guidance is static
+    agent-file text, independent of the marker constant; and the
+    (b) PREDICATE does NOT read ``SANITY_FLAG_VERSION`` (D2.18
+    content-blind — the predicate's emission / decision is decoupled
+    from the marker's emission state). The (b) guard/notice module
+    IS allowed to read ``SANITY_FLAG_VERSION`` in ONE bounded
+    location — the ``constants_marker_text()`` citation helper —
+    because the (b) notice's marker citation must be gated on the
+    (c) marker emission state (S1: a citation pointing at a marker
+    that never appears would be a lying instruction). This is a
+    deliberate, narrow coupling; the source-scan assert below is
+    updated to enforce that the read is BOUNDED to the citation
+    helper and does not leak into the predicate / enforcement path.
 
 Resolver truthiness semantics themselves (env values → bool, cache,
 restart-required) are pinned beside the resolver in
@@ -196,15 +206,91 @@ class TestSplitVersioningIndependence:
                 f"(split-versioning independence)"
             )
 
-    def test_guard_and_notice_never_read_sanity_flag_version(self) -> None:
-        """Source-scan: no code path in the (b) guard/notice module
-        (nor the (d) prompts test surface) reads SANITY_FLAG_VERSION —
-        the two versioned seams cannot couple.
+    def test_guard_predicate_does_not_read_sanity_flag_version(self) -> None:
+        """Source-scan: the (b) PREDICATE / gate code (not the citation
+        helper) does NOT read ``SANITY_FLAG_VERSION``. The predicate is
+        content-blind (D2.18) and its emission / decision is decoupled
+        from the (c) marker version.
+
+        The citation helper ``constants_marker_text()`` IS allowed to
+        read the constant (S1 council follow-up, 2026-08-30): the (b)
+        notice's marker citation is gated on the (c) marker emission
+        state so the citation cannot point at a marker that never
+        appears. This test asserts that read is BOUNDED to that helper
+        and does NOT leak into the predicate / enforcement path —
+        preserving the spirit of the S8 split-versioning ruling.
         """
-        guard_src = (
-            DAEMON_DIR / "services" / "report_integrity_guard.py"
-        ).read_text(encoding="utf-8")
-        assert "SANITY_FLAG_VERSION" not in guard_src, (
-            "the (b) guard/notice module must not read SANITY_FLAG_VERSION "
-            "(content-blind predicate D2.18; separately-versioned seams)"
+        guard_path = DAEMON_DIR / "services" / "report_integrity_guard.py"
+        guard_src = guard_path.read_text(encoding="utf-8")
+        lines = guard_src.splitlines()
+
+        # Find the helper's body by line number. We use a line-based
+        # scanner: from the ``def constants_marker_text(`` line forward,
+        # up to the next top-level ``def`` / ``class`` / ``@decorator`` at
+        # column 0 — or end of file (the helper is currently the last
+        # function in the module).
+        helper_start = next(
+            (
+                i
+                for i, ln in enumerate(lines)
+                if ln.startswith("def constants_marker_text(")
+            ),
+            None,
+        )
+        assert helper_start is not None, (
+            "the constants_marker_text() citation helper must exist in "
+            "daemon/services/report_integrity_guard.py"
+        )
+        helper_end = next(
+            (
+                i
+                for i in range(helper_start + 1, len(lines))
+                if (
+                    lines[i].startswith("def ")
+                    or lines[i].startswith("class ")
+                    or (
+                        lines[i].startswith("@")
+                        and not lines[i].startswith("    ")
+                    )
+                )
+            ),
+            len(lines),
+        )
+        helper_text = "\n".join(lines[helper_start:helper_end])
+
+        # Sanity pin 1: the bounded read IS present in the citation helper.
+        # If this assertion fires the helper was refactored away from its
+        # S1 contract — re-anchor the gate or update S1.
+        assert "SANITY_FLAG_VERSION" in helper_text, (
+            "S1 pinning: the constants_marker_text() citation helper MUST "
+            "read SANITY_FLAG_VERSION so the notice citation is gated on "
+            "the (c) marker emission state (council S1, 2026-08-30). If "
+            "this assertion fires the helper was refactored away from "
+            "its S1 contract — re-anchor the gate or update S1."
+        )
+
+        # Sanity pin 2: the (b) predicate / gate / enforcement code
+        # does NOT read the constant. We excise the helper body and
+        # assert the remainder is free of the constant. We strip
+        # comment lines first so a S1 explanation comment inside
+        # ``_build_adjudication_notice`` does not register as a leak —
+        # only actual code reads (non-comment, non-docstring) count.
+        def _strip_comments(src: str) -> str:
+            lines = src.splitlines()
+            kept = []
+            for ln in lines:
+                stripped = ln.lstrip()
+                if stripped.startswith("#"):
+                    continue
+                kept.append(ln)
+            return "\n".join(kept)
+
+        carved = "\n".join(lines[:helper_start] + lines[helper_end:])
+        carved_no_comments = _strip_comments(carved)
+        assert "SANITY_FLAG_VERSION" not in carved_no_comments, (
+            "S8 split-versioning independence: the (b) predicate / gate / "
+            "enforcement code MUST NOT read SANITY_FLAG_VERSION — the read "
+            "is bounded to the constants_marker_text() citation helper "
+            "(S1 council follow-up, 2026-08-30). Found a code-level read "
+            "(non-comment) in the carved-out source."
         )

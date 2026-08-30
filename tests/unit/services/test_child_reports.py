@@ -1709,6 +1709,76 @@ class TestMarkerPredicatePinnedToTruncationShortCircuit:
             ]
         ) is False
 
+    async def test_pure_tool_call_assistant_message_counts_as_tool_evidence(self):
+        """W1 (council-verified, 2026-08-30): pure tool-call AIMessage
+        (canonical shape: ``content=""``, ``tool_calls=[one]``) carries
+        tool-call evidence.
+
+        Filter ordering defect: the low-evidence computation previously
+        filtered out ``content=""`` ASSISTANT messages BEFORE the tool
+        check, so a legitimate minimal-tool history
+        ``[task] → [AIMessage(tool_calls=[…], content="")] → [final text AIMessage]``
+        was incorrectly marked as zero-evidence. Marker fired falsely and
+        the NR-3 counter inflated.
+
+        FIX (W1): the tool-evidence half now scans UNFILTERED assistant
+        messages — any assistant message with tool calls ⇒ tool evidence
+        present ⇒ NOT low-evidence. The WIDTH half stays exactly as
+        pinned by the C2-NR-4 test class.
+        """
+        # Minimal-tool history: pure tool-call AIMessage (content="")
+        # followed by the final text AIMessage. Filter drops the first
+        # (content="") but tool_calls were real — evidence IS present.
+        history = [
+            _msg_user("run the script and report"),
+            _msg_assistant("", tool_calls=[_tool_call("bash", "call_w1")]),
+            _msg_assistant("script ran successfully — found the bug"),
+        ]
+        # Pre-flight: the filter does drop content="" messages — the W1
+        # defect is precisely that the tool-evidence half inherits this
+        # filtering and loses the tool_calls.
+        filtered_content_bearing = [
+            m for m in history
+            if m.get("role") == "assistant" and (m.get("content", "") or "").strip()
+        ]
+        assert len(filtered_content_bearing) == 1, (
+            "fixture sanity: pure tool-call AIMessage must drop out of the "
+            "content-bearing filter — this is the shape the W1 fix "
+            "depends on"
+        )
+        # Marker MUST NOT fire — the work signal is tool_calls, not content.
+        assert await self._fire(history) is False, (
+            "W1 defect: marker fires on minimal-tool history that contains "
+            "a real tool call — must not (council W1, 2026-08-30)"
+        )
+
+    async def test_pure_tool_call_assistant_message_does_not_increment_counter(self):
+        """W1: NR-3 junk counter must NOT increment on minimal-tool history.
+
+        The counter share placement with the marker (``_is_zero_tool_short_history``
+        ⇒ both). If the marker is absent, the counter must also stay flat.
+        """
+        _reset_junk_counter()
+        try:
+            history = [
+                _msg_user("run the script and report"),
+                _msg_assistant("", tool_calls=[_tool_call("bash", "call_w1c")]),
+                _msg_assistant("script ran successfully"),
+            ]
+            service = _make_report_fetch_service(messages=history)
+            with _patch_fetch(history):
+                await service._get_last_assistant_message_raw(
+                    "test-instance-id", agent_id="worker"
+                )
+            from daemon.services.report_integrity_metrics import get_junk_report_total
+
+            assert get_junk_report_total() == 0, (
+                "W1 defect: counter increments on minimal-tool history with "
+                "a real tool call — must not (council W1, 2026-08-30)"
+            )
+        finally:
+            _reset_junk_counter()
+
 
 class TestSanityConstantsRegistry:
     """S8 registry pins (mirror ``LIMITS_GOVERNOR_RECURSION_GUARD_ENABLED``

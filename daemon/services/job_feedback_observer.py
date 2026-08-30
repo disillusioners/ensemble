@@ -2865,6 +2865,31 @@ class JobFeedbackObserver:
             instance.last_activity_at = datetime.now(timezone.utc)
             instance.version = (instance.version or 1) + 1
             session.commit()
+
+            # ── W2 dead-site symmetry attach (council, 2026-08-30) ──
+            # NOTE: dead-site attach — ``_finalize_instance`` (the only
+            # caller of this method) has ZERO production callers in
+            # ``daemon/``. Verified: only test-only sites in
+            # ``tests/test_finalize_instance.py`` and
+            # ``tests/test_deadlock_fix.py`` invoke it (grep-verified,
+            # 2026-08-30). Same dead-twin pattern as
+            # ``child_reports.py:~3390`` and the
+            # ``error_reporting.py:316-324`` bus=None fallback. Symmetry
+            # coverage ONLY — if this method ever becomes live (a
+            # future code path that bypasses ``_finalize_job``), the log
+            # position already matches the active
+            # ``child_reports.root_completion`` site so soak analysis
+            # stays comparable. LOG ONLY (no enforcement, no return
+            # value usage). Placed AFTER ``session.commit()`` so the
+            # helper gets a fresh session bound to the same engine
+            # (the caller's session is closed after commit) — matches
+            # the helper's contract: session is owned by the caller,
+            # never committed / rolled back / closed here.
+            log_declared_waiting_violations(
+                Session(self._instance_manager.engine),
+                instance_id,
+                context_tag="observer_finalize_instance_db_sync",
+            )
             return _InstanceFinalizeResult(
                 skip=False, parent_id=parent_id, agent_id=agent_id
             )

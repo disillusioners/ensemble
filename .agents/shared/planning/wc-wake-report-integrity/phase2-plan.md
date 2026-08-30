@@ -162,7 +162,7 @@ Candidate (b) carries the **highest blast radius in the system** (analysis §"Bl
 | # | Sub-step | Detail | Acceptance |
 |---|---|---|---|
 | B.S.1 | **Staged landing** — (b) ships in three sub-stages, each independently revert-fast: **(i)** predicate computation function (no behavior change); **(ii)** predicate-attached log line at the COMPLETED stamp site; **(iii)** actual gate enforcement | Each sub-stage is its own commit; revert is `git revert <hash>` | (i) unit-tested; (ii) observed in log without any flow disruption; (iii) production flip |
-| B.S.2 | **Kill-switch config name** — `WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED` (mirror of `LIMITS_GOVERNOR_RECURSION_GUARD_ENABLED` precedent; env binding via `daemon/config.py`, default 0, document at `docs/config.md`) | `daemon/config.py` new entry; `docs/config.md` updated | `LIMITS_*` precedent grep-anchored; env-binding test exists |
+| B.S.2 | **Kill-switch config name** — `WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED` (mirror of `LIMITS_GOVERNOR_RECURSION_GUARD_ENABLED` precedent; env binding via `daemon/config.py`, default 0, document at `docs/setup.md`) | `daemon/config.py` new entry; `docs/setup.md` updated | `LIMITS_*` precedent grep-anchored; env-binding test exists |
 | B.S.3 | **Fail-OPEN verification tests** — three test scenarios: (1) predicate raises exception → assert COMPLETED proceeds with warning log; (2) predicate returns malformed value → assert COMPLETED proceeds; (3) predicate times out (5s budget) → assert COMPLETED proceeds | `tests/unit/services/test_child_reports.py` extensions; new `tests/unit/services/test_b_fail_open.py` | All three scenarios green; documentation in `tests/unit/services/test_b_fail_open.py` module docstring |
 | B.S.4 | **Turn-reconciler compatibility check** (analysis Open Question 6) — if (b) injects a notice that re-opens the parent's turn, the new turn must thread through `reconcile_turn_mirror(work_id)` (authoritative per Critical Note). The inline check at `child_reports.py:2396` is the seam where any change must thread through. Verify by extending `tests/unit/services/test_turn_reconciler.py` (or its modern equivalent) with the (b)-re-open scenario. | `tests/` mirror-table test; one comment in `child_reports.py:2396` referencing `D2.reconciler-bridge` | Test green; comment exists |
 | B.S.5 | **Watchdog wedge-predicate alignment** (analysis Open Question 5) — verify the wedge predicate at `waiting_children_watchdog.py:861-893/:896-903/:911-927` is consistent with (b)'s declared-waiting predicate. If (b) blocks, the wedge never needs to fire for the same instance; update the wedge to skip instances that (b) is actively guarding. | `waiting_children_watchdog.py:861-893` predicate extension; one test asserting no double-fire | Test green; wedge predicate doc updated |
@@ -279,7 +279,7 @@ No decision closure invalidates the plan structure. All closures redirect within
 | 9 | Truncation-guard short-circuit audit memo linked from `decisions.md` | grep `audit memo` in `decisions.md` | Memo present |
 | 10 | No false-positive spike in excluded-agent flows post-rollout | NR-3 metric; comparison to pre-rollout baseline | Spike < 1σ over 7-day window |
 | 11 | `git log` shows per-candidate revert-fast commits for Seq-B's (b) | `git log --grep=stage-` | 3 commits (B.S.1 stage i, ii, iii) |
-| 12 | Documentation updated: `docs/config.md` lists new kill-switch env bindings | grep `WC_REPORT_INTEGRITY_*` in `docs/config.md` | Both env names present |
+| 12 | Documentation updated: `docs/setup.md` lists new kill-switch env bindings | grep `WC_REPORT_INTEGRITY_*` in `docs/setup.md` | Both env names present |
 
 ---
 
@@ -323,7 +323,7 @@ This is the cross-reference the implementer (developer worker in Phase 2b) uses.
 | `daemon/repositories/dependency_bus/repository.py` (+ `models.py`) | FIRED ∧ `enqueued_at IS NULL` (documented at `models.py:128`) | D2.7 CORROBORATING declared-waiting signal (FIRED-but-unenqueued fixture) | Seq-B (B.S.1-i) |
 | `daemon/services/dependency_bus.py` | 709 (post-`emit_terminal` purge), 960-961 (cache-first read) | Rationale-only citation — why `pending_watchers` is NOT the predicate source (D2.7); no code touch | — |
 | `daemon/config.py` | new entry `WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED` | Env binding (kill-switch) | Seq-B (B.2) |
-| `docs/config.md` | append | Document new kill-switch | Seq-B (B.S.2) |
+| `docs/setup.md` | append | Document new kill-switch | Seq-B (B.S.2) |
 | `tests/unit/services/test_child_reports.py` | extend | Completion-time injection test | Seq-B (B.1) |
 | `tests/test_dependency_bus.py` | extend | Watcher-pending-state fixture | Seq-B (B.1) |
 | `tests/integration/test_completion_gate_block.py` | new | Incident-repro + fail-OPEN + defense-in-depth | Seq-B (B.1, B.S.3, B.S.6) |

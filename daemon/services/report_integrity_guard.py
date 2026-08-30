@@ -88,6 +88,7 @@ from typing import TYPE_CHECKING, Any
 
 from sqlmodel import Session
 
+from daemon import constants as _constants
 from daemon.constants import (
     WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED,
 )
@@ -704,14 +705,24 @@ def _build_adjudication_notice(
             f"outcome may have reached no one. Adjudicate the task "
             f"explicitly."
         )
-    lines.append("")
-    lines.append(
-        "How to verify a (re)delivered child report: look for the "
-        f"integrity marker `{constants_marker_text()}` — its presence "
-        "means the report was sent with ZERO tool-call evidence in "
-        "the child's source history, so treat the report as an "
-        "interim acknowledgement, not evidence of completed work."
-    )
+    # S1 (council follow-up, 2026-08-30): the marker citation is
+    # gated on the SAME emission gate the marker itself uses
+    # (``SANITY_FLAG_VERSION == 1``). When the marker is suppressed
+    # (Wave-1 rollback seam), the citation MUST be omitted — citing a
+    # marker that never appears turns the notice into a lying
+    # instruction. The rest of the playbook stays intact. The gate is
+    # imported (NOT forked) from ``daemon.constants`` so any future
+    # version flip is observed here automatically.
+    marker_citation = constants_marker_text()
+    if marker_citation:
+        lines.append("")
+        lines.append(
+            "How to verify a (re)delivered child report: look for the "
+            f"integrity marker `{marker_citation}` — its presence "
+            "means the report was sent with ZERO tool-call evidence in "
+            "the child's source history, so treat the report as an "
+            "interim acknowledgement, not evidence of completed work."
+        )
     lines.append("")
     lines.append(
         "(Automated notice — you are not blocked; adjudicate the "
@@ -721,16 +732,34 @@ def _build_adjudication_notice(
 
 
 def constants_marker_text() -> str:
-    """Static (c) marker citation for the notice text (D2.9).
+    """Static (c) marker citation for the notice text (D2.9 + S1).
 
-    Reads the Wave-1 constant so the notice cannot drift from the
+    Reads the Wave-1 constants so the notice cannot drift from the
     marker actually appended to reports. Deliberately NOT a read of
     any report content (D2.18 content-blindness is about report
     payload; this is a compile-time constant).
-    """
-    from daemon.constants import REPORT_SANITY_MARKER
 
-    return REPORT_SANITY_MARKER
+    S1 (council follow-up, 2026-08-30): the citation is gated on the
+    SAME emission gate the marker itself uses in
+    ``child_reports.py:_get_last_assistant_message_raw``
+    (``SANITY_FLAG_VERSION == 1``). When the version is anything other
+    than 1 the marker emission is suppressed (Wave-1 rollback seam),
+    so citing the marker in the notice would teach the parent to
+    look for a string that NEVER appears in any child report — the
+    citation becomes a lying instruction. Suppressed ⇒ return ``""``
+    so the caller omits the citation while keeping the rest of the
+    notice playbook intact.
+
+    The gate is read from the SAME constant the marker emission uses
+    (imported, not forked) so any future flip of the rollback seam is
+    observed here without a separate edit. Reads via the module-level
+    attribute (``_constants.SANITY_FLAG_VERSION``) so test-time
+    monkeypatching of ``daemon.constants.SANITY_FLAG_VERSION`` is
+    observed here too.
+    """
+    if _constants.SANITY_FLAG_VERSION != 1:
+        return ""
+    return _constants.REPORT_SANITY_MARKER
 
 
 async def enforce_declared_waiting_violations(

@@ -1376,3 +1376,127 @@ class TestKillSwitchRevertProof:
 
         assert parent_id not in rig._B_NOTICE_LEDGER
 
+
+class TestMarkerCitationGateS1:
+    """S1 council follow-up (2026-08-30): the (b) adjudication notice
+    must gate its (c) marker citation on the SAME emission gate the
+    marker itself uses (``SANITY_FLAG_VERSION == 1``). When the marker
+    emission is suppressed, the citation would teach the parent to
+    look for a string that NEVER appears in any child report — the
+    citation becomes a lying instruction. Suppressed ⇒ omit the
+    citation line; the rest of the playbook stays intact.
+
+    The gate is imported (NOT forked) from ``daemon.constants`` so any
+    future flip of the rollback seam is observed here automatically
+    (S3 documents the scoping between this flag and the B-guard flag).
+    """
+
+    def _report(self, parent_id: str = "p", child_id: str = "child-s1"):
+        """Build a minimal non-empty violation report."""
+        return DeclaredWaitingViolationReport(
+            parent_instance_id=parent_id,
+            pending_with_terminal_child=[
+                {
+                    "injection_id": "inj-s1",
+                    "child_instance_id": child_id,
+                    "state": "PENDING",
+                    "child_terminal_status": "completed",
+                }
+            ],
+            fired_unenqueued=[],
+        )
+
+    def test_citation_present_when_marker_emission_active(self) -> None:
+        """SANITY_FLAG_VERSION == 1 (default ship state) ⇒ notice
+        contains the (c) marker string AND the rest of the playbook."""
+        import daemon.constants as constants
+        import daemon.services.report_integrity_guard as rig
+
+        # Defensive: assert the test fixture sees the active version.
+        assert constants.SANITY_FLAG_VERSION == 1
+
+        text = rig._build_adjudication_notice(
+            self._report(), context_tag="unit.s1.active"
+        )
+
+        # Marker citation present.
+        assert constants.REPORT_SANITY_MARKER in text, (
+            "S1: with SANITY_FLAG_VERSION == 1 the notice MUST cite the "
+            "(c) marker pattern so the parent knows what to look for in "
+            "a (re)delivered child report"
+        )
+        # The citation must be present in the 'How to verify' line.
+        assert "How to verify a (re)delivered child report" in text
+        # And the rest of the playbook is intact (per-child + notice tail).
+        assert "child-s1" in text
+        assert (
+            "Automated notice — you are not blocked" in text
+        ), "S1: the playbook tail must stay intact in the active case"
+
+    def test_citation_omitted_when_marker_emission_suppressed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """SANITY_FLAG_VERSION != 1 (suppressed / rollback seam active) ⇒
+        notice OMITS the marker citation while keeping the rest of the
+        playbook intact. Lying-instruction regression test."""
+        import daemon.constants as constants
+        import daemon.services.report_integrity_guard as rig
+
+        # Flip the rollback seam to suppress emission.
+        monkeypatch.setattr(constants, "SANITY_FLAG_VERSION", 0)
+        # The guard module reads the constant via ``_constants.SANITY_FLAG_VERSION``
+        # (module-attribute lookup, not a frozen local) — the patched
+        # value is observed at function-call time without reimport.
+
+        text = rig._build_adjudication_notice(
+            self._report(), context_tag="unit.s1.suppressed"
+        )
+
+        # The marker citation MUST be omitted entirely.
+        assert constants.REPORT_SANITY_MARKER not in text, (
+            "S1 defect (council, 2026-08-30): with SANITY_FLAG_VERSION != 1 "
+            "the marker is NEVER emitted on reports, so citing it in the "
+            "notice would teach the parent to look for a string that never "
+            "appears — citation MUST be omitted in the suppressed case"
+        )
+        # The 'How to verify' line itself is omitted (its only purpose is
+        # the citation — keeping it without the marker would still leak).
+        assert "How to verify a (re)delivered child report" not in text, (
+            "S1: the 'How to verify' line carries only the marker citation; "
+            "with the citation omitted the line itself must go (no empty "
+            "heading survives)"
+        )
+        # But the rest of the playbook stays intact.
+        assert "child-s1" in text, (
+            "S1: the per-child playbook MUST stay in the suppressed case — "
+            "only the marker citation is gated, NOT the adjudication work"
+        )
+        assert (
+            "Automated notice — you are not blocked" in text
+        ), "S1: the playbook tail MUST stay intact in the suppressed case"
+        assert (
+            "declared-waiting" in text
+        ), "S1: the detection statement MUST stay intact in the suppressed case"
+
+    def test_helper_returns_marker_when_active_marker_suppressed_when_not(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``constants_marker_text()`` returns the marker literal when
+        the version is 1 and ``""`` otherwise — the canonical seam that
+        the notice builder reads."""
+        import daemon.services.report_integrity_guard as rig
+
+        # Active — returns the literal.
+        assert rig.constants_marker_text() == (
+            "[REPORT SANITY: zero tool-call evidence in source history]"
+        )
+
+        # Suppressed (flip via the same module the notice builder reads).
+        monkeypatch.setattr(
+            "daemon.constants.SANITY_FLAG_VERSION", 0
+        )
+        assert rig.constants_marker_text() == "", (
+            "constants_marker_text() must return the empty string when "
+            "SANITY_FLAG_VERSION != 1 (S1 council follow-up)"
+        )
+

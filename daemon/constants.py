@@ -510,6 +510,19 @@ def is_reserved_source(source: str | None) -> bool:
 
 
 # ── Report Integrity (wc-wake-report-integrity Wave 1) ────────────────────────
+#
+# S3 scoping note (council follow-up, 2026-08-30): the Wave-1
+# observability instruments below — ``REPORT_SANITY_MARKER`` (the (c)
+# passive marker), ``REPORT_INTEGRITY_JUNK_REPORT_TOTAL`` (the NR-3 junk
+# counter), and the marker-append gate ``SANITY_FLAG_VERSION`` — are
+# ALWAYS-ON observability. Their rollback seam is ``SANITY_FLAG_VERSION``
+# alone; they are NOT gated by the Wave-2 B-guard kill-switch
+# (``WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED``, defined in
+# the next section). The B-guard flag controls ONLY (b) declared-waiting
+# ENFORCEMENT (notice injection, B.S.1-iii / B.S.2). Operators reading
+# the env table should not assume the B-guard flag suppresses (c)
+# emission or NR-3 counting — it does not. Pinned by the
+# TestMarkerCitationGateS1 class + the registry-completeness tests.
 
 # (c) Passive report-sanity marker (C2-D2.9 LOCKED, DESCRIPTIVE-ONLY).
 # Appended to TERMINAL completion reports whose source history shows zero
@@ -585,6 +598,13 @@ REPORT_REPAIR_EXCLUDED_AGENTS: frozenset[str] = frozenset(
 # default-0 semantics here match the ``LIMITS_GOVERNOR_RECURSION_GUARD_ENABLED``
 # precedent (kill-switch default OFF — the revert path; pre-committed
 # enforcement flip per D2.5-FLIP).
+#
+# S3 scoping note (council follow-up, 2026-08-30): this flag gates ONLY
+# (b) ENFORCEMENT (notice injection via B.S.1-iii / B.S.2). It does NOT
+# gate (c) marker emission, the NR-3 junk counter, or any other Wave-1
+# observability instrument — their rollback seam is ``SANITY_FLAG_VERSION``
+# (defined above), not this env. Operators flipping this flag should
+# expect zero change in (c) marker / NR-3 counter behavior.
 WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED: str = (
     "WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED"
 )
