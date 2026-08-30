@@ -71,6 +71,12 @@ def _make_manager_with_pending_dict():
             self._question_pause_requested: dict = {}
             self._question_manager = MagicMock()
             self._question_manager.clear_question_pack = MagicMock()
+            # C2-safe watchover cleanup marker — the real manager's
+            # ``_cleanup_instance_state`` discards from this set
+            # (daemon/manager.py ``_deferred_watchover_terminate``); the
+            # stub predates that attribute. Synced in the
+            # message-display-latency batch (pre-existing failure fix).
+            self._deferred_watchover_terminate: set[str] = set()
             self.release_context_usage_cache = MagicMock()
             self.clear_question_pause_requested = MagicMock()
             # Bind the real helpers as instance methods.
@@ -210,6 +216,49 @@ class TestSlotMechanics:
         normalized = ts.replace("Z", "+00:00")
         parsed = datetime.fromisoformat(normalized)
         assert parsed.tzinfo is not None
+
+    # ------------------------------------------------------------------
+    # message-display-latency Phase 1 — ``echo_id`` conditional entry key
+    # ------------------------------------------------------------------
+
+    def test_set_injection_without_echo_id_is_byte_identical(self):
+        """echo_id ABSENT → entry dict is BYTE-IDENTICAL to the pre-feature
+        shape: exactly ``{"content", "timestamp"}`` — no ``echo_id`` key,
+        no ``source`` key (tool-path back-compat contract)."""
+        mgr = _make_manager_with_pending_dict()
+        stored = mgr.set_injection("iid-1", "no-echo")
+
+        assert sorted(stored.keys()) == ["content", "timestamp"]
+        assert stored["content"] == "no-echo"
+
+    def test_set_injection_with_echo_id_adds_exactly_one_key(self):
+        """echo_id PROVIDED → entry gains exactly the ``echo_id`` key with
+        the caller-supplied value; content/timestamp untouched."""
+        mgr = _make_manager_with_pending_dict()
+        stored = mgr.set_injection("iid-1", "with-echo", echo_id="echo-uuid-1")
+
+        assert sorted(stored.keys()) == ["content", "echo_id", "timestamp"]
+        assert stored["echo_id"] == "echo-uuid-1"
+        assert stored["content"] == "with-echo"
+        assert "timestamp" in stored
+
+        # The FIFO entry (as the graph drain will read it) carries the id too.
+        fetched = mgr.get_injection("iid-1")
+        assert fetched is not None
+        assert fetched[0]["echo_id"] == "echo-uuid-1"
+
+    def test_set_injection_echo_id_and_source_coexist_conditionally(self):
+        """Both optional keys attach independently — a tool-path entry with
+        ``source`` but NO ``echo_id`` still lacks the ``echo_id`` key, and
+        a user-API entry with ``echo_id`` but no ``source`` lacks ``source``."""
+        mgr = _make_manager_with_pending_dict()
+        tool_entry = mgr.set_injection("iid-1", "from-tool", source="internal_agent:x")
+        assert sorted(tool_entry.keys()) == ["content", "source", "timestamp"]
+        assert "echo_id" not in tool_entry
+
+        api_entry = mgr.set_injection("iid-1", "from-api", echo_id="echo-uuid-2")
+        assert sorted(api_entry.keys()) == ["content", "echo_id", "timestamp"]
+        assert "source" not in api_entry
 
     def test_independent_instances_do_not_collide(self):
         mgr = _make_manager_with_pending_dict()

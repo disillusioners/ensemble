@@ -3,10 +3,12 @@
 import asyncio
 import json
 import logging
+import uuid
 from datetime import datetime, timezone
 from typing import Any, AsyncGenerator
 
 from fastapi import APIRouter, HTTPException, Request, Response
+from langchain_core.messages import HumanMessage
 
 from daemon.constants import (
     INJECTION_ELIGIBLE_STATUSES,
@@ -18,6 +20,7 @@ from daemon.models import ErrorCodes, ErrorResponse, MessageCreate, MessageRespo
 from daemon.repositories.instance.models import InstanceStatus
 from daemon.services.live_event_hub import LiveEventHub
 from daemon.services.work_status import canonicalize_status
+from daemon.utils import serialize_message
 from sse_starlette.sse import EventSourceResponse
 
 
@@ -114,6 +117,7 @@ async def _emit_injection_sse(
     content: str | None,
     timestamp: str | None,
     pending_count: int | None = None,
+    echo_id: str | None = None,
 ) -> None:
     """Fire-and-forget SSE emit for an injection lifecycle event.
 
@@ -121,6 +125,11 @@ async def _emit_injection_sse(
     No new method is added to ``LiveEventHub``. If no SSE connection is
     registered for this instance, ``stream_message`` silently drops the
     event — callers do not need to gate on connection counts.
+
+    ``echo_id`` (message-display-latency Phase 1) is an optional
+    correlation field added to the payload when provided (additive;
+    leader decision: include). When ``None`` the payload is
+    byte-identical to the pre-feature shape.
 
     Failure mode: SSE errors are logged at WARNING and swallowed because
     the API contract has already been honored (injection is stored, or
@@ -131,6 +140,8 @@ async def _emit_injection_sse(
     payload = _build_injection_payload(
         instance_id, event_type, content, timestamp, pending_count
     )
+    if echo_id is not None:
+        payload["echo_id"] = echo_id
     try:
         await live_hub.stream_message(
             instance_id,
@@ -351,9 +362,18 @@ async def send_message(
     if current_status in INJECTION_ELIGIBLE_STATUSES:
         live_hub = _get_live_hub(request)
 
+        # message-display-latency Phase 1: mint the stable server-side
+        # echo id HERE (router = POST time) and thread it through the
+        # RAM FIFO entry. The same id then appears on (a) the POST-time
+        # ``user_message`` echo below, (b) the drain-time re-emit
+        # (``daemon/graph.py`` — emit-twice-same-id-same-stamp), and
+        # (c) the checkpointed ``HumanMessage.id`` so GET /messages
+        # returns the same stable id.
+        echo_id = str(uuid.uuid4())
+
         # W5: stream_message with custom event_type — no new method
         # added to LiveEventHub.
-        entry = manager.set_injection(instance_id, message.content)
+        entry = manager.set_injection(instance_id, message.content, echo_id=echo_id)
         pending_count = manager.get_injection_count(instance_id)
 
         await _emit_injection_sse(
@@ -363,7 +383,47 @@ async def send_message(
             content=entry.get("content"),
             timestamp=entry.get("timestamp"),
             pending_count=pending_count,
+            echo_id=entry.get("echo_id"),
         )
+
+        # message-display-latency Phase 1: emit ``user_message``
+        # IMMEDIATELY at POST time so the FE renders the user bubble
+        # without waiting for the in-flight turn to end. Same
+        # serialization shape as the drain-time re-emit
+        # (``serialize_message`` output + ``instance_id``), with
+        # ``created_at`` pinned to the entry's POST timestamp so the
+        # FE's ``created_at``-sorted list keeps the bubble in send
+        # position. Emit-twice-same-id-same-stamp: the drain re-emit
+        # reuses this exact id + timestamp and the FE collapses the
+        # duplicate by ``message_id``. W5 framing: existing
+        # ``stream_message`` — no new hub method. Best-effort: an SSE
+        # outage must not fail the POST (the injection is already
+        # queued).
+        if live_hub is not None:
+            try:
+                post_echo_msg = HumanMessage(
+                    content=entry.get("content", ""),
+                    id=entry.get("echo_id"),
+                )
+                post_serialized = serialize_message(post_echo_msg)
+                post_serialized["instance_id"] = instance_id
+                # created_at = the entry's POST timestamp (NOT the
+                # serialization-time now) — same stamp the drain
+                # re-emit will carry.
+                entry_ts = entry.get("timestamp")
+                if entry_ts is not None:
+                    post_serialized["created_at"] = entry_ts
+                await live_hub.stream_message(
+                    instance_id=instance_id,
+                    message=post_serialized,
+                    event_type="user_message",
+                    checkpoint_id="user",
+                )
+            except Exception as e:  # pragma: no cover - defensive
+                logger.warning(
+                    f"[Injection] POST-time user_message SSE emit failed "
+                    f"for {instance_id[:8]}...: {type(e).__name__}: {e}"
+                )
 
         # 202 Accepted (NEW) signals to the frontend that the request is
         # acknowledged but the user turn will be absorbed asynchronously
@@ -371,6 +431,9 @@ async def send_message(
         # 200 is reserved for PAUSED auto-resume and IDLE/terminal enqueue.
         # ``pending_count`` is included so the FE can show a "N messages
         # queued" indicator without a separate GET round-trip.
+        # ``message_id`` (message-display-latency Phase 1) is ADDITIVE:
+        # the stable server-minted echo id the FE keys its provisional
+        # bubble on. Existing keys are unchanged.
         response.status_code = 202
         return {
             "status": "injected",
@@ -378,6 +441,7 @@ async def send_message(
             "content": entry.get("content"),
             "timestamp": entry.get("timestamp"),
             "pending_count": pending_count,
+            "message_id": entry.get("echo_id"),
         }
 
     # --- NORMAL PATH: IDLE / terminal → existing enqueue_message ---

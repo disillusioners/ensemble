@@ -58,6 +58,12 @@ def _make_manager_with_pending_dict():
             self._question_pause_requested: dict = {}
             self._question_manager = MagicMock()
             self._question_manager.clear_question_pack = MagicMock()
+            # C2-safe watchover cleanup marker — the real manager's
+            # ``_cleanup_instance_state`` discards from this set
+            # (daemon/manager.py ``_deferred_watchover_terminate``); the
+            # stub predates that attribute. Synced in the
+            # message-display-latency batch (pre-existing failure fix).
+            self._deferred_watchover_terminate: set[str] = set()
             self.release_context_usage_cache = MagicMock()
             self.clear_question_pause_requested = MagicMock()
             # Bind the real helpers as instance methods.

@@ -2953,9 +2953,20 @@ def create_agent_node(
                     entry_source = entry.get("source")
                     if entry_source is not None:
                         extra_kwargs["source"] = entry_source
+                    # message-display-latency Phase 1: carry the entry's
+                    # optional server-minted ``echo_id`` onto
+                    # ``HumanMessage.id`` so the checkpoint (and GET
+                    # /messages) surfaces a STABLE id for this injected
+                    # message. ``id`` is NOT serialized to the OpenAI
+                    # wire by ``langchain_openai`` — the LLM payload and
+                    # the ``additional_kwargs`` byte-identical contract
+                    # are untouched. Entries without ``echo_id``
+                    # (agent-tool / job_inject call sites) get ``id=None``
+                    # — byte-identical to the pre-feature behavior.
                     injected_msgs.append(
                         HumanMessage(
                             content=content,
+                            id=entry.get("echo_id"),
                             additional_kwargs=extra_kwargs,
                         )
                     )
@@ -3030,9 +3041,30 @@ def create_agent_node(
                         continue
                     content_echo = entry.get("content", "")
                     try:
-                        echoed_user_msg = HumanMessage(content=content_echo)
+                        # message-display-latency Phase 1 — emit-twice-
+                        # same-id-same-stamp: reuse the entry's
+                        # ``echo_id`` AND its POST-time ``timestamp`` on
+                        # the drain-time re-emit (NOT a fresh uuid4, NOT
+                        # a new timestamp) so the FE's id-keyed dedup
+                        # collapses the duplicate bubble and the
+                        # ``created_at``-sorted list keeps it in send
+                        # position. Entries WITHOUT ``echo_id`` (tool
+                        # paths) keep today's exact behavior: ``id=None``
+                        # → fresh uuid4 in ``serialize_message`` and a
+                        # fresh timestamp. Per-entry semantics only —
+                        # never a global suppression of the re-emit
+                        # (reconnect coverage depends on it).
+                        entry_echo_id = entry.get("echo_id")
+                        echoed_user_msg = HumanMessage(
+                            content=content_echo,
+                            id=entry_echo_id,
+                        )
                         user_serialized = serialize_message(echoed_user_msg)
                         user_serialized["instance_id"] = instance_id
+                        if entry_echo_id is not None:
+                            entry_ts = entry.get("timestamp")
+                            if entry_ts is not None:
+                                user_serialized["created_at"] = entry_ts
                         await live_hub.stream_message(
                             instance_id=instance_id,
                             message=user_serialized,

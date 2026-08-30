@@ -742,3 +742,107 @@ class TestInjectionSourceProvenance:
         msg = pull_records[0].getMessage()
         # No `` source=`` suffix when no entry carries one.
         assert "source=" not in msg
+
+
+# ---------------------------------------------------------------------------
+# message-display-latency Phase 1 — drain builds HumanMessage with the
+# FIFO entry's optional ``echo_id`` as ``id`` (id field ONLY; the
+# ``additional_kwargs`` byte-identical contract is untouched).
+# ---------------------------------------------------------------------------
+
+
+class TestDrainEchoId:
+    """message-display-latency Phase 1: the drained ``HumanMessage``
+    carries ``id = entry.get("echo_id")``.
+
+    * Entry WITH ``echo_id`` → ``HumanMessage.id == echo_id`` and
+      ``additional_kwargs == {"injected_message": True}`` (byte-identical
+      kwargs contract — the id lives on the message, NOT in kwargs).
+    * Entry WITHOUT ``echo_id`` (agent-tool ``instance.py:2811`` /
+      ``job_inject`` ``job_queue.py:1868``) → ``id is None`` — byte-
+      identical to the pre-feature shape.
+    * Coexistence with the quick-win #1 ``source`` kwarg is per-entry.
+    """
+
+    @pytest.mark.asyncio
+    async def test_echo_id_entry_sets_human_message_id(self):
+        slot = _StubInjectionSlot(initial={
+            "iid-1": [{
+                "content": "stable id message",
+                "timestamp": "2026-08-30T00:00:00+00:00",
+                "echo_id": "aabbccdd-1122-4333-8444-556677889900",
+            }],
+        })
+        agent_node, llm = _make_agent(injection_slot=slot)
+
+        result = await agent_node(
+            {"messages": []},
+            config={"configurable": {"thread_id": "iid-1"}},
+        )
+
+        # What the LLM was called with: last message is the injected HM.
+        drained = llm.calls[0][-1]
+        assert isinstance(drained, HumanMessage)
+        assert drained.id == "aabbccdd-1122-4333-8444-556677889900"
+        assert drained.content == "stable id message"
+        # additional_kwargs byte-identical contract (id is NOT smuggled
+        # into kwargs).
+        assert drained.additional_kwargs == {"injected_message": True}
+
+        # C2 persistence: the returned messages carry the same id — this
+        # is what the checkpoint commit stores for GET /messages.
+        persisted = [m for m in result["messages"] if isinstance(m, HumanMessage)]
+        assert persisted[0].id == "aabbccdd-1122-4333-8444-556677889900"
+
+    @pytest.mark.asyncio
+    async def test_no_echo_id_entry_keeps_id_none(self):
+        """Tool-path back-compat pin: entry without ``echo_id`` drains
+        with ``HumanMessage.id is None``."""
+        slot = _StubInjectionSlot(initial={
+            "iid-1": [{"content": "tool msg", "timestamp": "ts"}],
+        })
+        agent_node, llm = _make_agent(injection_slot=slot)
+
+        await agent_node(
+            {"messages": []},
+            config={"configurable": {"thread_id": "iid-1"}},
+        )
+
+        drained = llm.calls[0][-1]
+        assert isinstance(drained, HumanMessage)
+        assert drained.id is None
+        assert drained.additional_kwargs == {"injected_message": True}
+
+    @pytest.mark.asyncio
+    async def test_echo_id_and_source_coexist_per_entry(self):
+        """A user-API entry (echo_id) and an agent-tool entry (source) in
+        the same FIFO drain with their own per-entry fields."""
+        slot = _StubInjectionSlot(initial={
+            "iid-1": [
+                {
+                    "content": "from api",
+                    "timestamp": "t1",
+                    "echo_id": "11111111-2222-4333-8444-555555555555",
+                },
+                {
+                    "content": "from tool",
+                    "timestamp": "t2",
+                    "source": "internal_agent:caller-1",
+                },
+            ],
+        })
+        agent_node, llm = _make_agent(injection_slot=slot)
+
+        await agent_node(
+            {"messages": []},
+            config={"configurable": {"thread_id": "iid-1"}},
+        )
+
+        api_hm, tool_hm = llm.calls[0][-2], llm.calls[0][-1]
+        assert api_hm.id == "11111111-2222-4333-8444-555555555555"
+        assert api_hm.additional_kwargs == {"injected_message": True}
+        assert tool_hm.id is None
+        assert tool_hm.additional_kwargs == {
+            "injected_message": True,
+            "source": "internal_agent:caller-1",
+        }

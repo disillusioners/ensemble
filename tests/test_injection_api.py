@@ -30,6 +30,7 @@ routing logic is exercised in isolation.
 
 from __future__ import annotations
 
+import uuid
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -91,9 +92,15 @@ def _make_manager(
     # ``set_injection`` echoes the input content into its return dict so
     # tests that POST ``{"content": "hello agent"}`` see ``"hello agent"``
     # echoed back in the response body. Mirrors the real
-    # ``InstanceManager.set_injection`` behavior.
-    def _set_injection(iid, content):
-        return {"content": content, "timestamp": "2026-07-13T00:00:00+00:00"}
+    # ``InstanceManager.set_injection`` behavior — including the
+    # CONDITIONAL ``echo_id`` key (message-display-latency Phase 1):
+    # byte-identical entry shape when absent, ``echo_id`` key present
+    # when passed.
+    def _set_injection(iid, content, source=None, echo_id=None):
+        entry = {"content": content, "timestamp": "2026-07-13T00:00:00+00:00"}
+        if echo_id is not None:
+            entry["echo_id"] = echo_id
+        return entry
 
     manager.set_injection = MagicMock(side_effect=_set_injection)
     manager.clear_injection = MagicMock(return_value=pending_list)
@@ -186,23 +193,132 @@ class TestInjectionPath:
         # Phase 3: pending_count is in the response body
         assert body["pending_count"] == 1
 
-        # set_injection was called with the content
-        state["manager"].set_injection.assert_called_once_with("inst-abc", "hello agent")
+        # set_injection was called with the content AND the router-minted
+        # stable echo_id (message-display-latency Phase 1). No ``source``
+        # kwarg — provenance stays an agent-tool-only feature.
+        state["manager"].set_injection.assert_called_once()
+        call_kwargs = state["manager"].set_injection.call_args.kwargs
+        assert state["manager"].set_injection.call_args.args == (
+            "inst-abc",
+            "hello agent",
+        )
+        assert call_kwargs.get("source") is None
+        posted_echo_id = call_kwargs.get("echo_id")
+        assert posted_echo_id is not None
+        # The echo_id is a valid UUID4 string minted by the router.
+        assert str(uuid.UUID(posted_echo_id)) == posted_echo_id
+        assert uuid.UUID(posted_echo_id).version == 4
 
-        # SSE emit: exactly one injection_pending event
-        state["live_hub"].stream_message.assert_called_once()
-        call = state["live_hub"].stream_message.await_args
-        # W5 contract: stream_message reused with custom event_type.
-        # ``message`` is passed as a keyword arg (the daemon's
-        # convention), so read from ``call.kwargs``.
-        assert call.kwargs["event_type"] == "injection_pending"
-        assert call.args[0] == "inst-abc"
-        payload = call.kwargs["message"]
+        # SSE emit: injection_pending FIRST, then the POST-time
+        # user_message echo (message-display-latency Phase 1) — two calls.
+        assert state["live_hub"].stream_message.await_count == 2
+        calls = state["live_hub"].stream_message.await_args_list
+
+        # ---- Call 1: injection_pending — shape unchanged except the
+        # ADDITIVE ``echo_id`` correlation field (leader decision: YES). ----
+        pending_call = calls[0]
+        assert pending_call.kwargs["event_type"] == "injection_pending"
+        assert pending_call.args[0] == "inst-abc"
+        payload = pending_call.kwargs["message"]
         assert payload["event_type"] == "injection_pending"
         assert payload["content"] == "hello agent"
         assert payload["instance_id"] == "inst-abc"
         # Phase 3: pending_count is in the SSE payload
         assert payload["pending_count"] == 1
+        assert payload["echo_id"] == posted_echo_id
+
+        # ---- Call 2: POST-time user_message — same echo_id, POST stamp. ----
+        user_call = calls[1]
+        assert user_call.kwargs["event_type"] == "user_message"
+        assert user_call.kwargs["instance_id"] == "inst-abc"
+        user_payload = user_call.kwargs["message"]
+        assert user_payload["message_id"] == posted_echo_id
+        assert user_payload["role"] == "user"
+        assert user_payload["content"] == "hello agent"
+        # created_at = the entry's POST timestamp (the mock's fixed stamp)
+        assert user_payload["created_at"] == "2026-07-13T00:00:00+00:00"
+        assert user_payload["instance_id"] == "inst-abc"
+
+    def test_running_202_body_includes_message_id_existing_keys_unchanged(self, client_and_state):
+        """message-display-latency Phase 1: the 202 body gains
+        ``message_id`` (the router-minted echo id) — ADDITIVE; every
+        pre-existing key keeps its name and value.
+        """
+        client, state = client_and_state
+        state["manager"] = _make_manager(status="running", pending_count=1)
+        state["live_hub"] = _make_live_hub()
+
+        resp = client.post(
+            "/instances/inst-abc/messages",
+            json={"content": "hello agent"},
+        )
+
+        assert resp.status_code == 202, resp.text
+        body = resp.json()
+        # Existing keys unchanged
+        assert set(body) >= {
+            "status",
+            "instance_id",
+            "content",
+            "timestamp",
+            "pending_count",
+        }
+        assert body["status"] == "injected"
+        assert body["content"] == "hello agent"
+        assert body["timestamp"] == "2026-07-13T00:00:00+00:00"
+        # Additive: message_id == the same echo_id handed to set_injection
+        # (single id continuity at POST time)
+        echo_id = state["manager"].set_injection.call_args.kwargs["echo_id"]
+        assert body["message_id"] == echo_id
+
+    def test_post_time_user_message_survives_sse_outage(self, client_and_state):
+        """A POST-time SSE failure must NOT fail the POST (best-effort echo;
+        the injection is already queued)."""
+        client, state = client_and_state
+        state["manager"] = _make_manager(status="running", pending_count=1)
+        hub = _make_live_hub()
+        hub.stream_message = AsyncMock(side_effect=RuntimeError("SSE down"))
+        state["live_hub"] = hub
+
+        resp = client.post(
+            "/instances/inst-abc/messages",
+            json={"content": "hello agent"},
+        )
+
+        # The 202 + body are unaffected by the SSE outage.
+        assert resp.status_code == 202, resp.text
+        assert resp.json()["status"] == "injected"
+        # The manager call still happened exactly once.
+        state["manager"].set_injection.assert_called_once()
+
+    def test_waiting_children_post_time_user_message_shape(self, client_and_state):
+        """WAITING_CHILDREN gets the same POST-time user_message echo
+        (same shape, same entry POST timestamp)."""
+        client, state = client_and_state
+        state["manager"] = _make_manager(status="waiting_children", pending_count=1)
+        state["live_hub"] = _make_live_hub()
+
+        resp = client.post(
+            "/instances/inst-abc/messages",
+            json={"content": "please advise"},
+        )
+
+        assert resp.status_code == 202, resp.text
+        assert resp.json()["message_id"] == (
+            state["manager"].set_injection.call_args.kwargs["echo_id"]
+        )
+        calls = state["live_hub"].stream_message.await_args_list
+        assert [c.kwargs["event_type"] for c in calls] == [
+            "injection_pending",
+            "user_message",
+        ]
+        user_payload = calls[1].kwargs["message"]
+        assert user_payload["role"] == "user"
+        assert user_payload["content"] == "please advise"
+        assert user_payload["message_id"] == (
+            state["manager"].set_injection.call_args.kwargs["echo_id"]
+        )
+        assert user_payload["created_at"] == "2026-07-13T00:00:00+00:00"
 
     def test_waiting_children_routes_to_injection_with_202(self, client_and_state):
         """WAITING_CHILDREN → injection path (queue survives the parent wait)."""
@@ -252,9 +368,11 @@ class TestInjectionPath:
         assert resp.status_code == 202
         body = resp.json()
         assert body["pending_count"] == 2
-        # SSE payload also carries the pending_count
-        call = state["live_hub"].stream_message.await_args
-        assert call.kwargs["message"]["pending_count"] == 2
+        # SSE payload also carries the pending_count — on the FIRST call
+        # (injection_pending); the POST-time user_message echo follows it.
+        pending_call = state["live_hub"].stream_message.await_args_list[0]
+        assert pending_call.kwargs["event_type"] == "injection_pending"
+        assert pending_call.kwargs["message"]["pending_count"] == 2
 
 
 # ---------------------------------------------------------------------------
@@ -473,28 +591,34 @@ class TestAppendListSemantics:
 
         assert resp.status_code == 202, resp.text
 
-        # Only ONE SSE call — the pending event. NO ``injection_cleared``.
-        state["live_hub"].stream_message.assert_called_once()
-        call = state["live_hub"].stream_message.await_args
-        assert call.kwargs["event_type"] == "injection_pending"
-        payload = call.kwargs["message"]
+        # TWO SSE calls — injection_pending + POST-time user_message
+        # (message-display-latency Phase 1). NO ``injection_cleared``.
+        calls = state["live_hub"].stream_message.await_args_list
+        assert state["live_hub"].stream_message.await_count == 2
+        assert calls[0].kwargs["event_type"] == "injection_pending"
+        assert calls[1].kwargs["event_type"] == "user_message"
+        event_types = {c.kwargs["event_type"] for c in calls}
+        assert "injection_cleared" not in event_types
+        payload = calls[0].kwargs["message"]
         assert payload["content"] == "second message"
         assert payload["pending_count"] == 2
 
-    def test_first_injection_emits_only_pending(self, client_and_state):
-        """First injection (empty queue) → only pending, no spurious cleared event."""
+    def test_first_injection_emits_only_pending_then_post_echo(self, client_and_state):
+        """First injection (empty queue) → injection_pending + POST-time
+        user_message echo; no spurious cleared event."""
         client, state = client_and_state
         state["manager"] = _make_manager(status="running", pending_count=1)
         state["live_hub"] = _make_live_hub()
 
         client.post("/instances/inst-abc/messages", json={"content": "first"})
 
-        # Exactly one SSE call — the pending event, no cleared.
-        state["live_hub"].stream_message.assert_called_once()
-        call = state["live_hub"].stream_message.await_args
-        assert call.kwargs["event_type"] == "injection_pending"
-        # pending_count is in the payload
-        assert call.kwargs["message"]["pending_count"] == 1
+        # Exactly two SSE calls — pending + POST-time user_message; no cleared.
+        calls = state["live_hub"].stream_message.await_args_list
+        assert state["live_hub"].stream_message.await_count == 2
+        assert calls[0].kwargs["event_type"] == "injection_pending"
+        assert calls[1].kwargs["event_type"] == "user_message"
+        # pending_count is in the pending payload
+        assert calls[0].kwargs["message"]["pending_count"] == 1
 
     def test_response_body_includes_pending_count(self, client_and_state):
         """Phase 3: the 202 response body carries pending_count."""
