@@ -14,12 +14,11 @@ The C2 fix changed where ``pause_instance_cascade`` is invoked when the
   * **After the fix:** ``question_pause_node`` only sets a deferred-pause
     marker via ``manager.set_deferred_question_pause(instance_id)``. The
     actual ``pause_instance_cascade`` invocation runs from the
-    ``finally`` block of ``InstanceMessagingService.send_message`` /
-    ``_process_message_with_tracking`` AFTER ``_graph_tasks`` has been
-    popped — there is no graph task left to self-cancel and the DB
-    write completes cleanly.
+    ``finally`` block of ``_process_message_with_tracking`` AFTER
+    ``_graph_tasks`` has been popped — there is no graph task left to
+    self-cancel and the DB write completes cleanly.
 
-This test exercises the actual ``send_message`` finally block to verify
+This test exercises the actual turn-pipeline finally block to verify
 the post-graph callback path:
 
   * the deferred marker is observed as set after the graph completes;
@@ -28,14 +27,16 @@ the post-graph callback path:
   * ``_graph_tasks`` is empty by the time ``pause_instance_cascade`` is
     invoked — proving no self-cancel is possible.
 
-wc-wake-report-integrity (T6b, D7 LOCKED 2026-08-30): all tests in
-this module call the deleted ``InstanceMessagingService.send_message``
-method (the legacy ``:1060`` graph.ainvoke bypass). They are skipped
-pending a Phase-2 rewrite against the streaming
-``MessageProcessingPipeline`` — the deferred-pause cascade behavior
-itself is unaffected (the cascade runs from the pipeline's post-graph
-finally block, not from the deleted method), but the test fixtures
-bind directly to the deleted entry point.
+wc-wake-report-integrity T6b completion (2026-08-30): the legacy
+``InstanceMessagingService.send_message`` (the ``:1060`` graph.ainvoke
+bypass) was DELETED (C1-D7). Every fixture in this module was MIGRATED
+from that deleted entry point to the surviving pipeline entry point
+``_process_message_with_tracking`` (same astream-driven graph mock
+style as ``tests/unit/test_question_deferred_pause_edge_cases.py``) —
+the finally block under test is the SHARED post-graph completion path,
+so all six invariant pins (post-graph cascade, negative case,
+failure-swallow, run-to-completion, AREA 4 hoist, AREA 3 shield) are
+preserved against the code that actually runs in production.
 
 Mirrors the harness style used by ``tests/test_message_job_bridge.py``
 and ``tests/test_progressive_dispatch.py`` — a real
@@ -43,15 +44,6 @@ and ``tests/test_progressive_dispatch.py`` — a real
 """
 
 from __future__ import annotations
-
-import pytest
-
-pytestmark = pytest.mark.skip(
-    reason="T6b / D7 LOCKED 2026-08-30: InstanceMessagingService."
-    "send_message deleted. Awaiting Phase-2 rewrite against "
-    "MessageProcessingPipeline."
-)
-
 
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
@@ -63,20 +55,26 @@ from daemon.services.instance_messaging import InstanceMessagingService
 
 
 # =============================================================================
-# Helpers
+# Helpers (Path B: _process_message_with_tracking — the surviving pipeline)
+#
+# T6b completion (2026-08-30): the former Path-A helpers drove the DELETED
+# ``InstanceMessagingService.send_message`` (``graph.ainvoke`` bypass). The
+# builders below drive ``_process_message_with_tracking`` with an
+# astream-style graph mock — same shape as the edge-case file's Path-B
+# fixtures. The finally block under test is shared production code.
 # =============================================================================
 
 
 def _make_manager_with_real_marker_state() -> MagicMock:
     """Build a mock manager wired with real set/dict backing for the C2 path.
 
-    ``_graph_tasks`` is a real dict so ``send_message`` can register,
+    ``_graph_tasks`` is a real dict so the turn pipeline can register,
     observe, and pop the running task exactly as in production. The two
     deferred-pause methods are bound to a real ``_deferred_question_pause``
     set so the atomic set/pop semantics are exercised end-to-end.
 
-    Everything else the service touches during ``send_message`` is
-    stubbed to a ``MagicMock`` (the graph, repositories, the cascade).
+    Everything else the pipeline touches during a turn is stubbed to a
+    ``MagicMock`` (the graph, repositories, the cascade).
     """
     manager = MagicMock()
     manager._graph_tasks = {}
@@ -107,7 +105,7 @@ def _make_manager_with_real_marker_state() -> MagicMock:
     # Helper the finally block calls to release the per-instance cache.
     manager.release_context_usage_cache = MagicMock()
 
-    # DB / lifecycle surfaces ``send_message`` reaches before invoking
+    # DB / lifecycle surfaces the pipeline reaches before invoking
     # the graph — both need to resolve so the early ``asyncio.to_thread``
     # read and ``get_instance`` lookup succeed.
     manager.get_instance = AsyncMock()
@@ -120,44 +118,113 @@ def _make_manager_with_real_marker_state() -> MagicMock:
 def _make_graph_manager_mock(
     manager: MagicMock, instance_id: str
 ) -> MagicMock:
-    """Build a graph mock whose ``ainvoke`` sets the deferred marker.
+    """Build a graph mock whose ``astream`` sets the deferred marker.
 
-    Mimics the LangGraph execution surface that ``send_message`` awaits:
+    Mimics the LangGraph execution surface that the turn pipeline awaits:
     while the graph is "running" it invokes ``question_pause_node``,
     which calls ``manager.set_deferred_question_pause(instance_id)``.
-    After the node returns ``{}``, LangGraph routes to END and ``ainvoke``
-    resolves with an empty message state.
+    The stream then ends, the ``async for`` exits, and the finally block
+    fires.
+
+    ``aget_state`` is an ``AsyncMock`` returning ``None`` so the D1
+    entry-seam tail-guard (``_heal_poisoned_checkpoint_tail``)
+    short-circuits — these tests target the C2 finally block, not the
+    pairing guard.
     """
     graph = MagicMock()
+    graph.language_check_active = False
+    graph.aget_state = AsyncMock(return_value=None)
 
-    async def _ainvoke(_input: dict, _config: dict) -> dict:
+    async def _astream(_input: dict, _config: dict, stream_mode=None):
         # This side-effect call is the in-graph ``question_pause_node``
-        # equivalent — it runs INSIDE the awaited coroutine, i.e. on the
-        # same task that ``send_message`` registered in
-        # ``_graph_tasks[instance_id]``.
+        # equivalent — it runs INSIDE the ``astream`` loop, i.e. on the
+        # same task that ``_process_message_with_tracking`` registered
+        # in ``_graph_tasks[instance_id]``.
         manager.set_deferred_question_pause(instance_id)
-        return {"messages": []}
+        return
+        yield  # pragma: no cover - makes this an async generator
 
-    graph.ainvoke = _ainvoke
+    graph.astream = _astream
     return graph
 
 
 def _make_service(manager: MagicMock) -> InstanceMessagingService:
     """Build a real ``InstanceMessagingService`` with mocked collaborators.
 
-    ``send_message`` calls ``self._maybe_compact_context`` and
-    ``self._maybe_trigger_title_generation`` on the service instance
-    itself — stub both so they are no-ops in the test (they have
-    heavy DB / lifecycle side-effects in production).
+    Stubs the heavyweight DB / network collaborators so the test focuses
+    on the C2 finally block. ``is_retry=True`` + ``silent=True`` at the
+    call site bypass the project / skill / shared-context injection
+    blocks — those paths have their own dedicated tests.
     """
     service = InstanceMessagingService(
         manager=manager,
         cancellation_service=CancellationService(manager=manager),
     )
-    # No-op the helper methods so the test focuses on the C2 callback.
+
+    # No-op the service helpers so the test focuses on the C2 callback.
     service._maybe_compact_context = AsyncMock()  # type: ignore[method-assign]
     service._maybe_trigger_title_generation = MagicMock()  # type: ignore[method-assign]
+    # ``_has_checkpoint`` is consulted on the retry path; return False
+    # so the function takes the "re-add message" branch.
+    service._has_checkpoint = AsyncMock(return_value=False)  # type: ignore[method-assign]
+    # ``_emit_context_usage`` is invoked from inside the astream loop —
+    # with an empty astream it never fires, but stub it for safety.
+    service._emit_context_usage = AsyncMock()  # type: ignore[method-assign]
+
+    # Live event hub — every SSE stream call goes through here.
+    manager._live_hub = MagicMock()
+    manager._live_hub.stream_message = AsyncMock()
+    manager._live_hub.stream_tool_result = AsyncMock()
+    manager._live_hub.stream_context_usage = AsyncMock()
+    manager._live_hub.stream_error = AsyncMock()
+
+    # ``async with self._llm_semaphore:`` wraps the astream loop.
+    manager._llm_semaphore = asyncio.Semaphore()
+
+    # Config object the function reads for ``limits.graph_recursion_limit``.
+    manager.config = MagicMock()
+    manager.config.limits.graph_recursion_limit = 25
+
+    # Queue repository the ``ActivityCallbackHandler`` constructor captures.
+    manager._queue_repository = MagicMock()
+    manager._queue_repository.update_activity = MagicMock()
+
+    # ``_compactor is None`` short-circuits ``_maybe_compact_context``.
+    manager._compactor = None
+
+    # Source dispatcher is optional; ``None`` is a valid value that
+    # the code already guards against.
+    manager.source_dispatcher = None
+
+    # Instance / project repositories — ``is_retry=True`` bypasses most
+    # of them, but a few metadata lookups remain. Stub what we expect.
+    manager._instance_repository = MagicMock()
+    manager._instance_repository.get = MagicMock(return_value=None)
+    manager._project_repository = MagicMock()
+    manager.shared_meta_kv_repo = MagicMock()
+    # Skill injection / metrics services are optional — ``None`` is
+    # handled by ``getattr(..., None)`` everywhere in the function.
+    manager._skill_injection_service = None
+    manager._skill_clone_service = None
+    manager._skill_metrics_service = None
+
     return service
+
+
+async def _run_turn(service: InstanceMessagingService, instance_id: str, message: str = "hi"):
+    """Drive one turn through the surviving pipeline (is_retry + silent).
+
+    ``silent=True`` short-circuits graph_input assembly (the
+    ``:3407`` pure-resume branch) so the test exercises the graph →
+    finally-block path without the HumanMessage pre-emission machinery.
+    """
+    return await service._process_message_with_tracking(
+        instance_id=instance_id,
+        message=message,
+        message_id="msg-1",
+        is_retry=True,
+        silent=True,
+    )
 
 
 # =============================================================================
@@ -165,25 +232,25 @@ def _make_service(manager: MagicMock) -> InstanceMessagingService:
 # =============================================================================
 
 
-class TestSendMessageDeferredPauseCallback:
-    """``send_message`` finally block must invoke the cascade post-graph.
+class TestPipelineDeferredPauseCallback:
+    """The turn-pipeline finally block must invoke the cascade post-graph.
 
     These tests pin the C2 invariant: when ``question_pause_node`` runs
     and sets the deferred marker, the cascade runs from the finally
     block AFTER the graph task has been popped from ``_graph_tasks``.
     """
 
-    async def test_send_message_pops_marker_and_calls_cascade_after_graph(self):
+    async def test_pipeline_turn_pops_marker_and_calls_cascade_after_graph(self):
         """Marker → graph completes → finally pops marker → cascade called.
 
         Sets up the full post-graph callback pipeline:
 
-          1. ``send_message`` registers ``asyncio.current_task()`` in
+          1. the pipeline registers ``asyncio.current_task()`` in
              ``manager._graph_tasks["iid"]`` before awaiting the graph.
           2. The graph's mocked ``ainvoke`` calls
              ``manager.set_deferred_question_pause("iid")`` (the
              ``question_pause_node`` equivalent).
-          3. ``ainvoke`` returns normally; ``send_message`` enters its
+          3. the stream ends normally; the pipeline enters its
              ``finally`` block.
           4. The finally block pops the task from ``_graph_tasks`` and
              then calls ``pop_deferred_question_pause`` — observing
@@ -204,7 +271,7 @@ class TestSendMessageDeferredPauseCallback:
         # empty before invocation so the registration step is observable.
         assert instance_id not in manager._graph_tasks
 
-        result = await service.send_message(instance_id, "hi")
+        result = await _run_turn(service, instance_id)
 
         # The cascade ran — and crucially it ran from the finally block
         # (NOT from inside the graph task, which is the C2 bug).
@@ -228,7 +295,7 @@ class TestSendMessageDeferredPauseCallback:
         # post-commit callback did not crash the call.
         assert result is not None
 
-    async def test_send_message_does_not_call_cascade_without_marker(self):
+    async def test_pipeline_turn_does_not_call_cascade_without_marker(self):
         """No marker → cascade is NOT invoked, _graph_tasks is still cleaned up.
 
         Negative case: when the graph completes without ever setting the
@@ -241,12 +308,19 @@ class TestSendMessageDeferredPauseCallback:
 
         # Graph mock that completes WITHOUT setting the marker.
         graph = MagicMock()
-        graph.ainvoke = AsyncMock(return_value={"messages": []})
+        graph.language_check_active = False
+        graph.aget_state = AsyncMock(return_value=None)
+
+        async def _astream(_input, _config, stream_mode=None):
+            return
+            yield  # pragma: no cover
+
+        graph.astream = _astream
         manager.get_instance = AsyncMock(return_value=graph)
 
         service = _make_service(manager)
 
-        await service.send_message(instance_id, "hi")
+        await _run_turn(service, instance_id)
 
         # Cascade was never called — there was no marker to pop.
         manager.pause_instance_cascade.assert_not_called()
@@ -255,7 +329,7 @@ class TestSendMessageDeferredPauseCallback:
         assert manager._graph_tasks == {}
         manager.release_context_usage_cache.assert_called_once_with(instance_id)
 
-    async def test_send_message_cascade_failure_does_not_propagate(self):
+    async def test_pipeline_turn_cascade_failure_does_not_propagate(self):
         """A cascade failure inside the finally block is swallowed.
 
         The production finally block wraps ``pause_instance_cascade`` in
@@ -278,7 +352,7 @@ class TestSendMessageDeferredPauseCallback:
         service = _make_service(manager)
 
         # send_message does NOT raise — the inner try/except swallows.
-        result = await service.send_message(instance_id, "hi")
+        result = await _run_turn(service, instance_id)
 
         manager.pause_instance_cascade.assert_awaited_once_with(
             instance_id, suspension_reason="awaiting_answer"
@@ -290,7 +364,7 @@ class TestSendMessageDeferredPauseCallback:
         assert manager._graph_tasks == {}
         assert result is not None
 
-    async def test_send_message_cascade_is_awaited_and_runs_to_completion(self):
+    async def test_pipeline_turn_cascade_is_awaited_and_runs_to_completion(self):
         """AREA 3 + AREA 4: cascade must run to completion through the shield.
 
         The pre-fix C2 invariant was "task pop precedes cascade await" —
@@ -312,7 +386,7 @@ class TestSendMessageDeferredPauseCallback:
             cancel — a second layer of defence against self-cancel.
 
         The new safety property is: the cascade is awaited AND runs to
-        completion from the ``send_message`` finally block. We pin both
+        completion from the pipeline finally block. We pin both
         halves of that contract here via a side-channel flag — the mock
         cascade sets the flag when it completes, and we assert the flag
         is set after ``send_message`` returns. (The full
@@ -350,7 +424,7 @@ class TestSendMessageDeferredPauseCallback:
         )
         service = _make_service(manager)
 
-        result = await service.send_message(instance_id, "hi")
+        result = await _run_turn(service, instance_id)
 
         # The cascade was awaited exactly once with the right instance_id
         # — the marker pop in the finally block observed the deferred
@@ -374,7 +448,7 @@ class TestSendMessageDeferredPauseCallback:
         assert result is not None
 
 
-class TestSendMessageDeferredPauseConcurrencyFixes:
+class TestPipelineDeferredPauseConcurrencyFixes:
     """AREA 3 + AREA 4 fixes for the C2 deferred-question-pause callback.
 
     Two concurrency bugs were fixed in the ``send_message`` /
@@ -395,11 +469,11 @@ class TestSendMessageDeferredPauseConcurrencyFixes:
         would interrupt the cascade's DB transaction and leave the
         instance in PROCESSING while in-memory state said PAUSED.
 
-    These tests pin both invariants against the actual ``send_message``
-    finally block.
+    These tests pin both invariants against the actual turn-pipeline
+    (``_process_message_with_tracking``) finally block.
     """
 
-    async def test_send_message_consumes_marker_when_external_pre_pop_raced(
+    async def test_pipeline_turn_consumes_marker_when_external_pre_pop_raced(
         self,
     ):
         """AREA 4: marker must be consumed even when an external pause pre-popped.
@@ -407,7 +481,7 @@ class TestSendMessageDeferredPauseConcurrencyFixes:
         Scenario: while the graph task is running, an external
         ``pause_instance_cascade`` (``user-click-stop`` race) pops
         ``_graph_tasks[instance_id]`` and replaces it with the cancel
-        path's own bookkeeping. By the time ``send_message``'s ``finally``
+        path's own bookkeeping. By the time the pipeline's ``finally``
         block runs:
 
           * ``current_task`` is still the same task that ``send_message``
@@ -417,7 +491,7 @@ class TestSendMessageDeferredPauseConcurrencyFixes:
             is False.
 
         Before the fix the cascade pop lived INSIDE the identity guard,
-        so the marker leaked and the NEXT message would spuriously call
+        so the marker leaked and the NEXT turn would spuriously call
         ``pause_instance_cascade`` again. After the fix the pop is
         HOISTED above the guard, so the marker is always consumed and the
         cascade is invoked exactly once for the question pause that
@@ -429,23 +503,26 @@ class TestSendMessageDeferredPauseConcurrencyFixes:
         # Graph mock: sets the deferred marker (the in-graph
         # ``question_pause_node`` equivalent) AND simulates the external
         # ``pause_instance_cascade`` pre-popping ``_graph_tasks[instance_id]``
-        # before ``send_message``'s ``finally`` block runs.
+        # before the pipeline's ``finally`` block runs.
         graph = MagicMock()
+        graph.language_check_active = False
+        graph.aget_state = AsyncMock(return_value=None)
 
-        async def _ainvoke(_input: dict, _config: dict) -> dict:
+        async def _astream(_input: dict, _config: dict, stream_mode=None):
             manager.set_deferred_question_pause(instance_id)
             # External cancel race: user-click-stop / an in-flight
             # ``pause_instance_cascade`` pops the entry the graph task
             # had registered. After this point
             # ``existing is current_task`` is False inside ``finally``.
             manager._graph_tasks.pop(instance_id, None)
-            return {"messages": []}
+            return
+            yield  # pragma: no cover
 
-        graph.ainvoke = _ainvoke
+        graph.astream = _astream
         manager.get_instance = AsyncMock(return_value=graph)
         service = _make_service(manager)
 
-        result = await service.send_message(instance_id, "hi")
+        result = await _run_turn(service, instance_id)
 
         # The decisive AREA 4 assertion: the cascade ran even though the
         # identity guard inside ``finally`` would have skipped it. This
@@ -469,20 +546,20 @@ class TestSendMessageDeferredPauseConcurrencyFixes:
         assert instance_id not in manager._deferred_question_pause
 
         # ``_graph_tasks`` is empty (the external cancel popped the entry
-        # and ``send_message``'s finally correctly skipped re-popping
+        # and the pipeline's finally correctly skipped re-popping
         # since ``existing is current_task`` is False after the pre-pop).
         assert manager._graph_tasks == {}
 
-        # ``send_message`` returned a result — the AREA 4 fix did not
+        # The turn returned a result — the AREA 4 fix did not
         # crash the call path.
         assert result is not None
 
-    async def test_send_message_shield_protects_cascade_db_write_from_cancel(
+    async def test_pipeline_turn_shield_protects_cascade_db_write_from_cancel(
         self,
     ):
         """AREA 3: a second ``task.cancel()`` must not interrupt the cascade DB write.
 
-        Scenario: ``send_message``'s ``finally`` block awaits
+        Scenario: the pipeline's ``finally`` block awaits
         ``pause_instance_cascade`` (via ``asyncio.shield``). During that
         await, a second ``task.cancel()`` arrives — the same kind of
         cancel that previously caused ``pause_instance_cascade`` to
@@ -529,28 +606,31 @@ class TestSendMessageDeferredPauseConcurrencyFixes:
         # Graph mock: sets the deferred marker (the in-graph
         # ``question_pause_node`` equivalent), then yields once so the
         # test scheduler can issue the cancel. We schedule the cancel
-        # from a separate task started alongside ``send_message``.
+        # from a separate task started alongside the pipeline turn.
         graph = MagicMock()
+        graph.language_check_active = False
+        graph.aget_state = AsyncMock(return_value=None)
 
-        async def _ainvoke(_input: dict, _config: dict) -> dict:
+        async def _astream(_input: dict, _config: dict, stream_mode=None):
             manager.set_deferred_question_pause(instance_id)
             # Yield so the test scheduler task (started below) can run
             # and observe "cascade_entered" before the sleep completes.
             await asyncio.sleep(0)
-            return {"messages": []}
+            return
+            yield  # pragma: no cover
 
-        graph.ainvoke = _ainvoke
+        graph.astream = _astream
         manager.get_instance = AsyncMock(return_value=graph)
         service = _make_service(manager)
 
-        # Run ``send_message`` in a child task so the test scheduler can
+        # Run the pipeline turn in a child task so the test scheduler can
         # issue a cancel against it. We cannot cancel
         # ``asyncio.current_task()`` from within itself.
         send_cancelled = asyncio.Event()
 
         async def _run_send_message() -> None:
             try:
-                await service.send_message(instance_id, "hi")
+                await _run_turn(service, instance_id)
             except asyncio.CancelledError:
                 send_cancelled.set()
                 raise
@@ -580,7 +660,7 @@ class TestSendMessageDeferredPauseConcurrencyFixes:
         with pytest.raises(asyncio.CancelledError):
             await send_task
         assert send_cancelled.is_set(), (
-            "Outer send_message task did not raise CancelledError — "
+            "Outer pipeline-turn task did not raise CancelledError — "
             "the test harness did not actually simulate the second "
             "cancel scenario."
         )
