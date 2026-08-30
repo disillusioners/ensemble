@@ -337,6 +337,14 @@ async def send_message(
             "thinking_extracted": None,
             "tool_calls": None,
             "images": None,
+            # message-display-latency fix: ADDITIVE ``created_at`` so the
+            # PAUSED auto-resume 200 body matches the 202 body's contract
+            # shape. Without this the FE provisional ``created_at`` falls
+            # back to ``Date.now()`` and can mis-sort against in-flight
+            # assistant messages. ``datetime.now(timezone.utc)`` mirrors the
+            # legacy enqueue path's ``created_at`` (same source-of-truth
+            # for the non-injection routes).
+            "created_at": datetime.now(timezone.utc).isoformat(),
             "auto_resumed": True,
             "resume_info": {
                 "resumed": True,
@@ -440,6 +448,16 @@ async def send_message(
             "instance_id": instance_id,
             "content": entry.get("content"),
             "timestamp": entry.get("timestamp"),
+            # message-display-latency fix: server-authoritative ``created_at``
+            # so the FE's provisional bubble uses the SAME stamp as the
+            # POST-time ``user_message`` SSE echo and the drain re-emit
+            # (same-id-same-stamp principle — see
+            # ``.agents/shared/planning/message-display-latency/
+            # architecture-recommendation.md`` §4.3). Without this key the
+            # FE provisional was getting ``undefined`` and sorting to the
+            # top of the message list while ``evictPendingByAge`` treated
+            # the unparseable timestamp as expired.
+            "created_at": entry.get("timestamp"),
             "pending_count": pending_count,
             "message_id": entry.get("echo_id"),
         }

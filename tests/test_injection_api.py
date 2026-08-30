@@ -243,6 +243,12 @@ class TestInjectionPath:
         """message-display-latency Phase 1: the 202 body gains
         ``message_id`` (the router-minted echo id) — ADDITIVE; every
         pre-existing key keeps its name and value.
+
+        Phase 1 fix also adds ``created_at`` — ADDITIVE — using the
+        SAME entry POST timestamp the SSE echo carries (same-id-same-
+        stamp principle). Without this key the FE provisional was
+        getting ``undefined`` and ``evictPendingByAge`` was treating
+        the unparseable timestamp as expired.
         """
         client, state = client_and_state
         state["manager"] = _make_manager(status="running", pending_count=1)
@@ -266,6 +272,9 @@ class TestInjectionPath:
         assert body["status"] == "injected"
         assert body["content"] == "hello agent"
         assert body["timestamp"] == "2026-07-13T00:00:00+00:00"
+        # Additive: created_at == the entry POST timestamp (same stamp
+        # the SSE echo carries — same-id-same-stamp).
+        assert body["created_at"] == "2026-07-13T00:00:00+00:00"
         # Additive: message_id == the same echo_id handed to set_injection
         # (single id continuity at POST time)
         echo_id = state["manager"].set_injection.call_args.kwargs["echo_id"]
@@ -400,6 +409,15 @@ class TestPausedBranchUnchanged:
         assert body["auto_resumed"] is True
         assert body["content"] == "resume with this"
         assert body["message_id"] is None
+        # message-display-latency fix: PAUSED 200 fallback body now
+        # ALSO carries ``created_at`` (additive, mirrors the 202 body
+        # contract so the FE doesn't have to branch on response shape).
+        # Asserted as ``is not None`` — the exact stamp is
+        # wall-clock-dependent so we lock the shape, not the value.
+        assert body.get("created_at") is not None
+        # ISO-8601 with timezone — defensible regex check, not a value pin.
+        assert isinstance(body["created_at"], str)
+        assert "T" in body["created_at"]
 
     def test_paused_calls_resume_instance_cascade_and_processing_job(self, client_and_state):
         """The PAUSED path must still invoke the auto-resume helpers."""

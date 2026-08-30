@@ -35,11 +35,13 @@ export function isTerminalStatus(status: string | null | undefined): boolean {
 }
 
 /**
- * Build a provisional user message from a POST response. Returns ``null``
- * when ``messageId`` is absent so the caller can short-circuit the
- * optimistic append entirely (message-display-latency §4.3 item 12:
- * skip when ``message_id`` is absent — degrade to today's render-on-echo
- * behavior rather than ship a content-matching reconciler).
+ * Build a provisional user message from a POST response. The return is
+ * NON-NULLABLE — ``messageId`` is required by the type. The caller
+ * (``chat.component.ts:onSendMessage``) owns the null-guard: it
+ * short-circuits the optimistic append entirely when ``message_id`` is
+ * absent (old backend / PAUSED ``None``), degrading to today's
+ * render-on-echo flow rather than shipping a content-matching
+ * reconciler (message-display-latency §4.3 item 12).
  *
  * The returned message is keyed by the server-minted id (which the
  * id-keyed dedup collapses onto when the POST-time ``user_message`` SSE
@@ -151,27 +153,3 @@ export function evictPendingByAge(
   return touched ? result : [...messages];
 }
 
-/**
- * Strip ``pending: true`` from every entry. Used when the server has
- * definitively acknowledged the round-trip (e.g. a fresh
- * ``injection_consumed`` event, or a refetch where every server row
- * has the same id as a local pending — the merge above already handles
- * this case-by-case, but a terminal-status purge is broader: drop the
- * provisional state across the board so the "Message queued" /
- * dim-bubble affordances go away when the instance shuts down).
- */
-export function clearPendingFlags(messages: readonly Message[]): Message[] {
-  let touched = false;
-  const result: Message[] = [];
-  for (const msg of messages) {
-    if (msg.pending) {
-      touched = true;
-      const { pending: _pending, ...rest } = msg;
-      void _pending;
-      result.push(rest as Message);
-    } else {
-      result.push(msg);
-    }
-  }
-  return touched ? result : [...messages];
-}

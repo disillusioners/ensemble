@@ -131,7 +131,26 @@ export interface MessageResponse {
   thinking?: string | null;
   thinking_extracted?: string | null;
   tool_calls: unknown[] | null;
-  created_at: string;
+  // message-display-latency fix: ``created_at`` is OPTIONAL on the
+  // send-message response. The 202 (RUNNING / WAITING_CHILDREN
+  // injection) path now ships it — same value as the POST-time
+  // ``user_message`` SSE echo (same-id-same-stamp) — but the legacy
+  // 200 (IDLE/QUEUED/PAUSED auto-resume) paths still derive it
+  // server-side and may omit it on older backend versions. The
+  // component MUST defensively fall back to ``timestamp`` (and
+  // ultimately ``new Date().toISOString()``) — see
+  // ``chat.component.ts:onSendMessage``. The earlier non-optional
+  // type lie hid the BLOCKER (FE getting ``undefined`` and
+  // mis-sorting to the top of the list while ``evictPendingByAge``
+  // treated NaN as expired).
+  created_at?: string | null;
+  // message-display-latency fix: the legacy 200 enqueue body always
+  // shipped ``timestamp``; the 202 body does too. The component's
+  // defensive read of the server-authoritative stamp
+  // (``response.created_at ?? response.timestamp ?? ...``) requires
+  // this to be in the type. Optional because older backends /
+  // transient shapes may omit both ``created_at`` and ``timestamp``.
+  timestamp?: string | null;
   // Vision support: base64 data URIs of attached images (up to 3)
   images?: string[];
   // When true, the backend enqueued the message instead of dispatching it

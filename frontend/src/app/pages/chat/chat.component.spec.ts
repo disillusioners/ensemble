@@ -13,6 +13,11 @@ import { TabStateService } from '../../services/tab-state.service';
 import { WorkspaceOverlayService } from '../../services/workspace-overlay.service';
 import type { Agent, InstanceInfo } from '../../models';
 import { ProjectTab } from '../../models/tab.model';
+import {
+  evictPendingByAge,
+  makeProvisionalMessage,
+  mergeMessagesById,
+} from '../../services/message-merge.util';
 import { ChatComponent } from './chat.component';
 
 jest.mock('ngx-markdown', () => ({
@@ -226,7 +231,14 @@ class TestableChatComponent {
 
   /** Mirrors ChatComponent.SEND_COOLDOWN_MS */
   private readonly SEND_COOLDOWN_MS = 3000;
+  /** Mirrors ChatComponent.PENDING_TTL_MS — 10-minute wall-clock TTL
+   *  for ``evictPendingByAge``. */
+  private readonly PENDING_TTL_MS = 10 * 60 * 1000;
   private lastSendTime = 0;
+
+  // Send-side queued-indicator mirror (production ChatComponent sets this
+  // from ``response.queued``). Default ``null`` = no queued indicator.
+  readonly queuedMessage = signal<{ content: string } | null>(null);
 
   messageInputRef: { clearInput: jest.Mock } = { clearInput: jest.fn() };
 
@@ -315,8 +327,44 @@ class TestableChatComponent {
     this.isSending.set(true);
 
     this.api.sendMessage(instance.instance_id, payload.content, payload.images).subscribe({
-      next: () => {
+      next: (response: any) => {
+        // Mirror production ChatComponent.onSendMessage exactly:
+        //   1. Clear input on success.
+        //   2. Set ``queuedMessage`` from ``response.queued`` (truthy → show).
+        //   3. If ``message_id`` is present: build provisional, merge into
+        //      ``messages`` with eviction, reset ``isSending``. Otherwise
+        //      the SSE echo / drain re-emit will render the bubble instead.
+        // The defensive ``created_at ?? timestamp ?? now`` fallback mirrors
+        // production — without it, a degraded body shape would push the
+        // provisional to the top of the list AND evict it on the next
+        // refetch (the BLOCKER this spec set was added to catch).
         this.messageInputRef.clearInput();
+        if (response?.queued === true) {
+          this.queuedMessage.set({ content: payload.content });
+        } else {
+          this.queuedMessage.set(null);
+        }
+
+        const newId = response?.message_id;
+        if (newId) {
+          const provisionalStamp =
+            response.created_at ?? response.timestamp ?? new Date().toISOString();
+          const provisional = makeProvisionalMessage({
+            messageId: newId,
+            content: payload.content,
+            createdAt: provisionalStamp,
+            instanceId: instance.instance_id,
+            images: payload.images,
+          });
+          this.messages.update(existing =>
+            evictPendingByAge(
+              mergeMessagesById(existing, [provisional]),
+              this.PENDING_TTL_MS,
+              Date.now(),
+            )
+          );
+          this.isSending.set(false);
+        }
       },
       error: (err: any) => {
         this.sendError.set(err instanceof Error ? err.message : 'Failed to send message');
@@ -1027,6 +1075,255 @@ describe('ChatComponent - Project-Aware Navigation', () => {
       component.onSendMessage({ content: 'hello' });
 
       expect(mockApiService.sendMessage).not.toHaveBeenCalled();
+    });
+  });
+
+  /**
+   * message-display-latency Phase 1 BLOCKER specs.
+   *
+   * The original Phase 1 implementation built the provisional user bubble
+   * with ``createdAt: response.created_at``, but the BE 202 body did not
+   * ship that key — and the FE response type wrongly declared it
+   * ``required``. The provisional then carried ``undefined``, sorting
+   * to the top of the list while ``evictPendingByAge`` treated the
+   * unparseable timestamp as expired. In the common arrival order
+   * (POST-time SSE echo resolves before the HTTP 202), the merge
+   * replaced the good echo bubble with the malformed provisional and
+   * immediately evicted it.
+   *
+   * These specs lock in the fix using the REAL response shape — the
+   * missing key in the prior coverage that would have caught the bug.
+   *
+   * Timing note: ``evictPendingByAge`` drops a provisional entry when
+   * its ``created_at`` is older than 10 minutes. All test fixtures use
+   * ``new Date().toISOString()`` (or a stamp relative to a mocked
+   * ``Date.now``) so the provisional is always inside the TTL —
+   * otherwise the test would silently exercise eviction instead of
+   * the path under test.
+   */
+  describe('onSendMessage() - optimistic append (Phase 1 BLOCKER repro)', () => {
+    // Mirror production constants.
+    const TEN_MIN_MS = 10 * 60 * 1000;
+
+    /** Build a 202-shaped POST response with the Phase-1 additive fields.
+     *  Defaults to a fresh ``created_at`` so the provisional survives the
+     *  10-minute TTL; individual tests override ``created_at`` / drop
+     *  fields to exercise specific fallback paths. */
+    function make202Response(overrides: Partial<{
+      message_id: string;
+      created_at: string;
+      timestamp: string;
+      status: string;
+      instance_id: string;
+      content: string;
+      pending_count: number;
+      queued: boolean;
+    }> = {}) {
+      const now = new Date().toISOString();
+      return {
+        status: 'injected',
+        instance_id: 'inst-abc',
+        content: 'hello',
+        timestamp: now,
+        // ADDITIVE in Phase 1 — same stamp the SSE echo carries.
+        created_at: now,
+        pending_count: 1,
+        message_id: 'echo-uuid-1',
+        ...overrides,
+      };
+    }
+
+    /** Drive ``sendMessage`` synchronously and invoke the ``next`` handler. */
+    function fireSend(response: unknown): void {
+      mockApiService.sendMessage.mockReturnValueOnce({
+        subscribe: (handlers: any) => {
+          handlers.next(response);
+          return { unsubscribe: () => {} };
+        },
+      });
+      component.onSendMessage({ content: 'hello' });
+    }
+
+    beforeEach(() => {
+      component.currentInstance.set(createMockInstance({ instance_id: 'inst-abc' }));
+      // The SSE merge effect gates on ``viewState.activeInstanceId()``.
+      component.viewState.activeInstanceId.set('inst-abc');
+      mockSseService.messages.set([]);
+    });
+
+    afterEach(() => {
+      jest.restoreAllMocks();
+      mockSseService.messages.set([]);
+    });
+
+    // 3a — 202-with-id → optimistic append happens.
+    it('should append the provisional bubble when the 202 body carries message_id + created_at', () => {
+      const response = make202Response({
+        message_id: 'echo-uuid-1',
+        created_at: new Date().toISOString(),
+      });
+      fireSend(response);
+
+      const msgs = component.messages();
+      expect(msgs).toHaveLength(1);
+      expect(msgs[0]).toMatchObject({
+        message_id: 'echo-uuid-1',
+        role: 'user',
+        content: 'hello',
+        instance_id: 'inst-abc',
+        pending: true,
+      });
+      // ``created_at`` is the server-authoritative stamp and MUST be a
+      // parseable ISO string (the BLOCKER symptom was an unparseable
+      // stamp that ``evictPendingByAge`` treated as expired).
+      expect(typeof msgs[0].created_at).toBe('string');
+      expect(Number.isNaN(Date.parse(msgs[0].created_at))).toBe(false);
+      // Optimistic append completes the user-visible turn immediately.
+      expect(component.isSending()).toBe(false);
+      expect(component.messageInputRef.clearInput).toHaveBeenCalled();
+    });
+
+    // 3b — absent ``message_id`` (old BE / PAUSED None) → NO append.
+    it('should NOT append a provisional bubble when the response has no message_id (old BE / PAUSED None)', () => {
+      // Old backend shape: 202 body without the additive ``message_id``.
+      const degradedResponse = {
+        status: 'injected',
+        instance_id: 'inst-abc',
+        content: 'hello',
+        timestamp: new Date().toISOString(),
+        created_at: new Date().toISOString(),
+        pending_count: 1,
+        // message_id absent → render-on-echo fallback.
+      };
+      fireSend(degradedResponse);
+
+      // No optimistic append — the SSE echo / drain re-emit will render.
+      expect(component.messages()).toHaveLength(0);
+      // Input is still cleared and ``isSending`` reset, just no bubble.
+      expect(component.messageInputRef.clearInput).toHaveBeenCalled();
+    });
+
+    // 3c — eviction interaction: fresh provisional survives; aged one is evicted.
+    it('should keep a fresh provisional and evict an aged one (>10 min)', () => {
+      // Drive the clock forward so the eviction check sees a definite "now".
+      const fixedNow = Date.now();
+      jest.spyOn(Date, 'now').mockReturnValue(fixedNow);
+      const freshStamp = new Date(fixedNow - 5 * 60 * 1000).toISOString();     // 5 min old → survives
+      const agedStamp = new Date(fixedNow - 90 * 60 * 1000).toISOString();    // 90 min old → evicted
+      const newStamp = new Date(fixedNow).toISOString();
+
+      // Pre-existing message list with one fresh + one aged provisional.
+      component.messages.set([
+        {
+          message_id: 'fresh',
+          role: 'user',
+          content: 'recent',
+          created_at: freshStamp,
+          instance_id: 'inst-abc',
+          pending: true,
+        },
+        {
+          message_id: 'aged',
+          role: 'user',
+          content: 'stale',
+          created_at: agedStamp,
+          instance_id: 'inst-abc',
+          pending: true,
+        },
+      ]);
+
+      fireSend(make202Response({ message_id: 'echo-new', created_at: newStamp }));
+
+      const ids = component.messages().map((m: any) => m.message_id);
+      expect(ids).toContain('fresh');      // fresh provisional survives
+      expect(ids).not.toContain('aged');   // aged one (>10 min) evicted
+      expect(ids).toContain('echo-new');   // new provisional appended
+    });
+
+    // 3d — arrival-order regression (the BLOCKER scenario).
+    //
+    // Reproduces the original failure: the POST-time SSE ``user_message``
+    // echo lands in the SseService signal BEFORE the HTTP 202 resolves.
+    // Without a server-authoritative ``created_at`` the surrogate would
+    // build a provisional with ``undefined`` → mis-sort + immediate
+    // eviction, replacing the good SSE echo bubble.
+    //
+    // Asserts the four BLOCKER invariants from the spec: ONE bubble,
+    // SSE/server stamp, NOT evicted, NOT duplicated. The exact
+    // ``pending`` value is intentionally NOT pinned — that flag is
+    // cleared by the drain-time / refetch merge path, not by this
+    // optimistic-append path (which is the documented contract).
+    it('should produce exactly ONE bubble when the SSE echo lands before the HTTP 202 resolves', () => {
+      const serverStamp = new Date().toISOString();
+
+      // (1) SSE echo arrives first — POST-time ``user_message`` already
+      //     routed through ``runSseMergeEffect`` and was added to the
+      //     list with the server stamp.
+      mockSseService.messages.set([
+        {
+          message_id: 'echo-uuid-1',
+          role: 'user',
+          content: 'hello',
+          created_at: serverStamp,
+          instance_id: 'inst-abc',
+        },
+      ]);
+      component.runSseMergeEffect();
+
+      // After the SSE echo: one bubble, server stamp.
+      let msgs = component.messages();
+      expect(msgs).toHaveLength(1);
+      expect(msgs[0]).toMatchObject({
+        message_id: 'echo-uuid-1',
+        created_at: serverStamp,
+      });
+
+      // (2) HTTP 202 resolves — provisional append happens with the
+      //     SAME server stamp (no override, no NaN, no eviction).
+      fireSend(make202Response({ message_id: 'echo-uuid-1', created_at: serverStamp }));
+
+      msgs = component.messages();
+      // Exactly ONE bubble — id-keyed dedup collapses the echo + provisional
+      // (the BLOCKER's "duplicated" symptom).
+      expect(msgs).toHaveLength(1);
+      expect(msgs[0]).toMatchObject({
+        message_id: 'echo-uuid-1',
+        created_at: serverStamp,
+      });
+      // The stamp is the SSE/server stamp, not "now" — so the bubble
+      // stays in send position (the BLOCKER's "sorted to top" symptom
+      // came from an undefined stamp that localeCompare pushed ahead
+      // of every other entry).
+      expect(msgs[0].created_at).toBe(serverStamp);
+    });
+
+    // 3e — degraded body without ``created_at`` → fallback used, no NaN.
+    //
+    // Old-BE / transient-shape guard: if the 202 body carries
+    // ``message_id`` but neither ``created_at`` nor ``timestamp``, the
+    // component must NOT ship a provisional with an unparseable stamp
+    // (the original BLOCKER symptom — and the failure mode that
+    // ``evictPendingByAge`` would treat as expired).
+    //
+    // Exercise the SECOND link of the fallback chain
+    // (``timestamp``) so the assertion can pin an exact stamp
+    // independent of when ``new Date()`` runs inside the surrogate
+    // (V8's ``new Date()`` does not honor a ``Date.now`` spy).
+    it('should fall back to ``timestamp`` when the response carries no ``created_at``', () => {
+      const tsStamp = new Date().toISOString();
+      fireSend({ status: 'injected', message_id: 'echo-degraded', timestamp: tsStamp });
+
+      const msgs = component.messages();
+      expect(msgs).toHaveLength(1);
+      expect(msgs[0].message_id).toBe('echo-degraded');
+      // Fallback chain: ``created_at`` → ``timestamp`` (hit) → ``new Date().toISOString()``.
+      expect(msgs[0].created_at).toBe(tsStamp);
+      // Belt-and-suspenders: the stamp must be parseable AND recent enough
+      // that ``evictPendingByAge`` does not drop the provisional on the
+      // very next refetch (the BLOCKER's eviction symptom).
+      const parsed = Date.parse(msgs[0].created_at);
+      expect(Number.isNaN(parsed)).toBe(false);
+      expect(Date.now() - parsed).toBeLessThan(TEN_MIN_MS);
     });
   });
 

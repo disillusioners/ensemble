@@ -1266,10 +1266,20 @@ export class ChatComponent implements OnInit, OnDestroy {
         // confirmation for the send-before-SSE-connect race.
         const newId = response.message_id;
         if (newId) {
+          // message-display-latency fix: defensive read of the
+          // server-authoritative stamp. The 202 body now ships
+          // ``created_at`` (same value as the SSE echo's created_at),
+          // but older backends / degraded shapes may only carry
+          // ``timestamp``. Fall back in order, ending with ``now``
+          // only as a last resort so the provisional never gets an
+          // unparseable stamp (which would mis-sort to the top AND
+          // get evicted by ``evictPendingByAge`` on the next refetch).
+          const provisionalStamp =
+            response.created_at ?? response.timestamp ?? new Date().toISOString();
           const provisional = makeProvisionalMessage({
             messageId: newId,
             content: payload.content,
-            createdAt: response.created_at,
+            createdAt: provisionalStamp,
             instanceId: instance.instance_id,
             images: payload.images,
           });
