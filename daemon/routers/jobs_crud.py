@@ -279,11 +279,23 @@ async def create_job(
     # ``internal_invoke_and_wait:``, ``system:*`` infrastructure
     # notices) stamp these directly via ``manager.enqueue_message`` /
     # ``service.enqueue`` — they bypass this HTTP body path and are
-    # unaffected. The 422 response shape matches the existing
-    # ``ValidationError`` envelope (line 285-293) so the frontend
-    # treats it like any other Pydantic validation failure. Empty /
-    # None ``source`` falls back to the Pydantic default ``"api"`` so
-    # the legacy contract is preserved.
+    # unaffected.
+    #
+    # Post-fix 422 surface (Reviewer Warning #2, 2026-08-30):
+    #   * source omitted        → Pydantic default ``"api"`` reaches
+    #                             the service (legacy contract
+    #                             preserved).
+    #   * source is JSON null   → 422 from Pydantic type validation
+    #                             (``JobCreateRequest.source`` is
+    #                             typed ``str``, not ``str | None``).
+    #   * source is ``""``      → 422 from Pydantic ``min_length=1``
+    #                             on ``JobCreateRequest.source``.
+    #   * source is a reserved prefix / exact value (see
+    #     ``is_reserved_source`` + ``RESERVED_SOURCE_PREFIXES``) → 422
+    #     from THIS gate, NOT from Pydantic. The response body uses
+    #     the same ``JobValidationError`` envelope as the
+    #     ``ValidationError`` re-raise block below so the frontend
+    #     treats it like any other validation failure.
     if is_reserved_source(body.source):
         raise HTTPException(
             status_code=422,

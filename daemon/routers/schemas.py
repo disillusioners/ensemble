@@ -17,7 +17,7 @@ class JobCreateRequest(BaseModel):
     project_id: str | None = Field(default=None, description="Optional project ID for job serialization")
     queue_id: str | None = Field(default=None, description="Optional queue ID to assign job to a specific queue")
     priority: int = Field(default=5, ge=1, le=10, description="Job priority (1-10, default 5)")
-    source: str = Field(default="api", description="Source of the job")
+    source: str = Field(default="api", min_length=1, description="Source of the job. Empty string rejected by Pydantic (2026-08-30 Reviewer Warning #2 fix).")
     metadata: dict[str, Any] | None = Field(default=None, description="Optional metadata dictionary")
     idempotency_key: str | None = Field(default=None, max_length=255, description="Optional idempotency key for deduplication")
     

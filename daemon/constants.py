@@ -357,6 +357,40 @@ ALIVE_INSTANCE_STATUSES: frozenset[str] = frozenset({
 #   * ``"api_resume_fallback"``           — messages router fallback
 #                                          enqueue
 #                                          (``daemon/routers/messages.py:282``).
+#   * ``"explore:"``                      — kb-importer hand-off from the
+#                                          explore tool
+#                                          (``daemon/tools/knowledge_tools.py:323``).
+#   * ``"experience:"``                   — kb-writer hand-off from the
+#                                          experience tool
+#                                          (``daemon/tools/knowledge_tools.py:389``).
+#   * ``"blueprint-sidecar:"``            — blueprinter drift-signal
+#                                          sidecar enqueue
+#                                          (``daemon/tools/knowledge_tools.py:470``).
+#   * ``"agent:"``                        — server-derived agent-caller
+#                                          origin on the job tools
+#                                          (``daemon/tools/job_queue.py:550``
+#                                          and ``:1062``; the
+#                                          empty-caller fallback is
+#                                          ``internal_agent:unknown``,
+#                                          itself covered above).
+#   * ``"watchover_next_command"``        — terminal-activation
+#                                          follow-up enqueue
+#                                          (``daemon/services/watchover_service.py:1382``).
+#   * ``"skill_metric_scan"``             — periodic skill-evolution
+#                                          scan direct enqueue
+#                                          (``daemon/manager.py:4024``).
+#   * ``"skill_evolution"``               — skill_job_dispatcher stamp
+#                                          (``SOURCE_TAG`` at
+#                                          ``daemon/services/skill_job_dispatcher.py:76``,
+#                                          stamped at ``:257``).
+#   * ``"admin-endpoint"``                — blueprinter REST trigger
+#                                          (helper default at
+#                                          ``daemon/services/blueprint_job_helper.py:42``,
+#                                          stamped by
+#                                          ``daemon/routers/blueprints.py:300``).
+#   * ``"auto-scan"``                     — blueprinter scan-service
+#                                          trigger
+#                                          (``daemon/services/blueprint_scan_service.py:316``).
 #
 # Deliberately NOT in the set (legitimate user origins):
 #   * ``"api"``                           — default + bare-api origin;
@@ -373,6 +407,15 @@ ALIVE_INSTANCE_STATUSES: frozenset[str] = frozenset({
 #                                          by the source dispatcher.
 #   * ``"scheduler"``                     — scheduler adapter
 #                                          (``daemon/sources/adapters/scheduler.py``).
+#   * ``"dependency_bus"``                — FollowUp.source field default
+#                                          (``daemon/services/dependency_bus.py:159``),
+#                                          kept only as the legacy-payload
+#                                          deserialization fallback
+#                                          (``from_payload`` :210) — no active
+#                                          mint site today; the only mint
+#                                          (``daemon/tools/instance.py:538``)
+#                                          stamps ``internal_agent:``, which IS
+#                                          reserved above.
 #   * Arbitrary custom strings from
 #     integrated frontends / hooks. A user source value is a
 #     free-form identifier — pinning the F2 user-origin whitelist is
@@ -385,9 +428,18 @@ RESERVED_SOURCE_PREFIXES: frozenset[str] = frozenset({
     "internal_report:",
     "internal_error_report:",
     "internal_invoke_and_wait:",
+    "explore:",
+    "experience:",
+    "agent:",
+    "blueprint-sidecar:",
     # Non-colon exact values (matched by exact equality).
     "cascade_resume",
     "api_resume_fallback",
+    "watchover_next_command",
+    "skill_metric_scan",
+    "skill_evolution",
+    "admin-endpoint",
+    "auto-scan",
 })
 
 
@@ -416,3 +468,25 @@ def is_reserved_source(source: str | None) -> bool:
     if source in RESERVED_SOURCE_PREFIXES:
         return True
     return False
+
+
+# Case-sensitivity invariant (deliberate — do NOT casefold this helper).
+#   * Every stamp site mints the exact lowercase literals in
+#     ``RESERVED_SOURCE_PREFIXES`` — no daemon path ever produces a
+#     case-variant.
+#   * The internal dispatch sinks match case-SENSITIVELY (bare
+#     ``startswith`` / exact equality at
+#     ``daemon/services/instance_messaging.py:2290-2299`` and
+#     ``daemon/services/message_processing_pipeline.py:702-708``), so a
+#     case-variant body value (e.g. ``"SYSTEM:watchdog"``) would NOT be
+#     system-recognized as internal even if it reached a queue — it
+#     flows as an inert free-form external source. Casefolding here
+#     would claim a contract the sinks do not honor AND over-block
+#     free-form user identifiers (e.g. ``"Agent:my-app"``) that are
+#     harmless today.
+#   * If any sink is ever changed to casefolded matching, update the
+#     sink AND this helper together — they must agree exactly. The
+#     case-sensitive behavior is pinned by
+#     ``tests/unit/routers/test_source_reservation.py::
+#     TestReservedSourcePrefixesConstant::
+#     test_helper_is_deliberately_case_sensitive``.
