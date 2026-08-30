@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import os
 import time
 import uuid
 from datetime import datetime, timezone
@@ -46,6 +47,138 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# WC-wake kill-switch (wc-wake-report-integrity, C1-Q2 RESOLVED 2026-08-30)
+# ─────────────────────────────────────────────────────────────────────────────
+# The P1 routing pivot (T2 / T4 / T7) replaces the legacy "WC → RAM FIFO
+# set_injection" path with "WC → enqueue_message (durable wake turn)". That
+# change has three call sites — HTTP ``POST /messages``
+# (``daemon/routers/messages.py``), agent-tool ``send_message``
+# (``daemon/tools/instance.py``), and ``job_inject``
+# (``daemon/tools/job_queue.py``) — and they ALL cross the same
+# ``INJECTION_ELIGIBLE_STATUSES`` constant in ``daemon/constants.py`` (T2
+# shrinks it to ``frozenset({"running"})``).
+#
+# Per ``decisions.md`` C1-Q2 (RESOLVED 2026-08-30, leader-locked) the
+# pivot ships behind an env-driven kill-switch and is **DEFAULT OFF** at
+# code-land: the routing pivot only activates when
+# ``ENSEMBLE_WC_WAKE_ENQUEUE=1``. The flag mirrors the precedent set by
+# ``LIMITS_GOVERNOR_RECURSION_GUARD_ENABLED`` (governor-chain guard,
+# 2026-08-30; same shape: env-driven, cached on first access, restart-
+# required to flip, one-shot INFO log on boot, valid truthy/falsy values
+# spelled out below).
+#
+# Flag states:
+#
+#   * **OFF (default)** — the LEGACY behavior is preserved at all three
+#     call sites: HTTP returns 202-injected, agent-tool injection route
+#     returns the W3-stranding text, ``job_inject`` returns
+#     ``{status: "injected"}``. This is the documented revert path; an
+#     operator with an incident can flip the env back to the previous
+#     behavior in O(restart) without code changes. **The constant
+#     ``INJECTION_ELIGIBLE_STATUSES`` stays shrunk to ``{"running"}``
+#     regardless** — the flag-off branch reads that shrunk set and adds
+#     the legacy ``"waiting_children"`` glock back at the call sites
+#     (constant stays single-home, fork lives ONLY at the gating branch).
+#
+#   * **ON** — the new routing pivot is live everywhere: WC targets get
+#     real ``enqueue_message`` durable wake turns, HTTP returns 200 with
+#     ``MessageResponse{message_id, job_id, queued}``, the agent-tool
+#     enqueue branch handles WC, ``job_inject`` mirrors Option A.
+#
+# Always-active (no gating, no flag check): the D1 enqueue-seam pairing
+# tail-guard (T6), the D2 seam-drain of parked FIFO leftovers (T5), the
+# R1 deterministic placeholder ids (T1), and the T6b deletion of the
+# legacy ``Manager.send_message`` -> ``InstanceMessagingService.send_message``
+# -> ``graph.ainvoke`` bypass. These are correctness fixes that ship
+# regardless of which way the routing flag points.
+#
+# Soak / flip policy (per C2-D2.5-FLIP precedent, leader-locked 2026-08-30):
+# ≤ 2-week soak on the OFF default, operator flips ON on first deploy
+# thereafter; immediate flip to OFF on any silent-death incident. The
+# exact ``--flip-window``, soak duration, and incident criteria are
+# recorded in ``docs/setup.md`` next to the env var documentation.
+_WC_WAKE_ENQUEUE_ENV = "ENSEMBLE_WC_WAKE_ENQUEUE"
+_WC_WAKE_ENQUEUE_ENABLED: bool | None = None
+_WC_WAKE_ENQUEUE_BOOT_LOG_EMITTED: bool = False
+
+
+def _resolve_wc_wake_enqueue_enabled() -> bool:
+    """Resolve and cache the WC-wake routing-pivot kill-switch.
+
+    Returns:
+        ``True`` when the routing pivot is enabled — i.e. WC targets
+        route through ``enqueue_message`` (durable wake) instead of
+        ``set_injection`` (RAM FIFO). ``False`` when disabled via
+        ``ENSEMBLE_WC_WAKE_ENQUEUE=0`` — the LEGACY behavior is
+        preserved at all three call sites (HTTP, agent-tool, ``job_inject``).
+
+    Valid truthy values: ``("1", "true", "yes", "on", "")`` (the empty
+    string matches the unset-env default ``"0"`` resolver path — same
+    pattern as ``_resolve_governor_recursion_guard_enabled``).
+    Valid falsy values: ``("0", "false", "no", "off")``. Unknown values
+    fall back to ``False`` (the OFF default) with a one-shot WARN
+    cached on first access.
+
+    The first resolution also emits a one-shot INFO log via
+    :func:`emit_wc_wake_enqueue_boot_log` if not already emitted by the
+    manager-init path.
+    """
+    global _WC_WAKE_ENQUEUE_ENABLED
+    if _WC_WAKE_ENQUEUE_ENABLED is not None:
+        return _WC_WAKE_ENQUEUE_ENABLED
+    raw = os.environ.get(_WC_WAKE_ENQUEUE_ENV, "0").strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        _WC_WAKE_ENQUEUE_ENABLED = False
+    elif raw in ("1", "true", "yes", "on", ""):
+        _WC_WAKE_ENQUEUE_ENABLED = True
+    else:
+        logger.warning(
+            "%s=%r is not a recognized truthy/falsy value; falling back "
+            "to OFF (default — legacy WC injection routing). Valid falsy: "
+            "0/false/no/off. Valid truthy: 1/true/yes/on.",
+            _WC_WAKE_ENQUEUE_ENV,
+            raw,
+        )
+        _WC_WAKE_ENQUEUE_ENABLED = False
+    return _WC_WAKE_ENQUEUE_ENABLED
+
+
+def emit_wc_wake_enqueue_boot_log() -> None:
+    """Emit the one-time boot-time INFO log naming the resolved flag state.
+
+    Called from ``InstanceManager.__init__`` after the messaging service
+    is wired (mirrors ``emit_governor_recursion_guard_boot_log``). Restart-
+    required semantics — same as the governor-guard wrapper. The actual
+    routing logic is gated on ``_resolve_wc_wake_enqueue_enabled()`` at
+    every call site, so flipping the env mid-flight has no effect.
+    """
+    global _WC_WAKE_ENQUEUE_BOOT_LOG_EMITTED
+    if _WC_WAKE_ENQUEUE_BOOT_LOG_EMITTED:
+        return
+    _WC_WAKE_ENQUEUE_BOOT_LOG_EMITTED = True
+    enabled = _resolve_wc_wake_enqueue_enabled()
+    logger.info(
+        "WC-wake enqueue routing resolved: %s (env %s=%s); "
+        "WC targets %s. Restart required to flip. "
+        "See docs/setup.md (ENSEMBLE_WC_WAKE_ENQUEUE).",
+        "enabled" if enabled else "DISABLED (legacy FIFO injection)",
+        _WC_WAKE_ENQUEUE_ENV,
+        os.environ.get(_WC_WAKE_ENQUEUE_ENV, "<unset>"),
+        "route to enqueue_message (durable wake, first-class turn)"
+        if enabled
+        else "still route to set_injection (RAM FIFO; 202-injected)",
+    )
+
+
+def _reset_wc_wake_enqueue_for_tests() -> None:
+    """Clear the cached kill-switch state so tests can re-resolve after
+    mutating the env. Test-only — production code never invokes this."""
+    global _WC_WAKE_ENQUEUE_ENABLED, _WC_WAKE_ENQUEUE_BOOT_LOG_EMITTED
+    _WC_WAKE_ENQUEUE_ENABLED = None
+    _WC_WAKE_ENQUEUE_BOOT_LOG_EMITTED = False
 
 
 def _derive_task_flags_from_queue_type(

@@ -847,3 +847,132 @@ class TestConcurrentSourceSinglePassGuard:
         )
         # And the list is unchanged.
         assert msgs[4].content == "drain_1_result"
+
+
+# ---------------------------------------------------------------------------
+# R1 (wc-wake-report-integrity) — deterministic placeholder ids
+# ---------------------------------------------------------------------------
+
+
+class TestR1DeterministicPlaceholderIds:
+    """R1 (wc-wake-report-integrity): synthesized ``ToolMessage``
+    placeholders carry ``id=f"pairing-synth-{tc_id}"`` — a deterministic
+    format that lets LangGraph's ``add_messages`` reducer dedup
+    re-syntheses by id (so a re-heal of the same poisoned tail replaces
+    instead of duplicating). Before this change the constructor passed
+    no ``id`` and langchain minted a fresh UUID on every synthesis —
+    the reducer silently dedups by tool_call_id at LLM-time but a
+    re-synthesis between insert and checkpoint commit would have left a
+    stray duplicate in the checkpoint.
+
+    Carried from the 84fd8018+7822aebd follow-up arc; tested here so the
+    routine stays pinned.
+    """
+
+    def test_placeholder_id_format(self):
+        """Synthesized ``ToolMessage.id`` MUST equal ``pairing-synth-{tc_id}``
+        — exact format, no extra decoration."""
+        ai = AIMessage(content="", tool_calls=[_tc("call_alpha")])
+        msgs = [
+            SystemMessage(content="sys"),
+            HumanMessage(content="hi"),
+            ai,
+        ]
+
+        synthesized = _ensure_tool_result_pairing(msgs)
+
+        assert len(synthesized) == 1
+        assert synthesized[0].id == "pairing-synth-call_alpha"
+
+    @pytest.mark.parametrize("tc_id", ["call_1", "call_x", "uuid-7f3a"])
+    def test_placeholder_id_deterministic_per_tc(self, tc_id):
+        """The synthesis is fully deterministic — same ``tc_id`` always
+        produces the same ``id``. Multiple invocations across re-heal
+        paths produce id-stable messages."""
+        ai = AIMessage(content="", tool_calls=[_tc(tc_id)])
+        msgs = [
+            SystemMessage(content="sys"),
+            HumanMessage(content="hi"),
+            ai,
+        ]
+
+        first = _ensure_tool_result_pairing(msgs)
+        assert first[0].id == f"pairing-synth-{tc_id}"
+
+    def test_placeholder_id_unique_per_tc_id(self):
+        """Two different ``tc_id``s produce two distinct deterministic
+        placeholder ids — no collision, no shared id."""
+        ai = AIMessage(
+            content="",
+            tool_calls=[_tc("call_left"), _tc("call_right")],
+        )
+        msgs = [
+            SystemMessage(content="sys"),
+            HumanMessage(content="hi"),
+            ai,
+        ]
+
+        synthesized = _ensure_tool_result_pairing(msgs)
+
+        ids = [tm.id for tm in synthesized]
+        assert ids == [
+            "pairing-synth-call_left",
+            "pairing-synth-call_right",
+        ]
+        assert len(set(ids)) == 2  # no shared id
+
+    def test_placeholder_tool_call_id_preserved(self):
+        """``tool_call_id`` (the langchain pairing contract) MUST stay
+        unchanged — R1 changes ``id``, not ``tool_call_id``."""
+        ai = AIMessage(content="", tool_calls=[_tc("call_beta")])
+        msgs = [
+            SystemMessage(content="sys"),
+            HumanMessage(content="hi"),
+            ai,
+        ]
+
+        synthesized = _ensure_tool_result_pairing(msgs)
+
+        assert synthesized[0].tool_call_id == "call_beta"
+        assert synthesized[0].name == "tool"  # tc name preserved
+        assert synthesized[0].content == _TOOL_PAIRING_PLACEHOLDER_TEXT
+        # And the new id.
+        assert synthesized[0].id == "pairing-synth-call_beta"
+
+    def test_placeholder_id_dedup_on_reheal(self):
+        """Idempotence check: a second ``_ensure_tool_result_pairing``
+        call against a list whose tail is ALREADY the synthesized
+        ``ToolMessage`` MUST NOT synthesize a second placeholder —
+        dedupe by ``tool_call_id`` (Case 5 existing path) prevents it,
+        and the deterministic id means a re-heal of the same
+        poisoned tail replaces instead of duplicating at reducer-time.
+        """
+        ai = AIMessage(content="", tool_calls=[_tc("call_idem")])
+        msgs = [
+            SystemMessage(content="sys"),
+            HumanMessage(content="hi"),
+            ai,
+        ]
+
+        first = _ensure_tool_result_pairing(msgs)
+        assert len(first) == 1
+        # Healed state in msgs already has the placeholder between AI
+        # and the rest.
+        tail_placeholder = msgs[3]
+        assert tail_placeholder.id == "pairing-synth-call_idem"
+
+        # Re-run the guard on the healed list — tail is now the
+        # synthesized ToolMessage (Case 5 existing dedupe path), so the
+        # walk stops at the AI(tc) when re-scanning? No — the O(1)
+        # happy-path check on the tail skips because the tail is a
+        # ToolMessage (non-AI). Result: no new synthesis.
+        second = _ensure_tool_result_pairing(msgs)
+
+        assert second == [], (
+            f"Re-heal must not re-synthesize an already-answered "
+            f"tool_call_id; got {second}"
+        )
+        # Placeholder identity preserved — same deterministic id.
+        assert msgs[3] is tail_placeholder
+        assert msgs[3].id == "pairing-synth-call_idem"
+

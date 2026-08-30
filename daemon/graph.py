@@ -361,10 +361,20 @@ def _ensure_tool_result_pairing(
             if tc_id in existing_tool_call_ids:
                 continue
             tc_name = tc.get("name", "") if isinstance(tc, dict) else ""
+            # R1 (wc-wake-report-integrity): deterministic
+            # ``id="pairing-synth-{tc_id}"`` — ``add_messages`` reducer
+            # dedups by id, so re-synthesis after a crash-between-insert-
+            # and-checkpoint (or the new D1 enqueue-seam re-heal) replaces
+            # instead of duplicating. ``tc_id`` is unique per tool call, so
+            # collisions are only the exact re-heal case the dedup path
+            # wants to absorb. ``tool_call_id`` is left untouched (the
+            # langchain contract: pairing is by tool_call_id, not message
+            # id). Placeholder text :265-268.
             tm = ToolMessage(
                 content=_TOOL_PAIRING_PLACEHOLDER_TEXT,
                 tool_call_id=tc_id,
                 name=tc_name,
+                id=f"pairing-synth-{tc_id}",
             )
             existing_tool_call_ids.add(tc_id)
             block_synthesized.append(tm)

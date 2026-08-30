@@ -81,6 +81,7 @@ from .services.job_queue_service import DemandState
 from .services.dependency_bus import get_dependency_bus
 from .services.instance_lifecycle import InstanceLifecycleService
 from .services.instance_messaging import InstanceMessagingService
+from .services.instance_messaging import emit_wc_wake_enqueue_boot_log
 from .services.messaging_types import AsyncMessageResult  # re-exported for `from daemon.manager import AsyncMessageResult`
 from .services.child_reports import ChildReportsService
 from .services.error_reporting import ErrorReportingService
@@ -730,6 +731,13 @@ class InstanceManager:
         # to flip. See _resolve_governor_recursion_guard_enabled for env
         # syntax. Mirrors the cascade-lineage wrapper precedent.
         emit_governor_recursion_guard_boot_log()
+
+        # WC-wake enqueue routing pivot (wc-wake-report-integrity,
+        # 2026-08-30): one-time INFO log naming the resolved kill-switch
+        # state. Default DISABLED (legacy FIFO injection); restart-required
+        # to flip. See _resolve_wc_wake_enqueue_enabled for env syntax.
+        # Mirrors the governor-guard wrapper precedent.
+        emit_wc_wake_enqueue_boot_log()
 
         # NEW: Pluggable message sources system
         self.source_registry = SourceRegistry(
