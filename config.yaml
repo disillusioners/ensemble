@@ -73,11 +73,13 @@ llm:
   # JSON array). The legacy OPENAI_ALLOWED_MODELS env var is still
   # honored when OPENAI_SELECTABLE_MODELS is unset; in that case the
   # process logs a one-shot deprecation warning at startup.
-  # Default (when neither is set): ["agentic", "coding"]; an empty or
-  # whitespace-only env value is treated as unset (default applies) —
-  # to lift restrictions entirely, hardcode `allowed_models: []` here.
+  # Default (when neither is set): ["agentic", "coding"] — also inlined
+  # as the interpolation default below so the shipped default is visible
+  # at the value line. An empty or whitespace-only env value is treated
+  # as unset (default applies) — to lift restrictions entirely, hardcode
+  # `allowed_models: []` here.
   # Exact model names only — this is NOT a prefix or substring match.
-  allowed_models: ${OPENAI_SELECTABLE_MODELS:-}
+  allowed_models: ${OPENAI_SELECTABLE_MODELS:-agentic,coding}
 
   # Outbound LLM request-body gzip compression. When True, every
   # outbound LLM HTTP request body is gzip-compressed and a

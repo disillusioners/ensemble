@@ -1655,14 +1655,17 @@ def _resolve_allowed_models(
          effective source AND the ``on_legacy`` callback (typically
          :func:`warn_deprecated_allowed_models_env`) is invoked
          exactly once per process.
-      3. ``yaml_value`` — the YAML-interpolated value. Because
-         ``config.yaml`` interpolates ``${OPENAI_SELECTABLE_MODELS:-}``
-         (empty default), this is the empty string when neither env var
-         is exported. We replace that empty string with the documented
-         default ``["agentic", "coding"]`` so a no-env-var deployment
-         matches the pre-rename behavior. Non-empty values (e.g. an
-         operator hard-coded the value in YAML bypassing the env vars)
-         are passed through untouched.
+      3. ``yaml_value`` — the YAML-interpolated value. The shipped
+         ``config.yaml`` now inlines the default in its interpolation
+         (``${OPENAI_SELECTABLE_MODELS:-agentic,coding}``), so the YAML
+         layer hands us either the new-var value or that default — not
+         an empty string. The empty-string branch is retained as
+         defense-in-depth for custom/programmatic yaml and direct
+         resolver calls: we substitute the documented default
+         ``["agentic", "coding"]`` so a no-env-var deployment matches
+         the pre-rename behavior. Non-empty values (e.g. an operator
+         hard-coded the value in YAML bypassing the env vars) are
+         passed through untouched.
 
     Pure function (no ``os.environ`` access, no module-level mutation):
     tests pass the resolved env values directly, which keeps the
@@ -1743,14 +1746,18 @@ def load_config(config_path: str | None = None) -> Config:
     config_dict: Dict[str, Any] = {}
 
     # Resolve the OPENAI_SELECTABLE_MODELS / OPENAI_ALLOWED_MODELS
-    # precedence chain for ``llm.allowed_models``. config.yaml
-    # interpolates ``${OPENAI_SELECTABLE_MODELS:-}`` (empty default),
-    # so the YAML layer hands us either the new-var value or an empty
-    # string. We need explicit precedence here (and an os.environ check
-    # for the legacy name) so:
+    # precedence chain for ``llm.allowed_models``. The shipped
+    # config.yaml now inlines the default in its interpolation
+    # (``${OPENAI_SELECTABLE_MODELS:-agentic,coding}``), so the YAML
+    # layer hands us either the new-var value or that default — not
+    # an empty string. We still need explicit precedence here (and an
+    # os.environ check for the legacy name) so:
     #   * both vars set → new wins, no warning
     #   * only legacy set → legacy wins + one-shot warning
     #   * neither set → documented default ("agentic,coding")
+    # The "neither set" branch is defense-in-depth: it only fires when
+    # a custom/programmatic yaml (or direct resolver call) presents
+    # an empty yaml_value.
     # ``warn_deprecated_allowed_models_env`` is called HERE on the
     # "old-var-is-effective" branch (via the resolver callback), and
     # ALSO from the startup entry points (daemon/__main__.py,

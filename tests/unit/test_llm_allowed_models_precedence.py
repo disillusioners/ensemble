@@ -100,15 +100,18 @@ class TestResolveAllowedModelsPure:
         assert on_legacy_called == [True]
 
     def test_old_var_honored_with_empty_yaml(self) -> None:
-        """Real-world: config.yaml interpolates ``${OPENAI_SELECTABLE_MODELS:-}``
-        which produces an empty string when the new var is unset. The
-        resolver must NOT fall through to the default when the legacy
-        var is set — the legacy value must win.
+        """Real-world: the shipped config.yaml interpolates
+        ``${OPENAI_SELECTABLE_MODELS:-agentic,coding}`` so the default
+        is visible at the value line; an empty ``yaml_value`` here
+        simulates what custom/programmatic yaml or a direct resolver
+        call can still present. The resolver must NOT fall through to
+        the default when the legacy var is set — the legacy value
+        must win.
         """
         from daemon.config import _resolve_allowed_models
 
         result = _resolve_allowed_models(
-            "",  # what config.yaml hands us when nothing is exported
+            "",  # simulates a custom/programmatic yaml (shipped yaml now inlines the default)
             new_var=None,
             old_var="legacy-only",
             on_legacy=lambda: None,
@@ -116,10 +119,10 @@ class TestResolveAllowedModelsPure:
         assert result == "legacy-only"
 
     def test_neither_set_yields_documented_default(self) -> None:
-        """When neither env var is exported and YAML interpolation gave
-        us an empty placeholder (the typical config.yaml state), the
-        resolver substitutes the documented default ``agentic,coding``
-        so a no-env-var deployment matches the pre-rename behavior.
+        """When neither env var is exported and an empty yaml value
+        arrives (custom yaml or programmatic callers), the resolver
+        substitutes the documented default ``agentic,coding`` so a
+        no-env-var deployment matches the pre-rename behavior.
         """
         from daemon.config import _resolve_allowed_models
 
