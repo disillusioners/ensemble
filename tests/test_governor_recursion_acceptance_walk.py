@@ -806,26 +806,51 @@ class TestKillSwitch:
             f"councilor-to-governor must succeed: {result!r}"
         )
 
-    async def test_killswitch_env_off_convene_still_refused_by_tool_scalpel(
+    async def test_killswitch_env_off_convene_proceeds(
         self, engine, envctl
     ):
-        """BEHAVIORAL FINDING (documented, not fixed): the tool-layer convene
-        scalpel (``daemon/tools/instance.py`` — ``if caller_agent_id ==
-        "governor"``) does NOT consult the kill-switch, so convene remains
-        refused even with the lifecycle guard disabled."""
+        """``LIMITS_GOVERNOR_RECURSION_GUARD_ENABLED=0`` opens the
+        tool-layer convene valve: a governor caller may convene a council
+        (V1 analog now PROCEEDS, no ``convene_council refused`` raise).
+
+        Final pre-merge coupling fix: the tool-layer ``convene_council``
+        refusal at ``daemon/tools/instance.py`` is gated on the same
+        ``_tool_layer_guard_armed(manager)`` predicate as the lifecycle
+        guard (mirrored at ``daemon/services/instance_lifecycle.py``).
+        When the kill-switch is open, both layers fall through and the
+        convene request reaches the REAL spawn path — the council-manager
+        child is created (status ``convened``, ``governor_instance_id``
+        present).
+        """
         envctl.set(kill="0")
         mgr = build_manager(engine)
+        svc = mgr._lifecycle_service
         root_gov = seed_instance(engine, "iid-root-gov-k001", "governor", None)
-        with tools_for(mgr, root_gov, "governor") as tools:
-            with pytest.raises(ValueError) as excinfo:
-                await tool_of(tools, "convene_council").coroutine(
-                    councilor_agent_id="worker", request="still refused"
+
+        with real_spawn_patches(svc):
+            with tools_for(mgr, root_gov, "governor") as tools:
+                convene = tool_of(tools, "convene_council")
+                result = await convene.coroutine(
+                    councilor_agent_id="worker", request="now allowed"
                 )
-        assert "convene_council refused" in str(excinfo.value)
+
+        assert isinstance(result, dict) and result["status"] == "convened", (
+            f"kill-switch must open the tool-layer valve: {result!r}"
+        )
+        gov_child = result["governor_instance_id"]
+        row = mgr._instance_repository.get(gov_child)
+        assert row is not None and row.agent_id == "governor", (
+            "council-manager child must be a REAL governor row "
+            "(the tool-layer scalpel no longer fires under env=0)"
+        )
+        assert row.parent_id == root_gov
 
     async def test_killswitch_k_zero_disables(self, engine, envctl):
         """``LIMITS_MAX_GOVERNOR_ANCESTORS=0`` disables the guard via the
-        REAL pydantic config path (K=0 short-circuits the guard block)."""
+        REAL pydantic config path (K=0 short-circuits the guard block).
+        The same disable path also opens the tool-layer convene valve
+        (K=0 arms neither guard layer — see
+        ``daemon/tools/instance.py::_tool_layer_guard_armed``)."""
         envctl.set(k="0")
         mgr = build_manager(engine)  # REAL LimitsConfig resolves K=0 from env
         assert mgr.config.limits.max_governor_ancestors == 0
@@ -840,6 +865,16 @@ class TestKillSwitch:
             row = mgr._instance_repository.get(iid)
             assert row is not None and row.agent_id == "governor"
             assert row.parent_id == parent
+
+        # K=0 also opens the tool-layer convene valve (V1 vector).
+        with real_spawn_patches(svc):
+            with tools_for(mgr, root_gov, "governor") as tools:
+                result = await tool_of(tools, "convene_council").coroutine(
+                    councilor_agent_id="worker", request="K=0 allowed"
+                )
+        assert isinstance(result, dict) and result["status"] == "convened", (
+            f"K=0 must open the tool-layer convene valve: {result!r}"
+        )
 
     async def test_default_env_guard_is_on(self, engine, envctl):
         """Default (no env override) → guard ON (independent of V2)."""

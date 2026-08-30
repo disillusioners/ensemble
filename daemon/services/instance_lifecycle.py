@@ -1388,6 +1388,16 @@ class InstanceLifecycleService:
                 getattr(self._config.limits, "governor_recursion_guard_enabled", True)
             )
             env_enabled = _resolve_guard_enabled()
+            # ── Cross-reference ──────────────────────────────────────────────────
+            # Mirrored at ``daemon/tools/instance.py::_tool_layer_guard_armed``
+            # (the tool-layer ``convene_council`` / ``convene_council_with_skill``
+            # refusal MUST consult the same predicate so the kill-switch gates
+            # BOTH layers — see the acceptance-walk test
+            # ``TestKillSwitch::test_killswitch_env_off_convene_proceeds``). If
+            # this predicate grows a new leg, mirror it in the tool-layer
+            # helper. The tool layer intentionally drops the ``parent_id`` leg
+            # (tools always have an instance context; no equivalent edge).
+            # This is the canonical source-of-truth block.
             if k > 0 and cfg_enabled and env_enabled and parent_id:
                 # Bind the repository handle locally for the guard block.
                 # The spawn path below (line ~1465) introduces a local

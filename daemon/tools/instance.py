@@ -485,6 +485,46 @@ def _governor_recursion_refusal(tool_name: str) -> str:
     )
 
 
+def _tool_layer_guard_armed(manager: Any) -> bool:
+    """Tool-layer mirror of the lifecycle guard's enablement predicate.
+
+    Returns ``True`` ONLY when the recursion guard is fully armed at every
+    leg — ``max_governor_ancestors >= 1`` AND the ``governor_recursion_guard_enabled``
+    config attribute is True AND the env kill-switch
+    (``LIMITS_GOVERNOR_RECURSION_GUARD_ENABLED``) resolves enabled. Any
+    disable path (env=0 / cfg=False / K=0) opens the tool-layer valve
+    fully and ``convene_council`` / ``convene_council_with_skill`` proceed
+    normally for a governor caller — no refusal, no warning.
+
+    This is the SOURCE-OF-TRUTH-COUPLED mirror of the lifecycle guard's
+    gating block at ``daemon/services/instance_lifecycle.py:1400``
+    (``if k > 0 and cfg_enabled and env_enabled and parent_id:``). The
+    lifecycle block is canonical; if it grows a new leg (e.g. an
+    additional knob), this helper MUST mirror it so the kill-switch
+    gates BOTH layers and the two can never drift. ``parent_id`` does
+    NOT apply at the tool layer (tools always have an instance context),
+    so that lifecycle leg is intentionally dropped here.
+
+    Do NOT re-derive the predicate from prose — the lifecycle block at
+    ``daemon/services/instance_lifecycle.py:1400`` is the canonical
+    source.
+    """
+    # Lazy import — circular-import breaker. ``daemon.tools`` sits below
+    # ``daemon.services`` and ``daemon.repositories`` in the import graph;
+    # eager import of the repository module at top-of-file can race with
+    # mid-startup module wiring. Mirrors
+    # ``daemon/services/instance_lifecycle._resolve_guard_enabled`` above.
+    from ..repositories.instance.repository import (
+        _resolve_governor_recursion_guard_enabled,
+    )
+
+    limits = getattr(manager.config, "limits", None)
+    k = int(getattr(limits, "max_governor_ancestors", 1))
+    cfg_enabled = bool(getattr(limits, "governor_recursion_guard_enabled", True))
+    env_enabled = _resolve_governor_recursion_guard_enabled()
+    return k > 0 and cfg_enabled and env_enabled
+
+
 def _child_cap_status(
     manager: Any, parent_id: str | None
 ) -> tuple[int | None, int | None]:
@@ -500,7 +540,7 @@ def _child_cap_status(
     A repository hiccup (``count_children`` raising) used to be
     swallowed silently — operators had no way to tell a missing parent
     from a transient DB blip. We now surface it at DEBUG (one line per
-    hiccup) and degrade to ``(None, None)`` so the caller's "drop the
+    hiccup) and degrade to ``(None, limit)`` so the caller's "drop the
     count gracefully" path keeps working.
 
     Args:
@@ -511,10 +551,9 @@ def _child_cap_status(
             the count lookup entirely and returns ``(None, limit)``.
 
     Returns:
-        ``(count, limit)`` on success; ``(None, None)`` when
-        ``parent_id`` is falsy OR the repository raised. ``limit`` is
-        always the configured cap (0 when unset); it is independent of
-        the count failure path.
+        ``(count, limit)`` on success; ``(None, limit)`` when ``parent_id``
+        is falsy or the repository raised — ``limit`` is always the
+        configured cap.
     """
     limit = int(
         getattr(manager.config.limits, "max_children_per_instance", 0) or 0
@@ -2109,7 +2148,16 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         # not after a full DB walk. Mirrors the identity-guard style at the
         # top of spawn_councilor / clear_councilor_errors (closure-bound
         # caller_agent_id, no TOCTOU).
-        if caller_agent_id == "governor":
+        #
+        # Kill-switch coupling (final pre-merge fix, 2026-08-30): the
+        # tool-layer refusal is GATED on the same predicate as the
+        # lifecycle guard (``_tool_layer_guard_armed(manager)``) — when
+        # the kill-switch is open (env=0, cfg=False, OR K=0), the tool
+        # layer proceeds normally and the convene request reaches the
+        # lifecycle spawn, where it is handled (or not) by the same
+        # coupled predicate. See ``daemon/services/instance_lifecycle.py:
+        # 1400`` for the canonical source-of-truth block this gates on.
+        if caller_agent_id == "governor" and _tool_layer_guard_armed(manager):
             logger.warning(
                 "convene_council refused: caller is governor — would recurse. "
                 "caller=%s instance=%s",
@@ -2258,7 +2306,13 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         # tool layer. Mirrors the same guard in ``convene_council`` above;
         # both surfaces must reject governor→governor before the lifecycle
         # layer's chain walk. Closure-bound check, no TOCTOU.
-        if caller_agent_id == "governor":
+        #
+        # Kill-switch coupling: gated on the same predicate as the
+        # lifecycle guard (see ``_tool_layer_guard_armed`` above and the
+        # cross-reference comment at ``daemon/services/instance_lifecycle.py:
+        # 1400``). When the kill-switch is open, this surface proceeds
+        # normally and the lifecycle layer is the sole authority.
+        if caller_agent_id == "governor" and _tool_layer_guard_armed(manager):
             logger.warning(
                 "convene_council_with_skill refused: caller is governor "
                 "— would recurse. caller=%s instance=%s",
