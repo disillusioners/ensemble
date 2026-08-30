@@ -402,6 +402,18 @@ NOT interrupt tool execution, and does NOT race with the active
 moves to ``enqueue_message`` and DOES create a new first-class turn
 (durable wake) — the same primitive the agent-tool send_message uses.
 
+Return shape (m2 fix, LOCKED C1-D3 Option A, 2026-08-30): the
+``queued`` flag on the flag-ON WC branch is a LITERAL ``True``,
+meaning "message was enqueued as a first-class turn" — NOT the
+``AsyncMessageResult.queued`` capacity flag (a spec collision:
+``AsyncMessageResult.queued`` means "blocked at capacity" and
+defaults to ``False``). Mirror the HTTP lane's 200-enqueue
+``MessageResponse.queued=True`` on success. The ``getattr(result,
+"queued", True)`` propagation that pre-m2 carried the
+AsyncMessageResult field through to the tool response was a
+silent-spec-collision defect; the literal ``True`` matches the
+LOCKED decisions.md C1-D3 contract.
+
 Access control: the caller's project_id must match the job's
 project_id (when both are set); system-default (unscoped-or-root) callers
 act as global operators and may access jobs in any project.
@@ -1956,7 +1968,16 @@ def create_job_tools(
                     "instance_id": instance_id,
                     "status": "enqueued",
                     "message_id": getattr(result, "message_id", None),
-                    "queued": getattr(result, "queued", True),
+                    # m2 fix: literal ``True`` per the LOCKED C1-D3
+                    # contract (``decisions.md`` C1-D3 Option A, leader-
+                    # locked 2026-08-30) — the flag means "message was
+                    # enqueued as a first-class turn" on the job_inject
+                    # lane, NOT the ``AsyncMessageResult.queued``
+                    # capacity flag (a spec collision: that field is
+                    # "blocked at capacity" and defaults to ``False``).
+                    # Mirror the HTTP lane's 200-enqueue ``MessageResponse.
+                    # queued=True`` on success.
+                    "queued": True,
                 }
 
             # RUNNING (always) and WAITING_CHILDREN (flag OFF legacy)

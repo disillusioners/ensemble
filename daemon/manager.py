@@ -8271,9 +8271,11 @@ class InstanceManager:
         # canonical owner of any in-flight ``graph.astream`` call (any
         # path that goes through ``gate.run`` registers there). Fall
         # back to the legacy ``_graph_tasks`` dict for paths that
-        # have not yet been migrated (e.g. the synchronous
-        # ``send_message`` ``graph.ainvoke`` path in
-        # ``InstanceMessagingService.send_message``).
+        # have not yet been migrated (e.g. ``enqueue_message`` →
+        # ``MessageProcessingPipeline`` — the surviving enqueue/pipeline
+        # path that has not yet been wired through the gate; the
+        # pre-m3 reference to ``InstanceMessagingService.send_message``
+        # was stale — that entry point no longer exists).
         try:
             gate_cancelled = False
             try:

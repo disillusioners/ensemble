@@ -383,6 +383,189 @@ class TestW5FifoLeftoverSingleTurn:
 
 
 # ---------------------------------------------------------------------------
+# 2b. M1 — requeue safeguard dedupe by OBJECT IDENTITY (same-content collision)
+# ---------------------------------------------------------------------------
+
+
+class TestM1RequeueSafeguardObjectIdentity:
+    """M1 fix: the requeue safeguard dedupes by ``id(e)`` (object
+    identity), NOT by content string.
+
+    The pre-m1 safeguard used ``[e.get("content") for e in pending_snapshot
+    or []]`` as the snapshot key set and ``e.get("content")`` as the lookup
+    key — silently dropping any concurrent ``set_injection`` entry whose
+    content string collided with a snapshot entry (silent data-loss race).
+
+    Post-m1 the safeguard builds the snapshot key set from ``id(e)`` and
+    looks up by ``id(e)``. Concurrent ``set_injection`` calls append NEW
+    dict objects — even if their content string collides with a snapshot
+    entry, they have a distinct id and MUST be re-queued.
+    """
+
+    @pytest.mark.asyncio
+    async def test_same_content_collision_requeues_raced_entry(self):
+        """Snapshot has entry content='hello'; cleared contains BOTH the
+        snapshot object (same id) AND a racy DIFFERENT object with
+        identical content 'hello'. The raced object MUST be re-queued;
+        the snapshot object MUST NOT be double-queued.
+        """
+        snapshot_entry = {"content": "hello", "timestamp": "t1"}
+        # Build a SEPARATE dict object with identical content — a concurrent
+        # set_injection appends a NEW dict object, even with same content.
+        raced_entry = {"content": "hello", "timestamp": "t2"}
+        assert id(snapshot_entry) != id(raced_entry), (
+            "test fixture invariant: snapshot + raced must be distinct "
+            "objects (otherwise the race simulation collapses)"
+        )
+
+        leftovers = [snapshot_entry]
+        service, manager, _captured, _graph = _make_capture_service(leftovers)
+
+        # Override clear_injection to return BOTH the snapshot object AND
+        # the racy object (the get→clear race window picked up the
+        # concurrent set_injection between the get_injection and the clear).
+        manager.clear_injection = MagicMock(
+            return_value=[snapshot_entry, raced_entry],
+        )
+
+        result = await service._process_message_with_tracking(
+            instance_id="iid-race",
+            message="wake",
+            message_id="msg-wake",
+            is_retry=True,
+            silent=False,
+        )
+        assert result is not None
+
+        # M1 invariant: the raced entry (new id) is re-queued; the
+        # snapshot entry (id already in snapshot_ids set) is NOT.
+        manager.requeue_injections.assert_called_once_with(
+            "iid-race", [raced_entry],
+        )
+        # Also sanity-check that requeue was called with EXACTLY the
+        # raced entry (not a list containing the snapshot one too).
+        call_args = manager.requeue_injections.call_args
+        requeue_entries = call_args.args[1]
+        assert len(requeue_entries) == 1
+        assert id(requeue_entries[0]) == id(raced_entry)
+        assert id(requeue_entries[0]) not in {id(snapshot_entry)}
+
+    @pytest.mark.asyncio
+    async def test_pre_m1_content_dedupe_would_have_dropped_raced(self):
+        """Sanity check: under the OLD (buggy) content-keyed safeguard,
+        the same fixture would have DROPPED the raced entry — a silent
+        data-loss race. This pins the M1 defect shape."""
+        snapshot_entry = {"content": "hello", "timestamp": "t1"}
+        raced_entry = {"content": "hello", "timestamp": "t2"}
+
+        leftovers = [snapshot_entry]
+        service, manager, _captured, _graph = _make_capture_service(leftovers)
+        manager.clear_injection = MagicMock(
+            return_value=[snapshot_entry, raced_entry],
+        )
+
+        await service._process_message_with_tracking(
+            instance_id="iid-race-old",
+            message="wake",
+            message_id="msg-wake",
+            is_retry=True,
+            silent=False,
+        )
+
+        # M1 invariant (post-fix): the raced entry IS re-queued.
+        # Pre-m1 (buggy): the raced entry would be dropped because
+        # content "hello" already appears in the snapshot content set.
+        manager.requeue_injections.assert_called_once()
+        requeue_entries = manager.requeue_injections.call_args.args[1]
+        assert requeue_entries == [raced_entry], (
+            "M1 invariant: object-identity dedupe must keep the raced "
+            "entry even when its content string collides with a snapshot "
+            "entry. The pre-m1 content-keyed check would have dropped it."
+        )
+
+
+# ---------------------------------------------------------------------------
+# 2c. m1 — prepended_msgs seam parameter threading (LOCKED C1-D2 spec order)
+# ---------------------------------------------------------------------------
+
+
+class TestM1SeamParameterThreading:
+    """m1 fix: ``_build_graph_input`` threads ``prepended_msgs`` (FIFO
+    leftovers) BETWEEN the persistent block and the user message. The
+    end-to-end input order is
+    ``[persistent..., leftover..., user]`` (and the D1 seam guard then
+    prepends pairing placeholders at position 0 AFTER build).
+
+    The default-None call sites (the three existing build sites that
+    don't pass a FIFO) stay byte-identical — prepended_msgs=None → no
+    extra messages in the output.
+    """
+
+    def test_default_none_seam_is_byte_identical_to_pre_m1(self):
+        """``_build_graph_input(content, msg_id, persistent=...)`` with
+        ``prepended_msgs=None`` (default) returns exactly
+        ``persistent + [user]`` — byte-identical to the pre-m1 contract.
+        """
+        from daemon.services.instance_messaging import _build_graph_input
+
+        ctx = HumanMessage(content="[ctx]", id="c1")
+        result = _build_graph_input("hello", "m1", [ctx])
+        msgs = result["messages"]
+        assert len(msgs) == 2
+        assert msgs[0] is ctx
+        assert msgs[1].id == "m1"
+        assert msgs[1].content == "hello"
+
+    def test_persistent_plus_prepended_plus_user_order(self):
+        """``_build_graph_input(content, msg_id, persistent, prepended)``
+        returns ``persistent + prepended + [user]`` — the LOCKED C1-D2
+        S4 spec order (seam parameter between persistent and user)."""
+        from daemon.services.instance_messaging import _build_graph_input
+
+        persistent = HumanMessage(content="[persistent]", id="p1")
+        prepended = HumanMessage(
+            content="leftover",
+            id="l1",
+            additional_kwargs={"injected_message": True},
+        )
+        result = _build_graph_input(
+            "hello", "m1", [persistent], [prepended],
+        )
+        msgs = result["messages"]
+        assert len(msgs) == 3
+        assert msgs[0] is persistent
+        assert msgs[1] is prepended
+        assert msgs[2].id == "m1"
+
+    def test_prepended_only_order(self):
+        """``_build_graph_input(content, msg_id, persistent=None,
+        prepended=...)`` returns ``[] + prepended + [user]`` — i.e. the
+        retry-with-checkpoint path with a non-empty FIFO and no
+        persistent block (matches the W5 single-turn drain test)."""
+        from daemon.services.instance_messaging import _build_graph_input
+
+        left1 = HumanMessage(
+            content="left-1", additional_kwargs={"injected_message": True},
+        )
+        left2 = HumanMessage(
+            content="left-2",
+            additional_kwargs={
+                "injected_message": True,
+                "source": "internal_agent:child-x",
+            },
+        )
+        result = _build_graph_input(
+            "user-msg", "u1", None, [left1, left2],
+        )
+        msgs = result["messages"]
+        assert len(msgs) == 3
+        assert msgs[0] is left1
+        assert msgs[1] is left2
+        assert msgs[2].id == "u1"
+        assert msgs[2].content == "user-msg"
+
+
+# ---------------------------------------------------------------------------
 # 3. S9 — terminal-after-turn-1: queued Task claims on a COMPLETED parent
 # ---------------------------------------------------------------------------
 

@@ -534,8 +534,12 @@ def _build_graph_input(
     exact input order: ``[pairing_placeholders?] + persistent_block +
     leftover_fifo_msgs (oldest-first) + [user_message]`` — see
     ``test_instance_messaging_seam_drain`` for the positional pin
-    across all four slots. ``prepended_msgs`` defaults to ``None`` so
-    the three existing call sites (``:3402/:3411/:3420``) remain
+    across all four slots. The pairing-placeholders are prepended at
+    position 0 by the D1 entry-seam guard AFTER ``_build_graph_input``
+    returns — so the helper places ``prepended_msgs`` (the FIFO
+    leftovers) BETWEEN the persistent block and the user message,
+    not at the head. ``prepended_msgs`` defaults to ``None`` so the
+    three existing call sites (``:3402/:3411/:3420``) remain
     byte-identical; only the new seam-drain call site passes
     non-``None``.
 
@@ -553,14 +557,16 @@ def _build_graph_input(
             block this turn" — every turn after the first, or any
             turn when persistent context is empty.
         prepended_msgs: Optional list of :class:`HumanMessage` to
-            inject BEFORE the persistent block. Used by the D2
-            seam-drain to thread parked FIFO leftovers into the
-            LLM-bound list for THIS turn (oldest-first, single
-            turn when both leftovers + new message exist). The
-            pairing-placeholder ``ToolMessage``s synthesized by
-            the D1 entry-seam guard (T6) also ride this seam —
-            ``prepended_msgs`` carries both the placeholders AND
-            the FIFO leftovers, in that order. ``None`` (default)
+            inject BETWEEN the persistent block and the user
+            message. Used by the D2 seam-drain to thread parked
+            FIFO leftovers into the LLM-bound list for THIS turn
+            (oldest-first, single turn when both leftovers + new
+            message exist). The pairing-placeholder ``ToolMessage``s
+            synthesized by the D1 entry-seam guard (T6) ride a
+            different seam — they are prepended at position 0 by
+            :func:`_heal_poisoned_checkpoint_tail` AFTER
+            ``_build_graph_input`` returns, so they precede the
+            persistent block in the final list. ``None`` (default)
             and ``[]`` both mean "no prepended messages this
             turn" — preserves byte-identical behavior for the
             three existing call sites.
@@ -569,13 +575,18 @@ def _build_graph_input(
         ``{"messages": [...]}`` dict ready for
         ``graph.astream(graph_input, ...)``. With a non-empty
         ``persistent_context_msgs``, the list is
-        ``[prepended, persistent_1, ..., persistent_n, user_message]``.
-        With a non-empty ``prepended_msgs`` and no persistent
-        block, it is ``[prepended_1, ..., user_message]``. With
-        neither, just ``[user_message]``. The pairing
-        placeholders (T6) sit at the head — immediately after the
-        poisoned checkpoint tail — so they precede everything
-        else.
+        ``[persistent_1, ..., persistent_n, prepended_1, ...,
+        user_message]`` — the persistent block first, then the
+        FIFO leftovers (``prepended_msgs``), then the user
+        message. With a non-empty ``prepended_msgs`` and no
+        persistent block, it is ``[prepended_1, ..., user_message]``.
+        With neither, just ``[user_message]``. The pairing
+        placeholders (T6) sit at the head — prepended by the D1
+        guard AFTER ``_build_graph_input`` returns, so the final
+        end-to-end order is
+        ``[pairing_placeholders?] + persistent_block? +
+        leftover_fifo_msgs (oldest-first) + [user_message]``
+        per the LOCKED C1-D2 spec.
     """
     user_message = HumanMessage(content=content, id=message_id)
     # Hybrid split — prepend the persistent context block BEFORE the
@@ -584,16 +595,19 @@ def _build_graph_input(
     # produces the steady-state second-turn layout ``[user_message]``.
     # Per the 2026-07-29 refactor this block also carries skills.
     persistent = list(persistent_context_msgs or [])
-    # T5 (wc-wake): prepended_msgs sits BEFORE the persistent block.
-    # The pairing-placeholder ``ToolMessage``s synthesized by the D1
-    # entry-seam guard (T6) also flow through this seam — they MUST
-    # sit at the head (immediately after the poisoned checkpoint
-    # tail) so the order-pin test can verify positional composition
-    # across all four slots. Empty / None ``prepended_msgs``
-    # produces byte-identical pre-T5 output for the three call
-    # sites that do not pass it.
+    # T5 (wc-wake): ``prepended_msgs`` flows FIFO leftovers into the
+    # LLM-bound list between the persistent block and the user message
+    # — the LOCKED C1-D2 S4 spec order
+    # ``[pairing_placeholders?] + persistent + leftovers (oldest-first) +
+    # [user_message]``. The pairing-placeholder ``ToolMessage``s
+    # synthesized by the D1 entry-seam guard (T6) ride a DIFFERENT seam
+    # — they are prepended at position 0 by
+    # :func:`_heal_poisoned_checkpoint_tail` AFTER this helper returns,
+    # so they precede the persistent block in the final list. Empty /
+    # None ``prepended_msgs`` produces byte-identical pre-T5 output for
+    # the three call sites that do not pass it.
     prepended = list(prepended_msgs or [])
-    return {"messages": prepended + persistent + [user_message]}
+    return {"messages": persistent + prepended + [user_message]}
 
 
 def _get_message_event_type(msg: dict) -> str:
@@ -3493,6 +3507,55 @@ class InstanceMessagingService:
             )
             persistent_context_msgs.append(_task_ctx_msg)
 
+        # ── D2 seam drain (wc-wake-report-integrity, T5) — pre-build phase ──
+        # m1 fix: the FIFO snapshot + leftover HumanMessage list are built
+        # BEFORE the three ``_build_graph_input`` call sites below. The
+        # leftovers then ride the ``prepended_msgs`` seam parameter
+        # (``_build_graph_input`` keeps the existing positional contract
+        # for the three legacy call sites — they default ``None`` and
+        # stay byte-identical when the FIFO is empty; only the WC-wake
+        # wake-turn path threads non-empty leftovers through). The
+        # ``clear_injection`` step is hoisted to AFTER the build so the
+        # get → build → clear race window stays small. The requeue
+        # safeguard (M1 object-identity) closes the get/clear race the
+        # same way it did before.
+        #
+        # This subsumes the in-graph site 1
+        # (``daemon/graph.py:2937-3005``) for the wake turn (it
+        # finds an empty FIFO on the wake turn → no double-add).
+        # Crash-window parity with site 1 is accepted: a crash
+        # between the clear and ``graph.astream`` loses the leftovers
+        # — same exposure, no new risk.
+        #
+        # The drain is flag-INDEPENDENT (no gating; the constant
+        # ``INJECTION_ELIGIBLE_STATUSES`` shrunk to ``{"running"}``
+        # in T2 — but the drain operates on the RAM FIFO which is
+        # also the RUNNING-target lane; under flag OFF a WC-wake
+        # send still lands here via the legacy FIFO injection route
+        # and the drain picks it up the same way).
+        pending_snapshot = self._manager.get_injection(instance_id)
+        leftover_fifo_msgs: list[HumanMessage] = []
+        for entry in pending_snapshot or []:
+            # Mirror graph.py:2950-2961 — preserve the
+            # ``injected_message: True`` marker + optional
+            # ``source`` so leftovers ARE injections (C3
+            # compaction preservation + D12 subtree filter keep
+            # working). The marker is honestly applied because
+            # these are pre-existing injections, not first-class
+            # turn messages.
+            kwargs: dict[str, Any] = {
+                "injected_message": True,
+            }
+            _src = entry.get("source")
+            if _src:
+                kwargs["source"] = _src
+            leftover_fifo_msgs.append(
+                HumanMessage(
+                    content=entry.get("content", ""),
+                    additional_kwargs=kwargs,
+                )
+            )
+
         # Build input - on retry with checkpoint, resume from None
         if not is_retry:
             await self._maybe_compact_context(instance_id, graph, config)
@@ -3508,11 +3571,14 @@ class InstanceMessagingService:
                 content = _build_message_content(message, images)
                 if content and not silent:
                     # Resume on the existing checkpoint — no persistent
-                    # prepending (the persistent block already lives in
-                    # the checkpoint, and re-prepending would double-
-                    # inject on the resume).
+                    # prepending (the persistent block already lives
+                    # in the checkpoint, and re-prepending would double-
+                    # inject on the resume). m1: thread leftover FIFO
+                    # via the seam parameter (default-None when FIFO is
+                    # empty, byte-identical pre-m1 behavior).
                     graph_input = _build_graph_input(
                         content, message_id,
+                        prepended_msgs=leftover_fifo_msgs or None,
                     )
                 else:
                     # Pure checkpoint resume (silent mode or no content)
@@ -3522,88 +3588,55 @@ class InstanceMessagingService:
                 content = _build_message_content(message, images)
                 graph_input = _build_graph_input(
                     content, message_id,
+                    prepended_msgs=leftover_fifo_msgs or None,
                 )
         else:
             # First attempt - add message to conversation, with the
             # persistent context block (project + shared-context +
             # skills) prepended so LangGraph's ``add_messages`` reducer
-            # checkpoints it once for all subsequent turns.
+            # checkpoints it once for all subsequent turns. m1: thread
+            # leftover FIFO via the seam parameter; the helper places
+            # ``prepended_msgs`` (FIFO leftovers) BETWEEN the persistent
+            # block and the user message — positional order
+            # ``[persistent...] + [leftovers...] + [user]`` per the
+            # LOCKED C1-D2 S4 spec. The D1 entry-seam guard then
+            # prepends pairing placeholders at position 0 to produce
+            # the final end-to-end order
+            # ``[placeholders?] + persistent + leftovers + user``.
             content = _build_message_content(message, images)
             graph_input = _build_graph_input(
                 content, message_id,
                 persistent_context_msgs=persistent_context_msgs or None,
+                prepended_msgs=leftover_fifo_msgs or None,
             )
 
-        # ── D2 seam drain (wc-wake-report-integrity, T5) ────────────────────
-        # Parked-FIFO leftovers drain INTO the graph input BEFORE the
-        # new user message — oldest-first, one turn when both exist.
-        # This subsumes the in-graph site 1
-        # (``daemon/graph.py:2937-3005``) for the wake turn (it
-        # finds an empty FIFO on the wake turn → no double-add).
-        # Crash-window parity with site 1 is accepted: a crash
-        # between the clear (line below) and ``graph.astream``
-        # loses the leftovers — same exposure, no new risk.
-        # The drain is flag-INDEPENDENT (no gating; the constant
-        # ``INJECTION_ELIGIBLE_STATUSES`` shrunk to ``{"running"}``
-        # in T2 — but the drain operates on the RAM FIFO which is
-        # also the RUNNING-target lane; under flag OFF a WC-wake
-        # send still lands here via the legacy FIFO injection route
-        # and the drain picks it up the same way).
+        # ── D2 seam drain — post-build phase ─────────────────────────────
+        # ``clear_injection`` AFTER the build so the get → build → clear
+        # race window stays small. The requeue safeguard (M1 object-
+        # identity) closes the remaining get/clear window: entries
+        # present in ``cleared`` but not in ``pending_snapshot`` were
+        # appended mid-drain by a concurrent ``set_injection`` call;
+        # re-append them at the FRONT so the original FIFO order is
+        # preserved.
+        #
+        # Only clear when we actually built a graph_input (silent-resume
+        # path leaves the FIFO intact for the next turn — same gating
+        # as the pre-m1 drain).
+        #
+        # M1 fix: dedupe by OBJECT IDENTITY (``id(e)``), not by content
+        # string. A concurrent ``set_injection`` call appends a NEW dict
+        # object to the FIFO — same content string or not, it has a
+        # distinct id. The previous content-keyed check silently dropped
+        # a racy entry whose content string collided with a snapshot
+        # entry (silent data-loss race).
         if graph_input is not None:
-            pending_snapshot = self._manager.get_injection(instance_id)
-            leftover_fifo_msgs: list[HumanMessage] = []
-            for entry in pending_snapshot or []:
-                # Mirror graph.py:2950-2961 — preserve the
-                # ``injected_message: True`` marker + optional
-                # ``source`` so leftovers ARE injections (C3
-                # compaction preservation + D12 subtree filter keep
-                # working). The marker is honestly applied because
-                # these are pre-existing injections, not first-class
-                # turn messages.
-                kwargs: dict[str, Any] = {
-                    "injected_message": True,
-                }
-                _src = entry.get("source")
-                if _src:
-                    kwargs["source"] = _src
-                leftover_fifo_msgs.append(
-                    HumanMessage(
-                        content=entry.get("content", ""),
-                        additional_kwargs=kwargs,
-                    )
-                )
             cleared = self._manager.clear_injection(instance_id)
-            # Requeue safeguard — closes the get/clear race.
-            # Entries present in ``cleared`` but not in
-            # ``pending_snapshot`` were appended mid-drain by a
-            # concurrent ``set_injection`` call; re-append them at
-            # the FRONT so the original FIFO order is preserved.
             if cleared is not None:
-                snapshot_ids = [e.get("content") for e in pending_snapshot or []]
-                raced = [
-                    e for e in cleared if e.get("content") not in snapshot_ids
-                ]
+                snapshot_ids = {id(e) for e in pending_snapshot or []}
+                raced = [e for e in cleared if id(e) not in snapshot_ids]
                 if raced:
                     self._manager.requeue_injections(instance_id, raced)
-            # Compose the final graph_input: leftovers slot in
-            # BETWEEN the persistent block and the new user_msg,
-            # matching the S4 input-order pin. The pairing-
-            # placeholders (T6) ride the same seam but are appended
-            # at the head by the D1 entry-seam guard.
             if leftover_fifo_msgs:
-                existing_messages = list(graph_input.get("messages") or [])
-                # The user_message is the LAST entry (sentinel); the
-                # persistent block sits BEFORE it. Leftovers slot
-                # between persistent and user_message: that is,
-                # at index ``len(existing_messages) - 1``.
-                insert_at = max(0, len(existing_messages) - 1)
-                graph_input = {
-                    "messages": (
-                        existing_messages[:insert_at]
-                        + leftover_fifo_msgs
-                        + existing_messages[insert_at:]
-                    ),
-                }
                 logger.info(
                     f"[Injection] D2 seam-drain: {len(leftover_fifo_msgs)} "
                     f"parked FIFO entries flowed into graph_input for "

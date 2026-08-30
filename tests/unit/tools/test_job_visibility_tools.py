@@ -1174,6 +1174,77 @@ class TestJobInjectTool:
         mock_manager.set_injection.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_job_inject_waiting_children_flag_on_enqueue_returns_literal_queued(
+        self, mock_services, mock_manager, job_inject_tool,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """m2 fix (LOCKED C1-D3 Option A): the flag-ON WC branch returns
+        ``queued: True`` LITERALLY — NOT the ``AsyncMessageResult.queued``
+        capacity flag.
+
+        The pre-m2 implementation propagated ``getattr(result, "queued",
+        True)`` from the ``enqueue_message`` return value (an
+        ``AsyncMessageResult`` whose ``queued`` field defaults to ``False``
+        and means "blocked at capacity" — a spec collision with the
+        job_inject lane's "message was enqueued as a first-class turn"
+        meaning).
+
+        This test stubs ``enqueue_message`` to return an object whose
+        ``queued`` is ``False`` and asserts the tool response still
+        returns ``queued=True``. The pre-m2 implementation would have
+        propagated ``False``.
+        """
+        from daemon.services.instance_messaging import (
+            _reset_wc_wake_enqueue_for_tests,
+        )
+
+        monkeypatch.setenv("ENSEMBLE_WC_WAKE_ENQUEUE", "1")
+        _reset_wc_wake_enqueue_for_tests()
+
+        job_service, _, _ = mock_services
+
+        root_id = "inject-wc-on-m2"
+        record = _make_work_record(
+            "inject-wc-on-m2", instance_id=root_id, project_id="proj-1",
+            agent_id="developer",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+
+        root = _make_instance(root_id, status="waiting_children")
+        mock_manager._instance_repository.get = MagicMock(return_value=root)
+
+        # enqueue_message returns an object whose ``queued`` is FALSE —
+        # mirrors the AsyncMessageResult.queued capacity flag shape.
+        enqueue_result = MagicMock()
+        enqueue_result.message_id = "msg-wake-m2"
+        enqueue_result.queued = False  # <-- pre-m2 would have propagated this
+        mock_manager.enqueue_message = AsyncMock(return_value=enqueue_result)
+        # has_instance_busy pre-check — no live task.
+        if hasattr(mock_manager, "_task_repo") and mock_manager._task_repo is not None:
+            mock_manager._task_repo.has_instance_busy = MagicMock(return_value=False)
+        else:
+            mock_manager._task_repo = MagicMock()
+            mock_manager._task_repo.has_instance_busy = MagicMock(return_value=False)
+
+        result = await job_inject_tool.ainvoke({
+            "job_id": "inject-wc-on-m2",
+            "message": "wake up",
+        })
+
+        # m2 invariant: ``queued`` is the LITERAL ``True`` on the
+        # job_inject lane (LOCKED C1-D3), NOT the propagated
+        # AsyncMessageResult.queued capacity flag.
+        assert result["status"] == "enqueued"
+        assert result["message_id"] == "msg-wake-m2"
+        assert result["queued"] is True, (
+            "m2 invariant: job_inject must return ``queued=True`` LITERALLY, "
+            "regardless of the enqueue_message return value's queued field. "
+            "The pre-m2 getattr(result, 'queued', True) propagation silently "
+            "carried the AsyncMessageResult capacity flag through to the tool "
+            "response — a spec collision the LOCKED C1-D3 row closes."
+        )
+
+    @pytest.mark.asyncio
     async def test_job_inject_waiting_children_flag_on_busy(
         self, mock_services, mock_manager, job_inject_tool,
         monkeypatch: pytest.MonkeyPatch,
