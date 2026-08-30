@@ -79,7 +79,7 @@ llm:
   # as unset (default applies) — to lift restrictions entirely, hardcode
   # `allowed_models: []` here.
   # Exact model names only — this is NOT a prefix or substring match.
-  allowed_models: ${OPENAI_SELECTABLE_MODELS:-agentic,coding}
+  allowed_models: ${OPENAI_SELECTABLE_MODELS:-agentic,coding,coding2}
 
   # Outbound LLM request-body gzip compression. When True, every
   # outbound LLM HTTP request body is gzip-compressed and a
