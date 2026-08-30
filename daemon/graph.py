@@ -1958,6 +1958,23 @@ class ThinkingChatOpenAI(ChatOpenAI):
     # injects the default when the key is absent).
     default_streaming: ClassVar[bool] = True
 
+    # Default outbound request-gzip flag for ``clean_llm_config``. The
+    # daemon sets this from ``LLMConfig.request_gzip`` at startup
+    # (see ``daemon/__main__.py`` and ``daemon/api.py``), BEFORE any
+    # instance is created. Default OFF; operators flip to True via
+    # ``OPENAI_REQUEST_GZIP=true``. Sites that want to opt out for a
+    # specific LLM pass ``http_client=<plain client>`` and
+    # ``http_async_client=<plain client>`` in their config dict —
+    # those values are preserved verbatim (``clean_llm_config`` only
+    # attaches gzip clients when BOTH keys are absent). When True,
+    # ``clean_llm_config`` injects gzip-enabled ``http_client`` and
+    # ``http_async_client`` kwargs (see ``daemon.services.llm_gzip``)
+    # so every outbound LLM HTTP request body is gzip-compressed on
+    # the wire and ``Content-Encoding: gzip`` is stamped. Response
+    # handling is untouched — we never set ``Accept-Encoding: gzip``
+    # on the response side.
+    default_request_gzip: ClassVar[bool] = False
+
     def _should_echo_reasoning(self) -> bool:
         """Return True if reasoning_content echo is enabled for the current model.
 
@@ -2344,6 +2361,47 @@ def clean_llm_config(cfg: dict) -> dict:
     # Respect explicit caller opt-outs (stream_usage=False).
     if "stream_usage" not in cleaned:
         cleaned["stream_usage"] = True
+    # Outbound LLM request-body gzip compression (opt-in). When
+    # ``default_request_gzip`` is True and the caller has NOT already
+    # supplied an ``http_client`` / ``http_async_client`` kwarg, attach
+    # the gzip-enabled httpx clients (from ``daemon.services.llm_gzip``)
+    # so every outbound LLM HTTP request body is gzip-compressed on
+    # the wire and ``Content-Encoding: gzip`` is stamped (Content-Length
+    # auto-corrected). When the flag is OFF (default), this branch is
+    # a no-op — the langchain-openai client uses its built-in default
+    # httpx clients and the wire is byte-identical to the pre-feature
+    # state. Sites that want to bypass the gzip wrapping for a
+    # specific LLM pass plain ``http_client`` / ``http_async_client``
+    # kwargs explicitly — those values are preserved verbatim (the
+    # ``not in cleaned`` guards).
+    #
+    # Partial-override contract: passing EITHER ``http_client`` OR
+    # ``http_async_client`` (the caller-supplied value, even ``None``,
+    # counts as "present" — the ``not in cleaned`` checks test for key
+    # membership) opts the LLM out of gzip wrapping entirely on BOTH
+    # sync and async paths. There is no partial gzip — you cannot pass
+    # a gzip ``http_client`` and a plain ``http_async_client`` (or vice
+    # versa) and have one path gzipped while the other is not. To
+    # enable gzip, pass NEITHER — the function injects the gzip-enabled
+    # module singletons for both. If a caller actually needs one path
+    # gzipped and the other not (uncommon; test-only), they must build
+    # both clients by hand and pass both kwargs explicitly, bypassing
+    # this function.
+    if (
+        ThinkingChatOpenAI.default_request_gzip
+        and "http_client" not in cleaned
+        and "http_async_client" not in cleaned
+    ):
+        # Lazy import: ``daemon.services.llm_gzip`` pulls in httpx,
+        # but the project already depends on httpx. Keeping the import
+        # local avoids an extra import-ordering surprise in the rare
+        # test paths that touch ``daemon.graph`` without the LLM
+        # services loaded.
+        from .services.llm_gzip import get_or_build_gzip_clients
+
+        gzip_sync, gzip_async = get_or_build_gzip_clients()
+        cleaned["http_client"] = gzip_sync
+        cleaned["http_async_client"] = gzip_async
     return cleaned
 
 

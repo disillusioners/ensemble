@@ -59,6 +59,8 @@ def _do_chat_call(
     api_key: str | None,
     messages: list[dict[str, str]],
     temperature: float,
+    *,
+    http_client: Any | None = None,
 ) -> Any:
     """Construct a fresh ``openai.OpenAI`` client and run a chat-completion.
 
@@ -73,12 +75,30 @@ def _do_chat_call(
     When failover is inactive, ``current_failover_url()`` returns
     ``None`` and we fall back to ``base_url`` (the chat
     endpoint) — same behavior as pre-v2 (zero behavior change).
+
+    The ``http_client`` kwarg is the seam for outbound request-body
+    gzip compression (``OPENAI_REQUEST_GZIP=true``). When None
+    (default), the openai client constructs its own built-in
+    default httpx client (the openai SDK's ``DefaultHttpxClient``)
+    — no gzip wrapping, no ``Content-Encoding`` header, no
+    transport mutation; the wire is uncompressed and matches what
+    pre-feature callers observed. When a gzip-enabled client is
+    provided (the module singleton from
+    ``daemon.services.llm_gzip.get_or_build_gzip_clients``), every
+    request body the client sends is gzip-compressed and
+    ``Content-Encoding: gzip`` is stamped on the wire — the gzip
+    wrapping is the ONLY behavioral change on top of the SDK
+    defaults (Limits + Timeout are also pinned to match the SDK
+    defaults — see ``make_gzip_httpx_client``).
     """
     url = current_failover_url() or base_url
-    client = openai.OpenAI(
-        api_key=api_key or "",
-        base_url=url or None,
-    )
+    client_kwargs: dict[str, Any] = {
+        "api_key": api_key or "",
+        "base_url": url or None,
+    }
+    if http_client is not None:
+        client_kwargs["http_client"] = http_client
+    client = openai.OpenAI(**client_kwargs)
     return client.chat.completions.create(
         model=model,
         messages=messages,  # type: ignore[arg-type]
@@ -1523,11 +1543,20 @@ class SkillEvolutionService:
             # ``daemon/manager.py`` participates in the same
             # HA budget-split predicate as the LangChain sites.
             # See ``daemon.services.llm_failover``.
+            #
+            # Opt-in outbound request-body gzip compression — see
+            # ``daemon.services.llm_gzip.resolve_gzip_client`` for the
+            # full rationale.
+            from .llm_gzip import resolve_gzip_client
+
             failover_config = {
                 "base_url": base_url,
                 "base_url_backup": self._llm_config.get("base_url_backup"),
                 "api_key": api_key,
             }
+            gzip_http_client = resolve_gzip_client(
+                bool(self._llm_config.get("request_gzip"))
+            )
             response = await asyncio.to_thread(
                 invoke_raw_with_failover,
                 lambda: _do_chat_call(
@@ -1536,6 +1565,7 @@ class SkillEvolutionService:
                     api_key=api_key,
                     messages=messages,
                     temperature=0.7,
+                    http_client=gzip_http_client,
                 ),
                 failover_config,
             )
