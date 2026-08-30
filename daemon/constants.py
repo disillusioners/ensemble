@@ -391,8 +391,17 @@ ALIVE_INSTANCE_STATUSES: frozenset[str] = frozenset({
 #   * ``"auto-scan"``                     — blueprinter scan-service
 #                                          trigger
 #                                          (``daemon/services/blueprint_scan_service.py:316``).
+#   * ``"scheduler"``                     — scheduler adapter trigger
+#                                          enqueue — userless pure-daemon
+#                                          identity, same trust class as
+#                                          ``admin-endpoint`` /
+#                                          ``auto-scan``
+#                                          (``daemon/sources/adapters/scheduler.py:765``).
 #
-# Deliberately NOT in the set (legitimate user origins):
+# Deliberately NOT in the set (legitimate user origins — an end-user
+# identity rides the request; userless pure-daemon identities such as
+# ``admin-endpoint`` / ``auto-scan`` / ``scheduler`` mint no user
+# identity, are daemon-minted trust anchors, and are reserved above):
 #   * ``"api"``                           — default + bare-api origin;
 #                                          the full F2 P2.3 user-origin
 #                                          question stays gated/out of
@@ -405,8 +414,6 @@ ALIVE_INSTANCE_STATUSES: frozenset[str] = frozenset({
 #                                          adapter side and reflected
 #                                          back into ``JobItem.source``
 #                                          by the source dispatcher.
-#   * ``"scheduler"``                     — scheduler adapter
-#                                          (``daemon/sources/adapters/scheduler.py``).
 #   * ``"dependency_bus"``                — FollowUp.source field default
 #                                          (``daemon/services/dependency_bus.py:159``),
 #                                          kept only as the legacy-payload
@@ -440,6 +447,7 @@ RESERVED_SOURCE_PREFIXES: frozenset[str] = frozenset({
     "skill_evolution",
     "admin-endpoint",
     "auto-scan",
+    "scheduler",
 })
 
 

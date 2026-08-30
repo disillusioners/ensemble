@@ -94,7 +94,8 @@ class TestReservedSourcePrefixesConstant:
         (provenance comments in ``daemon/constants.py`` carry the
         file:line citations). Any future addition/removal MUST edit
         this pin in the same commit — a silent membership change is
-        exactly the fork this test exists to catch."""
+        exactly the fork this test exists to catch. 2026-08-30 gate
+        reverse-census added ``scheduler`` (17 members)."""
         from daemon.constants import RESERVED_SOURCE_PREFIXES
 
         assert RESERVED_SOURCE_PREFIXES == frozenset({
@@ -116,6 +117,7 @@ class TestReservedSourcePrefixesConstant:
             "skill_evolution",
             "admin-endpoint",
             "auto-scan",
+            "scheduler",
         })
 
     def test_helper_function_is_reserved_source(self):
@@ -147,12 +149,12 @@ class TestReservedSourcePrefixesConstant:
         assert is_reserved_source("skill_evolution") is True
         assert is_reserved_source("admin-endpoint") is True
         assert is_reserved_source("auto-scan") is True
+        assert is_reserved_source("scheduler") is True
 
         # Legitimate user origins — must NOT be flagged.
         assert is_reserved_source("api") is False
         assert is_reserved_source("telegram:user:1") is False
         assert is_reserved_source("webhook:gh-hook") is False
-        assert is_reserved_source("scheduler") is False
         assert is_reserved_source("custom-app") is False
 
         # Edge cases — None and empty strings are NOT reserved
@@ -743,15 +745,18 @@ class TestCreateJobSourceBoundary:
         kwargs = stub.enqueue.call_args.kwargs
         assert kwargs["source"] == "telegram:user:1"
 
-    def test_create_job_accepts_scheduler_source(
+    def test_create_job_rejects_scheduler_source(
         self, create_job_client
     ):
-        """``source='scheduler'`` is a legitimate user origin
-        (scheduled triggers via ``daemon/sources/adapters/scheduler.py``)
-        — NOT an internal family. Must pass through unchanged even
-        though it shares no prefix with the reserved set. Pinned
-        here to defend against a future over-broadening of the
-        reserved set (F2 P2.3 note)."""
+        """``source='scheduler'`` is a userless pure-daemon identity
+        minted at ``daemon/sources/adapters/scheduler.py:765`` (durable
+        in BOTH ``job_queue_items.source`` and
+        ``message_queue.source``) — same trust class as
+        ``admin-endpoint`` / ``auto-scan``. Census-reserved
+        2026-08-30 after the gate reverse-scan proved it forgeable
+        via ``POST /jobs``; the boundary must now reject it with
+        422 (former accept-side pin flipped — no accept-side
+        expectation remains)."""
         from daemon.routers.jobs_crud import get_job_queue_service
 
         stub = _stub_enqueue_service()
@@ -766,10 +771,8 @@ class TestCreateJobSourceBoundary:
             },
         )
 
-        assert resp.status_code == 500, resp.text  # sentinel -> 500
-        stub.enqueue.assert_called_once()
-        kwargs = stub.enqueue.call_args.kwargs
-        assert kwargs["source"] == "scheduler"
+        assert resp.status_code == 422, resp.text
+        stub.enqueue.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
