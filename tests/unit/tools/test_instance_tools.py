@@ -125,10 +125,42 @@ class TestAuditBaseline:
 
     def test_injection_eligible_statuses_constant_exists(self):
         """The eligibility set MUST live in ``daemon.constants`` (D13,
-        LOCKED choice — no Manager-attr alternative, delta-fix #4)."""
+        LOCKED choice — no Manager-attr alternative, delta-fix #4).
+
+        wc-wake-report-integrity (T2, 2026-08-30): ``WAITING_CHILDREN``
+        was removed from this set. A parked WC parent has no live turn
+        to absorb a mid-turn injection — only ``enqueue_message``
+        (durable wake, first-class turn) wakes it. The legacy WC
+        injection route is preserved behind the
+        ``ENSEMBLE_WC_WAKE_ENQUEUE`` kill-switch (C1-Q2 RESOLVED;
+        default OFF at code-land) via an explicit branch at each of
+        the three call sites — the constant stays single-home and
+        config-free. See ``_test_injection_eligible_constant_excludes_wc``
+        below for the parametrized flag-state coverage.
+        """
         from daemon.constants import INJECTION_ELIGIBLE_STATUSES
 
-        assert INJECTION_ELIGIBLE_STATUSES == frozenset({"running", "waiting_children"})
+        assert INJECTION_ELIGIBLE_STATUSES == frozenset({"running"})
+
+    def test_injection_eligible_statuses_excludes_wc(self):
+        """wc-wake-report-integrity (T2): the set no longer contains
+        ``\"waiting_children\"`` — the constant stays
+        config-free per single-home convention; the legacy WC
+        injection route lives behind the ``ENSEMBLE_WC_WAKE_ENQUEUE``
+        flag branch at each call site (see
+        ``_route_send_message`` /
+        ``daemon/routers/messages.py:351`` / ``job_inject``).
+        """
+        from daemon.constants import INJECTION_ELIGIBLE_STATUSES
+
+        assert "waiting_children" not in INJECTION_ELIGIBLE_STATUSES, (
+            "WC injected via set_injection strands the message on a "
+            "parked parent (no live agent_node pass to drain it). "
+            "All three lanes must route WC through enqueue_message "
+            "(under the flag ON) or fall back to the explicit "
+            "flag-OFF branch."
+        )
+        assert "running" in INJECTION_ELIGIBLE_STATUSES
 
     def test_terminal_instance_statuses_constant_exists(self):
         """Green fix (review follow-up): the terminal-status set is
@@ -1014,13 +1046,34 @@ class TestRunningInjection:
 
 
 class TestWaitingChildrenInjection:
-    """Task 3 / R-O4: WAITING_CHILDREN is injection-eligible (parity
-    with the user messages API). The injection sits in the FIFO until
-    the next dispatch (typically a child report waking the instance
-    via the dependency bus).
+    """Task 3 / R-O4 (pre-wc-wake): WAITING_CHILDREN was
+    injection-eligible (parity with the user messages API). The
+    injection sat in the FIFO until the next dispatch (typically a
+    child report waking the instance via the dependency bus).
+
+    wc-wake-report-integrity (T2 + C1-Q2 RESOLVED 2026-08-30): the
+    routing pivot was gated behind ``ENSEMBLE_WC_WAKE_ENQUEUE``.
+    Default OFF at code-land preserves the legacy FIFO-injection
+    route (this test, parametrized over the flag). Flag ON routes
+    WC through ``enqueue_message`` — a durable wake turn, the queue-
+    busy gate can trip, no W3 stranding caveat (the message is
+    durable). The exhaustive routing-map test below pins BOTH states.
     """
 
-    async def test_waiting_children_injects(self):
+    async def test_waiting_children_injects_legacy_flag_off(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Flag OFF (default): WC keeps the legacy FIFO injection
+        route — set_injection is called, no enqueue, message lands in
+        the FIFO. R-O2 W3 stranding caveat still present.
+        """
+        from daemon.services.instance_messaging import (
+            _reset_wc_wake_enqueue_for_tests,
+        )
+
+        monkeypatch.setenv("ENSEMBLE_WC_WAKE_ENQUEUE", "0")
+        _reset_wc_wake_enqueue_for_tests()
+
         with patch(
             "daemon.tools.instance._check_team_membership",
             return_value=None,
@@ -1030,13 +1083,48 @@ class TestWaitingChildrenInjection:
 
             result = await send_message.coroutine("target-id", "wake up")
 
-        # Injection path was taken.
+        # Legacy injection path was taken.
         manager.set_injection.assert_called_once()
         manager.enqueue_message.assert_not_called()
         # Result reflects WAITING_CHILDREN.
         assert "Message injected into waiting_children target" in result
-        # R-O2 W3 stranding caveat still present.
+        # R-O2 W3 stranding caveat still present (legacy behavior).
         assert "pause-loss parity with the user messages API" in result
+
+    async def test_waiting_children_routes_enqueue_flag_on(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Flag ON: WC routes through ``enqueue_message`` — a durable
+        wake turn. ``set_injection`` is NOT called. The result text
+        is the enqueue-parity message (no W3 stranding caveat; the
+        message is durable, not RAM-FIFO-volatile).
+        """
+        from daemon.services.instance_messaging import (
+            _reset_wc_wake_enqueue_for_tests,
+        )
+
+        monkeypatch.setenv("ENSEMBLE_WC_WAKE_ENQUEUE", "1")
+        _reset_wc_wake_enqueue_for_tests()
+
+        with patch(
+            "daemon.tools.instance._check_team_membership",
+            return_value=None,
+        ):
+            manager = _make_manager(status="waiting_children")
+            send_message = _get_send_message_tool(manager)
+
+            result = await send_message.coroutine("target-id", "wake up")
+
+        # New enqueue path was taken; legacy injection NOT taken.
+        manager.enqueue_message.assert_awaited_once()
+        manager.set_injection.assert_not_called()
+        # Enqueue carries the agent-tool caller provenance
+        # (consistent with the injection branch above).
+        kwargs = manager.enqueue_message.await_args.kwargs
+        assert kwargs["source"] == "internal_agent:parent-instance"
+        # Result is the enqueue-parity text (no W3 stranding caveat).
+        assert "Message queued and sent to target-id" in result
+        assert "pause-loss parity" not in result
 
 
 # ---------------------------------------------------------------------------
@@ -1060,7 +1148,24 @@ class TestEnqueueOverrideForLoadSkill:
     """
 
     @pytest.mark.parametrize("status", ["running", "waiting_children"])
-    async def test_load_skill_routes_via_enqueue_not_injection(self, status):
+    async def test_load_skill_routes_via_enqueue_not_injection(
+        self, status, monkeypatch: pytest.MonkeyPatch
+    ):
+        # wc-wake-report-integrity (T3): the load_skill override
+        # forces the enqueue pipeline on BOTH flag states for the
+        # status set. Under flag ON, waiting_children would already
+        # route to enqueue (no override needed); under flag OFF,
+        # waiting_children takes injection WITHOUT the override.
+        # We force flag ON here to pin the override's invariant
+        # independently of the flag — same expected behavior either
+        # way for the load_skill path.
+        from daemon.services.instance_messaging import (
+            _reset_wc_wake_enqueue_for_tests,
+        )
+
+        monkeypatch.setenv("ENSEMBLE_WC_WAKE_ENQUEUE", "1")
+        _reset_wc_wake_enqueue_for_tests()
+
         with patch(
             "daemon.tools.instance._check_team_membership",
             return_value=None,
@@ -1170,7 +1275,19 @@ class TestEnqueueOverrideForContext:
     """
 
     @pytest.mark.parametrize("status", ["running", "waiting_children"])
-    async def test_context_routes_via_enqueue_with_metadata(self, status):
+    async def test_context_routes_via_enqueue_with_metadata(
+        self, status, monkeypatch: pytest.MonkeyPatch
+    ):
+        # wc-wake-report-integrity (T3): same as the load_skill
+        # override, force flag ON so the test pins the override's
+        # invariant independently of the kill-switch state.
+        from daemon.services.instance_messaging import (
+            _reset_wc_wake_enqueue_for_tests,
+        )
+
+        monkeypatch.setenv("ENSEMBLE_WC_WAKE_ENQUEUE", "1")
+        _reset_wc_wake_enqueue_for_tests()
+
         with patch(
             "daemon.tools.instance._check_team_membership",
             return_value=None,
@@ -1301,10 +1418,21 @@ class TestExhaustiveEnumRouting:
     # ``_route_send_message`` in ``daemon/tools/instance.py``. A new
     # enum value with no entry here FAILS the parametrized test; an
     # entry here with no enum value FAILS the exhaustive check.
+    #
+    # wc-wake-report-integrity (T2 + C1-Q2): ``waiting_children`` was
+    # REMOVED from the unconditional map — its route is now flag-aware
+    # (OFF → injection legacy; ON → enqueue durable wake). The
+    # ``_FLAG_AWARE_STATUSES`` set below names the flag-aware values;
+    # ``test_each_enum_value_maps_to_known_branch`` parametrizes over
+    # BOTH flag states for those values and the canonical single
+    # mapping for the rest. The flag-OFF behavior for waiting_children
+    # IS the documented revert path; the flag-ON behavior is the
+    # new routing pivot.
+    _FLAG_AWARE_STATUSES: frozenset[str] = frozenset({"waiting_children"})
     _STATUS_TO_ROUTE: dict[str, str] = {
-        # INJECTION_ELIGIBLE_STATUSES (D13 / LOCKED choice).
+        # INJECTION_ELIGIBLE_STATUSES (D13 / LOCKED choice — T2 shrank
+        # to ``{"running"}``; waiting_children moved to flag-aware).
         "running": "injection",
-        "waiting_children": "injection",
         # TERMINAL_INSTANCE_STATUSES (revive branch).
         "completed": "enqueue-revive",
         "terminated": "enqueue-revive",
@@ -1317,22 +1445,44 @@ class TestExhaustiveEnumRouting:
         # PAUSED — explicit pre-check (R-O1).
         "paused": "paused",
     }
+    _FLAG_TO_ROUTE: dict[str, dict[bool, str]] = {
+        # ``True`` ⇒ flag ON, ``False`` ⇒ flag OFF (default).
+        "waiting_children": {False: "injection", True: "enqueue"},
+    }
 
     @pytest.mark.parametrize(
         "enum_value",
         _instance_status_values(),
     )
-    def test_each_enum_value_maps_to_known_branch(self, enum_value):
+    @pytest.mark.parametrize("flag_enabled", [False, True])
+    def test_each_enum_value_maps_to_known_branch(
+        self, enum_value, flag_enabled, monkeypatch: pytest.MonkeyPatch
+    ):
+        from daemon.services.instance_messaging import (
+            _reset_wc_wake_enqueue_for_tests,
+        )
         from daemon.tools.instance import _route_send_message
 
-        # The enum value MUST appear in the explicit mapping.
-        assert enum_value in self._STATUS_TO_ROUTE, (
-            f"Enum value {enum_value!r} has no entry in "
-            f"_STATUS_TO_ROUTE — every InstanceStatus must declare its "
-            f"expected route. Add it to TestExhaustiveEnumRouting."
-            f"_STATUS_TO_ROUTE to fix."
+        # Resolve the expected route (flag-aware values look up a
+        # two-state map; everything else uses the canonical mapping).
+        if enum_value in self._FLAG_AWARE_STATUSES:
+            expected_route = self._FLAG_TO_ROUTE[enum_value][flag_enabled]
+        else:
+            assert enum_value in self._STATUS_TO_ROUTE, (
+                f"Enum value {enum_value!r} has no entry in "
+                f"_STATUS_TO_ROUTE — every InstanceStatus must declare "
+                f"its expected route. Add it to "
+                f"TestExhaustiveEnumRouting._STATUS_TO_ROUTE to fix."
+            )
+            expected_route = self._STATUS_TO_ROUTE[enum_value]
+
+        # Wire the kill-switch env so the helper sees the requested
+        # flag state (default OFF; explicit ON for the flag-ON
+        # parametrization).
+        monkeypatch.setenv(
+            "ENSEMBLE_WC_WAKE_ENQUEUE", "1" if flag_enabled else "0"
         )
-        expected_route = self._STATUS_TO_ROUTE[enum_value]
+        _reset_wc_wake_enqueue_for_tests()
 
         manager = MagicMock()
         manager.get_instance_info = MagicMock(return_value={"status": enum_value})
@@ -1345,32 +1495,65 @@ class TestExhaustiveEnumRouting:
         routed_via, prior_status = result
         # Exact-route assertion (not a membership check).
         assert routed_via == expected_route, (
-            f"Enum value {enum_value!r} routes via {routed_via!r}; "
-            f"_STATUS_TO_ROUTE declares {expected_route!r}. "
-            f"Update _STATUS_TO_ROUTE OR fix _route_send_message."
+            f"Enum value {enum_value!r} (flag={flag_enabled}) routes "
+            f"via {routed_via!r}; expected {expected_route!r}. "
+            f"Update _STATUS_TO_ROUTE/_FLAG_TO_ROUTE OR fix "
+            f"_route_send_message."
         )
         assert prior_status == enum_value
 
     def test_status_to_route_mapping_is_exhaustive(self):
-        """The explicit ``_STATUS_TO_ROUTE`` mapping MUST have EXACTLY
-        the same keys as the ``InstanceStatus`` enum — no extra keys
+        """The combined ``_STATUS_TO_ROUTE ∪ _FLAG_TO_ROUTE`` MUST cover
+        every ``InstanceStatus`` enum value EXACTLY — no extra keys
         (e.g. a typo or a deprecated status string) and no missing
-        keys (every enum value is declared)."""
+        keys (every enum value is declared in one of the two maps).
+        """
         from daemon.repositories.instance.models import InstanceStatus
 
         enum_values = {s.value for s in InstanceStatus}
-        mapping_keys = set(self._STATUS_TO_ROUTE.keys())
+        # Union of canonical and flag-aware maps. ``_FLAG_TO_ROUTE``
+        # values are dicts (per-flag route), but its keys are the
+        # only ones that may overlap with the canonical map.
+        mapping_keys = (
+            set(self._STATUS_TO_ROUTE.keys())
+            | set(self._FLAG_TO_ROUTE.keys())
+        )
 
         missing = enum_values - mapping_keys
         extra = mapping_keys - enum_values
 
+        # Flag-aware statuses live in _FLAG_TO_ROUTE only (the
+        # canonical map omits them so the exhaustiveness check
+        # surfaces the routing pivot). The canonical map MUST NOT
+        # contain flag-aware statuses — that would be the old bug
+        # (single unconditional mapping). The canonical map MUST
+        # only contain non-flag-aware enum values.
+        if self._FLAG_AWARE_STATUSES:
+            canonical_intersect_flag = (
+                set(self._STATUS_TO_ROUTE.keys())
+                & self._FLAG_AWARE_STATUSES
+            )
+            assert not canonical_intersect_flag, (
+                f"_STATUS_TO_ROUTE must NOT contain flag-aware enum "
+                f"values (those live in _FLAG_TO_ROUTE only): "
+                f"{sorted(canonical_intersect_flag)}"
+            )
+            flag_intersect_canonical = (
+                set(self._FLAG_TO_ROUTE.keys())
+                & set(self._STATUS_TO_ROUTE.keys())
+            )
+            assert not flag_intersect_canonical, (
+                f"_FLAG_TO_ROUTE must NOT overlap with _STATUS_TO_ROUTE "
+                f"on non-flag-aware values: {sorted(flag_intersect_canonical)}"
+            )
+
         assert not missing, (
-            f"_STATUS_TO_ROUTE is missing these enum values: "
-            f"{sorted(missing)}"
+            f"_STATUS_TO_ROUTE ∪ _FLAG_TO_ROUTE is missing these enum "
+            f"values: {sorted(missing)}"
         )
         assert not extra, (
-            f"_STATUS_TO_ROUTE has keys not in InstanceStatus enum: "
-            f"{sorted(extra)}"
+            f"_STATUS_TO_ROUTE ∪ _FLAG_TO_ROUTE has keys not in "
+            f"InstanceStatus enum: {sorted(extra)}"
         )
 
     async def test_routing_helper_has_no_silent_fallthrough(self):
@@ -1795,18 +1978,42 @@ class TestInfoLogging:
     @pytest.mark.parametrize(
         "status,routed_via",
         [
-            ("running", "injection"),
-            ("waiting_children", "injection"),
-            ("idle", "enqueue"),
-            ("completed", "enqueue-revive"),
-            ("terminated", "enqueue-revive"),
-            ("error", "enqueue-revive"),
-            ("failed", "enqueue-revive"),
+            pytest.param("running", "injection", id="running"),
+            # wc-wake-report-integrity (T3): waiting_children's route
+            # depends on ENSEMBLE_WC_WAKE_ENQUEUE. The default OFF
+            # preserves the legacy FIFO injection (logged as
+            # routed_via=injection). The flag-ON pivot routes to
+            # enqueue (logged as routed_via=enqueue). We pin BOTH
+            # states here by adding a second parametrize over
+            # ``flag_enabled`` for waiting_children only — the other
+            # statuses are flag-independent.
+            pytest.param("waiting_children", "injection", id="waiting_children_flag_off"),
+            pytest.param("waiting_children", "enqueue", id="waiting_children_flag_on"),
+            pytest.param("idle", "enqueue", id="idle"),
+            pytest.param("completed", "enqueue-revive", id="completed"),
+            pytest.param("terminated", "enqueue-revive", id="terminated"),
+            pytest.param("error", "enqueue-revive", id="error"),
+            pytest.param("failed", "enqueue-revive", id="failed"),
         ],
     )
     async def test_successful_send_emits_agent_send_message_log(
-        self, caplog, status, routed_via
+        self, caplog, status, routed_via, monkeypatch: pytest.MonkeyPatch
     ):
+        # wc-wake-report-integrity: the flag-aware parametrization
+        # above uses the same expected routed_via as the flag state
+        # — derive the env from the route name itself (defensive
+        # against future flag-aware additions).
+        flag_enabled = routed_via == "enqueue" and status == "waiting_children"
+
+        from daemon.services.instance_messaging import (
+            _reset_wc_wake_enqueue_for_tests,
+        )
+
+        monkeypatch.setenv(
+            "ENSEMBLE_WC_WAKE_ENQUEUE", "1" if flag_enabled else "0"
+        )
+        _reset_wc_wake_enqueue_for_tests()
+
         with patch(
             "daemon.tools.instance._check_team_membership",
             return_value=None,
@@ -1918,22 +2125,36 @@ class TestRoutingHelper:
     """
 
     @pytest.mark.parametrize(
-        "status,expected_routed_via",
+        "status,expected_routed_via,flag_enabled",
         [
-            ("running", "injection"),
-            ("waiting_children", "injection"),
-            ("idle", "enqueue"),
-            ("waiting", "enqueue"),
-            ("queued", "enqueue"),
-            ("completed", "enqueue-revive"),
-            ("terminated", "enqueue-revive"),
-            ("error", "enqueue-revive"),
-            ("failed", "enqueue-revive"),
-            ("paused", "paused"),
+            ("running", "injection", False),
+            # wc-wake-report-integrity (T2): waiting_children is
+            # flag-aware. Default OFF → legacy injection; flag ON →
+            # enqueue durable wake. Both states pinned below.
+            ("waiting_children", "injection", False),
+            ("waiting_children", "enqueue", True),
+            ("idle", "enqueue", False),
+            ("waiting", "enqueue", False),
+            ("queued", "enqueue", False),
+            ("completed", "enqueue-revive", False),
+            ("terminated", "enqueue-revive", False),
+            ("error", "enqueue-revive", False),
+            ("failed", "enqueue-revive", False),
+            ("paused", "paused", False),
         ],
     )
-    def test_classifies_each_known_status(self, status, expected_routed_via):
+    def test_classifies_each_known_status(
+        self, status, expected_routed_via, flag_enabled, monkeypatch: pytest.MonkeyPatch
+    ):
+        from daemon.services.instance_messaging import (
+            _reset_wc_wake_enqueue_for_tests,
+        )
         from daemon.tools.instance import _route_send_message
+
+        monkeypatch.setenv(
+            "ENSEMBLE_WC_WAKE_ENQUEUE", "1" if flag_enabled else "0"
+        )
+        _reset_wc_wake_enqueue_for_tests()
 
         manager = MagicMock()
         manager.get_instance_info = MagicMock(return_value={"status": status})
@@ -1941,7 +2162,10 @@ class TestRoutingHelper:
         result = _route_send_message(manager, "target-id")
         assert result is not None
         routed_via, prior_status = result
-        assert routed_via == expected_routed_via
+        assert routed_via == expected_routed_via, (
+            f"Status {status!r} (flag_enabled={flag_enabled}) "
+            f"expected route {expected_routed_via!r}, got {routed_via!r}"
+        )
         assert prior_status == status
 
     def test_returns_none_for_unknown_instance_id(self):

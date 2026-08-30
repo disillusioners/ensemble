@@ -213,9 +213,20 @@ DEFERRED_REASON_RESUME_ROUTER: str = "RESUME_ROUTER"
 #   ``grep -n "_INJECTION_ELIGIBLE_STATUSES\s*=\s*{" daemon/`` must
 #   return exactly ONE hit — this module. The router's local frozenset
 #   and ``job_inject``'s inline tuple are GONE.
+#
+# wc-wake-report-integrity (T2, 2026-08-30): ``\"waiting_children\"`` was
+# REMOVED from this set. A parked ``WAITING_CHILDREN`` parent has no
+# live turn to absorb a mid-turn injection — only ``enqueue_message``
+# (durable wake, first-class turn) can wake it. The legacy FIFO
+# injection route is preserved behind the ``ENSEMBLE_WC_WAKE_ENQUEUE``
+# kill-switch (C1-Q2 RESOLVED 2026-08-30; see
+# ``daemon/services/instance_messaging.py::_resolve_wc_wake_enqueue_enabled``)
+# via an EXPLICIT ``status == \"waiting_children\" and not <flag>``
+# branch at each of the three call sites — the constant stays
+# config-free per single-home convention. The transient flag-off
+# window accepts the legacy semantics as the documented revert path.
 INJECTION_ELIGIBLE_STATUSES: frozenset[str] = frozenset({
     "running",
-    "waiting_children",
 })
 
 # Terminal instance statuses — companion to ``INJECTION_ELIGIBLE_STATUSES``
