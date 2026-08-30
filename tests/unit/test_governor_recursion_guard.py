@@ -241,7 +241,7 @@ class TestLifecycleGovernorChainGuard:
                 # Otherwise the guard let it through and a downstream
                 # helper raised — fine.
 
-    def test_root_position_governor_spawn_blocked(self, engine, patched_kill_switch):
+    def test_root_position_governor_spawn_allowed(self, engine, patched_kill_switch):
         """Top-level spawn (no parent_id) — guard does NOT fire.
 
         With ``parent_id is None`` the chain is empty, so a root-position
@@ -270,6 +270,50 @@ class TestLifecycleGovernorChainGuard:
                     pytest.fail(
                         f"Guard should NOT fire for root spawn; got: {e}"
                     )
+
+    def test_governor_spawn_fail_closed_on_ancestor_walk_error(
+        self, engine, patched_kill_switch
+    ):
+        """Ancestor-walk OR agent-id fetch raising must fail-CLOSED (refuse).
+
+        Regression for W1: the fail-closed branch was zero-coverage. Both
+        DB calls inside the guard's try/except must surface as the clean
+        refusal (ValueError + HINT), not propagate as an opaque 500.
+        """
+        from daemon.repositories.instance.repository import SQLModelInstanceRepository
+
+        _seed_instance(engine, "root-gov", "governor", None)
+
+        # (a) get_ancestor_ids raises — guard must refuse.
+        repo_a = MagicMock(spec=SQLModelInstanceRepository)
+        repo_a.get_ancestor_ids.side_effect = RuntimeError("db down")
+        svc_a, _ = _make_lifecycle_service_with_repo(repo_a, k=1)
+        with patch(
+            "daemon.registry.AgentRegistry.resolve_to_id",
+            return_value="governor",
+        ):
+            with pytest.raises(ValueError) as exc_a:
+                svc_a.spawn_instance(agent_id="governor", parent_id="root-gov")
+        err_a = str(exc_a.value)
+        assert "Spawn refused" in err_a and "HINT" in err_a
+        assert "root-gov" in err_a and "db down" in err_a
+
+        # (b) get_agent_ids_for raises — same refusal (covers the widened
+        # try from item 3: a DB failure during agent-id fetch must also
+        # fail closed).
+        repo_b = MagicMock(spec=SQLModelInstanceRepository)
+        repo_b.get_ancestor_ids.return_value = []
+        repo_b.get_agent_ids_for.side_effect = RuntimeError("db down")
+        svc_b, _ = _make_lifecycle_service_with_repo(repo_b, k=1)
+        with patch(
+            "daemon.registry.AgentRegistry.resolve_to_id",
+            return_value="governor",
+        ):
+            with pytest.raises(ValueError) as exc_b:
+                svc_b.spawn_instance(agent_id="governor", parent_id="root-gov")
+        err_b = str(exc_b.value)
+        assert "Spawn refused" in err_b and "HINT" in err_b
+        assert "root-gov" in err_b and "db down" in err_b
 
     def test_k_zero_disables_guard(self, engine, patched_kill_switch):
         """``max_governor_ancestors=0`` disables the guard (per spec)."""

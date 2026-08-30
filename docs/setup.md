@@ -363,6 +363,8 @@ limits:
 | `limits.instance_timeout_minutes` | integer | `60` | Auto-shutdown timeout for idle instances (minutes) |
 | `limits.graph_recursion_limit` | integer | `200` | Maximum recursion depth for LangGraph execution (global default) |
 | `limits.llm_concurrency` | integer | `10` | Maximum concurrent LLM API requests |
+| `limits.governor_recursion_guard_enabled` | boolean | `true` | Master kill-switch for the governor recursive-spawn guard. Override via `LIMITS_GOVERNOR_RECURSION_GUARD_ENABLED` (truthy values enable; `0` disables). Restart required — cached at boot. |
+| `limits.max_governor_ancestors` | integer | `1` | Max governor count allowed in the parent ∪ ancestors chain (K). When the parent-inclusive count ≥ K, governor spawns are refused with a corrective HINT. Override via `LIMITS_MAX_GOVERNOR_ANCESTORS`. `0` disables the guard entirely. Restart required. |
 
 > **Per-agent override:** the global `graph_recursion_limit` is a *base* — individual
 > agents can exceed it via `recursion_limit_multiplier` (e.g. `5` = 5× the base) or an

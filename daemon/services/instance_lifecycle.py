@@ -1399,12 +1399,16 @@ class InstanceLifecycleService:
                     chain_ids.extend(
                         inst_repo_for_guard.get_ancestor_ids(parent_id)
                     )
+                    agent_id_map = inst_repo_for_guard.get_agent_ids_for(chain_ids)
                 except Exception as ancestor_err:
                     # Fail closed: refuse the spawn rather than risk
-                    # recursion through a broken chain walk. Log loud;
-                    # the daemon-side ValueError below carries the HINT.
+                    # recursion through a broken chain walk (covers BOTH
+                    # the ancestor walk AND the agent-id fetch — a DB
+                    # failure during either surfaces as the clean
+                    # refusal below, not an opaque 500). Log loud;
+                    # the daemon-side ValueError carries the HINT.
                     logger.warning(
-                        "Governor recursion guard: ancestor walk failed "
+                        "Governor recursion guard: chain walk failed "
                         "for parent_id=%s; failing closed (refusing spawn). "
                         "Error: %s",
                         parent_id,
@@ -1419,7 +1423,6 @@ class InstanceLifecycleService:
                         f"guard refuses to spawn a governor until the "
                         f"chain can be walked."
                     )
-                agent_id_map = inst_repo_for_guard.get_agent_ids_for(chain_ids)
                 gov_count = sum(
                     1 for aid in agent_id_map.values() if aid == "governor"
                 )
