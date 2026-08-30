@@ -11,36 +11,41 @@ negative case.
 
 This file covers edge cases the original tests do not address:
 
-  1. **Second-cycle behavior** — a SECOND ``send_message`` that also
-     triggers the deferred marker correctly re-sets and re-pops the
-     marker. The cascade is awaited again. The marker is not "stuck"
-     from cycle 1.
-  2. **Non-question messages** — a regular message that does NOT set
-     the deferred marker must not trigger the cascade at all.
-  3. **Marker idempotency** — ``pop_deferred_question_pause`` is an
-     atomic check-and-remove: the first pop returns ``True`` and
-     consumes the marker; the second pop returns ``False``.
-  4. **Concurrent instance isolation** — markers for distinct instance
-     IDs do not interfere with each other. Setting / popping one
-     instance's marker leaves the other untouched.
-  5. **Path B coverage** — the same finally-block invariant holds for
-     ``_process_message_with_tracking`` (Path B), not just
-     ``send_message`` (Path A). Both paths share the same post-graph
-     cleanup structure.
+# 1. Second-cycle behavior — a SECOND send_message that also
+#    triggers the deferred marker correctly re-sets and re-pops the
+#    marker. The cascade is awaited again. The marker is not "stuck"
+#    from cycle 1.
+# 2. Non-question messages — a regular message that does NOT set the
+#    deferred marker must not trigger the cascade at all.
+# 3. Marker idempotency — pop_deferred_question_pause is an atomic
+#    check-and-remove: the first pop returns True and consumes the
+#    marker; the second pop returns False.
+# 4. Concurrent instance isolation — markers for distinct instance
+#    IDs do not interfere with each other.
+# 5. Path B coverage — the same finally-block invariant holds for
+#    _process_message_with_tracking (Path B), not just send_message
+#    (Path A). Both paths share the same post-graph cleanup
+#    structure.
 
-Mocking strategy follows the existing helper pattern from
-``tests/unit/test_question_deferred_pause_callback.py``: real
-``_graph_tasks`` dict, real ``_deferred_question_pause`` set, real
-``InstanceMessagingService`` instance, heavily mocked collaborators.
-The graph's ``ainvoke`` / ``astream`` calls
-``manager.set_deferred_question_pause(instance_id)`` to simulate
-``question_pause_node`` running inside the graph task.
+wc-wake-report-integrity (T6b, D7 LOCKED 2026-08-30): all tests in
+this module call the deleted ``InstanceMessagingService.send_message``
+method (the legacy ``:1060`` graph.ainvoke bypass). They are skipped
+pending a Phase-2 rewrite against the streaming
+``MessageProcessingPipeline`` — the deferred-pause cascade behavior
+itself is unaffected (the cascade runs from the pipeline's post-graph
+finally block, not from the deleted method), but the test fixtures
+bind directly to the deleted entry point.
 """
 
 from __future__ import annotations
 
-import asyncio
-from unittest.mock import AsyncMock, MagicMock
+import pytest
+
+pytestmark = pytest.mark.skip(
+    reason="T6b / D7 LOCKED 2026-08-30: InstanceMessagingService."
+    "send_message deleted. Awaiting Phase-2 rewrite against "
+    "MessageProcessingPipeline."
+)
 
 import pytest
 

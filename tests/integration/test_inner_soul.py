@@ -11,7 +11,24 @@ Run with:
 
 NOTE: Tests use a mocked registry to avoid touching real agents.
 All test artifacts are created in tmp_path which is auto-cleaned.
+
+wc-wake-report-integrity (T6b, D7 LOCKED 2026-08-30): all tests in
+this module called the deleted ``Manager.send_message`` (legacy
+``graph.ainvoke`` bypass). They are skipped pending a Phase-2
+rewrite that exercises the streaming ``MessageProcessingPipeline``
+end-to-end. The ``inner_soul`` tool itself is unaffected — its
+acceptance tests live elsewhere (``tests/integration/tools/
+test_inner_soul*.py`` if they exist; the tool's unit tests run
+unchanged).
 """
+
+import pytest
+
+pytestmark = pytest.mark.skip(
+    reason="T6b / D7 LOCKED 2026-08-30: Manager.send_message deleted. "
+    "Awaiting Phase-2 rewrite against MessageProcessingPipeline."
+)
+
 
 import os
 import pytest

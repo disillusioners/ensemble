@@ -1122,7 +1122,11 @@ class JobProcessor:
         await self._job_queue._repository.update(task)
         
         # Send message to instance
-        await self._instance_manager.send_message(
+        # wc-wake-report-integrity (T6b, D7 LOCKED 2026-08-30): the
+        # legacy ``Manager.send_message`` was DELETED. The example now
+        # uses ``enqueue_message`` (the durable wake path that ALL
+        # surviving production traffic must cross).
+        await self._instance_manager.enqueue_message(
             instance_id=instance_id,
             message=task.message,
             source=task.source

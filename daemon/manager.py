@@ -6303,20 +6303,16 @@ class InstanceManager:
                     logger.warning(f"MCP cleanup after spawn failure failed: {cleanup_err}")
             raise
 
-    async def send_message(self, instance_id: str, message: str) -> MessageResult:
-        """Send a message to an instance and get the response.
-
-        Args:
-            instance_id: The ID of the instance to send the message to.
-            message: The message content to send.
-
-        Returns:
-            MessageResult with content, thinking, and tool_calls.
-
-        Raises:
-            KeyError: If instance_id is not found.
-        """
-        return await self._messaging_service.send_message(instance_id, message)
+    # wc-wake-report-integrity (T6b, D7 LOCKED 2026-08-30): the legacy
+    # ``Manager.send_message`` method (and the corresponding
+    # ``InstanceMessagingService.send_message`` at the :1060
+    # ``graph.ainvoke`` bypass) were DELETED. The bypass re-opened
+    # the poisoned-tail → LangGraph 2013 exposure that the new D1
+    # enqueue-seam guard (T6) closes — every surviving path must
+    # cross the T6 choke point AND the in-graph pairing guard.
+    # Production callers must use ``enqueue_message`` (the durable
+    # wake path) or the FIFO ``set_injection`` API (for direct
+    # mid-turn injections on RUNNING targets).
 
     async def enqueue_message(
         self,

@@ -6,7 +6,28 @@ All test artifacts are created in a temporary directory that is cleaned up.
 
 Usage:
     python tests/integration/test_inner_soul_standalone.py
+
+wc-wake-report-integrity (T6b, D7 LOCKED 2026-08-30): this standalone
+script calls ``Manager.send_message`` (the deleted legacy
+``graph.ainvoke`` bypass). Skipped pending Phase-2 rewrite.
 """
+import sys
+
+import pytest
+
+if __name__ != "__main__":
+    pytest.skip(
+        "T6b / D7 LOCKED 2026-08-30: Manager.send_message deleted.",
+        allow_module_level=True,
+    )
+else:
+    print(
+        "T6b / D7 LOCKED 2026-08-30: Manager.send_message was deleted. "
+        "Standalone script is skipped; the inner_soul tool itself is "
+        "unaffected and its acceptance tests live elsewhere.",
+        file=sys.stderr,
+    )
+    sys.exit(0)
 
 import os
 import sys

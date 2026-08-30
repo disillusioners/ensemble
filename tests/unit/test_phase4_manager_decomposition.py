@@ -165,8 +165,17 @@ class TestPublicMethodsExist:
         assert hasattr(InstanceManager, "spawn_instance")
         assert callable(getattr(InstanceManager, "spawn_instance"))
 
+    @pytest.mark.skip(
+        reason="T6b / D7 LOCKED 2026-08-30: Manager.send_message deleted. "
+        "Use manager.enqueue_message (already pinned below)."
+    )
     def test_send_message_exists_and_callable(self):
-        """send_message method should exist and be callable."""
+        """send_message method should exist and be callable.
+
+        wc-wake-report-integrity (T6b, D7 LOCKED 2026-08-30): the
+        legacy ``Manager.send_message`` was DELETED. The replacement
+        is ``manager.enqueue_message`` (pinned in the test below).
+        """
         from daemon.manager import InstanceManager
 
         assert hasattr(InstanceManager, "send_message")
@@ -782,8 +791,20 @@ class TestFacadeDelegationPattern:
         manager._lifecycle_service.spawn_instance.assert_called_once()
         assert result == "test-instance-id"
 
+    @pytest.mark.skip(
+        reason="T6b / D7 LOCKED 2026-08-30: Manager.send_message and "
+        "InstanceMessagingService.send_message were DELETED. Awaiting "
+        "Phase-2 rewrite."
+    )
     def test_manager_send_message_delegates_to_messaging_service(self):
-        """send_message should delegate to _messaging_service."""
+        """send_message should delegate to _messaging_service.
+
+        wc-wake-report-integrity (T6b, D7 LOCKED 2026-08-30): the
+        ``Manager.send_message`` (and the corresponding
+        ``_messaging_service.send_message``) were DELETED. This test
+        asserts the deleted delegation; it is skipped pending a
+        Phase-2 rewrite.
+        """
         from daemon.manager import InstanceManager
 
         manager = InstanceManager.__new__(InstanceManager)

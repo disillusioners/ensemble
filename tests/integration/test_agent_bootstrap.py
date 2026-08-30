@@ -118,9 +118,22 @@ def test_agent_bootstrap_and_hello(integration_config, agent_system_prompt):
 
 async def test_agent_bootstrap_with_instance_manager(integration_config, agent_system_prompt):
     """Test using the full InstanceManager to bootstrap an agent.
-    
-    This validates the complete flow used by the actual application.
+
+    wc-wake-report-integrity (T6b, D7 LOCKED 2026-08-30): this test
+    used the deleted ``Manager.send_message`` method to round-trip
+    a message and assert on its synchronous response. The legacy
+    bypass was deleted; this test is skipped pending a Phase-2
+    rewrite that exercises the streaming
+    ``MessageProcessingPipeline`` end-to-end (the durable wake path
+    is asynchronous by design — ``enqueue_message`` returns a
+    ``AsyncMessageResult`` with ``message_id`` + ``job_id``, the
+    response arrives via SSE).
     """
+    import pytest
+    pytest.skip(
+        "T6b / D7 LOCKED 2026-08-30: Manager.send_message deleted. "
+        "Awaiting Phase-2 rewrite against MessageProcessingPipeline."
+    )
     from daemon.manager import InstanceManager
 
     project_root = Path(__file__).parent.parent.parent

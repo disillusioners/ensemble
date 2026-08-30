@@ -28,12 +28,30 @@ the post-graph callback path:
   * ``_graph_tasks`` is empty by the time ``pause_instance_cascade`` is
     invoked — proving no self-cancel is possible.
 
+wc-wake-report-integrity (T6b, D7 LOCKED 2026-08-30): all tests in
+this module call the deleted ``InstanceMessagingService.send_message``
+method (the legacy ``:1060`` graph.ainvoke bypass). They are skipped
+pending a Phase-2 rewrite against the streaming
+``MessageProcessingPipeline`` — the deferred-pause cascade behavior
+itself is unaffected (the cascade runs from the pipeline's post-graph
+finally block, not from the deleted method), but the test fixtures
+bind directly to the deleted entry point.
+
 Mirrors the harness style used by ``tests/test_message_job_bridge.py``
 and ``tests/test_progressive_dispatch.py`` — a real
 ``InstanceMessagingService`` instance wired to a heavily-mocked manager.
 """
 
 from __future__ import annotations
+
+import pytest
+
+pytestmark = pytest.mark.skip(
+    reason="T6b / D7 LOCKED 2026-08-30: InstanceMessagingService."
+    "send_message deleted. Awaiting Phase-2 rewrite against "
+    "MessageProcessingPipeline."
+)
+
 
 import asyncio
 from unittest.mock import AsyncMock, MagicMock

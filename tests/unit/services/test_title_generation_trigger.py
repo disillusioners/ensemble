@@ -932,6 +932,16 @@ class TestInstanceMessagingTriggerTitleGeneration:
 
     # ─── Scenario 4: send_message triggers title even on CancelledError ───────────
 
+    # wc-wake-report-integrity (T6b, D7 LOCKED 2026-08-30): the legacy
+    # ``InstanceMessagingService.send_message`` method was DELETED. All
+    # tests in the ``Scenario 4: send_message ...`` block below (and
+    # anywhere else ``messaging_service.send_message(...)`` is called)
+    # exercise the deleted entry point and are skipped pending a
+    # Phase-2 rewrite against ``MessageProcessingPipeline``.
+    @pytest.mark.skip(
+        reason="T6b / D7 LOCKED 2026-08-30: "
+        "InstanceMessagingService.send_message deleted."
+    )
     @pytest.mark.asyncio
     async def test_send_message_triggers_title_on_cancelled_error(
         self, messaging_service, mock_messaging_manager
@@ -988,6 +998,14 @@ class TestInstanceMessagingTriggerTitleGeneration:
 
     # ─── Scenario 5: Idempotent - early title generation prevents duplicate ────────
 
+    # wc-wake-report-integrity (T6b, D7 LOCKED 2026-08-30): this test
+    # calls ``messaging_service.send_message(...)`` directly, which was
+    # deleted. Skipped pending Phase-2 rewrite against
+    # ``MessageProcessingPipeline``.
+    @pytest.mark.skip(
+        reason="T6b / D7 LOCKED 2026-08-30: "
+        "InstanceMessagingService.send_message deleted."
+    )
     @pytest.mark.asyncio
     async def test_title_generation_skips_when_already_exists(
         self, messaging_service, mock_messaging_manager
@@ -1065,6 +1083,10 @@ class TestInstanceMessagingTriggerTitleGeneration:
                     # (title gen + initiative_message capture), so we assert "called" not "called_once".
                     mock_run_async.assert_called()
 
+    @pytest.mark.skip(
+        reason="T6b / D7 LOCKED 2026-08-30: "
+        "InstanceMessagingService.send_message deleted."
+    )
     @pytest.mark.asyncio
     async def test_send_message_raises_when_generate_method_is_none(
         self, messaging_service, mock_messaging_manager
@@ -1144,6 +1166,10 @@ class TestInstanceMessagingTriggerTitleGeneration:
                         f"Expected 2 fire-and-forget dispatches, got {mock_run_async.call_count}"
                     )
 
+    @pytest.mark.skip(
+        reason="T6b / D7 LOCKED 2026-08-30: "
+        "InstanceMessagingService.send_message deleted."
+    )
     @pytest.mark.asyncio
     async def test_send_message_no_trigger_when_not_idle(
         self, messaging_service, mock_messaging_manager

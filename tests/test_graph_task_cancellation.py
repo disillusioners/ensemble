@@ -149,6 +149,17 @@ class TestPauseInstanceCascadeIntegration:
         assert 'test-instance' not in mock_manager._graph_tasks
 
 
+# wc-wake-report-integrity (T6b, D7 LOCKED 2026-08-30): the legacy
+# ``InstanceMessagingService.send_message`` method was DELETED.
+# ``test_send_message_has_task_registration`` inspected the deleted
+# method's source — no longer applicable. The task-registration
+# invariant still holds for ``_process_message_with_tracking`` (the
+# surviving turn pipeline); that test below is unaffected.
+@pytest.mark.skip(
+    reason="T6b / D7 LOCKED 2026-08-30: InstanceMessagingService."
+    "send_message deleted. The task-registration invariant is now "
+    "pinned by test_process_message_has_task_registration below."
+)
 class TestSendMessageTaskRegistration:
     """Tests for task registration in send_message."""
 
