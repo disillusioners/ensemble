@@ -54,6 +54,77 @@ _CASCADE_LINEAGE_MODE: str | None = None
 _CASCADE_LINEAGE_BOOT_LOG_EMITTED: bool = False
 
 
+# Governor Recursion Guard (2026-08-30) — kill-switch state.
+# Mirrors the ``ENSEMBLE_CASCADE_LINEAGE`` wrapper above: env const →
+# resolved-once + cached → boot INFO log. The actual guard logic lives
+# inside ``InstanceLifecycleService.spawn_instance`` (see items 1a.1–1a.5
+# in `.agents/shared/planning/governor-recursion-guard/plan-overview.md`
+# if present; otherwise see the rule block at the top of that method).
+# Restart-required semantics (C4): flipping the env mid-flight does NOT
+# take effect until the daemon restarts.
+_GOVERNOR_RECURSION_GUARD_ENV = "LIMITS_GOVERNOR_RECURSION_GUARD_ENABLED"
+_GOVERNOR_RECURSION_GUARD_ENABLED: bool | None = None
+_GOVERNOR_RECURSION_GUARD_BOOT_LOG_EMITTED: bool = False
+
+
+def _resolve_governor_recursion_guard_enabled() -> bool:
+    """Resolve and cache the governor recursion guard kill-switch.
+
+    Returns:
+        ``True`` when the guard is enabled (default — matches the locked
+        design decision "guard default ON"), ``False`` when disabled via
+        ``LIMITS_GOVERNOR_RECURSION_GUARD_ENABLED=0``. The whitelist of
+        truthy values is exactly ``("1", "true", "yes", "on", "")`` — the
+        empty-string match mirrors the default-resolve path (``raw =
+        os.environ.get(..., "1")`` always returns a string, so an unset
+        env var passes the truthy check). Unknown values fall back to
+        enabled with a WARN (one-shot, cached on first access).
+    """
+    global _GOVERNOR_RECURSION_GUARD_ENABLED
+    if _GOVERNOR_RECURSION_GUARD_ENABLED is not None:
+        return _GOVERNOR_RECURSION_GUARD_ENABLED
+    raw = os.environ.get(_GOVERNOR_RECURSION_GUARD_ENV, "1").strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        _GOVERNOR_RECURSION_GUARD_ENABLED = False
+    elif raw in ("1", "true", "yes", "on", ""):
+        _GOVERNOR_RECURSION_GUARD_ENABLED = True
+    else:
+        logger.warning(
+            "%s=%r is not a recognized truthy/falsy value; "
+            "falling back to enabled (default). Valid falsy: 0/false/no/off. "
+            "Valid truthy: 1/true/yes/on.",
+            _GOVERNOR_RECURSION_GUARD_ENV,
+            raw,
+        )
+        _GOVERNOR_RECURSION_GUARD_ENABLED = True
+    return _GOVERNOR_RECURSION_GUARD_ENABLED
+
+
+def emit_governor_recursion_guard_boot_log() -> None:
+    """Emit the one-time boot-time INFO log naming the resolved guard state.
+
+    Called by ``InstanceManager.__init__`` after the instance repository
+    is wired (mirrors ``emit_cascade_lineage_boot_log``). Restart-required
+    semantics — same as the cascade-lineage wrapper. The actual guard
+    logic is gated on ``_resolve_governor_recursion_guard_enabled()`` at
+    every call site, so flipping the env mid-flight has no effect.
+    """
+    global _GOVERNOR_RECURSION_GUARD_BOOT_LOG_EMITTED
+    if _GOVERNOR_RECURSION_GUARD_BOOT_LOG_EMITTED:
+        return
+    _GOVERNOR_RECURSION_GUARD_BOOT_LOG_EMITTED = True
+    enabled = _resolve_governor_recursion_guard_enabled()
+    logger.info(
+        "Governor recursion guard resolved: %s (env %s=%s); "
+        "refuses governor spawn when parent chain already contains "
+        "≥ K governors (K from LIMITS_MAX_GOVERNOR_ANCESTORS, default 1). "
+        "Restart required to flip.",
+        "enabled" if enabled else "DISABLED",
+        _GOVERNOR_RECURSION_GUARD_ENV,
+        os.environ.get(_GOVERNOR_RECURSION_GUARD_ENV, "<unset>"),
+    )
+
+
 def _resolve_cascade_lineage_mode() -> str:
     """Resolve and cache the cascade-lineage mode from the kill-switch env.
 
@@ -544,6 +615,37 @@ class SQLModelInstanceRepository:
                 ancestors.append(instance.parent_id)
                 current_id = instance.parent_id
             return ancestors
+
+    def get_agent_ids_for(self, instance_ids: list[str]) -> dict[str, str | None]:
+        """Resolve ``agent_id`` for each instance id in one query.
+
+        Governor Recursion Guard (2026-08-30): used by the lifecycle-layer
+        chain walk to count how many ancestors (including the prospective
+        parent itself) carry ``agent_id == "governor"`` — without N round
+        trips. Missing ids map to ``None``; the caller treats ``None`` as
+        "not a governor" because we cannot confirm it. Empty input returns
+        an empty dict (no DB access).
+
+        Args:
+            instance_ids: Instance ids to look up. Order is not preserved;
+                the caller already has the chain list separately.
+
+        Returns:
+            Dict ``{instance_id: agent_id_or_None}`` — every input id is
+            present in the output. Missing rows map to ``None`` so the
+            caller can sum without KeyError risk.
+        """
+        if not instance_ids:
+            return {}
+        with SQLModelSession(self.engine) as db_session:
+            stmt = select(Instance.instance_id, Instance.agent_id).where(
+                Instance.instance_id.in_(set(instance_ids))
+            )
+            rows = db_session.exec(stmt).all()
+            found = {iid: aid for iid, aid in rows}
+        # Backfill missing ids with None — caller treats None as
+        # "not a governor".
+        return {iid: found.get(iid) for iid in instance_ids}
 
     # --------------------------------------------------------
     # LIST

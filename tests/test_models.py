@@ -331,7 +331,6 @@ class TestErrorCodes:
         assert ErrorCodes.INSTANCE_NOT_FOUND.value == "INSTANCE_NOT_FOUND"
         assert ErrorCodes.INSTANCE_TERMINATED.value == "INSTANCE_TERMINATED"
         assert ErrorCodes.RATE_LIMITED.value == "RATE_LIMITED"
-        assert ErrorCodes.MAX_INSTANCES_EXCEEDED.value == "MAX_INSTANCES_EXCEEDED"
         assert ErrorCodes.LLM_ERROR.value == "LLM_ERROR"
         assert ErrorCodes.INTERNAL_ERROR.value == "INTERNAL_ERROR"
 
@@ -349,7 +348,6 @@ class TestErrorCodes:
             "INSTANCE_NOT_FOUND",
             "INSTANCE_TERMINATED",
             "RATE_LIMITED",
-            "MAX_INSTANCES_EXCEEDED",
             "LLM_ERROR",
             "INTERNAL_ERROR",
             "SOURCE_NOT_FOUND",

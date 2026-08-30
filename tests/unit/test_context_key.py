@@ -171,7 +171,6 @@ class TestContextKeyInjection:
 
         # Mock config
         mock_config = MagicMock()
-        mock_config.limits.max_instances = 100
         mock_config.limits.max_children_per_instance = 50
         mock_config.limits.graph_recursion_limit = 1000
         mock_config.queue.llm_retry_transient_attempts = 3

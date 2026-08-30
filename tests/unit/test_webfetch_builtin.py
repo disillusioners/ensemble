@@ -504,10 +504,10 @@ class TestWebFetchBootstrapIntegration:
         config.daemon.port = 8079
 
         config.limits = MagicMock(spec=LimitsConfig)
-        config.limits.max_instances = 100
         config.limits.max_children_per_instance = 10
         config.limits.instance_timeout_minutes = 60
-        config.limits.message_rate_limit = 60
+        config.limits.governor_recursion_guard_enabled = True
+        config.limits.max_governor_ancestors = 1
         config.limits.graph_recursion_limit = 100
         config.limits.llm_concurrency = 10
 

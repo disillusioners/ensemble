@@ -346,27 +346,33 @@ async def test_project_id_roundtrip(client, mock_manager):
 
 
 @pytest.mark.asyncio
-async def test_create_instance_max_limit(client, mock_manager):
-    """Test POST /instances with max instances exceeded."""
+async def test_create_instance_validation_error_returns_400(client, mock_manager):
+    """Test POST /instances with a validation ValueError → 400 (INVALID_REQUEST).
+
+    The legacy ``MAX_INSTANCES_EXCEEDED`` 429 path was a dead knob —
+    removed in the Governor Recursion Guard (2026-08-30) along with the
+    ``LimitsConfig.max_instances`` field and ``MAX_INSTANCES`` constant.
+    The fallback for every spawn ValueError is now the generic 400 path.
+    """
     # Configure mock to raise ValueError (as the real manager does)
     mock_manager.spawn_instance_with_mcp.side_effect = ValueError(
-        "Max instances limit reached: 5"
+        "Some spawn validation error"
     )
     mock_manager.spawn_instance.side_effect = ValueError(
-        "Max instances limit reached: 5"
+        "Some spawn validation error"
     )
-    
+
     response = await client.post(
         "/instances",
         json={
             "agent_id": "developer"
         }
     )
-    
-    assert response.status_code == 429
+
+    assert response.status_code == 400
     data = response.json()
     assert "detail" in data
-    assert data["detail"]["code"] == "MAX_INSTANCES_EXCEEDED"
+    assert data["detail"]["code"] == "INVALID_REQUEST"
 
 
 @pytest.mark.asyncio

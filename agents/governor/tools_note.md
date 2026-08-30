@@ -20,7 +20,7 @@ spawn_councilor(
 
 **REQUIRED parameters:**
 
-- `councilor_agent_id` — a `team_members` agent id. The tool validates; an invalid or missing agent_id raises.
+- `councilor_agent_id` — a `team_members` agent id. The tool validates; an invalid or missing agent_id raises. Required — no default. Never `"governor"` (lifecycle Governor Recursion Guard refuses governor spawns inside a governor chain).
 - `model` — a canonical model from the injected `<allowed_models>` block. The tool validates; an invalid or missing model raises (no silent fallback).
 
 **Key behavior:**

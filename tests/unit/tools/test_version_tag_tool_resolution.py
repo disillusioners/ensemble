@@ -1195,6 +1195,13 @@ class TestClosureLevelConveneCouncilUsesVersionedMeta:
         ``developer``), not the deliberately-empty base meta. Base stays
         empty so a regression in the CALLER gate (silently dropping to base)
         would still reject (``'governor'`` ∉ ``[]``) and fail the test.
+
+        Governor Recursion Guard (2026-08-30): the caller must NOT be a
+        governor — the tool-layer fast-fail at the top of convene_council
+        refuses governor callers. The original test used ``agent_id=
+        "governor"`` as the caller; we now use ``reviewer`` (a non-governor
+        whose team_members includes "governor"). The membership gate being
+        tested is unchanged — only the caller identity changed.
         """
         from daemon.tools.instance import create_instance_tools
 
@@ -1204,8 +1211,8 @@ class TestClosureLevelConveneCouncilUsesVersionedMeta:
         # closure's councilor-vs-governor team-membership guard).
         # ``resolve_pure_id`` is identity so 'governor' canonicalizes to
         # itself.
-        base_meta = _make_meta("governor", team_members=[])
-        v2_meta = _make_meta("governor", team_members=["governor", "developer"])
+        base_meta = _make_meta("reviewer", team_members=[])
+        v2_meta = _make_meta("reviewer", team_members=["governor", "developer"])
         registry = _make_registry_with_versions(
             base_meta=base_meta, versioned_meta=v2_meta,
         )
@@ -1275,7 +1282,9 @@ class TestClosureLevelConveneCouncilUsesVersionedMeta:
                 tools = create_instance_tools(
                     manager,
                     current_instance_id="parent-iid",
-                    agent_id="governor",
+                    agent_id="reviewer",  # Governor Recursion Guard
+                                              # (2026-08-30): cannot use
+                                              # "governor" as caller.
                     version_tag="v2",
                 )
                 convene = next(

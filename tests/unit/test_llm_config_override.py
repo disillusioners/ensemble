@@ -50,9 +50,10 @@ def create_mock_config(
     mock_llm.buffer_response_header = True
 
     mock_limits = MagicMock(spec=LimitsConfig)
-    mock_limits.max_instances = 100
     mock_limits.max_children_per_instance = 10
     mock_limits.graph_recursion_limit = 100
+    mock_limits.governor_recursion_guard_enabled = True
+    mock_limits.max_governor_ancestors = 1
 
     mock_queue = MagicMock(spec=QueueConfig)
     mock_queue.llm_retry_transient_attempts = 10

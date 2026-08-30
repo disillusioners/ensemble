@@ -100,12 +100,18 @@ daemon:
 
 # Instance Limits
 limits:
-  max_instances: 100
   max_children_per_instance: 50
   instance_timeout_minutes: 60
-  message_rate_limit: 60
   graph_recursion_limit: 300
   llm_concurrency: 10
+  # Governor recursive-spawn guard knobs are NOT live keys here (defaults
+  # are pinned in the Config dataclass; adding active YAML keys would
+  # alter resolved-config semantics). Both are env-overridable and
+  # restart-required (cached at boot):
+  #   LIMITS_GOVERNOR_RECURSION_GUARD_ENABLED=0   → disable the guard
+  #     (kill-switch; default enabled). Truthy values enable.
+  #   LIMITS_MAX_GOVERNOR_ANCESTORS=N             → K threshold
+  #     (default 1). Set to 0 to disable the guard entirely.
 
 # Persistence Settings
 persistence:

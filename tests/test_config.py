@@ -84,7 +84,7 @@ class TestLoadConfig:
             assert config.llm.model == "gpt-4"
             assert config.daemon.host == "0.0.0.0"
             assert config.daemon.port == 8079
-            assert config.limits.max_instances == 100
+            assert config.limits.max_children_per_instance == 50
         finally:
             # Cleanup env var
             if "ENSEMBLE_CONFIG" in os.environ:
@@ -214,20 +214,20 @@ class TestConfigValidation:
         assert config.llm.model == "gpt-4"
         assert config.daemon.host == "0.0.0.0"
         assert config.daemon.port == 8079
-        assert config.limits.max_instances == 100
+        assert config.limits.max_children_per_instance == 50
 
     def test_config_with_custom_values(self):
         """Test Config with custom values."""
         config = Config(
             llm={"api_key": "custom-key", "model": "gpt-3.5-turbo"},
             daemon={"port": 9000},
-            limits={"max_instances": 50},
+            limits={"max_children_per_instance": 50},
         )
-        
+
         assert config.llm.api_key == "custom-key"
         assert config.llm.model == "gpt-3.5-turbo"
         assert config.daemon.port == 9000
-        assert config.limits.max_instances == 50
+        assert config.limits.max_children_per_instance == 50
 
     def test_config_serialization(self, sample_config_yaml, tmp_path):
         """Test Config model serialization."""
@@ -345,15 +345,16 @@ class TestLimitsConfig:
     def test_limits_config_defaults(self):
         """Test LimitsConfig default values."""
         from daemon.config import LimitsConfig
-        
+
         config = LimitsConfig()
-        
-        assert config.max_instances == 100
+
         assert config.max_children_per_instance == 50
         assert config.instance_timeout_minutes == 60
-        assert config.message_rate_limit == 60
         assert config.graph_recursion_limit == 100
         assert config.llm_concurrency == 10
+        # Governor Recursion Guard (2026-08-30): default-on, K=1.
+        assert config.governor_recursion_guard_enabled is True
+        assert config.max_governor_ancestors == 1
 
 
 class TestPersistenceConfig:

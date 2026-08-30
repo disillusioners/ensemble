@@ -351,22 +351,20 @@ daemon:
 
 ```yaml
 limits:
-  max_instances: 100
   max_children_per_instance: 50
   instance_timeout_minutes: 60
-  message_rate_limit: 60
   graph_recursion_limit: 200
   llm_concurrency: 10
 ```
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `limits.max_instances` | integer | `100` | Maximum number of concurrent agent instances |
 | `limits.max_children_per_instance` | integer | `50` | Maximum child instances per parent instance |
 | `limits.instance_timeout_minutes` | integer | `60` | Auto-shutdown timeout for idle instances (minutes) |
-| `limits.message_rate_limit` | integer | `60` | Maximum messages per minute per instance |
 | `limits.graph_recursion_limit` | integer | `200` | Maximum recursion depth for LangGraph execution (global default) |
 | `limits.llm_concurrency` | integer | `10` | Maximum concurrent LLM API requests |
+| `limits.governor_recursion_guard_enabled` | boolean | `true` | Master kill-switch for the governor recursive-spawn guard. Override via `LIMITS_GOVERNOR_RECURSION_GUARD_ENABLED` (truthy values enable; `0` disables). Restart required — cached at boot. |
+| `limits.max_governor_ancestors` | integer | `1` | Max governor count allowed in the parent ∪ ancestors chain (K). When the parent-inclusive count ≥ K, governor spawns are refused with a corrective HINT. Override via `LIMITS_MAX_GOVERNOR_ANCESTORS`. `0` disables the guard entirely. Restart required. |
 
 > **Per-agent override:** the global `graph_recursion_limit` is a *base* — individual
 > agents can exceed it via `recursion_limit_multiplier` (e.g. `5` = 5× the base) or an
