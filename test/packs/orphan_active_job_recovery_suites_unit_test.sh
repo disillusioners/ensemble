@@ -10,7 +10,7 @@
 # feature/orphan-active-job-recovery branch on top of the Pattern (f) council
 # work. Running all four green is the merge-gate view for this branch.
 #
-#   1. tests/job_queue/test_orphan_active_job_recovery.py (19 tests)
+#   1. tests/job_queue/test_orphan_active_job_recovery.py (21 tests)
 #      Pattern (f) orphan ACTIVE JobItem recovery (44d5b4cf) +
 #      Pattern (f) council criticals (dee03665):
 #        - f1 strict restart-wipe-dead predicate
@@ -35,7 +35,7 @@
 #        - bus terminal emit on defer completion
 #        - no double-emit on re-entry
 #
-# Expected: 39 tests (19 + 3 + 9 + 8).
+# Expected: 41 tests (21 + 3 + 9 + 8).
 #
 # NOT included here (covered elsewhere or out of branch scope):
 #   - tests/job_queue/test_seam_invariants.py → owned by
