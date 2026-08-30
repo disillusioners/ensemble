@@ -60,11 +60,16 @@ def _make_manager(*, task_row=None, queue_stats=None):
 
     # queue_stats fallback
     if queue_stats is None:
-        queue_stats = MagicMock(
-            pending_count=2,
-            processing_count=1,
-            oldest_message_age_seconds=42.0,
-        )
+        # REAL plain dict — matches the InstanceMessagingService
+        # ``get_queue_stats`` (-> dict) contract. A MagicMock stub here
+        # silently satisfies attribute access, which is how the
+        # AttributeError -> HTTP 500 in the fallback block survived
+        # these tests (stub-vs-contract drift).
+        queue_stats = {
+            "pending_count": 2,
+            "processing_count": 1,
+            "oldest_message_age_seconds": 42.0,
+        }
     manager.get_queue_stats = AsyncMock(return_value=queue_stats)
 
     return manager
@@ -257,10 +262,14 @@ class TestGetMessageStatusMapping:
         manager._task_repo.get_by_message = MagicMock(
             side_effect=RuntimeError("task table missing")
         )
+        # REAL plain dict — the zeros shape the service returns for
+        # terminal/missing instances.
         manager.get_queue_stats = AsyncMock(
-            return_value=MagicMock(
-                pending_count=0, processing_count=0, oldest_message_age_seconds=None
-            )
+            return_value={
+                "pending_count": 0,
+                "processing_count": 0,
+                "oldest_message_age_seconds": None,
+            }
         )
         state["manager"] = manager
 
@@ -269,3 +278,102 @@ class TestGetMessageStatusMapping:
         assert resp.status_code == 200, resp.text
         body = resp.json()
         assert "queue_stats" in body
+
+
+class TestFallbackQueueStatsRealDict:
+    """Regression: the fallback block must read the queue-stats PLAIN DICT
+    with dict access, not attribute access.
+
+    ``InstanceMessagingService.get_queue_stats`` is annotated ``-> dict`` and
+    returns ``{"pending_count": …, "processing_count": …,
+    "oldest_message_age_seconds": …}``. The earlier fallback tests in this
+    module injected ``MagicMock`` stats, which silently satisfies attribute
+    access — exactly how the production ``AttributeError: 'dict' object has
+    no attribute 'pending_count'`` (HTTP 500) survived them. These tests use
+    a REAL dict, matching the service contract.
+    """
+
+    def test_fallback_queue_stats_plain_dict_returns_200(self, client_with_manager):
+        """Happy fallback: real dict stats must produce 200 + legacy payload."""
+        client, state = client_with_manager
+        state["manager"] = _make_manager(
+            task_row=None,
+            # REAL plain dict — the exact shape get_queue_stats returns.
+            queue_stats={
+                "pending_count": 2,
+                "processing_count": 1,
+                "oldest_message_age_seconds": 42.0,
+            },
+        )
+
+        resp = client.get("/instances/inst-abc/messages/msg-xyz")
+
+        assert resp.status_code == 200, (
+            "get_message_status fallback raised on the plain dict returned "
+            f"by get_queue_stats (attribute access on a dict -> AttributeError "
+            f"-> HTTP 500). Got: {resp.text}"
+        )
+        body = resp.json()
+        assert body["queue_stats"]["pending_count"] == 2
+        assert body["queue_stats"]["processing_count"] == 1
+        assert body["queue_stats"]["oldest_message_age_seconds"] == 42.0
+        assert body["message_id"] == "msg-xyz"
+        assert body["instance_id"] == "inst-abc"
+
+    def test_exception_fallback_queue_stats_plain_dict_returns_200(
+        self, client_with_manager
+    ):
+        """Exception fallback: real dict stats (terminal-instance zeros shape,
+        instance_messaging.py get_queue_stats short-circuit) must produce 200."""
+        client, state = client_with_manager
+        manager = MagicMock()
+
+        async def _get_instance(instance_id):
+            return MagicMock(instance_id=instance_id)
+        manager.get_instance = _get_instance
+        manager._task_repo = MagicMock()
+        manager._task_repo.get_by_message = MagicMock(
+            side_effect=RuntimeError("task table missing")
+        )
+        # REAL plain dict — the zeros shape the service returns for
+        # terminal/missing instances.
+        manager.get_queue_stats = AsyncMock(
+            return_value={
+                "pending_count": 0,
+                "processing_count": 0,
+                "oldest_message_age_seconds": None,
+            }
+        )
+        state["manager"] = manager
+
+        resp = client.get("/instances/inst-abc/messages/msg-xyz")
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["queue_stats"]["pending_count"] == 0
+        assert body["queue_stats"]["processing_count"] == 0
+        assert body["queue_stats"]["oldest_message_age_seconds"] is None
+
+    def test_fallback_queue_stats_extra_keys_tolerated(self, client_with_manager):
+        """The response echoes exactly the legacy 3-key contract even if the
+        service dict carries extra keys — dict access must not over-select."""
+        client, state = client_with_manager
+        state["manager"] = _make_manager(
+            task_row=None,
+            queue_stats={
+                "pending_count": 7,
+                "processing_count": 3,
+                "oldest_message_age_seconds": 12.5,
+                "future_key": "something-new",
+            },
+        )
+
+        resp = client.get("/instances/inst-abc/messages/msg-xyz")
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["queue_stats"] == {
+            "pending_count": 7,
+            "processing_count": 3,
+            "oldest_message_age_seconds": 12.5,
+        }

@@ -601,9 +601,9 @@ async def get_message_status(instance_id: str, message_id: str, request: Request
         "message_id": message_id,
         "instance_id": instance_id,
         "queue_stats": {
-            "pending_count": stats.pending_count,
-            "processing_count": stats.processing_count,
-            "oldest_message_age_seconds": stats.oldest_message_age_seconds,
+            "pending_count": stats["pending_count"],
+            "processing_count": stats["processing_count"],
+            "oldest_message_age_seconds": stats["oldest_message_age_seconds"],
         }
     }
 

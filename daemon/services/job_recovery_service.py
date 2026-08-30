@@ -55,8 +55,9 @@ _TERMINAL_INSTANCE_STATUSES: set[str] = {
 # allowed to finalize the JobItem as DONE. Exists for two reasons:
 #
 # 1. Mechanism A residue (council REJECT 2026-08-29, Critical #3): the
-#    observer's terminal decision stamps ``failed_at`` (:3301-3302 in
-#    job_feedback_observer.py) — the marker atomic_retry requires. A
+#    observer's terminal decision stamps ``failed_at`` (see
+#    ``_finalize_job_db_sync`` in ``job_feedback_observer.py``) —
+#    the marker atomic_retry requires. A
 #    bare ``done`` transition that fires in the same wall-clock window
 #    forecloses retry. 60s gives the observer enough slack to land its
 #    ``failed_at`` stamp (and any sibling atomic_retry chain) BEFORE
@@ -563,7 +564,7 @@ class JobRecoveryService:
     ) -> dict[str, Any]:
         """Detect and repair drift between ``job_queue_items`` and ``task``.
 
-        Runs on a 60s loop (default, configurable via
+        Runs on a 300s loop (default 5min, configurable via
         ``DaemonConfig.services.drift_reconcile_interval_seconds``) and
         bypasses the ``MaintenanceService._is_idle`` gate — drift
         appears *during* active work, which is precisely the case the
@@ -2131,7 +2132,11 @@ class JobRecoveryService:
                 # first-turn end (task_processor.py:
                 # 856-864) while the JobItem is held
                 # open SOLELY by observer gates
-                # (bus :3133-3165, F14 :3196-3222) —
+                # (see ``_pattern_f_check_bus_pending``
+                # for the bus gate and
+                # ``_pattern_f_instance_has_pending_tasks``
+                # for the PENDING-bucket gate — both
+                # gate helpers live in this module) —
                 # a 300s sweep vs minute-to-hour child
                 # waits means f2 ROUTINELY DONE-
                 # finalizes healthy parents mid-wait
@@ -2140,9 +2145,10 @@ class JobRecoveryService:
                 # UP-side, lost DOWN-side).
                 # Mechanism A: the observer's
                 # terminal decision stamps failed_at
-                # (:3301-3302) — the marker
-                # atomic_retry requires; bare done
-                # forecloses retry.
+                # (see ``_finalize_job_db_sync`` in
+                # ``job_feedback_observer.py`` — the
+                # marker atomic_retry requires; bare
+                # done forecloses retry.
                 #
                 # FIX (locked): gate f2 on ALL of:
                 #   1. bus_pending == 0 (dependency
@@ -2156,9 +2162,10 @@ class JobRecoveryService:
                 #      closes Mechanism A residual).
                 # FAIL-SAFE: when the bus is
                 # unavailable/unqueryable → SKIP
-                # (leave JobItem active; next 60s
-                # cycle retries). Never guess. Add
-                # a distinct detail name
+                # (leave JobItem active; the next drift
+                # cycle retries — interval configurable
+                # via ``DaemonConfig.services.drift_reconcile_interval_seconds``).
+                # Never guess. Add a distinct detail name
                 # (``orphan_active_skipped_bus_unavailable``)
                 # and log it.
                 if (
@@ -2423,8 +2430,10 @@ class JobRecoveryService:
                 # exists (Task-mint is async; the
                 # ``task is None`` check would pass and
                 # the row would be DEAD-finalized on the
-                # next 60s cycle — losing the live
-                # work). Add conjunct:
+                # next drift cycle (default 300s (5min),
+                # configurable via
+                # ``DaemonConfig.services.drift_reconcile_interval_seconds``)
+                # — losing the live work. Add conjunct:
                 # ``instance.created_at < threshold``
                 # (same grace threshold as the JobItem
                 # side) so a just-spawned instance never
@@ -2728,7 +2737,8 @@ class JobRecoveryService:
 
         Council REJECT 2026-08-29 Critical #2: the
         pre-fix method transitioned active→done with
-        NO ``release_by_job`` (f1 has it at :2196) —
+        NO ``release_by_job`` (f1 has it inside
+        ``_pattern_f_finalize_dead``) —
         every f2 firing on a c=1 queue (defer /
         background queues!) wedged that queue until
         restart. Fix: ``release_by_job(project_id,
@@ -3149,8 +3159,10 @@ class JobRecoveryService:
               returned ``None``) or the count query
               raised. The caller MUST treat this as
               FAIL-SAFE (skip finalize, leave JobItem
-              active; next 60s cycle retries). Never
-              guess.
+              active; the next drift cycle retries
+              — interval configurable via
+              ``DaemonConfig.services.drift_reconcile_interval_seconds``).
+              Never guess.
         """
         if task_id is None:
             # No task id means the candidate is not
@@ -3174,7 +3186,26 @@ class JobRecoveryService:
             # incident). FAIL-SAFE: never guess.
             return (0, True)
         try:
-            pending = await bus.pending_watchers(task_id)
+            # ``str(task_id)`` is REQUIRED at this seam:
+            # ``DependencyBus.pending_watchers`` (and its
+            # delegate ``DependencyWatcherRepository.
+            # fetch_pending_for_source``) declare
+            # ``source_task_id: str`` and the underlying
+            # ``dependency_watchers.source_task_id`` column
+            # is VARCHAR. The Python-side ``task.id`` is
+            # int; passing it raw binds an int to a
+            # VARCHAR column. SQLite's type affinity
+            # tolerates the implicit cast so unit tests
+            # stay green, but PostgreSQL is strict and
+            # raises ``UndefinedFunction: operator does
+            # not exist: character varying = integer``
+            # on every call — the live-PROD evidence
+            # (v0.11.3, 2026-08-30, task 26303). Coercing
+            # here matches the dominant caller convention
+            # (``child_reports._emit_terminal_via_bus``
+            # passes ``task_id=str(task_id)`` to the
+            # sister ``bus.emit_terminal``).
+            pending = await bus.pending_watchers(str(task_id))
             return (len(pending), False)
         except Exception as bus_query_err:
             logger.warning(
@@ -3213,17 +3244,25 @@ class JobRecoveryService:
         Returns:
             ``True`` if at least one PENDING Task
             exists for the instance, ``False`` if the
-            instance has no PENDING Tasks (or the
-            repository is not wired). A repository
-            miss is treated as ``False`` (no pending
-            tasks) — the candidate gate has other
-            fail-safes (bus + age floor) to catch
-            pathological cases.
+            instance has no PENDING Tasks. The
+            fail-safe direction is ``True`` (skip
+            finalize, leave JobItem active, next
+            drift cycle re-checks) on all
+            fall-through paths — missing
+            ``instance_id``, unwired
+            ``_task_repository``, AND a transient
+            lookup error — consistent with the
+            sister bus-gate ``_pattern_f_check_bus_pending`` and
+            the sister ``_pattern_f_instance_has_inflight_task``
+            below; never guess on a missing input.
+            The candidate gate still has its bus +
+            age-floor checks to catch pathological
+            cases on the genuine data path.
         """
         if not instance_id:
-            return False
+            return True
         if self._task_repository is None:
-            return False
+            return True
         try:
             tasks = await asyncio.to_thread(
                 self._task_repository.get_by_instance,
@@ -3234,10 +3273,11 @@ class JobRecoveryService:
                 f"_pattern_f_instance_has_pending_tasks: "
                 f"get_by_instance raised for "
                 f"{instance_id[:8]}...: {lookup_err}. "
-                f"Treating as no pending tasks (other "
-                f"fail-safes cover pathological cases)."
+                f"FAIL-SAFE: skipping finalize, leaving "
+                f"JobItem active (next drift cycle "
+                f"re-checks)."
             )
-            return False
+            return True
         for t in tasks or []:
             if getattr(t, "status", None) == TaskStatus.PENDING.value:
                 return True
@@ -3306,16 +3346,16 @@ class JobRecoveryService:
             tasks, or none at all). A repository miss or a
             transient lookup error is treated as ``True``
             (FAIL-SAFE: skip finalize, leave JobItem active;
-            next 60s cycle retries) — consistent with the
+            next drift cycle retries) — consistent with the
             sister bus-gate ``_pattern_f_check_bus_pending``
-            (`:3138-3153`, "FAIL-SAFE: skip finalize, leave
-            JobItem active; next 60s cycle retries. Never
+             "FAIL-SAFE: skip finalize, leave
+            JobItem active; next drift cycle retries. Never
             guess."). Never guess.
         """
         if not instance_id:
-            return False
+            return True
         if self._task_repository is None:
-            return False
+            return True
         try:
             return await asyncio.to_thread(
                 self._task_repository.has_instance_busy,
@@ -3323,12 +3363,12 @@ class JobRecoveryService:
             )
         except Exception as lookup_err:
             # FAIL-SAFE: skip finalize, leave JobItem
-            # active. The next 60s cycle re-checks. This
+            # active. The next drift cycle re-checks. This
             # direction is consistent with the sister
             # bus-gate ``_pattern_f_check_bus_pending``
-            # (`:3138-3153`, "FAIL-SAFE: skip finalize,
-            # leave JobItem active; next 60s cycle
-            # retries. Never guess.") — the prior
+            # ("FAIL-SAFE: skip finalize, leave JobItem
+            # active; next drift cycle retries. Never
+            # guess.") — the prior
             # ``return False`` direction (residual (b),
             # gate §7) over-finalized a live retry child
             # during transient DB errors.
@@ -3337,7 +3377,7 @@ class JobRecoveryService:
                 f"has_instance_busy raised for "
                 f"{instance_id[:8] if instance_id else '?'}...: {lookup_err}. "
                 f"FAIL-SAFE: skipping finalize, leaving "
-                f"JobItem active (next 60s cycle "
+                f"JobItem active (next drift cycle "
                 f"re-checks)."
             )
             return True

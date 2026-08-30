@@ -293,3 +293,208 @@ ALIVE_INSTANCE_STATUSES: frozenset[str] = frozenset({
     "queued",
     "waiting_children",
 })
+
+
+# ── Source-Validation Boundary (stability-backlog item 7, F2 pre-close) ────────
+
+# Reserved source values for the ``source`` field of ``JobItem`` /
+# ``MessageQueue``. These originate inside the daemon and are NOT
+# forgeable by user-supplied HTTP bodies. Internal callers stamp them
+# directly via ``manager.enqueue_message(source=...)`` /
+# ``service.enqueue(source=...)``; the HTTP boundary rejects them with
+# 422 so a frontend bug or hostile body cannot impersonate an internal
+# dispatch lane (which would subvert the dispatch-source guard at
+# ``daemon/services/instance_messaging.py:2280-2339`` — e.g. forging
+# ``internal_report:<child>`` would route a user message through the
+# original-source lookup path used for completion reports).
+#
+# Match semantics (see :func:`is_reserved_source` below):
+#   * Colon-terminated members are matched by ``str.startswith`` so
+#     ``internal_report:abc:msg`` is caught by ``"internal_report:"``.
+#   * Non-colon members (``cascade_resume``, ``api_resume_fallback``)
+#     are matched by exact equality — a custom user source
+#     ``"cascade_resume_v2"`` must NOT be collateral-blocked because
+#     it merely starts with the reserved string.
+#
+# Membership pinned by
+# ``tests/unit/routers/test_source_reservation.py::
+# TestReservedSourcePrefixesConstant`` — same fork-prevention shape as
+# ``INJECTION_ELIGIBLE_STATUSES`` above. Single-home check:
+# ``grep -rn --include="*.py" "RESERVED_SOURCE_PREFIXES" daemon/``
+# MUST show exactly ONE assignment — the annotated declaration below
+# (the ``: frozenset[str]`` annotation sits between the name and
+# ``=``, so ``name\s*=\s*{`` patterns cannot match it). No
+# per-consumer fork allowed.
+#
+# Provenance (where each value is stamped):
+#   * ``"system:"``                       — infrastructure notices,
+#                                          e.g. ``system:watchdog``
+#                                          hang-notice (instance
+#                                          messaging dispatch-source
+#                                          guard:2284-2308).
+#   * ``"internal_agent:"``               — agent-to-agent message lane
+#                                          (``daemon/graph.py:2942``,
+#                                          ``daemon/services/work_notifier.py:293``
+#                                          job-event ping,
+#                                          ``daemon/services/message_processing_pipeline.py:706``
+#                                          for the special job-event
+#                                          prefix).
+#   * ``"internal_report:"``              — completion-report drain
+#                                          (``daemon/graph.py:3169``,
+#                                          ``daemon/services/child_reports.py:2744``,
+#                                          ``daemon/repositories/report_injection/repository.py:633``).
+#   * ``"internal_error_report:"``        — error-report drain
+#                                          (``daemon/services/error_reporting.py:745``,
+#                                          dedup key at :419).
+#   * ``"internal_invoke_and_wait:"``     — invoke_agent_and_wait tool
+#                                          (``daemon/utils.py:645``,
+#                                          documented as non-user
+#                                          origin in
+#                                          ``daemon/tools/upgrade_journal.py:1070``).
+#   * ``"cascade_resume"``                — answer-gate cascade resume
+#                                          (``daemon/manager.py:9285``,
+#                                          ``daemon/services/watchover_service.py:676,722``).
+#   * ``"api_resume_fallback"``           — messages router fallback
+#                                          enqueue
+#                                          (``daemon/routers/messages.py:282``).
+#   * ``"explore:"``                      — kb-importer hand-off from the
+#                                          explore tool
+#                                          (``daemon/tools/knowledge_tools.py:323``).
+#   * ``"experience:"``                   — kb-writer hand-off from the
+#                                          experience tool
+#                                          (``daemon/tools/knowledge_tools.py:389``).
+#   * ``"blueprint-sidecar:"``            — blueprinter drift-signal
+#                                          sidecar enqueue
+#                                          (``daemon/tools/knowledge_tools.py:470``).
+#   * ``"agent:"``                        — server-derived agent-caller
+#                                          origin on the job tools
+#                                          (``daemon/tools/job_queue.py:550``
+#                                          and ``:1062``; the
+#                                          empty-caller fallback is
+#                                          ``internal_agent:unknown``,
+#                                          itself covered above).
+#   * ``"watchover_next_command"``        — terminal-activation
+#                                          follow-up enqueue
+#                                          (``daemon/services/watchover_service.py:1382``).
+#   * ``"skill_metric_scan"``             — periodic skill-evolution
+#                                          scan direct enqueue
+#                                          (``daemon/manager.py:4024``).
+#   * ``"skill_evolution"``               — skill_job_dispatcher stamp
+#                                          (``SOURCE_TAG`` at
+#                                          ``daemon/services/skill_job_dispatcher.py:76``,
+#                                          stamped at ``:257``).
+#   * ``"admin-endpoint"``                — blueprinter REST trigger
+#                                          (helper default at
+#                                          ``daemon/services/blueprint_job_helper.py:42``,
+#                                          stamped by
+#                                          ``daemon/routers/blueprints.py:300``).
+#   * ``"auto-scan"``                     — blueprinter scan-service
+#                                          trigger
+#                                          (``daemon/services/blueprint_scan_service.py:316``).
+#   * ``"scheduler"``                     — scheduler adapter trigger
+#                                          enqueue — userless pure-daemon
+#                                          identity, same trust class as
+#                                          ``admin-endpoint`` /
+#                                          ``auto-scan``
+#                                          (``daemon/sources/adapters/scheduler.py:765``).
+#
+# Deliberately NOT in the set (legitimate user origins — an end-user
+# identity rides the request; userless pure-daemon identities such as
+# ``admin-endpoint`` / ``auto-scan`` / ``scheduler`` mint no user
+# identity, are daemon-minted trust anchors, and are reserved above):
+#   * ``"api"``                           — default + bare-api origin;
+#                                          the full F2 P2.3 user-origin
+#                                          question stays gated/out of
+#                                          scope per the stability
+#                                          backlog (item 7 preamble).
+#   * ``"telegram:"`` / ``"webhook:"`` /
+#     ``"whatsapp:"`` / ``"discord:"`` /
+#     ``"slack:"``                        — channel adapters, all
+#                                          stamped on the inbound
+#                                          adapter side and reflected
+#                                          back into ``JobItem.source``
+#                                          by the source dispatcher.
+#   * ``"dependency_bus"``                — FollowUp.source field default
+#                                          (``daemon/services/dependency_bus.py:159``),
+#                                          kept only as the legacy-payload
+#                                          deserialization fallback
+#                                          (``from_payload`` :210) — no active
+#                                          mint site today; the only mint
+#                                          (``daemon/tools/instance.py:538``)
+#                                          stamps ``internal_agent:``, which IS
+#                                          reserved above.
+#   * Arbitrary custom strings from
+#     integrated frontends / hooks. A user source value is a
+#     free-form identifier — pinning the F2 user-origin whitelist is
+#     a separate, deferred decision; this constant only pins the
+#     reserved INTERNAL half so the boundary is enforceable today.
+RESERVED_SOURCE_PREFIXES: frozenset[str] = frozenset({
+    # Colon-terminated families (matched by ``startswith``).
+    "system:",
+    "internal_agent:",
+    "internal_report:",
+    "internal_error_report:",
+    "internal_invoke_and_wait:",
+    "explore:",
+    "experience:",
+    "agent:",
+    "blueprint-sidecar:",
+    # Non-colon exact values (matched by exact equality).
+    "cascade_resume",
+    "api_resume_fallback",
+    "watchover_next_command",
+    "skill_metric_scan",
+    "skill_evolution",
+    "admin-endpoint",
+    "auto-scan",
+    "scheduler",
+})
+
+
+def is_reserved_source(source: str | None) -> bool:
+    """Return True if ``source`` matches a reserved internal origin.
+
+    Match semantics:
+      * Colon-terminated members of :data:`RESERVED_SOURCE_PREFIXES`
+        are matched by ``str.startswith``.
+      * Non-colon members are matched by exact equality.
+
+    ``None`` and the empty string return False — the HTTP-boundary
+    caller treats them as "no user-supplied value" and lets the
+    underlying Pydantic default (``"api"``) fill in. Internal
+    callers that pass ``None`` directly to
+    ``manager.enqueue_message`` are unaffected (the helper is a
+    boundary check, not a guard on the enqueue path itself).
+    """
+    if not isinstance(source, str) or not source:
+        return False
+    # Colon-terminated families — prefix-match.
+    for reserved in RESERVED_SOURCE_PREFIXES:
+        if reserved.endswith(":") and source.startswith(reserved):
+            return True
+    # Non-colon exact values — exact-match.
+    if source in RESERVED_SOURCE_PREFIXES:
+        return True
+    return False
+
+
+# Case-sensitivity invariant (deliberate — do NOT casefold this helper).
+#   * Every stamp site mints the exact lowercase literals in
+#     ``RESERVED_SOURCE_PREFIXES`` — no daemon path ever produces a
+#     case-variant.
+#   * The internal dispatch sinks match case-SENSITIVELY (bare
+#     ``startswith`` / exact equality at
+#     ``daemon/services/instance_messaging.py:2290-2299`` and
+#     ``daemon/services/message_processing_pipeline.py:702-708``), so a
+#     case-variant body value (e.g. ``"SYSTEM:watchdog"``) would NOT be
+#     system-recognized as internal even if it reached a queue — it
+#     flows as an inert free-form external source. Casefolding here
+#     would claim a contract the sinks do not honor AND over-block
+#     free-form user identifiers (e.g. ``"Agent:my-app"``) that are
+#     harmless today.
+#   * If any sink is ever changed to casefolded matching, update the
+#     sink AND this helper together — they must agree exactly. The
+#     case-sensitive behavior is pinned by
+#     ``tests/unit/routers/test_source_reservation.py::
+#     TestReservedSourcePrefixesConstant::
+#     test_helper_is_deliberately_case_sensitive``.
