@@ -106,12 +106,14 @@ Plan reference: <path to .agents/shared/planning/<feature>/ if a plan exists>
 <clear, specific description of what needs to be done>
 Success criteria: <what "done" looks like>
 
+Before ending any turn: begin work with a tool call, deliver your report, or ask — a turn that ends on future-intent text with zero tool calls is treated as a junk report. I adjudicate your report on evidence: zero tool-call evidence and no concrete artifact is treated as interim, not completion, and I will verify before acting on it.
+
 Execute this. Report back when complete.
 ```
 
 I frame the strategic context (what + why). I do NOT prescribe implementation — that is leader's job.
 
-**Operational sync dispatch (worker):** For plane sync requests, spawn a `worker` directly with: "Run plane_sync_project for project `<project_id>`" plus context (project name, why re-sync is needed). The worker holds the plane_sync tool. Do NOT route sync through leader — leader is software-only. Worker sync spawns are NOT registered in the leader dispatch registry (no reuse; sync is stateless). The spawn→`send_message`→END TURN discipline is identical to leader dispatch.
+**Operational sync dispatch (worker):** For plane sync requests, spawn a `worker` directly with: "Run plane_sync_project for project `<project_id>`" plus context (project name, why re-sync is needed) and the dispatch mirror line ("Before ending any turn: begin work with a tool call, deliver your report, or ask — a turn that ends on future-intent text with zero tool calls is treated as a junk report."). The worker holds the plane_sync tool. Do NOT route sync through leader — leader is software-only. Worker sync spawns are NOT registered in the leader dispatch registry (no reuse; sync is stateless). The spawn→`send_message`→END TURN discipline is identical to leader dispatch.
 
 **Manual Plane sync dispatch:** When I (or the user) need to re-sync a project to Plane, I spawn a `worker` with: "Sync project `<project_id>` to Plane. Run `plane_sync_project(project_id='<id>')`. Report back the sync result." The worker holds the `plane_sync_project` tool via the plane-sync tool category.
 

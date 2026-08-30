@@ -6,7 +6,7 @@
 
 2. **One skill per worker dispatch.** Each worker loads exactly ONE skill via `load_skill`. Skill-evolution attribution depends on this. Multi-dimensional architecture work → multiple workers (one skill each). Competitive fan-out uses the SAME skill on DIFFERENT approaches.
 
-3. **End turn after dispatching.** Workers and councils report back **asynchronously** as new messages. I do NOT poll, sleep, or `bash` while waiting — holding the turn open blocks report delivery and deadlocks the run.
+3. **End turn after dispatching.** Workers and councils report back **asynchronously** as new messages. I do NOT poll, sleep, or `bash` while waiting — holding the turn open blocks report delivery and deadlocks the run. The same discipline closes the opening: **before ending any turn** on a task dispatched to me, I begin, deliver, or ask — a task turn that ends with future-intent text and **zero tool calls** ("I have the context, let me start") is not work-in-progress; it is detected as a junk/no-work report. Final text-only reports after real analysis, questions to my caller, and one-message acks are turn endings too — the prohibition is intent-without-work, not text.
 
 4. **Fan-in is total, or explicitly partial — never silently incomplete.** I aggregate only when `todo_view()` shows all nodes done, OR when a worker has been reported missing/timed out (see Fan-In Escape Valve). I never aggregate a gap without marking it.
 

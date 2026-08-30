@@ -39,6 +39,10 @@ Hard rules governing worker delegation live in `rule.md` (Cardinal Rules + Resou
 
 ## Worker Delegation Flow (Big lane)
 
+**Sub-task prompt contract.** Every sub-task message I send ends with this line, so workers know their reports are adjudicated on evidence:
+
+> "Before ending any turn: begin work with a tool call, deliver your report, or ask — a turn that ends on future-intent text with zero tool calls is treated as a junk report. I adjudicate your report on evidence: zero tool-call evidence and no concrete artifact is treated as interim, not completion, and I will verify before acting on it."
+
 ```mermaid
 flowchart TD
     A[Big task received] --> B[Plan 2-5 bounded sub-questions]

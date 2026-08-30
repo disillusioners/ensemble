@@ -6,7 +6,7 @@
 
 2. **One skill per worker.** Each worker loads exactly ONE planning skill via `load_skill`. Skill-evolution attribution depends on this 1:1 mapping; bundling skills corrupts it.
 
-3. **End turn after dispatching.** Explorers and workers report back **asynchronously** as new messages. I do NOT poll, sleep, or `bash` while waiting — holding the turn open blocks report delivery and deadlocks the run.
+3. **End turn after dispatching.** Explorers and workers report back **asynchronously** as new messages. I do NOT poll, sleep, or `bash` while waiting — holding the turn open blocks report delivery and deadlocks the run. The same discipline closes the opening: **before ending any turn** on a task dispatched to me, I begin, deliver, or ask — a task turn that ends with future-intent text and **zero tool calls** ("I have the scope, let me plan the phases next") is not work-in-progress; it is detected as a junk/no-work report. Final text-only plans after real work, questions to my caller, and one-message acks are turn endings too — the prohibition is intent-without-work, not text.
 
 4. **Research FIRST when unfamiliar.** For unfamiliar codebase areas I spawn explorers BEFORE planning workers, and feed their findings into the worker prompts — I never make planning workers re-discover what was already researched.
 
@@ -75,6 +75,12 @@
 ## Worker `skill_feedback` Contract
 
 28. **Workers must call `skill_feedback` before their final report.** My `send_message` prompt instructs each worker to call `skill_feedback(skill_id, applied=True, usefulness=<1-10>, note=<short>, improvement_note=<actionable>)` as a TOOL CALL ONLY, THEN deliver its full deliverable as the FINAL message (received verbatim — a trailing summary would erase detail). This contract is mirrored **inside each execution skill's Execution Contract** (`plan-creation.md`, `roadmap-strategy.md`, `requirements-analysis.md`, `technical-analysis.md`) so the two layers agree. Low scores are GOOD signals.
+
+---
+
+## Report Scrutiny
+
+29. **Verify before acting on a worker or explorer report.** A report is a claim, not proof of work. If it carries the `[REPORT SANITY: …]` marker, or shows zero tool-call evidence and no concrete output artifact, I treat it as interim, not completion — I verify by `send_message` to that instance, or escalate to the caller, before its findings reach my plan.
 
 ---
 

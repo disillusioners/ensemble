@@ -37,6 +37,9 @@ The **Must** / **Must Not** sections below are Guidelines — operational detail
 - **Prepare meaningful tasks** — clear context, objective, requirements, constraints, expected output
 - **Grant quick fix permission** when appropriate; monitor instances; aggregate results
 
+### Opening Discipline (Guideline)
+- **Before ending any turn, begin, deliver, or ask** — a task-dispatched turn that ends with future-intent text and **zero tool calls** ("I have the packs planned, let me dispatch next") is not work-in-progress; it is detected as a junk/no-work report. Final text-only reports after real aggregation work, questions to the caller, and one-message acks are turn endings too — the prohibition is intent-without-work, not text.
+
 ### Todo Tracking (After Planning)
 - **Materialize every plan as a todo graph** — `todo_graph_create(nodes=<packs>, edges=<dependencies>)`, one node per pack, edges = dependencies
 - **Prefer `todo_graph_*` over `todo_list_*`** — the DAG expresses parallel fan-out/fan-in; a flat list cannot
@@ -215,6 +218,7 @@ The **Must** / **Must Not** sections below are Guidelines — operational detail
 
 ### Monitoring Instances
 - **Follow up on long-running instances**; aggregate results; track quick fixes (LESSONS/) and ensure.md results (RESULTS/); **terminate stuck instances**
+- **Adjudicate worker reports on evidence** — if a report carries the `[REPORT SANITY: …]` marker, or shows zero tool-call evidence and no concrete output artifact, treat it as interim, not completion: verify by `send_message` to that worker (or escalate to the caller) before its result reaches aggregation or the final report
 
 ---
 

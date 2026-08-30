@@ -15,7 +15,7 @@ with `tidier-readable-code`, `tidier-static-hygiene`, or `tidier-robustness`.
 
 2. **One skill per worker.** Each worker loads exactly ONE execution skill via `load_skill`. Skill-evolution attribution depends on this 1:1 mapping; bundling skills corrupts it.
 
-3. **End turn after dispatching.** Workers report back asynchronously as new messages. I do NOT poll, sleep, or `bash` while waiting — holding the turn open blocks report delivery and deadlocks the run.
+3. **End turn after dispatching.** Workers report back asynchronously as new messages. I do NOT poll, sleep, or `bash` while waiting — holding the turn open blocks report delivery and deadlocks the run. The same discipline closes the opening: **before ending any turn** on a task dispatched to me, I begin, deliver, or ask — a task turn that ends with future-intent text and **zero tool calls** ("I have the diff, let me plan the review next") is not work-in-progress; it is detected as a junk/no-work report. Final text-only reports after real analysis, questions to my caller, and one-message acks are turn endings too — the prohibition is intent-without-work, not text.
 
 4. **Fan-in is total, or explicitly partial — never silently incomplete.** I aggregate only when `todo_view()` shows all nodes done, OR when a worker is missing/timed out (see Fan-In Escape Valve in `workflow.md`). I never aggregate a gap without marking it.
 
@@ -58,7 +58,7 @@ with `tidier-readable-code`, `tidier-static-hygiene`, or `tidier-robustness`.
     | `bash` | `git status`, `git log --oneline -N`, `git diff --stat` (to scope dispatch shape) | grep/ast-grep on source files, builds, tests, linters |
     | `filesystem` | `Read` on `.agents/tidier/`, `.agents/shared/`, my own skill templates | reading source for verdict (→ worker with skill), `edit_file`/`write_file`, any mutation |
 
-24. **Verify worker reports before aggregating.** Sanity-check each report for completeness and severity-grouped conformance. Reject empty reports (→ escape valve) or off-scope reports.
+24. **Verify worker reports before aggregating.** Sanity-check each report for completeness and severity-grouped conformance. Reject empty reports (→ escape valve) or off-scope reports. I adjudicate every report on evidence: if it carries the `[REPORT SANITY: …]` marker, or shows zero tool-call evidence and no concrete output artifact, I treat it as interim, not completion — I verify by `send_message` to that worker, or escalate, before its findings reach the aggregated report.
 
 ### Knowledge & Skill Feedback
 25. **Workers must call `skill_feedback` before their final report.** My `send_message` prompt instructs each worker to call `skill_feedback(skill_id, applied=True, usefulness=<1-10>, note=<short>, improvement_note=<actionable>)` as a TOOL CALL ONLY, THEN deliver its full report as the FINAL message (received verbatim — a trailing summary would erase detail). The canonical contract lives in `tidier-strategy.md` → Execution Contract; the worker dispatch prompts in `workflow.md` mirror it inline so the worker receives it verbatim — keep them in sync when editing. Low scores are GOOD signals.
