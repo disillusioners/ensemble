@@ -61,6 +61,29 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _reset_wc_wake_enqueue_flag_cache():
+    """Reset the WC-wake kill-switch cache around EVERY test in this module.
+
+    W1 (2026-08-30 pre-flip batch): the flag-parametrized ``send_message`` tests
+    set ``ENSEMBLE_WC_WAKE_ENQUEUE`` and call ``_reset_wc_wake_enqueue_for_tests()``
+    so the resolver re-reads the env — but monkeypatch only restores the ENV at
+    teardown; the resolver's module-global cache stays at the last test's value
+    and leaks into later flag-implicit tests in the same pytest process. Clear
+    the cache BEFORE and AFTER every test so each test resolves the flag from
+    the ambient env. Module-scoped on purpose — a suite-global autouse in
+    ``tests/conftest.py`` would mask intentional flag-state tests and add
+    overhead everywhere.
+    """
+    from daemon.services.instance_messaging import (
+        _reset_wc_wake_enqueue_for_tests,
+    )
+
+    _reset_wc_wake_enqueue_for_tests()
+    yield
+    _reset_wc_wake_enqueue_for_tests()
+
+
 # Module-level: derive the repo root once. The test file lives at
 # ``tests/unit/tools/test_instance_tools.py``, so
 # ``parents[0]=tests/unit/tools/``, ``parents[1]=tests/unit/``,

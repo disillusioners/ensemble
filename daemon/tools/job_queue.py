@@ -1922,13 +1922,27 @@ def create_job_tools(
                 current_status not in INJECTION_ELIGIBLE_STATUSES
                 and current_status != "waiting_children"
             ):
+                # D3 (2026-08-30 pre-flip batch): the error TEXT branches on
+                # the kill-switch. Flag OFF shows the byte-faithful legacy
+                # string from 1f8f8ed4 — OFF is the instant-revert path, so
+                # the revert contract is byte-compatible, not just behavioral
+                # (the eligibility CONDITION above is identical in both
+                # states). Flag ON shows the routing-pivot wording.
+                if _resolve_wc_wake_enqueue_enabled():
+                    return {
+                        "error": (
+                            f"Instance is {instance_meta.status} — job_inject "
+                            "injects into RUNNING turns; WAITING_CHILDREN/IDLE/"
+                            "terminal targets get the message enqueued (WC under "
+                            "the flag-ON routing pivot) or should use job_continue. "
+                            "Use job_continue for IDLE/PAUSED/terminal instances."
+                        )
+                    }
                 return {
                     "error": (
                         f"Instance is {instance_meta.status} — job_inject "
-                        "injects into RUNNING turns; WAITING_CHILDREN/IDLE/"
-                        "terminal targets get the message enqueued (WC under "
-                        "the flag-ON routing pivot) or should use job_continue. "
-                        "Use job_continue for IDLE/PAUSED/terminal instances."
+                        "only works on RUNNING or WAITING_CHILDREN instances. "
+                        "Use job_continue for IDLE/terminal instances."
                     )
                 }
 

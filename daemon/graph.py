@@ -260,6 +260,17 @@ def _frame_injected_report(content: str) -> str:
 #   * In-place insert: the helper mutates ``messages`` so the synthesized
 #     placeholders flow into the C2 return (and the checkpoint) — the
 #     state is healed permanently at this point.
+#
+# CLE-mirror seam (wc-wake-report-integrity, T6): this in-graph guard is
+# ONE END of a two-end convention. The OTHER end is the enqueue-seam
+# tail-guard — ``_heal_poisoned_checkpoint_tail`` in
+# ``daemon/services/instance_messaging.py`` — which runs BEFORE the LLM
+# call (at the enqueue seam, after the ``_build_graph_input`` sites
+# converge) because the in-graph drain here fires too late for the
+# gateway rejection it prevents. Convention block + rationale live at
+# the "D1 entry-seam pairing tail-guard (wc-wake-report-integrity, T6)"
+# comment site in ``daemon/services/instance_messaging.py``; keep the
+# two ends cross-referenced when either changes.
 
 _TOOL_PAIRING_MAX_TRAVERSAL = 8
 _TOOL_PAIRING_PLACEHOLDER_TEXT = (

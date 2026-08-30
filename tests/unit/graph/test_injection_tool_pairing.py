@@ -558,12 +558,16 @@ class TestPlaceholderText:
 # Phase 1 (agent-instance-tools) — agent-tool-triggered injection path
 # ---------------------------------------------------------------------------
 #
-# Phase 1 routes agent-tool sends to RUNNING / WAITING_CHILDREN targets
-# through ``Manager.set_injection(...)`` — the SAME RAM-only FIFO the
-# user-facing API uses (``daemon/routers/messages.py:348`` →
-# ``Manager._pending_injections``). The agent-tool layer does NOT
-# create a new injection site; it piggybacks on the single delivery
-# point at ``agent_node`` (``daemon/graph.py:2871-2911``).
+# Routing (post-wc-wake-report-integrity): agent-tool sends to RUNNING
+# targets take the ``Manager.set_injection(...)`` RAM-only FIFO — the
+# SAME route the user-facing API uses (``daemon/routers/messages.py``
+# → ``Manager._pending_injections``). WAITING_CHILDREN targets are
+# flag-conditional: legacy FIFO injection under
+# ``ENSEMBLE_WC_WAKE_ENQUEUE`` OFF (default), durable ``enqueue_message``
+# wake under ON. The agent-tool layer creates NO new injection site;
+# injections still piggyback on the single delivery point in
+# ``agent_node``, where the FIFO drain runs
+# ``_ensure_tool_result_pairing`` BEFORE the LLM call.
 #
 # The existing 16-case regression suite (Cases 1-7 above) exercises
 # the user-API injection path. Phase 1 cases a / a-bis extend the
@@ -573,9 +577,9 @@ class TestPlaceholderText:
 # We do NOT re-test the helper itself here (the helper is a pure
 # stateless scan); we test the integration contract: when an
 # agent-tool send populates the FIFO with an in-flight unanswered
-# tool_call's tail, the same pairing guard at
-# ``daemon/graph.py:2893`` heals the checkpoint exactly as it does
-# for user-API injections.
+# tool_call's tail, the SAME pairing guard at the ``agent_node`` drain
+# site heals the checkpoint exactly as it does for user-API
+# injections.
 #
 # These tests are intentionally STATELESS (Cases 1-7 pattern): they
 # exercise ``_ensure_tool_result_pairing`` directly with hand-crafted
@@ -587,13 +591,14 @@ class TestAgentToolInjectionPairing:
     """Phase 1 / Test a — tool-pairing regression for the agent-tool
     injection path.
 
-    The agent-tool ``send_message`` tool routes RUNNING /
-    WAITING_CHILDREN targets through ``manager.set_injection(...)``
-    which is the same FIFO the user API uses. The drain at
-    ``daemon/graph.py:2871-2911`` runs ``_ensure_tool_result_pairing``
-    at :2893 — the SAME guard site. This class proves the agent-tool
-    trigger path exercises the SAME delivery point and guard as the
-    user API, with parametrized tool_call shapes / ids.
+    The agent-tool ``send_message`` tool routes RUNNING targets (and
+    WAITING_CHILDREN targets under the legacy flag-OFF routing — the
+    flag-ON pivot sends WC through ``enqueue_message`` instead) through
+    ``manager.set_injection(...)``, the same FIFO the user API uses.
+    The ``agent_node`` drain runs ``_ensure_tool_result_pairing`` at
+    that single delivery point — the SAME guard site. This class proves
+    the agent-tool trigger path exercises the SAME delivery point and
+    guard as the user API, with parametrized tool_call shapes / ids.
     """
 
     @pytest.mark.parametrize(

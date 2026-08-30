@@ -28,6 +28,30 @@ from daemon.tools._tool_registry import CATEGORY_MODULES
 from daemon import constants
 from daemon.services import project_normalizer
 
+
+@pytest.fixture(autouse=True)
+def _reset_wc_wake_enqueue_flag_cache():
+    """Reset the WC-wake kill-switch cache around EVERY test in this module.
+
+    W1 (2026-08-30 pre-flip batch): the flag-parametrized ``job_inject`` tests
+    set ``ENSEMBLE_WC_WAKE_ENQUEUE`` and call ``_reset_wc_wake_enqueue_for_tests()``
+    so the resolver re-reads the env — but monkeypatch only restores the ENV at
+    teardown; the resolver's module-global cache stays at the last test's value
+    and leaks into later flag-implicit tests (cross-file order AND
+    subset-by-name both reproduce ``assert 200 == 202`` failures on legacy
+    202 expectations). Clear the cache BEFORE and AFTER every test so each
+    test resolves the flag from the ambient env. Module-scoped on purpose —
+    a suite-global autouse in ``tests/conftest.py`` would mask intentional
+    flag-state tests and add overhead everywhere.
+    """
+    from daemon.services.instance_messaging import (
+        _reset_wc_wake_enqueue_for_tests,
+    )
+
+    _reset_wc_wake_enqueue_for_tests()
+    yield
+    _reset_wc_wake_enqueue_for_tests()
+
 # Test constant for system default project ID (mirrors test_job_queue_tools.py)
 TEST_SYSTEM_PROJECT_ID = "71931ae0-0f25-5fbf-853b-2a78cc978d7e"
 
@@ -963,6 +987,63 @@ class TestJobInjectTool:
         assert "completed" in result["error"]
         assert "RUNNING" in result["error"]
         assert "job_continue" in result["error"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("flag_value", "expected_error"),
+        [
+            pytest.param(
+                "0",
+                "Instance is completed — job_inject "
+                "only works on RUNNING or WAITING_CHILDREN instances. "
+                "Use job_continue for IDLE/terminal instances.",
+                id="flag_off_legacy_string",
+            ),
+            pytest.param(
+                "1",
+                "Instance is completed — job_inject "
+                "injects into RUNNING turns; WAITING_CHILDREN/IDLE/"
+                "terminal targets get the message enqueued (WC under "
+                "the flag-ON routing pivot) or should use job_continue. "
+                "Use job_continue for IDLE/PAUSED/terminal instances.",
+                id="flag_on_pivot_string",
+            ),
+        ],
+    )
+    async def test_job_inject_error_text_branches_on_flag(
+        self, mock_services, mock_manager, job_inject_tool,
+        monkeypatch: pytest.MonkeyPatch, flag_value: str, expected_error: str,
+    ):
+        """D3 (2026-08-30 pre-flip batch): the ``job_inject`` eligibility
+        error TEXT branches on the kill-switch. Flag OFF pins the
+        byte-faithful legacy string from 1f8f8ed4 — OFF is the
+        instant-revert path, so the revert contract is byte-compatible,
+        not just behavioral. Flag ON pins the routing-pivot wording.
+        The eligibility CONDITION is identical in both states."""
+        from daemon.services.instance_messaging import (
+            _reset_wc_wake_enqueue_for_tests,
+        )
+
+        monkeypatch.setenv("ENSEMBLE_WC_WAKE_ENQUEUE", flag_value)
+        _reset_wc_wake_enqueue_for_tests()
+
+        job_service, _, _ = mock_services
+
+        record = _make_work_record(
+            "inject-err", instance_id="inject-err-root",
+            project_id="proj-1", agent_id="developer",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+
+        root = _make_instance("inject-err-root", status="completed")
+        mock_manager._instance_repository.get = MagicMock(return_value=root)
+
+        result = await job_inject_tool.ainvoke({
+            "job_id": "inject-err",
+            "message": "Hello",
+        })
+
+        assert result == {"error": expected_error}
 
     @pytest.mark.asyncio
     async def test_job_inject_project_id_mismatch(

@@ -115,11 +115,15 @@ def _resolve_wc_wake_enqueue_enabled() -> bool:
         ``ENSEMBLE_WC_WAKE_ENQUEUE=0`` — the LEGACY behavior is
         preserved at all three call sites (HTTP, agent-tool, ``job_inject``).
 
-    Valid truthy values: ``("1", "true", "yes", "on", "")`` (the empty
-    string matches the unset-env default ``"0"`` resolver path — same
-    pattern as ``_resolve_governor_recursion_guard_enabled``).
-    Valid falsy values: ``("0", "false", "no", "off")``. Unknown values
-    fall back to ``False`` (the OFF default) with a one-shot WARN
+    Valid truthy values: ``("1", "true", "yes", "on")``. Valid falsy
+    values: ``("0", "false", "no", "off")``. Blank / unset / unknown
+    values all resolve ``False`` (the OFF default) — blanking the env
+    mid-incident (``ENSEMBLE_WC_WAKE_ENQUEUE=``) is the instant-revert
+    path, so it MUST resolve OFF. (Note: ``""`` is NOT in the truthy
+    tuple — unlike the governor-guard resolver, whose ``get(..., "1")``
+    unset default makes a blank env consistent with its ON direction;
+    this resolver defaults OFF via ``get(..., "0")``.) Unknown (non-blank)
+    values additionally fall back to ``False`` with a one-shot WARN
     cached on first access.
 
     The first resolution also emits a one-shot INFO log via
@@ -132,7 +136,7 @@ def _resolve_wc_wake_enqueue_enabled() -> bool:
     raw = os.environ.get(_WC_WAKE_ENQUEUE_ENV, "0").strip().lower()
     if raw in ("0", "false", "no", "off"):
         _WC_WAKE_ENQUEUE_ENABLED = False
-    elif raw in ("1", "true", "yes", "on", ""):
+    elif raw in ("1", "true", "yes", "on"):
         _WC_WAKE_ENQUEUE_ENABLED = True
     else:
         logger.warning(
@@ -1372,12 +1376,13 @@ class InstanceMessagingService:
 
 
     # wc-wake-report-integrity (T6b, D7 LOCKED 2026-08-30): the legacy
-    # ``InstanceMessagingService.send_message`` method (the :1060
-    # ``graph.ainvoke`` bypass) was DELETED. It re-opened the
-    # poisoned-tail → LangGraph 2013 exposure that the new D1
-    # enqueue-seam guard (T6) closes. Production callers must use
-    # ``enqueue_message`` (durable wake) or the FIFO ``set_injection``
-    # API (mid-turn injections on RUNNING targets).
+    # ``InstanceMessagingService.send_message`` method — the
+    # ``graph.ainvoke`` bypass — was DELETED (it never shipped in
+    # production); keeping it would have re-opened the poisoned-tail →
+    # LangGraph 2013 exposure that the D1 enqueue-seam guard (T6)
+    # closes. There is NO replacement bypass: production callers must
+    # use ``enqueue_message`` (durable wake) or the FIFO
+    # ``set_injection`` API (mid-turn injections on RUNNING targets).
 
     def _prepare_enqueued_message(
         self,

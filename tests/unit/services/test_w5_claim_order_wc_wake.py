@@ -38,11 +38,12 @@ Three pins live in this file:
 
 **S13 cross-ref** (plan §6-T9 additions): the caller-facing experience
 of the two-turn window — a WC target that already has a queued wake is
-BUSY — is pinned verbatim by
-``tests/unit/tools/test_instance_tools.py::TestWaitingChildrenQueueBusyGuard``
-and the ``job_inject`` twin
-``tests/unit/tools/test_job_visibility_tools.py::test_job_inject_waiting_children_flag_on_busy``
-(see also ``test_load_skill_keeps_queue_busy_guard``). Read the
+BUSY — is pinned by the ``job_inject`` twin
+``tests/unit/tools/test_job_visibility_tools.py::TestJobInjectTool::test_job_inject_waiting_children_flag_on_busy``
+(the ``has_instance_busy`` pre-check lives only in the ``job_inject``
+tool; the send-side queue-busy guard is pinned by
+``tests/unit/tools/test_instance_tools.py::TestEnqueueOverrideForLoadSkill::test_load_skill_keeps_queue_busy_guard``).
+Read the
 busy-gate contract and the claim-order contract in this file together:
 the gate is what the agent sees while the second turn is pending.
 
