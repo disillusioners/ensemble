@@ -812,7 +812,8 @@ def append_allowed_models(
         # --- Format the block ---
         if not allowed:
             block = (
-                "No model restriction is configured (OPENAI_ALLOWED_MODELS is "
+                "No model restriction is configured (OPENAI_SELECTABLE_MODELS "
+                "is empty/unset — legacy OPENAI_ALLOWED_MODELS is also "
                 "empty/unset). Any model string is accepted by spawn_councilor, "
                 "but you should CONFIRM the desired model list with the user "
                 "before spawning councilors.\n"

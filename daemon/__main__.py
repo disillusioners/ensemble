@@ -258,6 +258,10 @@ def main(run_preflight: bool = True):
     # load_config already emitted it)
     warn_deprecated_reasoning_echo_env()
 
+    # Warn-once if the legacy OPENAI_ALLOWED_MODELS env var is the
+    # effective source (no-op when load_config already emitted it).
+    warn_deprecated_allowed_models_env()
+
     # Log version for debugging
     from . import __version__
     logger.info(f"Starting Ensemble v{__version__}")

@@ -259,6 +259,10 @@ async def lifespan(app: FastAPI):
     # load_config already emitted it)
     warn_deprecated_reasoning_echo_env()
 
+    # Warn-once if the legacy OPENAI_ALLOWED_MODELS env var is the
+    # effective source (no-op when load_config already emitted it).
+    warn_deprecated_allowed_models_env()
+
     # Run RAG auto-test to verify LightRAG connectivity
     # This gracefully disables RAG if it's misconfigured (wrong API key, connection refused, etc.)
     # If RAG_IS_REQUIRED is set, the service will exit with an error on test failure.

@@ -11,7 +11,7 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Annotated, Any, Dict
+from typing import Annotated, Any, Callable, Dict
 
 import yaml
 from pydantic import Field, ConfigDict, model_validator, field_validator
@@ -367,16 +367,41 @@ class LLMConfig(BaseSettings):
     # Models allowed as instance model overrides at spawn time. Exact match
     # (case-insensitive) is performed against the override model name;
     # a match against ANY entry is sufficient. Empty list = all models
-    # allowed (no restriction). Override via OPENAI_ALLOWED_MODELS env var,
-    # e.g.   OPENAI_ALLOWED_MODELS="gpt-4,gpt-4o"
+    # allowed (no restriction).
+    #
+    # SCOPE — this allowlist is consulted ONLY by the four spawn-time
+    # selection flows: (1) `spawn model=` parameter override, (2) the
+    # weighted `llm_models` pool filter on worker/coder, (3) the
+    # `spawn_councilor` model-name validation, and (4) the
+    # session-restore re-validation on a resumed checkpoint. Purpose-bound
+    # models — ``model_title``, ``model_keywords`` (when set to a fixed
+    # value like ``"quick"``), ``model_vision``, the compaction model,
+    # and the skill evolution model — NEVER consult this list; configure
+    # them independently via their own env vars / YAML keys.
+    #
+    # Override via the env-var pair ``OPENAI_SELECTABLE_MODELS`` (primary)
+    # / ``OPENAI_ALLOWED_MODELS`` (legacy alias). Precedence and the
+    # one-shot deprecation warning are wired in ``load_config`` (see
+    # ``_resolve_allowed_models`` / ``warn_deprecated_allowed_models_env``)
+    # — this field is never auto-mapped by pydantic-settings' env
+    # mechanism because it has to honor both names with explicit ordering.
+    # Example:
+    #   OPENAI_SELECTABLE_MODELS="gpt-4,gpt-4o"
     # The NoDecode annotation prevents pydantic-settings from auto-JSON-decoding
-    # the env value, so our field_validator can handle comma-separated input.
+    # the value, so our field_validator can handle comma-separated input.
     allowed_models: Annotated[list[str], NoDecode] = Field(
         default_factory=list,
         description=(
             "Allowed model names (case-insensitive exact match) for instance "
             "model overrides at spawn time. Empty list = all models allowed "
-            "(no restriction). Default: []."
+            "(no restriction). Scoped to the four spawn-time selection flows "
+            "(spawn model= override, weighted llm_models pool filter, "
+            "spawn_councilor validation, session-restore re-validation); "
+            "purpose-bound models (model_title, model_keywords when set to "
+            "a fixed value, model_vision, compaction, skill_evolution) are "
+            "unaffected. Resolved from OPENAI_SELECTABLE_MODELS with "
+            "OPENAI_ALLOWED_MODELS as a legacy alias (warn-once when the "
+            "legacy name is the effective source). Default: []."
         ),
     )
 
@@ -1544,6 +1569,133 @@ def warn_deprecated_reasoning_echo_env() -> None:
     )
 
 
+# Shared normalizer for env-var values read out of ``os.environ``. Bare
+# ``KEY=`` lines in ``.env`` reach ``os.environ`` via
+# ``launcher.sh`` ``load_env_file`` exactly as the empty string — without
+# normalization, the precedence chain below would treat the empty
+# string as "set", defeating the documented default-on-empty semantics.
+def _clean_env_value(v: str | None) -> str | None:
+    """Return the trimmed string, or ``None`` for ``None`` / empty / whitespace-only."""
+    if v is None:
+        return None
+    stripped = v.strip()
+    return stripped or None
+
+
+# Warn-only deprecation guard for the legacy OPENAI_ALLOWED_MODELS env var.
+# The new primary name is OPENAI_SELECTABLE_MODELS — the old name is still
+# honored when the new one is unset, but every process emits exactly one
+# warning at startup when the legacy name is the effective source.
+_allowed_models_deprecation_warned = False
+
+
+def warn_deprecated_allowed_models_env() -> None:
+    """Log a single per-process warning when the legacy allowlist env var is the effective source.
+
+    Emits exactly when BOTH conditions hold:
+
+      * ``OPENAI_ALLOWED_MODELS`` is present in the environment AND has a
+        non-empty (non-whitespace) value, AND
+      * ``OPENAI_SELECTABLE_MODELS`` is unset (or present-but-empty).
+
+    Empty / whitespace-only values are treated as UNSET for BOTH names
+    so the warn function faithfully tracks the precedence winner (the
+    same normalization the resolver applies). A bare ``KEY=`` line in
+    ``.env`` is therefore never logged as spurious — it produces the
+    documented default, not a deprecation nag. Operators who set the new
+    name are also silent, even when the legacy name lingers on the same
+    machine: only the effective source triggers the warning.
+
+    Called from ``load_config`` (after the precedence is resolved) and
+    the startup wiring sites (``daemon/__main__.py``,
+    ``daemon/api.py``); the module-level guard makes the warning fire
+    at most once per process even if the function is invoked from
+    multiple entry points.
+    """
+    global _allowed_models_deprecation_warned
+    if _allowed_models_deprecation_warned:
+        return
+    _allowed_models_deprecation_warned = True
+    if _clean_env_value(os.environ.get("OPENAI_ALLOWED_MODELS")) is None:
+        return
+    if _clean_env_value(os.environ.get("OPENAI_SELECTABLE_MODELS")) is not None:
+        return
+    logger.warning(
+        "[Config] OPENAI_ALLOWED_MODELS is set but renamed to "
+        "OPENAI_SELECTABLE_MODELS — the legacy name is still honored as a "
+        "fallback when the new name is unset, but please rename the env "
+        "var in your deployment (.env / launcher exports) to silence this "
+        "warning. The internal config field (config.llm.allowed_models) "
+        "is unchanged; only the env-var-level aliasing changed."
+    )
+
+
+# Documented default for ``allowed_models`` when neither env var is set.
+# Mirrors the legacy ``config.yaml`` default so behavior is identical to
+# the pre-rename deployment when operators have not yet migrated.
+_ALLOWED_MODELS_DEFAULT: tuple[str, ...] = ("agentic", "coding")
+
+
+def _resolve_allowed_models(
+    yaml_value: Any,
+    *,
+    new_var: str | None,
+    old_var: str | None,
+    on_legacy: Callable[[], None] | None = None,
+) -> Any:
+    """Pure resolver for the ``allowed_models`` precedence chain.
+
+    Precedence (mirrors the documented contract):
+
+      1. ``new_var`` (``OPENAI_SELECTABLE_MODELS``) — when SET and
+         NON-EMPTY (empty/whitespace are treated as UNSET), wins
+         outright, no warning.
+      2. ``old_var`` (``OPENAI_ALLOWED_MODELS``) — when SET and
+         NON-EMPTY, AND the new name is unset/empty, used as the
+         effective source AND the ``on_legacy`` callback (typically
+         :func:`warn_deprecated_allowed_models_env`) is invoked
+         exactly once per process.
+      3. ``yaml_value`` — the YAML-interpolated value. Because
+         ``config.yaml`` interpolates ``${OPENAI_SELECTABLE_MODELS:-}``
+         (empty default), this is the empty string when neither env var
+         is exported. We replace that empty string with the documented
+         default ``["agentic", "coding"]`` so a no-env-var deployment
+         matches the pre-rename behavior. Non-empty values (e.g. an
+         operator hard-coded the value in YAML bypassing the env vars)
+         are passed through untouched.
+
+    Pure function (no ``os.environ`` access, no module-level mutation):
+    tests pass the resolved env values directly, which keeps the
+    precedence chain deterministic and side-effect-free. ``load_config``
+    does the ``os.environ`` lookup once and calls this function with
+    the resolved strings.
+
+    Empty / whitespace-only values for ``new_var`` or ``old_var`` are
+    treated as UNSET (legacy shell-style ``:-`` semantics preserved).
+    ``launcher.sh`` ``load_env_file`` exports bare ``KEY=`` lines
+    verbatim into ``os.environ``, so this normalization keeps a stray
+    blank entry from being read as "set-but-empty" — which would
+    otherwise defeat the documented default. Consequence: there is no
+    env path to an unrestricted allowlist; operators who want to lift
+    restrictions entirely must hardcode ``allowed_models: []`` in
+    ``config.yaml``.
+    """
+    new_clean = _clean_env_value(new_var)
+    old_clean = _clean_env_value(old_var)
+    if new_clean is not None:
+        return new_clean
+    if old_clean is not None:
+        if on_legacy is not None:
+            on_legacy()
+        return old_clean
+    # Neither env var set. If YAML gave us an empty-string placeholder,
+    # fall back to the documented default; otherwise pass the YAML value
+    # through (it'll go through the CSV/JSON field validator downstream).
+    if isinstance(yaml_value, str) and not yaml_value.strip():
+        return ",".join(_ALLOWED_MODELS_DEFAULT)
+    return yaml_value
+
+
 def load_config(config_path: str | None = None) -> Config:
     """
     Load configuration from YAML file with environment variable substitution.
@@ -1590,8 +1742,33 @@ def load_config(config_path: str | None = None) -> Config:
     # Build nested dict for Pydantic
     config_dict: Dict[str, Any] = {}
 
+    # Resolve the OPENAI_SELECTABLE_MODELS / OPENAI_ALLOWED_MODELS
+    # precedence chain for ``llm.allowed_models``. config.yaml
+    # interpolates ``${OPENAI_SELECTABLE_MODELS:-}`` (empty default),
+    # so the YAML layer hands us either the new-var value or an empty
+    # string. We need explicit precedence here (and an os.environ check
+    # for the legacy name) so:
+    #   * both vars set → new wins, no warning
+    #   * only legacy set → legacy wins + one-shot warning
+    #   * neither set → documented default ("agentic,coding")
+    # ``warn_deprecated_allowed_models_env`` is called HERE on the
+    # "old-var-is-effective" branch (via the resolver callback), and
+    # ALSO from the startup entry points (daemon/__main__.py,
+    # daemon/api.py) so a fresh process that only goes through the
+    # startup path (rare — load_config normally precedes those sites)
+    # still gets the warning. The module-level guard makes the second
+    # call silent.
+    # See ``_resolve_allowed_models`` for the full contract.
+    llm_config: Dict[str, Any] = {}
     if "llm" in processed_config:
-        config_dict["llm"] = processed_config["llm"]
+        llm_config = processed_config["llm"].copy()
+    llm_config["allowed_models"] = _resolve_allowed_models(
+        llm_config.get("allowed_models", ""),
+        new_var=os.environ.get("OPENAI_SELECTABLE_MODELS"),
+        old_var=os.environ.get("OPENAI_ALLOWED_MODELS"),
+        on_legacy=warn_deprecated_allowed_models_env,
+    )
+    config_dict["llm"] = llm_config
     if "daemon" in processed_config:
         config_dict["daemon"] = processed_config["daemon"]
     if "limits" in processed_config:
