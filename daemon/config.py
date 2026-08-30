@@ -464,13 +464,20 @@ class LimitsConfig(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="LIMITS_")
 
-    # Unused: global limit removed, per-parent limit used instead
-    max_instances: int = Field(default=100)
     max_children_per_instance: int = Field(default=50)
     instance_timeout_minutes: int = Field(default=60)
-    message_rate_limit: int = Field(default=60)
     graph_recursion_limit: int = Field(default=100)
     llm_concurrency: int = Field(default=10, ge=1, description="Maximum concurrent LLM calls across all instances")
+
+    # ── Governor recursive-spawn guard (Governor Recursion Guard, 2026-08-30) ──
+    # Default ON (matches the locked design decision). The guard refuses to
+    # spawn a governor instance when the prospective parent's chain (parent
+    # ∪ ancestors) already contains ≥ K governors. K=1 → only one governor
+    # in any chain; K=0 disables. The kill-switch env const
+    # LIMITS_GOVERNOR_RECURSION_GUARD_ENABLED=0 turns it off at boot —
+    # restart-required (matches ENSEMBLE_CASCADE_LINEAGE precedent).
+    governor_recursion_guard_enabled: bool = Field(default=True)
+    max_governor_ancestors: int = Field(default=1, ge=0)
 
 
 class PersistenceConfig(BaseSettings):

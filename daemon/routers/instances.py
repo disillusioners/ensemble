@@ -340,23 +340,20 @@ async def create_instance(
             version_tag=instance_create.version_tag,
         )
     except ValueError as e:
+        # Governor Recursion Guard (2026-08-30): the legacy 429 /
+        # MAX_INSTANCES_EXCEEDED branch was a dead knob — the spawn path
+        # no longer raises "Max instances limit reached" because the
+        # global ``MAX_INSTANCES`` cap was removed. Every spawn ValueError
+        # now surfaces as a 400 INVALID_REQUEST (which the legacy 400
+        # else-branch already handled). Kept as a single branch.
         error_msg = str(e)
-        if "Max instances limit" in error_msg:
-            raise HTTPException(
-                status_code=429,
-                detail=ErrorResponse(
-                    code=ErrorCodes.MAX_INSTANCES_EXCEEDED,
-                    message=error_msg
-                ).model_dump()
-            )
-        else:
-            raise HTTPException(
-                status_code=400,
-                detail=ErrorResponse(
-                    code=ErrorCodes.INVALID_REQUEST,
-                    message=error_msg
-                ).model_dump()
-            )
+        raise HTTPException(
+            status_code=400,
+            detail=ErrorResponse(
+                code=ErrorCodes.INVALID_REQUEST,
+                message=error_msg,
+            ).model_dump()
+        )
 
     # Get instance info from database
     instance_meta = manager.get_instance_info(instance_id)

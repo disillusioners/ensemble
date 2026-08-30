@@ -60,7 +60,11 @@ from .mcp import warmup_pool as _warmup_pool_module
 from .mcp.config import McpStdioConfig
 from .opencode import OpenCodeSessionRegistry, create_opencode_session_repository
 
-from .repositories.instance.repository import emit_cascade_lineage_boot_log, get_agent_name
+from .repositories.instance.repository import (
+    emit_cascade_lineage_boot_log,
+    emit_governor_recursion_guard_boot_log,
+    get_agent_name,
+)
 from .repositories.instance.models import Instance, InstanceStatus
 from .repositories.message_queue.models import MessageQueue, MessageStatus, MessageType
 from .repositories.task.models import Task, TaskType, TaskStatus
@@ -720,6 +724,12 @@ class InstanceManager:
         # instance_hierarchy. Restart-required to flip. See FT-004 for
         # the kill-switch removal ticket.
         emit_cascade_lineage_boot_log()
+
+        # Governor Recursion Guard (2026-08-30): one-time INFO log naming
+        # the resolved kill-switch state. Default enabled; restart-required
+        # to flip. See _resolve_governor_recursion_guard_enabled for env
+        # syntax. Mirrors the cascade-lineage wrapper precedent.
+        emit_governor_recursion_guard_boot_log()
 
         # NEW: Pluggable message sources system
         self.source_registry = SourceRegistry(

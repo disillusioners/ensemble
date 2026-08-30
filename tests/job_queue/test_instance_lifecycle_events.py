@@ -29,7 +29,6 @@ class TestPublishInstanceLifecycleEvent:
         mock_config.llm.request_timeout = 60
         mock_config.compaction.enabled = False
         mock_config.queue.discard_on_startup = False
-        mock_config.limits.max_instances = 10
         mock_config.limits.max_children_per_instance = 5
         mock_config.limits.llm_concurrency = 5
         mock_config.limits.graph_recursion_limit = 50
@@ -265,7 +264,6 @@ class TestLifecycleEventCallSites:
         mock_config.llm.request_timeout = 60
         mock_config.compaction.enabled = False
         mock_config.queue.discard_on_startup = False
-        mock_config.limits.max_instances = 10
         mock_config.limits.max_children_per_instance = 5
         mock_config.limits.llm_concurrency = 5
         mock_config.limits.graph_recursion_limit = 50

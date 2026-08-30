@@ -668,6 +668,19 @@ async def invoke_agent_and_wait(
         # Success
         return _return(result.content or "")
 
+    except ValueError as e:
+        # Governor Recursion Guard (2026-08-30): the lifecycle-layer guard
+        # raises a multi-line ValueError that carries the chain walk and a
+        # corrective HINT. Catch here so the caller's tool layer surfaces
+        # the full guidance as a readable "Error: ..." string instead of
+        # bubbling up as an opaque traceback. Preserve the full str(e)
+        # verbatim — including newlines and the HINT block.
+        logger_utils.warning(
+            "invoke_agent_and_wait: spawn refused by guard. agent_id=%s error=%s",
+            agent_id,
+            e,
+        )
+        return _return(f"Error: {e}")
     except Exception as e:
         logger_utils.error(f"invoke_agent_and_wait failed: {e}", exc_info=True)
         _try_terminate_orphan(manager, instance_id)

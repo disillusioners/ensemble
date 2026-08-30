@@ -41,7 +41,6 @@ Common error codes:
 - `JOB_NOT_FOUND` - Job not found
 - `PROJECT_NOT_FOUND` - Project not found
 - `QUEUE_NOT_FOUND` - Queue not found
-- `MAX_INSTANCES_EXCEEDED` - Instance limit reached (429)
 - `INTERNAL_ERROR` - Server error (500)
 
 ### Pagination

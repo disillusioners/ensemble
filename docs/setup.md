@@ -351,20 +351,16 @@ daemon:
 
 ```yaml
 limits:
-  max_instances: 100
   max_children_per_instance: 50
   instance_timeout_minutes: 60
-  message_rate_limit: 60
   graph_recursion_limit: 200
   llm_concurrency: 10
 ```
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `limits.max_instances` | integer | `100` | Maximum number of concurrent agent instances |
 | `limits.max_children_per_instance` | integer | `50` | Maximum child instances per parent instance |
 | `limits.instance_timeout_minutes` | integer | `60` | Auto-shutdown timeout for idle instances (minutes) |
-| `limits.message_rate_limit` | integer | `60` | Maximum messages per minute per instance |
 | `limits.graph_recursion_limit` | integer | `200` | Maximum recursion depth for LangGraph execution (global default) |
 | `limits.llm_concurrency` | integer | `10` | Maximum concurrent LLM API requests |
 

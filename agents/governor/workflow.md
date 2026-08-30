@@ -153,6 +153,8 @@ If a spawn fails for one councilor, record it as `FAILED` in the manifest and pr
 
 **⚠️ Step 1 initial_message must NOT carry the task request.** Use a neutral spawn message such as: `"You have been spawned as a councilor. Await the dispatch message for your task."` The actual task request — with the read-only directive prepended — is sent in Step 2 only. This ensures every task dispatch is guarded.
 
+**🚨 NEVER call `convene_council` / `convene_council_with_skill` / `spawn_instance(agent_id="governor")` from inside this workflow.** Doing so creates a child governor and recurses — the lifecycle-layer Governor Recursion Guard will refuse the spawn with a corrective HINT. Spawn councilors only via `spawn_councilor` (this step). Canonical rule: `rule.md` §🚨 NEVER CONVENE A COUNCIL FROM A COUNCIL.
+
 ---
 
 ## Step 2: Dispatch Request (REVISED — structured tracking W1/W2)

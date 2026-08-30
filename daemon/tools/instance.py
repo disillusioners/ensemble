@@ -1693,8 +1693,37 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
             fallback_notice = manager._lifecycle_service._format_model_fallback_notice(
                 model, validated_model_override
             )
+            # Governor Recursion Guard / Section 4 observability (2026-08-30):
+            # include child counts so the caller knows how close the parent
+            # is to the max_children_per_instance ceiling. ``child_index`` is
+            # 1-indexed (1st child, 2nd child, ...); ``child_total`` is the
+            # count after this spawn; ``limit`` is the configured cap. Root
+            # spawns (no parent) skip the count — there's no cap context.
+            child_index = None
+            child_total = None
+            limit = None
+            if current_instance_id:
+                try:
+                    child_total = (
+                        manager._instance_repository.count_children(current_instance_id)
+                    )
+                    child_index = child_total  # 1-indexed: Nth spawn = total after spawn
+                    limit = int(
+                        getattr(manager.config.limits, "max_children_per_instance", 0)
+                        or 0
+                    )
+                except Exception:
+                    # Repository hiccup is not fatal — drop the count gracefully.
+                    child_index = None
+                    child_total = None
+                    limit = None
+            child_count_line = (
+                f"\nChild {child_index} of {child_total} (limit {limit})"
+                if child_index is not None
+                else ""
+            )
             return (
-                f"Successfully spawned instance: {new_instance_id}\n"
+                f"Successfully spawned instance: {new_instance_id}{child_count_line}\n"
                 f"To communicate with this instance, use: send_message(instance_id=\"{new_instance_id}\", message=\"your message here\")"
                 f"{fallback_notice or ''}"
             )
@@ -1711,16 +1740,41 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
                     f"ERROR: {error_msg}\n"
                     f"HINT: If you don't need a project context, pass project_id=None or project_id='null'"
                 )
-            elif "Max instances" in error_msg:
-                return (
-                    f"ERROR: {error_msg}\n"
-                    f"HINT: Wait for existing instances to complete, or terminate unused instances with terminate_instance()"
-                )
             elif "Max children" in error_msg:
+                # Governor Recursion Guard / Section 4 (2026-08-30): named
+                # remedy + computed N. ``Consider a different approach`` is
+                # banished from spawn-family refusals — operators / agents
+                # deserve actionable guidance.
+                limit = int(
+                    getattr(manager.config.limits, "max_children_per_instance", 0)
+                    or 0
+                )
+                # Try to surface the live count if the parent is still readable.
+                live_count = None
+                if current_instance_id:
+                    try:
+                        live_count = manager._instance_repository.count_children(
+                            current_instance_id
+                        )
+                    except Exception:
+                        live_count = None
+                n_text = f"{live_count}" if live_count is not None else "current"
                 return (
                     f"ERROR: {error_msg}\n"
-                    f"HINT: The parent instance has too many child instances. Consider a different approach."
+                    f"HINT: Parent {current_instance_id} already has {n_text} "
+                    f"children (limit {limit}). Do NOT spawn more. Reduce "
+                    f"work, reuse existing children via send_message, or "
+                    f"terminate stale children with terminate_instance()."
                 )
+            elif (
+                "Spawn refused" in error_msg
+                and "governor" in error_msg.lower()
+            ):
+                # Governor Recursion Guard (2026-08-30): preserve the
+                # multi-line chain walk + corrective HINT intact. The
+                # lifecycle guard already carries the HINT in its message;
+                # we re-emit it as the tool ERROR string without mangling.
+                return f"ERROR: {error_msg}"
             else:
                 return f"ERROR: {error_msg}"
         except Exception as e:
@@ -1855,19 +1909,72 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         # Inherit project_id from the caller (governor) so councilors are
         # visible in the same project-scoped instance list.
         councilor_project_id = _get_instance_project_id(manager, current_instance_id)
-        new_instance_id, _returned_model = manager.spawn_instance(
-            agent_id=resolved_agent_id,
-            instance_id=None,
-            parent_id=current_instance_id,
-            project_id=councilor_project_id,
-            instance_name=instance_name,
-            model=canonical_model,
-            version_tag=version_tag,
-        )
+        try:
+            new_instance_id, _returned_model = manager.spawn_instance(
+                agent_id=resolved_agent_id,
+                instance_id=None,
+                parent_id=current_instance_id,
+                project_id=councilor_project_id,
+                instance_name=instance_name,
+                model=canonical_model,
+                version_tag=version_tag,
+            )
+        except ValueError as spawn_err:
+            # Governor Recursion Guard / Section 4 (2026-08-30): the bare
+            # cap error from spawn_instance gets the same HINT treatment as
+            # the max-children branch in spawn_instance. Without this, the
+            # councilor hits the opaque "Max children limit reached for
+            # parent <id>" without any guidance on what to do.
+            err_msg = str(spawn_err)
+            if "Max children" in err_msg:
+                limit = int(
+                    getattr(manager.config.limits, "max_children_per_instance", 0)
+                    or 0
+                )
+                live_count = None
+                try:
+                    live_count = manager._instance_repository.count_children(
+                        current_instance_id
+                    )
+                except Exception:
+                    live_count = None
+                n_text = f"{live_count}" if live_count is not None else "current"
+                raise ValueError(
+                    f"{err_msg}\nHINT: Governor already has {n_text} "
+                    f"children (limit {limit}). Do NOT spawn more. Reduce "
+                    f"work, reuse existing councilors via send_message, or "
+                    f"terminate stale councilors with terminate_instance()."
+                ) from spawn_err
+            if (
+                "Spawn refused" in err_msg
+                and "governor" in err_msg.lower()
+            ):
+                # Recursion guard already carries the HINT — re-raise verbatim
+                # so the tool ERROR string preserves the chain walk.
+                raise
+            raise
 
         # ─── STEP 5: Return success ───
+        # Section 4 (2026-08-30): include "Councilor M of K" count so the
+        # governor sees how close it is to the per-governor child cap.
+        # Falls back to "?" on repository hiccup; never fails the tool.
+        councilor_index: int | None = None
+        try:
+            councilor_index = manager._instance_repository.count_children(
+                current_instance_id
+            )
+        except Exception:
+            councilor_index = None
+        limit = int(
+            getattr(manager.config.limits, "max_children_per_instance", 0) or 0
+        )
+        count_line = (
+            f"\nCouncilor {councilor_index} of {limit} (limit {limit})"
+            if councilor_index is not None
+            else ""
+        )
         return (
-            f"Successfully spawned councilor instance: {new_instance_id}\n"
+            f"Successfully spawned councilor instance: {new_instance_id}{count_line}\n"
             f"Agent: {resolved_agent_id} | Model: {canonical_model}\n"
             f"To send the request, use: "
             f"send_message(instance_id=\"{new_instance_id}\", message=\"{initial_message}\")"
@@ -1931,6 +2038,31 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         if not canonical:
             raise ValueError(f"Unknown agent_id: {councilor_agent_id!r}")
 
+        # Governor Recursion Guard (2026-08-30) — fast-fail scalpel at the
+        # tool layer. The lifecycle-layer guard (1a) catches the recursion
+        # structurally — this branch is the fast-feedback counterpart so a
+        # governor gets the corrective HINT the moment it tries to convene,
+        # not after a full DB walk. Mirrors the W1 identity-guard style at
+        # :1771/:1893 (closure-bound caller_agent_id, no TOCTOU).
+        if caller_agent_id == "governor":
+            logger.warning(
+                "convene_council refused: caller is governor — would recurse. "
+                "caller=%s instance=%s",
+                caller_agent_id,
+                current_instance_id,
+                extra={"event": "council_spawn_refused"},
+            )
+            raise ValueError(
+                "convene_council refused: you are already a governor. "
+                "Calling convene_council (or spawn_instance with "
+                "agent_id='governor') from inside a governor creates an "
+                "infinite recursion. HINT: Spawn councilors via "
+                "spawn_councilor(councilor_agent_id=<agent>, model=<model>, "
+                "initial_message=<request>) — that is the only governor "
+                "spawning tool. If a council already exists, synthesize "
+                "its result and complete; do not convene another."
+            )
+
         # convene_council requires "governor" in the caller's team_members.
         # Add "governor" to meta.json team_members for any agent that should
         # be able to convene councils.
@@ -1966,7 +2098,10 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         if councilor_membership_error is not None:
             raise ValueError(councilor_membership_error)
 
-        # No W1 identity guard: any caller authorized by team_members may convene.
+        # W1-style governor caller guard is at the top of this function
+        # (Governor Recursion Guard, 2026-08-30) — the lifecycle layer
+        # would catch it too, but a tool-layer fast-fail surfaces the
+        # corrective HINT immediately and saves the chain walk.
         # Inherit project_id from the caller so the governor and its councilors
         # are visible in the same project-scoped instance list (mirrors the
         # spawn_instance tool's auto-inherit at the top of this file).
@@ -1980,8 +2115,17 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         )
 
         message_text = (
-            f'Convene a council using councilor_agent_id="{canonical}".\n'
-            f"Request: {request}\n"
+            # Governor Recursion Guard (2026-08-30): the old template
+            # literally said "Convene a council using councilor_agent_id=…"
+            # which a child governor interpreted as an instruction to call
+            # convene_council again — instant recursion. The new template
+            # names spawn_councilor as the action and explicitly forbids
+            # convene_council from a governor.
+            f'Spawn councilors via spawn_councilor('
+            f'councilor_agent_id="{canonical}", model=<one of allowed_models>, '
+            f'initial_message=<the request>).\n'
+            f"Do NOT call convene_council — that creates a new governor and "
+            f"recurses. Request: {request}\n"
             f"Models: {', '.join(models) if models else 'all available'}\n"
             f"Max councilors: "
             f"{max_councilors if max_councilors is not None else 'governor decides'}"
@@ -2053,6 +2197,29 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         canonical = registry.resolve_to_id(councilor_agent_id)
         if not canonical:
             raise ValueError(f"Unknown agent_id: {councilor_agent_id!r}")
+
+        # Governor Recursion Guard (2026-08-30) — fast-fail scalpel at the
+        # tool layer. Mirrors the same guard in ``convene_council`` above;
+        # both surfaces must reject governor→governor before the lifecycle
+        # layer's chain walk. W1-style closure-bound check, no TOCTOU.
+        if caller_agent_id == "governor":
+            logger.warning(
+                "convene_council_with_skill refused: caller is governor "
+                "— would recurse. caller=%s instance=%s",
+                caller_agent_id,
+                current_instance_id,
+                extra={"event": "council_spawn_refused"},
+            )
+            raise ValueError(
+                "convene_council_with_skill refused: you are already a "
+                "governor. Calling convene_council_with_skill (or "
+                "spawn_instance with agent_id='governor') from inside a "
+                "governor creates an infinite recursion. HINT: Spawn "
+                "councilors via spawn_councilor(councilor_agent_id=<agent>, "
+                "model=<model>, initial_message=<request>) — that is the "
+                "only governor spawning tool. If a council already exists, "
+                "synthesize its result and complete; do not convene another."
+            )
 
         # convene_council_with_skill requires "governor" in the caller's team_members.
         membership_error = _check_team_membership(caller_agent_id, "governor", caller_version_tag)
@@ -2127,7 +2294,10 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         if councilor_membership_error is not None:
             raise ValueError(councilor_membership_error)
 
-        # No W1 identity guard: any caller authorized by team_members may convene.
+        # W1-style governor caller guard is at the top of this function
+        # (Governor Recursion Guard, 2026-08-30) — the lifecycle layer
+        # would catch it too, but a tool-layer fast-fail surfaces the
+        # corrective HINT immediately and saves the chain walk.
         # Inherit project_id from the caller so the governor and its councilors
         # are visible in the same project-scoped instance list (mirrors the
         # spawn_instance tool's auto-inherit at the top of this file).
@@ -2141,7 +2311,17 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         )
 
         message_text = (
-            f'Convene a council using councilor_agent_id="{canonical}".\n'
+            # Governor Recursion Guard (2026-08-30): the old template
+            # literally said "Convene a council using councilor_agent_id=…"
+            # which a child governor interpreted as an instruction to call
+            # convene_council again — instant recursion. The new template
+            # names spawn_councilor as the action and explicitly forbids
+            # convene_council from a governor.
+            f'Spawn councilors via spawn_councilor('
+            f'councilor_agent_id="{canonical}", model=<one of allowed_models>, '
+            f'initial_message=<the request>).\n'
+            f"Do NOT call convene_council — that creates a new governor and "
+            f"recurses.\n"
             f"Councilor skill: {councilor_skill}\n"
             f"Request: {request}\n"
             f"Models: {', '.join(models) if models else 'all available'}\n"

@@ -1470,7 +1470,6 @@ curl -N http://localhost:8079/api/jobs/{job_id}/events \
 |------|-------------|-------------|
 | `INSTANCE_NOT_FOUND` | 404 | Instance does not exist |
 | `INSTANCE_TERMINATED` | 400 | Instance was terminated and cannot be resumed |
-| `MAX_INSTANCES_EXCEEDED` | 429 | Too many concurrent instances |
 | `INVALID_REQUEST` | 400 | Malformed request |
 | `INTERNAL_ERROR` | 500 | Server-side error |
 | `SOURCE_NOT_FOUND` | 404 | Source adapter not found |

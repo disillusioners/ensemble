@@ -334,7 +334,6 @@ class TestManagerSpawnInstanceErrors:
         config.llm.model = "test-model"
         config.llm.temperature = 0.7
         config.llm.request_timeout = 60
-        config.limits.max_instances = 10
         config.limits.max_children_per_instance = 5
         config.limits.graph_recursion_limit = 1000
         config.queue.llm_retry_transient_attempts = 8
@@ -387,7 +386,6 @@ class TestManagerSpawnInstanceErrors:
         config.llm.model = "test-model"
         config.llm.temperature = 0.7
         config.llm.request_timeout = 60
-        config.limits.max_instances = 10
         config.limits.max_children_per_instance = 5
         config.limits.graph_recursion_limit = 1000
         config.queue.llm_retry_transient_attempts = 8
@@ -419,7 +417,6 @@ class TestManagerSpawnInstanceErrors:
         config.llm.model = "test-model"
         config.llm.temperature = 0.7
         config.llm.request_timeout = 60
-        config.limits.max_instances = 10
         config.limits.max_children_per_instance = 5
         config.limits.graph_recursion_limit = 1000
         config.queue.llm_retry_transient_attempts = 8
@@ -463,7 +460,6 @@ class TestManagerSpawnInstanceErrors:
         config.llm.model = "test-model"
         config.llm.temperature = 0.7
         config.llm.request_timeout = 60
-        config.limits.max_instances = 10
         config.limits.max_children_per_instance = 5
         config.limits.graph_recursion_limit = 1000
         config.queue.llm_retry_transient_attempts = 8
@@ -528,7 +524,6 @@ class TestErrorMessageConsistency:
         config.llm.model = "test-model"
         config.llm.temperature = 0.7
         config.llm.request_timeout = 60
-        config.limits.max_instances = 10
         config.limits.max_children_per_instance = 5
         config.limits.graph_recursion_limit = 1000
         config.queue.llm_retry_transient_attempts = 8

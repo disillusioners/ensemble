@@ -70,8 +70,7 @@ def mock_config():
         ),
         limits=LimitsConfig(
             max_children_per_instance=3,
-            instance_timeout_minutes=60,
-            message_rate_limit=60
+            instance_timeout_minutes=60
         ),
         persistence=PersistenceConfig(
             db_path=":memory:",

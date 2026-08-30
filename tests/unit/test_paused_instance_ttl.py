@@ -547,7 +547,6 @@ class TestColdResume:
         manager.config.llm.temperature = 0.7
         manager.config.llm.request_timeout = 60
         manager.config.limits = MagicMock()
-        manager.config.limits.max_instances = 100
         manager.config.limits.max_children_per_instance = 10
         manager.config.limits.graph_recursion_limit = 50
         manager.config.limits.llm_concurrency = 5

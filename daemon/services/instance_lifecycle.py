@@ -23,6 +23,24 @@ from ..repositories.dependency_bus.models import (
     DependencyWatcherState,
 )
 from ..repositories.instance.models import Instance, InstanceHierarchy, InstanceStatus
+
+
+def _resolve_guard_enabled() -> bool:
+    """Local import wrapper for the guard kill-switch resolver.
+
+    The helper lives in ``daemon.repositories.instance.repository`` to
+    colocate it with the rest of the cascade-lineage kill-switch plumbing
+    (mirrors the ``_resolve_cascade_lineage_mode`` pattern). Importing
+    the repository module at module-import time would create a circular
+    import with ``daemon.services.__init__`` (which eagerly imports
+    ``instance_lifecycle``). Lazy import here keeps the module-load
+    cycle intact.
+    """
+    from ..repositories.instance.repository import (
+        _resolve_governor_recursion_guard_enabled,
+    )
+
+    return _resolve_governor_recursion_guard_enabled()
 from ..repositories.job_queue.models import AdmissionState
 from ..repositories.message_queue.models import MessageQueue, MessageStatus, MessageType
 from ..repositories.task.models import SuspensionReason, Task, TaskStatus
@@ -1342,7 +1360,7 @@ class InstanceLifecycleService:
         # Resolve and validate the spawn-time model override (silent fallback
         # to None if not in allowed_models — never raises).
         validated_model_override = self._resolve_model_override(model)
-        
+
         # Validate instance_id format or auto-generate
         if instance_id is None or not _UUID_PATTERN.match(instance_id):
             if instance_id is not None:
@@ -1352,11 +1370,96 @@ class InstanceLifecycleService:
                 )
             instance_id = str(uuid.uuid4())
 
+        # ── Governor Recursion Guard (2026-08-30) ────────────────────────
+        # Refuses to spawn a governor when the prospective parent's chain
+        # (parent ∪ ancestors) already contains ≥ K governors. K and the
+        # kill-switch come from config (LIMITS_MAX_GOVERNOR_ANCESTORS,
+        # LIMITS_GOVERNOR_RECURSION_GUARD_ENABLED); restart-required to
+        # flip. Position: AFTER agent resolution (we need to know the
+        # canonical id) but BEFORE any DB mutation (no rows written).
+        # Early-exit for every non-governor spawn keeps the hot path free
+        # — this block costs nothing for developer/coder/etc.
+        # Verified-during-impl: get_ancestor_ids returns STRICT ancestors
+        # (parent, grandparent, ...), NOT the start node. The parent-
+        # inclusive count therefore adds parent_id explicitly.
+        if resolved_agent_id == "governor":
+            k = int(getattr(self._config.limits, "max_governor_ancestors", 1))
+            cfg_enabled = bool(
+                getattr(self._config.limits, "governor_recursion_guard_enabled", True)
+            )
+            env_enabled = _resolve_guard_enabled()
+            if k > 0 and cfg_enabled and env_enabled and parent_id:
+                # Resolve instance_repository inline (the local binding is
+                # assigned later in the spawn path — we cannot rely on it
+                # here). Hot-path cost is one attribute lookup, dwarfed by
+                # the DB chain walk below.
+                inst_repo_for_guard = self._manager._instance_repository
+                chain_ids: list[str] = [parent_id]
+                try:
+                    chain_ids.extend(
+                        inst_repo_for_guard.get_ancestor_ids(parent_id)
+                    )
+                except Exception as ancestor_err:
+                    # Fail closed: refuse the spawn rather than risk
+                    # recursion through a broken chain walk. Log loud;
+                    # the daemon-side ValueError below carries the HINT.
+                    logger.warning(
+                        "Governor recursion guard: ancestor walk failed "
+                        "for parent_id=%s; failing closed (refusing spawn). "
+                        "Error: %s",
+                        parent_id,
+                        ancestor_err,
+                        extra={"event": "spawn_recursion_blocked"},
+                    )
+                    raise ValueError(
+                        f"Spawn refused: parent chain walk failed for "
+                        f"parent_id={parent_id}; refusing governor spawn "
+                        f"to fail closed. Error: {ancestor_err}. HINT: "
+                        f"Check DB connectivity / instances table; the "
+                        f"guard refuses to spawn a governor until the "
+                        f"chain can be walked."
+                    )
+                agent_id_map = inst_repo_for_guard.get_agent_ids_for(chain_ids)
+                gov_count = sum(
+                    1 for aid in agent_id_map.values() if aid == "governor"
+                )
+                if gov_count >= k:
+                    chain_lines: list[str] = []
+                    for cid in chain_ids:
+                        aid = agent_id_map.get(cid)
+                        short = cid[:8] if cid else "<root>"
+                        chain_lines.append(f"{aid or '?'} {short}")
+                    chain_text = " ← ".join(reversed(chain_lines))
+                    logger.warning(
+                        "Governor recursion guard blocked spawn. "
+                        "spawn_agent=%s parent_id=%s chain_count=%d k=%d",
+                        resolved_agent_id,
+                        parent_id,
+                        gov_count,
+                        k,
+                        extra={
+                            "event": "spawn_recursion_blocked",
+                            "parent_chain_count": gov_count,
+                            "limit": k,
+                            "parent_chain": chain_text,
+                        },
+                    )
+                    raise ValueError(
+                        f"Spawn refused: parent chain already contains "
+                        f"{gov_count} governor ancestor(s) (limit {k}). "
+                        f"Chain: {chain_text}. HINT: You are already the "
+                        f"governor for this request — do NOT convene "
+                        f"another council or spawn another governor. "
+                        f"Spawn councilors via spawn_councilor, or "
+                        f"synthesize the existing council result and "
+                        f"complete."
+                    )
+
         # Access manager's state dynamically
         instance_repository = self._manager._instance_repository
         project_repository = self._manager._project_repository
         prompt_cache = self._manager.prompt_cache
-        
+
         # Check max_children_per_instance limit if parent_id is provided (root instances skip the check)
         # Use truthy check to handle both None and empty string cases
         if parent_id:

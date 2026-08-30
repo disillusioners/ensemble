@@ -22,10 +22,6 @@ class TestConstants:
         """MAX_PAGE_LIMIT should be 100."""
         assert constants.MAX_PAGE_LIMIT == 100
 
-    def test_max_instances(self):
-        """MAX_INSTANCES should be 100."""
-        assert constants.MAX_INSTANCES == 100
-
     def test_max_credentials_size(self):
         """MAX_CREDENTIALS_SIZE should be 4096."""
         assert constants.MAX_CREDENTIALS_SIZE == 4096
@@ -154,7 +150,6 @@ class TestConstantsCompleteness:
             # API Limits
             "DEFAULT_PAGE_LIMIT",
             "MAX_PAGE_LIMIT",
-            "MAX_INSTANCES",
             "MAX_CREDENTIALS_SIZE",
             "MAX_ERROR_LEN",
             "MAX_CHAT_LOCKS",

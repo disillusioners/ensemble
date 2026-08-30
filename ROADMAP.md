@@ -164,8 +164,7 @@ Response 400/404/429/500:
 }
 ```
 
-Error codes: `INVALID_REQUEST`, `INSTANCE_NOT_FOUND`, `INSTANCE_TERMINATED`, 
-`RATE_LIMITED`, `MAX_INSTANCES_EXCEEDED`, `LLM_ERROR`, `INTERNAL_ERROR`
+Error codes: `INVALID_REQUEST`, `INSTANCE_NOT_FOUND`, `INSTANCE_TERMINATED`, `RATE_LIMITED`, `LLM_ERROR`, `INTERNAL_ERROR`
 
 ### API Documentation
 
@@ -253,10 +252,8 @@ daemon:
   port: 8079
   
 limits:
-  max_instances: 100
   max_children_per_instance: 10
   instance_timeout_minutes: 60
-  message_rate_limit: 60  # per minute per instance
   
 persistence:
   db_path: "./data/instances.db"
