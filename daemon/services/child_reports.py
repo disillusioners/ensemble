@@ -5,7 +5,7 @@ import json
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from sqlalchemy import exists, func, select, text, update as sa_update
 from sqlalchemy.exc import IntegrityError
@@ -32,7 +32,11 @@ from ..constants import (
     SANITY_FLAG_VERSION,
 )
 from .report_integrity_metrics import record_junk_report
-from .report_integrity_guard import log_declared_waiting_violations
+from .report_integrity_guard import (
+    _clear_b_notice_if_clean,
+    enforce_declared_waiting_violations,
+    log_declared_waiting_violations,
+)
 from .context_messages import _resolve_tree_root_id
 from .lifecycle_hooks import LifecycleHookContext, dispatch_lifecycle_hooks
 from .llm_failover import wrap_langchain_failover
@@ -200,6 +204,16 @@ class _ChildCompletionDbResult(NamedTuple):
     # the ``waiting_children`` SSE for the parent after the commit.
     parent_waiting_children_sse: bool = False
     waiting_children_parent_agent_id: str | None = None
+    # B.S.1-iii (stage iii): the (b) declared-waiting violation report
+    # evaluated at the INLINE SAME-TX position (B.S.7 — one evaluation,
+    # never re-read post-commit), handed to the async caller so the
+    # enforcement action (adjudication notice, flag-gated, fail-OPEN)
+    # runs AFTER the stamp transaction committed. ``None`` unless the
+    # root-COMPLETED stamp actually proceeded (rowcount > 0) AND the
+    # same-tx evaluation found violations. The enforcement itself is
+    # dormant behind the kill-switch — with the flag OFF this field is
+    # dead weight (one object reference, zero notice work).
+    b_violation_report: Any = None
 
 
 class ChildReportsService:
@@ -973,11 +987,10 @@ Provide a concise summary:"""
         # cascade below this hook is only reached when the bus is
         # None — bus singleton missing is a hard error.
         #
-        # Calling context: this method is called from
-        # _process_child_completion_and_notify_parent, which is invoked
-        # by MessageJobHandler.process via TaskProcessor.run_task using
-        # MainLoopBridge.run_async — so we are on the main asyncio event
-        # loop. A direct await is safe here.
+        # Calling context: this method has NO production callers (only a
+        # zero-caller Manager wrapper); the live non-root parent-completion
+        # path is the bus callback → job_feedback_observer._finalize_job,
+        # which carries the (b) enforcement.
         #
         # Skip the hook when message_id is missing/empty: the bus keys
         # correlations on the child task id (looked up from
@@ -1140,20 +1153,48 @@ Provide a concise summary:"""
                 # No pending messages, parent is truly complete
                 # Publish lifecycle event to mark job as completed
                 #
-                # B.S.1-ii (stage ii, LOG ONLY): (b) declared-waiting
-                # log at the parent-COMPLETED stamp. D2.8 (LOCKED):
-                # the bus count (is_parent_complete, above) and the
-                # own-queue count (parent_pending) are both zero here —
-                # the both-counts-zero precondition (B.S.7). Fail-OPEN:
+                # B.S.1-ii (stage ii, LOG ONLY) / B.S.1-iii (stage iii,
+                # flag-gated): (b) declared-waiting log at the
+                # parent-COMPLETED stamp. D2.8 (LOCKED): the bus count
+                # (is_parent_complete, above) and the own-queue count
+                # (parent_pending) are both zero here — the
+                # both-counts-zero precondition (B.S.7). Fail-OPEN:
                 # the helper never raises into the completion path.
-                log_declared_waiting_violations(
+                # Stage iii: the SAME evaluation is captured; the
+                # enforcement action runs after the status write below.
+                _b_violation_report = log_declared_waiting_violations(
                     session,
                     parent.instance_id,
                     context_tag="child_reports.update_parent_on_child_complete",
                 )
+                _clear_b_notice_if_clean(
+                    parent.instance_id, _b_violation_report
+                )
                 parent.status = InstanceStatus.COMPLETED.value
                 parent.updated_at = datetime.now(timezone.utc).isoformat()
                 logger.info(f"Parent {parent.instance_id[:8]}... completed after all children done")
+
+                # B.S.1-iii: post-stamp enforcement (fail-OPEN, D2.6 —
+                # the stamp above ALWAYS proceeds). The notice is
+                # enqueued only when the kill-switch is ON. Note: this
+                # site's transaction commit belongs to the caller; the
+                # notice is advisory and the enqueue opens its own
+                # transaction, so an (accepted, documented) residual is
+                # a notice for a stamp whose enclosing transaction the
+                # caller later rolls back — bounded to this site (the
+                # root/observer sites enforce strictly post-commit).
+                # D2.reconciler-bridge: the notice turn's work_id
+                # reconciles like any turn (see the root site's dispatch
+                # seam comment + the reconciler test module).
+                if _b_violation_report is not None:
+                    await enforce_declared_waiting_violations(
+                        _b_violation_report,
+                        manager=self._manager,
+                        parent_instance_id=parent.instance_id,
+                        context_tag=(
+                            "child_reports.update_parent_on_child_complete"
+                        ),
+                    )
 
                 # Capture parent_id for event publishing (instance will be detached after session closes)
                 completed_parent_id = parent.instance_id
@@ -2443,18 +2484,25 @@ Provide a concise summary:"""
                         parent_id=None,
                     )
 
-                # B.S.1-ii (stage ii, LOG ONLY): (b) declared-waiting
-                # predicate-attached log at the root-COMPLETED stamp.
-                # D2.8 (LOCKED) ordering: bus (fail-CLOSED, same-tx) >
-                # tasks (fail-OPEN) > (b) (fail-OPEN, LAST) — this line
+                # B.S.1-ii (stage ii, LOG ONLY) / B.S.1-iii (stage iii,
+                # flag-gated): (b) declared-waiting predicate-attached
+                # log at the root-COMPLETED stamp. D2.8 (LOCKED)
+                # ordering: bus (fail-CLOSED, same-tx) > tasks
+                # (fail-OPEN) > (b) (fail-OPEN, LAST) — this line
                 # is reached ONLY when every prior gate above reported
                 # zero (both-counts-zero bound, B.S.6/B.S.7). Fail-OPEN:
                 # the helper never raises into the completion path.
-                log_declared_waiting_violations(
+                # Stage iii: the SAME evaluation (never re-read) is
+                # captured and handed to the post-commit enforcement
+                # via the result payload — the notice itself is
+                # enqueued ONLY after the stamp below commits, and
+                # ONLY when the kill-switch is ON.
+                _b_violation_report = log_declared_waiting_violations(
                     session,
                     instance_id,
                     context_tag="child_reports.root_completion",
                 )
+                _clear_b_notice_if_clean(instance_id, _b_violation_report)
                 # Defense-in-depth atomic guard: use SQLAlchemy Core
                 # ``UPDATE ... WHERE status NOT IN (...)`` so a pause
                 # cascade that commits PAUSED between the ``session.get``
@@ -2505,6 +2553,11 @@ Provide a concise summary:"""
                     instance_id=instance_id,
                     agent_id=instance.agent_id,
                     parent_id=None,
+                    # B.S.1-iii: handed off ONLY when the stamp actually
+                    # proceeded (rowcount > 0 — the idempotency-skip path
+                    # above returns without it), so the notice fires
+                    # exactly once per completion event.
+                    b_violation_report=_b_violation_report,
                 )
             
             # Idempotency checks — inlined from _should_send_completion_report
@@ -3332,15 +3385,19 @@ Provide a concise summary:"""
                     if parent_pending == 0:
                         # No pending messages, parent is truly complete
                         #
-                        # NOTE: dead-code fallback — bus=None raises A8 (RuntimeError) above before reaching here; the helper is attached for symmetry with the production twin in _update_parent_on_child_complete but does not fire in production.
-                        # B.S.1-ii (stage ii, LOG ONLY): (b)
-                        # declared-waiting log at the inlined
-                        # parent-COMPLETED stamp (the in-this-function
-                        # twin of ``_update_parent_on_child_complete``).
-                        # D2.8 (LOCKED): bus count (is_parent_complete)
-                        # and own-queue count (parent_pending) are both
-                        # zero here — both-counts-zero precondition
-                        # (B.S.7). Fail-OPEN.
+                        # NOTE: dead-code fallback — bus=None raises A8 (RuntimeError) above before reaching here; the log-only attach below is symmetry with the stage-ii log position and does not fire in production.
+                        # Non-root (b) enforcement lives at the observer's
+                        # ``_finalize_job`` (post-finalize-commit), NOT in
+                        # the zero-caller ``_update_parent_on_child_complete``.
+                        # B.S.1-ii (stage ii, LOG ONLY): (b) declared-waiting
+                        # log at the inlined parent-COMPLETED stamp.
+                        # D2.8 (LOCKED): bus count (is_parent_complete) and
+                        # own-queue count (parent_pending) are both zero here
+                        # — both-counts-zero precondition (B.S.7). Fail-OPEN.
+                        # B.S.1-iii (stage iii): enforcement is deliberately
+                        # NOT attached here (task ruling — symmetry-only, do
+                        # not extend the dead-code twin). If this branch ever
+                        # becomes live, port the enforcement call.
                         log_declared_waiting_violations(
                             session,
                             parent.instance_id,
@@ -3625,6 +3682,35 @@ Provide a concise summary:"""
                         f"Failed to publish lifecycle event for root {instance_id[:8]}...: {e}"
                     )
             self._trigger_title_generation(instance_id, completed_message_id)
+
+            # ─── B.S.1-iii: (b) enforcement (flag-gated, fail-OPEN) ───
+            # The stamp transaction has ALREADY committed (the sync
+            # helper returned outcome="root_completed"). If the inline
+            # same-tx evaluation (B.S.7 position, unchanged) found
+            # violations, inject ONE adjudication notice to the parent.
+            # D2.6 LOCKED: notice, NEVER block — every failure inside
+            # the enforcement is absorbed (WARNING + continue). Dormant
+            # entirely when the kill-switch is OFF (ship default).
+            #
+            # D2.reconciler-bridge (B.S.4): THIS is the notice-turn
+            # seam. The notice below travels the durable enqueue path
+            # (``manager.enqueue_message`` → MessageQueue + Task rows),
+            # which re-opens the parent's turn; that new turn's
+            # work_id threads through ``reconcile_turn_mirror(work_id)``
+            # exactly like any other turn (authoritative mirror
+            # reconcile — see the reconcile_turn_mirror call sites in
+            # the message pipeline / observer finalize paths). Pinned
+            # by tests/repositories/test_turn_reconciler.py::
+            # TestReportIntegrityNoticeTurnReconciles (seam-level: the
+            # (b)-notice turn's work_id reconciles the mirror
+            # tables like any PROCESS_MESSAGE turn).
+            if result.b_violation_report is not None:
+                await enforce_declared_waiting_violations(
+                    result.b_violation_report,
+                    manager=self._manager,
+                    parent_instance_id=result.instance_id,
+                    context_tag="child_reports.root_completion",
+                )
             return
 
         # Idempotency skip: nothing to do (terminal COMPLETED/ERROR — delivery has happened or terminal-failed; no obligation to recover).

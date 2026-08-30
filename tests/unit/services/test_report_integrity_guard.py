@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from sqlalchemy import create_engine
@@ -88,9 +89,12 @@ from daemon.repositories.report_injection.repository import (
 )
 from daemon.services.report_integrity_guard import (
     DeclaredWaitingViolationReport,
+    enforce_declared_waiting_violations,
     evaluate_declared_waiting_violations,
     log_declared_waiting_violations,
 )
+
+import daemon.services.report_integrity_guard as rig  # noqa: E402
 
 
 # =============================================================================
@@ -121,6 +125,56 @@ def report_repo(engine: Engine) -> ReportInjectionRepository:
 @pytest.fixture
 def watcher_repo(engine: Engine) -> DependencyWatcherRepository:
     return DependencyWatcherRepository(engine)
+
+
+@pytest.fixture
+def wired_bus(engine: Engine):
+    """Started DependencyBus bound to the test engine (opt-in).
+
+    The stage-iii root-path revert-proof test drives the REAL
+    ``_process_child_completion_db_sync``, which hard-errors (A8) when
+    the bus singleton is None — wire it there; the pure guard tests
+    don't need it.
+    """
+    import asyncio
+
+    from daemon.repositories.dependency_bus.repository import (
+        DependencyWatcherRepository as _DWR,
+    )
+    from daemon.services.dependency_bus import (
+        DependencyBus,
+        set_dependency_bus,
+    )
+
+    repo = _DWR(engine)
+    b = DependencyBus(repo)
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            import concurrent.futures
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                ex.submit(asyncio.run, b.start()).result()
+        else:
+            loop.run_until_complete(b.start())
+    except RuntimeError:
+        asyncio.run(b.start())
+    set_dependency_bus(b)
+    try:
+        yield b
+    finally:
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                import concurrent.futures
+
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                    ex.submit(asyncio.run, b.stop()).result()
+            else:
+                loop.run_until_complete(b.stop())
+        except RuntimeError:
+            asyncio.run(b.stop())
+        set_dependency_bus(None)
 
 
 def _seed_instance(
@@ -798,7 +852,19 @@ class TestStageIILogHelper:
                     session, parent_id, context_tag="unit.stamp_site"
                 )
 
-        assert ret is None, "LOG-ONLY helper must return None"
+        # STAGE-III CONTRACT (B.S.1-iii): the helper's observable LOG
+        # behavior is unchanged (stage ii), but it now RETURNS the
+        # evaluated report so the SAME evaluation — never re-read, per
+        # B.S.7 — can be handed to the post-commit enforcement action.
+        # (Stage ii pinned ``ret is None`` here; stage iii extends the
+        # return to ``DeclaredWaitingViolationReport | None``. Failure
+        # and healthy paths still return None — pinned below and in
+        # tests/unit/services/test_b_fail_open.py.)
+        assert isinstance(ret, DeclaredWaitingViolationReport), (
+            "stage-iii extension: the helper must return the structured "
+            "report for the enforcement hand-off"
+        )
+        assert ret.is_violation is True
         guard = [
             r
             for r in caplog.records
@@ -927,3 +993,386 @@ class TestStageIILogHelper:
             for r in caplog.records
             if "declared-waiting violation" in r.getMessage()
         ], "a failed predicate must NOT produce a violation line"
+
+
+# =============================================================================
+# B.S.1-iii — flag-gated ENFORCEMENT (notice variants, channel, dedupe)
+# =============================================================================
+
+
+class TestEnforcementAction:
+    """B.S.1-iii — ``enforce_declared_waiting_violations`` (flag ON).
+
+    Contract under test:
+
+    * ONE adjudication notice per completion episode via the durable
+      enqueue path (``manager.enqueue_message``) with source
+      ``system:report-integrity-guard`` (reserved-origin contract +
+      the ``system:*`` dispatch-source guard), priority 0, structured
+      metadata provenance (the ``system:watchdog`` precedent).
+    * OQ-6: the notice text is parameterized per child terminal
+      status — COMPLETED / FAILED / ERROR / TERMINATED each carry a
+      DISTINCT adjudication playbook.
+    * D2.9: the notice cites the Wave-1 (c) marker pattern as a
+      STATIC string; D2.18: the guard never reads report content.
+    * C2-D2.2: plain system-authored text — NEVER inside the
+      ``[SYSTEM NOTE]`` frame.
+    * Dedupe: the same violation set is NOT re-notified (one notice
+      per episode); a different set starts a new episode.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _flag_on(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(
+            "WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED", "1"
+        )
+        monkeypatch.setattr(rig, "_B_GUARD_ENABLED", None)
+        rig._B_NOTICE_LEDGER.clear()
+        yield
+        rig._B_NOTICE_LEDGER.clear()
+
+    def _report(
+        self,
+        parent_id: str,
+        child_id: str,
+        status: str = InstanceStatus.COMPLETED.value,
+    ) -> DeclaredWaitingViolationReport:
+        return DeclaredWaitingViolationReport(
+            parent_instance_id=parent_id,
+            pending_with_terminal_child=[
+                {
+                    "injection_id": f"inj-{uuid.uuid4().hex[:8]}",
+                    "child_instance_id": child_id,
+                    "state": "PENDING",
+                    "child_terminal_status": status,
+                }
+            ],
+            fired_unenqueued=[],
+        )
+
+    @pytest.mark.parametrize(
+        "status", ["completed", "failed", "error", "terminated"]
+    )
+    async def test_notice_variants_per_child_terminal_status(
+        self, status: str
+    ) -> None:
+        """OQ-6: four terminal statuses → four DISTINCT playbooks."""
+        from daemon.services.report_integrity_guard import (
+            _build_adjudication_notice,
+        )
+
+        report = self._report("parent-x", "child-x", status=status)
+        text = _build_adjudication_notice(
+            report, context_tag="unit.variants"
+        )
+        playbooks = [
+            _build_adjudication_notice(
+                self._report("p", "c", status=s), context_tag="u"
+            )
+            for s in ["completed", "failed", "error", "terminated"]
+        ]
+        # Distinct per-status guidance — no two statuses share a line.
+        core = [t.split("- Child")[-1] for t in playbooks]
+        assert len(set(core)) == 4
+        assert status in text, "notice must name the verbatim status"
+
+    async def test_notice_content_contract(self) -> None:
+        """parent id + child id + detection statement + marker citation
+        + no [SYSTEM NOTE] frame + system source provenance.
+        """
+        parent_id = "parent-abc123"
+        child_id = "child-def456"
+        manager = AsyncMock()
+        manager.config = None
+
+        outcome = await enforce_declared_waiting_violations(
+            self._report(parent_id, child_id),
+            manager=manager,
+            parent_instance_id=parent_id,
+            context_tag="unit.content",
+        )
+
+        assert outcome is True
+        manager.enqueue_message.assert_awaited_once()
+        kwargs = manager.enqueue_message.await_args.kwargs
+        assert kwargs["instance_id"] == parent_id
+        assert kwargs["source"] == (
+            rig.REPORT_INTEGRITY_GUARD_NOTICE_SOURCE
+        )
+        assert kwargs["source"] == "system:report-integrity-guard"
+        assert kwargs["priority"] == 0
+        assert kwargs["metadata"]["report_integrity_notice"] is True
+        assert kwargs["metadata"]["context_tag"] == "unit.content"
+        message: str = kwargs["message"]
+        assert "[SYSTEM NOTE]" not in message, (
+            "C2-D2.2: notice must NEVER be inside the [SYSTEM NOTE] frame"
+        )
+        assert parent_id in message and child_id in message
+        assert "declared-waiting" in message
+        from daemon.constants import REPORT_SANITY_MARKER
+
+        assert REPORT_SANITY_MARKER in message, (
+            "D2.9: the notice must cite the (c) marker pattern"
+        )
+
+    async def test_notice_never_reads_report_content(self) -> None:
+        """D2.18: the notice text is built from durable-row state only —
+        an identical violation set yields an identical notice regardless
+        of any hypothetical report content.
+        """
+        from daemon.services.report_integrity_guard import (
+            _build_adjudication_notice,
+        )
+
+        a = _build_adjudication_notice(
+            self._report("p", "c"), context_tag="u"
+        )
+        b = _build_adjudication_notice(
+            self._report("p", "c"), context_tag="u"
+        )
+        assert a == b
+
+    async def test_dedupe_same_violation_set_not_renotified(self) -> None:
+        """ONE notice per completion episode: re-firing the site on the
+        SAME violation set does not re-enqueue.
+        """
+        parent_id = "parent-dedupe"
+        manager = AsyncMock()
+        manager.config = None
+        report = self._report(parent_id, "child-dedupe")
+
+        first = await enforce_declared_waiting_violations(
+            report,
+            manager=manager,
+            parent_instance_id=parent_id,
+            context_tag="unit.dedupe",
+        )
+        second = await enforce_declared_waiting_violations(
+            self._report(parent_id, "child-dedupe"),
+            manager=manager,
+            parent_instance_id=parent_id,
+            context_tag="unit.dedupe",
+        )
+
+        assert first is True and second is False
+        assert manager.enqueue_message.await_count == 1
+
+    async def test_new_violation_set_starts_new_episode(self) -> None:
+        """A DIFFERENT violation set (new child) replaces the episode and
+        notifies again.
+        """
+        parent_id = "parent-episode"
+        manager = AsyncMock()
+        manager.config = None
+
+        await enforce_declared_waiting_violations(
+            self._report(parent_id, "child-1"),
+            manager=manager,
+            parent_instance_id=parent_id,
+            context_tag="unit.episode",
+        )
+        await enforce_declared_waiting_violations(
+            self._report(parent_id, "child-2"),
+            manager=manager,
+            parent_instance_id=parent_id,
+            context_tag="unit.episode",
+        )
+        assert manager.enqueue_message.await_count == 2
+
+    async def test_clean_evaluation_closes_episode(
+        self, engine: Engine, report_repo: ReportInjectionRepository
+    ) -> None:
+        """A later same-tx evaluation coming back CLEAN clears the
+        shared cooldown — the wedge becomes eligible again (B.S.5).
+        """
+        from daemon.services.report_integrity_guard import (
+            parent_has_active_b_notice,
+        )
+
+        parent_id = "parent-close"
+        manager = AsyncMock()
+        manager.config = None
+        child_id = "child-close"
+        # Make the parent's episode real: seed rows the CLEAN evaluation
+        # can later resolve (the clean path needs the ledger entry to
+        # clear via the site hook, which we exercise directly).
+        await enforce_declared_waiting_violations(
+            self._report(parent_id, child_id),
+            manager=manager,
+            parent_instance_id=parent_id,
+            context_tag="unit.close",
+        )
+        assert parent_has_active_b_notice(parent_id)
+
+        healthy = DeclaredWaitingViolationReport(parent_instance_id=parent_id)
+        from daemon.services.report_integrity_guard import (
+            _clear_b_notice_if_clean,
+        )
+
+        _clear_b_notice_if_clean(parent_id, healthy)
+        assert not parent_has_active_b_notice(parent_id)
+
+    async def test_flag_off_means_zero_notice_work(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Kill-switch OFF (ship default) → the enforcement action
+        short-circuits before ANY notice work — no enqueue, no ledger
+        entry (the flag check is the first statement).
+        """
+        import daemon.services.report_integrity_guard as rig
+
+        monkeypatch.delenv(
+            "WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED",
+            raising=False,
+        )
+        monkeypatch.setattr(rig, "_B_GUARD_ENABLED", None)
+        rig._B_NOTICE_LEDGER.clear()
+
+        manager = AsyncMock()
+        outcome = await enforce_declared_waiting_violations(
+            self._report("parent-off", "child-off"),
+            manager=manager,
+            parent_instance_id="parent-off",
+            context_tag="unit.off",
+        )
+        assert outcome is False
+        manager.enqueue_message.assert_not_called()
+        assert "parent-off" not in rig._B_NOTICE_LEDGER
+
+
+# =============================================================================
+# B.S.1-iii — KILL-SWITCH REVERT PROOF (flag OFF = stage-ii behavior)
+# =============================================================================
+
+
+class TestKillSwitchRevertProof:
+    """Revert path proof: flag OFF + incident shape → NO notice, NO
+    enqueue call, ONLY the ``[ReportIntegrityGuard]`` soak log.
+
+    This is the operator-facing guarantee behind D2.5-FLIP: setting
+    ``WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED=0`` (or
+    blanking the env) + restart restores EXACTLY the stage-ii behavior.
+    (Commit-chain proof: each stage is its own commit — ``git revert
+    <stage-iii>`` restores stage-ii byte-behavior; with the flag OFF the
+    stage-iii diff is unreachable, so the revert is a formality for the
+    flag-OFF runtime path.)
+    """
+
+    @pytest.fixture(autouse=True)
+    def _flag_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import daemon.services.report_integrity_guard as rig
+
+        monkeypatch.delenv(
+            "WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED",
+            raising=False,
+        )
+        monkeypatch.setattr(rig, "_B_GUARD_ENABLED", None)
+        rig._B_NOTICE_LEDGER.clear()
+        yield
+        rig._B_NOTICE_LEDGER.clear()
+
+    async def test_flag_off_incident_no_enqueue(
+        self,
+        engine: Engine,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Direct: incident-shape report + flag OFF → no enqueue, no
+        ledger, no notice — the helper short-circuits on the flag.
+        """
+        manager = AsyncMock()
+        report = DeclaredWaitingViolationReport(
+            parent_instance_id="parent-revert",
+            pending_with_terminal_child=[
+                {
+                    "injection_id": "inj-1",
+                    "child_instance_id": "child-revert",
+                    "state": "PENDING",
+                    "child_terminal_status": "completed",
+                }
+            ],
+            fired_unenqueued=[],
+        )
+
+        with caplog.at_level(
+            logging.INFO, logger="daemon.services.report_integrity_guard"
+        ):
+            outcome = await enforce_declared_waiting_violations(
+                report,
+                manager=manager,
+                parent_instance_id="parent-revert",
+                context_tag="unit.revert",
+            )
+
+        assert outcome is False
+        manager.enqueue_message.assert_not_called(), (
+            "flag OFF must not even attempt the enqueue (revert proof)"
+        )
+        assert not [
+            r
+            for r in caplog.records
+            if "enforcement notice enqueued" in r.getMessage()
+        ]
+
+    def test_flag_off_root_path_log_only(
+        self,
+        engine: Engine,
+        report_repo: ReportInjectionRepository,
+        wired_bus,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Root-path: incident shape seeded, flag OFF → ONLY the soak log
+        fires; the sync result carries the evaluation but the post-commit
+        dispatch (with the manager spy) performs NO enqueue — byte-parity
+        with stage ii.
+        """
+        import logging as _logging
+
+        from daemon.services.child_reports import ChildReportsService
+        from daemon.write_pause_guard import WritePauseGuard
+
+        parent_id = _seed_parent(engine)
+        real_child = _seed_terminal_child(engine, parent_id)
+        _enqueue_pending(
+            report_repo, parent_id=parent_id, child_id=real_child
+        )
+
+        manager = MagicMock(name="InstanceManager")
+        manager.engine = engine
+        manager.write_guard = WritePauseGuard()
+        manager._checkpointer = None
+        manager._live_hub = None
+        manager._queue_repository = MagicMock()
+        manager._instance_repository = MagicMock()
+        manager.enqueue_message = AsyncMock()
+        service = ChildReportsService.__new__(ChildReportsService)
+        service._manager = manager
+        service._events_service = None
+
+        with caplog.at_level(
+            _logging.INFO, logger="daemon.services.report_integrity_guard"
+        ):
+            result = service._process_child_completion_db_sync(
+                instance_id=parent_id,
+                completed_message_id="msg-different-id",
+                last_content="assistant text",
+            )
+
+        # The stamp proceeded; the stage-ii log fired.
+        assert result.outcome == "root_completed"
+        guard_logs = [
+            r
+            for r in caplog.records
+            if "declared-waiting violation" in r.getMessage()
+        ]
+        assert len(guard_logs) == 1, "stage-ii soak log must still fire"
+        # NO notice: no enforcement log, no enqueue, no ledger.
+        assert not [
+            r
+            for r in caplog.records
+            if "enforcement notice enqueued" in r.getMessage()
+        ]
+        manager.enqueue_message.assert_not_called()
+        import daemon.services.report_integrity_guard as rig
+
+        assert parent_id not in rig._B_NOTICE_LEDGER
+

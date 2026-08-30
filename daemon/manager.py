@@ -82,6 +82,9 @@ from .services.dependency_bus import get_dependency_bus
 from .services.instance_lifecycle import InstanceLifecycleService
 from .services.instance_messaging import InstanceMessagingService
 from .services.instance_messaging import emit_wc_wake_enqueue_boot_log
+from .services.report_integrity_guard import (
+    emit_report_integrity_b_guard_boot_log,
+)
 from .services.messaging_types import AsyncMessageResult  # re-exported for `from daemon.manager import AsyncMessageResult`
 from .services.child_reports import ChildReportsService
 from .services.error_reporting import ErrorReportingService
@@ -738,6 +741,14 @@ class InstanceManager:
         # to flip. See _resolve_wc_wake_enqueue_enabled for env syntax.
         # Mirrors the governor-guard wrapper precedent.
         emit_wc_wake_enqueue_boot_log()
+
+        # Report-integrity (b) terminal-waiting guard (wc-wake-report-
+        # integrity Wave 2 stage iii, 2026-08-30): one-time INFO log
+        # naming the resolved kill-switch state. Default DISABLED
+        # (stage-ii log-only ship state); restart-required to flip;
+        # OPERATOR-OWNED flip per C2-D2.5-FLIP — no auto-flip exists.
+        # Mirrors the governor-guard / WC-wake wrapper precedents.
+        emit_report_integrity_b_guard_boot_log()
 
         # NEW: Pluggable message sources system
         self.source_registry = SourceRegistry(

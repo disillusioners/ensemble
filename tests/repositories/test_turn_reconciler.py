@@ -1358,3 +1358,156 @@ class TestWaitingChildrenGuard:
         assert _read_admission(engine, work_id) == AdmissionState.DONE.value
         full = _read_admission_full(engine, work_id)
         assert full["terminal_reason"] == TaskStatus.COMPLETED.value
+
+
+# ---------------------------------------------------------------------------
+# B.S.4 — D2.reconciler-bridge: the (b) notice-injected turn (seam-level).
+#
+# SCOPE (documented choice per phase2-plan §4.2 B.S.4): a FULL manager-level
+# integration (real ``manager.enqueue_message`` producing the notice turn and
+# the pipeline reconciling it) is too heavy for a unit fixture — it drags in
+# the WorkerPool, the graph, and the messaging dispatcher. This SEAM-LEVEL
+# test pins the property the bridge decision requires: a (b) adjudication
+# notice creates a turn that is structurally IDENTICAL to any
+# PROCESS_MESSAGE turn — a ``Task`` with a ``work_id``, a ``MessageQueue``
+# row (source ``system:report-integrity-guard``), and the mirror rows — so
+# its ``work_id`` flows into ``reconcile_turn_mirror(work_id)`` exactly like
+# any other turn, and the mirror tables converge when the turn goes
+# terminal. The production seam (where the notice is enqueued post-commit)
+# is annotated in
+# ``daemon/services/child_reports.py::_dispatch_post_commit_side_effects``
+# and ``daemon/services/job_feedback_observer.py::_finalize_job`` (both
+# reference D2.reconciler-bridge).
+# ---------------------------------------------------------------------------
+
+
+class TestReportIntegrityNoticeTurnReconciles:
+    """A (b) notice turn's work_id threads through the mirror reconcile."""
+
+    def test_notice_turn_reconciles_like_any_message_turn(
+        self, engine: Engine, repo: TaskRepository
+    ) -> None:
+        """(b) notice turn (source system:report-integrity-guard) goes
+        terminal → turn row + mirror tables consistent: message
+        completed + processing_task_id NULLed, lock deleted, JobItem
+        admission done.
+        """
+        instance_id = _new_id("parent")  # the noticed parent
+        work_id = _new_id("work")  # the notice turn's work_id
+        message_id = _new_id("msg")
+
+        _seed_instance(engine, instance_id, InstanceStatus.COMPLETED.value)
+        _seed_task(
+            engine,
+            work_id=work_id,
+            instance_id=instance_id,
+            message_id=message_id,
+            status=TaskStatus.RUNNING.value,
+        )
+        _seed_job_item(engine, work_id=work_id, instance_id=instance_id)
+        _seed_job_lock(engine, work_id=work_id, instance_id=instance_id)
+        # The notice message itself — the durable wake row (b) creates
+        # via ``manager.enqueue_message(source="system:report-integrity-
+        # guard")``. Stamped with the notice source + a stale
+        # processing_task_id so the reconcile's NULL write is exercised.
+        now = datetime.now(timezone.utc)
+        with Session(engine) as session:
+            session.add(
+                MessageQueue(
+                    message_id=message_id,
+                    instance_id=instance_id,
+                    content=(
+                        "[system:report-integrity-guard] Report-integrity "
+                        "notice — declared-waiting obligations with "
+                        "terminal child(ren)."
+                    ),
+                    type=MessageType.AGENT.value,
+                    source="system:report-integrity-guard",
+                    status=MessageStatus.PROCESSING.value,
+                    enqueued_at=now,
+                    last_activity_at=now,
+                    processing_task_id="stale-notice-task-id",
+                )
+            )
+            session.commit()
+
+        # The notice turn completes (the parent adjudicated) → reconcile.
+        _set_task_status(engine, work_id, TaskStatus.COMPLETED.value)
+        result = repo.reconcile_turn_mirror(work_id)
+
+        # Turn row + mirrors consistent.
+        assert result["updated_counts"]["message_queue"] >= 1
+        assert _read_message_status(engine, message_id) == (
+            MessageStatus.COMPLETED.value
+        )
+        assert _read_message_processing_task_id(engine, message_id) is None
+        assert _read_admission(engine, work_id) == AdmissionState.DONE.value
+        from sqlmodel import select as _select
+
+        with Session(engine) as session:
+            locks = session.exec(
+                _select(JobLock).where(JobLock.job_id == work_id)
+            ).all()
+            assert list(locks) == [], "the notice turn's lock must be released"
+
+    def test_notice_turn_work_id_is_the_reconcile_key(
+        self, engine: Engine, repo: TaskRepository
+    ) -> None:
+        """The notice source survives reconcile (provenance is durable),
+        and reconciling an UNRELATED work_id never touches the notice
+        turn — reconcile_turn_mirror(work_id) is keyed, not global.
+        """
+        instance_id = _new_id("parent")
+        notice_work = _new_id("work")
+        notice_msg = _new_id("msg")
+        other_work = _new_id("work")
+        other_msg = _new_id("msg")
+
+        # The noticed parent is post-adjudication terminal (the D13-style
+        # alive-instance suppression does not apply — mirrors the passing
+        # admission shape above).
+        _seed_instance(engine, instance_id, InstanceStatus.COMPLETED.value)
+        for wid, mid in ((notice_work, notice_msg), (other_work, other_msg)):
+            _seed_task(
+                engine,
+                work_id=wid,
+                instance_id=instance_id,
+                message_id=mid,
+                status=TaskStatus.RUNNING.value,
+            )
+            _seed_job_item(engine, work_id=wid, instance_id=instance_id)
+            _seed_message(
+                engine,
+                message_id=mid,
+                instance_id=instance_id,
+                status=MessageStatus.PROCESSING.value,
+            )
+        now = datetime.now(timezone.utc)
+        with Session(engine) as session:
+            notice_row = session.get(MessageQueue, notice_msg)
+            notice_row.source = "system:report-integrity-guard"
+            session.add(notice_row)
+            session.commit()
+
+        # Reconcile the OTHER turn — the notice turn must be untouched.
+        _set_task_status(engine, other_work, TaskStatus.COMPLETED.value)
+        repo.reconcile_turn_mirror(other_work)
+
+        assert _read_message_status(engine, other_msg) == (
+            MessageStatus.COMPLETED.value
+        )
+        assert _read_message_status(engine, notice_msg) == (
+            MessageStatus.PROCESSING.value
+        ), "an unrelated reconcile must NOT touch the (b) notice turn"
+
+        # Now the notice turn itself goes terminal and reconciles.
+        _set_task_status(engine, notice_work, TaskStatus.COMPLETED.value)
+        repo.reconcile_turn_mirror(notice_work)
+        assert _read_message_status(engine, notice_msg) == (
+            MessageStatus.COMPLETED.value
+        )
+        with Session(engine) as session:
+            row = session.get(MessageQueue, notice_msg)
+            assert row.source == "system:report-integrity-guard", (
+                "reconcile must preserve the notice provenance (source)"
+            )

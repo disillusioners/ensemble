@@ -67,6 +67,8 @@ from daemon.services.dependency_bus import get_dependency_bus
 from daemon.services.job_queue_service import DemandState, JobQueueService
 from daemon.services.job_state_machine import InvalidTransitionError
 from daemon.services.report_integrity_guard import (
+    _clear_b_notice_if_clean,
+    enforce_declared_waiting_violations,
     log_declared_waiting_violations,
 )
 from daemon.write_pause_guard import WriteGuardSession
@@ -272,6 +274,15 @@ class _FinalizeJobResult(NamedTuple):
     locks_released: int = 0
     instance_was_terminal: bool = False
     gate_deferred: bool = False
+    # B.S.1-iii (stage iii): the (b) declared-waiting violation report
+    # evaluated at the inline same-tx Step-2 position (B.S.7 — one
+    # evaluation, never re-read post-commit), handed to the async
+    # caller so the enforcement action (adjudication notice,
+    # flag-gated, fail-OPEN) runs AFTER the finalize transaction
+    # committed. ``None`` unless the COMPLETED stamp proceeded AND the
+    # same-tx evaluation found violations. Dead weight with the
+    # kill-switch OFF (ship default) — zero notice work.
+    b_violation_report: Any = None
 
 
 class JobFeedbackObserver:
@@ -1591,6 +1602,42 @@ class JobFeedbackObserver:
             # ─── Handle other skip paths (unknown terminal_status, CM re-check) ───
             if db_result.skip:
                 return
+
+            # ─── B.S.1-iii: (b) enforcement (flag-gated, fail-OPEN) ───
+            # The finalize transaction has ALREADY committed. If the
+            # inline same-tx evaluation (B.S.7 position, unchanged,
+            # COMPLETED-gated) found declared-waiting violations, inject
+            # ONE adjudication notice to the parent. D2.6 LOCKED:
+            # notice, NEVER block — every failure inside the
+            # enforcement is absorbed (WARNING + continue). Dormant
+            # entirely when the kill-switch is OFF (ship default).
+            #
+            # D2.reconciler-bridge (B.S.4): the notice re-opens the
+            # parent's turn via the durable enqueue path; that turn's
+            # work_id threads through ``reconcile_turn_mirror(work_id)``
+            # exactly like any other turn (the finalize-site reconciler
+            # pass above + the message-pipeline reconcile). Pinned at
+            # seam level by
+            # tests/repositories/test_turn_reconciler.py::
+            # TestReportIntegrityNoticeTurnReconciles.
+            if db_result.b_violation_report is not None:
+                try:
+                    await enforce_declared_waiting_violations(
+                        db_result.b_violation_report,
+                        manager=self._instance_manager,
+                        parent_instance_id=db_result.instance_id
+                        or "",
+                        context_tag="observer_finalize_job",
+                    )
+                except Exception as exc:  # noqa: BLE001 — belt-and-braces: enforcement is internally fail-OPEN
+                    logger.warning(
+                        "Observer: (b) enforcement action raised "
+                        "unexpectedly for instance %s — fail-OPEN, "
+                        "finalization already committed: %s: %s",
+                        instance_id,
+                        type(exc).__name__,
+                        exc,
+                    )
 
             # ─── Post-commit outbox: fire side effects on the event loop ───
             # B4 fix: Pre-fetch the list of watching instances BEFORE
@@ -3447,6 +3494,9 @@ class JobFeedbackObserver:
             # commits with steps 1 and 3. Captures parent_id / agent_id before
             # the session closes (instance is detached after commit).
             instance = session.get(Instance, instance_id)
+            # B.S.1-iii: (b) same-tx evaluation hand-off (None unless the
+            # COMPLETED stamp below proceeds with violations).
+            _b_violation_report = None
             if instance is None:
                 # Instance missing — job transitioned but instance row gone.
                 # Continue with lock release (step 3); instance-side side
@@ -3481,16 +3531,20 @@ class JobFeedbackObserver:
                 # adjudication. Fail-OPEN: the helper never raises into
                 # the finalization path (D2.6).
                 if terminal_status == InstanceStatus.COMPLETED.value:
-                    log_declared_waiting_violations(
+                    b_report = log_declared_waiting_violations(
                         session,
                         instance_id,
                         context_tag="observer_finalize_job",
                     )
+                    _clear_b_notice_if_clean(instance_id, b_report)
+                else:
+                    b_report = None
                 instance.status = terminal_status
                 instance.updated_at = now
                 instance.last_activity_at = now_dt
                 instance.version = (instance.version or 1) + 1
                 instance_was_terminal = False
+                _b_violation_report = b_report
 
             # ─── Step 3: Lock release ───
             # Inline the SQL instead of calling
@@ -3578,6 +3632,12 @@ class JobFeedbackObserver:
             error_message=error_message,
             locks_released=released,
             instance_was_terminal=instance_was_terminal,
+            # B.S.1-iii: handed off ONLY when the COMPLETED stamp actually
+            # proceeded (Step 2 ran — instance_was_terminal False), so the
+            # notice fires exactly once per finalize event.
+            b_violation_report=(
+                _b_violation_report if not instance_was_terminal else None
+            ),
         )
 
     async def _trigger_next_job_by_id(

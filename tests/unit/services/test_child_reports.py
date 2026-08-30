@@ -2089,3 +2089,217 @@ class TestReportIntegrityGuardStageIILog:
             f"(b) must evaluate LAST and only on the both-zero path; "
             f"got {order}"
         )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# B.S.6/B.S.7 EXTENSION (stage iii) — ENFORCEMENT ordering with flag ON.
+#
+# The stage-ii tests above pin bus > tasks > (b) for the LOG. Stage iii adds
+# the flag-gated ENFORCEMENT (adjudication notice) which consumes the SAME
+# same-tx evaluation (B.S.7 — never re-evaluated) AFTER the stamp commits.
+# These tests prove, with WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED=1:
+#
+#   * the ENFORCEMENT evaluation preserves the stage-ii ordering — (b) still
+#     evaluates LAST, only on the both-counts-zero path (bus > tasks > (b));
+#   * the both-counts-zero bound still holds with the flag ON (any gate
+#     short-circuit → (b) not evaluated at all → no report attached);
+#   * the post-commit enforcement fires from the async dispatch AFTER the
+#     stamp (outcome root_completed), via the durable enqueue with the
+#     system source — and the stamp itself is untouched (fail-OPEN).
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+class TestReportIntegrityGuardStageIIIEnforcement:
+    """Flag-ON ordering + both-counts-zero bound for the ENFORCEMENT path."""
+
+    @pytest.fixture(autouse=True)
+    def _flag_on(self, monkeypatch):
+        import daemon.services.report_integrity_guard as _rig
+
+        monkeypatch.setenv(
+            "WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED", "1"
+        )
+        monkeypatch.setattr(_rig, "_B_GUARD_ENABLED", None)
+        _rig._B_NOTICE_LEDGER.clear()
+        yield
+        _rig._B_NOTICE_LEDGER.clear()
+
+    def test_enforcement_evaluation_preserves_ordering(
+        self, engine, monkeypatch
+    ):
+        """Flag ON: (b) still evaluates LAST (bus > tasks > (b), D2.8),
+        the SAME evaluation is attached to the result, and the sync stamp
+        proceeds BEFORE any enforcement (which only the async dispatch
+        may perform).
+        """
+        import daemon.services.report_integrity_guard as _rig
+        from unittest.mock import AsyncMock as _AsyncMock
+
+        from daemon.services.report_integrity_guard import (
+            DeclaredWaitingViolationReport as _DWR,
+        )
+
+        service = _build_child_reports_service(engine)
+        service._manager.enqueue_message = _AsyncMock()
+        root_id = _seed_root_instance(engine)
+        child_id = _seed_child_instance(
+            engine, parent_id=root_id, status=InstanceStatus.COMPLETED.value
+        )
+        _seed_pending_injection(engine, parent_id=root_id, child_id=child_id)
+
+        order: list[str] = []
+        real_count = ChildReportsService._count_actionable_pending_tasks
+
+        def _count_spy(self, session, instance_id):
+            order.append("tasks_gate")
+            return real_count(self, session, instance_id)
+
+        monkeypatch.setattr(
+            ChildReportsService, "_count_actionable_pending_tasks", _count_spy
+        )
+
+        def _log_spy(session, pid, **k):
+            order.append(f"(b):{k.get('context_tag', '?')}")
+            return _DWR(
+                parent_instance_id=pid,
+                pending_with_terminal_child=[
+                    {
+                        "injection_id": "inj-1",
+                        "child_instance_id": child_id,
+                        "state": "PENDING",
+                        "child_terminal_status": "completed",
+                    }
+                ],
+                fired_unenqueued=[],
+            )
+
+        monkeypatch.setattr(
+            _child_reports_module, "log_declared_waiting_violations", _log_spy
+        )
+
+        result = service._process_child_completion_db_sync(
+            instance_id=root_id,
+            completed_message_id="msg-different-id",
+            last_content="assistant text",
+        )
+
+        # Ordering preserved: tasks gate FIRST, (b) LAST.
+        assert order == ["tasks_gate", "(b):child_reports.root_completion"], (
+            f"ENFORCEMENT evaluation must preserve bus > tasks > (b); got {order}"
+        )
+        # The stamp ALWAYS proceeds (fail-OPEN) and carries the SAME
+        # evaluation to the post-commit enforcement.
+        assert result.outcome == "root_completed"
+        assert isinstance(result.b_violation_report, _DWR)
+        assert result.b_violation_report.is_violation is True
+
+        # The SYNC half performed NO enforcement: manager untouched.
+        service._manager.enqueue_message.assert_not_called()
+
+        # The ASYNC dispatch (post-commit) is where the notice fires.
+        import asyncio
+
+        asyncio.run(
+            service._dispatch_post_commit_side_effects(
+                result, "assistant text", "msg-different-id"
+            )
+        )
+        service._manager.enqueue_message.assert_awaited_once()
+        kwargs = service._manager.enqueue_message.await_args.kwargs
+        assert kwargs["instance_id"] == root_id
+        assert kwargs["source"] == "system:report-integrity-guard"
+        assert kwargs["priority"] == 0
+
+    def test_both_counts_zero_bound_holds_with_flag_on(
+        self, engine, monkeypatch, caplog
+    ):
+        """Flag ON + bus gate short-circuit → (b) NOT evaluated at all:
+        no helper call, no log, NO report attached (the both-counts-zero
+        bound is flag-independent).
+        """
+        import logging
+
+        service = _build_child_reports_service(engine)
+        root_id = _seed_root_instance(engine)
+        child_id = _seed_child_instance(
+            engine, parent_id=root_id, status=InstanceStatus.COMPLETED.value
+        )
+        _seed_pending_injection(engine, parent_id=root_id, child_id=child_id)
+        # PENDING watcher → the bus gate defers the completion.
+        _seed_dependency_watcher(
+            engine,
+            target_instance_id=root_id,
+            state=DependencyWatcherState.PENDING.value,
+        )
+
+        helper_calls: list[str] = []
+        monkeypatch.setattr(
+            _child_reports_module,
+            "log_declared_waiting_violations",
+            lambda *a, **k: helper_calls.append(k.get("context_tag", "?")),
+        )
+
+        with caplog.at_level(
+            logging.WARNING, logger="daemon.services.report_integrity_guard"
+        ):
+            result = service._process_child_completion_db_sync(
+                instance_id=root_id,
+                completed_message_id="msg-different-id",
+                last_content="assistant text",
+            )
+
+        assert result.outcome == "deferred_waiting_children"
+        assert helper_calls == [], (
+            "(b) must NOT be evaluated when the bus gate short-circuits "
+            f"— flag ON changes nothing (D2.8); got {helper_calls}"
+        )
+        assert result.b_violation_report is None
+        assert _guard_records(caplog) == []
+        service._manager.enqueue_message.assert_not_called()
+
+    def test_flag_off_root_path_b_violation_report_is_inert(
+        self, engine, monkeypatch
+    ):
+        """Flag OFF (ship default): the sync result may still carry the
+        evaluation, but the enforcement branch in the async dispatch is
+        unreachable — byte-parity with stage ii (no enqueue, no notice).
+        """
+        import asyncio
+        from unittest.mock import AsyncMock
+
+        import daemon.services.report_integrity_guard as _rig
+
+        service = _build_child_reports_service(engine)
+        service._manager.enqueue_message = AsyncMock()
+        root_id = _seed_root_instance(engine)
+        child_id = _seed_child_instance(
+            engine, parent_id=root_id, status=InstanceStatus.COMPLETED.value
+        )
+        _seed_pending_injection(engine, parent_id=root_id, child_id=child_id)
+
+        # Override the class-level flag-ON fixture: this test pins the
+        # FLAG-OFF ship default (the test-body monkeypatch wins over the
+        # autouse fixture's env/cache state).
+        import daemon.services.report_integrity_guard as _rig
+
+        monkeypatch.delenv(
+            "WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED",
+            raising=False,
+        )
+        monkeypatch.setattr(_rig, "_B_GUARD_ENABLED", None)
+
+        result = service._process_child_completion_db_sync(
+            instance_id=root_id,
+            completed_message_id="msg-different-id",
+            last_content="assistant text",
+        )
+        assert result.outcome == "root_completed"
+
+        asyncio.run(
+            service._dispatch_post_commit_side_effects(
+                result, "assistant text", "msg-different-id"
+            )
+        )
+        # ZERO notice work with the flag OFF (revert-proof at the dispatch).
+        service._manager.enqueue_message.assert_not_called()
+        assert root_id not in _rig._B_NOTICE_LEDGER

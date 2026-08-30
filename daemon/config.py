@@ -1474,6 +1474,66 @@ class ReportRepairConfig(BaseSettings):
     lookback_messages: int = Field(default=5, ge=1, description="Number of recent assistant messages to pass to LLM repair")
 
 
+class ReportIntegrityConfig(BaseSettings):
+    """Report-integrity gate configuration (wc-wake-report-integrity).
+
+    Hosts the (b) terminal-child-aware waiting guard's kill-switch
+    (``WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED`` — the
+    name is single-homed in ``daemon/constants.py``; the derived env
+    binding below MUST equal it, pinned by
+    ``tests/unit/services/test_b_kill_switch_registry.py``).
+
+    Flip semantics (decisions.md C2-D2.5-FLIP, leader-CONFIRMED
+    2026-08-30 — OPERATOR-OWNED, no auto-flip exists anywhere):
+
+    * **OFF (default, ship state)** — log-only mode: the stage-ii
+      ``[ReportIntegrityGuard]`` WARNING still fires at the
+      completion-stamp sites; NO notice is ever injected.
+    * **ON** — enforcement: when the same-tx evaluation finds a
+      declared-waiting violation at a parent-COMPLETED stamp, ONE
+      adjudication notice is injected to the parent via the durable
+      enqueue path (``system:report-integrity-guard``). It NEVER
+      blocks completion (C2-D2.6 fail-OPEN) and never touches the
+      stamp transaction.
+    * **Restart required** — the resolver reads + caches the env once
+      at boot; flipping mid-flight has no effect until restart.
+      Truthy: ``1``/``true``/``yes``/``on``; falsy:
+      ``0``/``false``/``no``/``off``; unset/blank/unknown → OFF
+      (blanking the env + restart is the revert path). Soak/flip
+      policy: ≤2-week stage-ii log soak, then the OPERATOR flips ON
+      on first deploy; withheld on false-fires; immediate flip on
+      any silent-death incident.
+
+    The reserved candidate-(a) kill-switch name (see
+    ``daemon/constants.py``, the ``WC_REPORT_INTEGRITY_A_*`` constant)
+    deliberately has NO field here — reserved-unused per
+    C2-D2.2/D2.3 LOCKED (and its literal must not appear in this
+    module — pinned by the B.S.8 registry test).
+    """
+
+    model_config = SettingsConfigDict(env_prefix="WC_REPORT_INTEGRITY_")
+
+    # Dual-read mirror of the ``LIMITS_GOVERNOR_RECURSION_GUARD_ENABLED``
+    # precedent (config.py:~484 ``LimitsConfig.governor_recursion_guard_enabled``):
+    # this Pydantic field is the declarative binding (env + optional YAML
+    # override surface) while the runtime gate
+    # (``daemon/services/report_integrity_guard.is_report_integrity_b_enforcement_active``)
+    # reads the env via the constants NAME and ANDs this field — an
+    # explicit YAML ``false`` vetoes an env flip (defense-in-depth);
+    # a YAML ``true`` alone never enables (the env flip is the
+    # documented operator path).
+    b_terminal_waiting_guard_enabled: bool = Field(
+        default=False,
+        description=(
+            "(b) terminal-child-aware waiting guard: OFF = log-only "
+            "(stage-ii [ReportIntegrityGuard] WARNING still fires); ON = "
+            "enforcement (adjudication notice injected to the parent at "
+            "the completion stamp, never blocks). Restart required to "
+            "flip. Operator-owned flip per C2-D2.5-FLIP."
+        ),
+    )
+
+
 class LanguageConfig(BaseSettings):
     """Language check configuration."""
 
@@ -1587,6 +1647,7 @@ class Config(BaseSettings):
     skill_evolution: SkillEvolutionConfig = Field(default_factory=SkillEvolutionConfig)
     loop_breaker: LoopBreakerConfig = Field(default_factory=LoopBreakerConfig)
     report_repair: ReportRepairConfig = Field(default_factory=ReportRepairConfig)
+    report_integrity: ReportIntegrityConfig = Field(default_factory=ReportIntegrityConfig)
     language: LanguageConfig = Field(default_factory=LanguageConfig)
     vscode: VSCodeConfig = Field(default_factory=VSCodeConfig)
     blueprint: BlueprintConfig = Field(default_factory=BlueprintConfig)

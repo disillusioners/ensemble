@@ -505,3 +505,241 @@ async def test_b_predicate_dormant_on_healthy_sibling(engine: Engine):
     assert report.count == 0
     assert report.pending_with_terminal_child == []
     assert report.fired_unenqueued == []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# B.S.1-iii / NR-1 — (b) ENFORCEMENT extension to the incident repro.
+#
+# Flag ON in the repro's incident shape → the completion stamp is NOT
+# blocked (fail-OPEN, D2.6) and ONE adjudication notice is injected to
+# the parent via the durable enqueue with the reserved system source.
+# Flag OFF (ship default) → LOG-ONLY byte-parity with stage ii: the
+# [ReportIntegrityGuard] WARNING still fires, NO notice, NO enqueue.
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+async def test_b_enforcement_notice_injected_with_flag_on(
+    engine: Engine, monkeypatch
+):
+    """Flag ON + incident shape → completion proceeds + notice injected.
+
+    The parent's root completion flows the REAL sync path (stamp
+    proceeds → outcome root_completed) and the REAL post-commit
+    dispatch, which hands the SAME same-tx evaluation (B.S.7) to the
+    enforcement action. The enqueue is observed on the manager mock —
+    the durable path (MessageQueue + Task rows) it would drive is the
+    ``system:report-integrity-guard`` provenance pinned here.
+    """
+    from unittest.mock import AsyncMock
+
+    import daemon.services.report_integrity_guard as rig
+    from daemon.constants import REPORT_SANITY_MARKER as SANITY_MARKER_LITERAL
+    from daemon.repositories.report_injection.repository import (
+        ReportInjectionRepository,
+    )
+
+    # Flip the kill-switch BEFORE building the service so the boot-loaded
+    # config section AND the env resolver both read ON (dual-read gate).
+    monkeypatch.setenv(
+        "WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED", "1"
+    )
+    monkeypatch.setattr(rig, "_B_GUARD_ENABLED", None)
+    monkeypatch.setattr(rig, "_B_NOTICE_LEDGER", {})
+    assert rig.resolve_report_integrity_b_guard_enabled() is True
+
+    parent_id = _seed_parent_declared_waiting(engine)
+    child_id = _seed_child_running(engine, parent_id)
+    history = _junk_checkpoint_history()
+    service = _build_service(engine, history)
+    service._manager.enqueue_message = AsyncMock()
+
+    completed_message_id = f"msg-{uuid.uuid4().hex[:8]}"
+
+    # The junk report (zero-tool opener) — the (c) marker rides it.
+    with patch(
+        "daemon.services.child_reports.get_instance_messages",
+        new=AsyncMock(return_value=history),
+    ):
+        report_content = await service._get_last_assistant_message(
+            child_id, "worker"
+        )
+    assert report_content is not None
+    assert SANITY_MARKER_LITERAL in report_content
+
+    # The child's regular completion + terminal stamp + staged PENDING
+    # obligation (the same incident shape the Wave-1 scaffold builds).
+    result = service._process_child_completion_db_sync(
+        instance_id=child_id,
+        completed_message_id=completed_message_id,
+        last_content=report_content,
+    )
+    assert result.outcome == "regular_child_completed"
+
+    report_repo = ReportInjectionRepository(engine)
+    with Session(engine) as session:
+        session.execute(
+            sa_update(Instance)
+            .where(Instance.instance_id == child_id)
+            .where(
+                Instance.status.notin_([
+                    InstanceStatus.PAUSED.value,
+                    InstanceStatus.COMPLETED.value,
+                    InstanceStatus.ERROR.value,
+                ])
+            )
+            .values(status=InstanceStatus.COMPLETED.value)
+        )
+        session.commit()
+        report_repo.enqueue(
+            parent_instance_id=parent_id,
+            child_instance_id=child_id,
+            child_message_id=completed_message_id,
+            report_message_id=f"rmsg-{uuid.uuid4().hex[:8]}",
+            content="junk opener body",
+        )
+
+    # ── The parent's root completion through the REAL path ─────────────
+    stamp_result = service._process_child_completion_db_sync(
+        instance_id=parent_id,
+        completed_message_id="msg-unrelated",
+        last_content="parent wrap-up text",
+    )
+
+    # COMPLETION NOT BLOCKED (fail-OPEN): the stamp proceeded.
+    assert stamp_result.outcome == "root_completed", (
+        f"(b) must NEVER block the completion (D2.6); got "
+        f"{stamp_result.outcome!r}"
+    )
+    with Session(engine) as session:
+        row = session.get(Instance, parent_id)
+        assert row.status == InstanceStatus.COMPLETED.value
+
+    # The same-tx evaluation found the violation and rode the result.
+    assert stamp_result.b_violation_report is not None
+    assert stamp_result.b_violation_report.is_violation is True
+
+    # Post-commit dispatch → enforcement → ONE notice, durable source.
+    await service._dispatch_post_commit_side_effects(
+        stamp_result, "parent wrap-up text", "msg-unrelated"
+    )
+    service._manager.enqueue_message.assert_awaited_once()
+    kwargs = service._manager.enqueue_message.await_args.kwargs
+    assert kwargs["instance_id"] == parent_id
+    assert kwargs["source"] == "system:report-integrity-guard", (
+        "the notice must carry the reserved system source "
+        "(RESERVED_SOURCE_PREFIXES + the system:* dispatch-source guard)"
+    )
+    assert kwargs["priority"] == 0
+    assert kwargs["metadata"]["report_integrity_notice"] is True
+    assert child_id in kwargs["message"], (
+        "the notice must name the terminal child (per-child detail)"
+    )
+    assert SANITY_MARKER_LITERAL in kwargs["message"], (
+        "the notice must cite the (c) marker pattern (D2.9)"
+    )
+    assert "[SYSTEM NOTE]" not in kwargs["message"], (
+        "C2-D2.2: never inside the [SYSTEM NOTE] frame"
+    )
+
+
+async def test_b_flag_off_log_only_byte_parity_with_stage_ii(
+    engine: Engine, monkeypatch, caplog
+):
+    """Flag OFF (ship default) in the SAME incident shape → LOG-ONLY:
+    the stage-ii [ReportIntegrityGuard] WARNING fires at the stamp, the
+    completion proceeds exactly as stage ii, and NO notice is ever
+    attempted (byte-parity with the stage-ii behavior).
+    """
+    import logging
+
+    from unittest.mock import AsyncMock
+
+    import daemon.services.report_integrity_guard as rig
+    from daemon.repositories.report_injection.repository import (
+        ReportInjectionRepository,
+    )
+
+    monkeypatch.delenv(
+        "WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED",
+        raising=False,
+    )
+    monkeypatch.setattr(rig, "_B_GUARD_ENABLED", None)
+    monkeypatch.setattr(rig, "_B_NOTICE_LEDGER", {})
+
+    parent_id = _seed_parent_declared_waiting(engine)
+    child_id = _seed_child_running(engine, parent_id)
+    history = _junk_checkpoint_history()
+    service = _build_service(engine, history)
+    service._manager.enqueue_message = AsyncMock()
+
+    completed_message_id = f"msg-{uuid.uuid4().hex[:8]}"
+    with patch(
+        "daemon.services.child_reports.get_instance_messages",
+        new=AsyncMock(return_value=history),
+    ):
+        report_content = await service._get_last_assistant_message(
+            child_id, "worker"
+        )
+
+    result = service._process_child_completion_db_sync(
+        instance_id=child_id,
+        completed_message_id=completed_message_id,
+        last_content=report_content,
+    )
+    assert result.outcome == "regular_child_completed"
+
+    report_repo = ReportInjectionRepository(engine)
+    with Session(engine) as session:
+        session.execute(
+            sa_update(Instance)
+            .where(Instance.instance_id == child_id)
+            .where(
+                Instance.status.notin_([
+                    InstanceStatus.PAUSED.value,
+                    InstanceStatus.COMPLETED.value,
+                    InstanceStatus.ERROR.value,
+                ])
+            )
+            .values(status=InstanceStatus.COMPLETED.value)
+        )
+        session.commit()
+        report_repo.enqueue(
+            parent_instance_id=parent_id,
+            child_instance_id=child_id,
+            child_message_id=completed_message_id,
+            report_message_id=f"rmsg-{uuid.uuid4().hex[:8]}",
+            content="junk opener body",
+        )
+
+    with caplog.at_level(
+        logging.INFO, logger="daemon.services.report_integrity_guard"
+    ):
+        stamp_result = service._process_child_completion_db_sync(
+            instance_id=parent_id,
+            completed_message_id="msg-unrelated",
+            last_content="parent wrap-up text",
+        )
+        await service._dispatch_post_commit_side_effects(
+            stamp_result, "parent wrap-up text", "msg-unrelated"
+        )
+
+    # Stage-ii behavior preserved: stamp proceeded, soak log fired.
+    assert stamp_result.outcome == "root_completed"
+    guard_logs = [
+        r
+        for r in caplog.records
+        if "declared-waiting violation" in r.getMessage()
+    ]
+    assert len(guard_logs) == 1, (
+        f"stage-ii soak log must fire exactly once; got "
+        f"{[r.getMessage() for r in caplog.records]}"
+    )
+
+    # NO notice: zero enforcement logs, zero enqueue attempts, empty ledger.
+    assert not [
+        r
+        for r in caplog.records
+        if "enforcement notice enqueued" in r.getMessage()
+    ]
+    service._manager.enqueue_message.assert_not_called()
+    assert parent_id not in rig._B_NOTICE_LEDGER
