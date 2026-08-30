@@ -6,7 +6,7 @@
   "color": "accent-green",
   "version": "0.4.0",
   "innate_skills": ["todo", "chart", "dynamic-skill"],
-  "skill_injection": true,
+  "skill_injection": false,
   "team_members": ["explorer", "worker"],
   "tools": {
     "allow": ["bash", "proc", "filesystem", "time", "self", "help", "explore", "mcp", "context", "shared_meta_kv", "rag", "instance", "blueprint", "system-log", "db", "infra"]
