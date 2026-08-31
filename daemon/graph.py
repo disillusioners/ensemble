@@ -3119,8 +3119,8 @@ def create_agent_node(
                         #   re-emit message_id == HumanMessage.id ==
                         #   id returned by subsequent GET reads — stable
                         #   across reconnect refetches.
-                        entry_echo_id = entry.get("echo_id")
-                        if entry_echo_id is None:
+                        raw_echo_id = entry.get("echo_id")
+                        if raw_echo_id is None:
                             # Tool-path entry — mint once here so the
                             # HumanMessage.id is the SAME uuid
                             # ``serialize_message`` sees on the re-emit
@@ -3146,6 +3146,8 @@ def create_agent_node(
                             # ``pending_list``.
                             if i < len(injected_msgs):
                                 injected_msgs[i].id = entry_echo_id
+                        else:
+                            entry_echo_id = raw_echo_id
                         echoed_user_msg = HumanMessage(
                             content=content_echo,
                             id=entry_echo_id,
@@ -3157,11 +3159,13 @@ def create_agent_node(
                         # echo contract). Tool-path entries keep the
                         # fresh drain-time stamp from ``serialize_message``
                         # — unchanged.
-                        explicit_echo_id = entry.get("echo_id")
-                        if explicit_echo_id is not None:
-                            entry_ts = entry.get("timestamp")
-                            if entry_ts is not None:
-                                user_serialized["created_at"] = entry_ts
+                        if raw_echo_id is not None:
+                            # ``timestamp`` is stamped unconditionally by
+                            # the single producer ``Manager.set_injection``
+                            # (``daemon/manager.py:2444-2447``), so the
+                            # prior ``entry_ts is not None`` guard was
+                            # provably dead.
+                            user_serialized["created_at"] = entry.get("timestamp")
                         await live_hub.stream_message(
                             instance_id=instance_id,
                             message=user_serialized,

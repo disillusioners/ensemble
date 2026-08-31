@@ -452,10 +452,12 @@ async def send_message(
                 post_serialized["instance_id"] = instance_id
                 # created_at = the entry's POST timestamp (NOT the
                 # serialization-time now) — same stamp the drain
-                # re-emit will carry.
-                entry_ts = entry.get("timestamp")
-                if entry_ts is not None:
-                    post_serialized["created_at"] = entry_ts
+                # re-emit will carry. ``timestamp`` is stamped
+                # unconditionally by the single producer
+                # ``Manager.set_injection``
+                # (``daemon/manager.py:2444-2447``), so the prior
+                # ``entry_ts is not None`` guard was provably dead.
+                post_serialized["created_at"] = entry.get("timestamp")
                 await live_hub.stream_message(
                     instance_id=instance_id,
                     message=post_serialized,

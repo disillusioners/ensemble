@@ -6,7 +6,7 @@
  * Design reference: ``.agents/shared/planning/message-display-latency/
  * architecture-recommendation.md`` §4.3 items 9–14, §5 items 5–10, §6.
  */
-import type { Message } from '../models';
+import type { Message, InstanceStatus } from '../models';
 
 /**
  * Terminal instance statuses. A ``status_change`` to any of these triggers
@@ -16,7 +16,7 @@ import type { Message } from '../models';
  * so the helper has zero Angular dependencies and can be exercised by a
  * plain jest spec.
  */
-const TERMINAL_STATUSES: ReadonlySet<string> = new Set<string>([
+const TERMINAL_STATUSES: ReadonlySet<InstanceStatus> = new Set<InstanceStatus>([
   'completed',
   'error',
   'terminated',
@@ -31,7 +31,23 @@ const TERMINAL_STATUSES: ReadonlySet<string> = new Set<string>([
  */
 export function isTerminalStatus(status: string | null | undefined): boolean {
   if (!status) return false;
-  return TERMINAL_STATUSES.has(status);
+  return TERMINAL_STATUSES.has(status as InstanceStatus);
+}
+
+/**
+ * Return the earlier of two ISO timestamp strings by lexicographic
+ * (i.e. chronological) order. When both sides are truthy, return the
+ * earlier; when only one is truthy, return that one; when neither is
+ * truthy (both empty / zero-like), return ``a`` so the merge stays
+ * string-typed for ``Message.created_at``. Used by ``mergeMessagesById``
+ * to keep the pre-refetch timestamp for confirmed entries (MIN-4) —
+ * the GET re-stamp is later than the POST stamp, and re-sorting on
+ * every refetch would push the bubble below inter-streamed assistant
+ * messages.
+ */
+function earlierOf(a: string, b: string): string {
+  if (a && b) return a <= b ? a : b;
+  return a || b;
 }
 
 /**
@@ -115,25 +131,16 @@ export function mergeMessagesById(
       // a pending copy merging over a confirmed one must NOT
       // resurrect the spinner).
       const merged = { ...result[idx], ...msg };
-      const existingIsPending =
-        (result[idx] as { pending?: boolean }).pending === true;
+      const existingIsPending = result[idx].pending === true;
       if (!msg.pending || !existingIsPending) {
-        delete (merged as { pending?: boolean }).pending;
+        delete merged.pending;
       }
-      // MIN-4: for confirmed entries keep the earlier of the two
-      // timestamps so a GET re-stamp (checkpoint-commit ts) cannot
-      // re-sort the bubble. Applied only when the merged entry is NOT
-      // pending — a still-pending merge (duplicate provisional
-      // deliveries) keeps incoming-wins so the 202 body stamp rules.
+      // MIN-4: for CONFIRMED (non-pending) entries keep the earlier of
+      // the local/incoming timestamps so a GET re-stamp
+      // (checkpoint-commit ts) cannot re-sort the bubble. Pending
+      // merges keep incoming-wins so the 202 body stamp rules.
       if (!merged.pending) {
-        const localTs = result[idx].created_at;
-        const incomingTs = msg.created_at;
-        merged.created_at =
-          localTs && incomingTs
-            ? localTs <= incomingTs
-              ? localTs
-              : incomingTs
-            : (localTs || incomingTs);
+        merged.created_at = earlierOf(result[idx].created_at, msg.created_at);
       }
       result[idx] = merged;
     } else {

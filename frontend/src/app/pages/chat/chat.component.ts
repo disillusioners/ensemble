@@ -1,3 +1,17 @@
+/**
+ * Chat view component. Owns the visible message list, the optimistic
+ * provisional append, the SSE mirror effect, the REST refetch path,
+ * and the per-instance guards that gate async completions against
+ * stale-instance drift.
+ *
+ * Size rationale (~1570 lines, single file): this component is the
+ * load-bearing hub for the chat surface — it threads the message
+ * lifecycle end-to-end (send → provisional → SSE echo → REST refetch
+ * → purge on terminal). Natural future split seam: the optimistic-
+ * append + SSE-mirror + REST-refetch block (the ``handleOptimisticAppend``
+ * extraction and adjacent optimistic-append / SSE logic), once the
+ * SSE-mirror contract stabilizes. Out-of-scope for this pass.
+ */
 import { Component, signal, computed, inject, OnInit, OnDestroy, effect, ViewChild, Signal, input } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { Router } from '@angular/router';
@@ -1081,7 +1095,6 @@ export class ChatComponent implements OnInit, OnDestroy {
         if (!this.visible() || this.viewState.activeInstanceId() !== instanceId) {
           return;
         }
-        console.log('[Chat] Loaded', messages.length, 'messages from API (mode:', options.merge ? 'merge' : 'replace', ')');
         const viewModels = messages.map(m => this.toViewModel(m));
         if (options.merge) {
           // Union-by-id merge — never wipe local-only provisional entries.

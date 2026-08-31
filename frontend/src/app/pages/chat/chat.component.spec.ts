@@ -82,7 +82,7 @@ const mockInstanceService = {
 
 // Mock SseService for testing
 const mockSseService = {
-  messages: signal<any[]>([]),
+  messages: signal<Message[]>([]),
   events: signal<any[]>([]),
   statusChange: signal<{ instance_id: string; status: string } | null>(null),
   isStreaming: signal(false),
@@ -221,7 +221,7 @@ class TestableChatComponent {
    * write into. The F4 contract tests assert that a stale async
    * completion performs NO write here.
    */
-  readonly messages = signal<any[]>([]);
+  readonly messages = signal<Message[]>([]);
 
   /**
    * R1/R3 mirror: the App root binds ``[visible]`` to the chat
@@ -333,7 +333,7 @@ class TestableChatComponent {
     const sentInstanceId = instance.instance_id;
 
     this.api.sendMessage(instance.instance_id, payload.content, payload.images).subscribe({
-      next: (response: any) => {
+      next: (response: MessageResponse) => {
         // Mirror production ChatComponent.onSendMessage exactly:
         //   1. Clear input on success.
         //   2. Set ``queuedMessage`` from ``response.queued`` (truthy → show).
@@ -363,7 +363,7 @@ class TestableChatComponent {
             // landed for this id — merging a pending provisional over
             // the confirmed echo bubble would resurrect the spinner.
             const alreadyPresent = this.messages().some(
-              (m: any) => m.message_id === newId,
+              (m: Message) => m.message_id === newId,
             );
             if (!alreadyPresent) {
               const provisionalStamp =
@@ -614,21 +614,21 @@ class TestableChatComponent {
     const activeInstanceId = this.viewState.activeInstanceId();
     if (!activeInstanceId) return;
     const filtered = sseMessages.filter(
-      (m: any) => !m.instance_id || m.instance_id === activeInstanceId,
+      (m: Message) => !m.instance_id || m.instance_id === activeInstanceId,
     );
     if (filtered.length === 0) return;
 
     this.messages.update(existing => {
       const result = [...existing];
       for (const msg of filtered) {
-        const idx = result.findIndex((m: any) => m.message_id === msg.message_id);
+        const idx = result.findIndex((m: Message) => m.message_id === msg.message_id);
         if (idx >= 0) {
           result[idx] = { ...result[idx], ...msg };
         } else {
           result.push(msg);
         }
       }
-      result.sort((a: any, b: any) => (a.created_at || '').localeCompare(b.created_at || ''));
+      result.sort((a: Message, b: Message) => (a.created_at || '').localeCompare(b.created_at || ''));
       return result;
     });
   }
@@ -647,8 +647,8 @@ class TestableChatComponent {
     const activeInstanceId = this.viewState.activeInstanceId();
     if (!purgeInstanceId || !activeInstanceId) return;
     if (purgeInstanceId !== activeInstanceId) return;
-    this.messages.update((existing: any[]) => {
-      const filtered = existing.filter((m: any) => !m.pending);
+    this.messages.update((existing: Message[]) => {
+      const filtered = existing.filter((m: Message) => !m.pending);
       return filtered.length === existing.length ? existing : filtered;
     });
   }
@@ -668,7 +668,7 @@ class TestableChatComponent {
    */
   loadInstanceMessages(instanceId: string): void {
     this.api.getMessages(instanceId).subscribe({
-      next: (messages: any[]) => {
+      next: (messages: Message[]) => {
         if (!this.visible() || this.viewState.activeInstanceId() !== instanceId) {
           return;
         }
@@ -1281,7 +1281,7 @@ describe('ChatComponent - Project-Aware Navigation', () => {
 
       fireSend(make202Response({ message_id: 'echo-new', created_at: newStamp }));
 
-      const ids = component.messages().map((m: any) => m.message_id);
+      const ids = component.messages().map((m: Message) => m.message_id);
       expect(ids).toContain('fresh');      // fresh provisional survives
       expect(ids).toContain('aged');       // MIN-5: aged one survives the append pass
       expect(ids).toContain('echo-new');   // new provisional appended
@@ -1497,7 +1497,7 @@ describe('ChatComponent - Project-Aware Navigation', () => {
 
       component.runPendingPurgeEffect();
 
-      const ids = component.messages().map((m: any) => m.message_id);
+      const ids = component.messages().map((m: Message) => m.message_id);
       expect(ids).toContain('prov-1');      // provisional bubble survives
       expect(ids).toContain('m-confirmed'); // confirmed bubble untouched
     });
@@ -1509,7 +1509,7 @@ describe('ChatComponent - Project-Aware Navigation', () => {
 
       component.runPendingPurgeEffect();
 
-      expect(component.messages().map((m: any) => m.message_id)).toContain('prov-1');
+      expect(component.messages().map((m: Message) => m.message_id)).toContain('prov-1');
     });
 
     it('should purge when the terminal event matches the ACTIVE instance', () => {
@@ -1518,7 +1518,7 @@ describe('ChatComponent - Project-Aware Navigation', () => {
 
       component.runPendingPurgeEffect();
 
-      const ids = component.messages().map((m: any) => m.message_id);
+      const ids = component.messages().map((m: Message) => m.message_id);
       expect(ids).not.toContain('prov-1');   // provisional purged
       expect(ids).toContain('m-confirmed');  // confirmed bubble untouched
     });
@@ -1529,7 +1529,7 @@ describe('ChatComponent - Project-Aware Navigation', () => {
 
       component.runPendingPurgeEffect();
 
-      expect(component.messages().map((m: any) => m.message_id)).toContain('prov-1');
+      expect(component.messages().map((m: Message) => m.message_id)).toContain('prov-1');
     });
   });
 

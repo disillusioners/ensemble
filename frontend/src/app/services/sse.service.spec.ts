@@ -1,5 +1,6 @@
 import { signal } from '@angular/core';
 import type { Message, SSEEvent } from '../models';
+import { SseService as RealSseService } from './sse.service';
 
 // Mock EventSource class for testing
 class MockEventSource {
@@ -762,8 +763,6 @@ describe('SseService', () => {
     });
   });
 });
-
-import { SseService as RealSseService } from './sse.service';
 
 /**
  * N2 production regression: the surrogate ``TestSseService`` mirror at the

@@ -121,7 +121,7 @@ export interface MessageResponse {
    * FE MUST treat this as possibly-absent EVERYWHERE:
    *   - Older backends (pre-fix) never include it on 202.
    *   - The PAUSED auto-resume branch can return ``message_id: null``
-   *     (backend ``messages.py:319-322``).
+   *     (see the backend ``send_message`` handler in ``messages.py``).
    *   - New-FE/old-BE degradation: ``onSendMessage`` skips the optimistic
    *     append when absent, falling back to today's render-on-echo flow.
    */
