@@ -101,12 +101,27 @@ class RejectionReason(str, Enum):
 # ─────────────────────────────────────────────────────────────────────────
 
 
-# The O-B4 canonical terminal set (architect §5/§6): a /compact on any
-# of these statuses is refused. Single source shared with the
+# The compact-specific reject set (compact-on-COMPLETED, 2026-08-31 —
+# .agents/shared/planning/compact-on-completed/architecture-recommendation.md
+# step 1). LOCAL to the dispatcher, deliberately NOT derived from the
+# canonical ``daemon.constants.TERMINAL_INSTANCE_STATUSES`` (that set
+# keeps ``completed`` and its 5+ downstream consumers stay
+# byte-untouched). ``/compact`` is REFUSED on ``terminated`` / ``error``
+# / ``failed`` — their revive semantics and error-surfaces were never
+# assessed for compaction and the O-B4-era caution still applies — but
+# is COMPACT-ELIGIBLE on ``completed``: the C1 Variant A persistence
+# recipe (two ``aupdate_state`` calls WITHOUT ``as_node`` — ``next``
+# stays ``()``) structurally eliminates the O-B4 revive-brick for that
+# status, so revive-on-send (instance_messaging.py:1486-1510 /
+# :3580-3601) runs the agent normally. ``completed`` therefore falls
+# THROUGH the gate below to availability → pending-injections →
+# rate-limit → record_start, while REMAINING TERMINAL for every other
+# consumer of the canonical set (queue-stats short-circuit, agent-tool
+# terminal-revive, recovery sweeps, ...). Single source shared with the
 # executor's defense-in-depth guard (compact_executor) so the two
 # gates can never drift apart.
-TERMINAL_INSTANCE_STATUSES: frozenset[str] = frozenset(
-    {"completed", "terminated", "error", "failed"}
+COMPACT_REJECT_STATUSES: frozenset[str] = frozenset(
+    {"terminated", "error", "failed"}
 )
 
 # W-1.2 pinned guidance copy (plan S-14 / architect §5) — the executor
@@ -114,6 +129,11 @@ TERMINAL_INSTANCE_STATUSES: frozenset[str] = frozenset(
 # ack ``detail`` VERBATIM for ``terminal_instance`` (chat.component.ts
 # ``rejectionCopy``). Defect #2 fix: the SAME copy now answers at ack
 # time, and the executor reuses this constant so the copy cannot drift.
+# Scope (compact-on-COMPLETED, 2026-08-31): this copy is now produced
+# ONLY for the ``COMPACT_REJECT_STATUSES`` triple above — "Send a
+# message to start a new turn" is exactly right for them (only a real
+# message revives them). ``completed`` never reaches this rejection
+# anymore.
 TERMINAL_INSTANCE_GUIDANCE: str = (
     "Send a message to start a new turn, then /compact."
 )
@@ -892,14 +912,17 @@ class CommandDispatcher:
         1. Master-switch (``enabled``). Off → passthrough (no-op).
         2. ``//``-escape check (``parse``).
         3. Registry lookup.
-        4. Instance-status gate (defect #2, 2026-08-31): a terminal
-           instance (O-B4 set) → ``200 rejected terminal_instance``
-           ack — BEFORE record_start, so no ``command_id`` is minted,
-           no in-flight slot is taken, and NO background task is
-           spawned. Cheap + synchronous (the router already holds
-           ``instance_info``). The executor keeps its own terminal
-           guard as defense-in-depth for the read→handler-start
-           TOCTOU window.
+        4. Instance-status gate (defect #2, 2026-08-31): an instance in
+           ``COMPACT_REJECT_STATUSES`` (terminated/error/failed) →
+           ``200 rejected terminal_instance`` ack — BEFORE record_start,
+           so no ``command_id`` is minted, no in-flight slot is taken,
+           and NO background task is spawned. Cheap + synchronous (the
+           router already holds ``instance_info``). ``completed`` is
+           compact-eligible and falls through to availability →
+           pending-injections → rate-limit → record_start; it stays
+           terminal for every other consumer of the canonical set.
+           The executor keeps its own terminal guard as defense-in-depth
+           for the read→handler-start TOCTOU window.
         5. Availability predicate (O-B6 — unpopulated today).
         6. Pending-injections guard (WS-6 row, O-B11 ratified).
         7. Rate-limit (in-flight + min-interval).
@@ -947,13 +970,23 @@ class CommandDispatcher:
 
         # 4. Instance-status gate (defect #2, 2026-08-31). BEFORE
         # record_start → the rejection mints nothing, records nothing,
-        # spawns nothing. Beats busy/rate_limited: a terminal instance
-        # cannot compact, period — that is the more fundamental fact
-        # about the instance (§5/§6 matrix, terminal row).
+        # spawns nothing. Beats busy/rate_limited for the statuses it
+        # rejects — that is the more fundamental fact about the
+        # instance (§5/§6 matrix, terminal row).
+        #
+        # compact-on-COMPLETED (2026-08-31): the gate rejects ONLY the
+        # COMPACT_REJECT_STATUSES triple (terminated/error/failed).
+        # ``completed`` falls through to availability →
+        # pending-injections → rate-limit → record_start: it is
+        # compact-eligible (C1 Variant A persist keeps ``next=()``) but
+        # remains TERMINAL for every other consumer of
+        # ``daemon.constants.TERMINAL_INSTANCE_STATUSES`` — the
+        # gate-ordering invariant (terminal beats busy/rate-limited)
+        # is preserved unchanged for the other 3 statuses.
         if (
             instance_status is not None
             and instance_status.strip().lower()
-            in TERMINAL_INSTANCE_STATUSES
+            in COMPACT_REJECT_STATUSES
         ):
             logger.info(
                 "Rejecting command=%s for terminal-status instance=%s "

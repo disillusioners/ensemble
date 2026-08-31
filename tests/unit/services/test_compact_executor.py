@@ -1431,30 +1431,33 @@ class TestNoWaitForAroundCompactState:
 
 
 class TestExecutorTerminalRejection:
-    """WS-2.4 / C1 — terminal-status instance at the executor →
+    """WS-2.4 / C1 — compact-reject status at the executor →
     REJECT with guidance detail. ``aupdate_state`` NEVER invoked.
 
     C1 BINDING: the rejection is gated on INSTANCE STATUS (the
-    O-B4 set: completed / terminated / error / failed), NOT on
-    ``state.next == ()``. The headline scenario is an IDLE
-    instance with a post-turn quiescent checkpoint (``next=()``) —
-    that instance compacts fine. The proactive path (instance_messaging)
-    keeps its checkpoint-shape check (byte-equivalent); the executor
-    uses the manager's instance status as the authoritative terminal
-    signal (the brick-regression tests at
-    ``test_compact_executor_revive_brick_e2e.py`` already drive a
-    real-graph terminal with status="completed" — they stay green).
+    COMPACT_REJECT_STATUSES set: terminated / error / failed since
+    compact-on-COMPLETED 2026-08-31), NOT on ``state.next == ()``.
+    The headline scenario is an IDLE instance with a post-turn
+    quiescent checkpoint (``next=()``) — that instance compacts
+    fine — and now a ``completed`` instance does TOO (O-B4
+    superseded by C1 Variant A for that status; see the
+    ``TestExecutorCompactOnCompleted`` class below). The proactive
+    path (instance_messaging) keeps its checkpoint-shape check
+    (byte-equivalent); the executor uses the manager's instance
+    status as the authoritative status signal (the brick-regression
+    tests at ``test_compact_executor_revive_brick_e2e.py`` drive a
+    real-graph terminal — they stay green).
     """
 
     @pytest.mark.asyncio
     async def test_terminal_status_rejects_no_aupdate(self):
-        """Instance status in the O-B4 terminal set → reject."""
+        """Instance status in COMPACT_REJECT_STATUSES → reject."""
         dispatcher = _make_dispatcher()
         command_id = _make_active_command(dispatcher)
-        # C1: status="completed" drives the rejection. The
-        # checkpoint shape (``next=()``) is incidental — the
-        # executor no longer checks it for terminal-rejection.
-        mgr = _make_manager(instance_status="completed")
+        # compact-on-COMPLETED: status="terminated" drives the
+        # rejection now. The checkpoint shape (``next=()``) is
+        # incidental — the executor checks instance status only.
+        mgr = _make_manager(instance_status="terminated")
 
         # Build a checkpoint that's quiescent + big enough to exceed
         # the noop floor (so the rejection happens AT the status
@@ -1484,12 +1487,15 @@ class TestExecutorTerminalRejection:
         assert graph.aupdate_state.await_count == 0
 
     @pytest.mark.asyncio
-    async def test_terminal_status_each_in_ob4_set_rejects(self):
-        """Each O-B4 terminal status (completed / terminated / error /
-        failed) drives rejection. Belt-and-braces pin that the new
-        guard covers every status in the canonical terminal set.
+    async def test_terminal_status_each_in_reject_set_rejects(self):
+        """Each COMPACT_REJECT_STATUSES status (terminated / error /
+        failed) drives rejection. Belt-and-braces pin that the guard
+        covers every status in the compact-reject set.
+        (compact-on-COMPLETED 2026-08-31: ``completed`` was removed
+        from this set — it compacts; see
+        ``TestExecutorCompactOnCompleted``.)
         """
-        for term_status in ("completed", "terminated", "error", "failed"):
+        for term_status in ("terminated", "error", "failed"):
             dispatcher = _make_dispatcher()
             command_id = _make_active_command(dispatcher)
             mgr = _make_manager(instance_status=term_status)
@@ -1529,7 +1535,7 @@ class TestExecutorTerminalRejection:
         """
         dispatcher = _make_dispatcher()
         command_id = _make_active_command(dispatcher)
-        mgr = _make_manager(instance_status="completed")
+        mgr = _make_manager(instance_status="terminated")
 
         graph = MagicMock()
         graph.aupdate_state = AsyncMock()
@@ -1568,6 +1574,97 @@ class TestExecutorTerminalRejection:
         )
 
 
+class TestExecutorCompactOnCompleted:
+    """compact-on-COMPLETED (2026-08-31) — unit-level success path.
+
+    ``status="completed"`` proceeds through the executor: past the
+    compact-reject guard (now COMPACT_REJECT_STATUSES only), through
+    the quiescent-by-definition branch (no pause, no quiesce probe —
+    a COMPLETED instance has no live work), into engine → persistence
+    → SUCCESS in the dispatcher ring.
+
+    The REAL-graph acceptance canaries (Variant A persist shape +
+    revive-on-send) live in
+    ``test_compact_executor_revive_brick_e2e.py``
+    (``TestExecutorCompactOnCompletedRealGraph``).
+    """
+
+    @pytest.mark.asyncio
+    async def test_completed_instance_compacts_successfully(self):
+        """status="completed" → engine runs, persistence runs (2
+        aupdate calls, NO ``as_node``), ring lands ``success``."""
+        dispatcher = _make_dispatcher()
+        command_id = _make_active_command(dispatcher)
+        # completed: compact-ELIGIBLE now. Quiescent-by-definition —
+        # pause/resume must never fire.
+        mgr = _make_manager(instance_status="completed")
+
+        graph = MagicMock()
+        graph.aupdate_state = AsyncMock()
+
+        async def _aget_state(_config):
+            return _make_checkpoint_state(
+                next=(),
+                messages=_big_messages(n=15, char_count=4000),
+                compacted_at=None,
+            )
+        graph.aget_state = AsyncMock(side_effect=_aget_state)
+        mgr.get_instance = AsyncMock(return_value=graph)
+
+        async def _fake_compact_state(ctx, force=False):
+            return _make_compaction_result(
+                compaction_type="summary",
+                replacement_messages=[
+                    RemoveMessage(id="old-1"),
+                    SystemMessage(
+                        content="[Conversation Summary]\ncompleted-canary",
+                        id=f"compaction-{uuid.uuid4()}",
+                    ),
+                ],
+            )
+        mgr._compactor.compact_state = _fake_compact_state
+
+        ctx = CommandContext(
+            dispatcher=dispatcher, command_id=command_id, instance_id="inst-test"
+        )
+        dispatcher._manager = mgr
+
+        await execute_compact(
+            mgr, instance_id="inst-test", command_id=command_id, context=ctx
+        )
+
+        # SUCCESS landed in the ring.
+        ring_entry = dispatcher._state._ring["inst-test"][command_id]
+        assert ring_entry is not None, (
+            "completed instance must terminalize (success or failure) "
+            "in the dispatcher ring"
+        )
+        assert ring_entry.phase == CommandPhase.SUCCESS.value, (
+            f"completed must be compact-eligible — expected the success "
+            f"terminal; got phase={ring_entry.phase!r} "
+            f"detail={ring_entry.detail!r}"
+        )
+        assert ring_entry.detail.get("compacted_type") == "summary"
+
+        # Variant A persistence — exactly 2 aupdate calls, NEITHER
+        # carrying ``as_node``.
+        assert graph.aupdate_state.await_count == 2, (
+            f"persistence must emit exactly 2 aupdate_state calls; got "
+            f"{graph.aupdate_state.await_count}"
+        )
+        for idx, c in enumerate(graph.aupdate_state.await_args_list):
+            assert "as_node" not in c.kwargs, (
+                f"C1 Variant A: aupdate call #{idx + 1} must NOT carry "
+                f"as_node; got kwargs={c.kwargs!r}"
+            )
+
+        # Quiescent-by-definition: no pause, no resume, no quiesce
+        # probe for a COMPLETED instance.
+        mgr.pause_instance_cascade.assert_not_awaited()
+        mgr.resume_instance_cascade.assert_not_awaited()
+        mgr.wait_for_instance_quiescent.assert_not_awaited()
+
+
 # ─────────────────────────────────────────────────────────────────────────
 # WS-2.5 — revive-brick regression test (architect §10 🔴)
 # ─────────────────────────────────────────────────────────────────────────
@@ -1596,8 +1693,10 @@ class TestReviveBrickRegression:
         persistence step is caught at code-review time.
 
         C1 BINDING — the executor's terminal guard is an
-        INSTANCE-STATUS check (terminal_statuses set, O-B4), NOT the
-        ``_is_terminal_checkpoint`` shared helper. The shared helper
+        INSTANCE-STATUS check (the COMPACT_REJECT_STATUSES set,
+        terminated / error / failed since compact-on-COMPLETED
+        2026-08-31), NOT the ``_is_terminal_checkpoint`` shared
+        helper. The shared helper
         is still imported (used at other decision points — see
         ``TestTerminalCheckpointHelper``) but the rejection gate at
         the executor is the status check.
@@ -1612,17 +1711,18 @@ class TestReviveBrickRegression:
         from daemon.services import compact_executor as ce
 
         source = inspect.getsource(ce.execute_compact)
-        # C1: the status guard (the O-B4 terminal set — the shared
-        # TERMINAL_INSTANCE_STATUSES constant since defect #2's
-        # ack-time gate landed, previously a local terminal_statuses
-        # set) + the instance_status membership check must come BEFORE
-        # the persistence step (which calls ``aupdate_state``).
-        guard_marker = 'instance_status in TERMINAL_INSTANCE_STATUSES'
+        # C1: the status guard (the compact-reject set — the shared
+        # COMPACT_REJECT_STATUSES constant since compact-on-COMPLETED
+        # 2026-08-31; previously the O-B4 all-4 set, before that a
+        # local terminal_statuses set) + the instance_status
+        # membership check must come BEFORE the persistence step
+        # (which calls ``aupdate_state``).
+        guard_marker = 'instance_status in COMPACT_REJECT_STATUSES'
         persistence_idx = source.find("_persist_compaction_result")
         assert guard_marker in source, (
             "executor must gate terminal-rejection on instance status "
-            "(C1: rejection driven by O-B4 status set, not checkpoint "
-            "shape)"
+            "(C1: rejection driven by the COMPACT_REJECT_STATUSES set, "
+            "not checkpoint shape)"
         )
         assert persistence_idx != -1, (
             "executor must call _persist_compaction_result (D3)"
@@ -1713,12 +1813,14 @@ class TestRateLimitBeforeGateOrdering:
 
     @pytest.mark.asyncio
     async def test_terminal_guard_fires_before_gate(self):
-        """Terminal-status instance → gate is NEVER acquired."""
+        """Compact-reject status instance → gate is NEVER acquired."""
         dispatcher = _make_dispatcher()
         command_id = _make_active_command(dispatcher)
-        mgr = _make_manager(instance_status="completed")
-        # big_messages so we don't hit below-floor; status=completed
-        # is the load-bearing rejection signal.
+        mgr = _make_manager(instance_status="terminated")
+        # big_messages so we don't hit below-floor; status=terminated
+        # is the load-bearing rejection signal (compact-on-COMPLETED:
+        # completed is eligible now — the pin rides on a
+        # COMPACT_REJECT_STATUSES status).
         graph = MagicMock()
         graph.aupdate_state = AsyncMock()
 

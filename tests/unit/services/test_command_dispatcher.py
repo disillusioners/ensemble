@@ -1075,13 +1075,19 @@ class TestTerminalStatusAckRejection:
     """Defect #2 — the instance-status gate belongs at ACK time.
 
     Live evidence (tester gate 2026-08-31, command d34c1026): a
-    terminal (COMPLETED) instance acked ``accepted`` → the FE seeded
-    its waiting card → the bg executor terminalized
-    ``failed(terminal_instance)`` ~3ms later — a terminal event the
-    client could not observe (emitted before the post-ack
-    subscription). Architect §5/§6/§7: terminal instances are
-    rejected with ``reason=terminal_instance`` + the W-1.2 pinned
-    guidance copy, as a SYNC 200 ack envelope.
+    terminal instance acked ``accepted`` → the FE seeded its waiting
+    card → the bg executor terminalized ``failed(terminal_instance)``
+    ~3ms later — a terminal event the client could not observe
+    (emitted before the post-ack subscription). Architect §5/§6/§7:
+    rejected statuses answer with ``reason=terminal_instance`` + the
+    W-1.2 pinned guidance copy, as a SYNC 200 ack envelope.
+
+    compact-on-COMPLETED (2026-08-31): the gate rejects ONLY the
+    ``COMPACT_REJECT_STATUSES`` triple (terminated / error / failed).
+    ``completed`` is compact-eligible — it proceeds past the gate to
+    acceptance (C1 Variant A persist keeps ``next=()``; revive-on-send
+    runs the agent) — while remaining terminal for every other
+    consumer of ``daemon.constants.TERMINAL_INSTANCE_STATUSES``.
 
     The gate is a DISPATCH-TIME guard (cheap, synchronous): it fires
     BEFORE ``record_start`` so no ``command_id`` is minted, no
@@ -1091,7 +1097,7 @@ class TestTerminalStatusAckRejection:
     status read and the bg task's start).
     """
 
-    TERMINAL_STATUSES = ("completed", "terminated", "error", "failed")
+    COMPACT_REJECT_STATUSES = ("terminated", "error", "failed")
     GUIDANCE = "Send a message to start a new turn, then /compact."
 
     def _spy_handler_calls(self):
@@ -1103,11 +1109,12 @@ class TestTerminalStatusAckRejection:
         return _spy, calls
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("status", TERMINAL_STATUSES)
+    @pytest.mark.parametrize("status", COMPACT_REJECT_STATUSES)
     async def test_each_terminal_status_rejects_at_dispatch(
         self, status
     ):
-        """Every O-B4 terminal status → 200 ack envelope, state=rejected."""
+        """Every COMPACT_REJECT_STATUSES status → 200 ack envelope,
+        state=rejected."""
         handler, calls = self._spy_handler_calls()
         d = _make_dispatcher()
         d.registry.register(_make_spec(handler=handler))
@@ -1133,6 +1140,40 @@ class TestTerminalStatusAckRejection:
         assert ack["ttl_seconds"] == 600
 
     @pytest.mark.asyncio
+    async def test_completed_passes_the_terminal_gate(self):
+        """compact-on-COMPLETED (2026-08-31): ``completed`` is
+        compact-eligible — it proceeds PAST the instance-status gate
+        to a normal accepted dispatch (record_start runs, a
+        command_id is minted, the handler task is spawned). The
+        instance row remains terminal for every other consumer of
+        ``daemon.constants.TERMINAL_INSTANCE_STATUSES``; only /compact
+        falls through."""
+        handler, calls = self._spy_handler_calls()
+        d = _make_dispatcher()
+        d.registry.register(_make_spec(handler=handler))
+
+        outcome = await d.dispatch(
+            "inst-A", "/compact", instance_status="completed"
+        )
+
+        assert outcome.kind == "ack"
+        ack = outcome.ack
+        assert ack["state"] == "accepted", (
+            "completed must be compact-eligible — the gate rejects "
+            f"only {self.COMPACT_REJECT_STATUSES}"
+        )
+        assert ack["command"] == "compact"
+        assert ack["command_id"], "accepted ack mints a command_id"
+        assert ack["ttl_seconds"] == 600
+        assert ack["timestamp"]
+        # record_start ran → the active slot is taken and the bg
+        # handler task exists.
+        assert d._state.get_active("inst-A") is not None
+        assert len(d._tasks) == 1
+        for task in list(d._tasks):
+            task.cancel()
+
+    @pytest.mark.asyncio
     async def test_no_background_task_spawned_for_terminal(self):
         """No bg task, no handler invocation, no in-flight slot, no
         active registry entry — the rejection is pure dispatch-time."""
@@ -1141,7 +1182,7 @@ class TestTerminalStatusAckRejection:
         d.registry.register(_make_spec(handler=handler))
 
         outcome = await d.dispatch(
-            "inst-A", "/compact", instance_status="completed"
+            "inst-A", "/compact", instance_status="terminated"
         )
 
         assert outcome.ack["state"] == "rejected"
@@ -1160,9 +1201,13 @@ class TestTerminalStatusAckRejection:
     @pytest.mark.asyncio
     async def test_non_terminal_statuses_still_accept(self):
         """IDLE / RUNNING / PAUSED / WAITING_CHILDREN are NOT terminal —
-        the gate must not over-reject."""
+        the gate must not over-reject. compact-on-COMPLETED (2026-08-31):
+        ``completed`` joins the accepted set — compact-eligible, the
+        gate rejects only terminated / error / failed."""
         handler, calls = self._spy_handler_calls()
-        for status in ("idle", "running", "paused", "waiting_children"):
+        for status in (
+            "idle", "running", "paused", "waiting_children", "completed"
+        ):
             d = _make_dispatcher()
             d.registry.register(_make_spec(handler=handler))
             outcome = await d.dispatch(
@@ -1183,7 +1228,7 @@ class TestTerminalStatusAckRejection:
         d = _make_dispatcher()
         d.registry.register(_make_spec(handler=handler))
         outcome = await d.dispatch(
-            "inst-A", "/compact", instance_status="  COMPLETED "
+            "inst-A", "/compact", instance_status="  TERMINATED "
         )
         assert outcome.ack["state"] == "rejected"
         assert outcome.ack["reason"] == "terminal_instance"
@@ -1232,9 +1277,11 @@ class TestTerminalStatusAckRejection:
 
         # Same dispatcher state, but the instance is now terminal:
         # terminal wins over busy — the instance cannot compact,
-        # period.
+        # period. (compact-on-COMPLETED: ``terminated`` carries the
+        # terminal-beats-busy invariant; ``completed`` no longer
+        # rejects at all.)
         terminal = await d.dispatch(
-            "inst-A", "/compact", instance_status="completed"
+            "inst-A", "/compact", instance_status="terminated"
         )
         assert terminal.ack["state"] == "rejected"
         assert terminal.ack["reason"] == (
@@ -1253,10 +1300,10 @@ class TestTerminalStatusAckRejection:
         d.registry.register(_make_spec(handler=handler))
 
         first = await d.dispatch(
-            "inst-A", "/compact", instance_status="completed"
+            "inst-A", "/compact", instance_status="terminated"
         )
         second = await d.dispatch(
-            "inst-A", "/compact", instance_status="completed"
+            "inst-A", "/compact", instance_status="terminated"
         )
         assert first.ack["reason"] == "terminal_instance"
         assert second.ack["reason"] == "terminal_instance", (

@@ -33,23 +33,40 @@ Status gating per WS-6 (architect §6):
 * ``PAUSED`` (with or without frozen task): treat as quiescent →
   gate → compact; instance STAYS PAUSED (no state change you
   didn't make).
-* Terminal (``COMPLETED`` / ``ERROR`` / ``FAILED`` / ``TERMINATED``):
+* Compact-reject statuses (``ERROR`` / ``FAILED`` / ``TERMINATED``):
   REJECT ``reason=terminal_instance``, ``guidance`` = the W-1.2
-  pinned copy (plan S-14 / architect §5) — now answered AT ACK TIME
+  pinned copy (plan S-14 / architect §5) — answered AT ACK TIME
   by the dispatcher's instance-status gate (defect #2, 2026-08-31);
   this executor keeps the same guard (shared
-  ``TERMINAL_INSTANCE_STATUSES`` / ``TERMINAL_INSTANCE_GUIDANCE``
+  ``COMPACT_REJECT_STATUSES`` / ``TERMINAL_INSTANCE_GUIDANCE``
   constants) as defense-in-depth for the read→handler-start TOCTOU
   window. ``aupdate_state`` NEVER invoked. C1
-  BINDING — the gate is INSTANCE STATUS (the O-B4 canonical
-  terminal set), NOT ``state.next == ()``. The shared
+  BINDING — the gate is INSTANCE STATUS (the compact-reject set),
+  NOT ``state.next == ()``. The shared
   :func:`daemon.services._checkpoint_utils._is_terminal_checkpoint`
   helper still anchors the proactive path (instance_messaging.py)
   byte-equivalently; the executor's gate is the manager status field,
-  which is the authoritative terminal signal the O-B4 spec pins.
-  A post-turn IDLE instance has ``state.next == ()`` but a
-  non-terminal status — that instance compacts fine (the headline
-  scenario the C1 amendment re-opens).
+  which is the authoritative status signal.
+* ``COMPLETED`` — COMPACT-ELIGIBLE (compact-on-COMPLETED,
+  2026-08-31): O-B4's blanket terminal rejection is SUPERSEDED by
+  C1 Variant A for this status ONLY. Variant A persistence (two
+  ``aupdate_state`` calls WITHOUT ``as_node``) never touches the
+  next pointer — ``next`` stays ``()`` — so revive-on-send
+  (instance_messaging.py:1486-1510 / :3580-3601 ``astream`` with
+  ``is_retry=True``) runs the agent normally. The instance row
+  STAYS ``completed``; the compact mutates only the checkpointer.
+  The documented ``as_node="agent"`` collapse
+  (instance_messaging.py:1132-1140) requires
+  ``interrupt_before=['agent']`` — zero production agents carry it
+  — and the no-``as_node`` recipe closes the window regardless
+  (pinned by the COMPLETED canaries in
+  ``test_compact_executor_revive_brick_e2e.py``).
+  ``terminated`` / ``error`` / ``failed`` remain REJECTED — their
+  revive semantics and error-surfaces were never assessed for
+  compaction (architect "What NOT to do"). A post-turn IDLE
+  instance has ``state.next == ()`` but a non-terminal status —
+  that instance compacts fine (the headline scenario the C1
+  amendment re-opens).
 
 Executor pre-checks BEFORE any engine call (architect §2):
 
@@ -115,8 +132,8 @@ from ..compaction import (
 )
 from ._checkpoint_utils import _is_terminal_checkpoint
 from .command_dispatcher import (
+    COMPACT_REJECT_STATUSES,
     TERMINAL_INSTANCE_GUIDANCE,
-    TERMINAL_INSTANCE_STATUSES,
 )
 
 logger = logging.getLogger(__name__)
@@ -219,7 +236,9 @@ _QUIESCENCE_TIMEOUT_S = 30.0
 
 
 # C1 BINDING: the executor's terminal-rejection gate is INSTANCE STATUS
-# (the O-B4 canonical set: completed / terminated / error / failed),
+# (the compact-reject set — terminated / error / failed since
+# compact-on-COMPLETED 2026-08-31; ``completed`` is compact-eligible,
+# O-B4 superseded by C1 Variant A for that status),
 # NOT ``_is_terminal_checkpoint`` (the shared helper that keys on
 # ``state.next``). The shared helper still anchors the proactive
 # compaction path at ``instance_messaging._maybe_compact_context``
@@ -574,9 +593,11 @@ async def execute_compact(
     # checkpoint shape) ─────────────────────────────────────────────────
     #
     # The C1 critical fix: rejection is gated on INSTANCE STATUS ∈
-    # {completed, terminated, error, failed} (O-B4 semantics +
-    # revive-brick tests stay green), NOT on ``_is_terminal_checkpoint``
-    # (``state.next == ()``).
+    # COMPACT_REJECT_STATUSES {terminated, error, failed}
+    # (compact-on-COMPLETED 2026-08-31: ``completed`` no longer
+    # rejects — O-B4 superseded by C1 Variant A for that status; the
+    # revive-brick tests stay green), NOT on
+    # ``_is_terminal_checkpoint`` (``state.next == ()``).
     #
     # WHY: the previous helper fired on ANY quiescent checkpoint,
     # including a post-turn IDLE instance (real post-turn state has
@@ -591,26 +612,34 @@ async def execute_compact(
     # it must skip compaction on a finished graph, and the
     # checkpointer's behavior is what the helper sees, not the manager
     # facade. The executor's path is engine-/persistence-driven — it
-    # cares about INSTANCE STATUS (the O-B4 set), which is the
-    # authoritative terminal signal from the manager.
+    # cares about INSTANCE STATUS (the compact-reject set), which is
+    # the authoritative status signal from the manager.
     #
-    # The revive-brick collapse test stays in place — it pins WHY
-    # TERMINAL-STATUS instances must never be compacted (the brick
-    # property of ``aupdate_state`` on a finished graph). For the
-    # executor, the gating signal is the status field, not the
-    # checkpointer shape.
+    # The revive-brick collapse test stays in place — it pins WHY the
+    # as_node persistence recipe is forbidden on a finished graph (the
+    # brick property of ``aupdate_state(as_node=...)`` on a finished
+    # graph). For the executor, the gating signal is the status field,
+    # not the checkpointer shape.
     #
     # Defect #2 (2026-08-31): this guard is now DEFENSE-IN-DEPTH. The
     # primary gate lives in the dispatcher's ack path
-    # (``CommandDispatcher.dispatch`` — terminal instances are
+    # (``CommandDispatcher.dispatch`` — compact-reject instances are
     # rejected in the 200 ack envelope before any task is spawned),
-    # so in the normal flow this code is unreachable for a terminal
-    # instance. It remains load-bearing for the TOCTOU window: the
+    # so in the normal flow this code is unreachable for a rejected
+    # status. It remains load-bearing for the TOCTOU window: the
     # instance can terminalize between the router's status read and
     # this task's start (terminated mid-flight by a parallel request).
     # The status set + guidance copy are the dispatcher's shared
     # constants — the two gates cannot drift.
-    if instance_status in TERMINAL_INSTANCE_STATUSES:
+    #
+    # compact-on-COMPLETED (2026-08-31): the guard rejects ONLY the
+    # ``COMPACT_REJECT_STATUSES`` triple (terminated/error/failed).
+    # ``completed`` is compact-eligible — O-B4 is superseded by C1
+    # Variant A for this status (the no-as_node two-aupdate recipe
+    # never touches ``next``, so revive-on-send runs the agent) — but
+    # stays terminal for every other consumer of the canonical
+    # ``daemon.constants.TERMINAL_INSTANCE_STATUSES``.
+    if instance_status in COMPACT_REJECT_STATUSES:
         logger.info(
             "[/compact] rejecting terminal-status instance %s... (status=%s)",
             instance_id[:8],
