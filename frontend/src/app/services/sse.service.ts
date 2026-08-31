@@ -236,6 +236,7 @@ export class SseService {
     console.log('[SSE] connect() called with instanceId:', instanceId);
     if (this.currentInstanceId === instanceId && this.eventSource) {
       console.log('[SSE] Already connected to this instance');
+      this.connectionHadError = false;
       return;
     }
 

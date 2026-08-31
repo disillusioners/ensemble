@@ -762,3 +762,101 @@ describe('SseService', () => {
     });
   });
 });
+
+import { SseService as RealSseService } from './sse.service';
+
+/**
+ * N2 production regression: the surrogate ``TestSseService`` mirror at the
+ * top of this file matches production ``SseService.connect()`` line by
+ * line today, but a surrogate is only as good as the last manual copy-edit.
+ * The reviewer cycle-2 N2 blocker was exactly this gap: the surrogate had
+ * the reset, production did not, and the green surrogate test gave false
+ * confidence. This block exercises the REAL production class so a future
+ * drift between surrogate and production is caught immediately rather than
+ * via another reviewer cycle.
+ *
+ * Setup: jsdom does not ship ``EventSource``, so each test installs a
+ * stub via ``globalThis.EventSource`` and restores the prior value in
+ * ``afterEach``. The test path only exercises ``connect()`` /
+ * ``connectInternal()`` early-return semantics and never fires any
+ * SSE listener, so we can supply a trivial ``ngZone.run(fn) → fn()`` stub
+ * and an empty ``ApiService`` (the production connect path never calls it).
+ */
+describe('SseService (production) — same-id connect() early-return', () => {
+  let realService: InstanceType<typeof RealSseService>;
+  let eventSourceInstances: Array<{
+    onerror: ((e: Event) => void) | null;
+    [k: string]: unknown;
+  }>;
+  let originalEventSource: unknown;
+
+  const ngZoneStub = {
+    run: <T>(fn: () => T): T => fn(),
+    runOutsideAngular: <T>(fn: () => T): T => fn(),
+  } as unknown as ConstructorParameters<typeof RealSseService>[0];
+  const apiStub = {} as ConstructorParameters<typeof RealSseService>[1];
+
+  beforeEach(() => {
+    eventSourceInstances = [];
+    originalEventSource = (globalThis as { EventSource?: unknown }).EventSource;
+
+    class EventSourceStub {
+      url: string;
+      readyState = 0;
+      onerror: ((e: Event) => void) | null = null;
+      onopen: ((e: Event) => void) | null = null;
+      onmessage: ((e: MessageEvent) => void) | null = null;
+      private listeners: Map<string, Array<(e: Event | MessageEvent) => void>> = new Map();
+      constructor(url: string) {
+        this.url = url;
+        eventSourceInstances.push(this as unknown as typeof eventSourceInstances[number]);
+      }
+      close(): void {
+        this.readyState = 2;
+      }
+      addEventListener(
+        type: string,
+        handler: (e: Event | MessageEvent) => void,
+      ): void {
+        const arr = this.listeners.get(type) ?? [];
+        arr.push(handler);
+        this.listeners.set(type, arr);
+      }
+    }
+
+    (globalThis as { EventSource?: unknown }).EventSource = EventSourceStub;
+    realService = new RealSseService(ngZoneStub, apiStub);
+  });
+
+  afterEach(() => {
+    if (originalEventSource === undefined) {
+      delete (globalThis as { EventSource?: unknown }).EventSource;
+    } else {
+      (globalThis as { EventSource?: unknown }).EventSource = originalEventSource;
+    }
+  });
+
+  it('resets connectionHadError and skips EventSource re-construction on a same-id re-connect', () => {
+    realService.connect('instance-prod-1');
+    expect(eventSourceInstances.length).toBe(1);
+
+    // Drive a connection-level error so the latch flips to true. The real
+    // EventSource onerror handler sets ``connectionHadError = true``
+    // (sse.service.ts onerror handler).
+    (eventSourceInstances[0].onerror as ((e: Event) => void) | null)?.(
+      new Event('error'),
+    );
+    expect(
+      (realService as unknown as { connectionHadError: boolean }).connectionHadError,
+    ).toBe(true);
+
+    // Same-id re-connect — the production early-return must reset the
+    // latch (FIX #1) AND must NOT construct a second EventSource. If
+    // either half regresses, this spec fails — that is the point.
+    realService.connect('instance-prod-1');
+    expect(eventSourceInstances.length).toBe(1);
+    expect(
+      (realService as unknown as { connectionHadError: boolean }).connectionHadError,
+    ).toBe(false);
+  });
+});
