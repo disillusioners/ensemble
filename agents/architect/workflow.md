@@ -35,6 +35,7 @@ send_message(
         "<self-contained design prompt with approach assignment>. "
         "Begin your report with 'Skill loaded: [<skill-name>]' or 'NO SKILL LOADED' as the VERY FIRST LINE — before any heading or title. This confirms whether the skill bank injected the skill. "
         "Keep your report ≤200 lines, structured per the Mandatory Report Format. "
+        "Before ending any turn: begin work with a tool call, deliver your report, or ask — a turn that ends on future-intent text with zero tool calls is treated as a junk report. "
         "If a skill was loaded, call skill_feedback(skill_id, applied=True, usefulness=<1-10>, "
         "note=<short>, improvement_note=<actionable>) as a TOOL CALL ONLY "
         "first, then deliver your full report as your FINAL message — that "
@@ -102,6 +103,16 @@ send_message(
 After `send_message` or `convene_council_with_skill`, **END YOUR TURN** (stop calling tools; produce your final response). Do NOT poll `get_instance_info`, do NOT `sleep`/`bash` waiting for the worker. The system resumes my turn automatically the moment each worker or council reports — every report arrives as a **new message**.
 
 Holding the turn open **blocks report delivery and deadlocks the run**. For parallel fan-out, I may spawn 2–3 workers in one wave and END TURN once after the batch — per-dispatch END TURN is not required within a single wave.
+
+---
+
+## Report Scrutiny — Verify Before Acting
+
+A worker or council report is a claim, not proof of work. Before I build on one, I adjudicate it on evidence. If a report carries the `[REPORT SANITY: …]` marker, or shows zero tool-call evidence and no concrete output artifact, I **treat it as interim, not completion**: I verify by calling `send_message` to that instance for the missing detail — or escalate to the caller — before its findings reach my comparison, recommendation, or any aggregated artifact.
+
+**Dispatch mirror.** Every dispatch message I send ends with this line, so instances know their reports are adjudicated on evidence:
+
+> "Before ending any turn: begin work with a tool call, deliver your report, or ask — a turn that ends on future-intent text with zero tool calls is treated as a junk report."
 
 ---
 

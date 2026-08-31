@@ -149,35 +149,26 @@ class TestPauseInstanceCascadeIntegration:
         assert 'test-instance' not in mock_manager._graph_tasks
 
 
-class TestSendMessageTaskRegistration:
-    """Tests for task registration in send_message."""
+# wc-wake-report-integrity T6b completion (2026-08-30): the
+# ``TestSendMessageTaskRegistration`` class was DELETED as a dead contract —
+# ``test_send_message_has_task_registration`` ran ``inspect.getsource`` over
+# the deleted ``InstanceMessagingService.send_message`` (the :1060
+# ``graph.ainvoke`` bypass removed by C1-D7); a source-text assert on a
+# method that no longer exists tests nothing. The task-registration
+# invariant on the SURVIVING turn pipeline remains pinned by
+# ``test_process_message_has_task_registration`` below (unaffected).
+def test_process_message_has_task_registration():
+    """_process_message_with_tracking should register and unregister graph task."""
+    import inspect
+    from daemon.services.instance_messaging import InstanceMessagingService
 
-    def test_send_message_has_task_registration(self):
-        """send_message should register and unregister graph task."""
-        # Verify the code structure by checking the method source
-        import inspect
-        from daemon.services.instance_messaging import InstanceMessagingService
-        
-        source = inspect.getsource(InstanceMessagingService.send_message)
-        
-        # Verify task registration is in the code
-        assert 'asyncio.current_task()' in source
-        assert '_graph_tasks[instance_id]' in source
-        assert '_graph_tasks.pop(instance_id' in source
-        assert 'asyncio.CancelledError' in source
+    source = inspect.getsource(InstanceMessagingService._process_message_with_tracking)
 
-    def test_process_message_has_task_registration(self):
-        """_process_message_with_tracking should register and unregister graph task."""
-        import inspect
-        from daemon.services.instance_messaging import InstanceMessagingService
-        
-        source = inspect.getsource(InstanceMessagingService._process_message_with_tracking)
-        
-        # Verify task registration is in the code
-        assert 'asyncio.current_task()' in source
-        assert '_graph_tasks[instance_id]' in source
-        assert '_graph_tasks.pop(instance_id' in source
-        assert 'asyncio.CancelledError' in source
+    # Verify task registration is in the code
+    assert 'asyncio.current_task()' in source
+    assert '_graph_tasks[instance_id]' in source
+    assert '_graph_tasks.pop(instance_id' in source
+    assert 'asyncio.CancelledError' in source
 
 
 class TestEdgeCases:

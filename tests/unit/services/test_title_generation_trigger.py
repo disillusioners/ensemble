@@ -723,9 +723,12 @@ class TestFireAndForgetBehavior:
 class TestInstanceMessagingTriggerTitleGeneration:
     """Tests for _maybe_trigger_title_generation in InstanceMessagingService.
 
-    Tests the two call sites:
+    Tests the surviving call sites:
     1. enqueue_message: triggers on IDLE→RUNNING with HUMAN message
-    2. send_message: triggers in finally block for first message
+    2. _process_message_with_tracking (T6b completion): triggers on the
+       IDLE→RUNNING transition recorded by ``_prepare_enqueued_message`` —
+       the deleted ``InstanceMessagingService.send_message`` call site
+       (C1-D7) no longer exists.
     """
 
     @pytest.fixture
@@ -930,61 +933,63 @@ class TestInstanceMessagingTriggerTitleGeneration:
                     # (title gen + initiative_message capture), so we assert "called" not "called_once".
                     mock_run_async.assert_called()
 
-    # ─── Scenario 4: send_message triggers title even on CancelledError ───────────
+    # ─── Scenario 4: enqueue-path title trigger (post-T6b) ──────────────────────
+
+    # wc-wake-report-integrity T6b completion (2026-08-30): the former
+    # ``test_send_message_triggers_title_on_cancelled_error`` was DELETED
+    # as a dead contract. It pinned the DELETED
+    # ``InstanceMessagingService.send_message``'s finally-block title
+    # trigger firing even when the graph raised CancelledError — that
+    # entry point no longer exists (C1-D7). On the surviving
+    # ``enqueue_message`` path, title generation fires at ENQUEUE time
+    # (strictly before any turn/graph execution, so no turn error can
+    # prevent it — the invariant is structural). Enqueue-time firing on
+    # the IDLE→RUNNING transition is pinned by the Scenario 1-3 tests
+    # above (``test_enqueue_triggers_*``), including the empty-content
+    # edge case below. No Phase-2 surface remains here.
 
     @pytest.mark.asyncio
     async def test_send_message_triggers_title_on_cancelled_error(
         self, messaging_service, mock_messaging_manager
     ):
-        """Verify _maybe_trigger_title_generation is called in finally block even when:
-        - send_message raises asyncio.CancelledError
-        - Instance was in IDLE state (is_first_message=True)
+        """[DELETED-CONTRACT REPLACEMENT] Title trigger is enqueue-time on the surviving path.
+
+        wc-wake-report-integrity T6b completion: the deleted test pinned
+        the removed ``send_message`` finally-block behavior. The
+        equivalent contract on the surviving enqueue path is that the
+        title dispatch fires at ENQUEUE time — before any graph turn
+        exists — so a later CancelledError inside the turn cannot
+        suppress it. We pin the enqueue-time firing directly (no graph
+        is ever involved on this path).
         """
         instance_id = "instance-cancel-123"
         message_content = "Message that will be cancelled"
 
-        # Mock instance in IDLE state (so is_first_message=True)
-        mock_instance_meta = MagicMock()
-        mock_instance_meta.status = InstanceStatus.IDLE.value
+        mock_instance = MagicMock()
+        mock_instance.status = InstanceStatus.IDLE.value
+        mock_instance.version = 1
 
-        mock_messaging_manager._instance_repository.get.return_value = mock_instance_meta
+        mock_session = MagicMock()
+        mock_session.get.return_value = mock_instance
 
-        # Mock graph that raises CancelledError
-        mock_graph = MagicMock()
-        mock_graph.ainvoke = AsyncMock(side_effect=asyncio.CancelledError)
+        @contextmanager
+        def mock_session_ctx():
+            yield mock_session
 
-        mock_messaging_manager.get_instance = AsyncMock(return_value=mock_graph)
-
-        # Create a proper MessageResult mock that accepts keyword arguments
-        mock_message_result = MagicMock()
-        mock_message_result.content = ""
-
-        def create_message_result(**kwargs):
-            result = MagicMock()
-            result.content = kwargs.get("content", "")
-            return result
-
-        # Mock task for cancellation tracking
-        mock_task = MagicMock()
         import sys
         mock_manager_module = MagicMock()
-        mock_manager_module.MessageResult = create_message_result
         with patch.dict('sys.modules', {'daemon.manager': mock_manager_module}):
-            with patch("asyncio.current_task", return_value=mock_task):
+            with patch("daemon.services.instance_messaging.Session", return_value=mock_session_ctx()):
                 with patch("daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait") as mock_run_async:
-                    # Should not raise - CancelledError should be caught in send_message
-                    result = await messaging_service.send_message(
+                    await messaging_service.enqueue_message(
                         instance_id=instance_id,
                         message=message_content,
+                        source="api",
                     )
 
-                    # Verify title generation was still triggered in finally block.
-                    # NOTE: _maybe_trigger_title_generation fires 2 fire-and-forget dispatches
-                    # (title gen + initiative_message capture), so we assert "called" not "called_once".
-                    mock_run_async.assert_called()
-
-                    # Result should be a MagicMock with empty content (CancelledError handled)
-                    assert result.content == ""
+                    # Title dispatch fired at enqueue time (2 fire-and-forget
+                    # dispatches: title gen + initiative_message capture).
+                    assert mock_run_async.call_count == 2
 
     # ─── Scenario 5: Idempotent - early title generation prevents duplicate ────────
 
@@ -992,37 +997,50 @@ class TestInstanceMessagingTriggerTitleGeneration:
     async def test_title_generation_skips_when_already_exists(
         self, messaging_service, mock_messaging_manager
     ):
-        """Verify title generation checks for existing title and skips if present."""
+        """Verify title generation checks for existing title and skips if present.
+
+        wc-wake-report-integrity T6b completion: migrated from the deleted
+        ``InstanceMessagingService.send_message`` entry point to the
+        surviving ``enqueue_message`` path (same Session-patch pattern as
+        Scenario 1). The dispatch still fires fire-and-forget; the
+        idempotency check lives inside ``_generate_and_broadcast_title``.
+        """
         instance_id = "instance-existing-title"
 
-        # Mock instance with existing title
-        mock_instance_meta = MagicMock()
-        mock_instance_meta.status = InstanceStatus.IDLE.value
-        mock_instance_meta.instance_metadata = {"title": "Existing Title"}
-        mock_messaging_manager._instance_repository.get.return_value = mock_instance_meta
+        # Mock instance with existing title, starting IDLE so the
+        # IDLE→RUNNING transition gates the trigger on.
+        mock_instance = MagicMock()
+        mock_instance.status = InstanceStatus.IDLE.value
+        mock_instance.version = 1
+        mock_instance.instance_metadata = {"title": "Existing Title"}
+        mock_instance.paused_at = None
+        mock_instance.agent_id = "test-agent"
 
-        # Mock the title generation service
-        mock_messaging_manager._generate_and_broadcast_title = AsyncMock()
+        mock_session = MagicMock()
+        mock_session.get.return_value = mock_instance
 
-        # Mock graph
-        mock_graph = MagicMock()
-        mock_graph.ainvoke = AsyncMock(return_value={"messages": []})
-        mock_messaging_manager.get_instance.return_value = mock_graph
+        @contextmanager
+        def mock_session_ctx():
+            yield mock_session
 
         import sys
         mock_manager_module = MagicMock()
         with patch.dict('sys.modules', {'daemon.manager': mock_manager_module}):
-            with patch("daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait") as mock_run_async:
-                await messaging_service.send_message(
-                    instance_id=instance_id,
-                    message="Test message",
-                )
+            with patch("daemon.services.instance_messaging.Session", return_value=mock_session_ctx()):
+                with patch("daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait") as mock_run_async:
+                    await messaging_service.enqueue_message(
+                        instance_id=instance_id,
+                        message="Test message",
+                        source="api",
+                    )
 
-                # Title generation should still be triggered (fire-and-forget).
-                # The idempotency check happens inside _generate_and_broadcast_title.
-                # NOTE: _maybe_trigger_title_generation fires 2 fire-and-forget dispatches
-                # (title gen + initiative_message capture), so we assert "called" not "called_once".
-                mock_run_async.assert_called()
+                    # Title generation is still triggered (fire-and-forget);
+                    # idempotency is enforced inside
+                    # _generate_and_broadcast_title. 2 dispatches
+                    # (title gen + initiative capture — the capture is
+                    # skipped inside because initiative_message gating reads
+                    # metadata later; the dispatch itself still fires).
+                    mock_run_async.assert_called()
 
     # ─── Edge Cases ─────────────────────────────────────────────────────────────
 
@@ -1065,41 +1083,58 @@ class TestInstanceMessagingTriggerTitleGeneration:
                     # (title gen + initiative_message capture), so we assert "called" not "called_once".
                     mock_run_async.assert_called()
 
+    # wc-wake-report-integrity T6b completion (2026-08-30): the former
+    # ``test_send_message_raises_when_generate_method_is_none`` was
+    # DELETED as a dead contract — it pinned the deleted
+    # ``InstanceMessagingService.send_message`` raising TypeError when
+    # ``_generate_and_broadcast_title`` was None. That failure mode died
+    # with the deleted method (C1-D7); on the surviving enqueue path
+    # the dispatch is ``MainLoopBridge.run_async_no_wait``-wrapped
+    # fire-and-forget and the generator-missing scenario has no
+    # equivalent surface.
     @pytest.mark.asyncio
-    async def test_send_message_raises_when_generate_method_is_none(
+    async def test_send_message_no_trigger_when_not_idle(
         self, messaging_service, mock_messaging_manager
     ):
-        """Verify send_message raises TypeError when _generate_and_broadcast_title is None.
+        """Verify _maybe_trigger_title_generation is NOT called when instance is RUNNING.
 
-        Note: The current implementation does NOT handle this gracefully - it raises TypeError.
-        This test documents current behavior. In production, _generate_and_broadcast_title
-        should always be set (it's a method on the manager).
+        wc-wake-report-integrity T6b completion: migrated from the deleted
+        ``InstanceMessagingService.send_message`` entry point to the
+        surviving ``enqueue_message`` path. The instance starts (and
+        stays) RUNNING, so ``is_idle_to_running`` is False and the
+        ``should_trigger`` gate skips the dispatch.
         """
-        instance_id = "instance-no-generator"
+        instance_id = "instance-running"
 
-        # Mock instance in IDLE state
-        mock_instance_meta = MagicMock()
-        mock_instance_meta.status = InstanceStatus.IDLE.value
-        mock_messaging_manager._instance_repository.get.return_value = mock_instance_meta
+        # Mock instance in RUNNING state (not IDLE)
+        mock_instance = MagicMock()
+        mock_instance.status = InstanceStatus.RUNNING.value
+        mock_instance.version = 1
+        mock_instance.instance_metadata = {}
+        mock_instance.agent_id = "test-agent"
+        mock_instance.paused_at = None
 
-        # Mock _generate_and_broadcast_title as None
-        mock_messaging_manager._generate_and_broadcast_title = None
+        mock_session = MagicMock()
+        mock_session.get.return_value = mock_instance
 
-        # Mock graph
-        mock_graph = MagicMock()
-        mock_graph.ainvoke = AsyncMock(return_value={"messages": []})
-        mock_messaging_manager.get_instance.return_value = mock_graph
+        @contextmanager
+        def mock_session_ctx():
+            yield mock_session
 
         import sys
         mock_manager_module = MagicMock()
         with patch.dict('sys.modules', {'daemon.manager': mock_manager_module}):
-            with patch("daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait"):
-                # Expect TypeError because None is not callable
-                with pytest.raises(TypeError, match="'NoneType' object is not callable"):
-                    await messaging_service.send_message(
+            with patch("daemon.services.instance_messaging.Session", return_value=mock_session_ctx()):
+                with patch("daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait") as mock_run_async:
+                    await messaging_service.enqueue_message(
                         instance_id=instance_id,
-                        message="Test message",
+                        message="Second message",
+                        source="api",
                     )
+
+                    # Title generation should NOT be triggered
+                    # (is_idle_to_running=False → should_trigger=False).
+                    mock_run_async.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_concurrent_enqueue_messages_both_trigger(
@@ -1143,36 +1178,6 @@ class TestInstanceMessagingTriggerTitleGeneration:
                     assert mock_run_async.call_count == 2, (
                         f"Expected 2 fire-and-forget dispatches, got {mock_run_async.call_count}"
                     )
-
-    @pytest.mark.asyncio
-    async def test_send_message_no_trigger_when_not_idle(
-        self, messaging_service, mock_messaging_manager
-    ):
-        """Verify _maybe_trigger_title_generation is NOT called when instance is RUNNING."""
-        instance_id = "instance-running"
-
-        # Mock instance in RUNNING state (not IDLE)
-        mock_instance_meta = MagicMock()
-        mock_instance_meta.status = InstanceStatus.RUNNING.value
-        mock_messaging_manager._instance_repository.get.return_value = mock_instance_meta
-
-        # Mock graph
-        mock_graph = MagicMock()
-        mock_graph.ainvoke = AsyncMock(return_value={"messages": []})
-        mock_messaging_manager.get_instance.return_value = mock_graph
-
-        import sys
-        mock_manager_module = MagicMock()
-        with patch.dict('sys.modules', {'daemon.manager': mock_manager_module}):
-            with patch("daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait") as mock_run_async:
-                await messaging_service.send_message(
-                    instance_id=instance_id,
-                    message="Second message",
-                )
-
-                # Title generation should NOT be triggered (is_first_message=False)
-                mock_run_async.assert_not_called()
-
 
 # ─── Test Group G: _maybe_trigger_title_generation method directly ──────────────
 

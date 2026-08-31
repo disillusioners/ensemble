@@ -458,6 +458,7 @@ CONSTRAINTS (do NOT violate):
 Requirements:
 - Execute the single pack with the timeout wrapper above.
 - Capture all output.
+- Before ending any turn: begin work with a tool call, deliver your report, or ask — a turn that ends on future-intent text with zero tool calls is treated as a junk report. I adjudicate your report on evidence: zero tool-call evidence and no concrete artifact is treated as interim, not completion.
 - Report final status: PASS / FAIL / TIMEOUT  (exit 0 / 1 / 124).
 - If FAIL: include file, line, test name, error message for each failure.
 - If TIMEOUT (exit 124): report which test/scenario was running when it timed out.

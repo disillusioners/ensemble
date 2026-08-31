@@ -27,7 +27,10 @@ async def mock_manager():
     # Basic instance manager mocks
     manager.spawn_instance_with_mcp = AsyncMock(return_value="test-instance-id")
     manager.get_instance = AsyncMock()
-    manager.send_message = Mock(return_value="Test response")
+    # wc-wake-report-integrity T6b completion (2026-08-30): the stale
+    # ``manager.send_message`` Mock stub was REMOVED — the legacy
+    # Manager.send_message is deleted (C1-D7) and nothing in this file
+    # referenced it.
     manager.terminate_instance = Mock(return_value=True)
     manager.list_instances = Mock(return_value=([], 0))
     manager.get_instance_info = Mock()

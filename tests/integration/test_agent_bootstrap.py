@@ -118,8 +118,16 @@ def test_agent_bootstrap_and_hello(integration_config, agent_system_prompt):
 
 async def test_agent_bootstrap_with_instance_manager(integration_config, agent_system_prompt):
     """Test using the full InstanceManager to bootstrap an agent.
-    
-    This validates the complete flow used by the actual application.
+
+    wc-wake-report-integrity T6b completion (2026-08-30): this test
+    previously round-tripped a message through the deleted
+    ``Manager.send_message`` (C1-D7). It now enqueues via
+    ``manager.enqueue_message`` (the durable wake path — asserting the
+    ``AsyncMessageResult`` contract) and then drives the REAL engine
+    turn through ``_process_message_with_tracking`` (the same pipeline
+    the WorkerPool's processor runs; a bare InstanceManager has no
+    worker pool). The LLM-response assertions are unchanged in spirit:
+    the turn must produce a non-empty response.
     """
     from daemon.manager import InstanceManager
 
@@ -133,21 +141,35 @@ async def test_agent_bootstrap_with_instance_manager(integration_config, agent_s
     manager = InstanceManager(
         config=integration_config,
     )
-    
+
     # Spawn an instance with the developer agent
     instance_id, _ = manager.spawn_instance(agent_id="developer")
-    
+
     assert instance_id, "Should return an instance ID"
     assert instance_id in manager.instances, "Instance should be registered"
-    
-    # Send hello message
-    response = await manager.send_message(instance_id, "Hello! Please respond briefly.")
-    
+
+    # Enqueue hello message via the durable wake path
+    message = "Hello! Please respond briefly."
+    enqueue_result = await manager.enqueue_message(instance_id, message, source="api")
+
+    assert enqueue_result is not None, "enqueue must return an AsyncMessageResult"
+    assert enqueue_result.message_id, "enqueue must mint a durable message_id"
+    assert enqueue_result.instance_id == instance_id
+    assert enqueue_result.status == "queued"
+
+    # Drive the real-engine turn (the WorkerPool processor's pipeline)
+    response = await manager._messaging_service._process_message_with_tracking(
+        instance_id=instance_id,
+        message=message,
+        message_id=enqueue_result.message_id,
+    )
+
     # Validate response
     assert response, "Should receive a non-empty response"
-    assert len(response) > 10, "Response seems too short"
-    
-    print(f"\n[INTEGRATION TEST] InstanceManager Response: {response[:200]}...")
-    
+    assert response.content, "Response content should not be empty"
+    assert len(response.content) > 10, "Response seems too short"
+
+    print(f"\n[INTEGRATION TEST] InstanceManager Response: {response.content[:200]}...")
+
     # Clean up
     manager.terminate_instance(instance_id)

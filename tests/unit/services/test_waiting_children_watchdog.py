@@ -1455,3 +1455,135 @@ class TestHungChildrenSqlDialectParity:
         rendered = str(sql.compile(dialect=sqlite_dialect.dialect()))
         assert "julianday" in rendered
         assert "EXTRACT" not in rendered
+
+
+# ─── B.S.5 — wedge skip-if-(b)-guarding + shared per-parent cooldown ─────────
+
+
+class TestWedgeSkipsBGuardedParents:
+    """B.S.5 (wc-wake-report-integrity, OQ-4 disposition): the wedge
+    backstop must NOT double-fire for an episode the (b) report-integrity
+    guard already noticed.
+
+    (b) fires at the parent-COMPLETED stamp; the wedge scans WC-status
+    parents — the overlap is the tick-snapshot race (parent observed WC
+    pre-stamp, the wedge pass runs post-stamp/notice). The shared
+    per-parent cooldown lives in
+    ``daemon/services/report_integrity_guard._B_NOTICE_LEDGER``; while a
+    (b) notice episode is OPEN for the parent, the wedge predicate skips
+    it. When the episode closes (clean evaluation) or is replaced by a
+    different violation set, the wedge becomes eligible again.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_b_ledger(self):
+        from daemon.services import report_integrity_guard as rig
+
+        rig._B_NOTICE_LEDGER.clear()
+        yield
+        rig._B_NOTICE_LEDGER.clear()
+
+    def _watchdog(self, repo, manager):
+        """A watchdog with a task repo that reports ZERO live carriers —
+        the wedge precondition (no revival seam, no carrier).
+        """
+        task_repo = MagicMock()
+        task_repo.list_live_process_report_carriers_for_instance = (
+            lambda instance_id: []
+        )
+        return WaitingChildrenWatchdog(
+            repo,
+            manager,
+            interval_seconds=1,
+            hang_threshold_seconds=1,
+            task_repository=task_repo,
+        )
+
+    async def test_b_notice_suppresses_wedge_for_same_episode(
+        self, repo, manager, make_instance
+    ):
+        """(b) enforcement fires → the wedge does NOT enqueue for the
+        same (parent, child, episode); once the (b) episode closes, the
+        wedge is eligible again.
+        """
+        from daemon.services import report_integrity_guard as rig
+
+        # The wedged shape: WC parent + zero NON-terminal children (the
+        # only child is COMPLETED) + zero live carrier.
+        parent_id = make_instance(
+            status=InstanceStatus.WAITING_CHILDREN,
+            instance_id="wc-parent-bguarded",
+        )
+        make_instance(
+            status=InstanceStatus.COMPLETED,
+            parent_id=parent_id,
+        )
+        watchdog = self._watchdog(repo, manager)
+
+        # Sanity: without (b) involvement the wedge WOULD fire.
+        await watchdog.run_once()
+        manager.enqueue_message.assert_awaited()
+        wedge_source = manager.enqueue_message.await_args.kwargs["source"]
+        assert wedge_source.startswith("system:watchdog"), (
+            "control: the wedge backstop fires on the plain wedged shape"
+        )
+        wedge_count_after_control = watchdog.wedge_notices_enqueued
+        manager.enqueue_message.reset_mock()
+
+        # (b) enforcement fires for the same parent (open episode).
+        rig._B_NOTICE_LEDGER[parent_id] = (
+            "child-x:completed:PENDING|child-y:failed:DEFERRED"
+        )
+
+        stats = await watchdog.run_once()
+        manager.enqueue_message.assert_not_called(), (
+            "B.S.5: an open (b) notice episode must suppress the wedge "
+            "notice for the same episode (no double-fire)"
+        )
+        assert (
+            watchdog.wedge_notices_enqueued == wedge_count_after_control
+        ), "the wedge counter must not advance while (b) is guarding"
+        manager.reset_mock()
+
+        # The (b) episode closes (clean evaluation clears the ledger) —
+        # the wedge is eligible again. A fresh watchdog simulates the
+        # post-episode sweep (the wedge's own per-parent cooldown is
+        # episode-scoped too and the control run consumed it).
+        rig._B_NOTICE_LEDGER.clear()
+        watchdog_fresh = self._watchdog(repo, manager)
+        await watchdog_fresh.run_once()
+        manager.enqueue_message.assert_awaited()
+        assert (
+            manager.enqueue_message.await_args.kwargs["source"].startswith(
+                "system:watchdog"
+            )
+        )
+        assert watchdog_fresh.wedge_notices_enqueued >= 1
+
+    async def test_wedge_eligible_again_after_new_b_episode(
+        self, repo, manager, make_instance
+    ):
+        """A DIFFERENT (b) violation set (new episode) replaces the
+        ledger signature — the wedge stays suppressed only while the
+        current episode is open; a replaced signature is still an open
+        episode (no wedge), pinning the replace-not-stack semantics.
+        """
+        from daemon.services import report_integrity_guard as rig
+
+        parent_id = make_instance(
+            status=InstanceStatus.WAITING_CHILDREN,
+            instance_id="wc-parent-bguarded-2",
+        )
+        make_instance(status=InstanceStatus.COMPLETED, parent_id=parent_id)
+        watchdog = self._watchdog(repo, manager)
+
+        rig._B_NOTICE_LEDGER[parent_id] = "episode-1"
+        await watchdog.run_once()
+        manager.enqueue_message.assert_not_called()
+
+        # New violation set → new episode (signature replaced, still open).
+        rig._B_NOTICE_LEDGER[parent_id] = "episode-2"
+        await watchdog.run_once()
+        manager.enqueue_message.assert_not_called(), (
+            "a replaced (b) episode is still an OPEN episode — wedge stays silent"
+        )

@@ -175,6 +175,19 @@ When my turn produces a deliverable for my dispatcher, **the final message of th
 
 ---
 
+### 🚨 CRITICAL: OPENING DISCIPLINE — A TURN STARTS WITH WORK, NOT INTENT
+
+The closing rule above governs delivery; this one governs the opening. **Before ending any turn** on a task I was dispatched, one check: did this turn begin the work? A task turn that ends with future-intent text and **zero tool calls** — "I have the context, let me start", "I'll begin with X next" — is not work-in-progress. That turn is detected as a junk/no-work report, and my dispatcher will treat it as interim, not completion.
+
+**The compliant moves, in order:**
+1. **Begin the work with a tool call** — even one read that grounds the task counts.
+2. **Deliver the report** — if the work is already done, the report IS the turn ending.
+3. **Ask** — if something blocks me, the question IS the turn ending.
+
+**Scope.** This binds the opening pattern only. It does NOT prohibit: ending a turn after `send_message` (the async dispatch contract above), final text-only reports after real work, question-to-dispatcher turns (a request for input is not future-intent), one-message acks, or synthesis-only reports.
+
+---
+
 ## Must Not
 
 ### ❌ Never Execute Breaking Changes Without Permission (Under SemiAuto)

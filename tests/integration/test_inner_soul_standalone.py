@@ -6,7 +6,26 @@ All test artifacts are created in a temporary directory that is cleaned up.
 
 Usage:
     python tests/integration/test_inner_soul_standalone.py
+
+wc-wake-report-integrity T6b completion (2026-08-30): the two turn-drive
+sites were migrated off the deleted ``Manager.send_message`` (legacy
+``graph.ainvoke`` bypass, C1-D7) onto ``manager.enqueue_message`` (the
+durable wake path) followed by the real-engine turn via
+``_process_message_with_tracking`` — the same shape as
+``tests/integration/test_inner_soul.py``. The skip-under-pytest guard
+below is the original standalone-script gate (this file is a script,
+not a pytest module), not a T6b disposition.
 """
+import sys
+
+import pytest
+
+if __name__ != "__main__":
+    pytest.skip(
+        "Standalone script — run directly with: python "
+        "tests/integration/test_inner_soul_standalone.py",
+        allow_module_level=True,
+    )
 
 import os
 import sys
@@ -204,6 +223,27 @@ def integration_config(tmp_path):
     return config
 
 
+async def _drive_turn(manager, instance_id: str, message: str):
+    """Enqueue a message (durable wake) and run the real-engine turn.
+
+    T6b completion: replaces the deleted ``Manager.send_message``
+    round-trip. Returns ``(enqueue_result, turn_result)``.
+    """
+    enqueue_result = await manager.enqueue_message(
+        instance_id, message, source="api"
+    )
+    assert enqueue_result is not None
+    assert enqueue_result.message_id
+    assert enqueue_result.status == "queued"
+
+    turn_result = await manager._messaging_service._process_message_with_tracking(
+        instance_id=instance_id,
+        message=message,
+        message_id=enqueue_result.message_id,
+    )
+    return enqueue_result, turn_result
+
+
 async def _run_remember_test(config, agent_dir: str):
     """Run the remember test logic.
     
@@ -255,8 +295,8 @@ async def _run_remember_test(config, agent_dir: str):
 Call inner_soul with intent="remember" and the content above."""
         
         print(f"\nSending message: {message[:100]}...")
-        response = await manager.send_message(instance_id, message)
-        
+        _enqueue_result, response = await _drive_turn(manager, instance_id, message)
+
         print(f"\nAgent response:\n{response.content[:500]}...")
         if response.tool_calls:
             print(f"Tool calls made: {response.tool_calls}")
@@ -354,7 +394,7 @@ async def _run_workflow_test(config, agent_dir: str):
 Call: inner_soul(intent="change", target="workflow", content="Step 4: Review before responding")"""
         
         print(f"Sending message...")
-        response = await manager.send_message(instance_id, message)
+        _enqueue_result, response = await _drive_turn(manager, instance_id, message)
         print(f"Response: {response.content[:300]}...")
         
         workflow_after = workflow_file.read_text()

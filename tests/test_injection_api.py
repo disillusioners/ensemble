@@ -37,6 +37,30 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 
+@pytest.fixture(autouse=True)
+def _reset_wc_wake_enqueue_flag_cache():
+    """Reset the WC-wake kill-switch cache around EVERY test in this module.
+
+    W1 (2026-08-30 pre-flip batch): flag-ON tests set
+    ``ENSEMBLE_WC_WAKE_ENQUEUE=1`` and call ``_reset_wc_wake_enqueue_for_tests()``
+    so the resolver re-reads the env — but monkeypatch only restores the ENV at
+    teardown; the resolver's module-global cache stays ``True`` and leaks into
+    later flag-implicit tests (both the cross-file-order and subset-by-name
+    vectors reproduce ``assert 200 == 202`` on the legacy 202 expectation).
+    Clear the cache BEFORE and AFTER every test so each test resolves the flag
+    from the ambient env. Module-scoped on purpose — a suite-global autouse in
+    ``tests/conftest.py`` would mask intentional flag-state tests and add
+    overhead everywhere.
+    """
+    from daemon.services.instance_messaging import (
+        _reset_wc_wake_enqueue_for_tests,
+    )
+
+    _reset_wc_wake_enqueue_for_tests()
+    yield
+    _reset_wc_wake_enqueue_for_tests()
+
+
 # ---------------------------------------------------------------------------
 # Test doubles
 # ---------------------------------------------------------------------------
@@ -49,6 +73,7 @@ def _make_manager(
     pending_list: list[dict] | None = None,
     pending_count: int = 0,
     set_return: dict | None = None,
+    queued: bool = False,
 ):
     """Build a mock InstanceManager with the surface used by the messages router.
 
@@ -103,7 +128,7 @@ def _make_manager(
     enqueue_result = MagicMock()
     enqueue_result.message_id = "msg-enqueued"
     enqueue_result.job_id = "job-enqueued"
-    enqueue_result.queued = False
+    enqueue_result.queued = queued
     manager.enqueue_message_job = AsyncMock(return_value=enqueue_result)
 
     # resume_instance_cascade (async) — used by the PAUSED path.
@@ -218,6 +243,47 @@ class TestInjectionPath:
         assert resp.status_code == 202, resp.text
         assert resp.json()["status"] == "injected"
         state["manager"].set_injection.assert_called_once()
+
+    def test_waiting_children_routes_to_enqueue_with_200_flag_on(
+        self, client_and_state, monkeypatch: pytest.MonkeyPatch
+    ):
+        """wc-wake-report-integrity (T4 + C1-Q2): when
+        ``ENSEMBLE_WC_WAKE_ENQUEUE=1``, WAITING_CHILDREN targets fall
+        to the enqueue branch (durable wake, 200 ``MessageResponse``)
+        instead of the legacy FIFO injection (202).
+
+        This pins the HTTP side of the routing pivot — the
+        ``injection_pending`` SSE does NOT fire for WC under flag ON
+        (FE sees the message via the normal turn-start
+        ``user_message`` pre-emit instead).
+        """
+        from daemon.services.instance_messaging import (
+            _reset_wc_wake_enqueue_for_tests,
+        )
+
+        monkeypatch.setenv("ENSEMBLE_WC_WAKE_ENQUEUE", "1")
+        _reset_wc_wake_enqueue_for_tests()
+
+        client, state = client_and_state
+        state["manager"] = _make_manager(status="waiting_children", queued=True)
+        state["live_hub"] = _make_live_hub()
+
+        resp = client.post(
+            "/instances/inst-abc/messages",
+            json={"content": "please advise"},
+        )
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        # Enqueue branch returns the standard MessageResponse shape
+        # with message_id + job_id + queued (D4 contract).
+        assert body["message_id"]
+        assert body["job_id"]
+        assert body["queued"] is True
+        # No injection, no SSE for the injection_pending channel.
+        state["manager"].set_injection.assert_not_called()
+        state["manager"].enqueue_message_job.assert_awaited_once()
+        state["live_hub"].stream_message.assert_not_called()
 
     def test_running_does_not_enqueue_message_job(self, client_and_state):
         """Injection path MUST NOT fall through to enqueue_message_job."""

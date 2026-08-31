@@ -11,6 +11,7 @@ from sqlmodel import Session
 
 from ..repositories.instance.models import Instance, InstanceStatus
 from ..repositories.message_queue.models import MessageQueue, MessageStatus
+from .report_integrity_guard import log_declared_waiting_violations
 from ..write_pause_guard import WriteGuardSession
 
 if TYPE_CHECKING:
@@ -321,6 +322,27 @@ class ErrorReportingService:
                             ).isoformat()
                             logger.info(
                                 f"Parent {parent.instance_id[:8]}... completed after child error"
+                            )
+
+                            # ── W2 dead-site symmetry attach (council, 2026-08-30) ──
+                            # NOTE: dead-site attach — this branch is the bus=None
+                            # fallback (see the ``if bus is not None`` /
+                            # ``else: raise RuntimeError("DependencyBus is None …")``
+                            # pair at :241-253). Bus=None raises A8 (RuntimeError)
+                            # before control reaches here, so this log line NEVER
+                            # fires in production. Same A8 pattern as the inline
+                            # twin at ``child_reports.py:~3390``. Symmetry
+                            # coverage ONLY — if this branch ever becomes live
+                            # (a future bus-bypass code path), the log position
+                            # already matches the active ``child_reports.root_completion``
+                            # site so soak analysis stays comparable. LOG ONLY
+                            # (no enforcement, no return value usage).
+                            log_declared_waiting_violations(
+                                session,
+                                parent.instance_id,
+                                context_tag=(
+                                    "error_reporting.parent_completion_bus_none_fallback"
+                                ),
                             )
 
                             # Capture parent_id and agent_id for event publishing (outside transaction)

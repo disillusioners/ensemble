@@ -3,13 +3,14 @@
 import asyncio
 import json
 import logging
+import os
 import time
 import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from langchain_core.callbacks import BaseCallbackHandler
-from langchain_core.messages import HumanMessage, RemoveMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, ToolMessage
 from sqlmodel import Session
 
 from ..cancellation import CancellationToken
@@ -46,6 +47,147 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# WC-wake kill-switch (wc-wake-report-integrity, C1-Q2 RESOLVED 2026-08-30)
+# ─────────────────────────────────────────────────────────────────────────────
+# The P1 routing pivot (T2 / T4 / T7) replaces the legacy "WC → RAM FIFO
+# set_injection" path with "WC → enqueue_message (durable wake turn)". That
+# change has three call sites — HTTP ``POST /messages``
+# (``daemon/routers/messages.py``), agent-tool ``send_message``
+# (``daemon/tools/instance.py``), and ``job_inject``
+# (``daemon/tools/job_queue.py``) — and they ALL cross the same
+# ``INJECTION_ELIGIBLE_STATUSES`` constant in ``daemon/constants.py`` (T2
+# shrinks it to ``frozenset({"running"})``).
+#
+# Per ``decisions.md`` C1-Q2 (RESOLVED 2026-08-30, leader-locked) the
+# pivot ships behind an env-driven kill-switch and is **DEFAULT OFF** at
+# code-land: the routing pivot only activates when
+# ``ENSEMBLE_WC_WAKE_ENQUEUE=1``. The flag mirrors the precedent set by
+# ``LIMITS_GOVERNOR_RECURSION_GUARD_ENABLED`` (governor-chain guard,
+# 2026-08-30; same shape: env-driven, cached on first access, restart-
+# required to flip, one-shot INFO log on boot, valid truthy/falsy values
+# spelled out below).
+#
+# Flag states:
+#
+#   * **OFF (default)** — the LEGACY behavior is preserved at all three
+#     call sites: HTTP returns 202-injected, agent-tool injection route
+#     returns the W3-stranding text, ``job_inject`` returns
+#     ``{status: "injected"}``. This is the documented revert path; an
+#     operator with an incident can flip the env back to the previous
+#     behavior in O(restart) without code changes. **The constant
+#     ``INJECTION_ELIGIBLE_STATUSES`` stays shrunk to ``{"running"}``
+#     regardless** — the flag-off branch reads that shrunk set and adds
+#     the legacy ``"waiting_children"`` glock back at the call sites
+#     (constant stays single-home, fork lives ONLY at the gating branch).
+#
+#   * **ON** — the new routing pivot is live everywhere: WC targets get
+#     real ``enqueue_message`` durable wake turns, HTTP returns 200 with
+#     ``MessageResponse{message_id, job_id, queued}``, the agent-tool
+#     enqueue branch handles WC, ``job_inject`` mirrors Option A.
+#
+# Always-active (no gating, no flag check): the D1 enqueue-seam pairing
+# tail-guard (T6), the D2 seam-drain of parked FIFO leftovers (T5), the
+# R1 deterministic placeholder ids (T1), and the T6b deletion of the
+# legacy ``Manager.send_message`` -> ``InstanceMessagingService.send_message``
+# -> ``graph.ainvoke`` bypass. These are correctness fixes that ship
+# regardless of which way the routing flag points.
+#
+# Soak / flip policy (per C2-D2.5-FLIP precedent, leader-locked 2026-08-30):
+# ≤ 2-week soak on the OFF default, operator flips ON on first deploy
+# thereafter; immediate flip to OFF on any silent-death incident. The
+# exact ``--flip-window``, soak duration, and incident criteria are
+# recorded in ``docs/setup.md`` next to the env var documentation.
+_WC_WAKE_ENQUEUE_ENV = "ENSEMBLE_WC_WAKE_ENQUEUE"
+_WC_WAKE_ENQUEUE_ENABLED: bool | None = None
+_WC_WAKE_ENQUEUE_BOOT_LOG_EMITTED: bool = False
+
+
+def _resolve_wc_wake_enqueue_enabled() -> bool:
+    """Resolve and cache the WC-wake routing-pivot kill-switch.
+
+    Returns:
+        ``True`` when the routing pivot is enabled — i.e. WC targets
+        route through ``enqueue_message`` (durable wake) instead of
+        ``set_injection`` (RAM FIFO). ``False`` when disabled via
+        ``ENSEMBLE_WC_WAKE_ENQUEUE=0`` — the LEGACY behavior is
+        preserved at all three call sites (HTTP, agent-tool, ``job_inject``).
+
+    Valid truthy values: ``("1", "true", "yes", "on")``. Valid falsy
+    values: ``("0", "false", "no", "off")``. Blank / unset / unknown
+    values all resolve ``False`` (the OFF default) — blanking the env
+    mid-incident (``ENSEMBLE_WC_WAKE_ENQUEUE=``) is the instant-revert
+    path, so it MUST resolve OFF. (Note: ``""`` is NOT in the truthy
+    tuple — unlike the governor-guard resolver, whose ``get(..., "1")``
+    unset default makes a blank env consistent with its ON direction;
+    this resolver defaults OFF via ``get(..., "0")``.) Unknown (non-blank)
+    values additionally fall back to ``False`` with a one-shot WARN
+    cached on first access.
+
+    Caching and the boot-log emission are independent: this function
+    caches ONLY the resolved boolean; the one-shot INFO log naming the
+    resolved state is emitted by :func:`emit_wc_wake_enqueue_boot_log`
+    itself (gated by its own ``_WC_WAKE_ENQUEUE_BOOT_LOG_EMITTED``
+    flag), which is called from ``InstanceManager.__init__``
+    (``daemon/manager.py:740`` — manager-init path). Flipping the env
+    mid-flight has no effect on either: the boolean is cached for the
+    daemon's lifetime, and the log fires exactly once per process.
+    """
+    global _WC_WAKE_ENQUEUE_ENABLED
+    if _WC_WAKE_ENQUEUE_ENABLED is not None:
+        return _WC_WAKE_ENQUEUE_ENABLED
+    raw = os.environ.get(_WC_WAKE_ENQUEUE_ENV, "0").strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        _WC_WAKE_ENQUEUE_ENABLED = False
+    elif raw in ("1", "true", "yes", "on"):
+        _WC_WAKE_ENQUEUE_ENABLED = True
+    else:
+        logger.warning(
+            "%s=%r is not a recognized truthy/falsy value; falling back "
+            "to OFF (default — legacy WC injection routing). Valid falsy: "
+            "0/false/no/off. Valid truthy: 1/true/yes/on.",
+            _WC_WAKE_ENQUEUE_ENV,
+            raw,
+        )
+        _WC_WAKE_ENQUEUE_ENABLED = False
+    return _WC_WAKE_ENQUEUE_ENABLED
+
+
+def emit_wc_wake_enqueue_boot_log() -> None:
+    """Emit the one-time boot-time INFO log naming the resolved flag state.
+
+    Called from ``InstanceManager.__init__`` after the messaging service
+    is wired (mirrors ``emit_governor_recursion_guard_boot_log``). Restart-
+    required semantics — same as the governor-guard wrapper. The actual
+    routing logic is gated on ``_resolve_wc_wake_enqueue_enabled()`` at
+    every call site, so flipping the env mid-flight has no effect.
+    """
+    global _WC_WAKE_ENQUEUE_BOOT_LOG_EMITTED
+    if _WC_WAKE_ENQUEUE_BOOT_LOG_EMITTED:
+        return
+    _WC_WAKE_ENQUEUE_BOOT_LOG_EMITTED = True
+    enabled = _resolve_wc_wake_enqueue_enabled()
+    logger.info(
+        "WC-wake enqueue routing resolved: %s (env %s=%s); "
+        "WC targets %s. Restart required to flip. "
+        "See docs/setup.md (ENSEMBLE_WC_WAKE_ENQUEUE).",
+        "enabled" if enabled else "DISABLED (legacy FIFO injection)",
+        _WC_WAKE_ENQUEUE_ENV,
+        os.environ.get(_WC_WAKE_ENQUEUE_ENV, "<unset>"),
+        "route to enqueue_message (durable wake, first-class turn)"
+        if enabled
+        else "still route to set_injection (RAM FIFO; 202-injected)",
+    )
+
+
+def _reset_wc_wake_enqueue_for_tests() -> None:
+    """Clear the cached kill-switch state so tests can re-resolve after
+    mutating the env. Test-only — production code never invokes this."""
+    global _WC_WAKE_ENQUEUE_ENABLED, _WC_WAKE_ENQUEUE_BOOT_LOG_EMITTED
+    _WC_WAKE_ENQUEUE_ENABLED = None
+    _WC_WAKE_ENQUEUE_BOOT_LOG_EMITTED = False
 
 
 def _derive_task_flags_from_queue_type(
@@ -173,10 +315,191 @@ def _dedup_merge_skill_ids(
     )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# D1 entry-seam pairing tail-guard (wc-wake-report-integrity, T6)
+# ─────────────────────────────────────────────────────────────────────────────
+# Closes the pre-existing poisoned-tail → LangGraph 2013 exposure at the
+# enqueue-seam boundary. The in-graph guard
+# (``daemon.graph._ensure_tool_result_pairing`` at graph.py:271-384)
+# runs at the ``agent_node`` drain sites AFTER ``astream`` is invoked
+# — too late for the LLM call that the gateway is about to reject.
+# The seam guard runs at the enqueue seam (after the three
+# ``_build_graph_input`` sites converge, before ``graph.astream``),
+# reads the checkpoint state via ``graph.aget_state``, and prepends
+# synthesized ``ToolMessage`` placeholders (R1 deterministic ids) to
+# ``graph_input['messages']`` so the LLM-bound list is structurally
+# valid before the gateway sees it. LangGraph's ``add_messages``
+# reducer then commits the healed tail to the checkpoint in the same
+# superstep as the new turn.
+#
+# Flag-INDEPENDENT (always active, no gating) per the dispatch directive.
+# Same O(1) happy-path tail check as the in-graph helper; cost is one
+# ``aget_state`` read per enqueued turn + bounded walk — measured-cheap,
+# optimization seam documented in case profiling flags it later.
+
+
+async def _heal_poisoned_checkpoint_tail(
+    graph: "CompiledStateGraph",
+    config: dict,
+    graph_input: dict | None,
+    instance_short: str = "",
+) -> list[ToolMessage]:
+    """Prepend synthesized ``ToolMessage`` placeholders to
+    ``graph_input['messages']`` when the checkpoint tail is poisoned.
+
+    wc-wake-report-integrity (T6, D1): the helper reads the current
+    checkpoint state via ``graph.aget_state(config)``, tail-checks it
+    the same way ``daemon.graph._ensure_tool_result_pairing`` does
+    (O(1) happy path, bounded backward walk), and prepends synthesized
+    placeholders to ``graph_input['messages']`` so the LLM-bound list
+    is structurally valid. ``add_messages`` then commits the healed
+    tail to the checkpoint in the same superstep as the new turn —
+    no separate ``aupdate_state`` round-trip.
+
+    The synthesized placeholders carry the SAME R1 deterministic id
+    format (``pairing-synth-{tc_id}``) as the in-graph helper, so a
+    re-heal across the seam + in-graph dedup chain is idempotent
+    (``add_messages`` dedups by id).
+
+    Args:
+        graph: The compiled LangGraph for this instance.
+        config: LangGraph config dict (carries ``thread_id``).
+        graph_input: The LLM-bound dict being prepared for
+            ``graph.astream``. **MUTATED IN PLACE** — placeholders
+            are prepended to ``graph_input['messages']``. Pass
+            ``None`` to short-circuit (silent-resume branch).
+        instance_short: Short instance id (``<first-segment-of-uuid>``)
+            for the WARNING log. Empty string is accepted.
+
+    Returns:
+        The list of placeholder ``ToolMessage``s synthesized and
+        prepended (in the order they appear in ``graph_input['messages']``).
+        Empty on the happy path (no trailing unanswered ``tool_calls``)
+        or on ``graph_input=None`` (silent-resume short-circuit).
+
+    Note:
+        The inspection core is intentionally NOT pulled from the
+        in-graph helper directly (no cross-module import) — this
+        helper is a state-aware checkpoint reader, not a
+        list-mutator. The bounded walk's O(1) happy path and the
+        deduplication rules mirror ``_ensure_tool_result_pairing``:
+        if the tail is not an ``AIMessage`` carrying ``tool_calls``,
+        return ``[]``. If it is, walk backward over trailing
+        ``AIMessage(tc)`` blocks (bounded by the same 8-message
+        window), dedupe against existing ``tool_call_id``s in the
+        trailing window, and synthesize one ``ToolMessage`` per
+        unanswered ``tool_call_id``.
+    """
+    if graph_input is None:
+        # S5 / architect correction 2: the ``:3407`` silent-resume
+        # branch sets ``graph_input = None`` (pure checkpoint resume
+        # — silent mode or no content). The seam heal/prepend MUST
+        # SKIP a None graph_input: that path injects no new
+        # mid-turn HumanMessage at the seam and is already covered
+        # by the in-graph pairing guard (graph.py:2971 / :3145).
+        return []
+
+    # Read the checkpoint state. Pattern already used in this file
+    # at :925 (``_maybe_compact_context``).
+    state = await graph.aget_state(config)
+    if state is None:
+        return []
+
+    # ``state.values`` is dict-like. Defensive fallback for the rare
+    # mock / alternative state shape that returns None for ``values``
+    # or lacks a ``messages`` key.
+    messages: list | None = None
+    values = getattr(state, "values", None)
+    if isinstance(values, dict):
+        messages = values.get("messages")
+    if not messages:
+        return []
+
+    # O(1) happy path: only proceed when the tail itself is an
+    # AIMessage carrying tool_calls. NO full-history scan — that
+    # pattern was explicitly rejected in the in-graph helper as too
+    # costly (mirrors ``daemon/graph.py:311-316``).
+    tail = messages[-1]
+    if not (isinstance(tail, AIMessage) and getattr(tail, "tool_calls", None)):
+        return []
+
+    # Walk backward over trailing AIMessage(tc) blocks; stop on the
+    # first non-AIMessage(tc) message OR when we hit the safety
+    # bound (mirrors ``daemon/graph.py:318-329``).
+    ai_indices: list[int] = []
+    end_bound = max(0, len(messages) - 8)  # _TOOL_PAIRING_MAX_TRAVERSAL=8
+    i = len(messages) - 1
+    while i >= end_bound:
+        msg = messages[i]
+        if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
+            ai_indices.append(i)
+            i -= 1
+        else:
+            break
+    if not ai_indices:
+        return []
+
+    ai_indices.reverse()
+    leftmost_idx = ai_indices[0]
+
+    # Dedupe against existing ToolMessages in the trailing window.
+    existing_tool_call_ids: set[str] = set()
+    for m in messages[leftmost_idx:]:
+        if isinstance(m, ToolMessage) and m.tool_call_id:
+            existing_tool_call_ids.add(m.tool_call_id)
+
+    synthesized: list[ToolMessage] = []
+    for orig_idx in ai_indices:
+        ai_msg = messages[orig_idx]
+        tool_calls = ai_msg.tool_calls or []
+        for tc in tool_calls:
+            tc_id = tc.get("id") if isinstance(tc, dict) else None
+            if not tc_id or tc_id in existing_tool_call_ids:
+                continue
+            tc_name = tc.get("name", "") if isinstance(tc, dict) else ""
+            # R1 deterministic id (mirrors graph.py:364-368) — same
+            # id format so a re-heal across the seam + in-graph
+            # dedup chain is idempotent.
+            tm = ToolMessage(
+                content=(
+                    "[Tool execution interrupted (daemon restart/crash) — "
+                    "result unavailable. Re-issue the tool call if still "
+                    "needed.]"
+                ),
+                tool_call_id=tc_id,
+                name=tc_name,
+                id=f"pairing-synth-{tc_id}",
+            )
+            existing_tool_call_ids.add(tc_id)
+            synthesized.append(tm)
+
+    if not synthesized:
+        return []
+
+    # Prepend to ``graph_input['messages']`` so the LLM-bound list is
+    # structurally valid before ``graph.astream``. The D1 seam
+    # places placeholders at the HEAD — the poisoned checkpoint
+    # tail sits at the head of the persisted state, so the
+    # placeholders must immediately follow it for the gateway to
+    # accept the LLM call.
+    existing_messages = list(graph_input.get("messages") or [])
+    graph_input["messages"] = synthesized + existing_messages
+
+    logger.warning(
+        f"[ToolPairing] D1 entry-seam: synthesized {len(synthesized)} "
+        f"placeholder tool result(s) for instance {instance_short} — "
+        f"checkpoint tail had unanswered tool_calls before enqueue "
+        f"turn build."
+    )
+
+    return synthesized
+
+
 def _build_graph_input(
     content: str | list,
     message_id: str,
     persistent_context_msgs: list[HumanMessage] | None = None,
+    prepended_msgs: list[HumanMessage] | None = None,
 ) -> dict[str, list[HumanMessage]]:
     """Build the LangGraph ``graph_input`` dict, prepending the persistent context block.
 
@@ -209,6 +532,26 @@ def _build_graph_input(
     turn — no double-injection because ``agent_node`` no longer
     re-injects skills into ``full_messages``.
 
+    wc-wake-report-integrity (T5): ``prepended_msgs`` is the seam
+    parameter the D2 FIFO-leftover drain flows through. The drain
+    site in ``_process_message_with_tracking`` builds a list of
+    ``HumanMessage`` instances from the parked FIFO (preserving the
+    ``injected_message: True`` marker + optional ``source`` per
+    ``graph.py:2950-2961`` so leftovers ARE injections — the marker
+    is kept so C3 compaction preservation and D12 subtree filtering
+    continue to recognise them as injected traffic). The drain's
+    exact input order: ``[pairing_placeholders?] + persistent_block +
+    leftover_fifo_msgs (oldest-first) + [user_message]`` — see
+    ``test_instance_messaging_seam_drain`` for the positional pin
+    across all four slots. The pairing-placeholders are prepended at
+    position 0 by the D1 entry-seam guard AFTER ``_build_graph_input``
+    returns — so the helper places ``prepended_msgs`` (the FIFO
+    leftovers) BETWEEN the persistent block and the user message,
+    not at the head. ``prepended_msgs`` defaults to ``None`` so the
+    three existing call sites (``:3402/:3411/:3420``) remain
+    byte-identical; only the new seam-drain call site passes
+    non-``None``.
+
     Args:
         content: The user message content (string or multimodal
             content-block list from ``_build_message_content``).
@@ -222,17 +565,37 @@ def _build_graph_input(
             ``None`` (default) and ``[]`` both mean "no persistent
             block this turn" — every turn after the first, or any
             turn when persistent context is empty.
+        prepended_msgs: Optional list of :class:`HumanMessage` to
+            inject BETWEEN the persistent block and the user
+            message. Used by the D2 seam-drain to thread parked
+            FIFO leftovers into the LLM-bound list for THIS turn
+            (oldest-first, single turn when both leftovers + new
+            message exist). The pairing-placeholder ``ToolMessage``s
+            synthesized by the D1 entry-seam guard (T6) ride a
+            different seam — they are prepended at position 0 by
+            :func:`_heal_poisoned_checkpoint_tail` AFTER
+            ``_build_graph_input`` returns, so they precede the
+            persistent block in the final list. ``None`` (default)
+            and ``[]`` both mean "no prepended messages this
+            turn" — preserves byte-identical behavior for the
+            three existing call sites.
 
     Returns:
         ``{"messages": [...]}`` dict ready for
         ``graph.astream(graph_input, ...)``. With a non-empty
         ``persistent_context_msgs``, the list is
-        ``[persistent_1, ..., persistent_n, user_message]`` — the
-        persistent block sits BEFORE the user message so it appears
-        at the very start of ``state['messages']`` after the first
-        ``add_messages`` reducer pass. With an empty
-        ``persistent_context_msgs``, the list contains ONLY the
-        ``user_message``.
+        ``[persistent_1, ..., persistent_n, prepended_1, ...,
+        user_message]`` — the persistent block first, then the
+        FIFO leftovers (``prepended_msgs``), then the user
+        message. With a non-empty ``prepended_msgs`` and no
+        persistent block, it is ``[prepended_1, ..., user_message]``.
+        With neither, just ``[user_message]``. The pairing
+        placeholders (T6) sit at the head — prepended by the D1
+        guard AFTER ``_build_graph_input`` returns, so the final
+        end-to-end order is
+        ``[pairing_placeholders?] + persistent_block? +
+        leftover_fifo_msgs (oldest-first) + [user_message]``
+        per the LOCKED C1-D2 spec.
     """
     user_message = HumanMessage(content=content, id=message_id)
     # Hybrid split — prepend the persistent context block BEFORE the
@@ -241,7 +604,19 @@ def _build_graph_input(
     # produces the steady-state second-turn layout ``[user_message]``.
     # Per the 2026-07-29 refactor this block also carries skills.
     persistent = list(persistent_context_msgs or [])
-    return {"messages": persistent + [user_message]}
+    # T5 (wc-wake): ``prepended_msgs`` flows FIFO leftovers into the
+    # LLM-bound list between the persistent block and the user message
+    # — the LOCKED C1-D2 S4 spec order
+    # ``[pairing_placeholders?] + persistent + leftovers (oldest-first) +
+    # [user_message]``. The pairing-placeholder ``ToolMessage``s
+    # synthesized by the D1 entry-seam guard (T6) ride a DIFFERENT seam
+    # — they are prepended at position 0 by
+    # :func:`_heal_poisoned_checkpoint_tail` AFTER this helper returns,
+    # so they precede the persistent block in the final list. Empty /
+    # None ``prepended_msgs`` produces byte-identical pre-T5 output for
+    # the three call sites that do not pass it.
+    prepended = list(prepended_msgs or [])
+    return {"messages": persistent + prepended + [user_message]}
 
 
 def _get_message_event_type(msg: dict) -> str:
@@ -1004,254 +1379,15 @@ class InstanceMessagingService:
                 f"failed for {instance_id[:8]}...: {type(exc).__name__}: {exc}"
             )
 
-    async def send_message(self, instance_id: str, message: str) -> "MessageResult":
-        """Send a message to an instance and get the response.
 
-        Args:
-            instance_id: The ID of the instance to send the message to.
-            message: The message content to send.
-
-        Returns:
-            MessageResult with content, thinking, and tool_calls.
-
-        Raises:
-            KeyError: If instance_id is not found.
-        """
-        from ..manager import MessageResult
-        
-        # Get instance graph (will lazy-load from DB if needed)
-        # Note: get_instance() now handles MCP preload internally
-        graph = await self._manager.get_instance(instance_id)
-        
-        # Check if this is the first message (instance was IDLE)
-        # This determines if we should trigger title generation
-        # Wrap the sync DB read in ``asyncio.to_thread`` so SQLite WAL write
-        # contention cannot block the event loop (the deadlock chain documented
-        # in the experience docs is rooted in sync DB calls on the loop thread).
-        instance_meta = await asyncio.to_thread(
-            self._manager._instance_repository.get, instance_id
-        )
-        is_first_message = (
-            instance_meta is not None and
-            instance_meta.status == InstanceStatus.IDLE.value
-        )
-
-        # Register current task for cancellation tracking
-        current_task = asyncio.current_task()
-        task_registered = False
-        if current_task:
-            self._manager._graph_tasks[instance_id] = current_task
-            task_registered = True
-            logger.debug(f"Registered graph task for instance {instance_id[:8]}...")
-
-        # Invoke with message.
-        # Use the per-agent recursion-limit override / multiplier so
-        # long-running working agents (e.g. worker, coder) get a larger
-        # LangGraph step quota than the global default.
-        config = {
-            "configurable": {"thread_id": instance_id},
-            "recursion_limit": self._effective_recursion_limit(instance_meta),
-        }
-        
-        try:
-            # Compact context before processing (non-blocking)
-            await self._maybe_compact_context(instance_id, graph, config)
-
-            result = await graph.ainvoke({"messages": [message]}, config)
-        except asyncio.CancelledError:
-            logger.info(f"Graph execution cancelled for instance {instance_id}")
-            # Return a graceful empty result so callers (and the title-generation
-            # finally block above) can observe a consistent contract. The
-            # title-generation trigger in the finally block still fires, ensuring
-            # the first-message title is generated even on cancellation.
-            return MessageResult(content="")
-        finally:
-            # Trigger title generation even on cancellation (fire-and-forget)
-            self._maybe_trigger_title_generation(instance_id, message, is_first_message)
-
-            # C2 fix — deferred question pause (Solution A), second pass.
-            #
-            # ``question_pause_node`` ran inside this graph task and set a
-            # marker rather than calling ``pause_instance_cascade`` directly
-            # (to avoid self-cancel of this very task). The graph task is now
-            # popped from ``_graph_tasks`` so we are safely OUTSIDE the
-            # graph-task context — calling the cascade here will not
-            # self-cancel; the DB transaction completes normally.
-            #
-            # HOISTED out of the ``if existing is current_task`` guard below:
-            # if an external ``pause_instance_cascade`` already pre-popped
-            # ``_graph_tasks[instance_id]`` (e.g. user-click-stop racing the
-            # graph completion), the identity check fails and the marker
-            # would otherwise leak — causing a spurious pause on the next
-            # message. ``pop_deferred_question_pause`` is idempotent
-            # (``set.discard``), so it's safe to call unconditionally.
-            #
-            # C1 FIX (marker lifetime): the marker is PEEKED with
-            # ``has_deferred_question_pause`` BEFORE the cascade and POPPED
-            # with ``pop_deferred_question_pause`` in the ``finally`` block
-            # AFTER the cascade's ``pause_instance_cascade`` completes. The
-            # old "pop-before-cascade" ordering left the marker empty during
-            # the cascade's DB-commit window (DB still RUNNING) so source-
-            # side Task guards saw ``marker=False, db=RUNNING`` and CREATED
-            # a spurious Task. Extending the marker lifetime past the
-            # cascade's DB commit closes that race. Safe because:
-            #   * the marker is in-memory only (no DB write) — moving the
-            #     pop cannot introduce a DB torn state;
-            #   * the cascade is wrapped in ``asyncio.shield`` so the DB
-            #     write completes regardless of outer cancellation;
-            #   * ``pause_instance_cascade`` does NOT touch
-            #     ``_deferred_question_pause`` (confirmed by grep — no
-            #     reference in ``instance_lifecycle.py``);
-            #   * ``pop_deferred_question_pause`` is idempotent.
-            #
-            # SHIELDED against double-cancel: a second ``task.cancel()``
-            # arriving during the ``await`` would raise ``CancelledError``
-            # (a ``BaseException`` in 3.8+, NOT caught by ``except Exception``).
-            # ``asyncio.shield`` protects the DB write so a transient cancel
-            # during the pause cascade does not corrupt instance state.
-            #
-            # Wrapped in try/except so a transient cascade failure does not
-            # crash the message-processing call. The question pack SSE has
-            # already fired from the tool, so the user can still answer; the
-            # instance will just remain in whatever status the graph
-            # completed in. Re-pausing an already-PAUSED instance is a
-            # no-op (``pause_instance_cascade`` filters out PAUSED nodes
-            # at line 1966), so a residual marker on top of an external
-            # pause is harmless.
-            if self._manager.has_deferred_question_pause(instance_id):
-                try:
-                    await asyncio.shield(
-                        self._manager.pause_instance_cascade(
-                            instance_id,
-                            suspension_reason=SuspensionReason.AWAITING_ANSWER.value,
-                        )
-                    )
-                except Exception as pause_err:
-                    logger.warning(
-                        f"[send_message] deferred question pause "
-                        f"failed for {instance_id[:8]}...: "
-                        f"{type(pause_err).__name__}: {pause_err}"
-                    )
-                finally:
-                    # Pop AFTER the cascade completes so the marker
-                    # covers the full cascade-execution window (DB
-                    # commit to PAUSED). Closes C1.
-                    self._manager.pop_deferred_question_pause(instance_id)
-
-            # Watchover deferred termination (T2.9).
-            #
-            # Consumed here by ``_drain_deferred_watchover_terminate`` — the
-            # C2-safe deferred cascade runs from this post-graph completion
-            # path AFTER ``_graph_tasks`` is popped (mirrors the
-            # question_pause pattern). See the helper docstring for the full
-            # contract (C2 torn-state + H2 retry-on-failure semantics).
-            await self._drain_deferred_watchover_terminate(instance_id)
-
-            # P2.2 Dispatch B: deferred system-execution drain (D-FA1.4).
-            # The marker set by the actor tools fires the daemonized
-            # executor at exact turn-end (additive consumer of this
-            # post-graph path; shielded inside the helper; never raises).
-            await self._drain_pending_system_executions(instance_id)
-
-            # Always unregister the task, but only if we're still the registered task
-            # (handles race condition where new execution starts before our finally runs)
-            if task_registered and current_task:
-                existing = self._manager._graph_tasks.get(instance_id)
-                if existing is current_task:
-                    self._manager._graph_tasks.pop(instance_id, None)
-                    self._manager.release_context_usage_cache(instance_id)
-                    logger.debug(f"Unregistered graph task for instance {instance_id[:8]}...")
-
-        # Extract message data from the current turn
-        messages = result.get("messages", [])
-        
-        if messages:
-            # Find where the current turn starts (last HumanMessage from this invoke)
-            # We only want to process messages from the current turn, not history
-            current_turn_start = 0
-            for i, msg in enumerate(messages):
-                # HumanMessage is the user's input
-                if hasattr(msg, 'type') and msg.type == 'human':
-                    current_turn_start = i
-            
-            # Get messages from current turn only
-            current_turn_messages = messages[current_turn_start:]
-            
-            # Build map of tool_call_id -> output from ToolMessages in current turn
-            tool_outputs = {}
-            for msg in current_turn_messages:
-                if hasattr(msg, 'tool_call_id'):  # It's a ToolMessage
-                    tool_outputs[msg.tool_call_id] = msg.content
-            
-            # Collect all tool_calls from AIMessages in current turn
-            all_tool_calls = []
-            for msg in current_turn_messages:
-                if hasattr(msg, 'tool_calls') and msg.tool_calls:
-                    for tc in msg.tool_calls:
-                        # Handle both dict and object formats
-                        tc_id = tc.get("id", "") if isinstance(tc, dict) else getattr(tc, "id", "")
-                        output = tool_outputs.get(tc_id)
-                        
-                        if isinstance(tc, dict):
-                            all_tool_calls.append({
-                                "id": tc.get("id", ""),
-                                "name": tc.get("name", ""),
-                                "arguments": tc.get("args", {}),
-                                "output": output,
-                            })
-                        else:
-                            all_tool_calls.append({
-                                "id": getattr(tc, "id", ""),
-                                "name": getattr(tc, "name", ""),
-                                "arguments": getattr(tc, "args", {}),
-                                "output": output,
-                            })
-            
-            tool_calls = all_tool_calls if all_tool_calls else None
-            
-            # Find the last AIMessage (the current assistant response) for content and thinking
-            last_ai_message = None
-            for msg in reversed(messages):
-                if hasattr(msg, 'type') and msg.type == 'ai':
-                    last_ai_message = msg
-                    break
-            
-            if last_ai_message:
-                content = last_ai_message.content or ""
-                
-                # Extract thinking ONLY from the last AIMessage (for models that support extended thinking)
-                thinking = None
-                
-                # Check direct thinking attribute (some providers)
-                if hasattr(last_ai_message, 'thinking') and last_ai_message.thinking:
-                    thinking = last_ai_message.thinking
-                
-                # Check additional_kwargs (most common for OpenAI-compatible proxies like LiteLLM)
-                elif hasattr(last_ai_message, 'additional_kwargs'):
-                    kwargs = last_ai_message.additional_kwargs or {}
-                    if kwargs.get("thinking"):
-                        thinking = kwargs["thinking"]
-                    elif kwargs.get("reasoning_content"):
-                        thinking = kwargs["reasoning_content"]
-                
-                # Check response_metadata (fallback)
-                elif hasattr(last_ai_message, 'response_metadata'):
-                    metadata = last_ai_message.response_metadata or {}
-                    if metadata.get("thinking"):
-                        thinking = metadata["thinking"]
-                    elif metadata.get("reasoning_content"):
-                        thinking = metadata["reasoning_content"]
-                
-                # Parse <think/> tags from content
-                content, thinking_extracted = parse_think_tags(content)
-                
-                return MessageResult(
-                    content=content,
-                    thinking=thinking,
-                    thinking_extracted=thinking_extracted,
-                    tool_calls=tool_calls,
-                )
-        return MessageResult(content="")
+    # wc-wake-report-integrity (T6b, D7 LOCKED 2026-08-30): the legacy
+    # ``InstanceMessagingService.send_message`` method — the
+    # ``graph.ainvoke`` bypass — was DELETED (it never shipped in
+    # production); keeping it would have re-opened the poisoned-tail →
+    # LangGraph 2013 exposure that the D1 enqueue-seam guard (T6)
+    # closes. There is NO replacement bypass: production callers must
+    # use ``enqueue_message`` (durable wake) or the FIFO
+    # ``set_injection`` API (mid-turn injections on RUNNING targets).
 
     def _prepare_enqueued_message(
         self,
@@ -3381,6 +3517,55 @@ class InstanceMessagingService:
             )
             persistent_context_msgs.append(_task_ctx_msg)
 
+        # ── D2 seam drain (wc-wake-report-integrity, T5) — pre-build phase ──
+        # m1 fix: the FIFO snapshot + leftover HumanMessage list are built
+        # BEFORE the three ``_build_graph_input`` call sites below. The
+        # leftovers then ride the ``prepended_msgs`` seam parameter
+        # (``_build_graph_input`` keeps the existing positional contract
+        # for the three legacy call sites — they default ``None`` and
+        # stay byte-identical when the FIFO is empty; only the WC-wake
+        # wake-turn path threads non-empty leftovers through). The
+        # ``clear_injection`` step is hoisted to AFTER the build so the
+        # get → build → clear race window stays small. The requeue
+        # safeguard (M1 object-identity) closes the get/clear race the
+        # same way it did before.
+        #
+        # This subsumes the in-graph site 1
+        # (``daemon/graph.py:2937-3005``) for the wake turn (it
+        # finds an empty FIFO on the wake turn → no double-add).
+        # Crash-window parity with site 1 is accepted: a crash
+        # between the clear and ``graph.astream`` loses the leftovers
+        # — same exposure, no new risk.
+        #
+        # The drain is flag-INDEPENDENT (no gating; the constant
+        # ``INJECTION_ELIGIBLE_STATUSES`` shrunk to ``{"running"}``
+        # in T2 — but the drain operates on the RAM FIFO which is
+        # also the RUNNING-target lane; under flag OFF a WC-wake
+        # send still lands here via the legacy FIFO injection route
+        # and the drain picks it up the same way).
+        pending_snapshot = self._manager.get_injection(instance_id)
+        leftover_fifo_msgs: list[HumanMessage] = []
+        for entry in pending_snapshot or []:
+            # Mirror graph.py:2950-2961 — preserve the
+            # ``injected_message: True`` marker + optional
+            # ``source`` so leftovers ARE injections (C3
+            # compaction preservation + D12 subtree filter keep
+            # working). The marker is honestly applied because
+            # these are pre-existing injections, not first-class
+            # turn messages.
+            kwargs: dict[str, Any] = {
+                "injected_message": True,
+            }
+            _src = entry.get("source")
+            if _src:
+                kwargs["source"] = _src
+            leftover_fifo_msgs.append(
+                HumanMessage(
+                    content=entry.get("content", ""),
+                    additional_kwargs=kwargs,
+                )
+            )
+
         # Build input - on retry with checkpoint, resume from None
         if not is_retry:
             await self._maybe_compact_context(instance_id, graph, config)
@@ -3396,11 +3581,14 @@ class InstanceMessagingService:
                 content = _build_message_content(message, images)
                 if content and not silent:
                     # Resume on the existing checkpoint — no persistent
-                    # prepending (the persistent block already lives in
-                    # the checkpoint, and re-prepending would double-
-                    # inject on the resume).
+                    # prepending (the persistent block already lives
+                    # in the checkpoint, and re-prepending would double-
+                    # inject on the resume). m1: thread leftover FIFO
+                    # via the seam parameter (default-None when FIFO is
+                    # empty, byte-identical pre-m1 behavior).
                     graph_input = _build_graph_input(
                         content, message_id,
+                        prepended_msgs=leftover_fifo_msgs or None,
                     )
                 else:
                     # Pure checkpoint resume (silent mode or no content)
@@ -3410,17 +3598,61 @@ class InstanceMessagingService:
                 content = _build_message_content(message, images)
                 graph_input = _build_graph_input(
                     content, message_id,
+                    prepended_msgs=leftover_fifo_msgs or None,
                 )
         else:
             # First attempt - add message to conversation, with the
             # persistent context block (project + shared-context +
             # skills) prepended so LangGraph's ``add_messages`` reducer
-            # checkpoints it once for all subsequent turns.
+            # checkpoints it once for all subsequent turns. m1: thread
+            # leftover FIFO via the seam parameter; the helper places
+            # ``prepended_msgs`` (FIFO leftovers) BETWEEN the persistent
+            # block and the user message — positional order
+            # ``[persistent...] + [leftovers...] + [user]`` per the
+            # LOCKED C1-D2 S4 spec. The D1 entry-seam guard then
+            # prepends pairing placeholders at position 0 to produce
+            # the final end-to-end order
+            # ``[placeholders?] + persistent + leftovers + user``.
             content = _build_message_content(message, images)
             graph_input = _build_graph_input(
                 content, message_id,
                 persistent_context_msgs=persistent_context_msgs or None,
+                prepended_msgs=leftover_fifo_msgs or None,
             )
+
+        # ── D2 seam drain — post-build phase ─────────────────────────────
+        # ``clear_injection`` AFTER the build so the get → build → clear
+        # race window stays small. The requeue safeguard (M1 object-
+        # identity) closes the remaining get/clear window: entries
+        # present in ``cleared`` but not in ``pending_snapshot`` were
+        # appended mid-drain by a concurrent ``set_injection`` call;
+        # re-append them at the FRONT so the original FIFO order is
+        # preserved.
+        #
+        # Only clear when we actually built a graph_input (silent-resume
+        # path leaves the FIFO intact for the next turn — same gating
+        # as the pre-m1 drain).
+        #
+        # M1 fix: dedupe by OBJECT IDENTITY (``id(e)``), not by content
+        # string. A concurrent ``set_injection`` call appends a NEW dict
+        # object to the FIFO — same content string or not, it has a
+        # distinct id. The previous content-keyed check silently dropped
+        # a racy entry whose content string collided with a snapshot
+        # entry (silent data-loss race).
+        if graph_input is not None:
+            cleared = self._manager.clear_injection(instance_id)
+            if cleared is not None:
+                snapshot_ids = {id(e) for e in pending_snapshot or []}
+                raced = [e for e in cleared if id(e) not in snapshot_ids]
+                if raced:
+                    self._manager.requeue_injections(instance_id, raced)
+            if leftover_fifo_msgs:
+                logger.info(
+                    f"[Injection] D2 seam-drain: {len(leftover_fifo_msgs)} "
+                    f"parked FIFO entries flowed into graph_input for "
+                    f"instance {instance_id[:8]}... (oldest-first)."
+                )
+        # ── end D2 seam drain ─────────────────────────────────────────────
 
         # Persistent context HumanMessages are graph inputs rather than normal
         # user turns, so they are not seen by the streaming loop's HumanMessage
@@ -3514,6 +3746,25 @@ class InstanceMessagingService:
         # version after ``astream`` completes.
         _deferred_msg_ids: set[str] = set()
 
+        # ── D1 entry-seam pairing tail-guard (T6, S5) ────────────────────
+        # Read the checkpoint state via ``graph.aget_state(config)`` and
+        # prepend synthesized ``ToolMessage`` placeholders to
+        # ``graph_input['messages']`` when the checkpoint tail is
+        # poisoned. ``add_messages`` then commits the healed tail to the
+        # checkpoint in the same superstep as the new turn — no separate
+        # ``aupdate_state`` round-trip. Cost: one ``aget_state`` read per
+        # enqueued turn + O(1) tail check.
+        #
+        # The helper short-circuits on ``graph_input is None`` (the
+        # silent-resume branch :3407 injects no new mid-turn HumanMessage
+        # at the seam; the in-graph pairing guard already covers it).
+        # Flag-INDEPENDENT — always active regardless of the
+        # ``ENSEMBLE_WC_WAKE_ENQUEUE`` kill-switch.
+        if graph_input is not None:
+            await _heal_poisoned_checkpoint_tail(
+                graph, config, graph_input, instance_id[:8],
+            )
+
         # Stream through graph execution
         # Register task for cancellation tracking INSIDE try block to prevent leaks
         # if CancelledError is raised during _maybe_compact_context
@@ -3525,7 +3776,7 @@ class InstanceMessagingService:
                 self._manager._graph_tasks[instance_id] = current_task
                 task_registered = True
                 logger.debug(f"Registered graph task for instance {instance_id[:8]}...")
-            
+
             async with self._llm_semaphore:
                 async for event in graph.astream(graph_input, config, stream_mode=["updates"]):
                     # Unpack tuple: (mode, data)

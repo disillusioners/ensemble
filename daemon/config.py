@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Annotated, Any, Callable, Dict
 
 import yaml
-from pydantic import Field, ConfigDict, model_validator, field_validator
+from pydantic import AliasChoices, Field, ConfigDict, model_validator, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 # Single source of truth for the non-status transient-channel pattern
@@ -31,6 +31,7 @@ from .constants import (
     CHECKPOINT_CLEANUP_INTERVAL_HOURS,
     MAX_INSTANCE_HISTORY,
     MAINTENANCE_CHECK_INTERVAL_MINUTES,
+    REPORT_REPAIR_EXCLUDED_AGENTS,
 )
 
 logger = logging.getLogger(__name__)
@@ -1411,28 +1412,126 @@ class ReportRepairConfig(BaseSettings):
     catching mid-sentence truncation.
     """
 
-    model_config = SettingsConfigDict(env_prefix="REPORT_REPAIR_")
+    model_config = SettingsConfigDict(env_prefix="REPORT_REPAIR_", populate_by_name=True)
 
     enabled: bool = Field(default=True, description="Enable unhappy-path report repair")
     # Factor-5 accuracy guard (was 2.0 pre-2026-08-11). Intentional short
     # reports (e.g., governor's 36-word final message after a 143-word
     # prior turn) are NOT repaired — only mid-sentence truncation is.
     size_ratio_threshold: float = Field(default=5.0, ge=1.0, description="Word-count ratio (earlier/last) that triggers repair")
-    # Agent IDs whose reports are NEVER repaired. Exploration agents
-    # (wanderer, explorer) naturally produce short, legitimately-concise
-    # reports — repairing them wastes LLM time and corrupts the report
-    # with hallucinated content. Override via REPORT_REPAIR_EXCLUDED_AGENTS
-    # env var (comma-separated) to add or remove IDs.
-    repair_excluded_agents: set[str] = Field(
-        default_factory=lambda: {"wanderer", "explorer"},
-        description="Agent IDs whose reports are never repaired (exploration agents naturally produce short reports)",
+    # Agent IDs whose reports are NEVER repaired (and never carry the (c)
+    # sanity marker). The default DERIVES from the shared constant
+    # ``daemon.constants.REPORT_REPAIR_EXCLUDED_AGENTS`` (NR-2 lift,
+    # C2-D2.15 LOCKED) — one source of truth; text-only-by-design agents
+    # (wanderer, explorer, watcher) belong there, documented at the
+    # constant. Override via the REPORT_REPAIR_EXCLUDED_AGENTS env var
+    # (comma-separated, REPLACES the set — add or remove IDs, e.g. drop
+    # ``watcher``). NR-2 fix note: the env name was previously dead —
+    # ``env_prefix`` + the field name resolved to
+    # ``REPORT_REPAIR_REPAIR_EXCLUDED_AGENTS`` (silently ignored), and
+    # ``set[str]`` env parsing was JSON-only (comma strings crashed).
+    # ``NoDecode`` + the ``_parse_repair_excluded_agents`` validator +
+    # ``validation_alias`` make the documented name work; empty string →
+    # empty set (explicit "no exclusions", mirroring
+    # ``reasoning_echo_disabled_models``).
+    repair_excluded_agents: Annotated[set[str], NoDecode] = Field(
+        default_factory=lambda: set(REPORT_REPAIR_EXCLUDED_AGENTS),
+        validation_alias=AliasChoices(
+            "REPORT_REPAIR_EXCLUDED_AGENTS", "repair_excluded_agents"
+        ),
+        description="Agent IDs whose reports are never repaired (text-only-by-design agents naturally produce short zero-tool reports)",
     )
+
+    @field_validator("repair_excluded_agents", mode="before")
+    @classmethod
+    def _parse_repair_excluded_agents(cls, value: Any) -> Any:
+        """Accept comma-separated strings (and JSON arrays) from env / YAML.
+
+        Delegates to ``_parse_csv_or_json_list`` for the shared parsing
+        logic; the ``NoDecode`` annotation prevents pydantic-settings from
+        auto-JSON-decoding env values, so we handle both forms here:
+          - ``"gamma,delta"`` → ``{"gamma", "delta"}``
+          - ``'["gamma"]'`` → ``{"gamma"}``
+          - ``{"gamma"}`` / ``["gamma"]`` → passthrough → set
+          - ``""`` or whitespace → empty set (explicit "no exclusions")
+
+        Env format example::
+
+            REPORT_REPAIR_EXCLUDED_AGENTS="wanderer,explorer"
+        """
+        if isinstance(value, (set, frozenset)):
+            return set(value)
+        parsed = _parse_csv_or_json_list(value)
+        if isinstance(parsed, list):
+            return set(parsed)
+        return parsed
+
     # W2: tighter default timeout (30s instead of 120s) — repair should be
     # fast; on timeout we fall back to combine. 120s is excessive given the
     # prompt is bounded to recent messages.
     timeout_seconds: int = Field(default=30, description="Timeout for the repair LLM call")
     # S2: validator — must be >=1 message.
     lookback_messages: int = Field(default=5, ge=1, description="Number of recent assistant messages to pass to LLM repair")
+
+
+class ReportIntegrityConfig(BaseSettings):
+    """Report-integrity gate configuration (wc-wake-report-integrity).
+
+    Hosts the (b) terminal-child-aware waiting guard's kill-switch
+    (``WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED`` — the
+    name is single-homed in ``daemon/constants.py``; the derived env
+    binding below MUST equal it, pinned by
+    ``tests/unit/services/test_b_kill_switch_registry.py``).
+
+    Flip semantics (decisions.md C2-D2.5-FLIP, leader-CONFIRMED
+    2026-08-30 — OPERATOR-OWNED, no auto-flip exists anywhere):
+
+    * **OFF (default, ship state)** — log-only mode: the stage-ii
+      ``[ReportIntegrityGuard]`` WARNING still fires at the
+      completion-stamp sites; NO notice is ever injected.
+    * **ON** — enforcement: when the same-tx evaluation finds a
+      declared-waiting violation at a parent-COMPLETED stamp, ONE
+      adjudication notice is injected to the parent via the durable
+      enqueue path (``system:report-integrity-guard``). It NEVER
+      blocks completion (C2-D2.6 fail-OPEN) and never touches the
+      stamp transaction.
+    * **Restart required** — the resolver reads + caches the env once
+      at boot; flipping mid-flight has no effect until restart.
+      Truthy: ``1``/``true``/``yes``/``on``; falsy:
+      ``0``/``false``/``no``/``off``; unset/blank/unknown → OFF
+      (blanking the env + restart is the revert path). Soak/flip
+      policy: ≤2-week stage-ii log soak, then the OPERATOR flips ON
+      on first deploy; withheld on false-fires; immediate flip on
+      any silent-death incident.
+
+    The reserved candidate-(a) kill-switch name (see
+    ``daemon/constants.py``, the ``WC_REPORT_INTEGRITY_A_*`` constant)
+    deliberately has NO field here — reserved-unused per
+    C2-D2.2/D2.3 LOCKED (and its literal must not appear in this
+    module — pinned by the B.S.8 registry test).
+    """
+
+    model_config = SettingsConfigDict(env_prefix="WC_REPORT_INTEGRITY_")
+
+    # Dual-read mirror of the ``LIMITS_GOVERNOR_RECURSION_GUARD_ENABLED``
+    # precedent (config.py:~484 ``LimitsConfig.governor_recursion_guard_enabled``):
+    # this Pydantic field is the declarative binding (env + optional YAML
+    # override surface) while the runtime gate
+    # (``daemon/services/report_integrity_guard.is_report_integrity_b_enforcement_active``)
+    # reads the env via the constants NAME and ANDs this field — an
+    # explicit YAML ``false`` vetoes an env flip (defense-in-depth);
+    # a YAML ``true`` alone never enables (the env flip is the
+    # documented operator path).
+    b_terminal_waiting_guard_enabled: bool = Field(
+        default=False,
+        description=(
+            "(b) terminal-child-aware waiting guard: OFF = log-only "
+            "(stage-ii [ReportIntegrityGuard] WARNING still fires); ON = "
+            "enforcement (adjudication notice injected to the parent at "
+            "the completion stamp, never blocks). Restart required to "
+            "flip. Operator-owned flip per C2-D2.5-FLIP."
+        ),
+    )
 
 
 class LanguageConfig(BaseSettings):
@@ -1548,6 +1647,7 @@ class Config(BaseSettings):
     skill_evolution: SkillEvolutionConfig = Field(default_factory=SkillEvolutionConfig)
     loop_breaker: LoopBreakerConfig = Field(default_factory=LoopBreakerConfig)
     report_repair: ReportRepairConfig = Field(default_factory=ReportRepairConfig)
+    report_integrity: ReportIntegrityConfig = Field(default_factory=ReportIntegrityConfig)
     language: LanguageConfig = Field(default_factory=LanguageConfig)
     vscode: VSCodeConfig = Field(default_factory=VSCodeConfig)
     blueprint: BlueprintConfig = Field(default_factory=BlueprintConfig)

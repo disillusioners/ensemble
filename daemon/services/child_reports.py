@@ -5,7 +5,7 @@ import json
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from sqlalchemy import exists, func, select, text, update as sa_update
 from sqlalchemy.exc import IntegrityError
@@ -25,7 +25,18 @@ from ..repositories.dependency_bus.models import DependencyWatcher, DependencyWa
 from ..repositories.report_injection.models import ReportInjection, ReportInjectionState
 from ..registry import get_registry
 from ..write_pause_guard import WriteGuardSession
-from ..constants import DEFERRED_REASON_IDEMPOTENCY_SKIP, DEFERRED_REASON_PENDING_MESSAGES
+from ..constants import (
+    DEFERRED_REASON_IDEMPOTENCY_SKIP,
+    DEFERRED_REASON_PENDING_MESSAGES,
+    REPORT_SANITY_MARKER,
+    SANITY_FLAG_VERSION,
+)
+from .report_integrity_metrics import record_junk_report
+from .report_integrity_guard import (
+    _clear_b_notice_if_clean,
+    enforce_declared_waiting_violations,
+    log_declared_waiting_violations,
+)
 from .context_messages import _resolve_tree_root_id
 from .lifecycle_hooks import LifecycleHookContext, dispatch_lifecycle_hooks
 from .llm_failover import wrap_langchain_failover
@@ -193,6 +204,16 @@ class _ChildCompletionDbResult(NamedTuple):
     # the ``waiting_children`` SSE for the parent after the commit.
     parent_waiting_children_sse: bool = False
     waiting_children_parent_agent_id: str | None = None
+    # B.S.1-iii (stage iii): the (b) declared-waiting violation report
+    # evaluated at the INLINE SAME-TX position (B.S.7 — one evaluation,
+    # never re-read post-commit), handed to the async caller so the
+    # enforcement action (adjudication notice, flag-gated, fail-OPEN)
+    # runs AFTER the stamp transaction committed. ``None`` unless the
+    # root-COMPLETED stamp actually proceeded (rowcount > 0) AND the
+    # same-tx evaluation found violations. The enforcement itself is
+    # dormant behind the kill-switch — with the flag OFF this field is
+    # dead weight (one object reference, zero notice work).
+    b_violation_report: Any = None
 
 
 class ChildReportsService:
@@ -966,11 +987,10 @@ Provide a concise summary:"""
         # cascade below this hook is only reached when the bus is
         # None — bus singleton missing is a hard error.
         #
-        # Calling context: this method is called from
-        # _process_child_completion_and_notify_parent, which is invoked
-        # by MessageJobHandler.process via TaskProcessor.run_task using
-        # MainLoopBridge.run_async — so we are on the main asyncio event
-        # loop. A direct await is safe here.
+        # Calling context: this method has NO production callers (only a
+        # zero-caller Manager wrapper); the live non-root parent-completion
+        # path is the bus callback → job_feedback_observer._finalize_job,
+        # which carries the (b) enforcement.
         #
         # Skip the hook when message_id is missing/empty: the bus keys
         # correlations on the child task id (looked up from
@@ -1132,9 +1152,49 @@ Provide a concise summary:"""
             if parent_pending == 0:
                 # No pending messages, parent is truly complete
                 # Publish lifecycle event to mark job as completed
+                #
+                # B.S.1-ii (stage ii, LOG ONLY) / B.S.1-iii (stage iii,
+                # flag-gated): (b) declared-waiting log at the
+                # parent-COMPLETED stamp. D2.8 (LOCKED): the bus count
+                # (is_parent_complete, above) and the own-queue count
+                # (parent_pending) are both zero here — the
+                # both-counts-zero precondition (B.S.7). Fail-OPEN:
+                # the helper never raises into the completion path.
+                # Stage iii: the SAME evaluation is captured; the
+                # enforcement action runs after the status write below.
+                _b_violation_report = log_declared_waiting_violations(
+                    session,
+                    parent.instance_id,
+                    context_tag="child_reports.update_parent_on_child_complete",
+                )
+                _clear_b_notice_if_clean(
+                    parent.instance_id, _b_violation_report
+                )
                 parent.status = InstanceStatus.COMPLETED.value
                 parent.updated_at = datetime.now(timezone.utc).isoformat()
                 logger.info(f"Parent {parent.instance_id[:8]}... completed after all children done")
+
+                # B.S.1-iii: post-stamp enforcement (fail-OPEN, D2.6 —
+                # the stamp above ALWAYS proceeds). The notice is
+                # enqueued only when the kill-switch is ON. Note: this
+                # site's transaction commit belongs to the caller; the
+                # notice is advisory and the enqueue opens its own
+                # transaction, so an (accepted, documented) residual is
+                # a notice for a stamp whose enclosing transaction the
+                # caller later rolls back — bounded to this site (the
+                # root/observer sites enforce strictly post-commit).
+                # D2.reconciler-bridge: the notice turn's work_id
+                # reconciles like any turn (see the root site's dispatch
+                # seam comment + the reconciler test module).
+                if _b_violation_report is not None:
+                    await enforce_declared_waiting_violations(
+                        _b_violation_report,
+                        manager=self._manager,
+                        parent_instance_id=parent.instance_id,
+                        context_tag=(
+                            "child_reports.update_parent_on_child_complete"
+                        ),
+                    )
 
                 # Capture parent_id for event publishing (instance will be detached after session closes)
                 completed_parent_id = parent.instance_id
@@ -1246,8 +1306,9 @@ Provide a concise summary:"""
             agent_id: The agent ID (e.g., "developer", "leader"). Also
                 drives the exclusion check in the raw call: when
                 ``agent_id`` is in ``report_repair.repair_excluded_agents``
-                (default: ``{"wanderer", "explorer"}``), repair is
-                skipped.
+                (default derives from
+                ``daemon.constants.REPORT_REPAIR_EXCLUDED_AGENTS``), repair
+                is skipped and the (c) sanity marker is suppressed.
             skip_repair: When True, propagate to the raw call so the
                 truncation check + LLM repair + combine fallback are
                 all skipped. Used by interim paths (e.g.,
@@ -1504,12 +1565,29 @@ Provide a concise summary:"""
                 trigger repair on the same message.
             agent_id: Optional agent ID for the exclusion check. When
                 the agent_id is in ``report_repair.repair_excluded_agents``
-                (default: ``{"wanderer", "explorer"}``), repair is
-                skipped — exploration agents naturally produce short,
-                legitimately-concise reports and repairing them wastes
-                LLM time and corrupts the report with hallucinated
-                content. ``None`` means "unknown agent" — repair runs
-                (safe default).
+                (default derives from
+                ``daemon.constants.REPORT_REPAIR_EXCLUDED_AGENTS``), repair
+                is skipped and the (c) sanity marker is suppressed —
+                text-only-by-design agents (wanderer, explorer, watcher)
+                naturally produce short, legitimately-concise reports and
+                repairing them wastes LLM time and corrupts the report
+                with hallucinated content. ``None`` means "unknown agent"
+                — repair runs (safe default).
+
+                Wave-1 (wc-wake-report-integrity) behavior added here:
+                  * NR-3 — when the returned message has zero tool-call
+                    evidence in a short history, the
+                    ``report_integrity_junk_report_total`` counter
+                    increments BEFORE the ``skip_repair`` and
+                    ``report_repair.enabled`` short-circuits so ALL
+                    terminal completions count (observability only).
+                  * (c) — on the TERMINAL path (``skip_repair=False``),
+                    the same low-evidence shape appends the
+                    DESCRIPTIVE-ONLY ``REPORT_SANITY_MARKER`` to the
+                    returned content (suppressed for excluded agents or
+                    when ``SANITY_FLAG_VERSION != 1``). Interim callers
+                    never carry the marker, and the terminal path marks
+                    exactly once.
 
         Returns:
             The raw assistant message content, or None if not found.
@@ -1524,10 +1602,19 @@ Provide a concise summary:"""
         else:
             messages = []
 
+        # Collect ALL assistant messages (unfiltered) for the tool-evidence
+        # half of the low-evidence predicate (W1 council fix, 2026-08-30).
+        # ``content=""`` ASSISTANT messages carry ``tool_calls`` — they are
+        # the canonical pure tool-call AIMessage shape — and MUST count as
+        # tool evidence even though the width filter below drops them.
+        # Filter ordering was the W1 defect: the tool-evidence half used to
+        # inherit this filter and lost the work signal.
+        all_assistant_msgs = [m for m in messages if m.get("role") == "assistant"]
+
         # Collect real assistant messages with content (chronological)
         assistant_msgs = [
-            m for m in messages
-            if m.get("role") == "assistant" and (m.get("content", "") or "").strip()
+            m for m in all_assistant_msgs
+            if (m.get("content", "") or "").strip()
         ]
         if not assistant_msgs:
             return None
@@ -1542,29 +1629,65 @@ Provide a concise summary:"""
         # — both were running repair, wasting ~19s of LLM time and
         # discarding both outputs. Interim callers MUST pass
         # ``skip_repair=True`` so repair runs only on the terminal path.
+
+        # --- Report-integrity instruments (NR-3 counter + (c) marker) ---
+        # Shared low-evidence predicate, computed ONCE (C2-D2.18 LOCKED:
+        # work signal = last assistant message's ``tool_calls`` empty;
+        # width = exactly the ``_is_likely_truncated_report`` short-circuit
+        # input per C2-NR-4 CONFIRMED). The exclusion read stays on the
+        # config (its default derives from the shared NR-2 constant, so
+        # env overrides still apply — one source of truth = the constant).
+        report_repair_cfg = self._config.report_repair
+        excluded = report_repair_cfg.repair_excluded_agents
+        agent_excluded = agent_id is not None and agent_id in excluded
+        low_evidence = self._is_zero_tool_short_history(
+            last, assistant_msgs, all_assistant_msgs
+        )
+
+        # NR-3 junk-rate counter — placed BEFORE the ``skip_repair`` and
+        # ``report_repair.enabled`` short-circuits (§6 adjustment,
+        # 2026-08-30) so ALL terminal completions count, not only
+        # repair-eligible ones. Observability only — never changes content.
+        if low_evidence:
+            record_junk_report(instance_id=instance_id, agent_id=agent_id)
+
+        # (c) Passive report-sanity marker (C2-D2.9 LOCKED, DESCRIPTIVE-ONLY).
+        # TERMINAL path only: interim ``skip_repair=True`` callers (the
+        # in-progress notification path) must NOT carry it, and the
+        # terminal path marks exactly once via this single suffix.
+        # ``SANITY_FLAG_VERSION`` is the rollback seam — any value other
+        # than 1 suppresses the marker while the code stays live.
+        sanity_suffix = ""
+        if (
+            low_evidence
+            and not skip_repair
+            and not agent_excluded
+            and SANITY_FLAG_VERSION == 1
+        ):
+            sanity_suffix = f"\n\n{REPORT_SANITY_MARKER}"
+
         if skip_repair:
             return last_content
 
         # --- Repair disable short-circuit ---
         # S4: Config has ``default_factory`` for ``report_repair`` — always
         # present, no need for ``getattr`` defensive guard.
-        report_repair_cfg = self._config.report_repair
         if not report_repair_cfg.enabled:
-            return last_content  # happy path, skip repair entirely
+            return last_content + sanity_suffix  # happy path, skip repair entirely
 
         # --- Agent exclusion check ---
         # 2026-08-11: exploration agents (wanderer, explorer) produce
         # short, intentionally-concise reports. Repairing them wastes
         # LLM time and can corrupt the report with hallucinated content.
-        # The exclusion set is configured via REPORT_REPAIR_EXCLUDED_AGENTS;
-        # default is {"wanderer", "explorer"}.
-        excluded = report_repair_cfg.repair_excluded_agents
-        if agent_id is not None and agent_id in excluded:
+        # The exclusion set is configured via REPORT_REPAIR_EXCLUDED_AGENTS
+        # (default derives from ``daemon.constants.REPORT_REPAIR_EXCLUDED_AGENTS``
+        # — NR-2 lift; watcher included since 2026-08-30).
+        if agent_excluded:
             logger.info(
                 f"[ReportRepairer] Skipping repair for instance {instance_id[:8]}... "
                 f"agent_id={agent_id!r} (in repair_excluded_agents)"
             )
-            return last_content
+            return last_content + sanity_suffix
 
         # --- Truncation check ---
         # ``lookback_messages`` controls the slice passed to both the
@@ -1575,7 +1698,7 @@ Provide a concise summary:"""
         lookback = report_repair_cfg.lookback_messages
         recent = assistant_msgs[-lookback:] if len(assistant_msgs) >= lookback else assistant_msgs
         if not self._is_likely_truncated_report(recent, ratio=report_repair_cfg.size_ratio_threshold):
-            return last_content  # happy path — sizes are similar
+            return last_content + sanity_suffix  # happy path — sizes are similar
 
         logger.info(
             f"[ReportRepairer] Unhappy path triggered for instance {instance_id[:8]}... "
@@ -1588,12 +1711,64 @@ Provide a concise summary:"""
         )
         if repaired and repaired.strip():
             logger.info(f"[ReportRepairer] LLM repair succeeded for instance {instance_id[:8]}...")
-            return repaired.strip()
+            return repaired.strip() + sanity_suffix
 
         # --- Fallback: combine messages ---
         logger.info(f"[ReportRepairer] Using combine-fallback for instance {instance_id[:8]}...")
         combined = self._combine_messages(recent)
-        return combined if combined.strip() else last_content
+        return (combined if combined.strip() else last_content) + sanity_suffix
+
+    @staticmethod
+    def _is_zero_tool_short_history(
+        last_msg: dict,
+        assistant_msgs: list[dict],
+        all_assistant_msgs: list[dict] | None = None,
+    ) -> bool:
+        """True when the report shows the ZERO-EVIDENCE junk shape.
+
+        Shape (C2-D2.18 LOCKED — the work signal): the LAST assistant
+        message has no tool calls, AND the content-bearing assistant
+        history is short (fewer than 2 messages) — exactly the input where
+        ``_is_likely_truncated_report`` short-circuits
+        (``len(messages) < 2 → False``) per C2-NR-4 CONFIRMED. The NR-4
+        pin test
+        (``tests/unit/services/test_child_reports.py::
+        TestMarkerPredicatePinnedToTruncationShortCircuit``) enforces that
+        boundary — widening the width would mark legitimate multi-message
+        reports and duplicate the (c) signal.
+
+        W1 amendment (council, 2026-08-30): the tool-evidence half now
+        scans UNFILTERED assistant messages (``all_assistant_msgs``) for
+        any ``tool_calls``. ``content=""`` ASSISTANT messages carry
+        ``tool_calls`` (canonical pure tool-call AIMessage shape) and must
+        count as tool evidence even though the width filter drops them.
+        Without this fix a legitimate minimal-tool history
+        ``[task] → [AIMessage(tool_calls=[…], content="")] → [final text]``
+        was marked ``low_evidence=True`` ⇒ marker falsely fired, NR-3
+        counter inflated, (d) parents spuriously re-verified.
+
+        The WIDTH half (``len(assistant_msgs) < 2``, content-bearing only)
+        is unchanged — C2-NR-4 remains LOAD-BEARING for the boundary.
+
+        ``tool_calls`` absent / ``None`` / ``[]`` all count as zero
+        evidence (``serialize_message`` emits ``[]`` for tool-less AIMessages).
+
+        Consumers: the NR-3 junk counter and the (c) report-sanity marker
+        in ``_get_last_assistant_message_raw``. Observability only.
+        """
+        # Back-compat: callers that pre-date the W1 amendment pass only
+        # ``(last_msg, assistant_msgs)``. Fall back to the width-only scan
+        # so legacy behavior is preserved where ``all_assistant_msgs`` is
+        # unavailable.
+        if all_assistant_msgs is None:
+            all_assistant_msgs = assistant_msgs
+        # W1: tool-evidence half scans UNFILTERED assistant messages —
+        # any assistant message with tool calls ⇒ tool evidence present.
+        if any(m.get("tool_calls") for m in all_assistant_msgs):
+            return False
+        # Width half: content-bearing assistant count < 2 — unchanged
+        # per C2-NR-4 (TestMarkerPredicatePinnedToTruncationShortCircuit).
+        return len(assistant_msgs) < 2
 
     async def _process_child_completion_and_notify_parent(self, instance_id: str, completed_message_id: str) -> None:
         """Check if child instance is done and send completion report to parent.
@@ -2114,6 +2289,12 @@ Provide a concise summary:"""
                 # completion that should proceed.
                 from .dependency_bus import get_dependency_bus as _get_bus
                 if _get_bus() is not None:
+                    # D2.8 (LOCKED) defense-in-depth gate ordering:
+                    # bus (fail-CLOSED, same-tx — THIS gate) > tasks
+                    # (fail-OPEN, checked above) > (b) declared-waiting
+                    # (fail-OPEN, LAST — B.S.6/B.S.7). The (b) LOG attach
+                    # at the COMPLETED stamp below runs ONLY when this
+                    # gate and the tasks gate both reported zero.
                     _bus_pending_stmt = (
                         select(func.count())
                         .select_from(DependencyWatcher)
@@ -2341,6 +2522,25 @@ Provide a concise summary:"""
                         parent_id=None,
                     )
 
+                # B.S.1-ii (stage ii, LOG ONLY) / B.S.1-iii (stage iii,
+                # flag-gated): (b) declared-waiting predicate-attached
+                # log at the root-COMPLETED stamp. D2.8 (LOCKED)
+                # ordering: bus (fail-CLOSED, same-tx) > tasks
+                # (fail-OPEN) > (b) (fail-OPEN, LAST) — this line
+                # is reached ONLY when every prior gate above reported
+                # zero (both-counts-zero bound, B.S.6/B.S.7). Fail-OPEN:
+                # the helper never raises into the completion path.
+                # Stage iii: the SAME evaluation (never re-read) is
+                # captured and handed to the post-commit enforcement
+                # via the result payload — the notice itself is
+                # enqueued ONLY after the stamp below commits, and
+                # ONLY when the kill-switch is ON.
+                _b_violation_report = log_declared_waiting_violations(
+                    session,
+                    instance_id,
+                    context_tag="child_reports.root_completion",
+                )
+                _clear_b_notice_if_clean(instance_id, _b_violation_report)
                 # Defense-in-depth atomic guard: use SQLAlchemy Core
                 # ``UPDATE ... WHERE status NOT IN (...)`` so a pause
                 # cascade that commits PAUSED between the ``session.get``
@@ -2391,6 +2591,11 @@ Provide a concise summary:"""
                     instance_id=instance_id,
                     agent_id=instance.agent_id,
                     parent_id=None,
+                    # B.S.1-iii: handed off ONLY when the stamp actually
+                    # proceeded (rowcount > 0 — the idempotency-skip path
+                    # above returns without it), so the notice fires
+                    # exactly once per completion event.
+                    b_violation_report=_b_violation_report,
                 )
             
             # Idempotency checks — inlined from _should_send_completion_report
@@ -3217,6 +3422,27 @@ Provide a concise summary:"""
 
                     if parent_pending == 0:
                         # No pending messages, parent is truly complete
+                        #
+                        # NOTE: dead-code fallback — bus=None raises A8 (RuntimeError) above before reaching here; the log-only attach below is symmetry with the stage-ii log position and does not fire in production.
+                        # Non-root (b) enforcement lives at the observer's
+                        # ``_finalize_job`` (post-finalize-commit), NOT in
+                        # the zero-caller ``_update_parent_on_child_complete``.
+                        # B.S.1-ii (stage ii, LOG ONLY): (b) declared-waiting
+                        # log at the inlined parent-COMPLETED stamp.
+                        # D2.8 (LOCKED): bus count (is_parent_complete) and
+                        # own-queue count (parent_pending) are both zero here
+                        # — both-counts-zero precondition (B.S.7). Fail-OPEN.
+                        # B.S.1-iii (stage iii): enforcement is deliberately
+                        # NOT attached here (task ruling — symmetry-only, do
+                        # not extend the dead-code twin). If this branch ever
+                        # becomes live, port the enforcement call.
+                        log_declared_waiting_violations(
+                            session,
+                            parent.instance_id,
+                            context_tag=(
+                                "child_reports.inline_parent_cascade"
+                            ),
+                        )
                         parent.status = InstanceStatus.COMPLETED.value
                         parent.updated_at = datetime.now(timezone.utc).isoformat()
                         logger.info(f"Parent {parent.instance_id[:8]}... completed after all children done")
@@ -3494,6 +3720,35 @@ Provide a concise summary:"""
                         f"Failed to publish lifecycle event for root {instance_id[:8]}...: {e}"
                     )
             self._trigger_title_generation(instance_id, completed_message_id)
+
+            # ─── B.S.1-iii: (b) enforcement (flag-gated, fail-OPEN) ───
+            # The stamp transaction has ALREADY committed (the sync
+            # helper returned outcome="root_completed"). If the inline
+            # same-tx evaluation (B.S.7 position, unchanged) found
+            # violations, inject ONE adjudication notice to the parent.
+            # D2.6 LOCKED: notice, NEVER block — every failure inside
+            # the enforcement is absorbed (WARNING + continue). Dormant
+            # entirely when the kill-switch is OFF (ship default).
+            #
+            # D2.reconciler-bridge (B.S.4): THIS is the notice-turn
+            # seam. The notice below travels the durable enqueue path
+            # (``manager.enqueue_message`` → MessageQueue + Task rows),
+            # which re-opens the parent's turn; that new turn's
+            # work_id threads through ``reconcile_turn_mirror(work_id)``
+            # exactly like any other turn (authoritative mirror
+            # reconcile — see the reconcile_turn_mirror call sites in
+            # the message pipeline / observer finalize paths). Pinned
+            # by tests/repositories/test_turn_reconciler.py::
+            # TestReportIntegrityNoticeTurnReconciles (seam-level: the
+            # (b)-notice turn's work_id reconciles the mirror
+            # tables like any PROCESS_MESSAGE turn).
+            if result.b_violation_report is not None:
+                await enforce_declared_waiting_violations(
+                    result.b_violation_report,
+                    manager=self._manager,
+                    parent_instance_id=result.instance_id,
+                    context_tag="child_reports.root_completion",
+                )
             return
 
         # Idempotency skip: nothing to do (terminal COMPLETED/ERROR — delivery has happened or terminal-failed; no obligation to recover).

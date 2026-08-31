@@ -213,9 +213,20 @@ DEFERRED_REASON_RESUME_ROUTER: str = "RESUME_ROUTER"
 #   ``grep -n "_INJECTION_ELIGIBLE_STATUSES\s*=\s*{" daemon/`` must
 #   return exactly ONE hit — this module. The router's local frozenset
 #   and ``job_inject``'s inline tuple are GONE.
+#
+# wc-wake-report-integrity (T2, 2026-08-30): ``\"waiting_children\"`` was
+# REMOVED from this set. A parked ``WAITING_CHILDREN`` parent has no
+# live turn to absorb a mid-turn injection — only ``enqueue_message``
+# (durable wake, first-class turn) can wake it. The legacy FIFO
+# injection route is preserved behind the ``ENSEMBLE_WC_WAKE_ENQUEUE``
+# kill-switch (C1-Q2 RESOLVED 2026-08-30; see
+# ``daemon/services/instance_messaging.py::_resolve_wc_wake_enqueue_enabled``)
+# via an EXPLICIT ``status == \"waiting_children\" and not <flag>``
+# branch at each of the three call sites — the constant stays
+# config-free per single-home convention. The transient flag-off
+# window accepts the legacy semantics as the documented revert path.
 INJECTION_ELIGIBLE_STATUSES: frozenset[str] = frozenset({
     "running",
-    "waiting_children",
 })
 
 # Terminal instance statuses — companion to ``INJECTION_ELIGIBLE_STATUSES``
@@ -496,3 +507,115 @@ def is_reserved_source(source: str | None) -> bool:
 #     ``tests/unit/routers/test_source_reservation.py::
 #     TestReservedSourcePrefixesConstant::
 #     test_helper_is_deliberately_case_sensitive``.
+
+
+# ── Report Integrity (wc-wake-report-integrity Wave 1) ────────────────────────
+#
+# S3 scoping note (council follow-up, 2026-08-30): the Wave-1
+# observability instruments below — ``REPORT_SANITY_MARKER`` (the (c)
+# passive marker), ``REPORT_INTEGRITY_JUNK_REPORT_TOTAL`` (the NR-3 junk
+# counter), and the marker-append gate ``SANITY_FLAG_VERSION`` — are
+# ALWAYS-ON observability. Their rollback seam is ``SANITY_FLAG_VERSION``
+# alone; they are NOT gated by the Wave-2 B-guard kill-switch
+# (``WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED``, defined in
+# the next section). The B-guard flag controls ONLY (b) declared-waiting
+# ENFORCEMENT (notice injection, B.S.1-iii / B.S.2). Operators reading
+# the env table should not assume the B-guard flag suppresses (c)
+# emission or NR-3 counting — it does not. Pinned by the
+# TestMarkerCitationGateS1 class + the registry-completeness tests.
+
+# (c) Passive report-sanity marker (C2-D2.9 LOCKED, DESCRIPTIVE-ONLY).
+# Appended to TERMINAL completion reports whose source history shows zero
+# tool-call evidence in a short history (see
+# ``ChildReportsService._is_zero_tool_short_history``). Byte-for-byte
+# pinned by ``tests/unit/services/test_child_reports.py::
+# TestSanityConstantsRegistry`` — the directive half ("treat as interim,
+# not completion") deliberately lives in (d) prompt guidance, NEVER here.
+REPORT_SANITY_MARKER: str = "[REPORT SANITY: zero tool-call evidence in source history]"
+
+# Separately-versioned rollback seam for the (c) marker (ruling S8; mirror
+# ``LIMITS_GOVERNOR_RECURSION_GUARD_ENABLED`` precedent). The marker appends
+# only while this equals 1: bumping to 0 (or any future value, e.g. 2)
+# SUPPRESSES the marker while leaving the code paths live — no revert
+# needed if the marker ever breaks downstream consumers. Bump rationale
+# belongs in CHANGELOG.md next to the code change.
+SANITY_FLAG_VERSION: int = 1
+
+# NR-3 junk-rate metric name (Prometheus-style). Counter is observability
+# only — it never changes report content. Increment site:
+# ``ChildReportsService._get_last_assistant_message_raw`` (BEFORE the
+# skip_repair and report_repair.enabled short-circuits so ALL terminal
+# completions count); sink seam: ``daemon/services/report_integrity_metrics``.
+REPORT_INTEGRITY_JUNK_REPORT_TOTAL: str = "report_integrity_junk_report_total"
+
+# NR-2 (C2-D2.15 LOCKED): the ONE source of truth for agent IDs whose
+# completion reports are exempt from report repair AND from the (c) sanity
+# marker. ``ReportRepairConfig.repair_excluded_agents`` derives its default
+# from this frozenset; the documented env override
+# (``REPORT_REPAIR_EXCLUDED_AGENTS``, comma-separated — REPLACES the set)
+# remains the per-deployment escape hatch.
+#
+# Members are text-only-by-design agents whose short, zero-tool-call
+# reports are legitimate work products, NOT silent-death evidence:
+#   * ``wanderer`` / ``explorer`` — exploration agents; naturally concise
+#     final reports (original 2026-08-11 spec).
+#   * ``watcher`` — included at NR-2 landing (evidence-based call):
+#     ``agents/watcher/meta.json`` has ``tools.allow: []`` — it STRUCTURALLY
+#     cannot emit tool_calls, so the zero-evidence predicate would match
+#     100% of its reports; its verdict output is text-only by design.
+#     (Today no daemon code path spawns watcher instances — the watchover
+#     flow invokes it as an inline single-call LLM evaluator — so this
+#     entry is defensive; it becomes load-bearing the moment a watcher
+#     instance rides the report path.) Third text-only-by-design member ⇒
+#     D2.15/OQ-1 re-open trigger (generic per-agent opt-out) is now MET —
+#     flagged to the component owner, NOT built here.
+REPORT_REPAIR_EXCLUDED_AGENTS: frozenset[str] = frozenset(
+    {"wanderer", "explorer", "watcher"}
+)
+
+
+# ── wc-wake-report-integrity (Wave 2 — B.S.8 PARTIAL) ────────────────────────
+#
+# Kill-switch registry entries for the Wave-2 report-integrity gates.
+# Both env names are RESERVED at this commit (B.S.1-i PREDICATE-FUNCTION-ONLY).
+# The env bindings (config.py field + ``_resolve_*_enabled()`` helper,
+# mirroring the ``LIMITS_GOVERNOR_RECURSION_GUARD_ENABLED`` precedent at
+# ``daemon/repositories/instance/repository.py:65`` and the
+# ``ENSEMBLE_WC_WAKE_ENQUEUE`` precedent for C1-Q2) land at stage iii
+# (B.S.1-iii / B.S.8 registry test) — that commit also asserts the
+# registry test for BOTH env names, including the reserved-unused (a).
+#
+# Decisions: C2-D2.5 (b) ships in this component; C2-D2.5-FLIP
+# (leader-confirmed 2026-08-30) commits to the enforcement flip
+# after ≤2-week soak or immediately on any silent-death incident;
+# C2-D2.2 ((a) does NOT land initially; WITHDRAWN — subsumed by (c)).
+#
+# ────────────────────────────────────────────────────────────────────────────
+
+# (b) Terminal-child-aware waiting guard (decisions.md C2-D2.5 LOCKED,
+# C2-D2.6 LOCKED, C2-D2.7 LOCKED, C2-D2.8 LOCKED, C2-D2.18 LOCKED).
+# Wave-2 stage-iii (B.S.1-iii) wires the config.py env binding; the
+# default-0 semantics here match the ``LIMITS_GOVERNOR_RECURSION_GUARD_ENABLED``
+# precedent (kill-switch default OFF — the revert path; pre-committed
+# enforcement flip per D2.5-FLIP).
+#
+# S3 scoping note (council follow-up, 2026-08-30): this flag gates ONLY
+# (b) ENFORCEMENT (notice injection via B.S.1-iii / B.S.2). It does NOT
+# gate (c) marker emission, the NR-3 junk counter, or any other Wave-1
+# observability instrument — their rollback seam is ``SANITY_FLAG_VERSION``
+# (defined above), not this env. Operators flipping this flag should
+# expect zero change in (c) marker / NR-3 counter behavior.
+WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED: str = (
+    "WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED"
+)
+
+# (a) Premature-first-turn guard — RESERVED-UNUSED (decisions.md C2-D2.2
+# LOCKED — (a) does NOT land initially; (a2) WITHDRAWN — subsumed by (c);
+# C2-D2.3 LOCKED — default OFF behind kill-switch; C2-D2.4 LOCKED —
+# first-turn only if ever activated). The env name is reserved so
+# future escalation has a single canonical home and the B.S.8 registry
+# test at stage iii covers BOTH names. NO config binding lands at this
+# commit — the name is a forward declaration only.
+WC_REPORT_INTEGRITY_A_PREMATURE_TURN_GUARD_ENABLED: str = (
+    "WC_REPORT_INTEGRITY_A_PREMATURE_TURN_GUARD_ENABLED"
+)

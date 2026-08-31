@@ -189,7 +189,13 @@ Send the **same** composed request to every spawned councilor. Track every dispa
 
 ```raw
 For each councilor in manifest (status = SPAWNED):
-  1. composed_message = <read_only_directive> + "\n\n" + <the request>
+  1. composed_message = <read_only_directive> + "\n\n" + <the request> + "\n\n" + <report_discipline_line>
+
+     # <report_discipline_line> (append to EVERY councilor dispatch, initial and refinement):
+     # "Before ending any turn: begin work with a tool call, deliver your report, or ask —
+     #  a turn that ends on future-intent text with zero tool calls is treated as a junk report.
+     #  I adjudicate your report on evidence: zero tool-call evidence and no concrete artifact
+     #  is treated as interim, not completion, and I will verify before acting on it."
   2. Dispatch (skill-aware):
      - If `councilor_skill` was set in Step 0 (convening came through
        `convene_council_with_skill`):

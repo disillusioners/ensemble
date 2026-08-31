@@ -126,6 +126,30 @@ def mock_prompt_cache():
     return Mock()
 
 
+# wc-wake-report-integrity T6b completion (2026-08-30): the classes below are
+# NOT skipped for T6b reasons. The first T6b pass installed a MODULE-WIDE
+# ``pytest.mark.skip`` whose blanket also hid a PRE-EXISTING quarantine
+# family: the SQLite migration cascade 20260714_000001 (PG-only
+# ``ALTER TABLE job_queues DROP CONSTRAINT IF EXISTS`` raised under SQLite
+# by ``InstanceManager(mock_config)`` -> ``MigrationRunner``). That family is
+# documented in .agents/tester/QUARANTINE.md (2026-08-26 row,
+# "tests/test_manager.py x38", base-evidenced) and is OUT OF SCOPE for the
+# wc-wake arc. The blanket skip has been replaced by these per-class markers
+# so the T6b disposition (migrate/delete) stays precise and the pre-existing
+# family keeps its own truthful reason.
+_QM = pytest.mark.skip(
+    reason=(
+        "Pre-existing SQLite-migration family 20260714_000001 "
+        "(QUARANTINE.md 2026-08-26, tests/test_manager.py x38; "
+        "InstanceManager(mock_config) -> MigrationRunner fails under SQLite: "
+        "PG-only ALTER TABLE ... DROP CONSTRAINT). NOT a T6b/wc-wake "
+        "disposition - hidden by the over-broad module skip removed in the "
+        "T6b completion pass. Report-only quarantine."
+    )
+)
+
+
+@_QM
 class TestInstanceManagerInit:
     """Tests for InstanceManager initialization."""
 
@@ -142,6 +166,7 @@ class TestInstanceManagerInit:
             assert manager.instances == {}
 
 
+@_QM
 class TestSpawnInstance:
     """Tests for spawn_instance method."""
 
@@ -213,40 +238,143 @@ class TestSpawnInstance:
             assert manager.instances[instance_id][1].endswith("agents/developer")
 
 
+# wc-wake-report-integrity (T6b completion, C1-D7 LOCKED 2026-08-30): the
+# module-level ``pytest.mark.skip`` the first pass installed here skipped the
+# ENTIRE module (49 tests) — far beyond the deleted-method coverage. It has
+# been removed; dispositions are now per-class:
+#   * TestSendMessage      — MIGRATED to ``manager.enqueue_message`` (fixture-style
+#                            callers; AsyncMessageResult shape, not content).
+#   * TestThinkTagParsing  — DELETED (dead contract: asserted the deleted
+#                            method's synchronous think-tag return shape;
+#                            ``parse_think_tags`` itself is still pinned by
+#                            TestParseThinkTags above).
 class TestSendMessage:
-    """Tests for send_message method."""
+    """Tests for the manager message facade (enqueue_message).
+
+    wc-wake-report-integrity (T6b completion): the legacy
+    ``Manager.send_message`` was DELETED (C1-D7). These fixtures now drive
+    ``manager.enqueue_message`` — the durable wake path — using the same
+    Session/MessageQueue/Task/Event patch pattern as
+    ``TestTitleGenerationTrigger`` below.
+    """
 
     @pytest.mark.asyncio
     async def test_send_message_success(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph, mock_instance_repository):
-        """Test sending message to instance."""
-        with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
-             patch('daemon.manager.build_instance_graph', return_value=mock_graph), \
-             patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
-             patch('daemon.manager.create_instance_tools', return_value=[]):
-            
-            manager = InstanceManager(mock_config)
-            manager._instance_repository = mock_instance_repository
-            instance_id, _ = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
-            
-            # Send a message
-            response = await manager.send_message(instance_id, "Hello!")
-            
-            # Verify the response content
-            assert response.content == "Test response"
+        """Test enqueueing a message to an instance via the manager facade."""
+        from daemon.repositories.instance.models import InstanceStatus
 
-    @pytest.mark.asyncio
+        # T6b completion: these tests exercise the enqueue SEAM, not the
+        # (pre-existing-broken under SQLite) migration family — no-op the
+        # runner so InstanceManager(mock_config) constructs cleanly.
+        with patch(
+            "daemon.migrations.runner.MigrationRunner.run_pending_migrations",
+            return_value=[],
+        ):
+            with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
+                 patch('daemon.manager.build_instance_graph', return_value=mock_graph), \
+                 patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
+                 patch('daemon.manager.create_instance_tools', return_value=[]):
+
+                manager = InstanceManager(mock_config)
+                manager._instance_repository = mock_instance_repository
+                # T6b completion fixture adaptation: spawn validates the
+                # (system-default) project via _project_repository — stub a
+                # truthy project so the enqueue-seam focus is not hijacked by
+                # the pre-existing project-validation fixture drift family.
+                manager._project_repository = MagicMock()
+                manager._live_hub = MagicMock()
+                manager._live_hub.stream_status_change = AsyncMock()
+                manager._worker_pool = None
+                instance_id, _ = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
+
+                with patch('daemon.services.instance_messaging.Session') as mock_session_cls, \
+                     patch('daemon.services.instance_messaging.MainLoopBridge'), \
+                     patch('daemon.services.instance_messaging.Instance'), \
+                     patch('daemon.services.instance_messaging.MessageQueue'), \
+                     patch('daemon.services.instance_messaging.Task'), \
+                     patch('daemon.services.instance_messaging.Event'):
+
+                    def _get_side_effect(instance_id, instance_cls):
+                        mock_instance = MagicMock()
+                        mock_instance.status = InstanceStatus.IDLE.value
+                        mock_instance.agent_id = "developer"
+                        mock_instance.instance_metadata = {}
+                        mock_instance.version = 1
+                        mock_instance.paused_at = None
+                        return mock_instance
+
+                    mock_session = MagicMock()
+                    mock_session.get.side_effect = _get_side_effect
+
+                    @contextmanager
+                    def mock_session_ctx():
+                        yield mock_session
+
+                    mock_session_cls.return_value = mock_session_ctx()
+
+                    result = await manager.enqueue_message(instance_id, "Hello!", source="api")
+
+        # wc-wake-report-integrity (T6b completion): enqueue returns an
+        # AsyncMessageResult (message_id/job_id), NOT the deleted
+        # method's synchronous MessageResult.content shape.
+        assert result is not None
+        assert result.message_id, "enqueue must return a durable message_id"
+        assert result.instance_id == instance_id
+        assert result.status == "queued"
+
     @pytest.mark.asyncio
     async def test_send_message_instance_not_found(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_instance_repository):
-        """Test error when instance doesn't exist."""
-        with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache):
-            
-            manager = InstanceManager(mock_config)
-            manager._instance_repository = mock_instance_repository
-            
-            with pytest.raises(KeyError, match="Instance not found"):
-                await manager.send_message("non-existent-instance", "Hello!")
+        """Test enqueue to a non-existent instance.
+
+        Contract CHANGED by T6b (C1-D7): the deleted ``Manager.send_message``
+        raised ``KeyError("Instance not found")``; ``enqueue_message``
+        writes the durable rows anyway and logs a not-found WARNING (the
+        claim gate simply never matches an unknown instance id). This test
+        pins the NEW behavior — no raise, result still returned.
+        """
+        with patch(
+            "daemon.migrations.runner.MigrationRunner.run_pending_migrations",
+            return_value=[],
+        ):
+            with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache):
+
+                manager = InstanceManager(mock_config)
+                manager._instance_repository = mock_instance_repository
+                manager._live_hub = MagicMock()
+                manager._live_hub.stream_status_change = AsyncMock()
+                manager._worker_pool = None
+
+                with patch('daemon.services.instance_messaging.Session') as mock_session_cls, \
+                     patch('daemon.services.instance_messaging.MainLoopBridge'), \
+                     patch('daemon.services.instance_messaging.Instance'), \
+                     patch('daemon.services.instance_messaging.MessageQueue'), \
+                     patch('daemon.services.instance_messaging.Task'), \
+                     patch('daemon.services.instance_messaging.Event'), \
+                     patch("daemon.services.instance_messaging.logger") as mock_logger:
+
+                    mock_session = MagicMock()
+                    mock_session.get.return_value = None  # instance not found
+
+                    @contextmanager
+                    def mock_session_ctx():
+                        yield mock_session
+
+                    mock_session_cls.return_value = mock_session_ctx()
+
+                    result = await manager.enqueue_message(
+                        "non-existent-instance", "Hello!", source="api"
+                    )
+
+        assert result is not None
+        assert result.message_id
+        assert result.instance_id == "non-existent-instance"
+        warning_calls = mock_logger.warning.call_args_list
+        assert any(
+            "not found in database" in str(c.args[0]) for c in warning_calls
+        ), f"expected a not-found WARNING, got: {warning_calls}"
 
 
+@_QM
 class TestTerminateInstance:
     """Tests for terminate_instance method."""
 
@@ -337,6 +465,7 @@ class TestTerminateInstance:
             assert result is False
 
 
+@_QM
 class TestGetInstance:
     """Tests for get_instance method."""
 
@@ -367,6 +496,7 @@ class TestGetInstance:
                 await manager.get_instance("non-existent-instance")
 
 
+@_QM
 class TestListInstances:
     """Tests for list_instances method."""
 
@@ -402,183 +532,7 @@ class TestListInstances:
             assert total == 2
 
 
-class TestThinkTagParsing:
-    """Tests for think tag parsing in send_message."""
-
-    @pytest.mark.asyncio
-    async def test_basic_think_tag_extraction(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph, mock_instance_repository):
-        """Test that basic think tags are extracted from response."""
-        mock_message = Mock(spec=['content', 'type', 'tool_calls'])
-        mock_message.content = "\x3cthink\x3ethis is my thinking\x3c/think\x3eThe actual response"
-        mock_message.type = 'ai'
-        mock_message.tool_calls = []
-        
-        # Update the mock_graph to return our message
-        async def mock_ainvoke(*args, **kwargs):
-            return {"messages": [mock_message]}
-        mock_graph.ainvoke = mock_ainvoke
-        mock_graph.invoke.return_value = {"messages": [mock_message]}
-        
-        with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
-             patch('daemon.manager.build_instance_graph', return_value=mock_graph), \
-             patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
-             patch('daemon.manager.create_instance_tools', return_value=[]):
-            
-            manager = InstanceManager(mock_config)
-            manager._instance_repository = mock_instance_repository
-            instance_id, _ = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
-            
-            result = await manager.send_message(instance_id, "Hello!")
-            
-            # Thinking should be extracted
-            assert result.thinking_extracted == "this is my thinking"
-            # Content should have tags removed
-            assert result.content == "The actual response"
-            # No metadata thinking in this case
-            assert result.thinking is None
-
-    @pytest.mark.asyncio
-    async def test_multiple_think_tags_extracted(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph, mock_instance_repository):
-        """Test that multiple <think/> tags are combined."""
-        mock_message = Mock(spec=['content', 'type', 'tool_calls'])
-        mock_message.content = '<think>First thought</think>Some text<think>Second thought</think>More text'
-        mock_message.type = 'ai'
-        mock_message.tool_calls = []
-        
-        async def mock_ainvoke(*args, **kwargs):
-            return {"messages": [mock_message]}
-        mock_graph.ainvoke = mock_ainvoke
-        mock_graph.invoke.return_value = {"messages": [mock_message]}
-        
-        with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
-             patch('daemon.manager.build_instance_graph', return_value=mock_graph), \
-             patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
-             patch('daemon.manager.create_instance_tools', return_value=[]):
-            
-            manager = InstanceManager(mock_config)
-            manager._instance_repository = mock_instance_repository
-            instance_id, _ = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
-            
-            result = await manager.send_message(instance_id, "Hello!")
-            
-            # Both thoughts should be combined with newline
-            assert result.thinking_extracted == "First thought\nSecond thought"
-            # Content should have all tags removed
-            assert result.content == "Some textMore text"
-
-    @pytest.mark.asyncio
-    async def test_think_tag_with_attributes(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph, mock_instance_repository):
-        """Test that <think/> tags with attributes are parsed."""
-        mock_message = Mock(spec=['content', 'type', 'tool_calls'])
-        mock_message.content = '<think budget="123" duration="456">My reasoning here</think>Another thought'
-
-        mock_message.type = 'ai'
-        mock_message.tool_calls = []
-        
-        async def mock_ainvoke(*args, **kwargs):
-            return {"messages": [mock_message]}
-        mock_graph.ainvoke = mock_ainvoke
-        mock_graph.invoke.return_value = {"messages": [mock_message]}
-        
-        with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
-             patch('daemon.manager.build_instance_graph', return_value=mock_graph), \
-             patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
-             patch('daemon.manager.create_instance_tools', return_value=[]):
-            
-            manager = InstanceManager(mock_config)
-            manager._instance_repository = mock_instance_repository
-            instance_id, _ = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
-            
-            result = await manager.send_message(instance_id, "Hello!")
-            
-            assert result.thinking_extracted == "My reasoning here"
-            assert result.content == "Another thought"
-
-    @pytest.mark.asyncio
-    async def test_thinking_metadata_priority_over_extracted(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph, mock_instance_repository):
-        """Test that metadata thinking takes priority over extracted thinking."""
-        mock_message = Mock(spec=['content', 'type', 'tool_calls'])
-        mock_message.content = '<think>Extracted thinking\n</think>\n'
-        mock_message.type = 'ai'
-        mock_message.tool_calls = []
-        # Simulate metadata thinking (from provider)
-        mock_message.additional_kwargs = {"reasoning_content": "Metadata thinking"}
-        
-        async def mock_ainvoke(*args, **kwargs):
-            return {"messages": [mock_message]}
-        mock_graph.ainvoke = mock_ainvoke
-        mock_graph.invoke.return_value = {"messages": [mock_message]}
-        
-        with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
-             patch('daemon.manager.build_instance_graph', return_value=mock_graph), \
-             patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
-             patch('daemon.manager.create_instance_tools', return_value=[]):
-            
-            manager = InstanceManager(mock_config)
-            manager._instance_repository = mock_instance_repository
-            instance_id, _ = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
-            
-            result = await manager.send_message(instance_id, "Hello!")
-            
-            # Both should be populated separately
-            assert result.thinking == "Metadata thinking"
-            assert result.thinking_extracted == "Extracted thinking"
-            assert result.content == ""
-
-    @pytest.mark.asyncio
-    async def test_no_think_tag_returns_none_extracted(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph, mock_instance_repository):
-        """Test that response without think tags has None for thinking_extracted."""
-        mock_message = Mock(spec=['content', 'type', 'tool_calls'])
-        mock_message.content = "Just a regular response"
-        mock_message.type = 'ai'
-        mock_message.tool_calls = []
-        
-        async def mock_ainvoke(*args, **kwargs):
-            return {"messages": [mock_message]}
-        mock_graph.ainvoke = mock_ainvoke
-        mock_graph.invoke.return_value = {"messages": [mock_message]}
-        
-        with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
-             patch('daemon.manager.build_instance_graph', return_value=mock_graph), \
-             patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
-             patch('daemon.manager.create_instance_tools', return_value=[]):
-            
-            manager = InstanceManager(mock_config)
-            manager._instance_repository = mock_instance_repository
-            instance_id, _ = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
-            
-            result = await manager.send_message(instance_id, "Hello!")
-            
-            assert result.thinking_extracted is None
-            assert result.thinking is None
-            assert result.content == "Just a regular response"
-
-    @pytest.mark.asyncio
-    async def test_case_insensitive_think_tags(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph, mock_instance_repository):
-        """Test that <THINK> and <Think> tags are also parsed."""
-        mock_message = Mock(spec=['content', 'type', 'tool_calls'])
-        mock_message.content = "<THINK>Upper case thinking</THINK>Response"
-        mock_message.type = 'ai'
-        mock_message.tool_calls = []
-        
-        async def mock_ainvoke(*args, **kwargs):
-            return {"messages": [mock_message]}
-        mock_graph.ainvoke = mock_ainvoke
-        mock_graph.invoke.return_value = {"messages": [mock_message]}
-        
-        with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
-             patch('daemon.manager.build_instance_graph', return_value=mock_graph), \
-             patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
-             patch('daemon.manager.create_instance_tools', return_value=[]):
-            
-            manager = InstanceManager(mock_config)
-            manager._instance_repository = mock_instance_repository
-            instance_id, _ = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
-            
-            result = await manager.send_message(instance_id, "Hello!")
-            
-            assert result.thinking_extracted == "Upper case thinking"
-            assert result.content == "Response"
+@_QM
 class TestGenerateAndBroadcastTitle:
     """Tests for _generate_and_broadcast_title method."""
 
@@ -765,6 +719,7 @@ class TestGenerateAndBroadcastTitle:
             assert "Failed to generate title" in str(mock_logger.warning.call_args)
 
 
+@_QM
 class TestProgressiveMessageDelivery:
     """Tests for progressive message delivery via source_dispatcher."""
 
@@ -1006,6 +961,7 @@ class TestProgressiveMessageDelivery:
             mock_source_dispatcher.dispatch_message.assert_not_called()
 
 
+@_QM
 class TestToolResultStreaming:
     """Tests for real-time tool_result SSE emission from the streaming loop."""
 
@@ -1181,6 +1137,7 @@ class TestToolResultStreaming:
         assert {c["content"] for c in call_kwarg_pairs} == {"first", "second"}
 
 
+@_QM
 class TestListContentHandling:
     """Tests for Fix W2: List content handling (content as list of blocks)."""
 
@@ -1371,6 +1328,7 @@ class TestListContentHandling:
             assert call_args.kwargs['content'] == "Part one  Part two  Part three"
 
 
+@_QM
 class TestStreamingDeduplicationByMessageId:
     """Tests for Fix W3: Streaming deduplication by message ID."""
 

@@ -93,6 +93,11 @@ def _make_capturing_graph(captured: dict) -> MagicMock:
         yield  # pragma: no cover — sentinel for async-generator fn
 
     graph = MagicMock()
+    # wc-wake T6 (D1 seam): the pipeline reads checkpoint state via
+    # ``graph.aget_state`` before astream on every enqueued turn. Return
+    # a healthy (None) state so the tail-guard short-circuits — these
+    # tests target the injection hooks, not the pairing guard.
+    graph.aget_state = AsyncMock(return_value=None)
     graph.astream = fake_astream
     return graph
 

@@ -30,6 +30,13 @@ This service is the safety net. Every ``interval_seconds`` (default
    decision-maker during a pause, and a notice computed from
    pre-pause hang data would be stale by the time the instance
    resumes. Skipping also keeps the scan cheap.
+   B.S.5 (wc-wake-report-integrity Wave 2, OQ-4): the wedge pass
+   additionally skips parents with an ACTIVE (b) report-integrity
+   notice episode (``report_integrity_guard.parent_has_active_b_notice``)
+   so a parent that (b) just noticed at its completion stamp never
+   gets a second wedge notice for the same episode (shared per-parent
+   cooldown; the wedge is eligible again once the (b) episode closes
+   or is replaced by a new violation set).
 5. For each (parent, child) pair in a new "hang episode", delivers a
    terse, directive notice to the parent via
    :meth:`InstanceManager.enqueue_message` with provenance
@@ -150,6 +157,7 @@ from typing import Any
 
 from daemon.repositories.instance.models import InstanceStatus
 from daemon.repositories.instance.repository import SQLModelInstanceRepository
+from daemon.services.report_integrity_guard import parent_has_active_b_notice
 
 logger = logging.getLogger(__name__)
 
@@ -839,6 +847,21 @@ class WaitingChildrenWatchdog:
         # revival seam is slow (or missed), this backstop catches
         # the gap until the next sweep cycle.
         #
+        # B.S.5 (wc-wake-report-integrity Wave 2, OQ-4 disposition):
+        # the wedge predicate ALSO skips parents that the (b)
+        # report-integrity guard is actively guarding
+        # (``report_integrity_guard.parent_has_active_b_notice`` —
+        # an open adjudication-notice episode for this parent). (b)
+        # fires at the completion stamp; the wedge sees WC-status
+        # parents — the overlap is the tick-snapshot race (parent
+        # observed WC pre-stamp, wedge pass runs post-stamp/notice).
+        # A parent that (b) just noticed must NOT also get a wedge
+        # notice for the SAME episode (no double-fire); the shared
+        # cooldown clears when a later same-tx evaluation for the
+        # parent comes back CLEAN (episode closed) or is replaced by
+        # a different violation set (new episode) — after which the
+        # wedge is eligible again.
+        #
         # Budget per tick: ONE batched query for the children gate
         # (across all WC parents, via
         # ``repository.parents_with_non_terminal_children``) + ONE
@@ -900,6 +923,16 @@ class WaitingChildrenWatchdog:
                 if parent_row is None:
                     continue
                 if parent_row.status == InstanceStatus.PAUSED.value:
+                    continue
+                # B.S.5 shared cooldown: skip parents that the (b)
+                # report-integrity guard is actively guarding (an open
+                # adjudication-notice episode). OQ-4 disposition — no
+                # double-fire for the same (parent, child, episode):
+                # (b) fired at the completion stamp; the wedge must not
+                # re-notice the same episode from a stale WC snapshot.
+                # Cheap in-memory read (module-level ledger in
+                # ``daemon/services/report_integrity_guard``).
+                if parent_has_active_b_notice(parent_id):
                     continue
                 # Wedge condition part 3: zero non-terminal children.
                 # A HEALTHY WC parent waiting on live children has no

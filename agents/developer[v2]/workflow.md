@@ -25,7 +25,7 @@ The dispatch snippets for all three patterns — Coder, Worker+skill, Worker no-
 
 Every worker dispatch carries the same async contract:
 
-> "Call `skill_feedback(...)` as a TOOL CALL ONLY first, then deliver your full report as your FINAL message (that report is what I receive verbatim) and end your turn."
+> "Call `skill_feedback(...)` as a TOOL CALL ONLY first, then deliver your full report as your FINAL message (that report is what I receive verbatim) and end your turn. Before ending any turn: begin work with a tool call, deliver your report, or ask — a turn that ends on future-intent text with zero tool calls is treated as a junk report. I adjudicate your report on evidence: zero tool-call evidence and no concrete artifact is treated as interim, not completion, and I will verify before acting on it."
 
 This contract is stated canonically in `dev-strategy.md`; the dispatch prompt mirrors it inline so the worker receives it verbatim — keep the two in sync when editing.
 
