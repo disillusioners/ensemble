@@ -223,6 +223,18 @@ describe('MessageInputComponent — slash-command autocomplete palette (Task 10)
       expect(textarea.value).toBe('/c');
       expect(palette()).not.toBeNull();
     });
+
+    it('Tab with the input ALREADY the complete command still rewrites with the trailing space', () => {
+      // Tab has NO verbatim-send exception (that is palette-Enter only, see
+      // the Enter describe below): acceptance ALWAYS inserts the canonical
+      // '/compact ' form, even when the typed value is byte-identical.
+      type('/compact');
+      press('Tab');
+      expect(textarea.value).toBe('/compact ');
+      expect(sent).toHaveLength(0);
+      expect(palette()).toBeNull(); // trailing space ends the bare-command trigger
+      expect(document.activeElement).toBe(textarea);
+    });
   });
 
   describe('Enter — accept-then-send vs non-regression', () => {

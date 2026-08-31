@@ -60,12 +60,12 @@
         aria-haspopup="listbox"
         aria-autocomplete="list"
         [attr.aria-expanded]="isSlashPaletteOpen()"
-        [attr.aria-controls]="isSlashPaletteOpen() && slashMatches().length > 0 ? 'slash-command-listbox' : null"
+        [attr.aria-controls]="isSlashPaletteOpen() ? (slashMatches().length > 0 ? 'slash-command-listbox' : 'slash-command-palette') : null"
         [attr.aria-activedescendant]="slashActiveDescendant()"
       ></textarea>
 
       @if (isSlashPaletteOpen()) {
-        <div class="slash-command-palette" data-testid="slash-command-palette">
+        <div class="slash-command-palette" id="slash-command-palette" data-testid="slash-command-palette">
           @if (slashMatches().length > 0) {
             <div class="slash-command-list" role="listbox" id="slash-command-listbox" aria-label="Slash commands">
               @for (cmd of slashMatches(); track cmd.name; let i = $index) {
