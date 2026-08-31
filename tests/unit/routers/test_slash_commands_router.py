@@ -951,3 +951,229 @@ class TestRapidClickRace:
         # Cleanup the hanging task.
         for task in list(dispatcher._tasks):
             task.cancel()
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Defect #4 (Scope 3, 2026-08-31 e2e gate) — escape-path single-write
+# invariant. The reporter saw TWO identical user rows persist on one
+# POST ``//compact is useful`` (ids fb125533 / f5739113); retest with
+# ``//compact is useful v2`` produced ONE row. Original run4 has no
+# captured netlog so the double-POST hypothesis cannot be ruled in or
+# out from network evidence alone — but the BE code has no
+# double-insert path (the escape branch in
+# ``daemon/services/command_dispatcher.py:875-879`` returns
+# immediately, and ``daemon/routers/messages.py:251-584`` runs at
+# most ONE of {PAUSED auto-resume, RUNNING/WC injection,
+# IDLE/terminal enqueue} per request). These tests pin the
+# structural invariant on each state branch so a future regression
+# that introduces a fall-through double-write is caught at unit-test
+# time, not by the e2e gate.
+# ─────────────────────────────────────────────────────────────────────────
+
+
+class TestEscapePathSingleWrite:
+    """Defect #4 regression — ``//compact is useful`` style escape
+    reaches exactly ONE write sink per POST, regardless of instance
+    status. Pinned across the four production-relevant branches:
+    IDLE → NORMAL enqueue, PAUSED → auto-resume, RUNNING → injection,
+    WAITING_CHILDREN (legacy flag-OFF) → injection. The terminal
+    (COMPLETED/ERROR/FAILED/TERMINATED) branch shares the IDLE path's
+    NORMAL enqueue, so the IDLE test covers both.
+    """
+
+    # The exact text from the defect. If a regression reintroduces a
+    # double-insert for any ``//…`` input, the four assertions below
+    # catch it deterministically.
+    ESCAPE_TEXT = "//compact is useful"
+    EXPECTED_CONTENT = "/compact is useful"  # one slash stripped
+
+    def test_idle_state_one_enqueue_zero_other_writes(
+        self, client_with_manager, dispatcher
+    ):
+        """IDLE → NORMAL path: ``enqueue_message_job`` exactly once,
+        no set_injection, no resume cascade. This is the production
+        branch for the defect scenario (post-(c) idle terminal)."""
+        client, state = client_with_manager
+        _register_compact(dispatcher)
+        manager = _make_manager(dispatcher, instance_status="idle")
+        state["manager"] = manager
+
+        resp = client.post(
+            "/instances/inst-A/messages",
+            json={"content": self.ESCAPE_TEXT},
+        )
+        assert resp.status_code == 200, resp.text
+
+        # Exactly one enqueue — pinned via assert_awaited_once.
+        manager.enqueue_message_job.assert_awaited_once()
+        kwargs = manager.enqueue_message_job.await_args.kwargs
+        assert kwargs["message"] == self.EXPECTED_CONTENT
+        assert kwargs["instance_id"] == "inst-A"
+        assert kwargs["source"] == "api"
+
+        # No other write path triggered.
+        manager.set_injection.assert_not_called()
+        # ``resume_instance_cascade`` / ``resume_processing_job`` are
+        # auto-MagicMock attributes on the default manager — use
+        # ``assert_not_called`` which works for both sync Mock and
+        # AsyncMock (the existing tests in this file use the same
+        # pattern at lines 390-391).
+        manager.resume_instance_cascade.assert_not_called()
+        manager.resume_processing_job.assert_not_called()
+
+        # Dispatcher state untouched (escape bypasses command
+        # processing — no in-flight / no rate-limit record).
+        assert dispatcher._inflight == {}
+        assert dispatcher._last_dispatch == {}
+
+    def test_completed_state_one_enqueue_zero_other_writes(
+        self, client_with_manager, dispatcher
+    ):
+        """COMPLETED → NORMAL path (revive + enqueue). Same invariant
+        as IDLE — the terminal branch in
+        ``daemon/routers/messages.py:533-584`` reaches the same
+        ``enqueue_message_job`` call as IDLE."""
+        client, state = client_with_manager
+        _register_compact(dispatcher)
+        manager = _make_manager(dispatcher, instance_status="completed")
+        state["manager"] = manager
+
+        resp = client.post(
+            "/instances/inst-A/messages",
+            json={"content": self.ESCAPE_TEXT},
+        )
+        assert resp.status_code == 200, resp.text
+
+        manager.enqueue_message_job.assert_awaited_once()
+        manager.set_injection.assert_not_called()
+        manager.resume_instance_cascade.assert_not_called()
+        manager.resume_processing_job.assert_not_called()
+
+    def test_running_state_one_injection_zero_enqueue(
+        self, client_with_manager, dispatcher
+    ):
+        """RUNNING → injection path: ``set_injection`` exactly once
+        (RAM FIFO — no DB write), no enqueue_message_job."""
+        client, state = client_with_manager
+        _register_compact(dispatcher)
+        manager = _make_manager(dispatcher, instance_status="running")
+        state["manager"] = manager
+
+        resp = client.post(
+            "/instances/inst-A/messages",
+            json={"content": self.ESCAPE_TEXT},
+        )
+        assert resp.status_code == 202, resp.text
+
+        # Exactly one injection slot write (append-list semantics).
+        manager.set_injection.assert_called_once()
+        manager.enqueue_message_job.assert_not_awaited()
+        manager.resume_instance_cascade.assert_not_called()
+        manager.resume_processing_job.assert_not_called()
+
+    def test_waiting_children_legacy_flag_off_one_injection_zero_enqueue(
+        self, client_with_manager, dispatcher
+    ):
+        """WAITING_CHILDREN with the WC-wake kill-switch OFF (the
+        legacy default — ``_resolve_wc_wake_enqueue_enabled()``
+        resolves to False unless ``ENSEMBLE_WC_WAKE_ENQUEUE=1``):
+        → legacy FIFO injection, no DB enqueue."""
+        # Default flag state is OFF — no env set means False.
+        from daemon.services.instance_messaging import (
+            _resolve_wc_wake_enqueue_enabled,
+        )
+        # Sanity check the test precondition.
+        assert _resolve_wc_wake_enqueue_enabled() is False, (
+            "test precondition: ENSEMBLE_WC_WAKE_ENQUEUE must NOT be "
+            "set in this test environment; otherwise the WC branch "
+            "falls through to enqueue instead of legacy injection."
+        )
+
+        client, state = client_with_manager
+        _register_compact(dispatcher)
+        manager = _make_manager(dispatcher, instance_status="waiting_children")
+        state["manager"] = manager
+
+        resp = client.post(
+            "/instances/inst-A/messages",
+            json={"content": self.ESCAPE_TEXT},
+        )
+        assert resp.status_code == 202, resp.text
+
+        manager.set_injection.assert_called_once()
+        manager.enqueue_message_job.assert_not_awaited()
+        manager.resume_instance_cascade.assert_not_called()
+        manager.resume_processing_job.assert_not_called()
+
+    def test_paused_state_resume_cascade_once_no_enqueue(
+        self, client_with_manager, dispatcher
+    ):
+        """PAUSED → auto-resume path: ``resume_instance_cascade``
+        exactly once; ``resume_processing_job`` exactly once for the
+        target resumed instance. No enqueue_message_job unless the
+        fallback path fires (which it does NOT for a healthy resumed
+        instance)."""
+        client, state = client_with_manager
+        _register_compact(dispatcher)
+        manager = _make_manager(dispatcher, instance_status="paused")
+        manager.resume_instance_cascade = AsyncMock(
+            return_value={
+                "resumed_ids": ["inst-A"],
+                "skipped_ids": [],
+                "target_id": "inst-A",
+            }
+        )
+        manager.resume_processing_job = AsyncMock(
+            return_value={"status": "resumed", "message_id": "msg-r"}
+        )
+        state["manager"] = manager
+
+        resp = client.post(
+            "/instances/inst-A/messages",
+            json={"content": self.ESCAPE_TEXT},
+        )
+        assert resp.status_code == 200, resp.text
+
+        # Resume cascade: exactly one.
+        manager.resume_instance_cascade.assert_awaited_once()
+        # Processing job resumed: exactly one (for the single resumed id).
+        manager.resume_processing_job.assert_awaited_once()
+        # No fallback enqueue — the resume returned a non-None result.
+        manager.enqueue_message_job.assert_not_awaited()
+        # No injection (PAUSED branch returns 200, not 202).
+        manager.set_injection.assert_not_called()
+
+    def test_escape_does_not_mutate_dispatcher_state(
+        self, client_with_manager, dispatcher
+    ):
+        """Structural guard: the escape branch in
+        ``daemon/services/command_dispatcher.py:875-879`` returns
+        BEFORE the record_start / in-flight / last-dispatch mutation
+        (lines 954-976). Pinned here so a future refactor that
+        accidentally promotes the escape to a recorded command (e.g.
+        rate-limit-stamp on every passthrough) is caught at unit time
+        — that bug would cause every subsequent /compact on the same
+        instance to be rate-limited as if the escape counted."""
+        client, state = client_with_manager
+        _register_compact(dispatcher)
+        manager = _make_manager(dispatcher, instance_status="idle")
+        state["manager"] = manager
+
+        resp = client.post(
+            "/instances/inst-A/messages",
+            json={"content": self.ESCAPE_TEXT},
+        )
+        assert resp.status_code == 200, resp.text
+
+        # Dispatcher state must remain empty for passthrough/escape.
+        assert dispatcher._inflight == {}, (
+            f"escape must not populate _inflight; got {dispatcher._inflight!r}"
+        )
+        assert dispatcher._last_dispatch == {}, (
+            f"escape must not stamp _last_dispatch; got "
+            f"{dispatcher._last_dispatch!r}"
+        )
+        # No bg task spawned for the escape.
+        assert list(dispatcher._tasks) == [], (
+            f"escape must not spawn a bg task; got {dispatcher._tasks!r}"
+        )
