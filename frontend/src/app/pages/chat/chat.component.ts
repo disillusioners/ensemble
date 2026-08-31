@@ -21,8 +21,10 @@ import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatDialog, MatDialogModule } from '@angular/material/dialog';
-import { ApiService } from '../../services/api.service';
+import { ApiService, extractUnknownCommandError, parseCommandAck } from '../../services/api.service';
 import { SseService } from '../../services/sse.service';
+import { CommandRegistryService } from '../../services/command-registry.service';
+import { CommandStateService } from '../../services/command-state.service';
 import {
   mergeMessagesById,
   makeProvisionalMessage,
@@ -43,7 +45,7 @@ import {
   WatchoverDialogComponent,
   WatchoverDialogResult,
 } from '../../components/watchover-dialog/watchover-dialog.component';
-import type { Agent, InstanceInfo, Message } from '../../models';
+import type { Agent, InstanceInfo, Message, CommandAck, RejectionReason } from '../../models';
 
 const NEXT_AGENT_STORAGE_KEY = 'ensemble-next-instance-agent';
 
@@ -72,6 +74,11 @@ export class ChatComponent implements OnInit, OnDestroy {
   private readonly router = inject(Router);
   private readonly api = inject(ApiService);
   private readonly sseService = inject(SseService);
+  /** Slash-command registry (advisory pre-check) + per-instance command
+   *  state machine (Phase 2 / Tasks 4–8). Both are root singletons so the
+   *  chat-interface card reads the same machine state the send path seeds. */
+  private readonly commandRegistry = inject(CommandRegistryService);
+  protected readonly commandState = inject(CommandStateService);
   protected readonly tabStateService = inject(TabStateService);
   protected readonly instanceService = inject(InstanceService);
   private readonly projectService = inject(ProjectService);
@@ -364,6 +371,11 @@ export class ChatComponent implements OnInit, OnDestroy {
   });
 
   constructor() {
+    // Wire the CommandStateService GET-fallback seam to the API layer
+    // (Phase 2 / Task 8). The service itself stays dependency-free so the
+    // logic-mirror specs can instantiate it without TestBed.
+    this.commandState.wireFetch(instanceId => this.api.getActiveCommand(instanceId));
+
     // Effect to persist showThinking preference
     effect(() => {
       localStorage.setItem('ensemble-show-thinking', String(this.showThinking()));
@@ -467,6 +479,52 @@ export class ChatComponent implements OnInit, OnDestroy {
         const filtered = existing.filter(m => !m.pending);
         return filtered.length === existing.length ? existing : filtered;
       });
+    }, { allowSignalWrites: true });
+
+    // ── Slash-command effects (Phase 2 / Tasks 3+4+7+8) ────────────────
+
+    // Feed SSE command_progress events into the state machine. The SSE
+    // listener already applied the per-channel staleness guard; this
+    // second guard (R2 layer 2) re-checks against the ACTIVE instance so
+    // an event that raced an instance switch is never applied to the new
+    // instance's machine state. The per-instance map (R2 layer 3) makes
+    // any residual race cosmetic-only.
+    effect(() => {
+      const event = this.sseService.commandProgress();
+      if (!event) return;
+      const activeInstanceId = this.viewState.activeInstanceId();
+      if (!activeInstanceId || event.instance_id !== activeInstanceId) return;
+      this.commandState.onSseEvent(event);
+    }, { allowSignalWrites: true });
+
+    // REST fallback polling (Task 8): poll GET /commands/active at ~5s
+    // ONLY while the card is active AND SSE is dead. The service owns the
+    // timer; this effect just feeds it the two inputs it cannot see
+    // (active instance + SSE liveness). The service re-evaluates its own
+    // start/stop conditions after every state mutation, so poll stops on
+    // terminal phase or {exists:false} without further wiring here.
+    effect(() => {
+      const activeInstanceId = this.viewState.activeInstanceId();
+      const sseAlive = this.sseService.isStreaming();
+      this.commandState.syncPolling(activeInstanceId, sseAlive);
+    }, { allowSignalWrites: true });
+
+    // Terminal-command refetch (Task 7): when a command reaches a terminal
+    // phase (success / fallback_applied / failed), refetch the message
+    // list so the timeline reflects the compacted context. Fires EXACTLY
+    // once per command (service-side refetchTriggered flag). The instance
+    // guard keeps a trigger recorded for the previously-open instance
+    // from applying to the newly-opened one (SC8 stale-switch safety).
+    // context_usage token-meter refresh needs no wiring here — the
+    // backend re-emits the SSE signal post-compaction.
+    effect(() => {
+      const tick = this.commandState.refetchRequest();
+      if (tick === 0) return;
+      const refetchInstanceId = this.commandState.refetchInstanceId();
+      const activeInstanceId = this.viewState.activeInstanceId();
+      if (!refetchInstanceId || !activeInstanceId) return;
+      if (refetchInstanceId !== activeInstanceId) return;
+      this.loadInstanceMessages(activeInstanceId, { merge: true });
     }, { allowSignalWrites: true });
 
     // Fallback: Reset isSending if streaming stopped but isSending is still true
@@ -879,6 +937,10 @@ export class ChatComponent implements OnInit, OnDestroy {
     // clears events, and stops polling. On full component destruction
     // we still disconnect SSE and clear events to free the EventSource
     // and prevent stale state from leaking into the next session.
+    // Phase 2: stop the command poll / eviction timers (per-instance
+    // command states are intentionally KEPT — they survive re-mounts and
+    // are re-synced from the server by the load-time GET reconcile).
+    this.commandState.stopAllTimers();
     this.sseService.clearEvents();
     this.sseService.disconnect();
     this.messages.set([]);
@@ -1139,6 +1201,11 @@ export class ChatComponent implements OnInit, OnDestroy {
         // SseService.connect() while preserving symmetric handling.
         this.sseService.fetchPendingInjection(instanceId);
         this.sseService.fetchPendingQuestion(instanceId);
+        // Slash-command recovery (Phase 2 / Task 8a): load-time GET
+        // reconcile — a reload or instance re-entry mid-command restores
+        // the card from server truth (server wins). Silent on
+        // {exists:false} and on network failure by service contract.
+        void this.commandState.reconcileFromServer(instanceId);
       }
     });
 
@@ -1232,6 +1299,38 @@ export class ChatComponent implements OnInit, OnDestroy {
     const instance = this.renderedInstance();
     if (!instance) return;
 
+    // ── Slash-command pre-parse (Phase 2 / Task 5) ────────────────────
+    // Runs BEFORE the cooldown guard so an advisory rejection never
+    // stamps the duplicate-send cooldown. Branches:
+    //   ``//x``  → strip ONE slash, deliver as a plain message (O-B1 —
+    //              load-bearing: the BE would re-parse the stripped text
+    //              as a command if we POSTed it unrewritten);
+    //   plain    → fall through to the unchanged message path;
+    //   known    → command send path (duplicate guard + ack handling);
+    //   unknown  → inline validation error, ZERO network call (advisory;
+    //              the BE 400 UNKNOWN_COMMAND + available list remains
+    //              authoritative and feeds the same inline surface when
+    //              it fires).
+    let effectiveContent = payload.content;
+    const parse = this.commandRegistry.parseCommandInput(payload.content);
+    if ('escape' in parse) {
+      effectiveContent = parse.text;
+    } else if ('known' in parse && parse.known) {
+      if (this.commandState.isActive(instance.instance_id)) {
+        // Advisory duplicate-command guard (SC5) — BE ``busy`` /
+        // ``rate_limited`` refusals stay authoritative (§6).
+        this.messageInputRef?.showCommandValidationError(
+          'A command is already in progress on this instance.',
+        );
+        return;
+      }
+      this.sendCommand(instance.instance_id, payload);
+      return;
+    } else if ('known' in parse && !parse.known) {
+      this.messageInputRef?.showCommandValidationError(`Unknown command: /${parse.name}`);
+      return;
+    }
+
     // Cooldown guard: block consecutive sends within SEND_COOLDOWN_MS to
     // prevent duplicate submissions from double Enter / double click. Both
     // the send button and the Enter key route through this handler, so this
@@ -1260,14 +1359,26 @@ export class ChatComponent implements OnInit, OnDestroy {
     // same guard pattern the SSE mirror effect uses.
     const sentInstanceId = instance.instance_id;
 
-    this.api.sendMessage(instance.instance_id, payload.content, payload.images, payload.queue_id).subscribe({
+    this.api.sendMessage(instance.instance_id, effectiveContent, payload.images, payload.queue_id).subscribe({
       // Both 200 (PAUSED auto-resume / IDLE enqueue) and 202 (RUNNING /
       // WAITING_CHILDREN injection acceptance) are 2xx and fire `next` by
       // default in Angular's HttpClient. We treat both as success from the
       // UI's perspective — clear the input, rely on `injection_pending`
       // SSE event (and the chat-interface pendingInjection card driven
       // off the SseService signal) to reflect the injection's queued state.
-      next: (response) => {
+      next: (rawResponse) => {
+        // Single parsing point (Phase 2 / Task 2): plain-text content is
+        // never a command, so a command ack here would mean BE registry
+        // drift (R7) — surface its rejection copy defensively and bail.
+        const parsed = parseCommandAck(rawResponse);
+        if (parsed.kind === 'command') {
+          this.isSending.set(false);
+          if (parsed.ack.state === 'rejected') {
+            this.messageInputRef?.showCommandValidationError(this.rejectionCopy(parsed.ack), 8000);
+          }
+          return;
+        }
+        const response = parsed.message;
         // Clear input only on success — error recovery keeps input populated
         this.messageInputRef?.clearInput();
         // Surface a "queued" indicator when the backend accepted the message
@@ -1327,7 +1438,10 @@ export class ChatComponent implements OnInit, OnDestroy {
                 response.created_at ?? response.timestamp ?? new Date().toISOString();
               const provisional = makeProvisionalMessage({
                 messageId: newId,
-                content: payload.content,
+                // Phase 2: the DELIVERED content (``//x`` was rewritten to
+                // ``/x`` pre-POST) — the bubble must show what the model
+                // sees, not the raw composer text.
+                content: effectiveContent,
                 createdAt: provisionalStamp,
                 instanceId: instance.instance_id,
                 images: payload.images,
@@ -1359,6 +1473,106 @@ export class ChatComponent implements OnInit, OnDestroy {
         // Do NOT clear input on error — user can retry
       }
     });
+  }
+
+  /**
+   * Slash-command send path (Phase 2 / Task 5). Posts the command text to
+   * the SAME ``POST /messages`` endpoint (BE-side router intercept — Q1
+   * ratified) and branches on the discriminated ack:
+   *
+   * - ``accepted`` → clear the input (parent-owned clearing contract) and
+   *   seed the CommandStateService card in ``waiting`` IMMEDIATELY —
+   *   before any SSE event (the ack→first-SSE gap can be ≤30s, R5).
+   * - ``rejected``  → NO machine start; keep the input populated for
+   *   retry; render reason-specific inline copy — ``terminal_instance``
+   *   renders the ack ``detail`` guidance VERBATIM (§9-12 / SC14).
+   *
+   * In BOTH ack cases the command NEVER enters the message echo/merge
+   * pipeline — no ``makeProvisionalMessage``, no ``mergeMessagesById`` —
+   * so a command cannot produce a provisional row or a duplicate timeline
+   * entry (R4 / SC6). The card (out-of-timeline, Q3 confirmed) is the
+   * command's only UI surface.
+   */
+  private sendCommand(instanceId: string, payload: MessagePayload): void {
+    this.sendError.set(null);
+    this.isSending.set(true);
+
+    // MIN-2 TOCTOU capture — same rationale as the message path (R2).
+    const sentInstanceId = instanceId;
+
+    this.api.sendMessage(instanceId, payload.content, payload.images, payload.queue_id).subscribe({
+      next: (response) => {
+        this.isSending.set(false);
+        const parsed = parseCommandAck(response);
+        if (parsed.kind !== 'command') {
+          // Defensive legacy fallback: an old backend without the intercept
+          // answered the command text with a normal message body. The text
+          // WAS delivered as a message — clear the input and surface the
+          // queued indicator when the body says so; never seed the card.
+          this.messageInputRef?.clearInput();
+          if (parsed.message?.queued === true) {
+            this.queuedMessage.set({ content: payload.content });
+          }
+          return;
+        }
+
+        const ack = parsed.ack;
+        if (ack.state === 'accepted') {
+          this.messageInputRef?.clearInput();
+          // R2: apply the seed only when the user is still viewing the
+          // instance the command was sent to (sentInstanceId guard).
+          if (this.viewState.activeInstanceId() === sentInstanceId) {
+            this.commandState.startCommand(sentInstanceId, ack);
+          }
+          return;
+        }
+
+        // Rejected — reason-specific inline copy; input stays populated.
+        this.messageInputRef?.showCommandValidationError(this.rejectionCopy(ack), 8000);
+      },
+      error: (err) => {
+        this.isSending.set(false);
+        // HTTP 400 UNKNOWN_COMMAND (§7 split rule / O13) → typed error
+        // carrying ``details.available``; offered inline as the recovery.
+        const unknown = extractUnknownCommandError(err);
+        if (unknown) {
+          const available = unknown.available.length > 0
+            ? ` Available: ${unknown.available.map(c => '/' + c).join(', ')}`
+            : '';
+          this.messageInputRef?.showCommandValidationError(`Unknown command.${available}`, 6000);
+          return;
+        }
+        console.error('Failed to send command:', err);
+        this.sendError.set(err instanceof Error ? err.message : 'Failed to send command');
+        // Do NOT clear input on error — user can retry
+      },
+    });
+  }
+
+  /**
+   * Reason-specific rejection copy (Task 5). ``terminal_instance`` shows
+   * the backend ``detail`` guidance VERBATIM — the copy table in
+   * architecture-recommendation.md §9-12 pins "Send a message to start a
+   * new turn, then /compact." as the string the user must see.
+   */
+  private rejectionCopy(ack: CommandAck): string {
+    if (ack.reason === 'terminal_instance') {
+      return ack.detail || 'Send a message to start a new turn, then /compact.';
+    }
+    switch (ack.reason) {
+      case 'busy':
+        return 'A command is already running on this instance — wait for it to finish (busy).';
+      case 'rate_limited':
+        return 'Please wait a moment before running another command (rate_limited).';
+      case 'pending_injections':
+        return 'Deliver the pending injections first, then retry (pending_injections).';
+      case 'compaction_disabled':
+        return 'Compaction is disabled for this instance (compaction_disabled).';
+      case 'quiescence_timeout':
+        return 'The instance could not be quiesced in time — try again (quiescence_timeout).';
+      default:
+        return ack.detail || 'The command was rejected.';
+    }
   }
 
   protected onClearError(): void {

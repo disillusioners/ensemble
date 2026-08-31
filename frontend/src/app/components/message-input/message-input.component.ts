@@ -242,6 +242,25 @@ export class MessageInputComponent {
     setTimeout(() => this.validationError.set(null), 4000);
   }
 
+  /**
+   * Public inline-error surface for slash-command validation (Phase 2 /
+   * Task 5). The chat component owns the command send flow, but the inline
+   * validation UI (and its auto-dismiss timer) lives HERE in the input —
+   * same pattern as ``showValidationError`` (4s default auto-dismiss).
+   *
+   * ``durationMs`` is overridable: rejection guidance (e.g. the
+   * terminal-instance hint rendered VERBATIM from the ack ``detail``)
+   * needs more reading time than a 4s flash, so the chat component passes
+   * a longer window for rejected acks.
+   *
+   * Returns the dismiss timer handle so tests (and the component) can
+   * verify auto-dismiss behavior deterministically.
+   */
+  showCommandValidationError(message: string, durationMs = 4000): ReturnType<typeof setTimeout> {
+    this.validationError.set(message);
+    return setTimeout(() => this.validationError.set(null), durationMs);
+  }
+
   async processFiles(files: File[]): Promise<void> {
     for (const file of files) {
       // Check count limit

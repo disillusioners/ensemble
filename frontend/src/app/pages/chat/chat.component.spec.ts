@@ -11,7 +11,7 @@ import { ProjectService } from '../../services/project.service';
 import { SseService } from '../../services/sse.service';
 import { TabStateService } from '../../services/tab-state.service';
 import { WorkspaceOverlayService } from '../../services/workspace-overlay.service';
-import type { Agent, InstanceInfo } from '../../models';
+import type { Agent, InstanceInfo, CommandProgressEvent } from '../../models';
 import { ProjectTab } from '../../models/tab.model';
 import {
   makeProvisionalMessage,
@@ -96,6 +96,10 @@ const mockSseService = {
   // MIN-3: which instance the latest purge bump refers to — the
   // component effect compares it against ``activeInstanceId()``.
   pendingPurgeInstanceId: signal<string | null>(null),
+  // Phase 2 / slash-commands: latest ``command_progress`` event mirror.
+  // The component effect feeds it into CommandStateService (guarded by
+  // the active instance id); tests can drive it directly.
+  commandProgress: signal<CommandProgressEvent | null>(null),
   connect: jest.fn(),
   disconnect: jest.fn(),
   clearEvents: jest.fn(),

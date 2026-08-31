@@ -1,6 +1,114 @@
 // Instance types
 export type InstanceStatus = 'idle' | 'running' | 'paused' | 'completed' | 'error' | 'terminated' | 'queued' | 'waiting_children' | 'failed';
 
+// ─────────────────────────────────────────────────────────────────────────
+// Slash-command subsystem (Phase 2) — architect §7 wire contract, PINNED.
+// Encoded VERBATIM from
+// .agents/shared/planning/slash-commands/architecture-recommendation.md §7
+// (with the post-review adjudication amendment: compacted_type gains
+// "partial_summary"). The Jest parseCommandAck adapter test is the
+// executable contract spec for these types — any Phase 1 backend drift
+// must fail FE CI with a named field (R6).
+// ─────────────────────────────────────────────────────────────────────────
+
+/** SSE ``command_progress`` phases — the six-phase machine is unchanged by
+ *  the C1 amendment (partial is a detail-level distinction). */
+export type CommandPhase =
+  | 'waiting'
+  | 'in_progress'
+  | 'success'
+  | 'timed_out'
+  | 'fallback_applied'
+  | 'failed';
+
+/** Semantic refusals arrive as 200 ack ``state:"rejected"`` + reason.
+ *  Unknown COMMANDS are parse-time client errors → HTTP 400
+ *  ``UNKNOWN_COMMAND`` instead (§7 split rule). */
+export type RejectionReason =
+  | 'terminal_instance'
+  | 'busy'
+  | 'rate_limited'
+  | 'pending_injections'
+  | 'compaction_disabled'
+  | 'quiescence_timeout';
+
+/** §7 amendment (post-review adjudication C1, 2026-08-31): the enum gains
+ *  "partial_summary". Mapping count = three: summary → success;
+ *  partial_summary and truncation → timed_out → fallback_applied;
+ *  noop → success (+ noop_reason). */
+export type CompactedType = 'summary' | 'partial_summary' | 'truncation' | 'noop';
+
+export type NoopReason = 'below_floor' | 'recently_compacted' | 'too_few_messages';
+
+export type CommandFailureKind = 'timeout' | 'error' | null;
+
+/** Optional detail object on ``CommandProgressEvent``. Budget exhaustion
+ *  reports ``failure_kind: "timeout"``; ``detail.reason`` is free-form and
+ *  may say ``budget_exhausted``. */
+export interface CommandProgressDetail {
+  tokens_before?: number;
+  tokens_after?: number;
+  compacted_type?: CompactedType;
+  failure_kind?: CommandFailureKind;
+  noop_reason?: NoopReason;
+  checkpoint_id?: string;
+  reason?: string;
+}
+
+/** SSE event_type="command_progress" (LiveEventHub.stream_message,
+ *  live-only, no replay). ``phase_seq`` is monotonic per command — the FE
+ *  dedup/reorder guard ignores events with ``phase_seq <=`` last seen for
+ *  the same ``command_id``. ``elapsed_ms`` (server clock) is the FE
+ *  elapsed-timer source of truth. ``eta_ms`` is advisory, in_progress only.
+ *  Heartbeat: the backend re-emits in_progress every 10s (phase_seq+1,
+ *  fresh timestamp/elapsed_ms). */
+export interface CommandProgressEvent {
+  instance_id: string;
+  command_id: string;
+  phase: CommandPhase;
+  phase_seq: number;
+  timestamp: string;
+  elapsed_ms: number;
+  eta_ms?: number;
+  detail?: CommandProgressDetail;
+}
+
+/** POST /api/instances/{id}/messages → command ack (sync, ≤500ms).
+ *
+ *  Delta note (executable-spec finding, 2026-08-31): §7 pins
+ *  ``command_id`` as a UUIDv4 string, but the Phase 1 dispatcher ships
+ *  ``command_id: null`` on ``state:"rejected"`` acks (nothing to
+ *  correlate). The type therefore carries ``string | null``; the
+ *  ``parseCommandAck`` adapter is the single point that absorbs the
+ *  difference, and callers never read ``command_id`` on rejections. */
+export interface CommandAck {
+  status: 'command';
+  command: string; // "compact"
+  command_id: string | null; // UUIDv4 — correlates ALL events (null on rejected)
+  state: 'accepted' | 'rejected';
+  reason?: RejectionReason | null; // when rejected
+  detail?: string | null; // human guidance (e.g. terminal-instance hint)
+  timestamp: string; // ISO8601
+  ttl_seconds: number; // GET-fallback memory window (default 600)
+}
+
+/** GET /api/instances/{id}/commands/active — fallback for SSE loss; auth
+ *  mirrors GET /messages. Daemon restart ⇒ {exists:false} ⇒ FE clears the
+ *  card silently. Poll ~5s while the card is active AND SSE is dead. */
+export type GetActiveResponse =
+  | { exists: false }
+  | { exists: true; command: CommandProgressEvent };
+
+/** Extensible command surface (registry seed = /compact). The autocomplete
+ *  palette (Task 10) is out of scope this phase; ``availability`` is the
+ *  O-B6 per-agent policy hook's landing spot (Q4 — global for now). */
+export interface CommandDefinition {
+  name: string; // canonical, lowercase, no leading slash
+  description: string;
+  argsHint?: string | null;
+  availability?: () => boolean;
+}
+
 export interface InstanceInfo {
   instance_id: string;
   agent_id: string;

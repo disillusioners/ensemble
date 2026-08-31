@@ -837,3 +837,112 @@ $cyan: #06b6d4;
     animation: none;
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Active slash-command card (Phase 2 / Task 6). Modeled on the
+// .pending-injection-card pattern (out-of-timeline status card, Q3
+// confirmed): cyan while working, green on success, red on failure.
+// Non-modal and non-blocking — the composer stays usable while the card
+// is visible.
+// ─────────────────────────────────────────────────────────────────────────
+.active-command-card {
+  margin-top: 1rem;
+  padding: 0.75rem 1rem;
+  border-radius: 0.75rem;
+  background-color: rgba($cyan, 0.08);
+  border: 1px solid rgba($cyan, 0.45);
+  max-width: 70%;
+}
+
+.active-command-card.terminal {
+  background-color: rgba($cyan, 0.04);
+}
+
+// Terminal SUCCESS tint (summary + noop alike — noop is NOT a failure).
+.active-command-card.success-terminal {
+  background-color: rgba(#22c55e, 0.08);
+  border-color: rgba(#22c55e, 0.45);
+}
+
+// Failure tint — only .failed ever gets red (SC13: noop must not).
+.active-command-card.failed {
+  background-color: rgba(#ef4444, 0.08);
+  border-color: rgba(#ef4444, 0.45);
+}
+
+.active-command-badge {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.375rem;
+  color: $cyan;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.active-command-card.failed .active-command-badge {
+  color: #ef4444;
+}
+
+.active-command-card.success-terminal .active-command-badge {
+  color: #22c55e;
+}
+
+.active-command-spinner {
+  flex: 0 0 auto;
+}
+
+.active-command-icon {
+  font-size: 0.875rem;
+  line-height: 1;
+}
+
+.active-command-label {
+  text-transform: none;
+  letter-spacing: 0.02em;
+}
+
+.active-command-elapsed {
+  font-variant-numeric: tabular-nums;
+  color: $text-secondary;
+  font-weight: 500;
+}
+
+.active-command-eta {
+  font-weight: 400;
+  color: $text-muted;
+}
+
+.active-command-title {
+  color: $text-primary;
+  font-size: 0.875rem;
+  line-height: 1.45;
+}
+
+.active-command-detail {
+  margin-top: 0.25rem;
+  color: $text-secondary;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+  overflow-wrap: break-word;
+}
+
+.active-command-tokens {
+  margin-top: 0.25rem;
+  color: $text-secondary;
+  font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.active-command-hint {
+  margin-top: 0.375rem;
+  color: $amber;
+  font-size: 0.8125rem;
+}
+
+.active-command-note {
+  margin-top: 0.375rem;
+  color: $text-muted;
+  font-size: 0.75rem;
+  font-style: italic;
+}

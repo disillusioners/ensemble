@@ -1,5 +1,5 @@
 import { Injectable, NgZone, signal } from '@angular/core';
-import type { Message, SSEEvent, ToolCall, InstanceInfo } from '../models';
+import type { Message, SSEEvent, ToolCall, InstanceInfo, CommandProgressEvent } from '../models';
 import type { QuestionPack } from '../models/question.model';
 import { ApiService } from './api.service';
 import { isTerminalStatus } from './message-merge.util';
@@ -100,6 +100,15 @@ export class SseService {
   // ``question_pack`` event is emitted by the tool itself before the
   // cascade and is the only reliable pause-UI signal for this state.
   questionPack = signal<QuestionPack | null>(null);
+
+  // Latest ``command_progress`` event for the connected instance (Phase 2 /
+  // slash-commands, plan Task 3). The listener is a dumb pipe: it applies
+  // ONLY the per-instance staleness guard (fetchPendingInjection :633
+  // pattern) and forwards the parsed event WITH its ``phase_seq`` intact —
+  // dedup / reorder / heartbeat filtering belongs to the CommandStateService
+  // machine (Task 4), because heartbeat events legitimately repeat the
+  // phase with ``phase_seq+1`` and must not be dropped here.
+  commandProgress = signal<CommandProgressEvent | null>(null);
 
   // Reconnect-refetch trigger (message-display-latency §4.3 item 10).
   // Bumped each time the SSE channel observes an error/disconnect followed
@@ -559,6 +568,44 @@ export class SseService {
       });
     });
 
+    // Slash-command progress (Phase 2 / plan Task 3). Modeled on
+    // ``injection_pending`` above: LiveEventHub wraps the flat
+    // CommandProgressEvent inside the envelope's ``message`` field
+    // (messages.py yields ``json.dumps(event)`` where ``event.message``
+    // is the dispatcher's payload). Best-effort parse — malformed JSON is
+    // logged and swallowed so the stream never breaks (same convention as
+    // the other 16 listeners). The per-instance staleness guard below is
+    // the ONLY filter applied here; ``phase_seq`` ordering/dedup is the
+    // CommandStateService's job (Task 4).
+    eventSource.addEventListener('command_progress', (e: MessageEvent) => {
+      this.ngZone.run(() => {
+        try {
+          const data = JSON.parse(e.data);
+          const message = data.message ?? {};
+          const event: CommandProgressEvent = {
+            instance_id: message.instance_id as string,
+            command_id: message.command_id as string,
+            phase: message.phase as CommandProgressEvent['phase'],
+            phase_seq: Number(message.phase_seq),
+            timestamp: (message.timestamp as string) ?? '',
+            elapsed_ms: Number(message.elapsed_ms ?? 0),
+          };
+          if (typeof message.eta_ms === 'number') event.eta_ms = message.eta_ms;
+          if (message.detail && typeof message.detail === 'object') {
+            event.detail = message.detail as CommandProgressEvent['detail'];
+          }
+          // Staleness guard (:633 pattern) — drop events that belong to a
+          // different instance than the one this channel is attached to.
+          if (event.instance_id !== this.currentInstanceId) return;
+          // Forward with ``phase_seq`` INTACT — the state machine dedups
+          // stale/duplicate/heartbeat events; this listener must not.
+          this.commandProgress.set(event);
+        } catch (err) {
+          console.error('[SSE] Failed to parse command_progress:', err);
+        }
+      });
+    });
+
     // Error event
     eventSource.addEventListener('error', (e: MessageEvent) => {
       this.ngZone.run(() => {
@@ -689,6 +736,11 @@ export class SseService {
     this.contextUsage.set(null);
     this.pendingInjection.set(null);
     this.questionPack.set(null);
+    // Slash-command progress is the live channel's latest event; a fresh
+    // connection cycle starts clean. The per-instance machine state lives
+    // in CommandStateService (retained across switches by design) — this
+    // only drops the transient SSE mirror, exactly like pendingInjection.
+    this.commandProgress.set(null);
     this.pendingToolOutputs.clear();
     // Reconnect catch-up latch + purge trigger counters — reset on
     // disconnect so a brand-new connection cycle starts clean. The

@@ -171,6 +171,55 @@
           <div class="pending-injection-content">{{ pending.content }}</div>
         </div>
       }
+
+      <!-- Active slash-command card (Phase 2 / Task 6). Out-of-timeline
+           status card (Q3 confirmed) — commands never become messages, so
+           this is their only UI surface. accessibility parity with the
+           injection card: role="status" + aria-live="polite" (SC9).
+           ``data-command-phase`` gives e2e a stable hook per phase. The
+           card is non-modal and non-blocking: the input stays usable while
+           a command runs (Q2 confirmed — queued messages are safe and the
+           note below documents the latency). -->
+      @if (activeCommand; as cmd) {
+        <div
+          class="active-command-card"
+          role="status"
+          aria-live="polite"
+          data-testid="active-command-card"
+          [attr.data-command-phase]="cmd.phase"
+          [class.terminal]="isTerminalCommand(cmd)"
+          [class.failed]="isFailedCommand(cmd)"
+          [class.success-terminal]="cmd.phase === 'success'"
+        >
+          <div class="active-command-badge">
+            @if (isSpinnerPhase(cmd.phase)) {
+              <mat-progress-spinner class="active-command-spinner" mode="indeterminate" diameter="14"></mat-progress-spinner>
+            } @else {
+              <span class="active-command-icon">{{ phaseGlyph(cmd.phase) }}</span>
+            }
+            <span class="active-command-label">/{{ cmd.command }}</span>
+            @if (cmd.phase === 'in_progress') {
+              <span class="active-command-elapsed">{{ commandElapsedLabel(cmd) }}</span>
+              @if (commandEtaLabel(cmd); as eta) {
+                <span class="active-command-eta">{{ eta }}</span>
+              }
+            }
+          </div>
+          <div class="active-command-title">{{ commandTitle(cmd) }}</div>
+          @if (commandDetailLine(cmd); as detailLine) {
+            <div class="active-command-detail">{{ detailLine }}</div>
+          }
+          @if (commandTokensLabel(cmd); as tokens) {
+            <div class="active-command-tokens">{{ tokens }}</div>
+          }
+          @if (showLongHint(cmd)) {
+            <div class="active-command-hint">Large contexts can take several minutes</div>
+          }
+          @if (isWorkingCommandPhase(cmd.phase)) {
+            <div class="active-command-note">Messages sent now will run after compaction finishes.</div>
+          }
+        </div>
+      }
       </div>
     </div>
 
