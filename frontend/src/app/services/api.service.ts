@@ -1,6 +1,6 @@
 import { Injectable } from '@angular/core';
 import { HttpClient, HttpParams } from '@angular/common/http';
-import { Observable, of } from 'rxjs';
+import { Observable, of, throwError, firstValueFrom } from 'rxjs';
 import { catchError, map } from 'rxjs/operators';
 import type { TodoItem, TodoNode, SubTask } from './sse.service';
 import type { QuestionPack } from '../models/question.model';
@@ -26,8 +26,103 @@ import type {
   DeleteResponse,
   PauseResponse,
   ResumeResponse,
-  JobQueueListResponse
+  JobQueueListResponse,
+  CommandAck,
+  GetActiveResponse
 } from '../models';
+
+// ─────────────────────────────────────────────────────────────────────────
+// Slash-command send-path helpers (Phase 2 / Task 2). Pure functions so the
+// wire contract has an executable Jest spec (parse-command-ack.spec.ts)
+// without TestBed — logic-mirror house style.
+// ─────────────────────────────────────────────────────────────────────────
+
+/** HTTP 400 ``UNKNOWN_COMMAND`` mapped to a typed error carrying the
+ *  available-commands list (§7 split rule / O13). The FE toast path
+ *  consumes ``available``; it later feeds slash autocomplete without a
+ *  contract change. */
+export class UnknownCommandHttpError extends Error {
+  readonly code = 'UNKNOWN_COMMAND' as const;
+  readonly available: string[];
+  readonly serverMessage: string;
+
+  constructor(available: string[], serverMessage = 'Unknown command') {
+    super(serverMessage);
+    this.name = 'UnknownCommandHttpError';
+    this.available = available;
+    this.serverMessage = serverMessage;
+  }
+}
+
+/** Discriminated parse of the POST /messages response body. The command
+ *  intercept (Phase 1) returns ``{status: 'command', ...}``; every legacy
+ *  body (202 ``injected``, 200 auto-resume, 200 enqueue — the latter two
+ *  carry NO ``status`` key) is a message response. */
+export type ParsedSendResponse =
+  | { kind: 'message'; message: MessageResponse }
+  | { kind: 'command'; ack: CommandAck };
+
+/**
+ * THE single parsing point for the POST /messages response (phase2 Task 2).
+ * Encodes the pinned §7 CommandAck shape exactly — the Jest adapter test
+ * (parse-command-ack.spec.ts) is the executable contract spec: a Phase 1
+ * wire drift fails here with a named field (R6).
+ *
+ * Discrimination is defensive (``payload?.status === 'command'``) because
+ * legacy message bodies do NOT all carry a ``status`` key (the PAUSED
+ * auto-resume 200 and the IDLE enqueue 200 ship none).
+ */
+export function parseCommandAck(payload: unknown): ParsedSendResponse {
+  if (
+    payload !== null &&
+    typeof payload === 'object' &&
+    (payload as { status?: unknown }).status === 'command'
+  ) {
+    return { kind: 'command', ack: payload as CommandAck };
+  }
+  return { kind: 'message', message: payload as MessageResponse };
+}
+
+/**
+ * Inspect an HttpClient error and map the HTTP 400 ``UNKNOWN_COMMAND``
+ * validation envelope to a typed {@link UnknownCommandHttpError}. Returns
+ * ``null`` for every other error so callers can rethrow unchanged.
+ *
+ * Backend wire shape (daemon/routers/messages.py:256-267 +
+ * daemon/models/common.py ErrorResponse): FastAPI wraps the ErrorResponse
+ * under ``detail``, and the available list rides the ADDITIVE ``details``
+ * dict — ``err.error.detail = {code, message, details: {available: [...]}}``.
+ */
+export function extractUnknownCommandError(err: unknown): UnknownCommandHttpError | null {
+  // Idempotent: an already-typed error (the sendMessage pipe maps it once;
+  // sendCommand's error handler inspects the result) passes through so a
+  // second inspection cannot degrade it to the generic error branch.
+  if (err instanceof UnknownCommandHttpError) return err;
+  const httpErr = err as {
+    status?: number;
+    error?: {
+      detail?: {
+        code?: string;
+        message?: string;
+        details?: { available?: unknown };
+      };
+    };
+  } | null;
+  if (!httpErr || httpErr.status !== 400) return null;
+  const detail = httpErr.error?.detail;
+  if (!detail || detail.code !== 'UNKNOWN_COMMAND') return null;
+  const rawAvailable = detail.details?.available;
+  const available = Array.isArray(rawAvailable)
+    ? rawAvailable.filter((v): v is string => typeof v === 'string')
+    : [];
+  return new UnknownCommandHttpError(available, detail.message || 'Unknown command');
+}
+
+/** True when ``ack`` seeded a real command run (BE ships ``command_id:
+ *  null`` on rejected acks — nothing to correlate). */
+export function isAcceptedCommandAck(ack: CommandAck): ack is CommandAck & { command_id: string } {
+  return ack.state === 'accepted' && typeof ack.command_id === 'string' && ack.command_id.length > 0;
+}
 
 @Injectable({
   providedIn: 'root'
@@ -184,11 +279,56 @@ export class ApiService {
   }
 
   // Messages
-  sendMessage(instanceId: string, content: string, images?: string[], queueId?: string | null): Observable<MessageResponse> {
+  //
+  // Phase 2 (slash-commands): the response is now a UNION. The Phase 1
+  // BE-side intercept answers ``/command`` content with a sync CommandAck
+  // (200) instead of a message body, and unknown commands with HTTP 400
+  // ``UNKNOWN_COMMAND``. Discrimination happens in ``parseCommandAck``
+  // (single parsing point — executable contract spec lives in
+  // parse-command-ack.spec.ts), NOT here.
+  sendMessage(
+    instanceId: string,
+    content: string,
+    images?: string[],
+    queueId?: string | null,
+  ): Observable<MessageResponse | CommandAck> {
     const body: { content: string; images?: string[]; queue_id?: string } = { content };
     if (images?.length) body.images = images;
     if (queueId) body.queue_id = queueId;
-    return this.http.post<MessageResponse>(`${this.API_BASE}/instances/${instanceId}/messages`, body);
+    return this.http
+      .post<MessageResponse | CommandAck>(`${this.API_BASE}/instances/${instanceId}/messages`, body)
+      .pipe(
+        catchError(err => {
+          // Map HTTP 400 UNKNOWN_COMMAND to a typed error carrying
+          // ``detail.available`` for the existing toast path. Every other
+          // error rethrows UNCHANGED (normal-message path untouched).
+          const unknown = extractUnknownCommandError(err);
+          if (unknown) return throwError(() => unknown);
+          return throwError(() => err);
+        }),
+      );
+  }
+
+  /**
+   * GET /api/instances/{id}/commands/active — SSE-loss recovery fallback
+   * (phase2 Task 8 / §7). NEVER throws: a network / HTTP failure resolves
+   * to ``null`` (swallowed-error convention, sse.service.ts:653 pattern),
+   * which the caller must treat as "no information" — keep the current
+   * card, keep polling. A LEGITIMATE ``{exists: false}`` (daemon restart,
+   * TTL expiry, disabled subsystem) is the authoritative silent-clear
+   * signal and is returned verbatim.
+   */
+  getActiveCommand(instanceId: string): Promise<GetActiveResponse | null> {
+    return firstValueFrom(
+      this.http
+        .get<GetActiveResponse>(`${this.API_BASE}/instances/${instanceId}/commands/active`)
+        .pipe(
+          catchError(err => {
+            console.error('[Api] Failed to fetch active command:', err);
+            return of(null);
+          }),
+        ),
+    );
   }
 
   getQueues(projectId: string): Observable<JobQueueListResponse> {

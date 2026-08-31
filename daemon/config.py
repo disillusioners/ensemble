@@ -752,6 +752,116 @@ class CompactionConfig(BaseSettings):
     min_messages_before_compaction: int = Field(default=10, description="Minimum number of messages before compaction is considered")
     summarization_chunk_threshold: float = Field(default=0.60, description="Fraction of context window above which summarization uses chunking")
 
+    # ── Adaptive LLM timeout (Phase 1 / WS-3) ──────────────────────────────────
+    # Adaptive formula (per-call): ``min(cap, base + (tokens/100_000)*per_100k)``
+    # applied at every ``_call_summarization_llm`` site. Replaces the prior
+    # hard-coded ``timeout=30.0`` literal so merge/condense prompts (tiny)
+    # get the base timeout instead of an oversized conversation-scale cap.
+    timeout_base_s: float = Field(
+        default=90.0,
+        description=(
+            "Adaptive LLM timeout base (seconds) for the per-call summarization "
+            "wait. Combined with tokens-estimated scaling; result is min'd "
+            "against timeout_cap_s. Default 90s replaces the prior 30s literal."
+        ),
+    )
+    timeout_per_100k_tokens_s: float = Field(
+        default=60.0,
+        description=(
+            "Adaptive LLM timeout scaling: extra seconds added per 100,000 "
+            "tokens of the prompt being sent. Default 60s/100k."
+        ),
+    )
+    timeout_cap_s: float = Field(
+        default=300.0,
+        description=(
+            "Hard ceiling for the adaptive per-call LLM timeout (seconds). "
+            "Default 300s."
+        ),
+    )
+    timeout_facade_margin_s: float = Field(
+        default=5.0,
+        description=(
+            "Wall-clock margin (seconds) added to the inner per-call cap when "
+            "threaded into the HA failover facade's ``wall_clock_cap_s``. "
+            "PINNED to 5s by architect §9.8 so tenacity retries stay inside "
+            "the outer cap and the site-level TimeoutError trips first."
+        ),
+    )
+    operation_budget_s: float = Field(
+        default=300.0,
+        description=(
+            "Whole-operation budget (seconds) spanning all chunk calls in a "
+            "single ``_summarize_chunked`` run. Cumulative clock across batch "
+            "summaries + merges + condense; on exhaustion the engine stops "
+            "issuing chunks and proceeds to the truncate fallback. Trips "
+            "BETWEEN LLM calls only — never between the two ``aupdate_state`` "
+            "persistence calls."
+        ),
+    )
+
+
+class SlashCommandConfig(BaseSettings):
+    """Slash-command subsystem configuration (Phase 1 / WS-7).
+
+    Surfaced to the operator via ``SLASH_COMMANDS_*`` environment variables.
+    A later phase (compact_executor / command_dispatcher) consumes this
+    config; engine code paths do NOT read it. Exact names here are a contract.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="SLASH_COMMANDS_")
+
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "Master switch. False disables slash-command parsing entirely — "
+            "messages starting with / are treated as plain text (used as the "
+            "kill-switch and for the WS-8 'no regression when feature off' "
+            "test)."
+        ),
+    )
+    escape_prefix: str = Field(
+        default="//",
+        description=(
+            "Escape prefix checked BEFORE the leading / parse. Leading ``//`` "
+            "strips one / and treats the rest as plain text (Slack convention, "
+            "architect O-B1 ratified)."
+        ),
+    )
+    min_interval_s: int = Field(
+        default=10,
+        description=(
+            "Per-instance rate-limit minimum interval (seconds). The O-B13 "
+            "abuse guard — second POST inside this window returns "
+            "``rate_limited``. Checked BEFORE ExecutionGate acquisition."
+        ),
+    )
+    noop_floor_ratio: float = Field(
+        default=0.05,
+        description=(
+            "Executor noop floor as fraction of the resolved per-instance "
+            "context window. Estimated tokens below this ratio of the window "
+            "→ ``success + noop + reason=below_floor``; engine never invoked. "
+            "5% is a tuning guess (architect §2: 'expect adjustment')."
+        ),
+    )
+    state_ttl_s: int = Field(
+        default=600,
+        description=(
+            "TTL (seconds) for in-memory command-state entries used by the "
+            "GET ``/commands/active`` fallback. Mirrors the ``ttl_seconds`` "
+            "field on the POST command-ack envelope."
+        ),
+    )
+    max_state_per_instance: int = Field(
+        default=20,
+        description=(
+            "Maximum number of terminal command-state entries retained in "
+            "the daemon-wide ring per instance. Once the bound is reached, "
+            "oldest terminal entry is evicted (LRU)."
+        ),
+    )
+
 
 class ServicesConfig(BaseSettings):
     """Worker pool and background service configuration."""
@@ -1641,6 +1751,7 @@ class Config(BaseSettings):
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     queue: QueueConfig = Field(default_factory=QueueConfig)
     compaction: CompactionConfig = Field(default_factory=CompactionConfig)
+    slash_commands: SlashCommandConfig = Field(default_factory=SlashCommandConfig)
     services: ServicesConfig = Field(default_factory=ServicesConfig)
     job_system: JobSystemConfig = Field(default_factory=JobSystemConfig)
     mcp_pool: McpPoolConfig = Field(default_factory=McpPoolConfig)
@@ -1927,6 +2038,17 @@ def load_config(config_path: str | None = None) -> Config:
 
     if "compaction" in processed_config:
         config_dict["compaction"] = processed_config["compaction"]
+    if "slash_commands" in processed_config:
+        # Phase 1 / WS-7: operators may set SLASH_COMMANDS_* via YAML; let
+        # the nested section fall through to ``SlashCommandConfig`` so the
+        # ``SLASH_COMMANDS_*`` env-var prefix still wins (default-factory
+        # would otherwise shadow YAML → env precedence; mirroring the
+        # ``blueprint`` / ``skill_evolution`` None-strip pattern keeps the
+        # order intentional and grep-able).
+        sc_raw = processed_config["slash_commands"]
+        config_dict["slash_commands"] = {
+            k: v for k, v in sc_raw.items() if v is not None
+        }
     if "services" in processed_config:
         config_dict["services"] = processed_config["services"]
     if "job_system" in processed_config:

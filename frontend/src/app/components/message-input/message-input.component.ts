@@ -8,6 +8,17 @@ export interface MessagePayload {
   content: string;
   images?: string[];  // optional, not required
   queue_id?: string | null;
+  /**
+   * Defect #5 retry path (2026-08-31, must-fix #1): when set, this send
+   * is a retry of a previously-failed bubble (id-keyed). The chat
+   * component's success handler uses this to clear the failed marker
+   * on the originating bubble — the clear happens in the success path,
+   * NOT synchronously in the retry handler, so a cooldown-blocked
+   * retry preserves the user's error state (no POST went out → the
+   * bubble keeps its ``failed`` marker). Internal-only; the message
+   * input component never sets this.
+   */
+  retry_of_message_id?: string;
 }
 
 interface FilePreview {
@@ -240,6 +251,25 @@ export class MessageInputComponent {
   private showValidationError(message: string): void {
     this.validationError.set(message);
     setTimeout(() => this.validationError.set(null), 4000);
+  }
+
+  /**
+   * Public inline-error surface for slash-command validation (Phase 2 /
+   * Task 5). The chat component owns the command send flow, but the inline
+   * validation UI (and its auto-dismiss timer) lives HERE in the input —
+   * same pattern as ``showValidationError`` (4s default auto-dismiss).
+   *
+   * ``durationMs`` is overridable: rejection guidance (e.g. the
+   * terminal-instance hint rendered VERBATIM from the ack ``detail``)
+   * needs more reading time than a 4s flash, so the chat component passes
+   * a longer window for rejected acks.
+   *
+   * Returns the dismiss timer handle so tests (and the component) can
+   * verify auto-dismiss behavior deterministically.
+   */
+  showCommandValidationError(message: string, durationMs = 4000): ReturnType<typeof setTimeout> {
+    this.validationError.set(message);
+    return setTimeout(() => this.validationError.set(null), durationMs);
   }
 
   async processFiles(files: File[]): Promise<void> {

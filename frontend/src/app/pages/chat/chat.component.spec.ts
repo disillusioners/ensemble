@@ -11,7 +11,7 @@ import { ProjectService } from '../../services/project.service';
 import { SseService } from '../../services/sse.service';
 import { TabStateService } from '../../services/tab-state.service';
 import { WorkspaceOverlayService } from '../../services/workspace-overlay.service';
-import type { Agent, InstanceInfo } from '../../models';
+import type { Agent, InstanceInfo, CommandProgressEvent } from '../../models';
 import { ProjectTab } from '../../models/tab.model';
 import {
   makeProvisionalMessage,
@@ -96,6 +96,10 @@ const mockSseService = {
   // MIN-3: which instance the latest purge bump refers to — the
   // component effect compares it against ``activeInstanceId()``.
   pendingPurgeInstanceId: signal<string | null>(null),
+  // Phase 2 / slash-commands: latest ``command_progress`` event mirror.
+  // The component effect feeds it into CommandStateService (guarded by
+  // the active instance id); tests can drive it directly.
+  commandProgress: signal<CommandProgressEvent | null>(null),
   connect: jest.fn(),
   disconnect: jest.fn(),
   clearEvents: jest.fn(),
@@ -111,6 +115,9 @@ const mockSnackBar = {
 interface TestMessagePayload {
   content: string;
   images?: string[];
+  queue_id?: string | null;
+  /** Defect #5 retry path — see production ``MessagePayload``. */
+  retry_of_message_id?: string;
 }
 
 // Mock WorkspaceOverlayService — mirrors production semantics:
@@ -332,7 +339,7 @@ class TestableChatComponent {
     // response handler re-checks it against ``activeInstanceId()``.
     const sentInstanceId = instance.instance_id;
 
-    this.api.sendMessage(instance.instance_id, payload.content, payload.images).subscribe({
+    this.api.sendMessage(instance.instance_id, payload.content, payload.images, payload.queue_id).subscribe({
       next: (response: MessageResponse) => {
         // Mirror production ChatComponent.onSendMessage exactly:
         //   1. Clear input on success.
@@ -385,11 +392,135 @@ class TestableChatComponent {
           }
           this.isSending.set(false);
         }
+
+        // Defect #5 retry-path mirror (must-fix #1, 2026-08-31):
+        // clear the failed marker on the originating bubble ONLY when
+        // the POST actually succeeded. The synchronous mirror-in-
+        // production is gone — a cooldown-blocked retry preserves the
+        // error state because the marker-clear lives here, not in
+        // ``onRetryFailedMessage``.
+        if (payload.retry_of_message_id) {
+          this.messages.update(msgs =>
+            msgs.map(m =>
+              m.message_id === payload.retry_of_message_id
+                ? { ...m, failed: false, errorReason: undefined }
+                : m
+            )
+          );
+        }
       },
       error: (err: any) => {
-        this.sendError.set(err instanceof Error ? err.message : 'Failed to send message');
+        // Mirror production ChatComponent.onSendMessage error path:
+        //   1. Set ``sendError`` for the top-of-chat banner.
+        //   2. Release the sending flag (no spinner stick).
+        //   3. Defect #5 (2026-08-31): if the SSE echo raced ahead
+        //      and a bubble for this send is already in the list, mark
+        //      it failed so the chat-interface renders an error state
+        //      + retry affordance instead of a "delivered" bubble the
+        //      server never recorded. Must-fix #2: also stash the
+        //      original send's ``queue_id`` so the retry can re-use
+        //      it. F1 escape-retry fix: also stash the ORIGINAL-send
+        //      ``content`` as ``retry_content`` so the retry POST
+        //      re-uses the RAW ``//x`` form even when the bubble
+        //      carries the delivered ``/x`` form.
+        const errorReason = err instanceof Error ? err.message : 'Failed to send message';
+        this.sendError.set(errorReason);
         this.isSending.set(false);
+        const escaped = payload.content.replace(/^\/\//, '/');
+        const sentQueueId = payload.queue_id;
+        this.messages.update(msgs => {
+          for (let i = msgs.length - 1; i >= 0; i--) {
+            const m = msgs[i];
+            if (m.role !== 'user' || m.failed) continue;
+            if (m.instance_id && m.instance_id !== sentInstanceId) continue;
+            if (m.content === payload.content || m.content === escaped) {
+              const next = msgs.slice();
+              // Preserve any pre-existing queue_id (defensive — a
+              // retry that fails twice should keep the original
+              // stash rather than overwrite with a null variant).
+              const stash = sentQueueId !== undefined ? sentQueueId : m.queue_id;
+              // F1 escape-retry stash: preserve any pre-existing
+              // ``retry_content`` defensively (same discipline as
+              // ``queue_id``). When the bubble was a non-escape
+              // message the sent content already matches the
+              // bubble's content, so the retry is correct
+              // regardless; when it was an escape message the
+              // bubble's content is the STRIPPED form and the
+              // stash carries the RAW form. Stash the RAW form
+              // unconditionally — the retry handler picks
+              // ``retry_content`` when present, and a non-escape
+              // bubble carries identical content in both fields.
+              const retryStash = m.retry_content !== undefined
+                ? m.retry_content
+                : payload.content;
+              next[i] = {
+                ...m,
+                failed: true,
+                errorReason,
+                queue_id: stash,
+                retry_content: retryStash,
+              };
+              return next;
+            }
+          }
+          return msgs;
+        });
       }
+    });
+  }
+
+  /**
+   * Mirror production ``ChatComponent.onRetryFailedMessage``. Re-POSTs
+   * the same content through the same composer path so the cooldown
+   * stamping / sendError clearing / queue_id-carrying invariants are
+   * exercised identically to a fresh send. The failed marker is NOT
+   * cleared synchronously here — it is cleared in
+   * ``onSendMessage``'s success path, which means a cooldown-blocked
+   * retry preserves the error state (no POST went out → bubble stays
+   * failed). See chat.component.ts must-fix #1 (2026-08-31).
+   *
+   * F1 escape-retry fix (2026-08-31): re-POSTs ``target.retry_content``
+   * when present (the RAW ``//x`` form stashed at fail-mark time),
+   * falling back to ``target.content`` when the stash is genuinely
+   * absent (older mark paths, BE refetches that surfaced a failed
+   * bubble without a stash). Naive ``content: target.content`` would
+   * re-POST the bubble's stripped form for an ESCAPE message — the
+   * BE re-parses it as a real slash command and the retry performs
+   * a DIFFERENT action than the original send.
+   */
+  onRetryFailedMessage(messageId: string): void {
+    const target = this.messages().find(m => m.message_id === messageId);
+    if (!target || !target.failed) return;
+    this.sendError.set(null);
+    // Carry the original send's ``queue_id`` through the retry POST
+    // (must-fix #2). Falls back to ``activeProjectId`` only when the
+    // stash is absent on the bubble.
+    const retryQueueId = target.queue_id !== undefined
+      ? target.queue_id
+      : (this.tabStateService.activeProjectId() ?? null);
+    // F1 escape-retry: carry the ORIGINAL-send content (RAW ``//x``
+    // form for escape messages). Falls back to the bubble's displayed
+    // content only when the stash is genuinely absent.
+    const retryContent = target.retry_content !== undefined
+      ? target.retry_content
+      : target.content;
+    this.onSendMessage({
+      content: retryContent,
+      images: target.images,
+      queue_id: retryQueueId,
+      retry_of_message_id: messageId,
+    });
+  }
+
+  /**
+   * Mirror production ``ChatComponent.onDismissFailedMessage``: drop
+   * the failed bubble from the local list. The sendError banner and the
+   * composer text stay intact so the user can manually re-send / edit.
+   */
+  onDismissFailedMessage(messageId: string): void {
+    this.messages.update(msgs => {
+      const next = msgs.filter(m => m.message_id !== messageId);
+      return next.length === msgs.length ? msgs : next;
     });
   }
 
@@ -1075,7 +1206,11 @@ describe('ChatComponent - Project-Aware Navigation', () => {
       jest.spyOn(Date, 'now').mockReturnValue(1000);
       component.onSendMessage({ content: 'hello' });
 
-      expect(mockApiService.sendMessage).toHaveBeenCalledWith('cooldown-inst', 'hello', undefined);
+      // The 4th arg is the queue_id (must-fix #2, 2026-08-31):
+      // tests that don't supply a queue_id see it forwarded as
+      // ``undefined``. Production ``MessagePayload.queue_id`` is
+      // optional, and the api call passes it through verbatim.
+      expect(mockApiService.sendMessage).toHaveBeenCalledWith('cooldown-inst', 'hello', undefined, undefined);
       expect(mockSnackBar.open).not.toHaveBeenCalled();
     });
 
@@ -1375,6 +1510,845 @@ describe('ChatComponent - Project-Aware Navigation', () => {
       const parsed = Date.parse(msgs[0].created_at);
       expect(Number.isNaN(parsed)).toBe(false);
       expect(Date.now() - parsed).toBeLessThan(TEN_MIN_MS);
+    });
+  });
+
+  /**
+   * Defect #5 (2026-08-31) — dishonest optimistic bubble.
+   *
+   * The tester observed that a bubble was rendered for a message the
+   * POST never persisted (e.g. the SSE ``user_message`` echo raced the
+   * HTTP error, OR a 2xx response carried a phantom ``message_id``).
+   * Without this fix, the bubble stayed rendered as a delivered user
+   * message — the user trusts a chat surface that lies.
+   *
+   * These specs lock in the fix:
+   *   - Failed POST → sendError banner set, isSending released, AND
+   *     any bubble that landed for this send is marked ``failed`` so
+   *     the chat-interface renders an error state + retry affordance.
+   *   - The SSE-echo race: the bubble was already on screen when the
+   *     POST errored. The error handler finds it and marks it failed.
+   *   - Retry: the retry handler clears the marker and re-POSTs the
+   *     same content; success path lands a fresh, non-failed bubble.
+   *   - Dismiss: drops the failed bubble from the list; composer text
+   *     and sendError state are left to the existing happy-path code.
+   *   - Merge helper: a later SSE echo / refetch MUST NOT silently
+   *     clear the failed flag (server cannot have a message we never
+   *     sent) and the TTL eviction MUST NOT drop a failed entry
+   *     (would re-introduce the bug).
+   */
+  describe('onSendMessage() - failed POST (defect #5)', () => {
+    function fireFailedSend(errorMessage = 'Network unreachable'): void {
+      mockApiService.sendMessage.mockReturnValueOnce({
+        subscribe: (handlers: any) => {
+          handlers.error(new Error(errorMessage));
+          return { unsubscribe: () => {} };
+        },
+      });
+    }
+
+    beforeEach(() => {
+      component.currentInstance.set(createMockInstance({ instance_id: 'inst-abc' }));
+      component.viewState.activeInstanceId.set('inst-abc');
+      mockSseService.messages.set([]);
+    });
+
+    afterEach(() => {
+      jest.restoreAllMocks();
+      mockSseService.messages.set([]);
+    });
+
+    // 5a — Happy precondition: no SSE bubble, no optimistic append.
+    // POST error → no bubble in the list, only the banner.
+    it('should NOT leave a bubble in the list when no SSE echo raced the error', () => {
+      fireFailedSend('Network unreachable');
+
+      component.onSendMessage({ content: 'hello' });
+
+      // No bubble rendered — the POST errored BEFORE anything was added.
+      expect(component.messages()).toHaveLength(0);
+      // The sendError banner is set so the user sees WHAT failed.
+      expect(component.sendError()).toBe('Network unreachable');
+      expect(component.isSending()).toBe(false);
+      // Input is preserved (the existing contract).
+      expect(component.messageInputRef.clearInput).not.toHaveBeenCalled();
+    });
+
+    // 5b — SSE-echo race: the bubble was already on screen when the
+    // POST errored. The error handler must find it and mark it failed.
+    it('should mark an SSE-echoed bubble as failed when the POST errored after the echo', () => {
+      // (1) SSE echo lands first — the BE-side hook emitted the event
+      //     before responding to the POST. The bubble is now in the
+      //     list with the delivered (post-strip) content.
+      const echoId = 'echo-uuid-1';
+      const echoStamp = new Date().toISOString();
+      mockSseService.messages.set([
+        {
+          message_id: echoId,
+          role: 'user',
+          content: 'hello',
+          created_at: echoStamp,
+          instance_id: 'inst-abc',
+        },
+      ]);
+      component.runSseMergeEffect();
+      expect(component.messages()).toHaveLength(1);
+
+      // (2) POST error fires after the echo — the bubble should be
+      //     marked failed so the user knows the message never reached
+      //     the server.
+      fireFailedSend('Connection reset by peer');
+      component.onSendMessage({ content: 'hello' });
+
+      const msgs = component.messages();
+      expect(msgs).toHaveLength(1);
+      // The errorReason is surfaced verbatim so the operator can act.
+      expect(msgs[0].failed).toBe(true);
+      expect(msgs[0].errorReason).toBe('Connection reset by peer');
+      // The SSE-echoed id / stamp are preserved (id-keyed dedup
+      // contract; the server-authoritative stamp pins the bubble in
+      // send position).
+      expect(msgs[0].message_id).toBe(echoId);
+      expect(msgs[0].created_at).toBe(echoStamp);
+      expect(component.sendError()).toBe('Connection reset by peer');
+    });
+
+    // 5c — Escape-contract race: the bubble carries the delivered
+    // (post-strip) form while the composer fired the raw form. The
+    // error handler matches both so the bubble is found and marked.
+    it('should mark the bubble as failed when the content was rewritten by the //escape contract', () => {
+      // SSE echo arrived with the delivered (one-slash-stripped) text.
+      mockSseService.messages.set([
+        {
+          message_id: 'echo-strip',
+          role: 'user',
+          content: '/compact is useful',
+          created_at: new Date().toISOString(),
+          instance_id: 'inst-abc',
+        },
+      ]);
+      component.runSseMergeEffect();
+
+      // Composer fired the RAW `//compact is useful` (post 235650f1
+      // contract: FE does NOT pre-strip — BE strips one slash).
+      fireFailedSend('502 Bad Gateway');
+      component.onSendMessage({ content: '//compact is useful' });
+
+      const msgs = component.messages();
+      expect(msgs).toHaveLength(1);
+      expect(msgs[0].failed).toBe(true);
+      expect(msgs[0].errorReason).toBe('502 Bad Gateway');
+      // The bubble content stays as delivered (the user can still see
+      // what was attempted).
+      expect(msgs[0].content).toBe('/compact is useful');
+    });
+
+    // 5d — Retry: clearing the marker and re-POSTing replaces the
+    // bubble with a non-failed copy (id-keyed dedup collapses onto
+    // the same row when the retry succeeds).
+    it('should re-issue the send when retry is invoked on a failed bubble', () => {
+      // Seed a failed bubble.
+      component.messages.set([
+        {
+          message_id: 'echo-retry',
+          role: 'user',
+          content: 'hello retry',
+          created_at: new Date().toISOString(),
+          instance_id: 'inst-abc',
+          failed: true,
+          errorReason: 'transient',
+        },
+      ]);
+
+      // The retry re-POSTs through the same composer path. Mock a
+      // 202-with-id success so the optimistic append can land.
+      const successStamp = new Date().toISOString();
+      mockApiService.sendMessage.mockReturnValueOnce({
+        subscribe: (handlers: any) => {
+          handlers.next({
+            status: 'injected',
+            message_id: 'echo-retry',
+            created_at: successStamp,
+            timestamp: successStamp,
+            instance_id: 'inst-abc',
+            content: 'hello retry',
+            pending_count: 1,
+          });
+          return { unsubscribe: () => {} };
+        },
+      });
+
+      component.onRetryFailedMessage('echo-retry');
+
+      // sendError was cleared on retry.
+      expect(component.sendError()).toBe(null);
+      // The bubble is no longer marked failed (id-keyed dedup keeps
+      // the same row; the optimistic append path with the same id
+      // would merge onto the same row but is skipped because the id
+      // already exists, so the existing entry stays as-is with the
+      // marker cleared).
+      const msgs = component.messages();
+      expect(msgs).toHaveLength(1);
+      expect(msgs[0].message_id).toBe('echo-retry');
+      expect(msgs[0].failed).toBe(false);
+      expect(msgs[0].errorReason).toBeUndefined();
+    });
+
+    // 5e — Dismiss: drops the failed bubble from the local list.
+    it('should drop the failed bubble when the user dismisses', () => {
+      component.messages.set([
+        {
+          message_id: 'echo-dismiss',
+          role: 'user',
+          content: 'hello dismiss',
+          created_at: new Date().toISOString(),
+          instance_id: 'inst-abc',
+          failed: true,
+          errorReason: 'aborted',
+        },
+        {
+          message_id: 'other-msg',
+          role: 'assistant',
+          content: 'previous turn',
+          created_at: new Date(Date.now() - 60_000).toISOString(),
+          instance_id: 'inst-abc',
+        },
+      ]);
+
+      component.onDismissFailedMessage('echo-dismiss');
+
+      const msgs = component.messages();
+      expect(msgs).toHaveLength(1);
+      expect(msgs[0].message_id).toBe('other-msg');
+    });
+
+    // 5f — Merge helper invariant: a later SSE echo / refetch MUST
+    // NOT silently clear the failed flag (server cannot have a message
+    // we never sent). The merge helper preserves it.
+    //
+    // Strengthened (NIT 2, 2026-08-31): exercises the production
+    // ``mergeMessagesById`` directly (the previous version of this
+    // test ran a mock spread that did NOT cover the merge helper's
+    // failed-preservation branch — a regression in the merge helper
+    // would not have been caught). Same pattern as test 5g below
+    // which calls ``evictPendingByAge`` directly.
+    it('should preserve the failed flag across an SSE echo merge', () => {
+      // Seed a failed bubble.
+      component.messages.set([
+        {
+          message_id: 'echo-keep',
+          role: 'user',
+          content: 'hello',
+          created_at: new Date().toISOString(),
+          instance_id: 'inst-abc',
+          failed: true,
+          errorReason: 'flaky network',
+        },
+      ]);
+
+      // The SSE echo arrives for the same id (the BE-side hook
+      // emitted it before the POST errored in production). Drive
+      // the production ``mergeMessagesById`` so this test exercises
+      // the real failed-preservation branch.
+      const echoArrival = {
+        message_id: 'echo-keep',
+        role: 'user' as const,
+        content: 'hello',
+        created_at: new Date().toISOString(),
+        instance_id: 'inst-abc',
+      };
+      const merged = mergeMessagesById(component.messages(), [echoArrival]);
+
+      // The failed flag stays set; the user keeps the error state
+      // until they retry or dismiss.
+      expect(merged).toHaveLength(1);
+      expect(merged[0].failed).toBe(true);
+      expect(merged[0].errorReason).toBe('flaky network');
+    });
+
+    // 5f-bonus — Merge helper invariant for the queue_id stash
+    // (must-fix #2, 2026-08-31): the ``queue_id`` stashed on a
+    // failed bubble at fail-mark time MUST survive a subsequent
+    // SSE echo merge — otherwise a retry that races an echo would
+    // lose the stash and fall back to the (possibly wrong)
+    // activeProjectId default.
+    it('should preserve the stashed queue_id across an SSE echo merge', () => {
+      component.messages.set([
+        {
+          message_id: 'echo-stash',
+          role: 'user',
+          content: 'hello',
+          created_at: new Date().toISOString(),
+          instance_id: 'inst-abc',
+          failed: true,
+          errorReason: 'flaky network',
+          queue_id: 'queue-42',
+        },
+      ]);
+
+      const echoArrival = {
+        message_id: 'echo-stash',
+        role: 'user' as const,
+        content: 'hello',
+        created_at: new Date().toISOString(),
+        instance_id: 'inst-abc',
+      };
+      const merged = mergeMessagesById(component.messages(), [echoArrival]);
+
+      expect(merged).toHaveLength(1);
+      expect(merged[0].failed).toBe(true);
+      // The stash survives the merge.
+      expect(merged[0].queue_id).toBe('queue-42');
+    });
+
+    // 5f-bonus-2 — Merge helper invariant for the retry_content
+    // stash (F1 escape-retry fix, 2026-08-31): the ``retry_content``
+    // stashed on a failed bubble at fail-mark time MUST survive a
+    // subsequent SSE echo merge — otherwise a retry that races an
+    // echo would lose the RAW ``//x`` form and re-POST the bubble's
+    // stripped form, silently triggering a real slash command.
+    it('should preserve the stashed retry_content across an SSE echo merge', () => {
+      component.messages.set([
+        {
+          message_id: 'echo-stash-escape',
+          role: 'user',
+          content: '/compact is useful', // delivered (post-strip) form
+          created_at: new Date().toISOString(),
+          instance_id: 'inst-abc',
+          failed: true,
+          errorReason: '502 Bad Gateway',
+          retry_content: '//compact is useful', // RAW form the original send POSTed
+        },
+      ]);
+
+      // SSE echo arrival: the BE-side hook re-emitted the bubble
+      // with the delivered form (no ``retry_content`` field — the
+      // server has no notion of this client-side retry stash).
+      const echoArrival = {
+        message_id: 'echo-stash-escape',
+        role: 'user' as const,
+        content: '/compact is useful',
+        created_at: new Date().toISOString(),
+        instance_id: 'inst-abc',
+      };
+      const merged = mergeMessagesById(component.messages(), [echoArrival]);
+
+      expect(merged).toHaveLength(1);
+      expect(merged[0].failed).toBe(true);
+      // The RAW form stash survives the merge — the next retry
+      // re-POSTs ``//compact is useful``, not ``/compact is
+      // useful``.
+      expect(merged[0].retry_content).toBe('//compact is useful');
+    });
+
+    // 5g — TTL eviction invariant: the failed entry MUST NOT be
+    // evicted by ``evictPendingByAge``. Otherwise the bug re-appears
+    // as a silent bubble drop (and the user has no record of the
+    // failure).
+    it('should NOT evict a failed entry by age', () => {
+      // Drive the clock so the entry is "ancient" by TTL standards.
+      const fixedNow = Date.now();
+      jest.spyOn(Date, 'now').mockReturnValue(fixedNow);
+      const TEN_MIN_MS = 10 * 60 * 1000;
+      const oldStamp = new Date(fixedNow - TEN_MIN_MS * 2).toISOString();
+
+      component.messages.set([
+        {
+          message_id: 'echo-old-failed',
+          role: 'user',
+          content: 'ancient failed',
+          created_at: oldStamp,
+          instance_id: 'inst-abc',
+          failed: true,
+          errorReason: 'old failure',
+        },
+      ]);
+
+      // Trigger a refetch pass that runs eviction — mimic the
+      // loadInstanceMessages merge path by calling the same evict
+      // helper.
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const { evictPendingByAge } = require('../../services/message-merge.util');
+      const evicted = evictPendingByAge(component.messages(), TEN_MIN_MS, Date.now());
+      expect(evicted).toHaveLength(1);
+      expect(evicted[0].failed).toBe(true);
+    });
+
+    // 5h — Retry-during-cooldown invariant (must-fix #1, 2026-08-31).
+    // If the user clicks Retry within the 3-second cooldown window of
+    // the original send, ``onSendMessage`` blocks at its cooldown
+    // guard. The retry handler MUST NOT clear the failed marker
+    // synchronously — doing so leaves the bubble rendering as
+    // "delivered" with no corresponding POST, exactly the dishonest
+    // state defect #5 forbids. The marker is cleared in the SUCCESS
+    // path instead, so a no-POST cooldown-blocked retry keeps the
+    // error state intact.
+    //
+    // This is the regression test the original must-fix-#1 review
+    // flagged: the original code cleared the marker at the top of
+    // ``onRetryFailedMessage`` BEFORE calling ``onSendMessage``, so
+    // the cooldown snackbar would fire AND the marker would already
+    // be gone. The behavior was the silent deliver with no POST.
+    it('should keep the bubble failed when retry is clicked during the cooldown window', () => {
+      // Drive the clock so the cooldown is deterministically active.
+      const nowSpy = jest.spyOn(Date, 'now');
+      const t0 = 10_000;
+      nowSpy.mockReturnValue(t0);
+
+      // (1) The original send: SSE echo lands, POST errors, error
+      //     handler marks the bubble failed. The cooldown stamp is
+      //     set by the original ``onSendMessage`` path.
+      mockSseService.messages.set([
+        {
+          message_id: 'echo-cooldown',
+          role: 'user',
+          content: 'hello',
+          created_at: new Date(t0).toISOString(),
+          instance_id: 'inst-abc',
+        },
+      ]);
+      component.runSseMergeEffect();
+      expect(component.messages()).toHaveLength(1);
+
+      fireFailedSend('Server unavailable');
+      component.onSendMessage({ content: 'hello' });
+
+      const afterOriginal = component.messages();
+      expect(afterOriginal).toHaveLength(1);
+      expect(afterOriginal[0].failed).toBe(true);
+      expect(afterOriginal[0].errorReason).toBe('Server unavailable');
+      const sendCallsBeforeRetry = mockApiService.sendMessage.mock.calls.length;
+
+      // (2) The user clicks Retry ~1s later (still inside the 3s
+      //     cooldown window). Clock does NOT advance.
+      nowSpy.mockReturnValue(t0 + 1_000);
+      component.onRetryFailedMessage('echo-cooldown');
+
+      // The retry handler called ``onSendMessage``, which fired the
+      // cooldown snackbar and returned early. The retry POST never
+      // went out.
+      expect(mockApiService.sendMessage).toHaveBeenCalledTimes(sendCallsBeforeRetry);
+      expect(mockSnackBar.open).toHaveBeenCalledWith(
+        expect.stringContaining('Please wait'),
+        'Dismiss',
+        { duration: 2000, panelClass: 'info-snackbar' },
+      );
+
+      // The bubble STILL carries the failed marker and the original
+      // error reason — the user keeps the error state. No
+      // "delivered" rendering for a send that never happened.
+      const afterRetry = component.messages();
+      expect(afterRetry).toHaveLength(1);
+      expect(afterRetry[0].message_id).toBe('echo-cooldown');
+      expect(afterRetry[0].failed).toBe(true);
+      expect(afterRetry[0].errorReason).toBe('Server unavailable');
+    });
+
+    // 5i — Retry carries the original send's queue_id (must-fix #2,
+    // 2026-08-31). The original code passed
+    // ``activeProjectId() === null ? undefined : undefined`` (both
+    // branches undefined — a tautology that always dropped the queue
+    // context). The retry POST must land on the SAME queue the
+    // original send was routed to, else a project switch between
+    // the original fail and the retry click would silently re-route
+    // the retry.
+    //
+    // Three sub-cases:
+    //   - stash is a string: retry forwards it verbatim;
+    //   - stash is null: retry forwards null (queue selector was
+    //     open with nothing selected);
+    //   - stash is undefined (older mark path): retry falls back to
+    //     ``activeProjectId``.
+    it('should forward the stashed queue_id on retry (string value)', () => {
+      component.messages.set([
+        {
+          message_id: 'echo-q',
+          role: 'user',
+          content: 'hello',
+          created_at: new Date().toISOString(),
+          instance_id: 'inst-abc',
+          failed: true,
+          errorReason: 'flaky',
+          queue_id: 'queue-orig-1',
+        },
+      ]);
+
+      // Switch the active project — if the retry fell back to
+      // activeProjectId (the buggy tautology), it would pick up the
+      // new project id. The assert below confirms the stash wins.
+      component.tabStateService.setActiveTab('project-2');
+
+      // Mock a successful retry POST.
+      mockApiService.sendMessage.mockReturnValueOnce({
+        subscribe: (handlers: any) => {
+          handlers.next({
+            status: 'injected',
+            message_id: 'echo-q',
+            created_at: new Date().toISOString(),
+            timestamp: new Date().toISOString(),
+            instance_id: 'inst-abc',
+            content: 'hello',
+            pending_count: 1,
+          });
+          return { unsubscribe: () => {} };
+        },
+      });
+
+      component.onRetryFailedMessage('echo-q');
+
+      expect(mockApiService.sendMessage).toHaveBeenLastCalledWith(
+        'inst-abc',
+        'hello',
+        undefined,
+        'queue-orig-1', // the stashed value, NOT the active project
+      );
+    });
+
+    it('should forward null queue_id on retry when the stash was null', () => {
+      component.messages.set([
+        {
+          message_id: 'echo-q-null',
+          role: 'user',
+          content: 'hello',
+          created_at: new Date().toISOString(),
+          instance_id: 'inst-abc',
+          failed: true,
+          errorReason: 'flaky',
+          queue_id: null,
+        },
+      ]);
+
+      mockApiService.sendMessage.mockReturnValueOnce({
+        subscribe: (handlers: any) => {
+          handlers.next({
+            status: 'injected',
+            message_id: 'echo-q-null',
+            created_at: new Date().toISOString(),
+            timestamp: new Date().toISOString(),
+            instance_id: 'inst-abc',
+            content: 'hello',
+            pending_count: 1,
+          });
+          return { unsubscribe: () => {} };
+        },
+      });
+
+      component.onRetryFailedMessage('echo-q-null');
+
+      expect(mockApiService.sendMessage).toHaveBeenLastCalledWith(
+        'inst-abc',
+        'hello',
+        undefined,
+        null, // explicit null forwarded (not coerced to undefined)
+      );
+    });
+
+    it('should fall back to activeProjectId when the bubble has no stash', () => {
+      component.messages.set([
+        {
+          message_id: 'echo-q-missing',
+          role: 'user',
+          content: 'hello',
+          created_at: new Date().toISOString(),
+          instance_id: 'inst-abc',
+          failed: true,
+          errorReason: 'older mark path',
+          // no queue_id (older bubble without the stash)
+        },
+      ]);
+
+      component.tabStateService.setActiveTab('project-fallback');
+
+      mockApiService.sendMessage.mockReturnValueOnce({
+        subscribe: (handlers: any) => {
+          handlers.next({
+            status: 'injected',
+            message_id: 'echo-q-missing',
+            created_at: new Date().toISOString(),
+            timestamp: new Date().toISOString(),
+            instance_id: 'inst-abc',
+            content: 'hello',
+            pending_count: 1,
+          });
+          return { unsubscribe: () => {} };
+        },
+      });
+
+      component.onRetryFailedMessage('echo-q-missing');
+
+      expect(mockApiService.sendMessage).toHaveBeenLastCalledWith(
+        'inst-abc',
+        'hello',
+        undefined,
+        'project-fallback', // falls back to activeProjectId
+      );
+    });
+
+    // 5j — End-to-end: original send errors, fail-mark stashes the
+    // queue_id; retry then forwards the SAME queue_id to the API.
+    // This is the integration-level contract test for the full
+    // stash-then-retry flow (must-fix #2 from error to retry POST).
+    it('should stash queue_id on fail-mark and forward it on retry', () => {
+      // Drive the clock past the cooldown so the retry actually fires.
+      const t0 = 50_000;
+      jest.spyOn(Date, 'now').mockReturnValue(t0);
+
+      // (1) SSE echo + failed POST — bubble gets marked failed AND
+      //     the queue_id is stashed.
+      mockSseService.messages.set([
+        {
+          message_id: 'echo-e2e',
+          role: 'user',
+          content: 'hello',
+          created_at: new Date(t0).toISOString(),
+          instance_id: 'inst-abc',
+        },
+      ]);
+      component.runSseMergeEffect();
+
+      // Mock the original send to error AFTER we set up a
+      // different active project so the retry could (incorrectly)
+      // pick it up if the stash were absent.
+      component.tabStateService.setActiveTab('project-active');
+
+      fireFailedSend('Server unavailable');
+      component.onSendMessage({ content: 'hello', queue_id: 'queue-e2e-7' });
+
+      const afterFail = component.messages();
+      expect(afterFail).toHaveLength(1);
+      expect(afterFail[0].failed).toBe(true);
+      // Stash landed on the bubble.
+      expect(afterFail[0].queue_id).toBe('queue-e2e-7');
+
+      // (2) User clicks Retry after cooldown elapses (clock advances).
+      jest.spyOn(Date, 'now').mockReturnValue(t0 + 5_000);
+
+      // Switch the active project again — if the retry incorrectly
+      // derived queue_id from activeProjectId, it would land on
+      // 'project-active' or whatever is current. The assert below
+      // confirms the stash is forwarded verbatim.
+      component.tabStateService.setActiveTab('project-other');
+
+      mockApiService.sendMessage.mockReturnValueOnce({
+        subscribe: (handlers: any) => {
+          handlers.next({
+            status: 'injected',
+            message_id: 'echo-e2e',
+            created_at: new Date().toISOString(),
+            timestamp: new Date().toISOString(),
+            instance_id: 'inst-abc',
+            content: 'hello',
+            pending_count: 1,
+          });
+          return { unsubscribe: () => {} };
+        },
+      });
+
+      component.onRetryFailedMessage('echo-e2e');
+
+      // The retry POST used the ORIGINAL queue context — not the
+      // currently-active project.
+      expect(mockApiService.sendMessage).toHaveBeenLastCalledWith(
+        'inst-abc',
+        'hello',
+        undefined,
+        'queue-e2e-7',
+      );
+    });
+
+    // F1 escape-retry fix (2026-08-31) — primary regression test.
+    //
+    // The original send POSTed the RAW form ``//compact is useful``
+    // (the BE strips one slash and delivers the literal — the
+    // ``//x`` escape contract). The bubble in the UI carries the
+    // delivered (post-strip) form ``/compact is useful`` so the
+    // user sees what the model sees. The naive retry re-POSTs
+    // ``target.content`` (the stripped form), and the BE re-parses
+    // it as a REAL slash command — ``/compact`` triggers
+    // compaction, the user intended plain text. Retry must
+    // re-POST the RAW form.
+    //
+    // Asserts the stash at fail-mark time survives to the retry
+    // POST body. Mirrors the ``queue_id`` stash discipline from
+    // commit 34c08746 (must-fix #2).
+    it('should re-POST the RAW escape form on retry (not the stripped bubble form)', () => {
+      // Seed a failed ESCAPE-form bubble. ``content`` is the
+      // delivered (post-strip) form — the BE delivered ``/compact
+      // is useful``. ``retry_content`` is the RAW form the
+      // original send actually POSTed.
+      component.messages.set([
+        {
+          message_id: 'echo-escape-retry',
+          role: 'user',
+          content: '/compact is useful',
+          created_at: new Date().toISOString(),
+          instance_id: 'inst-abc',
+          failed: true,
+          errorReason: '502 Bad Gateway',
+          retry_content: '//compact is useful',
+        },
+      ]);
+
+      // Mock a successful retry POST.
+      mockApiService.sendMessage.mockReturnValueOnce({
+        subscribe: (handlers: any) => {
+          handlers.next({
+            status: 'injected',
+            message_id: 'echo-escape-retry',
+            created_at: new Date().toISOString(),
+            timestamp: new Date().toISOString(),
+            instance_id: 'inst-abc',
+            content: '//compact is useful',
+            pending_count: 1,
+          });
+          return { unsubscribe: () => {} };
+        },
+      });
+
+      component.onRetryFailedMessage('echo-escape-retry');
+
+      // The retry POST body carried the RAW ``//compact is useful``
+      // form — the BE re-strips one slash and delivers the
+      // literal, matching the original send. The stripped
+      // ``/compact is useful`` would have triggered real
+      // compaction (a different action than the original send).
+      //
+      // The 4th arg is the queue_id: the bubble has no ``queue_id``
+      // stash, and the test setup leaves ``activeProjectId()`` at
+      // its default ``null`` (the initial 'all' pseudo-tab), so the
+      // fallback chain resolves to ``null`` — the same fallback the
+      // ``queue_id`` test 5i exercises for the no-stash case.
+      expect(mockApiService.sendMessage).toHaveBeenLastCalledWith(
+        'inst-abc',
+        '//compact is useful',
+        undefined,
+        null,
+      );
+    });
+
+    // F1 fallback (2026-08-31): bubble without the
+    // ``retry_content`` stash retries with ``target.content`` —
+    // no behavior regression for normal messages (non-escape
+    // text, where the rendered form IS the sent form) and for
+    // older mark paths that did not stash the field.
+    it('should fall back to target.content on retry when no retry_content stash is present', () => {
+      // Failed bubble WITHOUT the ``retry_content`` stash — older
+      // mark path or a BE refetch that surfaced a failed bubble
+      // without the field. The content is what it is; for a
+      // non-escape message, this matches the sent form.
+      component.messages.set([
+        {
+          message_id: 'echo-no-stash',
+          role: 'user',
+          content: 'hello world',
+          created_at: new Date().toISOString(),
+          instance_id: 'inst-abc',
+          failed: true,
+          errorReason: 'older mark path',
+          // no retry_content (older bubble without the stash)
+        },
+      ]);
+
+      mockApiService.sendMessage.mockReturnValueOnce({
+        subscribe: (handlers: any) => {
+          handlers.next({
+            status: 'injected',
+            message_id: 'echo-no-stash',
+            created_at: new Date().toISOString(),
+            timestamp: new Date().toISOString(),
+            instance_id: 'inst-abc',
+            content: 'hello world',
+            pending_count: 1,
+          });
+          return { unsubscribe: () => {} };
+        },
+      });
+
+      component.onRetryFailedMessage('echo-no-stash');
+
+      // The retry POST used the bubble's content verbatim — the
+      // fallback discipline mirrors the ``queue_id`` fallback
+      // (must-fix #2, 2026-08-31). The 4th arg is ``null`` for the
+      // same reason as the escape-form test above (no queue_id
+      // stash, default activeProjectId is ``null``).
+      expect(mockApiService.sendMessage).toHaveBeenLastCalledWith(
+        'inst-abc',
+        'hello world',
+        undefined,
+        null,
+      );
+    });
+
+    // F1 failed-marker invariant (2026-08-31) — mirrors the
+    // must-fix #1 cooldown-race test (5h) for the escape form.
+    // The failed marker clears ONLY when the retry POST actually
+    // fires (gated via ``payload.retry_of_message_id`` in the
+    // success path of ``onSendMessage``). A cooldown-blocked
+    // retry — even with an escape-form bubble and a stashed
+    // RAW ``retry_content`` — must keep the failed state so the
+    // user keeps the error UI until they retry outside the
+    // cooldown window.
+    it('should keep an escape-form bubble failed when retry is clicked during the cooldown window', () => {
+      // Drive the clock so the cooldown is deterministically active.
+      const nowSpy = jest.spyOn(Date, 'now');
+      const t0 = 30_000;
+      nowSpy.mockReturnValue(t0);
+
+      // (1) The original ESCAPE-form send: SSE echo lands with
+      //     the delivered (post-strip) form, POST errors, error
+      //     handler marks the bubble failed AND stashes the RAW
+      //     ``//compact is useful`` as ``retry_content``.
+      mockSseService.messages.set([
+        {
+          message_id: 'echo-escape-cooldown',
+          role: 'user',
+          content: '/compact is useful',
+          created_at: new Date(t0).toISOString(),
+          instance_id: 'inst-abc',
+        },
+      ]);
+      component.runSseMergeEffect();
+      expect(component.messages()).toHaveLength(1);
+
+      fireFailedSend('Server unavailable');
+      component.onSendMessage({ content: '//compact is useful' });
+
+      const afterOriginal = component.messages();
+      expect(afterOriginal).toHaveLength(1);
+      expect(afterOriginal[0].failed).toBe(true);
+      expect(afterOriginal[0].errorReason).toBe('Server unavailable');
+      // The stash landed on the bubble — RAW form, distinct from
+      // the bubble's stripped content.
+      expect(afterOriginal[0].retry_content).toBe('//compact is useful');
+      expect(afterOriginal[0].content).toBe('/compact is useful');
+      const sendCallsBeforeRetry = mockApiService.sendMessage.mock.calls.length;
+
+      // (2) User clicks Retry ~1s later (still inside the 3s
+      //     cooldown window). Clock does NOT advance.
+      nowSpy.mockReturnValue(t0 + 1_000);
+      component.onRetryFailedMessage('echo-escape-cooldown');
+
+      // The retry handler called ``onSendMessage``, which fired
+      // the cooldown snackbar and returned early. The retry POST
+      // never went out — no RAW ``//x`` form was POSTed twice.
+      expect(mockApiService.sendMessage).toHaveBeenCalledTimes(sendCallsBeforeRetry);
+      expect(mockSnackBar.open).toHaveBeenCalledWith(
+        expect.stringContaining('Please wait'),
+        'Dismiss',
+        { duration: 2000, panelClass: 'info-snackbar' },
+      );
+
+      // The bubble STILL carries the failed marker and the RAW
+      // stash — the user keeps the error state AND the
+      // retry content. No "delivered" rendering for a send that
+      // never happened; the next retry (post-cooldown) will
+      // re-POST the RAW form.
+      const afterRetry = component.messages();
+      expect(afterRetry).toHaveLength(1);
+      expect(afterRetry[0].message_id).toBe('echo-escape-cooldown');
+      expect(afterRetry[0].failed).toBe(true);
+      expect(afterRetry[0].errorReason).toBe('Server unavailable');
+      expect(afterRetry[0].retry_content).toBe('//compact is useful');
     });
   });
 

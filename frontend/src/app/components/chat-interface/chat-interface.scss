@@ -579,6 +579,75 @@ $cyan: #06b6d4;
   }
 }
 
+// Defect #5 (2026-08-31): failed-send bubble + retry/dismiss panel.
+// The bubble keeps its existing shape — only the border color and a
+// subtle red wash flip — so the user can still see WHAT failed to
+// send. The inline panel below renders the error label + controls;
+// retry/dismiss call up to the chat component which owns the message
+// list and the POST machinery.
+.message-bubble-failed {
+  border: 1px solid #ef4444 !important;
+  background-color: rgba(239, 68, 68, 0.08) !important;
+  opacity: 0.85;
+}
+
+.message-failed-panel {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  background-color: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.5);
+  border-radius: 0.5rem;
+  font-size: 0.8125rem;
+  color: #fca5a5;
+  max-width: 100%;
+  flex-wrap: wrap;
+}
+
+.message-failed-icon {
+  font-size: 0.875rem;
+  color: #ef4444;
+}
+
+.message-failed-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  word-break: break-word;
+}
+
+.message-failed-retry,
+.message-failed-dismiss {
+  border: none;
+  border-radius: 0.375rem;
+  padding: 0.25rem 0.75rem;
+  font-size: 0.75rem;
+  cursor: pointer;
+  font-weight: 500;
+  transition: background-color 0.15s ease;
+}
+
+.message-failed-retry {
+  background-color: #ef4444;
+  color: #fff;
+
+  &:hover {
+    background-color: #dc2626;
+  }
+}
+
+.message-failed-dismiss {
+  background-color: transparent;
+  color: #9ca3af;
+  border: 1px solid #4b5563;
+
+  &:hover {
+    background-color: #374151;
+    color: $text-primary;
+  }
+}
+
 // Mermaid diagram styling for dark theme.
 // Note: `.mermaid` and the overlay buttons below are injected into the
 // DOM via `innerHTML` by the mermaid library / `MermaidActionsService`,
@@ -836,4 +905,113 @@ $cyan: #06b6d4;
   .pending-injection-card {
     animation: none;
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Active slash-command card (Phase 2 / Task 6). Modeled on the
+// .pending-injection-card pattern (out-of-timeline status card, Q3
+// confirmed): cyan while working, green on success, red on failure.
+// Non-modal and non-blocking — the composer stays usable while the card
+// is visible.
+// ─────────────────────────────────────────────────────────────────────────
+.active-command-card {
+  margin-top: 1rem;
+  padding: 0.75rem 1rem;
+  border-radius: 0.75rem;
+  background-color: rgba($cyan, 0.08);
+  border: 1px solid rgba($cyan, 0.45);
+  max-width: 70%;
+}
+
+.active-command-card.terminal {
+  background-color: rgba($cyan, 0.04);
+}
+
+// Terminal SUCCESS tint (summary + noop alike — noop is NOT a failure).
+.active-command-card.success-terminal {
+  background-color: rgba(#22c55e, 0.08);
+  border-color: rgba(#22c55e, 0.45);
+}
+
+// Failure tint — only .failed ever gets red (SC13: noop must not).
+.active-command-card.failed {
+  background-color: rgba(#ef4444, 0.08);
+  border-color: rgba(#ef4444, 0.45);
+}
+
+.active-command-badge {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.375rem;
+  color: $cyan;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.active-command-card.failed .active-command-badge {
+  color: #ef4444;
+}
+
+.active-command-card.success-terminal .active-command-badge {
+  color: #22c55e;
+}
+
+.active-command-spinner {
+  flex: 0 0 auto;
+}
+
+.active-command-icon {
+  font-size: 0.875rem;
+  line-height: 1;
+}
+
+.active-command-label {
+  text-transform: none;
+  letter-spacing: 0.02em;
+}
+
+.active-command-elapsed {
+  font-variant-numeric: tabular-nums;
+  color: $text-secondary;
+  font-weight: 500;
+}
+
+.active-command-eta {
+  font-weight: 400;
+  color: $text-muted;
+}
+
+.active-command-title {
+  color: $text-primary;
+  font-size: 0.875rem;
+  line-height: 1.45;
+}
+
+.active-command-detail {
+  margin-top: 0.25rem;
+  color: $text-secondary;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+  overflow-wrap: break-word;
+}
+
+.active-command-tokens {
+  margin-top: 0.25rem;
+  color: $text-secondary;
+  font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.active-command-hint {
+  margin-top: 0.375rem;
+  color: $amber;
+  font-size: 0.8125rem;
+}
+
+.active-command-note {
+  margin-top: 0.375rem;
+  color: $text-muted;
+  font-size: 0.75rem;
+  font-style: italic;
 }

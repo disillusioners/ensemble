@@ -1,6 +1,120 @@
 // Instance types
 export type InstanceStatus = 'idle' | 'running' | 'paused' | 'completed' | 'error' | 'terminated' | 'queued' | 'waiting_children' | 'failed';
 
+// ─────────────────────────────────────────────────────────────────────────
+// Slash-command subsystem (Phase 2) — architect §7 wire contract, PINNED.
+// Encoded VERBATIM from
+// .agents/shared/planning/slash-commands/architecture-recommendation.md §7
+// (with the post-review adjudication amendment: compacted_type gains
+// "partial_summary"). The Jest parseCommandAck adapter test is the
+// executable contract spec for these types — any Phase 1 backend drift
+// must fail FE CI with a named field (R6).
+// ─────────────────────────────────────────────────────────────────────────
+
+/** SSE ``command_progress`` phases — the six-phase machine is unchanged by
+ *  the C1 amendment (partial is a detail-level distinction). */
+export type CommandPhase =
+  | 'waiting'
+  | 'in_progress'
+  | 'success'
+  | 'timed_out'
+  | 'fallback_applied'
+  | 'failed';
+
+/** Semantic refusals arrive as 200 ack ``state:"rejected"`` + reason.
+ *  Unknown COMMANDS are parse-time client errors → HTTP 400
+ *  ``UNKNOWN_COMMAND`` instead (§7 split rule). */
+export type RejectionReason =
+  | 'terminal_instance'
+  | 'busy'
+  | 'rate_limited'
+  | 'pending_injections'
+  | 'compaction_disabled'
+  | 'quiescence_timeout'
+  /** W1 (2026-08-31, contract drift): BE ships an additional rejection
+   *  reason — emitted when the daemon has the command registered but the
+   *  policy gate (O-B6 per-agent availability, or a future quota check)
+   *  refuses to dispatch it. The literal string is pinned in
+   *  ``daemon/services/command_dispatcher.py`` and must agree here. */
+  | 'unavailable';
+
+/** §7 amendment (post-review adjudication C1, 2026-08-31): the enum gains
+ *  "partial_summary". Mapping count = three: summary → success;
+ *  partial_summary and truncation → timed_out → fallback_applied;
+ *  noop → success (+ noop_reason). */
+export type CompactedType = 'summary' | 'partial_summary' | 'truncation' | 'noop';
+
+export type NoopReason = 'below_floor' | 'recently_compacted' | 'too_few_messages';
+
+export type CommandFailureKind = 'timeout' | 'error' | null;
+
+/** Optional detail object on ``CommandProgressEvent``. Budget exhaustion
+ *  reports ``failure_kind: "timeout"``; ``detail.reason`` is free-form and
+ *  may say ``budget_exhausted``. */
+export interface CommandProgressDetail {
+  tokens_before?: number;
+  tokens_after?: number;
+  compacted_type?: CompactedType;
+  failure_kind?: CommandFailureKind;
+  noop_reason?: NoopReason;
+  checkpoint_id?: string;
+  reason?: string;
+}
+
+/** SSE event_type="command_progress" (LiveEventHub.stream_message,
+ *  live-only, no replay). ``phase_seq`` is monotonic per command — the FE
+ *  dedup/reorder guard ignores events with ``phase_seq <=`` last seen for
+ *  the same ``command_id``. ``elapsed_ms`` (server clock) is the FE
+ *  elapsed-timer source of truth. ``eta_ms`` is advisory, in_progress only.
+ *  Heartbeat: the backend re-emits in_progress every 10s (phase_seq+1,
+ *  fresh timestamp/elapsed_ms). */
+export interface CommandProgressEvent {
+  instance_id: string;
+  command_id: string;
+  phase: CommandPhase;
+  phase_seq: number;
+  timestamp: string;
+  elapsed_ms: number;
+  eta_ms?: number;
+  detail?: CommandProgressDetail;
+}
+
+/** POST /api/instances/{id}/messages → command ack (sync, ≤500ms).
+ *
+ *  Delta note (executable-spec finding, 2026-08-31): §7 pins
+ *  ``command_id`` as a UUIDv4 string, but the Phase 1 dispatcher ships
+ *  ``command_id: null`` on ``state:"rejected"`` acks (nothing to
+ *  correlate). The type therefore carries ``string | null``; the
+ *  ``parseCommandAck`` adapter is the single point that absorbs the
+ *  difference, and callers never read ``command_id`` on rejections. */
+export interface CommandAck {
+  status: 'command';
+  command: string; // "compact"
+  command_id: string | null; // UUIDv4 — correlates ALL events (null on rejected)
+  state: 'accepted' | 'rejected';
+  reason?: RejectionReason | null; // when rejected
+  detail?: string | null; // human guidance (e.g. terminal-instance hint)
+  timestamp: string; // ISO8601
+  ttl_seconds: number; // GET-fallback memory window (default 600)
+}
+
+/** GET /api/instances/{id}/commands/active — fallback for SSE loss; auth
+ *  mirrors GET /messages. Daemon restart ⇒ {exists:false} ⇒ FE clears the
+ *  card silently. Poll ~5s while the card is active AND SSE is dead. */
+export type GetActiveResponse =
+  | { exists: false }
+  | { exists: true; command: CommandProgressEvent };
+
+/** Extensible command surface (registry seed = /compact). The autocomplete
+ *  palette (Task 10) is out of scope this phase; ``availability`` is the
+ *  O-B6 per-agent policy hook's landing spot (Q4 — global for now). */
+export interface CommandDefinition {
+  name: string; // canonical, lowercase, no leading slash
+  description: string;
+  argsHint?: string | null;
+  availability?: () => boolean;
+}
+
 export interface InstanceInfo {
   instance_id: string;
   agent_id: string;
@@ -73,6 +187,64 @@ export interface Message {
    * never participates in dedup — id-keyed dedup is the source of truth.
    */
   pending?: boolean;
+  /**
+   * Failed-send state (defect #5 fix, 2026-08-31). Set by the chat
+   * component's POST error handler when the request to /messages was
+   * rejected (HTTP error, timeout, network failure, or any case where
+   * the user saw a bubble rendered but the server never persisted the
+   * message — e.g. SSE echo arrived before the POST errored, OR the
+   * optimistic append path added a bubble for a response shape that
+   * ultimately did not survive a subsequent server check). The bubble
+   * renders with an error styling + retry affordance. The merge helper
+   * does NOT clear this on SSE echo (the server cannot have a message
+   * we never sent) and the TTL eviction does NOT touch it (user must
+   * retry or explicitly dismiss). The flag is a UI affordance only —
+   * id-keyed dedup remains the source of truth.
+   */
+  failed?: boolean;
+  /** Error reason surfaced in the failed-state UI. */
+  errorReason?: string;
+  /**
+   * Queue context the original send was routed to (defect #5 retry
+   * fix, 2026-08-31, must-fix #2). Set on the bubble when the chat
+   * component's POST error handler marks the send failed — the retry
+   * handler reads this back so the retry POST lands on the SAME
+   * queue as the original send. A fresh ``activeProjectId``-derived
+   * value would silently route the retry to a different queue if the
+   * user switched projects between the original fail and the retry
+   * click. ``null`` is a meaningful value (user had the queue
+   * selector open and selected no queue); ``undefined`` means the
+   * stash is absent (older mark paths, BE refetches). Server-blind:
+   * never persisted, never emitted over SSE / refetch — but the
+   * client-side merge helper preserves it across in-memory SSE
+   * echo merges the same way it preserves the ``failed`` flag so
+   * a retry that races an echo still finds the stash.
+   */
+  queue_id?: string | null;
+  /**
+   * Original-send content the retry must re-POST verbatim
+   * (F1 escape-retry fix, 2026-08-31). Set on the bubble when the
+   * chat component's POST error handler marks the send failed —
+   * the retry handler reads this back so the retry POST carries
+   * the SAME string the original send carried. For an ESCAPE-form
+   * message (``//x``), the original send POSTed the RAW form
+   * (``//x`` — the BE strips one slash and delivers the literal);
+   * the rendered bubble carries the delivered (post-strip) form
+   * (``/x``) so the user sees what the model saw. Without this
+   * stash, ``onRetryFailedMessage`` re-POSTs the bubble's
+   * ``content`` (the stripped form), and the BE re-parses it as
+   * a REAL slash command — retry performs a DIFFERENT action than
+   * the original send. ``null`` is NOT a meaningful value here
+   * (retry-content is always a string when stashed); ``undefined``
+   * means the stash is absent (older mark paths, BE refetches,
+   * non-escape messages where the rendered content happens to
+   * match the sent form). Server-blind: never persisted, never
+   * emitted over SSE / refetch — the merge helper preserves it
+   * across in-memory SSE echo merges the same way it preserves
+   * ``queue_id`` so a retry that races an echo still finds the
+   * stash.
+   */
+  retry_content?: string;
 }
 
 // SSE event types

@@ -1,6 +1,8 @@
 import {
   Component,
   Input,
+  Output,
+  EventEmitter,
   ViewChild,
   ElementRef,
   AfterViewChecked,
@@ -13,13 +15,16 @@ import {
   DOCUMENT,
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
+import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MarkdownModule } from 'ngx-markdown';
-import { Message, Agent, ToolCall } from '../../models';
+import type { Message, Agent, ToolCall } from '../../models';
+import type { ActiveCommandState } from '../../services/command-state.service';
 import {
   MermaidActionsService,
   MermaidCopyResult,
 } from '../../services/mermaid-actions.service';
 import { SseService } from '../../services/sse.service';
+import { CommandStateService } from '../../services/command-state.service';
 
 interface MermaidChartContext {
   /** Bubble that owns this chart — used to look up the source message. */
@@ -46,7 +51,7 @@ interface MermaidChartContext {
 @Component({
   selector: 'app-chat-interface',
   standalone: true,
-  imports: [CommonModule, MarkdownModule],
+  imports: [CommonModule, MarkdownModule, MatProgressSpinnerModule],
   templateUrl: './chat-interface.html',
   styleUrls: ['./chat-interface.scss'],
 })
@@ -63,10 +68,24 @@ export class ChatInterfaceComponent implements AfterViewChecked, OnChanges, OnDe
   @Input() showToolCalls = true;
   @Input() showSystemPrompt = false;
 
+  /**
+   * Defect #5 (2026-08-31): the failed-send retry / dismiss controls
+   * live on the bubble template; the actions bubble up to the chat
+   * component (which owns the messages list and the cooldown /
+   * sendError machinery) via these two outputs. The chat-interface
+   * stays a pure view — no direct api / sendMessage wiring here.
+   */
+  @Output() onRetryFailedMessage = new EventEmitter<string>();
+  @Output() onDismissFailedMessage = new EventEmitter<string>();
+
   private readonly mermaidActions = inject(MermaidActionsService);
   private readonly ngZone = inject(NgZone);
   private readonly document = inject(DOCUMENT);
   private readonly sseService = inject(SseService);
+  /** Root-singleton command state machine (Phase 2 / Task 6). The card is
+   *  a pure view over this service — same instance the chat send path
+   *  seeds, so ack-seeded and SSE/REST-driven state land here. */
+  private readonly commandStateService = inject(CommandStateService);
 
   private shouldScroll = signal(false);
   isNearBottom = signal(true);
@@ -234,6 +253,143 @@ export class ChatInterfaceComponent implements AfterViewChecked, OnChanges, OnDe
    */
   get pendingInjection() {
     return this.sseService.pendingInjection;
+  }
+
+  // ── Active slash-command card (Phase 2 / Task 6) ───────────────────────
+  // Pure view over CommandStateService.stateFor(currentInstanceId). All
+  // helpers below are public: template-bound members must not be private
+  // (strictTemplates / R8). Copy follows the per-value FE copy table in
+  // architecture-recommendation.md (post-review adjudication) VERBATIM.
+
+  /** The current instance's command state, or null when none is tracked.
+   *  Reads the service's per-instance signal, so the card updates on every
+   *  SSE event / ack seed / reconcile without extra wiring. The terminal
+   *  card auto-dismisses when the service's display-window eviction
+   *  removes the entry. */
+  get activeCommand(): ActiveCommandState | null {
+    return this.commandStateService.stateFor(this.instanceId);
+  }
+
+  /** mm:ss elapsed label — sourced from SERVER elapsed_ms (the timer
+   *  source of truth). Resyncs on every event incl. 10s heartbeats; there
+   *  is deliberately NO local ticking timer, so a reconnect/reload can
+   *  never desync it. */
+  commandElapsedLabel(cmd: ActiveCommandState): string {
+    const totalSeconds = Math.max(0, Math.floor(cmd.elapsedMs / 1000));
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${minutes}:${String(seconds).padStart(2, '0')}`;
+  }
+
+  /** Advisory ETA — rendered ONLY while in_progress and only when the
+   *  server shipped it (the machine nulls it for every other phase). */
+  commandEtaLabel(cmd: ActiveCommandState): string | null {
+    if (cmd.phase !== 'in_progress' || cmd.etaMs === null || cmd.etaMs === undefined) {
+      return null;
+    }
+    return `~${Math.ceil(cmd.etaMs / 1000)}s remaining`;
+  }
+
+  /** True for the working phases that warrant the queued-messages note. */
+  isWorkingCommandPhase(phase: ActiveCommandState['phase']): boolean {
+    return phase === 'waiting' || phase === 'in_progress' || phase === 'timed_out';
+  }
+
+  /** Progressive hint after 60s of in_progress (large contexts are slow —
+   *  R3: silence must not read as failure). */
+  showLongHint(cmd: ActiveCommandState): boolean {
+    return cmd.phase === 'in_progress' && cmd.elapsedMs > 60_000;
+  }
+
+  /** Spinner only for in_progress; every other phase gets a glyph. */
+  isSpinnerPhase(phase: ActiveCommandState['phase']): boolean {
+    return phase === 'in_progress';
+  }
+
+  phaseGlyph(phase: ActiveCommandState['phase']): string {
+    switch (phase) {
+      case 'waiting': return '⏳';
+      case 'timed_out': return '⏱';
+      case 'success': return '✓';
+      case 'fallback_applied': return '✂';
+      case 'failed': return '✕';
+      default: return '•';
+    }
+  }
+
+  /** Terminal copy table — VERBATIM per the post-review adjudication:
+   *  summary → "Context compacted"; partial_summary and truncation arrive
+   *  via timed_out → fallback_applied with the honest per-value copy;
+   *  noop → "Nothing to compact" (instant-success look — NOT a failure). */
+  commandTitle(cmd: ActiveCommandState): string {
+    switch (cmd.phase) {
+      case 'waiting':
+        // ≤30s on the RUNNING pause path is normal — must not imply failure.
+        return 'Preparing compaction… (waiting for instance to quiesce)';
+      case 'in_progress':
+        return 'Compacting context…';
+      case 'timed_out':
+        return 'Compaction timed out — applying fallback…';
+      case 'success': {
+        const type = cmd.detail?.compacted_type;
+        if (type === 'noop') return 'Nothing to compact';
+        return 'Context compacted';
+      }
+      case 'fallback_applied': {
+        const type = cmd.detail?.compacted_type;
+        if (type === 'partial_summary') {
+          return 'Compaction timed out partway — kept the summarized sections, trimmed the un-summarized older section';
+        }
+        if (type === 'truncation') {
+          return 'Compaction timed out — history was trimmed without a summary';
+        }
+        return 'Compaction timed out — the context was trimmed to fit';
+      }
+      case 'failed':
+        return 'Compaction failed';
+      default:
+        return 'Working…';
+    }
+  }
+
+  /** Explanatory line: noop_reason mapping for noop successes, failure
+   *  reason for failed, transient note for timed_out. */
+  commandDetailLine(cmd: ActiveCommandState): string | null {
+    const detail = cmd.detail;
+    if (cmd.phase === 'success' && detail?.compacted_type === 'noop') {
+      switch (detail?.noop_reason) {
+        case 'recently_compacted': return 'Already compacted recently';
+        case 'below_floor': return 'Context too small to compact';
+        case 'too_few_messages': return 'Too few messages';
+        default: return 'No compaction was needed';
+      }
+    }
+    if (cmd.phase === 'failed') {
+      const reason = detail?.reason || (detail?.failure_kind ? String(detail.failure_kind) : null);
+      return reason ? `Reason: ${reason}` : null;
+    }
+    if (cmd.phase === 'fallback_applied' && detail?.reason) {
+      return detail.reason;
+    }
+    return null;
+  }
+
+  /** "12,345 → 4,567 tokens" — only when the server shipped both values. */
+  commandTokensLabel(cmd: ActiveCommandState): string | null {
+    const before = cmd.detail?.tokens_before;
+    const after = cmd.detail?.tokens_after;
+    if (typeof before !== 'number' || typeof after !== 'number') return null;
+    return `${before.toLocaleString()} → ${after.toLocaleString()} tokens`;
+  }
+
+  /** Card success/failure tinting. noop is a SUCCESS — the failed class
+   *  must never apply to it (SC13). */
+  isFailedCommand(cmd: ActiveCommandState): boolean {
+    return cmd.phase === 'failed';
+  }
+
+  isTerminalCommand(cmd: ActiveCommandState): boolean {
+    return cmd.phase === 'success' || cmd.phase === 'fallback_applied' || cmd.phase === 'failed';
   }
 
   formatToolArgs(args: string | Record<string, unknown>): string {

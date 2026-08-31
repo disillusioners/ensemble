@@ -986,6 +986,31 @@ class InstanceManager:
         from .services.execution_gate import ExecutionGateService
         self._execution_gate = ExecutionGateService()
 
+        # Slash-command dispatcher (Phase 1 / WS-1 + WS-5 ack/GET parts).
+        # Owns the parse layer, command registry, O10 state registry
+        # (active slot per instance + daemon-wide terminal ring LRU +
+        # TTL), and the dispatch-time guards (rate-limit +
+        # pending-injections). Routers reach it via
+        # ``manager.command_dispatcher``. The /compact executor (WS-2)
+        # is the O-B7 handler that registers itself into the
+        # dispatcher's registry; this slice leaves the registry empty.
+        from .services.command_dispatcher import CommandDispatcher
+        slash_cfg = self.config.slash_commands
+        self._command_dispatcher = CommandDispatcher(
+            enabled=slash_cfg.enabled,
+            escape_prefix=slash_cfg.escape_prefix,
+            min_interval_s=slash_cfg.min_interval_s,
+            state_ttl_s=slash_cfg.state_ttl_s,
+            max_state_per_instance=slash_cfg.max_state_per_instance,
+        )
+        # Phase 1 / WS-2: back-reference the manager so the executor
+        # handler can resolve the engine / compactor / live_hub without
+        # taking a parameter. The dispatcher constructor signature is
+        # FROZEN — we attach the ref via a public-attr set rather than
+        # threading a kwarg through (preserves backward compat with all
+        # WS-1 tests that construct ``CommandDispatcher(...)`` directly).
+        self._command_dispatcher._manager = self  # type: ignore[attr-defined]
+
         # Shutdown flag for graceful shutdown
         self._shutting_down = False
 
@@ -997,6 +1022,28 @@ class InstanceManager:
 
         # Maintenance service for periodic cleanup tasks
         self._maintenance_service: MaintenanceService | None = None
+
+        # Phase 1 / WS-2 — register the ``/compact`` slash command
+        # into the dispatcher. Lazy import inside the helper to
+        # avoid pulling compact_executor (which imports
+        # ``langchain_core.messages`` etc.) at the top of
+        # ``InstanceManager.__init__`` — keeps the boot path
+        # lightweight and avoids import cycles
+        # (command_dispatcher → compact_executor).
+        try:
+            from .services.compact_executor import register_compact_command
+
+            register_compact_command(self._command_dispatcher)
+            logger.info(
+                "[/compact] registered /compact command "
+                "(availability predicate unpopulated — O-B6)"
+            )
+        except Exception as _compact_reg_err:  # pragma: no cover — defensive
+            logger.warning(
+                "[/compact] registration failed; /compact will be "
+                "unavailable until daemon restart: %s",
+                _compact_reg_err,
+            )
 
         # Bootstrap built-in MCP servers
         self._bootstrap_builtin_servers()
@@ -2064,6 +2111,27 @@ class InstanceManager:
             manager.
         """
         return self._execution_gate
+
+    @property
+    def command_dispatcher(self) -> "CommandDispatcher":
+        """Public read-only access to the slash-command dispatcher.
+
+        The dispatcher (Phase 1 / WS-1 + WS-5 ack/GET parts) owns the
+        parse layer, command registry, O10 state registry (active slot
+        per instance + daemon-wide terminal ring LRU + TTL), and the
+        dispatch-time guards (rate-limit + pending-injections). The
+        /compact executor (WS-2) registers itself into the
+        dispatcher's registry and is the O-B7 durability seam.
+
+        Routers reach it via ``app.state.manager.command_dispatcher``
+        from the POST /messages intercept seam and the GET
+        /commands/active endpoint (WS-5 / O12).
+
+        Returns:
+            The :class:`CommandDispatcher` instance owned by this
+            manager.
+        """
+        return self._command_dispatcher
 
     @property
     def is_write_paused(self) -> bool:
@@ -3636,6 +3704,18 @@ class InstanceManager:
         """
         task = self._graph_tasks.pop(instance_id, None)
         cleared_injection = self._pending_injections.pop(instance_id, None)
+        # Slash-command dispatcher (Phase 1 / WS-1 + O10): drop the
+        # active slot and terminal ring for the instance so command
+        # state cannot outlive the instance. Mirrors the
+        # ``_pending_injections`` pattern — same lifetime, same call
+        # site. The dispatcher is created unconditionally in
+        # ``__init__``, so no ``getattr`` defensive guard is needed;
+        # however a handful of unit tests build a minimal
+        # ``InstanceManager`` without going through the full
+        # ``__init__`` — keep the ``getattr`` for those.
+        _command_dispatcher = getattr(self, "_command_dispatcher", None)
+        if _command_dispatcher is not None:
+            _command_dispatcher.evict_instance(instance_id)
         # Pop the gii throttle entry too — without this cleanup the dict
         # grows unbounded for long-lived daemons that process many short-
         # lived instances (each termination leaks one entry).

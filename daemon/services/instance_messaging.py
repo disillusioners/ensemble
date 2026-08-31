@@ -15,6 +15,7 @@ from sqlmodel import Session
 
 from ..cancellation import CancellationToken
 from ..compaction import ContextCompactor, CompactionContext, get_model_context_limit
+from ._checkpoint_utils import _is_terminal_checkpoint
 from ..language_detection import _normalize_content
 from ..loader import estimate_messages_tokens
 from ..persistence import get_instance_messages
@@ -1130,20 +1131,25 @@ class InstanceMessagingService:
                 return
 
             # ── Terminal-checkpoint guard ───────────────────────────────
-            # Skip compaction entirely when the checkpoint is terminal
-            # (state.next is empty/None). On a finished graph, calling
-            # ``aupdate_state(as_node="agent")`` below would clear the
-            # checkpoint's ``next=()``, causing the subsequent
-            # ``astream(graph_input)`` to return instantly without running
-            # the agent. On reuse of a completed instance this collapses
-            # the COMPLETED→RUNNING→COMPLETED cycle to <100ms so the
-            # frontend never observes RUNNING.
+            # Skip compaction entirely when the checkpoint is terminal.
+            # On a finished graph, calling ``aupdate_state(as_node="agent")``
+            # below would clear the checkpoint's ``next=()``, causing the
+            # subsequent ``astream(graph_input)`` to return instantly
+            # without running the agent. On reuse of a completed instance
+            # this collapses the COMPLETED→RUNNING→COMPLETED cycle to
+            # <100ms so the frontend never observes RUNNING.
             #
             # Compaction is an optimization — skipping it here is safe:
             # the new message is passed as ``graph_input`` to ``astream``
             # and the agent runs against the full (uncompacted) history
             # for this turn. Active (non-terminal) turns compact normally.
-            if not state.next:
+            #
+            # Phase 1 / WS-2.4 (architect §5): the helper lives in the
+            # shared ``_checkpoint_utils`` module so this site AND the
+            # ``/compact`` executor (compact_executor.py) agree on what
+            # "terminal" means — anti-drift (see source-level grep test
+            # ``test_terminal_helper_used_by_two_sites``).
+            if _is_terminal_checkpoint(state):
                 logger.debug(
                     f"[Compaction] Skipping on terminal checkpoint for {instance_id[:8]}..."
                 )

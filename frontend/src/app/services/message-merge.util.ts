@@ -135,6 +135,41 @@ export function mergeMessagesById(
       if (!msg.pending || !existingIsPending) {
         delete merged.pending;
       }
+      // Defect #5 (2026-08-31): the ``failed`` flag is server-blind —
+      // a failed POST never reached the server, so an SSE echo /
+      // refetch MUST NOT silently clear the user-visible error state
+      // and re-render the bubble as delivered. If the existing copy
+      // is failed, keep the failed flag (and the errorReason) so the
+      // user can retry / dismiss. Incoming failed flags are
+      // preserved too (uniform behavior — the server cannot have a
+      // message we never sent).
+      if (result[idx].failed) {
+        merged.failed = true;
+        if (result[idx].errorReason) merged.errorReason = result[idx].errorReason;
+      }
+      // Defect #5 retry stash (must-fix #2, 2026-08-31): the
+      // ``queue_id`` on a failed bubble is the original-send queue
+      // context the retry must re-use. The server has no notion of
+      // queue_id (client-side routing), but incoming echoes that
+      // explicitly carry ``queue_id: undefined`` would clobber the
+      // stash via spread; pin the existing copy through every merge
+      // pass so a retry that races an SSE echo still finds the stash.
+      if (result[idx].queue_id !== undefined) {
+        merged.queue_id = result[idx].queue_id;
+      }
+      // F1 escape-retry stash (2026-08-31): the ``retry_content`` on a
+      // failed bubble is the ORIGINAL-send content the retry must
+      // re-POST verbatim (preserves the RAW ``//x`` form for escape
+      // messages whose bubble carries the delivered ``/x`` form).
+      // The server has no notion of ``retry_content`` (purely
+      // client-side retry correctness), but incoming echoes that
+      // explicitly carry ``retry_content: undefined`` would clobber
+      // the stash via spread; pin the existing copy through every
+      // merge pass so a retry that races an SSE echo still finds
+      // the stash.
+      if (result[idx].retry_content !== undefined) {
+        merged.retry_content = result[idx].retry_content;
+      }
       // MIN-4: for CONFIRMED (non-pending) entries keep the earlier of
       // the local/incoming timestamps so a GET re-stamp
       // (checkpoint-commit ts) cannot re-sort the bubble. Pending
@@ -163,6 +198,12 @@ export function mergeMessagesById(
  * are evicted conservatively — a provisional entry we cannot timestamp
  * is suspect and should not linger.
  *
+ * Defect #5 (2026-08-31): ``failed`` entries are NEVER evicted by this
+ * pass — a failed send is a user-actionable state (retry / dismiss) and
+ * dropping it silently would re-introduce the "dishonest bubble" bug
+ * (a user who looks away from the screen and back would see the error
+ * vanish without acknowledgement).
+ *
  * Stateless and pure: callers can run this on every refetch / merge to
  * get lazy eviction without a background timer.
  */
@@ -174,6 +215,14 @@ export function evictPendingByAge(
   let touched = false;
   const result: Message[] = [];
   for (const msg of messages) {
+    if (msg.failed) {
+      // Never evict a failed entry — leave it for the user to retry
+      // or dismiss. The chat component removes the entry explicitly
+      // when the user clicks "Retry" (which re-attempts the POST) or
+      // "Dismiss" (which removes the bubble from the list).
+      result.push(msg);
+      continue;
+    }
     if (msg.pending) {
       const ts = Date.parse(msg.created_at);
       // Invalid timestamp OR older than the TTL: evict. NaN from

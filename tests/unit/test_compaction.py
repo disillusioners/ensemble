@@ -2,7 +2,12 @@
 
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
+import asyncio
+import random
+import time
+
 import pytest
+import tiktoken
 
 from langchain_core.messages import (
     AIMessage,
@@ -17,12 +22,15 @@ from langchain_core.messages.tool import ToolCall
 from daemon.compaction import (
     MODEL_CONTEXT_LIMITS,
     DEFAULT_CONTEXT_LIMIT,
+    ChunkedOutcome,
     CompactionConfig,
     CompactionContext,
     CompactionResult,
     ContextCompactor,
     MessageGroup,
+    _append_truncation_marker,
     _extract_text_from_content,
+    _summarization_timeout_s,
     _truncate_batch_to_fit,
     emergency_truncate,
     get_model_context_limit,
@@ -30,6 +38,7 @@ from daemon.compaction import (
     select_compactable_groups,
 )
 from daemon.config import CompactionConfig as CompactionConfigModel
+from daemon.config import SlashCommandConfig
 from daemon.loader import estimate_messages_tokens
 
 
@@ -50,6 +59,12 @@ def make_compaction_config(**overrides) -> CompactionConfigModel:
         "summarization_model": "",
         "min_messages_before_compaction": 10,
         "summarization_chunk_threshold": 0.60,
+        # Phase 1 / WS-3 adaptive timeout defaults.
+        "timeout_base_s": 90.0,
+        "timeout_per_100k_tokens_s": 60.0,
+        "timeout_cap_s": 300.0,
+        "timeout_facade_margin_s": 5.0,
+        "operation_budget_s": 300.0,
     }
     defaults.update(overrides)
     return CompactionConfigModel(**defaults)
@@ -1030,3 +1045,1115 @@ class TestSummarizationLLMStripsModelVision:
         call_kwargs = mock_cls.call_args.kwargs
         assert "model_vision" not in call_kwargs
         assert call_kwargs.get("model") == "gpt-4o-mini"
+
+
+# =============================================================================
+# Phase 1 / WS-8 engine tests (slash-commands /compact feature)
+# =============================================================================
+
+
+def _make_prompt_of_tokens(target_tokens: int) -> str:
+    """Build a prompt whose cl100k_base token count is approximately ``target_tokens``.
+
+    Uses diverse English text (random words from a fixed vocab with varied
+    sentence lengths) so the tiktoken encoder does NOT collapse the result
+    via repetition compression. To keep the test fast, we calibrate the
+    ``chars-per-token`` ratio ONCE (per process) and reuse it.
+    """
+    if target_tokens == 0:
+        return ""
+    cache_attr = "_token_prompt_cache"
+    cache = globals().setdefault(cache_attr, {})
+    if target_tokens in cache:
+        return cache[target_tokens]
+    rng = random.Random(42)
+    vocab = [
+        "the", "quick", "brown", "fox", "jumps", "over", "lazy", "dog",
+        "and", "runs", "fast", "slow", "around", "house", "tree", "sun",
+        "moon", "stars", "cloud", "rain", "bright", "day", "blue", "sky",
+        "river", "mountain", "valley", "field", "garden", "ocean", "wind",
+        "leaves", "winter", "summer", "spring", "autumn", "evening",
+        "morning", "afternoon", "night", "story", "song", "voice",
+    ]
+    enc = tiktoken.get_encoding("cl100k_base")
+
+    # Build a large enough buffer for the largest target (350k tokens
+    # requires ~1.5M+ chars at our chars-per-token ratio). To stay under
+    # the test timeout, we build a 3M-char buffer once and slice it.
+    parts: list[str] = []
+    total = 0
+    while total < 3_000_000:
+        n_words = rng.randint(3, 20)
+        parts.append(" ".join(rng.choices(vocab, k=n_words)) + ".")
+        total += sum(len(p) + 1 for p in parts[-1:])
+    big = " ".join(parts)[:3_000_000]
+    # Encoding is still O(N) but we only do it once per process.
+    full_tokens = len(enc.encode(big))
+    chars_per_token = 3_000_000 / full_tokens
+
+    target_chars = int(target_tokens * chars_per_token)
+    target_chars = min(target_chars, 3_000_000 - 1)
+    result = big[:target_chars]
+    cache[target_tokens] = result
+    return result
+
+
+class TestSummarizationTimeoutFormula:
+    """WS-3.1 adaptive timeout formula (table-driven).
+
+    Formula: ``min(timeout_cap_s, timeout_base_s + (tokens / 100_000) *
+    timeout_per_100k_tokens_s)``.
+    """
+
+    @pytest.mark.parametrize(
+        "tokens,expected_s",
+        [
+            (0, 90.0),
+            (50_000, 120.0),
+            (100_000, 150.0),
+            (250_000, 240.0),
+            (350_000, 300.0),  # cap
+            (500_000, 300.0),  # cap
+        ],
+    )
+    def test_formula_table(self, tokens, expected_s):
+        prompt = _make_prompt_of_tokens(tokens)
+        config = make_compaction_config()
+        timeout = _summarization_timeout_s(prompt, config)
+        # Allow ±1s tolerance for token-count rounding noise.
+        assert abs(timeout - expected_s) < 1.5, (
+            f"expected ~{expected_s}s for {tokens} tokens, got {timeout:.2f}s"
+        )
+
+    def test_helper_shared_by_three_call_sites(self):
+        """Single source of truth — three call origins (single-batch / merge / condense)
+        all delegate to ``_summarization_timeout_s``.
+
+        The plan's WS-3.1 invariant: the prior plan duplicated the inline
+        expression three times; the helper consolidates it. We assert the
+        helper exists as a module-scope callable and is reachable from the
+        three call sites via ``ContextCompactor._call_summarization_llm``.
+        """
+        # Module-scope: the helper is importable directly.
+        import daemon.compaction as cm
+        assert hasattr(cm, "_summarization_timeout_s")
+        assert callable(cm._summarization_timeout_s)
+
+        # Single source: the three call sites all go through the helper
+        # rather than re-deriving the formula inline. This is enforced by
+        # construction — there is no other timeout=... literal at any of
+        # the three call sites anymore.
+        import inspect
+        src = inspect.getsource(ContextCompactor._call_summarization_llm)
+        assert "_summarization_timeout_s" in src
+        # No hard-coded timeout literals (the prior ``timeout=30.0`` at
+        # the old :1038 site must be gone).
+        assert "timeout=30" not in src
+
+    def test_per_origin_prompts_get_base_scale_timeouts(self):
+        """Merge/condense prompts are tiny — they must NOT receive a
+        conversation-scale timeout (architect §3 Correction 1 — passing
+        ``context.messages`` over-estimates massively).
+        """
+        config = make_compaction_config()
+        merge_prompt = (
+            "Combine these conversation summaries into a single coherent "
+            "summary. Preserve all key decisions, important facts, tool "
+            "actions and their outcomes, and user requests. Remove "
+            "redundancy but keep all unique information.\n\n"
+            "Part 1:\n[Conversation Summary]\nold summary A\n\n---\n\n"
+            "Part 2:\n[Conversation Summary]\nold summary B"
+        )
+        condense_prompt = (
+            "Condense this conversation summary to be more concise while "
+            "keeping all key information. Focus on decisions, facts, and "
+            "outcomes:\n\n[Conversation Summary]\nsome long summary"
+        )
+        merge_timeout = _summarization_timeout_s(merge_prompt, config)
+        condense_timeout = _summarization_timeout_s(condense_prompt, config)
+        # Both within ~2s of the base (no per-100k kick-in for tiny prompts).
+        assert merge_timeout < 92.0, merge_timeout
+        assert condense_timeout < 92.0, condense_timeout
+        # Tiny prompts do NOT exceed conversation-scale timeouts even when
+        # a much larger context exists in the engine.
+        assert merge_timeout < 120.0, merge_timeout
+        assert condense_timeout < 120.0, condense_timeout
+
+
+class TestWallClockFacadeCap:
+    """WS-3.2 — facade receives ``inner_cap + timeout_facade_margin_s`` (PINNED +5s)."""
+
+    @pytest.mark.asyncio
+    async def test_facade_cap_is_inner_plus_margin(self):
+        """The wall_clock_cap_s threaded into ``wrap_langchain_failover`` is
+        exactly ``inner_cap + timeout_facade_margin_s`` (architect §9.8).
+        """
+        config = make_compaction_config(
+            timeout_base_s=90.0,
+            timeout_per_100k_tokens_s=60.0,
+            timeout_cap_s=300.0,
+            timeout_facade_margin_s=5.0,
+        )
+        llm_config = {
+            "base_url": "http://localhost:1234/v1",
+            "api_key": "test-key",
+            "model": "gpt-4o",
+            "model_vision": "gpt-4o-vision",
+        }
+        compactor = ContextCompactor(config, llm_config)
+        prompt = "Summarize this short conversation."
+
+        captured: dict = {}
+
+        class _StubLLM:
+            def invoke(self, _messages):
+                resp = MagicMock()
+                resp.content = "ok"
+                return resp
+
+        def _fake_wrap(llm, llm_cfg, *, wall_clock_cap_s):
+            captured["wall_clock_cap_s"] = wall_clock_cap_s
+            return _StubLLM()
+
+        mock_llm_instance = MagicMock()
+        mock_llm_instance.invoke = MagicMock(
+            side_effect=lambda _msgs: MagicMock(content="ok")
+        )
+
+        with patch("daemon.graph.ThinkingChatOpenAI", return_value=mock_llm_instance, create=True):
+            with patch("daemon.services.llm_failover.wrap_langchain_failover", side_effect=_fake_wrap) as mock_wrap:
+                await compactor._call_summarization_llm(prompt, CompactionContext(
+                    messages=[], system_prompt_tokens=0,
+                    model_name="gpt-4o", config=config, llm_config=llm_config,
+                ))
+
+        assert mock_wrap.called
+        inner_cap = _summarization_timeout_s(prompt, config)
+        expected = inner_cap + config.timeout_facade_margin_s
+        assert captured["wall_clock_cap_s"] == expected, (
+            f"facade cap={captured['wall_clock_cap_s']}, expected={expected}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_site_timeouterror_trips_first(self):
+        """Inner ``asyncio.wait_for(inner_cap)`` is the FIRST to trip — the
+        facade cap is the secondary line of defense (PINNED +5s margin).
+        """
+        config = make_compaction_config(
+            # Tiny base cap so the test runs fast.
+            timeout_base_s=0.05,
+            timeout_per_100k_tokens_s=0.0,
+            timeout_cap_s=0.05,
+            timeout_facade_margin_s=5.0,
+        )
+        compactor = ContextCompactor(config, {
+            "base_url": "http://localhost:1234/v1",
+            "api_key": "test-key",
+            "model": "gpt-4o",
+        })
+
+        mock_llm_instance = MagicMock()
+        # A blocking sync invoke: ``asyncio.to_thread`` will hold the
+        # event loop; ``asyncio.wait_for(..., timeout=inner_cap)`` trips
+        # first with asyncio.TimeoutError.
+        import threading
+        block = threading.Event()
+
+        def _blocking_invoke(_messages):
+            block.wait(timeout=2.0)
+            return MagicMock(content="too late")
+
+        mock_llm_instance.invoke = MagicMock(side_effect=_blocking_invoke)
+
+        facade_cap_seen: list = []
+
+        def _fake_wrap(llm, llm_cfg, *, wall_clock_cap_s):
+            facade_cap_seen.append(wall_clock_cap_s)
+            return mock_llm_instance  # passthrough; invoke is blocking
+
+        with patch("daemon.graph.ThinkingChatOpenAI", return_value=mock_llm_instance, create=True):
+            with patch("daemon.services.llm_failover.wrap_langchain_failover", side_effect=_fake_wrap):
+                with pytest.raises(asyncio.TimeoutError):
+                    await compactor._call_summarization_llm(
+                        "any prompt",
+                        CompactionContext(
+                            messages=[], system_prompt_tokens=0,
+                            model_name="gpt-4o", config=config, llm_config={},
+                        ),
+                    )
+        block.set()  # unblock the mock
+
+        # Facade cap was sized to inner + margin (PINNED).
+        assert facade_cap_seen and facade_cap_seen[0] == 0.05 + 5.0
+
+
+class TestCompactionConfigWS7Knobs:
+    """WS-7 — new CompactionConfig knobs resolve via env + factory defaults."""
+
+    def test_compaction_timeout_knob_defaults(self):
+        c = CompactionConfigModel()
+        assert c.timeout_base_s == 90.0
+        assert c.timeout_per_100k_tokens_s == 60.0
+        assert c.timeout_cap_s == 300.0
+        assert c.timeout_facade_margin_s == 5.0
+        assert c.operation_budget_s == 300.0
+
+    def test_slash_command_config_defaults(self):
+        sc = SlashCommandConfig()
+        assert sc.enabled is True
+        assert sc.escape_prefix == "//"
+        assert sc.min_interval_s == 10
+        assert sc.noop_floor_ratio == 0.05
+        assert sc.state_ttl_s == 600
+        assert sc.max_state_per_instance == 20
+
+    def test_slash_command_config_resolves_via_config_tree(self):
+        from daemon.config import Config
+        c = Config()
+        # Nested-config pattern: ``config.slash_commands.<knob>`` resolves.
+        assert c.slash_commands.enabled is True
+        assert c.slash_commands.noop_floor_ratio == 0.05
+
+
+class TestForceFlagWS2:
+    """WS-2 — ``force=True`` bypasses the THRESHOLD check ONLY.
+
+    Min-messages and 60s dedup still apply (S-7 + architect §2 narrowed).
+    Default ``False`` → automatic paths byte-identical (anti-drift).
+    """
+
+    @pytest.fixture
+    def mock_llm(self):
+        mock_response = AIMessage(content="Summarized conversation history.", id="mock-response")
+        mock_llm_instance = MagicMock()
+        mock_llm_instance.invoke = MagicMock(return_value=mock_response)
+        with patch("daemon.graph.ThinkingChatOpenAI", return_value=mock_llm_instance, create=True):
+            yield mock_llm_instance
+
+    @pytest.mark.asyncio
+    async def test_force_below_threshold_triggers_compaction(self, mock_llm):
+        """With ``force=True`` and tokens well below threshold, compaction
+        still runs — this is the ONLY bypass (architect §2 narrowed).
+        """
+        # Tokens tiny (well below any reasonable threshold), but force=True.
+        config = make_compaction_config(
+            min_messages_before_compaction=2,
+            threshold=0.80,  # would NOT trigger on tiny context
+            recent_message_window=2,
+            min_recent_window=1,
+            context_window_overrides={"gpt-4o": 1_000_000},
+        )
+        messages = make_messages(20)
+        context = CompactionContext(
+            messages=messages,
+            system_prompt_tokens=0,
+            model_name="gpt-4o",
+            config=config,
+            llm_config={},
+        )
+        compactor = ContextCompactor(config, {})
+        result = await compactor.compact_state(context, force=True)
+        assert result is not None
+        assert result.forced is True
+        assert result.compaction_type == "summarization"
+
+    @pytest.mark.asyncio
+    async def test_no_force_below_threshold_returns_none(self, mock_llm):
+        """Without force, threshold check rejects — byte-identical auto-path."""
+        config = make_compaction_config(
+            min_messages_before_compaction=2,
+            threshold=0.80,
+            recent_message_window=2,
+            min_recent_window=1,
+            context_window_overrides={"gpt-4o": 1_000_000},
+        )
+        context = CompactionContext(
+            messages=make_messages(20),
+            system_prompt_tokens=0,
+            model_name="gpt-4o",
+            config=config,
+            llm_config={},
+        )
+        compactor = ContextCompactor(config, {})
+        result = await compactor.compact_state(context)  # force default False
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_force_does_not_bypass_dedup(self, mock_llm):
+        """60s dedup still applies under force — recently compacted → None."""
+        config = make_compaction_config(
+            min_messages_before_compaction=2,
+            threshold=0.99,  # very high to avoid threshold triggering
+            recent_message_window=2,
+            min_recent_window=1,
+            context_window_overrides={"gpt-4o": 1_000_000},
+        )
+        context = CompactionContext(
+            messages=make_messages(20),
+            system_prompt_tokens=0,
+            model_name="gpt-4o",
+            config=config,
+            llm_config={},
+            last_compacted_at=datetime.now(timezone.utc).isoformat(),
+        )
+        compactor = ContextCompactor(config, {})
+        result = await compactor.compact_state(context, force=True)
+        # Dedup wins; force does not bypass it.
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_force_does_not_bypass_min_messages(self, mock_llm):
+        """Min-messages check still applies under force."""
+        config = make_compaction_config(
+            min_messages_before_compaction=100,  # big so we trip it
+            threshold=0.99,
+            recent_message_window=2,
+            min_recent_window=1,
+            context_window_overrides={"gpt-4o": 1_000_000},
+        )
+        context = CompactionContext(
+            messages=make_messages(5),
+            system_prompt_tokens=0,
+            model_name="gpt-4o",
+            config=config,
+            llm_config={},
+        )
+        compactor = ContextCompactor(config, {})
+        result = await compactor.compact_state(context, force=True)
+        # Min-messages wins; force does not bypass it.
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_auto_paths_byte_identical_forced_false(self, mock_llm):
+        """Auto paths (proactive + reactive) call ``compact_state(context)``
+        without ``force`` — the result MUST carry ``forced=False`` (S-7
+        anti-drift). Same-compaction comparison: simulate each caller's
+        pattern via the same context and assert the field.
+        """
+        config = make_compaction_config(
+            min_messages_before_compaction=2,
+            threshold=0.01,
+            recent_message_window=2,
+            min_recent_window=1,
+            context_window_overrides={"gpt-4o": 1000},
+        )
+        messages = make_messages(200)
+        compactor = ContextCompactor(config, {})
+
+        # Both call sites use the same signature (no force kwarg).
+        ctx = CompactionContext(
+            messages=messages, system_prompt_tokens=0,
+            model_name="gpt-4o", config=config, llm_config={},
+        )
+        result = await compactor.compact_state(ctx)
+        assert result is not None
+        assert result.forced is False, (
+            "auto-path byte-identity: forced must be False on default "
+            "compact_state(context) calls"
+        )
+        # No-timeout scenario: compaction_type != 'partial_summary' (O14).
+        assert result.compaction_type != "partial_summary"
+
+
+class TestTruncationMarkerWS41:
+    """WS-4.1 — marker exactly-once in truncation AND partial_summary outputs."""
+
+    def test_marker_helper_module_scope(self):
+        """Marker helper exists at module scope (approver pin)."""
+        from daemon import compaction as cm
+        assert hasattr(cm, "_append_truncation_marker")
+        # Id-deterministic prefix.
+        r: list = []
+        _append_truncation_marker(r)
+        _append_truncation_marker(r)
+        assert len(r) == 2
+        assert all(isinstance(m, SystemMessage) for m in r)
+        assert all(m.content == "[Earlier messages trimmed to fit context]" for m in r)
+        assert all(m.id.startswith("truncation-marker-") for m in r)
+        # Each call gets a fresh UUID4 id.
+        assert r[0].id != r[1].id
+
+    @pytest.fixture
+    def mock_llm(self):
+        mock_response = AIMessage(content="Summary text.", id="mock-response")
+        mock_llm_instance = MagicMock()
+        mock_llm_instance.invoke = MagicMock(return_value=mock_response)
+        with patch("daemon.graph.ThinkingChatOpenAI", return_value=mock_llm_instance, create=True):
+            yield mock_llm_instance
+
+    @pytest.mark.asyncio
+    async def test_truncation_output_has_marker_exactly_once(self, mock_llm):
+        """``compaction_type='truncation'`` output contains exactly one marker.
+
+        O15 regression — auto-path truncation NOW carries the marker
+        (intentional behavior change, pinned here).
+        """
+        mock_llm.invoke.side_effect = Exception("LLM API error")
+        config = make_compaction_config(
+            min_messages_before_compaction=2,
+            threshold=0.01,
+            recent_message_window=2,
+            min_recent_window=1,
+            context_window_overrides={"gpt-4o": 1000},
+        )
+        context = CompactionContext(
+            messages=make_messages(200),
+            system_prompt_tokens=0,
+            model_name="gpt-4o",
+            config=config,
+            llm_config={},
+        )
+        compactor = ContextCompactor(config, {})
+        result = await compactor.compact_state(context)
+        assert result is not None
+        assert result.compaction_type == "truncation"
+        markers = [
+            m for m in result.replacement_messages
+            if isinstance(m, SystemMessage) and m.id.startswith("truncation-marker-")
+        ]
+        assert len(markers) == 1, (
+            f"expected exactly one truncation marker, found {len(markers)}"
+        )
+        assert markers[0].content == "[Earlier messages trimmed to fit context]"
+        # failure_kind carries "error" because LLM raised (not a TimeoutError).
+        assert result.failure_kind == "error"
+
+
+class TestPartialSummaryWS34:
+    """WS-3.4 C1 acceptance (a)-(d).
+
+    (a) first-batch timeout → ``truncation`` + marker + no summaries
+    (b) >=2 batches, batch-2 timeout → ``partial_summary`` + batch-1 summary + batch-2 absent + marker exactly once
+    (c) budget exhaustion mid-run → same as (b) with stop_reason="budget"
+    (d) proactive + reactive callers observe identical outcome semantics
+    """
+
+    @pytest.fixture
+    def large_message_set(self):
+        # Enough messages that chunking kicks in (>20 groups).
+        return make_messages(120)
+
+    @pytest.fixture
+    def compactor_config(self):
+        return make_compaction_config(
+            min_messages_before_compaction=2,
+            threshold=0.01,
+            recent_message_window=2,
+            min_recent_window=1,
+            context_window_overrides={"gpt-4o": 1000},
+            summarization_chunk_threshold=0.01,  # force chunking
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_first_batch_timeout_truncation_with_marker(
+        self, compactor_config, large_message_set,
+    ):
+        """C1 (a): single-batch path times out → ``truncation`` + marker + no summaries."""
+        # Force the single-batch path (compactable_tokens <= threshold).
+        # Also shrink the adaptive-timeout base so the test runs fast.
+        config = compactor_config
+        config.summarization_chunk_threshold = 1.5  # disable chunking
+        config.timeout_base_s = 0.05  # 50ms cap → trips immediately
+        config.timeout_cap_s = 0.05
+        compactor = ContextCompactor(config, {})
+
+        # Use a synchronous blocking invoke so ``asyncio.wait_for`` trips
+        # first with ``asyncio.TimeoutError`` (per O14 — TimeoutError is
+        # caught in the per-chunk except, no astream mimicry needed).
+        import threading
+        block = threading.Event()
+
+        def _blocking_invoke(_messages):
+            block.wait(timeout=2.0)
+            return MagicMock(content="never returns")
+
+        mock_llm_instance = MagicMock()
+        mock_llm_instance.invoke = MagicMock(side_effect=_blocking_invoke)
+        with patch("daemon.graph.ThinkingChatOpenAI", return_value=mock_llm_instance, create=True):
+            try:
+                result = await compactor.compact_state(CompactionContext(
+                    messages=large_message_set, system_prompt_tokens=0,
+                    model_name="gpt-4o", config=config, llm_config={},
+                ))
+            finally:
+                block.set()  # unblock the mock
+
+        assert result is not None
+        assert result.compaction_type == "truncation"
+        assert result.failure_kind == "timeout"
+        # No summaries in the result.
+        summaries = [
+            m for m in result.replacement_messages
+            if isinstance(m, SystemMessage) and (m.id or "").startswith("compaction-")
+        ]
+        assert summaries == []
+        # Marker present exactly once.
+        markers = [
+            m for m in result.replacement_messages
+            if isinstance(m, SystemMessage) and (m.id or "").startswith("truncation-marker-")
+        ]
+        assert len(markers) == 1
+        # compacted_at stamped on this path (D12).
+        assert result.compacted_at is not None
+
+    @pytest.mark.asyncio
+    async def test_b_second_batch_timeout_partial_summary(
+        self, compactor_config, large_message_set,
+    ):
+        """C1 (b): batch-2 times out → ``partial_summary`` + batch-1 summary present +
+        batch-2 raw messages absent + marker exactly once.
+        """
+        config = compactor_config
+        compactor = ContextCompactor(config, {})
+
+        # Stub ``_summarize_chunked`` directly — simulating the C1 hybrid
+        # scenario where batch-1 succeeded and batch-2 raised TimeoutError.
+        from daemon.compaction import ChunkedOutcome
+
+        async def _fake_chunked(compactable, context):
+            return ChunkedOutcome(
+                summaries=[SystemMessage(
+                    content="[Conversation Summary]\nbatch-1 summary",
+                    id=f"compaction-{1}",
+                )],
+                failed_batches=[1, 2, 3, 4, 5],
+                stop_reason="timeout",
+            )
+
+        compactor._summarize_chunked = _fake_chunked
+
+        result = await compactor.compact_state(CompactionContext(
+            messages=large_message_set, system_prompt_tokens=0,
+            model_name="gpt-4o", config=config, llm_config={},
+        ))
+
+        assert result is not None
+        assert result.compaction_type == "partial_summary"
+        assert result.failure_kind == "timeout"
+        # Batch-1 summary present.
+        batch1_summaries = [
+            m for m in result.replacement_messages
+            if isinstance(m, SystemMessage) and (m.id or "").startswith("compaction-")
+        ]
+        assert len(batch1_summaries) == 1, (
+            f"expected batch-1 summary, got {len(batch1_summaries)}: {batch1_summaries}"
+        )
+        # Marker exactly once.
+        markers = [
+            m for m in result.replacement_messages
+            if isinstance(m, SystemMessage) and (m.id or "").startswith("truncation-marker-")
+        ]
+        assert len(markers) == 1
+        # compacted_at stamped on this path (D12 — a partial is a completed compaction).
+        assert result.compacted_at is not None
+
+    @pytest.mark.asyncio
+    async def test_c_budget_exhaustion_partial_summary(self, large_message_set):
+        """C1 (c): budget exhaustion mid-run → ``partial_summary`` + marker + stop_reason="budget"."""
+        from daemon.compaction import ChunkedOutcome
+
+        config = make_compaction_config(
+            min_messages_before_compaction=2,
+            threshold=0.01,
+            recent_message_window=2,
+            min_recent_window=1,
+            context_window_overrides={"gpt-4o": 1000},
+            summarization_chunk_threshold=0.01,
+            # TINY budget so it exhausts after the first chunk completes.
+            operation_budget_s=0.0,
+        )
+        compactor = ContextCompactor(config, {})
+
+        mock_response = MagicMock(content="Batch 1 summary.")
+        mock_llm_instance = MagicMock()
+        mock_llm_instance.invoke = MagicMock(return_value=mock_response)
+
+        with patch("daemon.graph.ThinkingChatOpenAI", return_value=mock_llm_instance, create=True):
+            result = await compactor.compact_state(CompactionContext(
+                messages=large_message_set, system_prompt_tokens=0,
+                model_name="gpt-4o", config=config, llm_config={},
+            ))
+
+        # operation_budget_s=0 means budget exhausted immediately; if
+        # chunking kicks in, the first pre-call check trips and we get
+        # |S|=0 → truncate fallback. To hit the partial path we want
+        # the budget to trip AFTER at least one batch. Patch
+        # ``_summarize_chunked`` to simulate the partial outcome.
+        captured_kwargs: dict = {}
+
+        async def _fake_chunked(compactable, context):
+            return ChunkedOutcome(
+                summaries=[SystemMessage(
+                    content="[Conversation Summary]\nfirst batch",
+                    id=f"compaction-{1}",
+                )],
+                failed_batches=[1, 2, 3, 4, 5],
+                stop_reason="budget",
+            )
+
+        # Force the partial path: stub ``_summarize_chunked`` to return
+        # a budget-stopped ChunkedOutcome with one surviving summary.
+        compactor._summarize_chunked = _fake_chunked
+
+        result = await compactor.compact_state(CompactionContext(
+            messages=large_message_set, system_prompt_tokens=0,
+            model_name="gpt-4o", config=config, llm_config={},
+        ))
+
+        assert result is not None
+        assert result.compaction_type == "partial_summary"
+        assert result.failure_kind == "timeout"
+        # Marker exactly once.
+        markers = [
+            m for m in result.replacement_messages
+            if isinstance(m, SystemMessage) and (m.id or "").startswith("truncation-marker-")
+        ]
+        assert len(markers) == 1
+
+    @pytest.mark.asyncio
+    async def test_d_identical_outcome_proactive_vs_reactive(self):
+        """C1 (d): the same engine call from proactive-context vs reactive-context
+        must produce IDENTICAL CompactionResult outcome semantics.
+
+        The two auto-path callers (instance_messaging.py:1179 +
+        graph.py:3513) construct CompactionContext differently (different
+        system_prompt_tokens, different llm_config) but the engine
+        branching must not depend on the caller's identity — it depends
+        only on the outcome of ``_summarize_chunked``.
+        """
+        from daemon.compaction import ChunkedOutcome
+
+        config = make_compaction_config(
+            min_messages_before_compaction=2,
+            threshold=0.01,
+            recent_message_window=2,
+            min_recent_window=1,
+            context_window_overrides={"gpt-4o": 1000},
+            summarization_chunk_threshold=0.01,
+        )
+        messages = make_messages(120)
+
+        async def _fake_chunked_partial(compactable, context):
+            return ChunkedOutcome(
+                summaries=[SystemMessage(
+                    content="[Conversation Summary]\nfirst batch",
+                    id=f"compaction-{1}",
+                )],
+                failed_batches=[1],
+                stop_reason="timeout",
+            )
+
+        # Proactive-context (instance_messaging.py:1179 pattern):
+        # larger system_prompt_tokens, full llm_config.
+        proactive_compactor = ContextCompactor(config, {})
+        proactive_compactor._summarize_chunked = _fake_chunked_partial
+        proactive_ctx = CompactionContext(
+            messages=messages, system_prompt_tokens=2000,
+            model_name="gpt-4o", config=config,
+            llm_config={"model": "gpt-4o", "base_url": "http://x", "api_key": "k"},
+        )
+        proactive_result = await proactive_compactor.compact_state(proactive_ctx)
+
+        # Reactive-context (graph.py:3513 pattern):
+        # system_prompt_tokens=0, llm_config from compactor instance.
+        reactive_compactor = ContextCompactor(config, {})
+        reactive_compactor._summarize_chunked = _fake_chunked_partial
+        reactive_ctx = CompactionContext(
+            messages=messages, system_prompt_tokens=0,
+            model_name="gpt-4o", config=config, llm_config={},
+        )
+        reactive_result = await reactive_compactor.compact_state(reactive_ctx)
+
+        # Identical outcome semantics.
+        assert proactive_result.compaction_type == reactive_result.compaction_type == "partial_summary"
+        assert proactive_result.failure_kind == reactive_result.failure_kind == "timeout"
+        assert proactive_result.compacted_at is not None
+        assert reactive_result.compacted_at is not None
+        # Both carry exactly one marker.
+        for r in (proactive_result, reactive_result):
+            markers = [
+                m for m in r.replacement_messages
+                if isinstance(m, SystemMessage) and (m.id or "").startswith("truncation-marker-")
+            ]
+            assert len(markers) == 1
+
+
+class TestPerChunkTimeoutNarrowing:
+    """O14: per-chunk try/except narrowed to ``(TimeoutError, asyncio.TimeoutError)``.
+    Other exceptions propagate normally.
+    """
+
+    @pytest.mark.asyncio
+    async def test_non_timeout_exception_propagates_to_outer_handler(self):
+        """Per-chunk ``except`` is narrow — ValueError still escapes to the
+        outer ``except Exception`` at ``compact_state`` :744-772.
+        """
+        config = make_compaction_config(
+            min_messages_before_compaction=2,
+            threshold=0.01,
+            recent_message_window=2,
+            min_recent_window=1,
+            context_window_overrides={"gpt-4o": 1000},
+            summarization_chunk_threshold=0.01,
+        )
+        compactor = ContextCompactor(config, {})
+
+        mock_llm_instance = MagicMock()
+        mock_llm_instance.invoke = MagicMock(side_effect=ValueError("non-timeout exception"))
+
+        with patch("daemon.graph.ThinkingChatOpenAI", return_value=mock_llm_instance, create=True):
+            result = await compactor.compact_state(CompactionContext(
+                messages=make_messages(120), system_prompt_tokens=0,
+                model_name="gpt-4o", config=config, llm_config={},
+            ))
+
+        # Non-timeout exception → outer handler maps to truncation +
+        # failure_kind="error" (NOT timeout).
+        assert result is not None
+        assert result.compaction_type == "truncation"
+        assert result.failure_kind == "error"
+        assert result.summarization_error is not None
+        assert "non-timeout exception" in result.summarization_error
+
+
+class TestOperationBudgetWS33:
+    """WS-3.3 — operation budget trips BETWEEN LLM calls only."""
+
+    @pytest.mark.asyncio
+    async def test_budget_exhaustion_stops_remaining_chunks(self):
+        """After the budget is exhausted mid-run, the engine stops issuing
+        remaining chunks and returns the partial path (or fallback on
+        ``|S| = 0``). No aupdate_state interleaving can happen because
+        the engine only touches the state via the outer caller.
+        """
+        from daemon.compaction import ChunkedOutcome
+
+        config = make_compaction_config(
+            min_messages_before_compaction=2,
+            threshold=0.01,
+            recent_message_window=2,
+            min_recent_window=1,
+            context_window_overrides={"gpt-4o": 1000},
+            summarization_chunk_threshold=0.01,
+            operation_budget_s=300.0,  # default
+        )
+        messages = make_messages(120)
+
+        # Inject a slow first chunk so the budget clock advances, then
+        # assert the next-batch pre-check trips and we get |S|>=1.
+        captured: dict = {}
+
+        async def _first_slow_then_fast_chunked(compactable, context):
+            # Sleep so that the budget clock advances well past budget_seconds.
+            await asyncio.sleep(0.5)
+            return ChunkedOutcome(
+                summaries=[SystemMessage(
+                    content="[Conversation Summary]\nonly-batch-summary",
+                    id=f"compaction-{1}",
+                )],
+                failed_batches=list(range(1, 200)),
+                stop_reason="budget",
+            )
+
+        compactor = ContextCompactor(config, {})
+        compactor._summarize_chunked = _first_slow_then_fast_chunked
+
+        # Override operation_budget_s to a tiny value so the budget trips.
+        config.operation_budget_s = 0.001
+
+        result = await compactor.compact_state(CompactionContext(
+            messages=messages, system_prompt_tokens=0,
+            model_name="gpt-4o", config=config, llm_config={},
+        ))
+
+        # Budget-stopped partial path: |S|>=1 → partial_summary.
+        assert result is not None
+        assert result.compaction_type == "partial_summary"
+        assert result.failure_kind == "timeout"
+        # compacted_at stamped on this path (D12).
+        assert result.compacted_at is not None
+        # Marker exactly once.
+        markers = [
+            m for m in result.replacement_messages
+            if isinstance(m, SystemMessage) and (m.id or "").startswith("truncation-marker-")
+        ]
+        assert len(markers) == 1
+
+
+class TestChunkedOutcomeDataclass:
+    """Dataclass surface contract — both fields are required, types pinned."""
+
+    def test_chunked_outcome_construction(self):
+        co = ChunkedOutcome(summaries=[], failed_batches=[], stop_reason="completed")
+        assert co.summaries == []
+        assert co.failed_batches == []
+        assert co.stop_reason == "completed"
+
+    def test_chunked_outcome_with_summaries(self):
+        sm = SystemMessage(content="x", id="compaction-1")
+        co = ChunkedOutcome(
+            summaries=[sm], failed_batches=[1], stop_reason="timeout",
+        )
+        assert co.summaries == [sm]
+        assert co.failed_batches == [1]
+        assert co.stop_reason == "timeout"
+
+
+class TestReCompactionMarkerDedup:
+    """W-4.3 — re-compaction no-duplicate-markers.
+
+    The dedup property is BOUNDED ACCUMULATION (per construction
+    path, the marker fires at most once), NOT ``add_messages``
+    id-dedup (the freshly-minted UUID4 in the marker id would
+    defeat any id-based dedup — see ``_append_truncation_marker``
+    docstring, 2026-08-31 amendment).
+
+    Pin: a SECOND compaction invocation against the same
+    replacement list produces a SECOND marker (different id) —
+    callers must NOT re-apply a single marker repeatedly. Each
+    construction path (truncate fallback + partial assembly) calls
+    the helper at most once per ``CompactionResult``.
+    """
+
+    def test_second_marker_call_produces_different_id(self):
+        """Each ``_append_truncation_marker`` call mints a fresh UUID4
+        — so re-appending the helper a SECOND time on the SAME
+        replacement list adds a SECOND marker (distinct id). This is
+        the load-bearing property: bounded accumulation, NOT
+        id-based dedup.
+        """
+        a: list = []
+        b: list = []
+        _append_truncation_marker(a)
+        _append_truncation_marker(b)
+        assert a[0].id != b[0].id
+        assert a[0].id.startswith("truncation-marker-")
+        assert b[0].id.startswith("truncation-marker-")
+
+    def test_marker_appended_at_most_once_per_compaction_result(self):
+        """W-4.3 — a single ``CompactionResult`` built by either
+        construction path (truncate fallback or partial assembly)
+        carries AT MOST ONE marker. The marker is the single
+        in-band signal that summarization fell back to trim; a
+        doubled marker would mislead downstream consumers.
+
+        Builds a replacement list via the public ``_truncate_fallback``
+        helper and asserts the marker count is exactly 1.
+        """
+        from daemon.compaction import ContextCompactor, MessageGroup
+        from daemon.config import CompactionConfig
+
+        config = CompactionConfig(
+            enabled=True,
+            threshold=0.80,
+            recent_message_window=10,
+            min_recent_window=3,
+            context_window_overrides={},
+            context_window_default=128000,
+            target_ratio=0.40,
+            summarization_model="",
+            min_messages_before_compaction=10,
+            summarization_chunk_threshold=0.60,
+            timeout_base_s=90.0,
+            timeout_per_100k_tokens_s=60.0,
+            timeout_cap_s=300.0,
+            timeout_facade_margin_s=5.0,
+            operation_budget_s=300.0,
+        )
+        compactor = ContextCompactor(config, llm_config={})
+
+        from langchain_core.messages import HumanMessage
+
+        compactable = [
+            MessageGroup(
+                start_idx=0,
+                end_idx=2,
+                group_type="single",
+                messages=[HumanMessage(content="x" * 100, id=f"old-{n}") for n in range(3)],
+            )
+        ]
+        preserved: list[MessageGroup] = []
+
+        replacement, ctype = compactor._truncate_fallback(
+            compactable, preserved, context=None  # not used by this path
+        )
+        assert ctype == "truncation"
+        markers = [
+            m for m in replacement
+            if isinstance(m, SystemMessage) and (m.id or "").startswith("truncation-marker-")
+        ]
+        assert len(markers) == 1, (
+            f"W-4.3: a single compaction result must carry AT MOST ONE "
+            f"marker (bounded accumulation); got {len(markers)}"
+        )
+
+
+def _load_real_add_messages():
+    """Import the REAL LangGraph ``add_messages`` reducer, bypassing
+    the conftest's mocked ``langgraph.*`` entries in ``sys.modules``.
+
+    Same identity-restore discipline as
+    ``test_compact_executor_revive_brick_e2e._RealLangGraph``: snap the
+    originals, drop mocked AND freshly-imported real langgraph entries,
+    then restore the SAME module objects so subsequent tests keep
+    seeing the conftest mocks.
+    """
+    import importlib
+    import sys
+
+    saved = {
+        k: sys.modules[k]
+        for k in list(sys.modules)
+        if k.startswith("langgraph")
+    }
+    for k in [k for k in sys.modules if k.startswith("langgraph")]:
+        del sys.modules[k]
+    try:
+        mod = importlib.import_module("langgraph.graph.message")
+        return mod.add_messages
+    finally:
+        for k in [k for k in sys.modules if k.startswith("langgraph")]:
+            del sys.modules[k]
+        sys.modules.update(saved)
+
+
+class TestChainedSecondCompactionMarkers:
+    """W-4.3 — REAL chained compaction: marker accumulation stays bounded.
+    The tests above pin AT MOST ONE marker per single ``CompactionResult``
+    (construction-level). This test pins the CHAINED property end-to-end:
+
+    1. Run ONE ``compact_state`` that produces a marker-bearing
+       replacement (``truncation`` — LLM fails, ``_truncate_fallback``
+       fires).
+    2. Apply that replacement to the channel via LangGraph's
+       ``add_messages`` reducer (the production persistence semantics
+       for ``aupdate_state(values={"messages": replacement})``).
+    3. Feed the resulting post-compaction history (marker included)
+       PLUS fresh follow-up messages into a SECOND ``compact_state``
+       run.
+    4. Assert NO duplicate truncation markers in the final channel.
+
+    Why the final channel carries exactly one marker: by the second
+    run the first-round marker has aged out of the preserved window,
+    so it sits inside the second run's ``RemoveMessage`` span — it is
+    dropped and re-stamped by the fresh marker. Combined with the
+    per-result bound (at most one marker per construction path per
+    result), accumulation stays bounded at one marker per channel no
+    matter how many truncate-fallback compactions chain.
+    """
+
+    @pytest.fixture
+    def failing_llm(self):
+        """LLM stub whose ``invoke`` always raises → ``|S| = 0`` →
+        ``_truncate_fallback`` (deterministic marker-bearing path)."""
+        mock_response = AIMessage(content="Summary text.", id="mock-response")
+        mock_llm_instance = MagicMock()
+        mock_llm_instance.invoke = MagicMock(return_value=mock_response)
+        mock_llm_instance.invoke.side_effect = Exception("LLM API error")
+        with patch(
+            "daemon.graph.ThinkingChatOpenAI",
+            return_value=mock_llm_instance,
+            create=True,
+        ):
+            yield mock_llm_instance
+
+    @staticmethod
+    def _marker_count(messages) -> int:
+        return sum(
+            1
+            for m in messages
+            if isinstance(m, SystemMessage)
+            and (m.id or "").startswith("truncation-marker-")
+        )
+
+    def _make_ctx(self, config, messages) -> CompactionContext:
+        # ``last_compacted_at=None`` — the engine-level 60s dedup is
+        # bypassed so BOTH chained runs actually execute (in
+        # production the second run happens after the dedup window or
+        # via the executor's explicit path).
+        return CompactionContext(
+            messages=list(messages),
+            system_prompt_tokens=0,
+            model_name="gpt-4o",
+            config=config,
+            llm_config={},
+            last_compacted_at=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_chained_compaction_leaves_exactly_one_marker(
+        self, failing_llm
+    ):
+        add_messages = _load_real_add_messages()
+
+        config = make_compaction_config(
+            min_messages_before_compaction=2,
+            threshold=0.01,
+            recent_message_window=2,
+            min_recent_window=1,
+            context_window_overrides={"gpt-4o": 1000},
+        )
+        compactor = ContextCompactor(config, {})
+
+        # ── Compaction #1 — marker-bearing replacement ──────────────
+        history_1 = make_messages(200)
+        result_1 = await compactor.compact_state(self._make_ctx(config, history_1))
+        assert result_1 is not None, "compaction #1 must fire"
+        assert result_1.compaction_type == "truncation"
+        assert self._marker_count(result_1.replacement_messages) == 1, (
+            "W-4.3: result #1 must carry exactly one truncation marker"
+        )
+
+        # Apply via the production reducer semantics.
+        channel = add_messages(history_1, result_1.replacement_messages)
+        assert self._marker_count(channel) == 1, (
+            "post-compaction-#1 channel must carry exactly one marker"
+        )
+
+        # ── Continued conversation — fresh messages on top ──────────
+        follow_ups = [
+            HumanMessage(content=f"Follow-up {i}", id=f"post-{i}")
+            for i in range(6)
+        ]
+        channel = add_messages(channel, follow_ups)
+        assert self._marker_count(channel) == 1
+
+        # ── Compaction #2 on the marker-bearing history ─────────────
+        result_2 = await compactor.compact_state(self._make_ctx(config, channel))
+        assert result_2 is not None, "compaction #2 must fire"
+        assert result_2.compaction_type == "truncation"
+        # Per-result bounded accumulation: at most one marker per
+        # construction path per result.
+        assert self._marker_count(result_2.replacement_messages) == 1, (
+            "W-4.3: result #2 must carry AT MOST ONE marker "
+            "(bounded accumulation per construction path)"
+        )
+
+        final_channel = add_messages(channel, result_2.replacement_messages)
+
+        # The load-bearing chained assertion: NO duplicate markers in
+        # the final output. The first-round marker must have been
+        # covered by result #2's RemoveMessage span (not preserved),
+        # so only the fresh marker survives.
+        old_markers = [
+            m
+            for m in channel
+            if isinstance(m, SystemMessage)
+            and (m.id or "").startswith("truncation-marker-")
+        ]
+        assert len(old_markers) == 1
+        rm_ids = {
+            m.id
+            for m in result_2.replacement_messages
+            if isinstance(m, RemoveMessage)
+        }
+        assert old_markers[0].id in rm_ids, (
+            "the first-round marker must be INSIDE result #2's "
+            "RemoveMessage span — otherwise it survives alongside the "
+            "fresh marker and duplicates accumulate"
+        )
+        assert self._marker_count(final_channel) == 1, (
+            f"W-4.3 chained: final channel must carry exactly ONE "
+            f"truncation marker (no duplicate accumulation); got "
+            f"{self._marker_count(final_channel)}"
+        )

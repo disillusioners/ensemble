@@ -156,6 +156,8 @@
           [showThinking]="showThinking()"
           [showToolCalls]="showToolCalls()"
           [showSystemPrompt]="showSystemPrompt()"
+          (onRetryFailedMessage)="onRetryFailedMessage($event)"
+          (onDismissFailedMessage)="onDismissFailedMessage($event)"
         ></app-chat-interface>
       }
 

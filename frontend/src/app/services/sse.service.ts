@@ -1,5 +1,5 @@
 import { Injectable, NgZone, signal } from '@angular/core';
-import type { Message, SSEEvent, ToolCall, InstanceInfo } from '../models';
+import type { Message, SSEEvent, ToolCall, InstanceInfo, CommandProgressEvent } from '../models';
 import type { QuestionPack } from '../models/question.model';
 import { ApiService } from './api.service';
 import { isTerminalStatus } from './message-merge.util';
@@ -43,6 +43,66 @@ export interface TodoNode {
 }
 
 export type TodoItem = TodoNode;
+
+/**
+ * Parse a raw ``command_progress`` SSE message payload into a
+ * {@link CommandProgressEvent} or ``null`` when the payload is malformed,
+ * wrong-instance, or otherwise unusable.
+ *
+ * W2 (2026-08-31): extracted from ``SseService`` so the listener is a
+ * thin wrapper and the wire-decoding rules have a logic-mirror Jest
+ * spec. Behavior preserved verbatim from the in-listener code:
+ *
+ *   - envelope unwrap: LiveEventHub wraps the flat CommandProgressEvent
+ *     inside ``data.message`` (messages.py yields ``json.dumps(event)``
+ *     where ``event.message`` is the dispatcher's payload). A missing
+ *     ``message`` key returns ``null`` (graceful drop) so malformed
+ *     envelopes never reach the command state machine.
+ *   - field coercions: ``phase_seq`` / ``elapsed_ms`` go through
+ *     ``Number(...)``; ``timestamp`` defaults to ``''``; ``eta_ms`` is
+ *     only attached when numeric; ``detail`` is only attached when
+ *     object-shaped (avoids leaking garbage into the state machine).
+ *   - per-instance staleness guard: drop events whose ``instance_id``
+ *     disagrees with ``currentInstanceId`` (the channel is attached to
+ *     exactly one instance; cross-instance events must never reach the
+ *     command state machine — they belong to another channel).
+ *   - malformed JSON: returns ``null`` (never throws) — the listener's
+ *     try/catch now only exists to keep the SSE stream alive across a
+ *     rare parse error; this helper is the single source of truth.
+ *   - ``phase_seq`` is forwarded INTACT — the listener must not drop
+ *     old seq values; the CommandStateService owns monotonic dedup.
+ */
+export function parseCommandProgressEvent(
+  data: string,
+  currentInstanceId: string | null,
+): CommandProgressEvent | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== 'object') return null;
+  const message = (parsed as { message?: unknown }).message;
+  if (!message || typeof message !== 'object') return null;
+  const m = message as Record<string, unknown>;
+  const event: CommandProgressEvent = {
+    instance_id: m['instance_id'] as string,
+    command_id: m['command_id'] as string,
+    phase: m['phase'] as CommandProgressEvent['phase'],
+    phase_seq: Number(m['phase_seq']),
+    timestamp: (m['timestamp'] as string) ?? '',
+    elapsed_ms: Number(m['elapsed_ms'] ?? 0),
+  };
+  if (typeof m['eta_ms'] === 'number') event.eta_ms = m['eta_ms'] as number;
+  if (m['detail'] && typeof m['detail'] === 'object') {
+    event.detail = m['detail'] as CommandProgressEvent['detail'];
+  }
+  // Per-instance staleness guard — drop events that belong to a different
+  // instance than the one this channel is attached to.
+  if (event.instance_id !== currentInstanceId) return null;
+  return event;
+}
 
 @Injectable({
   providedIn: 'root'
@@ -100,6 +160,15 @@ export class SseService {
   // ``question_pack`` event is emitted by the tool itself before the
   // cascade and is the only reliable pause-UI signal for this state.
   questionPack = signal<QuestionPack | null>(null);
+
+  // Latest ``command_progress`` event for the connected instance (Phase 2 /
+  // slash-commands, plan Task 3). The listener is a dumb pipe: it applies
+  // ONLY the per-instance staleness guard (fetchPendingInjection :633
+  // pattern) and forwards the parsed event WITH its ``phase_seq`` intact —
+  // dedup / reorder / heartbeat filtering belongs to the CommandStateService
+  // machine (Task 4), because heartbeat events legitimately repeat the
+  // phase with ``phase_seq+1`` and must not be dropped here.
+  commandProgress = signal<CommandProgressEvent | null>(null);
 
   // Reconnect-refetch trigger (message-display-latency §4.3 item 10).
   // Bumped each time the SSE channel observes an error/disconnect followed
@@ -559,6 +628,29 @@ export class SseService {
       });
     });
 
+    // Slash-command progress (Phase 2 / plan Task 3). Modeled on
+    // ``injection_pending`` above: LiveEventHub wraps the flat
+    // CommandProgressEvent inside the envelope's ``message`` field
+    // (messages.py yields ``json.dumps(event)`` where ``event.message``
+    // is the dispatcher's payload). The listener is a thin wrapper —
+    // parse + staleness guard live in ``parseCommandProgressEvent`` so
+    // the wire-decoding rules are covered by the logic-mirror Jest
+    // spec (W2). Best-effort: malformed JSON is swallowed here so the
+    // stream never breaks (same convention as the other 16 listeners).
+    eventSource.addEventListener('command_progress', (e: MessageEvent) => {
+      this.ngZone.run(() => {
+        try {
+          const event = parseCommandProgressEvent(e.data, this.currentInstanceId);
+          if (!event) return; // malformed / wrong-instance → drop
+          // Forward with ``phase_seq`` INTACT — the state machine dedups
+          // stale/duplicate/heartbeat events; this listener must not.
+          this.commandProgress.set(event);
+        } catch (err) {
+          console.error('[SSE] Failed to parse command_progress:', err);
+        }
+      });
+    });
+
     // Error event
     eventSource.addEventListener('error', (e: MessageEvent) => {
       this.ngZone.run(() => {
@@ -689,6 +781,11 @@ export class SseService {
     this.contextUsage.set(null);
     this.pendingInjection.set(null);
     this.questionPack.set(null);
+    // Slash-command progress is the live channel's latest event; a fresh
+    // connection cycle starts clean. The per-instance machine state lives
+    // in CommandStateService (retained across switches by design) — this
+    // only drops the transient SSE mirror, exactly like pendingInjection.
+    this.commandProgress.set(null);
     this.pendingToolOutputs.clear();
     // Reconnect catch-up latch + purge trigger counters — reset on
     // disconnect so a brand-new connection cycle starts clean. The

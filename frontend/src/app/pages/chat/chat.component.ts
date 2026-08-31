@@ -21,8 +21,10 @@ import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatDialog, MatDialogModule } from '@angular/material/dialog';
-import { ApiService } from '../../services/api.service';
+import { ApiService, extractUnknownCommandError, parseCommandAck } from '../../services/api.service';
 import { SseService } from '../../services/sse.service';
+import { CommandRegistryService } from '../../services/command-registry.service';
+import { CommandStateService } from '../../services/command-state.service';
 import {
   mergeMessagesById,
   makeProvisionalMessage,
@@ -43,7 +45,7 @@ import {
   WatchoverDialogComponent,
   WatchoverDialogResult,
 } from '../../components/watchover-dialog/watchover-dialog.component';
-import type { Agent, InstanceInfo, Message } from '../../models';
+import type { Agent, InstanceInfo, Message, CommandAck, RejectionReason } from '../../models';
 
 const NEXT_AGENT_STORAGE_KEY = 'ensemble-next-instance-agent';
 
@@ -72,6 +74,11 @@ export class ChatComponent implements OnInit, OnDestroy {
   private readonly router = inject(Router);
   private readonly api = inject(ApiService);
   private readonly sseService = inject(SseService);
+  /** Slash-command registry (advisory pre-check) + per-instance command
+   *  state machine (Phase 2 / Tasks 4–8). Both are root singletons so the
+   *  chat-interface card reads the same machine state the send path seeds. */
+  private readonly commandRegistry = inject(CommandRegistryService);
+  protected readonly commandState = inject(CommandStateService);
   protected readonly tabStateService = inject(TabStateService);
   protected readonly instanceService = inject(InstanceService);
   private readonly projectService = inject(ProjectService);
@@ -364,6 +371,11 @@ export class ChatComponent implements OnInit, OnDestroy {
   });
 
   constructor() {
+    // Wire the CommandStateService GET-fallback seam to the API layer
+    // (Phase 2 / Task 8). The service itself stays dependency-free so the
+    // logic-mirror specs can instantiate it without TestBed.
+    this.commandState.wireFetch(instanceId => this.api.getActiveCommand(instanceId));
+
     // Effect to persist showThinking preference
     effect(() => {
       localStorage.setItem('ensemble-show-thinking', String(this.showThinking()));
@@ -467,6 +479,52 @@ export class ChatComponent implements OnInit, OnDestroy {
         const filtered = existing.filter(m => !m.pending);
         return filtered.length === existing.length ? existing : filtered;
       });
+    }, { allowSignalWrites: true });
+
+    // ── Slash-command effects (Phase 2 / Tasks 3+4+7+8) ────────────────
+
+    // Feed SSE command_progress events into the state machine. The SSE
+    // listener already applied the per-channel staleness guard; this
+    // second guard (R2 layer 2) re-checks against the ACTIVE instance so
+    // an event that raced an instance switch is never applied to the new
+    // instance's machine state. The per-instance map (R2 layer 3) makes
+    // any residual race cosmetic-only.
+    effect(() => {
+      const event = this.sseService.commandProgress();
+      if (!event) return;
+      const activeInstanceId = this.viewState.activeInstanceId();
+      if (!activeInstanceId || event.instance_id !== activeInstanceId) return;
+      this.commandState.onSseEvent(event);
+    }, { allowSignalWrites: true });
+
+    // REST fallback polling (Task 8): poll GET /commands/active at ~5s
+    // ONLY while the card is active AND SSE is dead. The service owns the
+    // timer; this effect just feeds it the two inputs it cannot see
+    // (active instance + SSE liveness). The service re-evaluates its own
+    // start/stop conditions after every state mutation, so poll stops on
+    // terminal phase or {exists:false} without further wiring here.
+    effect(() => {
+      const activeInstanceId = this.viewState.activeInstanceId();
+      const sseAlive = this.sseService.isStreaming();
+      this.commandState.syncPolling(activeInstanceId, sseAlive);
+    }, { allowSignalWrites: true });
+
+    // Terminal-command refetch (Task 7): when a command reaches a terminal
+    // phase (success / fallback_applied / failed), refetch the message
+    // list so the timeline reflects the compacted context. Fires EXACTLY
+    // once per command (service-side refetchTriggered flag). The instance
+    // guard keeps a trigger recorded for the previously-open instance
+    // from applying to the newly-opened one (SC8 stale-switch safety).
+    // context_usage token-meter refresh needs no wiring here — the
+    // backend re-emits the SSE signal post-compaction.
+    effect(() => {
+      const tick = this.commandState.refetchRequest();
+      if (tick === 0) return;
+      const refetchInstanceId = this.commandState.refetchInstanceId();
+      const activeInstanceId = this.viewState.activeInstanceId();
+      if (!refetchInstanceId || !activeInstanceId) return;
+      if (refetchInstanceId !== activeInstanceId) return;
+      this.loadInstanceMessages(activeInstanceId, { merge: true });
     }, { allowSignalWrites: true });
 
     // Fallback: Reset isSending if streaming stopped but isSending is still true
@@ -879,6 +937,10 @@ export class ChatComponent implements OnInit, OnDestroy {
     // clears events, and stops polling. On full component destruction
     // we still disconnect SSE and clear events to free the EventSource
     // and prevent stale state from leaking into the next session.
+    // Phase 2: stop the command poll / eviction timers (per-instance
+    // command states are intentionally KEPT — they survive re-mounts and
+    // are re-synced from the server by the load-time GET reconcile).
+    this.commandState.stopAllTimers();
     this.sseService.clearEvents();
     this.sseService.disconnect();
     this.messages.set([]);
@@ -1139,6 +1201,11 @@ export class ChatComponent implements OnInit, OnDestroy {
         // SseService.connect() while preserving symmetric handling.
         this.sseService.fetchPendingInjection(instanceId);
         this.sseService.fetchPendingQuestion(instanceId);
+        // Slash-command recovery (Phase 2 / Task 8a): load-time GET
+        // reconcile — a reload or instance re-entry mid-command restores
+        // the card from server truth (server wins). Silent on
+        // {exists:false} and on network failure by service contract.
+        void this.commandState.reconcileFromServer(instanceId);
       }
     });
 
@@ -1232,6 +1299,48 @@ export class ChatComponent implements OnInit, OnDestroy {
     const instance = this.renderedInstance();
     if (!instance) return;
 
+    // ── Slash-command pre-parse (Phase 2 / Task 5) ────────────────────
+    // Runs BEFORE the cooldown guard so an advisory rejection never
+    // stamps the duplicate-send cooldown. Branches:
+    //   ``//x``  → fall through to the plain-message path with the RAW
+    //              ``//x`` text (O-B1 — load-bearing: the BE strips the
+    //              escape and delivers the literal; the FE MUST NOT
+    //              pre-strip the slash, otherwise the BE would re-parse
+    //              the rewritten ``/x`` as a real command and trigger
+    //              compaction / 400 UNKNOWN_COMMAND on what the user
+    //              intended as plain text).
+    //   plain    → fall through to the unchanged message path;
+    //   known    → command send path (duplicate guard + ack handling);
+    //   unknown  → inline validation error, ZERO network call (advisory;
+    //              the BE 400 UNKNOWN_COMMAND + available list remains
+    //              authoritative and feeds the same inline surface when
+    //              it fires).
+    // The parse outcome is only used for ROUTING CLASSIFICATION here — the
+    // ``escape`` branch is detected so we skip the command-acks path, but
+    // the original ``payload.content`` is what gets POSTed (the registry's
+    // ``parse.text`` rewrite would break the BE's escape contract).
+    const parse = this.commandRegistry.parseCommandInput(payload.content);
+    if ('known' in parse && parse.known) {
+      if (this.commandState.isActive(instance.instance_id)) {
+        // Advisory duplicate-command guard (SC5) — BE ``busy`` /
+        // ``rate_limited`` refusals stay authoritative (§6).
+        this.messageInputRef?.showCommandValidationError(
+          'A command is already in progress on this instance.',
+        );
+        return;
+      }
+      this.sendCommand(instance.instance_id, payload);
+      return;
+    } else if ('known' in parse && !parse.known) {
+      this.messageInputRef?.showCommandValidationError(`Unknown command: /${parse.name}`);
+      return;
+    }
+    // Both the escape (``//x``) and plain (no leading ``/``) branches fall
+    // through here: POST the raw composer text. The BE strips the leading
+    // escape and delivers the literal, so the bubble shows what the user
+    // typed (e.g. ``//compact is useful`` → ``/compact is useful``).
+    const effectiveContent = payload.content;
+
     // Cooldown guard: block consecutive sends within SEND_COOLDOWN_MS to
     // prevent duplicate submissions from double Enter / double click. Both
     // the send button and the Enter key route through this handler, so this
@@ -1260,14 +1369,35 @@ export class ChatComponent implements OnInit, OnDestroy {
     // same guard pattern the SSE mirror effect uses.
     const sentInstanceId = instance.instance_id;
 
-    this.api.sendMessage(instance.instance_id, payload.content, payload.images, payload.queue_id).subscribe({
+    this.api.sendMessage(instance.instance_id, effectiveContent, payload.images, payload.queue_id).subscribe({
       // Both 200 (PAUSED auto-resume / IDLE enqueue) and 202 (RUNNING /
       // WAITING_CHILDREN injection acceptance) are 2xx and fire `next` by
       // default in Angular's HttpClient. We treat both as success from the
       // UI's perspective — clear the input, rely on `injection_pending`
       // SSE event (and the chat-interface pendingInjection card driven
       // off the SseService signal) to reflect the injection's queued state.
-      next: (response) => {
+      next: (rawResponse) => {
+        // Single parsing point (Phase 2 / Task 2): plain-text content is
+        // never a command, so a command ack here would mean BE registry
+        // drift (R7) — surface its rejection copy defensively and bail.
+        const parsed = parseCommandAck(rawResponse);
+        if (parsed.kind === 'command') {
+          this.isSending.set(false);
+          if (parsed.ack.state === 'rejected') {
+            // W4: TOCTOU guard — only render the inline rejection when
+            // the user is STILL viewing the instance the command was
+            // sent to (sentInstanceId pattern, mirroring the accepted
+            // branch at :1530-1537). Without this, a user who switched
+            // tabs while a command POST was in flight would see the
+            // rejection toast land on the newly-opened instance's input
+            // and trigger an inline error there.
+            if (this.viewState.activeInstanceId() === sentInstanceId) {
+              this.messageInputRef?.showCommandValidationError(this.rejectionCopy(parsed.ack), 8000);
+            }
+          }
+          return;
+        }
+        const response = parsed.message;
         // Clear input only on success — error recovery keeps input populated
         this.messageInputRef?.clearInput();
         // Surface a "queued" indicator when the backend accepted the message
@@ -1327,7 +1457,10 @@ export class ChatComponent implements OnInit, OnDestroy {
                 response.created_at ?? response.timestamp ?? new Date().toISOString();
               const provisional = makeProvisionalMessage({
                 messageId: newId,
-                content: payload.content,
+                // Phase 2: the DELIVERED content (``//x`` was rewritten to
+                // ``/x`` pre-POST) — the bubble must show what the model
+                // sees, not the raw composer text.
+                content: effectiveContent,
                 createdAt: provisionalStamp,
                 instanceId: instance.instance_id,
                 images: payload.images,
@@ -1351,18 +1484,370 @@ export class ChatComponent implements OnInit, OnDestroy {
           // the user-visible state is the bubble, not a spinner.
           this.isSending.set(false);
         }
+
+        // Defect #5 retry path (must-fix #1, 2026-08-31): when this
+        // send was triggered by retrying a failed bubble, the POST
+        // has now confirmed the message — clear the failed marker on
+        // the originating bubble so the chat-interface renders it as
+        // a delivered user message. Done here (in the success path)
+        // rather than synchronously in ``onRetryFailedMessage`` so a
+        // cooldown-blocked retry preserves the user's error state:
+        // if no POST went out, the bubble keeps its ``failed`` flag.
+        // ``sendError`` is still cleared by ``onRetryFailedMessage``
+        // — the cooldown-blocked path is the only branch where the
+        // marker stays, and the cooldown snackbar already explains
+        // the wait; the redundant banner would be misleading UX.
+        if (payload.retry_of_message_id) {
+          this.messages.update(msgs =>
+            msgs.map(m =>
+              m.message_id === payload.retry_of_message_id
+                ? { ...m, failed: false, errorReason: undefined }
+                : m
+            )
+          );
+        }
       },
       error: (err) => {
         console.error('Failed to send message:', err);
-        this.sendError.set(err instanceof Error ? err.message : 'Failed to send message');
+        const errorReason = err instanceof Error ? err.message : 'Failed to send message';
+        this.sendError.set(errorReason);
         this.isSending.set(false);
-        // Do NOT clear input on error — user can retry
+        // Do NOT clear input on error — user can retry.
+        //
+        // Defect #5 (2026-08-31, race (a)): the optimistic bubble can
+        // land BEFORE the POST errored when the SSE ``user_message``
+        // echo races the HTTP error (the BE emits the echo before
+        // responding to the POST). Without this fix, that bubble
+        // stays rendered as a delivered user message even though the
+        // API never recorded it (the tester's run4 evidence). Mark
+        // the most-recent matching user bubble as failed so the
+        // chat-interface renders an error state + retry affordance
+        // instead.
+        //
+        // Note: race (b) — a 2xx response with a phantom
+        // ``message_id`` that the BE never actually persisted — is
+        // NOT handled here. Detection would require a follow-up GET
+        // or a cross-instance refetch; tracked as out-of-scope
+        // follow-up (deliberately not implementing it as part of the
+        // cooldown race fix).
+        //
+        // Carry the original send's ``queue_id`` so the retry can
+        // re-use it (must-fix #2); if absent the retry falls back to
+        // ``activeProjectId`` mirroring the legacy tautology.
+        this.markSendFailedForContent(
+          effectiveContent,
+          errorReason,
+          sentInstanceId,
+          payload.queue_id,
+        );
       }
     });
   }
 
+  /**
+   * Slash-command send path (Phase 2 / Task 5). Posts the command text to
+   * the SAME ``POST /messages`` endpoint (BE-side router intercept — Q1
+   * ratified) and branches on the discriminated ack:
+   *
+   * - ``accepted`` → clear the input (parent-owned clearing contract) and
+   *   seed the CommandStateService card in ``waiting`` IMMEDIATELY —
+   *   before any SSE event (the ack→first-SSE gap can be ≤30s, R5).
+   * - ``rejected``  → NO machine start; keep the input populated for
+   *   retry; render reason-specific inline copy — ``terminal_instance``
+   *   renders the ack ``detail`` guidance VERBATIM (§9-12 / SC14).
+   *
+   * In BOTH ack cases the command NEVER enters the message echo/merge
+   * pipeline — no ``makeProvisionalMessage``, no ``mergeMessagesById`` —
+   * so a command cannot produce a provisional row or a duplicate timeline
+   * entry (R4 / SC6). The card (out-of-timeline, Q3 confirmed) is the
+   * command's only UI surface.
+   */
+  private sendCommand(instanceId: string, payload: MessagePayload): void {
+    this.sendError.set(null);
+    this.isSending.set(true);
+
+    // MIN-2 TOCTOU capture — same rationale as the message path (R2).
+    const sentInstanceId = instanceId;
+
+    this.api.sendMessage(instanceId, payload.content, payload.images, payload.queue_id).subscribe({
+      next: (response) => {
+        this.isSending.set(false);
+        const parsed = parseCommandAck(response);
+        if (parsed.kind !== 'command') {
+          // Defensive legacy fallback: an old backend without the intercept
+          // answered the command text with a normal message body. The text
+          // WAS delivered as a message — clear the input and surface the
+          // queued indicator when the body says so; never seed the card.
+          this.messageInputRef?.clearInput();
+          if (parsed.message?.queued === true) {
+            this.queuedMessage.set({ content: payload.content });
+          }
+          return;
+        }
+
+        const ack = parsed.ack;
+        if (ack.state === 'accepted') {
+          this.messageInputRef?.clearInput();
+          // R2: apply the seed only when the user is still viewing the
+          // instance the command was sent to (sentInstanceId guard).
+          if (this.viewState.activeInstanceId() === sentInstanceId) {
+            this.commandState.startCommand(sentInstanceId, ack);
+          }
+          return;
+        }
+
+        // Rejected — reason-specific inline copy; input stays populated.
+        this.messageInputRef?.showCommandValidationError(this.rejectionCopy(ack), 8000);
+      },
+      error: (err) => {
+        this.isSending.set(false);
+        // HTTP 400 UNKNOWN_COMMAND (§7 split rule / O13) → typed error
+        // carrying ``details.available``; offered inline as the recovery.
+        const unknown = extractUnknownCommandError(err);
+        if (unknown) {
+          const available = unknown.available.length > 0
+            ? ` Available: ${unknown.available.map(c => '/' + c).join(', ')}`
+            : '';
+          this.messageInputRef?.showCommandValidationError(`Unknown command.${available}`, 6000);
+          return;
+        }
+        console.error('Failed to send command:', err);
+        this.sendError.set(err instanceof Error ? err.message : 'Failed to send command');
+        // Do NOT clear input on error — user can retry
+      },
+    });
+  }
+
+  /**
+   * Reason-specific rejection copy (Task 5). ``terminal_instance`` shows
+   * the backend ``detail`` guidance VERBATIM — the copy table in
+   * architecture-recommendation.md §9-12 pins "Send a message to start a
+   * new turn, then /compact." as the string the user must see.
+   */
+  private rejectionCopy(ack: CommandAck): string {
+    if (ack.reason === 'terminal_instance') {
+      return ack.detail || 'Send a message to start a new turn, then /compact.';
+    }
+    switch (ack.reason) {
+      case 'busy':
+        return 'A command is already running on this instance — wait for it to finish (busy).';
+      case 'rate_limited':
+        return 'Please wait a moment before running another command (rate_limited).';
+      case 'pending_injections':
+        return 'Deliver the pending injections first, then retry (pending_injections).';
+      case 'compaction_disabled':
+        return 'Compaction is disabled for this instance (compaction_disabled).';
+      case 'quiescence_timeout':
+        return 'The instance could not be quiesced in time — try again (quiescence_timeout).';
+      case 'unavailable':
+        // W1 (2026-08-31): BE gates via O-B6 per-agent policy and may emit
+        // this reason for a registered command the agent does not allow.
+        return ack.detail || 'This command is not available on this agent.';
+      default:
+        return ack.detail || 'The command was rejected.';
+    }
+  }
+
   protected onClearError(): void {
     this.sendError.set(null);
+  }
+
+  /**
+   * Defect #5 (2026-08-31): mark the bubble associated with a failed
+   * POST as ``failed: true`` so the chat-interface renders an error
+   * state + retry affordance. The bubble may have been added by the
+   * SSE ``user_message`` echo (raced the POST error) or by the
+   * optimistic-append path (response shape the BE ultimately did not
+   * persist). Without this, the user sees a delivered-style bubble
+   * for a message the server never recorded.
+   *
+   * Strategy: scan the local ``messages`` list newest-to-oldest for a
+   * user-role bubble whose content matches the just-sent text (or the
+   * delivered form for ``//x``-stripping). The first match wins — once
+   * marked failed the merge helper preserves the flag on every
+   * subsequent SSE / refetch pass.
+   *
+   * Must-fix #2 (retry stash): also stamp the original send's
+   * ``queue_id`` on the bubble so a later ``onRetryFailedMessage`` can
+   * re-POST to the SAME queue. ``sentQueueId`` may be ``string``,
+   * ``null`` (user had the selector open with nothing selected), or
+   * ``undefined`` (older callers / message input that does not carry
+   * the field). ``null`` is preserved verbatim — it is a meaningful
+   * value distinct from "stash absent".
+   *
+   * F1 escape-retry stash (2026-08-31): also stamp the ORIGINAL
+   * send's ``content`` (``sentContent``) on the bubble as
+   * ``retry_content`` so a later ``onRetryFailedMessage`` re-POSTs
+   * the SAME string the original POST carried. For an ESCAPE-form
+   * message the user typed ``//x``; the original send POSTed the RAW
+   * form (``//x`` — the BE strips one slash and delivers the literal)
+   * but the bubble carries the delivered form (``/x``). Without this
+   * stash, ``onRetryFailedMessage`` re-POSTs the bubble's
+   * ``content`` (the stripped form), and the BE re-parses it as a
+   * REAL slash command — retry performs a DIFFERENT action than the
+   * original send. The stash is preserved on double-failure retry
+   * (mirrors the ``queue_id`` defensive-stash discipline) so a
+   * ``retry`` whose retry-also-failed keeps the ORIGINAL-send
+   * content, not a transformed round-trip.
+   */
+  private markSendFailedForContent(
+    sentContent: string,
+    errorReason: string,
+    sentInstanceId: string,
+    sentQueueId?: string | null,
+  ): void {
+    // The //x escape contract strips ONE leading slash, so the
+    // rendered bubble may show the post-strip text even though we
+    // POSTed the raw form. Match either form so the bubble (whatever
+    // path rendered it) is caught.
+    const escaped = sentContent.replace(/^\/\//, '/');
+    const activeInstanceId = this.viewState.activeInstanceId();
+    this.messages.update(msgs => {
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        const m = msgs[i];
+        if (m.role !== 'user') continue;
+        if (m.failed) continue;
+        // Only mark bubbles for the instance we sent to — defensive
+        // against an instance switch that left a phantom bubble from
+        // a prior send on the new instance's list.
+        if (m.instance_id && m.instance_id !== sentInstanceId) continue;
+        if (m.content === sentContent || m.content === escaped) {
+          const next = msgs.slice();
+          // Preserve any pre-existing queue_id (defensive — a retry
+          // that failed twice should keep the original stash rather
+          // than overwriting with a null/undefined variant that
+          // happened to round-trip differently).
+          const stash = sentQueueId !== undefined ? sentQueueId : m.queue_id;
+          // F1 escape-retry stash: preserve any pre-existing
+          // ``retry_content`` defensively (same discipline as
+          // ``queue_id``). When the bubble was a non-escape message
+          // the sent content already matches the bubble's content,
+          // so the retry is correct regardless; when it was an
+          // escape message the bubble's content is the STRIPPED
+          // form and the stash carries the RAW form. Stash the
+          // RAW form unconditionally — the retry handler picks
+          // ``retry_content`` when present, and a non-escape
+          // bubble carries identical content in both fields, so
+          // stashing unconditionally never produces a wrong
+          // retry.
+          const retryStash = m.retry_content !== undefined
+            ? m.retry_content
+            : sentContent;
+          next[i] = {
+            ...m,
+            failed: true,
+            errorReason,
+            queue_id: stash,
+            retry_content: retryStash,
+          };
+          return next;
+        }
+      }
+      // No matching bubble — keep the list unchanged. The sendError
+      // banner at the top of the chat is still visible to the user,
+      // and the input is preserved for retry.
+      void activeInstanceId; // currently read for staleness symmetry; reserved
+      return msgs;
+    });
+  }
+
+  /**
+   * Retry a failed-send bubble. Re-POSTs the same content (which seeds
+   * a fresh optimistic-append or echo path) through the same composer
+   * path so the cooldown stamping, sendError clearing, and other
+   * invariants are exercised identically to a fresh send.
+   *
+   * Must-fix #1 (cooldown race, 2026-08-31): do NOT clear the failed
+   * marker synchronously here. If the user clicks Retry within the
+   * 3-second cooldown window of the original send, ``onSendMessage``
+   * blocks at its cooldown guard — but a synchronous marker clear
+   * would already have flipped the bubble to "delivered" with no
+   * corresponding POST, which is exactly the dishonest state defect
+   * #5 forbids. The marker is cleared in ``onSendMessage``'s SUCCESS
+   * path instead (only fires when the POST actually completes).
+   * If the cooldown blocks, the bubble stays failed — the user keeps
+   * the error state until they retry outside the cooldown window
+   * (or dismiss).
+   *
+   * Must-fix #2 (queue_id tautology, 2026-08-31): carry the original
+   * send's ``queue_id`` (stashed on the bubble at fail-mark time)
+   * through the retry POST. A fresh ``activeProjectId``-derived
+   * value would silently re-route the retry to a different queue if
+   * the user switched projects between the original fail and the
+   * retry click — defeating the project's queue isolation.
+   *
+   * F1 escape-retry fix (2026-08-31): carry the ORIGINAL-send
+   * ``content`` (stashed on the bubble at fail-mark time as
+   * ``retry_content``) through the retry POST. A naive
+   * ``content: target.content`` would re-POST the bubble's displayed
+   * form, which for an ESCAPE-form message is the STRIPPED form
+   * (``/x``) — the BE re-parses it as a real slash command and the
+   * retry performs a DIFFERENT action than the original send. Fall
+   * back to ``target.content`` only when the stash is genuinely
+   * absent (older mark paths, BE refetches that surfaced a failed
+   * bubble without a stash) — same fallback discipline as
+   * ``retryQueueId``. The merge helper preserves the stash across
+   * SSE echo merges the same way it preserves ``queue_id``.
+   *
+   * ``messageInputRef`` is left untouched — the composer is still
+   * populated from the original failure, and a successful retry will
+   * clear it via the normal ``onSendMessage`` flow.
+   *
+   * Called from the chat-interface's retry button
+   * (``[retryFailedMessage]`` output).
+   */
+  protected onRetryFailedMessage(messageId: string): void {
+    const target = this.messages().find(m => m.message_id === messageId);
+    if (!target || !target.failed) return;
+    // Clear sendError on retry attempt — the bubble's failed state IS
+    // the error indicator, so the banner is redundant when a failed
+    // bubble is on screen. Cleared optimistically so the cooldown-
+    // blocked branch (which never re-fires the banner) does not leave
+    // a stale message visible after the user retries again later.
+    this.sendError.set(null);
+    // Carry the original send's ``queue_id`` so the retry lands on
+    // the SAME queue context. Falls back to ``activeProjectId`` only
+    // when the stash is genuinely absent (older mark paths, BE
+    // refetches that surfaced a failed bubble without a stash) —
+    // mirrors the original send's queue-id derivation as closely as
+    // the call surface allows.
+    const retryQueueId = target.queue_id !== undefined
+      ? target.queue_id
+      : this.tabStateService.activeProjectId() ?? null;
+    // F1 escape-retry: carry the ORIGINAL-send content (the exact
+    // string the original POST carried). Falls back to the
+    // bubble's displayed content only when the stash is genuinely
+    // absent — older mark paths, BE refetches that surfaced a
+    // failed bubble without a stash, or non-escape messages where
+    // the rendered content already matches the sent form. The
+    // fail-mark pass stashes ``retry_content`` unconditionally so
+    // any bubble that was marked failed via the current path
+    // carries the RAW sent form here.
+    const retryContent = target.retry_content !== undefined
+      ? target.retry_content
+      : target.content;
+    // ``retry_of_message_id`` tells the success handler which bubble
+    // to clear (id-keyed dedup means the bubble keeps its id on
+    // success). The failure path re-marks via content-match in
+    // ``markSendFailedForContent`` — no extra signal needed there.
+    this.onSendMessage({
+      content: retryContent,
+      images: target.images,
+      queue_id: retryQueueId,
+      retry_of_message_id: messageId,
+    });
+  }
+
+  /**
+   * Dismiss a failed-send bubble. Removes it from the local list so
+   * the user can move on without retrying. The original composer text
+   * stays populated so the user can manually re-send or edit.
+   */
+  protected onDismissFailedMessage(messageId: string): void {
+    this.messages.update(msgs => {
+      const next = msgs.filter(m => m.message_id !== messageId);
+      return next.length === msgs.length ? msgs : next;
+    });
   }
 
   protected onToggleWatchover(): void {
