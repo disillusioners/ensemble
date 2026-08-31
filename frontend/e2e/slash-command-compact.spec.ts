@@ -254,6 +254,51 @@ test.describe('/compact slash-command UX (Phase 2)', () => {
     await expect(page.locator(COMPOSER)).toHaveValue('/foo');
   });
 
+  // ── AC1 (Task 10): autocomplete palette — / opens, ArrowDown+Enter
+  //    completes AND submits (plan e2e acceptance: "/co"+Enter completes
+  //    to /compact and submits).
+  test('AC1: autocomplete — "/" opens palette; ArrowDown+Enter completes to /compact and submits', async () => {
+    test.setTimeout(120_000);
+    await clearRoutes(page);
+    const PALETTE = '[data-testid="slash-command-palette"]';
+    let capturedBody: { content?: string } | null = null;
+    const counters = await installCommandMocks(page, instanceId, {
+      killSse: true,
+      gateUntilPost: true,
+      respondPost: (parsed) => {
+        capturedBody = parsed;
+        return { status: 200, body: commandAck({ command_id: 'e2e-cmd-1' }) };
+      },
+      // Post-command polls answer {exists:false}; the card stays in the
+      // ack-seeded waiting phase for the assertion window (~5s poll gap).
+      activeScript: () => ({ exists: false }),
+    });
+    await gotoInstance(page, instanceId);
+
+    // Bare "/" opens the palette listing /compact (name + description).
+    await page.fill(COMPOSER, '/');
+    await page.waitForSelector(PALETTE, { state: 'visible' });
+    const paletteOption = page.locator(`${PALETTE} [role="option"]`, { hasText: '/compact' });
+    await expect(paletteOption).toHaveCount(1);
+    await expect(paletteOption).toContainText("Compact this instance's message history");
+    // ARIA combobox wiring on the input.
+    await expect(page.locator(COMPOSER)).toHaveAttribute('aria-expanded', 'true');
+    await expect(page.locator(COMPOSER)).toHaveAttribute('aria-activedescendant', /slash-command-option-\d+/);
+
+    // ArrowDown keeps a valid highlight; Enter accepts the highlighted
+    // command AND submits — identical to typing '/compact' + Enter.
+    await page.press(COMPOSER, 'ArrowDown');
+    await page.press(COMPOSER, 'Enter');
+
+    // Card appears from the ack; the POST body proves the palette
+    // completion delivered the full '/compact' command (trimmed send).
+    await page.waitForSelector(`${CARD}[data-command-phase="waiting"]`);
+    expect(counters.postCount()).toBe(1);
+    expect(capturedBody?.content).toBe('/compact');
+    // Palette closed after acceptance; input cleared by the ack path.
+    await expect(page.locator(PALETTE)).toHaveCount(0);
+  });
+
   // ── SC1: happy path — ack seeds waiting, REST fallback drives phases ──
   test('SC1: /compact full path — waiting from ack → in_progress → success (+tokens)', async () => {
     test.setTimeout(120_000);

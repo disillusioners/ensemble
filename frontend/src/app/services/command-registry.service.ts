@@ -40,12 +40,12 @@ export class CommandRegistryService {
   private readonly registry = signal<CommandDefinition[]>([
     {
       name: 'compact',
-      description: 'Compact the conversation context now (on-demand compaction)',
+      description: 'Compact this instance\'s message history',
       argsHint: null,
     },
   ]);
 
-  /** Read-only view for autocomplete / help surfaces (Task 10 stretch). */
+  /** Read-only view for the autocomplete palette (Task 10) / help surfaces. */
   readonly commands = this.registry.asReadonly();
 
   /**
