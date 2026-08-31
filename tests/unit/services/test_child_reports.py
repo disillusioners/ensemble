@@ -1886,6 +1886,26 @@ class TestSanityConstantsRegistry:
             else:
                 os.environ["REPORT_REPAIR_EXCLUDED_AGENTS"] = old
 
+    async def test_sanity_flag_version_suppresses_marker_when_not_one(
+        self, monkeypatch
+    ):
+        """SANITY_FLAG_VERSION != 1 is the documented rollback seam
+        (child_reports.py:1658-1659, ``child_reports.py`` gate at :1665):
+        any value other than 1 suppresses the (c) marker while the code
+        stays live — operator's escape hatch. Pin-only tests assert the
+        constant is 1; this test pins the GATE (no marker fires when the
+        flag is bumped to 0/2)."""
+        import daemon.services.child_reports as _cr
+
+        monkeypatch.setattr(_cr, "SANITY_FLAG_VERSION", 0)
+        service = _make_report_fetch_service(messages=_junk_history())
+        with _patch_fetch(service._pending_report_messages):
+            raw = await service._get_last_assistant_message_raw(
+                "test-instance-id", agent_id="worker"
+            )
+        assert raw == "I'll take a look at this now."
+        assert SANITY_MARKER_LITERAL not in raw
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # B.S.1-ii — (b) declared-waiting predicate-attached LOG at the
