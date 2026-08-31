@@ -62,6 +62,13 @@ describe('slash-command-palette.util', () => {
     it.each(['//compact', 'hello', '/compact arg'])('%s → null (not a trigger)', (value) => {
       expect(slashCommandQuery(value)).toBeNull();
     });
+
+    it('non-string input → null (no trigger, no crash; treated as no-command-context)', () => {
+      // Defensive guard: component flow types message as string, but the
+      // util must not crash if a future caller or stub hands us undefined.
+      expect(slashCommandQuery(undefined as unknown as string)).toBeNull();
+      expect(isSlashCommandTrigger(undefined as unknown as string)).toBe(false);
+    });
   });
 
   describe('filterCommandsByPrefix — case-insensitive prefix match', () => {
@@ -93,6 +100,22 @@ describe('slash-command-palette.util', () => {
       expect(filterCommandsByPrefix(all, '').map(c => c.name)).toEqual(['compact', 'clear']);
       expect(filterCommandsByPrefix(all, 'cl').map(c => c.name)).toEqual(['clear']);
       expect(filterCommandsByPrefix(all, 'c').map(c => c.name)).toEqual(['compact', 'clear']);
+    });
+
+    it('entries with a non-string name are SKIPPED; valid entries still match', () => {
+      // Defensive-only: a malformed registry row must not crash the filter.
+      const malformed = [
+        { name: 'compact', description: 'd' },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        { name: undefined as any, description: 'bad' },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        { name: 42 as any, description: 'also bad' },
+        { name: 'clear', description: 'Clear the context' },
+      ];
+      expect(filterCommandsByPrefix(malformed as CommandDefinition[], '').map(c => c.name))
+        .toEqual(['compact', 'clear']);
+      expect(filterCommandsByPrefix(malformed as CommandDefinition[], 'cl').map(c => c.name))
+        .toEqual(['clear']);
     });
   });
 

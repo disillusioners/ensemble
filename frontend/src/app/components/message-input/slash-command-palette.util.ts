@@ -22,9 +22,11 @@ export function isSlashCommandTrigger(value: string): boolean {
 /**
  * Text typed after the leading slash, lowercased for prefix matching.
  * ``''`` for the bare ``/`` (shows every command); ``null`` when the
- * value is not a trigger at all.
+ * value is not a trigger at all (or when the caller hands us a non-string,
+ * which we treat as "no command context" rather than crashing on slice).
  */
 export function slashCommandQuery(value: string): string | null {
+  if (typeof value !== 'string') return null;
   if (!isSlashCommandTrigger(value)) return null;
   return value.slice(1).toLowerCase();
 }
@@ -35,7 +37,11 @@ export function filterCommandsByPrefix(
   query: string,
 ): CommandDefinition[] {
   const q = query.toLowerCase();
-  return commands.filter(c => c.name.toLowerCase().startsWith(q));
+  // Defensive-only: skip entries whose name is not a string (e.g. malformed
+  // registry rows). Valid entries still match on the normal path.
+  return commands.filter(
+    c => typeof c.name === 'string' && c.name.toLowerCase().startsWith(q),
+  );
 }
 
 /**

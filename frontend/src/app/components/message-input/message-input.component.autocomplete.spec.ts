@@ -269,6 +269,10 @@ describe('MessageInputComponent — slash-command autocomplete palette (Task 10)
     it('Enter with zero palette matches falls through to the normal send (unknown command)', () => {
       type('/foo');
       expect(palette()).not.toBeNull(); // hint shown, but no options
+      // Zero-match container id added in 4f729f43 — pin the aria-controls
+      // fallback so the combobox never points at null while the palette
+      // is open.
+      expect(textarea.getAttribute('aria-controls')).toBe('slash-command-palette');
       press('Enter');
       expect(sent).toHaveLength(1);
       expect(sent[0].content).toBe('/foo'); // chat component validates it (Task 5)
