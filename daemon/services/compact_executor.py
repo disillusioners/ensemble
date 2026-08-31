@@ -19,10 +19,12 @@ Status gating per WS-6 (architect §6):
 * ``WAITING_CHILDREN``: probe ONLY; treat as IDLE on quiescence.
   NEVER ``pause_instance_cascade`` / ``graph_task.cancel()`` (O16 —
   child workers are legitimate work, N1 sub-tokens invariant).
-* ``RUNNING``: ``waiting`` SSE FIRST (F3) → ``pause_instance_cascade``
-  (cascade_to_root default True — do not flip) → quiescence wait
-  (timeout=30s) → gate → compact → ``resume_instance_cascade`` in
-  ``finally``. O9 BINDING: the ENTIRE pause→quiesce sequence in ONE
+* ``RUNNING``: ``waiting`` SSE FIRST (F3 — emitted at the TOP of the
+  handler since defect #7, 2026-08-31, before the pre-check pipeline)
+  → ``pause_instance_cascade`` (cascade_to_root default True — do not
+  flip) → quiescence wait (timeout=30s) → gate → compact →
+  ``resume_instance_cascade`` in ``finally``. O9 BINDING: the ENTIRE
+  pause→quiesce sequence in ONE
   ``try/except``; any failure (timeout OR raised exception) →
   ``rejected + reason=quiescence_timeout`` with the exception
   CLASS NAME in ``detail``; best-effort ``resume_instance_cascade``
@@ -32,9 +34,13 @@ Status gating per WS-6 (architect §6):
   gate → compact; instance STAYS PAUSED (no state change you
   didn't make).
 * Terminal (``COMPLETED`` / ``ERROR`` / ``FAILED`` / ``TERMINATED``):
-  REJECT ``reason=terminal_instance``, ``guidance="Send a message
-  to start a new turn, then /compact."`` (W-1.2 pinned copy — plan
-  S-14 / architect §5). ``aupdate_state`` NEVER invoked. C1
+  REJECT ``reason=terminal_instance``, ``guidance`` = the W-1.2
+  pinned copy (plan S-14 / architect §5) — now answered AT ACK TIME
+  by the dispatcher's instance-status gate (defect #2, 2026-08-31);
+  this executor keeps the same guard (shared
+  ``TERMINAL_INSTANCE_STATUSES`` / ``TERMINAL_INSTANCE_GUIDANCE``
+  constants) as defense-in-depth for the read→handler-start TOCTOU
+  window. ``aupdate_state`` NEVER invoked. C1
   BINDING — the gate is INSTANCE STATUS (the O-B4 canonical
   terminal set), NOT ``state.next == ()``. The shared
   :func:`daemon.services._checkpoint_utils._is_terminal_checkpoint`
@@ -108,6 +114,10 @@ from ..compaction import (
     get_model_context_limit,
 )
 from ._checkpoint_utils import _is_terminal_checkpoint
+from .command_dispatcher import (
+    TERMINAL_INSTANCE_GUIDANCE,
+    TERMINAL_INSTANCE_STATUSES,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -427,20 +437,29 @@ async def execute_compact(
     1. Resolve instance status (``get_instance_info``).
     2. Pre-check 1 — terminal via shared helper → REJECT
        ``reason=terminal_instance`` with guidance detail.
-    3. Pre-check 2 — recency (``compacted_at`` <60s) → SUCCESS + noop.
-    4. Pre-check 3 — below-floor → SUCCESS + noop.
-    5. Quiescence / pause / resume orchestration per WS-6 matrix.
-    6. Acquire ExecutionGate (the per-instance ``asyncio.Lock``).
-    7. Re-read ``has_instance_busy`` UNDER the gate, retry-once.
-    8. Emit ``in_progress`` (heartbeat starts after this).
-    9. Build :class:`CompactionContext` (per-instance model +
-       overrides) → ``compact_state(force=True)``.
-    10. Persist (C1 recipe — two ``aupdate_state`` calls in order,
+       (Defect #2, 2026-08-31: DEFENSE-IN-DEPTH ONLY — the primary
+       gate is the dispatcher's ack-time instance-status check, which
+       rejects in the 200 ack envelope before this handler is ever
+       spawned. This guard covers the read→handler-start TOCTOU
+       window.)
+    3. RUNNING row: emit ``waiting`` SSE — F3/D-B9 "waiting FIRST",
+       moved here (defect #7) so the first feedback precedes the whole
+       pre-check pipeline instead of trailing it by the unbounded
+       async prefix (~32s observed live on the gate run).
+    4. Pre-check 2 — recency (``compacted_at`` <60s) → SUCCESS + noop.
+    5. Pre-check 3 — below-floor → SUCCESS + noop.
+    6. Quiescence / pause / resume orchestration per WS-6 matrix.
+    7. Acquire ExecutionGate (the per-instance ``asyncio.Lock``).
+    8. Re-read ``has_instance_busy`` UNDER the gate, retry-once.
+    9. Emit ``in_progress`` (heartbeat starts after this).
+    10. Build :class:`CompactionContext` (per-instance model +
+        overrides) → ``compact_state(force=True)``.
+    11. Persist (C1 recipe — two ``aupdate_state`` calls in order,
         NO ``as_node``).
-    11. Map engine result → executor outcome via the engine→wire
+    12. Map engine result → executor outcome via the engine→wire
         mapping function (approver note 1).
-    12. ``emit_context_usage_for_instance`` (FE token-drop refresh).
-    13. Terminalize via ``context.terminalize`` (and update_phase for
+    13. ``emit_context_usage_for_instance`` (FE token-drop refresh).
+    14. Terminalize via ``context.terminalize`` (and update_phase for
         the timed_out → fallback_applied two-step).
 
     Args:
@@ -526,8 +545,18 @@ async def execute_compact(
     # property of ``aupdate_state`` on a finished graph). For the
     # executor, the gating signal is the status field, not the
     # checkpointer shape.
-    terminal_statuses = {"completed", "terminated", "error", "failed"}
-    if instance_status in terminal_statuses:
+    #
+    # Defect #2 (2026-08-31): this guard is now DEFENSE-IN-DEPTH. The
+    # primary gate lives in the dispatcher's ack path
+    # (``CommandDispatcher.dispatch`` — terminal instances are
+    # rejected in the 200 ack envelope before any task is spawned),
+    # so in the normal flow this code is unreachable for a terminal
+    # instance. It remains load-bearing for the TOCTOU window: the
+    # instance can terminalize between the router's status read and
+    # this task's start (terminated mid-flight by a parallel request).
+    # The status set + guidance copy are the dispatcher's shared
+    # constants — the two gates cannot drift.
+    if instance_status in TERMINAL_INSTANCE_STATUSES:
         logger.info(
             "[/compact] rejecting terminal-status instance %s... (status=%s)",
             instance_id[:8],
@@ -538,14 +567,45 @@ async def execute_compact(
             detail={
                 "failure_kind": _FAILURE_KIND_ERROR,
                 "reason": "terminal_instance",
-                "guidance": (
-                    "Send a message to start a new turn, then /compact."
-                ),
+                "guidance": TERMINAL_INSTANCE_GUIDANCE,
             },
         )
         return
 
-    # ── 3. Pre-check: recently compacted (recency <60s) ────────────────
+    # ── 3. F3/D-B9 — emit ``waiting`` NOW for the RUNNING row (defect
+    # #7, 2026-08-31 e2e gate) ──────────────────────────────────────────
+    #
+    # The RUNNING instance is the only row whose first user-visible
+    # phase is ``waiting`` (§6 matrix: "waiting SSE FIRST"). Live
+    # evidence (gate run): the emission previously lived INSIDE the
+    # pause-first branch BELOW the pre-check pipeline (checkpoint read
+    # + token estimate), so a RUNNING instance's first feedback could
+    # lag the ack by the whole unbounded async prefix (~32s observed
+    # live) — the user stared at no UI progress. The emission is moved
+    # to the FRONT of the handler: only the sync status read above
+    # sits between the ack and the ``waiting`` SSE event. F3 still
+    # holds trivially — no pause mutation has happened yet.
+    #
+    # Cosmetic note (accepted): a RUNNING instance that noops below
+    # the floor now flashes ``waiting`` for ~ms before the noop
+    # terminal instead of showing nothing at all — honest ("preparing")
+    # and strictly better than silence.
+    if instance_status == "running":
+        await context.update_phase(
+            _PHASE_WAITING,
+            bump_seq=False,  # waiting is the start state — do not bump seq
+            detail={"checkpoint_id": None},
+        )
+        await _emit_phase_event(
+            manager,
+            instance_id=instance_id,
+            command_id=command_id,
+            phase=_PHASE_WAITING,
+            started_at_monotonic=started_at_monotonic,
+            context=context,
+        )
+
+    # ── 4. Pre-check: recently compacted (recency <60s) ────────────────
     # Reads ``compacted_at`` off the live checkpoint. We do NOT call
     # the engine for this — the executor's recency pre-check is
     # independent (architect §2: "engine stays single-purpose").
@@ -591,7 +651,7 @@ async def execute_compact(
         )
         return
 
-    # ── 4. Per-instance model + context window for noop floor ──────────
+    # ── 4b. Per-instance model + context window for noop floor ────────
     compactor = getattr(manager, "_compactor", None)
     if compactor is None:
         # Engine not available → REJECT compaction_disabled. No
@@ -667,26 +727,14 @@ async def execute_compact(
     #   * pause → quiesce → gate → resume (RUNNING)
     #   * gate only (PAUSED — already quiescent)
     # The matrix lives in the plan; here we orchestrate.
+    # (Defect #7: the RUNNING row's ``waiting`` SSE emission moved to
+    # step 3 above — it now precedes this whole block and the
+    # pre-check pipeline, not just the pause mutation.)
     run_status = instance_status
     needs_pause_resume = run_status == "running"
     paused_state_resume_ok = False  # for the resume-in-finally
 
     if needs_pause_resume:
-        # F3: emit waiting BEFORE any pause mutation.
-        await context.update_phase(
-            _PHASE_WAITING,
-            bump_seq=False,  # waiting is the start state — do not bump seq
-            detail={"checkpoint_id": None},
-        )
-        await _emit_phase_event(
-            manager,
-            instance_id=instance_id,
-            command_id=command_id,
-            phase=_PHASE_WAITING,
-            started_at_monotonic=started_at_monotonic,
-            context=context,
-        )
-
         # W-3.3 — snapshot the pre-pause checkpoint_state for
         # re-reading AFTER quiescence. Building CompactionContext
         # from the pre-pause snapshot produces a chronologically

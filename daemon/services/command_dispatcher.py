@@ -78,11 +78,13 @@ class RejectionReason(str, Enum):
     ``pending_injections`` was the original workaround that the
     reviewer flagged as incorrect.
 
-    The dispatcher only ever produces ``busy`` / ``rate_limited`` /
-    ``pending_injections`` / ``unavailable`` (the first four); the
-    executor (WS-2) is responsible for producing
-    ``terminal_instance``, ``compaction_disabled``,
-    ``quiescence_timeout`` as terminal phase details.
+    The dispatcher produces ``terminal_instance`` (defect #2,
+    2026-08-31 — the ack-time instance-status gate), ``busy`` /
+    ``rate_limited`` / ``pending_injections`` / ``unavailable``; the
+    executor (WS-2) keeps ``terminal_instance`` as a defense-in-depth
+    guard and is responsible for producing
+    ``compaction_disabled`` and ``quiescence_timeout`` as terminal
+    phase details.
     """
 
     TERMINAL_INSTANCE = "terminal_instance"
@@ -92,6 +94,29 @@ class RejectionReason(str, Enum):
     UNAVAILABLE = "unavailable"  # W-2.5 (leader-approved 2026-08-31)
     COMPACTION_DISABLED = "compaction_disabled"
     QUIESCENCE_TIMEOUT = "quiescence_timeout"
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Ack-time instance-status gate (defect #2, 2026-08-31 e2e gate)
+# ─────────────────────────────────────────────────────────────────────────
+
+
+# The O-B4 canonical terminal set (architect §5/§6): a /compact on any
+# of these statuses is refused. Single source shared with the
+# executor's defense-in-depth guard (compact_executor) so the two
+# gates can never drift apart.
+TERMINAL_INSTANCE_STATUSES: frozenset[str] = frozenset(
+    {"completed", "terminated", "error", "failed"}
+)
+
+# W-1.2 pinned guidance copy (plan S-14 / architect §5) — the executor
+# has carried this exact string since the C1 fix; the FE renders the
+# ack ``detail`` VERBATIM for ``terminal_instance`` (chat.component.ts
+# ``rejectionCopy``). Defect #2 fix: the SAME copy now answers at ack
+# time, and the executor reuses this constant so the copy cannot drift.
+TERMINAL_INSTANCE_GUIDANCE: str = (
+    "Send a message to start a new turn, then /compact."
+)
 
 
 class CommandPhase(str, Enum):
@@ -854,6 +879,7 @@ class CommandDispatcher:
         *,
         pending_injections: int = 0,
         instance_context: Any = None,
+        instance_status: str | None = None,
     ) -> DispatchOutcome:
         """Dispatch a slash-command.
 
@@ -866,16 +892,36 @@ class CommandDispatcher:
         1. Master-switch (``enabled``). Off → passthrough (no-op).
         2. ``//``-escape check (``parse``).
         3. Registry lookup.
-        4. Availability predicate (O-B6 — unpopulated today).
-        5. Pending-injections guard (WS-6 row, O-B11 ratified).
-        6. Rate-limit (in-flight + min-interval).
-        7. ``record_start`` → mint ``command_id``.
-        8. Spawn bg task + return ack.
+        4. Instance-status gate (defect #2, 2026-08-31): a terminal
+           instance (O-B4 set) → ``200 rejected terminal_instance``
+           ack — BEFORE record_start, so no ``command_id`` is minted,
+           no in-flight slot is taken, and NO background task is
+           spawned. Cheap + synchronous (the router already holds
+           ``instance_info``). The executor keeps its own terminal
+           guard as defense-in-depth for the read→handler-start
+           TOCTOU window.
+        5. Availability predicate (O-B6 — unpopulated today).
+        6. Pending-injections guard (WS-6 row, O-B11 ratified).
+        7. Rate-limit (in-flight + min-interval).
+        8. ``record_start`` → mint ``command_id``.
+        9. Spawn bg task + return ack.
 
         The rate-limit step happens BEFORE the bg task spawn, so a
         rate-limited request never acquires the ExecutionGate
         (the executor, WS-2, is the gate-acquirer and runs in the bg
         task).
+
+        Args:
+            instance_id: Target instance.
+            text: Raw message content (command or plain text).
+            pending_injections: Queue depth from the router.
+            instance_context: O-B6 availability hook input.
+            instance_status: The instance's status string as read by
+                the router (``instance_info["status"]``). ``None``
+                (default) keeps the pre-defect-#2 behavior — the gate
+                is silent, and terminal instances fall through to the
+                executor's defense-in-depth guard. Normalized
+                case/whitespace-tolerant.
         """
         # 1. Master switch.
         if not self._enabled:
@@ -899,7 +945,30 @@ class CommandDispatcher:
                 available=self._registry.list(),
             )
 
-        # 4. Availability predicate (O-B6 — unpopulated today).
+        # 4. Instance-status gate (defect #2, 2026-08-31). BEFORE
+        # record_start → the rejection mints nothing, records nothing,
+        # spawns nothing. Beats busy/rate_limited: a terminal instance
+        # cannot compact, period — that is the more fundamental fact
+        # about the instance (§5/§6 matrix, terminal row).
+        if (
+            instance_status is not None
+            and instance_status.strip().lower()
+            in TERMINAL_INSTANCE_STATUSES
+        ):
+            logger.info(
+                "Rejecting command=%s for terminal-status instance=%s "
+                "at ack time (status=%s)",
+                parsed.command.name,
+                instance_id,
+                instance_status.strip().lower(),
+            )
+            return self._rejected(
+                command=parsed.command.name,
+                reason=RejectionReason.TERMINAL_INSTANCE,
+                detail=TERMINAL_INSTANCE_GUIDANCE,
+            )
+
+        # 5. Availability predicate (O-B6 — unpopulated today).
         if spec.availability is not None:
             allowed = await spec.availability(instance_context)
             if not allowed:
@@ -921,7 +990,7 @@ class CommandDispatcher:
                     detail="command not available in this context",
                 )
 
-        # 5. Pending-injections guard (WS-6 row, O-B11).
+        # 6. Pending-injections guard (WS-6 row, O-B11).
         if pending_injections > 0:
             return self._rejected(
                 command=parsed.command.name,
@@ -929,7 +998,7 @@ class CommandDispatcher:
                 detail="instance has queued injections; retry after drain",
             )
 
-        # 6. Rate-limit. Checked BEFORE the bg task spawn (and
+        # 7. Rate-limit. Checked BEFORE the bg task spawn (and
         # therefore BEFORE any ExecutionGate acquisition, which is
         # the executor's job in WS-2).
         if self._is_inflight(instance_id):
@@ -951,7 +1020,7 @@ class CommandDispatcher:
                 ),
             )
 
-        # 7. Record start + mint command_id.
+        # 8. Record start + mint command_id.
         command_id = str(uuid4())
         try:
             self._state.record_start(
@@ -975,7 +1044,7 @@ class CommandDispatcher:
         self._inflight[instance_id] = command_id
         self._last_dispatch[instance_id] = now
 
-        # 8. Spawn background task.
+        # 9. Spawn background task.
         ctx = CommandContext(
             dispatcher=self,
             command_id=command_id,

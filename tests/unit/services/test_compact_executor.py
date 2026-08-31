@@ -365,6 +365,97 @@ class TestRecencyPrecheck:
         assert active is None
 
 
+class TestRunningNoopWaitingSequence:
+    """Defect #7 follow-up — the RUNNING-noop SSE sequence pin.
+
+    With the relocated ``waiting`` emit (compact_executor.py, step 3,
+    F3/D-B9), a RUNNING instance that noops at a pre-check (recency or
+    below-floor) must emit ``waiting`` THEN the ``success(noop)``
+    terminal — never ``success(noop)`` alone. This locks the relocated
+    emission against future revert attempts (the pre-#7 code emitted
+    nothing at all for this path) and supports the #7 acceptance
+    criterion that the ``waiting`` event arrives immediately,
+    independent of the pause-first pipeline.
+    """
+
+    @pytest.mark.asyncio
+    async def test_running_recency_noop_emits_waiting_then_success(self):
+        """RUNNING + recently-compacted → SSE phases == waiting, success.
+
+        The recency pre-check fires BEFORE the pause-first branch (a
+        noop must never pause the instance), so this pins the exact
+        sequence the FE sees on a RUNNING-noop: ``waiting`` (the
+        relocated emit) then ``success`` with the noop detail — and
+        that ``pause_instance_cascade`` is never awaited.
+        """
+        dispatcher = _make_dispatcher()
+        command_id = _make_active_command(dispatcher)
+
+        # Recent compacted_at (30s-scale past) → recency noop fires.
+        past_iso = (
+            datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        )
+        cp = _make_checkpoint_state(
+            # Genuine RUNNING-row checkpoint shape (frozen mid-graph,
+            # ``next == ("agent",)`` — the only legit synthetic
+            # mid-graph shape per the defect-1 fixture doctrine).
+            # Outcome-irrelevant for the recency check (C1: the gate
+            # is instance status), but keeps the fixture honest.
+            next=("agent",),
+            messages=[HumanMessage(content="hi", id="h-1")],
+            compacted_at=past_iso,
+        )
+        graph = MagicMock()
+        graph.aupdate_state = AsyncMock()
+
+        async def _aget_state(_config):
+            return cp
+
+        graph.aget_state = AsyncMock(side_effect=_aget_state)
+
+        mgr = _make_manager(graph_obj=graph, instance_status="running")
+
+        ctx = CommandContext(
+            dispatcher=dispatcher,
+            command_id=command_id,
+            instance_id="inst-test",
+        )
+        dispatcher._manager = mgr
+
+        await execute_compact(
+            mgr,
+            instance_id="inst-test",
+            command_id=command_id,
+            context=ctx,
+        )
+
+        # THE PIN — SSE sequence is waiting THEN success(noop), not
+        # success(noop) alone (the pre-#7 behavior for this path).
+        phases = [e["message"]["phase"] for e in mgr._emitted_events]
+        assert phases == ["waiting", "success"], (
+            f"RUNNING-noop must emit waiting then success(noop); "
+            f"got {phases!r} — a revert of the relocated waiting-emit "
+            f"(defect #7) drops the leading 'waiting'"
+        )
+        # The waiting emit is the START state: phase_seq 1 (record_start
+        # default, bump_seq=False), and the terminal carries a strictly
+        # greater registry-authoritative seq (W-3.1 single source).
+        assert mgr._emitted_events[0]["message"]["phase_seq"] == 1
+        assert (
+            mgr._emitted_events[1]["message"]["phase_seq"]
+            > mgr._emitted_events[0]["message"]["phase_seq"]
+        )
+        # The terminal is the noop success with the recency detail.
+        success_detail = mgr._emitted_events[1]["message"]["detail"]
+        assert success_detail["compacted_type"] == "noop"
+        assert success_detail["noop_reason"] == "recently_compacted"
+        # A noop must never pause the instance — the pre-check fires
+        # before the pause-first branch.
+        mgr.pause_instance_cascade.assert_not_awaited()
+        # Engine persistence never ran (recency pre-check exited).
+        assert graph.aupdate_state.await_count == 0
+
+
 class TestBelowFloorPrecheck:
     """W-5.2(b) — WS-2.2 pre-check row for ``below_floor``.
 
@@ -1316,10 +1407,12 @@ class TestReviveBrickRegression:
         from daemon.services import compact_executor as ce
 
         source = inspect.getsource(ce.execute_compact)
-        # C1: the status guard (terminal_statuses set + the
-        # instance_status membership check) must come BEFORE the
-        # persistence step (which calls ``aupdate_state``).
-        guard_marker = 'instance_status in terminal_statuses'
+        # C1: the status guard (the O-B4 terminal set — the shared
+        # TERMINAL_INSTANCE_STATUSES constant since defect #2's
+        # ack-time gate landed, previously a local terminal_statuses
+        # set) + the instance_status membership check must come BEFORE
+        # the persistence step (which calls ``aupdate_state``).
+        guard_marker = 'instance_status in TERMINAL_INSTANCE_STATUSES'
         persistence_idx = source.find("_persist_compaction_result")
         assert guard_marker in source, (
             "executor must gate terminal-rejection on instance status "

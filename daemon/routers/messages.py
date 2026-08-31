@@ -247,11 +247,19 @@ async def send_message(
     #   if not a command: fall through byte-identical.
     # All status-branch bodies (:252 PAUSED, :402 RUNNING/WC, :503 IDLE/terminal)
     # are untouched for non-command traffic. Rate-limit + pending-injections
-    # + unknown-command cases are handled BEFORE any ExecutionGate acquisition.
+    # + unknown-command + terminal-instance (defect #2, 2026-08-31 —
+    # the instance-status gate is cheap and synchronous, so a terminal
+    # instance is rejected IN the ack envelope instead of acking
+    # accepted and leaving the client's waiting card stranded until a
+    # much-later GET reconcile — live gate: terminal event stamped
+    # ~3ms post-ack, unseen by the client, card stuck waiting) cases
+    # are handled BEFORE any ExecutionGate acquisition. The status
+    # read at :207 doubles as the gate's input — no extra DB hit.
     command_outcome = await manager.command_dispatcher.dispatch(
         instance_id=instance_id,
         text=message.content,
         pending_injections=manager.get_injection_count(instance_id),
+        instance_status=instance_info.get("status"),
     )
     if command_outcome.kind == "ack":
         return command_outcome.ack

@@ -393,9 +393,15 @@ class TestSlashCommandIntercept:
     def test_command_short_circuits_before_terminal_revival(
         self, client_with_manager, dispatcher
     ):
-        """A command on a terminal instance reaches the dispatcher —
-        the executor (WS-2) is responsible for the terminal_instance
-        rejection. The router-level intercept just dispatches."""
+        """A command on a terminal instance is REJECTED IN THE ACK
+        (defect #2, 2026-08-31 — the instance-status gate is a
+        dispatch-time guard). Semantics update: the executor used to
+        own the terminal_instance rejection from the bg task (which
+        raced the client's post-ack subscription and stranded the FE
+        waiting card); the dispatcher now answers it synchronously and
+        spawns no task at all. The 200 + no-enqueue behavior below is
+        unchanged — a rejected ack is still a 200 that never reaches
+        the enqueue/revive branch."""
         client, state = client_with_manager
         _register_compact(dispatcher, handler=_hanging_handler)
         manager = _make_manager(dispatcher, instance_status="completed")
@@ -406,20 +412,12 @@ class TestSlashCommandIntercept:
             json={"content": "/compact"},
         )
         assert resp.status_code == 200
+        body = resp.json()
+        assert body["state"] == "rejected"
+        assert body["reason"] == "terminal_instance"
         # Falls through to enqueue_message_job? No — the dispatcher
         # captured the request, so enqueue is NOT called.
         manager.enqueue_message_job.assert_not_awaited()
-
-        # Cleanup the hanging handler.
-        for task in list(dispatcher._tasks):
-            task.cancel()
-        for task in list(dispatcher._tasks):
-            try:
-                await_coro = task
-                # Drain via the test client's loop:
-                # the AsyncMock is not awaitable; use a small sleep.
-            except Exception:
-                pass
 
     def test_unknown_command_short_circuits_before_idle_enqueue(
         self, client_with_manager, dispatcher
@@ -1177,3 +1175,447 @@ class TestEscapePathSingleWrite:
         assert list(dispatcher._tasks) == [], (
             f"escape must not spawn a bg task; got {dispatcher._tasks!r}"
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Defect #2 (2026-08-31 e2e gate) — terminal-instance rejection AT ACK TIME
+# ─────────────────────────────────────────────────────────────────────────
+
+
+class TestTerminalInstanceAckRejection:
+    """Defect #2 — POST /compact on a terminal instance must answer the
+    200 rejected ack envelope AT ACK TIME (architect §5/§7).
+
+    Live evidence (gate run, command d34c1026): the old path acked
+    ``accepted`` → the FE seeded its waiting card → the bg executor
+    terminalized ``failed(terminal_instance)`` ~3ms after the ack —
+    a terminal SSE event the client could not observe (it raced the
+    post-ack subscription). The instance-status check is cheap and
+    synchronous; it belongs in the ack path.
+
+    Router contract pinned here:
+    - 200 + full CommandAck envelope (state=rejected,
+      reason=terminal_instance, detail=W-1.2 guidance copy).
+    - NO fallthrough to the terminal-revival enqueue branch.
+    - NO background executor task spawned.
+    - NO SSE waiting event (the executor never runs).
+    """
+
+    GUIDANCE = "Send a message to start a new turn, then /compact."
+
+    def _post_compact(self, client):
+        return client.post(
+            "/instances/inst-A/messages",
+            json={"content": "/compact"},
+        )
+
+    def test_terminal_completed_full_ack_envelope(
+        self, client_with_manager, dispatcher
+    ):
+        """Acceptance criterion (a) — full envelope assertion on the
+        COMPLETED row (the exact live-evidence status)."""
+        client, state = client_with_manager
+        _register_compact(dispatcher, handler=_hanging_handler)
+        manager = _make_manager(dispatcher, instance_status="completed")
+        state["manager"] = manager
+
+        resp = self._post_compact(client)
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        # Full CommandAck envelope (§7 schema).
+        assert body["status"] == "command"
+        assert body["command"] == "compact"
+        assert body["state"] == "rejected"
+        assert body["reason"] == "terminal_instance"
+        assert body["detail"] == self.GUIDANCE
+        assert body["command_id"] is None  # nothing was minted
+        assert body["timestamp"]
+        assert body["ttl_seconds"] == 600
+
+    @pytest.mark.parametrize("status", ["terminated", "error", "failed"])
+    def test_every_ob4_terminal_status_rejects_at_router(
+        self, client_with_manager, dispatcher, status
+    ):
+        client, state = client_with_manager
+        _register_compact(dispatcher, handler=_hanging_handler)
+        manager = _make_manager(dispatcher, instance_status=status)
+        state["manager"] = manager
+
+        resp = self._post_compact(client)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["state"] == "rejected"
+        assert body["reason"] == "terminal_instance"
+        assert body["detail"] == self.GUIDANCE
+
+    def test_terminal_rejection_spawns_no_executor_task(
+        self, client_with_manager, dispatcher
+    ):
+        """Cleaner-of-the-two ruling (leader task): the rejection is
+        dispatch-time — NO async executor task is spawned at all (the
+        executor's own guard remains as defense-in-depth for the
+        router-read→handler-start TOCTOU window)."""
+        client, state = client_with_manager
+        handler_calls = []
+
+        async def _spy_handler(*, instance_id, args, command_id, context):
+            handler_calls.append(command_id)
+
+        _register_compact(dispatcher, handler=_spy_handler)
+        manager = _make_manager(dispatcher, instance_status="completed")
+        state["manager"] = manager
+
+        resp = self._post_compact(client)
+        assert resp.status_code == 200
+        assert resp.json()["state"] == "rejected"
+        assert handler_calls == []
+        assert list(dispatcher._tasks) == [], (
+            "terminal rejection must not spawn the executor bg task"
+        )
+        assert dispatcher.get_for_endpoint("inst-A") is None, (
+            "no registry entry — no phantom card on GET /commands/active"
+        )
+
+    def test_terminal_rejection_neither_enqueues_nor_waits(
+        self, client_with_manager, dispatcher
+    ):
+        """The rejection short-circuits BEFORE the terminal-revival
+        enqueue branch (no message row, no revive) — and before any
+        waiting phase could exist."""
+        client, state = client_with_manager
+        _register_compact(dispatcher, handler=_hanging_handler)
+        manager = _make_manager(dispatcher, instance_status="completed")
+        # If the intercept fell through, the terminal branch would
+        # revive/enqueue — pin both as untouched.
+        manager.resume_instance_cascade = AsyncMock()
+        state["manager"] = manager
+
+        resp = self._post_compact(client)
+        assert resp.status_code == 200
+        assert resp.json()["state"] == "rejected"
+        manager.enqueue_message_job.assert_not_awaited()
+        manager.resume_instance_cascade.assert_not_awaited()
+
+    def test_terminal_rejection_does_not_stamp_rate_limit(
+        self, client_with_manager, dispatcher
+    ):
+        """Retrying /compact on a terminal instance keeps answering
+        terminal_instance — rejections never consume the min-interval."""
+        client, state = client_with_manager
+        _register_compact(dispatcher, handler=_hanging_handler)
+        manager = _make_manager(dispatcher, instance_status="completed")
+        state["manager"] = manager
+
+        first = self._post_compact(client)
+        second = self._post_compact(client)
+        assert first.json()["reason"] == "terminal_instance"
+        assert second.json()["reason"] == "terminal_instance"
+        assert dispatcher._last_dispatch == {}
+
+    def test_running_instance_still_accepts_at_router(
+        self, client_with_manager, dispatcher
+    ):
+        """Guard against over-rejection: RUNNING still acks accepted
+        (the pause-first path is the executor's job)."""
+        client, state = client_with_manager
+        _register_compact(dispatcher, handler=_hanging_handler)
+        manager = _make_manager(dispatcher, instance_status="running")
+        state["manager"] = manager
+
+        resp = self._post_compact(client)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["state"] == "accepted"
+        assert body["command_id"]
+        for task in list(dispatcher._tasks):
+            task.cancel()
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Defect #7 (2026-08-31 e2e gate) — ack latency + waiting-before-pause order
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def _make_full_executor_manager(events, dispatcher, *, instance_status="running"):
+    """Manager mock with the REAL /compact executor's full surface.
+
+    Unlike ``_make_manager`` (dispatcher-surface only), this stubs the
+    executor seams so the REAL ``execute_compact`` can be wired via
+    ``register_compact_command``:
+
+    - ``pause_instance_cascade`` records ``pause_entered`` then sleeps
+      3600s — an ARTIFICIALLY BLOCKED pause. If the ack path (or the
+      waiting emission) ever awaited pause completion, the POST would
+      hang and the assertions below would fail.
+    - ``get_instance().aget_state`` records ``checkpoint_read`` — the
+      defect-#7 reorder pin: ``waiting`` must be emitted BEFORE the
+      checkpoint read, not after the pre-check pipeline.
+    - ``_live_hub.stream_message`` records every SSE phase event.
+
+    ``events`` is a shared ordered timeline (appended from the app
+    loop thread; list.append is atomic under the GIL).
+    """
+    from daemon.compaction import ContextCompactor
+    from daemon.config import CompactionConfig, SlashCommandConfig
+
+    mgr = MagicMock()
+    mgr.is_write_paused = False
+    # The router reaches the dispatch seam via the manager facade.
+    mgr.command_dispatcher = dispatcher
+    mgr.get_injection_count = MagicMock(return_value=0)
+    mgr._lifecycle_service = MagicMock()
+    mgr._lifecycle_service.get_instance_info = MagicMock(
+        return_value={
+            "status": instance_status,
+            "id": "inst-A",
+            "metadata": {},
+            "children": [],
+        }
+    )
+
+    compactor = ContextCompactor(
+        config=CompactionConfig(
+            enabled=True,
+            threshold=0.80,
+            recent_message_window=10,
+            min_recent_window=3,
+            context_window_overrides={},
+            context_window_default=128000,
+            target_ratio=0.40,
+            summarization_model="",
+            min_messages_before_compaction=10,
+            summarization_chunk_threshold=0.60,
+            timeout_base_s=90.0,
+            timeout_per_100k_tokens_s=60.0,
+            timeout_cap_s=300.0,
+            timeout_facade_margin_s=5.0,
+            operation_budget_s=300.0,
+        ),
+        llm_config={
+            "base_url": "http://example",
+            "base_url_backup": None,
+            "api_key": "test",
+            "model": "gpt-4o",
+            "model_vision": "gpt-4o",
+            "temperature": 0.7,
+            "request_timeout": 30.0,
+            "buffer_response_header": True,
+        },
+    )
+    mgr._compactor = compactor
+    mgr.config = MagicMock()
+    mgr.config.llm.model = "gpt-4o"
+    mgr.config.compaction = compactor.config
+    mgr.config.slash_commands = SlashCommandConfig(noop_floor_ratio=0.05)
+
+    async def _gate_run(instance_id, holder_id, holder_kind, work_fn):
+        return await work_fn()
+
+    mgr.execution_gate = MagicMock()
+    mgr.execution_gate.run = AsyncMock(side_effect=_gate_run)
+
+    async def _blocked_pause(instance_id):
+        events.append({"kind": "pause_entered"})
+        # Defect #7 pin: an artificially SLOW/blocked pause. The ack
+        # and the waiting event must not wait for this to finish.
+        await asyncio.sleep(3600)
+
+    mgr.pause_instance_cascade = AsyncMock(side_effect=_blocked_pause)
+    mgr.resume_instance_cascade = AsyncMock(
+        return_value={"resumed_ids": ["inst-A"], "skipped_ids": []}
+    )
+
+    async def _quiescent(instance_id, timeout):
+        return True
+
+    mgr.wait_for_instance_quiescent = AsyncMock(side_effect=_quiescent)
+
+    # Checkpoint state — mid-graph RUNNING shape (next=("agent",)) with
+    # enough messages to clear the 5%×128k noop floor (15×4000 chars ≈
+    # 15k tokens > 6400), so the executor reaches the pause-first row.
+    from langchain_core.messages import HumanMessage as _HM
+
+    class _State:
+        def __init__(self):
+            self.next = ("agent",)
+            self.values = {
+                "messages": [
+                    _HM(content="x" * 4000, id=f"h-{n}") for n in range(15)
+                ],
+                "compacted_at": None,
+            }
+            self.config = {"configurable": {"thread_id": "inst-A"}}
+
+    graph = MagicMock()
+
+    async def _aget_state(_config):
+        events.append({"kind": "checkpoint_read"})
+        return _State()
+
+    graph.aget_state = AsyncMock(side_effect=_aget_state)
+
+    async def _get_instance(instance_id):
+        return graph
+
+    mgr.get_instance = AsyncMock(side_effect=_get_instance)
+
+    mgr._messaging_service = MagicMock()
+    mgr._messaging_service.emit_context_usage_for_instance = AsyncMock()
+
+    async def _stream(instance_id, message, event_type, **kwargs):
+        events.append(
+            {
+                "kind": "sse",
+                "phase": message.get("phase"),
+                "phase_seq": message.get("phase_seq"),
+            }
+        )
+
+    mgr._live_hub = MagicMock()
+    mgr._live_hub.stream_message = AsyncMock(side_effect=_stream)
+
+    mgr._task_repo = MagicMock()
+    mgr._task_repo.has_instance_busy = MagicMock(return_value=False)
+
+    return mgr
+
+
+class TestRunningAckOrdering:
+    """Defect #7 — the POST ack must not wait for pause-first work.
+
+    Live evidence (gate run): /compact on a RUNNING instance showed
+    NO UI feedback for ~32s (back-calculated elapsed_ms 32081) — the
+    feedback-critical ``waiting`` SSE emission lived deep inside the
+    bg task's pre-check pipeline (checkpoint read + token estimate),
+    behind an unbounded async prefix on a loop shared with an
+    actively-streaming turn. Architect §6 RUNNING row (D-B9/F3):
+    ``waiting`` SSE FIRST; §7: CommandAck is SYNC ≤500ms.
+
+    Pinned structurally, per acceptance criterion (b):
+    - the POST ack returns WHILE the pause is artificially blocked;
+    - the ``waiting`` SSE event is emitted while the pause is still
+      blocked (emission independent of pause completion);
+    - ``waiting`` precedes the pause mutation AND the checkpoint read.
+    """
+
+    def test_ack_returns_and_waiting_emits_while_pause_blocked(self):
+        from daemon.services.compact_executor import (
+            register_compact_command,
+        )
+
+        events: list[dict] = []
+
+        dispatcher = CommandDispatcher(
+            enabled=True,
+            escape_prefix="//",
+            min_interval_s=10,
+            state_ttl_s=600,
+            max_state_per_instance=20,
+        )
+        manager = _make_full_executor_manager(events, dispatcher)
+        # The real executor resolves its manager via the dispatcher's
+        # back-reference (manager.py:1012 wiring).
+        dispatcher._manager = manager
+        register_compact_command(dispatcher)
+
+        from fastapi import FastAPI
+
+        from daemon.routers.instances import router as instances_router
+        from daemon.routers.messages import router as messages_router
+
+        app = FastAPI()
+        app.include_router(messages_router)
+        app.include_router(instances_router)
+        state = {"manager": manager}
+
+        @app.middleware("http")
+        async def _inject_manager(request, call_next):
+            request.app.state.manager = state["manager"]
+            return await call_next(request)
+
+        # `with` keeps ONE portal loop alive across requests so the bg
+        # executor task survives past the POST response (a bare
+        # TestClient would cancel it at request-scope teardown).
+        with TestClient(app) as client:
+            t0 = time.monotonic()
+            resp = client.post(
+                "/instances/inst-A/messages",
+                json={"content": "/compact"},
+            )
+            elapsed = time.monotonic() - t0
+
+            assert resp.status_code == 200, resp.text
+            body = resp.json()
+            assert body["state"] == "accepted"
+            # ≤500ms structural bound (§7) — in-process, no network.
+            assert elapsed < 0.5, (
+                f"ack took {elapsed*1000:.0f}ms — the ack path must "
+                "not await pause/quiesce/executor work (defect #7)"
+            )
+
+            # The waiting SSE event arrives while the pause is STILL
+            # blocked — emission is independent of pause completion.
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                if any(
+                    e["kind"] == "sse" and e["phase"] == "waiting"
+                    for e in events
+                ):
+                    break
+                time.sleep(0.01)
+            waiting_events = [
+                (i, e)
+                for i, e in enumerate(events)
+                if e["kind"] == "sse" and e["phase"] == "waiting"
+            ]
+            assert waiting_events, (
+                "waiting SSE event must be emitted immediately after "
+                "the ack — not after the pre-check pipeline or the "
+                "pause (defect #7)"
+            )
+            waiting_idx = waiting_events[0][0]
+
+            pause_idx = next(
+                (
+                    i
+                    for i, e in enumerate(events)
+                    if e["kind"] == "pause_entered"
+                ),
+                None,
+            )
+            checkpoint_idx = next(
+                (
+                    i
+                    for i, e in enumerate(events)
+                    if e["kind"] == "checkpoint_read"
+                ),
+                None,
+            )
+            # F3/D-B9: waiting BEFORE any pause mutation.
+            assert pause_idx is not None, "executor must reach the pause"
+            assert waiting_idx < pause_idx, (
+                f"waiting (idx {waiting_idx}) must precede the pause "
+                f"mutation (idx {pause_idx})"
+            )
+            # Defect #7 reorder: waiting BEFORE the checkpoint read —
+            # no async pre-work may sit between ack and waiting.
+            assert checkpoint_idx is not None
+            assert waiting_idx < checkpoint_idx, (
+                f"waiting (idx {waiting_idx}) must precede the "
+                f"checkpoint read (idx {checkpoint_idx}) — the old "
+                "pre-check pipeline delayed the first feedback"
+            )
+
+            # The pause is STILL blocked right now — the ack AND the
+            # waiting event did not wait for it.
+            pause_completed = manager.pause_instance_cascade.await_count
+            entered = [
+                e for e in events if e["kind"] == "pause_entered"
+            ]
+            assert entered and pause_completed >= 1
+            assert all(
+                e["kind"] != "pause_completed" for e in events
+            ), "pause was mocked blocked — it must not have completed"
+
+        # TestClient context exit tears down the portal loop and
+        # cancels the sleeping bg task (pause sleeps 3600s).

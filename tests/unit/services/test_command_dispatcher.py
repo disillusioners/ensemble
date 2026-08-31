@@ -1064,3 +1064,203 @@ class TestEnums:
             "recently_compacted",
             "too_few_messages",
         }
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Defect #2 (2026-08-31 e2e gate) — terminal-instance rejection AT ACK TIME
+# ─────────────────────────────────────────────────────────────────────────
+
+
+class TestTerminalStatusAckRejection:
+    """Defect #2 — the instance-status gate belongs at ACK time.
+
+    Live evidence (tester gate 2026-08-31, command d34c1026): a
+    terminal (COMPLETED) instance acked ``accepted`` → the FE seeded
+    its waiting card → the bg executor terminalized
+    ``failed(terminal_instance)`` ~3ms later — a terminal event the
+    client could not observe (emitted before the post-ack
+    subscription). Architect §5/§6/§7: terminal instances are
+    rejected with ``reason=terminal_instance`` + the W-1.2 pinned
+    guidance copy, as a SYNC 200 ack envelope.
+
+    The gate is a DISPATCH-TIME guard (cheap, synchronous): it fires
+    BEFORE ``record_start`` so no ``command_id`` is minted, no
+    in-flight slot is taken, and NO background task is spawned. The
+    executor keeps its own terminal guard as defense-in-depth for
+    the TOCTOU window (instance terminalizes between the router's
+    status read and the bg task's start).
+    """
+
+    TERMINAL_STATUSES = ("completed", "terminated", "error", "failed")
+    GUIDANCE = "Send a message to start a new turn, then /compact."
+
+    def _spy_handler_calls(self):
+        calls = []
+
+        async def _spy(*, instance_id, args, command_id, context):
+            calls.append(command_id)
+
+        return _spy, calls
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", TERMINAL_STATUSES)
+    async def test_each_terminal_status_rejects_at_dispatch(
+        self, status
+    ):
+        """Every O-B4 terminal status → 200 ack envelope, state=rejected."""
+        handler, calls = self._spy_handler_calls()
+        d = _make_dispatcher()
+        d.registry.register(_make_spec(handler=handler))
+
+        outcome = await d.dispatch(
+            "inst-A", "/compact", instance_status=status
+        )
+
+        assert outcome.kind == "ack"
+        ack = outcome.ack
+        assert ack["status"] == "command"
+        assert ack["command"] == "compact"
+        assert ack["state"] == "rejected"
+        assert ack["reason"] == RejectionReason.TERMINAL_INSTANCE.value
+        assert ack["detail"] == self.GUIDANCE, (
+            "the guidance copy must be the W-1.2 pinned string (§5), "
+            "reused verbatim from the executor's defense-in-depth guard"
+        )
+        # §7 schema: a rejected ack carries NO command_id — none was
+        # minted because record_start never ran.
+        assert ack["command_id"] is None
+        assert ack["timestamp"]
+        assert ack["ttl_seconds"] == 600
+
+    @pytest.mark.asyncio
+    async def test_no_background_task_spawned_for_terminal(self):
+        """No bg task, no handler invocation, no in-flight slot, no
+        active registry entry — the rejection is pure dispatch-time."""
+        handler, calls = self._spy_handler_calls()
+        d = _make_dispatcher()
+        d.registry.register(_make_spec(handler=handler))
+
+        outcome = await d.dispatch(
+            "inst-A", "/compact", instance_status="completed"
+        )
+
+        assert outcome.ack["state"] == "rejected"
+        # Give the loop a chance to run anything mistakenly spawned.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert d._tasks == set(), "no background task may be spawned"
+        assert calls == [], "handler must never run"
+        assert "inst-A" not in d._inflight
+        assert d._state.get_active("inst-A") is None
+        assert d.get_for_endpoint("inst-A") is None, (
+            "nothing was recorded — GET /commands/active returns "
+            "exists:false (no phantom card)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_non_terminal_statuses_still_accept(self):
+        """IDLE / RUNNING / PAUSED / WAITING_CHILDREN are NOT terminal —
+        the gate must not over-reject."""
+        handler, calls = self._spy_handler_calls()
+        for status in ("idle", "running", "paused", "waiting_children"):
+            d = _make_dispatcher()
+            d.registry.register(_make_spec(handler=handler))
+            outcome = await d.dispatch(
+                "inst-A", "/compact", instance_status=status
+            )
+            assert outcome.kind == "ack", status
+            assert outcome.ack["state"] == "accepted", (
+                f"status={status!r} is not terminal; must accept"
+            )
+            for task in list(d._tasks):
+                task.cancel()
+
+    @pytest.mark.asyncio
+    async def test_status_gate_is_case_and_space_tolerant(self):
+        """Status strings arrive from the router's instance_info —
+        normalize defensively (strip + lower)."""
+        handler, calls = self._spy_handler_calls()
+        d = _make_dispatcher()
+        d.registry.register(_make_spec(handler=handler))
+        outcome = await d.dispatch(
+            "inst-A", "/compact", instance_status="  COMPLETED "
+        )
+        assert outcome.ack["state"] == "rejected"
+        assert outcome.ack["reason"] == "terminal_instance"
+
+    @pytest.mark.asyncio
+    async def test_instance_status_none_keeps_legacy_behavior(self):
+        """Back-compat: callers that don't pass ``instance_status``
+        (older tests, future commands without a status source) get the
+        pre-defect-#2 behavior — the gate is silent on None."""
+        handler, calls = self._spy_handler_calls()
+        d = _make_dispatcher()
+        d.registry.register(_make_spec(handler=handler))
+        outcome = await d.dispatch("inst-A", "/compact")
+        assert outcome.ack["state"] == "accepted"
+        for task in list(d._tasks):
+            task.cancel()
+
+    @pytest.mark.asyncio
+    async def test_terminal_rejection_precedes_other_guards(self):
+        """A terminal instance answers terminal_instance even when a
+        command is ALSO in-flight-busy — the terminal state is the
+        more fundamental fact about the instance.
+
+        (Reviewer note: this test leaks ``_inflight["inst-A"]`` from
+        the first accepted dispatch; it is cleared by the cancelled
+        hanging handler's cancel-path cleanup when the tasks are
+        cancelled below — fixture behavior, not asserted.)
+        """
+        d = _make_dispatcher()
+        d.registry.register(_make_spec(handler=_hanging_handler))
+
+        # Put the instance into in-flight state via a normal dispatch
+        # on a RUNNING instance (hanging handler keeps it active).
+        busy_setup = await d.dispatch(
+            "inst-A", "/compact", instance_status="running"
+        )
+        assert busy_setup.ack["state"] == "accepted"
+
+        # A second dispatch on the busy instance (still RUNNING) is
+        # BUSY — baseline.
+        busy = await d.dispatch(
+            "inst-A", "/compact", instance_status="running"
+        )
+        assert busy.ack["state"] == "rejected"
+        assert busy.ack["reason"] == RejectionReason.BUSY.value
+
+        # Same dispatcher state, but the instance is now terminal:
+        # terminal wins over busy — the instance cannot compact,
+        # period.
+        terminal = await d.dispatch(
+            "inst-A", "/compact", instance_status="completed"
+        )
+        assert terminal.ack["state"] == "rejected"
+        assert terminal.ack["reason"] == (
+            RejectionReason.TERMINAL_INSTANCE.value
+        ), "terminal beats busy: the instance cannot compact, period"
+        for task in list(d._tasks):
+            task.cancel()
+
+    @pytest.mark.asyncio
+    async def test_terminal_rejection_does_not_burn_rate_limit(self):
+        """A rejected dispatch never stamps ``_last_dispatch`` — a user
+        retrying /compact on a terminal instance must not trip the
+        min-interval guard."""
+        handler, calls = self._spy_handler_calls()
+        d = _make_dispatcher(min_interval_s=10)
+        d.registry.register(_make_spec(handler=handler))
+
+        first = await d.dispatch(
+            "inst-A", "/compact", instance_status="completed"
+        )
+        second = await d.dispatch(
+            "inst-A", "/compact", instance_status="completed"
+        )
+        assert first.ack["reason"] == "terminal_instance"
+        assert second.ack["reason"] == "terminal_instance", (
+            "retry after a terminal rejection must still surface the "
+            "terminal reason (rejections don't consume the min-interval)"
+        )
+        assert "inst-A" not in d._last_dispatch
