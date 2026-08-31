@@ -1,6 +1,8 @@
 import {
   Component,
   Input,
+  Output,
+  EventEmitter,
   ViewChild,
   ElementRef,
   AfterViewChecked,
@@ -65,6 +67,16 @@ export class ChatInterfaceComponent implements AfterViewChecked, OnChanges, OnDe
   @Input() showThinking = true;
   @Input() showToolCalls = true;
   @Input() showSystemPrompt = false;
+
+  /**
+   * Defect #5 (2026-08-31): the failed-send retry / dismiss controls
+   * live on the bubble template; the actions bubble up to the chat
+   * component (which owns the messages list and the cooldown /
+   * sendError machinery) via these two outputs. The chat-interface
+   * stays a pure view — no direct api / sendMessage wiring here.
+   */
+  @Output() onRetryFailedMessage = new EventEmitter<string>();
+  @Output() onDismissFailedMessage = new EventEmitter<string>();
 
   private readonly mermaidActions = inject(MermaidActionsService);
   private readonly ngZone = inject(NgZone);

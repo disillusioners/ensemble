@@ -579,6 +579,75 @@ $cyan: #06b6d4;
   }
 }
 
+// Defect #5 (2026-08-31): failed-send bubble + retry/dismiss panel.
+// The bubble keeps its existing shape — only the border color and a
+// subtle red wash flip — so the user can still see WHAT failed to
+// send. The inline panel below renders the error label + controls;
+// retry/dismiss call up to the chat component which owns the message
+// list and the POST machinery.
+.message-bubble-failed {
+  border: 1px solid #ef4444 !important;
+  background-color: rgba(239, 68, 68, 0.08) !important;
+  opacity: 0.85;
+}
+
+.message-failed-panel {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  background-color: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.5);
+  border-radius: 0.5rem;
+  font-size: 0.8125rem;
+  color: #fca5a5;
+  max-width: 100%;
+  flex-wrap: wrap;
+}
+
+.message-failed-icon {
+  font-size: 0.875rem;
+  color: #ef4444;
+}
+
+.message-failed-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  word-break: break-word;
+}
+
+.message-failed-retry,
+.message-failed-dismiss {
+  border: none;
+  border-radius: 0.375rem;
+  padding: 0.25rem 0.75rem;
+  font-size: 0.75rem;
+  cursor: pointer;
+  font-weight: 500;
+  transition: background-color 0.15s ease;
+}
+
+.message-failed-retry {
+  background-color: #ef4444;
+  color: #fff;
+
+  &:hover {
+    background-color: #dc2626;
+  }
+}
+
+.message-failed-dismiss {
+  background-color: transparent;
+  color: #9ca3af;
+  border: 1px solid #4b5563;
+
+  &:hover {
+    background-color: #374151;
+    color: $text-primary;
+  }
+}
+
 // Mermaid diagram styling for dark theme.
 // Note: `.mermaid` and the overlay buttons below are injected into the
 // DOM via `innerHTML` by the mermaid library / `MermaidActionsService`,

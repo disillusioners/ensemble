@@ -1484,12 +1484,62 @@ export class ChatComponent implements OnInit, OnDestroy {
           // the user-visible state is the bubble, not a spinner.
           this.isSending.set(false);
         }
+
+        // Defect #5 retry path (must-fix #1, 2026-08-31): when this
+        // send was triggered by retrying a failed bubble, the POST
+        // has now confirmed the message — clear the failed marker on
+        // the originating bubble so the chat-interface renders it as
+        // a delivered user message. Done here (in the success path)
+        // rather than synchronously in ``onRetryFailedMessage`` so a
+        // cooldown-blocked retry preserves the user's error state:
+        // if no POST went out, the bubble keeps its ``failed`` flag.
+        // ``sendError`` is still cleared by ``onRetryFailedMessage``
+        // — the cooldown-blocked path is the only branch where the
+        // marker stays, and the cooldown snackbar already explains
+        // the wait; the redundant banner would be misleading UX.
+        if (payload.retry_of_message_id) {
+          this.messages.update(msgs =>
+            msgs.map(m =>
+              m.message_id === payload.retry_of_message_id
+                ? { ...m, failed: false, errorReason: undefined }
+                : m
+            )
+          );
+        }
       },
       error: (err) => {
         console.error('Failed to send message:', err);
-        this.sendError.set(err instanceof Error ? err.message : 'Failed to send message');
+        const errorReason = err instanceof Error ? err.message : 'Failed to send message';
+        this.sendError.set(errorReason);
         this.isSending.set(false);
-        // Do NOT clear input on error — user can retry
+        // Do NOT clear input on error — user can retry.
+        //
+        // Defect #5 (2026-08-31, race (a)): the optimistic bubble can
+        // land BEFORE the POST errored when the SSE ``user_message``
+        // echo races the HTTP error (the BE emits the echo before
+        // responding to the POST). Without this fix, that bubble
+        // stays rendered as a delivered user message even though the
+        // API never recorded it (the tester's run4 evidence). Mark
+        // the most-recent matching user bubble as failed so the
+        // chat-interface renders an error state + retry affordance
+        // instead.
+        //
+        // Note: race (b) — a 2xx response with a phantom
+        // ``message_id`` that the BE never actually persisted — is
+        // NOT handled here. Detection would require a follow-up GET
+        // or a cross-instance refetch; tracked as out-of-scope
+        // follow-up (deliberately not implementing it as part of the
+        // cooldown race fix).
+        //
+        // Carry the original send's ``queue_id`` so the retry can
+        // re-use it (must-fix #2); if absent the retry falls back to
+        // ``activeProjectId`` mirroring the legacy tautology.
+        this.markSendFailedForContent(
+          effectiveContent,
+          errorReason,
+          sentInstanceId,
+          payload.queue_id,
+        );
       }
     });
   }
@@ -1600,6 +1650,143 @@ export class ChatComponent implements OnInit, OnDestroy {
 
   protected onClearError(): void {
     this.sendError.set(null);
+  }
+
+  /**
+   * Defect #5 (2026-08-31): mark the bubble associated with a failed
+   * POST as ``failed: true`` so the chat-interface renders an error
+   * state + retry affordance. The bubble may have been added by the
+   * SSE ``user_message`` echo (raced the POST error) or by the
+   * optimistic-append path (response shape the BE ultimately did not
+   * persist). Without this, the user sees a delivered-style bubble
+   * for a message the server never recorded.
+   *
+   * Strategy: scan the local ``messages`` list newest-to-oldest for a
+   * user-role bubble whose content matches the just-sent text (or the
+   * delivered form for ``//x``-stripping). The first match wins — once
+   * marked failed the merge helper preserves the flag on every
+   * subsequent SSE / refetch pass.
+   *
+   * Must-fix #2 (retry stash): also stamp the original send's
+   * ``queue_id`` on the bubble so a later ``onRetryFailedMessage`` can
+   * re-POST to the SAME queue. ``sentQueueId`` may be ``string``,
+   * ``null`` (user had the selector open with nothing selected), or
+   * ``undefined`` (older callers / message input that does not carry
+   * the field). ``null`` is preserved verbatim — it is a meaningful
+   * value distinct from "stash absent".
+   */
+  private markSendFailedForContent(
+    sentContent: string,
+    errorReason: string,
+    sentInstanceId: string,
+    sentQueueId?: string | null,
+  ): void {
+    // The //x escape contract strips ONE leading slash, so the
+    // rendered bubble may show the post-strip text even though we
+    // POSTed the raw form. Match either form so the bubble (whatever
+    // path rendered it) is caught.
+    const escaped = sentContent.replace(/^\/\//, '/');
+    const activeInstanceId = this.viewState.activeInstanceId();
+    this.messages.update(msgs => {
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        const m = msgs[i];
+        if (m.role !== 'user') continue;
+        if (m.failed) continue;
+        // Only mark bubbles for the instance we sent to — defensive
+        // against an instance switch that left a phantom bubble from
+        // a prior send on the new instance's list.
+        if (m.instance_id && m.instance_id !== sentInstanceId) continue;
+        if (m.content === sentContent || m.content === escaped) {
+          const next = msgs.slice();
+          // Preserve any pre-existing queue_id (defensive — a retry
+          // that failed twice should keep the original stash rather
+          // than overwriting with a null/undefined variant that
+          // happened to round-trip differently).
+          const stash = sentQueueId !== undefined ? sentQueueId : m.queue_id;
+          next[i] = { ...m, failed: true, errorReason, queue_id: stash };
+          return next;
+        }
+      }
+      // No matching bubble — keep the list unchanged. The sendError
+      // banner at the top of the chat is still visible to the user,
+      // and the input is preserved for retry.
+      void activeInstanceId; // currently read for staleness symmetry; reserved
+      return msgs;
+    });
+  }
+
+  /**
+   * Retry a failed-send bubble. Re-POSTs the same content (which seeds
+   * a fresh optimistic-append or echo path) through the same composer
+   * path so the cooldown stamping, sendError clearing, and other
+   * invariants are exercised identically to a fresh send.
+   *
+   * Must-fix #1 (cooldown race, 2026-08-31): do NOT clear the failed
+   * marker synchronously here. If the user clicks Retry within the
+   * 3-second cooldown window of the original send, ``onSendMessage``
+   * blocks at its cooldown guard — but a synchronous marker clear
+   * would already have flipped the bubble to "delivered" with no
+   * corresponding POST, which is exactly the dishonest state defect
+   * #5 forbids. The marker is cleared in ``onSendMessage``'s SUCCESS
+   * path instead (only fires when the POST actually completes).
+   * If the cooldown blocks, the bubble stays failed — the user keeps
+   * the error state until they retry outside the cooldown window
+   * (or dismiss).
+   *
+   * Must-fix #2 (queue_id tautology, 2026-08-31): carry the original
+   * send's ``queue_id`` (stashed on the bubble at fail-mark time)
+   * through the retry POST. A fresh ``activeProjectId``-derived
+   * value would silently re-route the retry to a different queue if
+   * the user switched projects between the original fail and the
+   * retry click — defeating the project's queue isolation.
+   *
+   * ``messageInputRef`` is left untouched — the composer is still
+   * populated from the original failure, and a successful retry will
+   * clear it via the normal ``onSendMessage`` flow.
+   *
+   * Called from the chat-interface's retry button
+   * (``[retryFailedMessage]`` output).
+   */
+  protected onRetryFailedMessage(messageId: string): void {
+    const target = this.messages().find(m => m.message_id === messageId);
+    if (!target || !target.failed) return;
+    // Clear sendError on retry attempt — the bubble's failed state IS
+    // the error indicator, so the banner is redundant when a failed
+    // bubble is on screen. Cleared optimistically so the cooldown-
+    // blocked branch (which never re-fires the banner) does not leave
+    // a stale message visible after the user retries again later.
+    this.sendError.set(null);
+    // Carry the original send's ``queue_id`` so the retry lands on
+    // the SAME queue context. Falls back to ``activeProjectId`` only
+    // when the stash is genuinely absent (older mark paths, BE
+    // refetches that surfaced a failed bubble without a stash) —
+    // mirrors the original send's queue-id derivation as closely as
+    // the call surface allows.
+    const retryQueueId = target.queue_id !== undefined
+      ? target.queue_id
+      : this.tabStateService.activeProjectId() ?? null;
+    // ``retry_of_message_id`` tells the success handler which bubble
+    // to clear (id-keyed dedup means the bubble keeps its id on
+    // success). The failure path re-marks via content-match in
+    // ``markSendFailedForContent`` — no extra signal needed there.
+    this.onSendMessage({
+      content: target.content,
+      images: target.images,
+      queue_id: retryQueueId,
+      retry_of_message_id: messageId,
+    });
+  }
+
+  /**
+   * Dismiss a failed-send bubble. Removes it from the local list so
+   * the user can move on without retrying. The original composer text
+   * stays populated so the user can manually re-send or edit.
+   */
+  protected onDismissFailedMessage(messageId: string): void {
+    this.messages.update(msgs => {
+      const next = msgs.filter(m => m.message_id !== messageId);
+      return next.length === msgs.length ? msgs : next;
+    });
   }
 
   protected onToggleWatchover(): void {

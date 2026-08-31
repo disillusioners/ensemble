@@ -100,13 +100,46 @@
               @if (message.role !== 'system' && (hasMeaningfulContent(message) || !message.tool_calls || message.tool_calls.length === 0)) {
                 <div
                   class="message-bubble"
+                  [class.message-bubble-failed]="message.failed"
                   [attr.data-message-id]="message.message_id"
+                  [attr.data-message-failed]="message.failed ? 'true' : null"
                   [style.backgroundColor]="message.role === 'user' ? '#343541' : agentColor + '15'"
                   [style.border]="message.role === 'assistant' ? '1px solid ' + agentColor + '30' : 'none'"
                   [style.borderTopLeftRadius]="message.role === 'assistant' ? '4px' : '12px'"
                   [style.borderTopRightRadius]="message.role === 'user' ? '4px' : '12px'"
                 >
                   <markdown [data]="message.content || ''" mermaid></markdown>
+                </div>
+              }
+
+              <!-- Failed-send affordance (defect #5, 2026-08-31). The
+                   bubble above stays rendered so the user can see WHAT
+                   failed to send; this block renders the error label
+                   + Retry / Dismiss controls. Bound to ``message.failed``
+                   only — non-failed bubbles (the common path) keep the
+                   pre-fix shape unchanged. -->
+              @if (message.failed) {
+                <div class="message-failed-panel" role="alert" aria-live="assertive">
+                  <span class="message-failed-icon" aria-hidden="true">⚠</span>
+                  <span class="message-failed-text">
+                    Failed to send{{ message.errorReason ? ': ' + message.errorReason : '' }}
+                  </span>
+                  <button
+                    type="button"
+                    class="message-failed-retry"
+                    data-testid="message-failed-retry"
+                    (click)="onRetryFailedMessage.emit(message.message_id)"
+                  >
+                    Retry
+                  </button>
+                  <button
+                    type="button"
+                    class="message-failed-dismiss"
+                    data-testid="message-failed-dismiss"
+                    (click)="onDismissFailedMessage.emit(message.message_id)"
+                  >
+                    Dismiss
+                  </button>
                 </div>
               }
 

@@ -8,6 +8,17 @@ export interface MessagePayload {
   content: string;
   images?: string[];  // optional, not required
   queue_id?: string | null;
+  /**
+   * Defect #5 retry path (2026-08-31, must-fix #1): when set, this send
+   * is a retry of a previously-failed bubble (id-keyed). The chat
+   * component's success handler uses this to clear the failed marker
+   * on the originating bubble — the clear happens in the success path,
+   * NOT synchronously in the retry handler, so a cooldown-blocked
+   * retry preserves the user's error state (no POST went out → the
+   * bubble keeps its ``failed`` marker). Internal-only; the message
+   * input component never sets this.
+   */
+  retry_of_message_id?: string;
 }
 
 interface FilePreview {

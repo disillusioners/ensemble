@@ -187,6 +187,40 @@ export interface Message {
    * never participates in dedup — id-keyed dedup is the source of truth.
    */
   pending?: boolean;
+  /**
+   * Failed-send state (defect #5 fix, 2026-08-31). Set by the chat
+   * component's POST error handler when the request to /messages was
+   * rejected (HTTP error, timeout, network failure, or any case where
+   * the user saw a bubble rendered but the server never persisted the
+   * message — e.g. SSE echo arrived before the POST errored, OR the
+   * optimistic append path added a bubble for a response shape that
+   * ultimately did not survive a subsequent server check). The bubble
+   * renders with an error styling + retry affordance. The merge helper
+   * does NOT clear this on SSE echo (the server cannot have a message
+   * we never sent) and the TTL eviction does NOT touch it (user must
+   * retry or explicitly dismiss). The flag is a UI affordance only —
+   * id-keyed dedup remains the source of truth.
+   */
+  failed?: boolean;
+  /** Error reason surfaced in the failed-state UI. */
+  errorReason?: string;
+  /**
+   * Queue context the original send was routed to (defect #5 retry
+   * fix, 2026-08-31, must-fix #2). Set on the bubble when the chat
+   * component's POST error handler marks the send failed — the retry
+   * handler reads this back so the retry POST lands on the SAME
+   * queue as the original send. A fresh ``activeProjectId``-derived
+   * value would silently route the retry to a different queue if the
+   * user switched projects between the original fail and the retry
+   * click. ``null`` is a meaningful value (user had the queue
+   * selector open and selected no queue); ``undefined`` means the
+   * stash is absent (older mark paths, BE refetches). Server-blind:
+   * never persisted, never emitted over SSE / refetch — but the
+   * client-side merge helper preserves it across in-memory SSE
+   * echo merges the same way it preserves the ``failed`` flag so
+   * a retry that races an echo still finds the stash.
+   */
+  queue_id?: string | null;
 }
 
 // SSE event types
