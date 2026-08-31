@@ -1615,7 +1615,7 @@ class TestJunkReportCounter:
             ]
             service = _make_report_fetch_service(messages=messages)
             with _patch_fetch(messages):
-                service._get_last_assistant_message_raw(
+                await service._get_last_assistant_message_raw(
                     "test-instance-id", agent_id="worker"
                 )
             from daemon.services.report_integrity_metrics import get_junk_report_total
@@ -1634,7 +1634,7 @@ class TestJunkReportCounter:
             ]
             service = _make_report_fetch_service(messages=messages)
             with _patch_fetch(messages):
-                service._get_last_assistant_message_raw(
+                await service._get_last_assistant_message_raw(
                     "test-instance-id", agent_id="worker"
                 )
             from daemon.services.report_integrity_metrics import get_junk_report_total

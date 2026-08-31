@@ -91,14 +91,16 @@ cd "$PROJECT_DIR"
 
 # Script-internal timeout guard (Layer 2): 180s — interrupts hung tests.
 # Command-level timeout (Layer 1): caller wraps with `timeout 300`.
+# Safe-form `|| EXIT_CODE=$?` defeats `set -e` so the RESULT echo prints
+# on failure paths too (the bare `CMD; EXIT_CODE=$?` pattern aborts on
+# non-zero exit before the capture).
 timeout 180s .venv/bin/pytest \
   tests/unit/services/test_report_integrity_guard.py \
   tests/unit/services/test_b_fail_open.py \
   tests/unit/services/test_b_kill_switch_registry.py \
   tests/unit/services/test_observer_finalize_no_job.py \
   tests/unit/services/test_w2_dead_site_symmetry.py \
-  --override-ini="addopts=" --tb=short -q 2>&1
-EXIT_CODE=$?
+  --override-ini="addopts=" --tb=short -q 2>&1 || EXIT_CODE=$?
 if [ $EXIT_CODE -eq 124 ]; then
   echo "RESULT: TIMEOUT"
   exit 124
