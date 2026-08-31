@@ -213,6 +213,7 @@ export class CommandStateService {
     // through to apply, corrupting the state (a NaN phaseSeq stored on
     // the entry means the next monotonic check also slips through). The
     // fix: ignore when NOT finite OR less-than-or-equal current seq.
+    // Defect #7 BE hoist (2026-08-31): fast in-order waiting→terminal (RUNNING below-floor noop) renders the terminal directly — the waiting SSE applies below as a Rule 4 heartbeat refresh and the terminal transitions legally via Rule 5; out-of-order stale waiting is dropped here by design.
     if (!Number.isFinite(event.phase_seq) || event.phase_seq <= current.phaseSeq) return;
 
     if (event.phase === current.phase) {
