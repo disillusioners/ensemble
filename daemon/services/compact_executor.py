@@ -138,6 +138,60 @@ _COMPACTED_TYPE_TRUNCATION = "truncation"
 _COMPACTED_TYPE_EMERGENCY_TRUNCATION = "emergency_truncation"
 _COMPACTED_TYPE_NOOP = "noop"
 
+# ─────────────────────────────────────────────────────────────────────────
+# W-4.4 / N1 — engine → wire compacted_type mapping
+# ─────────────────────────────────────────────────────────────────────────
+# The engine emits the LITERAL strings ``"summarization"``,
+# ``"partial_summary"``, ``"truncation"``, and ``"emergency_truncation"``
+# from ``daemon/compaction.py:875/900/920/933/953/966/1547``. The mapping
+# below is TOTAL-BY-CONSTRUCTION: every known engine value maps to a wire
+# value, and any unforeseen engine value (forward-compat) falls through
+# with the raw engine string preserved — so the wire layer can carry it
+# as diagnostic detail and the executor never reports an honest engine
+# success as ``failed/unknown_compaction_type`` (N1 finding, 2026-08-31).
+#
+# Wire enum (CompactedType, ``daemon/services/command_dispatcher.py:133``):
+#     ``summary | partial_summary | truncation | noop``
+#
+# Engine vocabulary → wire mapping:
+#     ``summarization``         → ``summary``         (engine success path)
+#     ``summary``               → ``summary``         (alias / forward-compat)
+#     ``chunked_summarization`` → ``summary``         (legacy collapse per WS-3.4)
+#     ``partial_summary``       → ``partial_summary`` (wire-compatible verbatim)
+#     ``truncation``            → ``truncation``      (wire-compatible verbatim)
+#     ``emergency_truncation``  → ``truncation``      (collapsed; diagnostic
+#                                                       ``engine_compacted_type``
+#                                                       carries the raw)
+#     ``<unforeseen>``          → ``<raw engine value>`` (forward-compat pass-through)
+_ENGINE_TYPE_TO_WIRE_COMPACTED_TYPE: dict[str, str] = {
+    "summarization": _COMPACTED_TYPE_SUMMARY,
+    "summary": _COMPACTED_TYPE_SUMMARY,
+    "chunked_summarization": _COMPACTED_TYPE_SUMMARY,
+    "partial_summary": _COMPACTED_TYPE_PARTIAL_SUMMARY,
+    "truncation": _COMPACTED_TYPE_TRUNCATION,
+    "emergency_truncation": _COMPACTED_TYPE_TRUNCATION,
+}
+
+# Engine compaction types that represent a SUCCESSFUL engine run. These
+# are the engine values that, on the success path (failure_kind=None),
+# map to ``_PHASE_SUCCESS``. Used by ``_map_engine_result_to_wire`` to
+# distinguish "engine did its work" from "engine applied a fallback".
+_ENGINE_SUCCESS_COMPACTION_TYPES: frozenset[str] = frozenset({
+    "summarization",
+    "summary",
+    "chunked_summarization",
+})
+
+# Engine compaction types that emit a fallback boundary on the engine
+# side (partial / truncating). These map to ``_PHASE_FALLBACK_APPLIED``
+# UNLESS the engine also stamped ``failure_kind="error"`` (genuine LLM
+# error — see W-4.2), in which case the wire outcome is ``failed``.
+_ENGINE_FALLBACK_COMPACTION_TYPES: frozenset[str] = frozenset({
+    "partial_summary",
+    "truncation",
+    "emergency_truncation",
+})
+
 _NOOP_REASON_BELOW_FLOOR = "below_floor"
 _NOOP_REASON_RECENTLY_COMPACTED = "recently_compacted"
 
@@ -1193,26 +1247,48 @@ class WireOutcome:
 def _map_engine_result_to_wire(result: CompactionResult) -> WireOutcome:
     """Map engine ``CompactionResult`` → executor wire outcome.
 
-    Three-way mapping (approver note 1, plan §7 amendment, W-4.2):
+    W-4.4 / N1 (2026-08-31) — TOTAL-BY-CONSTRUCTION mapping. The engine
+    emits ``summarization`` (NOT ``summary``) on the normal success
+    path (``daemon/compaction.py:920``); the prior mapping pinned
+    ``"summary"`` which never matched a real engine emission, surfacing
+    an honest engine success as ``failed/unknown_compaction_type`` under
+    hammer load (regression caught at slash-commands re-gate
+    9eb1b67e, command 7c78a141 vicinity). Every known engine value is
+    now in :data:`_ENGINE_TYPE_TO_WIRE_COMPACTED_TYPE`; any unforeseen
+    value passes through to the wire layer as a diagnostic detail and
+    is NEVER misinterpreted as a failure when ``failure_kind`` is
+    ``None`` (engine success).
 
-    * ``summary`` → ``success`` (full summarization succeeded).
-    * ``partial_summary`` + ``failure_kind="timeout"`` →
-      ``timed_out → fallback_applied`` (the un-summarized span was
-      trimmed; partial summaries survived).
-    * ``truncation`` + ``failure_kind="timeout"`` →
-      ``timed_out → fallback_applied`` (no summaries; truncate
-      fallback fired on timeout).
-    * ``truncation`` + ``failure_kind="error"`` → ``failed`` + a
-      fallback note if the truncate fallback actually applied
-      (W-4.2 — engine misclassifies a genuine LLM error that
-      applied the truncate fallback as ``failure_kind="error"``;
-      mapping now distinguishes so FE does not see "timed out"
-      for a real error).
-    * ``emergency_truncation`` → ``timed_out → fallback_applied``
-      (documented choice — the wire enum only carries
-      ``truncation`` / ``partial_summary`` for the timed-out /
-      fallback cases; emergency is mapped to ``truncation`` at the
-      detail level).
+    Phase matrix (per the executor pre-flight review):
+
+    * ``success-path engine type`` (``summarization`` / ``summary`` /
+      ``chunked_summarization``) + ``failure_kind="error"`` →
+      contradiction by construction; treated as ``success`` (the engine
+      DID do its work; the failure_kind stamp is a label artifact).
+      Defense only — the success path emits ``failure_kind=None``.
+    * ``success-path engine type`` + other ``failure_kind`` →
+      ``success``.
+    * ``fallback-path engine type`` (``partial_summary`` /
+      ``truncation`` / ``emergency_truncation``) + ``failure_kind="error"`` →
+      ``failed`` + ``fallback_applied`` note (W-4.2 — a genuine LLM
+      error that still applied the truncate fallback must surface as
+      failed, not timed_out → fallback_applied).
+    * ``fallback-path engine type`` + timeout / None →
+      ``fallback_applied``. Emergency is collapsed to
+      ``compacted_type="truncation"`` with the raw engine value
+      preserved under ``engine_compacted_type``.
+    * ``unknown engine type`` + ``failure_kind="error"`` →
+      ``failed`` + unknown diagnostic.
+    * ``unknown engine type`` + no failure →
+      ``success`` + unknown diagnostic (forward-compat — the engine
+      did its work; we just don't yet recognize the type).
+
+    Tokens accounting: ``tokens_before``, ``tokens_after``, and
+    ``tokens_saved`` pass through from the engine result ``UNMODIFIED``
+    (N1 finding — the live event showed ``tokens_saved=-6764`` after a
+    summarization that GREW the context. The executor MUST report the
+    honest negative delta; clamping to 0 or fabricating a positive
+    value would mask a real engine anomaly from the FE / operator.)
 
     Returns:
         :class:`WireOutcome` carrying the terminal phase + detail.
@@ -1220,9 +1296,18 @@ def _map_engine_result_to_wire(result: CompactionResult) -> WireOutcome:
     ctype = result.compaction_type
     fk = result.failure_kind
 
+    # Pass-through from the engine's :class:`CompactionResult`. The
+    # helper translates ``ctype`` via the alias dict; for any
+    # unforeseen engine type it returns the raw value so the wire
+    # layer keeps a single, homogeneous ``compacted_type`` key.
     detail: dict = {
         "compacted_type": _wire_compacted_type(ctype),
         "failure_kind": fk,
+        # HONEST accounting — do NOT clamp / fabricate. The engine
+        # computes ``tokens_saved = total_tokens - tokens_after`` and
+        # negative values are real (e.g., summary output larger than
+        # the trimmed span when the conversation is dominated by
+        # short structured exchanges; N1 evidence: 41,865 → 48,629).
         "tokens_before": result.tokens_before,
         "tokens_after": result.tokens_after,
         "tokens_saved": result.tokens_saved,
@@ -1232,77 +1317,96 @@ def _map_engine_result_to_wire(result: CompactionResult) -> WireOutcome:
     if result.forced:
         detail["forced"] = True
 
-    if ctype == _COMPACTED_TYPE_SUMMARY:
+    is_success_type = ctype in _ENGINE_SUCCESS_COMPACTION_TYPES
+    is_fallback_type = ctype in _ENGINE_FALLBACK_COMPACTION_TYPES
+    is_known_type = ctype in _ENGINE_TYPE_TO_WIRE_COMPACTED_TYPE
+
+    # Diagnostic: surface the RAW engine value whenever it differs from
+    # the wire value (engine emission not 1:1 wire-compatible, or the
+    # engine type was unrecognized). This preserves forensic evidence
+    # for the FE / operator without altering the wire enum.
+    if (not is_known_type) or ctype != detail["compacted_type"]:
+        detail["engine_compacted_type"] = ctype
+    if not is_known_type:
+        detail["unknown_compaction_type"] = True
+
+    # Emergency → wire truncation collapse (preserves the legacy
+    # diagnostic key for backward compatibility with the 41 existing
+    # executor tests that pin ``compacted_type="truncation"`` +
+    # ``engine_compacted_type="emergency_truncation"``).
+    if ctype == _COMPACTED_TYPE_EMERGENCY_TRUNCATION:
+        detail["compacted_type"] = _COMPACTED_TYPE_TRUNCATION
+        # ``engine_compacted_type`` already set above for non-1:1
+        # values; keep it as the literal engine string.
+
+    # W-4.4 branch 1: genuine engine failure on a fallback-path type.
+    # The engine applied the truncate fallback AFTER its LLM call
+    # errored. The wire outcome is ``failed`` (NOT
+    # ``timed_out → fallback_applied``); the fallback note tells
+    # the FE the engine still kept the user-visible message tail.
+    if fk == _FAILURE_KIND_ERROR and not is_success_type:
+        detail.setdefault("fallback_applied", True)
+        return WireOutcome(terminal_phase=_PHASE_FAILED, detail=detail)
+
+    # W-4.4 branch 2: engine success path — summarization (or its
+    # forward-compat / legacy aliases) completed cleanly. Return
+    # ``success`` regardless of any odd ``failure_kind`` stamp (which
+    # by construction cannot occur; the defense is intentional and
+    # mirrors the docstring of :class:`daemon.compaction.CompactionResult`).
+    if is_success_type:
+        # For genuinely-success-type values we don't need the
+        # ``engine_compacted_type`` diagnostic — it equals the wire
+        # value for the canonical mapping. Strip if redundant so the
+        # detail stays minimal.
+        if detail.get("engine_compacted_type") == detail["compacted_type"]:
+            detail.pop("engine_compacted_type", None)
         return WireOutcome(terminal_phase=_PHASE_SUCCESS, detail=detail)
 
-    if ctype in (
-        _COMPACTED_TYPE_PARTIAL_SUMMARY,
-        _COMPACTED_TYPE_TRUNCATION,
-        _COMPACTED_TYPE_EMERGENCY_TRUNCATION,
-    ):
-        # W-4.2 — branch on failure_kind BEFORE selecting the terminal
-        # phase. A genuine LLM error that applied the truncate fallback
-        # (failure_kind="error" + compacted_type="truncation") is a
-        # failed outcome, NOT timed_out → fallback_applied. The
-        # fallback note carries the diagnostic so the FE can still
-        # show "we kept your messages, just trimmed" alongside the
-        # failure detail.
-        if fk == "error":
-            # Error case — failed + fallback note. The wire enum
-            # has no "failed_with_fallback" so we encode via detail.
-            detail.setdefault("fallback_applied", True)
-            return WireOutcome(terminal_phase=_PHASE_FAILED, detail=detail)
-        # timeout (or None for the emergency / unknown path) →
-        # timed_out → fallback_applied (two-step in caller).
-        if ctype == _COMPACTED_TYPE_EMERGENCY_TRUNCATION:
-            # Documented mapping — emergency → wire truncation.
-            detail["compacted_type"] = _COMPACTED_TYPE_TRUNCATION
-            detail["engine_compacted_type"] = _COMPACTED_TYPE_EMERGENCY_TRUNCATION
+    # W-4.4 branch 3: fallback-path type with timeout / None —
+    # ``timed_out → fallback_applied`` (the un-summarized span was
+    # trimmed; partial summaries survived).
+    if is_fallback_type:
         return WireOutcome(
             terminal_phase=_PHASE_FALLBACK_APPLIED, detail=detail
         )
 
-    # Unknown / unhandled engine enum — surface as failed.
-    return WireOutcome(
-        terminal_phase=_PHASE_FAILED,
-        detail={
-            **detail,
-            "reason": "unknown_compaction_type",
-            "engine_compacted_type": ctype,
-        },
-    )
+    # W-4.4 branch 4 (TOTAL-BY-CONSTRUCTION default): unknown engine
+    # type with no failure_kind. The engine ran successfully enough
+    # to return a result; the executor simply hasn't seen this type
+    # string before (forward-compat / pre-feature engine variant /
+    # post-merge vocabulary drift). Surface as ``success`` with the
+    # raw engine value as diagnostic detail — explicitly NEVER as
+    # ``failed/unknown_compaction_type``. The detail key
+    # ``unknown_compaction_type=True`` lets the FE / operator
+    # recognize a new engine vocabulary if it ever appears.
+    return WireOutcome(terminal_phase=_PHASE_SUCCESS, detail=detail)
 
 
 def _wire_compacted_type(engine_compacted_type: str) -> str:
     """Translate engine ``compaction_type`` → wire ``compacted_type``.
 
-    The wire enum is ``summary | partial_summary | truncation | noop``
-    (WS-5 §7). The engine emits ``summary | partial_summary |
-    truncation | emergency_truncation`` (``chunked_summarization``
-    is collapsed into ``summary`` by the WS-3.4 amendment). The
-    executor-only ``noop`` value comes from pre-checks; this helper
-    is NOT used for noop paths.
+    W-4.4 / N1 — TOTAL-BY-CONSTRUCTION via the explicit alias dict
+    :data:`_ENGINE_TYPE_TO_WIRE_COMPACTED_TYPE`. The wire enum is
+    ``summary | partial_summary | truncation | noop`` (CompactedType,
+    ``daemon/services/command_dispatcher.py:133``). For any
+    unrecognized engine emission (forward-compat), the raw engine
+    string is returned — the helper is exhaustive over known engine
+    values and permissive over unknowns, so the wire layer can carry
+    the unknown as a diagnostic detail rather than the executor
+    mis-classifying an honest engine success as a failure.
 
     Args:
         engine_compacted_type: The ``CompactionResult.compaction_type``
             value.
 
     Returns:
-        The wire-compatible ``compacted_type``. Emergency is mapped
-        to ``truncation`` at this layer (the diagnostic key
-        ``engine_compacted_type`` preserves the original).
+        The wire-compatible ``compacted_type``. ``emergency_truncation``
+        collapses to ``truncation`` (the legacy mapping; the raw is
+        preserved by the caller under ``engine_compacted_type``).
     """
-    if engine_compacted_type in (
-        _COMPACTED_TYPE_SUMMARY,
-        _COMPACTED_TYPE_PARTIAL_SUMMARY,
-        _COMPACTED_TYPE_TRUNCATION,
-    ):
-        return engine_compacted_type
-    if engine_compacted_type == _COMPACTED_TYPE_EMERGENCY_TRUNCATION:
-        return _COMPACTED_TYPE_TRUNCATION
-    # Unknown — return as-is so the wire enum stays intact and the
-    # caller can attach the diagnostic key.
-    return engine_compacted_type
+    return _ENGINE_TYPE_TO_WIRE_COMPACTED_TYPE.get(
+        engine_compacted_type, engine_compacted_type
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────

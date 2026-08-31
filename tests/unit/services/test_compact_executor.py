@@ -848,6 +848,211 @@ class TestEngineToWireMapping:
         assert wire.terminal_phase == CommandPhase.FAILED.value
         assert wire.detail["compacted_type"] == "totally-unknown"
 
+    # ─────────────────────────────────────────────────────────────────────
+    # W-4.4 / N1 (2026-08-31) — engine → wire TOTAL-BY-CONSTRUCTION.
+    #
+    # Live re-gate evidence at 9eb1b67e, command 7c78a141 vicinity: an
+    # accepted compact terminalized ``phase=failed, reason=
+    # unknown_compaction_type`` while the engine emitted
+    # ``compaction_type="summarization"`` (its actual success-path
+    # literal at ``daemon/compaction.py:920``). 1 occurrence / 3
+    # accepted compacts under hammer load. Root cause: the prior
+    # mapping pinned ``"summary"`` which never matched the engine's
+    # real emission — the engine's mapping table is now total-by-
+    # construction via ``_ENGINE_TYPE_TO_WIRE_COMPACTED_TYPE``.
+    #
+    # These tests pin (a) the regression — engine literal
+    # ``"summarization"`` maps to ``success`` — and (b) the full
+    # enum coverage + the ``fk="error"`` carve-out + the
+    # forward-compat safe default.
+    # ─────────────────────────────────────────────────────────────────────
+
+    def test_engine_summarization_literal_maps_to_success(self):
+        """W-4.4 / N1 — engine emits ``"summarization"`` (its success-
+        path literal at ``daemon/compaction.py:920``) and the
+        executor MUST translate that to wire ``compacted_type=
+        "summary"`` + ``phase=success``. Pinning this prevents a
+        re-introduction of the regressed pre-W-4.4 mapping.
+        """
+        result = _make_compaction_result(
+            compaction_type="summarization",
+            failure_kind=None,
+            forced=True,
+            tokens_before=41865,
+            tokens_after=48629,
+            tokens_saved=-6764,  # negative — engine grew the context
+        )
+        wire = _map_engine_result_to_wire(result)
+        assert wire.terminal_phase == CommandPhase.SUCCESS.value, (
+            "N1 regression: engine emitted summarization (success), the "
+            f"executor MUST return success; got {wire.terminal_phase!r}"
+        )
+        assert wire.detail["compacted_type"] == "summary", (
+            f"wire enum must collapse engine 'summarization' → "
+            f"'summary'; got {wire.detail['compacted_type']!r}"
+        )
+        assert wire.detail["failure_kind"] is None
+        assert wire.detail.get("reason") != "unknown_compaction_type"
+        # Honest pass-through of the negative delta.
+        assert wire.detail["tokens_saved"] == -6764
+
+    def test_engine_legacy_summary_alias_maps_to_success(self):
+        """W-4.4 — engine ``"summary"`` is an accepted alias (forward-
+        compat / pre-feature variant). Maps identically to wire
+        ``"summary"`` + ``phase=success``. Pinned by the same byte-
+        compatibility requirement as ``test_summary_to_success``.
+        """
+        result = _make_compaction_result(
+            compaction_type="summary", failure_kind=None
+        )
+        wire = _map_engine_result_to_wire(result)
+        assert wire.terminal_phase == CommandPhase.SUCCESS.value
+        assert wire.detail["compacted_type"] == "summary"
+        assert wire.detail["failure_kind"] is None
+
+    def test_engine_chunked_summarization_legacy_collapse(self):
+        """W-4.4 — engine ``"chunked_summarization"`` is the legacy
+        emit (pre-WS-3.4) and is collapsed to wire ``"summary"`` per
+        the WS-3.4 amendment. Mapped identically to the other
+        success-path engine emissions.
+        """
+        result = _make_compaction_result(
+            compaction_type="chunked_summarization",
+            failure_kind=None,
+        )
+        wire = _map_engine_result_to_wire(result)
+        assert wire.terminal_phase == CommandPhase.SUCCESS.value
+        assert wire.detail["compacted_type"] == "summary"
+        assert wire.detail["failure_kind"] is None
+
+    def test_negative_tokens_saved_passes_through_unchanged(self):
+        """W-4.4 / N1 — the executor MUST report the actual negative
+        ``tokens_saved`` on the wire (no clamping to 0, no
+        fabrication). The live re-gate showed ``-6764`` after a
+        summarization that GREW the context; masking that delta
+        would defeat operator / FE diagnosis.
+        """
+        result = _make_compaction_result(
+            compaction_type="summarization",
+            failure_kind=None,
+            tokens_before=41865,
+            tokens_after=48629,
+            tokens_saved=-6764,
+        )
+        wire = _map_engine_result_to_wire(result)
+        assert wire.detail["tokens_before"] == 41865
+        assert wire.detail["tokens_after"] == 48629
+        assert wire.detail["tokens_saved"] == -6764, (
+            "negative tokens_saved MUST pass through; got "
+            f"{wire.detail['tokens_saved']!r}"
+        )
+
+    def test_unknown_engine_type_with_no_failure_maps_to_success(self):
+        """W-4.4 — TOTAL-BY-CONSTRUCTION default. An unforeseen engine
+        value (e.g., ``"summary_v2"`` from a post-merge feature
+        branch) with ``failure_kind=None`` is treated as an HONEST
+        engine success: ``phase=success`` + raw engine value carried
+        as diagnostic detail under ``engine_compacted_type`` and
+        ``unknown_compaction_type=True``. NEVER
+        ``failed/unknown_compaction_type`` — N1 explicitly forbids
+        that carve-out for engine success.
+        """
+        result = _make_compaction_result(
+            compaction_type="summary_v2",
+            failure_kind=None,
+        )
+        wire = _map_engine_result_to_wire(result)
+        assert wire.terminal_phase == CommandPhase.SUCCESS.value, (
+            "unknown engine value + no failure MUST surface as success "
+            f"(forward-compat); got {wire.terminal_phase!r}"
+        )
+        assert wire.detail["compacted_type"] == "summary_v2", (
+            "wire enum carries the raw engine value so the FE can "
+            "recognize a new engine vocabulary; got "
+            f"{wire.detail['compacted_type']!r}"
+        )
+        assert wire.detail.get("engine_compacted_type") == "summary_v2"
+        assert wire.detail.get("unknown_compaction_type") is True
+
+    def test_unknown_engine_type_with_error_failure_maps_to_failed(self):
+        """W-4.4 — the failure_kind-based carve-out still binds for
+        ``failed`` on truly-unknown engine types: when the engine
+        stamps ``failure_kind="error"`` the wire outcome is
+        ``failed`` + diagnostic, regardless of how exotic the
+        ``compaction_type`` is. This protects the original safety
+        case while the default-unknown-success branch above
+        protects the engine-success path.
+        """
+        result = _make_compaction_result(
+            compaction_type="summary_v2",
+            failure_kind="error",
+            summarization_error="internal_blew_up",
+        )
+        wire = _map_engine_result_to_wire(result)
+        assert wire.terminal_phase == CommandPhase.FAILED.value
+        assert wire.detail.get("unknown_compaction_type") is True
+        assert wire.detail.get("fallback_applied") is True
+
+    @pytest.mark.parametrize(
+        "engine_value,fk,expected_phase,expected_wire_type",
+        [
+            # Success-path engine values → wire summary / success.
+            ("summarization", None, "success", "summary"),
+            ("summarization", "timeout", "success", "summary"),
+            ("summary", None, "success", "summary"),
+            ("summary", "error", "success", "summary"),  # defense: fk=error on
+                                                          # success-type is
+                                                          # contradictory and
+                                                          # treated as success
+            ("chunked_summarization", None, "success", "summary"),
+            # Fallback-path engine values, no error → fallback_applied.
+            ("partial_summary", "timeout", "fallback_applied", "partial_summary"),
+            ("partial_summary", None, "fallback_applied", "partial_summary"),
+            ("truncation", "timeout", "fallback_applied", "truncation"),
+            ("truncation", None, "fallback_applied", "truncation"),
+            ("emergency_truncation", "timeout", "fallback_applied", "truncation"),
+            ("emergency_truncation", None, "fallback_applied", "truncation"),
+            # Fallback-path + fk="error" → failed.
+            ("partial_summary", "error", "failed", "partial_summary"),
+            ("truncation", "error", "failed", "truncation"),
+            ("emergency_truncation", "error", "failed", "truncation"),
+            # Unknown / forward-compat: no error → success; with error →
+            # failed. The safe default for unforeseen engine values
+            # is the SIGNATURE of W-4.4 (N1 fix).
+            ("totally-new-type", None, "success", "totally-new-type"),
+            ("totally-new-type", "error", "failed", "totally-new-type"),
+        ],
+    )
+    def test_engine_to_wire_enum_exhaustively(
+        self, engine_value, fk, expected_phase, expected_wire_type
+    ):
+        """W-4.4 — parametrize EVERY known engine emission path
+        enumerated in ``daemon/compaction.py`` AND the failure_kind
+        × type combinations. The mapping is TOTAL-BY-CONSTRUCTION:
+        every input terminates with a sane phase + wire type; no
+        input lands in the legacy ``failed/unknown_compaction_type``
+        fallback UNLESS the engine itself reported an error.
+        """
+        result = _make_compaction_result(
+            compaction_type=engine_value,
+            failure_kind=fk,
+            forced=True,
+        )
+        wire = _map_engine_result_to_wire(result)
+        assert wire.terminal_phase == expected_phase, (
+            f"engine={engine_value!r} fk={fk!r}: expected "
+            f"phase={expected_phase!r}, got {wire.terminal_phase!r}"
+        )
+        assert wire.detail["compacted_type"] == expected_wire_type, (
+            f"engine={engine_value!r} fk={fk!r}: expected "
+            f"compacted_type={expected_wire_type!r}, got "
+            f"{wire.detail['compacted_type']!r}"
+        )
+        # Engine-success path MUST NOT carry reason=unknown_compaction_type.
+        # That string is reserved for genuinely-failed engine results.
+        if expected_phase == "success":
+            assert wire.detail.get("reason") != "unknown_compaction_type"
+
 
 class TestPhaseSeqMonotonicity:
     """W-3.1 / W-3.2 — phase_seq is STRICTLY increasing across the
