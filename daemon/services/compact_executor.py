@@ -1238,14 +1238,15 @@ async def _heartbeat_loop(
     executor's outer finally cancels this task; ``CancelledError`` is
     swallowed inside ``wait``.
 
-    W-3.1 / W-3.2 — ``phase_seq`` is read from the dispatcher's
-    registry (single source of truth) via ``context.current_phase_seq()``
-    at emit time. NO local counter, NO ``phase_seq_provider``
-    closure — the registry is bumped on every update_phase /
-    terminalize, so a heartbeat re-emit lands on the registry's
-    current value. The previous local counter could collide with a
-    terminal event on a >10s compaction (FE dedup drops the
-    terminal); this design is collision-proof.
+    W-3.1 / W-3.2 — the heartbeat READS the dispatcher's
+    ``current_phase_seq`` (single source of truth) via
+    ``context.current_phase_seq()`` at emit time — it does NOT
+    advance it. NO local counter, NO ``phase_seq_provider``
+    closure — the shared counter is advanced on terminalize via
+    ``update_phase(bump_seq=True)``, so a heartbeat re-emit lands
+    on the registry's current value. The previous local counter
+    could collide with a terminal event on a >10s compaction (FE
+    dedup drops the terminal); this design is collision-proof.
     """
     try:
         while True:

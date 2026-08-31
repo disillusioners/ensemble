@@ -1060,6 +1060,18 @@ class TestExecutorCompactOnRealQuiescentInstanceWithPersistence:
                     f"got kwargs={second_call[2]!r}"
                 )
 
+                # Pin the POST-WRITE quiescence symmetry EXPLICITLY
+                # (mirror of the pre-write assertion at the seed
+                # block): after BOTH aupdate_state writes have landed,
+                # the checkpoint's ``next`` must STILL be ``()`` —
+                # the C1 Variant-A recipe must not strand a node
+                # pointer at the persisted checkpoint.
+                st_post = await compiled.aget_state(cfg)
+                assert st_post.next == (), (
+                    f"checkpoint must remain quiescent (next=()) "
+                    f"after both aupdate_state writes; got next={st_post.next!r}"
+                )
+
                 # 3. NO-BRICK — subsequent astream runs the agent.
                 runs.clear()
                 async for _chunk in compiled.astream(
