@@ -564,12 +564,23 @@ class CommandStateRegistry:
         if not ring:
             return None
         now = time.monotonic()
+        # Snapshot the values atomically BEFORE iterating. Iterating
+        # the live OrderedDict while mutating it (the lazy-evict
+        # ``ring.pop(...)`` below fires when an entry has expired)
+        # raises ``RuntimeError: OrderedDict mutated during iteration``
+        # in CPython — see defect #3 (2026-08-31 live gate) which
+        # surfaced this as a transient 500 on GET /commands/active.
+        # Iterating a ``list`` snapshot decouples iteration from
+        # mutation; eviction of expired entries continues to bound
+        # the ring at read time as before.
+        snapshot = list(ring.values())
         # Iteration is insertion order; ``reversed`` gives newest first.
-        for entry in reversed(ring.values()):
+        for entry in reversed(snapshot):
             elapsed = now - entry.last_event_at
             if elapsed <= entry.ttl_seconds:
                 return entry
-            # Lazy eviction — drop the expired entry we touched.
+            # Lazy eviction — drop the expired entry we touched. Safe
+            # because we iterate the snapshot, not the live dict.
             ring.pop(entry.command_id, None)
         return None
 

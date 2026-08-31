@@ -362,6 +362,83 @@ class TestCommandStateRegistry:
         # The per-instance ring slice is emptied by the lazy-evict pass.
         assert s._ring.get("inst-A") in (None, {})  # lazy-evicted
 
+    def test_ttl_expiry_multiple_expired_entries_does_not_mutate_during_iteration(self):
+        """Defect #3 (2026-08-31 live gate) — GET /commands/active raised
+        HTTP 500 ``RuntimeError: OrderedDict mutated during iteration``
+        when the per-instance ring held multiple expired entries.
+
+        Root cause: ``get_for_endpoint`` iterated
+        ``reversed(ring.values())`` and the lazy-eviction
+        ``ring.pop(...)`` mutated the same OrderedDict mid-iteration.
+        CPython detects the size change and raises.
+
+        Deterministic repro: terminalize multiple commands to populate
+        the per-instance ring, then mark every entry expired by setting
+        ``last_event_at`` backwards (no ``time.sleep`` so the test is
+        reliable and finishes in <10ms). Old code raised
+        ``RuntimeError`` here; new code returns ``None`` and the ring
+        slice is cleaned.
+        """
+        s = self._make(ttl=1)
+        # Need >=2 ring entries so the for-loop has at least one
+        # iteration step AFTER the first pop() — the error fires on the
+        # NEXT iteration when CPython detects the size change.
+        for cmd_id in ("cmd-1", "cmd-2", "cmd-3"):
+            s.record_start(
+                instance_id="inst-A",
+                command_id=cmd_id,
+                command="compact",
+                ttl_seconds=1,
+            )
+            s.terminalize("inst-A", cmd_id, phase="success")
+        ring = s._ring["inst-A"]
+        assert len(ring) == 3
+        # Force-expire every entry deterministically — wall-clock pin
+        # makes the test independent of system scheduling jitter.
+        past = time.monotonic() - 100.0  # 100s ago → way past TTL=1
+        for entry in ring.values():
+            entry.last_event_at = past
+        # The call that crashed on the old code. Must NOT raise.
+        result = s.get_for_endpoint("inst-A")
+        # All expired → endpoint reports "no command".
+        assert result is None
+        # Lazy-evict pass emptied the per-instance ring slice.
+        assert s._ring.get("inst-A") in (None, {})
+
+    def test_get_for_endpoint_prefers_newest_unexpired_with_expired_older(self):
+        """Companion to the defect-#3 fix — confirms the snapshot-iterate
+        pattern preserves the "newest wins" semantic when an older
+        expired entry sits beside a fresh one in the ring.
+
+        Iterates ``reversed(values)`` → newest first → returns on the
+        first FRESH hit, never touches the older expired entry on this
+        call (a future call will evict it lazily once it also expires).
+        The point is: no exception + correct ordering.
+        """
+        s = self._make(ttl=10)
+        # cmd-1 — old, marked expired below.
+        s.record_start(
+            instance_id="inst-A",
+            command_id="cmd-1",
+            command="compact",
+            ttl_seconds=10,
+        )
+        s.terminalize("inst-A", "cmd-1", phase="success")
+        # cmd-2 — newest, stays fresh.
+        s.record_start(
+            instance_id="inst-A",
+            command_id="cmd-2",
+            command="compact",
+            ttl_seconds=10,
+        )
+        s.terminalize("inst-A", "cmd-2", phase="success")
+        # Force-expire ONLY cmd-1.
+        s._ring["inst-A"]["cmd-1"].last_event_at = time.monotonic() - 100.0
+        # Newest entry (cmd-2) wins — no exception.
+        ac = s.get_for_endpoint("inst-A")
+        assert ac is not None
+        assert ac.command_id == "cmd-2"
+
     def test_get_for_endpoint_prefers_active_over_ring(self):
         s = self._make()
         s.record_start(
