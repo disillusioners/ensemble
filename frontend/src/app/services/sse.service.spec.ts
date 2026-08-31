@@ -1,5 +1,6 @@
 import { signal } from '@angular/core';
 import type { Message, SSEEvent } from '../models';
+import { SseService as RealSseService } from './sse.service';
 
 // Mock EventSource class for testing
 class MockEventSource {
@@ -46,15 +47,71 @@ class TestSseService {
   isStreaming = signal(false);
   events = signal<SSEEvent[]>([]);
   latestError = signal<{ message: string; instance_id?: string } | null>(null);
-  
+
   // Messages from checkpoint events
   messages = signal<Message[]>([]);
 
   // Status change events for instance updates
   statusChange = signal<{ instance_id: string; status: string; agent_id?: string } | null>(null);
 
+  // Reconnect-refetch trigger (message-display-latency §4.3 item 10).
+  // Mirrors the real service: bumped exactly once per error→connected
+  // transition so a stable connection doesn't loop.
+  refetchRequest = signal<number>(0);
+
+  // Terminal-status pending-purge trigger (message-display-latency
+  // §4.3 item 11). Bumped when status_change lands with a terminal
+  // status. Mirrors the real service's allowlist.
+  pendingPurgeRequest = signal<number>(0);
+
+  // MIN-3 mirror: the instance the latest purge bump refers to, so the
+  // chat-side effect can re-check it against the active instance.
+  pendingPurgeInstanceId = signal<string | null>(null);
+
+  /**
+   * True after the current EventSource observed a connection-level
+   * error; reset on the next ``connected`` event so the refetch
+   * trigger fires exactly once.
+   */
+  private connectionHadError = false;
+
+  /**
+   * Allowlist for terminal-status detection in this test mirror. Kept
+   * inline (vs. importing the real util) so the test class has zero
+   * module dependencies — same rationale as the production service.
+   */
+  private static readonly TERMINAL_STATUSES: ReadonlySet<string> = new Set<string>([
+    'completed',
+    'error',
+    'terminated',
+    'failed',
+  ]);
+
+  /**
+   * Id-keyed upsert with sort by ``created_at`` — the canonical merge
+   * behavior the SSE mirror effect relies on (mirrors
+   * ``SseService.upsertMessage``).
+   */
+  private upsertMessage(message: Message): void {
+    this.messages.update(msgs => {
+      const idx = msgs.findIndex(m => m.message_id === message.message_id);
+      let result: Message[];
+      if (idx >= 0) {
+        result = [...msgs];
+        result[idx] = message;
+      } else {
+        result = [...msgs, message];
+      }
+      result.sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
+      return result;
+    });
+  }
+
   connect(instanceId: string): void {
     if (this.currentInstanceId === instanceId && this.eventSource) {
+      // N2 mirror: an explicit same-instance re-connect on an open
+      // channel clears a stale error latch (see production connect()).
+      this.connectionHadError = false;
       return;
     }
 
@@ -83,6 +140,36 @@ class TestSseService {
         this.events.update(evts => [...evts, { type: 'connected', data }]);
       } catch {
         this.events.update(evts => [...evts, { type: 'connected', data: {} }]);
+      }
+      // Reconnect catch-up mirror (message-display-latency §4.3 item 10):
+      // error→connected transition bumps the refetch trigger exactly once.
+      if (this.connectionHadError) {
+        this.connectionHadError = false;
+        this.refetchRequest.update(n => n + 1);
+      }
+    });
+
+    // User-message event handler — id-keyed upsert so the POST-time echo
+    // and the drain-time re-emit collapse onto a single bubble (mirrors
+    // production ``upsertMessage``).
+    eventSource.addEventListener('user_message', (e: MessageEvent) => {
+      try {
+        const data = JSON.parse(e.data);
+        const m = data.message ?? {};
+        const message: Message = {
+          message_id: m.message_id,
+          role: m.role ?? 'user',
+          content: m.content ?? '',
+          thinking: m.thinking ?? null,
+          thinking_extracted: m.thinking_extracted ?? null,
+          tool_calls: m.tool_calls ?? undefined,
+          created_at: m.created_at ?? new Date().toISOString(),
+          instance_id: m.instance_id,
+          images: m.images,
+        };
+        this.upsertMessage(message);
+      } catch {
+        // Ignore parse errors in test
       }
     });
 
@@ -143,14 +230,30 @@ class TestSseService {
           status: data.status as string,
           agent_id: data.agent_id as string | undefined,
         });
+        // Pending-purge trigger mirror (message-display-latency §4.3
+        // item 11): bump only on terminal statuses so non-terminal
+        // transitions (running → waiting_children etc.) leave
+        // provisional entries alone. MIN-3 mirror: the bump also
+        // requires the event's ``instance_id`` to match the CONNECTED
+        // instance — a cascade CHILD going terminal on this channel
+        // must not purge the connected instance's provisional entries.
+        if (
+          TestSseService.TERMINAL_STATUSES.has(data.status) &&
+          data.instance_id === this.currentInstanceId
+        ) {
+          this.pendingPurgeInstanceId.set(data.instance_id);
+          this.pendingPurgeRequest.update(n => n + 1);
+        }
       } catch (err) {
         // Ignore parse errors in test
       }
     });
 
-    // Connection error handler
+    // Connection error handler — sets the latch so the next ``connected``
+    // event bumps the refetch trigger exactly once.
     eventSource.onerror = () => {
       this.isStreaming.set(false);
+      this.connectionHadError = true;
     };
 
     // Close handler
@@ -404,5 +507,355 @@ describe('SseService', () => {
 
       expect(service.statusChange()?.agent_id).toBe('kb-importer');
     });
+  });
+
+  /**
+   * Phase 2 / message-display-latency §7 FE unit tests #5
+   * ("reconnect: error → connected → exactly one merge-refetch").
+   *
+   * The refetch-trigger surface here is the bare latch: the chat
+   * component subscribes to ``refetchRequest`` and runs the actual
+   * REST refetch. We verify the trigger behavior end-to-end:
+   *   - first connected after error → bumps once
+   *   - subsequent connected without error → does NOT bump (no loop)
+   *   - error→error→connected → bumps once (latch is binary)
+   */
+  describe('refetchRequest trigger (reconnect catch-up)', () => {
+    it('should start at zero', () => {
+      expect(service.refetchRequest()).toBe(0);
+    });
+
+    it('should NOT bump on initial connect (no prior error)', () => {
+      service.connect('instance-123');
+      service.getEventSource()?.simulateEvent('connected', {});
+      expect(service.refetchRequest()).toBe(0);
+    });
+
+    it('should bump exactly once on error → connected transition', () => {
+      service.connect('instance-123');
+      // First connected after connect() does not bump (no prior error).
+      service.getEventSource()?.simulateEvent('connected', {});
+      expect(service.refetchRequest()).toBe(0);
+
+      // Connection drops.
+      const es = service.getEventSource()!;
+      es.onerror?.(new Event('error'));
+
+      // Reconnect — must bump exactly once.
+      es.simulateEvent('connected', {});
+      expect(service.refetchRequest()).toBe(1);
+    });
+
+    it('should NOT bump on subsequent connected events without an intervening error', () => {
+      service.connect('instance-123');
+      const es = service.getEventSource()!;
+
+      es.onerror?.(new Event('error'));
+      es.simulateEvent('connected', {});
+      expect(service.refetchRequest()).toBe(1);
+
+      // No error in between — should not bump again.
+      es.simulateEvent('connected', {});
+      es.simulateEvent('connected', {});
+      expect(service.refetchRequest()).toBe(1);
+    });
+
+    it('should bump a second time after another error → connected cycle', () => {
+      service.connect('instance-123');
+      const es = service.getEventSource()!;
+
+      es.onerror?.(new Event('error'));
+      es.simulateEvent('connected', {});
+      expect(service.refetchRequest()).toBe(1);
+
+      es.onerror?.(new Event('error'));
+      es.simulateEvent('connected', {});
+      expect(service.refetchRequest()).toBe(2);
+    });
+
+    // N2: an explicit re-connect for the instance we are ALREADY
+    // attached to clears a stale error latch, so the next ``connected``
+    // event does not fire a catch-up refetch for an error cycle the
+    // explicit connect() already superseded (that UI flow runs its own
+    // merge-mode refetch).
+    it('should NOT bump when connect() re-asserts the same instance after an error (N2 latch reset)', () => {
+      service.connect('instance-123');
+      const es = service.getEventSource()!;
+
+      // Connection drops — latch set.
+      es.onerror?.(new Event('error'));
+
+      // UI re-asserts the connection for the SAME instance while the
+      // channel object is still attached → early-return resets the latch.
+      service.connect('instance-123');
+
+      // The deferred recovery connected-event now finds no latch.
+      es.simulateEvent('connected', {});
+      expect(service.refetchRequest()).toBe(0);
+    });
+
+    it('should still bump exactly once for a genuine error AFTER an explicit re-connect (N2 does not brick the trigger)', () => {
+      service.connect('instance-123');
+      const es = service.getEventSource()!;
+
+      // Stale latch cleared by the explicit re-connect…
+      es.onerror?.(new Event('error'));
+      service.connect('instance-123');
+
+      // …but a NEW error → recovery cycle afterwards still counts once.
+      es.onerror?.(new Event('error'));
+      es.simulateEvent('connected', {});
+      expect(service.refetchRequest()).toBe(1);
+    });
+  });
+
+  /**
+   * Phase 2 / message-display-latency §7 FE unit tests #3 (terminal
+   * portion: "eviction: 10-min TTL + terminal-status purge").
+   *
+   * The terminal-status purge trigger is the SSE-side surface; the
+   * actual ``pending: true`` strip happens in the chat component
+   * effect. We verify the trigger fires for every terminal status
+   * and stays silent for non-terminal transitions.
+   */
+  describe('pendingPurgeRequest trigger (terminal-status eviction)', () => {
+    it('should start at zero', () => {
+      expect(service.pendingPurgeRequest()).toBe(0);
+    });
+
+    it.each([
+      ['completed'],
+      ['error'],
+      ['terminated'],
+      ['failed'],
+    ])('should bump on terminal status %s', (status) => {
+      service.connect('instance-123');
+      service.getEventSource()?.simulateEvent('status_change', {
+        instance_id: 'instance-123',
+        status,
+      });
+      expect(service.pendingPurgeRequest()).toBe(1);
+      // MIN-3: the bump records WHICH instance went terminal so the
+      // chat-side effect can re-check it against the active instance.
+      expect(service.pendingPurgeInstanceId()).toBe('instance-123');
+    });
+
+    it.each([
+      ['running'],
+      ['idle'],
+      ['queued'],
+      ['waiting_children'],
+      ['paused'],
+    ])('should NOT bump on non-terminal status %s', (status) => {
+      service.connect('instance-123');
+      service.getEventSource()?.simulateEvent('status_change', {
+        instance_id: 'instance-123',
+        status,
+      });
+      expect(service.pendingPurgeRequest()).toBe(0);
+    });
+
+    it('should bump per terminal transition (multiple shutdowns)', () => {
+      service.connect('instance-123');
+      const es = service.getEventSource()!;
+      es.simulateEvent('status_change', { instance_id: 'instance-123', status: 'completed' });
+      es.simulateEvent('status_change', { instance_id: 'instance-123', status: 'error' });
+      es.simulateEvent('status_change', { instance_id: 'instance-123', status: 'terminated' });
+      expect(service.pendingPurgeRequest()).toBe(3);
+    });
+
+    // MIN-3: the connected channel can forward terminal status_change
+    // events for OTHER instances (a cascade CHILD shutting down while
+    // the parent chat is open). Such an event must NOT bump the purge
+    // trigger — the connected (parent) instance's provisional entries
+    // are still perfectly resolvable.
+    it('should NOT bump when a DIFFERENT instance (cascade child) goes terminal on this channel', () => {
+      service.connect('instance-123');
+      const es = service.getEventSource()!;
+
+      es.simulateEvent('status_change', { instance_id: 'child-1', status: 'completed' });
+      es.simulateEvent('status_change', { instance_id: 'child-2', status: 'failed' });
+      // Terminal AND matching is required — a foreign terminal event
+      // with a terminal status is still filtered out.
+      expect(service.pendingPurgeRequest()).toBe(0);
+      expect(service.pendingPurgeInstanceId()).toBeNull();
+    });
+
+    it('should NOT record a purge instance id for a foreign terminal event', () => {
+      service.connect('instance-123');
+      const es = service.getEventSource()!;
+
+      // The statusChange signal itself still records the foreign event
+      // (instance list relies on it) — only the purge trigger is scoped.
+      es.simulateEvent('status_change', { instance_id: 'child-1', status: 'completed' });
+      expect(service.statusChange()?.instance_id).toBe('child-1');
+      expect(service.pendingPurgeInstanceId()).toBeNull();
+    });
+  });
+
+  /**
+   * Phase 2 / message-display-latency §7 FE unit tests #1
+   * ("dedup collapse: POST-echo + drain-echo same id → single
+   * bubble with POST created_at").
+   *
+   * The SSE-side contract here is the id-keyed upsert with sort by
+   * ``created_at``. The chat component's merge contract (clears the
+   * ``pending`` flag, preserves local-only entries) is exercised in
+   * ``message-merge.util.spec.ts`` because it's a pure function.
+   */
+  describe('user_message dedup (id-keyed upsert)', () => {
+    it('should upsert two events with the same id into a single bubble', () => {
+      service.connect('instance-123');
+
+      // POST-time echo — server mints echo_id, created_at = POST ts.
+      service.getEventSource()?.simulateEvent('user_message', {
+        message: {
+          message_id: 'echo-1',
+          role: 'user',
+          content: 'hello',
+          created_at: '2024-01-01T00:00:00Z',
+          instance_id: 'instance-123',
+        },
+      });
+
+      // Drain-time re-emit — same id, same created_at, no duplicate.
+      service.getEventSource()?.simulateEvent('user_message', {
+        message: {
+          message_id: 'echo-1',
+          role: 'user',
+          content: 'hello',
+          created_at: '2024-01-01T00:00:00Z',
+          instance_id: 'instance-123',
+        },
+      });
+
+      const msgs = service.messages();
+      expect(msgs.length).toBe(1);
+      expect(msgs[0].message_id).toBe('echo-1');
+      expect(msgs[0].created_at).toBe('2024-01-01T00:00:00Z');
+    });
+
+    it('should keep two distinct ids as two bubbles', () => {
+      service.connect('instance-123');
+
+      service.getEventSource()?.simulateEvent('user_message', {
+        message: {
+          message_id: 'a',
+          role: 'user',
+          content: 'first',
+          created_at: '2024-01-01T00:00:00Z',
+          instance_id: 'instance-123',
+        },
+      });
+      service.getEventSource()?.simulateEvent('user_message', {
+        message: {
+          message_id: 'b',
+          role: 'user',
+          content: 'second',
+          created_at: '2024-01-01T00:00:01Z',
+          instance_id: 'instance-123',
+        },
+      });
+
+      const msgs = service.messages();
+      expect(msgs.length).toBe(2);
+      expect(msgs.map(m => m.message_id)).toEqual(['a', 'b']);
+    });
+  });
+});
+
+/**
+ * N2 production regression: the surrogate ``TestSseService`` mirror at the
+ * top of this file matches production ``SseService.connect()`` line by
+ * line today, but a surrogate is only as good as the last manual copy-edit.
+ * The reviewer cycle-2 N2 blocker was exactly this gap: the surrogate had
+ * the reset, production did not, and the green surrogate test gave false
+ * confidence. This block exercises the REAL production class so a future
+ * drift between surrogate and production is caught immediately rather than
+ * via another reviewer cycle.
+ *
+ * Setup: jsdom does not ship ``EventSource``, so each test installs a
+ * stub via ``globalThis.EventSource`` and restores the prior value in
+ * ``afterEach``. The test path only exercises ``connect()`` /
+ * ``connectInternal()`` early-return semantics and never fires any
+ * SSE listener, so we can supply a trivial ``ngZone.run(fn) → fn()`` stub
+ * and an empty ``ApiService`` (the production connect path never calls it).
+ */
+describe('SseService (production) — same-id connect() early-return', () => {
+  let realService: InstanceType<typeof RealSseService>;
+  let eventSourceInstances: Array<{
+    onerror: ((e: Event) => void) | null;
+    [k: string]: unknown;
+  }>;
+  let originalEventSource: unknown;
+
+  const ngZoneStub = {
+    run: <T>(fn: () => T): T => fn(),
+    runOutsideAngular: <T>(fn: () => T): T => fn(),
+  } as unknown as ConstructorParameters<typeof RealSseService>[0];
+  const apiStub = {} as ConstructorParameters<typeof RealSseService>[1];
+
+  beforeEach(() => {
+    eventSourceInstances = [];
+    originalEventSource = (globalThis as { EventSource?: unknown }).EventSource;
+
+    class EventSourceStub {
+      url: string;
+      readyState = 0;
+      onerror: ((e: Event) => void) | null = null;
+      onopen: ((e: Event) => void) | null = null;
+      onmessage: ((e: MessageEvent) => void) | null = null;
+      private listeners: Map<string, Array<(e: Event | MessageEvent) => void>> = new Map();
+      constructor(url: string) {
+        this.url = url;
+        eventSourceInstances.push(this as unknown as typeof eventSourceInstances[number]);
+      }
+      close(): void {
+        this.readyState = 2;
+      }
+      addEventListener(
+        type: string,
+        handler: (e: Event | MessageEvent) => void,
+      ): void {
+        const arr = this.listeners.get(type) ?? [];
+        arr.push(handler);
+        this.listeners.set(type, arr);
+      }
+    }
+
+    (globalThis as { EventSource?: unknown }).EventSource = EventSourceStub;
+    realService = new RealSseService(ngZoneStub, apiStub);
+  });
+
+  afterEach(() => {
+    if (originalEventSource === undefined) {
+      delete (globalThis as { EventSource?: unknown }).EventSource;
+    } else {
+      (globalThis as { EventSource?: unknown }).EventSource = originalEventSource;
+    }
+  });
+
+  it('resets connectionHadError and skips EventSource re-construction on a same-id re-connect', () => {
+    realService.connect('instance-prod-1');
+    expect(eventSourceInstances.length).toBe(1);
+
+    // Drive a connection-level error so the latch flips to true. The real
+    // EventSource onerror handler sets ``connectionHadError = true``
+    // (sse.service.ts onerror handler).
+    (eventSourceInstances[0].onerror as ((e: Event) => void) | null)?.(
+      new Event('error'),
+    );
+    expect(
+      (realService as unknown as { connectionHadError: boolean }).connectionHadError,
+    ).toBe(true);
+
+    // Same-id re-connect — the production early-return must reset the
+    // latch (FIX #1) AND must NOT construct a second EventSource. If
+    // either half regresses, this spec fails — that is the point.
+    realService.connect('instance-prod-1');
+    expect(eventSourceInstances.length).toBe(1);
+    expect(
+      (realService as unknown as { connectionHadError: boolean }).connectionHadError,
+    ).toBe(false);
   });
 });

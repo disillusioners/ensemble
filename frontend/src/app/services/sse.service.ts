@@ -2,6 +2,7 @@ import { Injectable, NgZone, signal } from '@angular/core';
 import type { Message, SSEEvent, ToolCall, InstanceInfo } from '../models';
 import type { QuestionPack } from '../models/question.model';
 import { ApiService } from './api.service';
+import { isTerminalStatus } from './message-merge.util';
 
 export interface SubTask {
   id: string;
@@ -100,10 +101,53 @@ export class SseService {
   // cascade and is the only reliable pause-UI signal for this state.
   questionPack = signal<QuestionPack | null>(null);
 
+  // Reconnect-refetch trigger (message-display-latency §4.3 item 10).
+  // Bumped each time the SSE channel observes an error/disconnect followed
+  // by a fresh ``connected`` event. The chat component listens to this
+  // signal and runs a one-shot merge-mode ``loadInstanceMessages`` to
+  // catch up on any messages that landed while the channel was down
+  // (LiveEventHub is fire-and-forget live-only — no replay buffer).
+  //
+  // Idempotent: a single ``connected`` event after a disconnect bumps the
+  // counter exactly once; subsequent ``connected`` events without an
+  // intervening error do NOT bump (no refetch loop).
+  refetchRequest = signal<number>(0);
+
+  // Pending-purge trigger (message-display-latency §4.3 item 11 second
+  // half). Bumped when a ``status_change`` lands with a terminal status
+  // (completed / error / terminated / failed). The chat component listens
+  // to this and drops its provisional pending entries — they cannot
+  // possibly resolve once the instance has shut down. Bumping a counter
+  // (rather than emitting a typed event) keeps the surface minimal and
+  // matches the reconnect-refetch trigger pattern.
+  pendingPurgeRequest = signal<number>(0);
+
+  // The instance the latest ``pendingPurgeRequest`` bump refers to.
+  // Companion to the counter above (MIN-3): a cascade CHILD reaching a
+  // terminal status on this channel must not wipe the PARENT chat's
+  // provisional bubbles, and a trigger recorded just before an instance
+  // switch must not purge the newly-opened instance's list. The chat
+  // component compares this id against its ``activeInstanceId()`` and
+  // skips the purge on mismatch. NOT reset by ``clearEvents()`` — it
+  // must stay observable across a connect/disconnect cycle exactly like
+  // the counter it annotates.
+  pendingPurgeInstanceId = signal<string | null>(null);
+
   // Pending tool_result outputs keyed by tool_call_id. Flushed whenever a
   // matching tool_call or assistant_message arrives, so a tool_result that
   // races ahead of its tool_call is not lost. Cleared on disconnect.
   private pendingToolOutputs = new Map<string, string>();
+
+  /**
+   * True after the current EventSource observed a connection-level error
+   * (``onerror`` / ``handleClose``). Reset to ``false`` the next time a
+   * fresh ``connected`` event lands — that transition is the
+   * reconnect-refetch trigger (message-display-latency §4.3 item 10).
+   *
+   * Not exposed: it's a private latch the connected-handler reads. The
+   * chat component subscribes to ``refetchRequest`` instead.
+   */
+  private connectionHadError = false;
 
   constructor(private ngZone: NgZone, private api: ApiService) {}
 
@@ -192,6 +236,7 @@ export class SseService {
     console.log('[SSE] connect() called with instanceId:', instanceId);
     if (this.currentInstanceId === instanceId && this.eventSource) {
       console.log('[SSE] Already connected to this instance');
+      this.connectionHadError = false;
       return;
     }
 
@@ -224,6 +269,19 @@ export class SseService {
           this.events.update(evts => [...evts, { type: 'connected', data }]);
         } catch {
           this.events.update(evts => [...evts, { type: 'connected', data: {} }]);
+        }
+
+        // Reconnect catch-up (message-display-latency §4.3 item 10): if the
+        // channel saw an error/disconnect earlier in this connection
+        // lifecycle, bump the refetch request exactly once. The chat
+        // component listens and triggers a merge-mode REST refetch — the
+        // union-by-id merge in ``loadInstanceMessages`` is idempotent so
+        // duplicate SSE echoes and refetched rows collapse onto the same
+        // bubbles. Without an intervening error, this is a no-op so a
+        // stable connection never loops refetches.
+        if (this.connectionHadError) {
+          this.connectionHadError = false;
+          this.refetchRequest.update(n => n + 1);
         }
       });
     });
@@ -312,6 +370,33 @@ export class SseService {
             status: data.status as string,
             agent_id: data.agent_id as string | undefined,
           });
+          // Pending-purge trigger (message-display-latency §4.3 item 11).
+          // Terminal statuses (completed / error / terminated / failed)
+          // mean the instance cannot possibly consume any provisional
+          // pending entry, so the chat component clears them in its
+          // own message list. We delegate the actual mutation to the
+          // chat component because it owns the visible ``messages``
+          // signal (the SSE-side ``messages`` mirror only holds live
+          // SSE echoes — it never has provisional entries to begin
+          // with). Bumping a counter is the same trigger pattern as
+          // ``refetchRequest`` and keeps the surface minimal.
+          //
+          // MIN-3: the channel can forward terminal ``status_change``
+          // events for OTHER instances (a cascade CHILD shutting down
+          // while the parent chat is open). Such an event must NOT
+          // purge the connected instance's provisional entries, so the
+          // bump fires only when the event's ``instance_id`` matches
+          // the instance this channel is attached to. The event's id
+          // is recorded alongside the counter so the chat-side effect
+          // can re-check it against the ACTIVE instance (guarding the
+          // switch-between-send-and-event race too).
+          if (
+            isTerminalStatus(data.status as string | null) &&
+            data.instance_id === this.currentInstanceId
+          ) {
+            this.pendingPurgeInstanceId.set(data.instance_id as string);
+            this.pendingPurgeRequest.update(n => n + 1);
+          }
         } catch (err) {
           console.error('[SSE] Failed to parse status_change:', err);
         }
@@ -507,6 +592,10 @@ export class SseService {
     eventSource.onerror = () => {
       console.error('[SSE] EventSource connection error');
       this.handleClose();
+      // Reconnect catch-up latch (message-display-latency §4.3 item 10):
+      // mark the connection as having observed an error so the next
+      // ``connected`` event triggers exactly one merge-mode refetch.
+      this.connectionHadError = true;
     };
   }
 
@@ -601,5 +690,13 @@ export class SseService {
     this.pendingInjection.set(null);
     this.questionPack.set(null);
     this.pendingToolOutputs.clear();
+    // Reconnect catch-up latch + purge trigger counters — reset on
+    // disconnect so a brand-new connection cycle starts clean. The
+    // triggers themselves (``refetchRequest`` / ``pendingPurgeRequest``)
+    // are NOT reset here: the chat component subscribes to them via
+    // effects and must still observe any pending value across a
+    // connect/disconnect cycle (otherwise a purge scheduled just
+    // before disconnect would silently disappear).
+    this.connectionHadError = false;
   }
 }

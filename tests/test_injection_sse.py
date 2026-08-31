@@ -41,10 +41,12 @@ that Phase 3 (frontend) will subscribe to.
 from __future__ import annotations
 
 import asyncio
+import uuid
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from langchain_core.messages import HumanMessage
 
 
 # ---------------------------------------------------------------------------
@@ -271,6 +273,9 @@ class TestAgentNodeConsumptionSSE:
         # Two SSE events fire at the consumption point: user_message
         # first (echoes the injected text to the FE) and
         # injection_consumed second (clears the pending indicator).
+        # message-display-latency Phase 1: the DRAIN echo count is
+        # UNCHANGED (the POST-time echo is a router-side event, not a
+        # drain event).
         assert hub.stream_message.await_count == 2
         calls = hub.stream_message.await_args_list
 
@@ -282,6 +287,25 @@ class TestAgentNodeConsumptionSSE:
         assert user_payload["instance_id"] == "inst-1"
         assert user_payload["role"] == "user"
         assert user_payload["content"] == "user pending msg"
+
+        # message-display-latency Phase 1 — MAJ-1 fix: an entry WITHOUT
+        # ``echo_id`` mints a uuid4 ONCE in the drain loop. The minted
+        # id is stamped on the HumanMessage AND reused in the SSE
+        # re-emit, so the re-emit message_id == HumanMessage.id — stable
+        # for FE union-by-id merge on reconnect refetch.
+        assert user_payload["message_id"] != "2026-07-13T00:00:00+00:00"
+        parsed_msg_id = uuid.UUID(user_payload["message_id"])  # raises if not a UUID
+        assert parsed_msg_id.version == 4
+        assert user_payload["created_at"] != "2026-07-13T00:00:00+00:00"
+        # The LLM-bound HumanMessage carries the SAME minted uuid4 (NOT
+        # ``None`` — that was the pre-MAJ-1 shape that broke FE merge).
+        drained_hm = llm.calls[0][-1]
+        assert isinstance(drained_hm, HumanMessage)
+        assert drained_hm.content == "user pending msg"
+        assert drained_hm.id is not None
+        assert uuid.UUID(drained_hm.id).version == 4
+        # MAJ-1 mint-once-in-drain: HumanMessage.id == SSE re-emit id.
+        assert drained_hm.id == user_payload["message_id"]
 
         # ---- Call 2: injection_consumed — queue entry echoed ----
         second = calls[1]
@@ -333,6 +357,7 @@ class TestAgentNodeConsumptionSSE:
         await agent_node(state, config={"configurable": {"thread_id": "inst-1"}})
 
         # 3 user_message + 1 injection_consumed = 4 SSE events
+        # (message-display-latency Phase 1: drain echo counts UNCHANGED).
         assert hub.stream_message.await_count == 4
         calls = hub.stream_message.await_args_list
 
@@ -340,6 +365,17 @@ class TestAgentNodeConsumptionSSE:
         for i, expected_content in enumerate(["first", "second", "third"]):
             assert calls[i].kwargs["event_type"] == "user_message"
             assert calls[i].kwargs["message"]["content"] == expected_content
+
+        # MAJ-1: tool-path entries (no echo_id) mint a uuid4 ONCE in the
+        # drain loop and reuse it on the re-emit. Each entry still gets
+        # its OWN distinct uuid4 (mint-once-per-entry), but the mint
+        # happens in the drain loop, not in ``serialize_message`` — so
+        # the HumanMessage.id, the SSE message_id, and the GET /messages
+        # read-back all share ONE id per entry (the FE merge contract).
+        msg_ids = [calls[i].kwargs["message"]["message_id"] for i in range(3)]
+        assert len(set(msg_ids)) == 3
+        for mid in msg_ids:
+            assert uuid.UUID(mid).version == 4
 
         # Last call is injection_consumed with pending_count = 3
         last = calls[3]
@@ -406,6 +442,206 @@ class TestAgentNodeConsumptionSSE:
 
         # The agent_node still produced the injected HumanMessage + AI response
         assert len(result["messages"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# message-display-latency Phase 1 — echo_id threading through the drain
+# ---------------------------------------------------------------------------
+
+
+class TestDrainEchoIdThreading:
+    """message-display-latency Phase 1: the agent_node drain reuses the
+    FIFO entry's ``echo_id`` + POST-time ``timestamp`` on the per-entry
+    ``user_message`` re-emit (emit-twice-same-id-same-stamp), and stamps
+    ``HumanMessage.id`` with the same id so the checkpoint (and GET
+    /messages) surfaces a stable id.
+
+    Entries WITHOUT ``echo_id`` (agent-tool / job_inject paths) — MAJ-1:
+    the drain mints a uuid4 ONCE per entry at HumanMessage construction
+    time. The minted id is BOTH the HumanMessage.id (so the checkpoint
+    surfaces a stable id) AND the id ``serialize_message`` reuses on the
+    re-emit (so the SSE message_id matches the HumanMessage.id). Pre-MAJ-1
+    these entries drained with ``id=None`` and ``serialize_message``
+    re-minted a fresh uuid4 per call, producing duplicates on reconnect
+    refetch (FE union-by-id merge could not collapse them).
+
+    Semantics are PER-ENTRY: a mixed queue emits one re-emit per entry,
+    each honoring its own entry's echo_id presence. Suppression of the
+    drain re-emit is never global.
+    """
+
+    def _make(self, entries: list[dict[str, str]]):
+        """Build (agent_node, llm, slot, hub) with the given FIFO entries."""
+        from daemon.graph import create_agent_node
+
+        class _StubLLM:
+            def __init__(self):
+                self.calls = []
+
+            def invoke(self, messages):
+                self.calls.append(list(messages))
+                from langchain_core.messages import AIMessage
+
+                return AIMessage(content="stubbed response")
+
+        class _StubInjectionSlot:
+            def __init__(self):
+                self.cleared_entries = list(entries)
+                self.clear_called = False
+
+            def get(self, instance_id):
+                return list(self.cleared_entries)
+
+            def clear(self, instance_id):
+                self.clear_called = True
+                result = self.cleared_entries
+                self.cleared_entries = []
+                return result
+
+        llm = _StubLLM()
+        slot = _StubInjectionSlot()
+        hub = MagicMock()
+        hub.stream_message = AsyncMock()
+
+        agent_node = create_agent_node(
+            llm_with_tools=llm,
+            system_prompt="you are a test",
+            compactor=None,
+            graph_ref=[None],
+            config={"configurable": {"thread_id": "inst-echo"}},
+            llm_config={"model": "stub"},
+            retry_config={"transient_attempts": 1, "timeout_attempts": 1},
+            llm_standard=None,
+            injection_slot=slot,
+            live_hub=hub,
+        )
+        return agent_node, llm, slot, hub
+
+    @pytest.mark.asyncio
+    async def test_drain_reuses_echo_id_and_post_timestamp(self):
+        """echo_id present → LLM-bound HumanMessage.id == echo_id, drain
+        re-emit message_id == echo_id, created_at == the entry's POST
+        timestamp (NOT fresh). SSE event counts UNCHANGED (2)."""
+        entry = {
+            "content": "provisional bubble",
+            "timestamp": "2026-08-30T00:00:00+00:00",
+            "echo_id": "0f1e2d3c-4b5a-4678-9abc-def012345678",
+        }
+        agent_node, llm, _slot, hub = self._make([entry])
+
+        result = await agent_node(
+            {"messages": []},
+            config={"configurable": {"thread_id": "inst-echo"}},
+        )
+
+        # The LLM-bound HumanMessage carries the echo id.
+        drained_hm = llm.calls[0][-1]
+        assert isinstance(drained_hm, HumanMessage)
+        assert drained_hm.id == "0f1e2d3c-4b5a-4678-9abc-def012345678"
+        # additional_kwargs byte-identical contract preserved.
+        assert drained_hm.additional_kwargs == {"injected_message": True}
+
+        # Drain SSE counts unchanged: 1 user_message + 1 injection_consumed.
+        assert hub.stream_message.await_count == 2
+        calls = hub.stream_message.await_args_list
+
+        user_payload = calls[0].kwargs["message"]
+        assert calls[0].kwargs["event_type"] == "user_message"
+        # SAME id + SAME POST-time stamp (emit-twice-same-id-same-stamp).
+        assert user_payload["message_id"] == "0f1e2d3c-4b5a-4678-9abc-def012345678"
+        assert user_payload["created_at"] == "2026-08-30T00:00:00+00:00"
+        assert user_payload["role"] == "user"
+        assert user_payload["content"] == "provisional bubble"
+
+        # C2 return persists the HumanMessage with the id intact (this is
+        # what the checkpoint commit carries → GET /messages stability).
+        persisted = [m for m in result["messages"] if isinstance(m, HumanMessage)]
+        assert len(persisted) == 1
+        assert persisted[0].id == "0f1e2d3c-4b5a-4678-9abc-def012345678"
+
+    @pytest.mark.asyncio
+    async def test_drain_without_echo_id_mints_uuid_in_drain(self):
+        """MAJ-1 — tool-path id stability: entry WITHOUT echo_id mints a
+        uuid4 ONCE in the drain loop. The HumanMessage.id AND the SSE
+        re-emit message_id share the SAME uuid (mint-once-per-drain);
+        the timestamp stays a FRESH drain-time stamp (NOT the FIFO
+        timestamp) — only the id is now stable.
+        """
+        entry = {
+            "content": "tool-path message",
+            "timestamp": "2026-08-30T00:00:00+00:00",
+        }
+        agent_node, llm, _slot, hub = self._make([entry])
+
+        await agent_node(
+            {"messages": []},
+            config={"configurable": {"thread_id": "inst-echo"}},
+        )
+
+        # The LLM-bound HumanMessage carries a uuid4 minted at drain time
+        # (NOT ``None`` — pre-MAJ-1 shape).
+        drained_hm = llm.calls[0][-1]
+        assert isinstance(drained_hm, HumanMessage)
+        assert drained_hm.id is not None
+        parsed_hm = uuid.UUID(drained_hm.id)
+        assert parsed_hm.version == 4
+
+        calls = hub.stream_message.await_args_list
+        user_payload = calls[0].kwargs["message"]
+        # MAJ-1 — mint-once-in-drain: SSE re-emit message_id ==
+        # HumanMessage.id. Pre-MAJ-1 these were DIFFERENT (the SSE id
+        # was minted inside ``serialize_message`` and changed per call).
+        assert user_payload["message_id"] == drained_hm.id
+        # Timestamp still a fresh drain-time stamp (unchanged from pre-MAJ-1).
+        assert user_payload["created_at"] != "2026-08-30T00:00:00+00:00"
+
+    @pytest.mark.asyncio
+    async def test_mixed_queue_per_entry_semantics(self):
+        """Mixed FIFO queue (one entry with echo_id, one without) →
+        PER-ENTRY semantics: first re-emit reuses the echo_id + POST
+        stamp; second re-emit mints fresh. Never global suppression."""
+        entries = [
+            {
+                "content": "with id",
+                "timestamp": "2026-08-30T00:00:00+00:00",
+                "echo_id": "12345678-90ab-4cde-8f01-23456789abcd",
+            },
+            {
+                "content": "without id",
+                "timestamp": "2026-08-30T00:00:01+00:00",
+            },
+        ]
+        agent_node, llm, _slot, hub = self._make(entries)
+
+        await agent_node(
+            {"messages": []},
+            config={"configurable": {"thread_id": "inst-echo"}},
+        )
+
+        calls = hub.stream_message.await_args_list
+        # 2 user_message re-emits + 1 injection_consumed — counts unchanged.
+        assert hub.stream_message.await_count == 3
+        assert calls[0].kwargs["event_type"] == "user_message"
+        assert calls[1].kwargs["event_type"] == "user_message"
+        assert calls[2].kwargs["event_type"] == "injection_consumed"
+
+        first_payload = calls[0].kwargs["message"]
+        assert first_payload["message_id"] == "12345678-90ab-4cde-8f01-23456789abcd"
+        assert first_payload["created_at"] == "2026-08-30T00:00:00+00:00"
+
+        second_payload = calls[1].kwargs["message"]
+        # MAJ-1 — mint-once-in-drain: the tool-path entry's SSE message_id
+        # is a uuid4 minted in the drain loop, NOT a fresh uuid from
+        # ``serialize_message``. The LLM-bound HumanMessage.id and the
+        # SSE re-emit message_id share the SAME uuid per entry.
+        second_drained = llm.calls[0][-1]
+        assert second_drained.id == second_payload["message_id"]
+        second_id = uuid.UUID(second_payload["message_id"])
+        assert second_id != uuid.UUID("12345678-90ab-4cde-8f01-23456789abcd")
+        assert second_id.version == 4
+        # Timestamp still fresh drain-time stamp (NOT the FIFO timestamp)
+        # — unchanged from pre-MAJ-1.
+        assert second_payload["created_at"] != "2026-08-30T00:00:01+00:00"
 
 
 # ---------------------------------------------------------------------------

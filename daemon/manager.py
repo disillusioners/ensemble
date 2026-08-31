@@ -2380,7 +2380,9 @@ class InstanceManager:
     #   * .agents/shared/planning/user-msg-injection/phase3-plan.md
     #
     # Threading contract (Phase 3 depends on this surface):
-    #   * set_injection(iid, content)      — APPEND; multi-entry queue
+    #   * set_injection(iid, content)      — APPEND; multi-entry queue.
+    #     Optional ``source`` / ``echo_id`` kwargs attach conditionally
+    #     (byte-identical entry when absent).
     #   * get_injection(iid)                — peek; returns LIST (or None)
     #   * get_injection_count(iid)          — count; returns int (0 if none)
     #   * clear_injection(iid)              — pop; returns LIST (or None)
@@ -2398,6 +2400,7 @@ class InstanceManager:
         instance_id: str,
         content: str,
         source: str | None = None,
+        echo_id: str | None = None,
     ) -> dict[str, str]:
         """Append a pending user message to the RAM injection queue.
 
@@ -2424,10 +2427,19 @@ class InstanceManager:
                 ``"internal_agent:<caller_instance_id>"``. ``None``
                 (default) preserves byte-identical pre-quick-win
                 behavior.
+            echo_id: Optional server-minted stable id (message-display-
+                latency Phase 1). When provided, the entry carries an
+                ``"echo_id"`` key which the graph drain uses for
+                ``HumanMessage.id`` and for the POST-time + drain-time
+                ``user_message`` SSE echo id (emit-twice-same-id).
+                ``None`` (default) preserves byte-identical entry shape
+                — required by the tool-path back-compat contract
+                (agent-tool ``instance.py`` / ``job_inject``
+                ``job_queue.py`` call sites pass no ``echo_id``).
 
         Returns:
             The newly appended entry as ``{"content": str, "timestamp": str}``,
-            plus ``"source"`` when provided.
+            plus ``"source"`` when provided, plus ``"echo_id"`` when provided.
         """
         entry: dict[str, str] = {
             "content": content,
@@ -2439,6 +2451,14 @@ class InstanceManager:
             # shape when ``source is None`` — required by the
             # back-compat contract.
             entry["source"] = source
+        if echo_id is not None:
+            # message-display-latency Phase 1: stable server-minted echo
+            # id. Conditionally attached (same pattern as ``source``) so
+            # the entry dict stays byte-identical to the pre-feature
+            # shape when ``echo_id is None`` — the tool-path call sites
+            # (agent-tool ``instance.py``, ``job_inject``
+            # ``job_queue.py``) must keep today's exact behavior.
+            entry["echo_id"] = echo_id
         queue = self._pending_injections.get(instance_id)
         if queue is None:
             queue = []

@@ -60,6 +60,19 @@ export interface Message {
   instance_id?: string;
   // Vision support: base64 data URIs of attached images (up to 3)
   images?: string[];
+  /**
+   * Provisional visual state. Set by the chat component's optimistic append
+   * (Phase 2 / message-display-latency) when the POST response carries a
+   * ``message_id``. Cleared by:
+   *   - the SSE echo upsert (POST-time echo or drain-time re-emit) — the
+   *     server has now confirmed the message and a non-pending copy takes
+   *     its place in the union-merge refetch;
+   *   - the 10-minute wall-clock TTL eviction (message-display-latency §5 item 9);
+   *   - a terminal ``status_change`` purge (same).
+   * The flag is purely a UI affordance (dim/spinner until consumed) and
+   * never participates in dedup — id-keyed dedup is the source of truth.
+   */
+  pending?: boolean;
 }
 
 // SSE event types
@@ -98,13 +111,46 @@ export interface MessageCreate {
 }
 
 export interface MessageResponse {
-  message_id: string;
+  /**
+   * Server-minted message id. Additive contract per message-display-latency
+   * §4.3 item 5: the 200 (IDLE/QUEUED/PAUSED-auto-resume) path has always
+   * carried a real id; the 202 (RUNNING / WAITING_CHILDREN injection)
+   * branch now also carries one (the same ``echo_id`` re-used by the
+   * POST-time ``user_message`` SSE event and the drain-time re-emit).
+   *
+   * FE MUST treat this as possibly-absent EVERYWHERE:
+   *   - Older backends (pre-fix) never include it on 202.
+   *   - The PAUSED auto-resume branch can return ``message_id: null``
+   *     (see the backend ``send_message`` handler in ``messages.py``).
+   *   - New-FE/old-BE degradation: ``onSendMessage`` skips the optimistic
+   *     append when absent, falling back to today's render-on-echo flow.
+   */
+  message_id?: string | null;
   role: string;
   content: string | null;
   thinking?: string | null;
   thinking_extracted?: string | null;
   tool_calls: unknown[] | null;
-  created_at: string;
+  // message-display-latency fix: ``created_at`` is OPTIONAL on the
+  // send-message response. The 202 (RUNNING / WAITING_CHILDREN
+  // injection) path now ships it — same value as the POST-time
+  // ``user_message`` SSE echo (same-id-same-stamp) — but the legacy
+  // 200 (IDLE/QUEUED/PAUSED auto-resume) paths still derive it
+  // server-side and may omit it on older backend versions. The
+  // component MUST defensively fall back to ``timestamp`` (and
+  // ultimately ``new Date().toISOString()``) — see
+  // ``chat.component.ts:onSendMessage``. The earlier non-optional
+  // type lie hid the BLOCKER (FE getting ``undefined`` and
+  // mis-sorting to the top of the list while ``evictPendingByAge``
+  // treated NaN as expired).
+  created_at?: string | null;
+  // message-display-latency fix: the legacy 200 enqueue body always
+  // shipped ``timestamp``; the 202 body does too. The component's
+  // defensive read of the server-authoritative stamp
+  // (``response.created_at ?? response.timestamp ?? ...``) requires
+  // this to be in the type. Optional because older backends /
+  // transient shapes may omit both ``created_at`` and ``timestamp``.
+  timestamp?: string | null;
   // Vision support: base64 data URIs of attached images (up to 3)
   images?: string[];
   // When true, the backend enqueued the message instead of dispatching it
