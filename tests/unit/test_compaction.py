@@ -1986,3 +1986,174 @@ class TestReCompactionMarkerDedup:
             f"W-4.3: a single compaction result must carry AT MOST ONE "
             f"marker (bounded accumulation); got {len(markers)}"
         )
+
+
+def _load_real_add_messages():
+    """Import the REAL LangGraph ``add_messages`` reducer, bypassing
+    the conftest's mocked ``langgraph.*`` entries in ``sys.modules``.
+
+    Same identity-restore discipline as
+    ``test_compact_executor_revive_brick_e2e._RealLangGraph``: snap the
+    originals, drop mocked AND freshly-imported real langgraph entries,
+    then restore the SAME module objects so subsequent tests keep
+    seeing the conftest mocks.
+    """
+    import importlib
+    import sys
+
+    saved = {
+        k: sys.modules[k]
+        for k in list(sys.modules)
+        if k.startswith("langgraph")
+    }
+    for k in [k for k in sys.modules if k.startswith("langgraph")]:
+        del sys.modules[k]
+    try:
+        mod = importlib.import_module("langgraph.graph.message")
+        return mod.add_messages
+    finally:
+        for k in [k for k in sys.modules if k.startswith("langgraph")]:
+            del sys.modules[k]
+        sys.modules.update(saved)
+
+
+class TestChainedSecondCompactionMarkers:
+    """W-4.3 — REAL chained compaction: marker accumulation stays bounded.
+    The tests above pin AT MOST ONE marker per single ``CompactionResult``
+    (construction-level). This test pins the CHAINED property end-to-end:
+
+    1. Run ONE ``compact_state`` that produces a marker-bearing
+       replacement (``truncation`` — LLM fails, ``_truncate_fallback``
+       fires).
+    2. Apply that replacement to the channel via LangGraph's
+       ``add_messages`` reducer (the production persistence semantics
+       for ``aupdate_state(values={"messages": replacement})``).
+    3. Feed the resulting post-compaction history (marker included)
+       PLUS fresh follow-up messages into a SECOND ``compact_state``
+       run.
+    4. Assert NO duplicate truncation markers in the final channel.
+
+    Why the final channel carries exactly one marker: by the second
+    run the first-round marker has aged out of the preserved window,
+    so it sits inside the second run's ``RemoveMessage`` span — it is
+    dropped and re-stamped by the fresh marker. Combined with the
+    per-result bound (at most one marker per construction path per
+    result), accumulation stays bounded at one marker per channel no
+    matter how many truncate-fallback compactions chain.
+    """
+
+    @pytest.fixture
+    def failing_llm(self):
+        """LLM stub whose ``invoke`` always raises → ``|S| = 0`` →
+        ``_truncate_fallback`` (deterministic marker-bearing path)."""
+        mock_response = AIMessage(content="Summary text.", id="mock-response")
+        mock_llm_instance = MagicMock()
+        mock_llm_instance.invoke = MagicMock(return_value=mock_response)
+        mock_llm_instance.invoke.side_effect = Exception("LLM API error")
+        with patch(
+            "daemon.graph.ThinkingChatOpenAI",
+            return_value=mock_llm_instance,
+            create=True,
+        ):
+            yield mock_llm_instance
+
+    @staticmethod
+    def _marker_count(messages) -> int:
+        return sum(
+            1
+            for m in messages
+            if isinstance(m, SystemMessage)
+            and (m.id or "").startswith("truncation-marker-")
+        )
+
+    def _make_ctx(self, config, messages) -> CompactionContext:
+        # ``last_compacted_at=None`` — the engine-level 60s dedup is
+        # bypassed so BOTH chained runs actually execute (in
+        # production the second run happens after the dedup window or
+        # via the executor's explicit path).
+        return CompactionContext(
+            messages=list(messages),
+            system_prompt_tokens=0,
+            model_name="gpt-4o",
+            config=config,
+            llm_config={},
+            last_compacted_at=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_chained_compaction_leaves_exactly_one_marker(
+        self, failing_llm
+    ):
+        add_messages = _load_real_add_messages()
+
+        config = make_compaction_config(
+            min_messages_before_compaction=2,
+            threshold=0.01,
+            recent_message_window=2,
+            min_recent_window=1,
+            context_window_overrides={"gpt-4o": 1000},
+        )
+        compactor = ContextCompactor(config, {})
+
+        # ── Compaction #1 — marker-bearing replacement ──────────────
+        history_1 = make_messages(200)
+        result_1 = await compactor.compact_state(self._make_ctx(config, history_1))
+        assert result_1 is not None, "compaction #1 must fire"
+        assert result_1.compaction_type == "truncation"
+        assert self._marker_count(result_1.replacement_messages) == 1, (
+            "W-4.3: result #1 must carry exactly one truncation marker"
+        )
+
+        # Apply via the production reducer semantics.
+        channel = add_messages(history_1, result_1.replacement_messages)
+        assert self._marker_count(channel) == 1, (
+            "post-compaction-#1 channel must carry exactly one marker"
+        )
+
+        # ── Continued conversation — fresh messages on top ──────────
+        follow_ups = [
+            HumanMessage(content=f"Follow-up {i}", id=f"post-{i}")
+            for i in range(6)
+        ]
+        channel = add_messages(channel, follow_ups)
+        assert self._marker_count(channel) == 1
+
+        # ── Compaction #2 on the marker-bearing history ─────────────
+        result_2 = await compactor.compact_state(self._make_ctx(config, channel))
+        assert result_2 is not None, "compaction #2 must fire"
+        assert result_2.compaction_type == "truncation"
+        # Per-result bounded accumulation: at most one marker per
+        # construction path per result.
+        assert self._marker_count(result_2.replacement_messages) == 1, (
+            "W-4.3: result #2 must carry AT MOST ONE marker "
+            "(bounded accumulation per construction path)"
+        )
+
+        final_channel = add_messages(channel, result_2.replacement_messages)
+
+        # The load-bearing chained assertion: NO duplicate markers in
+        # the final output. The first-round marker must have been
+        # covered by result #2's RemoveMessage span (not preserved),
+        # so only the fresh marker survives.
+        old_markers = [
+            m
+            for m in channel
+            if isinstance(m, SystemMessage)
+            and (m.id or "").startswith("truncation-marker-")
+        ]
+        assert len(old_markers) == 1
+        rm_ids = {
+            m.id
+            for m in result_2.replacement_messages
+            if isinstance(m, RemoveMessage)
+        }
+        assert old_markers[0].id in rm_ids, (
+            "the first-round marker must be INSIDE result #2's "
+            "RemoveMessage span — otherwise it survives alongside the "
+            "fresh marker and duplicates accumulate"
+        )
+        assert self._marker_count(final_channel) == 1, (
+            f"W-4.3 chained: final channel must carry exactly ONE "
+            f"truncation marker (no duplicate accumulation); got "
+            f"{self._marker_count(final_channel)}"
+        )

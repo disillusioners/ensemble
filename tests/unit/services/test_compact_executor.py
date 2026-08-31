@@ -272,11 +272,20 @@ def _make_manager(
 
 def _make_checkpoint_state(
     *,
-    next=("agent",),
+    next=(),
     messages=None,
     compacted_at=None,
 ):
-    """Build a LangGraph-like state snapshot."""
+    """Build a LangGraph-like state snapshot.
+
+    Default ``next=()`` — a GENUINELY quiescent post-turn checkpoint.
+    Under C1 (terminal rejection is instance-status-based), the
+    quiescent shape is the LEGITIMATE success-path state: every
+    success-path fixture must NOT fabricate a non-empty ``next``.
+    Pass ``next=("agent",)`` explicitly ONLY where a test genuinely
+    simulates a mid-graph shape (e.g. the pause-first/RUNNING path
+    with a frozen in-flight task).
+    """
     state = MagicMock()
     state.next = next
     state.values = {"messages": messages or [], "compacted_at": compacted_at}
@@ -307,7 +316,9 @@ class TestRecencyPrecheck:
             datetime.now(timezone.utc).replace(microsecond=0).isoformat()
         )
         cp = _make_checkpoint_state(
-            next=("agent",),
+            # Quiescent fixture (default next=()) — the recency
+            # pre-check must fire on the LEGITIMATE post-turn shape,
+            # not a fabricated mid-graph one.
             messages=[HumanMessage(content="hi", id="h-1")],
             compacted_at=past_iso,
         )
@@ -384,7 +395,8 @@ class TestBelowFloorPrecheck:
         graph = MagicMock()
         graph.aupdate_state = AsyncMock()
         cp = _make_checkpoint_state(
-            next=("agent",),
+            # Quiescent fixture (default next=()) — below-floor noop
+            # is a success path; must not fabricate a mid-graph next.
             messages=[HumanMessage(content="hi", id="h-1")],
             compacted_at=None,
         )
@@ -423,7 +435,8 @@ class TestBelowFloorPrecheck:
         graph = MagicMock()
         graph.aupdate_state = AsyncMock()
         cp = _make_checkpoint_state(
-            next=("agent",),
+            # Quiescent fixture (default next=()) — below-floor noop
+            # is a success path; must not fabricate a mid-graph next.
             messages=[HumanMessage(content="hi", id="h-1")],
             compacted_at=None,
         )
@@ -782,7 +795,8 @@ class TestPhaseSeqMonotonicity:
 
         async def _aget_state(_config):
             return _make_checkpoint_state(
-                next=("agent",),
+                # Quiescent fixture (default next=()) — noop success
+                # path; must not fabricate a mid-graph next.
                 messages=_big_messages(n=15, char_count=4000),
                 compacted_at=None,
             )
@@ -844,7 +858,8 @@ class TestPhaseSeqMonotonicity:
 
         async def _aget_state(_config):
             return _make_checkpoint_state(
-                next=("agent",),
+                # Quiescent fixture (default next=()) — noop success
+                # path; must not fabricate a mid-graph next.
                 messages=_big_messages(n=15, char_count=4000),
                 compacted_at=None,
             )
@@ -968,7 +983,10 @@ class TestPersistenceRecipe:
 
         async def _aget_state(_config):
             return _make_checkpoint_state(
-                next=("agent",),
+                # Quiescent fixture (default next=()) — this is a
+                # SUCCESS-to-persistence test; the fabricated
+                # mid-graph next was carried over from pre-C1 and
+                # misdescribed the real post-turn shape.
                 messages=_big_messages(n=15, char_count=4000),
                 compacted_at=None,
             )
@@ -1065,7 +1083,10 @@ class TestCompactionDisabled:
 
         async def _aget_state(_config):
             return _make_checkpoint_state(
-                next=("agent",),
+                # Quiescent fixture (default next=()) — this is an
+                # IDLE-instance rejection (engine unavailable); the
+                # real post-turn shape is quiescent, so the fixture
+                # must not fabricate a mid-graph next.
                 messages=_big_messages(n=15, char_count=4000),
                 compacted_at=None,
             )
@@ -1336,7 +1357,11 @@ class TestQuiescenceFailurePath:
         # Build a checkpoint with active next + non-recent
         # compacted_at + enough tokens to exceed the noop floor
         # (so the executor reaches the pause/quiesce step instead
-        # of short-circuiting on below-floor).
+        # of short-circuiting on below-floor). This is the ONE
+        # fixture that deliberately keeps ``next=("agent",)``: a
+        # RUNNING instance with a frozen in-flight task is a
+        # genuine mid-graph shape (pause-first/RUNNING path), not
+        # a fabricated success-path shape.
         graph = MagicMock()
         graph.aupdate_state = AsyncMock()
 
@@ -1436,7 +1461,8 @@ class TestRateLimitBeforeGateOrdering:
         graph = MagicMock()
         graph.aupdate_state = AsyncMock()
         cp = _make_checkpoint_state(
-            next=("agent",),
+            # Quiescent fixture (default next=()) — recency noop is
+            # a success path; must not fabricate a mid-graph next.
             messages=_big_messages(n=15, char_count=4000),
             compacted_at=past_iso,
         )

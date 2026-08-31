@@ -324,17 +324,28 @@ class TestGuardPreventsAupdateOnRealTerminal:
 
     The manager surface is mocked (we don't need a real
     ``InstanceManager``), but the graph object — the load-bearing
-    surface for the terminal guard — is real.
+    surface for the persistence step the guard must prevent — is real.
+
+    C1 BINDING — the executor's terminal guard is gated on INSTANCE
+    STATUS (the O-B4 canonical set: completed / terminated / error /
+    failed), NOT on the shared ``_is_terminal_checkpoint`` helper or
+    the ``state.next == ()`` shape. The mocked manager surface here
+    reports ``status="completed"``, which is what fires the guard.
+    The quiescent checkpoint shape is INCIDENTAL under C1: a post-turn
+    IDLE instance carries the SAME ``next=()`` shape and MUST compact
+    (see the C1 canary classes below — the inverse brick property).
 
     Asserts:
 
-    1. The shared ``_is_terminal_checkpoint`` helper fires on the
-       REAL ``StateSnapshot`` (not a MagicMock substitute) → guard
-       rejects with ``reason=terminal_instance``.
-    2. ``aupdate_state`` is NEVER invoked on the real graph (the
-       wrapper's call count stays at 0).
-    3. The rejection carries the correct ``checkpoint_id`` (thread_id
-       off the real ``state.config``).
+    1. ``aupdate_state`` is NEVER invoked on the real graph (the
+       wrapper's call count stays at 0) — the brick collapse the
+       guard prevents is aupdate_state on a terminal-status instance.
+    2. The rejection lands in the dispatcher's terminal ring with
+       ``reason=terminal_instance`` and the PINNED guidance copy
+       ("Send a message to start a new turn, then /compact." — the
+       W-1.2 copy; NOT the old ``checkpoint_id`` artifact).
+    3. The active command slot is cleared on terminalize and the
+       terminal phase is ``failed``.
     """
 
     @pytest.mark.asyncio
@@ -884,6 +895,17 @@ class TestExecutorCompactOnRealQuiescentInstanceWithPersistence:
                 ]
                 await compiled.aupdate_state(
                     cfg, {"messages": big_messages}, as_node="agent"
+                )
+
+                # Pin the quiescent precondition EXPLICITLY (the compact
+                # below relies on it — do not leave it implied): the
+                # as_node seed must land at a terminal checkpoint
+                # (next=()) — the LEGITIMATE post-turn IDLE shape under
+                # C1, NOT a mid-graph state.
+                st = await compiled.aget_state(cfg)
+                assert st.next == (), (
+                    f"seeded checkpoint must be quiescent (next=()) "
+                    f"before compact; got next={st.next!r}"
                 )
 
                 wrapped = _GraphWrapper(compiled)

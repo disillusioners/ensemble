@@ -750,6 +750,86 @@ class TestDispatcherLifecycle:
 
 
 # ─────────────────────────────────────────────────────────────────────────
+# W-3.4 — bg-task cancellation drops BOTH slots (no phantom busy)
+# ─────────────────────────────────────────────────────────────────────────
+
+
+class TestHandlerCancellationDropsSlots:
+    """W-3.4 — cancelling an in-flight command task drops BOTH the
+    ``_inflight`` slot AND the state registry's active entry
+    (``command_dispatcher.py`` ``_run_handler`` CancelledError branch),
+    so the GET endpoint returns ``exists:false`` instead of a phantom
+    "stuck busy" command.
+
+    Drives the REAL ``dispatch`` → ``asyncio.create_task(_run_handler)``
+    background-task path: the hanging handler is cancelled mid-flight;
+    ``_run_handler`` catches ``asyncio.CancelledError``, pops both
+    rows, and re-raises. The cancel path deliberately does NOT move
+    the entry to the terminal ring (transient state; restart resets),
+    so even the TTL-aware ``get_for_endpoint`` fallback finds nothing.
+    """
+
+    async def test_cancel_drops_inflight_and_active(self):
+        handler_started = asyncio.Event()
+
+        async def _spy_started_handler(*, instance_id, args, command_id, context):
+            handler_started.set()
+            await _hanging_handler(
+                instance_id=instance_id,
+                args=args,
+                command_id=command_id,
+                context=context,
+            )
+
+        d = _make_dispatcher(min_interval_s=0)
+        d.registry.register(_make_spec(handler=_spy_started_handler))
+
+        outcome = await d.dispatch("inst-A", "/compact")
+        assert outcome.kind == "ack"
+        assert outcome.ack["state"] == "accepted"
+        command_id = outcome.ack["command_id"]
+
+        # Wait until the handler is GENUINELY mid-flight before
+        # cancelling — cancelling before the task's first step would
+        # skip ``_run_handler``'s body entirely (the coroutine is
+        # never entered) and the W-3.4 branch would not be driven.
+        await asyncio.wait_for(handler_started.wait(), timeout=1.0)
+
+        # Pre-condition: while the handler hangs, BOTH rows exist.
+        assert d._is_inflight("inst-A")
+        active = d._state._active.get("inst-A")
+        assert active is not None
+        assert active.command_id == command_id
+        assert d.get_active("inst-A") is active
+
+        # Cancel the bg task and let ``_run_handler``'s
+        # CancelledError branch run (it re-raises after cleanup).
+        tasks = list(d._tasks)
+        assert tasks, "dispatch must have spawned a bg task"
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass  # expected — _run_handler re-raises after cleanup
+
+        # BOTH rows dropped (W-3.4 binding).
+        assert not d._inflight.get("inst-A"), (
+            "cancelled command must drop the _inflight slot"
+        )
+        assert d._state._active.get("inst-A") is None, (
+            "cancelled command must drop the state registry's active entry"
+        )
+
+        # GET-equivalent: exists:false afterward. ``get_active`` is
+        # the active-only accessor; ``get_for_endpoint`` is what the
+        # GET route serializes — its None → ``{exists: false}``.
+        assert d.get_active("inst-A") is None
+        assert d.get_for_endpoint("inst-A") is None
+
+
+# ─────────────────────────────────────────────────────────────────────────
 # WS-5 ack envelope + WS-6 ordering test (more granular)
 # ─────────────────────────────────────────────────────────────────────────
 
