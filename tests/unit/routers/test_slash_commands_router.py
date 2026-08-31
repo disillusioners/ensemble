@@ -393,18 +393,21 @@ class TestSlashCommandIntercept:
     def test_command_short_circuits_before_terminal_revival(
         self, client_with_manager, dispatcher
     ):
-        """A command on a terminal instance is REJECTED IN THE ACK
-        (defect #2, 2026-08-31 — the instance-status gate is a
-        dispatch-time guard). Semantics update: the executor used to
-        own the terminal_instance rejection from the bg task (which
-        raced the client's post-ack subscription and stranded the FE
-        waiting card); the dispatcher now answers it synchronously and
-        spawns no task at all. The 200 + no-enqueue behavior below is
+        """A /compact on a compact-REJECTED instance (terminated /
+        error / failed) is REJECTED IN THE ACK (defect #2, 2026-08-31
+        — the instance-status gate is a dispatch-time guard).
+        Semantics update: the executor used to own the
+        terminal_instance rejection from the bg task (which raced the
+        client's post-ack subscription and stranded the FE waiting
+        card); the dispatcher now answers it synchronously and spawns
+        no task at all. The 200 + no-enqueue behavior below is
         unchanged — a rejected ack is still a 200 that never reaches
-        the enqueue/revive branch."""
+        the enqueue/revive branch. (compact-on-COMPLETED 2026-08-31:
+        ``terminated`` carries the pin — ``completed`` now accepts and
+        has its own dedicated case above.)"""
         client, state = client_with_manager
         _register_compact(dispatcher, handler=_hanging_handler)
-        manager = _make_manager(dispatcher, instance_status="completed")
+        manager = _make_manager(dispatcher, instance_status="terminated")
         state["manager"] = manager
 
         resp = client.post(
@@ -1183,8 +1186,8 @@ class TestEscapePathSingleWrite:
 
 
 class TestTerminalInstanceAckRejection:
-    """Defect #2 — POST /compact on a terminal instance must answer the
-    200 rejected ack envelope AT ACK TIME (architect §5/§7).
+    """Defect #2 — POST /compact on a compact-rejected instance must
+    answer the 200 rejected ack envelope AT ACK TIME (architect §5/§7).
 
     Live evidence (gate run, command d34c1026): the old path acked
     ``accepted`` → the FE seeded its waiting card → the bg executor
@@ -1192,6 +1195,12 @@ class TestTerminalInstanceAckRejection:
     a terminal SSE event the client could not observe (it raced the
     post-ack subscription). The instance-status check is cheap and
     synchronous; it belongs in the ack path.
+
+    compact-on-COMPLETED (2026-08-31): the gate rejects ONLY
+    terminated / error / failed. A COMPLETED instance's /compact now
+    proceeds PAST the gate to an accepted ack (the dedicated
+    COMPLETED case below pins the flip); it stays terminal for every
+    other consumer of the canonical set.
 
     Router contract pinned here:
     - 200 + full CommandAck envelope (state=rejected,
@@ -1209,11 +1218,15 @@ class TestTerminalInstanceAckRejection:
             json={"content": "/compact"},
         )
 
-    def test_terminal_completed_full_ack_envelope(
+    def test_completed_compact_accepts_at_router(
         self, client_with_manager, dispatcher
     ):
-        """Acceptance criterion (a) — full envelope assertion on the
-        COMPLETED row (the exact live-evidence status)."""
+        """compact-on-COMPLETED (2026-08-31) — the dedicated flip: a
+        COMPLETED instance's /compact proceeds PAST the instance-status
+        gate to an ACCEPTED ack (was: rejected terminal_instance).
+        C1 Variant A persist keeps ``next=()`` so the executor's
+        compact is safe; the instance row remains terminal for every
+        other consumer of ``daemon.constants.TERMINAL_INSTANCE_STATUSES``."""
         client, state = client_with_manager
         _register_compact(dispatcher, handler=_hanging_handler)
         manager = _make_manager(dispatcher, instance_status="completed")
@@ -1222,20 +1235,26 @@ class TestTerminalInstanceAckRejection:
         resp = self._post_compact(client)
         assert resp.status_code == 200, resp.text
         body = resp.json()
-        # Full CommandAck envelope (§7 schema).
+        # Full CommandAck envelope (§7 schema) — accepted this time.
         assert body["status"] == "command"
         assert body["command"] == "compact"
-        assert body["state"] == "rejected"
-        assert body["reason"] == "terminal_instance"
-        assert body["detail"] == self.GUIDANCE
-        assert body["command_id"] is None  # nothing was minted
+        assert body["state"] == "accepted"
+        assert body["command_id"], "accepted ack mints a command_id"
         assert body["timestamp"]
         assert body["ttl_seconds"] == 600
+        # The dispatch consumed the intercept seam — no revive/enqueue
+        # fallthrough to the normal message path.
+        manager.enqueue_message_job.assert_not_awaited()
+        for task in list(dispatcher._tasks):
+            task.cancel()
 
     @pytest.mark.parametrize("status", ["terminated", "error", "failed"])
-    def test_every_ob4_terminal_status_rejects_at_router(
+    def test_every_compact_reject_status_rejects_at_router(
         self, client_with_manager, dispatcher, status
     ):
+        """terminated / error / failed STILL reject at the ack
+        (COMPACT_REJECT_STATUSES — completed excluded since
+        compact-on-COMPLETED, 2026-08-31)."""
         client, state = client_with_manager
         _register_compact(dispatcher, handler=_hanging_handler)
         manager = _make_manager(dispatcher, instance_status=status)
@@ -1262,7 +1281,7 @@ class TestTerminalInstanceAckRejection:
             handler_calls.append(command_id)
 
         _register_compact(dispatcher, handler=_spy_handler)
-        manager = _make_manager(dispatcher, instance_status="completed")
+        manager = _make_manager(dispatcher, instance_status="terminated")
         state["manager"] = manager
 
         resp = self._post_compact(client)
@@ -1284,7 +1303,7 @@ class TestTerminalInstanceAckRejection:
         waiting phase could exist."""
         client, state = client_with_manager
         _register_compact(dispatcher, handler=_hanging_handler)
-        manager = _make_manager(dispatcher, instance_status="completed")
+        manager = _make_manager(dispatcher, instance_status="terminated")
         # If the intercept fell through, the terminal branch would
         # revive/enqueue — pin both as untouched.
         manager.resume_instance_cascade = AsyncMock()
@@ -1303,7 +1322,7 @@ class TestTerminalInstanceAckRejection:
         terminal_instance — rejections never consume the min-interval."""
         client, state = client_with_manager
         _register_compact(dispatcher, handler=_hanging_handler)
-        manager = _make_manager(dispatcher, instance_status="completed")
+        manager = _make_manager(dispatcher, instance_status="terminated")
         state["manager"] = manager
 
         first = self._post_compact(client)
