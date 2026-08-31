@@ -1027,9 +1027,12 @@ async def execute_compact(
                 context=context,
                 detail=terminal_detail,
             )
-
-            if needs_pause_resume and paused_state_resume_ok:
-                await _safe_resume(manager, instance_id)
+            # Defect #1 S1 fix (2026-08-31): the pause→quiesce→
+            # resume lifecycle resume moved to a single ``finally``
+            # on ``execution_gate.run`` below. The
+            # engine-returned-None early-return at line 966 above
+            # also falls through to that finally — paused instances
+            # are NEVER left stuck because of an early return.
         finally:
             heartbeat_task.cancel()
             try:
@@ -1037,7 +1040,28 @@ async def execute_compact(
             except (asyncio.CancelledError, Exception):
                 pass
 
-    # Run inside the per-instance ExecutionGate.
+    # ── Defect #1 S1 (2026-08-31) ────────────────────────────────
+    # pause→quiesce→resume lifecycle invariant: when the executor
+    # entered the RUNNING row (paused the instance), the
+    # ``_safe_resume`` MUST fire on EVERY exit path from the gate
+    # body — normal return (incl. the engine-returned-None early
+    # return at line 966 inside ``_in_gate``), ``_GateExit`` raised
+    # by ``_in_gate``, or any other ``Exception`` raised from
+    # ``_in_gate`` / ``execution_gate.run``.
+    #
+    # The previous design placed ``_safe_resume`` at the end of the
+    # success branch only, plus inside the ``_GateExit`` and
+    # generic-Exception ``except`` handlers. The
+    # engine-returned-None early return bypassed ALL of them — the
+    # gate returned normally with no exception fired, so the
+    # handlers never ran. The instance was left stuck PAUSED, the
+    # queue was fully stalled, and only a manual
+    # ``resume_instance_cascade`` unblocked it (scope-3 live
+    # evidence: instance ``e1206f9a…`` stalled >130s on
+    # 2026-08-31). The fix is to colocate the resume with the
+    # pause lifecycle via a single ``finally`` clause on
+    # ``execution_gate.run``. The ``finally`` fires for every exit
+    # path, so the resume lands unconditionally.
     try:
         await manager.execution_gate.run(
             instance_id,
@@ -1048,8 +1072,9 @@ async def execute_compact(
     except _GateExit:
         # Inner gate returned early (stale-busy / terminal guard).
         # The terminalize + emit already happened inside _in_gate.
-        if needs_pause_resume and paused_state_resume_ok:
-            await _safe_resume(manager, instance_id)
+        # Fall through to the ``finally`` so the pause-side resume
+        # still lands.
+        pass
     except Exception as e:
         # Any escape from the gate body surfaces as a terminal
         # ``failed`` event. The bg task MUST NOT crash (O9).
@@ -1080,6 +1105,19 @@ async def execute_compact(
                 "reason": type(e).__name__,
             },
         )
+        # Fall through to the ``finally`` so the pause-side resume
+        # still lands.
+    finally:
+        # ``paused_state_resume_ok`` is True ONLY when the
+        # pause+quiesce sequence completed without exception.
+        # IDLE / WAITING_CHILDREN / PAUSED entries don't pause the
+        # instance and so don't need a resume (the guard keeps the
+        # call a no-op for those rows). The ``finally`` is the
+        # resume lifecycle's home — colocated with the pause at the
+        # top of ``execute_compact`` — so the instance can never
+        # remain paused because the executor landed on an
+        # early-return path that bypassed the success-branch
+        # ``_safe_resume`` call.
         if needs_pause_resume and paused_state_resume_ok:
             await _safe_resume(manager, instance_id)
 
