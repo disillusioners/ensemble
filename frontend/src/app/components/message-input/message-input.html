@@ -41,17 +41,55 @@
       <div class="validation-error">{{ validationError() }}</div>
     }
     
-    <textarea
-      #textarea
-      [value]="message()"
-      (input)="onInput($event)"
-      (keydown.enter)="onKeydownEnter($event)"
-      [disabled]="disabled()"
-      placeholder="Type your message or drag images here..."
-      rows="1"
-      class="input-textarea"
-      [class.active]="canSend()"
-    ></textarea>
+    <div class="slash-anchor">
+      <textarea
+        #textarea
+        [value]="message()"
+        (input)="onInput($event)"
+        (keydown.enter)="onKeydownEnter($event)"
+        (keydown.arrowup)="onSlashArrow($event, -1)"
+        (keydown.arrowdown)="onSlashArrow($event, 1)"
+        (keydown.escape)="onSlashEscape($event)"
+        (keydown.tab)="onSlashTab($event)"
+        [disabled]="disabled()"
+        placeholder="Type your message or drag images here..."
+        rows="1"
+        class="input-textarea"
+        [class.active]="canSend()"
+        role="combobox"
+        aria-haspopup="listbox"
+        aria-autocomplete="list"
+        [attr.aria-expanded]="isSlashPaletteOpen()"
+        [attr.aria-controls]="isSlashPaletteOpen() ? (slashMatches().length > 0 ? 'slash-command-listbox' : 'slash-command-palette') : null"
+        [attr.aria-activedescendant]="slashActiveDescendant()"
+      ></textarea>
+
+      @if (isSlashPaletteOpen()) {
+        <div class="slash-command-palette" id="slash-command-palette" data-testid="slash-command-palette">
+          @if (slashMatches().length > 0) {
+            <div class="slash-command-list" role="listbox" id="slash-command-listbox" aria-label="Slash commands">
+              @for (cmd of slashMatches(); track cmd.name; let i = $index) {
+                <div
+                  class="slash-command-option"
+                  role="option"
+                  [id]="slashOptionId(i)"
+                  [class.highlighted]="i === slashActiveIndex()"
+                  [attr.aria-selected]="i === slashActiveIndex()"
+                  (mousedown)="$event.preventDefault()"
+                  (click)="onSlashOptionClick($event, cmd)"
+                  (mouseenter)="onSlashOptionHover(i)"
+                >
+                  <span class="slash-command-name">/{{ cmd.name }}</span>
+                  <span class="slash-command-description">{{ cmd.description }}</span>
+                </div>
+              }
+            </div>
+          } @else {
+            <div class="slash-command-empty">No matching command</div>
+          }
+        </div>
+      }
+    </div>
 
     <button 
       type="button" 
@@ -130,7 +168,10 @@
         </select>
       </label>
     }
-    Press <kbd class="kbd">Enter</kbd> to send, 
+    Press <kbd class="kbd">Enter</kbd> to send,
     <kbd class="kbd">Shift + Enter</kbd> for new line
   </p>
+
+  <!-- Polite announcement of palette open / match-count changes (Task 10 a11y). -->
+  <div class="sr-only" role="status" aria-live="polite">{{ slashLiveMessage() }}</div>
 </form>
