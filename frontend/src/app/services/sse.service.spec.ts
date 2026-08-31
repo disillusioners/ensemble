@@ -63,6 +63,10 @@ class TestSseService {
   // status. Mirrors the real service's allowlist.
   pendingPurgeRequest = signal<number>(0);
 
+  // MIN-3 mirror: the instance the latest purge bump refers to, so the
+  // chat-side effect can re-check it against the active instance.
+  pendingPurgeInstanceId = signal<string | null>(null);
+
   /**
    * True after the current EventSource observed a connection-level
    * error; reset on the next ``connected`` event so the refetch
@@ -104,6 +108,9 @@ class TestSseService {
 
   connect(instanceId: string): void {
     if (this.currentInstanceId === instanceId && this.eventSource) {
+      // N2 mirror: an explicit same-instance re-connect on an open
+      // channel clears a stale error latch (see production connect()).
+      this.connectionHadError = false;
       return;
     }
 
@@ -225,8 +232,15 @@ class TestSseService {
         // Pending-purge trigger mirror (message-display-latency §4.3
         // item 11): bump only on terminal statuses so non-terminal
         // transitions (running → waiting_children etc.) leave
-        // provisional entries alone.
-        if (TestSseService.TERMINAL_STATUSES.has(data.status)) {
+        // provisional entries alone. MIN-3 mirror: the bump also
+        // requires the event's ``instance_id`` to match the CONNECTED
+        // instance — a cascade CHILD going terminal on this channel
+        // must not purge the connected instance's provisional entries.
+        if (
+          TestSseService.TERMINAL_STATUSES.has(data.status) &&
+          data.instance_id === this.currentInstanceId
+        ) {
+          this.pendingPurgeInstanceId.set(data.instance_id);
           this.pendingPurgeRequest.update(n => n + 1);
         }
       } catch (err) {
@@ -557,6 +571,41 @@ describe('SseService', () => {
       es.simulateEvent('connected', {});
       expect(service.refetchRequest()).toBe(2);
     });
+
+    // N2: an explicit re-connect for the instance we are ALREADY
+    // attached to clears a stale error latch, so the next ``connected``
+    // event does not fire a catch-up refetch for an error cycle the
+    // explicit connect() already superseded (that UI flow runs its own
+    // merge-mode refetch).
+    it('should NOT bump when connect() re-asserts the same instance after an error (N2 latch reset)', () => {
+      service.connect('instance-123');
+      const es = service.getEventSource()!;
+
+      // Connection drops — latch set.
+      es.onerror?.(new Event('error'));
+
+      // UI re-asserts the connection for the SAME instance while the
+      // channel object is still attached → early-return resets the latch.
+      service.connect('instance-123');
+
+      // The deferred recovery connected-event now finds no latch.
+      es.simulateEvent('connected', {});
+      expect(service.refetchRequest()).toBe(0);
+    });
+
+    it('should still bump exactly once for a genuine error AFTER an explicit re-connect (N2 does not brick the trigger)', () => {
+      service.connect('instance-123');
+      const es = service.getEventSource()!;
+
+      // Stale latch cleared by the explicit re-connect…
+      es.onerror?.(new Event('error'));
+      service.connect('instance-123');
+
+      // …but a NEW error → recovery cycle afterwards still counts once.
+      es.onerror?.(new Event('error'));
+      es.simulateEvent('connected', {});
+      expect(service.refetchRequest()).toBe(1);
+    });
   });
 
   /**
@@ -581,10 +630,13 @@ describe('SseService', () => {
     ])('should bump on terminal status %s', (status) => {
       service.connect('instance-123');
       service.getEventSource()?.simulateEvent('status_change', {
-        instance_id: 'inst',
+        instance_id: 'instance-123',
         status,
       });
       expect(service.pendingPurgeRequest()).toBe(1);
+      // MIN-3: the bump records WHICH instance went terminal so the
+      // chat-side effect can re-check it against the active instance.
+      expect(service.pendingPurgeInstanceId()).toBe('instance-123');
     });
 
     it.each([
@@ -596,7 +648,7 @@ describe('SseService', () => {
     ])('should NOT bump on non-terminal status %s', (status) => {
       service.connect('instance-123');
       service.getEventSource()?.simulateEvent('status_change', {
-        instance_id: 'inst',
+        instance_id: 'instance-123',
         status,
       });
       expect(service.pendingPurgeRequest()).toBe(0);
@@ -605,10 +657,38 @@ describe('SseService', () => {
     it('should bump per terminal transition (multiple shutdowns)', () => {
       service.connect('instance-123');
       const es = service.getEventSource()!;
-      es.simulateEvent('status_change', { instance_id: 'inst', status: 'completed' });
-      es.simulateEvent('status_change', { instance_id: 'inst', status: 'error' });
-      es.simulateEvent('status_change', { instance_id: 'inst', status: 'terminated' });
+      es.simulateEvent('status_change', { instance_id: 'instance-123', status: 'completed' });
+      es.simulateEvent('status_change', { instance_id: 'instance-123', status: 'error' });
+      es.simulateEvent('status_change', { instance_id: 'instance-123', status: 'terminated' });
       expect(service.pendingPurgeRequest()).toBe(3);
+    });
+
+    // MIN-3: the connected channel can forward terminal status_change
+    // events for OTHER instances (a cascade CHILD shutting down while
+    // the parent chat is open). Such an event must NOT bump the purge
+    // trigger — the connected (parent) instance's provisional entries
+    // are still perfectly resolvable.
+    it('should NOT bump when a DIFFERENT instance (cascade child) goes terminal on this channel', () => {
+      service.connect('instance-123');
+      const es = service.getEventSource()!;
+
+      es.simulateEvent('status_change', { instance_id: 'child-1', status: 'completed' });
+      es.simulateEvent('status_change', { instance_id: 'child-2', status: 'failed' });
+      // Terminal AND matching is required — a foreign terminal event
+      // with a terminal status is still filtered out.
+      expect(service.pendingPurgeRequest()).toBe(0);
+      expect(service.pendingPurgeInstanceId()).toBeNull();
+    });
+
+    it('should NOT record a purge instance id for a foreign terminal event', () => {
+      service.connect('instance-123');
+      const es = service.getEventSource()!;
+
+      // The statusChange signal itself still records the foreign event
+      // (instance list relies on it) — only the purge trigger is scoped.
+      es.simulateEvent('status_change', { instance_id: 'child-1', status: 'completed' });
+      expect(service.statusChange()?.instance_id).toBe('child-1');
+      expect(service.pendingPurgeInstanceId()).toBeNull();
     });
   });
 

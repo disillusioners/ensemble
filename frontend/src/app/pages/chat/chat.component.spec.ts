@@ -14,7 +14,6 @@ import { WorkspaceOverlayService } from '../../services/workspace-overlay.servic
 import type { Agent, InstanceInfo } from '../../models';
 import { ProjectTab } from '../../models/tab.model';
 import {
-  evictPendingByAge,
   makeProvisionalMessage,
   mergeMessagesById,
 } from '../../services/message-merge.util';
@@ -94,6 +93,9 @@ const mockSseService = {
   // tests they're plain signals tests can drive directly.
   refetchRequest: signal<number>(0),
   pendingPurgeRequest: signal<number>(0),
+  // MIN-3: which instance the latest purge bump refers to — the
+  // component effect compares it against ``activeInstanceId()``.
+  pendingPurgeInstanceId: signal<string | null>(null),
   connect: jest.fn(),
   disconnect: jest.fn(),
   clearEvents: jest.fn(),
@@ -326,14 +328,19 @@ class TestableChatComponent {
     this.sendError.set(null);
     this.isSending.set(true);
 
+    // MIN-2 mirror: capture the target instance id AT SEND TIME; the
+    // response handler re-checks it against ``activeInstanceId()``.
+    const sentInstanceId = instance.instance_id;
+
     this.api.sendMessage(instance.instance_id, payload.content, payload.images).subscribe({
       next: (response: any) => {
         // Mirror production ChatComponent.onSendMessage exactly:
         //   1. Clear input on success.
         //   2. Set ``queuedMessage`` from ``response.queued`` (truthy → show).
         //   3. If ``message_id`` is present: build provisional, merge into
-        //      ``messages`` with eviction, reset ``isSending``. Otherwise
-        //      the SSE echo / drain re-emit will render the bubble instead.
+        //      ``messages`` WITHOUT eviction (MIN-5), reset ``isSending``.
+        //      Otherwise the SSE echo / drain re-emit will render the
+        //      bubble instead.
         // The defensive ``created_at ?? timestamp ?? now`` fallback mirrors
         // production — without it, a degraded body shape would push the
         // provisional to the top of the list AND evict it on the next
@@ -347,22 +354,35 @@ class TestableChatComponent {
 
         const newId = response?.message_id;
         if (newId) {
-          const provisionalStamp =
-            response.created_at ?? response.timestamp ?? new Date().toISOString();
-          const provisional = makeProvisionalMessage({
-            messageId: newId,
-            content: payload.content,
-            createdAt: provisionalStamp,
-            instanceId: instance.instance_id,
-            images: payload.images,
-          });
-          this.messages.update(existing =>
-            evictPendingByAge(
-              mergeMessagesById(existing, [provisional]),
-              this.PENDING_TTL_MS,
-              Date.now(),
-            )
-          );
+          // MIN-2 mirror: drop the provisional when the user switched
+          // instances between send and response; still release the
+          // sending flag so the spinner doesn't stick across the switch.
+          const activeInstanceId = this.viewState.activeInstanceId();
+          if (activeInstanceId === sentInstanceId) {
+            // MIN-1a mirror: skip the append when the SSE echo already
+            // landed for this id — merging a pending provisional over
+            // the confirmed echo bubble would resurrect the spinner.
+            const alreadyPresent = this.messages().some(
+              (m: any) => m.message_id === newId,
+            );
+            if (!alreadyPresent) {
+              const provisionalStamp =
+                response.created_at ?? response.timestamp ?? new Date().toISOString();
+              const provisional = makeProvisionalMessage({
+                messageId: newId,
+                content: payload.content,
+                createdAt: provisionalStamp,
+                instanceId: instance.instance_id,
+                images: payload.images,
+              });
+              // MIN-5 mirror: NO ``evictPendingByAge`` on the optimistic
+              // append path — eviction runs only in the SSE-mirror /
+              // refetch passes.
+              this.messages.update(existing =>
+                mergeMessagesById(existing, [provisional])
+              );
+            }
+          }
           this.isSending.set(false);
         }
       },
@@ -610,6 +630,26 @@ class TestableChatComponent {
       }
       result.sort((a: any, b: any) => (a.created_at || '').localeCompare(b.created_at || ''));
       return result;
+    });
+  }
+
+  /**
+   * MIN-3 mirror of the production terminal-status pending-purge
+   * effect. The purge fires ONLY when the recorded purge instance id
+   * matches the ACTIVE instance — a cascade CHILD's terminal event (or
+   * a trigger recorded for a previously-opened instance) must not wipe
+   * the active chat's provisional bubbles.
+   */
+  runPendingPurgeEffect(): void {
+    const tick = this.sseService.pendingPurgeRequest();
+    if (tick === 0) return;
+    const purgeInstanceId = this.sseService.pendingPurgeInstanceId();
+    const activeInstanceId = this.viewState.activeInstanceId();
+    if (!purgeInstanceId || !activeInstanceId) return;
+    if (purgeInstanceId !== activeInstanceId) return;
+    this.messages.update((existing: any[]) => {
+      const filtered = existing.filter((m: any) => !m.pending);
+      return filtered.length === existing.length ? existing : filtered;
     });
   }
 
@@ -1203,16 +1243,23 @@ describe('ChatComponent - Project-Aware Navigation', () => {
       expect(component.messageInputRef.clearInput).toHaveBeenCalled();
     });
 
-    // 3c — eviction interaction: fresh provisional survives; aged one is evicted.
-    it('should keep a fresh provisional and evict an aged one (>10 min)', () => {
-      // Drive the clock forward so the eviction check sees a definite "now".
+    // 3c — MIN-5: the optimistic-append path must NOT run TTL eviction.
+    // A >10-min stalled POST's provisional (freshly appended with its
+    // original send-time stamp) would otherwise be appended and
+    // immediately evicted by this very pass — the bubble would flash
+    // and the user would lose their only send confirmation. Eviction
+    // belongs to the SSE-mirror / refetch passes only.
+    it('should NOT evict an aged pending entry on the optimistic-append path (MIN-5)', () => {
+      // Drive the clock forward so any (wrongful) eviction check would
+      // see a definite "now".
       const fixedNow = Date.now();
       jest.spyOn(Date, 'now').mockReturnValue(fixedNow);
-      const freshStamp = new Date(fixedNow - 5 * 60 * 1000).toISOString();     // 5 min old → survives
-      const agedStamp = new Date(fixedNow - 90 * 60 * 1000).toISOString();    // 90 min old → evicted
+      const freshStamp = new Date(fixedNow - 5 * 60 * 1000).toISOString();     // 5 min old
+      const agedStamp = new Date(fixedNow - 90 * 60 * 1000).toISOString();    // 90 min old
       const newStamp = new Date(fixedNow).toISOString();
 
-      // Pre-existing message list with one fresh + one aged provisional.
+      // Pre-existing message list with one fresh + one aged provisional
+      // (the aged one = a previous stalled POST still awaiting its echo).
       component.messages.set([
         {
           message_id: 'fresh',
@@ -1236,7 +1283,7 @@ describe('ChatComponent - Project-Aware Navigation', () => {
 
       const ids = component.messages().map((m: any) => m.message_id);
       expect(ids).toContain('fresh');      // fresh provisional survives
-      expect(ids).not.toContain('aged');   // aged one (>10 min) evicted
+      expect(ids).toContain('aged');       // MIN-5: aged one survives the append pass
       expect(ids).toContain('echo-new');   // new provisional appended
     });
 
@@ -1249,10 +1296,10 @@ describe('ChatComponent - Project-Aware Navigation', () => {
     // eviction, replacing the good SSE echo bubble.
     //
     // Asserts the four BLOCKER invariants from the spec: ONE bubble,
-    // SSE/server stamp, NOT evicted, NOT duplicated. The exact
-    // ``pending`` value is intentionally NOT pinned — that flag is
-    // cleared by the drain-time / refetch merge path, not by this
-    // optimistic-append path (which is the documented contract).
+    // SSE/server stamp, NOT evicted, NOT duplicated — and the MIN-1
+    // invariant: the provisional append is SKIPPED entirely (the id
+    // already exists), so ``pending`` STAYS cleared on the confirmed
+    // echo bubble (no spinner resurrection).
     it('should produce exactly ONE bubble when the SSE echo lands before the HTTP 202 resolves', () => {
       const serverStamp = new Date().toISOString();
 
@@ -1278,8 +1325,8 @@ describe('ChatComponent - Project-Aware Navigation', () => {
         created_at: serverStamp,
       });
 
-      // (2) HTTP 202 resolves — provisional append happens with the
-      //     SAME server stamp (no override, no NaN, no eviction).
+      // (2) HTTP 202 resolves — the append is skipped (id already
+      //     present): no duplicate, no pending resurrection, no eviction.
       fireSend(make202Response({ message_id: 'echo-uuid-1', created_at: serverStamp }));
 
       msgs = component.messages();
@@ -1295,6 +1342,10 @@ describe('ChatComponent - Project-Aware Navigation', () => {
       // came from an undefined stamp that localeCompare pushed ahead
       // of every other entry).
       expect(msgs[0].created_at).toBe(serverStamp);
+      // MIN-1a: the confirmed echo bubble must NOT regress to a
+      // spinner — ``pending`` stays cleared after both arrivals.
+      expect(msgs[0].pending).toBeUndefined();
+      expect(component.isSending()).toBe(false);
     });
 
     // 3e — degraded body without ``created_at`` → fallback used, no NaN.
@@ -1324,6 +1375,161 @@ describe('ChatComponent - Project-Aware Navigation', () => {
       const parsed = Date.parse(msgs[0].created_at);
       expect(Number.isNaN(parsed)).toBe(false);
       expect(Date.now() - parsed).toBeLessThan(TEN_MIN_MS);
+    });
+  });
+
+  // ────────────────────────────────────────────────────────────────────────
+  // MIN-2 — optimistic-append TOCTOU across instance switch
+  //
+  // The HTTP response can land AFTER the user switched instances. The
+  // append must capture the instance id at send time and drop the
+  // provisional when ``activeInstanceId()`` no longer matches —
+  // otherwise instance B's freshly-loaded list gets a bubble belonging
+  // to instance A. ``isSending`` is still released so the spinner
+  // doesn't stick across the switch.
+  // ────────────────────────────────────────────────────────────────────────
+  describe('onSendMessage() - optimistic append TOCTOU guard (MIN-2)', () => {
+    /** Two-phase send: register the response, hold it in-flight. */
+    function holdSend(response: unknown): { resolve: () => void } {
+      let release: (() => void) | null = null;
+      mockApiService.sendMessage.mockReturnValueOnce({
+        subscribe: (handlers: any) => {
+          release = () => handlers.next(response);
+          return { unsubscribe: () => {} };
+        },
+      });
+      component.onSendMessage({ content: 'hello' });
+      return {
+        resolve: () => {
+          if (release) release();
+          else throw new Error('subscribe handler never registered');
+        },
+      };
+    }
+
+    const makeResponse = () => ({
+      status: 'injected',
+      instance_id: 'inst-abc',
+      content: 'hello',
+      timestamp: new Date().toISOString(),
+      created_at: new Date().toISOString(),
+      pending_count: 1,
+      message_id: 'echo-toctou-1',
+      queued: false,
+    });
+
+    beforeEach(() => {
+      component.currentInstance.set(createMockInstance({ instance_id: 'inst-abc' }));
+      component.viewState.activeInstanceId.set('inst-abc');
+      mockSseService.messages.set([]);
+    });
+
+    afterEach(() => {
+      jest.restoreAllMocks();
+      mockSseService.messages.set([]);
+    });
+
+    it('should DROP the provisional when the user switched instances before the response landed', () => {
+      const held = holdSend(makeResponse());
+
+      // User switches to another instance while the POST is in-flight.
+      component.viewState.activeInstanceId.set('inst-other');
+
+      held.resolve();
+
+      // No bubble may land in the (now different) active view.
+      expect(component.messages()).toHaveLength(0);
+      // The send itself completed — the spinner must not stick.
+      expect(component.isSending()).toBe(false);
+    });
+
+    it('should STILL append when the response lands with no instance switch (control)', () => {
+      const held = holdSend(makeResponse());
+      held.resolve();
+
+      expect(component.messages()).toHaveLength(1);
+      expect(component.messages()[0].message_id).toBe('echo-toctou-1');
+      expect(component.messages()[0].pending).toBe(true);
+      expect(component.isSending()).toBe(false);
+    });
+  });
+
+  // ────────────────────────────────────────────────────────────────────────
+  // MIN-3 — terminal-status pending purge scoped to the ACTIVE instance
+  //
+  // A cascade CHILD reaching a terminal status on this channel (or a
+  // trigger recorded for a previously-opened instance) must NOT wipe
+  // the active chat's provisional bubbles.
+  // ────────────────────────────────────────────────────────────────────────
+  describe('pending purge effect — activeInstanceId scoping (MIN-3)', () => {
+    beforeEach(() => {
+      component.currentInstance.set(createMockInstance({ instance_id: 'inst-abc' }));
+      component.viewState.activeInstanceId.set('inst-abc');
+      component.messages.set([
+        {
+          message_id: 'prov-1',
+          role: 'user',
+          content: 'in flight',
+          created_at: new Date().toISOString(),
+          instance_id: 'inst-abc',
+          pending: true,
+        },
+        {
+          message_id: 'm-confirmed',
+          role: 'assistant',
+          content: 'confirmed',
+          created_at: new Date().toISOString(),
+          instance_id: 'inst-abc',
+        },
+      ]);
+      mockSseService.messages.set([]);
+    });
+
+    afterEach(() => {
+      mockSseService.messages.set([]);
+    });
+
+    it('should NOT purge when the terminal event belongs to a cascade CHILD (≠ active instance)', () => {
+      // Child went terminal on the parent's channel: the service (or
+      // the test, driving the signals directly) records the CHILD id.
+      mockSseService.pendingPurgeRequest.set(1);
+      mockSseService.pendingPurgeInstanceId.set('child-1');
+
+      component.runPendingPurgeEffect();
+
+      const ids = component.messages().map((m: any) => m.message_id);
+      expect(ids).toContain('prov-1');      // provisional bubble survives
+      expect(ids).toContain('m-confirmed'); // confirmed bubble untouched
+    });
+
+    it('should NOT purge when no active instance is cached', () => {
+      component.viewState.activeInstanceId.set(null);
+      mockSseService.pendingPurgeRequest.set(1);
+      mockSseService.pendingPurgeInstanceId.set('inst-abc');
+
+      component.runPendingPurgeEffect();
+
+      expect(component.messages().map((m: any) => m.message_id)).toContain('prov-1');
+    });
+
+    it('should purge when the terminal event matches the ACTIVE instance', () => {
+      mockSseService.pendingPurgeRequest.set(1);
+      mockSseService.pendingPurgeInstanceId.set('inst-abc');
+
+      component.runPendingPurgeEffect();
+
+      const ids = component.messages().map((m: any) => m.message_id);
+      expect(ids).not.toContain('prov-1');   // provisional purged
+      expect(ids).toContain('m-confirmed');  // confirmed bubble untouched
+    });
+
+    it('should be a no-op when the purge trigger never fired', () => {
+      mockSseService.pendingPurgeRequest.set(0);
+      mockSseService.pendingPurgeInstanceId.set(null);
+
+      component.runPendingPurgeEffect();
+
+      expect(component.messages().map((m: any) => m.message_id)).toContain('prov-1');
     });
   });
 

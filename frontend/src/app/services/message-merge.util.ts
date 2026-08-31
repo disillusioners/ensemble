@@ -81,12 +81,24 @@ export function makeProvisionalMessage(input: {
  * single unit-tested surface.
  *
  * Top-level fields from ``incoming`` win on conflict (so SSE / server
- * can patch a tool_calls[].output in place), but the ``pending`` flag
- * is cleared when the incoming copy is NOT itself pending — i.e. the
- * SSE echo / GET-refetch / drain-re-emit supersedes the provisional
- * visual state. This is the dedup-collapse behavior (behavior #1): a
- * POST-echo + drain-echo pair with the same id produces a single bubble
- * with ``pending: undefined`` and the POST timestamp.
+ * can patch a tool_calls[].output in place), with two corrections:
+ *
+ * MIN-1b (pending-flag resurrection): the ``pending`` flag survives a
+ * merge ONLY when BOTH copies are pending. The previous rule (clear
+ * when the incoming copy is non-pending) left the reverse arrival
+ * order broken: if the SSE echo lands BEFORE the HTTP 202 response,
+ * the optimistic append would merge a ``pending: true`` provisional
+ * over the already-confirmed server copy and resurrect the spinner
+ * on a bubble the server had already confirmed. Now either side being
+ * confirmed clears the flag, in both arrival orders.
+ *
+ * MIN-4 (GET ``created_at`` re-stamp): for server-confirmed (non-
+ * pending) entries the merge keeps the EARLIER of the local/incoming
+ * timestamps instead of incoming-wins. GET read-back re-stamps rows
+ * with the checkpoint-commit timestamp (later than the original POST
+ * stamp), which re-sorted the user bubble below inter-streamed
+ * assistant messages on every refetch. Keeping the earlier stamp pins
+ * the bubble in its original send position.
  */
 export function mergeMessagesById(
   existing: readonly Message[],
@@ -97,13 +109,31 @@ export function mergeMessagesById(
   for (const msg of incoming) {
     const idx = result.findIndex(m => m.message_id === msg.message_id);
     if (idx >= 0) {
-      // Top-level merge: incoming wins, but explicitly clear the
-      // provisional flag if the incoming copy is not itself pending
-      // (server-side copies are never pending — only the optimistic
-      // append carries the flag).
+      // Top-level merge: incoming wins, but the provisional flag is
+      // cleared when EITHER copy is confirmed — pending survives only
+      // if both the existing and the incoming copy carry it (MIN-1b:
+      // a pending copy merging over a confirmed one must NOT
+      // resurrect the spinner).
       const merged = { ...result[idx], ...msg };
-      if (!msg.pending) {
+      const existingIsPending =
+        (result[idx] as { pending?: boolean }).pending === true;
+      if (!msg.pending || !existingIsPending) {
         delete (merged as { pending?: boolean }).pending;
+      }
+      // MIN-4: for confirmed entries keep the earlier of the two
+      // timestamps so a GET re-stamp (checkpoint-commit ts) cannot
+      // re-sort the bubble. Applied only when the merged entry is NOT
+      // pending — a still-pending merge (duplicate provisional
+      // deliveries) keeps incoming-wins so the 202 body stamp rules.
+      if (!merged.pending) {
+        const localTs = result[idx].created_at;
+        const incomingTs = msg.created_at;
+        merged.created_at =
+          localTs && incomingTs
+            ? localTs <= incomingTs
+              ? localTs
+              : incomingTs
+            : (localTs || incomingTs);
       }
       result[idx] = merged;
     } else {

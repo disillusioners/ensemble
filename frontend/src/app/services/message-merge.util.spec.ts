@@ -160,6 +160,99 @@ describe('mergeMessagesById (union-by-id)', () => {
     expect(merged[0].created_at).toBe('2026-08-30T11:00:00Z');
   });
 
+  it('keeps pending STAYS cleared after BOTH arrival orders (echo BEFORE the 202 — MIN-1b)', () => {
+    // MIN-1b regression: the SSE echo can land BEFORE the HTTP 202
+    // resolves. The optimistic append then merges a ``pending: true``
+    // provisional over the ALREADY-CONFIRMED server copy — the old
+    // incoming-wins rule resurrected the spinner on a confirmed bubble.
+    // Arrival order 1: server copy first, provisional second → the
+    // merged entry must stay confirmed (pending stays cleared).
+    const serverCopy = makeMessage({
+      message_id: 'echo-1',
+      content: 'hello',
+      created_at: '2026-08-30T11:00:00Z',
+    });
+    const lateProvisional = makeMessage({
+      message_id: 'echo-1',
+      content: 'hello',
+      created_at: '2026-08-30T11:00:00Z',
+      pending: true,
+    });
+    const merged = mergeMessagesById([serverCopy], [lateProvisional]);
+    expect(merged.length).toBe(1);
+    expect(merged[0].pending).toBeUndefined();
+
+    // Arrival order 2 (the long-covered direction): provisional first,
+    // server copy second → also cleared.
+    const mergedReversed = mergeMessagesById(
+      [makeMessage({ ...lateProvisional })],
+      [makeMessage({ ...serverCopy })],
+    );
+    expect(mergedReversed.length).toBe(1);
+    expect(mergedReversed[0].pending).toBeUndefined();
+  });
+
+  it('keeps the EARLIER timestamp for a confirmed entry when GET re-stamps it later (MIN-4)', () => {
+    // MIN-4: GET read-back re-stamps rows with the checkpoint-commit
+    // timestamp, which is LATER than the original POST stamp. The merge
+    // must keep the EARLIER stamp so the user bubble stays in its
+    // original send position instead of re-sorting below inter-streamed
+    // assistant messages.
+    const originalPostStamp = '2026-08-30T11:00:00Z';
+    const restampedLater = '2026-08-30T11:05:00Z';
+    const local = makeMessage({
+      message_id: 'u-1',
+      created_at: originalPostStamp,
+    });
+    const incoming = makeMessage({
+      message_id: 'u-1',
+      created_at: restampedLater,
+    });
+    const merged = mergeMessagesById([local], [incoming]);
+    expect(merged.length).toBe(1);
+    expect(merged[0].created_at).toBe(originalPostStamp);
+  });
+
+  it('keeps the earlier timestamp regardless of which side carries it (MIN-4, reverse direction)', () => {
+    // The incoming copy can also be the earlier one (e.g. the local
+    // entry was seeded from a later snapshot). Same rule: earlier wins.
+    const earlier = '2026-08-30T10:55:00Z';
+    const later = '2026-08-30T11:00:00Z';
+    const local = makeMessage({ message_id: 'u-1', created_at: later });
+    const incoming = makeMessage({ message_id: 'u-1', created_at: earlier });
+    const merged = mergeMessagesById([local], [incoming]);
+    expect(merged[0].created_at).toBe(earlier);
+  });
+
+  it('does NOT apply the earlier-of rule to a still-pending merge (202 body stamp rules)', () => {
+    // MIN-4 is scoped to server-confirmed entries. A merge that stays
+    // pending (duplicate provisional deliveries) keeps incoming-wins
+    // for ``created_at``.
+    const local = makeMessage({
+      message_id: 'p-1',
+      created_at: '2026-08-30T11:00:00Z',
+      pending: true,
+    });
+    const incoming = makeMessage({
+      message_id: 'p-1',
+      created_at: '2026-08-30T10:59:00Z',
+      pending: true,
+    });
+    const merged = mergeMessagesById([local], [incoming]);
+    expect(merged[0].pending).toBe(true);
+    expect(merged[0].created_at).toBe('2026-08-30T10:59:00Z');
+  });
+
+  it('falls back to the non-empty stamp when one side has none (MIN-4 edge)', () => {
+    const local = makeMessage({ message_id: 'u-1', created_at: '' });
+    const incoming = makeMessage({
+      message_id: 'u-1',
+      created_at: '2026-08-30T11:00:00Z',
+    });
+    const merged = mergeMessagesById([local], [incoming]);
+    expect(merged[0].created_at).toBe('2026-08-30T11:00:00Z');
+  });
+
   it('should preserve the incoming pending flag when both sides are pending', () => {
     // Defensive case: if a refetch returns the same id AND the same
     // pending flag (e.g. an aggressive retry), the merge should not

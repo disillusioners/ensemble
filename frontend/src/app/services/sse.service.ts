@@ -122,6 +122,17 @@ export class SseService {
   // matches the reconnect-refetch trigger pattern.
   pendingPurgeRequest = signal<number>(0);
 
+  // The instance the latest ``pendingPurgeRequest`` bump refers to.
+  // Companion to the counter above (MIN-3): a cascade CHILD reaching a
+  // terminal status on this channel must not wipe the PARENT chat's
+  // provisional bubbles, and a trigger recorded just before an instance
+  // switch must not purge the newly-opened instance's list. The chat
+  // component compares this id against its ``activeInstanceId()`` and
+  // skips the purge on mismatch. NOT reset by ``clearEvents()`` — it
+  // must stay observable across a connect/disconnect cycle exactly like
+  // the counter it annotates.
+  pendingPurgeInstanceId = signal<string | null>(null);
+
   // Pending tool_result outputs keyed by tool_call_id. Flushed whenever a
   // matching tool_call or assistant_message arrives, so a tool_result that
   // races ahead of its tool_call is not lost. Cleared on disconnect.
@@ -368,7 +379,21 @@ export class SseService {
           // SSE echoes — it never has provisional entries to begin
           // with). Bumping a counter is the same trigger pattern as
           // ``refetchRequest`` and keeps the surface minimal.
-          if (isTerminalStatus(data.status as string | null)) {
+          //
+          // MIN-3: the channel can forward terminal ``status_change``
+          // events for OTHER instances (a cascade CHILD shutting down
+          // while the parent chat is open). Such an event must NOT
+          // purge the connected instance's provisional entries, so the
+          // bump fires only when the event's ``instance_id`` matches
+          // the instance this channel is attached to. The event's id
+          // is recorded alongside the counter so the chat-side effect
+          // can re-check it against the ACTIVE instance (guarding the
+          // switch-between-send-and-event race too).
+          if (
+            isTerminalStatus(data.status as string | null) &&
+            data.instance_id === this.currentInstanceId
+          ) {
+            this.pendingPurgeInstanceId.set(data.instance_id as string);
             this.pendingPurgeRequest.update(n => n + 1);
           }
         } catch (err) {

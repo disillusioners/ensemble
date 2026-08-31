@@ -435,9 +435,20 @@ export class ChatComponent implements OnInit, OnDestroy {
     // them. The trigger is bumped by the SSE ``status_change`` listener
     // (terminal statuses only); the actual mutation happens here because
     // the chat component owns the visible ``messages`` signal.
+    //
+    // MIN-3: the purge must fire only for the instance the user is
+    // VIEWING. The SSE-side listener already drops terminal events for
+    // cascade children that land on this channel; this second guard
+    // covers the instance-switch race — a trigger recorded for the
+    // previously-open instance must not wipe the newly-opened
+    // instance's provisional bubbles.
     effect(() => {
       const tick = this.sseService.pendingPurgeRequest();
       if (tick === 0) return;
+      const purgeInstanceId = this.sseService.pendingPurgeInstanceId();
+      const activeInstanceId = this.viewState.activeInstanceId();
+      if (!purgeInstanceId || !activeInstanceId) return;
+      if (purgeInstanceId !== activeInstanceId) return;
       this.messages.update(existing => {
         const filtered = existing.filter(m => !m.pending);
         return filtered.length === existing.length ? existing : filtered;
@@ -1229,6 +1240,13 @@ export class ChatComponent implements OnInit, OnDestroy {
     this.sendError.set(null);
     this.isSending.set(true);
 
+    // MIN-2: capture the target instance id AT SEND TIME. The HTTP
+    // response can land after the user switched instances (TOCTOU) —
+    // the ``next`` handler below re-checks ``activeInstanceId()``
+    // against this captured value before touching ``messages``, the
+    // same guard pattern the SSE mirror effect uses.
+    const sentInstanceId = instance.instance_id;
+
     this.api.sendMessage(instance.instance_id, payload.content, payload.images, payload.queue_id).subscribe({
       // Both 200 (PAUSED auto-resume / IDLE enqueue) and 202 (RUNNING /
       // WAITING_CHILDREN injection acceptance) are 2xx and fire `next` by
@@ -1266,30 +1284,53 @@ export class ChatComponent implements OnInit, OnDestroy {
         // confirmation for the send-before-SSE-connect race.
         const newId = response.message_id;
         if (newId) {
-          // message-display-latency fix: defensive read of the
-          // server-authoritative stamp. The 202 body now ships
-          // ``created_at`` (same value as the SSE echo's created_at),
-          // but older backends / degraded shapes may only carry
-          // ``timestamp``. Fall back in order, ending with ``now``
-          // only as a last resort so the provisional never gets an
-          // unparseable stamp (which would mis-sort to the top AND
-          // get evicted by ``evictPendingByAge`` on the next refetch).
-          const provisionalStamp =
-            response.created_at ?? response.timestamp ?? new Date().toISOString();
-          const provisional = makeProvisionalMessage({
-            messageId: newId,
-            content: payload.content,
-            createdAt: provisionalStamp,
-            instanceId: instance.instance_id,
-            images: payload.images,
-          });
-          this.messages.update(existing =>
-            evictPendingByAge(
-              mergeMessagesById(existing, [provisional]),
-              this.PENDING_TTL_MS,
-              Date.now(),
-            )
-          );
+          // MIN-2: drop the provisional when the user switched instances
+          // between send and response — appending here would land a
+          // bubble for ``sentInstanceId`` into the newly-opened
+          // instance's list. ``isSending`` is still released: the send
+          // itself completed and the spinner must not stick across the
+          // switch.
+          const activeInstanceId = this.viewState.activeInstanceId();
+          if (activeInstanceId === sentInstanceId) {
+            // MIN-1a: skip the append when a message with this id
+            // already exists — the SSE echo can land BEFORE the HTTP
+            // response, and merging a ``pending: true`` provisional
+            // over the already-confirmed echo bubble would resurrect
+            // the spinner (pending-flag resurrection). The confirmed
+            // copy stays untouched.
+            const alreadyPresent = this.messages().some(
+              m => m.message_id === newId,
+            );
+            if (!alreadyPresent) {
+              // message-display-latency fix: defensive read of the
+              // server-authoritative stamp. The 202 body now ships
+              // ``created_at`` (same value as the SSE echo's created_at),
+              // but older backends / degraded shapes may only carry
+              // ``timestamp``. Fall back in order, ending with ``now``
+              // only as a last resort so the provisional never gets an
+              // unparseable stamp (which would mis-sort to the top AND
+              // get evicted by ``evictPendingByAge`` on the next refetch).
+              const provisionalStamp =
+                response.created_at ?? response.timestamp ?? new Date().toISOString();
+              const provisional = makeProvisionalMessage({
+                messageId: newId,
+                content: payload.content,
+                createdAt: provisionalStamp,
+                instanceId: instance.instance_id,
+                images: payload.images,
+              });
+              // MIN-5: TTL eviction runs ONLY in the SSE-mirror /
+              // refetch passes — never here. A slow POST whose 202
+              // carries the original send-time ``created_at`` would
+              // otherwise be appended and immediately evicted by this
+              // very pass (>10 min old by stamp), flashing the bubble
+              // and dropping the user's only send confirmation. The
+              // next mirror / refetch pass handles eviction.
+              this.messages.update(existing =>
+                mergeMessagesById(existing, [provisional])
+              );
+            }
+          }
           // The optimistic bubble is the user's confirmation that the
           // message landed — the SSE echo / drain re-emit will clear
           // the ``pending`` flag via the merge helper. Reset the
