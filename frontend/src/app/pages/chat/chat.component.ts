@@ -1302,20 +1302,25 @@ export class ChatComponent implements OnInit, OnDestroy {
     // ── Slash-command pre-parse (Phase 2 / Task 5) ────────────────────
     // Runs BEFORE the cooldown guard so an advisory rejection never
     // stamps the duplicate-send cooldown. Branches:
-    //   ``//x``  → strip ONE slash, deliver as a plain message (O-B1 —
-    //              load-bearing: the BE would re-parse the stripped text
-    //              as a command if we POSTed it unrewritten);
+    //   ``//x``  → fall through to the plain-message path with the RAW
+    //              ``//x`` text (O-B1 — load-bearing: the BE strips the
+    //              escape and delivers the literal; the FE MUST NOT
+    //              pre-strip the slash, otherwise the BE would re-parse
+    //              the rewritten ``/x`` as a real command and trigger
+    //              compaction / 400 UNKNOWN_COMMAND on what the user
+    //              intended as plain text).
     //   plain    → fall through to the unchanged message path;
     //   known    → command send path (duplicate guard + ack handling);
     //   unknown  → inline validation error, ZERO network call (advisory;
     //              the BE 400 UNKNOWN_COMMAND + available list remains
     //              authoritative and feeds the same inline surface when
     //              it fires).
-    let effectiveContent = payload.content;
+    // The parse outcome is only used for ROUTING CLASSIFICATION here — the
+    // ``escape`` branch is detected so we skip the command-acks path, but
+    // the original ``payload.content`` is what gets POSTed (the registry's
+    // ``parse.text`` rewrite would break the BE's escape contract).
     const parse = this.commandRegistry.parseCommandInput(payload.content);
-    if ('escape' in parse) {
-      effectiveContent = parse.text;
-    } else if ('known' in parse && parse.known) {
+    if ('known' in parse && parse.known) {
       if (this.commandState.isActive(instance.instance_id)) {
         // Advisory duplicate-command guard (SC5) — BE ``busy`` /
         // ``rate_limited`` refusals stay authoritative (§6).
@@ -1330,6 +1335,11 @@ export class ChatComponent implements OnInit, OnDestroy {
       this.messageInputRef?.showCommandValidationError(`Unknown command: /${parse.name}`);
       return;
     }
+    // Both the escape (``//x``) and plain (no leading ``/``) branches fall
+    // through here: POST the raw composer text. The BE strips the leading
+    // escape and delivers the literal, so the bubble shows what the user
+    // typed (e.g. ``//compact is useful`` → ``/compact is useful``).
+    const effectiveContent = payload.content;
 
     // Cooldown guard: block consecutive sends within SEND_COOLDOWN_MS to
     // prevent duplicate submissions from double Enter / double click. Both
@@ -1374,7 +1384,16 @@ export class ChatComponent implements OnInit, OnDestroy {
         if (parsed.kind === 'command') {
           this.isSending.set(false);
           if (parsed.ack.state === 'rejected') {
-            this.messageInputRef?.showCommandValidationError(this.rejectionCopy(parsed.ack), 8000);
+            // W4: TOCTOU guard — only render the inline rejection when
+            // the user is STILL viewing the instance the command was
+            // sent to (sentInstanceId pattern, mirroring the accepted
+            // branch at :1530-1537). Without this, a user who switched
+            // tabs while a command POST was in flight would see the
+            // rejection toast land on the newly-opened instance's input
+            // and trigger an inline error there.
+            if (this.viewState.activeInstanceId() === sentInstanceId) {
+              this.messageInputRef?.showCommandValidationError(this.rejectionCopy(parsed.ack), 8000);
+            }
           }
           return;
         }
@@ -1570,6 +1589,10 @@ export class ChatComponent implements OnInit, OnDestroy {
         return 'Compaction is disabled for this instance (compaction_disabled).';
       case 'quiescence_timeout':
         return 'The instance could not be quiesced in time — try again (quiescence_timeout).';
+      case 'unavailable':
+        // W1 (2026-08-31): BE gates via O-B6 per-agent policy and may emit
+        // this reason for a registered command the agent does not allow.
+        return ack.detail || 'This command is not available on this agent.';
       default:
         return ack.detail || 'The command was rejected.';
     }

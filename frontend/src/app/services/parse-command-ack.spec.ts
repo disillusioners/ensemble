@@ -138,6 +138,11 @@ describe('parseCommandAck — the pinned §7 CommandAck, field by field', () => 
     'pending_injections',
     'compaction_disabled',
     'quiescence_timeout',
+    // W1 (2026-08-31, contract-drift amendment): BE ships a seventh
+    // rejection reason when the O-B6 per-agent policy gate refuses a
+    // registered command. The union must agree so a future BE-side flip
+    // fails the FE CI here with a named expectation.
+    'unavailable',
   ] as const)('rejected ack with reason %s parses with detail + ttl intact', (reason) => {
     const ack = fullAcceptedAck({
       state: 'rejected',

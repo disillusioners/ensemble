@@ -252,6 +252,47 @@ describe('CommandStateService — phase_seq monotonic guard (R9)', () => {
     service.onSseEvent(makeEvent({ phase: 'in_progress', phase_seq: 1 })); // late
     expect(service.stateFor('inst-1')?.phase).toBe('success');
   });
+
+  // S1 regression (2026-08-31): the prior ``Number.isFinite(...) && <=``
+  // guard inverted NaN handling — a NaN event slipped through the LHS
+  // and corrupted phaseSeq to NaN, which then short-circuited every
+  // subsequent monotonic check. The fix flips the polarity: non-finite
+  // OR less-than-or-equal ⇒ ignore.
+  it('S1: NaN phase_seq is ignored — state machine never stores NaN', () => {
+    const service = new CommandStateService();
+    service.startCommand('inst-1', makeAck());
+    service.onSseEvent(makeEvent({ phase: 'waiting', phase_seq: 0 }));
+    service.onSseEvent(makeEvent({ phase: 'in_progress', phase_seq: 1 }));
+    // BEFORE the fix this would land phase_seq=NaN on the entry; AFTER,
+    // the guard drops it and state survives intact.
+    service.onSseEvent(
+      makeEvent({ phase: 'in_progress', phase_seq: Number.NaN as unknown as number }),
+    );
+    expect(service.stateFor('inst-1')?.phase).toBe('in_progress');
+    expect(service.stateFor('inst-1')?.phaseSeq).toBe(1);
+    expect(Number.isNaN(service.stateFor('inst-1')?.phaseSeq ?? 0)).toBe(false);
+    // A later, valid heartbeat must still apply — the NaN did not brick
+    // the guard for subsequent events.
+    service.onSseEvent(makeEvent({ phase: 'in_progress', phase_seq: 2, elapsed_ms: 20000 }));
+    expect(service.stateFor('inst-1')?.phaseSeq).toBe(2);
+    expect(service.stateFor('inst-1')?.elapsedMs).toBe(20000);
+  });
+
+  it('S1: ±Infinity phase_seq is ignored — no Infinity ever stored', () => {
+    const service = new CommandStateService();
+    service.startCommand('inst-1', makeAck());
+    service.onSseEvent(makeEvent({ phase: 'waiting', phase_seq: 0 }));
+    service.onSseEvent(makeEvent({ phase: 'in_progress', phase_seq: 1 }));
+    service.onSseEvent(
+      makeEvent({ phase: 'in_progress', phase_seq: Number.POSITIVE_INFINITY as unknown as number }),
+    );
+    service.onSseEvent(
+      makeEvent({ phase: 'in_progress', phase_seq: Number.NEGATIVE_INFINITY as unknown as number }),
+    );
+    const seq = service.stateFor('inst-1')?.phaseSeq ?? 0;
+    expect(Number.isFinite(seq)).toBe(true);
+    expect(seq).toBe(1);
+  });
 });
 
 describe('CommandStateService — command_id correlation', () => {

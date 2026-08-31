@@ -44,6 +44,66 @@ export interface TodoNode {
 
 export type TodoItem = TodoNode;
 
+/**
+ * Parse a raw ``command_progress`` SSE message payload into a
+ * {@link CommandProgressEvent} or ``null`` when the payload is malformed,
+ * wrong-instance, or otherwise unusable.
+ *
+ * W2 (2026-08-31): extracted from ``SseService`` so the listener is a
+ * thin wrapper and the wire-decoding rules have a logic-mirror Jest
+ * spec. Behavior preserved verbatim from the in-listener code:
+ *
+ *   - envelope unwrap: LiveEventHub wraps the flat CommandProgressEvent
+ *     inside ``data.message`` (messages.py yields ``json.dumps(event)``
+ *     where ``event.message`` is the dispatcher's payload). A missing
+ *     ``message`` key returns ``null`` (graceful drop) so malformed
+ *     envelopes never reach the command state machine.
+ *   - field coercions: ``phase_seq`` / ``elapsed_ms`` go through
+ *     ``Number(...)``; ``timestamp`` defaults to ``''``; ``eta_ms`` is
+ *     only attached when numeric; ``detail`` is only attached when
+ *     object-shaped (avoids leaking garbage into the state machine).
+ *   - per-instance staleness guard: drop events whose ``instance_id``
+ *     disagrees with ``currentInstanceId`` (the channel is attached to
+ *     exactly one instance; cross-instance events must never reach the
+ *     command state machine — they belong to another channel).
+ *   - malformed JSON: returns ``null`` (never throws) — the listener's
+ *     try/catch now only exists to keep the SSE stream alive across a
+ *     rare parse error; this helper is the single source of truth.
+ *   - ``phase_seq`` is forwarded INTACT — the listener must not drop
+ *     old seq values; the CommandStateService owns monotonic dedup.
+ */
+export function parseCommandProgressEvent(
+  data: string,
+  currentInstanceId: string | null,
+): CommandProgressEvent | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== 'object') return null;
+  const message = (parsed as { message?: unknown }).message;
+  if (!message || typeof message !== 'object') return null;
+  const m = message as Record<string, unknown>;
+  const event: CommandProgressEvent = {
+    instance_id: m['instance_id'] as string,
+    command_id: m['command_id'] as string,
+    phase: m['phase'] as CommandProgressEvent['phase'],
+    phase_seq: Number(m['phase_seq']),
+    timestamp: (m['timestamp'] as string) ?? '',
+    elapsed_ms: Number(m['elapsed_ms'] ?? 0),
+  };
+  if (typeof m['eta_ms'] === 'number') event.eta_ms = m['eta_ms'] as number;
+  if (m['detail'] && typeof m['detail'] === 'object') {
+    event.detail = m['detail'] as CommandProgressEvent['detail'];
+  }
+  // Per-instance staleness guard — drop events that belong to a different
+  // instance than the one this channel is attached to.
+  if (event.instance_id !== currentInstanceId) return null;
+  return event;
+}
+
 @Injectable({
   providedIn: 'root'
 })
@@ -572,31 +632,16 @@ export class SseService {
     // ``injection_pending`` above: LiveEventHub wraps the flat
     // CommandProgressEvent inside the envelope's ``message`` field
     // (messages.py yields ``json.dumps(event)`` where ``event.message``
-    // is the dispatcher's payload). Best-effort parse — malformed JSON is
-    // logged and swallowed so the stream never breaks (same convention as
-    // the other 16 listeners). The per-instance staleness guard below is
-    // the ONLY filter applied here; ``phase_seq`` ordering/dedup is the
-    // CommandStateService's job (Task 4).
+    // is the dispatcher's payload). The listener is a thin wrapper —
+    // parse + staleness guard live in ``parseCommandProgressEvent`` so
+    // the wire-decoding rules are covered by the logic-mirror Jest
+    // spec (W2). Best-effort: malformed JSON is swallowed here so the
+    // stream never breaks (same convention as the other 16 listeners).
     eventSource.addEventListener('command_progress', (e: MessageEvent) => {
       this.ngZone.run(() => {
         try {
-          const data = JSON.parse(e.data);
-          const message = data.message ?? {};
-          const event: CommandProgressEvent = {
-            instance_id: message.instance_id as string,
-            command_id: message.command_id as string,
-            phase: message.phase as CommandProgressEvent['phase'],
-            phase_seq: Number(message.phase_seq),
-            timestamp: (message.timestamp as string) ?? '',
-            elapsed_ms: Number(message.elapsed_ms ?? 0),
-          };
-          if (typeof message.eta_ms === 'number') event.eta_ms = message.eta_ms;
-          if (message.detail && typeof message.detail === 'object') {
-            event.detail = message.detail as CommandProgressEvent['detail'];
-          }
-          // Staleness guard (:633 pattern) — drop events that belong to a
-          // different instance than the one this channel is attached to.
-          if (event.instance_id !== this.currentInstanceId) return;
+          const event = parseCommandProgressEvent(e.data, this.currentInstanceId);
+          if (!event) return; // malformed / wrong-instance → drop
           // Forward with ``phase_seq`` INTACT — the state machine dedups
           // stale/duplicate/heartbeat events; this listener must not.
           this.commandProgress.set(event);

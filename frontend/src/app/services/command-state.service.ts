@@ -206,7 +206,14 @@ export class CommandStateService {
     if (current.commandId !== event.command_id) return;
 
     // Rule 3 — monotonic seq guard (per command_id).
-    if (Number.isFinite(event.phase_seq) && event.phase_seq <= current.phaseSeq) return;
+    // S1 (2026-08-31): NaN guard flipped — non-finite phase_seq (NaN or
+    // ±Infinity) MUST be ignored. The previous shape
+    // ``Number.isFinite(...) && <= current.phaseSeq`` had the polarity
+    // inverted: a NaN event short-circuited the LHS to false and slipped
+    // through to apply, corrupting the state (a NaN phaseSeq stored on
+    // the entry means the next monotonic check also slips through). The
+    // fix: ignore when NOT finite OR less-than-or-equal current seq.
+    if (!Number.isFinite(event.phase_seq) || event.phase_seq <= current.phaseSeq) return;
 
     if (event.phase === current.phase) {
       // Rule 4 — heartbeat refresh (non-terminal only; a repeated terminal
@@ -381,6 +388,22 @@ export class CommandStateService {
 
   // ── internals ─────────────────────────────────────────────────────────
 
+  /**
+   * Build an {@link ActiveCommandState} from an SSE ``command_progress``
+   * event (the self-healing adopt path for unknown-instance events).
+   *
+   * S6 (2026-08-31): the hard-coded ``command: 'compact'`` below is the
+   * SOLE Phase-2 command the registry currently advertises; this is the
+   * single seam to generalize when the registry grows. The card renders
+   * ``state.command`` verbatim, so adding a second command later means:
+   * (a) read the command name from the SSE envelope (the dispatcher
+   * already includes it on each event — promote from the registry here);
+   * (b) wire a per-command default-copy lookup for the card copy; and
+   * (c) extend the state machine's legal-transition table if the new
+   * command's phase set differs from ``compact``'s six phases. Until
+   * then, treating ``'compact'`` as the only legal literal is intentional
+   * (single-command Phase 2).
+   */
   private fromEvent(event: CommandProgressEvent): ActiveCommandState {
     return {
       instanceId: event.instance_id,

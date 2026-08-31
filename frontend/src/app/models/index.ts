@@ -30,7 +30,13 @@ export type RejectionReason =
   | 'rate_limited'
   | 'pending_injections'
   | 'compaction_disabled'
-  | 'quiescence_timeout';
+  | 'quiescence_timeout'
+  /** W1 (2026-08-31, contract drift): BE ships an additional rejection
+   *  reason — emitted when the daemon has the command registered but the
+   *  policy gate (O-B6 per-agent availability, or a future quota check)
+   *  refuses to dispatch it. The literal string is pinned in
+   *  ``daemon/services/command_dispatcher.py`` and must agree here. */
+  | 'unavailable';
 
 /** §7 amendment (post-review adjudication C1, 2026-08-31): the enum gains
  *  "partial_summary". Mapping count = three: summary → success;

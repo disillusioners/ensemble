@@ -563,6 +563,60 @@ test.describe('/compact slash-command UX (Phase 2)', () => {
     await expect(page.locator(CARD)).toHaveCount(0);
   });
 
+  // ── C1 e2e (plan-mandated): // escape delivers a literal message, NOT a command ──
+  // Regression for review C1: the FE previously re-parsed ``//x`` into
+  // ``/x`` and POSTed that, which the BE re-classified as a command —
+  // ``//compact is useful`` triggered REAL compaction (no card yet ⇒ user
+  // confusion) and ``//etc/hosts`` 400'd. The fix posts the RAW ``//…``
+  // text and lets the BE strip the escape on its end. This e2e covers the
+  // end-to-end happy-path through the message branch (NOT the command
+  // branch): a bubble with the literal text, no card, no advisory error,
+  // and the POST body is verified to be the RAW ``//…`` text (no FE-side
+  // pre-strip, which would have re-triggered the original bug).
+  test('C1: //compact is useful → literal message bubble, no command ack, no card (POST body raw)', async () => {
+    await clearRoutes(page);
+    let capturedBody: { content?: string } | null = null;
+    const counters = await installCommandMocks(page, instanceId, {
+      killSse: false,
+      respondPost: (content) => {
+        capturedBody = content;
+        // BE contract: ``//`` escape is stripped server-side and stored
+        // verbatim as a plain message — return the stripped literal.
+        const stripped = (content.content ?? '').replace(/^\/\//, '/');
+        return {
+          status: 202,
+          body: {
+            status: 'injected',
+            instance_id: instanceId,
+            content: stripped,
+            timestamp: isoNow(),
+            created_at: isoNow(),
+            pending_count: 1,
+            message_id: `echo-escape-${Date.now()}`,
+          },
+        };
+      },
+    });
+    await gotoInstance(page, instanceId);
+
+    await sendCommand(page, '//compact is useful');
+
+    // A user-bubble must appear (server echoed the stripped literal).
+    const bubble = page.locator('.message-bubble', { hasText: '/compact is useful' });
+    await expect(bubble).toHaveCount(1, { timeout: 10000 });
+
+    // NO command-ack branch consumed: no card, no validation-error.
+    await expect(page.locator(CARD)).toHaveCount(0);
+    await expect(page.locator('.validation-error')).toHaveCount(0);
+
+    // POST body verified RAW — the FE bug would have shipped ``/compact…``
+    // (one slash pre-stripped) and re-triggered the original bug. With
+    // the fix the FE ships ``//…`` and lets the BE strip it.
+    expect(capturedBody).not.toBeNull();
+    expect(capturedBody?.content).toBe('//compact is useful');
+    expect(counters.postCount()).toBe(1);
+  });
+
   // ── SC15: restart + polling semantics ──────────────────────────────────
   test('SC15: {exists:false} clears card silently; poll cadence ~5s while SSE dead; poll stops', async () => {
     test.setTimeout(180_000);
