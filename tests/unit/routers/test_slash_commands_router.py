@@ -551,25 +551,40 @@ class TestGetActiveCommand:
     def test_active_command_returns_event_payload(
         self, client_with_manager, dispatcher
     ):
+        """Active command → event payload (W-1.3 timestamp + W-3.4 active-slot integrity).
+
+        W-3.4 — the previous behaviour leaked the active slot across
+        event-loop boundaries (a long handler that was cancelled on
+        loop close left ``_active`` populated). The current dispatch
+        drops the active slot on cancel. To exercise the GET
+        endpoint with a live active command, this test seeds the
+        active slot directly via the dispatcher's state registry
+        (the same pattern used by
+        ``test_inflight_busy_rejects_with_reason``).
+        """
         client, state = client_with_manager
-
-        async def _long_handler(*, instance_id, args, command_id, context):
-            # Stay in-flight so the active slot stays populated.
-            await asyncio.Event().wait()
-
-        _register_compact(dispatcher, handler=_long_handler)
+        _register_compact(dispatcher, handler=_hanging_handler)
         state["manager"] = _make_manager(dispatcher)
 
-        async def _dispatch():
-            return await dispatcher.dispatch(
-                instance_id="inst-A",
-                text="/compact",
-                pending_injections=0,
-            )
+        # Seed an active command in the dispatcher's state registry
+        # WITHOUT spawning a bg task — the bg task is what TestClient
+        # would cancel between requests (the cross-loop cancel path
+        # is what W-3.4 fixes; the dispatcher actively drops the
+        # active slot on cancel, so we can't rely on the bg task
+        # leaving the slot populated).
+        command_id = "cmd-active-payload"
+        import asyncio as _asyncio
 
-        outcome = asyncio.run(_dispatch())
-        assert outcome.kind == "ack"
-        command_id = outcome.ack["command_id"]
+        async def _seed():
+            dispatcher._state.record_start(
+                instance_id="inst-A",
+                command_id=command_id,
+                command="compact",
+                ttl_seconds=600,
+            )
+            dispatcher._inflight["inst-A"] = command_id
+
+        _asyncio.run(_seed())
 
         resp = client.get("/instances/inst-A/commands/active")
         assert resp.status_code == 200
@@ -582,6 +597,7 @@ class TestGetActiveCommand:
             "command_id",
             "phase",
             "phase_seq",
+            "timestamp",  # W-1.3 — ISO 8601, NOT time.monotonic() float
             "elapsed_ms",
             "last_event_elapsed_ms",
         ):

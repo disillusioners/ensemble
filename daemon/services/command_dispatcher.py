@@ -67,13 +67,21 @@ logger = logging.getLogger(__name__)
 
 
 class RejectionReason(str, Enum):
-    """Six rejection reasons for the WS-5 CommandAck envelope.
+    """Seven rejection reasons for the WS-5 CommandAck envelope.
 
-    The enum is closed at six values per the architect verdict
-    (architecture-recommendation.md §7 / decisions.md). The
-    dispatcher only ever produces ``busy`` / ``rate_limited`` /
-    ``pending_injections``; the executor (WS-2) is responsible for
-    producing ``terminal_instance``, ``compaction_disabled``,
+    The enum was closed at six values per the architect verdict
+    (architecture-recommendation.md §7 / decisions.md) and gained
+    the 7th value ``UNAVAILABLE`` per W-2.5 (leader-approved, 2026-08-31)
+    — the per-agent availability predicate (O-B6) was always
+    designed-in but the rejection-reason enum had no slot for
+    "agent policy denied"; surfacing ``availability=False`` as
+    ``pending_injections`` was the original workaround that the
+    reviewer flagged as incorrect.
+
+    The dispatcher only ever produces ``busy`` / ``rate_limited`` /
+    ``pending_injections`` / ``unavailable`` (the first four); the
+    executor (WS-2) is responsible for producing
+    ``terminal_instance``, ``compaction_disabled``,
     ``quiescence_timeout`` as terminal phase details.
     """
 
@@ -81,6 +89,7 @@ class RejectionReason(str, Enum):
     BUSY = "busy"
     RATE_LIMITED = "rate_limited"
     PENDING_INJECTIONS = "pending_injections"
+    UNAVAILABLE = "unavailable"  # W-2.5 (leader-approved 2026-08-31)
     COMPACTION_DISABLED = "compaction_disabled"
     QUIESCENCE_TIMEOUT = "quiescence_timeout"
 
@@ -300,10 +309,16 @@ class ActiveCommand:
             all events for one command (WS-5 schema).
         command: canonical command name (e.g. ``"compact"``).
         started_at: monotonic clock — start instant.
+        started_at_iso: ISO-8601 UTC string captured at the SAME
+            instant as ``started_at`` — the wire timestamp the SSE
+            + GET endpoint surface (W-1.3 / schema pin).
         phase: current :class:`CommandPhase` value (lowercase string).
         phase_seq: monotonic per-command counter — FE dedup/reorder guard.
         last_event_at: monotonic clock — last ``update_phase`` /
             ``terminalize`` instant; drives TTL.
+        last_event_at_iso: ISO-8601 UTC string captured at the SAME
+            instant as ``last_event_at`` — the wire timestamp the SSE
+            + GET endpoint surface (W-1.3 / schema pin).
         ttl_seconds: TTL window for GET-fallback visibility
             (mirrors the ``ttl_seconds`` field on the ack envelope).
         detail: WS-5 ``detail`` dict (``tokens_before``,
@@ -315,9 +330,11 @@ class ActiveCommand:
     command_id: str
     command: str
     started_at: float
+    started_at_iso: str
     phase: str
     phase_seq: int
     last_event_at: float
+    last_event_at_iso: str
     ttl_seconds: int
     detail: dict | None = None
 
@@ -392,6 +409,12 @@ class CommandStateRegistry:
         prevent this from raising; the assert surfaces dispatcher
         invariant violations as ``RuntimeError`` (caught upstream
         and converted to a ``busy`` rejection for defense in depth).
+
+        W-1.3 — captures ``started_at_iso`` at the SAME ``time.monotonic()``
+        instant as ``started_at`` (monotonic) so the wire and the
+        monotonic clock never drift apart. The GET endpoint surfaces
+        the stored ISO string verbatim — no recomputation at read
+        time.
         """
         if instance_id in self._active:
             existing = self._active[instance_id]
@@ -407,9 +430,11 @@ class CommandStateRegistry:
             command_id=command_id,
             command=command,
             started_at=now,
+            started_at_iso=_iso8601_now(),
             phase=phase,
             phase_seq=1,
             last_event_at=now,
+            last_event_at_iso=_iso8601_now(),
             ttl_seconds=ttl_seconds,
         )
         self._active[instance_id] = ac
@@ -428,6 +453,11 @@ class CommandStateRegistry:
 
         Returns the updated ``ActiveCommand`` or ``None`` when there is
         no matching active entry (e.g. already terminalized).
+
+        W-1.3 — also updates ``last_event_at_iso`` to the wall-clock
+        instant captured AT this call (same ``time.monotonic()`` as
+        ``last_event_at``). The GET endpoint surfaces the stored ISO
+        string verbatim.
         """
         ac = self._active.get(instance_id)
         if ac is None or ac.command_id != command_id:
@@ -436,6 +466,7 @@ class CommandStateRegistry:
         if bump_seq:
             ac.phase_seq += 1
         ac.last_event_at = time.monotonic()
+        ac.last_event_at_iso = _iso8601_now()
         if detail is not None:
             ac.detail = detail
         return ac
@@ -470,6 +501,38 @@ class CommandStateRegistry:
         while len(ring) > self._max_state_per_instance:
             ring.popitem(last=False)
         return ac
+
+    def current_phase_seq(
+        self,
+        instance_id: str,
+        command_id: str,
+    ) -> int:
+        """Return the dispatcher's current ``phase_seq`` for
+        ``command_id`` (active OR ring).
+
+        The registry is the single source of truth for ``phase_seq``.
+        The executor's SSE emits MUST use this value (NOT a local
+        counter) so the GET endpoint and the SSE stream agree on the
+        sequence. W-3.1 — without a single counter helper, a long
+        compaction (>10s) can re-emit a heartbeat with the same
+        ``phase_seq`` as a later terminal event (FE dedup drops the
+        terminal on its side). W-3.2 — without the registry being
+        authoritative, the executor's local counter and the registry
+        counter can fall out of sync by 1-2 steps.
+
+        Returns ``0`` when no active / ring entry matches — callers
+        must NOT emit when this returns 0 (the executor gates on
+        ``active or ring existence`` before calling).
+        """
+        ac = self._active.get(instance_id)
+        if ac is not None and ac.command_id == command_id:
+            return ac.phase_seq
+        ring = self._ring.get(instance_id)
+        if ring:
+            entry = ring.get(command_id)
+            if entry is not None:
+                return entry.phase_seq
+        return 0
 
     def get_active(self, instance_id: str) -> ActiveCommand | None:
         """Active (non-terminal) command for ``instance_id`` only.
@@ -567,6 +630,20 @@ class CommandContext:
             self.command_id,
             phase=phase,
             detail=detail,
+        )
+
+    def current_phase_seq(self) -> int:
+        """Return the dispatcher's authoritative ``phase_seq`` for this
+        command (W-3.1 / W-3.2 single source of truth).
+
+        SSE emit sites in the executor call this to fetch the
+        registry's counter — the executor MUST NOT use a local
+        counter (a long compaction's heartbeat + terminal emit can
+        otherwise collide on the same phase_seq, dropping the
+        terminal on the FE's dedup).
+        """
+        return self.dispatcher.current_phase_seq(
+            self.instance_id, self.command_id
         )
 
 
@@ -721,14 +798,29 @@ class CommandDispatcher:
         if cur == command_id:
             self._inflight.pop(instance_id, None)
 
-    def get_active(self, instance_id: str) -> ActiveCommand | None:
-        """Active OR recent-terminal-within-TTL snapshot for the GET
-        endpoint. Returns ``None`` when there is nothing relevant.
+    def get_for_endpoint(self, instance_id: str) -> ActiveCommand | None:
+        """Forward to :meth:`CommandStateRegistry.get_for_endpoint`.
 
-        The endpoint serializes this to either
-        ``{exists:false}`` or ``{exists:true, command: ...}``.
+        Active OR recent-terminal-within-TTL snapshot for the GET
+        endpoint. Returns ``None`` when there is nothing relevant.
+        The endpoint serializes this to either ``{exists:false}`` or
+        ``{exists:true, command: ...}``.
         """
         return self._state.get_for_endpoint(instance_id)
+
+    def get_active(self, instance_id: str) -> ActiveCommand | None:
+        """Active (non-terminal) command only. Forwarder to the
+        registry's ``get_active``."""
+        return self._state.get_active(instance_id)
+
+    def current_phase_seq(self, instance_id: str, command_id: str) -> int:
+        """Forward to :meth:`CommandStateRegistry.current_phase_seq`.
+
+        W-3.1 / W-3.2 — single source of truth for ``phase_seq``.
+        The executor reads via this accessor; SSE emits use the
+        registry value so SSE / GET agree on the sequence.
+        """
+        return self._state.current_phase_seq(instance_id, command_id)
 
     def evict_instance(self, instance_id: str) -> None:
         """Drop every dispatcher row keyed to ``instance_id``.
@@ -800,24 +892,21 @@ class CommandDispatcher:
         if spec.availability is not None:
             allowed = await spec.availability(instance_context)
             if not allowed:
-                # The predicate is unpopulated today, so this branch
-                # is unreachable in practice. We surface it as a
-                # ``pending_injections`` placeholder because the
-                # rejection-reason enum is pinned at six values and
-                # there is no slot for "agent policy denied". Future
-                # work: add a 7th enum value when the predicate is
-                # first populated (executor coder).
-                logger.warning(
+                # W-2.5 (leader-approved, 2026-08-31) — the rejection
+                # reason enum has its own 7th slot for "agent policy
+                # denied" (UNAVAILABLE). We surface it directly; the
+                # ``pending_injections`` placeholder that the previous
+                # implementation used was misleading (it implied a
+                # retryable injection-drain path that did not exist).
+                logger.info(
                     "Availability predicate returned False for command=%s "
-                    "instance=%s; the rejection-reason enum has no slot "
-                    "for 'unavailable' — surfacing as pending_injections "
-                    "placeholder.",
+                    "instance=%s; surfacing as rejection reason=unavailable.",
                     parsed.command.name,
                     instance_id,
                 )
                 return self._rejected(
                     command=parsed.command.name,
-                    reason=RejectionReason.PENDING_INJECTIONS,
+                    reason=RejectionReason.UNAVAILABLE,
                     detail="command not available in this context",
                 )
 
@@ -929,7 +1018,20 @@ class CommandDispatcher:
         except asyncio.CancelledError:
             # Deliberate cancel (e.g. daemon shutdown). Don't
             # synthesize a terminal phase — restart will reset.
+            #
+            # W-3.4 — drop BOTH the in-flight slot AND the state
+            # registry's active entry. The previous behaviour kept
+            # ``_active`` populated, so a subsequent GET returned
+            # exists=true for a command whose handler is no longer
+            # running — the instance appeared "stuck busy" until
+            # restart. We choose DROP for cancel (let GET return
+            # exists:false). The handler's own terminalize never
+            # ran (CancelledError is re-raised), so we drop the
+            # active slot the registry created at record_start
+            # without moving it to the ring (the cancel path is
+            # transient; restart resets).
             self._inflight.pop(instance_id, None)
+            self._state._active.pop(instance_id, None)
             raise
         except Exception as e:  # noqa: BLE001 — O9: never crash
             logger.exception(

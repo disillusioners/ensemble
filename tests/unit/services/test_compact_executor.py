@@ -9,13 +9,18 @@ Covers:
   override window; fallback path logs structured WARNING w/
   instance_id + resolved window).
 * Persistence integration (exactly 2 ``aupdate`` calls, order,
-  RemoveMessage+summary together in first, ``compacted_at`` second).
-* Terminal guard (aupdate never invoked, guidance detail, shared
-  helper used — source-level grep both import sites).
+  RemoveMessage+summary together in first, ``compacted_at`` second;
+  C1 — NO ``as_node`` kwarg).
+* Terminal guard (aupdate never invoked, guidance detail, status-
+  driven gate; instance status is the authoritative signal per
+  C1 BINDING — the brick-regression test stays in place).
 * Revive-brick regression (2.5): REAL graph run, file-backed SQLite
   ``tmp_path`` (NEVER StaticPool/in-memory) — ``aupdate_state`` on
   ``next=()`` checkpoint → subsequent ``astream`` instant-return
-  documented collapse; assert the guard prevents it.
+  documented collapse; assert the guard prevents it. ALSO C1
+  CANARY (4.5/W-5.2): real-graph SUCCESS on a genuinely quiescent
+  instance, AND a subsequent ``astream`` still runs the agent
+  (the inverse brick property).
 * 4.4 checklist asserts (sentinel single-write, pairing intact
   post-compact, fresh ``compaction-<uuid4>`` ids, NO
   ``truncated-<uuid4>`` renames on normal fallback).
@@ -24,6 +29,11 @@ Covers:
 * No ``wait_for`` wrapper around ``compact_state`` (4.3).
 * O9 quiescence-failure (rejected quiescence_timeout, async task
   alive, ack not hung, exception class in detail, resume-in-finally).
+* W-3.1 phase_seq monotonicity (heartbeat → terminal: strictly
+  increasing, no reuse).
+* W-5.2(b) below-floor pre-check (added 2026-08-31 to honor the
+  docstring claim; previously only ``terminal`` + ``recently_compacted``
+  pre-checks had dedicated test classes).
 * V-1 §5 pins: wiring-invariant service test (registered task ==
   gate-holding task).
 * V-2 load-check (approver note 2) — the ``wall_clock_cap_s =
@@ -344,6 +354,102 @@ class TestRecencyPrecheck:
         assert active is None
 
 
+class TestBelowFloorPrecheck:
+    """W-5.2(b) — WS-2.2 pre-check row for ``below_floor``.
+
+    Added 2026-08-31 to honor the docstring claim at line 5
+    ("Per-pre-check row (recently_compacted, below_floor, terminal)")
+    — only ``recently_compacted`` + ``terminal`` had dedicated test
+    classes; ``below_floor`` is now covered explicitly.
+
+    ``below_floor`` fires when ``estimated_tokens < noop_floor_ratio
+    * resolved_window``. The executor must:
+
+    1. NOT call the engine.
+    2. NOT persist anything (no aupdate_state call).
+    3. Terminalize ``success`` with ``compacted_type=noop`` and
+       ``noop_reason=below_floor`` (the FE shows "nothing to
+       compact" via the same noop surface).
+    4. Emit the success SSE phase.
+    """
+
+    @pytest.mark.asyncio
+    async def test_below_floor_returns_noop_success(self):
+        """Small messages under the floor → success + noop."""
+        dispatcher = _make_dispatcher()
+        command_id = _make_active_command(dispatcher)
+
+        # A SINGLE small message — well under any floor (1 msg ≈
+        # 100 tokens; floor is 0.05 * 128000 = 6400 tokens).
+        graph = MagicMock()
+        graph.aupdate_state = AsyncMock()
+        cp = _make_checkpoint_state(
+            next=("agent",),
+            messages=[HumanMessage(content="hi", id="h-1")],
+            compacted_at=None,
+        )
+        async def _aget_state(_config):
+            return cp
+        graph.aget_state = AsyncMock(side_effect=_aget_state)
+        mgr = _make_manager(graph_obj=graph)
+
+        ctx = CommandContext(
+            dispatcher=dispatcher, command_id=command_id, instance_id="inst-test"
+        )
+        dispatcher._manager = mgr
+
+        await execute_compact(
+            mgr, instance_id="inst-test", command_id=command_id, context=ctx
+        )
+
+        # No aupdate — below-floor short-circuits before persistence.
+        assert graph.aupdate_state.await_count == 0
+        # Terminalize with success + noop below_floor.
+        ring_entry = dispatcher._state._ring["inst-test"][command_id]
+        assert ring_entry is not None
+        assert ring_entry.phase == CommandPhase.SUCCESS.value
+        assert ring_entry.detail["compacted_type"] == "noop"
+        assert ring_entry.detail["noop_reason"] == "below_floor"
+
+    @pytest.mark.asyncio
+    async def test_below_floor_never_acquires_gate(self):
+        """Architect §2 / WS-6 invariant — below-floor pre-check
+        fires BEFORE the ExecutionGate acquisition, so a below-floor
+        request never holds the gate.
+        """
+        dispatcher = _make_dispatcher()
+        command_id = _make_active_command(dispatcher)
+
+        graph = MagicMock()
+        graph.aupdate_state = AsyncMock()
+        cp = _make_checkpoint_state(
+            next=("agent",),
+            messages=[HumanMessage(content="hi", id="h-1")],
+            compacted_at=None,
+        )
+        async def _aget_state(_config):
+            return cp
+        graph.aget_state = AsyncMock(side_effect=_aget_state)
+        mgr = _make_manager(graph_obj=graph)
+
+        ctx = CommandContext(
+            dispatcher=dispatcher, command_id=command_id, instance_id="inst-test"
+        )
+        dispatcher._manager = mgr
+
+        await execute_compact(
+            mgr, instance_id="inst-test", command_id=command_id, context=ctx
+        )
+
+        # ExecutionGate.run is NEVER called for below-floor
+        # (the pre-check fires first — W-5.2(c) executor-level
+        # rate-limit-before-gate analogue).
+        assert mgr.execution_gate.run.await_count == 0, (
+            "below-floor pre-check MUST fire before the ExecutionGate "
+            f"acquisition; got {mgr.execution_gate.run.await_count} gate calls"
+        )
+
+
 # ─────────────────────────────────────────────────────────────────────────
 # WS-2.4 — terminal guard (shared helper)
 # ─────────────────────────────────────────────────────────────────────────
@@ -571,18 +677,63 @@ class TestEngineToWireMapping:
         # The engine value is preserved under a diagnostic key.
         assert wire.detail["engine_compacted_type"] == "emergency_truncation"
 
-    def test_error_failure_kind_surfaces_in_detail(self):
-        """failure_kind="error" → detail carries the failure_kind,
-        terminal_phase is the mapping for the engine value."""
+    def test_error_failure_kind_with_truncation_means_failed(self):
+        """W-4.2 — ``failure_kind="error"`` + ``compacted_type="truncation"``
+        (the engine applied the truncate fallback to a genuine LLM error)
+        maps to ``failed`` + a fallback note. The previous mapping
+        misclassified it as ``timed_out → fallback_applied``, masking
+        a real error from the FE.
+
+        ``failure_kind="error"`` + ``compacted_type="summary"`` is
+        impossible by construction (the success path emits
+        ``failure_kind=None``); it lands in the unknown-type branch
+        below.
+        """
         result = _make_compaction_result(
             compaction_type="truncation",
             failure_kind="error",
             summarization_error="boom",
         )
         wire = _map_engine_result_to_wire(result)
-        assert wire.terminal_phase == CommandPhase.FALLBACK_APPLIED.value
+        assert wire.terminal_phase == CommandPhase.FAILED.value, (
+            f"W-4.2: error+truncation must surface as failed (not "
+            f"fallback_applied); got {wire.terminal_phase!r}"
+        )
         assert wire.detail["failure_kind"] == "error"
         assert wire.detail["summarization_error"] == "boom"
+        assert wire.detail.get("fallback_applied") is True, (
+            "W-4.2: error+truncation detail must carry fallback_applied "
+            "note so the FE can show 'we kept your messages, just trimmed' "
+            "alongside the failure"
+        )
+
+    def test_error_failure_kind_with_partial_summary_means_failed(self):
+        """W-4.2 — ``failure_kind="error"`` + ``compacted_type="partial_summary"``
+        (defensive — engine flow doesn't normally emit this, but if a
+        bug ever surfaces, the mapping is conservative) →
+        ``failed`` + fallback note.
+        """
+        result = _make_compaction_result(
+            compaction_type="partial_summary",
+            failure_kind="error",
+            summarization_error="edge",
+        )
+        wire = _map_engine_result_to_wire(result)
+        assert wire.terminal_phase == CommandPhase.FAILED.value
+        assert wire.detail.get("fallback_applied") is True
+
+    def test_emergency_truncation_with_error_means_failed(self):
+        """W-4.2 — ``emergency_truncation`` + ``failure_kind="error"``
+        (defensive — the engine never emits ``error`` for emergency
+        paths by construction, but the mapping is conservative).
+        """
+        result = _make_compaction_result(
+            compaction_type="emergency_truncation",
+            failure_kind="error",
+        )
+        wire = _map_engine_result_to_wire(result)
+        assert wire.terminal_phase == CommandPhase.FAILED.value
+        assert wire.detail.get("fallback_applied") is True
 
     def test_unknown_compaction_type_to_failed(self):
         result = _make_compaction_result(
@@ -592,6 +743,204 @@ class TestEngineToWireMapping:
         wire = _map_engine_result_to_wire(result)
         assert wire.terminal_phase == CommandPhase.FAILED.value
         assert wire.detail["compacted_type"] == "totally-unknown"
+
+
+class TestPhaseSeqMonotonicity:
+    """W-3.1 / W-3.2 — phase_seq is STRICTLY increasing across the
+    full heartbeat → terminal lifecycle, and the dispatcher
+    registry (NOT an executor-local counter) is the single source
+    of truth.
+
+    The previous executor-local counter could collide with a
+    later terminal emit on a >10s compaction (FE dedup drops the
+    terminal on its side). The current design reads the
+    registry's authoritative ``phase_seq`` at emit time
+    (``context.current_phase_seq()``) and bumps via
+    ``update_phase(bump_seq=True)``.
+
+    These tests pin:
+
+    1. Two SSE emits carry strictly increasing phase_seq values.
+    2. The GET endpoint returns the same value as the last SSE
+       emit (registry / SSE agreement).
+    3. The dispatcher registry's phase_seq matches the SSE emits
+       (single source of truth).
+    """
+
+    @pytest.mark.asyncio
+    async def test_two_emits_strictly_increasing_phase_seq(self):
+        """A second SSE emit carries a phase_seq strictly greater
+        than the first. Without this property, FE dedup can drop
+        later events on >10s compactions.
+        """
+        dispatcher = _make_dispatcher()
+        command_id = _make_active_command(dispatcher)
+        mgr = _make_manager()
+
+        graph = MagicMock()
+        graph.aupdate_state = AsyncMock()
+
+        async def _aget_state(_config):
+            return _make_checkpoint_state(
+                next=("agent",),
+                messages=_big_messages(n=15, char_count=4000),
+                compacted_at=None,
+            )
+        graph.aget_state = AsyncMock(side_effect=_aget_state)
+        mgr.get_instance = AsyncMock(return_value=graph)
+
+        ctx = CommandContext(
+            dispatcher=dispatcher, command_id=command_id, instance_id="inst-test"
+        )
+        dispatcher._manager = mgr
+
+        # Stub the engine to return a noop so the executor
+        # terminalizes success via the noop path (engine-None
+        # → below_floor noop surface).
+        mgr._compactor.compact_state = AsyncMock(return_value=None)
+
+        await execute_compact(
+            mgr, instance_id="inst-test", command_id=command_id, context=ctx
+        )
+
+        # Collect every SSE emit — the manager's _live_hub mock
+        # captures them.
+        emitted = mgr._emitted_events
+        # Filter to command_progress events for our command.
+        my_events = [
+            e for e in emitted
+            if e.get("event_type") == "command_progress"
+            and e["message"]["command_id"] == command_id
+        ]
+        assert len(my_events) >= 2, (
+            f"executor must emit >= 2 events for a below-floor noop "
+            f"(in_progress + success); got {len(my_events)}"
+        )
+        # Strictly increasing phase_seq across all emits.
+        seqs = [e["message"]["phase_seq"] for e in my_events]
+        for prev, nxt in zip(seqs, seqs[1:]):
+            assert nxt > prev, (
+                f"W-3.1: phase_seq must be strictly increasing; got "
+                f"{seqs!r}"
+            )
+        # Every seq > 0 (the registry was used, NOT a placeholder 0).
+        assert all(s > 0 for s in seqs), (
+            f"W-3.2: phase_seq must come from the registry "
+            f"(single source of truth); got {seqs!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_get_endpoint_phase_seq_matches_registry(self):
+        """The GET endpoint (W-1.3 — uses the stored ISO timestamp
+        AND the registry's phase_seq) returns the same phase_seq as
+        the last SSE emit. Drift between them = dropped events.
+        """
+        dispatcher = _make_dispatcher()
+        command_id = _make_active_command(dispatcher)
+        mgr = _make_manager()
+
+        graph = MagicMock()
+        graph.aupdate_state = AsyncMock()
+
+        async def _aget_state(_config):
+            return _make_checkpoint_state(
+                next=("agent",),
+                messages=_big_messages(n=15, char_count=4000),
+                compacted_at=None,
+            )
+        graph.aget_state = AsyncMock(side_effect=_aget_state)
+        mgr.get_instance = AsyncMock(return_value=graph)
+        mgr._compactor.compact_state = AsyncMock(return_value=None)
+
+        ctx = CommandContext(
+            dispatcher=dispatcher, command_id=command_id, instance_id="inst-test"
+        )
+        dispatcher._manager = mgr
+
+        await execute_compact(
+            mgr, instance_id="inst-test", command_id=command_id, context=ctx
+        )
+
+        # Registry's phase_seq for the now-terminal entry.
+        ring_entry = dispatcher._state._ring["inst-test"][command_id]
+        assert ring_entry is not None
+        registry_seq = ring_entry.phase_seq
+
+        # The current_phase_seq() accessor (W-3.2 single source
+        # of truth) returns the same value.
+        accessor_seq = dispatcher.current_phase_seq("inst-test", command_id)
+        assert accessor_seq == registry_seq
+
+        # Last SSE emit's phase_seq matches (no drift).
+        emitted = mgr._emitted_events
+        my_events = [
+            e for e in emitted
+            if e.get("event_type") == "command_progress"
+            and e["message"]["command_id"] == command_id
+        ]
+        assert my_events, "executor must emit >= 1 SSE event"
+        last_emit_seq = my_events[-1]["message"]["phase_seq"]
+        assert last_emit_seq == registry_seq, (
+            f"W-3.1/W-3.2: last SSE emit phase_seq ({last_emit_seq}) "
+            f"must equal registry's ({registry_seq}); drift between "
+            "SSE and registry = dropped terminal event on the FE."
+        )
+
+    @pytest.mark.asyncio
+    async def test_two_terminalize_calls_strictly_increasing(self):
+        """Multiple terminalize / update_phase calls on the SAME
+        command carry strictly increasing phase_seq values
+        (the registry bumps per call). A future regression that
+        drops the bump (e.g. bug_seq=False on terminalize) would
+        collide and fail this.
+        """
+        from daemon.services.command_dispatcher import (
+            CommandPhase as _CP,
+        )
+        from daemon.services.command_dispatcher import (
+            CommandContext as _CC,
+        )
+
+        d = _make_dispatcher()
+
+        async def _ok_handler(*, instance_id, args, command_id, context):
+            await context.terminalize(
+                _CP.SUCCESS.value,
+                detail={"reason": "phase_seq_test"},
+            )
+
+        # Record start (phase_seq=1), then bump via update_phase,
+        # then terminalize. The final phase_seq must be strictly
+        # greater than 1.
+        d._state.record_start(
+            instance_id="inst-A",
+            command_id="cmd-test",
+            command="compact",
+            ttl_seconds=600,
+        )
+        d._inflight["inst-A"] = "cmd-test"
+
+        ctx = _CC(
+            dispatcher=d,
+            command_id="cmd-test",
+            instance_id="inst-A",
+        )
+        # Bump once via update_phase.
+        await ctx.update_phase(_CP.IN_PROGRESS.value, bump_seq=True)
+        # Then terminalize.
+        await ctx.terminalize(
+            _CP.SUCCESS.value, detail={"reason": "phase_seq_test"}
+        )
+
+        # The ring entry carries phase_seq strictly greater
+        # than the record_start default of 1 (update_phase +
+        # terminalize both bumped).
+        entry = d.state._ring["inst-A"]["cmd-test"]
+        assert entry.phase_seq > 1, (
+            f"update_phase + terminalize must bump phase_seq; got "
+            f"phase_seq={entry.phase_seq} (record_start default is 1; "
+            "any successful update/terminalize bumps to >= 2)"
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -765,16 +1114,34 @@ class TestNoWaitForAroundCompactState:
 
 
 class TestExecutorTerminalRejection:
-    """WS-2.4 — terminal checkpoint at the executor → REJECT with
-    guidance detail. ``aupdate_state`` NEVER invoked."""
+    """WS-2.4 / C1 — terminal-status instance at the executor →
+    REJECT with guidance detail. ``aupdate_state`` NEVER invoked.
+
+    C1 BINDING: the rejection is gated on INSTANCE STATUS (the
+    O-B4 set: completed / terminated / error / failed), NOT on
+    ``state.next == ()``. The headline scenario is an IDLE
+    instance with a post-turn quiescent checkpoint (``next=()``) —
+    that instance compacts fine. The proactive path (instance_messaging)
+    keeps its checkpoint-shape check (byte-equivalent); the executor
+    uses the manager's instance status as the authoritative terminal
+    signal (the brick-regression tests at
+    ``test_compact_executor_revive_brick_e2e.py`` already drive a
+    real-graph terminal with status="completed" — they stay green).
+    """
 
     @pytest.mark.asyncio
-    async def test_terminal_checkpoint_rejects_no_aupdate(self):
+    async def test_terminal_status_rejects_no_aupdate(self):
+        """Instance status in the O-B4 terminal set → reject."""
         dispatcher = _make_dispatcher()
         command_id = _make_active_command(dispatcher)
-        mgr = _make_manager()
+        # C1: status="completed" drives the rejection. The
+        # checkpoint shape (``next=()``) is incidental — the
+        # executor no longer checks it for terminal-rejection.
+        mgr = _make_manager(instance_status="completed")
 
-        # Terminal checkpoint (next=()).
+        # Build a checkpoint that's quiescent + big enough to exceed
+        # the noop floor (so the rejection happens AT the status
+        # guard, not at a pre-check).
         graph = MagicMock()
         graph.aupdate_state = AsyncMock()
 
@@ -796,8 +1163,92 @@ class TestExecutorTerminalRejection:
             mgr, instance_id="inst-test", command_id=command_id, context=ctx
         )
 
-        # No aupdate_state call — the guard fires before any write.
+        # No aupdate_state call — the status guard fires before any write.
         assert graph.aupdate_state.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_terminal_status_each_in_ob4_set_rejects(self):
+        """Each O-B4 terminal status (completed / terminated / error /
+        failed) drives rejection. Belt-and-braces pin that the new
+        guard covers every status in the canonical terminal set.
+        """
+        for term_status in ("completed", "terminated", "error", "failed"):
+            dispatcher = _make_dispatcher()
+            command_id = _make_active_command(dispatcher)
+            mgr = _make_manager(instance_status=term_status)
+
+            graph = MagicMock()
+            graph.aupdate_state = AsyncMock()
+
+            async def _aget_state(_config):
+                return _make_checkpoint_state(
+                    next=(),
+                    messages=_big_messages(n=15, char_count=4000),
+                    compacted_at=None,
+                )
+            graph.aget_state = AsyncMock(side_effect=_aget_state)
+            mgr.get_instance = AsyncMock(return_value=graph)
+
+            ctx = CommandContext(
+                dispatcher=dispatcher, command_id=command_id, instance_id="inst-test"
+            )
+            dispatcher._manager = mgr
+
+            await execute_compact(
+                mgr, instance_id="inst-test", command_id=command_id, context=ctx
+            )
+
+            # No aupdate_state call for any terminal status.
+            assert graph.aupdate_state.await_count == 0, (
+                f"terminal status '{term_status}' must reject with "
+                f"no aupdate_state; got {graph.aupdate_state.await_count}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_terminal_rejection_emits_pinned_guidance(self):
+        """W-1.2 — the rejection detail carries the PINNED guidance
+        copy 'Send a message to start a new turn, then /compact.'
+        (plan S-14 / architect §5).
+        """
+        dispatcher = _make_dispatcher()
+        command_id = _make_active_command(dispatcher)
+        mgr = _make_manager(instance_status="completed")
+
+        graph = MagicMock()
+        graph.aupdate_state = AsyncMock()
+
+        async def _aget_state(_config):
+            return _make_checkpoint_state(
+                next=(),
+                messages=_big_messages(n=15, char_count=4000),
+                compacted_at=None,
+            )
+        graph.aget_state = AsyncMock(side_effect=_aget_state)
+        mgr.get_instance = AsyncMock(return_value=graph)
+
+        ctx = CommandContext(
+            dispatcher=dispatcher, command_id=command_id, instance_id="inst-test"
+        )
+        dispatcher._manager = mgr
+
+        await execute_compact(
+            mgr, instance_id="inst-test", command_id=command_id, context=ctx
+        )
+
+        # The terminal entry pushed to the ring carries the guidance.
+        ring_entry = dispatcher._state._ring["inst-test"][command_id]
+        assert ring_entry is not None, (
+            "terminalized entry must land in the dispatcher's ring"
+        )
+        assert ring_entry.phase == CommandPhase.FAILED.value
+        assert ring_entry.detail is not None
+        assert (
+            ring_entry.detail.get("guidance")
+            == "Send a message to start a new turn, then /compact."
+        ), (
+            "W-1.2: rejection must carry the PINNED guidance copy; got "
+            f"detail={ring_entry.detail!r}"
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -827,8 +1278,15 @@ class TestReviveBrickRegression:
         level so a future change that moves the guard AFTER the
         persistence step is caught at code-review time.
 
-        The documented brick collapse (``aupdate_state`` on
-        ``next=()`` checkpoint → ``astream`` instant-return) is the
+        C1 BINDING — the executor's terminal guard is an
+        INSTANCE-STATUS check (terminal_statuses set, O-B4), NOT the
+        ``_is_terminal_checkpoint`` shared helper. The shared helper
+        is still imported (used at other decision points — see
+        ``TestTerminalCheckpointHelper``) but the rejection gate at
+        the executor is the status check.
+
+        The documented brick collapse (``aupdate_state`` on a
+        terminal instance → ``astream`` instant-return) is the
         property the guard prevents. The reproduction lives in
         ``tests/unit/services/test_compact_executor_revive_brick_e2e.py``
         (real graph + real SQLite + real ``astream``); this test is
@@ -837,19 +1295,24 @@ class TestReviveBrickRegression:
         from daemon.services import compact_executor as ce
 
         source = inspect.getsource(ce.execute_compact)
-        # The shared terminal helper check must come BEFORE the
+        # C1: the status guard (terminal_statuses set + the
+        # instance_status membership check) must come BEFORE the
         # persistence step (which calls ``aupdate_state``).
-        helper_idx = source.find("_is_terminal_checkpoint(checkpoint_state)")
+        guard_marker = 'instance_status in terminal_statuses'
         persistence_idx = source.find("_persist_compaction_result")
-        assert helper_idx != -1, (
-            "executor must call _is_terminal_checkpoint"
+        assert guard_marker in source, (
+            "executor must gate terminal-rejection on instance status "
+            "(C1: rejection driven by O-B4 status set, not checkpoint "
+            "shape)"
         )
         assert persistence_idx != -1, (
             "executor must call _persist_compaction_result (D3)"
         )
-        assert helper_idx < persistence_idx, (
-            "terminal guard must fire BEFORE the persistence step "
-            "(WS-2.5 — guard prevents the brick collapse)"
+        guard_idx = source.find(guard_marker)
+        assert guard_idx < persistence_idx, (
+            "terminal-status guard must fire BEFORE the persistence step "
+            "(WS-2.5 + C1 — guard prevents the brick collapse on "
+            "terminal-status instances)"
         )
 
 
@@ -903,6 +1366,100 @@ class TestQuiescenceFailurePath:
         mgr.pause_instance_cascade.assert_awaited_once()
         # Resume was attempted (best-effort, in finally).
         mgr.resume_instance_cascade.assert_awaited_once()
+
+
+class TestRateLimitBeforeGateOrdering:
+    """W-5.2(c) — rate-limit / pre-checks fire BEFORE the
+    ExecutionGate acquisition (executor-side ordering invariant).
+
+    The dispatcher's rate-limit guard lives OUTSIDE the executor
+    (the executor's handler is spawned AFTER the rate-limit
+    passes — see ``command_dispatcher.dispatch`` step 6 +
+    ``TestRateLimitAndOrdering.test_rate_limited_never_acquires_gate``
+    in test_command_dispatcher.py). This test pins the EXECUTOR's
+    side of the ordering:
+
+    * The terminal-status guard (C1) fires before the gate.
+    * The recently-compacted pre-check fires before the gate.
+    * The below-floor pre-check fires before the gate.
+
+    A regression that moved any of these checks AFTER the gate
+    acquisition would let a rejected request hold the gate
+    momentarily (violating the WS-6 ordering).
+    """
+
+    @pytest.mark.asyncio
+    async def test_terminal_guard_fires_before_gate(self):
+        """Terminal-status instance → gate is NEVER acquired."""
+        dispatcher = _make_dispatcher()
+        command_id = _make_active_command(dispatcher)
+        mgr = _make_manager(instance_status="completed")
+        # big_messages so we don't hit below-floor; status=completed
+        # is the load-bearing rejection signal.
+        graph = MagicMock()
+        graph.aupdate_state = AsyncMock()
+
+        async def _aget_state(_config):
+            return _make_checkpoint_state(
+                next=(),
+                messages=_big_messages(n=15, char_count=4000),
+                compacted_at=None,
+            )
+        graph.aget_state = AsyncMock(side_effect=_aget_state)
+        mgr.get_instance = AsyncMock(return_value=graph)
+
+        ctx = CommandContext(
+            dispatcher=dispatcher, command_id=command_id, instance_id="inst-test"
+        )
+        dispatcher._manager = mgr
+
+        await execute_compact(
+            mgr, instance_id="inst-test", command_id=command_id, context=ctx
+        )
+
+        # Terminal-status guard fires BEFORE the gate (WS-6 ordering).
+        assert mgr.execution_gate.run.await_count == 0, (
+            "terminal-status guard MUST fire before the ExecutionGate; "
+            f"got {mgr.execution_gate.run.await_count} gate calls"
+        )
+
+    @pytest.mark.asyncio
+    async def test_recently_compacted_fires_before_gate(self):
+        """Recently-compacted pre-check → gate is NEVER acquired."""
+        dispatcher = _make_dispatcher()
+        command_id = _make_active_command(dispatcher)
+
+        # Recent compacted_at (30s ago) → recency fires.
+        past_iso = (
+            datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        )
+        graph = MagicMock()
+        graph.aupdate_state = AsyncMock()
+        cp = _make_checkpoint_state(
+            next=("agent",),
+            messages=_big_messages(n=15, char_count=4000),
+            compacted_at=past_iso,
+        )
+        async def _aget_state(_config):
+            return cp
+        graph.aget_state = AsyncMock(side_effect=_aget_state)
+        mgr = _make_manager(graph_obj=graph)
+
+        ctx = CommandContext(
+            dispatcher=dispatcher, command_id=command_id, instance_id="inst-test"
+        )
+        dispatcher._manager = mgr
+
+        await execute_compact(
+            mgr, instance_id="inst-test", command_id=command_id, context=ctx
+        )
+
+        # Recency pre-check fires BEFORE the gate.
+        assert mgr.execution_gate.run.await_count == 0, (
+            "recently-compacted pre-check MUST fire before the "
+            f"ExecutionGate; got {mgr.execution_gate.run.await_count} "
+            "gate calls"
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────

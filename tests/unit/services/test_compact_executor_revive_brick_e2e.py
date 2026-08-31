@@ -347,7 +347,7 @@ class TestGuardPreventsAupdateOnRealTerminal:
             from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
             from langgraph.graph import END, START, MessagesState, StateGraph
 
-            from daemon.config import CompactionConfig
+            from daemon.config import CompactionConfig, SlashCommandConfig
             from daemon.services.command_dispatcher import (
                 CommandContext,
                 CommandDispatcher,
@@ -445,13 +445,18 @@ class TestGuardPreventsAupdateOnRealTerminal:
                 )
                 mgr.config = MagicMock()
                 mgr.config.llm.model = "gpt-4o"
+                mgr.config.slash_commands = SlashCommandConfig(noop_floor_ratio=0.05)
+                # Anchor context_window_default so get_model_context_limit
+                # resolves to 128000 (gpt-4o registry value) regardless
+                # of mock interaction. Floor ratio 0.05 → 6400 tokens,
+                # which 15×4000-char messages comfortably exceed.
                 mgr.config.compaction = CompactionConfig(
                     enabled=True,
                     threshold=0.80,
                     recent_message_window=10,
                     min_recent_window=3,
                     context_window_overrides={},
-                    context_window_default=0,
+                    context_window_default=128000,
                     target_ratio=0.40,
                     summarization_model="",
                     min_messages_before_compaction=10,
@@ -528,10 +533,20 @@ class TestGuardPreventsAupdateOnRealTerminal:
                     f"guard from the below_floor noop path — both produce "
                     f"aupdate_state_call_count == 0 for different reasons)"
                 )
-                assert detail.get("checkpoint_id") == iid, (
-                    f"rejection must carry checkpoint_id (thread_id); "
-                    f"got checkpoint_id={detail.get('checkpoint_id')!r}, "
-                    f"expected {iid!r}"
+                # C1 + W-1.2: the rejection detail carries the PINNED
+                # guidance copy (plan S-14 / architect §5) instead of
+                # the old ``checkpoint_id`` artifact. The
+                # checkpoint_id was keyed off the LangGraph state
+                # shape — the C1 fix moves the gate to INSTANCE
+                # STATUS (the O-B4 canonical set), so the state shape
+                # is incidental; the user-facing guidance copy is the
+                # load-bearing detail.
+                assert (
+                    detail.get("guidance")
+                    == "Send a message to start a new turn, then /compact."
+                ), (
+                    f"rejection must carry the PINNED guidance copy "
+                    f"(W-1.2 / architect §5); got detail={detail!r}"
                 )
 
                 # Pin 3 — phase is failed (the executor emits
@@ -539,6 +554,501 @@ class TestGuardPreventsAupdateOnRealTerminal:
                 assert terminalized.phase == "failed", (
                     f"terminal phase must be 'failed'; got "
                     f"phase={terminalized.phase!r}"
+                )
+            finally:
+                await conn.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# 4. C1 BINDING — REAL-graph SUCCESS canary on a genuinely quiescent
+#    instance (file-backed SQLite). The inverse of the brick property:
+#    compact succeeds AND a subsequent astream(new input) runs the agent.
+# ─────────────────────────────────────────────────────────────────────────
+
+
+class TestExecutorCompactOnRealQuiescentInstanceSucceeds:
+    """C1 canary — the headline scenario the C1 fix re-opens.
+
+    Drives ``execute_compact`` against a REAL graph that has
+    settled into a genuinely quiescent post-turn state
+    (``state.next == ()``, no ``interrupt_before``). The
+    executor's status guard sees ``status="idle"`` (NOT in the
+    O-B4 terminal set), so it proceeds through pre-checks →
+    engine → persistence. Two invariants are pinned:
+
+    1. SUCCESS — the executor reaches the engine (no premature
+       terminal-rejection). The terminalize lands ``phase=success``.
+    2. NO-BRICK — a subsequent ``astream(graph_input)`` on the
+       SAME checkpoint still runs the agent. This is the
+       inverse of the brick property in
+       ``TestBrickCollapseOnRealGraph`` — that test pinned
+       why TERMINAL-STATUS instances must never be compacted;
+       this test pins why IDLE instances with post-turn
+       quiescent checkpoints CAN be compacted (the C1
+       re-opened scenario).
+
+    The persistence recipe omits ``as_node="agent"`` (C1
+    binding — see ``_persist_compaction_result`` docstring);
+    empirically verified by
+    ``/tmp/c1_explore.py`` Variant A on 2026-08-31.
+    """
+
+    @pytest.mark.asyncio
+    async def test_compact_succeeds_on_quiescent_instance(self, tmp_path):
+        with _RealLangGraph():
+            import aiosqlite
+            from langchain_core.messages import AIMessage, HumanMessage
+            from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+            from langgraph.graph import END, START, MessagesState, StateGraph
+
+            from daemon.config import CompactionConfig, SlashCommandConfig
+            from daemon.services.command_dispatcher import (
+                CommandContext,
+                CommandDispatcher,
+            )
+            from daemon.services.compact_executor import execute_compact
+
+            # Real graph driver — record EVERY agent invocation.
+            runs: list[str] = []
+
+            async def _agent(state):
+                runs.append("ran")
+                return {"messages": [AIMessage(content="agent-out")]}
+
+            db_path = tmp_path / "canary_quiescent.db"
+            conn = await aiosqlite.connect(str(db_path))
+            saver = AsyncSqliteSaver(conn)
+            await saver.setup()
+            try:
+                g = StateGraph(MessagesState)
+                g.add_node("agent", _agent)
+                g.add_edge(START, "agent")
+                g.add_edge("agent", END)
+                # NO ``interrupt_before`` — langgraph 1.0.x re-primes
+                # the graph on new input; this is the configuration
+                # that lets the brick test (TestBrickCollapseOnRealGraph)
+                # reproduce the documented collapse. WITHOUT
+                # ``interrupt_before`` AND with status="idle", the
+                # executor must compact successfully.
+                compiled = g.compile(checkpointer=saver)
+
+                iid = "canary-quiescent"
+                cfg = {"configurable": {"thread_id": iid}}
+
+                # 1. Drive to a genuinely quiescent post-turn state
+                #    (no interrupt_before).
+                await compiled.ainvoke(
+                    {"messages": [HumanMessage(content="turn-1")]}, cfg
+                )
+                runs.clear()
+
+                # 2. Confirm the quiescent shape.
+                st = await compiled.aget_state(cfg)
+                assert st.next == (), (
+                    f"setup invariant: pre-/compact must be quiescent; "
+                    f"got next={st.next!r}"
+                )
+
+                # 3. Seed BIG messages so the executor's noop-floor
+                #    pre-check does NOT short-circuit. We seed AFTER
+                #    the ainvoke so the message history is real (not
+                #    a synthetic seed).
+                big_messages = [
+                    HumanMessage(content="x" * 4000, id=f"h-{n}")
+                    for n in range(15)
+                ]
+                await compiled.aupdate_state(
+                    cfg, {"messages": big_messages}, as_node="agent"
+                )
+
+                # 4. Build the dispatcher + manager surface.
+                wrapped = _GraphWrapper(compiled)
+                dispatcher = CommandDispatcher(
+                    enabled=True,
+                    escape_prefix="//",
+                    min_interval_s=10,
+                    state_ttl_s=600,
+                    max_state_per_instance=20,
+                )
+                command_id = "cmd-canary-quiescent-success"
+                dispatcher._state.record_start(
+                    instance_id=iid,
+                    command_id=command_id,
+                    command="compact",
+                    ttl_seconds=600,
+                )
+                dispatcher._inflight[iid] = command_id
+
+                mgr = MagicMock()
+                mgr._lifecycle_service = MagicMock()
+                # C1: status="idle" — NOT in the O-B4 terminal set.
+                mgr._lifecycle_service.get_instance_info = MagicMock(
+                    return_value={
+                        "status": "idle",
+                        "id": iid,
+                        "metadata": {},
+                        "children": [],
+                    }
+                )
+                mgr.config = MagicMock()
+                mgr.config.llm.model = "gpt-4o"
+                mgr.config.slash_commands = SlashCommandConfig(noop_floor_ratio=0.05)
+                # Anchor context_window_default so get_model_context_limit
+                # resolves to 128000 (gpt-4o registry value) regardless
+                # of mock interaction. Floor ratio 0.05 → 6400 tokens,
+                # which 15×4000-char messages comfortably exceed.
+                mgr.config.compaction = CompactionConfig(
+                    enabled=True,
+                    threshold=0.80,
+                    recent_message_window=10,
+                    min_recent_window=3,
+                    context_window_overrides={},
+                    context_window_default=128000,
+                    target_ratio=0.40,
+                    summarization_model="",
+                    min_messages_before_compaction=10,
+                    summarization_chunk_threshold=0.60,
+                    timeout_base_s=90.0,
+                    timeout_per_100k_tokens_s=60.0,
+                    timeout_cap_s=300.0,
+                    timeout_facade_margin_s=5.0,
+                    operation_budget_s=300.0,
+                )
+
+                async def _get_instance(_iid):
+                    return wrapped
+
+                mgr.get_instance = AsyncMock(side_effect=_get_instance)
+                mgr.execution_gate = MagicMock()
+
+                async def _gate_run(instance_id, holder_id, holder_kind, work_fn):
+                    return await work_fn()
+                mgr.execution_gate.run = AsyncMock(side_effect=_gate_run)
+                mgr.pause_instance_cascade = AsyncMock(
+                    return_value={"paused_ids": [iid], "skipped_ids": []}
+                )
+                mgr.resume_instance_cascade = AsyncMock(
+                    return_value={"resumed_ids": [iid], "skipped_ids": []}
+                )
+
+                async def _quiescent(instance_id, timeout):
+                    return True
+                mgr.wait_for_instance_quiescent = AsyncMock(side_effect=_quiescent)
+
+                mgr._messaging_service = MagicMock()
+                mgr._messaging_service.emit_context_usage_for_instance = AsyncMock()
+
+                mgr._live_hub = MagicMock()
+                mgr._live_hub.stream_message = AsyncMock()
+
+                mgr._task_repo = MagicMock()
+                mgr._task_repo.has_instance_busy = MagicMock(return_value=False)
+
+                dispatcher._manager = mgr
+
+                ctx = CommandContext(
+                    dispatcher=dispatcher,
+                    command_id=command_id,
+                    instance_id=iid,
+                )
+
+                # 5. Drive execute_compact. The executor uses a
+                #    stubbed engine that returns a noop result via
+                #    the engine's compactor mock — we assert the
+                #    SUCCESS terminal phase lands in the ring.
+                #    The engine isn't invoked here because the
+                #    pre-checks will short-circuit on below_floor
+                #    (the BIG messages exceed 5% of the 128k window,
+                #    so the floor passes; but the compactor isn't
+                #    reachable without a real LLM call. We patch
+                #    compact_state to a noop so the persistence step
+                #    runs).
+                async def _noop_compact_state(ctx, force=False):
+                    return None  # → below_floor noop path
+                mgr._compactor = MagicMock()
+                mgr._compactor.compact_state = AsyncMock(
+                    side_effect=_noop_compact_state
+                )
+
+                await execute_compact(
+                    mgr, instance_id=iid, command_id=command_id, context=ctx
+                )
+
+                # INVARIANT 1 — SUCCESS terminal phase landed in the
+                # ring (the engine returned None → below_floor noop,
+                # which surfaces as success + compacted_type=noop).
+                ring = dispatcher._state._ring.get(iid, {})
+                terminalized = ring.get(command_id)
+                assert terminalized is not None, (
+                    "executor must terminalize with success on a "
+                    f"quiescent IDLE instance; ring keys={list(ring.keys())}"
+                )
+                assert terminalized.phase == "success", (
+                    f"phase must be 'success' (below_floor noop); got "
+                    f"phase={terminalized.phase!r} detail={terminalized.detail!r}"
+                )
+
+                # 6. INVARIANT 2 — NO-BRICK: subsequent astream(new
+                # input) on the SAME checkpoint runs the agent. This
+                # is the brick-regression inverse.
+                st_before = await compiled.aget_state(cfg)
+                # The big messages are still present (the below_floor
+                # noop doesn't persist anything).
+                assert len(st_before.values.get("messages", [])) > 0
+                runs.clear()
+                async for _chunk in compiled.astream(
+                    {"messages": [HumanMessage(content="turn-2-after-compact")]}, cfg
+                ):
+                    pass
+                assert runs == ["ran"], (
+                    "INVARIANT 2 violated (NO-BRICK): subsequent "
+                    f"astream(new input) did not run the agent on a "
+                    f"quiescent instance after execute_compact. "
+                    f"runs={runs}. The C1 fix re-opens the headline "
+                    "scenario only if subsequent turns still work."
+                )
+            finally:
+                await conn.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# 5. C1 BINDING — REAL-graph SUCCESS canary WITH persistence
+#    (the more demanding variant — persistence step runs)
+# ─────────────────────────────────────────────────────────────────────────
+
+
+class TestExecutorCompactOnRealQuiescentInstanceWithPersistence:
+    """C1 canary with persistence — drive ``execute_compact`` on a
+    real graph with a stubbed engine that returns a real summary
+    so the two ``aupdate_state`` calls in
+    ``_persist_compaction_result`` run. Verify:
+
+    1. SUCCESS — the executor reaches persistence and
+       terminalizes success.
+    2. NO-BRICK — a subsequent ``astream(graph_input)`` runs the
+       agent. The persistence recipe (Variant A — no ``as_node``)
+       must not interact badly with the live checkpointer.
+    """
+
+    @pytest.mark.asyncio
+    async def test_compact_persists_and_next_turn_runs_agent(
+        self, tmp_path
+    ):
+        with _RealLangGraph():
+            import aiosqlite
+            from langchain_core.messages import (
+                AIMessage,
+                HumanMessage,
+                RemoveMessage,
+                SystemMessage,
+            )
+            from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+            from langgraph.graph import END, START, MessagesState, StateGraph
+
+            from daemon.config import CompactionConfig, SlashCommandConfig
+            from daemon.services.command_dispatcher import (
+                CommandContext,
+                CommandDispatcher,
+            )
+            from daemon.services.compact_executor import execute_compact
+
+            runs: list[str] = []
+
+            async def _agent(state):
+                runs.append("ran")
+                return {"messages": [AIMessage(content="agent-out")]}
+
+            db_path = tmp_path / "canary_persist.db"
+            conn = await aiosqlite.connect(str(db_path))
+            saver = AsyncSqliteSaver(conn)
+            await saver.setup()
+            try:
+                g = StateGraph(MessagesState)
+                g.add_node("agent", _agent)
+                g.add_edge(START, "agent")
+                g.add_edge("agent", END)
+                compiled = g.compile(checkpointer=saver)
+
+                iid = "canary-persist"
+                cfg = {"configurable": {"thread_id": iid}}
+
+                # Drive to quiescence first.
+                await compiled.ainvoke(
+                    {"messages": [HumanMessage(content="turn-1")]}, cfg
+                )
+                runs.clear()
+                # Seed big messages.
+                big_messages = [
+                    HumanMessage(content="x" * 4000, id=f"h-{n}")
+                    for n in range(15)
+                ]
+                await compiled.aupdate_state(
+                    cfg, {"messages": big_messages}, as_node="agent"
+                )
+
+                wrapped = _GraphWrapper(compiled)
+                dispatcher = CommandDispatcher(
+                    enabled=True,
+                    escape_prefix="//",
+                    min_interval_s=10,
+                    state_ttl_s=600,
+                    max_state_per_instance=20,
+                )
+                command_id = "cmd-canary-persist-success"
+                dispatcher._state.record_start(
+                    instance_id=iid,
+                    command_id=command_id,
+                    command="compact",
+                    ttl_seconds=600,
+                )
+                dispatcher._inflight[iid] = command_id
+
+                mgr = MagicMock()
+                mgr._lifecycle_service = MagicMock()
+                mgr._lifecycle_service.get_instance_info = MagicMock(
+                    return_value={
+                        "status": "idle",
+                        "id": iid,
+                        "metadata": {},
+                        "children": [],
+                    }
+                )
+                mgr.config = MagicMock()
+                mgr.config.llm.model = "gpt-4o"
+                mgr.config.slash_commands = SlashCommandConfig(noop_floor_ratio=0.05)
+                # Anchor context_window_default so get_model_context_limit
+                # resolves to 128000 (gpt-4o registry value) regardless
+                # of mock interaction. Floor ratio 0.05 → 6400 tokens,
+                # which 15×4000-char messages comfortably exceed.
+                mgr.config.compaction = CompactionConfig(
+                    enabled=True,
+                    threshold=0.80,
+                    recent_message_window=10,
+                    min_recent_window=3,
+                    context_window_overrides={},
+                    context_window_default=128000,
+                    target_ratio=0.40,
+                    summarization_model="",
+                    min_messages_before_compaction=10,
+                    summarization_chunk_threshold=0.60,
+                    timeout_base_s=90.0,
+                    timeout_per_100k_tokens_s=60.0,
+                    timeout_cap_s=300.0,
+                    timeout_facade_margin_s=5.0,
+                    operation_budget_s=300.0,
+                )
+
+                async def _get_instance(_iid):
+                    return wrapped
+                mgr.get_instance = AsyncMock(side_effect=_get_instance)
+                mgr.execution_gate = MagicMock()
+
+                async def _gate_run(instance_id, holder_id, holder_kind, work_fn):
+                    return await work_fn()
+                mgr.execution_gate.run = AsyncMock(side_effect=_gate_run)
+                mgr.pause_instance_cascade = AsyncMock(
+                    return_value={"paused_ids": [iid], "skipped_ids": []}
+                )
+                mgr.resume_instance_cascade = AsyncMock(
+                    return_value={"resumed_ids": [iid], "skipped_ids": []}
+                )
+
+                async def _quiescent(instance_id, timeout):
+                    return True
+                mgr.wait_for_instance_quiescent = AsyncMock(side_effect=_quiescent)
+
+                mgr._messaging_service = MagicMock()
+                mgr._messaging_service.emit_context_usage_for_instance = AsyncMock()
+
+                mgr._live_hub = MagicMock()
+                mgr._live_hub.stream_message = AsyncMock()
+
+                mgr._task_repo = MagicMock()
+                mgr._task_repo.has_instance_busy = MagicMock(return_value=False)
+
+                dispatcher._manager = mgr
+
+                ctx = CommandContext(
+                    dispatcher=dispatcher,
+                    command_id=command_id,
+                    instance_id=iid,
+                )
+
+                # Stub the engine to return a real CompactionResult
+                # (the persistence step will run with two aupdate
+                # calls — first the messages replacement, second the
+                # compacted_at stamp).
+                from daemon.compaction import CompactionResult
+
+                async def _fake_compact_state(ctx, force=False):
+                    return CompactionResult(
+                        replacement_messages=[
+                            RemoveMessage(id=f"h-{n}") for n in range(15)
+                        ] + [
+                            SystemMessage(
+                                content="[Conversation Summary]\nreal-summary",
+                                id="compaction-canary-x",
+                            )
+                        ],
+                        tokens_before=15000,
+                        tokens_after=100,
+                        tokens_saved=14900,
+                        messages_before=15,
+                        messages_after=1,
+                        compaction_type="summary",
+                        summarization_error=None,
+                        compacted_at="2026-08-31T00:00:00+00:00",
+                        forced=force,
+                        failure_kind=None,
+                    )
+                mgr._compactor = MagicMock()
+                mgr._compactor.compact_state = AsyncMock(
+                    side_effect=_fake_compact_state
+                )
+
+                await execute_compact(
+                    mgr, instance_id=iid, command_id=command_id, context=ctx
+                )
+
+                # 1. SUCCESS landed.
+                ring = dispatcher._state._ring.get(iid, {})
+                terminalized = ring.get(command_id)
+                assert terminalized is not None
+                assert terminalized.phase == "success", (
+                    f"phase must be 'success'; got {terminalized.phase!r} "
+                    f"detail={terminalized.detail!r}"
+                )
+
+                # 2. Persistence ran — TWO aupdate_state calls
+                #    (messages first, compacted_at second), NO
+                #    ``as_node`` (C1 Variant A).
+                assert wrapped.aupdate_state_call_count == 2, (
+                    f"persistence must emit exactly 2 aupdate_state "
+                    f"calls; got {wrapped.aupdate_state_call_count}"
+                )
+                first_call = wrapped.aupdate_state_calls[0]
+                second_call = wrapped.aupdate_state_calls[1]
+                # C1: no as_node kwarg in either call.
+                assert "as_node" not in first_call[2], (
+                    f"C1: persistence first call must NOT carry as_node; "
+                    f"got kwargs={first_call[2]!r}"
+                )
+                assert "as_node" not in second_call[2], (
+                    f"C1: persistence second call must NOT carry as_node; "
+                    f"got kwargs={second_call[2]!r}"
+                )
+
+                # 3. NO-BRICK — subsequent astream runs the agent.
+                runs.clear()
+                async for _chunk in compiled.astream(
+                    {"messages": [HumanMessage(content="turn-2-after-persist")]}, cfg
+                ):
+                    pass
+                assert runs == ["ran"], (
+                    f"INVARIANT 2 violated (NO-BRICK): subsequent "
+                    f"astream(new input) did not run the agent. "
+                    f"runs={runs}. The C1 persistence recipe must "
+                    "preserve subsequent turn integrity."
                 )
             finally:
                 await conn.close()

@@ -1900,18 +1900,27 @@ class TestChunkedOutcomeDataclass:
 
 
 class TestReCompactionMarkerDedup:
-    """Re-compaction should NOT duplicate the marker (id-deterministic prefix +
-    ``add_messages`` reducer de-dups on equal ``id``)."""
+    """W-4.3 — re-compaction no-duplicate-markers.
 
-    def test_marker_ids_are_unique_per_call(self):
-        """Each ``_append_truncation_marker`` call mints a fresh UUID4 — so a
-        single result never double-stamps (the helper appends exactly once),
-        but across re-compaction runs, the ``add_messages`` reducer will
-        de-dup by ``id`` equality.
+    The dedup property is BOUNDED ACCUMULATION (per construction
+    path, the marker fires at most once), NOT ``add_messages``
+    id-dedup (the freshly-minted UUID4 in the marker id would
+    defeat any id-based dedup — see ``_append_truncation_marker``
+    docstring, 2026-08-31 amendment).
 
-        This test pins the per-call uniqueness so future refactors don't
-        accidentally start reusing a stable id (which would defeat the
-        ``add_messages`` de-dup contract).
+    Pin: a SECOND compaction invocation against the same
+    replacement list produces a SECOND marker (different id) —
+    callers must NOT re-apply a single marker repeatedly. Each
+    construction path (truncate fallback + partial assembly) calls
+    the helper at most once per ``CompactionResult``.
+    """
+
+    def test_second_marker_call_produces_different_id(self):
+        """Each ``_append_truncation_marker`` call mints a fresh UUID4
+        — so re-appending the helper a SECOND time on the SAME
+        replacement list adds a SECOND marker (distinct id). This is
+        the load-bearing property: bounded accumulation, NOT
+        id-based dedup.
         """
         a: list = []
         b: list = []
@@ -1920,3 +1929,60 @@ class TestReCompactionMarkerDedup:
         assert a[0].id != b[0].id
         assert a[0].id.startswith("truncation-marker-")
         assert b[0].id.startswith("truncation-marker-")
+
+    def test_marker_appended_at_most_once_per_compaction_result(self):
+        """W-4.3 — a single ``CompactionResult`` built by either
+        construction path (truncate fallback or partial assembly)
+        carries AT MOST ONE marker. The marker is the single
+        in-band signal that summarization fell back to trim; a
+        doubled marker would mislead downstream consumers.
+
+        Builds a replacement list via the public ``_truncate_fallback``
+        helper and asserts the marker count is exactly 1.
+        """
+        from daemon.compaction import ContextCompactor, MessageGroup
+        from daemon.config import CompactionConfig
+
+        config = CompactionConfig(
+            enabled=True,
+            threshold=0.80,
+            recent_message_window=10,
+            min_recent_window=3,
+            context_window_overrides={},
+            context_window_default=128000,
+            target_ratio=0.40,
+            summarization_model="",
+            min_messages_before_compaction=10,
+            summarization_chunk_threshold=0.60,
+            timeout_base_s=90.0,
+            timeout_per_100k_tokens_s=60.0,
+            timeout_cap_s=300.0,
+            timeout_facade_margin_s=5.0,
+            operation_budget_s=300.0,
+        )
+        compactor = ContextCompactor(config, llm_config={})
+
+        from langchain_core.messages import HumanMessage
+
+        compactable = [
+            MessageGroup(
+                start_idx=0,
+                end_idx=2,
+                group_type="single",
+                messages=[HumanMessage(content="x" * 100, id=f"old-{n}") for n in range(3)],
+            )
+        ]
+        preserved: list[MessageGroup] = []
+
+        replacement, ctype = compactor._truncate_fallback(
+            compactable, preserved, context=None  # not used by this path
+        )
+        assert ctype == "truncation"
+        markers = [
+            m for m in replacement
+            if isinstance(m, SystemMessage) and (m.id or "").startswith("truncation-marker-")
+        ]
+        assert len(markers) == 1, (
+            f"W-4.3: a single compaction result must carry AT MOST ONE "
+            f"marker (bounded accumulation); got {len(markers)}"
+        )

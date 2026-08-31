@@ -636,7 +636,7 @@ class TestDispatchFlow:
         assert terminal.phase == CommandPhase.SUCCESS.value
         assert terminal.detail == {"reason": "noop_test"}
         # get_active (which falls back to ring within TTL) sees it too.
-        ac = d.get_active("inst-A")
+        ac = d.get_for_endpoint("inst-A")
         assert ac is not None
         assert ac.command_id == command_id
 
@@ -653,7 +653,7 @@ class TestDispatchFlow:
             except Exception:
                 pass
         # GET endpoint sees FAILED terminal (within TTL).
-        ac = d.get_active("inst-A")
+        ac = d.get_for_endpoint("inst-A")
         assert ac is not None
         assert ac.command_id == command_id
         assert ac.phase == CommandPhase.FAILED.value
@@ -671,7 +671,7 @@ class TestDispatchFlow:
         for task in list(d._tasks):
             await task
         # Forced FAILED so the GET endpoint doesn't hang on "waiting".
-        ac = d.get_active("inst-A")
+        ac = d.get_for_endpoint("inst-A")
         assert ac is not None
         assert ac.phase == CommandPhase.FAILED.value
         assert ac.detail == {"reason": "handler_returned_without_terminalize"}
@@ -734,15 +734,19 @@ class TestDispatcherLifecycle:
         await d.dispatch("inst-A", "/compact")
         for task in list(d._tasks):
             await task
-        # Active command terminalized — still visible via get_active
-        # (within TTL) for SSE-loss recovery.
-        ac = d.get_active("inst-A")
+        # Active command terminalized — still visible via
+        # get_for_endpoint (within TTL) for SSE-loss recovery.
+        ac = d.get_for_endpoint("inst-A")
         assert ac is not None
         assert ac.phase == CommandPhase.SUCCESS.value
 
     def test_get_active_when_empty(self):
         d = _make_dispatcher()
+        # No active command — get_active returns None. The TTL-aware
+        # fallback ``get_for_endpoint`` also returns None for an
+        # instance with no history.
         assert d.get_active("ghost") is None
+        assert d.get_for_endpoint("ghost") is None
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -809,15 +813,73 @@ class TestAckEnvelope:
 
 
 class TestEnums:
-    def test_rejection_reasons_pinned_at_six(self):
+    def test_rejection_reasons_pinned_at_seven(self):
+        # W-2.5 (leader-approved 2026-08-31) — the enum gained the
+        # 7th value ``unavailable`` for the per-agent availability
+        # predicate path (O-B6). The 6-value pin is OBSOLETE; we
+        # now pin at 7.
         assert {r.value for r in RejectionReason} == {
             "terminal_instance",
             "busy",
             "rate_limited",
             "pending_injections",
+            "unavailable",  # W-2.5
             "compaction_disabled",
             "quiescence_timeout",
         }
+
+    def test_rejection_reasons_unique(self):
+        # Belt-and-braces — every enum value is unique (a regression
+        # that duplicated a value would silently pass the set-equality
+        # check above).
+        values = [r.value for r in RejectionReason]
+        assert len(values) == len(set(values)), (
+            f"RejectionReason values must be unique; got {values!r}"
+        )
+
+    def test_availability_predicate_emits_unavailable(self):
+        """W-2.5 — when ``spec.availability`` returns False, the
+        dispatch surfaces ``reason=unavailable`` (NOT the historical
+        ``pending_injections`` placeholder). The pending_injections
+        guard (step 5) remains its own independent check."""
+        async def _deny_availability(instance_context):
+            return False
+
+        d = _make_dispatcher()
+        d.registry.register(
+            _make_spec(availability=_deny_availability)
+        )
+
+        outcome = asyncio.run(d.dispatch("inst-A", "/compact"))
+        assert outcome.kind == "ack"
+        assert outcome.ack["state"] == "rejected"
+        assert outcome.ack["reason"] == RejectionReason.UNAVAILABLE.value, (
+            f"W-2.5: availability predicate False must surface as "
+            f"'unavailable'; got {outcome.ack['reason']!r} (the previous "
+            "implementation used pending_injections as a placeholder)."
+        )
+        assert "not available" in outcome.ack["detail"].lower()
+
+    def test_pending_injections_guard_independent(self):
+        """W-2.5 — the pending_injections guard (step 5) is its own
+        check, not the placeholder for unavailable. A non-empty
+        pending_injections queue still rejects with
+        reason=pending_injections (the original WS-6 row), distinct
+        from the new ``unavailable`` path.
+        """
+        d = _make_dispatcher()
+        d.registry.register(_make_spec())
+
+        outcome = asyncio.run(
+            d.dispatch("inst-A", "/compact", pending_injections=2)
+        )
+        assert outcome.kind == "ack"
+        assert outcome.ack["state"] == "rejected"
+        assert outcome.ack["reason"] == RejectionReason.PENDING_INJECTIONS.value, (
+            "pending_injections guard must surface as "
+            "'pending_injections' (NOT 'unavailable'); the two are "
+            "distinct paths after W-2.5"
+        )
 
     def test_phases_include_six_core(self):
         # WS-5 phase machine — 6 phases.

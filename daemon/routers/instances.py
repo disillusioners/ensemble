@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import time
 import uuid
 from datetime import datetime
 from typing import Any
@@ -1538,22 +1539,28 @@ async def get_active_command(
     if not manager.command_dispatcher.enabled:
         return {"exists": False}
 
-    ac = manager.command_dispatcher.get_active(instance_id)
+    ac = manager.command_dispatcher.get_for_endpoint(instance_id)
     if ac is None:
         return {"exists": False}
 
     # WS-5 CommandProgressEvent shape. ``elapsed_ms`` is computed from
     # the server clock (the FE's elapsed-timer source of truth) so the
     # timer survives reconnect.
-    import time as _time
-    elapsed_ms = max(0, int((_time.monotonic() - ac.started_at) * 1000))
-    last_event_ms = max(0, int((_time.monotonic() - ac.last_event_at) * 1000))
+    #
+    # W-1.3 — the ``timestamp`` field is the stored ISO-8601 string
+    # captured at ``update_phase`` / ``terminalize`` time. The schema
+    # + SSE use ISO 8601 uniformly; the monotonic float (``last_event_at``)
+    # stays internal for TTL computation only. Returning the ISO
+    # string verbatim means the wire shape is stable across reconnects
+    # and the SSE / GET endpoints agree.
+    elapsed_ms = max(0, int((time.monotonic() - ac.started_at) * 1000))
+    last_event_ms = max(0, int((time.monotonic() - ac.last_event_at) * 1000))
     event: dict[str, Any] = {
         "instance_id": ac.instance_id,
         "command_id": ac.command_id,
         "phase": ac.phase,
         "phase_seq": ac.phase_seq,
-        "timestamp": ac.last_event_at,
+        "timestamp": ac.last_event_at_iso,
         "elapsed_ms": elapsed_ms,
         "last_event_elapsed_ms": last_event_ms,
     }

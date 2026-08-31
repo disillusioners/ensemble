@@ -107,8 +107,19 @@ def _append_truncation_marker(replacement: list) -> None:
 
     The marker is a ``SystemMessage`` carrying a short, fixed line that
     tells downstream consumers the older history has been trimmed rather
-    than summarized. Id format ``truncation-marker-<uuid4>`` is fixed by
-    the WS-4.1 spec; the literal content is also pinned.
+    than summarized.
+
+    W-4.3 — the id format is ``truncation-marker-<uuid4>`` and is
+    freshly minted per call. The marker is NOT intended to be
+    id-deterministic across re-compaction runs; the dedup property is
+    that within a single construction path (one result), the marker
+    fires AT MOST once (this helper appends exactly one). The two
+    construction paths (``_truncate_fallback`` and
+    ``_build_partial_replacement_messages``) are mutually exclusive
+    per result (the partial-summary path requires ``|S| >= 1`` from
+    ``_summarize_chunked``; the truncate fallback fires when
+    ``|S| = 0``) — so exactly one marker fires per
+    ``CompactionResult`` regardless of construction path.
 
     Args:
         replacement: The mutable replacement message list to append to.
@@ -922,6 +933,30 @@ class ContextCompactor:
                 compaction_type = "partial_summary"
                 failure_kind = "timeout"
 
+        except (TimeoutError, asyncio.TimeoutError) as e:
+            # W-4.1 — merge/condense path can surface a
+            # ``TimeoutError`` / ``asyncio.TimeoutError`` that the
+            # inner per-chunk narrowing (O14) DOES NOT catch (those
+            # exceptions live outside ``_summarize_chunked``). Without
+            # this branch, the outer ``except Exception`` catches them
+            # and the engine emits ``failure_kind="error"`` — masking
+            # a real timeout as a generic error and misclassifying
+            # the wire outcome (FE would see "failed" instead of
+            # "timed_out → fallback_applied"). The truncate fallback
+            # still applies (preserves the auto-path contract); only
+            # the classification differs.
+            logger.warning(
+                "Summarization timed out (merge/condense path), falling "
+                "back to truncation: %s",
+                e,
+            )
+            replacement, compaction_type = self._truncate_fallback(
+                compactable, preserved, context
+            )
+            # C3: same re-attach on the truncation fallback path.
+            replacement.extend(injected_messages)
+            failure_kind = "timeout"
+            summarization_error = f"{type(e).__name__}: {e}"
         except Exception as e:
             # Non-timeout exceptions from ``_summarize_chunked`` (O14
             # narrowed per-chunk except) or from merge/condense surface
@@ -1435,9 +1470,14 @@ class ContextCompactor:
         # ``_summarize_chunked``).
         replacement.extend(summaries)
 
-        # Marker — exactly once, via the module-scope helper that
-        # ``_truncate_fallback`` also uses. Same id prefix means
-        # ``add_messages`` reducer de-dups on re-compaction.
+        # Marker — W-4.3. The marker comes AFTER the surviving
+        # summaries and BEFORE the preserved tail. The dedup
+        # property is bounded accumulation (this helper appends
+        # exactly one marker per call; the helper is called once
+        # per ``CompactionResult``); the freshly-minted UUID4 in
+        # the marker id would defeat any id-based dedup (this
+        # helper does NOT rely on ``add_messages`` dedup — see
+        # ``_append_truncation_marker`` docstring).
         _append_truncation_marker(replacement)
 
         # Preserved tail with multimodal content flattened.
@@ -1464,7 +1504,10 @@ class ContextCompactor:
         pinned by the C1 acceptance regression test). The marker is
         identical in shape to the one the partial-summary assembly
         emits; the two construction paths are mutually exclusive per
-        result so exactly one marker fires.
+        result so exactly one marker fires (W-4.3 — the dedup
+        property is bounded accumulation, NOT
+        ``add_messages`` id-dedup; the UUID4 is freshly minted per
+        call and would defeat any id-based dedup).
 
         Args:
             compactable: Groups that would have been summarized.
@@ -1476,24 +1519,30 @@ class ContextCompactor:
         """
         replacement: list[BaseMessage] = []
 
+        # W-4.3 — RemoveMessage for compactable first (drops the old
+        # span via the reducer).
         for group in compactable:
             for msg in group.messages:
                 if msg.id:
                     replacement.append(RemoveMessage(id=msg.id))
 
+        # W-4.3 — marker comes BEFORE the preserved tail. The
+        # previous ordering (marker AFTER preserved tail) rendered
+        # the marker as the newest message in the channel, which
+        # pushed the surviving history UP and visually buried the
+        # truncation notice. With the marker BEFORE the preserved
+        # tail, the notice sits between the dropped span and the
+        # surviving history — the natural "we trimmed, here's the
+        # tail" position.
+        _append_truncation_marker(replacement)
+
+        # Preserved tail with multimodal content flattened.
         for group in preserved:
             for msg in group.messages:
                 # Convert multimodal content to clean string
                 if isinstance(msg.content, list):
                     msg.content = _extract_text_from_content(msg.content)
                 replacement.append(msg)
-
-        # WS-4.1 marker exactly-once. The marker comes AFTER the
-        # preserved tail — by then the surviving history is in place
-        # and the marker tells downstream consumers the older span
-        # was trimmed. ``add_messages`` reducer will de-duplicate on
-        # re-compaction thanks to the id-deterministic prefix.
-        _append_truncation_marker(replacement)
 
         return replacement, "truncation"
     
