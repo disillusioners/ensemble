@@ -1487,6 +1487,82 @@ async def get_messages(
 
 
 # ---------------------------------------------------------------------------
+# Slash-command subsystem (Phase 1 / WS-5 GET /commands/active — O12)
+# ---------------------------------------------------------------------------
+#
+# Mounted UNCONDITIONALLY (architect §7 / O12, 2026-08-31): with
+# ``slash_commands.enabled=false`` the endpoint still returns 200
+# ``{exists:false}`` so the FE contract is invariant across config
+# flips — no route-surface change when the subsystem is disabled.
+# Auth mirrors GET /messages (R-17) — both endpoints share the same
+# FastAPI app-level auth surface (no per-endpoint gates), so the
+# caller parity is exact.
+
+
+@router.get("/{instance_id}/commands/active")
+async def get_active_command(
+    instance_id: str,
+    request: Request,
+) -> dict:
+    """Return the active or recently-terminal command for ``instance_id``.
+
+    Response shape (architect §7, O10 spec pin)::
+
+        { "exists": false }
+            OR
+        { "exists": true, "command": CommandProgressEvent }
+
+    The endpoint is the SSE-loss recovery mechanism: the FE polls it
+    (~5s while the card is active and SSE is dead) to re-sync after
+    reconnect or daemon restart. Daemon restart returns
+    ``{exists:false}`` (in-memory registry lost by design, D-B8) and
+    the FE clears the card silently.
+    """
+    manager = _get_manager(request)
+
+    # Mirror GET /messages auth gates exactly — instance existence
+    # 404s (R-17 / O12). The dispatcher is created in
+    # ``__init__`` unconditionally, so we reach it via the facade.
+    try:
+        await manager.get_instance(instance_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail=ErrorResponse(
+                code=ErrorCodes.INSTANCE_NOT_FOUND,
+                message=f"Instance not found: {instance_id}",
+            ).model_dump(),
+        )
+
+    # Disabled flag → uniform 200 {exists:false} (O12 invariant).
+    if not manager.command_dispatcher.enabled:
+        return {"exists": False}
+
+    ac = manager.command_dispatcher.get_active(instance_id)
+    if ac is None:
+        return {"exists": False}
+
+    # WS-5 CommandProgressEvent shape. ``elapsed_ms`` is computed from
+    # the server clock (the FE's elapsed-timer source of truth) so the
+    # timer survives reconnect.
+    import time as _time
+    elapsed_ms = max(0, int((_time.monotonic() - ac.started_at) * 1000))
+    last_event_ms = max(0, int((_time.monotonic() - ac.last_event_at) * 1000))
+    event: dict[str, Any] = {
+        "instance_id": ac.instance_id,
+        "command_id": ac.command_id,
+        "phase": ac.phase,
+        "phase_seq": ac.phase_seq,
+        "timestamp": ac.last_event_at,
+        "elapsed_ms": elapsed_ms,
+        "last_event_elapsed_ms": last_event_ms,
+    }
+    if ac.detail is not None:
+        event["detail"] = ac.detail
+    return {"exists": True, "command": event}
+
+
+# ---------------------------------------------------------------------------
 # Todo list endpoints (read + comment annotation + graph edges)
 # ---------------------------------------------------------------------------
 

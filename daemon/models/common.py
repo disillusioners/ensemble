@@ -25,6 +25,11 @@ class ErrorCodes(str, Enum):
     TODO_NOT_FOUND = "TODO_NOT_FOUND"
     SERVICE_UNAVAILABLE = "SERVICE_UNAVAILABLE"
     BUILTIN_SERVER_PROTECTED = "BUILTIN_SERVER_PROTECTED"
+    # Phase 1 / WS-1.5 — slash-command subsystem. Additive on top of
+    # the existing {code, message} envelope (mirrors O13, 2026-08-31);
+    # FE toasts on ``code`` and ``details.available`` later feeds
+    # slash autocomplete without a contract change.
+    UNKNOWN_COMMAND = "UNKNOWN_COMMAND"
 
 
 class ErrorResponse(BaseModel):

@@ -239,6 +239,37 @@ async def send_message(
             ).model_dump(),
         )
 
+    # ── Slash-command intercept (Phase 1 / WS-1) ──────────────────────────
+    # Sits AFTER images validation (~:240) and BEFORE status capture (~:243).
+    # Architect §1 / plan 1.3 — 4-6 line seam:
+    #   parse → if command: dispatcher → ack (200) or unknown (400) ;
+    #   if `//` escape: rewrite content and fall through byte-identical ;
+    #   if not a command: fall through byte-identical.
+    # All status-branch bodies (:252 PAUSED, :402 RUNNING/WC, :503 IDLE/terminal)
+    # are untouched for non-command traffic. Rate-limit + pending-injections
+    # + unknown-command cases are handled BEFORE any ExecutionGate acquisition.
+    command_outcome = await manager.command_dispatcher.dispatch(
+        instance_id=instance_id,
+        text=message.content,
+        pending_injections=manager.get_injection_count(instance_id),
+    )
+    if command_outcome.kind == "ack":
+        return command_outcome.ack
+    if command_outcome.kind == "unknown_command":
+        raise HTTPException(
+            status_code=400,
+            detail=ErrorResponse(
+                code=ErrorCodes.UNKNOWN_COMMAND,
+                message=f"Unknown command: {message.content.split(maxsplit=1)[0]}",
+                details={"available": command_outcome.available or []},
+            ).model_dump(),
+        )
+    # kind == "passthrough" — fall through. The //-escape case
+    # rewrites the message content to ``sanitized_text`` (one fewer
+    # leading slash) so the LLM sees the literal path.
+    if command_outcome.sanitized_text is not None:
+        message = message.model_copy(update={"content": command_outcome.sanitized_text})
+
     # Capture status once — used in the routing decision below.
     current_status = instance_info.get("status")
 
