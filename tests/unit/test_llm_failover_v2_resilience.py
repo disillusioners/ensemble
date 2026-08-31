@@ -273,12 +273,19 @@ class TestLatencyCaps:
             f"the operator-tunable knob in ReportRepairConfig."
         )
 
-    def test_compaction_has_30s_wait_for(self):
-        """``compaction._call_summarization_llm`` must use a 30s cap.
+    def test_compaction_has_adaptive_wait_for(self):
+        """``compaction._call_summarization_llm`` must use the adaptive
+        per-call timeout (Phase 1 / WS-3.1) — the prior literal
+        ``timeout=30.0`` was replaced with
+        ``timeout=_summarization_timeout_s(prompt, config)``. The
+        facade (``wrap_langchain_failover``) then receives
+        ``wall_clock_cap_s = inner_cap + timeout_facade_margin_s`` per
+        WS-3.2 (architect §9.8 PINNED +5s margin).
 
         ``compaction`` is in ``daemon/compaction.py`` (not
         ``daemon/services/``) — check both locations to catch a
-        future module move."""
+        future module move.
+        """
         try:
             import daemon.compaction as cmp
             module_label = "daemon.compaction"
@@ -294,9 +301,20 @@ class TestLatencyCaps:
             "asyncio.wait_for(..., timeout=...) to cap wall-clock latency"
         )
         kwarg = _wait_for_timeout_kwarg(body)
-        assert kwarg == "30.0", (
-            f"{module_label}._call_summarization_llm must use literal "
-            f"timeout=30.0; got timeout={kwarg!r}"
+        # Phase 1 / WS-3.1: adaptive timeout — the inner cap is the
+        # output of ``_summarization_timeout_s(prompt, config)``, not
+        # a hard-coded 30s literal.
+        assert kwarg == "inner_cap", (
+            f"{module_label}._call_summarization_llm must use the "
+            f"adaptive timeout via ``timeout=inner_cap`` (computed from "
+            f"_summarization_timeout_s); got timeout={kwarg!r}"
+        )
+        # The facade (``wrap_langchain_failover``) must be threaded with
+        # ``wall_clock_cap_s = inner_cap + timeout_facade_margin_s``.
+        assert "wall_clock_cap_s=facade_cap" in body, (
+            f"{module_label}._call_summarization_llm must thread "
+            "``wall_clock_cap_s=facade_cap`` into wrap_langchain_failover "
+            "(WS-3.2 — PINNED +5s margin per architect §9.8)"
         )
 
     def test_keyword_extraction_has_wait_for_with_timeout_s(self):

@@ -91,6 +91,70 @@ def _is_injected_message(msg: BaseMessage) -> bool:
     return bool(additional_kwargs.get("injected_message"))
 
 
+# Phase 1 / WS-4.1 (Q5 DECIDED + post-review adjudication C1):
+# Module-scope marker helper. Both construction paths MUST reach the SAME
+# helper so the engine emits exactly one marker per result (the two paths
+# are mutually exclusive per result — partial-summary assembly goes here
+# when ``|S| ≥ 1``; full-truncate fallback goes here when ``|S| = 0``).
+# APPROVER PIN (2026-08-31): module-scope so neither path can fork a
+# divergent copy and double-stamp a marker line. The id-deterministic
+# prefix ``truncation-marker-`` lets ``add_messages`` reducer de-dup on
+# re-compaction; a freshly-generated UUID4 per call is fine because the
+# id remains stable for that result and the synthetic system message
+# prepend (persistence.py:404-449) is unaffected.
+def _append_truncation_marker(replacement: list) -> None:
+    """Append the truncation marker to a replacement list (in-place).
+
+    The marker is a ``SystemMessage`` carrying a short, fixed line that
+    tells downstream consumers the older history has been trimmed rather
+    than summarized. Id format ``truncation-marker-<uuid4>`` is fixed by
+    the WS-4.1 spec; the literal content is also pinned.
+
+    Args:
+        replacement: The mutable replacement message list to append to.
+            Mutated in place; nothing is returned.
+    """
+    replacement.append(
+        SystemMessage(
+            content="[Earlier messages trimmed to fit context]",
+            id=f"truncation-marker-{uuid.uuid4()}",
+        )
+    )
+
+
+# Phase 1 / WS-3.1: shared adaptive-timeout formula for the three LLM
+# call origins (single-batch :900, merge :939, condense :971 —
+# pre-feature the inline expression was duplicated three times; the
+# helper consolidates it to a single source of truth). The plan REJECTS
+# using ``context.messages`` as the input (architect §3 Correction 1)
+# — that would over-estimate every call after the first chunk and
+# massively over-estimate merge/condense. Input MUST be the prompt
+# actually being sent at the call site.
+def _summarization_timeout_s(prompt: str, config: CompactionConfig) -> float:
+    """Adaptive per-call LLM timeout for summarization calls.
+
+    Formula:
+        ``min(timeout_cap_s, timeout_base_s + (tokens/100_000) * timeout_per_100k_tokens_s)``
+
+    Args:
+        prompt: The exact prompt string the caller is about to send. Sized
+            via ``estimate_messages_tokens`` (loader.py:465, tiktoken
+            cl100k_base) wrapped in a single ``HumanMessage`` so the
+            per-message overhead matches the actual payload. NOT
+            ``context.messages`` — that over-estimates and breaks
+            merge/condense timeouts (architect §3 Correction 1).
+        config: Active ``CompactionConfig`` carrying the adaptive knobs.
+
+    Returns:
+        Per-call timeout in seconds. Capped at ``config.timeout_cap_s``.
+    """
+    tokens = estimate_messages_tokens([HumanMessage(content=prompt)])
+    return min(
+        config.timeout_cap_s,
+        config.timeout_base_s + (tokens / 100_000) * config.timeout_per_100k_tokens_s,
+    )
+
+
 def _partition_injected_messages(
     messages: list[BaseMessage],
 ) -> tuple[list[BaseMessage], list[BaseMessage]]:
@@ -233,7 +297,7 @@ class CompactionContext:
 @dataclass
 class CompactionResult:
     """Result of a compaction operation.
-    
+
     Attributes:
         replacement_messages: List containing RemoveMessage for deleted items
             and the new summary/retained messages.
@@ -243,9 +307,21 @@ class CompactionResult:
         messages_before: Number of messages before compaction.
         messages_after: Number of messages after compaction.
         compaction_type: Strategy used ("summarization", "chunked_summarization",
-            "truncation", "emergency_truncation").
+            "truncation", "partial_summary", "emergency_truncation").
         summarization_error: Error message if summarization failed.
         compacted_at: ISO timestamp when compaction occurred.
+        forced: True when ``ContextCompactor.compact_state`` was invoked with
+            ``force=True`` (WS-2 / architect §2 — only the threshold bypass is
+            exposed; dedup + min-messages still apply). Additive default —
+            existing construction sites continue to work unchanged, and the
+            auto paths (proactive / reactive) emit ``forced=False`` by
+            construction (S-7 anti-drift).
+        failure_kind: When summarization fails mid-run, this is set to
+            ``"timeout"`` (TimeoutError / asyncio.TimeoutError caught per
+            WS-3.4 narrowing) or ``"error"`` (other exception). ``None`` on
+            the success path. The executor maps ``failure_kind="timeout"``
+            to the ``timed_out → fallback_applied`` SSE phases (WS-4 §7
+            amendment).
     """
     replacement_messages: list[BaseMessage]
     tokens_before: int
@@ -253,9 +329,39 @@ class CompactionResult:
     tokens_saved: int
     messages_before: int
     messages_after: int
-    compaction_type: str  # "summarization" | "chunked_summarization" | "truncation" | "emergency_truncation"
+    compaction_type: str  # "summarization" | "chunked_summarization" | "truncation" | "partial_summary" | "emergency_truncation"
     summarization_error: str | None = None
     compacted_at: str | None = None
+    forced: bool = False  # Phase 1 / WS-2: set by compact_state when force=True
+    failure_kind: str | None = None  # Phase 1 / WS-3: "timeout" | "error" | None
+
+
+@dataclass
+class ChunkedOutcome:
+    """Phase 1 / WS-3.4 typed return for ``ContextCompactor._summarize_chunked``.
+
+    Attributes:
+        summaries: Successful per-batch ``SystemMessage`` summaries in order.
+            May be empty (all batches failed) — caller branches on this
+            (WS-3.4 binding: ``|S| = 0`` → existing truncate fallback;
+            ``|S| ≥ 1`` → partial-summary assembly).
+        failed_batches: 0-based batch indices that did NOT produce a summary
+            (either timed out per the WS-3.4 narrowing, or were skipped due
+            to budget exhaustion). Length equals ``len(batches) - len(summaries)``
+            after the loop terminates; partials are tracked for observability
+            but the engine already encodes the stop semantics in
+            ``stop_reason``.
+        stop_reason: ``"completed"`` if all batches succeeded;
+            ``"timeout"`` if a per-chunk TimeoutError tripped;
+            ``"budget"`` if the whole-operation budget exhausted before the
+            remaining batches could be issued;
+            ``"error"`` if a non-timeout exception escaped per-chunk (outer
+            handler at ``compact_state`` :744-772 still catches it via the
+            broader ``except Exception`` for the fallback mapping).
+    """
+    summaries: list
+    failed_batches: list
+    stop_reason: str  # "completed" | "timeout" | "error" | "budget"
 
 
 @dataclass
@@ -605,14 +711,32 @@ class ContextCompactor:
             },
         }
     
-    async def compact_state(self, context: CompactionContext) -> CompactionResult | None:
+    async def compact_state(
+        self,
+        context: CompactionContext,
+        force: bool = False,
+    ) -> CompactionResult | None:
         """Compact conversation history if it exceeds context window threshold.
 
         Args:
             context: CompactionContext with messages and configuration.
+            force: Phase 1 / WS-2 (architect §2 narrowed). When True, the
+                THRESHOLD check (:765) is bypassed — that is the ONLY
+                bypass. Min-messages (:751) and the 60s dedup (:724-726)
+                stay in-engine and STILL APPLY under force. Never bypasses
+                boundary groups (D2), D3 sentinel persistence, pairing
+                guard, or terminal guard. Default ``False`` → automatic
+                paths (proactive `instance_messaging.py:1179`, reactive
+                `graph.py:3513`) byte-identical when callers do not pass
+                the flag (S-7 anti-drift). ``forced`` is stamped on the
+                result so callers can distinguish forced compactions.
 
         Returns:
             CompactionResult if compaction occurred, None if not needed.
+            ``compaction_type`` ∈ ``{"summarization", "truncation",
+            "partial_summary", "emergency_truncation"}``.
+            ``failure_kind`` ∈ ``{None, "timeout", "error"}`` on the
+            engine result (WS-3.4 binding).
         """
         # 1. Deduplication: skip if recently compacted
         if context.last_compacted_at and self._is_recently_compacted(context.last_compacted_at):
@@ -654,9 +778,15 @@ class ContextCompactor:
         history_tokens = estimate_messages_tokens(regular_messages)
         total_tokens = history_tokens + context.system_prompt_tokens
 
-        # 4. Context window and threshold check
+        # 4. Context window and threshold check.
+        # Phase 1 / WS-2: ``force=True`` bypasses THIS check ONLY (architect
+        # §2 narrowed from the broader dedup+min-messages+threshold form).
+        # Min-messages (:751 above) and the 60s dedup (:724-726 above)
+        # stay in-engine and STILL APPLY under force. Auto paths do not
+        # pass ``force`` so their threshold check is unchanged when
+        # ``force=False`` (S-7 byte-identity anti-drift).
         context_window = get_model_context_limit(context.model_name, context.config)
-        if total_tokens <= context_window * context.config.threshold:
+        if not force and total_tokens <= context_window * context.config.threshold:
             logger.debug(
                 f"Skipping compaction: {total_tokens} tokens "
                 f"<= threshold {int(context_window * context.config.threshold)}"
@@ -666,7 +796,8 @@ class ContextCompactor:
         logger.info(
             f"Compaction triggered: {total_tokens} tokens "
             f"(threshold: {int(context_window * context.config.threshold)}, "
-            f"regular={len(regular_messages)}, injected={len(injected_messages)})"
+            f"force={force}, regular={len(regular_messages)}, "
+            f"injected={len(injected_messages)})"
         )
 
         # 5. Boundary groups (regular messages only)
@@ -734,54 +865,92 @@ class ContextCompactor:
                 compacted_at=timestamp,
             )
 
-        # 7. Summarization path
+        # 7. Summarization path.
+        # Phase 1 / WS-3.4 (C1 hybrid — binding): branch on
+        # ``outcome.summaries`` empty vs non-empty; identical semantics
+        # for proactive and reactive callers (no per-caller branching —
+        # WS-3.4 binding). The marker (WS-4.1) is appended exactly once
+        # by whichever path takes over: ``_truncate_fallback`` for
+        # |S|=0, the partial-assembly helper for |S|>=1 with
+        # stop_reason ∈ {timeout, budget}.
+        failure_kind: str | None = None
+        summarization_error: str | None = None
         try:
-            summaries = await self._summarize_chunked(compactable, context)
+            outcome = await self._summarize_chunked(compactable, context)
+            summaries = outcome.summaries
 
-            # C2: _summarize_chunked always returns a single-element list
-            summary = summaries[0]
-
-            replacement = self._build_replacement_messages(compactable, preserved, summary)
-            # C3: re-attach injected messages at the end of the
-            # replacement list. They are appended AFTER the preserved
-            # tail and the summary so their chronological position is
-            # honored (the add_messages reducer handles interleaving
-            # correctly by ``id``).
-            replacement.extend(injected_messages)
-            compaction_type = "chunked_summarization" if len(summaries) > 1 else "summarization"
+            if not summaries:
+                # |S| = 0 — all batches failed (single-batch timeout,
+                # multi-batch first-batch timeout, or budget exhausted
+                # before any batch succeeded). Existing
+                # ``_truncate_fallback`` fires unchanged; the marker is
+                # appended in that helper so this path still emits
+                # exactly one (compaction_type="truncation").
+                replacement, compaction_type = self._truncate_fallback(
+                    compactable, preserved, context
+                )
+                # C3: re-attach injected messages verbatim at the end
+                # so they survive truncation.
+                replacement.extend(injected_messages)
+                if outcome.stop_reason in ("timeout", "budget"):
+                    failure_kind = "timeout"
+                else:
+                    failure_kind = "error"
+            elif outcome.stop_reason == "completed":
+                # All batches succeeded → single merged or single-batch
+                # summary. ``_summarize_chunked`` collapses the merge to
+                # one entry on the success path.
+                replacement = self._build_replacement_messages(
+                    compactable, preserved, summaries[0]
+                )
+                # C3: re-attach injected messages at the end of the
+                # replacement list.
+                replacement.extend(injected_messages)
+                compaction_type = "summarization"
+                failure_kind = None
+            else:
+                # Partial-summary path: |S| >= 1, stop_reason ∈
+                # {"timeout", "budget"}. Per WS-3.4 binding, B's messages
+                # are DROPPED — true trim of the un-summarized span.
+                # Marker appended between summaries and preserved tail
+                # via the partial-assembly helper (WS-4.1 exactly-once).
+                replacement = self._build_partial_replacement_messages(
+                    compactable, preserved, summaries
+                )
+                # C3: re-attach injected messages at the end.
+                replacement.extend(injected_messages)
+                compaction_type = "partial_summary"
+                failure_kind = "timeout"
 
         except Exception as e:
+            # Non-timeout exceptions from ``_summarize_chunked`` (O14
+            # narrowed per-chunk except) or from merge/condense surface
+            # here. ``_truncate_fallback`` applies — marker is appended
+            # inside that helper.
             logger.warning(f"Summarization failed, falling back to truncation: {e}")
-            replacement, compaction_type = self._truncate_fallback(compactable, preserved, context)
-            # C3: same re-attach on the truncation fallback path
-            replacement.extend(injected_messages)
-
-            # Include error info in result
-            non_removal = [m for m in replacement if not isinstance(m, RemoveMessage)]
-            tokens_after = estimate_messages_tokens(non_removal) + context.system_prompt_tokens
-            return CompactionResult(
-                replacement_messages=replacement,
-                tokens_before=total_tokens,
-                tokens_after=tokens_after,
-                tokens_saved=total_tokens - tokens_after,
-                messages_before=len(context.messages),
-                messages_after=len(non_removal),
-                compaction_type=compaction_type,
-                summarization_error=str(e),
-                compacted_at=timestamp,
+            replacement, compaction_type = self._truncate_fallback(
+                compactable, preserved, context
             )
+            # C3: same re-attach on the truncation fallback path.
+            replacement.extend(injected_messages)
+            failure_kind = "error"
+            summarization_error = str(e)
 
-        # 8. Build result
+        # 8. Build result — covers summarization, partial_summary, and
+        # truncation fallback. ``compacted_at`` is stamped on every
+        # branch above (D12 — a partial is a completed compaction, not
+        # a failure).
         non_removal = [m for m in replacement if not isinstance(m, RemoveMessage)]
         tokens_after = estimate_messages_tokens(non_removal) + context.system_prompt_tokens
 
         logger.info(
             f"Compaction complete: {total_tokens} -> {tokens_after} tokens "
             f"(saved {total_tokens - tokens_after}), type={compaction_type}, "
+            f"forced={force}, failure_kind={failure_kind}, "
             f"injected_preserved={len(injected_messages)}"
         )
 
-        return CompactionResult(
+        result_kwargs: dict = dict(
             replacement_messages=replacement,
             tokens_before=total_tokens,
             tokens_after=tokens_after,
@@ -790,32 +959,92 @@ class ContextCompactor:
             messages_after=len(non_removal),
             compaction_type=compaction_type,
             compacted_at=timestamp,
+            forced=force,
+            failure_kind=failure_kind,
         )
+        if summarization_error:
+            result_kwargs["summarization_error"] = summarization_error
+
+        return CompactionResult(**result_kwargs)
     
     async def _summarize_chunked(
         self,
         compactable_groups: list[MessageGroup],
-        context: CompactionContext
-    ) -> list[SystemMessage]:
+        context: CompactionContext,
+    ) -> "ChunkedOutcome":
         """Summarize compactable groups, chunking if necessary.
-        
+
+        Phase 1 / WS-3.4 (C1 hybrid): returns a ``ChunkedOutcome`` instead
+        of raising on per-chunk failure. The outer handler at
+        ``compact_state`` :744-772 branches on ``summaries`` empty vs
+        non-empty — identical semantics for proactive (WS-3.5 instance_messaging.py:1179)
+        and reactive (WS-3.5 graph.py:3513) callers by construction.
+
+        Per-chunk try/except is narrowed to
+        ``(TimeoutError, asyncio.TimeoutError)`` (O14); other exceptions
+        propagate to the outer ``except Exception`` (compact_state :744-772),
+        which maps them to the existing truncate fallback and emits
+        ``failure_kind="error"`` on the engine result.
+
+        Whole-operation budget ``context.config.operation_budget_s``:
+        cumulative clock across chunk calls. Trips BETWEEN LLM calls only
+        — never between the two ``aupdate_state`` persistence calls in
+        callers (D-B5/D-B6 — torn-write guard, that lives upstream).
+        Exhaustion records ``stop_reason="budget"`` and the engine returns
+        with whatever summaries were collected so far; the outer handler
+        decides the path.
+
         Args:
             compactable_groups: Groups to summarize.
             context: Compaction context with configuration.
-            
+
         Returns:
-            List of summary SystemMessages.
+            ``ChunkedOutcome(summaries, failed_batches, stop_reason)``.
+            ``stop_reason`` ∈ ``{"completed","timeout","error","budget"}``.
         """
         compactable_messages = [msg for g in compactable_groups for msg in g.messages]
         compactable_tokens = estimate_messages_tokens(compactable_messages)
         context_window = get_model_context_limit(context.model_name, context.config)
         threshold_tokens = context_window * context.config.summarization_chunk_threshold
-        
+
+        # Whole-operation budget wall-clock anchor — measured against the
+        # chunked LLM calls only (merges + condense inherit the same
+        # budget because they sit in the same ``_summarize_chunked`` call
+        # frame). Module-level ``time.monotonic`` is monotonic across the
+        # event loop and unaffected by wall-clock skew.
+        import time as _time
+        budget_started_at = _time.monotonic()
+        budget_seconds = float(context.config.operation_budget_s)
+
+        def _budget_remaining() -> float:
+            return budget_seconds - (_time.monotonic() - budget_started_at)
+
         # Single batch if small enough
         if compactable_tokens <= threshold_tokens:
-            summary = await self._summarize_single_batch(compactable_groups, context)
-            return [summary]
-        
+            try:
+                summary = await self._summarize_single_batch(
+                    compactable_groups, context
+                )
+                return ChunkedOutcome(
+                    summaries=[summary],
+                    failed_batches=[],
+                    stop_reason="completed",
+                )
+            except (TimeoutError, asyncio.TimeoutError):
+                # O14-narrowed per-chunk timeout. Outer handler maps
+                # empty-summaries → truncate fallback (compaction_type
+                # "truncation" + marker).
+                logger.warning(
+                    "Single-batch summarization timed out within "
+                    "context.config.operation_budget_s=%ss",
+                    context.config.operation_budget_s,
+                )
+                return ChunkedOutcome(
+                    summaries=[],
+                    failed_batches=[0],
+                    stop_reason="timeout",
+                )
+
         # Chunk into batches of 20 groups
         batch_size = 20
         batches: list[list[MessageGroup]] = []
@@ -823,27 +1052,93 @@ class ContextCompactor:
             batch_groups = compactable_groups[i:i + batch_size]
             batch_msgs = [msg for g in batch_groups for msg in g.messages]
             batch_tokens = estimate_messages_tokens(batch_msgs)
-            
+
             # Truncate batch if still too large
             if batch_tokens > threshold_tokens:
                 batch_groups = _truncate_batch_to_fit(
                     batch_groups,
                     int(threshold_tokens),
-                    estimate_messages_tokens
+                    estimate_messages_tokens,
                 )
             batches.append(batch_groups)
-        
-        # Summarize each batch
+
+        # Summarize each batch, tracking the operation budget and
+        # per-chunk failures. The budget trips BETWEEN LLM calls only
+        # (i.e. between iterations of this loop) — never between an
+        # LLM call and an in-flight aupdate in callers (D-B5/D-B6).
         partial_summaries: list[SystemMessage] = []
-        for batch in batches:
-            partial = await self._summarize_single_batch(batch, context)
-            partial_summaries.append(partial)
-        
-        # Merge if multiple summaries
-        if len(partial_summaries) == 1:
-            return partial_summaries
-        
-        return [await self._merge_summaries(partial_summaries, context)]
+        failed_batches: list[int] = []
+        stop_reason = "completed"
+        for batch_idx, batch in enumerate(batches):
+            # Check budget BEFORE issuing the next LLM call. If the
+            # remaining budget is exhausted, stop issuing chunks
+            # immediately — the engine's outer handler routes the
+            # partial-summary path on |S|>=1 or the truncate fallback
+            # on |S|=0. We do NOT pre-charge the budget; a future
+            # chunk that would fit (small enough) simply gets skipped.
+            if _budget_remaining() <= 0:
+                logger.warning(
+                    "Operation budget exhausted after %d/%d batches; "
+                    "stopping chunked summarization.",
+                    batch_idx, len(batches),
+                )
+                stop_reason = "budget"
+                # Mark remaining batches as skipped (not "failed" — they
+                # never started). Track batch_idx..len(batches)-1 for
+                # observability so test assertions can distinguish
+                # "never started" from "started-and-failed".
+                failed_batches.extend(range(batch_idx, len(batches)))
+                break
+
+            try:
+                partial = await self._summarize_single_batch(batch, context)
+                partial_summaries.append(partial)
+            except (TimeoutError, asyncio.TimeoutError):
+                # O14-narrowed per-chunk timeout. Stop issuing further
+                # chunks: the outer handler treats ``summaries`` as
+                # authoritative and routes partial-summary (|S|>=1) or
+                # truncate fallback (|S|=0).
+                logger.warning(
+                    "Chunk %d/%d summarization timed out; halting "
+                    "chunked run (collected %d summaries so far).",
+                    batch_idx + 1, len(batches), len(partial_summaries),
+                )
+                stop_reason = "timeout"
+                failed_batches.append(batch_idx)
+                # Mark the rest as skipped for observability.
+                failed_batches.extend(range(batch_idx + 1, len(batches)))
+                break
+
+        # If we ran out of time before any batch succeeded, surface
+        # "timeout" — even if some partials are present. Outer handler
+        # ignores this string on the |S|>=1 path; only ``summaries``
+        # drives the partial-vs-truncate branching.
+        if partial_summaries and stop_reason == "completed":
+            # All batches succeeded → merge if multiple.
+            if len(partial_summaries) == 1:
+                return ChunkedOutcome(
+                    summaries=partial_summaries,
+                    failed_batches=[],
+                    stop_reason="completed",
+                )
+            merged = await self._merge_summaries(partial_summaries, context)
+            return ChunkedOutcome(
+                summaries=[merged],
+                failed_batches=[],
+                stop_reason="completed",
+            )
+
+        # Partial-summary path (|S| >= 1, with stop_reason ∈
+        # {"timeout", "budget"}) OR all-batches-failed path (|S| = 0).
+        # Do NOT call _merge_summaries here — that's the explicit
+        # rule for the partial path (architect §3 Correction 2 + C1):
+        # only successful batches are summarized, and the preserved
+        # tail + injected messages take over from B's raw span.
+        return ChunkedOutcome(
+            summaries=partial_summaries,
+            failed_batches=failed_batches,
+            stop_reason=stop_reason,
+        )
     
     async def _summarize_single_batch(
         self,
@@ -983,11 +1278,11 @@ class ContextCompactor:
         context: CompactionContext
     ) -> str:
         """Call LLM for summarization.
-        
+
         Args:
             prompt: Summarization prompt.
             context: Compaction context with model info.
-            
+
         Returns:
             LLM response content as string.
         """
@@ -1003,27 +1298,40 @@ class ContextCompactor:
         else:
             llm_config = self.llm_config_with_headers
 
+        # Phase 1 / WS-3.1+3.2: adaptive per-call timeout + facade margin.
+        # ``inner_cap`` sizes both the ``asyncio.wait_for`` backstop AND the
+        # facade's ``wall_clock_cap_s`` (``inner_cap + margin``). The
+        # site-level backstop trips FIRST — that is the contract (architect
+        # §9.8, "site TimeoutError still the first tripped"). The facade
+        # cap is sized to wrap cleanly after the inner cancel so tenacity
+        # retries stay inside the outer cap (llm_failover.py:559-568).
+        inner_cap = _summarization_timeout_s(prompt, context.config)
+        facade_cap = inner_cap + context.config.timeout_facade_margin_s
+
         # ``base_url_backup`` is consumed by the HA facade from the raw
         # config dict; clean it only at the constructor.
         llm = ThinkingChatOpenAI(**clean_llm_config(dict(llm_config)))
         # v2 HA: route through the shared facade. See
-        # ``daemon.services.llm_failover``.
-        llm_wrapper = wrap_langchain_failover(llm, llm_config)
+        # ``daemon.services.llm_failover``. The facade cap is
+        # ``inner_cap + timeout_facade_margin_s`` (default +5s) per the
+        # architect §9.8 PINNED margin.
+        llm_wrapper = wrap_langchain_failover(llm, llm_config, wall_clock_cap_s=facade_cap)
 
-        # Belt-and-braces: the 30s ``asyncio.wait_for`` is a
-        # backstop that cancels the inner task on timeout.
-        # The REAL cap home is the facade's
+        # Belt-and-braces: ``inner_cap`` ``asyncio.wait_for`` is the
+        # site-level cap (the FIRST to trip on timeout). The REAL
+        # primary line of defense is the facade's
         # ``wall_clock_cap_s`` (tenacity ``stop_after_delay``
         # inside the retry loop) — see
         # ``daemon.services.llm_failover`` docstring "Wall-clock
         # cap". Belt-and-braces decision: keep the site-level
         # cap so a future site bypass of the facade still gets
-        # cancellation; the facade cap is the primary line of
-        # defense. The ``asyncio.TimeoutError`` propagates to
-        # the caller's ``except Exception`` blocks (e.g.
-        # ``compact_messages``'s summarization-failed →
-        # truncation fallback at the :741 handler),
-        # preserving graceful degradation.
+        # cancellation; the facade cap is sized to wrap cleanly
+        # after the inner cancel + a small margin so tenacity
+        # retries don't overrun the outer ceiling. The
+        # ``asyncio.TimeoutError`` propagates to the per-chunk
+        # except in ``_summarize_chunked`` (narrowed to
+        # ``(TimeoutError, asyncio.TimeoutError)`` per WS-3.4
+        # O14), preserving the partial-summary path (C1).
         response = await asyncio.wait_for(
             asyncio.to_thread(
                 llm_wrapper.invoke,
@@ -1035,9 +1343,9 @@ class ContextCompactor:
                     HumanMessage(content=prompt),
                 ],
             ),
-            timeout=30.0,
+            timeout=inner_cap,
         )
-        
+
         content = response.content
         return _extract_text_from_content(content)
     
@@ -1048,26 +1356,26 @@ class ContextCompactor:
         summary: SystemMessage
     ) -> list[BaseMessage]:
         """Build replacement message list with RemoveMessage for old content.
-        
+
         Args:
             compactable_groups: Groups being summarized.
             preserved_groups: Groups being kept intact.
             summary: Summary SystemMessage to insert.
-            
+
         Returns:
             List with RemoveMessage for old content and new summary + preserved.
         """
         replacement: list[BaseMessage] = []
-        
+
         # Add RemoveMessage for compactable groups
         for group in compactable_groups:
             for msg in group.messages:
                 if msg.id:
                     replacement.append(RemoveMessage(id=msg.id))
-        
+
         # Add summary
         replacement.append(summary)
-        
+
         # Add preserved groups with multimodal content converted to strings
         for group in preserved_groups:
             for msg in group.messages:
@@ -1075,9 +1383,72 @@ class ContextCompactor:
                 if isinstance(msg.content, list):
                     msg.content = _extract_text_from_content(msg.content)
                 replacement.append(msg)
-        
+
         return replacement
-    
+
+    @staticmethod
+    def _build_partial_replacement_messages(
+        compactable_groups: list[MessageGroup],
+        preserved_groups: list[MessageGroup],
+        summaries: list,
+    ) -> list[BaseMessage]:
+        """Build the partial-summary replacement list (WS-3.4 binding, C1).
+
+        Difference from ``_build_replacement_messages``:
+
+        * Multiple surviving summaries are inserted (one per successful
+          batch) — not just one.
+        * The un-summarized batch span is TRULY TRIMMED: ``RemoveMessage``
+          entries are emitted for those messages but no replacement
+          summary covers them. This is the bounded shrink the C1
+          acceptance criterion (b) requires — reduction is provably ≥
+          the un-summarized span.
+        * A truncation marker (WS-4.1 exactly-once) is appended between
+          the surviving summaries and the preserved tail. The marker is
+          identical in shape to the one ``_truncate_fallback`` emits —
+          both paths share the module-scope ``_append_truncation_marker``
+          helper, so the marker can never double-stamp or fork.
+
+        Args:
+            compactable_groups: All groups targeted for summarization
+                (regardless of which batches succeeded — their
+                ``RemoveMessage`` entries are still emitted).
+            preserved_groups: Groups being kept intact.
+            summaries: Surviving summaries from ``_summarize_chunked``
+                (``|S| >= 1`` when this helper is called).
+
+        Returns:
+            Replacement message list with ``RemoveMessage`` entries,
+            surviving summaries, exactly one marker, and the preserved
+            tail (multimodal content flattened to strings).
+        """
+        replacement: list[BaseMessage] = []
+
+        # ``RemoveMessage`` for ALL compactable groups — including the
+        # un-summarized span, whose messages are being trimmed.
+        for group in compactable_groups:
+            for msg in group.messages:
+                if msg.id:
+                    replacement.append(RemoveMessage(id=msg.id))
+
+        # Surviving summaries (order preserved from
+        # ``_summarize_chunked``).
+        replacement.extend(summaries)
+
+        # Marker — exactly once, via the module-scope helper that
+        # ``_truncate_fallback`` also uses. Same id prefix means
+        # ``add_messages`` reducer de-dups on re-compaction.
+        _append_truncation_marker(replacement)
+
+        # Preserved tail with multimodal content flattened.
+        for group in preserved_groups:
+            for msg in group.messages:
+                if isinstance(msg.content, list):
+                    msg.content = _extract_text_from_content(msg.content)
+                replacement.append(msg)
+
+        return replacement
+
     def _truncate_fallback(
         self,
         compactable: list[MessageGroup],
@@ -1085,29 +1456,45 @@ class ContextCompactor:
         context: CompactionContext
     ) -> tuple[list[BaseMessage], str]:
         """Fallback truncation when summarization fails.
-        
+
+        Phase 1 / WS-4.1 (Q5 DECIDED, post-review adjudication C1):
+        appends the truncation marker via the module-scope helper so
+        the auto-path ``compaction_type="truncation"`` result also
+        carries the marker line (O15 — intentional behavior change,
+        pinned by the C1 acceptance regression test). The marker is
+        identical in shape to the one the partial-summary assembly
+        emits; the two construction paths are mutually exclusive per
+        result so exactly one marker fires.
+
         Args:
             compactable: Groups that would have been summarized.
             preserved: Groups being kept intact.
             context: Compaction context.
-            
+
         Returns:
-            Tuple of (replacement_messages, compaction_type).
+            Tuple of (replacement_messages, ``"truncation"``).
         """
         replacement: list[BaseMessage] = []
-        
+
         for group in compactable:
             for msg in group.messages:
                 if msg.id:
                     replacement.append(RemoveMessage(id=msg.id))
-        
+
         for group in preserved:
             for msg in group.messages:
                 # Convert multimodal content to clean string
                 if isinstance(msg.content, list):
                     msg.content = _extract_text_from_content(msg.content)
                 replacement.append(msg)
-        
+
+        # WS-4.1 marker exactly-once. The marker comes AFTER the
+        # preserved tail — by then the surviving history is in place
+        # and the marker tells downstream consumers the older span
+        # was trimmed. ``add_messages`` reducer will de-duplicate on
+        # re-compaction thanks to the id-deterministic prefix.
+        _append_truncation_marker(replacement)
+
         return replacement, "truncation"
     
     @staticmethod
