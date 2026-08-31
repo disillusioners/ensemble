@@ -221,6 +221,30 @@ export interface Message {
    * a retry that races an echo still finds the stash.
    */
   queue_id?: string | null;
+  /**
+   * Original-send content the retry must re-POST verbatim
+   * (F1 escape-retry fix, 2026-08-31). Set on the bubble when the
+   * chat component's POST error handler marks the send failed —
+   * the retry handler reads this back so the retry POST carries
+   * the SAME string the original send carried. For an ESCAPE-form
+   * message (``//x``), the original send POSTed the RAW form
+   * (``//x`` — the BE strips one slash and delivers the literal);
+   * the rendered bubble carries the delivered (post-strip) form
+   * (``/x``) so the user sees what the model saw. Without this
+   * stash, ``onRetryFailedMessage`` re-POSTs the bubble's
+   * ``content`` (the stripped form), and the BE re-parses it as
+   * a REAL slash command — retry performs a DIFFERENT action than
+   * the original send. ``null`` is NOT a meaningful value here
+   * (retry-content is always a string when stashed); ``undefined``
+   * means the stash is absent (older mark paths, BE refetches,
+   * non-escape messages where the rendered content happens to
+   * match the sent form). Server-blind: never persisted, never
+   * emitted over SSE / refetch — the merge helper preserves it
+   * across in-memory SSE echo merges the same way it preserves
+   * ``queue_id`` so a retry that races an echo still finds the
+   * stash.
+   */
+  retry_content?: string;
 }
 
 // SSE event types

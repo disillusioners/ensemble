@@ -419,7 +419,10 @@ class TestableChatComponent {
         //      + retry affordance instead of a "delivered" bubble the
         //      server never recorded. Must-fix #2: also stash the
         //      original send's ``queue_id`` so the retry can re-use
-        //      it.
+        //      it. F1 escape-retry fix: also stash the ORIGINAL-send
+        //      ``content`` as ``retry_content`` so the retry POST
+        //      re-uses the RAW ``//x`` form even when the bubble
+        //      carries the delivered ``/x`` form.
         const errorReason = err instanceof Error ? err.message : 'Failed to send message';
         this.sendError.set(errorReason);
         this.isSending.set(false);
@@ -436,7 +439,27 @@ class TestableChatComponent {
               // retry that fails twice should keep the original
               // stash rather than overwrite with a null variant).
               const stash = sentQueueId !== undefined ? sentQueueId : m.queue_id;
-              next[i] = { ...m, failed: true, errorReason, queue_id: stash };
+              // F1 escape-retry stash: preserve any pre-existing
+              // ``retry_content`` defensively (same discipline as
+              // ``queue_id``). When the bubble was a non-escape
+              // message the sent content already matches the
+              // bubble's content, so the retry is correct
+              // regardless; when it was an escape message the
+              // bubble's content is the STRIPPED form and the
+              // stash carries the RAW form. Stash the RAW form
+              // unconditionally — the retry handler picks
+              // ``retry_content`` when present, and a non-escape
+              // bubble carries identical content in both fields.
+              const retryStash = m.retry_content !== undefined
+                ? m.retry_content
+                : payload.content;
+              next[i] = {
+                ...m,
+                failed: true,
+                errorReason,
+                queue_id: stash,
+                retry_content: retryStash,
+              };
               return next;
             }
           }
@@ -455,6 +478,15 @@ class TestableChatComponent {
    * ``onSendMessage``'s success path, which means a cooldown-blocked
    * retry preserves the error state (no POST went out → bubble stays
    * failed). See chat.component.ts must-fix #1 (2026-08-31).
+   *
+   * F1 escape-retry fix (2026-08-31): re-POSTs ``target.retry_content``
+   * when present (the RAW ``//x`` form stashed at fail-mark time),
+   * falling back to ``target.content`` when the stash is genuinely
+   * absent (older mark paths, BE refetches that surfaced a failed
+   * bubble without a stash). Naive ``content: target.content`` would
+   * re-POST the bubble's stripped form for an ESCAPE message — the
+   * BE re-parses it as a real slash command and the retry performs
+   * a DIFFERENT action than the original send.
    */
   onRetryFailedMessage(messageId: string): void {
     const target = this.messages().find(m => m.message_id === messageId);
@@ -466,8 +498,14 @@ class TestableChatComponent {
     const retryQueueId = target.queue_id !== undefined
       ? target.queue_id
       : (this.tabStateService.activeProjectId() ?? null);
+    // F1 escape-retry: carry the ORIGINAL-send content (RAW ``//x``
+    // form for escape messages). Falls back to the bubble's displayed
+    // content only when the stash is genuinely absent.
+    const retryContent = target.retry_content !== undefined
+      ? target.retry_content
+      : target.content;
     this.onSendMessage({
-      content: target.content,
+      content: retryContent,
       images: target.images,
       queue_id: retryQueueId,
       retry_of_message_id: messageId,
@@ -1763,6 +1801,46 @@ describe('ChatComponent - Project-Aware Navigation', () => {
       expect(merged[0].queue_id).toBe('queue-42');
     });
 
+    // 5f-bonus-2 — Merge helper invariant for the retry_content
+    // stash (F1 escape-retry fix, 2026-08-31): the ``retry_content``
+    // stashed on a failed bubble at fail-mark time MUST survive a
+    // subsequent SSE echo merge — otherwise a retry that races an
+    // echo would lose the RAW ``//x`` form and re-POST the bubble's
+    // stripped form, silently triggering a real slash command.
+    it('should preserve the stashed retry_content across an SSE echo merge', () => {
+      component.messages.set([
+        {
+          message_id: 'echo-stash-escape',
+          role: 'user',
+          content: '/compact is useful', // delivered (post-strip) form
+          created_at: new Date().toISOString(),
+          instance_id: 'inst-abc',
+          failed: true,
+          errorReason: '502 Bad Gateway',
+          retry_content: '//compact is useful', // RAW form the original send POSTed
+        },
+      ]);
+
+      // SSE echo arrival: the BE-side hook re-emitted the bubble
+      // with the delivered form (no ``retry_content`` field — the
+      // server has no notion of this client-side retry stash).
+      const echoArrival = {
+        message_id: 'echo-stash-escape',
+        role: 'user' as const,
+        content: '/compact is useful',
+        created_at: new Date().toISOString(),
+        instance_id: 'inst-abc',
+      };
+      const merged = mergeMessagesById(component.messages(), [echoArrival]);
+
+      expect(merged).toHaveLength(1);
+      expect(merged[0].failed).toBe(true);
+      // The RAW form stash survives the merge — the next retry
+      // re-POSTs ``//compact is useful``, not ``/compact is
+      // useful``.
+      expect(merged[0].retry_content).toBe('//compact is useful');
+    });
+
     // 5g — TTL eviction invariant: the failed entry MUST NOT be
     // evicted by ``evictPendingByAge``. Otherwise the bug re-appears
     // as a silent bubble drop (and the user has no record of the
@@ -2076,6 +2154,201 @@ describe('ChatComponent - Project-Aware Navigation', () => {
         undefined,
         'queue-e2e-7',
       );
+    });
+
+    // F1 escape-retry fix (2026-08-31) — primary regression test.
+    //
+    // The original send POSTed the RAW form ``//compact is useful``
+    // (the BE strips one slash and delivers the literal — the
+    // ``//x`` escape contract). The bubble in the UI carries the
+    // delivered (post-strip) form ``/compact is useful`` so the
+    // user sees what the model sees. The naive retry re-POSTs
+    // ``target.content`` (the stripped form), and the BE re-parses
+    // it as a REAL slash command — ``/compact`` triggers
+    // compaction, the user intended plain text. Retry must
+    // re-POST the RAW form.
+    //
+    // Asserts the stash at fail-mark time survives to the retry
+    // POST body. Mirrors the ``queue_id`` stash discipline from
+    // commit 34c08746 (must-fix #2).
+    it('should re-POST the RAW escape form on retry (not the stripped bubble form)', () => {
+      // Seed a failed ESCAPE-form bubble. ``content`` is the
+      // delivered (post-strip) form — the BE delivered ``/compact
+      // is useful``. ``retry_content`` is the RAW form the
+      // original send actually POSTed.
+      component.messages.set([
+        {
+          message_id: 'echo-escape-retry',
+          role: 'user',
+          content: '/compact is useful',
+          created_at: new Date().toISOString(),
+          instance_id: 'inst-abc',
+          failed: true,
+          errorReason: '502 Bad Gateway',
+          retry_content: '//compact is useful',
+        },
+      ]);
+
+      // Mock a successful retry POST.
+      mockApiService.sendMessage.mockReturnValueOnce({
+        subscribe: (handlers: any) => {
+          handlers.next({
+            status: 'injected',
+            message_id: 'echo-escape-retry',
+            created_at: new Date().toISOString(),
+            timestamp: new Date().toISOString(),
+            instance_id: 'inst-abc',
+            content: '//compact is useful',
+            pending_count: 1,
+          });
+          return { unsubscribe: () => {} };
+        },
+      });
+
+      component.onRetryFailedMessage('echo-escape-retry');
+
+      // The retry POST body carried the RAW ``//compact is useful``
+      // form — the BE re-strips one slash and delivers the
+      // literal, matching the original send. The stripped
+      // ``/compact is useful`` would have triggered real
+      // compaction (a different action than the original send).
+      //
+      // The 4th arg is the queue_id: the bubble has no ``queue_id``
+      // stash, and the test setup leaves ``activeProjectId()`` at
+      // its default ``null`` (the initial 'all' pseudo-tab), so the
+      // fallback chain resolves to ``null`` — the same fallback the
+      // ``queue_id`` test 5i exercises for the no-stash case.
+      expect(mockApiService.sendMessage).toHaveBeenLastCalledWith(
+        'inst-abc',
+        '//compact is useful',
+        undefined,
+        null,
+      );
+    });
+
+    // F1 fallback (2026-08-31): bubble without the
+    // ``retry_content`` stash retries with ``target.content`` —
+    // no behavior regression for normal messages (non-escape
+    // text, where the rendered form IS the sent form) and for
+    // older mark paths that did not stash the field.
+    it('should fall back to target.content on retry when no retry_content stash is present', () => {
+      // Failed bubble WITHOUT the ``retry_content`` stash — older
+      // mark path or a BE refetch that surfaced a failed bubble
+      // without the field. The content is what it is; for a
+      // non-escape message, this matches the sent form.
+      component.messages.set([
+        {
+          message_id: 'echo-no-stash',
+          role: 'user',
+          content: 'hello world',
+          created_at: new Date().toISOString(),
+          instance_id: 'inst-abc',
+          failed: true,
+          errorReason: 'older mark path',
+          // no retry_content (older bubble without the stash)
+        },
+      ]);
+
+      mockApiService.sendMessage.mockReturnValueOnce({
+        subscribe: (handlers: any) => {
+          handlers.next({
+            status: 'injected',
+            message_id: 'echo-no-stash',
+            created_at: new Date().toISOString(),
+            timestamp: new Date().toISOString(),
+            instance_id: 'inst-abc',
+            content: 'hello world',
+            pending_count: 1,
+          });
+          return { unsubscribe: () => {} };
+        },
+      });
+
+      component.onRetryFailedMessage('echo-no-stash');
+
+      // The retry POST used the bubble's content verbatim — the
+      // fallback discipline mirrors the ``queue_id`` fallback
+      // (must-fix #2, 2026-08-31). The 4th arg is ``null`` for the
+      // same reason as the escape-form test above (no queue_id
+      // stash, default activeProjectId is ``null``).
+      expect(mockApiService.sendMessage).toHaveBeenLastCalledWith(
+        'inst-abc',
+        'hello world',
+        undefined,
+        null,
+      );
+    });
+
+    // F1 failed-marker invariant (2026-08-31) — mirrors the
+    // must-fix #1 cooldown-race test (5h) for the escape form.
+    // The failed marker clears ONLY when the retry POST actually
+    // fires (gated via ``payload.retry_of_message_id`` in the
+    // success path of ``onSendMessage``). A cooldown-blocked
+    // retry — even with an escape-form bubble and a stashed
+    // RAW ``retry_content`` — must keep the failed state so the
+    // user keeps the error UI until they retry outside the
+    // cooldown window.
+    it('should keep an escape-form bubble failed when retry is clicked during the cooldown window', () => {
+      // Drive the clock so the cooldown is deterministically active.
+      const nowSpy = jest.spyOn(Date, 'now');
+      const t0 = 30_000;
+      nowSpy.mockReturnValue(t0);
+
+      // (1) The original ESCAPE-form send: SSE echo lands with
+      //     the delivered (post-strip) form, POST errors, error
+      //     handler marks the bubble failed AND stashes the RAW
+      //     ``//compact is useful`` as ``retry_content``.
+      mockSseService.messages.set([
+        {
+          message_id: 'echo-escape-cooldown',
+          role: 'user',
+          content: '/compact is useful',
+          created_at: new Date(t0).toISOString(),
+          instance_id: 'inst-abc',
+        },
+      ]);
+      component.runSseMergeEffect();
+      expect(component.messages()).toHaveLength(1);
+
+      fireFailedSend('Server unavailable');
+      component.onSendMessage({ content: '//compact is useful' });
+
+      const afterOriginal = component.messages();
+      expect(afterOriginal).toHaveLength(1);
+      expect(afterOriginal[0].failed).toBe(true);
+      expect(afterOriginal[0].errorReason).toBe('Server unavailable');
+      // The stash landed on the bubble — RAW form, distinct from
+      // the bubble's stripped content.
+      expect(afterOriginal[0].retry_content).toBe('//compact is useful');
+      expect(afterOriginal[0].content).toBe('/compact is useful');
+      const sendCallsBeforeRetry = mockApiService.sendMessage.mock.calls.length;
+
+      // (2) User clicks Retry ~1s later (still inside the 3s
+      //     cooldown window). Clock does NOT advance.
+      nowSpy.mockReturnValue(t0 + 1_000);
+      component.onRetryFailedMessage('echo-escape-cooldown');
+
+      // The retry handler called ``onSendMessage``, which fired
+      // the cooldown snackbar and returned early. The retry POST
+      // never went out — no RAW ``//x`` form was POSTed twice.
+      expect(mockApiService.sendMessage).toHaveBeenCalledTimes(sendCallsBeforeRetry);
+      expect(mockSnackBar.open).toHaveBeenCalledWith(
+        expect.stringContaining('Please wait'),
+        'Dismiss',
+        { duration: 2000, panelClass: 'info-snackbar' },
+      );
+
+      // The bubble STILL carries the failed marker and the RAW
+      // stash — the user keeps the error state AND the
+      // retry content. No "delivered" rendering for a send that
+      // never happened; the next retry (post-cooldown) will
+      // re-POST the RAW form.
+      const afterRetry = component.messages();
+      expect(afterRetry).toHaveLength(1);
+      expect(afterRetry[0].message_id).toBe('echo-escape-cooldown');
+      expect(afterRetry[0].failed).toBe(true);
+      expect(afterRetry[0].errorReason).toBe('Server unavailable');
+      expect(afterRetry[0].retry_content).toBe('//compact is useful');
     });
   });
 

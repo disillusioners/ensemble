@@ -1674,6 +1674,21 @@ export class ChatComponent implements OnInit, OnDestroy {
    * ``undefined`` (older callers / message input that does not carry
    * the field). ``null`` is preserved verbatim — it is a meaningful
    * value distinct from "stash absent".
+   *
+   * F1 escape-retry stash (2026-08-31): also stamp the ORIGINAL
+   * send's ``content`` (``sentContent``) on the bubble as
+   * ``retry_content`` so a later ``onRetryFailedMessage`` re-POSTs
+   * the SAME string the original POST carried. For an ESCAPE-form
+   * message the user typed ``//x``; the original send POSTed the RAW
+   * form (``//x`` — the BE strips one slash and delivers the literal)
+   * but the bubble carries the delivered form (``/x``). Without this
+   * stash, ``onRetryFailedMessage`` re-POSTs the bubble's
+   * ``content`` (the stripped form), and the BE re-parses it as a
+   * REAL slash command — retry performs a DIFFERENT action than the
+   * original send. The stash is preserved on double-failure retry
+   * (mirrors the ``queue_id`` defensive-stash discipline) so a
+   * ``retry`` whose retry-also-failed keeps the ORIGINAL-send
+   * content, not a transformed round-trip.
    */
   private markSendFailedForContent(
     sentContent: string,
@@ -1703,7 +1718,28 @@ export class ChatComponent implements OnInit, OnDestroy {
           // than overwriting with a null/undefined variant that
           // happened to round-trip differently).
           const stash = sentQueueId !== undefined ? sentQueueId : m.queue_id;
-          next[i] = { ...m, failed: true, errorReason, queue_id: stash };
+          // F1 escape-retry stash: preserve any pre-existing
+          // ``retry_content`` defensively (same discipline as
+          // ``queue_id``). When the bubble was a non-escape message
+          // the sent content already matches the bubble's content,
+          // so the retry is correct regardless; when it was an
+          // escape message the bubble's content is the STRIPPED
+          // form and the stash carries the RAW form. Stash the
+          // RAW form unconditionally — the retry handler picks
+          // ``retry_content`` when present, and a non-escape
+          // bubble carries identical content in both fields, so
+          // stashing unconditionally never produces a wrong
+          // retry.
+          const retryStash = m.retry_content !== undefined
+            ? m.retry_content
+            : sentContent;
+          next[i] = {
+            ...m,
+            failed: true,
+            errorReason,
+            queue_id: stash,
+            retry_content: retryStash,
+          };
           return next;
         }
       }
@@ -1740,6 +1776,19 @@ export class ChatComponent implements OnInit, OnDestroy {
    * the user switched projects between the original fail and the
    * retry click — defeating the project's queue isolation.
    *
+   * F1 escape-retry fix (2026-08-31): carry the ORIGINAL-send
+   * ``content`` (stashed on the bubble at fail-mark time as
+   * ``retry_content``) through the retry POST. A naive
+   * ``content: target.content`` would re-POST the bubble's displayed
+   * form, which for an ESCAPE-form message is the STRIPPED form
+   * (``/x``) — the BE re-parses it as a real slash command and the
+   * retry performs a DIFFERENT action than the original send. Fall
+   * back to ``target.content`` only when the stash is genuinely
+   * absent (older mark paths, BE refetches that surfaced a failed
+   * bubble without a stash) — same fallback discipline as
+   * ``retryQueueId``. The merge helper preserves the stash across
+   * SSE echo merges the same way it preserves ``queue_id``.
+   *
    * ``messageInputRef`` is left untouched — the composer is still
    * populated from the original failure, and a successful retry will
    * clear it via the normal ``onSendMessage`` flow.
@@ -1765,12 +1814,24 @@ export class ChatComponent implements OnInit, OnDestroy {
     const retryQueueId = target.queue_id !== undefined
       ? target.queue_id
       : this.tabStateService.activeProjectId() ?? null;
+    // F1 escape-retry: carry the ORIGINAL-send content (the exact
+    // string the original POST carried). Falls back to the
+    // bubble's displayed content only when the stash is genuinely
+    // absent — older mark paths, BE refetches that surfaced a
+    // failed bubble without a stash, or non-escape messages where
+    // the rendered content already matches the sent form. The
+    // fail-mark pass stashes ``retry_content`` unconditionally so
+    // any bubble that was marked failed via the current path
+    // carries the RAW sent form here.
+    const retryContent = target.retry_content !== undefined
+      ? target.retry_content
+      : target.content;
     // ``retry_of_message_id`` tells the success handler which bubble
     // to clear (id-keyed dedup means the bubble keeps its id on
     // success). The failure path re-marks via content-match in
     // ``markSendFailedForContent`` — no extra signal needed there.
     this.onSendMessage({
-      content: target.content,
+      content: retryContent,
       images: target.images,
       queue_id: retryQueueId,
       retry_of_message_id: messageId,

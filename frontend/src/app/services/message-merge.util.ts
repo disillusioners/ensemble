@@ -157,6 +157,19 @@ export function mergeMessagesById(
       if (result[idx].queue_id !== undefined) {
         merged.queue_id = result[idx].queue_id;
       }
+      // F1 escape-retry stash (2026-08-31): the ``retry_content`` on a
+      // failed bubble is the ORIGINAL-send content the retry must
+      // re-POST verbatim (preserves the RAW ``//x`` form for escape
+      // messages whose bubble carries the delivered ``/x`` form).
+      // The server has no notion of ``retry_content`` (purely
+      // client-side retry correctness), but incoming echoes that
+      // explicitly carry ``retry_content: undefined`` would clobber
+      // the stash via spread; pin the existing copy through every
+      // merge pass so a retry that races an SSE echo still finds
+      // the stash.
+      if (result[idx].retry_content !== undefined) {
+        merged.retry_content = result[idx].retry_content;
+      }
       // MIN-4: for CONFIRMED (non-pending) entries keep the earlier of
       // the local/incoming timestamps so a GET re-stamp
       // (checkpoint-commit ts) cannot re-sort the bubble. Pending
