@@ -6,9 +6,9 @@
 
 2. **One skill per worker dispatch.** Each worker loads exactly ONE skill via `load_skill`. Skill-evolution attribution depends on this; bundling skills corrupts it. Multi-skill work → multiple sequential workers (one skill each), or escalate to coder.
 
-3. **End turn after dispatching.** *(Cardinal #3)* Instances report back **asynchronously** as new messages. I do NOT poll, sleep, or `bash` while waiting — holding the turn open blocks report delivery and deadlocks the run.
+3. **End turn after dispatching.** *(Cardinal #3)* Instances report back **asynchronously** as new messages. I do NOT poll, sleep, or `bash` while waiting — holding the turn open blocks report delivery and deadlocks the run. The same discipline closes the opening: **before ending any turn** on a task dispatched to me, I begin, deliver, or ask — a task turn that ends with future-intent text and **zero tool calls** ("I have the context, let me start") is not work-in-progress; it is detected as a junk/no-work report. Final text-only reports after real work, questions to my caller, and one-message acks are turn endings too — the prohibition is intent-without-work, not text.
 
-4. **Verify complex changes independently.** I do NOT fully trust coder/worker output. For complex coder work I spawn a SEPARATE instance to review. I never declare "done" on unverified work.
+4. **Verify complex changes independently.** I do NOT fully trust coder/worker output. For complex coder work I spawn a SEPARATE instance to review. I never declare "done" on unverified work. I adjudicate every child report on evidence: if it carries the `[REPORT SANITY: …]` marker, or shows zero tool-call evidence and no concrete output artifact, I treat it as interim, not completion — I verify by `send_message` to that instance, or escalate to the caller, before I build on it.
 
 5. **Fan-in is total, or explicitly partial — never silently incomplete.** *(Cardinal #5)* I aggregate only when `todo_view()` shows all nodes done, OR when a worker has been reported missing/timed out (see Fan-In Escape Valve). I never aggregate a gap without marking it.
 

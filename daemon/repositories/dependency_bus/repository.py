@@ -473,6 +473,91 @@ class DependencyWatcherRepository:
             return int(session.scalar(stmt) or 0)
 
     # --------------------------------------------------------
+    # B.S.1-i (wc-wake-report-integrity Wave 2) — same-tx
+    # executable declared-waiting predicate source (D2.7
+    # CORROBORATING signal).
+    # --------------------------------------------------------
+
+    def count_fired_unenqueued_for_parent(
+        self,
+        session: Session,
+        target_instance_id: str,
+    ) -> list[dict[str, str]]:
+        """Return per-row detail of FIRED ∧ ``enqueued_at IS NULL`` watchers for a parent.
+
+        B.S.1-i (decisions.md C2-D2.7 LOCKED 2026-08-30): the
+        declared-waiting predicate's CORROBORATING signal is a
+        ``dependency_watchers`` row in FIRED state whose
+        ``enqueued_at`` is NULL — the FIRED-but-unenqueued
+        inter-report-gap shape. This method exposes the
+        per-watcher detail for the predicate's structured return
+        (stage iii will use ``watch_id`` to cite the row in the
+        adjudication notice).
+
+        **Same-tx contract (B.S.7 binding).** The caller passes
+        an already-open session; the predicate runs INSIDE the
+        completion transaction so a freshly-stamped watcher (or a
+        freshly-FIRED one in stage ii/iii) is visible to the
+        predicate without an intermediate ``session.commit()``.
+        This method MUST NOT call ``session.commit()`` and MUST
+        NOT open a new transaction.
+
+        **Why this row exists (D2.7 LOCKED rationale).** The
+        ``enqueued_at`` column is stamped by the bus AFTER the
+        FollowUp is enqueued (``models.py:128`` documents the
+        semantics: stamped only via the NORMAL path when the
+        parent is NOT paused; ``dependency_bus.py:709`` purges
+        the cache post-``emit_terminal``). In the inter-report
+        gap, a FIRED-but-not-yet-stamped row sits on disk while
+        the in-memory ``pending_watchers`` cache (``dependency_bus.py:960-961``)
+        is empty for the same source task — exactly the shape
+        the predicate must detect. The 60s-grace DELETE
+        predicate ``enqueued_at IS NOT NULL`` (the recovery sweep
+        contract) is load-bearing for restart survival and is
+        preserved verbatim by this method.
+
+        Args:
+            session: An open SQLModel/SQLAlchemy ``Session`` on
+                the same engine that holds this repository. The
+                session is owned by the caller — the method
+                MUST NOT commit / rollback / close it.
+            target_instance_id: The parent whose corroborating
+                obligations to evaluate.
+
+        Returns:
+            A list of ``{"watch_id", "source_task_id", "state",
+            "fired_at"}`` dicts — one per FIRED ∧
+            ``enqueued_at IS NULL`` row for the parent. Empty
+            list when no corroborating obligations exist.
+        """
+        stmt = (
+            select(
+                DependencyWatcher.watch_id,
+                DependencyWatcher.source_task_id,
+                DependencyWatcher.state,
+                DependencyWatcher.fired_at,
+            )
+            .where(
+                DependencyWatcher.target_instance_id == target_instance_id
+            )
+            .where(
+                DependencyWatcher.state
+                == DependencyWatcherState.FIRED.value
+            )
+            .where(DependencyWatcher.enqueued_at.is_(None))
+        )
+        rows = list(session.exec(stmt).all())
+        return [
+            {
+                "watch_id": r.watch_id,
+                "source_task_id": r.source_task_id,
+                "state": r.state,
+                "fired_at": r.fired_at,
+            }
+            for r in rows
+        ]
+
+    # --------------------------------------------------------
     # STATE TRANSITION (atomic backpressure primitive)
     # --------------------------------------------------------
 

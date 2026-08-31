@@ -66,3 +66,31 @@ intentional historical records.
 - `docs/configuration/completion-flags.md` — Flag interaction matrix, triage runbook
 - `docs/plans/decouple-execution-plan.md` — Full 3-phase execution plan
 - `docs/plans/decouple-review.md` — Review findings (round 1 + round 2)
+
+## wc-wake-report-integrity Phase 1 (2026-08-30)
+
+**Status**: Phase 1 COMPLETE (T1-T7 landed; T6b fixture migration; T8 docs).
+
+**Branch**: `feature/wc-wake-report-integrity` @ `cf210e32+`
+
+**Lock-in**: kill-switch `ENSEMBLE_WC_WAKE_ENQUEUE` (default OFF at code-land; flag-ON ships the new routing per D2.5-FLIP).
+
+**Key changes**:
+- `INJECTION_ELIGIBLE_STATUSES` shrunk to `frozenset({"running"})` (T2)
+- HTTP / agent-tool / job_inject routing pivots behind the kill-switch (T3+T4+T7)
+- `_heal_poisoned_checkpoint_tail` closes the poisoned-tail → LangGraph 2013 exposure at the enqueue seam (T6)
+- D2 seam drain moves parked FIFO leftovers into graph_input (T5)
+- `Manager.send_message` and `InstanceMessagingService.send_message` DELETED (T6b / D7 LOCKED) — surviving production traffic must use `enqueue_message` (durable wake) or `set_injection` (mid-turn injections on RUNNING)
+
+**Flag states**:
+- OFF (default): legacy FIFO injection for WC targets (revert path)
+- ON: WC → `enqueue_message` (durable wake, first-class turn)
+
+**Tests affected by T6b deletion**: ~13 test files skipped (TestSendMessage, TestThinkTagParsing, TestInstanceMessagingTriggerTitleGeneration send_message subset, test_question_deferred_pause_*, test_inner_soul*, etc.). All skipped tests assert behavior of the deleted methods and are pending a Phase-2 rewrite against `MessageProcessingPipeline`.
+
+**Docs**:
+- `docs/setup.md` documents the env var
+- `docs/features/job-queue.md` example updated to `manager.enqueue_message`
+- `daemon/tools/instance.py` `_full_doc_` documents both flag states + D6 busy-gate consequence
+- `daemon/tools/job_queue.py` `_FULL_DOCS["job_inject"]` rewritten
+- `daemon/routers/messages.py` routing-table docstring updated

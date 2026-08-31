@@ -105,7 +105,7 @@ def create_chart_tools(manager: "InstanceManager", current_instance_id: str) -> 
             project_id=pid,
             parent_id=current_instance_id,
             instance_name=f"chart-{description[:30]}",
-            timeout=300.0,
+            timeout=600.0,
             return_instance_id=True,
         )
 
@@ -132,7 +132,7 @@ block. The agent is responsible for:
 4. Returning the validated diagram with a brief explanation.
 
 The tool blocks until the agent produces its final response (default
-``timeout`` = 300s) and returns the agent's text — a ```` ```mermaid ````
+``timeout`` = 600s) and returns the agent's text — a ```` ```mermaid ````
 fenced block plus explanation — directly to the caller. Paste it into
 your response without re-wrapping or stripping the fence.
 

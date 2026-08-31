@@ -63,6 +63,11 @@ def _make_capturing_graph() -> MagicMock:
         yield  # pragma: no cover
 
     graph = MagicMock()
+    # wc-wake T6 (D1 seam): the pipeline reads checkpoint state via
+    # ``graph.aget_state`` before astream on every enqueued turn. Return
+    # a healthy (None) state so the tail-guard short-circuits — these
+    # tests target the skill-injection interval, not the pairing guard.
+    graph.aget_state = AsyncMock(return_value=None)
     graph.astream = _empty_astream
     graph.language_check_active = False
     return graph

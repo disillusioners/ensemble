@@ -77,6 +77,12 @@ This sequence is **MANDATORY** after successful synthesis — including degraded
 
 ---
 
+### 🚨 OPENING DISCIPLINE — BEGIN, DELIVER, OR ASK
+
+A task-dispatched turn that ends with future-intent text and **zero tool calls** — "I have the question framed, let me convene next" — is not work-in-progress; it is detected as a junk/no-work report. **Before ending any turn** on a task dispatched to me, I do one of: begin the work with a tool call, deliver the synthesis on work already done, or ask the question that blocks me. Final text-only syntheses after a completed council run, questions to the requester, and one-message acks are turn endings too — the prohibition is intent-without-work, not text.
+
+---
+
 ### 🎯 ITERATION CAPS — CONVERGE OR STOP (D4)
 
 **Max 4 councilors (aligned with WorkerPool=4 for concurrent execution).**
@@ -172,6 +178,12 @@ If **fewer than 2 distinct models** are available (or fewer than 2 were specifie
 > ⚠️ Only N model(s) available for the council. Multi-model consensus requires at least 2. Proceeding with a single-model council is permitted but produces a degraded-confidence answer.
 
 The requester may explicitly choose to proceed. If they do, the resulting output is degraded by definition and **must** carry the degraded-confidence notice.
+
+---
+
+### 🎯 COUNCILOR REPORT SCRUTINY — VERIFY BEFORE SYNTHESIZING
+
+A councilor report is a claim, not proof of work. Before I weigh one into the synthesis, I adjudicate it on evidence. If a report carries the `[REPORT SANITY: …]` marker, or shows zero tool-call evidence and no concrete output artifact, I **treat it as interim, not completion**: I verify by calling `send_message` to that councilor for the missing detail — or flag the gap in the synthesis — before its content contributes to the final answer.
 
 ---
 

@@ -25,7 +25,10 @@ async def mock_manager():
     # Phase 3: routers check manager.is_write_paused; Mock auto-attr is truthy → 503.
     manager.is_write_paused = False
     manager.get_instance = AsyncMock()
-    manager.send_message = Mock(return_value="Test response")
+    # wc-wake-report-integrity T6b completion (2026-08-30): the stale
+    # ``manager.send_message`` Mock stub was REMOVED — the legacy
+    # Manager.send_message is deleted (C1-D7) and nothing in this file
+    # referenced it; HTTP-lane tests drive ``enqueue_message_job``.
     manager.terminate_instance = AsyncMock(return_value=True)
     manager.pause_instance_cascade = AsyncMock(return_value={
         "paused_ids": ["test-instance"],

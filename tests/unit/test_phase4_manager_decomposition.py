@@ -165,13 +165,12 @@ class TestPublicMethodsExist:
         assert hasattr(InstanceManager, "spawn_instance")
         assert callable(getattr(InstanceManager, "spawn_instance"))
 
-    def test_send_message_exists_and_callable(self):
-        """send_message method should exist and be callable."""
-        from daemon.manager import InstanceManager
-
-        assert hasattr(InstanceManager, "send_message")
-        assert callable(getattr(InstanceManager, "send_message"))
-
+    # wc-wake-report-integrity T6b completion (2026-08-30): the former
+    # ``test_send_message_exists_and_callable`` was DELETED as a dead
+    # contract — an existence/callable check on the deleted
+    # ``Manager.send_message`` (C1-D7) can only assert against a method
+    # that no longer exists. The surviving facade surface is pinned by
+    # ``test_enqueue_message_exists_and_callable`` directly below.
     def test_enqueue_message_exists_and_callable(self):
         """enqueue_message method should exist and be callable."""
         from daemon.manager import InstanceManager
@@ -782,25 +781,16 @@ class TestFacadeDelegationPattern:
         manager._lifecycle_service.spawn_instance.assert_called_once()
         assert result == "test-instance-id"
 
-    def test_manager_send_message_delegates_to_messaging_service(self):
-        """send_message should delegate to _messaging_service."""
-        from daemon.manager import InstanceManager
-
-        manager = InstanceManager.__new__(InstanceManager)
-        manager._messaging_service = AsyncMock()
-        mock_result = MagicMock()
-        manager._messaging_service.send_message = AsyncMock(return_value=mock_result)
-
-        async def test():
-            result = await manager.send_message("instance-123", "hello")
-            assert result is mock_result
-            manager._messaging_service.send_message.assert_called_once_with(
-                "instance-123", "hello"
-            )
-
-        import asyncio
-        asyncio.run(test())
-
+    # wc-wake-report-integrity T6b completion (2026-08-30): the former
+    # ``test_manager_send_message_delegates_to_messaging_service`` was
+    # DELETED as a dead contract — it asserted the deleted
+    # ``Manager.send_message`` → ``_messaging_service.send_message``
+    # delegation (both halves removed by C1-D7). The surviving
+    # delegation surfaces (spawn/terminate) remain pinned by the
+    # sibling tests in this class; the enqueue delegation is
+    # structural (manager.enqueue_message → service.enqueue_message)
+    # and exercised end-to-end by tests/test_manager.py::TestSendMessage
+    # plus the D1/T10 seam suites.
     def test_manager_terminate_instance_delegates_to_lifecycle_service(self):
         """terminate_instance should delegate to _lifecycle_service.
 

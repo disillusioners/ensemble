@@ -70,6 +70,12 @@ def _make_capturing_graph(captured: dict) -> MagicMock:
 
     graph = MagicMock()
     graph.astream = fake_astream
+    # wc-wake-report-integrity (T6): the D1 seam heal calls
+    # ``graph.aget_state(config)`` to inspect the checkpoint tail.
+    # These tests don't model a poisoned checkpoint — the helper
+    # returns ``[]`` immediately on None state, so a clean
+    # AsyncMock returning None short-circuits the heal.
+    graph.aget_state = AsyncMock(return_value=None)
     return graph
 
 

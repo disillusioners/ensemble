@@ -11,6 +11,17 @@ Run with:
 
 NOTE: Tests use a mocked registry to avoid touching real agents.
 All test artifacts are created in tmp_path which is auto-cleaned.
+
+wc-wake-report-integrity T6b completion (2026-08-30): these tests
+previously drove the turn through the deleted ``Manager.send_message``
+(legacy ``graph.ainvoke`` bypass, C1-D7). They now (a) enqueue via
+``manager.enqueue_message`` — the durable wake path, asserting the
+``AsyncMessageResult`` contract — then (b) drive the REAL engine turn
+through ``_process_message_with_tracking`` (the same pipeline the
+WorkerPool's ProcessMessageProcessor invokes; a bare InstanceManager
+has no worker pool, and wiring one here would claim unrelated rows in
+the shared dev DB). The side-effect assertions (memory file /
+workflow.md / soul proposal) are unchanged.
 """
 
 import os
@@ -33,6 +44,29 @@ pytestmark = [
         reason="Set OPENAI_API_KEY to run integration tests"
     ),
 ]
+
+
+async def _drive_turn(manager, instance_id: str, message: str):
+    """Enqueue a message (durable wake) and run the real-engine turn.
+
+    Returns ``(enqueue_result, turn_result)``. The enqueue asserts the
+    wc-wake durable contract; the turn drive replaces the deleted
+    ``Manager.send_message`` round-trip (T6b, C1-D7).
+    """
+    enqueue_result = await manager.enqueue_message(
+        instance_id, message, source="api"
+    )
+    assert enqueue_result is not None
+    assert enqueue_result.message_id, "enqueue must mint a durable message_id"
+    assert enqueue_result.instance_id == instance_id
+    assert enqueue_result.status == "queued"
+
+    turn_result = await manager._messaging_service._process_message_with_tracking(
+        instance_id=instance_id,
+        message=message,
+        message_id=enqueue_result.message_id,
+    )
+    return enqueue_result, turn_result
 
 
 @pytest.fixture
@@ -136,15 +170,15 @@ async def test_inner_soul_remember_e2e(integration_config, test_agent_dir, mock_
         instance_id, _ = manager.spawn_instance(agent_id="test_agent")
         assert instance_id, "Should return a instance ID"
         
-        # Send message asking agent to remember something
-        # The agent should use inner_soul tool to do this
+        # Enqueue the wake + drive the real-engine turn (T6b completion).
+        # The agent should use inner_soul tool to do this.
         message = """Please use the inner_soul tool to remember this: "My name is TestAgent and I was created for testing."
 
 Use the inner_soul tool with intent="remember" to store this information."""
-        
-        response = await manager.send_message(instance_id, message)
-        
-        # Verify response exists (MessageResult has .content attribute)
+
+        _enqueue_result, response = await _drive_turn(manager, instance_id, message)
+
+        # Verify the turn produced a response (MessageResult has .content)
         assert response.content, "Should receive a response"
         print(f"\n[INNER_SOUL TEST] Agent response: {response.content[:500]}...")
         
@@ -198,8 +232,8 @@ async def test_inner_soul_change_workflow_e2e(integration_config, test_agent_dir
 
 Use: inner_soul(intent="change", target="workflow", content="Step 4: Review response before sending")"""
         
-        response = await manager.send_message(instance_id, message)
-        
+        _enqueue_result, response = await _drive_turn(manager, instance_id, message)
+
         assert response.content, "Should receive a response"
         print(f"\n[INNER_SOUL TEST] Workflow change response: {response.content[:500]}...")
         
@@ -247,8 +281,8 @@ async def test_inner_soul_change_soul_proposal_e2e(integration_config, test_agen
 
 Use: inner_soul(intent="change", target="soul", content="I value clear communication in all interactions")"""
         
-        response = await manager.send_message(instance_id, message)
-        
+        _enqueue_result, response = await _drive_turn(manager, instance_id, message)
+
         assert response.content, "Should receive a response"
         print(f"\n[INNER_SOUL TEST] Soul proposal response: {response.content[:500]}...")
         

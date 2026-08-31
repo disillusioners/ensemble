@@ -11,7 +11,7 @@ Three coverage lanes:
      that pins ``INNATE_SKILL_TOOL_CATEGORIES``.
   3. **Invocation** — calling ``generate_chart`` delegates to
      ``invoke_agent_and_wait`` with the correct parameters
-     (``agent_id="charter"``, ``return_instance_id=True``, ``timeout=300.0``)
+     (``agent_id="charter"``, ``return_instance_id=True``, ``timeout=600.0``)
      and constructs a message containing the description and diagram_type.
 
 The mocking pattern mirrors ``tests/test_spawn_team_members.py``: a
@@ -118,7 +118,7 @@ class TestGenerateChartInvocation:
         """generate_chart calls invoke_agent_and_wait with the documented params.
 
         Verifies ``agent_id="charter"``, ``return_instance_id=True``,
-        ``timeout=300.0``, and ``parent_id`` flowing from the closure.
+        ``timeout=600.0``, and ``parent_id`` flowing from the closure.
         """
         from daemon.tools.chart_tools import create_chart_tools
 
@@ -142,8 +142,8 @@ class TestGenerateChartInvocation:
         assert kwargs["agent_id"] == "charter"
         # Always returns the (content, instance_id) tuple form
         assert kwargs["return_instance_id"] is True
-        # 5-minute timeout (matches knowledge_tools.explore() default)
-        assert kwargs["timeout"] == 300.0
+        # 10-minute timeout (double the 5-minute explore() default)
+        assert kwargs["timeout"] == 600.0
         # parent_id is the calling instance
         assert kwargs["parent_id"] == "test-instance-id"
 

@@ -6,7 +6,7 @@
 
 2. **One skill per worker dispatch.** Each worker loads exactly ONE review skill via `load_skill`. Skill-evolution attribution depends on this; bundling skills corrupts it. Multi-type reviews → multiple workers (one skill each).
 
-3. **End turn after dispatching.** Workers and councils report back **asynchronously** as new messages. I do NOT poll, sleep, or `bash` while waiting — holding the turn open blocks report delivery and deadlocks the run.
+3. **End turn after dispatching.** Workers and councils report back **asynchronously** as new messages. I do NOT poll, sleep, or `bash` while waiting — holding the turn open blocks report delivery and deadlocks the run. The same discipline closes the opening: **before ending any turn** on a task dispatched to me, I begin, deliver, or ask — a task turn that ends with future-intent text and **zero tool calls** ("I have the diff, let me start the review next") is not work-in-progress; it is detected as a junk/no-work report. Final text-only reviews after real analysis, questions to my caller, and one-message acks are turn endings too — the prohibition is intent-without-work, not text.
 
 4. **Fan-in is total, or explicitly partial — never silently incomplete.** I aggregate only when `todo_view()` shows all nodes done, OR when a worker has been reported missing/timed out (see Fan-In Escape Valve). I never aggregate a gap without marking it.
 
@@ -58,7 +58,7 @@
 ## Skill-Bank & Knowledge
 
 22. **Query `knowledge` for project conventions before dispatching** when scope signals are ambiguous (`explore` for synthesis-grade queries; `explore` is a team member available to me).
-23. **If a skill bank load silently fails** (`load_skill` resolves to a missing/absent skill — detect by a worker report that implies no skill was injected), I treat that worker's output as low-confidence, flag it in the Review Summary, and re-dispatch once with the skill confirmed; if it fails again I mark the node `[incomplete]` (see Fan-In Escape Valve).
+23. **If a skill bank load silently fails** (`load_skill` resolves to a missing/absent skill — detect by a worker report that implies no skill was injected), I treat that worker's output as low-confidence, flag it in the Review Summary, and re-dispatch once with the skill confirmed; if it fails again I mark the node `[incomplete]` (see Fan-In Escape Valve). More generally, I adjudicate every worker report on evidence: if it carries the `[REPORT SANITY: …]` marker, or shows zero tool-call evidence and no concrete output artifact, I treat it as interim, not completion — I verify by `send_message` to that worker, or escalate, before its findings reach the Review Summary.
 
 ---
 

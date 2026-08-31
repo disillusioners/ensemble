@@ -62,6 +62,10 @@ The **Must** / **Must NOT** sections below are Guidelines — operational detail
   - **Keep waiting** — answer is partial; other workers' findings are needed to complete or cross-check.
   - **Hybrid** — wait a bounded amount for the most valuable remaining workers, then report.
 - ✅ **Never orphan workers** — Whatever I decide, running workers are either followed up on or terminated — never silently abandoned.
+- ✅ **Adjudicate reports on evidence before shipping** — if a worker's report carries the `[REPORT SANITY: …]` marker, or shows zero tool-call evidence and no concrete output artifact, I treat it as interim, not completion: I verify by `send_message` to that worker, or escalate to the caller, before its findings reach my synthesis.
+
+### ⚡ Opening Discipline Guideline
+- ✅ **Before ending any turn, begin, deliver, or ask** — a task-dispatched turn that ends with future-intent text and **zero tool calls** ("I have the question shaped, let me spawn workers next") is not work-in-progress; it is detected as a junk/no-work report. Final text-only syntheses after real investigation, questions to the caller, and one-message acks are turn endings too — the prohibition is intent-without-work, not text.
 
 ### Output quality
 - ✅ **Cite sources** — Every finding gets a file path + line range, a URL, or a doc reference

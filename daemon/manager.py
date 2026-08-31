@@ -81,6 +81,10 @@ from .services.job_queue_service import DemandState
 from .services.dependency_bus import get_dependency_bus
 from .services.instance_lifecycle import InstanceLifecycleService
 from .services.instance_messaging import InstanceMessagingService
+from .services.instance_messaging import emit_wc_wake_enqueue_boot_log
+from .services.report_integrity_guard import (
+    emit_report_integrity_b_guard_boot_log,
+)
 from .services.messaging_types import AsyncMessageResult  # re-exported for `from daemon.manager import AsyncMessageResult`
 from .services.child_reports import ChildReportsService
 from .services.error_reporting import ErrorReportingService
@@ -730,6 +734,21 @@ class InstanceManager:
         # to flip. See _resolve_governor_recursion_guard_enabled for env
         # syntax. Mirrors the cascade-lineage wrapper precedent.
         emit_governor_recursion_guard_boot_log()
+
+        # WC-wake enqueue routing pivot (wc-wake-report-integrity,
+        # 2026-08-30): one-time INFO log naming the resolved kill-switch
+        # state. Default DISABLED (legacy FIFO injection); restart-required
+        # to flip. See _resolve_wc_wake_enqueue_enabled for env syntax.
+        # Mirrors the governor-guard wrapper precedent.
+        emit_wc_wake_enqueue_boot_log()
+
+        # Report-integrity (b) terminal-waiting guard (wc-wake-report-
+        # integrity Wave 2 stage iii, 2026-08-30): one-time INFO log
+        # naming the resolved kill-switch state. Default DISABLED
+        # (stage-ii log-only ship state); restart-required to flip;
+        # OPERATOR-OWNED flip per C2-D2.5-FLIP — no auto-flip exists.
+        # Mirrors the governor-guard / WC-wake wrapper precedents.
+        emit_report_integrity_b_guard_boot_log()
 
         # NEW: Pluggable message sources system
         self.source_registry = SourceRegistry(
@@ -2510,6 +2529,59 @@ class InstanceManager:
         if queue is None:
             return None
         return list(queue)
+
+    def requeue_injections(
+        self,
+        instance_id: str,
+        entries: list[dict[str, str]],
+    ) -> None:
+        """Prepend ``entries`` to the pending injection queue.
+
+        wc-wake-report-integrity (T5): the D2 seam drain closes the
+        get/clear race that pre-existed at the in-graph site 1
+        (``daemon/graph.py:2977-2979``). The drain takes a snapshot
+        via :meth:`get_injection` and then clears via
+        :meth:`clear_injection`. Entries appended by a concurrent
+        :meth:`set_injection` between the snapshot and the clear are
+        observable as ``cleared - pending``; the drain re-appends
+        those via this helper so the FIFO invariant
+        (``clear_injection == drained``) holds across the race
+        window.
+
+        Prepend-order-preserving: if the existing queue already has
+        entries (the racy append landed FIRST), ``entries`` go to the
+        FRONT so the original drain order is restored. If the queue is
+        empty (the racy append landed AFTER the clear), ``entries``
+        simply become the new queue in their original order.
+
+        The empty-input short-circuit preserves the lock-free semantic
+        for the (very common) case where there is no race — a single
+        dict-assign under the GIL is sufficient.
+
+        Args:
+            instance_id: Target instance.
+            entries: A list of FIFO-entry dicts (``content``,
+                ``timestamp``, optional ``source``). Order is preserved
+                on prepend (oldest-first).
+        """
+        if not entries:
+            return
+        existing = self._pending_injections.get(instance_id)
+        if existing is None:
+            # Empty queue — entries become the new queue in order.
+            self._pending_injections[instance_id] = list(entries)
+        else:
+            # Prepend-order-preserving merge. The race window's
+            # concurrent set_injection call landed AFTER our drain's
+            # snapshot but BEFORE our clear, so its entries are in
+            # ``existing`` and the drained entries must be
+            # restored to the FRONT.
+            self._pending_injections[instance_id] = list(entries) + existing
+        logger.info(
+            f"[Injection] Re-queued {len(entries)} entries for instance "
+            f"{instance_id[:8]}... (D2 seam-drain race safeguard, "
+            f"queue_depth={len(self._pending_injections[instance_id])})"
+        )
 
     # ------------------------------------------------------------------
     # Quick-win #7 — revive-once guard for agent-tool-initiated revives
@@ -6262,20 +6334,16 @@ class InstanceManager:
                     logger.warning(f"MCP cleanup after spawn failure failed: {cleanup_err}")
             raise
 
-    async def send_message(self, instance_id: str, message: str) -> MessageResult:
-        """Send a message to an instance and get the response.
-
-        Args:
-            instance_id: The ID of the instance to send the message to.
-            message: The message content to send.
-
-        Returns:
-            MessageResult with content, thinking, and tool_calls.
-
-        Raises:
-            KeyError: If instance_id is not found.
-        """
-        return await self._messaging_service.send_message(instance_id, message)
+    # wc-wake-report-integrity (T6b, D7 LOCKED 2026-08-30): the legacy
+    # ``Manager.send_message`` method (and the corresponding
+    # ``InstanceMessagingService.send_message`` at the :1060
+    # ``graph.ainvoke`` bypass) were DELETED. The bypass re-opened
+    # the poisoned-tail → LangGraph 2013 exposure that the new D1
+    # enqueue-seam guard (T6) closes — every surviving path must
+    # cross the T6 choke point AND the in-graph pairing guard.
+    # Production callers must use ``enqueue_message`` (the durable
+    # wake path) or the FIFO ``set_injection`` API (for direct
+    # mid-turn injections on RUNNING targets).
 
     async def enqueue_message(
         self,
@@ -8084,8 +8152,9 @@ class InstanceManager:
             agent_id: The agent ID (e.g., "developer", "leader"). Also
                 drives the exclusion check in the raw call: when
                 ``agent_id`` is in ``report_repair.repair_excluded_agents``
-                (default: ``{"wanderer", "explorer"}``), repair is
-                skipped.
+                (default derives from
+                ``daemon.constants.REPORT_REPAIR_EXCLUDED_AGENTS``), repair
+                is skipped and the (c) sanity marker is suppressed.
             skip_repair: When True, propagate to the raw call so the
                 truncation check + LLM repair + combine fallback are
                 all skipped. Used by interim paths (e.g.,
@@ -8123,8 +8192,10 @@ class InstanceManager:
                 with the terminal completion path.
             agent_id: Optional agent ID for the exclusion check. When
                 ``agent_id`` is in
-                ``report_repair.repair_excluded_agents`` (default:
-                ``{"wanderer", "explorer"}``), repair is skipped.
+                ``report_repair.repair_excluded_agents`` (default
+                derives from
+                ``daemon.constants.REPORT_REPAIR_EXCLUDED_AGENTS``), repair
+                is skipped.
                 ``None`` means "unknown agent" — repair runs (safe default).
 
         Returns:
@@ -8234,9 +8305,11 @@ class InstanceManager:
         # canonical owner of any in-flight ``graph.astream`` call (any
         # path that goes through ``gate.run`` registers there). Fall
         # back to the legacy ``_graph_tasks`` dict for paths that
-        # have not yet been migrated (e.g. the synchronous
-        # ``send_message`` ``graph.ainvoke`` path in
-        # ``InstanceMessagingService.send_message``).
+        # have not yet been migrated (e.g. ``enqueue_message`` →
+        # ``MessageProcessingPipeline`` — the surviving enqueue/pipeline
+        # path that has not yet been wired through the gate; the
+        # pre-m3 reference to ``InstanceMessagingService.send_message``
+        # was stale — that entry point no longer exists).
         try:
             gate_cancelled = False
             try:

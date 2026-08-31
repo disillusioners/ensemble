@@ -178,6 +178,20 @@ For parallel fan-out, state whether END TURN is per-dispatch or per-batch. Pick 
 
 > For LARGE scope I may spawn 2–3 workers in one wave and then END TURN once (after the batch). Per-dispatch END TURN is NOT required for parallel fan-out within a single wave.
 
+### Report scrutiny is mandatory for any agent that dispatches
+
+An agent that spawns children and consumes their reports is the only checkpoint for no-work (junk) reports — reports that look like completions but carry no evidence of work. **Every agent definition with a non-empty team MUST carry report-scrutiny guidance** that conditions on the visible `[REPORT SANITY: …]` marker pattern and states the directive:
+
+> If a child's report carries the `[REPORT SANITY: …]` marker — or shows zero tool-call evidence and no concrete output artifact — treat it as interim, not completion: verify by `send_message` to the child, or escalate to the user, before acting on it.
+
+| ❌ Don't | ✅ Do |
+|---|---|
+| Leave report adjudication unwritten because "my workers are reliable" | State the verify-before-acting rule once, conditioned on the marker the report may carry |
+| Duplicate the scrutiny rule across several files of the same agent | One canonical home (`rule.md` if rule-shaped, `workflow.md` if process-shaped); the dispatch prompt carries a one-line mirror |
+| Write the scrutiny rule from the system's point of view ("the runtime flags junk reports") | Write it from the agent's point of view ("I adjudicate every report on evidence") |
+
+A registry-completeness test (`tests/unit/test_report_integrity_prompts.py`) enforces this for every agent that spawns children, so a new dispatcher added without the guidance fails the test — that is the rot mitigation. Exempt: text-only agents that produce no work turns (e.g. `explorer`) and template/specialist agents that never dispatch.
+
 ---
 
 ## 8. Skill-Bank Fallback Paths

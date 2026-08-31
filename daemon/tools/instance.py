@@ -829,9 +829,13 @@ def _route_send_message(
         A ``(routed_via, prior_status)`` tuple, or ``None`` if the target
         is not routable (i.e. ``manager.get_instance_info(...)`` raised
         ``KeyError``). ``routed_via`` is one of:
-          * ``"injection"`` — RUNNING / WAITING_CHILDREN. The caller should
-            invoke ``manager.set_injection(target_instance_id, message)``
-            and DROP the queue-busy guard (status is the source of truth
+          * ``"injection"`` — RUNNING (always), plus WAITING_CHILDREN
+            when the ``ENSEMBLE_WC_WAKE_ENQUEUE`` kill-switch is OFF
+            (the legacy behavior, preserved as the documented revert
+            path per ``decisions.md`` C1-Q2 RESOLVED 2026-08-30). When
+            the flag is ON, WC falls through to ``"enqueue"``. The
+            caller should invoke ``manager.set_injection(...)`` and
+            DROP the queue-busy guard (status is the source of truth
             per D11).
           * ``"enqueue-revive"`` — terminal state (COMPLETED / TERMINATED /
             ERROR / FAILED). The caller should invoke
@@ -841,8 +845,11 @@ def _route_send_message(
             message dispatched." The queue-busy guard STAYS — it
             serializes terminal-revives against in-flight child reports.
           * ``"enqueue"`` — non-eligible non-terminal state (IDLE /
-            WAITING / QUEUED + future additions). Same as the pre-Phase 1
-            behavior. The queue-busy guard STAYS.
+            WAITING / QUEUED + future additions) AND WAITING_CHILDREN
+            under the flag-ON routing pivot. Same as the pre-Phase 1
+            behavior for the first set; for WC-under-flag-ON it is a
+            durable wake turn via ``enqueue_message``. The queue-busy
+            guard STAYS.
           * ``"paused"`` — PAUSED. The caller returns the verbatim R-O1
             rejection text and does NOT enqueue / inject.
 
@@ -850,6 +857,12 @@ def _route_send_message(
         routing — surfaced so the tool result can communicate it back to
         the calling LLM (e.g. "Instance was completed — revived ...").
     """
+    # Lazy import — circular-import breaker (mirrors the pattern at the
+    # governor-guard helper above; ``daemon.tools`` sits below
+    # ``daemon.services`` in the import graph).
+    from ..services.instance_messaging import (
+        _resolve_wc_wake_enqueue_enabled,
+    )
     try:
         info = manager.get_instance_info(target_instance_id)
     except KeyError:
@@ -873,8 +886,18 @@ def _route_send_message(
     if prior_status == "paused":
         return ("paused", prior_status)
 
-    # Injection branch — RUNNING / WAITING_CHILDREN.
-    if prior_status in INJECTION_ELIGIBLE_STATUSES:
+    # Injection branch — RUNNING, plus WC under the flag-OFF legacy
+    # window. wc-wake-report-integrity (T2 + C1-Q2) shrunk
+    # ``INJECTION_ELIGIBLE_STATUSES`` to ``{\"running\"}``; the legacy
+    # WC injection route is preserved here as an explicit
+    # ``status == \"waiting_children\" and not <flag>`` branch (per the
+    # dispatch directive: the constant stays single-home and config-free;
+    # the flag branch lives at the call site). Under the flag ON, WC
+    # falls through to the enqueue branch below — a durable wake turn.
+    if prior_status in INJECTION_ELIGIBLE_STATUSES or (
+        prior_status == "waiting_children"
+        and not _resolve_wc_wake_enqueue_enabled()
+    ):
         return ("injection", prior_status)
 
     # Terminal-revive branch — all four terminal states flow through the
@@ -2969,20 +2992,42 @@ Phase 1 (agent-instance-tools) routes the message through the same
 delivery machinery as the user-facing HTTP API, based on the target's
 status at the moment of invocation:
 
-  * ``RUNNING`` / ``WAITING_CHILDREN`` → INJECTION via
-    ``Manager.set_injection(...)``. The message lands in the target's
-    live turn on the next ``agent_node`` pass. Tool-pairing safety is
-    preserved by the existing ``_ensure_tool_result_pairing`` guard at
-    ``daemon/graph.py:2893`` — no new guard site is added.
-    Provenance (quick-win #1): agent-tool injected sends carry
-    an ``internal_agent:<caller_instance_id>`` marker on the
-    downstream ``HumanMessage.additional_kwargs["source"]``;
-    user-API injected sends carry no ``source`` (back-compat).
+  * ``RUNNING`` → INJECTION via ``Manager.set_injection(...)``. The
+    message lands in the target's live turn on the next ``agent_node``
+    pass. Tool-pairing safety is preserved by the existing
+    ``_ensure_tool_result_pairing`` guard at ``daemon/graph.py:2893``
+    — no new guard site is added. Provenance (quick-win #1):
+    agent-tool injected sends carry an
+    ``internal_agent:<caller_instance_id>`` marker on the downstream
+    ``HumanMessage.additional_kwargs["source"]``; user-API injected
+    sends carry no ``source`` (back-compat). EXCEPTION: a send
+    bearing ``load_skill`` or a non-empty ``context`` routes via
+    ENQUEUE even for RUNNING — both parameters are enqueue-pipeline-only
+    (the ``<meta>`` tag parser and the ``metadata`` channel live in
+    ``enqueue_message``'s pipeline) and would be lost or land as raw
+    tag text on the injection branch.
+
+  * ``WAITING_CHILDREN`` → depends on the
+    ``ENSEMBLE_WC_WAKE_ENQUEUE`` kill-switch
+    (``decisions.md`` C1-Q2 RESOLVED 2026-08-30):
+      - **Flag OFF (default — legacy FIFO injection):** INJECTION via
+        ``Manager.set_injection(...)``. The message lands in the
+        parked parent's FIFO and is consumed on the next ``agent_node``
+        pass when a child report wakes the parent. This is the
+        documented revert path. Carries the W3 stranding caveat
+        (pause-loss parity with the user messages API).
+      - **Flag ON (post-flip):** ENQUEUE via
+        ``manager.enqueue_message(...)`` — a durable ``MessageQueue``
+        + ``Task`` row, WC→RUNNING flip, real wake, first-class turn.
+        The queued-wake message carries no ``injected_message`` marker
+        (D5) and the busy gate (``get_queue_stats`` pending/processing
+        > 0 → busy ERROR) trips during the enqueue→claim window when a
+        WC target already has a queued wake (D6 busy-gate consequence).
+        No W3 stranding caveat (the message is durable, not
+        RAM-FIFO-volatile).
     EXCEPTION: a send bearing ``load_skill`` or a non-empty ``context``
-    routes via ENQUEUE even for these statuses — both parameters are
-    enqueue-pipeline-only (the ``<meta>`` tag parser and the
-    ``metadata`` channel live in ``enqueue_message``'s pipeline) and
-    would be lost or land as raw tag text on the injection branch.
+    ALWAYS routes via ENQUEUE regardless of the flag — both parameters
+    are enqueue-pipeline-only and would be lost on the injection branch.
 
   * ``COMPLETED`` / ``TERMINATED`` / ``ERROR`` / ``FAILED`` → REVIVE +
     ENQUEUE via the shared ``_prepare_enqueued_message`` path
@@ -3057,22 +3102,35 @@ Returns:
       * ``"Instance '<id>' is PAUSED. …"`` (PAUSED reject —
         no dispatch; full text below).
       * ``"Message injected into {prior_status} target. …"``
-        (injection; includes the R-O2 W3 stranding caveat).
-      * ``"Instance was {prior_status} — revived and message
-        dispatched. Message queued and sent to <id>. …"``
-        (terminal-revive).
-      * ``"Refused: Instance '<id>' has already been revived once
-        and failed again. Spawn a replacement instance instead."``
-        (revive-once refusal — second
-        agent-tool revive attempt; no dispatch).
-      * ``"Message queued and sent to <id>. …"`` (enqueue parity).
+        (injection branch — RUNNING always; WC only when
+        ``ENSEMBLE_WC_WAKE_ENQUEUE`` is OFF). Carries the W3
+        stranding caveat.
+      * ``"Message queued and sent to <id>. The completion report …"``
+        (enqueue branch — terminal-revive, non-eligible non-terminal,
+        OR WC under the flag-ON routing pivot). For WC under
+        flag-ON, the message is a durable wake turn — no stranding
+        caveat, but the busy gate can trip if a wake is already
+        queued (D6 busy-gate consequence — the ERROR text is
+        verbatim: ``"ERROR: Instance '<id>' already has a message in
+        progress. Pending: N, Processing: M. Please wait for the
+        current message to complete before sending another."``).
+
+Quietness: routing errors (not-found, paused, trim-check) return
+a friendly message and NEVER raise. The calling LLM sees a
+well-formed tool result and can reason about it.
+
+Revert path: the legacy WC injection route is preserved by setting
+``ENSEMBLE_WC_WAKE_ENQUEUE=0`` and restarting the daemon
+(documented in ``docs/setup.md``). Operator escape hatch for any
+silent-death incident on the flag-ON path — flip to OFF, restart,
+the constant + flag branches revert to pre-feature behavior.
 
 Example outputs::
 
     # trim-check reject:
     "Message content is empty; nothing to send."
 
-    # injection (RUNNING / WAITING_CHILDREN):
+    # injection (RUNNING — flag OFF legacy path includes WC):
     "Message injected into running target. The next agent_node cycle
     will deliver it to the live turn.
 
@@ -3080,14 +3138,16 @@ Example outputs::
     delivery, an in-flight injected message may be dropped
     (pause-loss parity with the user messages API)."
 
+    # enqueue parity (terminal-revive, non-eligible non-terminal,
+    # OR WAITING_CHILDREN under flag ON):
+    "Message queued and sent to <id>. The completion report will be
+    delivered to you automatically as a new message that resumes
+    your turn the moment the child finishes — do not poll or sleep
+    waiting for it."
+
     # terminal revive (COMPLETED / TERMINATED / ERROR / FAILED):
     "Instance was completed — revived and message dispatched. Message
-    queued and sent to <id>. The completion report will be delivered
-    to you automatically as a new message that resumes your turn the
-    moment the child finishes — do not poll or sleep waiting for it.
-    You may continue other work (spawn more children, send more
-    messages, etc.) in the meantime; when you have nothing left to
-    do, end your turn and the report will arrive on its own."
+    queued and sent to <id>. …"
 
     # revive-once refusal (SECOND agent-tool revive attempt — no
     # dispatch; spawn a replacement instead):
@@ -3096,6 +3156,13 @@ Example outputs::
 
     # PAUSED reject (no dispatch):
     "Instance '<id>' is PAUSED. Paused instances cannot receive messages; delivery is rejected to respect the pause (operator/lifecycle intent). Wait for it to be resumed via the API/UI, or proceed with other work."
+
+    # Busy gate (enqueue branch — D6 consequence; trips when a
+    # WC target already has a queued wake during the enqueue→claim
+    # window):
+    "ERROR: Instance '<id>' already has a message in progress.
+    Pending: N, Processing: M. Please wait for the current message
+    to complete before sending another."
 """
 
     # ──────────────────────────────────────────────────────────────────

@@ -1074,3 +1074,112 @@ class ReportInjectionRepository:
                 )
             )
             return int(session.exec(stmt).one() or 0)
+
+    # --------------------------------------------------------
+    # B.S.1-i (wc-wake-report-integrity Wave 2) — same-tx
+    # executable declared-waiting predicate source (D2.7
+    # PRIMARY signal).
+    # --------------------------------------------------------
+
+    def count_pending_for_parent_with_terminal_child(
+        self,
+        session: Session,
+        parent_instance_id: str,
+    ) -> list[dict[str, str]]:
+        """Return the per-child PENDING ∪ DEFERRED rows whose child is terminal.
+
+        B.S.1-i (decisions.md C2-D2.7 LOCKED 2026-08-30): the
+        declared-waiting predicate's PRIMARY signal is a
+        ``report_injections`` row in ``PENDING`` or ``DEFERRED``
+        state whose child instance is in a terminal status
+        (COMPLETED / FAILED / ERROR / TERMINATED). This method
+        promotes the existing diagnostic
+        :meth:`count_pending_for_parent` into a structured,
+        per-child, same-tx-executable variant with the
+        child-terminal JOIN.
+
+        **Same-tx contract (B.S.7 binding).** The caller passes an
+        already-open session; the predicate runs INSIDE the
+        completion transaction so a freshly-INSERTed row (e.g.
+        the report-injection write in stage ii/iii) is visible to
+        the predicate without an intermediate ``session.commit()``.
+        This method MUST NOT call ``session.commit()`` and MUST
+        NOT open a new transaction — it is a read-only
+        ``SELECT`` on the caller's session.
+
+        **Content-blind (D2.18 LOCKED).** Reads delivery/declaration
+        state ONLY — never message ``content``, never
+        ``tool_calls``. The predicate is about declared-waiting
+        state, not about what the report says.
+
+        **Why not ``pending_watchers`` (D2.7 LOCKED rationale).**
+        The bus's ``pending_watchers`` is the in-memory cache
+        (``dependency_bus.py:960-961`` — cache-first read) and is
+        PURGED post-``emit_terminal`` (``dependency_bus.py:709``).
+        In the inter-report gap (between A's report consumed and
+        B's terminal event), the cache is EMPTY for exactly the
+        scenario the predicate must detect. The durable
+        ``report_injections`` row is the source of truth — it
+        survives cache eviction, restart, and the cache-purge
+        window.
+
+        Args:
+            session: An open SQLModel/SQLAlchemy ``Session`` on
+                the same engine that holds this repository.
+                The session is owned by the caller — the method
+                MUST NOT commit / rollback / close it.
+            parent_instance_id: The parent whose obligations to
+                evaluate.
+
+        Returns:
+            A list of ``{"injection_id", "child_instance_id",
+            "state", "child_terminal_status"}`` dicts — one per
+            ``PENDING ∪ DEFERRED`` row whose child is terminal.
+            The ``child_terminal_status`` field carries the
+            child's terminal status verbatim
+            (``InstanceStatus.COMPLETED.value``,
+            ``.FAILED.value``, ``.ERROR.value``, or
+            ``.TERMINATED.value``) so the stage-iii enforcement
+            notice can parameterize the adjudication playbook by
+            terminal class (OQ-6 dispositions, decisions.md
+            bottom). Empty list when no obligations are terminal.
+        """
+        from sqlalchemy import func
+
+        terminal_statuses = (
+            InstanceStatus.COMPLETED.value,
+            InstanceStatus.FAILED.value,
+            InstanceStatus.ERROR.value,
+            InstanceStatus.TERMINATED.value,
+        )
+        child_inst = aliased(Instance, name="child_inst")
+        stmt = (
+            select(
+                ReportInjection.injection_id,
+                ReportInjection.child_instance_id,
+                ReportInjection.state,
+                child_inst.status.label("child_terminal_status"),
+            )
+            .join(
+                child_inst,
+                child_inst.instance_id == ReportInjection.child_instance_id,
+            )
+            .where(ReportInjection.parent_instance_id == parent_instance_id)
+            .where(
+                ReportInjection.state.in_([
+                    _PENDING_STATE,
+                    _DEFERRED_STATE,
+                ])
+            )
+            .where(child_inst.status.in_(terminal_statuses))
+        )
+        rows = list(session.exec(stmt).all())
+        return [
+            {
+                "injection_id": r.injection_id,
+                "child_instance_id": r.child_instance_id,
+                "state": r.state,
+                "child_terminal_status": r.child_terminal_status,
+            }
+            for r in rows
+        ]
