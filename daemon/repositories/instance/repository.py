@@ -29,7 +29,7 @@ from daemon.repositories.instance_ui_prefs.models import InstanceUiPrefs
 logger = logging.getLogger(__name__)
 
 # Keep in sync with frontend: frontend/src/app/services/instance.service.ts (KB_AGENT_IDS)
-KB_AGENT_IDS = frozenset(["experiencer", "kb-importer", "kb-writer"])
+KB_AGENT_IDS = frozenset(["experiencer", "kb-importer", "kb-writer", "blueprinter"])
 
 # Safety limit for tree traversal — prevents infinite loops from circular references
 _MAX_TRAVERSAL_DEPTH = 256

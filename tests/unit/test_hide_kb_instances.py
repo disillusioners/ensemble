@@ -44,13 +44,14 @@ class TestKBAgentIdsConstant:
     """Tests for KB_AGENT_IDS constant."""
 
     def test_kb_agent_ids_constant(self):
-        """Verify KB_AGENT_IDS is a frozenset containing experiencer, kb-importer, and kb-writer."""
-        assert KB_AGENT_IDS == frozenset(["experiencer", "kb-importer", "kb-writer"])
+        """Verify KB_AGENT_IDS is a frozenset containing experiencer, kb-importer, kb-writer, and blueprinter."""
+        assert KB_AGENT_IDS == frozenset(["experiencer", "kb-importer", "kb-writer", "blueprinter"])
         assert isinstance(KB_AGENT_IDS, frozenset)
         assert "experiencer" in KB_AGENT_IDS
         assert "kb-importer" in KB_AGENT_IDS
         assert "kb-writer" in KB_AGENT_IDS
-        assert len(KB_AGENT_IDS) == 3
+        assert "blueprinter" in KB_AGENT_IDS
+        assert len(KB_AGENT_IDS) == 4
 
 
 class TestListExcludesKB:

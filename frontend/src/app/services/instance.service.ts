@@ -9,7 +9,7 @@ const PAGE_SIZE = 10;
 // Keep in sync with backend: daemon/repositories/instance/repository.py (KB_AGENT_IDS)
 
 // KB agent IDs to filter when showKb is false
-const KB_AGENT_IDS = new Set(['experiencer', 'kb-importer', 'kb-writer']);
+const KB_AGENT_IDS = new Set(['experiencer', 'kb-importer', 'kb-writer', 'blueprinter']);
 
 export function sortByCreatedAtDesc(instances: InstanceInfo[]): InstanceInfo[] {
   return [...instances].sort((a, b) => {
