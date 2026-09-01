@@ -663,6 +663,103 @@ class TaskRepository:
             }).fetchone()
             return row is not None
 
+    def count_live_tasks_in_instances(self, instance_ids: list[str]) -> int:
+        """Count PENDING/RUNNING ``task`` rows across a SET of instances.
+
+        f1-misfire batch (incident 2026-08-31, JobItem 69a34b35):
+        the Pattern-f1 subtree-alive guard's leg 1. ``has_instance_busy``
+        answers the question for ONE instance; the guard must
+        aggregate the whole permanent lineage (root + descendants via
+        ``get_tree_ids_permanent``) because the misfire class is
+        exactly "the JobItem's own instance row looks quiet while a
+        descendant's Task is mid-flight".
+
+        Status set is PENDING + RUNNING (the f1 guard's "live work"
+        predicate — PAUSED Tasks are handled by the dedicated
+        ``orphan_active_skipped_paused`` sub-shape one status at a
+        time via ``get_by_work_id``; a PAUSED Task on a DIFFERENT
+        tree member does not block the zombie cleanup of an
+        unrelated JobItem).
+
+        Args:
+            instance_ids: Instance IDs to scan (the lineage tree).
+
+        Returns:
+            Number of PENDING/RUNNING tasks across the set (0 when
+            the set is empty).
+        """
+        if not instance_ids:
+            return 0
+        with SQLModelSession(self.engine) as db_session:
+            stmt = select(func.count()).select_from(Task).where(
+                Task.instance_id.in_(instance_ids),
+                Task.status.in_([
+                    TaskStatus.PENDING.value,
+                    TaskStatus.RUNNING.value,
+                ]),
+            )
+            return db_session.exec(stmt).one()
+
+    def find_work_ids_on_active_jobs_with_alive_instances(
+        self,
+    ) -> list[str]:
+        """Work_ids whose Task rows sit on ACTIVE JobItems with alive instances.
+
+        Restart-wipe coherence probe (f1-misfire batch, Point 5).
+        ``discard_on_startup`` wipes backlog task rows; a wiped PENDING
+        task whose JobItem is still ``admission_state='active'`` and
+        whose instance is alive leaves that JobItem with nothing to
+        drive it — exactly the 802095d8 / f1-misfire surface. Callers
+        run this BEFORE the wipe and log a joined WARNING naming the
+        job ids (``task.work_id == job_queue_items.job_id`` is the
+        linkage key, so each work_id IS the affected job id).
+
+        "Alive instance" = instance row exists with a non-terminal
+        status (terminal set: completed / error / terminated / failed).
+        NULL ``work_id`` tasks are skipped (no linkage to correlate).
+
+        Returns:
+            Deduplicated list of work_ids (== job ids) whose wipe
+            would strand an ACTIVE JobItem on an alive instance.
+        """
+        terminal = [
+            InstanceStatus.COMPLETED.value,
+            InstanceStatus.ERROR.value,
+            InstanceStatus.TERMINATED.value,
+            InstanceStatus.FAILED.value,
+        ]
+        with SQLModelSession(self.engine) as db_session:
+            stmt = (
+                select(Task.work_id)
+                .join(
+                    JobItem,
+                    JobItem.job_id == Task.work_id,
+                )
+                .join(
+                    Instance,
+                    Instance.instance_id == JobItem.instance_id,
+                )
+                .where(
+                    Task.work_id.isnot(None),
+                    JobItem.admission_state
+                    == AdmissionState.ACTIVE.value,
+                    Instance.status.notin_(terminal),
+                    # The wipe this probe warns about is
+                    # ``clear_all(preserve_in_flight=True)`` — it
+                    # PRESERVES RUNNING/PAUSED rows. Filter them
+                    # out here too so the joined WARNING names
+                    # only rows actually being deleted (otherwise
+                    # preserved in-flight work is over-reported
+                    # as "will be stranded").
+                    Task.status.notin_([
+                        TaskStatus.RUNNING.value,
+                        TaskStatus.PAUSED.value,
+                    ]),
+                )
+                .distinct()
+            )
+            return list(db_session.exec(stmt).all())
+
     def list_running_tasks(self) -> list[Task]:
         """Return every RUNNING ``task`` row.
 

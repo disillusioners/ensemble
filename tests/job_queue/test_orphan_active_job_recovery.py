@@ -46,12 +46,14 @@ post-fix tests pass.
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from sqlalchemy import text
-from sqlmodel import Session as SQLModelSession
+from sqlalchemy import create_engine, text
+from sqlmodel import Session as SQLModelSession, SQLModel
 
 from daemon.repositories.job_queue.lock_repository import LockRepository
 from daemon.repositories.job_queue.models import (
@@ -64,8 +66,12 @@ from daemon.repositories.instance.models import Instance, InstanceStatus
 from daemon.repositories.instance.repository import SQLModelInstanceRepository
 from daemon.repositories.task.models import TaskStatus, TaskType
 from daemon.repositories.task.repository import TaskRepository
+from daemon.services import job_recovery_service as _jrs
+from daemon.services.job_feedback_observer import JobFeedbackObserver
+from daemon.services.job_processor import JobProcessor
 from daemon.services.job_recovery_service import JobRecoveryService
 from daemon.services.job_queue_service import JobQueueService
+from daemon.services.instance_messaging import AsyncMessageResult
 from daemon.services.stale_task_recovery import StaleTaskRecovery
 
 
@@ -82,6 +88,8 @@ def _insert_instance(
     status: str = "running",
     agent_id: str = "developer",
     created_at: datetime | None = None,
+    parent_id: str | None = None,
+    last_activity_at: datetime | None = None,
 ) -> None:
     """Insert an Instance row directly via SQL. Mirrors the
     helper in test_seam_invariants.py.
@@ -89,18 +97,32 @@ def _insert_instance(
     The optional ``created_at`` lets tests backdate the
     instance past the W1 mid-mint guard without an
     additional UPDATE round-trip.
+
+    The optional ``parent_id`` + ``last_activity_at``
+    (f1-misfire batch, incident 2026-08-31) let tests
+    build the subtree shape the new tree-alive guard
+    enumerates: ``parent_id`` links a grandchild into the
+    permanent lineage and ``last_activity_at`` backdates /
+    freshens the tree-activity signal.
     """
     now = (created_at or datetime.now(timezone.utc)).isoformat()
+    activity_iso = (
+        last_activity_at.isoformat()
+        if last_activity_at is not None
+        else None
+    )
     with engine.begin() as conn:
         conn.execute(
             text(
                 """
                 INSERT INTO instances
                     (instance_id, agent_id, agent_dir, status, project_id,
-                     created_at, updated_at, version)
+                     created_at, updated_at, version, parent_id,
+                     last_activity_at)
                 VALUES
                     (:instance_id, :agent_id, :agent_dir, :status, :project_id,
-                     :created_at, :updated_at, 1)
+                     :created_at, :updated_at, 1, :parent_id,
+                     :last_activity_at)
                 """
             ),
             {
@@ -111,6 +133,8 @@ def _insert_instance(
                 "project_id": project_id,
                 "created_at": now,
                 "updated_at": now,
+                "parent_id": parent_id,
+                "last_activity_at": activity_iso,
             },
         )
 
@@ -2972,4 +2996,874 @@ class TestPatternFResidualsPairedFix:
             f"MUST stay ACTIVE (FAIL-SAFE skip, next 60s "
             f"cycle retries). Got admission_state="
             f"{job_after.admission_state!r}"
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# f1-misfire fix batch (incident 2026-08-31, JobItem 69a34b35, instance
+# 28c6421b). An observer-triggered start_job dispatch minted the driving
+# process_message Task with a FRESH work_id instead of JobItem.job_id, so
+# Pattern-f1's ``get_by_work_id(job_id)`` returned None and the strict
+# ``task is None`` predicate misread a LIVE subtree as a restart-orphan →
+# active→DEAD while the leader waited in waiting_children and a grandchild
+# ran mid-LLM.
+#
+# The batch adds:
+#   * a subtree-alive guard (T1/T2) — f1 must aggregate the TREE, not the row
+#   * durable terminal_reason='pattern_f1_orphan' (T3)
+#   * an ENSEMBLE_ORPHAN_F1_ENABLED kill-switch (default ON)
+#   * the observer mint-site linkage contract (work_id == job_id)
+#
+# Test-env convention for this batch: FILE-BACKED SQLite (tmp_path) — the
+# shared ``engine`` fixture is in-memory StaticPool, which corrupts writes
+# when dependency-bus repo sessions share one open transaction.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def f1_engine(tmp_path):
+    """File-backed SQLite engine for the f1-misfire batch tests.
+
+    Deliberately NOT the shared in-memory StaticPool engine: each
+    session gets its own connection against a real file, so no
+    shared-open-transaction write corruption is possible.
+    """
+    db_path = tmp_path / "f1_misfire_batch.db"
+    engine = create_engine(
+        f"sqlite:///{db_path}",
+        connect_args={"check_same_thread": False},
+    )
+    SQLModel.metadata.create_all(engine)
+    yield engine
+    engine.dispose()
+
+
+class TestPatternF1SubtreeAliveGuard:
+    """Point 2 — the f1 subtree-alive guard (misfire shield).
+
+    Per-row checks provably fail: ``last_activity_at`` freezes on a
+    waiting_children parent for 16min+. The guard MUST aggregate the
+    TREE via ``get_tree_ids_permanent`` and skip when ANY live Task
+    (any work_id) sits in the lineage OR the tree's max
+    ``last_activity_at`` is within the activity window.
+    """
+
+    @pytest.mark.asyncio
+    async def test_f1_incident_replay_tree_alive_skips_dead_finalize(
+        self, f1_engine,
+    ):
+        """T1 — incident replay (RED on e863f010).
+
+        Shape: leader in waiting_children (its last_activity_at
+        FROZEN 1000s ago), grandchild RUNNING a Task mid-LLM
+        (last_activity_at 5s ago), and the driving Task's work_id
+        MISMATCHES the JobItem's job_id (the mint-site defect) →
+        ``get_by_work_id(job_id)`` returns None.
+
+        The guard MUST skip f1: the JobItem stays ACTIVE. On the
+        pre-fix tree the strict ``task is None`` predicate
+        DEAD-finalizes the live subtree — this test is RED there.
+        """
+        repository = JobRepository(f1_engine)
+        task_repository = TaskRepository(f1_engine)
+        lock_repo = LockRepository(f1_engine)
+        instance_repo = SQLModelInstanceRepository(engine=f1_engine)
+        stale_recovery = StaleTaskRecovery(
+            task_repository=task_repository,
+            message_repository=None,
+            event_repository=None,
+        )
+        jq_mock = MagicMock()
+        jq_mock.notify_watchers = AsyncMock(return_value=None)
+
+        now = datetime.now(timezone.utc)
+
+        # Leader — waiting_children, activity FROZEN 1000s ago
+        # (the incident's per-row trap: outside the 900s window).
+        _insert_instance(
+            f1_engine,
+            "inst-leader-28c6",
+            status="waiting_children",
+            created_at=now - timedelta(seconds=1800),
+            last_activity_at=now - timedelta(seconds=1000),
+        )
+        # Grandchild — mid-LLM, activity FRESH (5s ago).
+        _insert_instance(
+            f1_engine,
+            "inst-grandchild-run",
+            status="running",
+            created_at=now - timedelta(seconds=600),
+            parent_id="inst-leader-28c6",
+            last_activity_at=now - timedelta(seconds=5),
+        )
+        # JobItem pinned to the LEADER, past the grace.
+        _insert_job_item(
+            f1_engine,
+            job_id="job-f1-incident",
+            instance_id="inst-leader-28c6",
+            project_id="test-project",
+            queue_id="queue-f1-incident",
+            admission_state=AdmissionState.ACTIVE.value,
+            created_at=now - timedelta(seconds=1800),
+        )
+        _insert_lock(
+            f1_engine,
+            project_id="test-project",
+            queue_id="queue-f1-incident",
+            job_id="job-f1-incident",
+            instance_id="inst-leader-28c6",
+        )
+        # The live grandchild Task carries a FRESH work_id (the
+        # mint-site defect) — NOT the JobItem's job_id.
+        _insert_task_with_status(
+            f1_engine,
+            work_id="fresh-uuid-NOT-the-job-id",
+            instance_id="inst-grandchild-run",
+            status=TaskStatus.RUNNING.value,
+        )
+
+        service = JobRecoveryService(
+            job_repository=repository,
+            lock_repository=lock_repo,
+            instance_repository=instance_repo,
+            job_queue_service=jq_mock,
+            task_repository=task_repository,
+            stale_task_recovery=stale_recovery,
+        )
+
+        stats = await service.reconcile_drift_states(
+            min_pending_age_seconds=0,
+            min_orphan_age_seconds=60,
+        )
+
+        # The live subtree MUST be skipped, not killed.
+        job_after = repository.get("job-f1-incident")
+        assert job_after is not None
+        assert job_after.admission_state == AdmissionState.ACTIVE.value, (
+            f"f1 misfire: live subtree (leader waiting_children + "
+            f"grandchild RUNNING task, work_id mismatch) was "
+            f"DEAD-finalized. admission_state="
+            f"{job_after.admission_state!r}, details: {stats['details']}"
+        )
+        skip_records = [
+            d for d in stats["details"]
+            if d.get("pattern") == "orphan_active_skipped_tree_alive"
+            and d.get("job_id") == "job-f1-incident"
+        ]
+        assert skip_records, (
+            f"f1 must record an orphan_active_skipped_tree_alive "
+            f"detail for the live subtree. Got details: "
+            f"{stats['details']}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_f1_zombie_still_fires_with_stale_tree(
+        self, f1_engine,
+    ):
+        """T2 — zombie preservation (802095d8 class).
+
+        Stale-running instance, NO tasks anywhere in the tree, tree
+        activity stale (outside the window) → f1 MUST still fire
+        after the grace. The guard shields LIVE trees only; genuine
+        restart-orphan zombies keep their recovery path.
+        """
+        repository = JobRepository(f1_engine)
+        task_repository = TaskRepository(f1_engine)
+        lock_repo = LockRepository(f1_engine)
+        instance_repo = SQLModelInstanceRepository(engine=f1_engine)
+        stale_recovery = StaleTaskRecovery(
+            task_repository=task_repository,
+            message_repository=None,
+            event_repository=None,
+        )
+        jq_mock = MagicMock()
+        jq_mock.notify_watchers = AsyncMock(return_value=None)
+
+        now = datetime.now(timezone.utc)
+
+        _insert_instance(
+            f1_engine,
+            "inst-zombie-stale",
+            status="running",
+            created_at=now - timedelta(seconds=1800),
+            last_activity_at=now - timedelta(seconds=7200),
+        )
+        _insert_job_item(
+            f1_engine,
+            job_id="job-f1-zombie",
+            instance_id="inst-zombie-stale",
+            project_id="test-project",
+            queue_id="queue-f1-zombie",
+            admission_state=AdmissionState.ACTIVE.value,
+            created_at=now - timedelta(seconds=1800),
+        )
+        _insert_lock(
+            f1_engine,
+            project_id="test-project",
+            queue_id="queue-f1-zombie",
+            job_id="job-f1-zombie",
+            instance_id="inst-zombie-stale",
+        )
+        # NO Task rows — the genuine zombie shape.
+
+        service = JobRecoveryService(
+            job_repository=repository,
+            lock_repository=lock_repo,
+            instance_repository=instance_repo,
+            job_queue_service=jq_mock,
+            task_repository=task_repository,
+            stale_task_recovery=stale_recovery,
+        )
+
+        stats = await service.reconcile_drift_states(
+            min_pending_age_seconds=0,
+            min_orphan_age_seconds=60,
+        )
+
+        job_after = repository.get("job-f1-zombie")
+        assert job_after is not None
+        assert job_after.admission_state == AdmissionState.DEAD.value, (
+            f"f1 must still fire on the zombie shape (stale instance, "
+            f"no tasks, stale tree activity). Got admission_state="
+            f"{job_after.admission_state!r}, details: {stats['details']}"
+        )
+        f1_records = [
+            d for d in stats["details"]
+            if d.get("pattern") == "orphan_active_no_task_dead"
+            and d.get("job_id") == "job-f1-zombie"
+        ]
+        assert f1_records, (
+            f"f1 must record orphan_active_no_task_dead for the zombie. "
+            f"Got details: {stats['details']}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_f1_zombie_fires_with_tz_naive_stale_tree_activity(
+        self, f1_engine,
+    ):
+        """T3 — tz-naive tree-activity isolation (PG leg-2 round-trip).
+
+        PostgreSQL reads ``last_activity_at`` back TIMEZONE-NAIVE
+        (the watchdog subsystem deliberately computes age in SQL for
+        exactly this reason — instance/repository.py:2180-2184). A
+        naive MAX that parses back ``tzinfo is None`` must NOT blow
+        up the leg-2 comparison (naive datetime vs aware cutoff →
+        TypeError): the parsed value is tz-normalized to UTC.
+
+        Shape: alive running instance, tree max ``last_activity_at``
+        stored NAIVE and STALE (outside the window), no live tasks
+        (leg 1 silent) → the genuine zombie MUST still fire AND the
+        recovery pass MUST NOT abort on this row.
+
+        RED on 04fd0c52: the naive-vs-aware TypeError skips this
+        row via the per-row handler EVERY cycle — the zombie is
+        never finalized and the row spams an ERROR per cycle.
+        """
+        repository = JobRepository(f1_engine)
+        task_repository = TaskRepository(f1_engine)
+        lock_repo = LockRepository(f1_engine)
+        instance_repo = SQLModelInstanceRepository(engine=f1_engine)
+        stale_recovery = StaleTaskRecovery(
+            task_repository=task_repository,
+            message_repository=None,
+            event_repository=None,
+        )
+        jq_mock = MagicMock()
+        jq_mock.notify_watchers = AsyncMock(return_value=None)
+
+        now = datetime.now(timezone.utc)
+
+        # Alive running instance (created_at mirrors T2 — AWARE and
+        # backdated past the W1 mid-mint window). ONLY
+        # last_activity_at is NAIVE: no tz offset in the stored ISO
+        # text, and STALE (7200s — far outside the leg-2 window).
+        _insert_instance(
+            f1_engine,
+            "inst-zombie-naive-tz",
+            status="running",
+            created_at=now - timedelta(seconds=1800),
+            last_activity_at=(now - timedelta(seconds=7200)).replace(
+                tzinfo=None
+            ),
+        )
+        _insert_job_item(
+            f1_engine,
+            job_id="job-f1-naive-tz",
+            instance_id="inst-zombie-naive-tz",
+            project_id="test-project",
+            queue_id="queue-f1-naive-tz",
+            admission_state=AdmissionState.ACTIVE.value,
+            created_at=now - timedelta(seconds=1800),
+        )
+        _insert_lock(
+            f1_engine,
+            project_id="test-project",
+            queue_id="queue-f1-naive-tz",
+            job_id="job-f1-naive-tz",
+            instance_id="inst-zombie-naive-tz",
+        )
+        # NO Task rows — leg 1 is silent; only the naive leg-2 MAX
+        # is in play.
+
+        service = JobRecoveryService(
+            job_repository=repository,
+            lock_repository=lock_repo,
+            instance_repository=instance_repo,
+            job_queue_service=jq_mock,
+            task_repository=task_repository,
+            stale_task_recovery=stale_recovery,
+        )
+
+        stats = await service.reconcile_drift_states(
+            min_pending_age_seconds=0,
+            min_orphan_age_seconds=60,
+        )
+
+        details = (stats or {}).get("details", [])
+        job_after = repository.get("job-f1-naive-tz")
+        assert job_after is not None
+        assert job_after.admission_state == AdmissionState.DEAD.value, (
+            f"f1 must still fire on the tz-naive stale zombie (the "
+            f"naive MAX must be tz-normalized, not crash the leg-2 "
+            f"comparison). Got admission_state="
+            f"{job_after.admission_state!r}, details: {details}"
+        )
+        f1_records = [
+            d for d in details
+            if d.get("pattern") == "orphan_active_no_task_dead"
+            and d.get("job_id") == "job-f1-naive-tz"
+        ]
+        assert f1_records, (
+            f"f1 must record orphan_active_no_task_dead for the "
+            f"tz-naive zombie. Got details: {details}"
+        )
+        # The pass itself must NOT abort: reconcile returned a tally
+        # (not None) and the naive-stale row never masqueraded as a
+        # live tree.
+        assert stats is not None, (
+            f"recovery pass must not abort on the tz-naive row — "
+            f"reconcile_drift_states returned None. Details: {details}"
+        )
+        tree_alive_records = [
+            d for d in details
+            if d.get("pattern") == "orphan_active_skipped_tree_alive"
+            and d.get("job_id") == "job-f1-naive-tz"
+        ]
+        assert not tree_alive_records, (
+            f"stale naive tree activity must NOT read as alive. "
+            f"Got: {tree_alive_records}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_f1_finalize_persists_terminal_reason(
+        self, f1_engine,
+    ):
+        """T3 — durable terminal_reason (RED on e863f010).
+
+        ``error_message``/``completed_at`` are silently stripped by
+        ``_REMOVED_JOB_COLUMNS`` — pre-fix f1 kills carry an EMPTY
+        terminal_reason. The finalize must write the durable
+        ``terminal_reason='pattern_f1_orphan'`` column.
+        """
+        repository = JobRepository(f1_engine)
+        task_repository = TaskRepository(f1_engine)
+        lock_repo = LockRepository(f1_engine)
+        instance_repo = SQLModelInstanceRepository(engine=f1_engine)
+        stale_recovery = StaleTaskRecovery(
+            task_repository=task_repository,
+            message_repository=None,
+            event_repository=None,
+        )
+        jq_mock = MagicMock()
+        jq_mock.notify_watchers = AsyncMock(return_value=None)
+
+        now = datetime.now(timezone.utc)
+
+        _insert_instance(
+            f1_engine,
+            "inst-term-reason",
+            status="running",
+            created_at=now - timedelta(seconds=1800),
+        )
+        _insert_job_item(
+            f1_engine,
+            job_id="job-f1-term-reason",
+            instance_id="inst-term-reason",
+            project_id="test-project",
+            queue_id="queue-f1-term-reason",
+            admission_state=AdmissionState.ACTIVE.value,
+            created_at=now - timedelta(seconds=1800),
+        )
+        _insert_lock(
+            f1_engine,
+            project_id="test-project",
+            queue_id="queue-f1-term-reason",
+            job_id="job-f1-term-reason",
+            instance_id="inst-term-reason",
+        )
+
+        service = JobRecoveryService(
+            job_repository=repository,
+            lock_repository=lock_repo,
+            instance_repository=instance_repo,
+            job_queue_service=jq_mock,
+            task_repository=task_repository,
+            stale_task_recovery=stale_recovery,
+        )
+
+        stats = await service.reconcile_drift_states(
+            min_pending_age_seconds=0,
+            min_orphan_age_seconds=60,
+        )
+
+        job_after = repository.get("job-f1-term-reason")
+        assert job_after is not None
+        assert job_after.admission_state == AdmissionState.DEAD.value, (
+            f"f1 should have DEAD-finalized the zombie. Got "
+            f"admission_state={job_after.admission_state!r}, "
+            f"details: {stats['details']}"
+        )
+        assert (
+            job_after.terminal_reason == "pattern_f1_orphan"
+        ), (
+            f"f1 finalize MUST persist the durable "
+            f"terminal_reason='pattern_f1_orphan'. Got "
+            f"terminal_reason={job_after.terminal_reason!r} "
+            f"(error_message/completed_at are silently stripped by "
+            f"_REMOVED_JOB_COLUMNS — terminal_reason is the only "
+            f"durable record)"
+        )
+
+
+class TestPatternF1KillSwitch:
+    """Point 4 — ENSEMBLE_ORPHAN_F1_ENABLED (default ON, restart-to-flip).
+
+    OFF makes f1 fully inert (Pattern-f sweep lane only — patterns
+    a-e and f2 are untouched).
+    """
+
+    def _build_service(self, f1_engine):
+        repository = JobRepository(f1_engine)
+        task_repository = TaskRepository(f1_engine)
+        lock_repo = LockRepository(f1_engine)
+        instance_repo = SQLModelInstanceRepository(engine=f1_engine)
+        stale_recovery = StaleTaskRecovery(
+            task_repository=task_repository,
+            message_repository=None,
+            event_repository=None,
+        )
+        jq_mock = MagicMock()
+        jq_mock.notify_watchers = AsyncMock(return_value=None)
+        service = JobRecoveryService(
+            job_repository=repository,
+            lock_repository=lock_repo,
+            instance_repository=instance_repo,
+            job_queue_service=jq_mock,
+            task_repository=task_repository,
+            stale_task_recovery=stale_recovery,
+        )
+        return service, repository
+
+    @pytest.mark.asyncio
+    async def test_kill_switch_off_makes_f1_inert(
+        self, f1_engine, monkeypatch,
+    ):
+        """Kill-switch OFF → the zombie shape is NOT DEAD-finalized;
+        a skip detail names the switch. (RED on HEAD — the switch
+        does not exist there, so f1 fires.)
+        """
+        monkeypatch.setenv("ENSEMBLE_ORPHAN_F1_ENABLED", "0")
+        _jrs._reset_orphan_f1_for_tests()
+        try:
+            service, repository = self._build_service(f1_engine)
+            now = datetime.now(timezone.utc)
+
+            _insert_instance(
+                f1_engine,
+                "inst-ks-off",
+                status="running",
+                created_at=now - timedelta(seconds=1800),
+            )
+            _insert_job_item(
+                f1_engine,
+                job_id="job-f1-ks-off",
+                instance_id="inst-ks-off",
+                project_id="test-project",
+                queue_id="queue-f1-ks-off",
+                admission_state=AdmissionState.ACTIVE.value,
+                created_at=now - timedelta(seconds=1800),
+            )
+
+            stats = await service.reconcile_drift_states(
+                min_pending_age_seconds=0,
+                min_orphan_age_seconds=60,
+            )
+
+            job_after = repository.get("job-f1-ks-off")
+            assert job_after is not None
+            assert (
+                job_after.admission_state == AdmissionState.ACTIVE.value
+            ), (
+                f"Kill-switch OFF must make f1 fully inert (JobItem "
+                f"stays ACTIVE). Got admission_state="
+                f"{job_after.admission_state!r}, details: "
+                f"{stats['details']}"
+            )
+            # Inert-path detail contract (review polish d, 96a66e50
+            # follow-up): the skip record MUST use the canonical
+            # ``orphan_active_skipped_f1_disabled`` pattern key and
+            # name this job — operators and log scrapers key on the
+            # exact detail family, not merely "a skip happened".
+            disabled_details = [
+                d for d in stats.get("details", [])
+                if d.get("pattern")
+                == "orphan_active_skipped_f1_disabled"
+                and d.get("job_id") == "job-f1-ks-off"
+            ]
+            assert disabled_details, (
+                f"Kill-switch OFF must emit an explicit "
+                f"'orphan_active_skipped_f1_disabled' detail record "
+                f"for the inert-skipped JobItem. Got details: "
+                f"{stats.get('details')}"
+            )
+        finally:
+            _jrs._reset_orphan_f1_for_tests()
+
+    @pytest.mark.asyncio
+    async def test_kill_switch_off_leaves_f2_working(
+        self, f1_engine, monkeypatch,
+    ):
+        """Kill-switch OFF gates the f1 sub-shape ONLY — the f2
+        (active + COMPLETED Task → DONE) sub-shape keeps firing.
+        """
+        from unittest.mock import patch
+
+        monkeypatch.setenv("ENSEMBLE_ORPHAN_F1_ENABLED", "0")
+        _jrs._reset_orphan_f1_for_tests()
+        try:
+            service, repository = self._build_service(f1_engine)
+            now = datetime.now(timezone.utc)
+
+            _insert_instance(
+                f1_engine,
+                "inst-ks-off-f2",
+                status="running",
+                created_at=now - timedelta(seconds=1800),
+            )
+            _insert_job_item(
+                f1_engine,
+                job_id="job-f2-ks-off",
+                instance_id="inst-ks-off-f2",
+                project_id="test-project",
+                queue_id="queue-f2-ks-off",
+                admission_state=AdmissionState.ACTIVE.value,
+                created_at=now - timedelta(seconds=1800),
+            )
+            task_id = _insert_task_with_status(
+                f1_engine,
+                work_id="job-f2-ks-off",
+                instance_id="inst-ks-off-f2",
+                status=TaskStatus.COMPLETED.value,
+                created_at=now - timedelta(seconds=1800),
+                completed_at=now - timedelta(seconds=300),
+            )
+
+            # Wire the dependency-bus stub (zero pending watchers)
+            # so the f2 gate passes — mirrors the existing f2 tests.
+            class _BusStub:
+                async def pending_watchers(self, source_task_id):
+                    return []
+
+            with patch(
+                "daemon.services.job_recovery_service"
+                ".get_dependency_bus",
+                return_value=_BusStub(),
+            ):
+                stats = await service.reconcile_drift_states(
+                    min_pending_age_seconds=0,
+                    min_orphan_age_seconds=60,
+                )
+
+            job_after = repository.get("job-f2-ks-off")
+            assert job_after is not None
+            assert (
+                job_after.admission_state == AdmissionState.DONE.value
+            ), (
+                f"Kill-switch OFF must NOT disturb the f2 sub-shape "
+                f"(active + COMPLETED Task → DONE). Got "
+                f"admission_state={job_after.admission_state!r}, "
+                f"details: {stats['details']}"
+            )
+        finally:
+            _jrs._reset_orphan_f1_for_tests()
+
+
+class TestObserverMintLinkageContract:
+    """Point 1 — the observer mint-site linkage contract.
+
+    ``JobFeedbackObserver._trigger_next_job`` is the ONLY JobItem-driven
+    ``enqueue_message`` dispatch that did NOT pass ``work_id=job_id``
+    (JobProcessor's dispatch does — the documented
+    ``work_id == job_id`` contract at job_processor.py). The
+    downstream ``_prepare_enqueued_message`` then auto-mints a fresh
+    UUID4, breaking the Task↔JobItem linkage that Pattern-f1's
+    ``get_by_work_id(job_id)`` depends on.
+    """
+
+    @staticmethod
+    def _build_observer(enqueue_result_job_id: str):
+        """Observer with a mocked dispatch pipeline for a TASK-type job."""
+        started = SimpleNamespace(
+            job_id="job-mint-1",
+            job_type="task",
+            instance_id="inst-mint-target",
+            agent_id="developer",
+            project_id="proj-mint-1",
+            message="drive the work",
+            source="api",
+            admission_state=AdmissionState.ACTIVE.value,
+        )
+        jq = MagicMock()
+        jq._get_next_job = AsyncMock(
+            return_value=SimpleNamespace(job_id="job-mint-1")
+        )
+        jq.start_job = AsyncMock(return_value=started)
+        jq._repository = MagicMock()
+        manager = MagicMock()
+        manager.spawn_instance_with_mcp = AsyncMock(
+            return_value="inst-mint-target"
+        )
+        manager.enqueue_message = AsyncMock(
+            return_value=AsyncMessageResult(
+                message_id="msg-mint-1",
+                instance_id="inst-mint-target",
+                status="queued",
+                job_id=enqueue_result_job_id,
+            )
+        )
+        observer = JobFeedbackObserver(
+            event_bus=MagicMock(),
+            job_queue_service=jq,
+            job_repo=MagicMock(),
+            lock_repo=MagicMock(),
+            project_repo=MagicMock(),
+            instance_manager=manager,
+        )
+        return observer, manager
+
+    @pytest.mark.asyncio
+    async def test_observer_triggered_dispatch_carries_work_id(self):
+        """Mint contract — the observer's dispatch MUST carry
+        ``work_id=job_id`` so the driving Task links to its JobItem.
+        (RED on HEAD: the call omits work_id.)
+        """
+        observer, manager = self._build_observer(
+            enqueue_result_job_id="job-mint-1"
+        )
+
+        await observer._trigger_next_job(
+            SimpleNamespace(project_id="proj-mint-1")
+        )
+
+        assert manager.enqueue_message.await_count == 1, (
+            "The observer must dispatch exactly one enqueue_message "
+            "for a TASK-type job."
+        )
+        kwargs = manager.enqueue_message.call_args.kwargs
+        assert kwargs.get("work_id") == "job-mint-1", (
+            f"Mint-site linkage contract violated: the observer's "
+            f"enqueue_message dispatch MUST pass work_id=job_id so "
+            f"Task.work_id == JobItem.job_id (Pattern-f1's "
+            f"get_by_work_id(job_id) depends on it). Got kwargs keys: "
+            f"{sorted(kwargs.keys())}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_observer_warns_on_linkage_contract_violation(
+        self, caplog,
+    ):
+        """Tripwire — a dispatch whose returned Task work_id does not
+        match the JobItem's job_id must emit a WARNING naming the
+        linkage-contract violation (future-regression detector).
+        (RED on HEAD: no such tripwire exists.)
+        """
+        observer, manager = self._build_observer(
+            enqueue_result_job_id="mismatched-fresh-uuid"
+        )
+
+        with caplog.at_level(
+            logging.WARNING, logger="daemon.services.job_feedback_observer"
+        ):
+            await observer._trigger_next_job(
+                SimpleNamespace(project_id="proj-mint-1")
+            )
+
+        violations = [
+            r for r in caplog.records
+            if r.levelno >= logging.WARNING
+            and "work_id" in r.getMessage()
+            and "job-mint" in r.getMessage()
+        ]
+        assert violations, (
+            f"The observer must WARN when a task-job dispatch returns "
+            f"a Task work_id that does not match JobItem.job_id "
+            f"(linkage-contract tripwire). Captured: "
+            f"{[r.getMessage() for r in caplog.records]}"
+        )
+
+
+class TestProcessorRespawnMintLinkageContract:
+    """W1 (council 2026-08-31) — the JobProcessor re-spawn mint sites.
+
+    ``JobProcessor._process_next_job`` dispatches from TWO orphan
+    re-spawn sites in its ACTIVE-admission recovery loop, and BOTH
+    omitted ``work_id=proc_job.job_id`` — the same fresh-UUID mint /
+    linkage-break class as the observer incident (69a34b35):
+
+      * crash-recovery re-spawn — instance genuinely crashed/missing
+        (``get_instance`` → KeyError, DB row alive + non-terminal)
+        re-spawns and re-dispatches (~:959),
+      * orphan-resume re-spawn — ``instance_id`` never set (safety
+        net) resumes and re-dispatches (~:1019).
+
+    The downstream ``_prepare_enqueued_message`` auto-mints a fresh
+    UUID4 for the driving Task when ``work_id`` is absent, so
+    Pattern-f1's ``get_by_work_id(job_id)`` misses the Task and the
+    subtree-alive guard is the only backstop during PENDING/RUNNING
+    life — completed work still DEAD-finalizes after ~900s tree
+    quiet. Both sites MUST carry ``work_id=proc_job.job_id``.
+    """
+
+    @staticmethod
+    def _build_processor(
+        enqueue_result_job_id: str,
+        proc_instance_id: str | None,
+    ):
+        """Processor with a mocked pipeline driving ONE ACTIVE task job
+        through the crash-recovery (instance_id set) or orphan-resume
+        (instance_id None) re-spawn branch.
+        """
+        queue = SimpleNamespace(
+            queue_id="queue-w1-respawn",
+            project_id="proj-w1-respawn",
+            queue_name="default",
+            is_paused=False,
+            concurrency_limit=1,
+            queue_type="fifo",
+        )
+        proc_job = SimpleNamespace(
+            job_id="job-w1-respawn-1",
+            job_type="task",
+            instance_id=proc_instance_id,
+            agent_id="developer",
+            project_id="proj-w1-respawn",
+            message="drive the recovered work",
+            source="api",
+            admission_state=AdmissionState.ACTIVE.value,
+        )
+
+        jq = MagicMock()
+        jq._repository = MagicMock()
+        jq._repository.list_pending_by_queue = MagicMock(return_value=[])
+        jq._repository.list_by_queue = MagicMock(
+            return_value=([proc_job], 1)
+        )
+        jq._repository.stamp_message_id = MagicMock(return_value=None)
+
+        manager = MagicMock()
+        if proc_instance_id is not None:
+            # Crash-recovery shape: the instance is NOT in memory
+            # (KeyError) but its DB row is alive and non-terminal —
+            # the "genuine crash" fall-through to re-spawn.
+            manager.get_instance = AsyncMock(
+                side_effect=KeyError(proc_instance_id)
+            )
+            manager._instance_repository = MagicMock()
+            manager._instance_repository.get = MagicMock(
+                return_value=SimpleNamespace(
+                    instance_id=proc_instance_id, status="running",
+                )
+            )
+        manager.spawn_instance_with_mcp = AsyncMock(
+            return_value=proc_instance_id or "inst-w1-respawn"
+        )
+        manager.enqueue_message = AsyncMock(
+            return_value=AsyncMessageResult(
+                message_id="msg-w1-respawn-1",
+                instance_id=proc_instance_id or "inst-w1-respawn",
+                status="queued",
+                job_id=enqueue_result_job_id,
+            )
+        )
+
+        project_repo = MagicMock()
+        project_repo.get = MagicMock(
+            return_value=SimpleNamespace(job_queue_paused=False)
+        )
+        queue_repo = MagicMock()
+        queue_repo.list_queues_with_admittable_work = MagicMock(
+            return_value=[queue]
+        )
+
+        processor = JobProcessor(
+            queue_service=jq,
+            instance_manager=manager,
+            project_repo=project_repo,
+            queue_repo=queue_repo,
+            poll_interval=0.1,
+        )
+        return processor, manager
+
+    @pytest.mark.asyncio
+    async def test_crash_recovery_respawn_carries_work_id(self):
+        """Crash-recovery re-spawn dispatch MUST carry
+        ``work_id=proc_job.job_id`` (RED on 96a66e50: kwargs lack
+        work_id → fresh-UUID mint → linkage break).
+        """
+        processor, manager = self._build_processor(
+            enqueue_result_job_id="job-w1-respawn-1",
+            proc_instance_id="inst-w1-crashed",
+        )
+
+        await processor._process_next_job()
+
+        assert manager.enqueue_message.await_count == 1, (
+            "The crash-recovery re-spawn must dispatch exactly one "
+            "enqueue_message for the orphaned ACTIVE task job."
+        )
+        kwargs = manager.enqueue_message.call_args.kwargs
+        assert kwargs.get("work_id") == "job-w1-respawn-1", (
+            f"Crash-recovery re-spawn mint-site linkage contract "
+            f"violated: the re-spawn dispatch MUST pass "
+            f"work_id=proc_job.job_id so Task.work_id == "
+            f"JobItem.job_id (Pattern-f1's get_by_work_id(job_id) "
+            f"depends on it). Got kwargs keys: "
+            f"{sorted(kwargs.keys())}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_orphan_resume_respawn_carries_work_id(self):
+        """Orphan-resume re-spawn dispatch (no instance_id safety
+        net) MUST carry ``work_id=proc_job.job_id`` (RED on 96a66e50:
+        kwargs lack work_id).
+        """
+        processor, manager = self._build_processor(
+            enqueue_result_job_id="job-w1-respawn-1",
+            proc_instance_id=None,
+        )
+
+        await processor._process_next_job()
+
+        assert manager.enqueue_message.await_count == 1, (
+            "The orphan-resume re-spawn must dispatch exactly one "
+            "enqueue_message for the instance-less ACTIVE task job."
+        )
+        kwargs = manager.enqueue_message.call_args.kwargs
+        assert kwargs.get("work_id") == "job-w1-respawn-1", (
+            f"Orphan-resume re-spawn mint-site linkage contract "
+            f"violated: the re-spawn dispatch MUST pass "
+            f"work_id=proc_job.job_id so Task.work_id == "
+            f"JobItem.job_id (Pattern-f1's get_by_work_id(job_id) "
+            f"depends on it). Got kwargs keys: "
+            f"{sorted(kwargs.keys())}"
         )

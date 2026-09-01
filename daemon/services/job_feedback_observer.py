@@ -66,6 +66,7 @@ from daemon.repositories.dependency_bus.models import DependencyWatcher, Depende
 from daemon.services.dependency_bus import get_dependency_bus
 from daemon.services.job_queue_service import DemandState, JobQueueService
 from daemon.services.job_state_machine import InvalidTransitionError
+from daemon.services.messaging_types import _assert_linkage_contract
 from daemon.services.report_integrity_guard import (
     _clear_b_notice_if_clean,
     enforce_declared_waiting_violations,
@@ -3860,10 +3861,37 @@ class JobFeedbackObserver:
             # FAILED so we don't leave a no-consumer instance in the DB +
             # in-memory manager.
             try:
+                # ── f1-misfire fix (incident 2026-08-31, JobItem
+                # 69a34b35): pass the JobItem's ``job_id`` as the
+                # driving Task's ``work_id`` — the documented
+                # ``Task.work_id == JobItem.job_id`` linkage contract
+                # (mirrors ``JobProcessor._process_next_job``). The
+                # pre-fix call omitted ``work_id``, so
+                # ``_prepare_enqueued_message`` auto-minted a fresh
+                # UUID4 and Pattern-f1's
+                # ``TaskRepository.get_by_work_id(job_id)`` returned
+                # None — misreading a live subtree as a
+                # restart-orphan and DEAD-finalizing it mid-flight.
                 result = await self._instance_manager.enqueue_message(
                     instance_id=instance_id,
                     message=started_job.message,
                     source=started_job.source,
+                    work_id=started_job.job_id,
+                )
+                # ── Linkage-contract tripwire (future-regression
+                # detector): the dispatch result's ``job_id`` IS the
+                # minted Task's ``work_id``. Any mismatch against the
+                # driving JobItem means the Task↔JobItem linkage is
+                # broken — recovery surfaces (Pattern-f1
+                # ``get_by_work_id``, work resolver) will misfire.
+                # WARN loudly; never fail the dispatch. Semantics live
+                # in the shared helper (also used by JobProcessor's
+                # main + re-spawn dispatch sites).
+                _assert_linkage_contract(
+                    result,
+                    started_job.job_id,
+                    source="Observer",
+                    logger=logger,
                 )
                 # Stamp the message_id back onto the JobItem so the
                 # cross-system guard in ``claim_pending_task`` can

@@ -612,11 +612,46 @@ class InstanceManager:
                 f"(discard_on_startup=backlog-clear; in-flight/paused preserved)"
             )
 
-            # Also discard backlog tasks (linked to messages)
+            # Also discard backlog tasks (linked to messages).
+            # Restart-wipe coherence probe (f1-misfire batch,
+            # Point 5): before wiping, name any task rows whose
+            # JobItem is ACTIVE on an alive instance — wiping those
+            # strands the JobItem with nothing to drive it (the
+            # 802095d8 / f1-misfire surface). CHOSEN: WARN, not
+            # skip — silently retaining PENDING rows against an
+            # explicit operator knob could wedge idle gates that
+            # count PENDING work, while RUNNING/PAUSED (the live
+            # classes) are already preserved. The joined WARNING
+            # gives the operator the exact job-id audit trail.
             task_repo = TaskRepository(
                 engine=self._engine,
                 on_pending_task=lambda: self._worker_pool.notify_work() if self._worker_pool else None
             )
+            try:
+                stranded_work_ids = (
+                    task_repo
+                    .find_work_ids_on_active_jobs_with_alive_instances()
+                )
+            except Exception as probe_err:
+                # Boot-path guard: a probe failure must never break
+                # boot. The operator-mandated backlog clear below
+                # proceeds without the stranded-job audit trail.
+                logger.warning(
+                    f"discard_on_startup: restart-wipe coherence "
+                    f"probe failed ({probe_err}) — proceeding with "
+                    f"the backlog clear without the stranded-job "
+                    f"WARNING."
+                )
+                stranded_work_ids = []
+            if stranded_work_ids:
+                logger.warning(
+                    f"discard_on_startup: about to wipe "
+                    f"{len(stranded_work_ids)} task row(s) whose "
+                    f"JobItem is ACTIVE on an ALIVE instance — these "
+                    f"JobItems will be stranded (no driving Task) "
+                    f"until Pattern-f1 or manual cleanup: "
+                    f"{sorted(stranded_work_ids)}"
+                )
             task_count = task_repo.clear_all(preserve_in_flight=True)
             logger.info(
                 f"Cleared {task_count} backlog task(s) "
