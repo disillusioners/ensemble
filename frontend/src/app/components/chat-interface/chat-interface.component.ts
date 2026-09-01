@@ -338,7 +338,10 @@ export class ChatInterfaceComponent implements AfterViewChecked, OnChanges, OnDe
       case 'fallback_applied': {
         const type = cmd.detail?.compacted_type;
         if (type === 'partial_summary') {
-          return 'Compaction timed out partway — kept the summarized sections, trimmed the un-summarized older section';
+          // Non-contiguous survival (parallel chunked summarization): the
+          // surviving summaries need not be a prefix — any batch that
+          // finished keeps its summary, any batch that did not is trimmed.
+          return 'Compaction timed out partway — kept the summaries that completed, trimmed the messages that could not be summarized';
         }
         if (type === 'truncation') {
           return 'Compaction timed out — history was trimmed without a summary';

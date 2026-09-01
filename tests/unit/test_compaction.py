@@ -56,6 +56,7 @@ def make_compaction_config(**overrides) -> CompactionConfigModel:
         "context_window_overrides": {},
         "context_window_default": 0,
         "target_ratio": 0.40,
+        "model": "",
         "summarization_model": "",
         "min_messages_before_compaction": 10,
         "summarization_chunk_threshold": 0.60,
@@ -65,6 +66,8 @@ def make_compaction_config(**overrides) -> CompactionConfigModel:
         "timeout_cap_s": 300.0,
         "timeout_facade_margin_s": 5.0,
         "operation_budget_s": 300.0,
+        # Parallel chunked summarization (Commit A): bounded pool size.
+        "chunk_concurrency": 3,
     }
     defaults.update(overrides)
     return CompactionConfigModel(**defaults)
@@ -1520,12 +1523,24 @@ class TestTruncationMarkerWS41:
 
 
 class TestPartialSummaryWS34:
-    """WS-3.4 C1 acceptance (a)-(d).
+    """WS-3.4 C1 acceptance (a)-(d), migrated for the parallel pool (Commit A).
 
-    (a) first-batch timeout → ``truncation`` + marker + no summaries
-    (b) >=2 batches, batch-2 timeout → ``partial_summary`` + batch-1 summary + batch-2 absent + marker exactly once
-    (c) budget exhaustion mid-run → same as (b) with stop_reason="budget"
+    The engine now summarizes batches in a bounded parallel pool and the
+    surviving summary set is a SET, not a contiguous prefix: every
+    COMPLETED batch keeps its summary (in batch-index order), every
+    incomplete batch's messages are dropped individually.
+
+    (a) single-batch timeout → ``truncation`` + marker + no summaries
+    (b) non-contiguous timeout outcome (batches 0 and 2 completed,
+        batch 1 timed out) → ``partial_summary`` + BOTH surviving
+        summaries in batch order + batch-1 raw messages absent + marker
+        exactly once
+    (c) budget/deadline exhaustion mid-run → same as (b) with
+        stop_reason="budget"
     (d) proactive + reactive callers observe identical outcome semantics
+    (e) NEW: real-pool non-contiguous survival (batches 0,2,4 succeed;
+        1,3,5 fail) → 3 surviving summaries, all compactable messages
+        RemoveMessage'd, one marker
     """
 
     @pytest.fixture
@@ -1600,23 +1615,34 @@ class TestPartialSummaryWS34:
     async def test_b_second_batch_timeout_partial_summary(
         self, compactor_config, large_message_set,
     ):
-        """C1 (b): batch-2 times out → ``partial_summary`` + batch-1 summary present +
-        batch-2 raw messages absent + marker exactly once.
+        """C1 (b), parallel-pool contract: a per-batch timeout no longer
+        forces a contiguous prefix. Batches 0 and 2 complete, batch 1
+        times out → ``partial_summary`` + BOTH surviving summaries (in
+        batch order 0, 2) + batch-1 raw messages absent + marker exactly
+        once.
         """
         config = compactor_config
         compactor = ContextCompactor(config, {})
 
         # Stub ``_summarize_chunked`` directly — simulating the C1 hybrid
-        # scenario where batch-1 succeeded and batch-2 raised TimeoutError.
+        # scenario under the parallel pool: batches 0 and 2 succeeded,
+        # batch 1 raised TimeoutError. The surviving set is
+        # non-contiguous by construction.
         from daemon.compaction import ChunkedOutcome
 
         async def _fake_chunked(compactable, context):
             return ChunkedOutcome(
-                summaries=[SystemMessage(
-                    content="[Conversation Summary]\nbatch-1 summary",
-                    id=f"compaction-{1}",
-                )],
-                failed_batches=[1, 2, 3, 4, 5],
+                summaries=[
+                    SystemMessage(
+                        content="[Conversation Summary]\nbatch-0 summary",
+                        id="compaction-0",
+                    ),
+                    SystemMessage(
+                        content="[Conversation Summary]\nbatch-2 summary",
+                        id="compaction-2",
+                    ),
+                ],
+                failed_batches=[1],
                 stop_reason="timeout",
             )
 
@@ -1630,13 +1656,15 @@ class TestPartialSummaryWS34:
         assert result is not None
         assert result.compaction_type == "partial_summary"
         assert result.failure_kind == "timeout"
-        # Batch-1 summary present.
-        batch1_summaries = [
+        # BOTH surviving summaries present, in batch order (0 then 2) —
+        # the chronological invariant survives the parallel pool.
+        batch_summaries = [
             m for m in result.replacement_messages
             if isinstance(m, SystemMessage) and (m.id or "").startswith("compaction-")
         ]
-        assert len(batch1_summaries) == 1, (
-            f"expected batch-1 summary, got {len(batch1_summaries)}: {batch1_summaries}"
+        assert [m.id for m in batch_summaries] == ["compaction-0", "compaction-2"], (
+            f"expected non-contiguous survivors [0, 2] in order, "
+            f"got {[m.id for m in batch_summaries]}"
         )
         # Marker exactly once.
         markers = [
@@ -1649,7 +1677,11 @@ class TestPartialSummaryWS34:
 
     @pytest.mark.asyncio
     async def test_c_budget_exhaustion_partial_summary(self, large_message_set):
-        """C1 (c): budget exhaustion mid-run → ``partial_summary`` + marker + stop_reason="budget"."""
+        """C1 (c), parallel-pool contract: shared-deadline exhaustion mid-run →
+        ``partial_summary`` + non-contiguous surviving set + marker +
+        stop_reason="budget". The completed batches keep their summaries
+        even though the deadline cancelled the rest.
+        """
         from daemon.compaction import ChunkedOutcome
 
         config = make_compaction_config(
@@ -1659,40 +1691,31 @@ class TestPartialSummaryWS34:
             min_recent_window=1,
             context_window_overrides={"gpt-4o": 1000},
             summarization_chunk_threshold=0.01,
-            # TINY budget so it exhausts after the first chunk completes.
+            # TINY budget so the shared deadline fires mid-pool.
             operation_budget_s=0.0,
         )
         compactor = ContextCompactor(config, {})
 
-        mock_response = MagicMock(content="Batch 1 summary.")
-        mock_llm_instance = MagicMock()
-        mock_llm_instance.invoke = MagicMock(return_value=mock_response)
-
-        with patch("daemon.graph.ThinkingChatOpenAI", return_value=mock_llm_instance, create=True):
-            result = await compactor.compact_state(CompactionContext(
-                messages=large_message_set, system_prompt_tokens=0,
-                model_name="gpt-4o", config=config, llm_config={},
-            ))
-
-        # operation_budget_s=0 means budget exhausted immediately; if
-        # chunking kicks in, the first pre-call check trips and we get
-        # |S|=0 → truncate fallback. To hit the partial path we want
-        # the budget to trip AFTER at least one batch. Patch
-        # ``_summarize_chunked`` to simulate the partial outcome.
-        captured_kwargs: dict = {}
-
+        # Force the partial path: stub ``_summarize_chunked`` to return a
+        # budget-deadline ChunkedOutcome whose surviving set is
+        # non-contiguous (batches 0 and 2 completed; 1, 3, 4, 5 did not —
+        # the exact complement of the completion set).
         async def _fake_chunked(compactable, context):
             return ChunkedOutcome(
-                summaries=[SystemMessage(
-                    content="[Conversation Summary]\nfirst batch",
-                    id=f"compaction-{1}",
-                )],
-                failed_batches=[1, 2, 3, 4, 5],
+                summaries=[
+                    SystemMessage(
+                        content="[Conversation Summary]\nbatch-0 summary",
+                        id="compaction-0",
+                    ),
+                    SystemMessage(
+                        content="[Conversation Summary]\nbatch-2 summary",
+                        id="compaction-2",
+                    ),
+                ],
+                failed_batches=[1, 3, 4, 5],
                 stop_reason="budget",
             )
 
-        # Force the partial path: stub ``_summarize_chunked`` to return
-        # a budget-stopped ChunkedOutcome with one surviving summary.
         compactor._summarize_chunked = _fake_chunked
 
         result = await compactor.compact_state(CompactionContext(
@@ -1702,13 +1725,117 @@ class TestPartialSummaryWS34:
 
         assert result is not None
         assert result.compaction_type == "partial_summary"
+        # Budget is in the timeout failure_kind family (existing mapping
+        # unchanged — the outer handler maps budget → "timeout").
         assert result.failure_kind == "timeout"
+        # Non-contiguous survivors present in batch order.
+        batch_summaries = [
+            m for m in result.replacement_messages
+            if isinstance(m, SystemMessage) and (m.id or "").startswith("compaction-")
+        ]
+        assert [m.id for m in batch_summaries] == ["compaction-0", "compaction-2"]
         # Marker exactly once.
         markers = [
             m for m in result.replacement_messages
             if isinstance(m, SystemMessage) and (m.id or "").startswith("truncation-marker-")
         ]
         assert len(markers) == 1
+
+    @pytest.mark.asyncio
+    async def test_chunked_partial_summary_non_contiguous(
+        self, compactor_config, large_message_set,
+    ):
+        """NEW (Commit A, real pool): batches 0, 2, 4 succeed; 1, 3, 5 fail
+        → exactly 3 surviving summaries in batch order + RemoveMessage for
+        EVERY compactable message (non-contiguous drop is per-batch, not
+        per-tail) + marker exactly once.
+
+        Drives the REAL ``_summarize_chunked`` bounded pool — no engine
+        stub — with a content-keyed ``_summarize_single_batch`` stub
+        (content-keying is scheduling-independent under parallelism).
+        """
+        config = compactor_config
+        compactor = ContextCompactor(config, {})
+
+        # make_messages(120) → 120 single-message groups; recent window 2
+        # preserves the last 2 → 118 compactable groups → 6 batches of
+        # (20,20,20,20,20,18). Batch k starts at message number 20k, so
+        # ``first_message_number // 20`` identifies the batch index
+        # regardless of task scheduling order.
+        def _batch_idx(batch_groups):
+            first = batch_groups[0].messages[0]
+            return int(first.content.split()[-1]) // 20
+
+        async def _stub_single_batch(batch_groups, context):
+            idx = _batch_idx(batch_groups)
+            if idx % 2 == 1:
+                raise TimeoutError(f"batch-{idx} adaptive cap")
+            return SystemMessage(
+                content=f"[Conversation Summary]\nbatch-{idx} summary",
+                id=f"compaction-{idx}",
+            )
+
+        compactor._summarize_single_batch = _stub_single_batch
+
+        # Engine-level outcome: non-contiguous completion set, batch-index
+        # order preserved by the gather reassembly. (make_messages carries
+        # no injected flags, so grouping the raw list matches what
+        # compact_state feeds the engine.)
+        groups = identify_boundary_groups(large_message_set)
+        compactable, preserved, _ = select_compactable_groups(
+            groups, config.recent_message_window, config.min_recent_window,
+            1000, 0, estimate_messages_tokens, config_threshold=config.threshold,
+        )
+        outcome = await compactor._summarize_chunked(
+            compactable, CompactionContext(
+                messages=large_message_set, system_prompt_tokens=0,
+                model_name="gpt-4o", config=config, llm_config={},
+            )
+        )
+        assert outcome.stop_reason == "timeout"
+        assert [m.id for m in outcome.summaries] == [
+            "compaction-0", "compaction-2", "compaction-4",
+        ]
+        assert outcome.failed_batches == [1, 3, 5]
+
+        # Full-handler assembly: partial_summary with the non-contiguous
+        # survivors, every compactable message RemoveMessage'd, one marker.
+        result = await compactor.compact_state(CompactionContext(
+            messages=large_message_set, system_prompt_tokens=0,
+            model_name="gpt-4o", config=config, llm_config={},
+        ))
+        assert result is not None
+        assert result.compaction_type == "partial_summary"
+        assert result.failure_kind == "timeout"
+
+        removals = [
+            m for m in result.replacement_messages
+            if isinstance(m, RemoveMessage)
+        ]
+        compactable_msgs = [m for g in compactable for m in g.messages]
+        assert len(removals) == len(compactable_msgs), (
+            "every compactable message must be RemoveMessage'd, "
+            f"got {len(removals)} removals vs {len(compactable_msgs)} compactable"
+        )
+        batch_summaries = [
+            m for m in result.replacement_messages
+            if isinstance(m, SystemMessage) and (m.id or "").startswith("compaction-")
+        ]
+        assert [m.id for m in batch_summaries] == [
+            "compaction-0", "compaction-2", "compaction-4",
+        ]
+        markers = [
+            m for m in result.replacement_messages
+            if isinstance(m, SystemMessage) and (m.id or "").startswith("truncation-marker-")
+        ]
+        assert len(markers) == 1
+        # Chronological layout: removals, then summaries, then marker,
+        # then the preserved tail.
+        first_summary_pos = result.replacement_messages.index(batch_summaries[0])
+        assert all(
+            isinstance(m, RemoveMessage)
+            for m in result.replacement_messages[:first_summary_pos]
+        )
 
     @pytest.mark.asyncio
     async def test_d_identical_outcome_proactive_vs_reactive(self):
@@ -1817,17 +1944,22 @@ class TestPerChunkTimeoutNarrowing:
 
 
 class TestOperationBudgetWS33:
-    """WS-3.3 — operation budget trips BETWEEN LLM calls only."""
+    """WS-3.3, migrated for the parallel pool (Commit A): the operation
+    budget is a SHARED DEADLINE around the batch pool — expiry cancels
+    in-flight and un-started batches, keeps the completed summaries, and
+    the gathered set IS the completion set. The deadline lives entirely
+    inside ``_summarize_chunked`` (D-B5/D-B6): no caller-side
+    ``aupdate_state`` is ever interleaved with a live pool.
+    """
 
     @pytest.mark.asyncio
     async def test_budget_exhaustion_stops_remaining_chunks(self):
-        """After the budget is exhausted mid-run, the engine stops issuing
-        remaining chunks and returns the partial path (or fallback on
-        ``|S| = 0``). No aupdate_state interleaving can happen because
-        the engine only touches the state via the outer caller.
+        """Real-pool contract: with the deadline expiring after batch 0
+        completes, the gathered set (batch 0) IS the completion set — the
+        remaining batches never contribute summaries, and the run takes
+        the partial path (|S| >= 1). The old serial "stop issuing the
+        next chunk" pre-check is replaced by the shared deadline.
         """
-        from daemon.compaction import ChunkedOutcome
-
         config = make_compaction_config(
             min_messages_before_compaction=2,
             threshold=0.01,
@@ -1835,41 +1967,55 @@ class TestOperationBudgetWS33:
             min_recent_window=1,
             context_window_overrides={"gpt-4o": 1000},
             summarization_chunk_threshold=0.01,
-            operation_budget_s=300.0,  # default
+            # Deadline fires at 1.0s: batch 0 (fast) completes inside it,
+            # every later batch is still running/waiting when it trips.
+            operation_budget_s=1.0,
+            # Serial gating for a deterministic completion set.
+            chunk_concurrency=1,
         )
         messages = make_messages(120)
 
-        # Inject a slow first chunk so the budget clock advances, then
-        # assert the next-batch pre-check trips and we get |S|>=1.
-        captured: dict = {}
+        cancelled_batches: list[int] = []
 
-        async def _first_slow_then_fast_chunked(compactable, context):
-            # Sleep so that the budget clock advances well past budget_seconds.
-            await asyncio.sleep(0.5)
-            return ChunkedOutcome(
-                summaries=[SystemMessage(
-                    content="[Conversation Summary]\nonly-batch-summary",
-                    id=f"compaction-{1}",
-                )],
-                failed_batches=list(range(1, 200)),
-                stop_reason="budget",
+        async def _stub_single_batch(batch_groups, context):
+            idx = int(batch_groups[0].messages[0].content.split()[-1]) // 20
+            if idx == 0:
+                await asyncio.sleep(0.05)
+                return SystemMessage(
+                    content="[Conversation Summary]\nbatch-0 summary",
+                    id="compaction-0",
+                )
+            try:
+                await asyncio.sleep(5)
+            except asyncio.CancelledError:
+                # Record + re-raise — cancellation is observed, never
+                # swallowed (CancelledError is BaseException).
+                cancelled_batches.append(idx)
+                raise
+            return SystemMessage(
+                content=f"[Conversation Summary]\nbatch-{idx} summary",
+                id=f"compaction-{idx}",
             )
 
         compactor = ContextCompactor(config, {})
-        compactor._summarize_chunked = _first_slow_then_fast_chunked
-
-        # Override operation_budget_s to a tiny value so the budget trips.
-        config.operation_budget_s = 0.001
+        compactor._summarize_single_batch = _stub_single_batch
 
         result = await compactor.compact_state(CompactionContext(
             messages=messages, system_prompt_tokens=0,
             model_name="gpt-4o", config=config, llm_config={},
         ))
 
-        # Budget-stopped partial path: |S|>=1 → partial_summary.
+        # Budget-deadline partial path: |S|>=1 → partial_summary.
         assert result is not None
         assert result.compaction_type == "partial_summary"
         assert result.failure_kind == "timeout"
+        # The gathered set IS the completion set: exactly batch 0's
+        # summary survives.
+        batch_summaries = [
+            m for m in result.replacement_messages
+            if isinstance(m, SystemMessage) and (m.id or "").startswith("compaction-")
+        ]
+        assert [m.id for m in batch_summaries] == ["compaction-0"]
         # compacted_at stamped on this path (D12).
         assert result.compacted_at is not None
         # Marker exactly once.
@@ -1878,6 +2024,74 @@ class TestOperationBudgetWS33:
             if isinstance(m, SystemMessage) and (m.id or "").startswith("truncation-marker-")
         ]
         assert len(markers) == 1
+        # Cancellation evidence: batch 1 held the only slot in-flight when
+        # the deadline hit; batches 2-5 never acquired it.
+        assert cancelled_batches == [1]
+
+    @pytest.mark.asyncio
+    async def test_chunked_deadline_cancels_in_flight(self):
+        """NEW (Commit A, real pool): the shared deadline cancels an
+        in-flight batch while faster siblings complete around it. The
+        outcome carries the ACTUALLY-completed set in batch-index order
+        (the cancelled batch's slot stays empty — non-contiguous), with
+        ``stop_reason="budget"``, and the in-flight task observed a clean
+        cancellation (recorded + re-raised, never swallowed).
+        """
+        config = make_compaction_config(
+            min_messages_before_compaction=2,
+            threshold=0.01,
+            recent_message_window=2,
+            min_recent_window=1,
+            context_window_overrides={"gpt-4o": 1000},
+            summarization_chunk_threshold=0.01,
+            # Deadline at 0.8s: all fast batches finish well inside it;
+            # batch 1 is still in-flight when it trips.
+            operation_budget_s=0.8,
+            chunk_concurrency=2,
+        )
+        messages = make_messages(120)
+
+        cancelled_batches: list[int] = []
+
+        async def _stub_single_batch(batch_groups, context):
+            idx = int(batch_groups[0].messages[0].content.split()[-1]) // 20
+            if idx == 1:
+                try:
+                    await asyncio.sleep(5)
+                except asyncio.CancelledError:
+                    cancelled_batches.append(idx)
+                    raise
+                return SystemMessage(
+                    content=f"[Conversation Summary]\nbatch-{idx} summary",
+                    id=f"compaction-{idx}",
+                )
+            await asyncio.sleep(0.01)
+            return SystemMessage(
+                content=f"[Conversation Summary]\nbatch-{idx} summary",
+                id=f"compaction-{idx}",
+            )
+
+        compactor = ContextCompactor(config, {})
+        compactor._summarize_single_batch = _stub_single_batch
+
+        outcome = await compactor._summarize_chunked(
+            identify_boundary_groups(messages), CompactionContext(
+                messages=messages, system_prompt_tokens=0,
+                model_name="gpt-4o", config=config, llm_config={},
+            )
+        )
+
+        assert outcome.stop_reason == "budget"
+        # Actually-completed set in batch-index order — batch 1's slot is
+        # empty (non-contiguous survival with an in-flight hole).
+        assert [m.id for m in outcome.summaries] == [
+            "compaction-0", "compaction-2", "compaction-3",
+            "compaction-4", "compaction-5",
+        ]
+        # failed_batches is the exact complement of the completion set.
+        assert outcome.failed_batches == [1]
+        # In-flight batch observed a clean cancellation.
+        assert cancelled_batches == [1]
 
 
 class TestChunkedOutcomeDataclass:

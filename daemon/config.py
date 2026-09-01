@@ -748,7 +748,19 @@ class CompactionConfig(BaseSettings):
         ),
     )
     target_ratio: float = Field(default=0.40, description="Target token usage after compaction as fraction of context window")
-    summarization_model: str = Field(default="", description="Model to use for summarization. Empty = use session model")
+    model: str = Field(
+        default="",
+        description=(
+            "Model used by the compaction engine (summarization LLM calls AND "
+            "context-window math). Empty = session model (current behavior). "
+            "Settable via env COMPACTION_MODEL or YAML compaction.model; "
+            "precedence COMPACTION_MODEL > compaction.model, resolved "
+            "explicitly in load_config (_resolve_compaction_model), NOT by "
+            "pydantic layering. When both this and the legacy "
+            "summarization_model alias are set, this field wins."
+        ),
+    )
+    summarization_model: str = Field(default="", description="Legacy alias for ``model``. Kept for backwards compatibility; ignored when ``model`` is set")
     min_messages_before_compaction: int = Field(default=10, description="Minimum number of messages before compaction is considered")
     summarization_chunk_threshold: float = Field(default=0.60, description="Fraction of context window above which summarization uses chunking")
 
@@ -792,11 +804,30 @@ class CompactionConfig(BaseSettings):
         default=300.0,
         description=(
             "Whole-operation budget (seconds) spanning all chunk calls in a "
-            "single ``_summarize_chunked`` run. Cumulative clock across batch "
-            "summaries + merges + condense; on exhaustion the engine stops "
-            "issuing chunks and proceeds to the truncate fallback. Trips "
-            "BETWEEN LLM calls only — never between the two ``aupdate_state`` "
-            "persistence calls."
+            "single ``_summarize_chunked`` run. Cumulative clock enforced as "
+            "a shared deadline around the parallel batch pool; on expiry the "
+            "engine cancels in-flight batches, keeps the completed "
+            "summaries, and proceeds to the partial/truncate fallback. The "
+            "deadline lives entirely inside ``_summarize_chunked`` — never "
+            "between the two ``aupdate_state`` persistence calls."
+        ),
+    )
+    chunk_concurrency: int = Field(
+        default=3,
+        ge=1,
+        le=32,
+        description=(
+            "Max batch-summarization calls running in parallel inside one "
+            "chunked ``_summarize_chunked`` run (asyncio.Semaphore bound "
+            "around the batch pool). 1 = effectively serial (pre-parallel "
+            "behavior). Env knob: COMPACTION_CHUNK_CONCURRENCY (this config "
+            "block's env_prefix; env-only — no yaml for this knob). Default "
+            "3 is the conservative leader decision for local LLM proxies "
+            "with no backup URL: N-way parallelism multiplies in-flight "
+            "tenacity retries (worst case N x transient_max) against a "
+            "single endpoint. Batches are independent (static per-batch "
+            "prompt; merge runs after the pool), so this is a pure "
+            "throughput ceiling."
         ),
     )
 
@@ -1944,6 +1975,41 @@ def _resolve_allowed_models(
     return yaml_value
 
 
+def _resolve_compaction_model(yaml_value: Any, *, env_value: str | None) -> str:
+    """Pure resolver for the ``compaction.model`` precedence chain.
+
+    Precedence (documented contract for the compaction-model setting):
+
+      1. ``env_value`` (``COMPACTION_MODEL``) — when SET and NON-EMPTY
+         (empty/whitespace treated as UNSET), wins outright.
+      2. ``yaml_value`` (``compaction.model``) — when non-blank.
+      3. Unset — empty string, which the engine treats as "no override"
+         (session-model accessor + ``context_window_overrides``, the
+         pre-existing behavior).
+
+    Pure function (no ``os.environ`` access): ``load_config`` does the
+    env lookup once and calls this with the resolved string, mirroring
+    ``_resolve_allowed_models``. The explicit resolution exists because
+    passing the YAML ``compaction`` dict straight through as pydantic
+    init kwargs would give YAML silent priority over the env var —
+    the OPPOSITE of the documented order (see ``skill_evolution`` /
+    ``blueprint`` None-strip comments in ``load_config`` for the same
+    pydantic-settings init-kwarg-beats-env trap).
+
+    ``None`` (yaml key absent or explicit ``null``) and blank strings
+    normalize to ``""`` so the ``str`` field never receives ``None``
+    and "unset" always means the empty string.
+    """
+    env_clean = _clean_env_value(env_value)
+    if env_clean is not None:
+        return env_clean
+    if yaml_value is None:
+        return ""
+    if isinstance(yaml_value, str) and not yaml_value.strip():
+        return ""
+    return yaml_value
+
+
 def load_config(config_path: str | None = None) -> Config:
     """
     Load configuration from YAML file with environment variable substitution.
@@ -2056,8 +2122,23 @@ def load_config(config_path: str | None = None) -> Config:
     persistence_config.pop("checkpointer_db_path", None)
     config_dict["persistence"] = persistence_config
 
+    # compaction.model precedence (env COMPACTION_MODEL > yaml
+    # compaction.model > unset) is resolved EXPLICITLY here, not left to
+    # pydantic layering: a plain passthrough of the YAML ``compaction``
+    # dict would pass ``model`` as an init kwarg, and pydantic-settings
+    # gives init kwargs priority over env vars — silently inverting the
+    # documented order. The section is now ALWAYS present in
+    # ``config_dict`` so an env-only deployment (no ``compaction:`` key
+    # in yaml) still resolves ``COMPACTION_MODEL``. See
+    # ``_resolve_compaction_model`` for the contract.
+    compaction_config: Dict[str, Any] = {}
     if "compaction" in processed_config:
-        config_dict["compaction"] = processed_config["compaction"]
+        compaction_config = processed_config["compaction"].copy()
+    compaction_config["model"] = _resolve_compaction_model(
+        compaction_config.get("model", ""),
+        env_value=os.environ.get("COMPACTION_MODEL"),
+    )
+    config_dict["compaction"] = compaction_config
     if "slash_commands" in processed_config:
         # Phase 1 / WS-7: operators may set SLASH_COMMANDS_* via YAML; let
         # the nested section fall through to ``SlashCommandConfig`` so the
