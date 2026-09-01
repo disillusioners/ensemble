@@ -987,8 +987,8 @@ class JobProcessor:
                                 # Fix A escalation: ``enforce=True``
                                 # turns the tripwire into a hard
                                 # failure on the job-driven path (the
-                                # orphan-recovery re-spawn site).
-                                # non-fatal, never fails the dispatch.
+                                # orphan-recovery re-spawn site);
+                                # mismatches fail the recovery loudly.
                                 _assert_linkage_contract(
                                     result,
                                     proc_job.job_id,
@@ -1076,7 +1076,7 @@ class JobProcessor:
                         # escalation: ``enforce=True`` turns the
                         # tripwire into a hard failure on the
                         # job-driven path (the orphan-resume re-spawn
-                        # site).
+                        # site); mismatches fail the resume loudly.
                         _assert_linkage_contract(
                             result,
                             proc_job.job_id,

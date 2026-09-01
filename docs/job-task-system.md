@@ -285,10 +285,16 @@ marked otherwise; the **on-this-branch** column reflects Constitution Phase 0 + 
 | ID | Statement | Census 2026-09-01 | On this branch |
 |---|---|---|---|
 | **I1** | `Task.work_id == JobItem.job_id` at every job-driven dispatch; handles mint **fail-closed** | **BENT** — WARN-only tripwire; auto-mint fallback alive; no FK | **Enforced** — Fix A rejects omission at job-driven dispatch; mint sites censused (§7, §8) |
-| **I2** | One transition authority per `admission_state` class; others are idempotent-readers or **declared** subordinates (≤2 per class: owner + backstop) | **BROKEN** — 22 writers, 9 uncoordinated, 8 bypass `validate_transition`; an illegal `paused→done` exists | Unchanged (Phases 1–3 pending) — but every writer is now **visible** to the census (§7) |
+| **I2** | One transition authority per `admission_state` class; others are idempotent-readers or **declared** subordinates (≤2 per class: owner + backstop) | **BROKEN** — 20 writers (function-level; 28 line-level writes)¹, of which 9 are uncoordinated and 8 bypass `validate_transition`; an illegal `paused→done` exists | Unchanged (Phases 1–3 pending) — but every writer is now **visible** to the census (§7) |
 | **I3** | Proxy-per-kind: missions proxy instance lifecycle, mirrors are receipts; **one meaning per state per kind** | **BROKEN** — mirrors lack an event-time terminal write; two read answers exist (receipt-truthmaker vs liveness-only-when-active) | Unchanged (structural fixes B/C pending; C ships only with B) |
 | **I4** | Internal paths never create JobItems (JAFP boundary) | **BENT** — boundary held (zero internal creators) but convention-only | Now **censused** — `KNOWN_JOBITEM_CREATORS` makes the boundary machine-checked |
 | **I5** | `DEAD` is terminal; corrections are additive | **TRUE** + hazard — `dead→queued` only via DLQ replay; no path re-opens wrongly-`DONE` rows; revived-instance-under-`DEAD`-job unguarded | Unchanged |
+
+¹ **Census provenance (W4 adjudication, 2026-09-01):** The "22 writers" figure originates from the architect's wave-2 census on `latest @940e88b7`, reported in the I2 evidence column of `.agents/shared/planning/job-task-retrospective/drift-history-and-constitution.md`. The W1–W22 codes referenced there are **not a single pin-by-pin table** — they are scattered as inline name references in the planning doc (W1 = `repository.atomic_transition`, W2/W3/W4 = phase-2 routing, W5 = `_finalize_job_db_sync`, W6/W7 = lifecycle cascades, W13/W14 = DLQ, W20 = registered subordinate) and as `W-code` comments inside `daemon/job_state/constitution.py`. **No pin-by-pin diff table exists** in the planning tree; provenance for each W-code rests on the I2 evidence line and the constitution's neighbour-comments.
+
+Source-verified reconciliation on this branch (`feature/job-task-constitution-p0a @ dc4e0c89`, post-Fix-A): `discover_admission_state_writer_paths()` finds **20 function-level entries** in source, **bidirectional-equal** to `KNOWN_ADMISSION_STATE_WRITERS` (zero gaps in either direction — verified via `tests/unit/job_state/test_constitution_drift.py::test_known_admission_state_writers_matches_source_exactly_no_drift`). The same source tree contains **28 line-level writes** because several functions emit `SET admission_state` at multiple sites (e.g. `_finalize_job_db_sync`, `reconcile_turn_mirror`).
+
+**Adjudication outcome — granularity, not gap:** 22 → 20 is a granularity / scope correction, not an unregistered writer. Fix A (dc4e0c89) routed one previously-censused writer through the `enqueue_message_job` mint seam, removing an unmapped write site; the remaining 20 are now machine-checked. **No GAP — every census-referenced writer resolves to a registered entry.** The "9 uncoordinated" / "8 bypass `validate_transition`" / "5 bypass every guard" characterizations remain as the operational reading at `latest @940e88b7` and have not been re-measured on this branch; the I2 invariant stays **BROKEN** until Phases 1–3 land.
 
 ### 6.2 Evolution-allowed seams (no amendment needed)
 
@@ -320,7 +326,7 @@ Drift is too much the moment **any** of these is red — each is mechanically ch
 | **D1** | **Writer registry** — every `SET admission_state` site resolves to a registered owner; ≤2 per class | Census test against `KNOWN_ADMISSION_STATE_WRITERS` (§7) |
 | **D2** | **Event-time terminal rule** — every stateful row has an event-time terminal writer; a sweep is never primary, only loss-recovery for stale *unlabeled* rows | Design review; mirror event-time write (fix B) closes the current failure |
 | **D3** | **One-answer rule** — every derived status names its truthmaker + direction + bounded divergence | Read-model review (fix C, always paired with B) |
-| **D4** | **Fail-closed handles** — no path fabricates `work_id`/`job_id` on `None` | Census test against `KNOWN_MINT_SITES` + Fix A rejection (§8) |
+| **D4** | **Fail-closed handles** — `None` never auto-mints on a required job-driven path; every source `work_id` mint is a registration obligation | Review live mint sites; the subset-only `KNOWN_MINT_SITES` check (`KNOWN_MINT_SITES ⊆ source_mints`) prevents stale entries but does not enumerate every UUID call |
 
 Retro-validation: D1–D4 would have caught every historical drift event at landing
 (receipts-without-kind-split by D2; JAFP writer proliferation by D1; auto-mint by D4;
@@ -344,12 +350,20 @@ Phase 0 ships the Constitution's teeth as **pure-add static sets + AST census te
 - `KNOWN_JOBITEM_CREATORS` — every site that creates JobItems (the JAFP boundary, I4)
 - `KNOWN_MINT_SITES` — every site that mints a `work_id`/`job_id` handle (D4)
 
-Bidirectional AST census tests (precedent: the frozen tool-name discovery test) assert
-both directions: **every** writer/creator/mint site in the daemon resolves to a
-registered entry, and **every** registered entry matches a live site. The scanner must
-raise when it can read zero sources (a silently-empty scan must never read as "clean").
+Writer and creator AST census tests are bidirectional: **every**
+writer/creator site in the daemon resolves to a registered entry, and
+**every** registered entry matches a live site. The mint AST check is
+intentionally subset-only: it enforces
+`KNOWN_MINT_SITES ⊆ source_mints`. General-purpose UUID mints also
+appear in the source set but are outside the D4 registry, so live source
+mints remain a registration obligation rather than an exhaustive
+bidirectional census. The scanner must raise when it can read zero
+sources (a silently-empty scan must never read as "clean").
 
-The pack `test/packs/constitution_drift_test.sh` wraps the census for CI-style runs.
+The pack `test/packs/constitution_drift_test.sh` wraps the census for
+CI-style runs. Its branch guard is opt-in: with `EXPECTED_BRANCH` unset
+it prints a skip notice and runs on any branch; when set, a mismatch
+fails fast.
 
 ### 7.2 How to register a new writer / creator / mint site
 
@@ -396,10 +410,15 @@ went away). **Do not blind-regen to silence it** — that is how drift hides. Tr
 4. **Internal paths self-mint legitimately.** Legacy `enqueue_message` callers have no
    JobItem; the Task mints its own `work_id` (I4 — internal paths never create
    JobItems). The mint sites are registered (§7) so this boundary stays visible.
-5. **The WARN tripwire stays** as a regression detector
-   (`_assert_linkage_contract`, `daemon/services/messaging_types.py`) — it compares the
-   dispatch result's `job_id` against the driving JobItem and warns on mismatch. It is
-   a detector, not a gate; Fix A is the gate.
+5. **The linkage-contract tripwire is enforced on all four job-driven sites**
+   (`_assert_linkage_contract`, `enforce=True`, hard raise). It compares
+   the dispatch result's `job_id` against the driving JobItem and raises
+   `LinkageContractError` on mismatch instead of warning.
+
+Commit semantics differ: the omission raise (`work_id is None` with
+`work_id_required=True`) fires cleanly before the enqueue transaction and
+rolls back, whereas a result mismatch can be raised only after the
+enqueue commit and may leave the committed row behind.
 
 **Why fail-closed:** every recovery surface keys on `Task.work_id == JobItem.job_id`.
 A minted-on-None handle makes the Task invisible to `get_by_work_id`, the work resolver,

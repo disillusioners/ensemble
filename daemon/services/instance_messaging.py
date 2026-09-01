@@ -689,6 +689,8 @@ def _ensure_work_id_fail_closed(
     if work_id is not None:
         return work_id
     if work_id_required:
+        # This omission guard is pre-transaction and rolls back cleanly;
+        # a result-mismatch raise is necessarily post-enqueue and post-commit.
         raise LinkageContractError(
             source="_prepare_enqueued_message",
             expected_job_id="<required>",

@@ -98,11 +98,13 @@ def _assert_linkage_contract(
     Two enforcement modes:
 
     * **WARN-only (default).** The legacy mode (pre-Fix-A). Mismatches
-      log a WARNING and the dispatch proceeds. Used by every legacy
-      internal call site that has not yet migrated to the job-driven
-      path — keeps the current observable behaviour intact.
-    * **Enforce (``enforce=True``).** Fix A enforcement mode. Mismatches
-      raise :class:`LinkageContractError` instead of warning. There are
+      log a WARNING and the dispatch proceeds. This mode is retained for
+      legacy internal call sites outside the job-driven path, which do not
+      use the Fix A omission enforcement.
+    * **Enforce (``enforce=True``).** Fix A enforcement mode. All four
+      JOB-DRIVEN dispatch sites pass ``work_id_required=True`` and call
+      this function with ``enforce=True``; mismatches raise
+      :class:`LinkageContractError` instead of warning. There are
       five ``work_id_required=True`` call sites in total: the four
       JOB-DRIVEN dispatch sites enforced here (the observer + three
       JobProcessor re-spawn sites) PLUS the ``enqueue_message_job``
