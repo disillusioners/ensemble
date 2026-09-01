@@ -14,14 +14,20 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 echo "=== Test Pack: constitution_drift_test ==="
 cd "$PROJECT_DIR"
 
-# Sanity guard — fail fast if the active branch is no longer
-# feature/job-task-constitution-p0a. Shared-worktree hazard: an
-# external `git checkout` mid-run invalidates dispatched test results.
+# Sanity guard — optionally fail fast when EXPECTED_BRANCH is set.
+# Shared-worktree hazard: an external `git checkout` mid-run invalidates
+# dispatched test results. Set EXPECTED_BRANCH to a concrete branch to
+# enable this check; the merged pack otherwise runs branch-agnostic.
 ACTUAL_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
-EXPECTED_BRANCH="feature/job-task-constitution-p0a"
-if [[ "${ACTUAL_BRANCH}" != "${EXPECTED_BRANCH}" ]]; then
-  echo "RESULT: BRANCH-DRIFT (expected ${EXPECTED_BRANCH}, got ${ACTUAL_BRANCH})"
-  exit 1
+EXPECTED_BRANCH="${EXPECTED_BRANCH:-}"
+if [[ -n "${EXPECTED_BRANCH}" ]]; then
+  if [[ "${ACTUAL_BRANCH}" != "${EXPECTED_BRANCH}" ]]; then
+    echo "RESULT: BRANCH-DRIFT (expected ${EXPECTED_BRANCH}, got ${ACTUAL_BRANCH})"
+    exit 1
+  fi
+  echo "RESULT: BRANCH-CHECK (expected ${EXPECTED_BRANCH}, got ${ACTUAL_BRANCH})"
+else
+  echo "RESULT: SKIP (set EXPECTED_BRANCH to enforce branch guard)"
 fi
 
 timeout 110s .venv/bin/pytest \
