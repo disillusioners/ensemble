@@ -627,7 +627,22 @@ class InstanceManager:
                 engine=self._engine,
                 on_pending_task=lambda: self._worker_pool.notify_work() if self._worker_pool else None
             )
-            stranded_work_ids = task_repo.find_work_ids_on_active_jobs_with_alive_instances()
+            try:
+                stranded_work_ids = (
+                    task_repo
+                    .find_work_ids_on_active_jobs_with_alive_instances()
+                )
+            except Exception as probe_err:
+                # Boot-path guard: a probe failure must never break
+                # boot. The operator-mandated backlog clear below
+                # proceeds without the stranded-job audit trail.
+                logger.warning(
+                    f"discard_on_startup: restart-wipe coherence "
+                    f"probe failed ({probe_err}) — proceeding with "
+                    f"the backlog clear without the stranded-job "
+                    f"WARNING."
+                )
+                stranded_work_ids = []
             if stranded_work_ids:
                 logger.warning(
                     f"discard_on_startup: about to wipe "

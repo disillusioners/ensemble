@@ -2544,87 +2544,125 @@ class JobRecoveryService:
                     self._instance_repository is not None
                     and self._task_repository is not None
                 ):
-                    tree_ids = await asyncio.to_thread(
-                        self._instance_repository
-                        .get_tree_ids_permanent,
-                        instance_id,
-                    )
-                    tree_live_tasks = 0
-                    tree_max_activity = None
-                    if tree_ids:
-                        tree_live_tasks = await asyncio.to_thread(
-                            self._task_repository
-                            .count_live_tasks_in_instances,
-                            tree_ids,
-                        )
-                        tree_max_activity = await asyncio.to_thread(
+                    try:
+                        tree_ids = await asyncio.to_thread(
                             self._instance_repository
-                            .get_max_last_activity_in_instances,
-                            tree_ids,
+                            .get_tree_ids_permanent,
+                            instance_id,
                         )
-                    tree_activity_cutoff = datetime.now(
-                        timezone.utc
-                    ) - timedelta(seconds=f1_tree_activity_max_age_seconds)
-                    # SQLite may hand back the MAX aggregate as an
-                    # ISO string (raw column text) while PostgreSQL
-                    # returns a datetime — normalize before the
-                    # comparison; unparseable values are treated as
-                    # "no signal" (leg 2 silent), never as fatal.
-                    if isinstance(tree_max_activity, str):
-                        try:
-                            tree_max_activity = datetime.fromisoformat(
-                                tree_max_activity
+                        tree_live_tasks = 0
+                        tree_max_activity = None
+                        if tree_ids:
+                            tree_live_tasks = await asyncio.to_thread(
+                                self._task_repository
+                                .count_live_tasks_in_instances,
+                                tree_ids,
                             )
-                        except ValueError:
-                            tree_max_activity = None
-                    tree_max_activity_iso = (
-                        tree_max_activity.isoformat()
-                        if isinstance(tree_max_activity, datetime)
-                        else tree_max_activity
-                    )
-                    if (
-                        tree_live_tasks > 0
-                        or (
-                            tree_max_activity is not None
-                            and tree_max_activity >= tree_activity_cutoff
+                            tree_max_activity = await asyncio.to_thread(
+                                self._instance_repository
+                                .get_max_last_activity_in_instances,
+                                tree_ids,
+                            )
+                        tree_activity_cutoff = datetime.now(
+                            timezone.utc
+                        ) - timedelta(seconds=f1_tree_activity_max_age_seconds)
+                        # SQLite may hand back the MAX aggregate as an
+                        # ISO string (raw column text) while PostgreSQL
+                        # returns a datetime — normalize before the
+                        # comparison; unparseable values are treated as
+                        # "no signal" (leg 2 silent), never as fatal.
+                        if isinstance(tree_max_activity, str):
+                            try:
+                                tree_max_activity = datetime.fromisoformat(
+                                    tree_max_activity
+                                )
+                            except ValueError:
+                                tree_max_activity = None
+                        if (
+                            isinstance(tree_max_activity, datetime)
+                            and tree_max_activity.tzinfo is None
+                        ):
+                            # PostgreSQL reads this column back naive
+                            # (the watchdog comment at instance/
+                            # repository.py:2180-2184 computes age in
+                            # SQL for exactly this reason); comparing
+                            # naive against the aware cutoff raises
+                            # TypeError. Mirror the
+                            # ``_parse_job_created_at`` convention:
+                            # normalize to UTC before ANY use of the
+                            # value (comparison AND the isoformat
+                            # detail below).
+                            tree_max_activity = tree_max_activity.replace(
+                                tzinfo=timezone.utc
+                            )
+                        tree_max_activity_iso = (
+                            tree_max_activity.isoformat()
+                            if isinstance(tree_max_activity, datetime)
+                            else tree_max_activity
                         )
-                    ):
-                        details.append({
-                            "pattern": (
-                                "orphan_active_skipped_tree_alive"
-                            ),
-                            "job_id": job_id,
-                            "task_id": None,
-                            "instance_id": instance_id,
-                            "reason": (
-                                f"orphan ACTIVE JobItem (no Task "
-                                f"linked via work_id) BUT the "
-                                f"lineage tree is alive: "
-                                f"{tree_live_tasks} PENDING/RUNNING "
-                                f"task(s) across "
-                                f"{len(tree_ids)} tree member(s), "
-                                f"max last_activity_at="
-                                f"{tree_max_activity_iso!r} (window "
-                                f"{f1_tree_activity_max_age_seconds}s) "
-                                f"— live work exists under a "
-                                f"different work_id; f1 MUST NOT "
-                                f"DEAD-finalize. Next cycle retries."
-                            ),
-                        })
+                        if (
+                            tree_live_tasks > 0
+                            or (
+                                tree_max_activity is not None
+                                and tree_max_activity >= tree_activity_cutoff
+                            )
+                        ):
+                            details.append({
+                                "pattern": (
+                                    "orphan_active_skipped_tree_alive"
+                                ),
+                                "job_id": job_id,
+                                "task_id": None,
+                                "instance_id": instance_id,
+                                "reason": (
+                                    f"orphan ACTIVE JobItem (no Task "
+                                    f"linked via work_id) BUT the "
+                                    f"lineage tree is alive: "
+                                    f"{tree_live_tasks} PENDING/RUNNING "
+                                    f"task(s) across "
+                                    f"{len(tree_ids)} tree member(s), "
+                                    f"max last_activity_at="
+                                    f"{tree_max_activity_iso!r} (window "
+                                    f"{f1_tree_activity_max_age_seconds}s) "
+                                    f"— live work exists under a "
+                                    f"different work_id; f1 MUST NOT "
+                                    f"DEAD-finalize. Next cycle retries."
+                                ),
+                            })
+                            logger.warning(
+                                f"reconcile_drift_states: Pattern (f1) "
+                                f"skip — orphan ACTIVE JobItem "
+                                f"{job_id[:8]}... has no Task linked "
+                                f"via work_id, but its lineage tree is "
+                                f"ALIVE ({tree_live_tasks} live task(s) "
+                                f"across {len(tree_ids)} instance(s), "
+                                f"max activity "
+                                f"{tree_max_activity_iso!r}). This is "
+                                f"the f1-misfire class (incident "
+                                f"2026-08-31): a live subtree must "
+                                f"never be DEAD-finalized. Verify the "
+                                f"dispatch path carried "
+                                f"work_id=job_id."
+                            )
+                            continue
+                    except Exception as tree_guard_err:
+                        # Per-job isolation (review finding
+                        # #1b on 04fd0c52): one bad row in
+                        # the subtree-alive guard (e.g. an
+                        # unexpected value shape from the
+                        # tree aggregate) must not take out
+                        # the whole f1/f2 pass. WARN and move
+                        # to the next job; the outer per-row
+                        # handler and the caller-level
+                        # except keep their semantics.
                         logger.warning(
                             f"reconcile_drift_states: Pattern (f1) "
-                            f"skip — orphan ACTIVE JobItem "
-                            f"{job_id[:8]}... has no Task linked "
-                            f"via work_id, but its lineage tree is "
-                            f"ALIVE ({tree_live_tasks} live task(s) "
-                            f"across {len(tree_ids)} instance(s), "
-                            f"max activity "
-                            f"{tree_max_activity_iso!r}). This is "
-                            f"the f1-misfire class (incident "
-                            f"2026-08-31): a live subtree must "
-                            f"never be DEAD-finalized. Verify the "
-                            f"dispatch path carried "
-                            f"work_id=job_id."
+                            f"subtree-alive guard failed for job "
+                            f"{job_id[:8]}... (instance "
+                            f"{instance_id[:8]}...): "
+                            f"{tree_guard_err} — skipping this "
+                            f"row this cycle; the JobItem stays "
+                            f"ACTIVE and the next cycle retries."
                         )
                         continue
 

@@ -744,6 +744,17 @@ class TaskRepository:
                     JobItem.admission_state
                     == AdmissionState.ACTIVE.value,
                     Instance.status.notin_(terminal),
+                    # The wipe this probe warns about is
+                    # ``clear_all(preserve_in_flight=True)`` — it
+                    # PRESERVES RUNNING/PAUSED rows. Filter them
+                    # out here too so the joined WARNING names
+                    # only rows actually being deleted (otherwise
+                    # preserved in-flight work is over-reported
+                    # as "will be stranded").
+                    Task.status.notin_([
+                        TaskStatus.RUNNING.value,
+                        TaskStatus.PAUSED.value,
+                    ]),
                 )
                 .distinct()
             )

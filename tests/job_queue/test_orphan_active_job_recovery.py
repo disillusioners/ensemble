@@ -3237,6 +3237,123 @@ class TestPatternF1SubtreeAliveGuard:
         )
 
     @pytest.mark.asyncio
+    async def test_f1_zombie_fires_with_tz_naive_stale_tree_activity(
+        self, f1_engine,
+    ):
+        """T3 — tz-naive tree-activity isolation (PG leg-2 round-trip).
+
+        PostgreSQL reads ``last_activity_at`` back TIMEZONE-NAIVE
+        (the watchdog subsystem deliberately computes age in SQL for
+        exactly this reason — instance/repository.py:2180-2184). A
+        naive MAX that parses back ``tzinfo is None`` must NOT blow
+        up the leg-2 comparison (naive datetime vs aware cutoff →
+        TypeError): the parsed value is tz-normalized to UTC.
+
+        Shape: alive running instance, tree max ``last_activity_at``
+        stored NAIVE and STALE (outside the window), no live tasks
+        (leg 1 silent) → the genuine zombie MUST still fire AND the
+        recovery pass MUST NOT abort on this row.
+
+        RED on 04fd0c52: the naive-vs-aware TypeError skips this
+        row via the per-row handler EVERY cycle — the zombie is
+        never finalized and the row spams an ERROR per cycle.
+        """
+        repository = JobRepository(f1_engine)
+        task_repository = TaskRepository(f1_engine)
+        lock_repo = LockRepository(f1_engine)
+        instance_repo = SQLModelInstanceRepository(engine=f1_engine)
+        stale_recovery = StaleTaskRecovery(
+            task_repository=task_repository,
+            message_repository=None,
+            event_repository=None,
+        )
+        jq_mock = MagicMock()
+        jq_mock.notify_watchers = AsyncMock(return_value=None)
+
+        now = datetime.now(timezone.utc)
+
+        # Alive running instance (created_at mirrors T2 — AWARE and
+        # backdated past the W1 mid-mint window). ONLY
+        # last_activity_at is NAIVE: no tz offset in the stored ISO
+        # text, and STALE (7200s — far outside the leg-2 window).
+        _insert_instance(
+            f1_engine,
+            "inst-zombie-naive-tz",
+            status="running",
+            created_at=now - timedelta(seconds=1800),
+            last_activity_at=(now - timedelta(seconds=7200)).replace(
+                tzinfo=None
+            ),
+        )
+        _insert_job_item(
+            f1_engine,
+            job_id="job-f1-naive-tz",
+            instance_id="inst-zombie-naive-tz",
+            project_id="test-project",
+            queue_id="queue-f1-naive-tz",
+            admission_state=AdmissionState.ACTIVE.value,
+            created_at=now - timedelta(seconds=1800),
+        )
+        _insert_lock(
+            f1_engine,
+            project_id="test-project",
+            queue_id="queue-f1-naive-tz",
+            job_id="job-f1-naive-tz",
+            instance_id="inst-zombie-naive-tz",
+        )
+        # NO Task rows — leg 1 is silent; only the naive leg-2 MAX
+        # is in play.
+
+        service = JobRecoveryService(
+            job_repository=repository,
+            lock_repository=lock_repo,
+            instance_repository=instance_repo,
+            job_queue_service=jq_mock,
+            task_repository=task_repository,
+            stale_task_recovery=stale_recovery,
+        )
+
+        stats = await service.reconcile_drift_states(
+            min_pending_age_seconds=0,
+            min_orphan_age_seconds=60,
+        )
+
+        details = (stats or {}).get("details", [])
+        job_after = repository.get("job-f1-naive-tz")
+        assert job_after is not None
+        assert job_after.admission_state == AdmissionState.DEAD.value, (
+            f"f1 must still fire on the tz-naive stale zombie (the "
+            f"naive MAX must be tz-normalized, not crash the leg-2 "
+            f"comparison). Got admission_state="
+            f"{job_after.admission_state!r}, details: {details}"
+        )
+        f1_records = [
+            d for d in details
+            if d.get("pattern") == "orphan_active_no_task_dead"
+            and d.get("job_id") == "job-f1-naive-tz"
+        ]
+        assert f1_records, (
+            f"f1 must record orphan_active_no_task_dead for the "
+            f"tz-naive zombie. Got details: {details}"
+        )
+        # The pass itself must NOT abort: reconcile returned a tally
+        # (not None) and the naive-stale row never masqueraded as a
+        # live tree.
+        assert stats is not None, (
+            f"recovery pass must not abort on the tz-naive row — "
+            f"reconcile_drift_states returned None. Details: {details}"
+        )
+        tree_alive_records = [
+            d for d in details
+            if d.get("pattern") == "orphan_active_skipped_tree_alive"
+            and d.get("job_id") == "job-f1-naive-tz"
+        ]
+        assert not tree_alive_records, (
+            f"stale naive tree activity must NOT read as alive. "
+            f"Got: {tree_alive_records}"
+        )
+
+    @pytest.mark.asyncio
     async def test_f1_finalize_persists_terminal_reason(
         self, f1_engine,
     ):
