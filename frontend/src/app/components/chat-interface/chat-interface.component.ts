@@ -320,7 +320,14 @@ export class ChatInterfaceComponent implements AfterViewChecked, OnChanges, OnDe
   /** Terminal copy table — VERBATIM per the post-review adjudication:
    *  summary → "Context compacted"; partial_summary and truncation arrive
    *  via timed_out → fallback_applied with the honest per-value copy;
-   *  noop → "Nothing to compact" (instant-success look — NOT a failure). */
+   *  noop → "Nothing to compact" (instant-success look — NOT a failure).
+   *  Compaction-output-structure §9 upgrade: when the backend ships
+   *  section counts in the detail payload (``sections_kept`` /
+   *  ``sections_total`` — the wire detail object is additive/flat), the
+   *  success title names the preserved structure and the partial
+   *  fallback title gains the honest "(k/N sections kept; …)" suffix.
+   *  Without counts the prior copy is kept verbatim (graceful
+   *  degradation — the FE never renders a fabricated number). */
   commandTitle(cmd: ActiveCommandState): string {
     switch (cmd.phase) {
       case 'waiting':
@@ -333,6 +340,10 @@ export class ChatInterfaceComponent implements AfterViewChecked, OnChanges, OnDe
       case 'success': {
         const type = cmd.detail?.compacted_type;
         if (type === 'noop') return 'Nothing to compact';
+        const counts = this.commandSectionCounts(cmd);
+        if (counts) {
+          return `Context compacted — global overview + ${counts.total} section summaries preserved`;
+        }
         return 'Context compacted';
       }
       case 'fallback_applied': {
@@ -341,7 +352,12 @@ export class ChatInterfaceComponent implements AfterViewChecked, OnChanges, OnDe
           // Non-contiguous survival (parallel chunked summarization): the
           // surviving summaries need not be a prefix — any batch that
           // finished keeps its summary, any batch that did not is trimmed.
-          return 'Compaction timed out partway — kept the summaries that completed, trimmed the messages that could not be summarized';
+          const base = 'Compaction timed out partway — kept the summaries that completed, trimmed the messages that could not be summarized';
+          const counts = this.commandSectionCounts(cmd);
+          if (counts) {
+            return `${base} (${counts.kept}/${counts.total} sections kept; dropped spans listed in the compaction notice)`;
+          }
+          return base;
         }
         if (type === 'truncation') {
           return 'Compaction timed out — history was trimmed without a summary';
@@ -353,6 +369,30 @@ export class ChatInterfaceComponent implements AfterViewChecked, OnChanges, OnDe
       default:
         return 'Working…';
     }
+  }
+
+  /**
+   * Section counts for the §9 card copy, read defensively off the flat
+   * additive detail payload. The fields are intentionally NOT declared on
+   * ``CommandProgressDetail`` (models/index.ts stays unchanged — pinned
+   * by the compaction-output-structure spec): this accessor absorbs the
+   * optional backend fields at the component seam, returning null unless
+   * BOTH values are finite numbers with total > 0. No counts → callers
+   * keep the pre-existing copy (never a fabricated number).
+   */
+  private commandSectionCounts(cmd: ActiveCommandState): { kept: number; total: number } | null {
+    const detail = cmd.detail as
+      | (NonNullable<ActiveCommandState['detail']> & { sections_kept?: unknown; sections_total?: unknown })
+      | null;
+    const kept = detail?.sections_kept;
+    const total = detail?.sections_total;
+    if (
+      typeof kept === 'number' && Number.isFinite(kept) && kept >= 0 &&
+      typeof total === 'number' && Number.isFinite(total) && total > 0
+    ) {
+      return { kept, total };
+    }
+    return null;
   }
 
   /** Explanatory line: noop_reason mapping for noop successes, failure
@@ -446,9 +486,16 @@ export class ChatInterfaceComponent implements AfterViewChecked, OnChanges, OnDe
 
     // System messages are only shown when the system-prompt toggle is on.
     // When the toggle is off, the system row is hidden entirely (mirrors
-    // how thinking-only / tool-only messages vanish when their toggles are
-    // off, so the user can fully opt out of seeing system-prompt chatter).
+    // how thinking-only / tool-only messages vanish when their toggles
+    // are off, so the user can fully opt out of seeing system-prompt
+    // chatter). EXCEPTION — compaction docs (``compaction-global-`` id
+    // prefix): they carry the user-facing fold card (compaction-output-
+    // structure §9), so they stay visible regardless of the toggle —
+    // the user must always see that context was compacted.
     if (message.role === 'system') {
+      if (this.isCompactionDoc(message)) {
+        return this.hasMeaningfulContent(message);
+      }
       return this.showSystemPrompt && this.hasMeaningfulContent(message);
     }
 
@@ -469,6 +516,108 @@ export class ChatInterfaceComponent implements AfterViewChecked, OnChanges, OnDe
       return message.thinking_extracted;
     }
     return null;
+  }
+
+  // ── Compaction fold-with-preview card ──────────────────────────────────
+  // Single-document compaction output (compaction-output-structure §9):
+  // the backend persists exactly ONE SystemMessage per compaction with the
+  // stable id prefix ``compaction-global-`` and a long structured body
+  // (envelope header → GLOBAL OVERVIEW → SECTION DETAIL → boundary line).
+  // The card renders it COLLAPSED by default with a ≤500-char preview
+  // drawn from the GLOBAL OVERVIEW section, plus a "Show compacted
+  // context" expander revealing the full body — so the giant doc can
+  // never blow out the transcript visually.
+
+  /** Stable id prefix the backend mints compaction docs with
+   *  (full shape ``compaction-global-{instance_id}-{seq}``). */
+  private static readonly COMPACTION_ID_PREFIX = 'compaction-global-';
+
+  /** Preview cap. The spec asks for ≤500 chars; when truncating we keep
+   *  499 chars + an ellipsis so the rendered preview never exceeds 500. */
+  private static readonly COMPACTION_PREVIEW_MAX_CHARS = 500;
+
+  /** True when ``message`` is a single-document compaction doc. */
+  isCompactionDoc(message: Message): boolean {
+    return (
+      message.role === 'system' &&
+      typeof message.message_id === 'string' &&
+      message.message_id.startsWith(ChatInterfaceComponent.COMPACTION_ID_PREFIX)
+    );
+  }
+
+  /**
+   * ≤500-char preview for the collapsed fold card, drawn from the
+   * GLOBAL OVERVIEW section of the doc body
+   * (``── GLOBAL OVERVIEW ──\n…\n\n── SECTION DETAIL ──``).
+   *
+   * Degradation ladder (conditional clauses are omitted, never falsified —
+   * the doc shape varies by compaction outcome):
+   *  1. GLOBAL OVERVIEW section content (the normal shape);
+   *  2. when the section is absent (truncation mode may omit it, and a
+   *     failed merge pass leaves only the placeholder line inside it),
+   *     the envelope header line — the ``[CONTEXT COMPACTION — …]``
+   *     summary the backend always writes first;
+   *  3. otherwise the first 500 chars of the raw body.
+   */
+  compactionPreview(message: Message): string {
+    const body = message.content || '';
+    const max = ChatInterfaceComponent.COMPACTION_PREVIEW_MAX_CHARS;
+
+    const overviewStart = body.indexOf('── GLOBAL OVERVIEW ──');
+    if (overviewStart >= 0) {
+      const contentStart = body.indexOf('\n', overviewStart);
+      if (contentStart >= 0) {
+        // The overview section ends at the next structural marker —
+        // SECTION DETAIL, ARCHIVED, or the boundary line, whichever
+        // comes first.
+        const rest = body.slice(contentStart + 1);
+        const endIdx = ['── SECTION DETAIL ──', '── ARCHIVED:', '── END OF COMPACTED CONTEXT']
+          .map(marker => rest.indexOf(marker))
+          .filter(i => i >= 0)
+          .reduce((min, i) => Math.min(min, i), rest.length);
+        const overview = rest.slice(0, endIdx).trim();
+        if (overview) {
+          return this.capPreview(overview, max);
+        }
+      }
+    }
+
+    // No usable overview → fall back to the envelope header line.
+    if (body.startsWith('[CONTEXT COMPACTION')) {
+      const firstLine = body.split('\n', 1)[0].trim();
+      if (firstLine) {
+        return this.capPreview(firstLine, max);
+      }
+    }
+    return this.capPreview(body.trim(), max);
+  }
+
+  /** Hard-cap helper — never returns more than ``max`` characters. */
+  private capPreview(text: string, max: number): string {
+    if (text.length <= max) return text;
+    return text.slice(0, max - 1) + '…';
+  }
+
+  /** Message ids whose fold card is currently expanded. Immutable Set
+   *  updates (signal) so change detection sees the toggle. Keyed by
+   *  message id — the backend re-delivers compaction docs under the
+   *  SAME stable id, so expansion state survives union-merge upserts. */
+  readonly expandedCompactionIds = signal<ReadonlySet<string>>(new Set<string>());
+
+  isCompactionExpanded(messageId: string): boolean {
+    return this.expandedCompactionIds().has(messageId);
+  }
+
+  toggleCompactionDoc(messageId: string): void {
+    this.expandedCompactionIds.update(current => {
+      const next = new Set(current);
+      if (next.has(messageId)) {
+        next.delete(messageId);
+      } else {
+        next.add(messageId);
+      }
+      return next;
+    });
   }
 
   // ─── Mermaid chart overlay wiring ──────────────────────────────────────
