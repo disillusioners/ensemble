@@ -1750,7 +1750,11 @@ class TestPartialSummaryWS34:
         # non-contiguous by construction.
         from daemon.compaction import ChunkedOutcome
 
-        async def _fake_chunked(compactable, context):
+        async def _fake_chunked(compactable, context, previous_overview=None):
+            # Engine stub returning a synthetic partial-summary outcome.
+            # ``previous_overview`` is accepted for forward-compat with
+            # the W1 pass-2 seed (architect §4 — "the global frame
+            # converges across passes"); the stub ignores it.
             return ChunkedOutcome(
                 summaries=[
                     "batch-0 summary",
@@ -1833,7 +1837,11 @@ class TestPartialSummaryWS34:
         # budget-deadline ChunkedOutcome whose surviving set is
         # non-contiguous (batches 0 and 2 completed; 1, 3, 4, 5 did not —
         # the exact complement of the completion set).
-        async def _fake_chunked(compactable, context):
+        async def _fake_chunked(compactable, context, previous_overview=None):
+            # Engine stub returning a synthetic partial-summary outcome.
+            # ``previous_overview`` is accepted for forward-compat with
+            # the W1 pass-2 seed (architect §4 — "the global frame
+            # converges across passes"); the stub ignores it.
             return ChunkedOutcome(
                 summaries=[
                     "batch-0 summary",
@@ -1986,7 +1994,12 @@ class TestPartialSummaryWS34:
         )
         messages = make_messages(120)
 
-        async def _fake_chunked_partial(compactable, context):
+        async def _fake_chunked_partial(
+            compactable, context, previous_overview=None,
+        ):
+            # Engine stub returning a synthetic partial-summary outcome.
+            # ``previous_overview`` is accepted for forward-compat with
+            # the W1 pass-2 seed (architect §4); the stub ignores it.
             return ChunkedOutcome(
                 summaries=["first batch summary"],
                 failed_batches=[1],
@@ -2335,6 +2348,13 @@ def _load_real_add_messages():
     originals, drop mocked AND freshly-imported real langgraph entries,
     then restore the SAME module objects so subsequent tests keep
     seeing the conftest mocks.
+
+    Returns:
+        ``(add_messages, REMOVE_ALL_MESSAGES)`` tuple — both sourced
+        from the REAL installed ``langgraph.graph.message``. The
+        sentinel is the constant the reducer detects at
+        ``message.py:209``; using the imported symbol (not the
+        hard-coded literal) guards against upstream rename drift.
     """
     import importlib
     import sys
@@ -2348,11 +2368,39 @@ def _load_real_add_messages():
         del sys.modules[k]
     try:
         mod = importlib.import_module("langgraph.graph.message")
-        return mod.add_messages
+        return mod.add_messages, mod.REMOVE_ALL_MESSAGES
     finally:
         for k in [k for k in sys.modules if k.startswith("langgraph")]:
             del sys.modules[k]
         sys.modules.update(saved)
+
+
+# W4 fix (2026-09-01) — real skipif predicate for the installed
+# langgraph version. The reducer-semantics pins depend on
+# ``langgraph.graph.message.add_messages`` and
+# ``REMOVE_ALL_MESSAGES`` being importable. The conftest mocks
+# ``langgraph.*`` as non-package modules, so the real imports only
+# resolve inside ``_load_real_add_messages``'s swap window; this
+# skipif surfaces an explicit SKIP (not an ImportError swallowed
+# by the helper) when the real package is not installed.
+LANGGRAPH_INSTALLED = False
+LANGGRAPH_VERSION = ""
+try:
+    import importlib.metadata as _ilmd
+    LANGGRAPH_VERSION = _ilmd.version("langgraph")
+    LANGGRAPH_INSTALLED = True
+except Exception:
+    pass
+needs_real_langgraph = pytest.mark.skipif(
+    not LANGGRAPH_INSTALLED,
+    reason=(
+        "real langgraph package not importable in test env "
+        "(conftest mocks it); the reducer-semantics pins + the "
+        "REMOVE_ALL_MESSAGES sentinel constant require the real "
+        "installed package"
+    ),
+)
+
 
 
 class TestChainedSecondCompactionDocs:
@@ -2412,7 +2460,7 @@ class TestChainedSecondCompactionDocs:
     async def test_chained_compaction_leaves_exactly_one_doc(
         self, failing_llm
     ):
-        add_messages = _load_real_add_messages()
+        add_messages, _REMOVE_ALL = _load_real_add_messages()
 
         config = make_compaction_config(
             min_messages_before_compaction=2,
@@ -2435,11 +2483,16 @@ class TestChainedSecondCompactionDocs:
         # Apply via the production sentinel recipe (architect §5)
         # — add_messages + REMOVE_ALL_MESSAGES sentinel truncates the
         # channel to the new value verbatim. This is the only way the
-        # prior doc is dropped. The conftest mocks ``langgraph.graph``
-        # (so we cannot import ``REMOVE_ALL_MESSAGES`` directly); the
-        # constant value is source-verified at langgraph 1.0.9.
+        # prior doc is dropped.
+        #
+        # W4 fix (2026-09-01) — the sentinel constant is sourced
+        # from the real installed ``langgraph.graph.message`` (NOT
+        # the hard-coded ``"__remove_all__"`` literal). The conftest
+        # mocks ``langgraph.*`` as non-package modules, so the
+        # import happens via ``_load_real_add_messages``'s
+        # swap window.
         from langchain_core.messages import RemoveMessage
-        REMOVE_ALL_MESSAGES = "__remove_all__"
+        _, REMOVE_ALL_MESSAGES = _load_real_add_messages()
         channel = add_messages(
             history_1,
             [RemoveMessage(id=REMOVE_ALL_MESSAGES), *result_1.replacement_messages],
@@ -2693,15 +2746,23 @@ class TestSentinelRecipeRealGraph:
             sys.modules.update(saved)
 
 
+@needs_real_langgraph
 class TestReducerSemanticsPins:
     """Item 2 — reducer-semantics unit pins, version-guarded on
     langgraph 1.0.9 (direct ``add_messages`` import). The pins
     convert Worker 3's source-reading into executed proof.
+
+    W4 fix (2026-09-01) — the whole class is gated by
+    ``needs_real_langgraph``: when the real ``langgraph`` package
+    is not importable in the test env (CI without installed
+    langgraph, conftest-only mocks), the pins SKIP explicitly
+    rather than silently relying on the ImportError fallback in
+    :func:`build_sentinel_replacement`.
     """
 
     def test_existing_id_input_upserts_in_place(self):
         """Existing-id input → upsert IN PLACE, position never changes."""
-        add_messages = _load_real_add_messages()
+        add_messages, _REMOVE_ALL = _load_real_add_messages()
         left = [
             HumanMessage(content="A", id="1"),
             HumanMessage(content="B", id="2"),
@@ -2714,7 +2775,7 @@ class TestReducerSemanticsPins:
 
     def test_new_id_input_appends(self):
         """New-id input → APPEND at channel end."""
-        add_messages = _load_real_add_messages()
+        add_messages, _REMOVE_ALL = _load_real_add_messages()
         left = [HumanMessage(content="A", id="1"), HumanMessage(content="B", id="2")]
         right = [HumanMessage(content="C", id="3")]
         out = add_messages(left, right)
@@ -2723,7 +2784,7 @@ class TestReducerSemanticsPins:
 
     def test_remove_absent_id_raises(self):
         """``RemoveMessage`` of an ABSENT id → ValueError."""
-        add_messages = _load_real_add_messages()
+        add_messages, _REMOVE_ALL = _load_real_add_messages()
         left = [HumanMessage(content="A", id="1")]
         right = [RemoveMessage(id="nonexistent")]
         with pytest.raises(ValueError):
@@ -2731,7 +2792,7 @@ class TestReducerSemanticsPins:
 
     def test_same_call_remove_then_readd_is_inplace(self):
         """Same-call remove→re-add of id X → X resurrects IN PLACE."""
-        add_messages = _load_real_add_messages()
+        add_messages, _REMOVE_ALL = _load_real_add_messages()
         left = [
             HumanMessage(content="A", id="1"),
             HumanMessage(content="B", id="2"),
@@ -2743,7 +2804,7 @@ class TestReducerSemanticsPins:
 
     def test_same_call_readd_then_remove_deletes(self):
         """Same-call re-add→remove of X → X deleted (removals filter last)."""
-        add_messages = _load_real_add_messages()
+        add_messages, _REMOVE_ALL = _load_real_add_messages()
         left = [
             HumanMessage(content="A", id="1"),
             HumanMessage(content="B", id="2"),
@@ -2754,14 +2815,21 @@ class TestReducerSemanticsPins:
         assert [m.content for m in out] == ["A", "C"]
         assert [m.id for m in out] == ["1", "3"]
 
+    @needs_real_langgraph
     def test_sentinel_truncates_to_right(self):
         """``REMOVE_ALL_MESSAGES`` sentinel → everything after the
         first sentinel becomes the ENTIRE new channel value,
         verbatim order. This is the only position-control path
         in langgraph 1.0.9.
+
+        W4 fix (2026-09-01) — the sentinel constant is imported
+        from the real installed ``langgraph.graph.message``
+        (NOT the hard-coded ``"__remove_all__"`` literal); a
+        upstream rename of the sentinel would surface here as a
+        real failure rather than silently passing against a stale
+        literal.
         """
-        add_messages = _load_real_add_messages()
-        REMOVE_ALL = "__remove_all__"
+        add_messages, REMOVE_ALL = _load_real_add_messages()
         left = [
             HumanMessage(content="A", id="1"),
             HumanMessage(content="B", id="2"),
@@ -2914,7 +2982,11 @@ class TestMergeLadderFailOpen:
             msgs.append(AIMessage(content="y" * 30, id=f"a-{i}"))
 
         # Stub: chunked returns 2 per-batch summaries; merge fails.
-        async def _fake_chunked(compactable, context):
+        async def _fake_chunked(compactable, context, previous_overview=None):
+            # Engine stub returning a synthetic partial-summary outcome.
+            # ``previous_overview`` is accepted for forward-compat with
+            # the W1 pass-2 seed (architect §4 — "the global frame
+            # converges across passes"); the stub ignores it.
             # The real _summarize_chunked would have called
             # _merge_summaries and set merge_failed=True on
             # failure. Mirror that here so the engine's flow
@@ -2926,7 +2998,10 @@ class TestMergeLadderFailOpen:
                 merge_failed=True,
             )
 
-        async def fake_merge(partial_summaries, context, budget_seconds=None):
+        async def fake_merge(
+            partial_summaries, context, budget_seconds=None,
+            previous_overview=None,
+        ):
             # Engine: ≥2 summaries, merge call → returns failure
             return ("", False)
 
@@ -3007,14 +3082,29 @@ class TestMergeLadderFailOpen:
 class TestCeilingRule:
     """Item 5 — ceiling rule: over-cap doc → oldest sections
     condensed, GLOBAL preserved; hard cap → B-shape degrade.
+
+    W6 fix (2026-09-01) — assertions are REAL (oldest-first
+    ordering, condense COUNT, GLOBAL preserved on trim). The
+    prior substring-only ``assert "GLOBAL" in doc.content``
+    passed for any shape that contained the literal — vacuous.
     """
 
     def test_over_cap_condenses_oldest_sections(self):
         """The ceiling rule condenses the OLDEST sections first
         when GLOBAL + Σsections > 15% of context window.
+
+        W6 assertions (real):
+          * GLOBAL text is preserved verbatim in the doc
+          * OLDEST section(s) carry the condensed-for-budget
+            marker; NEWER sections retain full body
+          * The condensed count > 0 (cap actually fired)
+          * The ARCHIVED line count > 0 (the marker is present)
         """
         from daemon.compaction import build_compaction_doc
-        # 4 large sections totaling 10k tokens; cap is 5k.
+        # 40 large sections × ~250 tokens = 10k tokens of bodies;
+        # GLOBAL "GLOBAL" adds ~1 token. context_window=10_000 →
+        # cap = 1500 tokens → cap WILL fire (10k > 1500).
+        n_sections = 40
         sections = [
             {
                 "start_idx": i * 100 + 1,
@@ -3023,7 +3113,7 @@ class TestCeilingRule:
                 "start_id": f"s{i}-start",
                 "end_id": f"s{i}-end",
             }
-            for i in range(40)  # 40 sections × 250 tokens = 10k tokens
+            for i in range(n_sections)
         ]
         doc = build_compaction_doc(
             instance_id="ceiling-1",
@@ -3032,27 +3122,92 @@ class TestCeilingRule:
             compacted_at="2026-09-01T00:00:00+00:00",
             global_overview="GLOBAL",
             sections=sections,
-            total_sections=40,
+            total_sections=n_sections,
             summarized_start=1, summarized_end=4000,
             preserved_count=10,
             dropped_spans=[],
             # Tiny context window so the ceiling is violated.
             context_window=10_000,
         )
-        # The doc still has the GLOBAL.
-        assert "GLOBAL" in doc.content
-        # Sections were condensed — the cap was hit.
-        # The exact count depends on tiktoken, but the doc
-        # has SOME sections (the oldest got archived).
         body = doc.content
+
+        # W6 — REAL assertion: GLOBAL preserved verbatim.
+        assert "GLOBAL" in body, "GLOBAL OVERVIEW must be preserved"
+        # The condensed marker text (set in _apply_ceiling_rule)
+        # must appear at least once (cap fired → some condensation).
+        condensed_marker = "(condensed for budget — see GLOBAL OVERVIEW)"
+        condensed_count = body.count(condensed_marker)
+        assert condensed_count > 0, (
+            f"ceiling rule must condense at least one section; "
+            f"body did not contain the condensed marker. Body length: "
+            f"{len(body)}"
+        )
+        assert condensed_count < n_sections, (
+            f"not EVERY section should be condensed (the cap is "
+            f"15% of context window; some sections must fit). "
+            f"condensed_count={condensed_count} n_sections={n_sections}"
+        )
+        # W6 — REAL assertion: ARCHIVED line is present with the
+        # exact condensed count.
+        archived_marker = "── ARCHIVED:"
+        assert archived_marker in body, (
+            "ARCHIVED line must be emitted when condensation happens"
+        )
+        # The marker line should carry the condensed count.
+        import re as _re
+        archived_line_match = _re.search(
+            r"── ARCHIVED: (\d+) oldest sections condensed",
+            body,
+        )
+        assert archived_line_match, (
+            f"ARCHIVED line must carry the condensed count; got body: "
+            f"{body[-400:]!r}"
+        )
+        archived_count = int(archived_line_match.group(1))
+        assert archived_count == condensed_count, (
+            f"ARCHIVED count ({archived_count}) must equal the "
+            f"condensed-marker occurrences ({condensed_count})"
+        )
+
+        # W6 — REAL assertion: OLDEST-first ordering. The condensed
+        # marker must appear in section index order — the FIRST
+        # sections get condensed, later ones keep full body.
+        # ``### SECTION {i}/{n}`` headers carry the index in their
+        # header line; the section body follows. We assert the
+        # FIRST section in the doc carries the condensed marker
+        # (oldest = first).
+        first_section_pos = body.find("### SECTION 1/")
+        assert first_section_pos != -1, "section 1 header must be present"
+        # Slice from the first section header onward and look for
+        # the condensed marker within its body region (before
+        # the next section header or the ARCHIVED line).
+        next_section_pos = body.find("### SECTION 2/", first_section_pos)
+        if next_section_pos == -1:
+            next_section_pos = body.find(archived_marker, first_section_pos)
+        if next_section_pos == -1:
+            next_section_pos = len(body)
+        first_section_body = body[first_section_pos:next_section_pos]
+        assert condensed_marker in first_section_body, (
+            f"the OLDEST section (SECTION 1) must carry the "
+            f"condensed marker — ceiling rule condenses OLDEST "
+            f"first. Section 1 body region: {first_section_body!r}"
+        )
 
     def test_hard_cap_degrades_to_b_shape(self):
         """Hard cap (over 15% even after condensing all sections)
         → B-shape: GLOBAL + ARCHIVED line only, sections
         removed.
+
+        W6 assertions (real):
+          * Exactly ONE ARCHIVED line carrying n=total_sections
+          * NO ``### SECTION`` headers in the body (all
+            condensed to nothing)
+          * GLOBAL text preserved
+          * Boundary line preserved (the doc still closes
+            cleanly)
         """
         from daemon.compaction import build_compaction_doc
-        # 1 section that is itself huge — 1M tokens.
+        # 1 section that is itself huge — ~25k tokens.
         huge_body = "x" * 100_000
         sections = [
             {
@@ -3074,10 +3229,47 @@ class TestCeilingRule:
             summarized_start=1, summarized_end=10,
             preserved_count=0,
             dropped_spans=[],
-            context_window=1000,  # tiny — every section blows the cap
+            # Tiny context window — cap (15%) = 7 tokens. The
+            # condensed marker alone (~10 tokens) blows the cap,
+            # so even after condensing ALL sections the rule
+            # degrades to B-shape (sections dropped entirely,
+            # only the ARCHIVED line + GLOBAL survive).
+            context_window=50,
         )
-        # B-shape: ARCHIVED line replaces the section bodies.
-        assert "ARCHIVED" in doc.content
+        body = doc.content
+
+        # W6 — REAL assertion: B-shape ARCHIVED line carries the
+        # total section count.
+        import re as _re
+        archived_line_match = _re.search(
+            r"── ARCHIVED: (\d+) oldest sections condensed for budget",
+            body,
+        )
+        assert archived_line_match, (
+            f"B-shape ARCHIVED line must be present; got body: "
+            f"{body[-400:]!r}"
+        )
+        archived_count = int(archived_line_match.group(1))
+        assert archived_count == 1, (
+            f"B-shape ARCHIVED count must equal total_sections=1; "
+            f"got {archived_count}"
+        )
+
+        # W6 — REAL assertion: NO section headers remain (the
+        # body has only the GLOBAL + ARCHIVED line + boundary).
+        # Sections are dropped to metadata only on B-shape.
+        assert "### SECTION " not in body, (
+            "B-shape must remove ALL section headers; only the "
+            "ARCHIVED line remains"
+        )
+        # GLOBAL preserved.
+        assert "GLOBAL" in body, (
+            "B-shape must preserve the GLOBAL OVERVIEW"
+        )
+        # Boundary line preserved.
+        assert "END OF COMPACTED CONTEXT" in body, (
+            "B-shape must preserve the boundary line"
+        )
 
 
 class TestProvenanceNoTimestampLeak:
@@ -3420,3 +3612,682 @@ class TestReactivePairingGuardUnaffected:
         assert not getattr(doc, "tool_calls", [])
         # No tool_call_id.
         assert getattr(doc, "tool_call_id", None) is None
+
+
+# =============================================================================
+# 2026-09-01 Council Fix Pass — new tests for B1/B2/B3/W1/ride-alongs
+# =============================================================================
+
+
+class TestB1EnginePopulatedCompactedIds:
+    """B1 — engine-populated ``compacted_ids`` on CompactionResult.
+
+    The engine is the AUTHORITATIVE source for which snapshot ids
+    were intentionally removed (the compactable span). The three
+    persist-seam sites consume ``result.compacted_ids`` with a
+    strict-None fallback to the site-derived set. This is the
+    acceptance test for the engine-side population: every emit
+    site stamps the field, the value is the exact set of
+    compactable-group message ids (or — on the emergency path —
+    every original message id covered by a RemoveMessage), and
+    the field is frozen for downstream immutability.
+    """
+
+    def test_compaction_result_has_compacted_ids_field(self):
+        """CompactionResult carries a ``compacted_ids: frozenset |
+        None`` field that downstream code consumes.
+        """
+        import dataclasses as _dc
+        from daemon.compaction import CompactionResult
+        fields = {f.name: f for f in _dc.fields(CompactionResult)}
+        assert "compacted_ids" in fields, (
+            "CompactionResult must carry the compacted_ids field "
+            "so the seam sites can consume it"
+        )
+        # Type is ``frozenset[str] | None`` — None preserves back-
+        # compat for legacy construction sites; frozenset enforces
+        # downstream immutability.
+        assert fields["compacted_ids"].default is None, (
+            "compacted_ids default must be None (back-compat)"
+        )
+
+    def test_corrupted_replacement_now_aborts(self):
+        """B1 acceptance: an engine result missing a tail id in
+        BOTH the replacement AND ``compacted_ids`` (engine
+        dropped a tail id by mistake) → ``CompactionAborted``.
+
+        Before B1 the site-derived ``pre_ids − kept_ids``
+        collapsed to ∅ for every well-formed engine output (the
+        replacement carried every kept id and the compacted ids
+        were derived from the same set), so the guard passed for
+        every shape. With B1 the engine stamps its own
+        ``compacted_ids``; the guard now checks that the
+        replacement carries EVERY snapshot id that is NOT in the
+        engine's authoritative compacted set.
+        """
+        from langchain_core.messages import HumanMessage
+        from daemon.compaction import (
+            build_sentinel_replacement,
+            CompactionAborted,
+            CompactionResult,
+        )
+
+        # Snapshot: 3 messages with ids h-0, h-1, h-2.
+        snapshot = [
+            HumanMessage(content="h-0", id="h-0"),
+            HumanMessage(content="h-1", id="h-1"),
+            HumanMessage(content="h-2", id="h-2"),
+        ]
+        # Engine result: replacement is doc + h-1 + h-2 (h-0
+        # MISSING — engine forgot to include it). The engine
+        # ALSO forgot to mark h-0 as compacted.
+        result = CompactionResult(
+            replacement_messages=[
+                SystemMessage(id="compaction-global-test-1", content="doc"),
+                HumanMessage(content="h-1", id="h-1"),
+                HumanMessage(content="h-2", id="h-2"),
+            ],
+            tokens_before=100, tokens_after=50, tokens_saved=50,
+            messages_before=3, messages_after=3,
+            compaction_type="summary",
+            compacted_at="2026-09-01T00:00:00+00:00",
+            # Engine says it removed NOTHING (mistake — h-0
+            # dropped without mark). The guard must catch this.
+            compacted_ids=frozenset(),
+        )
+        # h-0 is in the snapshot but NOT in the replacement and
+        # NOT in compacted_ids → CompactionAborted.
+        with pytest.raises(CompactionAborted):
+            build_sentinel_replacement(result, snapshot)
+
+
+class TestB2EmergencyTruncationSeam:
+    """B2 — Emergency truncation path does NOT abort at any site.
+
+    Before B2 the engine emitted ``RemoveMessage`` items whose
+    ``.id`` was the ORIGINAL snapshot id (the per-message
+    emergency truncation RemoveMessage targets). The site-derived
+    ``pre_ids − kept_ids`` collapsed to ∅ because every original
+    id was folded into ``kept_ids`` via the RemoveMessage path —
+    but the guard treated the resulting ∅ as "nothing was
+    intentionally compacted" and aborted on every snapshot id.
+
+    After B2 the seam sites fold RemoveMessage target ids into
+    the kept set, so the emergency path does NOT abort.
+    """
+
+    def test_emergency_replacement_passes_seam_guard(self):
+        """A ``CompactionResult`` carrying ``compaction_type=
+        'emergency_truncation'`` with the expected
+        ``ReplaceMessage(id=<original>)`` items does NOT raise
+        ``CompactionAborted`` at the seam.
+        """
+        from langchain_core.messages import HumanMessage
+        from daemon.compaction import (
+            build_sentinel_replacement,
+            CompactionResult,
+        )
+
+        # Snapshot: 3 messages with ids h-0, h-1, h-2.
+        snapshot = [
+            HumanMessage(content="h-0", id="h-0"),
+            HumanMessage(content="h-1", id="h-1"),
+            HumanMessage(content="h-2", id="h-2"),
+        ]
+        # Engine result: emergency truncation emits a
+        # RemoveMessage for EVERY original id (the engine covers
+        # each one before adding the truncated replacement) +
+        # the new truncated messages (re-id'd).
+        result = CompactionResult(
+            replacement_messages=[
+                RemoveMessage(id="h-0"),
+                RemoveMessage(id="h-1"),
+                RemoveMessage(id="h-2"),
+                HumanMessage(content="truncated-0", id="truncated-0"),
+                HumanMessage(content="truncated-1", id="truncated-1"),
+            ],
+            tokens_before=100, tokens_after=50, tokens_saved=50,
+            messages_before=3, messages_after=2,
+            compaction_type="emergency_truncation",
+            compacted_at="2026-09-01T00:00:00+00:00",
+            # Engine is authoritative on the emergency path:
+            # EVERY original id was intentionally removed.
+            compacted_ids=frozenset({"h-0", "h-1", "h-2"}),
+        )
+        # Sentinel + 2 truncated messages (no per-id
+        # RemoveMessages are emitted; the sentinel replaces
+        # them, eliminating the ValueError-on-absent-id class).
+        out = build_sentinel_replacement(
+            result, snapshot, compacted_ids=frozenset({"h-0", "h-1", "h-2"})
+        )
+        assert isinstance(out[0], RemoveMessage)
+        assert out[0].id == "__remove_all__"
+        assert [m.id for m in out[1:]] == ["truncated-0", "truncated-1"]
+
+    def test_emergency_path_legacy_compacted_ids_none_falls_back(self):
+        """Defensive: when an emergency ``CompactionResult`` does
+        NOT populate ``compacted_ids`` (legacy test fixture /
+        older code path), the SITE derives a fallback
+        ``pre_ids − new_replacement_ids`` that correctly
+        captures the engine's intent — every original id was
+        intentionally removed because the engine covers each
+        one with a RemoveMessage.
+
+        This test mirrors the REAL site path: the helper sees
+        ``compacted_ids=None`` only if the caller did NOT run
+        the site fallback. Here we assert the SITE-derived
+        fallback (what the site computes when the engine
+        didn't stamp) — not the helper's strict mode — passes.
+        """
+        from langchain_core.messages import HumanMessage
+        from daemon.compaction import (
+            build_sentinel_replacement,
+            CompactionResult,
+        )
+
+        snapshot = [
+            HumanMessage(content="h-0", id="h-0"),
+            HumanMessage(content="h-1", id="h-1"),
+            HumanMessage(content="h-2", id="h-2"),
+        ]
+        # Engine result WITHOUT compacted_ids (None) — site
+        # derives the fallback.
+        result = CompactionResult(
+            replacement_messages=[
+                RemoveMessage(id="h-0"),
+                RemoveMessage(id="h-1"),
+                RemoveMessage(id="h-2"),
+                HumanMessage(content="truncated-0", id="truncated-0"),
+            ],
+            tokens_before=100, tokens_after=50, tokens_saved=50,
+            messages_before=3, messages_after=1,
+            compaction_type="emergency_truncation",
+            compacted_at="2026-09-01T00:00:00+00:00",
+            compacted_ids=None,  # legacy: site falls back
+        )
+        # Mirror the site derivation (B2 fix — see
+        # compact_executor.py:1597):
+        pre_ids = {getattr(m, "id", None) for m in snapshot}
+        pre_ids.discard(None)
+        new_replacement_ids = {
+            getattr(m, "id", None)
+            for m in result.replacement_messages
+            if not isinstance(m, RemoveMessage)
+        }
+        new_replacement_ids.discard(None)
+        site_compacted_ids = pre_ids - new_replacement_ids
+        # The derivation correctly captures the engine's
+        # intent: every original id was intentionally removed.
+        assert site_compacted_ids == {"h-0", "h-1", "h-2"}, (
+            f"site derivation must capture emergency truncation "
+            f"intent; got {site_compacted_ids}"
+        )
+        # Now the helper trusts the engine-declared set and
+        # does NOT abort.
+        out = build_sentinel_replacement(
+            result, snapshot,
+            compacted_ids={"h-0", "h-1", "h-2"},
+        )
+        assert isinstance(out[0], RemoveMessage)
+        assert out[0].id == "__remove_all__"
+
+
+class TestB3NonContiguousSectionCoords:
+    """B3 — non-contiguous partial survivors → ORIGINAL batch
+    coords.
+
+    Before B3 the survivor-compressed ``s_idx`` pointer
+    collapsed the next section's ``start_idx`` to the END of the
+    previous survivor (not the ORIGINAL batch boundary). The
+    actually-dropped batch was presented as covered. After B3
+    ``start_idx`` / ``end_idx`` are computed from the
+    compactable-list position of the batch.
+
+    This test drives ``compact_state`` with 3 batches of 20
+    groups each (60 messages compactable) and stubs
+    ``_summarize_chunked`` so batch 0 and batch 2 succeed (and
+    batch 1 fails). It asserts the doc carries sections at the
+    ORIGINAL batch boundaries: section 1 covers messages #1–#20
+    (batch 0) and section 2 covers messages #41–#60 (batch 2).
+    """
+
+    @pytest.mark.asyncio
+    async def test_non_contiguous_sections_use_original_batch_coords(self):
+        """3 batches × 20 messages, batch 1 fails. Doc sections
+        must cover #1–#20 (batch 0) and #41–#60 (batch 2); the
+        failed batch (#21–#40) appears in the dropped-spans
+        clause.
+        """
+        from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+        from daemon.compaction import (
+            ChunkedOutcome,
+            CompactionContext, ContextCompactor,
+        )
+        from daemon.config import CompactionConfig
+
+        cfg = CompactionConfig(
+            enabled=True, threshold=0.01,
+            recent_message_window=2, min_recent_window=1,
+            context_window_overrides={"gpt-4o": 1000},
+            context_window_default=0,
+            target_ratio=0.40, model="", summarization_model="",
+            min_messages_before_compaction=2,
+            summarization_chunk_threshold=1.5,
+            timeout_base_s=90.0, timeout_per_100k_tokens_s=60.0,
+            timeout_cap_s=300.0, timeout_facade_margin_s=5.0,
+            operation_budget_s=300.0, chunk_concurrency=3,
+        )
+        compactor = ContextCompactor(cfg, llm_config={})
+        # 60 compactable + 2 preserved = 62 messages
+        msgs: list = []
+        for i in range(1, 61):
+            msgs.append(HumanMessage(content=f"x{i}", id=f"h-{i}"))
+        msgs.extend([
+            HumanMessage(content="tail-1", id="t-1"),
+            HumanMessage(content="tail-2", id="t-2"),
+        ])
+
+        async def fake_chunked(
+            compactable, context, previous_overview=None,
+        ):
+            # Batches 0, 2 succeed; batch 1 fails.
+            return ChunkedOutcome(
+                summaries=["batch-0 body", "batch-2 body"],
+                failed_batches=[1],
+                stop_reason="timeout",
+                completed_idxs=[0, 2],
+                budget_remaining_after_pool=120.0,
+            )
+
+        compactor._summarize_chunked = fake_chunked
+
+        # Merge stub: produces a single merged text per summary
+        # (avoids the real merge call; we only test section
+        # metadata layout).
+        async def fake_merge(
+            partial_summaries, context,
+            budget_seconds=None, previous_overview=None,
+        ):
+            return ("MERGED GLOBAL", True)
+
+        compactor._merge_summaries = fake_merge
+
+        ctx = CompactionContext(
+            messages=msgs, system_prompt_tokens=0,
+            model_name="gpt-4o", config=cfg, llm_config={},
+            instance_id="b3-non-contiguous",
+        )
+        result = await compactor.compact_state(ctx)
+        assert result is not None
+        assert result.compaction_type == "partial_summary"
+
+        # Extract the single doc.
+        docs = [
+            m for m in result.replacement_messages
+            if isinstance(m, SystemMessage)
+            and (m.id or "").startswith("compaction-global-")
+        ]
+        assert len(docs) == 1
+        doc = docs[0]
+
+        # W6-style REAL assertion: section span indices in the
+        # ORIGINAL batch coordinates. The first surviving
+        # section covers batch 0 = messages #1–#20. The second
+        # surviving section covers batch 2 = messages #41–#60.
+        # The failed batch (#21–#40) MUST appear in dropped.
+        body = doc.content
+        assert "messages #1–#20" in body, (
+            f"first survivor must cover ORIGINAL batch 0 "
+            f"(messages #1–#20); body excerpt: {body[:500]!r}"
+        )
+        assert "messages #41–#60" in body, (
+            f"second survivor must cover ORIGINAL batch 2 "
+            f"(messages #41–#60); body excerpt: {body[:500]!r}"
+        )
+        # The failed batch (#21–#40) MUST be in the
+        # dropped-spans clause — the previous bug presented it
+        # as covered.
+        assert "dropped without summary" in body
+        assert "messages #21–#40" in body, (
+            f"the dropped batch (#21–#40) MUST appear in the "
+            f"dropped-spans clause; body excerpt: {body[:500]!r}"
+        )
+
+
+class TestW1EnginePassTwoSeedEndToEnd:
+    """W1 — previous_overview seed end-to-end.
+
+    Pass-2 convergence: when the pre-compaction snapshot
+    contains a prior ``compaction-global-{iid}-*`` doc, the new
+    merge prompt receives the prior doc's GLOBAL OVERVIEW as a
+    ``Previous overview: …`` seed, AND the new doc carries the
+    seed verbatim in its envelope (architect §4).
+    """
+
+    @pytest.mark.asyncio
+    async def test_merge_prompt_carries_previous_overview_seed(self):
+        """Drive the engine with a snapshot that contains a
+        prior doc. The merge prompt sent to the LLM must
+        include the prior GLOBAL as the ``Previous overview:``
+        seed.
+
+        The test stubs ``_summarize_single_batch`` (so the
+        real ``_summarize_chunked`` runs end-to-end and
+        triggers the inner merge pass) and
+        ``_call_summarization_llm`` (so we capture the exact
+        prompt text the merge pass sends).
+        """
+        from langchain_core.messages import HumanMessage, SystemMessage
+        from daemon.compaction import (
+            CompactionContext, ContextCompactor,
+        )
+        from daemon.config import CompactionConfig
+
+        cfg = CompactionConfig(
+            enabled=True, threshold=0.01,
+            recent_message_window=2, min_recent_window=1,
+            context_window_overrides={"gpt-4o": 1000},
+            context_window_default=0,
+            target_ratio=0.40, model="", summarization_model="",
+            min_messages_before_compaction=2,
+            # Small chunk threshold so 40 messages split into
+            # 2 batches (each ≤ 20 groups).
+            summarization_chunk_threshold=0.5,
+            timeout_base_s=90.0, timeout_per_100k_tokens_s=60.0,
+            timeout_cap_s=300.0, timeout_facade_margin_s=5.0,
+            operation_budget_s=300.0, chunk_concurrency=3,
+        )
+        compactor = ContextCompactor(cfg, llm_config={})
+
+        # Snapshot: a prior doc + 40 fresh messages (≥2 batches
+        # so the multi-batch merge path fires). The prior doc
+        # id MUST match the instance_id so
+        # ``_extract_previous_overview`` parses it (the needle
+        # prefix is ``compaction-global-{instance_id}-``).
+        prior_global = (
+            "PRIOR_GLOBAL_FRAME — entities: alice, bob; goal: ship X"
+        )
+        prior_doc = SystemMessage(
+            id="compaction-global-w1-pass2-1",
+            content=(
+                "[CONTEXT COMPACTION — mode=summary]\n"
+                "── GLOBAL OVERVIEW ──\n"
+                f"{prior_global}\n"
+                "── END OF COMPACTED CONTEXT"
+            ),
+        )
+        msgs: list = [prior_doc]
+        for i in range(40):
+            msgs.append(
+                HumanMessage(
+                    # Long content to push past the chunk
+                    # threshold so the multi-batch path fires.
+                    content=f"x{i} " * 200,
+                    id=f"h-{i}",
+                )
+            )
+
+        # Stub the per-batch call so the real bounded pool runs
+        # end-to-end (no LLM dependency) and the inner merge
+        # pass fires.
+        async def fake_single_batch(batch_groups, context):
+            return f"batch summary ({len(batch_groups)} groups)"
+
+        compactor._summarize_single_batch = fake_single_batch
+
+        # Spy on _call_summarization_llm — captures the merge
+        # prompt text the engine constructs.
+        captured_prompts: list[str] = []
+
+        async def spy_call_llm(prompt, context):
+            captured_prompts.append(prompt)
+            return "MERGED WITH PRIOR FRAME"
+
+        compactor._call_summarization_llm = spy_call_llm
+
+        ctx = CompactionContext(
+            messages=msgs, system_prompt_tokens=0,
+            model_name="gpt-4o", config=cfg, llm_config={},
+            instance_id="w1-pass2",
+        )
+        result = await compactor.compact_state(ctx)
+        assert result is not None
+
+        # W1 — REAL assertion: the merge prompt received the
+        # prior doc's GLOBAL OVERVIEW as a seed.
+        merge_prompts = [
+            p for p in captured_prompts
+            if "Combine these conversation segment summaries" in p
+        ]
+        assert merge_prompts, (
+            f"no merge prompt captured (2 batches expected to "
+            f"trigger the merge pass); captured: "
+            f"{captured_prompts!r}"
+        )
+        prompt = merge_prompts[0]
+        assert "Previous overview" in prompt, (
+            f"merge prompt must carry the prior overview seed; "
+            f"prompt excerpt: {prompt[:500]!r}"
+        )
+        assert "PRIOR_GLOBAL_FRAME" in prompt, (
+            f"merge prompt must carry the PRIOR doc's GLOBAL "
+            f"OVERVIEW text; prompt excerpt: {prompt[:500]!r}"
+        )
+        assert "alice, bob" in prompt, (
+            f"merge prompt must carry the prior doc's entities "
+            f"verbatim; prompt excerpt: {prompt[:500]!r}"
+        )
+
+        # W1 — REAL assertion: the new doc itself carries the
+        # seed verbatim in the envelope (architect §4).
+        docs = [
+            m for m in result.replacement_messages
+            if isinstance(m, SystemMessage)
+            and (m.id or "").startswith("compaction-global-")
+        ]
+        assert len(docs) == 1
+        doc = docs[0]
+        assert "Previous overview:" in doc.content, (
+            f"new doc must carry the Previous overview seed in "
+            f"its envelope; body: {doc.content[:500]!r}"
+        )
+        assert "PRIOR_GLOBAL_FRAME" in doc.content, (
+            f"new doc must carry the PRIOR doc's GLOBAL text "
+            f"verbatim; body: {doc.content[:500]!r}"
+        )
+
+
+class TestCreatedAtPreservationAfterSentinel:
+    """Ride-along — BE-side created_at preservation assert after
+    the sentinel write.
+
+    Per FE `mergeMessagesById` (`message-merge.util.ts:88-95`):
+    same-id re-add is an idempotent upsert that KEEPS the
+    earlier `created_at` (MIN-4, `:106-110`). The sentinel
+    recipe's full-message-object tail must preserve the
+    original ``created_at`` for each preserved tail message.
+
+    Plan §10.1 gap — extend the real-graph order-pinning test's
+    read-back to assert created_at preservation on the sentinel
+    recipe (the prior test only asserted landed order).
+    """
+
+    @pytest.mark.asyncio
+    async def test_created_at_preserved_on_preserved_tail(self, tmp_path):
+        """Drive the seam helper on a real ``StateGraph`` +
+        file-backed SQLite. Stamp ``created_at`` on the
+        pre-compaction tail messages; assert the post-write
+        channel carries the SAME ``created_at`` values for the
+        preserved tail ids (FE union-merge contract).
+        """
+        import importlib
+        import sys
+        saved = {
+            k: sys.modules[k]
+            for k in list(sys.modules)
+            if k.startswith("langgraph")
+        }
+        for k in [k for k in sys.modules if k.startswith("langgraph")]:
+            del sys.modules[k]
+        try:
+            import aiosqlite
+            from langchain_core.messages import HumanMessage, SystemMessage
+            from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+            from langgraph.graph import END, START, MessagesState, StateGraph
+
+            from daemon.compaction import (
+                CompactionResult, build_sentinel_replacement,
+            )
+
+            async def _agent(state):
+                return {"messages": []}
+
+            db_path = tmp_path / "sentinel_created_at.db"
+            conn = await aiosqlite.connect(str(db_path))
+            saver = AsyncSqliteSaver(conn)
+            await saver.setup()
+            try:
+                g = StateGraph(MessagesState)
+                g.add_node("agent", _agent)
+                g.add_edge(START, "agent")
+                g.add_edge("agent", END)
+                compiled = g.compile(checkpointer=saver)
+
+                iid = "sentinel-created-at"
+                cfg = {"configurable": {"thread_id": iid}}
+
+                # Seeded: 1 injected + 4 old + 2 tail.
+                seeded = [
+                    HumanMessage(
+                        content="INJ",
+                        id="INJ-1",
+                        additional_kwargs={"injected_message": True},
+                    ),
+                    HumanMessage(
+                        content="old-1", id="A1",
+                        additional_kwargs={
+                            "created_at": "2026-01-01T00:00:01+00:00",
+                        },
+                    ),
+                    HumanMessage(
+                        content="old-2", id="A2",
+                        additional_kwargs={
+                            "created_at": "2026-01-01T00:00:02+00:00",
+                        },
+                    ),
+                    HumanMessage(
+                        content="old-3", id="A3",
+                        additional_kwargs={
+                            "created_at": "2026-01-01T00:00:03+00:00",
+                        },
+                    ),
+                    HumanMessage(
+                        content="old-4", id="A4",
+                        additional_kwargs={
+                            "created_at": "2026-01-01T00:00:04+00:00",
+                        },
+                    ),
+                    HumanMessage(
+                        content="tail-1", id="T1",
+                        additional_kwargs={
+                            "created_at": "2026-09-01T00:00:01+00:00",
+                        },
+                    ),
+                    HumanMessage(
+                        content="tail-2", id="T2",
+                        additional_kwargs={
+                            "created_at": "2026-09-01T00:00:02+00:00",
+                        },
+                    ),
+                ]
+                await compiled.aupdate_state(
+                    cfg, {"messages": seeded}, as_node="agent"
+                )
+                await compiled.ainvoke({"messages": []}, cfg)
+
+                pre_state = await compiled.aget_state(cfg)
+                pre_messages = list(pre_state.values.get("messages", []))
+                assert len(pre_messages) == 7
+
+                # Engine result: doc + tail T1, T2. A1–A4 are
+                # in compacted_ids (intentionally removed).
+                result = CompactionResult(
+                    replacement_messages=[
+                        seeded[0],  # injected INJ-1
+                        SystemMessage(
+                            id=f"compaction-global-{iid}-1",
+                            content="[CONTEXT COMPACTION — mode=summary]\nGLOBAL\n",
+                        ),
+                        seeded[5],  # T1
+                        seeded[6],  # T2
+                    ],
+                    tokens_before=1000, tokens_after=500, tokens_saved=500,
+                    messages_before=7, messages_after=4,
+                    compaction_type="summary",
+                    compacted_at="2026-09-01T00:00:00+00:00",
+                    compacted_ids=frozenset(
+                        {"A1", "A2", "A3", "A4"}
+                    ),
+                )
+                pre_ids = {
+                    m.id for m in pre_messages if m.id
+                }
+                kept_ids = {
+                    m.id for m in result.replacement_messages
+                    if not isinstance(m, RemoveMessage)
+                }
+                kept_ids.discard(None)
+                kept_ids.update({
+                    m.id for m in result.replacement_messages
+                    if isinstance(m, RemoveMessage)
+                })
+                kept_ids.discard(None)
+                compacted_ids = pre_ids - kept_ids
+                sentinel_list = build_sentinel_replacement(
+                    result, pre_messages, compacted_ids=compacted_ids
+                )
+                await compiled.aupdate_state(
+                    cfg, {"messages": sentinel_list}
+                )
+                post_state = await compiled.aget_state(cfg)
+                post_messages = list(post_state.values.get("messages", []))
+                # Expected landed order: INJ-1, doc, T1, T2.
+                assert len(post_messages) == 4
+                assert [m.id for m in post_messages] == [
+                    "INJ-1", f"compaction-global-{iid}-1", "T1", "T2",
+                ]
+
+                # Ride-along: created_at preservation. FE
+                # union-merge keeps the EARLIER created_at
+                # (MIN-4); the sentinel recipe's full-message-
+                # object tail must carry the same value the
+                # pre-compaction snapshot carried.
+                post_T1 = post_messages[2]
+                post_T2 = post_messages[3]
+                pre_T1 = next(m for m in pre_messages if m.id == "T1")
+                pre_T2 = next(m for m in pre_messages if m.id == "T2")
+                assert (
+                    post_T1.additional_kwargs.get("created_at")
+                    == pre_T1.additional_kwargs.get("created_at")
+                    == "2026-09-01T00:00:01+00:00"
+                ), (
+                    f"T1 created_at drift: pre="
+                    f"{pre_T1.additional_kwargs.get('created_at')!r} "
+                    f"post={post_T1.additional_kwargs.get('created_at')!r}"
+                )
+                assert (
+                    post_T2.additional_kwargs.get("created_at")
+                    == pre_T2.additional_kwargs.get("created_at")
+                    == "2026-09-01T00:00:02+00:00"
+                ), (
+                    f"T2 created_at drift: pre="
+                    f"{pre_T2.additional_kwargs.get('created_at')!r} "
+                    f"post={post_T2.additional_kwargs.get('created_at')!r}"
+                )
+            finally:
+                await conn.close()
+        finally:
+            for k in [k for k in sys.modules if k.startswith("langgraph")]:
+                del sys.modules[k]
+            sys.modules.update(saved)
+

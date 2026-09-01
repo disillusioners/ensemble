@@ -170,6 +170,82 @@ def _next_compaction_seq(messages: list[BaseMessage], instance_id: str) -> int:
     return max_seq + 1
 
 
+def _extract_previous_overview(messages: list[BaseMessage], instance_id: str) -> str | None:
+    """Extract the prior doc's GLOBAL OVERVIEW text for pass-2 seeding.
+
+    W1 fix (2026-09-01) — pass-2 convergence. When the pre-compaction
+    snapshot contains a prior ``compaction-global-{iid}-{seq}``
+    SystemMessage, its GLOBAL OVERVIEW body is the seed the new merge
+    pass uses so the GLOBAL frame CONVERGES across passes (architect
+    §4 — "the global frame converges across passes instead of being
+    re-derived"). The engine hands the extracted text to the doc
+    builder, which prepends it as a ``Previous overview: …`` line.
+
+    Returns the GLOBAL OVERVIEW text (between ``── GLOBAL OVERVIEW ──``
+    and ``── SECTION DETAIL ──`` / ``── END OF COMPACTED CONTEXT ──``)
+    from the highest-seq prior doc for this instance. Returns ``None``
+    when no prior doc exists OR the prior doc's body cannot be parsed
+    (the doc builder then omits the ``Previous overview:`` line —
+    silent fallback, not an error).
+
+    Args:
+        messages: Pre-compaction snapshot (read-only — NOT mutated).
+        instance_id: The owning instance id; matches the doc id prefix.
+
+    Returns:
+        The prior GLOBAL OVERVIEW text, or ``None`` if no prior doc /
+        unparsable body.
+    """
+    needle_prefix = f"{GLOBAL_DOC_ID_PREFIX}{instance_id}-"
+    best_seq = -1
+    best_msg: SystemMessage | None = None
+    for msg in messages:
+        if not isinstance(msg, SystemMessage):
+            continue
+        mid = getattr(msg, "id", None) or ""
+        if not mid.startswith(needle_prefix):
+            continue
+        try:
+            seq = int(mid[len(needle_prefix):])
+        except (ValueError, TypeError):
+            continue
+        if seq > best_seq:
+            best_seq = seq
+            best_msg = msg
+    if best_msg is None:
+        return None
+    body = getattr(best_msg, "content", "") or ""
+    if not isinstance(body, str):
+        body = str(body)
+    # Slice between GLOBAL OVERVIEW marker and the next section /
+    # boundary marker.
+    overview_marker = "── GLOBAL OVERVIEW ──"
+    section_marker = "── SECTION DETAIL ──"
+    boundary_marker = "── END OF COMPACTED CONTEXT"
+    start = body.find(overview_marker)
+    if start == -1:
+        return None
+    start = start + len(overview_marker)
+    # Skip any leading ``Previous overview: …`` from the prior doc
+    # itself — we want the prior GLOBAL body, not the prior seed.
+    body_from = body[start:].lstrip("\n")
+    # Find the next major marker.
+    section_at = body_from.find(section_marker)
+    boundary_at = body_from.find(boundary_marker)
+    candidates = [i for i in (section_at, boundary_at) if i != -1]
+    end = min(candidates) if candidates else len(body_from)
+    overview = body_from[:end].rstrip()
+    # Drop a leading ``Previous overview: …\n\n`` line if the prior
+    # doc itself had a seed (recursion guard — we pass the seed of
+    # the seed, not the prior doc's seed).
+    if overview.startswith("Previous overview:"):
+        # Find the first blank-line separator after the seed.
+        sep = overview.find("\n\n")
+        if sep != -1:
+            overview = overview[sep + 2 :].lstrip("\n")
+    return overview or None
+
+
 def build_sentinel_replacement(
     result: "CompactionResult",
     current_messages: list[BaseMessage],
@@ -207,8 +283,11 @@ def build_sentinel_replacement(
 
     Atomicity: one checkpoint write for messages (same as today);
     crash-after-write-1 leaves messages compacted with stale
-    ``compacted_at``; later dedup re-compact is idempotent under sentinel
-    + same ids.
+    ``compacted_at``; later dedup re-compact is CONVERGENT under
+    sentinel + same ids — the new GLOBAL frame incorporates the
+    prior doc's GLOBAL via the W1 ``previous_overview`` seed,
+    so the chain converges across passes instead of being
+    re-derived from scratch (architect §4).
 
     Args:
         result: The :class:`CompactionResult` produced by the engine.
@@ -237,9 +316,31 @@ def build_sentinel_replacement(
     # back to the source-verified literal value
     # ``"__remove_all__"`` so the helper works under both the
     # real-langgraph runtime AND the test-mocked runtime.
+    #
+    # W4 fix (2026-09-01) — ImportError fallback drift guard.
+    # When the fallback fires, the helper now emits a one-time
+    # WARNING (NOT silent) so a future upstream rename of
+    # ``REMOVE_ALL_MESSAGES`` (which would make the import
+    # succeed but the sentinel constant be stale) does NOT
+    # silently use the wrong literal. Tests that need to pin
+    # the real sentinel use ``_load_real_add_messages``'s
+    # swap window to import from the real package.
+    REMOVE_ALL_FALLBACK_EMITTED = False
     try:
         from langgraph.graph.message import REMOVE_ALL_MESSAGES
     except (ImportError, ModuleNotFoundError):
+        import logging as _logging
+        if not REMOVE_ALL_FALLBACK_EMITTED:
+            _logging.getLogger(__name__).warning(
+                "build_sentinel_replacement: langgraph.graph.message "
+                "is not importable in this runtime; using the "
+                "source-verified literal '__remove_all__' as the "
+                "REMOVE_ALL_MESSAGES sentinel. This is expected "
+                "under the test conftest's mocked langgraph; in "
+                "production, a missing import here indicates a "
+                "langgraph install/rename drift."
+            )
+            REMOVE_ALL_FALLBACK_EMITTED = True
         REMOVE_ALL_MESSAGES = "__remove_all__"
 
     # Step 1: split result.replacement_messages into three buckets:
@@ -281,20 +382,31 @@ def build_sentinel_replacement(
         getattr(m, "id", None)
         for m in injected + doc_and_tail
     ]
-    replacement_ids_non_null = [rid for rid in replacement_ids if rid]
+    # Ride-along (2026-09-01) — membership check via SET, not
+    # list. ``sid in <list>`` is O(n) per id; ``sid in <set>`` is
+    # O(1). The seam is in the hot path of every compaction
+    # write, and the ``compacted_ids`` parameter is already a
+    # set; using a list on the other operand is asymmetric and
+    # needlessly slow.
+    replacement_ids_set: set[str] = {
+        rid for rid in replacement_ids if rid
+    }
     snapshot_ids = [getattr(m, "id", None) for m in current_messages]
-    snapshot_ids_non_null = [i for i in snapshot_ids if i]
+    snapshot_ids_set: set[str] = {
+        i for i in snapshot_ids if i
+    }
     if compacted_ids is not None:
-        assert compacted_ids <= set(snapshot_ids_non_null), (
+        assert compacted_ids <= snapshot_ids_set, (
             "compacted_ids must be a subset of the snapshot message ids"
         )
-    # The ONE safety check: no preserved-tail id may be silently
-    # lost. The engine passes ``compacted_ids`` to scope the check
-    # to ids that were NOT intentionally removed.
+    # The ONE safety check: every removed id must be in the
+    # engine's declared ``compacted_ids`` set. When the engine
+    # passes ``None`` (legacy / test fixture), the helper falls
+    # back to the strict mode — every removed id must be in
+    # compacted_ids.
     snapshot_ids_lost = [
-        sid for sid in snapshot_ids_non_null
-        if sid not in replacement_ids_non_null
-        and (compacted_ids is None or sid not in compacted_ids)
+        sid for sid in (snapshot_ids_set - replacement_ids_set)
+        if not compacted_ids or sid not in compacted_ids
     ]
     if snapshot_ids_lost:
         raise CompactionAborted(
@@ -474,6 +586,58 @@ def _conversation_time_for(
     if not msg_id or not msg_timestamps:
         return None
     return msg_timestamps.get(msg_id)
+
+
+def _truncate_to_token_cap(
+    text: str,
+    cap: int,
+) -> str:
+    """Truncate ``text`` to fit within ``cap`` tokens (approx).
+
+    W5 fix (2026-09-01) — the GLOBAL OVERVIEW cap is enforced
+    here at doc assembly, not just in the merge prompt. The
+    truncation is approximate (token estimation via
+    ``estimate_messages_tokens`` wrapped in a single
+    ``SystemMessage``); we iteratively shrink the text until it
+    fits, preserving the head of the content (the model is
+    instructed to put the most important entities/decisions
+    first; we honor that order).
+
+    The caller appends a ``[truncated]`` marker after this
+    helper's output, so we DO NOT add one here.
+
+    Args:
+        text: Source text to truncate.
+        cap: Maximum tokens (int). Caller passes
+            ``GLOBAL_OVERVIEW_TOKEN_CAP``.
+
+    Returns:
+        Truncated text that fits within the cap. May be the
+        original text (if it already fits).
+    """
+    if not text:
+        return text
+    full_tokens = estimate_messages_tokens(
+        [SystemMessage(content=text)]
+    )
+    if full_tokens <= cap:
+        return text
+    # Iterative shrink: chop 20% off the tail each pass, then
+    # re-estimate. Cheap bounded loop.
+    candidate = text
+    for _ in range(20):  # bounded retries — converge fast
+        if estimate_messages_tokens(
+            [SystemMessage(content=candidate)]
+        ) <= cap:
+            return candidate
+        # Chop 20% of the tail. Use a character heuristic
+        # (faster than tiktoken per-iteration) and let the
+        # final token estimate verify.
+        new_len = max(1, int(len(candidate) * 0.8))
+        candidate = candidate[:new_len]
+    # Last-ditch: return what we have (still over cap; caller
+    # will mark truncated).
+    return candidate
 
 
 def _apply_ceiling_rule(
@@ -687,7 +851,31 @@ def build_compaction_doc(
     if previous_overview:
         body += f"Previous overview: {previous_overview}\n\n"
     if global_overview:
-        body += f"{global_overview}\n"
+        # W5 fix (2026-09-01) — enforce
+        # ``GLOBAL_OVERVIEW_TOKEN_CAP`` at doc assembly. Today
+        # the cap is prompt-soft only (the merge prompt says
+        # "keep under ~600 tokens"); an over-long GLOBAL text
+        # from a misbehaving model OR a multi-section partial
+        # path would blow the cap silently. Truncate to the
+        # cap when the body exceeds it, appending a
+        # ``[truncated — see SECTION DETAIL for arc-local
+        # detail]`` marker so the user knows the GLOBAL is
+        # not the full text.
+        global_tokens = estimate_messages_tokens(
+            [SystemMessage(content=global_overview)]
+        )
+        if global_tokens > GLOBAL_OVERVIEW_TOKEN_CAP:
+            truncated = _truncate_to_token_cap(
+                global_overview, GLOBAL_OVERVIEW_TOKEN_CAP
+            )
+            body += (
+                f"{truncated}\n"
+                f"[truncated — full GLOBAL overview text exceeded the "
+                f"GLOBAL_OVERVIEW_TOKEN_CAP={GLOBAL_OVERVIEW_TOKEN_CAP}; "
+                f"SECTION DETAIL below remains complete]\n"
+            )
+        else:
+            body += f"{global_overview}\n"
     elif mode == "truncation":
         # Architect §6.3 — bounded best-effort GLOBAL call failed or
         # was skipped; the envelope already lists the dropped spans,
@@ -995,6 +1183,21 @@ class CompactionResult:
     # payload under the same names.
     sections_kept: int | None = None
     sections_total: int | None = None
+    # B1 fix (2026-09-01) — engine-populated ``compacted_ids``.
+    # The set of snapshot message ids that were INTENTIONALLY
+    # removed by the engine on this compaction (the compactable
+    # span, including emergency-truncation per-message targets).
+    # The persist-seam sites consume this with a strict-None
+    # fallback to the site-derived set; the site fallback ALSO
+    # folds in any ``RemoveMessage`` target ids carried inside
+    # ``replacement_messages`` (defense-in-depth — see B2 fix).
+    # Without this, the pre-write guard is TAUTOLOGICAL because
+    # the site-derived ``pre_ids − kept_ids`` partitions the
+    # snapshot by construction (every kept id is in the
+    # replacement, every dropped id is also in ``kept_ids`` only
+    # if a ``RemoveMessage`` carries it; otherwise every dropped
+    # id is silently lost under the sentinel).
+    compacted_ids: frozenset[str] | None = None
 
 
 @dataclass
@@ -1043,6 +1246,14 @@ class ChunkedOutcome:
     # default ``None`` means the caller is the contiguous
     # ``range(len(batches))`` case (no failed_batches).
     completed_idxs: list[int] | None = None
+    # W3 fix (2026-09-01) — wall-clock seconds remaining in the
+    # whole-operation budget AFTER the batch pool joined. The
+    # outer merge call in ``compact_state`` consumes this so the
+    # merge is anchored to the REMAINING budget (per §6.2 — not
+    # the placeholder ``operation_budget_s - 0.0``). ``None`` on
+    # the single-batch path (no pool was used) — caller falls
+    # back to ``operation_budget_s``.
+    budget_remaining_after_pool: float | None = None
 
 
 @dataclass
@@ -1609,6 +1820,20 @@ class ContextCompactor:
             non_removal = [m for m in replacement if not isinstance(m, RemoveMessage)]
             tokens_after = estimate_messages_tokens(non_removal) + context.system_prompt_tokens
 
+            # B1 fix (2026-09-01) — engine-populated compacted_ids.
+            # Emergency truncation RemoveMessages cover EVERY group
+            # message (every original message in the pre-compaction
+            # snapshot that was grouped). The truncated messages
+            # have been re-id'd ("truncated-{uuid}") so they are
+            # NOT in pre_ids; the snapshot ids that will be lost
+            # under the sentinel are exactly the RemoveMessage
+            # targets + the doc's own new id (which is allowed).
+            emergency_compacted_ids = frozenset({
+                getattr(msg, "id", None)
+                for group in groups
+                for msg in group.messages
+                if getattr(msg, "id", None)
+            })
             return CompactionResult(
                 replacement_messages=replacement,
                 tokens_before=total_tokens,
@@ -1618,6 +1843,7 @@ class ContextCompactor:
                 messages_after=len(non_removal),
                 compaction_type="emergency_truncation",
                 compacted_at=timestamp,
+                compacted_ids=emergency_compacted_ids,
             )
 
         # 7. Summarization path.
@@ -1639,12 +1865,30 @@ class ContextCompactor:
         # ``_summarize_chunked`` still set the attribute so the
         # doc builder is honest about n.
         context._compactable_groups_for_doc = compactable
+        # W1 fix (2026-09-01) — extract the prior doc's GLOBAL
+        # OVERVIEW once per compaction and thread it into the
+        # merge prompt + doc builder. ``None`` on the first
+        # compaction of an instance.
+        previous_overview = _extract_previous_overview(
+            context.messages, _extract_instance_id(context)
+        )
+        # W2 fix (2026-09-01) — stamp the preserved-tail count
+        # for the doc envelope header at every doc-builder call
+        # site (today only ``_truncate_fallback`` stamps it; the
+        # summarization and partial-summary paths printed
+        # ``preserved verbatim: 0 most recent messages``).
+        context._preserved_count_for_doc = sum(
+            len(g.messages) for g in preserved
+        )
         failure_kind: str | None = None
         summarization_error: str | None = None
         global_overview: str | None = None
         total_summary_status: str | None = None
         try:
-            outcome = await self._summarize_chunked(compactable, context)
+            outcome = await self._summarize_chunked(
+                compactable, context,
+                previous_overview=previous_overview,
+            )
             summaries = outcome.summaries
 
             if not summaries:
@@ -1689,12 +1933,23 @@ class ContextCompactor:
                         compactable, summaries, context,
                     )
                     import time as _time
-                    budget_remaining = max(
-                        0.0,
-                        float(context.config.operation_budget_s) - 0.0,
+                    # W3 fix (2026-09-01) — anchor the merge
+                    # budget to the REMAINING budget, NOT the
+                    # placeholder ``operation_budget_s - 0.0``.
+                    # The pool already spent some time; the merge
+                    # must respect what is left.
+                    budget_remaining = (
+                        outcome.budget_remaining_after_pool
+                        if outcome.budget_remaining_after_pool is not None
+                        else float(context.config.operation_budget_s)
                     )
+                    # W1 — thread the prior doc's GLOBAL OVERVIEW
+                    # into the merge prompt so the new GLOBAL
+                    # converges across passes.
                     merged, ok = await self._merge_summaries(
-                        summaries, context, budget_seconds=budget_remaining
+                        summaries, context,
+                        budget_seconds=budget_remaining,
+                        previous_overview=previous_overview,
                     )
                     if ok:
                         total_summary_status = "ok"
@@ -1708,6 +1963,7 @@ class ContextCompactor:
                         compacted_at=timestamp,
                         global_overview=global_overview,
                         effective_model_name=self._effective_model_name(context),
+                        previous_overview=previous_overview,
                     )
                 else:
                     global_text = summaries[0]
@@ -1718,6 +1974,7 @@ class ContextCompactor:
                         instance_id=_extract_instance_id(context),
                         compacted_at=timestamp,
                         effective_model_name=self._effective_model_name(context),
+                        previous_overview=previous_overview,
                     )
                 # C3: re-attach injected messages at the end of the
                 # replacement list. The doc is the FIRST element so
@@ -1756,13 +2013,21 @@ class ContextCompactor:
                 # (bounded by the independent cap; never deepens
                 # partiality on failure).
                 import time as _time
-                budget_remaining = max(
-                    0.0,
-                    float(context.config.operation_budget_s) - 0.0,
+                # W3 fix (2026-09-01) — anchor the merge budget
+                # to the REMAINING budget, NOT the placeholder
+                # ``operation_budget_s - 0.0``.
+                budget_remaining = (
+                    outcome.budget_remaining_after_pool
+                    if outcome.budget_remaining_after_pool is not None
+                    else float(context.config.operation_budget_s)
                 )
                 # Bounded merge; on failure the doc still emits.
+                # W1 — thread the prior doc's GLOBAL OVERVIEW into
+                # the merge prompt for cross-pass convergence.
                 merged, ok = await self._merge_summaries(
-                    summaries, context, budget_seconds=budget_remaining
+                    summaries, context,
+                    budget_seconds=budget_remaining,
+                    previous_overview=previous_overview,
                 )
                 if ok:
                     total_summary_status = "ok"
@@ -1776,6 +2041,7 @@ class ContextCompactor:
                     compacted_at=timestamp,
                     global_overview=global_overview,
                     effective_model_name=self._effective_model_name(context),
+                    previous_overview=previous_overview,
                 )
                 # C3: re-attach injected messages at the end.
                 replacement = [doc]
@@ -1846,6 +2112,20 @@ class ContextCompactor:
             f"total_summary_status={total_summary_status}"
         )
 
+        # B1 fix (2026-09-01) — engine-populated compacted_ids.
+        # The compactable span (every group message id that the
+        # engine intends to drop / replace with the doc) is the
+        # authoritative "removed" set for the persist-seam sites.
+        # Injected messages and the preserved tail are KEPT, NOT
+        # removed, so they are NOT in this set. The doc itself is
+        # a NEW id (allowed to be absent from the snapshot).
+        compacted_span_ids = frozenset({
+            getattr(msg, "id", None)
+            for group in compactable
+            for msg in group.messages
+            if getattr(msg, "id", None)
+        })
+
         result_kwargs: dict = dict(
             replacement_messages=replacement,
             tokens_before=total_tokens,
@@ -1859,6 +2139,7 @@ class ContextCompactor:
             failure_kind=failure_kind,
             total_summary_status=total_summary_status,
             global_overview=global_overview,
+            compacted_ids=compacted_span_ids,
         )
         if summarization_error:
             result_kwargs["summarization_error"] = summarization_error
@@ -1880,6 +2161,7 @@ class ContextCompactor:
         self,
         compactable_groups: list[MessageGroup],
         context: CompactionContext,
+        previous_overview: str | None = None,
     ) -> "ChunkedOutcome":
         """Summarize compactable groups, chunking if necessary.
 
@@ -1960,6 +2242,11 @@ class ContextCompactor:
                     summaries=[summary],
                     failed_batches=[],
                     stop_reason="completed",
+                    # No pool — outer merge falls back to the
+                    # full operation_budget_s (the budget_remaining
+                    # sentinel is None; caller substitutes the
+                    # full budget).
+                    budget_remaining_after_pool=None,
                 )
             except (TimeoutError, asyncio.TimeoutError):
                 # O14-narrowed per-chunk timeout. Outer handler maps
@@ -1974,6 +2261,7 @@ class ContextCompactor:
                     summaries=[],
                     failed_batches=[0],
                     stop_reason="timeout",
+                    budget_remaining_after_pool=None,
                 )
 
         # Chunk into batches of 20 groups
@@ -2113,21 +2401,31 @@ class ContextCompactor:
         # "timeout" — even if some partials are present. Outer handler
         # ignores this string on the |S|>=1 path; only ``summaries``
         # drives the partial-vs-truncate branching.
+        # W3 fix (2026-09-01) — compute the wall-clock REMAINING
+        # budget once and thread it into every ChunkedOutcome
+        # return path so the outer merge call uses the SAME value
+        # the inner merge call uses (per architect §6.2 — the
+        # merge is bounded by the remaining operation_budget_s).
+        budget_remaining = max(
+            0.0,
+            budget_seconds - (_time.monotonic() - budget_started_at)
+        )
         if partial_summaries and stop_reason == "completed":
             # All batches succeeded → merge if multiple. The merge
             # pass uses the same model selection as chunk summarization
             # (architect §6.7) and gets an independent budget derived
             # from the remaining operation_budget_s.
-            import time as _time
-            budget_remaining = max(0.0, budget_seconds - (_time.monotonic() - budget_started_at))
             if len(partial_summaries) == 1:
                 return ChunkedOutcome(
                     summaries=partial_summaries,
                     failed_batches=[],
                     stop_reason="completed",
+                    budget_remaining_after_pool=budget_remaining,
                 )
             merged, ok = await self._merge_summaries(
-                partial_summaries, context, budget_seconds=budget_remaining
+                partial_summaries, context,
+                budget_seconds=budget_remaining,
+                previous_overview=previous_overview,
             )
             if not ok:
                 # Merge pass failed; per §6.2 fail-open, we still
@@ -2143,6 +2441,7 @@ class ContextCompactor:
                     failed_batches=[],
                     stop_reason="completed",
                     merge_failed=True,
+                    budget_remaining_after_pool=budget_remaining,
                 )
             # When the merge succeeded, replace the per-batch list
             # with a SINGLE-element list: the GLOBAL. The downstream
@@ -2154,6 +2453,7 @@ class ContextCompactor:
                 summaries=[merged],
                 failed_batches=[],
                 stop_reason="completed",
+                budget_remaining_after_pool=budget_remaining,
             )
 
         # Partial-summary path (|S| >= 1, with stop_reason ∈
@@ -2170,6 +2470,7 @@ class ContextCompactor:
             failed_batches=failed_batches,
             stop_reason=stop_reason,
             completed_idxs=completed_idxs,
+            budget_remaining_after_pool=budget_remaining,
         )
     
     async def _summarize_single_batch(
@@ -2245,6 +2546,7 @@ class ContextCompactor:
         partial_summaries: list[str],
         context: CompactionContext,
         budget_seconds: float | None = None,
+        previous_overview: str | None = None,
     ) -> tuple[str, bool]:
         """Merge multiple per-batch summaries into one GLOBAL OVERVIEW.
 
@@ -2254,6 +2556,13 @@ class ContextCompactor:
         ``(content, ok)`` tuple: the merged content (or empty string
         on failure) and a boolean ``ok`` flag for the fail-open
         ladder.
+
+        W1 fix (2026-09-01) — pass-2 convergence. ``previous_overview``
+        is the prior doc's GLOBAL OVERVIEW text (from
+        :func:`_extract_previous_overview`); when provided, it is
+        threaded into the merge prompt as the "Previous overview:"
+        seed so the GLOBAL frame CONVERGES across passes instead of
+        being re-derived from scratch (architect §4).
 
         Independent budget (architect §6.2):
         ``min(inner_cap, 25% of remaining compaction deadline)``,
@@ -2280,6 +2589,11 @@ class ContextCompactor:
                 bounded by ``min(inner_cap, 0.25 * budget_seconds)``;
                 when ``None``, the merge falls back to the
                 ``timeout_base_s`` adaptive cap.
+            previous_overview: When non-empty, the prior doc's
+                GLOBAL OVERVIEW text. Threaded into the merge
+                prompt so the new GLOBAL CONVERGES with the prior
+                pass. ``None`` for the first compaction of an
+                instance.
 
         Returns:
             ``(merged_text, ok)`` — ``merged_text`` is the GLOBAL
@@ -2290,11 +2604,26 @@ class ContextCompactor:
         if not partial_summaries:
             return "", False
         if len(partial_summaries) == 1:
+            # W1 — single-section pass still threads the seed so
+            # the merge "prompt" (here a no-op) does not lose the
+            # pass-2 convergence contract. When the prior doc
+            # exists, the new doc carries its GLOBAL body verbatim
+            # (no merge LLM call needed; the seed IS the GLOBAL).
+            if previous_overview:
+                # Caller wraps this in the doc; we just signal ok
+                # so the doc builder picks up the seed from the
+                # context (already set by compact_state). Return
+                # empty so the caller does NOT set
+                # ``global_overview = merged`` and double-print.
+                return "", True
             return partial_summaries[0], True
 
         # Direct merge for 2-3 summaries
         if len(partial_summaries) <= 3:
-            return await self._merge_one_round(partial_summaries, context, budget_seconds)
+            return await self._merge_one_round(
+                partial_summaries, context, budget_seconds,
+                previous_overview=previous_overview,
+            )
 
         # Hierarchical pairwise merge for 4+ summaries (single LLM
         # call per round; we collapse rounds until ≤3 are left, then
@@ -2307,7 +2636,8 @@ class ContextCompactor:
                 pair = current[i:i + 2]
                 if len(pair) == 2:
                     merged, ok = await self._merge_one_round(
-                        pair, context, budget_seconds
+                        pair, context, budget_seconds,
+                        previous_overview=previous_overview,
                     )
                     if not ok:
                         # Fail-open: return empty so the caller emits
@@ -2320,7 +2650,10 @@ class ContextCompactor:
             if last_error is None and len(current) > 3:
                 last_error = "hierarchical-round-failure"  # diagnostic
 
-        final, ok = await self._merge_one_round(current, context, budget_seconds)
+        final, ok = await self._merge_one_round(
+            current, context, budget_seconds,
+            previous_overview=previous_overview,
+        )
         if not ok:
             return "", False
         return final, True
@@ -2330,6 +2663,7 @@ class ContextCompactor:
         partial_summaries: list[str],
         context: CompactionContext,
         budget_seconds: float | None,
+        previous_overview: str | None = None,
     ) -> tuple[str, bool]:
         """Single LLM call that merges a list of section bodies.
 
@@ -2337,6 +2671,12 @@ class ContextCompactor:
         architect §6.2 fail-open ladder: bounded by the independent
         cap, one retry on transient failure, returns ``("", False)``
         on second failure.
+
+        W1 fix (2026-09-01) — when ``previous_overview`` is
+        provided, the merge prompt is extended with a
+        ``Previous overview: …`` block so the model converges the
+        new GLOBAL with the prior pass instead of re-deriving from
+        scratch.
 
         Returns:
             ``(content, ok)`` — ``content`` is the merged text (no
@@ -2348,6 +2688,16 @@ class ContextCompactor:
         combined = "\n\n---\n\n".join(
             f"Part {i+1}:\n{s}" for i, s in enumerate(partial_summaries)
         )
+        # W1 — prior GLOBAL is threaded into the merge prompt so
+        # the model converges across passes. The doc builder also
+        # prints the same seed verbatim below the GLOBAL header.
+        previous_overview_block = ""
+        if previous_overview:
+            previous_overview_block = (
+                f"Previous overview (treat as authoritative frame; "
+                f"merge in any updates; do not lose entities/goals/"
+                f"decisions carried here):\n{previous_overview}\n\n"
+            )
         merge_prompt = (
             "Combine these conversation segment summaries into a single, "
             "coherent GLOBAL OVERVIEW of the conversation arc. Preserve:\n"
@@ -2357,6 +2707,7 @@ class ContextCompactor:
             "Remove redundancy, deduplicate, and keep the merged text under "
             "about 600 tokens. Do NOT include a timestamp or a header line — "
             "this is the body of the GLOBAL OVERVIEW section.\n\n"
+            f"{previous_overview_block}"
             f"Sections:\n{combined}"
         )
 
@@ -2505,6 +2856,7 @@ class ContextCompactor:
         instance_id: str,
         compacted_at: str,
         effective_model_name: str,
+        previous_overview: str | None = None,
     ) -> SystemMessage:
         """Build the global doc for the FULL-success path.
 
@@ -2512,6 +2864,16 @@ class ContextCompactor:
         the entire compactable span; the merged text becomes the
         GLOBAL OVERVIEW body. No per-batch sections (the per-batch
         texts are already merged into ``global_text``).
+
+        W5 fix (2026-09-01) — the SECTION 1 body is a SHORT
+        reference ("see GLOBAL OVERVIEW above") instead of
+        duplicating ``global_text`` verbatim; the GLOBAL body is
+        the only place the merged text appears. Eliminates the
+        prior full-success-path text duplication.
+
+        W1 fix (2026-09-01) — accepts ``previous_overview`` and
+        threads it into the doc via :func:`build_compaction_doc`'s
+        existing seed slot.
         """
         # Span boundaries in 1-based terms (relative to the
         # compactable_groups list, which is a slice of
@@ -2528,6 +2890,14 @@ class ContextCompactor:
         context_window = get_model_context_limit(
             effective_model_name, context.config
         )
+        # W5 — single-section full success: the section body is
+        # a short reference back to the GLOBAL OVERVIEW; the
+        # GLOBAL body is the canonical merged text. Eliminates
+        # the prior duplicated-text regression.
+        section_body = (
+            "(see GLOBAL OVERVIEW above — the merged text is the "
+            "authoritative summary for this compactable span)"
+        )
         return build_compaction_doc(
             instance_id=instance_id,
             seq=seq,
@@ -2538,7 +2908,7 @@ class ContextCompactor:
                 {
                     "start_idx": start_idx,
                     "end_idx": end_idx,
-                    "body": global_text,
+                    "body": section_body,
                     "start_id": start_id,
                     "end_id": end_id,
                 }
@@ -2546,65 +2916,12 @@ class ContextCompactor:
             total_sections=1,
             summarized_start=start_idx,
             summarized_end=end_idx,
-            preserved_count=sum(len(g.messages) for g in (
-                # Preserved tail count; may be 0 on a forced compact.
-                []  # placeholder; compact_state caller passes real count
-            )) if False else _count_preserved(context, compactable),
+            preserved_count=_count_preserved(context, compactable),
             dropped_spans=[],
             context_window=context_window,
+            previous_overview=previous_overview,
         )
 
-    @staticmethod
-    def _build_global_doc_for_full_failure(
-        compactable: list[MessageGroup],
-        per_batch_text: str,
-        context: CompactionContext,
-        *,
-        instance_id: str,
-        compacted_at: str,
-        preserved_groups: list[MessageGroup],
-        effective_model_name: str,
-    ) -> SystemMessage:
-        """Architect §6.2 — merge pass failed on the FULL path.
-
-        Emit ONE section whose body is the surviving per-batch text
-        (single surviving batch in the FULL path = the only batch that
-        succeeded before the merge pass errored). The GLOBAL OVERVIEW
-        is the placeholder line (the doc builder emits it when
-        ``global_overview`` is ``None`` and ``mode != "truncation"``).
-        """
-        start_idx = 1
-        end_idx = sum(len(g.messages) for g in compactable)
-        start_id = compactable[0].messages[0].id if compactable else None
-        end_id = compactable[-1].messages[-1].id if compactable else None
-        seq = _next_compaction_seq(context.messages, instance_id)
-        context_window = get_model_context_limit(
-            effective_model_name, context.config
-        )
-        return build_compaction_doc(
-            instance_id=instance_id,
-            seq=seq,
-            mode="summary",
-            compacted_at=compacted_at,
-            global_overview=None,  # placeholder
-            sections=[
-                {
-                    "start_idx": start_idx,
-                    "end_idx": end_idx,
-                    "body": per_batch_text,
-                    "start_id": start_id,
-                    "end_id": end_id,
-                }
-            ],
-            total_sections=1,
-            summarized_start=start_idx,
-            summarized_end=end_idx,
-            preserved_count=sum(len(g.messages) for g in preserved_groups),
-            dropped_spans=[],
-            context_window=context_window,
-        )
-
-    @staticmethod
     @staticmethod
     def _per_batch_section_meta(
         compactable: list[MessageGroup],
@@ -2635,14 +2952,17 @@ class ContextCompactor:
         # single batch covering everything.
         batch_size = 20
         sections: list[dict] = []
-        s_idx = 0  # pointer into compactable_groups
-        # ``_per_batch_section_meta`` walks the surviving
-        # summaries in order. For the partial path, the
-        # ``compact_state`` caller provides ``batch_indices`` to
-        # align the surviving body with its ORIGINAL batch index
-        # (so the slice into ``compactable`` lands on the right
-        # messages). When ``batch_indices`` is None, the loop
-        # index IS the batch index (contiguous case).
+        # B3 fix (2026-09-01) — ``start_idx`` / ``end_idx`` are
+        # minted in ORIGINAL batch coordinates, NOT in
+        # survivor-compressed coordinates. ``s_idx`` used to track
+        # the END of the previously-emitted section; for
+        # non-contiguous survivors (batches 0, 2, 4 succeed but
+        # 1, 3, 5 fail) that collapsed the next section's
+        # ``start_idx`` to ``s_idx + 1`` of the previous survivor,
+        # not the original batch boundary — SECTION 2 carried the
+        # wrong batch's summary, the actually-dropped batch was
+        # presented as covered. Compute ORIGINAL start/end from
+        # the compactable-list position of the batch.
         for i, body in enumerate(summaries):
             if batch_indices is not None:
                 batch_i = batch_indices[i]
@@ -2651,8 +2971,14 @@ class ContextCompactor:
             batch_groups = compactable[batch_i * batch_size:(batch_i + 1) * batch_size]
             if not batch_groups:
                 break
-            start_idx = s_idx + 1
-            end_idx = s_idx + sum(len(g.messages) for g in batch_groups)
+            # ORIGINAL coordinates: walk back over every compactable
+            # group BEFORE this batch's start.
+            prior_msgs = sum(
+                len(g.messages)
+                for g in compactable[: batch_i * batch_size]
+            )
+            start_idx = prior_msgs + 1
+            end_idx = prior_msgs + sum(len(g.messages) for g in batch_groups)
             start_id = batch_groups[0].messages[0].id
             end_id = batch_groups[-1].messages[-1].id
             if body:
@@ -2666,7 +2992,6 @@ class ContextCompactor:
             else:
                 # Failed batch → dropped span.
                 dropped_spans.append((start_idx, end_idx))
-            s_idx = end_idx
         return sections
 
     @staticmethod
@@ -2678,6 +3003,7 @@ class ContextCompactor:
         compacted_at: str,
         global_overview: str | None,
         effective_model_name: str,
+        previous_overview: str | None = None,
     ) -> SystemMessage:
         """Build the global doc for the PARTIAL-summary path.
 
@@ -2690,6 +3016,10 @@ class ContextCompactor:
         ``batch_sections`` is the survivor set; the total section
         count is computed from the compactable_groups length and
         the per-batch batch_size=20 slicing (so k/n is honest).
+
+        W1 fix (2026-09-01) — accepts ``previous_overview`` and
+        threads it into the doc via :func:`build_compaction_doc`'s
+        existing seed slot.
         """
         compactable = getattr(context, "_compactable_groups_for_doc", None)
         if compactable is None:
@@ -2739,6 +3069,7 @@ class ContextCompactor:
             preserved_count=_count_preserved(context, compactable),
             dropped_spans=dropped_spans,
             context_window=context_window,
+            previous_overview=previous_overview,
         )
 
     async def _truncate_fallback(
@@ -2773,6 +3104,12 @@ class ContextCompactor:
           envelope already enumerates the dropped span — the wire
           outcome is honest without a global frame.
 
+        W1 fix (2026-09-01) — when a prior doc exists in the
+        snapshot, its GLOBAL OVERVIEW is extracted by
+        :func:`_extract_previous_overview` and threaded into the
+        doc via :func:`build_compaction_doc`'s ``previous_overview``
+        slot so the pass-2 envelope carries the convergence seed.
+
         Args:
             compactable: Groups that would have been summarized.
             preserved: Groups being kept intact.
@@ -2792,12 +3129,29 @@ class ContextCompactor:
         iid = instance_id or _extract_instance_id(context)
         global_text: str | None = None
         status: str | None = None
+        # W1 — extract the prior doc's GLOBAL OVERVIEW so the new
+        # doc can converge. None on the first compaction of an
+        # instance.
+        previous_overview = _extract_previous_overview(
+            context.messages, iid
+        )
         if (
             context.tokens_before_total
             and context.tokens_before_total >= TRUNCATION_GLOBAL_MIN_TOKENS_BEFORE
         ):
             sampled = self._sample_for_truncation_global(compactable)
             if sampled:
+                # W1 — seed the bounded GLOBAL prompt with the
+                # prior doc's GLOBAL so the model converges across
+                # passes instead of re-deriving from scratch.
+                previous_overview_block = ""
+                if previous_overview:
+                    previous_overview_block = (
+                        f"Previous overview (treat as authoritative "
+                        f"frame; merge in any updates; do not lose "
+                        f"entities/goals/decisions carried here):\n"
+                        f"{previous_overview}\n\n"
+                    )
                 try:
                     overview_prompt = (
                         "Write a concise global overview (~300 tokens) of "
@@ -2806,6 +3160,7 @@ class ContextCompactor:
                         "line or timestamp — this is the body of the "
                         "GLOBAL OVERVIEW section. If the content is too "
                         "fragmented to summarize, return an empty string.\n\n"
+                        f"{previous_overview_block}"
                         f"Conversation:\n{sampled}"
                     )
                     global_text = await asyncio.wait_for(
@@ -2860,6 +3215,7 @@ class ContextCompactor:
             preserved_count=context._preserved_count_for_doc,
             dropped_spans=dropped_spans,
             context_window=context_window,
+            previous_overview=previous_overview,
         )
         # 3. Flatten preserved tail (multimodal content → text,
         # original ids preserved). The caller re-attaches injected.

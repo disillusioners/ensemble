@@ -1586,25 +1586,50 @@ async def _persist_compaction_result(
         build_sentinel_replacement,
         CompactionAborted,
     )
-    # §5 — scope the pre-write guard to the ids the engine
-    # intentionally removed. The engine's CompactionResult
-    # does not carry the explicit compactable-span id set today,
-    # so the engine path computes it from the messages it dropped
-    # (the ones whose ids are NOT in result.replacement_messages
-    # AND are non-None in the pre-compaction snapshot). This is
-    # the minimum the seam needs to distinguish preserved-tail
-    # loss from intentional compaction.
+    # §5 / B1 + B2 fix (2026-09-01) — see the docstring on
+    # :func:`build_sentinel_replacement` for the contract.
+    #
+    # The engine's ``CompactionResult.compacted_ids`` is the
+    # AUTHORITATIVE "intentionally removed" set. The site
+    # derives a fallback ONLY when the engine did not stamp it
+    # (legacy test fixtures that hand-build a result).
+    #
+    # The site-derived fallback is ``pre_ids − new_replacement_ids``
+    # where ``new_replacement_ids`` is the set of ids on
+    # non-RemoveMessage replacement messages (the "keep" set).
+    # RemoveMessage targets are declarations of loss, NOT
+    # "kept" ids — they are correctly excluded from the keep
+    # set so the derived compacted set captures the engine's
+    # intent (the engine is removing every snapshot id that
+    # is not in the keep set). This formulation is sound for
+    # ALL paths including the emergency path (where the
+    # engine populates RemoveMessages with the same ids it
+    # declares as compacted_ids).
     pre_ids = {
         getattr(m, "id", None)
         for m in pre_messages
     }
     pre_ids.discard(None)
-    kept_ids = {
+    new_replacement_ids = {
         getattr(m, "id", None)
         for m in result.replacement_messages
+        if not isinstance(m, RemoveMessage)
     }
-    kept_ids.discard(None)
-    compacted_ids: set[str] = pre_ids - kept_ids
+    new_replacement_ids.discard(None)
+    site_compacted_ids: set[str] = pre_ids - new_replacement_ids
+    engine_compacted_ids = getattr(result, "compacted_ids", None)
+    if engine_compacted_ids is not None:
+        # Engine is authoritative; assert disjointness so a
+        # mismatch surfaces loudly here, not as a silent loss
+        # in the checkpoint.
+        assert set(engine_compacted_ids) <= site_compacted_ids, (
+            "engine populated compacted_ids that are NOT a subset "
+            "of the site-derived set — engine and site disagree on "
+            "the removed span; refusing the write"
+        )
+        compacted_ids: set[str] = set(engine_compacted_ids)
+    else:
+        compacted_ids = site_compacted_ids
     try:
         replacement: list[BaseMessage] = build_sentinel_replacement(
             result, pre_messages, compacted_ids=compacted_ids

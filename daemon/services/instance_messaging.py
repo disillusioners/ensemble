@@ -1206,17 +1206,33 @@ class InstanceMessagingService:
                 build_sentinel_replacement,
                 CompactionAborted,
             )
+            # B1 + B2 fix (2026-09-01) — engine's compacted_ids
+            # is authoritative; site derives from
+            # ``pre_ids − new_replacement_ids`` (non-RemoveMessage
+            # keep set; RemoveMessage targets are NOT "kept").
+            # See compact_executor.py:1597 for the full rationale.
             pre_ids = {
                 getattr(m, "id", None)
                 for m in pre_messages
             }
             pre_ids.discard(None)
-            kept_ids = {
+            new_replacement_ids = {
                 getattr(m, "id", None)
                 for m in result.replacement_messages
+                if not isinstance(m, RemoveMessage)
             }
-            kept_ids.discard(None)
-            compacted_ids: set[str] = pre_ids - kept_ids
+            new_replacement_ids.discard(None)
+            site_compacted_ids: set[str] = pre_ids - new_replacement_ids
+            engine_compacted_ids = getattr(result, "compacted_ids", None)
+            if engine_compacted_ids is not None:
+                assert set(engine_compacted_ids) <= site_compacted_ids, (
+                    "engine populated compacted_ids that are NOT a "
+                    "subset of the site-derived set — engine and "
+                    "site disagree on the removed span"
+                )
+                compacted_ids: set[str] = set(engine_compacted_ids)
+            else:
+                compacted_ids = site_compacted_ids
             try:
                 replacement_messages = build_sentinel_replacement(
                     result, pre_messages, compacted_ids=compacted_ids
