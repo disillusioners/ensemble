@@ -486,3 +486,127 @@ class TestWindowMathFollowsCompactionModel:
         assert result_no_override is None, (
             "same messages must NOT trigger under the session model's window"
         )
+
+
+# =============================================================================
+# W1: auto-path threshold gated at min(session_window, override_window)
+# =============================================================================
+
+class TestWindowGatedAtSessionWindow:
+    """W1 (review fix): when a compaction-model override is active, the
+    AUTO-path threshold gate is sized at ``min(session_window,
+    override_window)`` — NOT at the override window alone — so a LARGER
+    override window cannot push proactive compaction past session
+    capacity. The internal sizing math (chunk batching, merge, condense)
+    still follows the OVERRIDE window; this is the TRIGGER side only.
+
+    Failure mode the gate prevents: with override > session, the OLD
+    code let the session model overflow before proactive compaction
+    triggered. The reactive CLE path (force=False) returns None on
+    context-length error, so auto-recovery was defeated. /compact
+    (force=True) still recovered — that path was never broken. Once
+    the gate is correct, proactive compaction fires at the SESSION
+    threshold, so the session model never overflows.
+    """
+
+    def test_override_greater_than_session_gates_at_session(self) -> None:
+        """(a) override window > session window → gate at SESSION."""
+        config = make_compaction_config(
+            model="big-override",
+            context_window_overrides={
+                "big-override": 200_000,
+                "session-model": 200,
+            },
+        )
+        compactor = ContextCompactor(config, {})
+        context = _make_context(config, [], model_name="session-model")
+        assert compactor._trigger_window(context) == 200
+
+    def test_override_smaller_than_session_gates_at_override(self) -> None:
+        """(b) override window < session window → gate at OVERRIDE
+        (current behavior, preserved)."""
+        config = make_compaction_config(
+            model="small-override",
+            context_window_overrides={
+                "small-override": 100,
+                "session-model": 200_000,
+            },
+        )
+        compactor = ContextCompactor(config, {})
+        context = _make_context(config, [], model_name="session-model")
+        assert compactor._trigger_window(context) == 100
+
+    def test_no_override_uses_session_model_window(self) -> None:
+        """No override set → session-model window, byte-identical with
+        pre-setting behavior (S-7 anti-drift: callers that never set
+        the override must see no change)."""
+        config = make_compaction_config()  # model="" → no override
+        compactor = ContextCompactor(config, {})
+        context = _make_context(config, [], model_name="gpt-4o")
+        # gpt-4o is in the MODEL_CONTEXT_LIMITS registry at 128000.
+        assert compactor._trigger_window(context) == 128000
+
+    def test_warn_emitted_once_when_override_greater_than_session(
+        self, caplog,
+    ) -> None:
+        """(c) WARN emitted when override window > session window,
+        exactly ONCE per compactor instance (no per-batch spam)."""
+        config = make_compaction_config(
+            model="big-override",
+            context_window_overrides={
+                "big-override": 200_000,
+                "session-model": 200,
+            },
+        )
+        compactor = ContextCompactor(config, {})
+        context = _make_context(config, [], model_name="session-model")
+        with caplog.at_level(logging.WARNING, logger="daemon.compaction"):
+            compactor._trigger_window(context)
+            compactor._trigger_window(context)  # second call: must NOT re-warn
+        warnings = [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING and "gated at" in r.getMessage()
+        ]
+        assert len(warnings) == 1, (
+            f"expected exactly ONE WARN per compactor instance, "
+            f"got {len(warnings)}"
+        )
+        msg = warnings[0].getMessage()
+        # Message names BOTH windows so operators can act on it.
+        assert "big-override" in msg
+        assert "session-model" in msg
+        assert "200000" in msg  # override window
+        assert "200" in msg  # session window
+
+    def test_no_warn_when_override_smaller_than_session(self, caplog) -> None:
+        """(c) WARN NOT emitted when override window <= session window
+        — the original asymmetric W1 condition is the only WARN trigger."""
+        config = make_compaction_config(
+            model="small-override",
+            context_window_overrides={
+                "small-override": 100,
+                "session-model": 200_000,
+            },
+        )
+        compactor = ContextCompactor(config, {})
+        context = _make_context(config, [], model_name="session-model")
+        with caplog.at_level(logging.WARNING, logger="daemon.compaction"):
+            compactor._trigger_window(context)
+        assert not [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING and "gated at" in r.getMessage()
+        ]
+
+    def test_no_warn_when_no_override(self, caplog) -> None:
+        """(c) WARN NOT emitted when no override is set — the gate
+        falls through to session-only and there is nothing to warn
+        about."""
+        config = make_compaction_config()  # model=""
+        compactor = ContextCompactor(config, {})
+        context = _make_context(config, [], model_name="gpt-4o")
+        with caplog.at_level(logging.WARNING, logger="daemon.compaction"):
+            compactor._trigger_window(context)
+        assert not [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING and "gated at" in r.getMessage()
+        ]

@@ -755,7 +755,54 @@ class ContextCompactor:
         byte-identical with the pre-setting behavior.
         """
         return resolve_compaction_model(context.config) or context.model_name
-    
+
+    def _trigger_window(self, context: CompactionContext) -> int:
+        """Context window for the AUTO-path threshold gate (:826-841).
+
+        W1 (review fix): when a compaction-model override is active,
+        gate at ``min(session_window, override_window)`` so a LARGER
+        override window cannot push proactive compaction past session
+        capacity (defeating CLE auto-recovery — force=False reactive
+        compaction returns None on context-length error). Internal
+        sizing (chunk batching, merge, condense — :1094, :1414)
+        continues to follow the OVERRIDE window via
+        ``_effective_model_name``; this helper is the TRIGGER side only.
+
+        One-shot WARN per compactor instance when the override window
+        exceeds the session window; the message states the gating
+        consequence so operators can pre-empt the surprise. Fires at
+        the gate site (not ``load_config``) so the operator sees BOTH
+        windows in the same log line, and so it is testable without
+        loading the daemon config.
+        """
+        if not resolve_compaction_model(context.config):
+            return get_model_context_limit(
+                context.model_name, context.config
+            )
+        override_name = resolve_compaction_model(context.config)
+        override_window = get_model_context_limit(
+            override_name, context.config
+        )
+        session_window = get_model_context_limit(
+            context.model_name, context.config
+        )
+        if override_window > session_window:
+            if not getattr(self, "_w_overflow_warned", False):
+                self._w_overflow_warned = True
+                logger.warning(
+                    "Compaction override '%s' window (%d) exceeds session "
+                    "model '%s' window (%d). Auto-path threshold gated at "
+                    "the session window; internal chunking/merge/condense "
+                    "sizing still follow the override. Use /compact to "
+                    "force-recover once the session model has overflowed.",
+                    override_name,
+                    override_window,
+                    context.model_name,
+                    session_window,
+                )
+            return session_window
+        return override_window
+
     async def compact_state(
         self,
         context: CompactionContext,
@@ -830,9 +877,12 @@ class ContextCompactor:
         # stay in-engine and STILL APPLY under force. Auto paths do not
         # pass ``force`` so their threshold check is unchanged when
         # ``force=False`` (S-7 byte-identity anti-drift).
-        context_window = get_model_context_limit(
-            self._effective_model_name(context), context.config
-        )
+        # W1 (review fix): gate the AUTO-path threshold at the SMALLER
+        # of session vs override window — see :meth:`_trigger_window`.
+        # The threshold check below uses that gated value; the engine's
+        # INTERNAL sizing (:1094 chunking, :1414 merge/condense) keeps
+        # following the OVERRIDE window via ``_effective_model_name``.
+        context_window = self._trigger_window(context)
         if not force and total_tokens <= context_window * context.config.threshold:
             logger.debug(
                 f"Skipping compaction: {total_tokens} tokens "
@@ -1097,10 +1147,14 @@ class ContextCompactor:
         threshold_tokens = context_window * context.config.summarization_chunk_threshold
 
         # Whole-operation budget wall-clock anchor — measured against the
-        # chunked LLM calls only (merges + condense inherit the same
-        # budget because they sit in the same ``_summarize_chunked`` call
-        # frame). Module-level ``time.monotonic`` is monotonic across the
-        # event loop and unaffected by wall-clock skew.
+        # pool gather ONLY (``asyncio.wait_for(pool, ...)`` at ~:1218).
+        # The budget does NOT wrap merge/condense — those run AFTER the
+        # deadline has fired, serially, as part of the same
+        # ``_summarize_chunked`` call frame but with no wall-clock cap
+        # of their own. Parallel merge is intentionally deferred to a
+        # future soak (Phase-1 design: chunking parallel; post-pool
+        # serial). Module-level ``time.monotonic`` is monotonic across
+        # the event loop and unaffected by wall-clock skew.
         import time as _time
         budget_started_at = _time.monotonic()
         budget_seconds = float(context.config.operation_budget_s)

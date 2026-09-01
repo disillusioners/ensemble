@@ -223,6 +223,11 @@ compaction:
   # (resolved explicitly in load_config); empty/unset = use the session
   # model (default behavior). Purpose-bound: never consulted against the
   # llm.allowed_models allowlist.
+  # Sizing guidance: prefer a model with window >= session model's, or
+  # equal; smaller override windows gate EARLIER (proactive compaction
+  # triggers sooner) but never later — the auto-path threshold is gated
+  # at min(session_window, override_window), so a LARGER override does
+  # NOT delay proactive compaction past session capacity.
   model: ""
   # summarization_model is the LEGACY spelling of `model` above — still
   # honored when `model` is empty; new configs should use `model`.
