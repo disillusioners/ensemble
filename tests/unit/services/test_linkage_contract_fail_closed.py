@@ -161,10 +161,15 @@ def test_fail_closed_guard_raises_when_required_and_work_id_none() -> None:
 
     err = exc_info.value
     assert err.source == "_prepare_enqueued_message"
-    assert err.expected_job_id == "<required>"
-    assert "auto-mint" in err.actual_job_id
+    # M6: the omission path fabricates no ids — no driving JobItem was
+    # supplied and NO Task was minted, so both id fields stay empty.
+    assert err.expected_job_id == ""
+    assert err.actual_job_id == ""
     # The rendered message must name the violation meaningfully.
     assert "LINKAGE CONTRACT VIOLATION" in str(err)
+    assert "work_id=None" in str(err)
+    assert "auto-mint refused" in str(err)
+    assert "pass work_id=job_id" in str(err)
 
 
 def test_fail_closed_guard_required_with_value_returns_value_unchanged() -> None:
@@ -226,18 +231,18 @@ def test_prepare_enqueued_message_signature_keeps_backward_compat() -> None:
 # ============================================================
 # _assert_linkage_contract — every repaired mint site still satisfies
 # linkage. The four repaired sites are:
-#   * job_feedback_observer.py:3879 (passes work_id=started_job.job_id)
-#   * job_processor.py:975       (passes work_id=proc_job.job_id)
-#   * job_processor.py:1065      (passes work_id=proc_job.job_id)
-#   * job_processor.py:1291      (passes work_id=job.job_id)
+#   * job_feedback_observer.py observer trigger (passes work_id=started_job.job_id)
+#   * job_processor.py crash-recovery re-spawn (passes work_id=proc_job.job_id)
+#   * job_processor.py orphan-resume re-spawn (passes work_id=proc_job.job_id)
+#   * job_processor.py main task dispatch (passes work_id=job.job_id)
 # enqueue_message_job is structurally safe by construction (always mints
 # locally and binds the SAME local — verified in instance_messaging.py
 # step-2 / step-3 sequence).
 # ============================================================
 
 def test_repaired_observer_site_passes_work_id() -> None:
-    """job_feedback_observer.py:3879 — the f1-misfire fix site must
-    continue to pass ``work_id=started_job.job_id`` post-Fix-A. The
+    """job_feedback_observer.py observer trigger — the f1-misfire fix
+    site must continue to pass ``work_id=started_job.job_id`` post-Fix-A. The
     Fix A boundary just makes that binding structurally guaranteed.
     """
     import inspect
@@ -259,7 +264,7 @@ def test_repaired_observer_site_passes_work_id() -> None:
 
 
 def test_repaired_job_processor_main_dispatch_site_passes_work_id() -> None:
-    """job_processor.py main TASK dispatch (line ~1291) — must
+    """job_processor.py main TASK dispatch — must
     continue to pass ``work_id=job.job_id`` and the Fix A flag.
     """
     import inspect

@@ -6519,10 +6519,10 @@ class InstanceManager:
         ``InstanceMessagingService.enqueue_message``. When True (the
         job-driven dispatch path), a ``None`` ``work_id`` raises
         :class:`~daemon.services.messaging_types.LinkageContractError`
-        from the service's fail-closed guard instead of auto-minting a
-        fresh UUID — a re-mint would re-key the Task and break
-        Pattern-f1 ``get_by_work_id`` recovery lookups. Default False
-        preserves the prior self-mint behaviour for every internal
+        from the service's fail-closed ``work_id`` guard instead of
+        auto-minting a fresh UUID — a re-mint would re-key the Task and
+        break Pattern-f1 ``get_by_work_id`` recovery lookups. Default
+        False preserves the prior self-mint behaviour for every internal
         caller that does not opt in.
 
         Args:
@@ -6534,6 +6534,11 @@ class InstanceManager:
             metadata: Optional metadata dictionary (e.g., {"resume_mode": True}).
             is_deferred: See above.
             is_background: See above.
+            work_id: Optional linkage UUID bound as the Task's
+                ``work_id``. When None the service self-mints a fresh
+                UUID unless ``work_id_required`` forces the fail-closed
+                contract (see above).
+            work_id_required: See above.
 
         Returns:
             AsyncMessageResult with message_id, instance_id, status, and

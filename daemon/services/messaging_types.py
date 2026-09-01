@@ -63,18 +63,32 @@ class LinkageContractError(RuntimeError):
         source: str,
         expected_job_id: str,
         actual_job_id: str,
+        omission: bool = False,
     ) -> None:
         self.source = source
         self.expected_job_id = expected_job_id
         self.actual_job_id = actual_job_id
-        super().__init__(
-            f"{source}: LINKAGE CONTRACT VIOLATION (job-driven path, "
-            f"enforce=True) — driving JobItem {expected_job_id[:8]}... "
-            f"but minted Task work_id {actual_job_id[:8]}... "
-            f"(Task.work_id != JobItem.job_id). Recovery lookups keyed "
-            f"by work_id will miss this Task; investigate the dispatch "
-            f"path."
-        )
+        if omission:
+            # Omission path (M6): no driving JobItem id was supplied and
+            # NO Task was minted — narrating the mismatch shape here
+            # would forge a phantom mint. Say what was omitted and how
+            # to fix it instead. Both id fields stay empty (honest
+            # absence, not fabricated placeholders).
+            super().__init__(
+                f"{source}: LINKAGE CONTRACT VIOLATION (job-driven path, "
+                f"enforce=True) — job-driven dispatch arrived with "
+                f"work_id=None; auto-mint refused (fail-closed) — pass "
+                f"work_id=job_id."
+            )
+        else:
+            super().__init__(
+                f"{source}: LINKAGE CONTRACT VIOLATION (job-driven path, "
+                f"enforce=True) — driving JobItem {expected_job_id[:8]}... "
+                f"but minted Task work_id {actual_job_id[:8]}... "
+                f"(Task.work_id != JobItem.job_id). Recovery lookups keyed "
+                f"by work_id will miss this Task; investigate the dispatch "
+                f"path."
+            )
 
 
 def _assert_linkage_contract(
@@ -106,8 +120,9 @@ def _assert_linkage_contract(
       this function with ``enforce=True``; mismatches raise
       :class:`LinkageContractError` instead of warning. There are
       five ``work_id_required=True`` call sites in total: the four
-      JOB-DRIVEN dispatch sites enforced here (the observer + three
-      JobProcessor re-spawn sites) PLUS the ``enqueue_message_job``
+      JOB-DRIVEN dispatch sites enforced here (the observer trigger +
+      the JobProcessor main TASK dispatch + the crash-recovery and
+      orphan-resume re-spawn sites) PLUS the ``enqueue_message_job``
       site, which is structurally safe — it mints the single shared
       linkage UUID itself and passes it straight through as ``work_id``,
       so it never enters the raise path by construction and needs no

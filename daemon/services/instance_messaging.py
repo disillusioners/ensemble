@@ -689,12 +689,15 @@ def _ensure_work_id_fail_closed(
     if work_id is not None:
         return work_id
     if work_id_required:
-        # This omission guard is pre-transaction and rolls back cleanly;
-        # a result-mismatch raise is necessarily post-enqueue and post-commit.
+        # This fail-closed ``work_id`` guard fires BEFORE any DB write:
+        # no row (and no Task) exists yet, so there is nothing to roll
+        # back. A result-mismatch raise is necessarily post-enqueue and
+        # post-commit.
         raise LinkageContractError(
             source="_prepare_enqueued_message",
-            expected_job_id="<required>",
-            actual_job_id="<auto-mint would have produced a fresh UUID>",
+            expected_job_id="",
+            actual_job_id="",
+            omission=True,
         )
     return str(uuid.uuid4())
 
@@ -2274,7 +2277,7 @@ class InstanceMessagingService:
         # method, so the flag is a structural guarantee rather than a
         # behavioural change — it ensures a future maintainer cannot
         # accidentally remove the ``work_id=job_id`` binding without
-        # tripping the loud-failure gate.
+        # tripping the fail-closed ``work_id`` guard.
         ctx = await asyncio.to_thread(
             self._prepare_enqueued_message,
             instance_id=instance_id,
