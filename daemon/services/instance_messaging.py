@@ -1192,13 +1192,56 @@ class InstanceMessagingService:
             tokens_before = result.tokens_before
             tokens_saved = result.tokens_saved
             
+            # Architect §5 — W1 fix: read the pre-compaction
+            # snapshot, then run the seam helper that emits the
+            # ``REMOVE_ALL_MESSAGES`` sentinel recipe. The sentinel
+            # MUST be element 0; anything before it is discarded.
+            # NO per-id RemoveMessages are sent (eliminates the
+            # ValueError-on-absent-id class entirely).
+            pre_state = await graph.aget_state(config)
+            pre_messages: list[BaseMessage] = list(
+                (pre_state.values or {}).get("messages", []) or []
+            )
+            from daemon.compaction import (
+                build_sentinel_replacement,
+                CompactionAborted,
+            )
+            pre_ids = {
+                getattr(m, "id", None)
+                for m in pre_messages
+            }
+            pre_ids.discard(None)
+            kept_ids = {
+                getattr(m, "id", None)
+                for m in result.replacement_messages
+            }
+            kept_ids.discard(None)
+            compacted_ids: set[str] = pre_ids - kept_ids
+            try:
+                replacement_messages = build_sentinel_replacement(
+                    result, pre_messages, compacted_ids=compacted_ids
+                )
+            except CompactionAborted as abort_exc:
+                # W1 mitigation: pre-write guard refused the write.
+                # The checkpoint is untouched, the executor surfaces
+                # a non-fatal warning, and the next attempt retries
+                # from a clean state.
+                import logging
+                logging.getLogger(__name__).warning(
+                    "compaction pre-write guard refused the write "
+                    "for instance=%s: %s — failing open, no "
+                    "checkpoint write",
+                    instance_id, abort_exc,
+                )
+                return
+
             # Update graph state with compacted messages
             await graph.aupdate_state(
                 config,
-                {'messages': result.replacement_messages},
+                {'messages': replacement_messages},
                 as_node='agent'
             )
-            
+
             # Update compaction timestamp if available
             if result.compacted_at:
                 await graph.aupdate_state(

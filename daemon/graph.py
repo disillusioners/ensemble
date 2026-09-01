@@ -3515,7 +3515,48 @@ def create_agent_node(
                 logger.warning('Reactive compaction returned no result, re-raising')
                 raise
 
-            await graph.aupdate_state(thread_config, {'messages': result.replacement_messages}, as_node='agent')
+            # Architect §5 — W1 fix: read the pre-compaction
+            # snapshot, then run the seam helper that emits the
+            # ``REMOVE_ALL_MESSAGES`` sentinel recipe. The sentinel
+            # MUST be element 0; anything before it is discarded.
+            # NO per-id RemoveMessages are sent (eliminates the
+            # ValueError-on-absent-id class entirely).
+            pre_state = await graph.aget_state(thread_config)
+            pre_messages = list(
+                (pre_state.values or {}).get('messages', []) or []
+            )
+            from .compaction import (
+                build_sentinel_replacement,
+                CompactionAborted,
+            )
+            pre_ids = {
+                getattr(m, "id", None)
+                for m in pre_messages
+            }
+            pre_ids.discard(None)
+            kept_ids = {
+                getattr(m, "id", None)
+                for m in result.replacement_messages
+            }
+            kept_ids.discard(None)
+            compacted_ids: set[str] = pre_ids - kept_ids
+            try:
+                replacement_messages = build_sentinel_replacement(
+                    result, pre_messages, compacted_ids=compacted_ids
+                )
+            except CompactionAborted as abort_exc:
+                # W1 mitigation: pre-write guard refused the write.
+                # The checkpoint is untouched; the reactive path
+                # re-raises so the upstream CLE handler can surface
+                # the failure (this is the CLE-retry path, not the
+                # auto-proactive path; fail-closed is correct here).
+                logger.warning(
+                    "reactive compaction pre-write guard refused the "
+                    "write: %s — re-raising", abort_exc
+                )
+                raise
+
+            await graph.aupdate_state(thread_config, {'messages': replacement_messages}, as_node='agent')
             if result.compacted_at:
                 await graph.aupdate_state(thread_config, {'compacted_at': result.compacted_at}, as_node='agent')
 

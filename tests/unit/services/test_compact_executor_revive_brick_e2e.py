@@ -1007,14 +1007,22 @@ class TestExecutorCompactOnRealQuiescentInstanceWithPersistence:
                 from daemon.compaction import CompactionResult
 
                 async def _fake_compact_state(ctx, force=False):
+                    # §4/§5 — the new engine emits a single doc +
+                    # preserved tail (NO per-id RemoveMessage; the
+                    # sentinel recipe in the seam helper drops the
+                    # rest of the channel). The mock mirrors the
+                    # new shape so the pre-write guard accepts the
+                    # replacement.
                     return CompactionResult(
                         replacement_messages=[
-                            RemoveMessage(id=f"h-{n}") for n in range(15)
-                        ] + [
                             SystemMessage(
-                                content="[Conversation Summary]\nreal-summary",
-                                id="compaction-canary-x",
-                            )
+                                content=(
+                                    "[CONTEXT COMPACTION — mode=summary | ...]\n"
+                                    "GLOBAL OVERVIEW\nreal-summary\n"
+                                    "── END OF COMPACTED CONTEXT ──"
+                                ),
+                                id="compaction-global-canary-persist-1",
+                            ),
                         ],
                         tokens_before=15000,
                         tokens_after=100,
@@ -1310,14 +1318,22 @@ class TestExecutorCompactOnCompletedRealGraph:
                 from daemon.compaction import CompactionResult
 
                 async def _fake_compact_state(ctx, force=False):
+                    # §4/§5 — the new engine emits a single doc +
+                    # preserved tail (NO per-id RemoveMessage; the
+                    # sentinel recipe in the seam helper drops the
+                    # rest of the channel). The mock mirrors the
+                    # new shape so the pre-write guard accepts the
+                    # replacement.
                     return CompactionResult(
                         replacement_messages=[
-                            RemoveMessage(id=f"h-{n}") for n in range(15)
-                        ] + [
                             SystemMessage(
-                                content="[Conversation Summary]\ncompleted-canary",
-                                id="compaction-canary-completed",
-                            )
+                                content=(
+                                    "[CONTEXT COMPACTION — mode=summary | ...]\n"
+                                    "GLOBAL OVERVIEW\ncompleted-canary\n"
+                                    "── END OF COMPACTED CONTEXT ──"
+                                ),
+                                id="compaction-global-canary-completed-1",
+                            ),
                         ],
                         tokens_before=15000,
                         tokens_after=100,
@@ -1597,17 +1613,22 @@ class TestExecutorCompactOnCompletedRealGraph:
                 from daemon.compaction import CompactionResult
 
                 async def _fake_compact_state(ctx, force=False):
+                    # §4/§5 — the new engine emits a single doc +
+                    # preserved tail (NO per-id RemoveMessage; the
+                    # sentinel recipe in the seam helper drops the
+                    # rest of the channel). The mock mirrors the
+                    # new shape so the pre-write guard accepts the
+                    # replacement.
                     return CompactionResult(
                         replacement_messages=[
-                            RemoveMessage(id=f"h-{n}") for n in range(15)
-                        ] + [
                             SystemMessage(
                                 content=(
-                                    "[Conversation Summary]\n"
-                                    "completed-interrupt-canary"
+                                    "[CONTEXT COMPACTION — mode=summary | ...]\n"
+                                    "GLOBAL OVERVIEW\ncompleted-interrupt-canary\n"
+                                    "── END OF COMPACTED CONTEXT ──"
                                 ),
-                                id="compaction-canary-completed-int",
-                            )
+                                id="compaction-global-canary-completed-int-1",
+                            ),
                         ],
                         tokens_before=15000,
                         tokens_after=100,

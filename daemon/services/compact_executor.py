@@ -1346,6 +1346,22 @@ def _map_engine_result_to_wire(result: CompactionResult) -> WireOutcome:
     if result.forced:
         detail["forced"] = True
 
+    # Coordination note (2026-09-01, FE) — ``sections_kept`` /
+    # ``sections_total`` are flat additive fields the FE reads
+    # DEFENSIVELY via ``commandSectionCounts()`` to render the
+    # /compact card copy (k = succeeded sections, n = total
+    # batches). These are stamped on the result by
+    # :func:`compact_state` for ``summarization`` /
+    # ``partial_summary`` outputs and are ``None`` for
+    # ``truncation`` / ``emergency_truncation`` (the FE falls back
+    # to the prior card copy in those cases). The exact field
+    # names are load-bearing for the FE accessor — a rename here
+    # requires a coordinated FE rename.
+    if result.sections_kept is not None:
+        detail["sections_kept"] = int(result.sections_kept)
+    if result.sections_total is not None:
+        detail["sections_total"] = int(result.sections_total)
+
     is_success_type = ctype in _ENGINE_SUCCESS_COMPACTION_TYPES
     is_fallback_type = ctype in _ENGINE_FALLBACK_COMPACTION_TYPES
     is_known_type = ctype in _ENGINE_TYPE_TO_WIRE_COMPACTED_TYPE
@@ -1555,10 +1571,63 @@ async def _persist_compaction_result(
     """
     graph = await manager.get_instance(instance_id)
     config = {"configurable": {"thread_id": instance_id}}
-    replacement: list[BaseMessage] = list(result.replacement_messages or [])
 
-    # First call: messages (RemoveMessage set + summary together —
-    # direct-list assignment concatenates under add_messages).
+    # Architect §5 — W1 fix: read the pre-compaction snapshot, then
+    # run the seam helper that emits the ``REMOVE_ALL_MESSAGES``
+    # sentinel recipe. The sentinel MUST be element 0; anything
+    # before it is discarded. NO per-id RemoveMessages are sent
+    # (eliminates the ValueError-on-absent-id class entirely).
+    pre_state = await graph.aget_state(config)
+    pre_messages: list[BaseMessage] = list(
+        (pre_state.values or {}).get("messages", []) or []
+    )
+
+    from daemon.compaction import (
+        build_sentinel_replacement,
+        CompactionAborted,
+    )
+    # §5 — scope the pre-write guard to the ids the engine
+    # intentionally removed. The engine's CompactionResult
+    # does not carry the explicit compactable-span id set today,
+    # so the engine path computes it from the messages it dropped
+    # (the ones whose ids are NOT in result.replacement_messages
+    # AND are non-None in the pre-compaction snapshot). This is
+    # the minimum the seam needs to distinguish preserved-tail
+    # loss from intentional compaction.
+    pre_ids = {
+        getattr(m, "id", None)
+        for m in pre_messages
+    }
+    pre_ids.discard(None)
+    kept_ids = {
+        getattr(m, "id", None)
+        for m in result.replacement_messages
+    }
+    kept_ids.discard(None)
+    compacted_ids: set[str] = pre_ids - kept_ids
+    try:
+        replacement: list[BaseMessage] = build_sentinel_replacement(
+            result, pre_messages, compacted_ids=compacted_ids
+        )
+    except CompactionAborted as abort_exc:
+        # W1 mitigation: pre-write guard refused the write. The
+        # checkpoint is untouched, the executor surfaces a non-fatal
+        # warning, and the next attempt retries from a clean state.
+        # We DO raise — the executor surfaces the abort so the
+        # calling command-state path can fail-open at the higher
+        # layer; the checkpoint is untouched.
+        import logging
+        logging.getLogger(__name__).warning(
+            "compaction pre-write guard refused the write for "
+            "instance=%s: %s — failing open, no checkpoint write",
+            instance_id, abort_exc,
+        )
+        raise
+
+    # First call: messages (REMOVE_ALL_MESSAGES sentinel + injected +
+    # doc + tail). The sentinel forces the entire new channel value
+    # after it (langgraph 1.0.9 ``add_messages`` semantics — the
+    # ONLY order-control path).
     # C1: NO ``as_node`` — the executor persists outside the graph-task
     # frame; the brick-interaction window is closed by the missing
     # ``as_node`` argument (LangGraph treats this as an external write).
