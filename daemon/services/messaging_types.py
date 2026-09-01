@@ -11,6 +11,7 @@ return value of ``enqueue_message`` and is re-exported from
 import it via ``from daemon.manager import AsyncMessageResult``.
 """
 
+import logging
 from dataclasses import dataclass
 
 
@@ -35,6 +36,42 @@ class AsyncMessageResult:
     status: str = "queued"
     job_id: str | None = None  # job_id of the enqueued MESSAGE job (None for non-JQ paths)
     queued: bool = False
+
+
+def _assert_linkage_contract(
+    result: AsyncMessageResult | None,
+    job_id: str,
+    *,
+    source: str,
+    logger: logging.Logger,
+) -> None:
+    """Shared linkage-contract tripwire (f1-misfire batch, council W1).
+
+    Every JobItem-driven ``enqueue_message`` dispatch MUST pass
+    ``work_id=job_id`` so the driving Task links to its JobItem (the
+    documented ``Task.work_id == JobItem.job_id`` contract). The
+    dispatch result's ``job_id`` IS the minted Task's ``work_id`` — a
+    mismatch against the driving JobItem means the mint re-keyed the
+    Task and recovery surfaces (Pattern-f1 ``get_by_work_id``,
+    the work resolver) will miss it.
+
+    WARN loudly; NEVER fail the dispatch — this is a
+    future-regression detector, not a gate. Single home for the
+    tripwire semantics shared by ``JobFeedbackObserver._trigger_next_job``
+    and ``JobProcessor._process_next_job`` (main TASK dispatch +
+    the crash-recovery / orphan-resume re-spawn sites).
+    """
+    if result is None or not getattr(result, "job_id", None):
+        return
+    if result.job_id == job_id:
+        return
+    logger.warning(
+        f"{source}: LINKAGE CONTRACT VIOLATION — task-job dispatch "
+        f"for JobItem {job_id[:8]}... minted Task work_id "
+        f"{result.job_id[:8]}... (Task.work_id != JobItem.job_id). "
+        f"Recovery lookups keyed by work_id will miss this Task; "
+        f"investigate the dispatch path."
+    )
 
 
 __all__ = ["AsyncMessageResult"]

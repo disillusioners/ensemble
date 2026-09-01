@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 from daemon.repositories.instance.models import InstanceStatus
 from daemon.repositories.job_queue.models import AdmissionState
 from daemon.services.dependency_bus import get_dependency_bus
+from daemon.services.messaging_types import _assert_linkage_contract
 from daemon.services.job_queue_service import (
     DemandState,
     JobQueueService,
@@ -962,6 +963,26 @@ class JobProcessor:
                                     source=proc_job.source,
                                     is_deferred=(queue.queue_type == "defer"),
                                     is_background=(queue.queue_type == "background"),
+                                    # Stamp the JobItem's ``job_id``
+                                    # onto the re-spawned Task's
+                                    # ``work_id`` — the documented
+                                    # linkage contract. Omitting it
+                                    # here minted a fresh UUID and
+                                    # broke Pattern-f1's
+                                    # ``get_by_work_id(job_id)``
+                                    # recovery lookups (council W1,
+                                    # incident 2026-08-31).
+                                    work_id=proc_job.job_id,
+                                )
+                                # ── Linkage-contract tripwire —
+                                # shared helper, same WARN semantics
+                                # as the main TASK dispatch below:
+                                # non-fatal, never fails the dispatch.
+                                _assert_linkage_contract(
+                                    result,
+                                    proc_job.job_id,
+                                    source="JobProcessor",
+                                    logger=logger,
                                 )
                                 # Stamp message_id defensively — a
                                 # stamping failure must not fail an
@@ -1022,6 +1043,24 @@ class JobProcessor:
                             source=proc_job.source,
                             is_deferred=(queue.queue_type == "defer"),
                             is_background=(queue.queue_type == "background"),
+                            # Stamp the JobItem's ``job_id`` onto the
+                            # resumed Task's ``work_id`` — the
+                            # documented linkage contract. Omitting it
+                            # here minted a fresh UUID and broke
+                            # Pattern-f1's ``get_by_work_id(job_id)``
+                            # recovery lookups (council W1, incident
+                            # 2026-08-31).
+                            work_id=proc_job.job_id,
+                        )
+                        # ── Linkage-contract tripwire — shared
+                        # helper, same WARN semantics as the main
+                        # TASK dispatch below: non-fatal, never fails
+                        # the dispatch.
+                        _assert_linkage_contract(
+                            result,
+                            proc_job.job_id,
+                            source="JobProcessor",
+                            logger=logger,
                         )
                         # Stamp message_id defensively — a stamping
                         # failure must not fail an otherwise-successful
@@ -1235,20 +1274,15 @@ class JobProcessor:
                     # driving JobItem means the Task↔JobItem linkage
                     # the recovery surfaces depend on
                     # (``get_by_work_id(job_id)``) is broken — WARN
-                    # loudly; never fail the dispatch.
-                    if (
-                        result
-                        and getattr(result, "job_id", None)
-                        and result.job_id != job.job_id
-                    ):
-                        logger.warning(
-                            f"JobProcessor: LINKAGE CONTRACT VIOLATION — "
-                            f"task-job dispatch for JobItem "
-                            f"{job.job_id[:8]}... minted Task work_id "
-                            f"{result.job_id[:8]}... (Task.work_id != "
-                            f"JobItem.job_id). Recovery lookups keyed by "
-                            f"work_id will miss this Task."
-                        )
+                    # loudly; never fail the dispatch. Semantics live
+                    # in the shared helper (also used by the observer
+                    # and the re-spawn sites).
+                    _assert_linkage_contract(
+                        result,
+                        job.job_id,
+                        source="JobProcessor",
+                        logger=logger,
+                    )
                     # Stamp the message_id back onto the JobItem so
                     # the cross-system guard in ``claim_pending_task``
                     # can correlate active MESSAGE JobItems with their

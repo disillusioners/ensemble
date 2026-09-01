@@ -66,6 +66,7 @@ from daemon.repositories.dependency_bus.models import DependencyWatcher, Depende
 from daemon.services.dependency_bus import get_dependency_bus
 from daemon.services.job_queue_service import DemandState, JobQueueService
 from daemon.services.job_state_machine import InvalidTransitionError
+from daemon.services.messaging_types import _assert_linkage_contract
 from daemon.services.report_integrity_guard import (
     _clear_b_notice_if_clean,
     enforce_declared_waiting_violations,
@@ -3883,21 +3884,15 @@ class JobFeedbackObserver:
                 # driving JobItem means the Task↔JobItem linkage is
                 # broken — recovery surfaces (Pattern-f1
                 # ``get_by_work_id``, work resolver) will misfire.
-                # WARN loudly; never fail the dispatch.
-                if (
-                    result is not None
-                    and getattr(result, "job_id", None)
-                    and result.job_id != started_job.job_id
-                ):
-                    logger.warning(
-                        f"Observer: LINKAGE CONTRACT VIOLATION — "
-                        f"task-job dispatch for JobItem "
-                        f"{started_job.job_id[:8]}... minted Task "
-                        f"work_id {result.job_id[:8]}... "
-                        f"(Task.work_id != JobItem.job_id). Recovery "
-                        f"lookups keyed by work_id will miss this "
-                        f"Task; investigate the dispatch path."
-                    )
+                # WARN loudly; never fail the dispatch. Semantics live
+                # in the shared helper (also used by JobProcessor's
+                # main + re-spawn dispatch sites).
+                _assert_linkage_contract(
+                    result,
+                    started_job.job_id,
+                    source="Observer",
+                    logger=logger,
+                )
                 # Stamp the message_id back onto the JobItem so the
                 # cross-system guard in ``claim_pending_task`` can
                 # correlate active MESSAGE JobItems with their

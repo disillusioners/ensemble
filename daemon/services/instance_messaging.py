@@ -2137,6 +2137,16 @@ class InstanceMessagingService:
             is_background=is_background,
         )
 
+        # ── Linkage contract (structurally-safe site) ──
+        # ``enqueue_message_job`` mints the shared linkage UUID itself
+        # (``job_id`` above) and binds it as ``work_id`` here, so the
+        # Task is born linked to its JobItem; the
+        # ``AsyncMessageResult.job_id`` handed back below is built from
+        # the SAME local. There is no re-mint seam to trip over, so —
+        # unlike the observer / JobProcessor dispatch sites (which
+        # delegate the mint to ``_prepare_enqueued_message`` and carry
+        # the shared ``_assert_linkage_contract`` tripwire) — no
+        # post-hoc tripwire is possible or needed on this path.
         ctx = await asyncio.to_thread(
             self._prepare_enqueued_message,
             instance_id=instance_id,

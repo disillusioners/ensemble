@@ -68,6 +68,7 @@ from daemon.repositories.task.models import TaskStatus, TaskType
 from daemon.repositories.task.repository import TaskRepository
 from daemon.services import job_recovery_service as _jrs
 from daemon.services.job_feedback_observer import JobFeedbackObserver
+from daemon.services.job_processor import JobProcessor
 from daemon.services.job_recovery_service import JobRecoveryService
 from daemon.services.job_queue_service import JobQueueService
 from daemon.services.instance_messaging import AsyncMessageResult
@@ -3508,6 +3509,23 @@ class TestPatternF1KillSwitch:
                 f"{job_after.admission_state!r}, details: "
                 f"{stats['details']}"
             )
+            # Inert-path detail contract (review polish d, 96a66e50
+            # follow-up): the skip record MUST use the canonical
+            # ``orphan_active_skipped_f1_disabled`` pattern key and
+            # name this job — operators and log scrapers key on the
+            # exact detail family, not merely "a skip happened".
+            disabled_details = [
+                d for d in stats.get("details", [])
+                if d.get("pattern")
+                == "orphan_active_skipped_f1_disabled"
+                and d.get("job_id") == "job-f1-ks-off"
+            ]
+            assert disabled_details, (
+                f"Kill-switch OFF must emit an explicit "
+                f"'orphan_active_skipped_f1_disabled' detail record "
+                f"for the inert-skipped JobItem. Got details: "
+                f"{stats.get('details')}"
+            )
         finally:
             _jrs._reset_orphan_f1_for_tests()
 
@@ -3691,4 +3709,161 @@ class TestObserverMintLinkageContract:
             f"a Task work_id that does not match JobItem.job_id "
             f"(linkage-contract tripwire). Captured: "
             f"{[r.getMessage() for r in caplog.records]}"
+        )
+
+
+class TestProcessorRespawnMintLinkageContract:
+    """W1 (council 2026-08-31) — the JobProcessor re-spawn mint sites.
+
+    ``JobProcessor._process_next_job`` dispatches from TWO orphan
+    re-spawn sites in its ACTIVE-admission recovery loop, and BOTH
+    omitted ``work_id=proc_job.job_id`` — the same fresh-UUID mint /
+    linkage-break class as the observer incident (69a34b35):
+
+      * crash-recovery re-spawn — instance genuinely crashed/missing
+        (``get_instance`` → KeyError, DB row alive + non-terminal)
+        re-spawns and re-dispatches (~:959),
+      * orphan-resume re-spawn — ``instance_id`` never set (safety
+        net) resumes and re-dispatches (~:1019).
+
+    The downstream ``_prepare_enqueued_message`` auto-mints a fresh
+    UUID4 for the driving Task when ``work_id`` is absent, so
+    Pattern-f1's ``get_by_work_id(job_id)`` misses the Task and the
+    subtree-alive guard is the only backstop during PENDING/RUNNING
+    life — completed work still DEAD-finalizes after ~900s tree
+    quiet. Both sites MUST carry ``work_id=proc_job.job_id``.
+    """
+
+    @staticmethod
+    def _build_processor(
+        enqueue_result_job_id: str,
+        proc_instance_id: str | None,
+    ):
+        """Processor with a mocked pipeline driving ONE ACTIVE task job
+        through the crash-recovery (instance_id set) or orphan-resume
+        (instance_id None) re-spawn branch.
+        """
+        queue = SimpleNamespace(
+            queue_id="queue-w1-respawn",
+            project_id="proj-w1-respawn",
+            queue_name="default",
+            is_paused=False,
+            concurrency_limit=1,
+            queue_type="fifo",
+        )
+        proc_job = SimpleNamespace(
+            job_id="job-w1-respawn-1",
+            job_type="task",
+            instance_id=proc_instance_id,
+            agent_id="developer",
+            project_id="proj-w1-respawn",
+            message="drive the recovered work",
+            source="api",
+            admission_state=AdmissionState.ACTIVE.value,
+        )
+
+        jq = MagicMock()
+        jq._repository = MagicMock()
+        jq._repository.list_pending_by_queue = MagicMock(return_value=[])
+        jq._repository.list_by_queue = MagicMock(
+            return_value=([proc_job], 1)
+        )
+        jq._repository.stamp_message_id = MagicMock(return_value=None)
+
+        manager = MagicMock()
+        if proc_instance_id is not None:
+            # Crash-recovery shape: the instance is NOT in memory
+            # (KeyError) but its DB row is alive and non-terminal —
+            # the "genuine crash" fall-through to re-spawn.
+            manager.get_instance = AsyncMock(
+                side_effect=KeyError(proc_instance_id)
+            )
+            manager._instance_repository = MagicMock()
+            manager._instance_repository.get = MagicMock(
+                return_value=SimpleNamespace(
+                    instance_id=proc_instance_id, status="running",
+                )
+            )
+        manager.spawn_instance_with_mcp = AsyncMock(
+            return_value=proc_instance_id or "inst-w1-respawn"
+        )
+        manager.enqueue_message = AsyncMock(
+            return_value=AsyncMessageResult(
+                message_id="msg-w1-respawn-1",
+                instance_id=proc_instance_id or "inst-w1-respawn",
+                status="queued",
+                job_id=enqueue_result_job_id,
+            )
+        )
+
+        project_repo = MagicMock()
+        project_repo.get = MagicMock(
+            return_value=SimpleNamespace(job_queue_paused=False)
+        )
+        queue_repo = MagicMock()
+        queue_repo.list_queues_with_admittable_work = MagicMock(
+            return_value=[queue]
+        )
+
+        processor = JobProcessor(
+            queue_service=jq,
+            instance_manager=manager,
+            project_repo=project_repo,
+            queue_repo=queue_repo,
+            poll_interval=0.1,
+        )
+        return processor, manager
+
+    @pytest.mark.asyncio
+    async def test_crash_recovery_respawn_carries_work_id(self):
+        """Crash-recovery re-spawn dispatch MUST carry
+        ``work_id=proc_job.job_id`` (RED on 96a66e50: kwargs lack
+        work_id → fresh-UUID mint → linkage break).
+        """
+        processor, manager = self._build_processor(
+            enqueue_result_job_id="job-w1-respawn-1",
+            proc_instance_id="inst-w1-crashed",
+        )
+
+        await processor._process_next_job()
+
+        assert manager.enqueue_message.await_count == 1, (
+            "The crash-recovery re-spawn must dispatch exactly one "
+            "enqueue_message for the orphaned ACTIVE task job."
+        )
+        kwargs = manager.enqueue_message.call_args.kwargs
+        assert kwargs.get("work_id") == "job-w1-respawn-1", (
+            f"Crash-recovery re-spawn mint-site linkage contract "
+            f"violated: the re-spawn dispatch MUST pass "
+            f"work_id=proc_job.job_id so Task.work_id == "
+            f"JobItem.job_id (Pattern-f1's get_by_work_id(job_id) "
+            f"depends on it). Got kwargs keys: "
+            f"{sorted(kwargs.keys())}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_orphan_resume_respawn_carries_work_id(self):
+        """Orphan-resume re-spawn dispatch (no instance_id safety
+        net) MUST carry ``work_id=proc_job.job_id`` (RED on 96a66e50:
+        kwargs lack work_id).
+        """
+        processor, manager = self._build_processor(
+            enqueue_result_job_id="job-w1-respawn-1",
+            proc_instance_id=None,
+        )
+
+        await processor._process_next_job()
+
+        assert manager.enqueue_message.await_count == 1, (
+            "The orphan-resume re-spawn must dispatch exactly one "
+            "enqueue_message for the instance-less ACTIVE task job."
+        )
+        kwargs = manager.enqueue_message.call_args.kwargs
+        assert kwargs.get("work_id") == "job-w1-respawn-1", (
+            f"Orphan-resume re-spawn mint-site linkage contract "
+            f"violated: the re-spawn dispatch MUST pass "
+            f"work_id=proc_job.job_id so Task.work_id == "
+            f"JobItem.job_id (Pattern-f1's get_by_work_id(job_id) "
+            f"depends on it). Got kwargs keys: "
+            f"{sorted(kwargs.keys())}"
         )

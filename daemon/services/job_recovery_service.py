@@ -2515,6 +2515,102 @@ class JobRecoveryService:
                     })
                     continue
 
+                # If the instance is alive — this is
+                # the genuine f1 candidate. Apply the
+                # grace period: only JobItems with
+                # ``created_at < threshold`` are
+                # eligible. ``JobItem.created_at`` is
+                # the canonical age signal (the model
+                # has no ``updated_at``; the active
+                # JobItem was enqueued at
+                # ``created_at`` and ``active`` rows
+                # don't receive regular updates).
+                job_created = self._parse_job_created_at(
+                    getattr(job, "created_at", None)
+                )
+                if (
+                    job_created is None
+                    or job_created >= threshold
+                ):
+                    # Either the timestamp is
+                    # unparseable (defensive — should
+                    # never happen for rows produced by
+                    # JobRepository.create) or the row
+                    # is inside the grace. Skip with a
+                    # grace detail so the operator can
+                    # see the row was observed.
+                    details.append({
+                        "pattern": "orphan_active_skipped_grace",
+                        "job_id": job_id,
+                        "task_id": None,
+                        "instance_id": instance_id,
+                        "reason": (
+                            f"orphan ACTIVE JobItem (no "
+                            f"Task rows, alive instance) "
+                            f"is within the grace period "
+                            f"(created_at="
+                            f"{job.created_at!r}, "
+                            f"threshold="
+                            f"{threshold.isoformat()}, "
+                            f"grace={min_orphan_age_seconds}s)"
+                            f" — left alone, next cycle "
+                            f"retries"
+                        ),
+                    })
+                    continue
+
+                # ── W1 mid-mint window (council REJECT
+                # 2026-08-29, W1) ───────────────────
+                # Queue-aged defer jobs can sit past
+                # ``created_at``-grace at dispatch; the
+                # spawn→Task-mint window is unguarded.
+                # Without this conjunct, a just-spawned
+                # instance whose Task mint is in flight
+                # could match f1 BEFORE the Task row
+                # exists (Task-mint is async; the
+                # ``task is None`` check would pass and
+                # the row would be DEAD-finalized on the
+                # next drift cycle (default 300s (5min),
+                # configurable via
+                # ``DaemonConfig.services.drift_reconcile_interval_seconds``)
+                # — losing the live work. Add conjunct:
+                # ``instance.created_at < threshold``
+                # (same grace threshold as the JobItem
+                # side) so a just-spawned instance never
+                # matches.
+                instance_created = self._parse_job_created_at(
+                    getattr(instance, "created_at", None)
+                )
+                if (
+                    instance_created is None
+                    or instance_created >= threshold
+                ):
+                    # Instance is fresh (inside the
+                    # grace) — Task mint is likely
+                    # in-flight. Skip with the grace
+                    # detail so the operator sees the
+                    # row was observed.
+                    details.append({
+                        "pattern": "orphan_active_skipped_grace",
+                        "job_id": job_id,
+                        "task_id": None,
+                        "instance_id": instance_id,
+                        "reason": (
+                            f"orphan ACTIVE JobItem (no "
+                            f"Task rows, alive instance) "
+                            f"instance is within the grace "
+                            f"period (instance.created_at="
+                            f"{getattr(instance, 'created_at', None)!r}, "
+                            f"threshold="
+                            f"{threshold.isoformat()}, "
+                            f"grace={min_orphan_age_seconds}s) "
+                            f"— W1 mid-mint guard: Task "
+                            f"mint is likely in flight; "
+                            f"next cycle retries"
+                        ),
+                    })
+                    continue
+
                 # ── Subtree-alive guard (f1-misfire batch,
                 # incident 2026-08-31, JobItem 69a34b35) ──
                 # The strict ``task is None`` predicate reads
@@ -2540,6 +2636,13 @@ class JobRecoveryService:
                 # stale-running instance + no live tasks +
                 # stale tree activity still fires after the
                 # grace.
+                # Ordering (guard-after-grace, review polish c on
+                # 04fd0c52): the two grace conjuncts above run
+                # FIRST — in-grace rows with live trees now emit
+                # the truer grace skip-detail and skip without
+                # burning the tree queries each 300s cycle. This
+                # guard still shields immediately BEFORE the DEAD
+                # finalization below.
                 if (
                     self._instance_repository is not None
                     and self._task_repository is not None
@@ -2665,102 +2768,6 @@ class JobRecoveryService:
                             f"ACTIVE and the next cycle retries."
                         )
                         continue
-
-                # If the instance is alive — this is
-                # the genuine f1 candidate. Apply the
-                # grace period: only JobItems with
-                # ``created_at < threshold`` are
-                # eligible. ``JobItem.created_at`` is
-                # the canonical age signal (the model
-                # has no ``updated_at``; the active
-                # JobItem was enqueued at
-                # ``created_at`` and ``active`` rows
-                # don't receive regular updates).
-                job_created = self._parse_job_created_at(
-                    getattr(job, "created_at", None)
-                )
-                if (
-                    job_created is None
-                    or job_created >= threshold
-                ):
-                    # Either the timestamp is
-                    # unparseable (defensive — should
-                    # never happen for rows produced by
-                    # JobRepository.create) or the row
-                    # is inside the grace. Skip with a
-                    # grace detail so the operator can
-                    # see the row was observed.
-                    details.append({
-                        "pattern": "orphan_active_skipped_grace",
-                        "job_id": job_id,
-                        "task_id": None,
-                        "instance_id": instance_id,
-                        "reason": (
-                            f"orphan ACTIVE JobItem (no "
-                            f"Task rows, alive instance) "
-                            f"is within the grace period "
-                            f"(created_at="
-                            f"{job.created_at!r}, "
-                            f"threshold="
-                            f"{threshold.isoformat()}, "
-                            f"grace={min_orphan_age_seconds}s)"
-                            f" — left alone, next cycle "
-                            f"retries"
-                        ),
-                    })
-                    continue
-
-                # ── W1 mid-mint window (council REJECT
-                # 2026-08-29, W1) ───────────────────
-                # Queue-aged defer jobs can sit past
-                # ``created_at``-grace at dispatch; the
-                # spawn→Task-mint window is unguarded.
-                # Without this conjunct, a just-spawned
-                # instance whose Task mint is in flight
-                # could match f1 BEFORE the Task row
-                # exists (Task-mint is async; the
-                # ``task is None`` check would pass and
-                # the row would be DEAD-finalized on the
-                # next drift cycle (default 300s (5min),
-                # configurable via
-                # ``DaemonConfig.services.drift_reconcile_interval_seconds``)
-                # — losing the live work. Add conjunct:
-                # ``instance.created_at < threshold``
-                # (same grace threshold as the JobItem
-                # side) so a just-spawned instance never
-                # matches.
-                instance_created = self._parse_job_created_at(
-                    getattr(instance, "created_at", None)
-                )
-                if (
-                    instance_created is None
-                    or instance_created >= threshold
-                ):
-                    # Instance is fresh (inside the
-                    # grace) — Task mint is likely
-                    # in-flight. Skip with the grace
-                    # detail so the operator sees the
-                    # row was observed.
-                    details.append({
-                        "pattern": "orphan_active_skipped_grace",
-                        "job_id": job_id,
-                        "task_id": None,
-                        "instance_id": instance_id,
-                        "reason": (
-                            f"orphan ACTIVE JobItem (no "
-                            f"Task rows, alive instance) "
-                            f"instance is within the grace "
-                            f"period (instance.created_at="
-                            f"{getattr(instance, 'created_at', None)!r}, "
-                            f"threshold="
-                            f"{threshold.isoformat()}, "
-                            f"grace={min_orphan_age_seconds}s) "
-                            f"— W1 mid-mint guard: Task "
-                            f"mint is likely in flight; "
-                            f"next cycle retries"
-                        ),
-                    })
-                    continue
 
                 # f1 confirmed — apply the DEAD
                 # finalization + per-job lock release.
