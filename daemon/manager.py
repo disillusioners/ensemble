@@ -6472,6 +6472,7 @@ class InstanceManager:
         is_deferred: bool = False,
         is_background: bool = False,
         work_id: str | None = None,
+        work_id_required: bool = False,
     ) -> AsyncMessageResult:
         """Enqueue a message WITHOUT a JobItem mirror (internal-only path).
 
@@ -6513,6 +6514,17 @@ class InstanceManager:
         for a background-queued message, both False for a normal
         foreground message).
 
+        ``work_id_required`` (Fix A, constitution Phase 0): keyword-only
+        marker forwarded to the underlying
+        ``InstanceMessagingService.enqueue_message``. When True (the
+        job-driven dispatch path), a ``None`` ``work_id`` raises
+        :class:`~daemon.services.messaging_types.LinkageContractError`
+        from the service's fail-closed guard instead of auto-minting a
+        fresh UUID — a re-mint would re-key the Task and break
+        Pattern-f1 ``get_by_work_id`` recovery lookups. Default False
+        preserves the prior self-mint behaviour for every internal
+        caller that does not opt in.
+
         Args:
             instance_id: The ID of the target instance.
             message: The message content.
@@ -6538,6 +6550,7 @@ class InstanceManager:
             is_deferred=is_deferred,
             is_background=is_background,
             work_id=work_id,
+            work_id_required=work_id_required,
         )
 
     async def enqueue_message_job(
