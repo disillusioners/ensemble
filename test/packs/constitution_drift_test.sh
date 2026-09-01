@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # Constitution drift test pack — Phase 0 census gates (D1 + D4 + JAFP).
 #
-# Runs the full bidirectionality census plus Fix A linkage-contract
-# tests in a single pack so any drift between source and the static
-# KNOWN_* sets in daemon/job_state/constitution.py fails the gate.
+# Runs the writer/creator bidirectional census, the subset-only mint
+# census, and the Fix A linkage-contract tests in a single pack so
+# census-covered drift between source and the static KNOWN_* sets in
+# daemon/job_state/constitution.py fails the gate. Bidirectional for
+# writers/creators; subset-only for mints — a new source mint is a
+# registration obligation (D4 checklist), not a test failure.
 #
 # Unit pack — 2 min hard limit. Dual-layer timeout.
 # Layer 2 (script-internal): 110s — interrupts hung tests

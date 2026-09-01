@@ -5,14 +5,19 @@ Mirrors the tool-name drift precedent in
 drift detection between source and the static ``KNOWN_*`` universes
 in ``daemon.job_state.constitution``.
 
-The bidirectionality test catches BOTH directions of drift:
+Drift semantics: bidirectional for writers/creators; subset-only for
+mints — a new source mint is a registration obligation (D4 checklist),
+not a test failure. Concretely:
 
-    * A new writer / creator / mint site lands in source but the static
-      set hasn't been regenerated → test fails (caller must run
-      ``regenerate_sets()``).
-    * A static entry references a function / line that no longer exists
-      in source (writer deleted but static set not updated) → test fails
-      the same way.
+    * Writers/creators: a new site lands in source but the static set
+      hasn't been regenerated → test fails (caller must run
+      ``regenerate_sets()`` and paste the writer/creator literals).
+    * Writers/creators: a static entry references a function that no
+      longer exists in source (writer deleted but static set not
+      updated) → test fails the same way.
+    * Mints: the test enforces only ``KNOWN_MINT_SITES ⊆ source`` — a
+      NEW source mint passes silently; registering it is a D4
+      checklist obligation for the human reviewer.
 
 The frozen-binary contract is enforced as a separate test:
 ``discover_*_paths()`` MUST raise ``RuntimeError`` when zero source
@@ -87,8 +92,9 @@ def test_known_mint_sites_is_subset_of_source() -> None:
     not part of the constitution.
 
     The constraint is therefore: ``KNOWN_MINT_SITES ⊆ source_mints``.
-    Drift in the other direction (a work_id mint missing from the
-    static set) is the D4 tripwire.
+    Bidirectional for writers/creators; subset-only for mints — a new
+    source mint missing from the static set is a registration
+    obligation (D4 checklist), not a test failure.
     """
     source_set = discover_work_id_mint_paths()
     static_set = set(KNOWN_MINT_SITES)
@@ -210,7 +216,12 @@ def test_get_all_admission_state_writers_falls_back_in_frozen_env(
 def test_mint_scanner_recognises_all_documented_idioms() -> None:
     """The mint scanner must recognise every idiom listed in the
     spec's OPEN ITEM (spec §5: ``uuid.uuid4`` vs ``token_hex`` /
-    ``uuid7``). Drift in either direction is a D4 tripwire.
+    ``uuid7``). Bidirectional for writers/creators; subset-only for
+    mints — a new source mint is a registration obligation (D4
+    checklist), not a test failure. This test pins the per-idiom
+    recognition coverage: the scanner must never silently lose one of
+    the documented idioms, since recognition is the only completeness
+    mechanism it has.
 
     Constructs an in-memory daemon tree with one file per idiom and
     confirms the scanner finds each one.

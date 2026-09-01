@@ -19,7 +19,10 @@ on the constitution (I4 amendment trigger).
 
 This module deliberately has NO heavyweight imports. It is importable from
 anywhere (tests, runtime, docs) without pulling the daemon chain, mirroring
-the leaf-type pattern in ``daemon.services.messaging_types``.
+the leaf-type pattern in ``daemon.services.messaging_types``. Its
+standalone-from-``_tool_registry`` structure is deliberate: a drift-catcher
+must not share failure modes (imports, dependencies, crash domains) with
+the code it polices.
 
 Key format
 ----------
@@ -81,9 +84,12 @@ static sets below by running::
 
     uv run python -c "from daemon.job_state.constitution import regenerate_sets; print(regenerate_sets())"
 
-Then paste the printed frozenset literals into the static ``KNOWN_*``
-sets below. Bidirectional drift between source and the static sets is
-caught by ``tests/unit/job_state/test_constitution_drift.py``.
+Drift semantics: bidirectional for writers/creators; subset-only for
+mints — a new source mint is a registration obligation (D4 checklist),
+not a test failure. The writers/creators output is paste-verbatim; the
+mint output is a hand-pick CANDIDATE list (``source − KNOWN_MINT_SITES``)
+— do NOT blind-regen to silence a census failure (§7.3 of
+``docs/job-task-system.md``); that is how drift hides.
 """
 from __future__ import annotations
 
@@ -157,7 +163,7 @@ KNOWN_JOBITEM_CREATORS: frozenset[str] = frozenset({
 #: call (e.g. ``uuid.uuid4`` or ``secrets.token_hex``). The static set
 #: is intentionally a SUBSET of the source.
 KNOWN_MINT_SITES: frozenset[str] = frozenset({
-    # ── The auto-mint site (instance_messaging.py:699 in the
+    # ── The auto-mint site (instance_messaging.py:702 in the
     # ── ``_ensure_work_id_fail_closed`` helper — extracted from
     # ── ``_prepare_enqueued_message`` by Fix A in dc4e0c89) — D4
     # ── fail-open handle; preserved by design for the INTERNAL
@@ -165,15 +171,15 @@ KNOWN_MINT_SITES: frozenset[str] = frozenset({
     # ── child reports — no JobItem). The job-driven path raises
     # ── LinkageContractError instead of minting. See
     # ── approach-comparison.md row A.
-    "daemon/services/instance_messaging.py:699:uuid.uuid4",
+    "daemon/services/instance_messaging.py:702:uuid.uuid4",
     # ── message_id mints (4 sites in _prepare_enqueued_message prelude) ──
-    "daemon/services/instance_messaging.py:1593:uuid.uuid4",
-    "daemon/services/instance_messaging.py:1597:uuid.uuid4",
-    "daemon/services/instance_messaging.py:1601:uuid.uuid4",
-    "daemon/services/instance_messaging.py:1605:uuid.uuid4",
+    "daemon/services/instance_messaging.py:1596:uuid.uuid4",
+    "daemon/services/instance_messaging.py:1600:uuid.uuid4",
+    "daemon/services/instance_messaging.py:1604:uuid.uuid4",
+    "daemon/services/instance_messaging.py:1608:uuid.uuid4",
     # ── The structurally-safe enqueue_message_job mint (joins the
     # ── shared linkage UUID into both the Task row and the JobItem) ──
-    "daemon/services/instance_messaging.py:2238:uuid.uuid4",
+    "daemon/services/instance_messaging.py:2241:uuid.uuid4",
 })
 
 
@@ -381,10 +387,13 @@ def _scan_mint_in_tree(tree: ast.AST, relpath: str) -> set[str]:
       * Bare ``uuid4(...)`` / ``uuid7(...)`` — ``from uuid import uuid4``
         pattern.
 
-    The scanner raises on an un-recognized mint idiom ONLY when a
-    heuristic pre-filter (presence of a string matching
-    ``uuid.uuid<N>`` or ``secrets.token_*``) trips; this is the
-    mint-idiom completeness guarantee the spec asks for.
+    There is NO heuristic pre-filter, and this scanner never raises on
+    an un-recognized mint idiom — any idiom outside the list above is
+    silently ignored. Mint-idiom completeness therefore rests on the
+    per-idiom recognition tests
+    (``tests/unit/job_state/test_constitution_drift.py::
+    test_mint_scanner_recognises_all_documented_idioms``) plus human
+    review when a new mint idiom lands.
     """
     found: set[str] = set()
     for node in ast.walk(tree):
@@ -616,19 +625,29 @@ def get_all_mint_sites() -> set[str]:
 # ---------------------------------------------------------------------------
 
 def regenerate_sets() -> str:
-    """Print the three static sets in ``frozenset({...})`` literal form.
+    """Print regen output for the three static sets.
 
     Run via::
 
         uv run python -c "from daemon.job_state.constitution import regenerate_sets; print(regenerate_sets())"
 
-    Paste the printed output into the ``KNOWN_*`` sets above. The
-    bidirectionality test (``tests/unit/job_state/test_constitution_drift.py``)
-    will fail until the static set matches source.
+    Writers/creators print as paste-verbatim ``frozenset({...})``
+    literals — their census is bidirectional, so pasting makes the
+    drift test pass cleanly. ``KNOWN_MINT_SITES`` is NOT paste-verbatim:
+    the mint census is subset-only (``KNOWN_MINT_SITES ⊆ source_mints``),
+    and the full source mint universe includes general-purpose UUID
+    mints (model PKs, message ids, ...) that must never be registered
+    as work_id sites. For mints this helper prints
+    ``source − KNOWN_MINT_SITES`` as a hand-pick CANDIDATE list — pick
+    only the sites that produce work_id-shaped handles. And do not
+    blind-regen to silence a census failure (§7.3 of
+    ``docs/job-task-system.md``) — that is how drift hides.
     """
     writers = sorted(discover_admission_state_writer_paths())
     creators = sorted(discover_jobitem_creator_paths())
-    mints = sorted(discover_work_id_mint_paths())
+    mint_candidates = sorted(
+        discover_work_id_mint_paths() - set(KNOWN_MINT_SITES)
+    )
 
     def fmt(keys: list[str]) -> str:
         if not keys:
@@ -644,9 +663,15 @@ def regenerate_sets() -> str:
         fmt(creators),
         "})",
         "",
-        "KNOWN_MINT_SITES: frozenset[str] = frozenset({",
-        fmt(mints),
-        "})",
+        "# KNOWN_MINT_SITES — NOT paste-verbatim. The mint census is",
+        "# subset-only (KNOWN_MINT_SITES ⊆ source_mints); pasting the full",
+        "# source universe would silently register general-purpose UUID",
+        "# mints (model PKs, message ids, ...) as work_id sites.",
+        "# Below: source − KNOWN_MINT_SITES = hand-pick CANDIDATES only.",
+        "# D4 checklist: register a candidate ONLY if it mints a",
+        "# work_id-bearing handle; leave general-purpose UUIDs out.",
+        "# CANDIDATES (hand-pick; do NOT blind-paste):",
+        fmt(mint_candidates),
     ]
     return "\n".join(parts)
 

@@ -379,8 +379,12 @@ fails fast.
 
 ### 7.3 When `constitution_drift_test` fails
 
-A failure means an unregistered writer/creator/mint site exists (or a registered one
-went away). **Do not blind-regen to silence it** — that is how drift hides. Triage:
+Triage depends on which set failed. **Do not blind-regen to silence a
+failure** — that is how drift hides (the regen helper prints mint
+output as hand-pick candidates for exactly this reason).
+
+**Writers / creators (bidirectional):** a failure means an unregistered
+writer/creator site exists (or a registered one went away).
 
 - **New site you intended** → register it (§7.2), including the amendment if it is an
   `admission_state` writer.
@@ -388,6 +392,12 @@ went away). **Do not blind-regen to silence it** — that is how drift hides. Tr
   reroute it. If it is a sweep-predicate re-scope, §6.3 applies.
 - **Registered site disappeared** → the refactor deleted or moved a write; update the
   set deliberately and confirm the write still happens somewhere registered.
+
+**Mints (subset-only):** the check enforces `KNOWN_MINT_SITES ⊆ source_mints`, so a
+failure can ONLY mean a stale registration — a static entry whose source site no
+longer exists (deleted or moved). A NEW unregistered source mint cannot fail this
+test: it is a silent registration obligation — review the live mint sites (§6.3, D4)
+and register it by hand only if it produces a `work_id`-shaped handle.
 
 ---
 
@@ -416,9 +426,10 @@ went away). **Do not blind-regen to silence it** — that is how drift hides. Tr
    `LinkageContractError` on mismatch instead of warning.
 
 Commit semantics differ: the omission raise (`work_id is None` with
-`work_id_required=True`) fires cleanly before the enqueue transaction and
-rolls back, whereas a result mismatch can be raised only after the
-enqueue commit and may leave the committed row behind.
+`work_id_required=True`) fires before the enqueue transaction begins —
+no row is written at all, so there is nothing to roll back — whereas a
+result mismatch can be raised only after the enqueue commit and may
+leave the committed row behind.
 
 **Why fail-closed:** every recovery surface keys on `Task.work_id == JobItem.job_id`.
 A minted-on-None handle makes the Task invisible to `get_by_work_id`, the work resolver,
