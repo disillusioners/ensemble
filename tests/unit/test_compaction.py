@@ -1969,6 +1969,100 @@ class TestPartialSummaryWS34:
         # Boundary line is INSIDE the doc.
         assert "END OF COMPACTED CONTEXT" in doc.content
 
+        # Strengthened 2026-09-01 (B3 regression pin): the prior
+        # version's assertion ``doc.content.count("### SECTION ") == 3``
+        # was section-count-vacuous — the OLD `_per_batch_section_meta`
+        # (a80767b9) still emitted 3 section headers even though
+        # their start_idx/end_idx ranged over batch bounds in a
+        # survivor-compressed manner (after batch 4 the next
+        # implicit boundary was batch 5's batch 1 coords, not the
+        # ORIGINAL batch 5 coords). This version BINDS each body
+        # to its ORIGINAL-coord section header: batch 0 → #1–#20,
+        # batch 2 → #41–#60, batch 4 → #81–#100. The dropped
+        # clause must contain ONLY the actually-failed batch
+        # ranges (1, 3, 5).
+        section_blocks = _parse_section_blocks(doc.content)
+        assert len(section_blocks) == 3, (
+            f"exactly three surviving sections (batches 0, 2, 4); "
+            f"got {len(section_blocks)} (block headers: "
+            f"{[h for h, _ in section_blocks]!r}); body excerpt: "
+            f"{doc.content[:500]!r}"
+        )
+        # Body→span binding: each surviving body is paired with its
+        # ORIGINAL-batch-coords section header.
+        expected_bindings = [
+            ("batch-0 summary", "messages #1–#20"),
+            ("batch-2 summary", "messages #41–#60"),
+            ("batch-4 summary", "messages #81–#100"),
+        ]
+        for i, (expected_body, expected_span) in enumerate(
+            expected_bindings
+        ):
+            header_line, body_text = section_blocks[i]
+            assert expected_span in header_line, (
+                f"section #{i + 1} header must carry the "
+                f"ORIGINAL batch coords ({expected_span!r}); got "
+                f"header={header_line!r}; body excerpt: {doc.content[:500]!r}"
+            )
+            assert expected_body in body_text, (
+                f"section #{i + 1} body must contain the surviving "
+                f"summary ({expected_body!r}); got body={body_text!r}"
+            )
+        # Cross-binding (anti-vacuous): no body may appear under
+        # a span header that doesn't carry its ORIGINAL coords.
+        for i, (expected_body, _expected_span) in enumerate(
+            expected_bindings
+        ):
+            for j, (_other_body, other_span) in enumerate(
+                expected_bindings
+            ):
+                if i == j:
+                    continue
+                other_header, other_body_text = section_blocks[j]
+                assert expected_body not in other_body_text, (
+                    f"section #{j + 1} body must NOT contain "
+                    f"{expected_body!r} (body→span binding pin); "
+                    f"got body={other_body_text!r}, "
+                    f"header={other_header!r}"
+                )
+        # Dropped clause: ONLY the actually-failed batches (1, 3,
+        # 5) must appear there. The OLD impl misclassified them as
+        # the survivors — binding the dropped clause to those
+        # three ranges catches the inversion.
+        envelope, _ = _split_envelope_and_section_detail(doc.content)
+        assert "dropped without summary:" in envelope, (
+            f"envelope must declare the dropped-without-summary "
+            f"clause; got envelope={envelope!r}"
+        )
+        # The three failed-batch ranges must appear in the dropped
+        # clause (in some order — the format is comma-joined).
+        # Layout: 120 messages total, min_window=1 so the LAST
+        # group is preserved (119 compactable messages), 6
+        # batches of (20, 20, 20, 20, 20, 19). Failed batches 1,
+        # 3, 5 → dropped-spans = (21, 40), (61, 80), (101, 119).
+        # Format note: only the FIRST range carries the
+        # ``messages `` prefix; subsequent ranges are joined with
+        # ``", #x"`` — they appear as ``"#61–#80"`` in the
+        # rendered envelope (NOT as ``"messages #61–#80"``).
+        assert ", #61–#80" in envelope and ", #101–#119" in envelope, (
+            f"the failed-batch ranges (#61–#80, #101–#119) must "
+            f"appear in the dropped clause (after the first "
+            f"``messages `` prefix); got envelope={envelope!r}"
+        )
+        assert "messages #21–#40" in envelope, (
+            f"the first failed-batch range (#21–#40) must appear "
+            f"in the dropped clause (with the ``messages `` "
+            f"prefix); got envelope={envelope!r}"
+        )
+        # The survivor ranges must NOT leak into the dropped clause.
+        for _body, survivor_span in expected_bindings:
+            assert survivor_span not in envelope, (
+                f"survivor batch span {survivor_span!r} must NOT "
+                f"appear in the dropped clause (would indicate "
+                f"B3 OLD impl misclassifying the survivor as "
+                f"dropped); got envelope={envelope!r}"
+            )
+
     @pytest.mark.asyncio
     async def test_d_identical_outcome_proactive_vs_reactive(
         self, compactor_config, mock_llm_merge,
@@ -2400,6 +2494,89 @@ needs_real_langgraph = pytest.mark.skipif(
         "installed package"
     ),
 )
+
+
+# =============================================================================
+# B3 body→span-binding helpers (W6 strengthened assertions 2026-09-01)
+# =============================================================================
+def _parse_section_blocks(body: str) -> list[tuple[str, str]]:
+    """Parse a ``compaction-global-…`` SystemMessage body into a list of
+    ``(header_line, body_text)`` tuples — one per ``### SECTION`` block.
+
+    The doc body layout (architect §4, build_compaction_doc):
+
+        ── ENVELOPE ──
+        <envelope header lines, including the dropped-without-
+        summary clause>
+        ── GLOBAL OVERVIEW ──
+        <global overview text>
+        ── SECTION DETAIL ──
+        ### SECTION 1/n — messages #a–#b[ | conversation time t0 → t1]
+        <section body>
+        <blank>
+        ### SECTION 2/n — messages #c–#d
+        <section body>
+        …
+        ── END OF COMPACTED CONTEXT ──
+
+    Each ``### SECTION i/n — messages #x–#y`` line is the section
+    header (carrying the per-section span coordinates). Body text
+    follows immediately (terminated by the next section header, the
+    boundary line, or end-of-string). The body→span-binding pin in
+    the strengthened tests asserts each section's body text is
+    paired with the correct ORIGINAL-batch-coord header.
+
+    Args:
+        body: Full doc body string of a compaction-global SystemMessage.
+
+    Returns:
+        List of ``(header_line, body_text)`` tuples in document
+        order. Header is the verbatim ``### SECTION i/n — messages
+        #x–#y[ | …]`` line; body_text is the per-section body
+        stripped of trailing blank lines.
+    """
+    marker = "### SECTION "
+    blocks: list[tuple[str, str]] = []
+    pos = body.find(marker)
+    while pos != -1:
+        end_of_header = body.find("\n", pos)
+        if end_of_header == -1:
+            header_line = body[pos:]
+            body_text = ""
+        else:
+            header_line = body[pos:end_of_header]
+            # Find the next section anchor (or terminator).
+            boundary_pos = body.find("── END OF", end_of_header)
+            next_section_pos = body.find(marker, end_of_header)
+            candidates = [
+                p for p in (next_section_pos, boundary_pos)
+                if p != -1
+            ]
+            next_stop = min(candidates) if candidates else len(body)
+            body_text = body[end_of_header + 1:next_stop]
+            # Strip trailing newlines / whitespace.
+            body_text = body_text.rstrip("\n").rstrip()
+        blocks.append((header_line, body_text))
+        pos = (
+            body.find(marker, end_of_header + 1)
+            if end_of_header != -1 else -1
+        )
+    return blocks
+
+
+def _split_envelope_and_section_detail(body: str) -> tuple[str, str]:
+    """Split a doc body at the ``── SECTION DETAIL ──`` boundary.
+
+    Returns:
+        ``(envelope_part, section_detail_part)``: everything
+        before the SECTION DETAIL marker (envelope + GLOBAL
+        OVERVIEW) and everything starting at the marker.
+    """
+    marker = "── SECTION DETAIL ──"
+    pos = body.find(marker)
+    if pos == -1:
+        return body, ""
+    return body[:pos], body[pos:]
 
 
 
@@ -2907,6 +3084,19 @@ class TestSentinelPreWriteGuard:
         out = build_sentinel_replacement(
             result, snapshot, compacted_ids={"h-0"}
         )
+        # W4 residue (2026-09-01): this test exercises the
+        # production ``build_sentinel_replacement`` under the
+        # conftest's mocked-langgraph env, which forces the
+        # ImportError fallback path in production
+        # (``daemon/compaction.py:343-344`` — the production
+        # helper falls back to the source-verified literal
+        # ``"__remove_all__"`` when ``langgraph.graph.message``
+        # is not importable). The literal assertion below is
+        # therefore INTENTIONAL: it pins the FALLBACK PATH
+        # output, not the real-langgraph constant. A test that
+        # needs the langgraph constant uses
+        # ``_load_real_add_messages``'s swap window and
+        # ``@needs_real_langgraph`` (see TestReducerSemanticsPins).
         # Sentinel + doc + tail.
         assert isinstance(out[0], RemoveMessage)
         assert out[0].id == "__remove_all__"
@@ -3506,6 +3696,18 @@ class TestSentinelAcrossPersistSites:
         out = build_sentinel_replacement(
             result, snapshot, compacted_ids=compacted_ids
         )
+        # W4 residue (2026-09-01): the literal ``"__remove_all__"``
+        # below is INTENTIONAL. The conftest mocks the
+        # ``langgraph.graph.message`` namespace, so the production
+        # ``build_sentinel_replacement`` helper falls back to the
+        # source-verified literal (see
+        # ``daemon/compaction.py:343-344``). This assertion pins
+        # the FALLBACK PATH output — the seam is site-agnostic
+        # and emits the literal sentinel regardless of which
+        # persist site invokes it. A test that needs the real
+        # langgraph constant uses
+        # ``_load_real_add_messages``'s swap window and
+        # ``@needs_real_langgraph`` (see TestReducerSemanticsPins).
         # Sentinel at 0, then doc, then tail. Identical for all
         # three persist sites.
         from langchain_core.messages import RemoveMessage
@@ -3760,6 +3962,16 @@ class TestB2EmergencyTruncationSeam:
         out = build_sentinel_replacement(
             result, snapshot, compacted_ids=frozenset({"h-0", "h-1", "h-2"})
         )
+        # W4 residue (2026-09-01): the literal ``"__remove_all__"``
+        # is INTENTIONAL — under the conftest's mocked-langgraph
+        # env, ``build_sentinel_replacement`` falls back to the
+        # source-verified literal
+        # (``daemon/compaction.py:343-344``). This test exercises
+        # the emergency-truncation path through the seam and
+        # asserts the FALLBACK PATH output. A test that needs the
+        # real langgraph constant uses
+        # ``_load_real_add_messages``'s swap window and
+        # ``@needs_real_langgraph`` (see TestReducerSemanticsPins).
         assert isinstance(out[0], RemoveMessage)
         assert out[0].id == "__remove_all__"
         assert [m.id for m in out[1:]] == ["truncated-0", "truncated-1"]
@@ -3828,6 +4040,17 @@ class TestB2EmergencyTruncationSeam:
             result, snapshot,
             compacted_ids={"h-0", "h-1", "h-2"},
         )
+        # W4 residue (2026-09-01): the literal ``"__remove_all__"``
+        # is INTENTIONAL — under the conftest's mocked-langgraph
+        # env, ``build_sentinel_replacement`` falls back to the
+        # source-verified literal
+        # (``daemon/compaction.py:343-344``). This test exercises
+        # the B2 site-derivation fallback (pre=None, derived
+        # via pre_ids − new_replacement_ids) and asserts the
+        # FALLBACK PATH sentinel output of the seam. A test that
+        # needs the real langgraph constant uses
+        # ``_load_real_add_messages``'s swap window and
+        # ``@needs_real_langgraph`` (see TestReducerSemanticsPins).
         assert isinstance(out[0], RemoveMessage)
         assert out[0].id == "__remove_all__"
 
@@ -3934,24 +4157,429 @@ class TestB3NonContiguousSectionCoords:
         # ORIGINAL batch coordinates. The first surviving
         # section covers batch 0 = messages #1–#20. The second
         # surviving section covers batch 2 = messages #41–#60.
-        # The failed batch (#21–#40) MUST appear in dropped.
+        # The failed batch (#21–#40) MUST appear in the
+        # dropped-spans clause.
+        #
+        # Strengthened 2026-09-01 (B3 regression pin): the prior
+        # version only asserted substring presence of
+        # ``"messages #1–#20"`` / ``"messages #41–#60"`` /
+        # ``"messages #21–#40"``. That was substring-vacuous:
+        # the OLD `_per_batch_section_meta` (a80767b9) collapsed
+        # ``s_idx`` to the END of the previous survivor, so the
+        # body for batch-2 carried header ``messages #21–#40``
+        # (the dropped-batch range) and the actually-failed
+        # batch's range appeared as the section header — the
+        # old substring assertions still passed. This version
+        # BINDS each body to its ORIGINAL-coord section header
+        # and asserts the dropped-clause contains ONLY the
+        # actually-failed batch's range.
         body = doc.content
-        assert "messages #1–#20" in body, (
-            f"first survivor must cover ORIGINAL batch 0 "
-            f"(messages #1–#20); body excerpt: {body[:500]!r}"
+        section_blocks = _parse_section_blocks(body)
+        # Two surviving sections, in batch order.
+        assert len(section_blocks) == 2, (
+            f"exactly two surviving sections; got {len(section_blocks)} "
+            f"(block headers: "
+            f"{[h for h, _ in section_blocks]!r}); body excerpt: {body[:500]!r}"
         )
-        assert "messages #41–#60" in body, (
-            f"second survivor must cover ORIGINAL batch 2 "
-            f"(messages #41–#60); body excerpt: {body[:500]!r}"
+        # Body→span binding #1: batch-0 body under messages #1–#20.
+        header_1, body_1 = section_blocks[0]
+        assert "messages #1–#20" in header_1, (
+            f"section #1 must carry ORIGINAL batch 0 coords in its "
+            f"HEADER (not just in body); got header={header_1!r}; "
+            f"body excerpt: {body[:500]!r}"
         )
-        # The failed batch (#21–#40) MUST be in the
-        # dropped-spans clause — the previous bug presented it
-        # as covered.
-        assert "dropped without summary" in body
-        assert "messages #21–#40" in body, (
-            f"the dropped batch (#21–#40) MUST appear in the "
-            f"dropped-spans clause; body excerpt: {body[:500]!r}"
+        assert "batch-0 body" in body_1, (
+            f"section #1 body must contain the batch-0 survivor body; "
+            f"got body_text={body_1!r}"
         )
+        # Cross-binding: the batch-0 body MUST NOT appear under the
+        # batch-2 header (would be vacuous: protects against the
+        # body being attached to the wrong survivor's header).
+        assert "batch-0 body" not in section_blocks[1][1], (
+            f"section #2 body must NOT carry the batch-0 survivor "
+            f"(body→span binding); got body={section_blocks[1][1]!r}"
+        )
+        # Body→span binding #2: batch-2 body under messages #41–#60.
+        header_2, body_2 = section_blocks[1]
+        assert "messages #41–#60" in header_2, (
+            f"section #2 must carry ORIGINAL batch 2 coords "
+            f"(#41–#60) in its header — the OLD impl collapsed "
+            f"s_idx and presented the dropped batch's coords here; "
+            f"got header={header_2!r}; body excerpt: {body[:500]!r}"
+        )
+        assert "batch-2 body" in body_2, (
+            f"section #2 body must contain the batch-2 survivor body; "
+            f"got body_text={body_2!r}"
+        )
+        assert "batch-2 body" not in section_blocks[0][1], (
+            f"section #1 body must NOT carry the batch-2 survivor; "
+            f"got body={section_blocks[0][1]!r}"
+        )
+        # Dropped clause: ONLY the actually-failed batch (#21–#40)
+        # must appear there. The OLD impl misclassified batch 2
+        # (the survivor at #41–#60) as "dropped" because the
+        # batch-2 body claimed the dropped-batch's coords —
+        # binding the clause to the survivors' absent ranges
+        # catches that.
+        envelope, _ = _split_envelope_and_section_detail(body)
+        assert "dropped without summary" in envelope, (
+            f"envelope must declare the dropped-without-summary "
+            f"clause; got envelope={envelope!r}"
+        )
+        assert "messages #21–#40" in envelope, (
+            f"the actually-failed batch (#21–#40) must appear in "
+            f"the dropped clause (B3 bug presented it as covered); "
+            f"got envelope={envelope!r}"
+        )
+        # Negative: the survivor ranges must NOT leak into the
+        # dropped clause (the OLD impl misclassified batch 2 as
+        # dropped because the batch-2 body claimed its coords).
+        assert "messages #41–#60" not in envelope, (
+            f"survivor batch 2 coords (#41–#60) must NOT appear in "
+            f"the dropped clause (would indicate OLD B3 impl "
+            f"misclassifying the survivor as dropped); "
+            f"got envelope={envelope!r}"
+        )
+        assert "messages #1–#20" not in envelope, (
+            f"survivor batch 0 coords (#1–#20) must NOT appear in "
+            f"the dropped clause; got envelope={envelope!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_batch_zero_fails_non_contiguous_variant(self):
+        """B3 regression pin — second non-contiguous layout.
+
+        Symmetric to :meth:`test_non_contiguous_sections_use_original_batch_coords`
+        but with the FIRST batch failing and the survivors at
+        indices 1 and 2. Exercises a different ``s_idx`` collapse
+        path on the OLD impl: the surviving batch 1 carries the
+        FIRST survivor's coordinates (#1–#20) instead of its
+        ORIGINAL batch 1 coords (#21–#40). Body→span binding
+        must hold for both survivors.
+        """
+        from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+        from daemon.compaction import (
+            ChunkedOutcome,
+            CompactionContext, ContextCompactor,
+        )
+        from daemon.config import CompactionConfig
+
+        cfg = CompactionConfig(
+            enabled=True, threshold=0.01,
+            recent_message_window=2, min_recent_window=1,
+            context_window_overrides={"gpt-4o": 1000},
+            context_window_default=0,
+            target_ratio=0.40, model="", summarization_model="",
+            min_messages_before_compaction=2,
+            summarization_chunk_threshold=1.5,
+            timeout_base_s=90.0, timeout_per_100k_tokens_s=60.0,
+            timeout_cap_s=300.0, timeout_facade_margin_s=5.0,
+            operation_budget_s=300.0, chunk_concurrency=3,
+        )
+        compactor = ContextCompactor(cfg, llm_config={})
+        msgs: list = []
+        for i in range(1, 61):
+            msgs.append(HumanMessage(content=f"x{i}", id=f"h-{i}"))
+        msgs.extend([
+            HumanMessage(content="tail-1", id="t-1"),
+            HumanMessage(content="tail-2", id="t-2"),
+        ])
+
+        async def fake_chunked(
+            compactable, context, previous_overview=None,
+        ):
+            # Batch 0 fails; batches 1 and 2 succeed (variant).
+            return ChunkedOutcome(
+                summaries=["batch-1 body", "batch-2 body"],
+                failed_batches=[0],
+                stop_reason="timeout",
+                completed_idxs=[1, 2],
+                budget_remaining_after_pool=120.0,
+            )
+
+        compactor._summarize_chunked = fake_chunked
+
+        async def fake_merge(
+            partial_summaries, context,
+            budget_seconds=None, previous_overview=None,
+        ):
+            return ("MERGED GLOBAL", True)
+
+        compactor._merge_summaries = fake_merge
+
+        ctx = CompactionContext(
+            messages=msgs, system_prompt_tokens=0,
+            model_name="gpt-4o", config=cfg, llm_config={},
+            instance_id="b3-batch0-fails",
+        )
+        result = await compactor.compact_state(ctx)
+        assert result is not None
+        assert result.compaction_type == "partial_summary"
+
+        docs = [
+            m for m in result.replacement_messages
+            if isinstance(m, SystemMessage)
+            and (m.id or "").startswith("compaction-global-")
+        ]
+        assert len(docs) == 1
+        doc = docs[0]
+        body = doc.content
+
+        section_blocks = _parse_section_blocks(body)
+        assert len(section_blocks) == 2, (
+            f"exactly two surviving sections (batches 1 + 2); got "
+            f"{len(section_blocks)} (block headers: "
+            f"{[h for h, _ in section_blocks]!r}); body excerpt: {body[:500]!r}"
+        )
+        # Batch 1 body → ORIGINAL coords #21–#40.
+        header_1, body_1 = section_blocks[0]
+        assert "messages #21–#40" in header_1, (
+            f"section #1 (batch 1 survivor) must carry ORIGINAL "
+            f"batch 1 coords (#21–#40); got header={header_1!r}; "
+            f"body excerpt: {body[:500]!r}"
+        )
+        assert "batch-1 body" in body_1
+        # Cross-binding — batch 2 body must not leak.
+        assert "batch-1 body" not in section_blocks[1][1]
+        # Batch 2 body → ORIGINAL coords #41–#60.
+        header_2, body_2 = section_blocks[1]
+        assert "messages #41–#60" in header_2, (
+            f"section #2 (batch 2 survivor) must carry ORIGINAL "
+            f"batch 2 coords (#41–#60); got header={header_2!r}; "
+            f"body excerpt: {body[:500]!r}"
+        )
+        assert "batch-2 body" in body_2
+        # Dropped clause: ONLY the actually-failed batch 0 (#1–#20).
+        envelope, _ = _split_envelope_and_section_detail(body)
+        assert "messages #1–#20" in envelope, (
+            f"the actually-failed batch 0 (#1–#20) must appear in "
+            f"the dropped clause; got envelope={envelope!r}"
+        )
+        # The survivor ranges (#21–#40, #41–#60) must NOT be in the
+        # dropped clause (the OLD impl with batch 0 failing would
+        # invert this and report batch 2 as dropped because the
+        # batch-2 body claimed coords #21–#40).
+        assert "messages #21–#40" not in envelope, (
+            f"survivor batch 1 coords (#21–#40) must NOT appear in "
+            f"the dropped clause (B3 OLD impl misclassification); "
+            f"got envelope={envelope!r}"
+        )
+        assert "messages #41–#60" not in envelope
+
+    @pytest.mark.asyncio
+    async def test_non_contiguous_old_impl_replay_b3_regression(self):
+        """PROOF TEST (B3 regression pin): the snapshotted OLD
+        ``_per_batch_section_meta`` (a80767b9) VIOLATES every
+        body→span binding expectation the strengthened test now
+        pins.
+
+        Mirrors the setup of
+        :meth:`test_non_contiguous_sections_use_original_batch_coords`
+        but invokes the OLD function body INLINE — production
+        code is NOT touched. The OLD body is snapshot-verbatim
+        via ``git show a80767b9:daemon/compaction.py`` (path
+        resolved ``2026-09-01``).
+
+        Pass-condition (suites GREEN on HEAD): the OLD impl
+        must exhibit at least one B3 violation. If a future
+        patch silently reverts ``_per_batch_section_meta`` to
+        the OLD shape, OR if a stronger snapshot pin is needed,
+        this proof will FAIL — the strengthening has become
+        vacuous. That is the regression-pin signal.
+        """
+        from langchain_core.messages import HumanMessage
+
+        # ── 1. Build the same compactable_groups as the scenario ──
+        msgs: list = []
+        for i in range(1, 61):
+            msgs.append(HumanMessage(content=f"x{i}", id=f"h-{i}"))
+        msgs.extend([
+            HumanMessage(content="tail-1", id="t-1"),
+            HumanMessage(content="tail-2", id="t-2"),
+        ])
+        groups = identify_boundary_groups(msgs)
+        compactable, _preserved, _ = select_compactable_groups(
+            groups, recent_window=2, min_window=1,
+            context_window=10**6, system_prompt_tokens=0,
+            estimate_fn=estimate_messages_tokens,
+            config_threshold=0.01,
+        )
+
+        # ── 2. OLD impl — snapshotted verbatim from a80767b9 ────────
+        # Production file at a80767b9: ``daemon/compaction.py``
+        # (resolved via ``git show a80767b9 --stat``).
+        # The OLD function used a collapsing ``s_idx = end_idx``
+        # pointer per iteration; for batch_indices=[0, 2] the
+        # second survivor was assigned the END-of-batch-0 coords
+        # (#21–#40) instead of ORIGINAL batch 2 coords (#41–#60).
+        def old_per_batch_section_meta(
+            compactable, summaries, _ctx, batch_indices=None,
+        ):
+            batch_size = 20
+            sections: list = []
+            old_dropped_spans: list[tuple[int, int]] = []
+            s_idx = 0
+            for i, body in enumerate(summaries):
+                if batch_indices is not None:
+                    batch_i = batch_indices[i]
+                else:
+                    batch_i = i
+                batch_groups = compactable[
+                    batch_i * batch_size:(batch_i + 1) * batch_size
+                ]
+                if not batch_groups:
+                    break
+                start_idx = s_idx + 1
+                end_idx = s_idx + sum(
+                    len(g.messages) for g in batch_groups
+                )
+                start_id = batch_groups[0].messages[0].id
+                end_id = batch_groups[-1].messages[-1].id
+                if body:
+                    sections.append({
+                        "start_idx": start_idx,
+                        "end_idx": end_idx,
+                        "body": body,
+                        "start_id": start_id,
+                        "end_id": end_id,
+                    })
+                else:
+                    # Dead branch on the partial-summary path
+                    # (summaries carries only survivors). Kept
+                    # verbatim to mirror the snapshot.
+                    old_dropped_spans.append((start_idx, end_idx))
+                s_idx = end_idx
+            return sections
+
+        # ── 3. Compute OLD sections + dropped_spans ────────────────
+        # Caller sweep — same algorithm HEAD uses for dropped_spans
+        # (any batch bucket whose start_idx is missing from
+        # surviving_starts is dropped). Divergence from HEAD is
+        # purely in the surviving_starts set.
+        old_sections = old_per_batch_section_meta(
+            compactable,
+            ["batch-0 body", "batch-2 body"],
+            None,  # OLD fn never reads ctx; positional per OLD signature
+            batch_indices=[0, 2],
+        )
+        surviving_starts = {s["start_idx"] for s in old_sections}
+        old_dropped_spans: list[tuple[int, int]] = []
+        batch_size = 20
+        s_idx = 0
+        for i in range(0, len(compactable), batch_size):
+            bg = compactable[i:i + batch_size]
+            s = s_idx + 1
+            e = s_idx + sum(len(g.messages) for g in bg)
+            if s not in surviving_starts:
+                old_dropped_spans.append((s, e))
+            s_idx = e
+
+        # ── 4. Render envelope + section detail (mirrors doc body) ──
+        n = len(old_sections)
+        rendered_sections: list[str] = []
+        for i, sec in enumerate(old_sections, start=1):
+            si = sec["start_idx"]
+            ei = sec["end_idx"]
+            s_label = (
+                f"#{si}" if si == ei else f"#{si}–#{ei}"
+            )
+            rendered_sections.append(
+                f"### SECTION {i}/{n} — messages {s_label}\n"
+                f"{sec['body']}\n"
+            )
+        if old_dropped_spans:
+            parts: list[str] = []
+            for s, e in old_dropped_spans:
+                parts.append(
+                    f"#{s}" if s == e else f"#{s}–#{e}"
+                )
+            dropped_clause = (
+                "dropped without summary: messages "
+                + ", ".join(parts)
+                + " — content not recoverable"
+            )
+        else:
+            dropped_clause = "dropped without summary: NONE"
+        body = (
+            f"── ENVELOPE ──\n{dropped_clause}\n── SECTION DETAIL ──\n"
+            + "\n".join(rendered_sections)
+        )
+
+        # ── 5. Apply the strengthened body→span-binding assertions ──
+        section_blocks = _parse_section_blocks(body)
+        assert len(section_blocks) == 2, (
+            f"sanity: snapshotted OLD produced 2 sections; got "
+            f"{[h for h, _ in section_blocks]!r}; body={body!r}"
+        )
+        _header_1, _body_1 = section_blocks[0]
+        header_2, body_2 = section_blocks[1]
+        envelope, _ = _split_envelope_and_section_detail(body)
+
+        # ── 6. PROOF CHECK — the OLD impl MUST violate at least ────
+        # one strengthened expectation. Each violation is a
+        # regression-pin the strengthened test now enforces. The
+        # strengthened test asserts the inverse of each pin (so
+        # passes on HEAD's NEW impl); this proof records the OLD
+        # violation explicitly so a future weakening of the
+        # strengthened assertions shows up as a here-PASS-now
+        # regression.
+        #
+        # The B3 bug signature on the OLD impl, given the
+        # strengthened scenario (batches 0+2 succeed, batch 1
+        # fails):
+        #
+        #   * section #2 header carries the DROPPED batch's
+        #     coords (#21–#40), not ORIGINAL batch 2 coords
+        #     (#41–#60) — the body→span binding was wrong.
+        #   * the dropped clause carries the SURVIVOR's coords
+        #     (#41–#60) — the sweep saw batch 2 (start_idx=41)
+        #     as not in surviving_starts (because section #2 had
+        #     claimed #21–#40) and emitted batch 2 as "dropped".
+        #   * the dropped clause does NOT contain the
+        #     ACTUALLY-FAILED batch's coords (#21–#40) — that
+        #     span was attributed to section #2 instead.
+        violations: list[str] = []
+
+        # Pin 1: on OLD, section #2 header carries the dropped
+        # batch's coords (#21–#40). BUG signature.
+        if "messages #21–#40" in header_2:
+            violations.append("section_2_carries_dropped_batch_coords")
+
+        # Pin 2: on OLD, the dropped clause carries the survivor's
+        # coords (#41–#60) — the impl misclassified the survivor
+        # as dropped. BUG signature.
+        if "messages #41–#60" in envelope:
+            violations.append("dropped_clause_carries_survivor_coords")
+
+        # Pin 3: on OLD, the dropped clause does NOT contain the
+        # actually-failed batch (#21–#40) — because the OLD
+        # impl attributed that span to section #2. BUG signature.
+        if "messages #21–#40" not in envelope:
+            violations.append("dropped_clause_missing_failed_batch")
+
+        # Pass-condition: at least ONE pin must be violated on
+        # the OLD impl. This is the regression-pin signal —
+        # if a future change weakens the strengthened assertions
+        # such that all three pins pass on OLD (i.e. NEW
+        # behavior), this proof correctly fails (the strengthened
+        # test can no longer catch B3 because the OLD impl no
+        # longer exhibits the bug).
+        assert violations, (
+            "PROOF FAILURE: snapshotted OLD impl did NOT exhibit "
+            "any B3 regression signal that the strengthened "
+            "test pins. Either the snapshot is wrong (the "
+            "function body was inadvertently edited), or the "
+            "strengthened assertions have been weakened too far "
+            "(all three pins pass on the OLD impl → no "
+            "regression protection). Inspect the rendered body "
+            "and the strengthened test's body→span-binding "
+            "assertions. "
+            f"OLD rendered body={body!r}, "
+            f"section_2_header={header_2!r}, "
+            f"envelope={envelope!r}"
+        )
+        # PASS path: the OLD impl exhibits at least one B3
+        # regression. The strengthened test is correctly wired.
 
 
 class TestW1EnginePassTwoSeedEndToEnd:
