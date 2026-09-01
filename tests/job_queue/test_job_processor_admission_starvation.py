@@ -284,7 +284,32 @@ class TestJobProcessorAdmissionStarvation:
         mock_instance_manager.spawn_instance_with_mcp = AsyncMock(
             return_value="regression-instance"
         )
-        mock_instance_manager.enqueue_message = AsyncMock()
+        # Fix A (constitution Phase 0, approach-comparison.md row A):
+        # the four JOB-DRIVEN dispatch sites — JobProcessor main TASK
+        # dispatch (~:1299), crash-recovery re-spawn (~:984), orphan-
+        # resume re-spawn (~:1073), and the observer trigger
+        # (``manager.py:3887``) — pass ``work_id=job_id`` and call
+        # ``_assert_linkage_contract(..., enforce=True)``. A bare
+        # ``AsyncMock()`` here returns an AsyncMock whose ``.job_id``
+        # is another MagicMock, which trips the linkage tripwire at
+        # ``job_processor.py:1339`` (``Task.work_id != JobItem.job_id``
+        # mismatch), the recovery try/except then finalizes the
+        # JobItem at FAILED, and the regression assertion sees
+        # ``admission_state='done'`` instead of ``'active'``. Supply a
+        # real ``AsyncMessageResult`` whose ``job_id`` matches the
+        # JobItem's job_id (i.e. matches the work_id production
+        # passes) — the tripwire stays silent, dispatch succeeds, and
+        # the regression assertion tests what it meant to test
+        # (starvation across >100 projects).
+        from daemon.services.instance_messaging import AsyncMessageResult
+        mock_instance_manager.enqueue_message = AsyncMock(
+            return_value=AsyncMessageResult(
+                message_id="msg-regression",
+                instance_id="regression-instance",
+                status="queued",
+                job_id=job_id,
+            )
+        )
         mock_instance_manager.get_instance = AsyncMock(
             side_effect=KeyError("not in memory")
         )

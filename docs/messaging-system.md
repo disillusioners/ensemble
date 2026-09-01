@@ -26,7 +26,7 @@ The system implements a **multi-layer queue architecture** with two distinct pat
 │  │         ↓                      │    │         ↓                      │ │
 │  │  JobQueueService.enqueue()     │    │  manager.enqueue_message()      │ │
 │  │         ↓                      │    │         ↓                      │ │
-│  │  JobItem (PENDING)            │    │  MessageQueue + Task (atomic)   │ │
+│  │  JobItem (queued)              │    │  MessageQueue + Task (atomic)   │ │
 │  │         ↓                      │    │         ↓                      │ │
 │  │  JobProcessor (poll 2s)        │    │  WorkerPool (poll 0.5s)        │ │
 │  │         ↓                      │    │         ↓                      │ │
@@ -45,6 +45,11 @@ The system implements a **multi-layer queue architecture** with two distinct pat
 
 Used for **background jobs** with priorities, project serialization, and queue management.
 
+> Job behavior splits into two dispatch cases — first-job (mission, spawns the instance)
+> and message-job (mirror receipt on an existing instance). See
+> [`docs/job-task-system.md`](job-task-system.md) for the canonical model, the
+> `admission_state` lifecycle, and the `work_id` linkage contract.
+
 ### Flow
 
 ```
@@ -60,7 +65,7 @@ Used for **background jobs** with priorities, project serialization, and queue m
           ▼
    ┌─────────────────────────────────────────────────────────────────────┐
    │                     JobQueueService.enqueue()                        │
-   │  • Creates JobItem with PENDING status                              │
+   │  • Creates JobItem (admission_state='queued')                              │
    │  • Assigns to queue based on project_id                            │
    │  • Sets priority (1-10, 10=highest)                                │
    └────────────────────────────┬────────────────────────────────────────┘
@@ -71,8 +76,8 @@ Used for **background jobs** with priorities, project serialization, and queue m
    │  ┌─────────┬──────────┬─────────┬──────────┬─────────────────────┐ │
    │  │ job_id  │  status  │ priority│ queue_id │ instance_id         │ │
    │  ├─────────┼──────────┼─────────┼──────────┼─────────────────────┤ │
-   │  │ job-001 │ PENDING  │   8     │ proj-q1  │ null                │ │
-   │  │ job-002 │ PENDING  │   5     │ proj-q1  │ null                │ │
+   │  │ job-001 │ queued   │   8     │ proj-q1  │ null                │ │
+   │  │ job-002 │ queued   │   5     │ proj-q1  │ null                │ │
    │  └─────────┴──────────┴─────────┴──────────┴─────────────────────┘ │
    └────────────────────────────┬────────────────────────────────────────┘
                                 │

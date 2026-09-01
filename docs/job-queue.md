@@ -32,6 +32,11 @@ The job queue provides persistent, reliable task execution with the following ca
 
 ### Job Lifecycle
 
+> The diagram below uses the **legacy API status vocabulary**. The stored authority is
+> the four-value `admission_state` (`queued`/`active`/`done`/`dead`) — see
+> [Job States & Transitions](#job-states--transitions) below and
+> [`docs/job-task-system.md`](job-task-system.md).
+
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                         JOB LIFECYCLE                                   │
@@ -171,38 +176,46 @@ When `idempotency_key` is provided, the system:
 
 ## Job States & Transitions
 
+> **Vocabulary note (2026-09-01).** The authoritative stored lifecycle is the four-value
+> `AdmissionState` (`queued` / `active` / `done` / `dead`) — the sole write authority on
+> `job_queue_items`. The six states below are the **legacy API-facing status strings**,
+> derived for `JobResponse.status` (via `_derive_legacy_status`, discriminated by
+> `terminal_reason` for `done` rows). API responses still speak the legacy vocabulary;
+> write sites and DB reads speak `admission_state` only. For the full model — including
+> the mission/mirror kind split and the linkage contract — see
+> [`docs/job-task-system.md`](job-task-system.md), the canonical core-module reference.
+
 ### States
 
-| State | Description |
-|-------|-------------|
-| `PENDING` | Job is queued, waiting to be processed |
-| `PROCESSING` | Job is actively being executed |
-| `COMPLETED` | Job finished successfully |
-| `FAILED` | Job failed (may be retried) |
-| `CANCELLED` | Job was cancelled (no retry) |
-| `DEAD_LETTER` | Job exhausted retries, moved to DLQ |
+Stored authority (`admission_state`) vs the legacy status an API caller sees:
+
+| `admission_state` (stored) | API legacy status | Description |
+|-------|------------------|-------------|
+| `queued` | `pending` | Job is in queue, awaiting dequeue |
+| `active` | `processing` | Job is dequeued, lock held, instance spawned/awake (pause is an instance concern — a paused job stays `active`) |
+| `done` (+ `terminal_reason`) | `completed` / `failed` / `cancelled` | Terminal, no retry pending; `terminal_reason` discriminates |
+| `dead` | `dead_letter` | Dead-lettered (exhausted retries) |
 
 ### Valid Transitions
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                    STATE TRANSITION TABLE                         │
-├──────────────────┬───────────────────────┬──────────────────────┤
-│     FROM         │         TO            │   TRANSITION NAME    │
-├──────────────────┼───────────────────────┼──────────────────────┤
-│ (none)           │ PENDING               │ create               │
-│ PENDING          │ PROCESSING            │ start                │
-│ PENDING          │ CANCELLED             │ cancel               │
-│ PROCESSING       │ COMPLETED             │ complete             │
-│ PROCESSING       │ FAILED                │ fail                 │
-│ PROCESSING       │ CANCELLED             │ abort                │
-│ PROCESSING       │ PENDING               │ requeue              │
-│ FAILED           │ PENDING               │ retry                │
-│ FAILED           │ DEAD_LETTER           │ dead_letter          │
-│ FAILED           │ CANCELLED             │ cancel_after_fail    │
-│ DEAD_LETTER      │ PENDING               │ replay               │
-└──────────────────┴───────────────────────┴──────────────────────┘
-```
+`VALID_TRANSITIONS` (`daemon/services/job_state_machine.py`), with the legacy name where
+one exists:
+
+| FROM | TO | Transition |
+|------|----|------------|
+| (none) | `queued` | create |
+| `queued` | `active` | start |
+| `queued` | `done` | cancel pending |
+| `active` | `done` | complete / fail / cancel / abort (NO_RETRY) |
+| `active` | `queued` | retry (RETRY, backoff scheduled) |
+| `active` | `dead` | dead-letter (DEAD_LETTER) |
+| `done` | `queued` | replay from done |
+| `dead` | `queued` | replay from DLQ (the only `dead` exit) |
+| `done` | `active` | orphan-race post-commit re-arm |
+
+`DEAD` is terminal except for DLQ replay; corrections are additive (no path re-opens a
+wrongly-`done` row). Every `admission_state` write must go through a registered
+authority — see the census gate in [`docs/job-task-system.md`](job-task-system.md#7-the-census-gate-phase-0).
 
 ### Retry Behavior
 

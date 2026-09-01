@@ -1,6 +1,11 @@
 # Agents Ensemble Architecture
 
 > **Note (2026-06-24):** Post-cleanup architecture. The Dependency Bus is the **sole** parent-waits-for-children mechanism; the CorrelationManager is deleted. The `USE_LEGACY_WAITING_FOR_CASCADE`, `USE_LEGACY_JOBQUEUE_DISPATCH`, and `DEBUG_COMPLETION_INVARIANT` flags are all removed. `MessageJobHandler` is deleted. The JobQueue is scheduling vocabulary only. Message dispatch is unified into a single `enqueue_message()` function with a `dispatch_path` parameter. See the [Completion Architecture](#completion-architecture) summary below, and [`docs/architecture/message-processing-and-correlation.md`](architecture/message-processing-and-correlation.md) for the current authoritative reference.
+>
+> **Update (2026-09-01):** since JAFP (2026-07), the Job is the **single public work
+> primitive** — every public entry point creates a JobItem; only internal paths bypass
+> the queue. "Scheduling vocabulary only" below refers to internal message dispatch.
+> See [`docs/job-task-system.md`](job-task-system.md) for the canonical job-task model.
 
 ## Core Design Philosophy
 
@@ -461,7 +466,7 @@ Ensemble could add:
 
 The agents-ensemble uses a single-dispatcher, DB-backed completion model:
 
-1. **Dispatcher**: WorkerPool (4 threads) is the sole execution path for all work (messages, tasks). The JobQueue is scheduling vocabulary only (priority, queue management, project scoping).
+1. **Dispatcher**: WorkerPool (4 threads) is the sole execution path for all work (messages, tasks). The JobQueue is scheduling vocabulary only (priority, queue management, project scoping) — for *internal* dispatch; public work enters as JobItems (JAFP, see [`docs/job-task-system.md`](job-task-system.md)).
 
 2. **Sole Completion Authority**: The Dependency Bus (`daemon/services/dependency_bus.py`) is the **sole** parent-waits-for-children mechanism. When a parent sends a message to a child, a `dependency_watchers` row is written. When the child's task reaches a terminal event, the bus atomically transitions the watcher `PENDING → FIRED` and enqueues a FollowUp back onto the parent. The bus is DB-backed — watcher state survives restart.
 
