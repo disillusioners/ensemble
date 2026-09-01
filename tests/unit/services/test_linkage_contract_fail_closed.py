@@ -26,6 +26,7 @@ no asyncio loop. The integration coverage lives in the existing
 from __future__ import annotations
 
 import logging
+import uuid
 from unittest.mock import MagicMock
 
 import pytest
@@ -138,38 +139,67 @@ def test_linkage_contract_error_is_runtime_error_subclass() -> None:
 
 
 # ============================================================
-# _prepare_enqueued_message — work_id_required fail-closed
+# _ensure_work_id_fail_closed — the extracted fail-closed guard,
+# exercised directly. It is a module-level pure function (no DB,
+# no manager), so the constitutional guarantee — required + None
+# raises instead of auto-minting — is tested by INVOCATION, not by
+# signature inspection.
 # ============================================================
 
-def test_prepare_enqueued_message_raises_on_none_work_id_when_required() -> None:
-    """Fix A boundary — when ``work_id_required=True`` AND ``work_id=None``,
-    ``_prepare_enqueued_message`` must raise :class:`LinkageContractError`
-    instead of silently auto-minting a fresh UUID (the 2026-08-31
-    f1-misfire incident).
+def test_fail_closed_guard_raises_when_required_and_work_id_none() -> None:
+    """Fix A boundary, by invocation — when ``work_id_required=True``
+    AND ``work_id=None``, the guard must raise
+    :class:`LinkageContractError` instead of silently auto-minting a
+    fresh UUID (the 2026-08-31 f1-misfire incident: an auto-mint on
+    the job-driven path re-keys the Task and breaks Pattern-f1
+    ``get_by_work_id`` recovery lookups).
     """
-    from daemon.services.instance_messaging import InstanceMessagingService
+    from daemon.services.instance_messaging import _ensure_work_id_fail_closed
 
-    svc = InstanceMessagingService.__new__(InstanceMessagingService)
-    # Don't construct the full instance — we're testing the boundary
-    # helper in isolation.
+    with pytest.raises(LinkageContractError) as exc_info:
+        _ensure_work_id_fail_closed(None, True)
 
-    # _prepare_enqueued_message is a sync method that opens a session
-    # via the manager; we cannot invoke it without a real manager.
-    # Verify the signature + the raise path is the only branch affected
-    # by inspecting the implementation directly: simulate the contract
-    # by checking that the parameter is keyword-only and a None value
-    # raises when work_id_required=True.
-    import inspect
-    sig = inspect.signature(svc._prepare_enqueued_message)
-    assert "work_id_required" in sig.parameters, (
-        "Fix A — _prepare_enqueued_message must accept a work_id_required "
-        "keyword-only parameter"
+    err = exc_info.value
+    assert err.source == "_prepare_enqueued_message"
+    assert err.expected_job_id == "<required>"
+    assert "auto-mint" in err.actual_job_id
+    # The rendered message must name the violation meaningfully.
+    assert "LINKAGE CONTRACT VIOLATION" in str(err)
+
+
+def test_fail_closed_guard_required_with_value_returns_value_unchanged() -> None:
+    """Required + explicit ``work_id`` → returned unchanged. The
+    caller-supplied linkage (JobItem.job_id) wins and nothing is
+    minted or rewritten.
+    """
+    from daemon.services.instance_messaging import _ensure_work_id_fail_closed
+
+    assert _ensure_work_id_fail_closed("JOB-UUID-1234", True) == "JOB-UUID-1234"
+
+
+def test_fail_closed_guard_not_required_with_none_self_mints_uuid() -> None:
+    """Not required + ``None`` → a freshly minted, non-empty UUID4
+    string. The internal self-mint path (agent-to-agent send_message,
+    cascade-resume, child reports — no JobItem) is preserved
+    byte-for-byte by the extraction.
+    """
+    from daemon.services.instance_messaging import _ensure_work_id_fail_closed
+
+    minted = _ensure_work_id_fail_closed(None, False)
+    assert isinstance(minted, str)
+    assert minted
+    # A real UUID4 mint, not a sentinel or empty fill.
+    parsed = uuid.UUID(minted)
+    assert parsed.version == 4
+
+
+def test_fail_closed_guard_not_required_with_value_returns_value() -> None:
+    """Not required + explicit ``work_id`` → returned unchanged."""
+    from daemon.services.instance_messaging import _ensure_work_id_fail_closed
+
+    assert _ensure_work_id_fail_closed("INTERNAL-UUID-5678", False) == (
+        "INTERNAL-UUID-5678"
     )
-    assert sig.parameters["work_id_required"].default is False, (
-        "Fix A — work_id_required default must be False for backward "
-        "compatibility with non-job-driven callers"
-    )
-    assert sig.parameters["work_id"].default is None
 
 
 def test_prepare_enqueued_message_signature_keeps_backward_compat() -> None:

@@ -102,10 +102,16 @@ def _assert_linkage_contract(
       internal call site that has not yet migrated to the job-driven
       path — keeps the current observable behaviour intact.
     * **Enforce (``enforce=True``).** Fix A enforcement mode. Mismatches
-      raise :class:`LinkageContractError` instead of warning. Reserved
-      for the four JOB-DRIVEN call sites that pass an explicit
-      ``work_id`` from a JobItem (the observer + three JobProcessor
-      re-spawn sites + ``enqueue_message_job``).
+      raise :class:`LinkageContractError` instead of warning. There are
+      five ``work_id_required=True`` call sites in total: the four
+      JOB-DRIVEN dispatch sites enforced here (the observer + three
+      JobProcessor re-spawn sites) PLUS the ``enqueue_message_job``
+      site, which is structurally safe — it mints the single shared
+      linkage UUID itself and passes it straight through as ``work_id``,
+      so it never enters the raise path by construction and needs no
+      tripwire (setting ``work_id_required=True`` there is a
+      structural guarantee that the ``work_id=job_id`` binding cannot
+      be silently removed).
 
     Single home for the tripwire semantics shared by
     ``JobFeedbackObserver._trigger_next_job`` and

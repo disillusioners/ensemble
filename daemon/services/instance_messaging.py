@@ -27,7 +27,7 @@ from ..utils import parse_think_tags, serialize_message
 from ..write_pause_guard import WriteGuardSession
 from .cancellation import CancellationService
 from .main_loop_bridge import MainLoopBridge
-from .messaging_types import AsyncMessageResult
+from .messaging_types import AsyncMessageResult, LinkageContractError
 from .project_normalizer import normalize_project_id
 from .skill_meta_parser import extract_load_skill, parse_meta_tag
 from .skill_metrics_service import (
@@ -661,6 +661,40 @@ def _compute_message_content_hash(msg: dict) -> str:
     # Normalize: sort keys and remove None values for consistent hashing
     content_str = json.dumps(content_parts, sort_keys=True, default=str)
     return hashlib.md5(content_str.encode()).hexdigest()[:16]
+
+
+def _ensure_work_id_fail_closed(
+    work_id: str | None,
+    work_id_required: bool,
+) -> str:
+    """Fail-closed ``work_id`` guard (Fix A, constitution Phase 0).
+
+    Pure decision extracted from ``_prepare_enqueued_message`` so the
+    contract is directly unit-testable without a DB session
+    (``tests/unit/services/test_linkage_contract_fail_closed.py``).
+
+    Behaviour (exactly the pre-extraction semantics):
+
+    * ``work_id`` provided → returned unchanged (the caller-supplied
+      linkage wins, job-driven or not).
+    * ``work_id_required=True`` and ``work_id is None`` → raise
+      :class:`LinkageContractError` instead of auto-minting — a fresh
+      UUID on the job-driven path would re-key the Task and break
+      Pattern-f1 ``get_by_work_id`` recovery lookups (the 2026-08-31
+      f1-misfire incident).
+    * ``work_id_required=False`` and ``work_id is None`` → return a
+      freshly minted UUID (the internal self-mint path: agent-to-agent
+      ``send_message``, cascade-resume, child reports — no JobItem).
+    """
+    if work_id is not None:
+        return work_id
+    if work_id_required:
+        raise LinkageContractError(
+            source="_prepare_enqueued_message",
+            expected_job_id="<required>",
+            actual_job_id="<auto-mint would have produced a fresh UUID>",
+        )
+    return str(uuid.uuid4())
 
 
 class _PreparedEnqueueContext(NamedTuple):
@@ -1609,16 +1643,10 @@ class InstanceMessagingService:
         # Raise loudly instead. Internal paths (agent-to-agent
         # send_message, cascade-resume, child reports — no JobItem)
         # legitimately self-mint and call with the default
-        # ``work_id_required=False``.
-        if work_id is None:
-            if work_id_required:
-                from daemon.services.messaging_types import LinkageContractError
-                raise LinkageContractError(
-                    source="_prepare_enqueued_message",
-                    expected_job_id="<required>",
-                    actual_job_id="<auto-mint would have produced a fresh UUID>",
-                )
-            work_id = str(uuid.uuid4())
+        # ``work_id_required=False``. The decision lives in the
+        # module-level pure helper ``_ensure_work_id_fail_closed`` —
+        # directly unit-testable without a DB session.
+        work_id = _ensure_work_id_fail_closed(work_id, work_id_required)
 
         with WriteGuardSession(Session(self._manager.engine), self._manager.write_guard) as session:
             # 1. Insert the message
