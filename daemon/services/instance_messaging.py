@@ -1476,6 +1476,7 @@ class InstanceMessagingService:
         is_deferred: bool = False,
         is_background: bool = False,
         work_id: str | None = None,
+        work_id_required: bool = False,
     ) -> _PreparedEnqueueContext:
         """Shared prelude for ``enqueue_message``.
 
@@ -1599,7 +1600,24 @@ class InstanceMessagingService:
         # later — a bare ``work_id: str | None = None`` re-declaration
         # elsewhere in the method would shadow the parameter, dropping
         # the caller's value on the floor and breaking the linkage.
+        #
+        # Fix A (constitution Phase 0, approach-comparison.md row A):
+        # when ``work_id_required=True`` (job-driven path), a ``None``
+        # work_id is no longer allowed — auto-minting a fresh UUID on
+        # the job-driven path would re-key the Task and break Pattern-f1
+        # ``get_by_work_id`` recovery lookups (the 2026-08-31 incident).
+        # Raise loudly instead. Internal paths (agent-to-agent
+        # send_message, cascade-resume, child reports — no JobItem)
+        # legitimately self-mint and call with the default
+        # ``work_id_required=False``.
         if work_id is None:
+            if work_id_required:
+                from daemon.services.messaging_types import LinkageContractError
+                raise LinkageContractError(
+                    source="_prepare_enqueued_message",
+                    expected_job_id="<required>",
+                    actual_job_id="<auto-mint would have produced a fresh UUID>",
+                )
             work_id = str(uuid.uuid4())
 
         with WriteGuardSession(Session(self._manager.engine), self._manager.write_guard) as session:
@@ -1822,6 +1840,7 @@ class InstanceMessagingService:
         is_deferred: bool = False,
         is_background: bool = False,
         work_id: str | None = None,
+        work_id_required: bool = False,
     ) -> "AsyncMessageResult":
         """Enqueue a message via the unified dispatcher.
 
@@ -1879,6 +1898,7 @@ class InstanceMessagingService:
             is_deferred=is_deferred,
             is_background=is_background,
             work_id=work_id,
+            work_id_required=work_id_required,
         )
 
         # Phase 5 (Option B): when this message is being delivered via
@@ -2215,6 +2235,16 @@ class InstanceMessagingService:
         # delegate the mint to ``_prepare_enqueued_message`` and carry
         # the shared ``_assert_linkage_contract`` tripwire) — no
         # post-hoc tripwire is possible or needed on this path.
+        #
+        # Fix A (constitution Phase 0, approach-comparison.md row A):
+        # set ``work_id_required=True`` to formally close the auto-mint
+        # fail-open handle (D4) on the job-driven path. The
+        # ``work_id=job_id`` argument above is unconditionally
+        # populated from the local UUID minted at the top of this
+        # method, so the flag is a structural guarantee rather than a
+        # behavioural change — it ensures a future maintainer cannot
+        # accidentally remove the ``work_id=job_id`` binding without
+        # tripping the loud-failure gate.
         ctx = await asyncio.to_thread(
             self._prepare_enqueued_message,
             instance_id=instance_id,
@@ -2226,6 +2256,7 @@ class InstanceMessagingService:
             is_deferred=is_deferred,
             is_background=is_background,
             work_id=job_id,
+            work_id_required=True,
         )
 
         # Preserve the historical synchronous side effects from the

@@ -153,21 +153,21 @@ KNOWN_JOBITEM_CREATORS: frozenset[str] = frozenset({
 #: (model PKs, message ids, instance ids, ...) live in source but are
 #: not part of the D4 register.
 KNOWN_MINT_SITES: frozenset[str] = frozenset({
-    # ── The auto-mint site (instance_messaging.py:1603) — D4 fail-open
+    # ── The auto-mint site (instance_messaging.py:1621) — D4 fail-open
     # ── handle; preserved by design for the INTERNAL self-mint path
     # ── (agent-to-agent send_message, cascade-resume, child reports — no
     # ── JobItem). The job-driven path is gated separately by Fix A; the
     # ── boundary flag on ``_prepare_enqueued_message(work_id_required=True)``
     # ── raises instead of minting. See approach-comparison.md row A.
-    "daemon/services/instance_messaging.py:1603:uuid.uuid4",
+    "daemon/services/instance_messaging.py:1621:uuid.uuid4",
     # ── message_id mints (5 sites in _prepare_enqueued_message prelude) ──
-    "daemon/services/instance_messaging.py:1556:uuid.uuid4",
-    "daemon/services/instance_messaging.py:1560:uuid.uuid4",
-    "daemon/services/instance_messaging.py:1564:uuid.uuid4",
-    "daemon/services/instance_messaging.py:1568:uuid.uuid4",
+    "daemon/services/instance_messaging.py:1557:uuid.uuid4",
+    "daemon/services/instance_messaging.py:1561:uuid.uuid4",
+    "daemon/services/instance_messaging.py:1565:uuid.uuid4",
+    "daemon/services/instance_messaging.py:1569:uuid.uuid4",
     # ── The structurally-safe enqueue_message_job mint (joins the
     # ── shared linkage UUID into both the Task row and the JobItem) ──
-    "daemon/services/instance_messaging.py:2188:uuid.uuid4",
+    "daemon/services/instance_messaging.py:2208:uuid.uuid4",
 })
 
 

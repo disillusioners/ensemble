@@ -3872,26 +3872,34 @@ class JobFeedbackObserver:
                 # ``TaskRepository.get_by_work_id(job_id)`` returned
                 # None — misreading a live subtree as a
                 # restart-orphan and DEAD-finalizing it mid-flight.
+                #
+                # Fix A (constitution Phase 0, approach-comparison.md
+                # row A): set ``work_id_required=True`` and
+                # ``enforce=True`` on the tripwire so a future regression
+                # that drops the ``work_id=`` binding FAILS LOUDLY
+                # instead of silently re-minting a fresh UUID and
+                # re-keying the Task.
                 result = await self._instance_manager.enqueue_message(
                     instance_id=instance_id,
                     message=started_job.message,
                     source=started_job.source,
                     work_id=started_job.job_id,
+                    work_id_required=True,
                 )
-                # ── Linkage-contract tripwire (future-regression
-                # detector): the dispatch result's ``job_id`` IS the
-                # minted Task's ``work_id``. Any mismatch against the
-                # driving JobItem means the Task↔JobItem linkage is
-                # broken — recovery surfaces (Pattern-f1
-                # ``get_by_work_id``, work resolver) will misfire.
-                # WARN loudly; never fail the dispatch. Semantics live
-                # in the shared helper (also used by JobProcessor's
-                # main + re-spawn dispatch sites).
+                # ── Linkage-contract tripwire — Fix A escalation: on
+                # the job-driven path the tripwire is now ENFORCED (not
+                # just WARN). A mismatch between the dispatched Task's
+                # ``work_id`` and the driving JobItem's ``job_id``
+                # raises :class:`LinkageContractError` so a regression
+                # that re-keys the Task fails closed at the dispatch
+                # boundary instead of silently breaking recovery
+                # lookups (Pattern-f1 ``get_by_work_id``, work resolver).
                 _assert_linkage_contract(
                     result,
                     started_job.job_id,
                     source="Observer",
                     logger=logger,
+                    enforce=True,
                 )
                 # Stamp the message_id back onto the JobItem so the
                 # cross-system guard in ``claim_pending_task`` can

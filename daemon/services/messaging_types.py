@@ -38,12 +38,52 @@ class AsyncMessageResult:
     queued: bool = False
 
 
+class LinkageContractError(RuntimeError):
+    """Raised when the documented ``Task.work_id == JobItem.job_id``
+    linkage contract is violated on a job-driven dispatch.
+
+    Fix A (constitution Phase 0 + approach-comparison.md row A):
+    on the job-driven path, ``work_id`` is required (it is the
+    JobItem's ``job_id``) and the dispatch result's ``job_id`` MUST
+    equal the driving JobItem's ``job_id`` (the dispatched Task's
+    ``work_id`` must match the JobItem's handle so recovery lookups
+    keyed by ``work_id`` hit the right row). Mismatches on the
+    job-driven path now raise instead of silently warning — this
+    closes the auto-mint fail-open handle (D4) that allowed the
+    2026-08-31 f1-misfire incident to slip through.
+
+    Internal paths (agent-to-agent send_message, cascade-resume,
+    child reports — no JobItem) legitimately self-mint and the
+    ``enforce=False`` default keeps those callers working unchanged.
+    """
+
+    def __init__(
+        self,
+        *,
+        source: str,
+        expected_job_id: str,
+        actual_job_id: str,
+    ) -> None:
+        self.source = source
+        self.expected_job_id = expected_job_id
+        self.actual_job_id = actual_job_id
+        super().__init__(
+            f"{source}: LINKAGE CONTRACT VIOLATION (job-driven path, "
+            f"enforce=True) — driving JobItem {expected_job_id[:8]}... "
+            f"but minted Task work_id {actual_job_id[:8]}... "
+            f"(Task.work_id != JobItem.job_id). Recovery lookups keyed "
+            f"by work_id will miss this Task; investigate the dispatch "
+            f"path."
+        )
+
+
 def _assert_linkage_contract(
     result: AsyncMessageResult | None,
     job_id: str,
     *,
     source: str,
     logger: logging.Logger,
+    enforce: bool = False,
 ) -> None:
     """Shared linkage-contract tripwire (f1-misfire batch, council W1).
 
@@ -55,16 +95,33 @@ def _assert_linkage_contract(
     Task and recovery surfaces (Pattern-f1 ``get_by_work_id``,
     the work resolver) will miss it.
 
-    WARN loudly; NEVER fail the dispatch — this is a
-    future-regression detector, not a gate. Single home for the
-    tripwire semantics shared by ``JobFeedbackObserver._trigger_next_job``
-    and ``JobProcessor._process_next_job`` (main TASK dispatch +
+    Two enforcement modes:
+
+    * **WARN-only (default).** The legacy mode (pre-Fix-A). Mismatches
+      log a WARNING and the dispatch proceeds. Used by every legacy
+      internal call site that has not yet migrated to the job-driven
+      path — keeps the current observable behaviour intact.
+    * **Enforce (``enforce=True``).** Fix A enforcement mode. Mismatches
+      raise :class:`LinkageContractError` instead of warning. Reserved
+      for the four JOB-DRIVEN call sites that pass an explicit
+      ``work_id`` from a JobItem (the observer + three JobProcessor
+      re-spawn sites + ``enqueue_message_job``).
+
+    Single home for the tripwire semantics shared by
+    ``JobFeedbackObserver._trigger_next_job`` and
+    ``JobProcessor._process_next_job`` (main TASK dispatch +
     the crash-recovery / orphan-resume re-spawn sites).
     """
     if result is None or not getattr(result, "job_id", None):
         return
     if result.job_id == job_id:
         return
+    if enforce:
+        raise LinkageContractError(
+            source=source,
+            expected_job_id=job_id,
+            actual_job_id=result.job_id,
+        )
     logger.warning(
         f"{source}: LINKAGE CONTRACT VIOLATION — task-job dispatch "
         f"for JobItem {job_id[:8]}... minted Task work_id "
@@ -74,4 +131,4 @@ def _assert_linkage_contract(
     )
 
 
-__all__ = ["AsyncMessageResult"]
+__all__ = ["AsyncMessageResult", "LinkageContractError", "_assert_linkage_contract"]

@@ -972,17 +972,29 @@ class JobProcessor:
                                     # ``get_by_work_id(job_id)``
                                     # recovery lookups (council W1,
                                     # incident 2026-08-31).
+                                    #
+                                    # Fix A (constitution Phase 0,
+                                    # approach-comparison.md row A):
+                                    # ``work_id_required=True`` makes
+                                    # the contract structural — a future
+                                    # regression that drops the
+                                    # ``work_id=`` binding FAILS LOUDLY
+                                    # instead of silently re-minting.
                                     work_id=proc_job.job_id,
+                                    work_id_required=True,
                                 )
                                 # ── Linkage-contract tripwire —
-                                # shared helper, same WARN semantics
-                                # as the main TASK dispatch below:
+                                # Fix A escalation: ``enforce=True``
+                                # turns the tripwire into a hard
+                                # failure on the job-driven path (the
+                                # orphan-recovery re-spawn site).
                                 # non-fatal, never fails the dispatch.
                                 _assert_linkage_contract(
                                     result,
                                     proc_job.job_id,
                                     source="JobProcessor",
                                     logger=logger,
+                                    enforce=True,
                                 )
                                 # Stamp message_id defensively — a
                                 # stamping failure must not fail an
@@ -1050,17 +1062,27 @@ class JobProcessor:
                             # Pattern-f1's ``get_by_work_id(job_id)``
                             # recovery lookups (council W1, incident
                             # 2026-08-31).
+                            #
+                            # Fix A (constitution Phase 0,
+                            # approach-comparison.md row A):
+                            # ``work_id_required=True`` makes the
+                            # contract structural — a future regression
+                            # that drops the ``work_id=`` binding FAILS
+                            # LOUDLY instead of silently re-minting.
                             work_id=proc_job.job_id,
+                            work_id_required=True,
                         )
-                        # ── Linkage-contract tripwire — shared
-                        # helper, same WARN semantics as the main
-                        # TASK dispatch below: non-fatal, never fails
-                        # the dispatch.
+                        # ── Linkage-contract tripwire — Fix A
+                        # escalation: ``enforce=True`` turns the
+                        # tripwire into a hard failure on the
+                        # job-driven path (the orphan-resume re-spawn
+                        # site).
                         _assert_linkage_contract(
                             result,
                             proc_job.job_id,
                             source="JobProcessor",
                             logger=logger,
+                            enforce=True,
                         )
                         # Stamp message_id defensively — a stamping
                         # failure must not fail an otherwise-successful
@@ -1266,22 +1288,33 @@ class JobProcessor:
                         # instead of guessing via the instance's
                         # "freshest" JobItem — which falsely flagged
                         # ``job_continue`` continuation Tasks.
+                        #
+                        # Fix A (constitution Phase 0,
+                        # approach-comparison.md row A):
+                        # ``work_id_required=True`` makes the
+                        # contract structural — a future regression
+                        # that drops the ``work_id=`` binding FAILS
+                        # LOUDLY instead of silently re-minting.
                         work_id=job.job_id,
+                        work_id_required=True,
                     )
-                    # ── Linkage-contract tripwire (f1-misfire batch,
-                    # incident 2026-08-31): ``result.job_id`` IS the
-                    # minted Task's ``work_id``. A mismatch against the
-                    # driving JobItem means the Task↔JobItem linkage
-                    # the recovery surfaces depend on
-                    # (``get_by_work_id(job_id)``) is broken — WARN
-                    # loudly; never fail the dispatch. Semantics live
-                    # in the shared helper (also used by the observer
-                    # and the re-spawn sites).
+                    # ── Linkage-contract tripwire — Fix A escalation:
+                    # ``enforce=True`` turns the tripwire into a hard
+                    # failure on the job-driven path (the main TASK
+                    # dispatch site). A mismatch between the
+                    # dispatched Task's ``work_id`` and the driving
+                    # JobItem's ``job_id`` raises
+                    # :class:`LinkageContractError` so a regression
+                    # that re-keys the Task fails closed at the
+                    # dispatch boundary instead of silently breaking
+                    # recovery lookups (Pattern-f1
+                    # ``get_by_work_id``, work resolver).
                     _assert_linkage_contract(
                         result,
                         job.job_id,
                         source="JobProcessor",
                         logger=logger,
+                        enforce=True,
                     )
                     # Stamp the message_id back onto the JobItem so
                     # the cross-system guard in ``claim_pending_task``
