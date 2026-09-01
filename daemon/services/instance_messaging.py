@@ -1160,6 +1160,13 @@ class InstanceMessagingService:
             last_compacted_at = state.values.get('compacted_at')
             
             # Build compaction context
+            # F1 fix (2026-09-01) — pre-stamp the first-appearance
+            # ``{msg_id: iso_ts}`` map so the SECTION DETAIL
+            # conversation-time clause renders in the doc (architect
+            # §4). F2 fix (2026-09-01) — pass ``instance_id`` so the
+            # doc id is ``compaction-global-{iid}-{seq}`` (not
+            # ``compaction-global--{seq}``) and seq is per-instance.
+            from ..compaction import _extract_msg_timestamps
             context = CompactionContext(
                 messages=messages,
                 system_prompt_tokens=system_prompt_tokens,
@@ -1179,6 +1186,8 @@ class InstanceMessagingService:
                     "buffer_response_header": self._config.llm.buffer_response_header,
                 },
                 last_compacted_at=last_compacted_at,
+                instance_id=instance_id,
+                msg_timestamps=_extract_msg_timestamps(messages),
             )
             
             # Compact state
@@ -1192,13 +1201,72 @@ class InstanceMessagingService:
             tokens_before = result.tokens_before
             tokens_saved = result.tokens_saved
             
+            # Architect §5 — W1 fix: read the pre-compaction
+            # snapshot, then run the seam helper that emits the
+            # ``REMOVE_ALL_MESSAGES`` sentinel recipe. The sentinel
+            # MUST be element 0; anything before it is discarded.
+            # NO per-id RemoveMessages are sent (eliminates the
+            # ValueError-on-absent-id class entirely).
+            pre_state = await graph.aget_state(config)
+            pre_messages: list[BaseMessage] = list(
+                (pre_state.values or {}).get("messages", []) or []
+            )
+            from daemon.compaction import (
+                build_sentinel_replacement,
+                CompactionAborted,
+            )
+            # B1 + B2 fix (2026-09-01) — engine's compacted_ids
+            # is authoritative; site derives from
+            # ``pre_ids − new_replacement_ids`` (non-RemoveMessage
+            # keep set; RemoveMessage targets are NOT "kept").
+            # See compact_executor.py:1597 for the full rationale.
+            pre_ids = {
+                getattr(m, "id", None)
+                for m in pre_messages
+            }
+            pre_ids.discard(None)
+            new_replacement_ids = {
+                getattr(m, "id", None)
+                for m in result.replacement_messages
+                if not isinstance(m, RemoveMessage)
+            }
+            new_replacement_ids.discard(None)
+            site_compacted_ids: set[str] = pre_ids - new_replacement_ids
+            engine_compacted_ids = getattr(result, "compacted_ids", None)
+            if engine_compacted_ids is not None:
+                assert set(engine_compacted_ids) <= site_compacted_ids, (
+                    "engine populated compacted_ids that are NOT a "
+                    "subset of the site-derived set — engine and "
+                    "site disagree on the removed span"
+                )
+                compacted_ids: set[str] = set(engine_compacted_ids)
+            else:
+                compacted_ids = site_compacted_ids
+            try:
+                replacement_messages = build_sentinel_replacement(
+                    result, pre_messages, compacted_ids=compacted_ids
+                )
+            except CompactionAborted as abort_exc:
+                # W1 mitigation: pre-write guard refused the write.
+                # The checkpoint is untouched, the executor surfaces
+                # a non-fatal warning, and the next attempt retries
+                # from a clean state.
+                import logging
+                logging.getLogger(__name__).warning(
+                    "compaction pre-write guard refused the write "
+                    "for instance=%s: %s — failing open, no "
+                    "checkpoint write",
+                    instance_id, abort_exc,
+                )
+                return
+
             # Update graph state with compacted messages
             await graph.aupdate_state(
                 config,
-                {'messages': result.replacement_messages},
+                {'messages': replacement_messages},
                 as_node='agent'
             )
-            
+
             # Update compaction timestamp if available
             if result.compacted_at:
                 await graph.aupdate_state(

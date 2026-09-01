@@ -243,6 +243,68 @@ $cyan: #06b6d4;
   }
 }
 
+// Compaction fold-with-preview card (compaction-output-structure §9).
+// Modeled on the .system-prompt-block pattern (in-timeline system-doc
+// card) with the expander button styled on the .message-failed-dismiss
+// pattern (quiet ghost button). Collapsed shows only the preview;
+// expanded swaps it for the full doc body.
+.compaction-card {
+  margin-bottom: 0.5rem;
+  width: 100%;
+  padding: 0.5rem 1rem;
+  border-radius: 0.75rem;
+  background-color: rgba(16, 185, 129, 0.1);
+  border: 1px solid rgba(16, 185, 129, 0.2);
+
+  .compaction-header {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    margin-bottom: 0.375rem;
+    color: #10b981;
+    font-size: 0.75rem;
+    font-weight: 500;
+  }
+
+  .compaction-preview {
+    color: $text-secondary;
+    font-size: 0.75rem;
+    line-height: 1.5;
+    margin: 0 0 0.5rem;
+    white-space: pre-wrap;
+    overflow-wrap: break-word;
+    word-break: break-word;
+  }
+
+  .compaction-expander {
+    border: 1px solid #4b5563;
+    border-radius: 0.375rem;
+    background-color: transparent;
+    color: #9ca3af;
+    padding: 0.25rem 0.75rem;
+    font-size: 0.75rem;
+    cursor: pointer;
+    font-weight: 500;
+    transition: background-color 0.15s ease, color 0.15s ease;
+
+    &:hover {
+      background-color: #374151;
+      color: $text-primary;
+    }
+  }
+
+  .compaction-full {
+    margin: 0.5rem 0 0;
+    color: $text-secondary;
+    font-size: 0.75rem;
+    font-family: monospace;
+    white-space: pre-wrap;
+    overflow-x: auto;
+    max-height: 24rem;
+    overflow-y: auto;
+  }
+}
+
 // Tool calls
 .tool-calls {
   margin-bottom: 0.5rem;

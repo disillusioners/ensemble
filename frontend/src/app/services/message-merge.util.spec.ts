@@ -303,6 +303,82 @@ describe('mergeMessagesById (union-by-id)', () => {
   });
 });
 
+describe('mergeMessagesById — single-document compaction doc (compaction-output-structure §10.9a)', () => {
+  // The backend persists exactly ONE SystemMessage per compaction with
+  // the stable id ``compaction-global-{instance_id}-{seq}``. Re-delivery
+  // (GET refetch, drain re-emit, reconnect catch-up) therefore re-uses
+  // the SAME id — the union-by-id merge must upsert it idempotently
+  // (no duplicate card in the transcript) and keep the EARLIER
+  // created_at so the card never re-sorts below newer traffic (MIN-4).
+  function makeCompactionDoc(overrides: Partial<Message> = {}): Message {
+    return makeMessage({
+      message_id: 'compaction-global-inst-1-3',
+      role: 'system',
+      content:
+        '[CONTEXT COMPACTION — mode=summary | compacted_at=2026-09-01T09:00:00Z]\n' +
+        '\n' +
+        '── GLOBAL OVERVIEW ──\n' +
+        'The user is hardening the compaction output. Decisions: single doc, stable id, fold card.\n' +
+        '\n' +
+        '── SECTION DETAIL ──\n' +
+        '### SECTION 1/2 — messages #1–#10\n' +
+        'Early arc: baseline counts captured.\n' +
+        '\n' +
+        '── END OF COMPACTED CONTEXT — everything below is the verbatim recent transcript ──',
+      created_at: '2026-08-30T11:00:00Z',
+      ...overrides,
+    });
+  }
+
+  it('upserts a re-delivered same-id compaction doc WITHOUT duplication', () => {
+    const existing = [makeCompactionDoc()];
+    // Same stable id — the backend re-mints the doc body but never the id.
+    const redelivered = [makeCompactionDoc({ content: makeCompactionDoc().content + '\n(extra section)' })];
+    const merged = mergeMessagesById(existing, redelivered);
+    const docs = merged.filter(m => m.message_id.startsWith('compaction-global-'));
+    expect(merged.length).toBe(1);
+    expect(docs.length).toBe(1);
+    expect(docs[0].message_id).toBe('compaction-global-inst-1-3');
+    // Incoming body wins on upsert (top-level merge rule) — one card
+    // showing the LATEST doc content.
+    expect(docs[0].content.endsWith('\n(extra section)')).toBe(true);
+  });
+
+  it('keeps the EARLIER created_at when the refetch re-stamps the doc later', () => {
+    const originalStamp = '2026-08-30T11:00:00Z';
+    const restampedLater = '2026-08-30T11:30:00Z';
+    const existing = [makeCompactionDoc({ created_at: originalStamp })];
+    const incoming = [makeCompactionDoc({ created_at: restampedLater })];
+    const merged = mergeMessagesById(existing, incoming);
+    expect(merged.length).toBe(1);
+    expect(merged[0].created_at).toBe(originalStamp);
+  });
+
+  it('keeps the EARLIER created_at regardless of arrival direction (doc seeded from a later snapshot)', () => {
+    const earlier = '2026-08-30T10:55:00Z';
+    const later = '2026-08-30T11:00:00Z';
+    const merged = mergeMessagesById(
+      [makeCompactionDoc({ created_at: later })],
+      [makeCompactionDoc({ created_at: earlier })],
+    );
+    expect(merged.length).toBe(1);
+    expect(merged[0].created_at).toBe(earlier);
+  });
+
+  it('keeps the doc and user traffic interleaved in created_at order after a re-delivery (tail never re-sorted)', () => {
+    const doc = makeCompactionDoc({ created_at: '2026-08-30T11:00:00Z' });
+    const before = makeMessage({ message_id: 'u-1', created_at: '2026-08-30T10:59:00Z' });
+    const after = makeMessage({ message_id: 'u-2', created_at: '2026-08-30T11:01:00Z' });
+    // Re-deliver the doc (same id, later re-stamp) alongside a brand-new
+    // tail message; positions of the OTHER messages must not move.
+    const merged = mergeMessagesById([before, doc, after], [
+      makeCompactionDoc({ created_at: '2026-08-30T11:30:00Z' }),
+      makeMessage({ message_id: 'u-3', created_at: '2026-08-30T11:02:00Z' }),
+    ]);
+    expect(merged.map(m => m.message_id)).toEqual(['u-1', 'compaction-global-inst-1-3', 'u-2', 'u-3']);
+  });
+});
+
 describe('evictPendingByAge (10-minute wall-clock TTL)', () => {
   it('should keep non-pending entries regardless of age', () => {
     const old = makeMessage({

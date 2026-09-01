@@ -48,8 +48,38 @@
           <!-- Message content -->
           <div class="message-content" [class.align-right]="message.role === 'user'">
 
-            <!-- System prompt block -->
-            @if (message.role === 'system' && showSystemPrompt) {
+            <!-- Compaction fold-with-preview card (compaction-output-
+                 structure §9). The single-document compaction doc
+                 (id prefix ``compaction-global-``) renders COLLAPSED by
+                 default: ≤500-char GLOBAL OVERVIEW preview + "Show
+                 compacted context" expander revealing the full body.
+                 Renders regardless of the system-prompt toggle — the
+                 user must always see that context was compacted. -->
+            @if (message.role === 'system' && isCompactionDoc(message)) {
+              <div class="compaction-card" data-testid="compaction-card">
+                <div class="compaction-header">
+                  <span>🗄️</span>
+                  <span>Compacted context</span>
+                </div>
+                @if (!isCompactionExpanded(message.message_id)) {
+                  <p class="compaction-preview" data-testid="compaction-card-preview">{{ compactionPreview(message) }}</p>
+                }
+                <button
+                  type="button"
+                  class="compaction-expander"
+                  data-testid="compaction-card-expander"
+                  (click)="toggleCompactionDoc(message.message_id)"
+                >
+                  {{ isCompactionExpanded(message.message_id) ? 'Hide compacted context' : 'Show compacted context' }}
+                </button>
+                @if (isCompactionExpanded(message.message_id)) {
+                  <pre class="compaction-full" data-testid="compaction-card-full">{{ message.content }}</pre>
+                }
+              </div>
+            }
+            <!-- System prompt block (compaction docs excluded — they have
+                 their own fold card above). -->
+            @else if (message.role === 'system' && showSystemPrompt) {
               <div class="system-prompt-block">
                 <div class="system-prompt-header">
                   <span>📋</span>

@@ -1273,33 +1273,43 @@ class TestPersistenceRecipe:
         command_id = _make_active_command(dispatcher)
         mgr = _make_manager()
 
-        # Mock the graph's aupdate_state to track calls.
+        # Mock compact_state to return a synthetic doc. The new
+        # design (§4 / §5) emits a single SystemMessage doc with
+        # the original tail ids preserved — the executor's sentinel
+        # recipe handles the rest. The mock mirrors that shape so
+        # the pre-write guard accepts the replacement.
+        # Build a stable snapshot once, share between the
+        # aget_state and the fake compactor's return.
         graph = MagicMock()
         graph.aupdate_state = AsyncMock()
-
+        _orig_messages = _big_messages(n=15, char_count=4000)
         async def _aget_state(_config):
             return _make_checkpoint_state(
                 # Quiescent fixture (default next=()) — this is a
                 # SUCCESS-to-persistence test; the fabricated
                 # mid-graph next was carried over from pre-C1 and
                 # misdescribed the real post-turn shape.
-                messages=_big_messages(n=15, char_count=4000),
+                messages=list(_orig_messages),
                 compacted_at=None,
             )
         graph.aget_state = AsyncMock(side_effect=_aget_state)
         mgr.get_instance = AsyncMock(return_value=graph)
 
-        # Mock compact_state to return a synthetic summary.
+        # Mock compact_state to return a synthetic doc with the
+        # SAME tail ids as the snapshot (the pre-write guard
+        # rejects replacements that lose snapshot ids).
         async def _fake_compact_state(ctx, force=False):
             return _make_compaction_result(
                 compaction_type="summary",
                 replacement_messages=[
-                    RemoveMessage(id="old-1"),
-                    RemoveMessage(id="old-2"),
                     SystemMessage(
-                        content="[Conversation Summary]\nx",
-                        id=f"compaction-{uuid.uuid4()}",
+                        content=(
+                            "[CONTEXT COMPACTION — mode=summary | ...]\n"
+                            "GLOBAL OVERVIEW\nx\n"
+                        ),
+                        id="compaction-global-inst-test-1",
                     ),
+                    *list(_orig_messages),
                 ],
             )
         mgr._compactor.compact_state = _fake_compact_state
@@ -1333,10 +1343,28 @@ class TestPersistenceRecipe:
             f"{list(update.keys()) if isinstance(update, dict) else update!r}"
         )
         msgs = update["messages"]
-        rm_ids = [m.id for m in msgs if isinstance(m, RemoveMessage)]
+        # §5 — the replacement starts with the REMOVE_ALL_MESSAGES
+        # sentinel (source-verified literal value
+        # ``"__remove_all__"`` at langgraph 1.0.9), then the doc,
+        # then the preserved tail (all original messages).
         sys_ids = [m.id for m in msgs if isinstance(m, SystemMessage)]
-        assert "old-1" in rm_ids and "old-2" in rm_ids
-        assert any(s.startswith("compaction-") for s in sys_ids)
+        # The doc carries the new id prefix.
+        assert any(
+            (s or "").startswith("compaction-global-") for s in sys_ids
+        ), f"expected a compaction-global- doc id, got {sys_ids}"
+        # Sentinel is element 0.
+        from langchain_core.messages import RemoveMessage
+        first = msgs[0]
+        assert isinstance(first, RemoveMessage)
+        assert first.id == "__remove_all__"
+        # The preserved tail ids follow the doc.
+        tail_ids = [
+            m.id for m in msgs
+            if not isinstance(m, (SystemMessage, RemoveMessage))
+        ]
+        assert len(tail_ids) == 15, (
+            f"preserved tail must carry all 15 original ids; got {len(tail_ids)}"
+        )
 
         # Second call: compacted_at.
         second_call = graph.aupdate_state.await_args_list[1]
@@ -1601,11 +1629,13 @@ class TestExecutorCompactOnCompleted:
 
         graph = MagicMock()
         graph.aupdate_state = AsyncMock()
+        # Stable snapshot, shared with the fake compactor.
+        _orig_messages = _big_messages(n=15, char_count=4000)
 
         async def _aget_state(_config):
             return _make_checkpoint_state(
                 next=(),
-                messages=_big_messages(n=15, char_count=4000),
+                messages=list(_orig_messages),
                 compacted_at=None,
             )
         graph.aget_state = AsyncMock(side_effect=_aget_state)
@@ -1615,11 +1645,14 @@ class TestExecutorCompactOnCompleted:
             return _make_compaction_result(
                 compaction_type="summary",
                 replacement_messages=[
-                    RemoveMessage(id="old-1"),
                     SystemMessage(
-                        content="[Conversation Summary]\ncompleted-canary",
-                        id=f"compaction-{uuid.uuid4()}",
+                        content=(
+                            "[CONTEXT COMPACTION — mode=summary | ...]\n"
+                            "GLOBAL OVERVIEW\ncompleted-canary\n"
+                        ),
+                        id="compaction-global-inst-test-1",
                     ),
+                    *list(_orig_messages),
                 ],
             )
         mgr._compactor.compact_state = _fake_compact_state
@@ -2045,24 +2078,33 @@ class TestSyntheticSystemSafety:
     """
 
     def test_compaction_summary_has_distinct_id_prefix(self):
-        """The summary id starts with ``compaction-<uuid4>`` — a
-        distinct prefix from ``synthetic-system-<iid>``. The two
-        can co-exist on the channel without collision."""
+        """Architect §4 — the doc id starts with
+        ``compaction-global-{instance_id}-{seq}`` — a distinct
+        prefix from ``synthetic-system-<iid>``. The two can
+        co-exist on the channel without collision.
+        """
         # Pin the id format via source-level inspection of the
-        # engine's ``ContextCompactor`` (the id format is documented
-        # in the dataclass docstring).
-        from daemon.compaction import ContextCompactor
+        # engine's :func:`build_compaction_doc` (the id is built
+        # in the module-scope helper, not the class).
+        import daemon.compaction as cm
+        from daemon.compaction import build_compaction_doc
 
-        source = inspect.getsource(ContextCompactor)
-        # The summary line carries the ``compaction-<uuid>`` id.
-        assert "compaction-" in source, (
-            "summary id prefix must be 'compaction-' (consumers key on this)"
+        source = inspect.getsource(build_compaction_doc)
+        # The doc id prefix is ``compaction-global-``.
+        assert "compaction-global-" in source, (
+            "doc id prefix must be 'compaction-global-' (FE keys on this — "
+            "the fold-with-preview card is gated by this prefix)"
         )
-        # The ``f"compaction-{uuid.uuid4()}"`` pattern appears at
-        # least once (the single-batch and merge/condense paths).
-        assert "compaction-{uuid.uuid4()}" in source, (
-            "summary id format must be 'compaction-<uuid4()>'"
+        # The doc id is built via ``f"compaction-global-{instance_id}-{seq}"``.
+        assert (
+            "compaction-global-" in source
+            and "instance_id" in source
+            and "seq" in source
+        ), (
+            "doc id format must be 'compaction-global-{instance_id}-{seq}'"
         )
+        # The module exposes the prefix constant for consumers.
+        assert cm.GLOBAL_DOC_ID_PREFIX == "compaction-global-"
 
     def test_persisted_replacement_uses_distinct_ids(self):
         """The summary id used in the persisted ``messages`` list

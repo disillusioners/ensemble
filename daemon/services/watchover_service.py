@@ -1568,8 +1568,14 @@ def _build_compaction_context(
     # Local import to avoid a module-level cycle: compaction imports
     # nothing from manager, but importing it here keeps the service
     # importable even when the compactor module is mocked.
-    from daemon.compaction import CompactionContext
+    from daemon.compaction import CompactionContext, _extract_msg_timestamps
 
+    # F1 fix (2026-09-01) — pre-stamp the first-appearance
+    # ``{msg_id: iso_ts}`` map so the SECTION DETAIL conversation-time
+    # clause renders in the doc (architect §4). F2 fix (2026-09-01) —
+    # pass ``instance_id`` so the doc id is
+    # ``compaction-global-{iid}-{seq}`` (not
+    # ``compaction-global--{seq}``) and seq is per-instance.
     return CompactionContext(
         messages=messages,
         system_prompt_tokens=0,
@@ -1581,6 +1587,8 @@ def _build_compaction_context(
         config=manager.config.compaction,
         llm_config=_llm_config_from_manager(manager),
         last_compacted_at=last_compacted_at,
+        instance_id=instance_id,
+        msg_timestamps=_extract_msg_timestamps(messages),
     )
 
     from daemon.compaction import CompactionContext

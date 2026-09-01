@@ -400,11 +400,14 @@ class TestContextCompactorMultimodal:
         compactor = ContextCompactor(config, {})
         summary = await compactor._summarize_single_batch(groups, context)
         
-        # Summary should be a SystemMessage
-        assert isinstance(summary, SystemMessage)
-        # Summary content should not contain garbage
-        assert "[{'type':" not in summary.content
-        assert "image_url" not in summary.content
+        # NEW str contract (a80767b9): _summarize_single_batch returns
+        # plain text; the caller wraps into a message downstream. Verify
+        # the contract here without re-introducing the SystemMessage
+        # assertion that the refactor deliberately removed.
+        assert isinstance(summary, str)
+        # Summary content should not contain garbage from multimodal blocks
+        assert "[{'type':" not in summary
+        assert "image_url" not in summary
 
     @pytest.mark.asyncio
     async def test_summarization_prompt_contains_clean_text(self, mock_llm):
