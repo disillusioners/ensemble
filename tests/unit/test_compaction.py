@@ -56,6 +56,7 @@ def make_compaction_config(**overrides) -> CompactionConfigModel:
         "context_window_overrides": {},
         "context_window_default": 0,
         "target_ratio": 0.40,
+        "model": "",
         "summarization_model": "",
         "min_messages_before_compaction": 10,
         "summarization_chunk_threshold": 0.60,

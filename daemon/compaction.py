@@ -281,6 +281,25 @@ def get_model_context_limit(model_name: str, config: object | None = None) -> in
     return DEFAULT_CONTEXT_LIMIT
 
 
+def resolve_compaction_model(config: CompactionConfig) -> str:
+    """Effective compaction-model override from a :class:`CompactionConfig`.
+
+    Precedence: ``config.model`` (canonical, env ``COMPACTION_MODEL`` /
+    yaml ``compaction.model`` — env>yaml resolved in ``load_config``)
+    → ``config.summarization_model`` (legacy alias, honored for
+    backwards compatibility) → ``""`` (no override: session-model
+    accessor + ``context_window_overrides``, the pre-existing behavior).
+
+    Pure function of the config object — the parallel summarization pool
+    calls this per batch (``_call_summarization_llm``), so every
+    concurrent batch call resolves the SAME override with no shared
+    mutable state. The empty-string result is falsy by design: callers
+    branch on truthiness ("override active") exactly as the legacy
+    ``summarization_model`` check did.
+    """
+    return config.model or config.summarization_model
+
+
 # =============================================================================
 # Phase 2: Compaction Engine
 # =============================================================================
@@ -721,6 +740,21 @@ class ContextCompactor:
                 ),
             },
         }
+
+    def _effective_model_name(self, context: CompactionContext) -> str:
+        """Model name for context-WINDOW math.
+
+        When a compaction-model override is active
+        (:func:`resolve_compaction_model`), token/window math follows the
+        OVERRIDE model's context window — thresholds, chunking, and
+        summary sizing all scale to the model that will actually serve
+        the summarization calls. ``context_window_overrides`` /
+        ``context_window_default`` apply to that name exactly as they
+        did for the session model (see :func:`get_model_context_limit`).
+        Unset override → the session model (``context.model_name``),
+        byte-identical with the pre-setting behavior.
+        """
+        return resolve_compaction_model(context.config) or context.model_name
     
     async def compact_state(
         self,
@@ -796,7 +830,9 @@ class ContextCompactor:
         # stay in-engine and STILL APPLY under force. Auto paths do not
         # pass ``force`` so their threshold check is unchanged when
         # ``force=False`` (S-7 byte-identity anti-drift).
-        context_window = get_model_context_limit(context.model_name, context.config)
+        context_window = get_model_context_limit(
+            self._effective_model_name(context), context.config
+        )
         if not force and total_tokens <= context_window * context.config.threshold:
             logger.debug(
                 f"Skipping compaction: {total_tokens} tokens "
@@ -1055,7 +1091,9 @@ class ContextCompactor:
         """
         compactable_messages = [msg for g in compactable_groups for msg in g.messages]
         compactable_tokens = estimate_messages_tokens(compactable_messages)
-        context_window = get_model_context_limit(context.model_name, context.config)
+        context_window = get_model_context_limit(
+            self._effective_model_name(context), context.config
+        )
         threshold_tokens = context_window * context.config.summarization_chunk_threshold
 
         # Whole-operation budget wall-clock anchor — measured against the
@@ -1373,7 +1411,9 @@ class ContextCompactor:
         
         # Size check: condense if too large
         final_tokens = estimate_messages_tokens([final])
-        context_window = get_model_context_limit(context.model_name, context.config)
+        context_window = get_model_context_limit(
+            self._effective_model_name(context), context.config
+        )
         max_summary_tokens = context_window * 0.10
         
         if final_tokens > max_summary_tokens:
@@ -1408,11 +1448,18 @@ class ContextCompactor:
         from .graph import ThinkingChatOpenAI, clean_llm_config
         from .services.llm_failover import wrap_langchain_failover
 
-        # Use summarization model override if set, otherwise use session model
-        if context.config.summarization_model:
+        # Compaction-model override (env COMPACTION_MODEL > yaml
+        # compaction.model, resolved in load_config; legacy
+        # summarization_model alias honored when unset): when active,
+        # EVERY summarization call — including each concurrent batch call
+        # in the parallel pool — resolves the SAME override through this
+        # pure function on the shared config object, so all N client
+        # constructions are consistent.
+        override_model = resolve_compaction_model(context.config)
+        if override_model:
             llm_config = {
                 **self.llm_config_with_headers,
-                "model": context.config.summarization_model,
+                "model": override_model,
             }
         else:
             llm_config = self.llm_config_with_headers
@@ -1427,14 +1474,34 @@ class ContextCompactor:
         inner_cap = _summarization_timeout_s(prompt, context.config)
         facade_cap = inner_cap + context.config.timeout_facade_margin_s
 
-        # ``base_url_backup`` is consumed by the HA facade from the raw
-        # config dict; clean it only at the constructor.
-        llm = ThinkingChatOpenAI(**clean_llm_config(dict(llm_config)))
-        # v2 HA: route through the shared facade. See
-        # ``daemon.services.llm_failover``. The facade cap is
-        # ``inner_cap + timeout_facade_margin_s`` (default +5s) per the
-        # architect §9.8 PINNED margin.
-        llm_wrapper = wrap_langchain_failover(llm, llm_config, wall_clock_cap_s=facade_cap)
+        # NEVER-SILENT FALLBACK (Commit B): if the override client cannot
+        # be CONSTRUCTED (bad model string rejected by the client, config
+        # shape error, facade wrap failure), WARN-log with the traceback
+        # and rebuild from the session-model config — never swallowed.
+        # (Invoke-time failures for an API-unknown model surface through
+        # the EXISTING per-batch/outer handlers, which warn and fall back
+        # to truncation — also never silent.)
+        try:
+            # ``base_url_backup`` is consumed by the HA facade from the raw
+            # config dict; clean it only at the constructor.
+            llm = ThinkingChatOpenAI(**clean_llm_config(dict(llm_config)))
+            # v2 HA: route through the shared facade. See
+            # ``daemon.services.llm_failover``. The facade cap is
+            # ``inner_cap + timeout_facade_margin_s`` (default +5s) per the
+            # architect §9.8 PINNED margin.
+            llm_wrapper = wrap_langchain_failover(llm, llm_config, wall_clock_cap_s=facade_cap)
+        except Exception:
+            if not override_model:
+                raise
+            logger.warning(
+                "Compaction model %r failed to construct; falling back to "
+                "the session model for this summarization call.",
+                override_model,
+                exc_info=True,
+            )
+            llm_config = self.llm_config_with_headers
+            llm = ThinkingChatOpenAI(**clean_llm_config(dict(llm_config)))
+            llm_wrapper = wrap_langchain_failover(llm, llm_config, wall_clock_cap_s=facade_cap)
 
         # Belt-and-braces: ``inner_cap`` ``asyncio.wait_for`` is the
         # site-level cap (the FIRST to trip on timeout). The REAL

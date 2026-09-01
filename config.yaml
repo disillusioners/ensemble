@@ -215,6 +215,17 @@ compaction:
     "agentic": 600000
     "vision": 120000
   target_ratio: 0.40
+  # Compaction model override. When set, the compaction engine's
+  # summarization LLM calls use this model AND token/window math follows
+  # THIS model's context window (context_window_overrides /
+  # context_window_default above still apply, matched against this
+  # name). Precedence: the COMPACTION_MODEL env var beats this yaml key
+  # (resolved explicitly in load_config); empty/unset = use the session
+  # model (default behavior). Purpose-bound: never consulted against the
+  # llm.allowed_models allowlist.
+  model: ""
+  # summarization_model is the LEGACY spelling of `model` above — still
+  # honored when `model` is empty; new configs should use `model`.
   summarization_model: ""
   min_messages_before_compaction: 10
   summarization_chunk_threshold: 0.60
