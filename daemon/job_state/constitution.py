@@ -144,30 +144,36 @@ KNOWN_JOBITEM_CREATORS: frozenset[str] = frozenset({
 })
 
 
-#: Every mint site that produces a UUID-shaped handle used as a
-#: ``Task.work_id`` / ``JobItem.job_id`` / message-id (the D4 scanner).
+#: Every mint site that produces a work_id-bearing handle (the D4
+#: scanner) — covers three families: the ``work_id`` auto-mint on the
+#: internal self-mint path, the ``work_id`` linkage stamp on the
+#: job-driven path, and the ``message_id`` mints in the
+#: ``_prepare_enqueued_message`` prelude that key the MessageQueue rows
+#: feeding the Task↔MessageQueue join. Pure general-purpose UUID mints
+#: (model primary keys, instance / planner scratch ids, ...) live in
+#: source but are intentionally NOT registered — they do not bear on
+#: the work_id / message_id linkage the constitution guards.
 #: Keys are ``"<relpath>:<line>:<token>"`` where token is the qualified
 #: call (e.g. ``uuid.uuid4`` or ``secrets.token_hex``). The static set
-#: is intentionally a SUBSET of the source — it covers only the mints
-#: that produce ``work_id``-shaped handles; general-purpose UUID mints
-#: (model PKs, message ids, instance ids, ...) live in source but are
-#: not part of the D4 register.
+#: is intentionally a SUBSET of the source.
 KNOWN_MINT_SITES: frozenset[str] = frozenset({
-    # ── The auto-mint site (instance_messaging.py:1621) — D4 fail-open
-    # ── handle; preserved by design for the INTERNAL self-mint path
-    # ── (agent-to-agent send_message, cascade-resume, child reports — no
-    # ── JobItem). The job-driven path is gated separately by Fix A; the
-    # ── boundary flag on ``_prepare_enqueued_message(work_id_required=True)``
-    # ── raises instead of minting. See approach-comparison.md row A.
-    "daemon/services/instance_messaging.py:1621:uuid.uuid4",
-    # ── message_id mints (5 sites in _prepare_enqueued_message prelude) ──
-    "daemon/services/instance_messaging.py:1557:uuid.uuid4",
-    "daemon/services/instance_messaging.py:1561:uuid.uuid4",
-    "daemon/services/instance_messaging.py:1565:uuid.uuid4",
-    "daemon/services/instance_messaging.py:1569:uuid.uuid4",
+    # ── The auto-mint site (instance_messaging.py:699 in the
+    # ── ``_ensure_work_id_fail_closed`` helper — extracted from
+    # ── ``_prepare_enqueued_message`` by Fix A in dc4e0c89) — D4
+    # ── fail-open handle; preserved by design for the INTERNAL
+    # ── self-mint path (agent-to-agent send_message, cascade-resume,
+    # ── child reports — no JobItem). The job-driven path raises
+    # ── LinkageContractError instead of minting. See
+    # ── approach-comparison.md row A.
+    "daemon/services/instance_messaging.py:699:uuid.uuid4",
+    # ── message_id mints (4 sites in _prepare_enqueued_message prelude) ──
+    "daemon/services/instance_messaging.py:1593:uuid.uuid4",
+    "daemon/services/instance_messaging.py:1597:uuid.uuid4",
+    "daemon/services/instance_messaging.py:1601:uuid.uuid4",
+    "daemon/services/instance_messaging.py:1605:uuid.uuid4",
     # ── The structurally-safe enqueue_message_job mint (joins the
     # ── shared linkage UUID into both the Task row and the JobItem) ──
-    "daemon/services/instance_messaging.py:2208:uuid.uuid4",
+    "daemon/services/instance_messaging.py:2238:uuid.uuid4",
 })
 
 
