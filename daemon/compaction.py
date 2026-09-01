@@ -1015,19 +1015,35 @@ class ContextCompactor:
         non-empty — identical semantics for proactive (WS-3.5 instance_messaging.py:1179)
         and reactive (WS-3.5 graph.py:3513) callers by construction.
 
-        Per-chunk try/except is narrowed to
-        ``(TimeoutError, asyncio.TimeoutError)`` (O14); other exceptions
-        propagate to the outer ``except Exception`` (compact_state :744-772),
-        which maps them to the existing truncate fallback and emits
-        ``failure_kind="error"`` on the engine result.
+        Per-batch try/except is narrowed to
+        ``(TimeoutError, asyncio.TimeoutError)`` (O14) INSIDE each pool
+        task; other exceptions are parked by the gather
+        (``return_exceptions=True``) and re-raised once the pool joins —
+        they propagate to the outer ``except Exception`` (compact_state
+        :744-772), which maps them to the existing truncate fallback and
+        emits ``failure_kind="error"`` on the engine result.
 
         Whole-operation budget ``context.config.operation_budget_s``:
-        cumulative clock across chunk calls. Trips BETWEEN LLM calls only
-        — never between the two ``aupdate_state`` persistence calls in
-        callers (D-B5/D-B6 — torn-write guard, that lives upstream).
-        Exhaustion records ``stop_reason="budget"`` and the engine returns
-        with whatever summaries were collected so far; the outer handler
-        decides the path.
+        shared wall-clock deadline (``asyncio.wait_for`` around the
+        batch-pool gather). The deadline lives entirely inside
+        ``_summarize_chunked`` — never between the two
+        ``aupdate_state`` persistence calls in callers (D-B5/D-B6 —
+        torn-write guard, that lives upstream). Expiry cancels in-flight
+        and un-started batch tasks, records ``stop_reason="budget"``,
+        and the engine returns with whatever summaries had completed;
+        the outer handler decides the path.
+
+        Parallelism (bounded pool): batches are INDEPENDENT — the
+        per-batch prompt is a static template over that batch's groups
+        only, and ``_merge_summaries`` consumes results strictly after
+        the pool. ``chunk_concurrency`` (default 3) bounds in-flight
+        calls via ``asyncio.Semaphore``; results are reassembled by
+        task-list index (``asyncio.gather`` preserves input order —
+        NEVER ``as_completed``), which is the chronological invariant
+        ``_build_partial_replacement_messages`` relies on. The existing
+        per-prompt adaptive timeout (``_summarization_timeout_s``)
+        applies per task and composes with the pool as the per-batch
+        failure boundary.
 
         Args:
             compactable_groups: Groups to summarize.
@@ -1097,52 +1113,120 @@ class ContextCompactor:
                 )
             batches.append(batch_groups)
 
-        # Summarize each batch, tracking the operation budget and
-        # per-chunk failures. The budget trips BETWEEN LLM calls only
-        # (i.e. between iterations of this loop) — never between an
-        # LLM call and an in-flight aupdate in callers (D-B5/D-B6).
-        partial_summaries: list[SystemMessage] = []
-        failed_batches: list[int] = []
-        stop_reason = "completed"
-        for batch_idx, batch in enumerate(batches):
-            # Check budget BEFORE issuing the next LLM call. If the
-            # remaining budget is exhausted, stop issuing chunks
-            # immediately — the engine's outer handler routes the
-            # partial-summary path on |S|>=1 or the truncate fallback
-            # on |S|=0. We do NOT pre-charge the budget; a future
-            # chunk that would fit (small enough) simply gets skipped.
-            if _budget_remaining() <= 0:
-                logger.warning(
-                    "Operation budget exhausted after %d/%d batches; "
-                    "stopping chunked summarization.",
-                    batch_idx, len(batches),
-                )
-                stop_reason = "budget"
-                # Mark remaining batches as skipped (not "failed" — they
-                # never started). Track batch_idx..len(batches)-1 for
-                # observability so test assertions can distinguish
-                # "never started" from "started-and-failed".
-                failed_batches.extend(range(batch_idx, len(batches)))
-                break
+        # Summarize batches in a bounded parallel pool. Batches are
+        # INDEPENDENT: the per-batch prompt is a static template over
+        # that batch's groups only (``_summarize_single_batch``) and
+        # ``_merge_summaries`` consumes the results strictly AFTER the
+        # pool completes — nothing inside the pool reads a prior
+        # batch's output. Results are reassembled BY TASK-LIST INDEX:
+        # ``asyncio.gather`` preserves input order, which IS the
+        # chronological invariant ``_build_partial_replacement_messages``
+        # relies on. NEVER ``as_completed`` here.
+        #
+        # FailoverController race note (parallel-429 review): every
+        # batch call constructs its own ``ThinkingChatOpenAI`` +
+        # ``wrap_langchain_failover`` wrapper inside
+        # ``_call_summarization_llm`` — a fresh ``FailoverController``
+        # and a fresh openai client per call — so concurrent
+        # 429-driven ``swap_to_backup`` / ``reset_to_primary``
+        # mutations never share mutable state across batches. No
+        # cross-batch race by construction; no lock needed.
+        chunk_concurrency = max(1, int(context.config.chunk_concurrency))
+        semaphore = asyncio.Semaphore(chunk_concurrency)
 
+        # Slot i of each structure is batch i. ``summaries_by_idx`` holds
+        # completed summaries (``None`` = not completed); ``started``
+        # flags batches whose task ACQUIRED a pool slot (i.e. actually
+        # began its LLM call). Observability contract for
+        # ``failed_batches`` (a member = that batch did not complete):
+        #   - "skipped": the task never acquired the semaphore before
+        #     the shared deadline cancelled the pool (never started);
+        #   - "failed": the task started and then hit its own per-batch
+        #     adaptive timeout, or was cancelled in-flight by the
+        #     deadline.
+        summaries_by_idx: list = [None] * len(batches)
+        started = [False] * len(batches)
+        timed_out_batches: set = set()
+
+        async def _run_batch(batch_idx: int, batch: list[MessageGroup]) -> None:
+            # Wait for a pool slot OUTSIDE the try: a cancellation while
+            # waiting means this batch never started, and a ``finally``
+            # release here would free a slot we never held.
+            await semaphore.acquire()
+            started[batch_idx] = True
             try:
-                partial = await self._summarize_single_batch(batch, context)
-                partial_summaries.append(partial)
-            except (TimeoutError, asyncio.TimeoutError):
-                # O14-narrowed per-chunk timeout. Stop issuing further
-                # chunks: the outer handler treats ``summaries`` as
-                # authoritative and routes partial-summary (|S|>=1) or
-                # truncate fallback (|S|=0).
-                logger.warning(
-                    "Chunk %d/%d summarization timed out; halting "
-                    "chunked run (collected %d summaries so far).",
-                    batch_idx + 1, len(batches), len(partial_summaries),
+                summaries_by_idx[batch_idx] = await self._summarize_single_batch(
+                    batch, context
                 )
-                stop_reason = "timeout"
-                failed_batches.append(batch_idx)
-                # Mark the rest as skipped for observability.
-                failed_batches.extend(range(batch_idx + 1, len(batches)))
-                break
+            except (TimeoutError, asyncio.TimeoutError):
+                # O14-narrowed per-batch timeout: this batch failed on
+                # its OWN adaptive cap, not the shared deadline (a
+                # deadline hit surfaces as gather cancellation, never as
+                # an exception here). Record it and let siblings finish.
+                timed_out_batches.add(batch_idx)
+                logger.warning(
+                    "Batch %d/%d summarization timed out on its own "
+                    "adaptive cap; continuing remaining batches.",
+                    batch_idx + 1, len(batches),
+                )
+            finally:
+                semaphore.release()
+
+        pool = asyncio.gather(
+            *(_run_batch(i, b) for i, b in enumerate(batches)),
+            return_exceptions=True,
+        )
+        try:
+            results = await asyncio.wait_for(pool, timeout=_budget_remaining())
+        except (TimeoutError, asyncio.TimeoutError):
+            # Shared budget deadline (D-B5/D-B6 preserved): the deadline
+            # lives entirely inside ``_summarize_chunked`` — ``wait_for``
+            # cancels the gather (cancelling every un-started and
+            # in-flight batch task, and awaiting that cancellation)
+            # BEFORE this handler runs, so no caller-side
+            # ``aupdate_state`` is ever interleaved with a live pool.
+            # Completed summaries are kept below. CancelledError is
+            # never swallowed here — it is consumed by ``wait_for``
+            # itself; no ``except BaseException`` exists in this file.
+            logger.warning(
+                "Operation budget deadline hit with %d/%d batch summaries "
+                "complete (%d in-flight cancelled, %d never started); "
+                "keeping completed summaries.",
+                sum(1 for s in summaries_by_idx if s is not None),
+                len(batches),
+                sum(
+                    1 for i in range(len(batches))
+                    if summaries_by_idx[i] is None and started[i]
+                ),
+                sum(
+                    1 for i in range(len(batches))
+                    if summaries_by_idx[i] is None and not started[i]
+                ),
+            )
+            stop_reason = "budget"
+        else:
+            # Deadline did NOT fire. ``return_exceptions=True`` parks any
+            # non-timeout batch exception in the results — re-raise the
+            # first one so the outer ``except Exception`` (compact_state)
+            # maps it to the truncate fallback with
+            # ``failure_kind="error"`` (O14: only timeouts are handled
+            # per-batch; everything else propagates).
+            for res in results:
+                if isinstance(res, BaseException):
+                    raise res
+            stop_reason = "timeout" if timed_out_batches else "completed"
+
+        # Completion set in batch-index order (non-contiguous survival:
+        # every COMPLETED batch's summary is kept; each incomplete
+        # batch's messages are dropped individually downstream —
+        # ``_build_partial_replacement_messages`` RemoveMessages ALL
+        # compactable groups, then re-adds the surviving summaries, the
+        # marker, and the preserved tail).
+        partial_summaries = [s for s in summaries_by_idx if s is not None]
+        completed_idxs = {
+            i for i, s in enumerate(summaries_by_idx) if s is not None
+        }
+        failed_batches = sorted(set(range(len(batches))) - completed_idxs)
 
         # If we ran out of time before any batch succeeded, surface
         # "timeout" — even if some partials are present. Outer handler
@@ -1433,11 +1517,14 @@ class ContextCompactor:
 
         * Multiple surviving summaries are inserted (one per successful
           batch) — not just one.
-        * The un-summarized batch span is TRULY TRIMMED: ``RemoveMessage``
-          entries are emitted for those messages but no replacement
-          summary covers them. This is the bounded shrink the C1
-          acceptance criterion (b) requires — reduction is provably ≥
-          the un-summarized span.
+        * Incomplete batches are TRULY TRIMMED, individually:
+          ``RemoveMessage`` entries are emitted for ALL compactable
+          groups (contiguous or not — under the parallel pool the
+          surviving summary set may be non-contiguous, e.g. batches
+          {0, 2, 4}) but no replacement summary covers the incomplete
+          ones. This is the bounded shrink the C1 acceptance criterion
+          (b) requires — reduction is provably ≥ the un-summarized
+          messages.
         * A truncation marker (WS-4.1 exactly-once) is appended between
           the surviving summaries and the preserved tail. The marker is
           identical in shape to the one ``_truncate_fallback`` emits —

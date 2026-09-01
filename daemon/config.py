@@ -792,11 +792,30 @@ class CompactionConfig(BaseSettings):
         default=300.0,
         description=(
             "Whole-operation budget (seconds) spanning all chunk calls in a "
-            "single ``_summarize_chunked`` run. Cumulative clock across batch "
-            "summaries + merges + condense; on exhaustion the engine stops "
-            "issuing chunks and proceeds to the truncate fallback. Trips "
-            "BETWEEN LLM calls only — never between the two ``aupdate_state`` "
-            "persistence calls."
+            "single ``_summarize_chunked`` run. Cumulative clock enforced as "
+            "a shared deadline around the parallel batch pool; on expiry the "
+            "engine cancels in-flight batches, keeps the completed "
+            "summaries, and proceeds to the partial/truncate fallback. The "
+            "deadline lives entirely inside ``_summarize_chunked`` — never "
+            "between the two ``aupdate_state`` persistence calls."
+        ),
+    )
+    chunk_concurrency: int = Field(
+        default=3,
+        ge=1,
+        le=32,
+        description=(
+            "Max batch-summarization calls running in parallel inside one "
+            "chunked ``_summarize_chunked`` run (asyncio.Semaphore bound "
+            "around the batch pool). 1 = effectively serial (pre-parallel "
+            "behavior). Env knob: COMPACTION_CHUNK_CONCURRENCY (this config "
+            "block's env_prefix; env-only — no yaml for this knob). Default "
+            "3 is the conservative leader decision for local LLM proxies "
+            "with no backup URL: N-way parallelism multiplies in-flight "
+            "tenacity retries (worst case N x transient_max) against a "
+            "single endpoint. Batches are independent (static per-batch "
+            "prompt; merge runs after the pool), so this is a pure "
+            "throughput ceiling."
         ),
     )
 
