@@ -3860,11 +3860,44 @@ class JobFeedbackObserver:
             # FAILED so we don't leave a no-consumer instance in the DB +
             # in-memory manager.
             try:
+                # ── f1-misfire fix (incident 2026-08-31, JobItem
+                # 69a34b35): pass the JobItem's ``job_id`` as the
+                # driving Task's ``work_id`` — the documented
+                # ``Task.work_id == JobItem.job_id`` linkage contract
+                # (mirrors ``JobProcessor._process_next_job``). The
+                # pre-fix call omitted ``work_id``, so
+                # ``_prepare_enqueued_message`` auto-minted a fresh
+                # UUID4 and Pattern-f1's
+                # ``TaskRepository.get_by_work_id(job_id)`` returned
+                # None — misreading a live subtree as a
+                # restart-orphan and DEAD-finalizing it mid-flight.
                 result = await self._instance_manager.enqueue_message(
                     instance_id=instance_id,
                     message=started_job.message,
                     source=started_job.source,
+                    work_id=started_job.job_id,
                 )
+                # ── Linkage-contract tripwire (future-regression
+                # detector): the dispatch result's ``job_id`` IS the
+                # minted Task's ``work_id``. Any mismatch against the
+                # driving JobItem means the Task↔JobItem linkage is
+                # broken — recovery surfaces (Pattern-f1
+                # ``get_by_work_id``, work resolver) will misfire.
+                # WARN loudly; never fail the dispatch.
+                if (
+                    result is not None
+                    and getattr(result, "job_id", None)
+                    and result.job_id != started_job.job_id
+                ):
+                    logger.warning(
+                        f"Observer: LINKAGE CONTRACT VIOLATION — "
+                        f"task-job dispatch for JobItem "
+                        f"{started_job.job_id[:8]}... minted Task "
+                        f"work_id {result.job_id[:8]}... "
+                        f"(Task.work_id != JobItem.job_id). Recovery "
+                        f"lookups keyed by work_id will miss this "
+                        f"Task; investigate the dispatch path."
+                    )
                 # Stamp the message_id back onto the JobItem so the
                 # cross-system guard in ``claim_pending_task`` can
                 # correlate active MESSAGE JobItems with their

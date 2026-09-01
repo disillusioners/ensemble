@@ -1229,6 +1229,26 @@ class JobProcessor:
                         # ``job_continue`` continuation Tasks.
                         work_id=job.job_id,
                     )
+                    # ── Linkage-contract tripwire (f1-misfire batch,
+                    # incident 2026-08-31): ``result.job_id`` IS the
+                    # minted Task's ``work_id``. A mismatch against the
+                    # driving JobItem means the Task↔JobItem linkage
+                    # the recovery surfaces depend on
+                    # (``get_by_work_id(job_id)``) is broken — WARN
+                    # loudly; never fail the dispatch.
+                    if (
+                        result
+                        and getattr(result, "job_id", None)
+                        and result.job_id != job.job_id
+                    ):
+                        logger.warning(
+                            f"JobProcessor: LINKAGE CONTRACT VIOLATION — "
+                            f"task-job dispatch for JobItem "
+                            f"{job.job_id[:8]}... minted Task work_id "
+                            f"{result.job_id[:8]}... (Task.work_id != "
+                            f"JobItem.job_id). Recovery lookups keyed by "
+                            f"work_id will miss this Task."
+                        )
                     # Stamp the message_id back onto the JobItem so
                     # the cross-system guard in ``claim_pending_task``
                     # can correlate active MESSAGE JobItems with their

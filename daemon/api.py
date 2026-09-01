@@ -189,7 +189,10 @@ async def lifespan(app: FastAPI):
     from daemon.services.job_feedback_observer import JobFeedbackObserver
     from daemon.services.job_queue_mgmt_service import JobQueueMgmtService
     from daemon.services.dead_letter_service import DeadLetterService
-    from daemon.services.job_recovery_service import JobRecoveryService
+    from daemon.services.job_recovery_service import (
+        JobRecoveryService,
+        emit_orphan_f1_boot_log,
+    )
     from daemon.services.dispatch_event_bus import DispatchEventBus
     from daemon.sources.credentials import CredentialManager
     from daemon.repositories.job_queue.queue_repository import JobQueueRepository
@@ -514,12 +517,23 @@ async def lifespan(app: FastAPI):
     # window to avoid racing with a healthy ``active`` job
     # whose Task row is still being enqueued.
     min_orphan_age = config.services.drift_reconcile_min_orphan_age_seconds
+    # Pattern-f1 subtree-alive guard window (f1-misfire batch,
+    # incident 2026-08-31, JobItem 69a34b35): skip the f1 DEAD
+    # finalize when the lineage tree's MAX last_activity_at is
+    # within this window. Sits alongside the f1 grace above.
+    f1_tree_activity_max_age = (
+        config.services.f1_tree_activity_max_age_seconds
+    )
+    # One-shot boot log for the Pattern-f1 kill-switch
+    # (ENSEMBLE_ORPHAN_F1_ENABLED, default ON, restart-to-flip).
+    emit_orphan_f1_boot_log()
     drift_reconciler_task = asyncio.create_task(
         _periodic_drift_reconcile_loop(
             job_recovery=job_recovery,
             interval_seconds=drift_interval,
             min_pending_age_seconds=min_pending_age,
             min_orphan_age_seconds=min_orphan_age,
+            f1_tree_activity_max_age_seconds=f1_tree_activity_max_age,
         ),
         name="drift-reconciler",
     )
@@ -527,7 +541,8 @@ async def lifespan(app: FastAPI):
     logger.info(
         f"Drift reconciler started: interval={drift_interval}s, "
         f"min_pending_age={min_pending_age}s, "
-        f"min_orphan_age={min_orphan_age}s"
+        f"min_orphan_age={min_orphan_age}s, "
+        f"f1_tree_activity_max_age={f1_tree_activity_max_age}s"
     )
 
     # ─────────────────────────────────────────────────────────────
@@ -1124,6 +1139,7 @@ async def _periodic_drift_reconcile_loop(
     interval_seconds: int,
     min_pending_age_seconds: int,
     min_orphan_age_seconds: int = 900,
+    f1_tree_activity_max_age_seconds: int = 900,
 ) -> None:
     """Periodic asyncio loop driving ``JobRecoveryService.reconcile_drift_states``.
 
@@ -1156,6 +1172,13 @@ async def _periodic_drift_reconcile_loop(
             ``SERVICES_DRIFT_RECONCILE_MIN_ORPHAN_AGE_SECONDS``.
             Default 900s = 15 minutes (per
             ``.agents/shared/planning/orphan-active-job-recovery/``).
+        f1_tree_activity_max_age_seconds: Forwarded to
+            ``reconcile_drift_states`` for the f1 subtree-alive
+            guard (f1-misfire batch, incident 2026-08-31). The
+            guard skips the DEAD finalize when the lineage tree's
+            MAX ``last_activity_at`` is within this window.
+            Configurable via
+            ``SERVICES_F1_TREE_ACTIVITY_MAX_AGE_SECONDS``.
     """
     # Small startup delay so the first tick fires after the system
     # has stabilized (mirrors MaintenanceService._loop's 60s initial
@@ -1171,6 +1194,9 @@ async def _periodic_drift_reconcile_loop(
             stats = await job_recovery.reconcile_drift_states(
                 min_pending_age_seconds=min_pending_age_seconds,
                 min_orphan_age_seconds=min_orphan_age_seconds,
+                f1_tree_activity_max_age_seconds=(
+                    f1_tree_activity_max_age_seconds
+                ),
             )
             reconciled = stats.get("reconciled", 0)
             if reconciled > 0:

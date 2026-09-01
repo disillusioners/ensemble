@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
@@ -91,6 +92,103 @@ _F2_COMPLETED_AGE_FLOOR_SECONDS: int = 60
 # No separate constant — the existing ``threshold`` variable in
 # ``_pattern_f_orphan_active_job_recovery`` (computed from
 # ``min_orphan_age_seconds``) is reused for the instance-side check.
+
+# Pattern (f1) subtree-alive guard — tree-activity window (f1-misfire
+# batch, incident 2026-08-31, JobItem 69a34b35). Leg 2 of the guard:
+# skip the DEAD finalize when the MAX ``last_activity_at`` over the
+# JobItem's permanent lineage is younger than this window. Default
+# 900s matches the f1 grace — long enough to absorb a legitimate
+# quiet stretch on a waiting parent, short enough that a genuinely
+# abandoned tree does not shield a zombie forever (T2 pins that).
+F1_TREE_ACTIVITY_MAX_AGE_DEFAULT_SECONDS: int = 900
+
+# Pattern (f1) kill-switch (f1-misfire batch). Env-only, default ON,
+# restart-to-flip semantics per the ENSEMBLE_WC_WAKE_ENQUEUE
+# convention: resolved once, cached for the process lifetime; the
+# boot log fires exactly once (``emit_orphan_f1_boot_log``, wired in
+# ``daemon/api.py`` lifespan next to the drift reconciler). OFF makes
+# the f1 sub-shape fully inert — patterns (a)-(e) and the (f2)
+# sub-shape are untouched.
+_ORPHAN_F1_ENABLED_ENV = "ENSEMBLE_ORPHAN_F1_ENABLED"
+_ORPHAN_F1_ENABLED: bool | None = None
+_ORPHAN_F1_BOOT_LOG_EMITTED: bool = False
+
+
+def _resolve_orphan_f1_enabled() -> bool:
+    """Resolve and cache the Pattern-f1 kill-switch.
+
+    Returns:
+        ``True`` (default) when Pattern-f1's orphan-ACTIVE-JobItem
+        DEAD-finalization runs. ``False`` when
+        ``ENSEMBLE_ORPHAN_F1_ENABLED`` is set to a falsy value —
+        the f1 sub-shape is skipped entirely (misfire escape hatch;
+        patterns (a)-(e) and f2 are unaffected).
+
+    Truthy values: ``("1", "true", "yes", "on")``. Falsy values:
+    ``("0", "false", "no", "off")``. Blank / unset resolve ON (the
+    default) — for an ON-default switch the instant-revert path is
+    a falsy spelling, not blanking. Unknown non-blank values fall
+    back to ON with a one-shot WARN.
+
+    Caching + boot log are independent: this function caches only
+    the boolean; the one-shot boot INFO is emitted by
+    :func:`emit_orphan_f1_boot_log`. Flipping the env mid-flight has
+    no effect until restart (cached boolean).
+    """
+    global _ORPHAN_F1_ENABLED
+    if _ORPHAN_F1_ENABLED is not None:
+        return _ORPHAN_F1_ENABLED
+    raw = os.environ.get(_ORPHAN_F1_ENABLED_ENV, "1").strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        _ORPHAN_F1_ENABLED = False
+    elif raw in ("1", "true", "yes", "on") or raw == "":
+        _ORPHAN_F1_ENABLED = True
+    else:
+        logger.warning(
+            "%s=%r is not a recognized truthy/falsy value; falling "
+            "back to ON (the default). Recognized falsy spellings: "
+            "0/false/no/off.",
+            _ORPHAN_F1_ENABLED_ENV,
+            raw,
+        )
+        _ORPHAN_F1_ENABLED = True
+    return _ORPHAN_F1_ENABLED
+
+
+def _reset_orphan_f1_for_tests() -> None:
+    """Reset the kill-switch cache + boot-log flag (tests only)."""
+    global _ORPHAN_F1_ENABLED, _ORPHAN_F1_BOOT_LOG_EMITTED
+    _ORPHAN_F1_ENABLED = None
+    _ORPHAN_F1_BOOT_LOG_EMITTED = False
+
+
+def emit_orphan_f1_boot_log() -> None:
+    """One-shot boot INFO naming the resolved f1 kill-switch state.
+
+    Called from the lifespan wiring (``daemon/api.py``) next to the
+    drift-reconciler start log. Fires exactly once per process;
+    restart required to re-evaluate (cached resolver).
+    """
+    global _ORPHAN_F1_BOOT_LOG_EMITTED
+    if _ORPHAN_F1_BOOT_LOG_EMITTED:
+        return
+    _ORPHAN_F1_BOOT_LOG_EMITTED = True
+    enabled = _resolve_orphan_f1_enabled()
+    if enabled:
+        logger.info(
+            "Pattern-f1 orphan-ACTIVE-JobItem recovery ENABLED "
+            "(default; set %s=0 to disable — restart required to "
+            "flip)",
+            _ORPHAN_F1_ENABLED_ENV,
+        )
+    else:
+        logger.warning(
+            "Pattern-f1 orphan-ACTIVE-JobItem recovery DISABLED via "
+            "%s=0 — orphan ACTIVE JobItems with no linked Task will "
+            "NOT be DEAD-finalized (patterns (a)-(e) and f2 remain "
+            "active)",
+            _ORPHAN_F1_ENABLED_ENV,
+        )
 
 
 # Alive instance statuses - hoisted to ``daemon.constants`` (see
@@ -561,6 +659,9 @@ class JobRecoveryService:
         self,
         min_pending_age_seconds: int = 300,
         min_orphan_age_seconds: int = 900,
+        f1_tree_activity_max_age_seconds: int = (
+            F1_TREE_ACTIVITY_MAX_AGE_DEFAULT_SECONDS
+        ),
     ) -> dict[str, Any]:
         """Detect and repair drift between ``job_queue_items`` and ``task``.
 
@@ -615,11 +716,16 @@ class JobRecoveryService:
           instance** → finalize the JobItem to
           ``admission_state='dead'`` (DEAD, distinct from
           Pattern (a)'s ``failed`` outcome — the JobItem is
-          structurally orphaned, not retried). The Task
-          absence is the restart-orphan signature: a daemon
-          restart cleared the ``task`` table but left the
-          JobItem row behind, so the JobItem is now
-          ``active`` with nothing to drive it forward. The
+          structurally orphaned, not retried). The honest
+          predicate is "no Task linked via ``work_id``"
+          (``get_by_work_id(job_id)`` returned None) —
+          classically a daemon restart wiped the ``task``
+          table but left the JobItem row behind, so the
+          JobItem is now ``active`` with nothing to drive it
+          forward (the tree-alive guard below shields the
+          misfire class where the linkage is broken but live
+          work exists — incident 2026-08-31, JobItem
+          69a34b35). The
           instance is left untouched (alive, but the
           JobItem's work is unrecoverable). Lock release
           follows the F4/F7 contract — scoped per-job via
@@ -1350,9 +1456,14 @@ class JobRecoveryService:
 
         # ── Pattern (f): orphan ACTIVE JobItem recovery ──────────
         # Leader-locked design (incident 802095d8, RCA-confirmed).
-        # The "restart-orphan" class: a daemon restart cleared the
-        # ``task`` table ("Cleared 737 backlog task(s)") but the
-        # JobItem rows SURVIVED the restart-wipe. Result: an
+        # The honest f1 predicate is "no Task linked via work_id"
+        # (get_by_work_id(job_id) → None). Classically that means a
+        # daemon restart cleared the ``task`` table ("Cleared 737
+        # backlog task(s)") but the JobItem rows SURVIVED the
+        # restart-wipe; the tree-alive guard (incident 2026-08-31,
+        # JobItem 69a34b35) additionally shields the broken-linkage
+        # misfire class where live work exists under a different
+        # work_id. Result: an
         # ``admission_state='active'`` JobItem with no Task rows and
         # an alive/stale instance. Without this pattern, the JobItem
         # sits ``active`` forever — the instance is still alive, the
@@ -1402,6 +1513,9 @@ class JobRecoveryService:
         try:
             extra = await self._pattern_f_orphan_active_job_recovery(
                 min_orphan_age_seconds=min_orphan_age_seconds,
+                f1_tree_activity_max_age_seconds=(
+                    f1_tree_activity_max_age_seconds
+                ),
             )
             if extra:
                 reconciled += extra.get("reconciled", 0)
@@ -1733,6 +1847,9 @@ class JobRecoveryService:
         self,
         *,
         min_orphan_age_seconds: int,
+        f1_tree_activity_max_age_seconds: int = (
+            F1_TREE_ACTIVITY_MAX_AGE_DEFAULT_SECONDS
+        ),
     ) -> dict | None:
         """Pattern (f) — detect and repair orphan ACTIVE JobItems.
 
@@ -2330,6 +2447,29 @@ class JobRecoveryService:
                 # structurally orphaned" class. An
                 # alive instance is checked via
                 # ``_is_instance_alive``.
+                #
+                # ── Kill-switch (f1-misfire batch) ──
+                # ``ENSEMBLE_ORPHAN_F1_ENABLED=0`` makes
+                # f1 fully inert: skip before ANY f1
+                # work (no instance lookup, no tree
+                # queries). Patterns (a)-(e) and the
+                # (f2) sub-shape above are untouched.
+                if not _resolve_orphan_f1_enabled():
+                    details.append({
+                        "pattern": "orphan_active_skipped_f1_disabled",
+                        "job_id": job_id,
+                        "task_id": None,
+                        "instance_id": instance_id,
+                        "reason": (
+                            f"orphan ACTIVE JobItem (no "
+                            f"Task linked via work_id) — "
+                            f"Pattern-f1 kill-switch is "
+                            f"OFF ({_ORPHAN_F1_ENABLED_ENV}"
+                            f"=0); f1 is inert, row left "
+                            f"as-is"
+                        ),
+                    })
+                    continue
                 instance = None
                 if self._instance_repository is not None:
                     try:
@@ -2374,6 +2514,119 @@ class JobRecoveryService:
                         ),
                     })
                     continue
+
+                # ── Subtree-alive guard (f1-misfire batch,
+                # incident 2026-08-31, JobItem 69a34b35) ──
+                # The strict ``task is None`` predicate reads
+                # only THIS JobItem's work_id — the misfire
+                # class mints the driving Task under a FRESH
+                # work_id, so the row LOOKS like a restart-
+                # orphan while a live subtree runs underneath.
+                # Per-row checks provably fail here:
+                # ``last_activity_at`` FREEZES on a
+                # waiting_children parent for 16min+ while a
+                # grandchild streams mid-LLM. The guard MUST
+                # aggregate the permanent lineage TREE (root +
+                # ALL descendants via
+                # ``get_tree_ids_permanent``) and skip when:
+                #   leg 1 — ANY Task (any work_id) in
+                #           PENDING/RUNNING sits on any tree
+                #           member, OR
+                #   leg 2 — MAX(last_activity_at) over the
+                #           tree is within
+                #           ``f1_tree_activity_max_age_seconds``
+                #           (default 900s).
+                # Zombie preservation (T2, 802095d8 class):
+                # stale-running instance + no live tasks +
+                # stale tree activity still fires after the
+                # grace.
+                if (
+                    self._instance_repository is not None
+                    and self._task_repository is not None
+                ):
+                    tree_ids = await asyncio.to_thread(
+                        self._instance_repository
+                        .get_tree_ids_permanent,
+                        instance_id,
+                    )
+                    tree_live_tasks = 0
+                    tree_max_activity = None
+                    if tree_ids:
+                        tree_live_tasks = await asyncio.to_thread(
+                            self._task_repository
+                            .count_live_tasks_in_instances,
+                            tree_ids,
+                        )
+                        tree_max_activity = await asyncio.to_thread(
+                            self._instance_repository
+                            .get_max_last_activity_in_instances,
+                            tree_ids,
+                        )
+                    tree_activity_cutoff = datetime.now(
+                        timezone.utc
+                    ) - timedelta(seconds=f1_tree_activity_max_age_seconds)
+                    # SQLite may hand back the MAX aggregate as an
+                    # ISO string (raw column text) while PostgreSQL
+                    # returns a datetime — normalize before the
+                    # comparison; unparseable values are treated as
+                    # "no signal" (leg 2 silent), never as fatal.
+                    if isinstance(tree_max_activity, str):
+                        try:
+                            tree_max_activity = datetime.fromisoformat(
+                                tree_max_activity
+                            )
+                        except ValueError:
+                            tree_max_activity = None
+                    tree_max_activity_iso = (
+                        tree_max_activity.isoformat()
+                        if isinstance(tree_max_activity, datetime)
+                        else tree_max_activity
+                    )
+                    if (
+                        tree_live_tasks > 0
+                        or (
+                            tree_max_activity is not None
+                            and tree_max_activity >= tree_activity_cutoff
+                        )
+                    ):
+                        details.append({
+                            "pattern": (
+                                "orphan_active_skipped_tree_alive"
+                            ),
+                            "job_id": job_id,
+                            "task_id": None,
+                            "instance_id": instance_id,
+                            "reason": (
+                                f"orphan ACTIVE JobItem (no Task "
+                                f"linked via work_id) BUT the "
+                                f"lineage tree is alive: "
+                                f"{tree_live_tasks} PENDING/RUNNING "
+                                f"task(s) across "
+                                f"{len(tree_ids)} tree member(s), "
+                                f"max last_activity_at="
+                                f"{tree_max_activity_iso!r} (window "
+                                f"{f1_tree_activity_max_age_seconds}s) "
+                                f"— live work exists under a "
+                                f"different work_id; f1 MUST NOT "
+                                f"DEAD-finalize. Next cycle retries."
+                            ),
+                        })
+                        logger.warning(
+                            f"reconcile_drift_states: Pattern (f1) "
+                            f"skip — orphan ACTIVE JobItem "
+                            f"{job_id[:8]}... has no Task linked "
+                            f"via work_id, but its lineage tree is "
+                            f"ALIVE ({tree_live_tasks} live task(s) "
+                            f"across {len(tree_ids)} instance(s), "
+                            f"max activity "
+                            f"{tree_max_activity_iso!r}). This is "
+                            f"the f1-misfire class (incident "
+                            f"2026-08-31): a live subtree must "
+                            f"never be DEAD-finalized. Verify the "
+                            f"dispatch path carried "
+                            f"work_id=job_id."
+                        )
+                        continue
 
                 # If the instance is alive — this is
                 # the genuine f1 candidate. Apply the
@@ -2676,21 +2929,31 @@ class JobRecoveryService:
         # ``from_status='active'`` is the canonical
         # key; ``to_status='dead'`` is the 4-value
         # ``AdmissionState`` vocabulary's DEAD value.
+        #
+        # Point 3 (f1-misfire batch): write the DURABLE
+        # ``terminal_reason='pattern_f1_orphan'`` column.
+        # The legacy ``completed_at``/``error_message``
+        # kwargs are silently stripped by
+        # ``_REMOVED_JOB_COLUMNS`` (JobItem mirror
+        # columns dropped in Phase B), which is why f1
+        # kills used to carry an EMPTY terminal_reason —
+        # the only surviving audit record was this log
+        # line. ``terminal_reason`` is a real JobItem
+        # column (Phase 7c) and flows through
+        # ``atomic_transition`` untouched.
         try:
-            now = datetime.now(timezone.utc).isoformat()
             await asyncio.to_thread(
                 job.atomic_transition,
                 job_id,
                 from_status="active",
                 to_status="dead",
-                completed_at=now,
+                terminal_reason="pattern_f1_orphan",
                 error_message=(
-                    "Pattern (f1) restart-orphan: active "
-                    "JobItem with no Task rows (alive "
-                    "instance) — daemon restart cleared the "
-                    "task table but the JobItem row "
-                    "survived; finalizing to DEAD per "
-                    "RCA 802095d8"
+                    "Pattern (f1) orphan cleanup: active "
+                    "JobItem with no Task linked via "
+                    "work_id (get_by_work_id returned "
+                    "None; alive instance, past grace) — "
+                    "finalizing to DEAD per RCA 802095d8"
                 ),
             )
         except InvalidTransitionError:

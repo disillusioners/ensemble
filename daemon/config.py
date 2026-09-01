@@ -1069,12 +1069,12 @@ class ServicesConfig(BaseSettings):
     # (``.agents/shared/planning/orphan-active-job-recovery/``,
     # 802095d8 incident). The ``active`` JobItem that has NO
     # ``task`` rows AND an alive/stale instance is the
-    # restart-orphan signature: the daemon restart cleared the
-    # ``task`` table but left the JobItem row behind, so the
-    # JobItem is now ``active`` with nothing to drive it forward.
-    # The reconciler Pattern (f1) finalizes such JobItems to
-    # ``admission_state='dead'`` (DEAD) — distinct from
-    # Pattern (a)'s ``failed`` outcome. The 15-minute default
+    # restart-orphan signature: no Task is linked to the JobItem
+    # via ``work_id``, so the JobItem is now ``active`` with
+    # nothing to drive it forward. The reconciler Pattern (f1)
+    # finalizes such JobItems to ``admission_state='dead'``
+    # (DEAD) — distinct from Pattern (a)'s ``failed`` outcome.
+    # The 15-minute default
     # matches the leader's design: long enough to absorb a normal
     # claim cycle (the existing P1 / Pattern (a) 5-minute default
     # for stuck PENDING tasks is the tighter window, but orphan
@@ -1094,6 +1094,26 @@ class ServicesConfig(BaseSettings):
             "enough to absorb a normal enqueue-to-claim cycle "
             "but short enough to surface a true restart-orphan "
             "within one reconciler cycle (5-minute default cadence)."
+        ),
+    )
+    # Pattern (f1) subtree-alive guard — tree-activity window
+    # (f1-misfire batch, incident 2026-08-31, JobItem 69a34b35).
+    # ``last_activity_at`` freezes on waiting_children parents, so
+    # the guard aggregates MAX(last_activity_at) over the whole
+    # permanent lineage: a tree with activity inside this window is
+    # ALIVE and must never be DEAD-finalized by f1, even when no
+    # Task links to the JobItem via work_id. Also gated by the
+    # ENSEMBLE_ORPHAN_F1_ENABLED kill-switch (env-only, default ON).
+    f1_tree_activity_max_age_seconds: int = Field(
+        default=900,
+        ge=1,
+        description=(
+            "Subtree-alive window (seconds) for Pattern (f1)'s "
+            "tree guard: when the JobItem's lineage tree reports "
+            "MAX(last_activity_at) within this window, the f1 "
+            "DEAD finalize is skipped (live work exists under a "
+            "different work_id — the f1-misfire class). Default "
+            "900s = 15 minutes, matching the f1 grace."
         ),
     )
     # ─── WAITING_CHILDREN hang watchdog (issue #8) ───

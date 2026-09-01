@@ -563,6 +563,38 @@ class SQLModelInstanceRepository:
                     )
             return visited
 
+    def get_max_last_activity_in_instances(
+        self, instance_ids: list[str]
+    ) -> datetime | None:
+        """MAX(last_activity_at) across a SET of instances (tree aggregate).
+
+        f1-misfire batch (incident 2026-08-31, JobItem 69a34b35):
+        the Pattern-f1 subtree-alive guard's leg 2. The per-row
+        signal provably fails — ``last_activity_at`` FREEZES on a
+        waiting_children parent while a descendant streams mid-LLM —
+        so the guard must aggregate MAX over the whole permanent
+        lineage (root + descendants via ``get_tree_ids_permanent``).
+
+        NULL ``last_activity_at`` rows are ignored by the MAX
+        aggregate. Returns ``None`` when no member has ever been
+        active (or the set is empty) — callers treat None as "no
+        activity signal", NOT as "recently active".
+
+        Args:
+            instance_ids: Instance IDs to aggregate over (the lineage
+                tree).
+
+        Returns:
+            The most recent ``last_activity_at`` in the set, or None.
+        """
+        if not instance_ids:
+            return None
+        with SQLModelSession(self.engine) as db_session:
+            stmt = select(
+                func.max(Instance.last_activity_at)
+            ).where(Instance.instance_id.in_(instance_ids))
+            return db_session.exec(stmt).one()
+
     def get_cascade_tree_ids(self, root_id: str) -> list[str]:
         """Deploy-window escape hatch — pick the cascade-lineage source.
 
