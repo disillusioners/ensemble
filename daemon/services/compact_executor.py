@@ -127,6 +127,7 @@ from ..compaction import (
     CompactionContext,
     CompactionResult,
     ContextCompactor,
+    _extract_msg_timestamps,
     estimate_messages_tokens,
     get_model_context_limit,
 )
@@ -1060,6 +1061,12 @@ async def execute_compact(
             # narrowed). The executor's pre-checks above only bypass
             # the threshold (which the engine also honors — the
             # bypass lives in the engine's force flag).
+            # F1 fix (2026-09-01) — pre-stamp the first-appearance
+            # ``{msg_id: iso_ts}`` map so the SECTION DETAIL
+            # conversation-time clause renders in the doc (architect
+            # §4). F2 fix (2026-09-01) — pass ``instance_id`` so the
+            # doc id is ``compaction-global-{iid}-{seq}`` (not
+            # ``compaction-global--{seq}``) and seq is per-instance.
             ctx = CompactionContext(
                 messages=messages,
                 system_prompt_tokens=system_prompt_tokens,
@@ -1067,6 +1074,8 @@ async def execute_compact(
                 config=manager.config.compaction,
                 llm_config=dict(llm_cfg),
                 last_compacted_at=last_compacted_at,
+                instance_id=instance_id,
+                msg_timestamps=_extract_msg_timestamps(messages),
             )
             result = await compactor.compact_state(ctx, force=True)
             if result is None:

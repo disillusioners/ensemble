@@ -1160,6 +1160,13 @@ class InstanceMessagingService:
             last_compacted_at = state.values.get('compacted_at')
             
             # Build compaction context
+            # F1 fix (2026-09-01) — pre-stamp the first-appearance
+            # ``{msg_id: iso_ts}`` map so the SECTION DETAIL
+            # conversation-time clause renders in the doc (architect
+            # §4). F2 fix (2026-09-01) — pass ``instance_id`` so the
+            # doc id is ``compaction-global-{iid}-{seq}`` (not
+            # ``compaction-global--{seq}``) and seq is per-instance.
+            from ..compaction import _extract_msg_timestamps
             context = CompactionContext(
                 messages=messages,
                 system_prompt_tokens=system_prompt_tokens,
@@ -1179,6 +1186,8 @@ class InstanceMessagingService:
                     "buffer_response_header": self._config.llm.buffer_response_header,
                 },
                 last_compacted_at=last_compacted_at,
+                instance_id=instance_id,
+                msg_timestamps=_extract_msg_timestamps(messages),
             )
             
             # Compact state

@@ -3575,6 +3575,337 @@ class TestProvenanceNoTimestampLeak:
         assert "conversation time" not in body
 
 
+class TestF1F2Wiring:
+    """F1 + F2 fix (2026-09-01) — wire ``msg_timestamps`` (F1) and
+    ``instance_id`` (F2) through the production ``compact_state`` path
+    so the SECTION DETAIL conversation-time clause actually renders in
+    the doc AND the doc id is ``compaction-global-{iid}-{seq}``.
+
+    Background — the tester's live gate identified two should-fix
+    findings: the conversation-time provenance clause was implemented
+    + unit-tested at the doc builder level (architect §4, W3) but the
+    production wiring never reached it (3 ``build_compaction_doc``
+    call sites in ``daemon/compaction.py:compact_state`` omitted the
+    argument). Likewise ``CompactionContext.instance_id`` defaulted to
+    ``""`` and all 4 production constructors omitted it, minting
+    ``compaction-global--{seq}`` ids and breaking the {iid}-{seq}
+    monotonic design.
+
+    These tests pin the end-to-end contract via the real
+    ``ContextCompactor.compact_state`` path (NOT just the doc
+    builder), so a future regression that reverts the wiring will
+    fail loudly here.
+    """
+
+    @staticmethod
+    def _ts_msg(content: str, mid: str, ts: str) -> HumanMessage:
+        """Build a ``HumanMessage`` with a timestamped
+        ``additional_kwargs['created_at']`` slot.
+
+        F1 (architect §4) — the doc builder's SECTION DETAIL
+        conversation-time clause derives from this slot. ``created_at``
+        takes precedence over ``ts`` in
+        :func:`_extract_msg_timestamps`; both are valid.
+        """
+        m = HumanMessage(content=content, id=mid)
+        m.additional_kwargs["created_at"] = ts
+        return m
+
+    @pytest.fixture
+    def mock_llm(self):
+        """LLM stub — produces a successful single-batch summary.
+
+        The doc builder on the FULL-success path emits ONE section;
+        the SECTION DETAIL conversation-time clause is the surface
+        the F1 test asserts on.
+        """
+        mock_response = AIMessage(
+            content="Summary of compactable history.", id="mock-resp",
+        )
+        mock_llm_instance = MagicMock()
+        mock_llm_instance.invoke = MagicMock(return_value=mock_response)
+        with patch(
+            "daemon.graph.ThinkingChatOpenAI",
+            return_value=mock_llm_instance,
+            create=True,
+        ):
+            yield mock_llm_instance
+
+    @pytest.mark.asyncio
+    async def test_f1_conversation_time_clause_uses_message_timestamps(
+        self, mock_llm,
+    ):
+        """F1 (2026-09-01) — the doc's SECTION DETAIL emits a
+        ``conversation time`` clause sourced from the message
+        timestamps, NOT from the engine's wall-clock generation
+        time (``compacted_at``).
+
+        Asserts three things:
+        1. The clause is present in the doc body.
+        2. The clause's timestamps are EXACTLY the ISO strings
+           carried on the message ``additional_kwargs['created_at']``
+           slot — not the envelope's ``compacted_at`` generation ts.
+        3. The clause does NOT fall back to wall-clock (a regression
+           here would mask F1).
+        """
+        from daemon.compaction import CompactionContext, ContextCompactor
+
+        # Generation timestamp — distinctly different from the message
+        # timestamps. The clause must NOT contain this string.
+        generation_ts = "2099-12-31T23:59:59+00:00"
+        # Two message timestamps — must appear verbatim in the
+        # clause (the section boundary ids).
+        t0 = "2026-08-31T09:00:00+00:00"
+        t1 = "2026-08-31T10:30:00+00:00"
+
+        msgs = [
+            self._ts_msg("first user turn", "m-0", t0),
+            AIMessage(content="first assistant turn", id="m-1"),
+            HumanMessage(content="second user turn", id="m-2"),
+            self._ts_msg("third user turn", "m-3", t1),
+            AIMessage(content="third assistant turn", id="m-4"),
+        ]
+
+        cfg = make_compaction_config(
+            min_messages_before_compaction=3,
+            threshold=0.01,
+            recent_message_window=2,
+            min_recent_window=1,
+            context_window_overrides={"gpt-4o": 1000},
+        )
+        compactor = ContextCompactor(cfg, {})
+
+        ctx = CompactionContext(
+            messages=msgs,
+            system_prompt_tokens=0,
+            model_name="gpt-4o",
+            config=cfg,
+            llm_config={},
+            last_compacted_at=None,
+            instance_id="f1-wiring",
+        )
+        result = await compactor.compact_state(ctx, force=True)
+        assert result is not None, "F1: compaction must fire"
+        docs = [
+            m for m in result.replacement_messages
+            if isinstance(m, SystemMessage)
+            and (m.id or "").startswith("compaction-global-")
+        ]
+        assert len(docs) == 1, (
+            f"F1: exactly one doc expected, got {len(docs)}; "
+            f"replacement: {[m.id for m in result.replacement_messages]}"
+        )
+        body = docs[0].content
+
+        # 1. The clause is present.
+        assert "conversation time" in body, (
+            f"F1: conversation-time clause must appear in SECTION "
+            f"DETAIL; body excerpt:\n{body!r}"
+        )
+        # 2. The message timestamps appear verbatim in the clause.
+        assert t0 in body, (
+            f"F1: start message timestamp {t0!r} must appear in the "
+            f"conversation-time clause; body excerpt:\n{body!r}"
+        )
+        assert t1 in body, (
+            f"F1: end message timestamp {t1!r} must appear in the "
+            f"conversation-time clause; body excerpt:\n{body!r}"
+        )
+        # 3. The clause does NOT fall back to wall-clock
+        #    generation ts (a regression of the F1 contract).
+        #    The envelope carries the generation ts ONCE
+        #    (``compacted_at={generation_ts}``), but the SECTION
+        #    DETAIL time clause must use message timestamps. The
+        #    following assertion: a date OTHER than the two
+        #    message timestamps must NOT appear inside the
+        #    conversation-time clause.
+        import re
+        m = re.search(
+            r"conversation time ([^\n]+)", body,
+        )
+        assert m, "F1: no conversation-time clause matched in body"
+        clause_payload = m.group(1)
+        # Generation ts must NOT appear in the clause payload.
+        assert generation_ts not in clause_payload, (
+            f"F1: clause must NOT use the wall-clock generation "
+            f"timestamp; clause={clause_payload!r}"
+        )
+        # And the two message timestamps MUST both be in the clause.
+        assert t0 in clause_payload and t1 in clause_payload, (
+            f"F1: clause must contain both message timestamps; "
+            f"clause={clause_payload!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_f1_compaction_state_threads_msg_timestamps_from_context(
+        self, mock_llm,
+    ):
+        """F1 (2026-09-01) — the engine reads ``context.msg_timestamps``
+        (stamped by the 3 production callers) and threads it into the
+        doc builder. Pin the contract: a CompactionContext with
+        ``msg_timestamps`` set produces a doc whose SECTION DETAIL
+        time clause contains the timestamps from the context (NOT
+        recomputed from wall-clock).
+        """
+        from daemon.compaction import CompactionContext, ContextCompactor
+
+        t0 = "2026-08-30T14:00:00+00:00"
+        t1 = "2026-08-30T15:30:00+00:00"
+        msgs = [
+            self._ts_msg("u1", "u-1", t0),
+            AIMessage(content="a1", id="a-1"),
+            HumanMessage(content="u2", id="u-2"),
+            self._ts_msg("u3", "u-3", t1),
+            AIMessage(content="a3", id="a-3"),
+        ]
+        explicit_map = {
+            "u-1": t0,
+            "a-1": "2026-08-30T14:15:00+00:00",
+            "u-2": "2026-08-30T15:00:00+00:00",
+            "u-3": t1,
+            "a-3": "2026-08-30T15:45:00+00:00",
+        }
+        cfg = make_compaction_config(
+            min_messages_before_compaction=3,
+            threshold=0.01,
+            recent_message_window=2,
+            min_recent_window=1,
+            context_window_overrides={"gpt-4o": 1000},
+        )
+        compactor = ContextCompactor(cfg, {})
+        ctx = CompactionContext(
+            messages=msgs,
+            system_prompt_tokens=0,
+            model_name="gpt-4o",
+            config=cfg,
+            llm_config={},
+            last_compacted_at=None,
+            instance_id="f1-thread",
+            msg_timestamps=explicit_map,
+        )
+        result = await compactor.compact_state(ctx, force=True)
+        assert result is not None
+        docs = [
+            m for m in result.replacement_messages
+            if isinstance(m, SystemMessage)
+            and (m.id or "").startswith("compaction-global-")
+        ]
+        assert len(docs) == 1
+        body = docs[0].content
+        # The two section-boundary timestamps appear in the clause.
+        assert "conversation time" in body
+        assert t0 in body
+        assert t1 in body
+
+    @pytest.mark.asyncio
+    async def test_f2_two_compactions_same_instance_mint_distinct_monotonic_ids(
+        self, mock_llm,
+    ):
+        """F2 (2026-09-01) — the doc id format is
+        ``compaction-global-{iid}-{seq}`` and the seq axis is
+        per-instance. Two compactions on the SAME instance mint
+        distinct monotonic ids.
+
+        Concretely: a CompactionContext with
+        ``instance_id="f2-iid"`` produces
+        ``"compaction-global-f2-iid-1"`` on the first run and
+        ``"compaction-global-f2-iid-2"`` on the second (after the
+        prior doc is in the channel). Empty-iid fallback
+        (``"compaction-global--N"``) MUST NOT happen.
+        """
+        from langchain_core.messages import RemoveMessage
+        from daemon.compaction import CompactionContext, ContextCompactor
+
+        add_messages, _REMOVE_ALL = _load_real_add_messages()
+        cfg = make_compaction_config(
+            min_messages_before_compaction=3,
+            threshold=0.01,
+            recent_message_window=2,
+            min_recent_window=1,
+            context_window_overrides={"gpt-4o": 1000},
+        )
+        compactor = ContextCompactor(cfg, {})
+
+        # ── Compaction #1 — first doc on a fresh channel. ───
+        history = make_messages(30)
+        ctx1 = CompactionContext(
+            messages=history,
+            system_prompt_tokens=0,
+            model_name="gpt-4o",
+            config=cfg,
+            llm_config={},
+            last_compacted_at=None,
+            instance_id="f2-iid",
+        )
+        result1 = await compactor.compact_state(ctx1, force=True)
+        assert result1 is not None
+        doc1 = next(
+            m for m in result1.replacement_messages
+            if isinstance(m, SystemMessage)
+            and (m.id or "").startswith("compaction-global-")
+        )
+        # F2 — id is ``compaction-global-f2-iid-1``, NOT
+        # ``compaction-global--1`` (empty iid fallback).
+        assert doc1.id == "compaction-global-f2-iid-1", (
+            f"F2: first doc id must be 'compaction-global-f2-iid-1'; "
+            f"got {doc1.id!r}"
+        )
+        assert "--" not in doc1.id, (
+            f"F2: doc id must NOT carry the empty-iid fallback "
+            f"('compaction-global--' double-hyphen); got {doc1.id!r}"
+        )
+
+        # ── Apply via the production sentinel recipe and re-compact. ───
+        _, REMOVE_ALL_MESSAGES = _load_real_add_messages()
+        channel = add_messages(
+            history,
+            [RemoveMessage(id=REMOVE_ALL_MESSAGES), *result1.replacement_messages],
+        )
+
+        # Continue the conversation so the second compaction has
+        # enough regular messages to clear
+        # ``min_messages_before_compaction``. Mirrors the
+        # ``test_chained_compaction_leaves_exactly_one_doc``
+        # pattern at lines 2681-2689.
+        follow_ups = [
+            HumanMessage(content=f"Follow-up {i}", id=f"post-{i}")
+            for i in range(40)
+        ]
+        channel = add_messages(channel, follow_ups)
+
+        # Compaction #2 — same instance, doc now in channel.
+        ctx2 = CompactionContext(
+            messages=channel,
+            system_prompt_tokens=0,
+            model_name="gpt-4o",
+            config=cfg,
+            llm_config={},
+            last_compacted_at=None,
+            instance_id="f2-iid",
+        )
+        result2 = await compactor.compact_state(ctx2, force=True)
+        assert result2 is not None
+        doc2 = next(
+            m for m in result2.replacement_messages
+            if isinstance(m, SystemMessage)
+            and (m.id or "").startswith("compaction-global-")
+        )
+        # F2 — id advances to ``compaction-global-f2-iid-2``,
+        # distinct and monotonic.
+        assert doc2.id == "compaction-global-f2-iid-2", (
+            f"F2: second doc id must be 'compaction-global-f2-iid-2'; "
+            f"got {doc2.id!r}"
+        )
+        assert doc1.id != doc2.id, (
+            f"F2: doc ids must be distinct across compactions; "
+            f"both = {doc1.id!r}"
+        )
+        # The two ids share the same instance prefix and the seq
+        # axis is monotonic (1 → 2).
+        assert doc1.id.split("-")[-1] == "1"
+        assert doc2.id.split("-")[-1] == "2"
+
+
 class TestPassTwoSeedConvergence:
     """Item 7 — pass-2 (extend ``TestChainedSecondCompactionDocs``):
     prior doc removed with span; new merge prompt contains

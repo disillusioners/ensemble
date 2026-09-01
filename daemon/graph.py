@@ -3500,7 +3500,13 @@ def create_agent_node(
             current_messages = current_state.values.get('messages', [])
             compacted_at_val = current_state.values.get('compacted_at')
 
-            from .compaction import CompactionContext
+            from .compaction import CompactionContext, _extract_msg_timestamps
+            # F1 fix (2026-09-01) — pre-stamp the first-appearance
+            # ``{msg_id: iso_ts}`` map so the SECTION DETAIL
+            # conversation-time clause renders in the doc (architect
+            # §4). F2 fix (2026-09-01) — pass ``instance_id`` so the
+            # doc id is ``compaction-global-{iid}-{seq}`` (not
+            # ``compaction-global--{seq}``) and seq is per-instance.
             ctx = CompactionContext(
                 messages=current_messages,
                 system_prompt_tokens=0,
@@ -3508,6 +3514,8 @@ def create_agent_node(
                 config=compactor.config,
                 llm_config=compactor.llm_config,
                 last_compacted_at=compacted_at_val,
+                instance_id=instance_id,
+                msg_timestamps=_extract_msg_timestamps(current_messages),
             )
 
             result = await compactor.compact_state(ctx)

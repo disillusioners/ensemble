@@ -588,6 +588,72 @@ def _conversation_time_for(
     return msg_timestamps.get(msg_id)
 
 
+def _extract_msg_timestamps(
+    messages: list[BaseMessage],
+) -> dict[str, str]:
+    """Build the first-appearance ``{msg_id: iso_ts}`` map from messages.
+
+    F1 (2026-09-01) — wire conversation-time provenance into the
+    production doc builder. Walks ``messages`` in order; for each
+    message carrying a timestamp, stamps the FIRST appearance as the
+    value (later appearances on the same id are ignored, so the
+    section-boundary lookup always returns the original conversation
+    time even if the message re-appears after a re-compaction cycle).
+
+    Timestamp precedence (first non-empty wins):
+
+    1. ``message.created_at`` — LangChain ``BaseMessage`` attribute
+       (timezone-aware ``datetime``).
+    2. ``message.additional_kwargs["ts"]`` — string ISO timestamp
+       (the engine / message_queue stamping convention).
+    3. ``message.additional_kwargs["created_at"]`` — ISO string.
+
+    Missing timestamp on a message → that id is OMITTED from the map;
+    the doc builder's section-header clause will then be OMITTED
+    (architect §4 — never generation-time fallback). The function
+    returns an empty dict when no message carries a timestamp; this
+    is the "no provenance available" case and the doc still emits
+    without the time clause (mirrors the existing
+    ``msg_timestamps=None`` semantics in :func:`build_compaction_doc`).
+    """
+    out: dict[str, str] = {}
+    for msg in messages:
+        mid = getattr(msg, "id", None)
+        if not mid or mid in out:
+            # Either no id (unrecoverable) or already seen (first
+            # appearance wins — the SPEC of the map).
+            continue
+        ts = _msg_timestamp_iso(msg)
+        if ts:
+            out[mid] = ts
+    return out
+
+
+def _msg_timestamp_iso(msg: BaseMessage) -> str | None:
+    """Pull a single ISO timestamp string from a message, or ``None``.
+
+    Helper for :func:`_extract_msg_timestamps`. Tries, in order:
+    ``created_at`` attribute, ``additional_kwargs["ts"]``,
+    ``additional_kwargs["created_at"]``. Returns the ISO string, or
+    ``None`` if none of the slots carries a value. Datetime objects
+    are normalized to ISO via ``.isoformat()``; strings are passed
+    through unchanged (already ISO by convention).
+    """
+    created = getattr(msg, "created_at", None)
+    if created is not None:
+        if hasattr(created, "isoformat"):
+            return created.isoformat()
+        # Strings: pass through.
+        return str(created)
+    extra = getattr(msg, "additional_kwargs", None) or {}
+    ts = extra.get("ts") or extra.get("created_at")
+    if ts is None:
+        return None
+    if hasattr(ts, "isoformat"):
+        return ts.isoformat()
+    return str(ts)
+
+
 def _truncate_to_token_cap(
     text: str,
     cap: int,
@@ -1114,6 +1180,15 @@ class CompactionContext:
     # bounded call does not race with the outer ``compact_state``
     # clock. Optional default ``""``; production callers stamp it.
     compacted_at_iso: str = ""
+    # Architect §4 / F1 (2026-09-01) — first-appearance
+    # ``{msg_id: iso_ts}`` map for the SECTION DETAIL conversation-time
+    # clause. Built by :func:`_extract_msg_timestamps` from
+    # ``messages``; missing rows → clause OMITTED (never
+    # generation-time fallback). Optional default ``None`` for legacy
+    # tests / the dead watchover helper; the 3 production
+    # ``compact_state`` callers stamp it before invoking the doc
+    # builder.
+    msg_timestamps: dict | None = None
 
 
 @dataclass
@@ -1880,6 +1955,21 @@ class ContextCompactor:
         context._preserved_count_for_doc = sum(
             len(g.messages) for g in preserved
         )
+        # F1 fix (2026-09-01) — derive the first-appearance
+        # ``{msg_id: iso_ts}`` map once per ``compact_state`` call
+        # and stamp it on the context so the doc builders see the
+        # same value (architect §4 conversation-time clause).
+        # The 4 ``CompactionContext`` construction sites (the 3
+        # active callers — compact_executor, instance_messaging,
+        # graph — and the watchover helper) all pre-populate
+        # ``context.msg_timestamps``; this defensive fallback
+        # recomputes from ``context.messages`` when the field is
+        # ``None`` (legacy / in-test construction paths that did
+        # not pre-stamp). Result is a single map per compaction
+        # cycle regardless of which doc-builder branch fires.
+        if not getattr(context, "msg_timestamps", None):
+            context.msg_timestamps = _extract_msg_timestamps(context.messages)
+        msg_timestamps = context.msg_timestamps
         failure_kind: str | None = None
         summarization_error: str | None = None
         global_overview: str | None = None
@@ -1902,7 +1992,9 @@ class ContextCompactor:
                 # bounded call itself fails).
                 replacement, compaction_type, total_summary_status = (
                     await self._truncate_fallback(
-                        compactable, preserved, context, instance_id=_extract_instance_id(context)
+                        compactable, preserved, context,
+                        instance_id=_extract_instance_id(context),
+                        msg_timestamps=msg_timestamps,
                     )
                 )
                 # C3: re-attach injected messages verbatim at the end
@@ -1964,6 +2056,7 @@ class ContextCompactor:
                         global_overview=global_overview,
                         effective_model_name=self._effective_model_name(context),
                         previous_overview=previous_overview,
+                        msg_timestamps=msg_timestamps,
                     )
                 else:
                     global_text = summaries[0]
@@ -1975,6 +2068,7 @@ class ContextCompactor:
                         compacted_at=timestamp,
                         effective_model_name=self._effective_model_name(context),
                         previous_overview=previous_overview,
+                        msg_timestamps=msg_timestamps,
                     )
                 # C3: re-attach injected messages at the end of the
                 # replacement list. The doc is the FIRST element so
@@ -2042,6 +2136,7 @@ class ContextCompactor:
                     global_overview=global_overview,
                     effective_model_name=self._effective_model_name(context),
                     previous_overview=previous_overview,
+                    msg_timestamps=msg_timestamps,
                 )
                 # C3: re-attach injected messages at the end.
                 replacement = [doc]
@@ -2075,6 +2170,7 @@ class ContextCompactor:
                 await self._truncate_fallback(
                     compactable, preserved, context,
                     instance_id=_extract_instance_id(context),
+                    msg_timestamps=msg_timestamps,
                 )
             )
             # C3: same re-attach on the truncation fallback path.
@@ -2090,6 +2186,7 @@ class ContextCompactor:
                 await self._truncate_fallback(
                     compactable, preserved, context,
                     instance_id=_extract_instance_id(context),
+                    msg_timestamps=msg_timestamps,
                 )
             )
             # C3: same re-attach on the truncation fallback path.
@@ -2857,6 +2954,7 @@ class ContextCompactor:
         compacted_at: str,
         effective_model_name: str,
         previous_overview: str | None = None,
+        msg_timestamps: dict | None = None,
     ) -> SystemMessage:
         """Build the global doc for the FULL-success path.
 
@@ -2874,6 +2972,15 @@ class ContextCompactor:
         W1 fix (2026-09-01) — accepts ``previous_overview`` and
         threads it into the doc via :func:`build_compaction_doc`'s
         existing seed slot.
+
+        F1 fix (2026-09-01) — accepts ``msg_timestamps`` and
+        threads it into the doc's SECTION DETAIL via
+        :func:`build_compaction_doc`'s existing
+        ``msg_timestamps`` slot, so the conversation-time clause
+        appears in the rendered doc. ``None`` is the legacy /
+        legacy-test path; production callers (compact_state)
+        always pass the first-appearance map derived from
+        ``context.messages``.
         """
         # Span boundaries in 1-based terms (relative to the
         # compactable_groups list, which is a slice of
@@ -2920,6 +3027,7 @@ class ContextCompactor:
             dropped_spans=[],
             context_window=context_window,
             previous_overview=previous_overview,
+            msg_timestamps=msg_timestamps,
         )
 
     @staticmethod
@@ -3004,6 +3112,7 @@ class ContextCompactor:
         global_overview: str | None,
         effective_model_name: str,
         previous_overview: str | None = None,
+        msg_timestamps: dict | None = None,
     ) -> SystemMessage:
         """Build the global doc for the PARTIAL-summary path.
 
@@ -3020,6 +3129,12 @@ class ContextCompactor:
         W1 fix (2026-09-01) — accepts ``previous_overview`` and
         threads it into the doc via :func:`build_compaction_doc`'s
         existing seed slot.
+
+        F1 fix (2026-09-01) — accepts ``msg_timestamps`` and
+        threads it into the doc's SECTION DETAIL via
+        :func:`build_compaction_doc`'s existing ``msg_timestamps``
+        slot, so each per-section conversation-time clause renders
+        from the first-appearance map (architect §4).
         """
         compactable = getattr(context, "_compactable_groups_for_doc", None)
         if compactable is None:
@@ -3070,6 +3185,7 @@ class ContextCompactor:
             dropped_spans=dropped_spans,
             context_window=context_window,
             previous_overview=previous_overview,
+            msg_timestamps=msg_timestamps,
         )
 
     async def _truncate_fallback(
@@ -3079,6 +3195,7 @@ class ContextCompactor:
         context: CompactionContext,
         *,
         instance_id: str = "",
+        msg_timestamps: dict | None = None,
     ) -> tuple[list[BaseMessage], str, str | None]:
         """Fallback when summarization produced no per-batch summaries.
 
@@ -3110,12 +3227,25 @@ class ContextCompactor:
         doc via :func:`build_compaction_doc`'s ``previous_overview``
         slot so the pass-2 envelope carries the convergence seed.
 
+        F1 fix (2026-09-01) — accepts ``msg_timestamps`` and
+        threads it into the doc. On the truncation path the doc
+        has no SECTION DETAIL (sections=[]), so the time clause
+        is OMITTED regardless; the parameter is plumbed for
+        uniformity with the full / partial doc builders (and to
+        keep the call-site symmetry if the path ever evolves).
+
         Args:
             compactable: Groups that would have been summarized.
             preserved: Groups being kept intact.
             context: Compaction context.
             instance_id: Instance id for the doc id; falls back to
                 ``context.instance_id`` when empty.
+            msg_timestamps: First-appearance map (msg_id → ISO ts)
+                for the SECTION DETAIL conversation-time clause.
+                ``None`` → clause OMITTED (never generation-time
+                fallback). ``None`` is the legacy / legacy-test
+                path; production callers stamp it before invoking
+                :func:`_truncate_fallback`.
 
         Returns:
             Tuple of ``(replacement_messages, compaction_type,
@@ -3216,6 +3346,7 @@ class ContextCompactor:
             dropped_spans=dropped_spans,
             context_window=context_window,
             previous_overview=previous_overview,
+            msg_timestamps=msg_timestamps,
         )
         # 3. Flatten preserved tail (multimodal content → text,
         # original ids preserved). The caller re-attaches injected.
