@@ -11,6 +11,14 @@ The private-service tests exercise the actual
 ``JobRecoveryService._reconcile_terminal_message_mirrors`` seam and its
 best-effort logging contract.  Repository tests stay on real file-backed
 SQLite rows so state and ordering are genuine database behavior.
+
+Round-3 widens the backstop scan + guarded IN-list to cover all
+pre-terminal admission states (``{queued, active, paused}``) — a
+mirror with a TERMINAL linked Task must follow it regardless of where
+in the dequeue lifecycle it is stuck.  ``(queued, done)`` and
+``(active, done)`` are both enumerated in ``VALID_TRANSITIONS``;
+``paused`` is normalized to the active branch for
+``validate_transition`` exactly as the inline writer does.
 """
 
 from __future__ import annotations
@@ -196,6 +204,104 @@ def test_terminal_task_statuses_all_follow(engine, job_repo, task_repo):
 def _all_jobs(engine) -> list[JobItem]:
     with Session(engine) as session:
         return list(session.exec(select(JobItem)))
+
+
+# ---------------------------------------------------------------------------
+# Round-3 — pre-terminal admission-state coverage for the widened F-1 scan.
+#
+# The F-1 backstop now sweeps every pre-terminal message mirror
+# (``{queued, active, paused}``) and the guarded IN-list must admit all
+# three.  ``active`` was the only covered state at round-2; the new cases
+# pin ``queued`` and ``paused`` here.  Live-task and task-type exclusions
+# MUST keep holding for every widened state — a queued / paused mirror
+# whose Task is still alive stays in place.
+# ---------------------------------------------------------------------------
+
+
+_PRE_TERMINAL_MIRROR_STATES = (
+    AdmissionState.QUEUED.value,
+    AdmissionState.ACTIVE.value,
+    "paused",
+)
+
+
+@pytest.mark.parametrize("admission_state", _PRE_TERMINAL_MIRROR_STATES)
+def test_widened_scan_reconciles_terminal_task_in_every_pre_terminal_state(
+    engine, job_repo, task_repo, admission_state
+):
+    """A mirror seeded in any pre-terminal state with a TERMINAL Task
+    follows the Task to ``done`` with ``terminal_reason='completed'``.
+
+    Pins the scan widening (every pre-terminal state is now a
+    candidate) AND the SQL guard widening (every pre-terminal state
+    is admitted by ``WHERE admission_state IN (...)`` so the UPDATE
+    actually lands — ``rowcount == 1``, not ``rowcount == 0``).
+    ``paused`` is the legacy/drift spelling.
+    """
+    instance_id = _seed_instance(engine)
+    job = _seed_job(
+        engine, instance_id=instance_id, admission_state=admission_state
+    )
+    _seed_task(
+        engine,
+        work_id=job.job_id,
+        instance_id=instance_id,
+        status=TaskStatus.COMPLETED.value,
+    )
+
+    reaped = job_repo.reconcile_terminal_message_mirrors(
+        task_repository=task_repo,
+    )
+
+    # Assert the reconciliation actually transitioned the row.
+    # ``rowcount == 1`` (not 0) is the real proof — a queued row with
+    # the pre-widening IN-list would have hit ``rowcount == 0`` even
+    # when the scan picked it up.
+    assert len(reaped) == 1
+    assert reaped[0].job_id == job.job_id
+    assert reaped[0].admission_state == AdmissionState.DONE.value
+    assert reaped[0].terminal_reason == "completed"
+    refreshed = _read_job(engine, job.job_id)
+    assert refreshed is not None
+    assert refreshed.admission_state == AdmissionState.DONE.value
+    assert refreshed.terminal_reason == "completed"
+
+
+@pytest.mark.parametrize("admission_state", _PRE_TERMINAL_MIRROR_STATES)
+def test_widened_scan_keeps_live_task_in_every_pre_terminal_state(
+    engine, job_repo, task_repo, admission_state
+):
+    """A mirror seeded in any pre-terminal state with a LIVE Task stays
+    in that state.
+
+    Live-task exclusion must hold for the widened states — a
+    ``queued`` or ``paused`` mirror whose Task is still running is
+    NOT a candidate, even though the scan widening now looks at
+    every pre-terminal row.  ``PENDING`` is the simplest non-terminal
+    Task that would otherwise qualify.
+    """
+    instance_id = _seed_instance(engine)
+    job = _seed_job(
+        engine, instance_id=instance_id, admission_state=admission_state
+    )
+    _seed_task(
+        engine,
+        work_id=job.job_id,
+        instance_id=instance_id,
+        status=TaskStatus.PENDING.value,
+    )
+
+    reaped = job_repo.reconcile_terminal_message_mirrors(
+        task_repository=task_repo,
+    )
+
+    assert reaped == []
+    refreshed = _read_job(engine, job.job_id)
+    assert refreshed is not None
+    assert refreshed.admission_state == admission_state
+    # The Task-side link must also be untouched — backstop never
+    # transitions Tasks; it only follows them.
+    assert refreshed.terminal_reason is None
 
 
 def test_live_task_statuses_remain_active(engine, job_repo, task_repo):

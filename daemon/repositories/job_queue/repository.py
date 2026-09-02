@@ -1985,8 +1985,23 @@ SET admission_state = 'queued',
             stmt = (
                 select(JobItem)
                 .where(JobItem.job_type == "message")
+                # F-1 covers ALL pre-terminal admission states: a mirror
+                # whose linked Task is terminal should follow it regardless
+                # of where in the dequeue lifecycle the mirror is stuck.
+                # The inline writer's IN-list at :1858-1866 already admits
+                # ``{queued, active, paused}``; the backstop scan must
+                # look at the same set, otherwise a ``queued`` row found
+                # by the scan hits ``rowcount == 0`` and never
+                # reconciles. ``(queued, done)`` is a legal transition
+                # per ``VALID_TRANSITIONS``; ``paused`` is normalized to
+                # the active branch for ``validate_transition`` exactly
+                # as the inline writer does below.
                 .where(
-                    JobItem.admission_state == AdmissionState.ACTIVE.value
+                    JobItem.admission_state.in_([
+                        AdmissionState.QUEUED.value,
+                        AdmissionState.ACTIVE.value,
+                        "paused",
+                    ])
                 )
                 # Soft-deleted mirrors are audit records, not live
                 # work; only a non-deleted row is eligible for repair.
@@ -2030,8 +2045,14 @@ SET admission_state = 'queued',
                 # A legacy/drift row can still carry the non-canonical
                 # ``paused`` admission spelling.  Normalize it to the
                 # active branch for the formal transition check while
-                # retaining the SQL guard's observer symmetry.
-                transition_source = getattr(candidate, "admission_state", None)
+                # retaining the SQL guard's observer symmetry. A
+                # ``queued`` row's true source state is ``queued`` —
+                # ``(queued, done)`` is enumerated in
+                # ``VALID_TRANSITIONS`` and is the legitimate Fix B
+                # transition used by ``finalize_mirror_job_at_completion``
+                # when a Task completes before dispatch promote.
+                source_state = getattr(candidate, "admission_state", None)
+                transition_source = source_state
                 if transition_source == "paused":
                     transition_source = AdmissionState.ACTIVE.value
                 job_state_machine.validate_transition(
@@ -2043,11 +2064,16 @@ SET admission_state = 'queued',
                 update_stmt = (
                     sqlmodel_update(JobItem)
                     .where(JobItem.job_id == job_id)
-                    # ``paused`` is a legacy/drift spelling observed by the
-                    # observer's defensive IN-guard.  Keep the same
-                    # symmetry here so a residual mirror can heal.
+                    # The SQL guard mirrors the inline writer's IN-list
+                    # exactly: ``{queued, active, paused}``. A
+                    # ``queued`` row discovered by the widened scan must
+                    # be admitted by the guard or ``rowcount == 0``
+                    # would silently no-op the recovery.
+                    # ``paused`` stays as a non-canonical defensive
+                    # member for residual legacy/drift rows.
                     .where(
                         JobItem.admission_state.in_([
+                            AdmissionState.QUEUED.value,
                             AdmissionState.ACTIVE.value,
                             "paused",
                         ])
@@ -2090,9 +2116,9 @@ SET admission_state = 'queued',
                     continue
                 logger.info(
                     "reconcile_terminal_message_mirrors: message mirror "
-                    "job %s... terminal_task=%s → admission_state=done "
-                    "terminal_reason=completed",
-                    job_id[:8], task_status,
+                    "job %s... admission_state=%s→done "
+                    "terminal_task=%s terminal_reason=completed",
+                    job_id[:8], source_state, task_status,
                 )
                 reconciled.append(_ReapedTerminalMessageMirror(
                     job_id=refreshed.job_id,

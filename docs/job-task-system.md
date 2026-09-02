@@ -538,7 +538,8 @@ loud dispatch-time error.
    service leg provides the bounded residual repair.
 6. **The F-1 backstop has no age floor.** The service periodically calls
    `JobRepository.reconcile_terminal_message_mirrors` for every non-deleted
-   ACTIVE message mirror whose linked Task is COMPLETED, FAILED, or CANCELLED.
+   pre-terminal message mirror (``admission_state ∈ {queued, active, paused}``)
+   whose linked Task is COMPLETED, FAILED, or CANCELLED.
    The mirror follows the Task at any age; the second call is idempotent.
 
 **Registered writers (§7):**
@@ -602,10 +603,11 @@ rows** (pre-cutover) are **RETIRED** by the one-time reconciliation method
   300s periodic cadence). Soft-fail: any exception is logged
   and the sweep continues with the regular patterns.
 - **F-1 terminal-message-mirror backstop:** a separate,
-  no-age leg scans every non-deleted ACTIVE message mirror,
+  no-age leg scans every non-deleted pre-terminal message
+  mirror (i.e. ``admission_state ∈ {queued, active, paused}``),
   keys it to its linked Task, and applies the same guarded
-  `active → done` writer when that Task is in
-  `{COMPLETED, FAILED, CANCELLED}`. This closes the crash
+  ``(queued | active | paused) → done`` writer when that Task
+  is in `{COMPLETED, FAILED, CANCELLED}`. This closes the crash
   window after Task completion and the `[cutover → deploy]`
   straggler window. It is permanent and idempotent: the Task
   is the receipt's truthmaker, so the mirror follows it at any
@@ -638,9 +640,7 @@ the EXACT prod shape); `validate_transition` path tests
 `test_fix_b_inline_mirror_transition.py::test_illegal_transition_raises_and_blocks_write`);
 self-extinguishing shape (2 tests); argument validation (2 tests);
 cutover-constant pin (1 test); plus three exception-containment cases.
-The documented 24-case baseline does not reconcile with the 28 cases
-collected after this round (the parametrization expansion is the source
-of the discrepancy).
++4 legacy suite = 3 negative-path containment tests + live-status parametrize 4→5.
 
 ---
 
