@@ -13,8 +13,10 @@
 # bundle-budget warnings are baseline-expected on Angular 21 production builds.
 #
 # Self-cap: 290s wall-clock SECONDS guard. Outer callers may wrap with
-# `timeout 300`. Outer callers MUST verify branch + SHA drift independently
-# if they have a different EXPECTED_* pair than this script.
+# `timeout 300`. Drift semantics: branch mismatch = hard FAIL (DRIFT);
+# the short SHA is recorded as DATA (GIT_SHA at start, re-captured at end).
+# SHA movement DURING the run = FAIL (DRIFT-MID-RUN). Commits landing
+# BETWEEN runs are legitimate and do not affect the verdict.
 set -uo pipefail
 
 # ─── Self-cap (SECONDS auto-increments inside bash) ────────────────────────
@@ -27,18 +29,18 @@ FRONTEND_DIR="$PROJECT_DIR/frontend"
 BUILD_LOG="/tmp/fe_static_build.log"
 
 EXPECTED_BRANCH="feature/job-queue-fe-liveness"
-EXPECTED_SHORT_SHA="de493472"
 
 echo "=== Test Pack: fe_static_typecheck_build_test ==="
 
 # ─── Stage 0: rev-parse bracket (worktree drift gate) ──────────────────────
 echo "--- Stage 0: worktree bracket ---"
 CURRENT_BRANCH=$(git -C "$PROJECT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "UNKNOWN")
-CURRENT_SHORT_SHA=$(git -C "$PROJECT_DIR" rev-parse --short HEAD 2>/dev/null || echo "UNKNOWN")
-echo "Branch: $CURRENT_BRANCH  SHA: $CURRENT_SHORT_SHA"
-echo "Expected: $EXPECTED_BRANCH @ $EXPECTED_SHORT_SHA"
+START_SHORT_SHA=$(git -C "$PROJECT_DIR" rev-parse --short HEAD 2>/dev/null || echo "UNKNOWN")
+echo "Branch: $CURRENT_BRANCH"
+echo "GIT_SHA=$START_SHORT_SHA"
+echo "Expected branch: $EXPECTED_BRANCH"
 
-if [ "$CURRENT_BRANCH" != "$EXPECTED_BRANCH" ] || [ "$CURRENT_SHORT_SHA" != "$EXPECTED_SHORT_SHA" ]; then
+if [ "$CURRENT_BRANCH" != "$EXPECTED_BRANCH" ]; then
     echo "RESULT: FAIL (DRIFT)"
     exit 1
 fi
@@ -91,6 +93,16 @@ else
     echo "(build log missing: $BUILD_LOG)"
     SCSS_WARNING_COUNT=0
     echo "SCSS_WARNING_COUNT=$SCSS_WARNING_COUNT"
+fi
+
+# ─── Mid-run SHA drift check ───────────────────────────────────────────────
+# SHA is recorded data, not a static gate: commits landing BETWEEN runs are
+# legitimate; movement DURING the run invalidates the worktree bracket.
+END_SHORT_SHA=$(git -C "$PROJECT_DIR" rev-parse --short HEAD 2>/dev/null || echo "UNKNOWN")
+echo "GIT_SHA_END=$END_SHORT_SHA"
+if [ "$END_SHORT_SHA" != "$START_SHORT_SHA" ]; then
+    echo "RESULT: FAIL (DRIFT-MID-RUN: $START_SHORT_SHA -> $END_SHORT_SHA)"
+    exit 1
 fi
 
 # ─── Verdict ───────────────────────────────────────────────────────────────
