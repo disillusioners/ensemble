@@ -18,7 +18,7 @@ import { MatTooltipModule } from '@angular/material/tooltip';
 import { JobService } from '../../services/job.service';
 import { ProjectService } from '../../services/project.service';
 import { TabStateService } from '../../services/tab-state.service';
-import { Job, JobStatus, isLiveMissionLiveness } from '../../models/job.model';
+import { Job, JobStatus, liveMissionIds } from '../../models/job.model';
 import { forkJoin } from 'rxjs';
 import { JobQueuePanelComponent } from '../job-queue-panel/job-queue-panel.component';
 
@@ -134,7 +134,7 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
 
   /**
    * Distinct live-mission instance ids, derived from data this
-   * component ALREADY polls (no new endpoints, no extra requests):
+   * component ALREADY polls (no new endpoints, no extra requests).
    *
    * A mirror row (``job_type === 'message'``) whose
    * ``mission_liveness`` is live (pending/processing/paused) proves
@@ -154,17 +154,14 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
    * are de-duplicated by ``instance_id`` (many receipts per
    * mission, one mission); a null instance_id falls back to the
    * job id so the row still counts rather than silently vanishing.
+   *
+   * Delegates to the exported ``liveMissionIds`` model helper so
+   * the operator-facing badge contract is proven against the real
+   * derivation, not a copy.
    */
-  readonly liveMissionIds = computed(() => {
-    const ids = new Set<string>();
-    for (const j of [...this.activeJobs(), ...this.recentJobs()]) {
-      if (j.job_type === 'message' && j.mission_liveness && isLiveMissionLiveness(j.mission_liveness)) {
-        // instance_id is `string | null` (required, not optional); the job_id fallback prevents null instance_ids from colliding in the Set.
-        ids.add(j.instance_id ?? j.job_id);
-      }
-    }
-    return ids;
-  });
+  readonly liveMissionIds = computed(() =>
+    liveMissionIds([...this.activeJobs(), ...this.recentJobs()])
+  );
 
   /** Number of distinct live missions behind handled receipts. */
   readonly liveMissionCount = computed(() => this.liveMissionIds().size);

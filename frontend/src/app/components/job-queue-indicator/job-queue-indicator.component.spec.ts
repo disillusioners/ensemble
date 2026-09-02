@@ -1,6 +1,6 @@
 import { signal, computed } from '@angular/core';
-import { Job, JobStatus, isLiveMissionLiveness } from '../../models/job.model';
-import { createMockJob, JobStatus as HelperJobStatus } from '../../testing/job-test-helpers';
+import { Job, JobStatus, liveMissionIds } from '../../models/job.model';
+import { createMockJob, createMockJobWithStatus } from '../../testing/job-test-helpers';
 
 /**
  * Logic-mirror of JobQueueIndicatorComponent.
@@ -64,19 +64,16 @@ class MockJobQueueIndicatorComponent {
   isIdle = computed(() => this.totalNonTerminal() === 0);
 
   /**
-   * Fix C (§8.2) mirror — distinct live-mission ids derived from the
-   * already-polled lists: mirror rows (job_type 'message') whose
-   * mission_liveness is live, de-duplicated by instance_id.
+   * Fix C (§8.2) mirror — delegates to the exported ``liveMissionIds``
+   * model helper so the operator-facing badge contract is proven
+   * against the real derivation, not a copy of the predicate. The
+   * mirror's only input surface is the data (active + recent jobs);
+   * the derivation itself lives in the model and is exercised by
+   * ``job.model.spec.ts``.
    */
-  liveMissionIds = computed(() => {
-    const ids = new Set<string>();
-    for (const j of [...this.activeJobs(), ...this.recentJobs()]) {
-      if (j.job_type === 'message' && j.mission_liveness && isLiveMissionLiveness(j.mission_liveness)) {
-        ids.add(j.instance_id ?? j.job_id);
-      }
-    }
-    return ids;
-  });
+  liveMissionIds = computed(() =>
+    liveMissionIds([...this.activeJobs(), ...this.recentJobs()])
+  );
 
   liveMissionCount = computed(() => this.liveMissionIds().size);
 
@@ -245,7 +242,7 @@ describe('JobQueueIndicatorComponent Logic', () => {
 
     it('should treat "active" as running via the defensive fallback', () => {
       component.setActiveJobs([
-        createMockJob({ status: 'active' as unknown as HelperJobStatus }),
+        createMockJobWithStatus('active'),
         createMockJob({ status: 'processing' }),
       ]);
       expect(component.runningCount()).toBe(2);
@@ -253,7 +250,7 @@ describe('JobQueueIndicatorComponent Logic', () => {
 
     it('should treat "paused" as running', () => {
       component.setActiveJobs([
-        createMockJob({ status: 'paused' as unknown as HelperJobStatus }),
+        createMockJobWithStatus('paused'),
         createMockJob({ status: 'processing' }),
         createMockJob({ status: 'pending' }),
       ]);
@@ -284,7 +281,7 @@ describe('JobQueueIndicatorComponent Logic', () => {
 
     it('should treat "queued" as pending via the defensive fallback', () => {
       component.setActiveJobs([
-        createMockJob({ status: 'queued' as unknown as HelperJobStatus }),
+        createMockJobWithStatus('queued'),
         createMockJob({ status: 'pending' }),
       ]);
       expect(component.pendingCount()).toBe(2);
@@ -293,7 +290,7 @@ describe('JobQueueIndicatorComponent Logic', () => {
     it('should not count processing, paused, or terminal jobs', () => {
       component.setActiveJobs([
         createMockJob({ status: 'processing' }),
-        createMockJob({ status: 'paused' as unknown as HelperJobStatus }),
+        createMockJobWithStatus('paused'),
         createMockJob({ status: 'completed' }),
         createMockJob({ status: 'failed' }),
         createMockJob({ status: 'cancelled' }),
@@ -339,7 +336,7 @@ describe('JobQueueIndicatorComponent Logic', () => {
 
     it('should count paused toward the running numerator', () => {
       component.setActiveJobs([
-        createMockJob({ status: 'paused' as unknown as HelperJobStatus }),
+        createMockJobWithStatus('paused'),
         createMockJob({ status: 'pending' }),
       ]);
       // paused → running (X), pending → pending (Y) → "1/2".
@@ -370,7 +367,7 @@ describe('JobQueueIndicatorComponent Logic', () => {
 
     it('should be false when there is at least one paused job', () => {
       component.setActiveJobs([
-        createMockJob({ status: 'paused' as unknown as HelperJobStatus }),
+        createMockJobWithStatus('paused'),
       ]);
       expect(component.isIdle()).toBe(false);
     });
@@ -502,7 +499,7 @@ describe('JobQueueIndicatorComponent Logic', () => {
       component.setActiveJobs([
         createMockJob({ job_id: 'r1', status: 'processing' }),
         createMockJob({ job_id: 'p1', status: 'pending' }),
-        createMockJob({ job_id: 'r2', status: 'active' as unknown as HelperJobStatus }),
+        createMockJobWithStatus('active', { job_id: 'r2' }),
         createMockJob({ job_id: 'c1', status: 'completed' }),
       ]);
       const ids = component.runningJobs().map((j) => j.job_id);
@@ -511,7 +508,7 @@ describe('JobQueueIndicatorComponent Logic', () => {
 
     it('should include paused jobs in the running subset', () => {
       component.setActiveJobs([
-        createMockJob({ job_id: 'pa', status: 'paused' as unknown as HelperJobStatus }),
+        createMockJobWithStatus('paused', { job_id: 'pa' }),
         createMockJob({ job_id: 'pr', status: 'processing' }),
         createMockJob({ job_id: 'pe', status: 'pending' }),
         createMockJob({ job_id: 'co', status: 'completed' }),
@@ -526,7 +523,7 @@ describe('JobQueueIndicatorComponent Logic', () => {
       component.setActiveJobs([
         createMockJob({ status: 'processing' }),
         createMockJob({ status: 'processing' }),
-        createMockJob({ status: 'paused' as unknown as HelperJobStatus }),
+        createMockJobWithStatus('paused'),
         createMockJob({ status: 'pending' }),
         createMockJob({ status: 'pending' }),
         createMockJob({ status: 'pending' }),
@@ -548,7 +545,7 @@ describe('JobQueueIndicatorComponent Logic', () => {
         createMockJob({ job_id: 'p1', status: 'pending' }),
         createMockJob({ job_id: 'f1', status: 'failed' }),
         createMockJob({ job_id: 'r1', status: 'processing' }),
-        createMockJob({ job_id: 'pa', status: 'paused' as unknown as HelperJobStatus }),
+        createMockJobWithStatus('paused', { job_id: 'pa' }),
         createMockJob({ job_id: 'd1', status: 'dead_letter' }),
         createMockJob({ job_id: 'x1', status: 'cancelled' }),
       ]);
@@ -599,7 +596,7 @@ describe('JobQueueIndicatorComponent Logic', () => {
       component.setRecentJobs([
         createMockJob({ status: 'pending' }),
         createMockJob({ status: 'processing' }),
-        createMockJob({ status: 'paused' as unknown as HelperJobStatus }),
+        createMockJobWithStatus('paused'),
       ]);
       expect(component.recentJobs()).toEqual([]);
     });

@@ -16,9 +16,9 @@ import {
   getPriorityColor,
   isReceiptRow,
   isLiveMissionLiveness,
-  isSettledMissionLiveness,
   getMissionLivenessColor,
   missionLivenessChip,
+  liveMissionIds,
 } from './job.model';
 
 describe('Job Model', () => {
@@ -652,13 +652,6 @@ describe('Job Model', () => {
       expect(isLiveMissionLiveness('failed')).toBe(false);
       expect(isLiveMissionLiveness('cancelled')).toBe(false);
     });
-
-    it('should mirror live/settled as exact complements', () => {
-      const values: MissionLiveness[] = ['pending', 'processing', 'paused', 'completed', 'failed', 'cancelled'];
-      for (const v of values) {
-        expect(isSettledMissionLiveness(v)).toBe(!isLiveMissionLiveness(v));
-      }
-    });
   });
 
   describe('getMissionLivenessColor', () => {
@@ -716,6 +709,43 @@ describe('Job Model', () => {
     it('CASE 4b — Task-backed record (no job_type, no liveness): renders NOTHING extra', () => {
       expect(missionLivenessChip({ job_type: null, mission_liveness: null })).toBeNull();
       expect(missionLivenessChip({})).toBeNull();
+    });
+  });
+
+  describe('liveMissionIds — exported model helper for badge delegation', () => {
+    function makeRow(over: Partial<{ job_id: string; instance_id: string | null; job_type: 'task' | 'message' | null; mission_liveness: MissionLiveness | null }> = {}) {
+      return {
+        job_id: 'job-default',
+        instance_id: 'inst-default',
+        job_type: 'message' as const,
+        mission_liveness: 'processing' as MissionLiveness,
+        ...over,
+      };
+    }
+
+    it('counts one live mirror per de-duped instance_id', () => {
+      // Full CASE-by-CASE coverage lives in
+      // job-queue-indicator.component.spec.ts (the badge spec already
+      // exercises the badge contract via this helper — the spec-level
+      // delegation is the proof against real code).
+      const ids = liveMissionIds([
+        makeRow({ job_id: 'r1', instance_id: 'leader', mission_liveness: 'processing' }),
+        makeRow({ job_id: 'r2', instance_id: 'leader', mission_liveness: 'paused' }),
+        makeRow({ job_id: 't1', instance_id: 'x', job_type: 'task', mission_liveness: 'processing' }),
+        makeRow({ instance_id: 'done', mission_liveness: 'completed' }),
+        makeRow({ instance_id: 'gone', mission_liveness: 'failed' }),
+        makeRow({ instance_id: 'null-row', mission_liveness: null }),
+      ]);
+      expect(ids.size).toBe(1);
+      expect(ids.has('leader')).toBe(true);
+    });
+
+    it('falls back to job_id when instance_id is null (defensive-only)', () => {
+      const ids = liveMissionIds([
+        makeRow({ job_id: 'orphan-receipt', instance_id: null, mission_liveness: 'processing' }),
+      ]);
+      expect(ids.size).toBe(1);
+      expect(ids.has('orphan-receipt')).toBe(true);
     });
   });
 });

@@ -167,6 +167,9 @@ class MockJobsComponent {
   readonly selectedJob = signal<Job | null>(null);
   readonly drawerOpen = signal(false);
   readonly projects = mockProjectService.projects;
+  // Phase 4 unified Work list — ``works()`` mirrors the real
+  // component's signal so SSE patch tests can drive both surfaces.
+  readonly works = signal<import('../../models/work.model').Work[]>([]);
   readonly selectedQueueId = signal<string | null>(null);
   readonly filters = signal<{ status?: JobStatus; source?: JobSource; agent_id?: string; project_id?: string; include_deleted?: boolean }>({});
   
@@ -420,6 +423,64 @@ class MockJobsComponent {
   getAgentDisplayName(agentId: string) {
     const agent = this.agents().find(a => a.agent_id === agentId);
     return agent ? `${agent.icon} ${agent.name}` : agentId;
+  }
+
+  /**
+   * Mirror of the real component's ``updateJobFromSse`` — used by the
+   * SSE propagation specs. Keeps the SAME present-as-null contract
+   * for ``job_type`` and ``mission_liveness`` as the real method:
+   * key absent → keep previous value, key present + null → clear.
+   * See ``jobs.component.ts:updateJobFromSse`` for the canonical
+   * implementation.
+   */
+  updateJobFromSse(status: import('../../models/job.model').JobEventPayload): void {
+    const nextJobType: Job['job_type'] =
+      'job_type' in status
+        ? (status.job_type ?? null) as Job['job_type']
+        : undefined;
+    const nextMissionLiveness: Job['mission_liveness'] =
+      'mission_liveness' in status
+        ? (status.mission_liveness ?? null)
+        : undefined;
+
+    this.jobs.update(jobs =>
+      jobs.map(job =>
+        job.job_id === status.job_id
+          ? {
+              ...job,
+              status: status.status || job.status,
+              queue_id: status.queue_id ?? job.queue_id,
+              instance_id: status.instance_id || job.instance_id,
+              result_summary: status.result_summary || job.result_summary,
+              error_message: status.error_message || job.error_message,
+              completed_at: status.status === 'completed' || status.status === 'failed'
+                ? new Date().toISOString()
+                : job.completed_at,
+              started_at: status.status === 'processing' && !job.started_at
+                ? new Date().toISOString()
+                : job.started_at,
+              ...(nextJobType !== undefined ? { job_type: nextJobType } : {}),
+              ...(nextMissionLiveness !== undefined ? { mission_liveness: nextMissionLiveness } : {}),
+            }
+          : job
+      )
+    );
+
+    this.works.update(works =>
+      works.map(work =>
+        work.work_id === status.job_id
+          ? {
+              ...work,
+              status: status.status || work.status,
+              instance_id: status.instance_id ?? work.instance_id,
+              result_summary: status.result_summary ?? work.result_summary,
+              error: status.error_message ?? work.error,
+              ...(nextJobType !== undefined ? { job_type: nextJobType } : {}),
+              ...(nextMissionLiveness !== undefined ? { mission_liveness: nextMissionLiveness } : {}),
+            }
+          : work
+      )
+    );
   }
 }
 
@@ -1888,6 +1949,78 @@ describe('JobsComponent Logic', () => {
         expect(cleanupService.cleanupAllJobs).not.toHaveBeenCalled();
         expect(mockSnackBar.openCalls).toHaveLength(0);
       });
+    });
+  });
+
+  // ── Fix C (§8.2) — SSE patch propagation ─────────────────────────────
+  //
+  // Round-1 only patched the works[] path, so a settled mirror in
+  // the Queues view stayed pinned to its stale live chip and the
+  // header badge kept counting it as a live mission. These specs
+  // drive ``updateJobFromSse`` directly so any future regression
+  // that drops the patch or collapses null-vs-absent fails loudly.
+
+  describe('updateJobFromSse — mission_liveness propagation (jobs[] path)', () => {
+    function seedMirrorRow(liveness: import('../../models/job.model').MissionLiveness) {
+      component.jobs.set([
+        createMockJob({
+          job_id: 'mirror-1',
+          status: 'completed',
+          instance_id: 'leader-x',
+          job_type: 'message',
+          mission_liveness: liveness,
+        }),
+      ]);
+      component.works.set([
+        {
+          work_id: 'mirror-1',
+          kind: 'job',
+          status: 'completed',
+          instance_id: 'leader-x',
+          project_id: null,
+          agent_id: 'developer',
+          result_summary: null,
+          error: null,
+          created_at: new Date().toISOString(),
+          job_type: 'message',
+          mission_liveness: liveness,
+        },
+      ]);
+    }
+
+    it('jobs[] path: settled mission_liveness in the payload overwrites the live row', () => {
+      seedMirrorRow('processing');
+      component.updateJobFromSse({
+        job_id: 'mirror-1',
+        status: 'completed',
+        mission_liveness: 'completed',
+      });
+      expect(component.jobs().find(j => j.job_id === 'mirror-1')!.mission_liveness).toBe('completed');
+      // works[] path also patches — same payload, same contract.
+      expect(component.works().find(w => w.work_id === 'mirror-1')!.mission_liveness).toBe('completed');
+    });
+
+    it('present-as-null: explicit null CLEARS, absent key KEEPS previous value', () => {
+      seedMirrorRow('processing');
+
+      // Explicit null → cleared on BOTH paths.
+      component.updateJobFromSse({
+        job_id: 'mirror-1',
+        status: 'completed',
+        mission_liveness: null,
+      });
+      expect(component.jobs().find(j => j.job_id === 'mirror-1')!.mission_liveness).toBeNull();
+      expect(component.works().find(w => w.work_id === 'mirror-1')!.mission_liveness).toBeNull();
+
+      // Reset, then payload without the key → previous value survives.
+      seedMirrorRow('processing');
+      component.updateJobFromSse({
+        job_id: 'mirror-1',
+        status: 'completed',
+        // mission_liveness key ABSENT.
+      });
+      expect(component.jobs().find(j => j.job_id === 'mirror-1')!.mission_liveness).toBe('processing');
+      expect(component.works().find(w => w.work_id === 'mirror-1')!.mission_liveness).toBe('processing');
     });
   });
 });

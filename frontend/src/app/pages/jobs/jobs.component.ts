@@ -621,6 +621,21 @@ export class JobsComponent implements OnInit, OnDestroy {
   }
 
   private updateJobFromSse(status: JobEventPayload): void {
+    // Present-as-null semantics for every Fix C split field:
+    // - key absent on the payload  → keep previous value (stale-tolerant)
+    // - key present + value `null` → degraded-lookup, clear the field
+    // - key present + non-null      → overwrite
+    // The ``in`` check is the only way to distinguish "wire didn't
+    // carry the field" from "wire explicitly said null"; ``??`` would
+    // collapse the two and pin stale liveness through degraded
+    // windows. Same logic applies to the work patch path below.
+    const nextJobType: Job['job_type'] = 'job_type' in status
+      ? (status.job_type ?? null) as Job['job_type']
+      : undefined; // undefined → keep via spread
+    const nextMissionLiveness: Job['mission_liveness'] = 'mission_liveness' in status
+      ? (status.mission_liveness ?? null)
+      : undefined; // undefined → keep via spread
+
     this.jobs.update(jobs =>
       jobs.map(job =>
         job.job_id === status.job_id
@@ -636,7 +651,16 @@ export class JobsComponent implements OnInit, OnDestroy {
                 : job.completed_at,
               started_at: status.status === 'processing' && !job.started_at
                 ? new Date().toISOString()
-                : job.started_at
+                : job.started_at,
+              // Fix C (§8.2) — propagate the split-semantics fields
+              // through the jobs[] patch path too (mirrors the works[]
+              // path below). The previous round only patched works[],
+              // so a live mission that settled while the Queues view
+              // was open stayed pinned to its stale live chip. See
+              // job-queue-indicator's liveMissionIds: a settled
+              // receipt must immediately drop out of the badge.
+              ...(nextJobType !== undefined ? { job_type: nextJobType } : {}),
+              ...(nextMissionLiveness !== undefined ? { mission_liveness: nextMissionLiveness } : {}),
             }
           : job
       )
@@ -650,7 +674,8 @@ export class JobsComponent implements OnInit, OnDestroy {
     // Fix C (§8.2): the split-semantics SSE payload also carries
     // ``mission_liveness`` — patch it through so a live mission that
     // settles while the page is open flips its indicator without a
-    // full refetch. Absent field keeps the previous value.
+    // full refetch. Same present-as-null contract as the jobs[] path
+    // above: absent keeps previous, explicit null clears.
     this.works.update(works =>
       works.map(work =>
         work.work_id === status.job_id
@@ -660,7 +685,8 @@ export class JobsComponent implements OnInit, OnDestroy {
               instance_id: status.instance_id ?? work.instance_id,
               result_summary: status.result_summary ?? work.result_summary,
               error: status.error_message ?? work.error,
-              mission_liveness: status.mission_liveness ?? work.mission_liveness,
+              ...(nextJobType !== undefined ? { job_type: nextJobType } : {}),
+              ...(nextMissionLiveness !== undefined ? { mission_liveness: nextMissionLiveness } : {}),
             }
           : work
       )

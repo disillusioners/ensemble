@@ -182,10 +182,6 @@ export function isLiveMissionLiveness(value: MissionLiveness): boolean {
   return value === 'pending' || value === 'processing' || value === 'paused';
 }
 
-export function isSettledMissionLiveness(value: MissionLiveness): boolean {
-  return !isLiveMissionLiveness(value);
-}
-
 /**
  * Chip colour for a ``mission_liveness`` value. Mirrors the Job
  * status palette for the overlapping names so a live mission reads
@@ -245,6 +241,55 @@ export function missionLivenessChip(
     label: `mission: ${value}`,
     color: getMissionLivenessColor(value),
   };
+}
+
+/**
+ * Tooltip wording for a mission-liveness chip. One implementation,
+ * used by every render surface so the wording cannot drift between
+ * card / panel / drawer.
+ *
+ * Two reads:
+ *
+ * * ``live`` — message receipt handled; parent mission is still
+ *   working. The canonical status is appended verbatim.
+ * * ``settled`` — message receipt handled; parent mission reached a
+ *   terminal canonical state. Same append.
+ *
+ * Both keep the canonical ``chip.value`` (not a recased / fabricated
+ * string) so the user can trust the parenthetical answer.
+ */
+export function missionLivenessChipTooltip(chip: MissionLivenessChip): string {
+  return chip.live
+    ? `Message receipt handled. Parent mission still working (canonical status: ${chip.value}).`
+    : `Message receipt handled. Parent mission settled (canonical status: ${chip.value}).`;
+}
+
+/**
+ * Distinct live-mission ids across a flat job list (Fix C §8.2).
+ *
+ * A mirror row (``job_type === 'message'``) whose
+ * ``mission_liveness`` is live (pending / processing / paused)
+ * proves its parent mission is still working — even when the
+ * mirror's own receipt status is terminal. Rows are de-duplicated
+ * by ``instance_id`` (many receipts per mission, one mission); a
+ * null ``instance_id`` falls back to ``job_id`` so the row still
+ * counts rather than silently vanishing.
+ *
+ * ``instance_id`` is `string | null` (required, not optional) on
+ * message rows; the ``job_id`` fallback is defensive-only for the
+ * pathological case where the wire carries an unexpected null.
+ *
+ * Used by the badge (``job-queue-indicator``) and any other surface
+ * that wants the live-mission derivation without re-implementing it.
+ */
+export function liveMissionIds(jobs: ReadonlyArray<Pick<Job, 'job_type' | 'mission_liveness' | 'instance_id' | 'job_id'>>): Set<string> {
+  const ids = new Set<string>();
+  for (const j of jobs) {
+    if (j.job_type === 'message' && j.mission_liveness && isLiveMissionLiveness(j.mission_liveness)) {
+      ids.add(j.instance_id ?? j.job_id);
+    }
+  }
+  return ids;
 }
 
 export function getStatusColor(status: JobStatus): string {
