@@ -936,10 +936,16 @@ class ProcessMessageProcessor(BaseProcessor):
                 except Exception as mirror_exc:
                     logger.warning(
                         f"Fix B inline mirror transition soft-failed "
-                        f"for work_id={completed_task.work_id}: "
+                        f"for task_id={getattr(completed_task, 'id', '?')} "
+                        f"work_id={completed_task.work_id}: "
                         f"{type(mirror_exc).__name__}: {mirror_exc} "
-                        f"— race-loss is benign; the next sweep / "
-                        f"observer pass will reconcile."
+                        f"— F-1 "
+                        f"``reconcile_terminal_message_mirrors`` is the "
+                        f"bounded residual recoverer; the legacy "
+                        f"``reap_legacy_mirror_zombies`` leg remains "
+                        f"pre-cutover-only, and the observer may also race "
+                        f"as a terminal writer",
+                        exc_info=True,
                     )
 
             # W6 — usage-limit anchor clear (success ENDS the episode):

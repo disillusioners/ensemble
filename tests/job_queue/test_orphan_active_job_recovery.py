@@ -878,36 +878,6 @@ class TestPatternFHealthyShapeExclusion:
         )
 
 
-# ─────────────────────────────────────────────────────────────────────
-# Fix B (2026-09-02) — f2's mirror slice retires
-# ─────────────────────────────────────────────────────────────────────
-#
-# The drift-history-and-constitution.md §4 spec retires f2's
-# mirror slice: message-mirror JobItems are now owned by the
-# inline idempotent mirror transition at T0
-# (``JobRepository.finalize_mirror_job_at_completion``), so the
-# f-sweep explicitly skips message-type rows. The skip must be:
-#
-#   1. **Observable** — the detail record carries the
-#      ``orphan_active_skipped_mirror_retired`` pattern name so a
-#      regression that re-introduced f2's mirror finalization
-#      would silence this signal.
-#   2. **Idempotent with the inline transition** — the inline
-#      transition is the legitimate owner; the f-sweep must not
-#      race-finalize the same row.
-#   3. **Non-blocking** — the message-skip must not abort the
-#      sweep's TASK-type processing on the same active-JobItem set.
-#
-# The test below pins all three. It uses task_id == job_id
-# (``get_by_work_id`` semantics — the linkage contract) and
-# backdates the JobItem's ``created_at`` past the grace so the
-# shape mirrors the production 7-hour-lag class (Incident B).
-#
-# Implementation note: the new skip runs BEFORE the task lookup, so
-# the test does not need to seed a Task row at all. The skip's
-# observable artifact is the ``details`` list — every detail entry
-# is the audit-trail the spec mandates.
-
         # Assert — the healthy-shape guard detail was recorded.
         healthy_records = [
             d for d in stats["details"]

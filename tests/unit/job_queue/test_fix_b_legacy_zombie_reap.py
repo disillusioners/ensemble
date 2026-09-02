@@ -34,8 +34,9 @@ log per reaped row.
 
 Same test isolation discipline as
 ``tests/unit/job_queue/test_fix_b_inline_mirror_transition.py``:
-file-backed SQLite for the candidate-scan test, in-memory for the
-rest.
+this file uses the in-memory SQLite StaticPool for its sequential tests;
+the concurrent-race recipe is kept file-backed and documented in the
+inline transition suite.
 """
 
 from __future__ import annotations
@@ -54,7 +55,10 @@ import daemon.repositories.instance.models  # noqa: F401
 import daemon.repositories.job_queue.models  # noqa: F401
 import daemon.repositories.task.models  # noqa: F401
 
-from daemon.constants import TERMINAL_INSTANCE_STATUSES
+from daemon.constants import (
+    ALIVE_INSTANCE_STATUSES,
+    TERMINAL_INSTANCE_STATUSES,
+)
 from daemon.repositories.instance.models import Instance, InstanceStatus
 from daemon.repositories.job_queue import JobRepository
 from daemon.repositories.job_queue.models import AdmissionState, JobItem
@@ -452,21 +456,14 @@ class TestReapLegacyMirrorZombiesPredicateExclusion:
 
     @pytest.mark.parametrize(
         "alive_status",
-        sorted({
-            InstanceStatus.RUNNING.value,
-            InstanceStatus.PAUSED.value,
-            InstanceStatus.WAITING_CHILDREN.value,
-            "idle",  # not in TERMINAL_INSTANCE_STATUSES — covers the
-                     # companion ALIVE set even when not enumerated
-        }),
+        sorted(ALIVE_INSTANCE_STATUSES),
     )
     def test_live_instance_statuses_all_protect(
         self, engine, job_repo, task_repo, instance_repo, alive_status
     ):
-        """Comprehensive live-instance coverage — every alive status
-        protects the row from the reap. Parametric over the union of
-        ALIVE_INSTANCE_STATUSES + an extra alias to catch future
-        additions.
+        """Comprehensive live-instance coverage — every value in the
+        canonical ``ALIVE_INSTANCE_STATUSES`` set protects the row
+        from the reap.
         """
         instance_id = _seed_instance(
             engine, status=alive_status,
@@ -696,7 +693,131 @@ class TestReapLegacyMirrorZombiesValidateTransitionPath:
         assert post.terminal_reason is None
 
 
-class TestReapLegacyMirrorZombiesSelfExtinguishing:
+class TestReapLegacyMirrorZombiesFailureContainment:
+    """Transient failures are logged and contained per cycle."""
+
+    def test_candidate_scan_failure_is_swallowed(
+        self, engine, job_repo, task_repo, instance_repo, monkeypatch, caplog
+    ):
+        """A candidate-query failure returns ``[]``; it never escapes
+        into the periodic recovery service."""
+        import daemon.repositories.job_queue.repository as repository_module
+
+        class FailingSession:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def exec(self, statement):
+                raise RuntimeError("candidate scan boom")
+
+        monkeypatch.setattr(
+            repository_module,
+            "SQLModelSession",
+            lambda unused_engine: FailingSession(),
+        )
+
+        with caplog.at_level(
+            "ERROR", logger="daemon.repositories.job_queue.repository"
+        ):
+            reaped = job_repo.reap_legacy_mirror_zombies(
+                task_repository=task_repo,
+                instance_repository=instance_repo,
+            )
+
+        assert reaped == []
+        assert "candidate scan" in caplog.text
+        assert any(record.exc_info for record in caplog.records)
+
+    def test_instance_lookup_failure_skips_only_bad_row(
+        self, engine, job_repo, task_repo, instance_repo, monkeypatch, caplog
+    ):
+        """One instance lookup failure is logged; the next row is still
+        reaped and the failed row remains ACTIVE for the next cycle."""
+        older_job = _seed_message_job(
+            engine,
+            created_at=datetime(2026, 8, 1, 8, 0, tzinfo=timezone.utc),
+        )
+        failing_instance_id = older_job.instance_id
+        newer_job = _seed_message_job(
+            engine,
+            created_at=datetime(2026, 8, 1, 9, 0, tzinfo=timezone.utc),
+        )
+        _seed_task(
+            engine, work_id=newer_job.job_id,
+            status=TaskStatus.COMPLETED.value,
+        )
+
+        original_get = instance_repo.get
+
+        def get_or_raise(instance_id):
+            if instance_id == failing_instance_id:
+                raise RuntimeError("instance lookup boom")
+            return original_get(instance_id)
+
+        monkeypatch.setattr(instance_repo, "get", get_or_raise)
+
+        with caplog.at_level(
+            "WARNING", logger="daemon.repositories.job_queue.repository"
+        ):
+            reaped = job_repo.reap_legacy_mirror_zombies(
+                task_repository=task_repo,
+                instance_repository=instance_repo,
+            )
+
+        assert [item.job_id for item in reaped] == [newer_job.job_id]
+        assert "instance lookup failed" in caplog.text
+        assert "task_id=None" in caplog.text
+        assert _read_job(engine, older_job.job_id).admission_state == "active"
+        assert _read_job(engine, newer_job.job_id).admission_state == "done"
+
+    def test_task_lookup_failure_skips_only_bad_row(
+        self, engine, job_repo, task_repo, instance_repo, monkeypatch, caplog
+    ):
+        """One Task lookup failure is logged; a later terminal Task is
+        still reaped and the failed row remains ACTIVE."""
+        failing_job = _seed_message_job(
+            engine,
+            created_at=datetime(2026, 8, 1, 8, 0, tzinfo=timezone.utc),
+        )
+        terminal_job = _seed_message_job(
+            engine,
+            created_at=datetime(2026, 8, 1, 9, 0, tzinfo=timezone.utc),
+        )
+        _seed_task(
+            engine, work_id=terminal_job.job_id,
+            status=TaskStatus.FAILED.value,
+        )
+        original_get_by_work_id = task_repo.get_by_work_id
+
+        def get_by_work_id_or_raise(work_id):
+            if work_id == failing_job.job_id:
+                raise RuntimeError("task lookup boom")
+            return original_get_by_work_id(work_id)
+
+        monkeypatch.setattr(
+            task_repo, "get_by_work_id", get_by_work_id_or_raise
+        )
+
+        with caplog.at_level(
+            "WARNING", logger="daemon.repositories.job_queue.repository"
+        ):
+            reaped = job_repo.reap_legacy_mirror_zombies(
+                task_repository=task_repo,
+                instance_repository=instance_repo,
+            )
+
+        assert [item.job_id for item in reaped] == [terminal_job.job_id]
+        assert "task lookup failed" in caplog.text
+        assert "task_id=None" in caplog.text
+        assert any(
+            record.getMessage().find(f"{failing_job.job_id[:8]}") >= 0
+            for record in caplog.records
+        )
+        assert _read_job(engine, failing_job.job_id).admission_state == "active"
+        assert _read_job(engine, terminal_job.job_id).admission_state == "done"
     """Forward rows (post-cutover) never match — the reap self-
     extinguishes on the cycle after the 3 rows are gone."""
 

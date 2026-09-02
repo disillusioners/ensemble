@@ -651,6 +651,57 @@ class JobRecoveryService:
         # instance-wide lock release — and any such path would be the
         # exact bug we are fixing.
 
+    async def _reconcile_terminal_message_mirrors(
+        self,
+    ) -> list[dict[str, Any]]:
+        """Run the F-1 no-age terminal-task backstop.
+
+        This leg is deliberately separate from the legacy zombie reap:
+        the latter is cutover-bounded and excludes live instances, while
+        this leg repairs any non-deleted ACTIVE message mirror whose
+        linked Task is terminal regardless of age.  The repository
+        writer owns the guarded SQL transition; the service only
+        converts its detached snapshots into the public sweep details.
+
+        The call is best-effort: a failure in this leg is logged with
+        traceback and the remaining drift patterns continue.
+        """
+        if (
+            self._job_repository is None
+            or self._task_repository is None
+        ):
+            return []
+
+        try:
+            terminal_mirrors = await asyncio.to_thread(
+                self._job_repository.reconcile_terminal_message_mirrors,
+                task_repository=self._task_repository,
+            )
+        except Exception as exc:
+            logger.error(
+                "reconcile_drift_states: F-1 terminal message-mirror "
+                "backstop soft-failed: %s",
+                exc,
+                exc_info=True,
+            )
+            return []
+
+        details: list[dict[str, Any]] = []
+        for mirror in terminal_mirrors:
+            details.append({
+                "pattern": "terminal_message_mirror_done",
+                "job_id": mirror.job_id,
+                "task_id": None,
+                "instance_id": mirror.instance_id,
+                "reason": (
+                    f"F-1 terminal message-mirror backstop: job "
+                    f"{mirror.job_id[:8]}... followed its terminal Task "
+                    f"to admission_state='done' with "
+                    f"terminal_reason='completed'"
+                ),
+            })
+        return details
+
     # ─────────────────────────────────────────────────────────────
     # Phase 3 (defer-seam bugfix, F5/F10): periodic drift reconciler
     # ─────────────────────────────────────────────────────────────
@@ -840,12 +891,12 @@ class JobRecoveryService:
                     reconciled += 1
                     details.append({
                         "pattern": "fix_b_legacy_zombie_retired",
-                        "job_id": getattr(r, "job_id", None),
+                        "job_id": r.job_id,
                         "task_id": None,
-                        "instance_id": getattr(r, "instance_id", None),
+                        "instance_id": r.instance_id,
                         "reason": (
                             f"Fix B legacy zombie reap: job "
-                            f"{getattr(r, 'job_id', '?')[:8]}... "
+                            f"{r.job_id[:8]}... "
                             f"reaped to admission_state='done' with "
                             f"terminal_reason='orphan_retired' "
                             f"(cutover-bound; D2-exempt "
@@ -856,8 +907,18 @@ class JobRecoveryService:
                 logger.warning(
                     f"reconcile_drift_states: Fix B legacy zombie "
                     f"reap soft-failed: {type(reap_err).__name__}: "
-                    f"{reap_err} — periodic sweep continues"
+                    f"{reap_err} — periodic sweep continues",
+                    exc_info=True,
                 )
+
+        # ── F-1 terminal message-mirror backstop ──────────────────
+        # This permanent leg is the bounded recovery for the crash
+        # window between Task completion and the inline writer.  The
+        # linked Task is terminal, so its receipt follows regardless
+        # of age or instance liveness.
+        for detail in await self._reconcile_terminal_message_mirrors():
+            reconciled += 1
+            details.append(detail)
 
         # ── Pattern (b): F10 — done JobItem + running Task ────────
         # Iterate the (small) RUNNING task set first — F10 is the
@@ -2006,10 +2067,19 @@ class JobRecoveryService:
                 # ``daemon/services/task_processor.py:on_success``
                 # is the event-time owner of mirror rows; the
                 # f-sweep only handles TASK-type drift from
-                # here on. A separate liveness-gated predicate
-                # for the 3 pre-08-30 zombie ACTIVE message jobs
-                # is OPEN per the spec — see FLAG below for
-                # leader adjudication.
+                # here on. The bounded terminal-message-mirror
+                # backstop is the residual-loss recoverer for
+                # a completed Task whose inline write was missed.
+                # RESOLVED by reap_legacy_mirror_zombie (381e355d,
+                # leader decision 09-02); see docs §8.1.
+                #
+                # Ordering is intentional: this check is before
+                # f1's no-Task/tree-alive path. The pre-B no-Task
+                # message-mirror + live-instance class was already
+                # preserved by startup recovery and the subtree-alive
+                # guard; the skip changes periodic ownership, not
+                # the safety outcome. The new backstop is the only
+                # bounded terminal repair for that cutover window.
                 #
                 # Why explicit skip (and not silent
                 # ``continue``): the new behavior must be
@@ -2018,18 +2088,6 @@ class JobRecoveryService:
                 # detail entry, which a future regression that
                 # reintroduced f2's mirror-slice finalization
                 # would silently undo.
-                #
-                # ── FLAG for leader decision: ──
-                # The 3 legacy zombie ACTIVE message jobs
-                # (pre-08-30, sweep-excluded by this skip)
-                # need a separate liveness predicate to be
-                # reaped. The spec is silent on the exact
-                # mechanism; the dispatch task flags this for
-                # the leader. The current implementation
-                # leaves them as-is (no-op skip with a
-                # distinct detail name). See
-                # ``docs/job-task-system.md`` §6 / §7 and the
-                # Fix B report for the disposition.
                 if getattr(job, "job_type", None) == "message":
                     details.append({
                         "pattern": (
