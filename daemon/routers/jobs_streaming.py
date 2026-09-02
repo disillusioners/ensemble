@@ -38,6 +38,16 @@ class _ResolvedWork:
     the unified WorkRecord view-model does not carry the JobItem
     queue affinity (Task rows never had one; JobItem rows lose it
     because WorkRecord is a deliberate denormalisation).
+
+    Fix C — read-model split: the SSE payload now carries the two
+    additive split-semantics fields (``job_type`` /
+    ``mission_liveness``) so the FE work-view can render mission
+    vs mirror rows distinctly. The fields are sourced from the
+    resolver's :class:`WorkRecord` so all four read surfaces
+    (``work_resolver`` primary + ``jobs_crud`` /
+    ``jobs_management`` delegation / ``jobs_streaming`` here)
+    agree on the split semantics. See
+    ``docs/job-task-system.md §8.2`` for the contract.
     """
 
     work_id: str
@@ -46,6 +56,8 @@ class _ResolvedWork:
     queue_id: str | None
     result_summary: str | None
     error_message: str | None
+    job_type: str | None
+    mission_liveness: str | None
 
     @classmethod
     def from_work_record(cls, record: Any) -> "_ResolvedWork":
@@ -63,6 +75,10 @@ class _ResolvedWork:
           ``error`` → ``failed``, ``terminated`` → ``cancelled``) pass
           through the same canonical map. The output lines up with
           :data:`TERMINAL_STATUSES` directly.
+        * ``job_type`` / ``mission_liveness`` — Fix C additive fields.
+          Pass through verbatim from the WorkRecord so the FE can
+          render the mission/mirror split; ``None`` for non-job rows
+          (reports) where the concept does not apply.
         """
         return cls(
             work_id=record.work_id,
@@ -71,26 +87,43 @@ class _ResolvedWork:
             queue_id=None,
             result_summary=record.result_summary,
             error_message=record.error,
+            job_type=getattr(record, "job_type", None),
+            mission_liveness=getattr(record, "mission_liveness", None),
         )
 
     def to_payload(self, *, work_id: str) -> dict[str, Any]:
         """Emit the connected/status_update payload keys."""
-        return {
+        payload: dict[str, Any] = {
             "job_id": work_id,
             "status": self.status,
             "instance_id": self.instance_id,
             "queue_id": self.queue_id,
         }
+        # Fix C — surface the split-semantics fields on every SSE
+        # payload so the FE work-view can distinguish mission vs
+        # mirror rows without a second resolver round-trip. Backward
+        # compatible: ``None`` for rows where the concept does not
+        # apply (Task/report rows) — older FE clients ignore the
+        # extra keys.
+        payload["job_type"] = self.job_type
+        payload["mission_liveness"] = self.mission_liveness
+        return payload
 
     def to_completed_payload(self, *, work_id: str) -> dict[str, Any]:
         """Emit the completed payload keys (includes terminal-state fields)."""
-        return {
+        payload: dict[str, Any] = {
             "job_id": work_id,
             "status": self.status,
             "result_summary": self.result_summary,
             "error_message": self.error_message,
             "queue_id": self.queue_id,
         }
+        # Fix C — same as ``to_payload``; the completed event also
+        # needs the split-semantics fields so the FE can mark a
+        # completed mirror with a still-running mission correctly.
+        payload["job_type"] = self.job_type
+        payload["mission_liveness"] = self.mission_liveness
+        return payload
 
 
 def _use_resolver(request: Request) -> bool:  # noqa: ARG001 — kept for legacy test compatibility

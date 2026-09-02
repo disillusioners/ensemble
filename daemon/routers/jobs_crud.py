@@ -216,6 +216,36 @@ def _job_to_response(
         # backward-compatible with mocks / older test fixtures that
         # construct ``JobItem`` rows without the column.
         terminal_reason=getattr(job, "terminal_reason", None),
+        # Fix C — read-model split (additive). Two new fields close
+        # the "is the work done?" ambiguity: ``job_type`` is the
+        # JobItem-side discriminator (``"task"`` vs ``"message"``),
+        # ``mission_liveness`` is the linked instance's canonical
+        # status (mirror-only — ``None`` for mission rows and for
+        # degraded lookups). Both JobResponse surfaces
+        # (jobs_crud + jobs_management delegation) source the
+        # fields from the resolver-backed WorkRecord; SSE
+        # (_ResolvedWork, third surface) carries them verbatim.
+        # The DLQ surface is an orthogonal DeadLetterItem
+        # projection and does not consume these fields — see
+        # §8.2 / DLQ footnote. When ``work_record`` is ``None``
+        # (batch list path: a JobItem that the resolver filtered
+        # out — e.g. child-instance or status mismatch between
+        # ``list_jobs`` and ``list_work``), the legacy fallback
+        # sources ``job_type`` from ``JobItem.job_type`` and
+        # leaves ``mission_liveness=None``; the consumer should
+        # treat a ``None`` ``mission_liveness`` as "split
+        # semantics unavailable, fall back to receipt-only view"
+        # rather than "instance dead".
+        job_type=(
+            getattr(work_record, "job_type", None)
+            if work_record is not None
+            else getattr(job, "job_type", None)
+        ),
+        mission_liveness=(
+            getattr(work_record, "mission_liveness", None)
+            if work_record is not None
+            else None
+        ),
     )
 
 

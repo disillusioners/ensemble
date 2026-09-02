@@ -622,6 +622,12 @@ class TestSerialization:
             # key. ``None`` on legacy rows that pre-date the F1 fix;
             # UUID strings on rows stamped at enqueue time.
             "message_id",
+            # Fix C (read-model split, additive). Task-backed rows
+            # carry ``None`` for both — the mission/mirror concept
+            # does not apply to reports. Consumers can branch on
+            # ``kind`` and ignore these keys for report rows.
+            "job_type",
+            "mission_liveness",
         }
         # Phase 4 partial collapse: report Task surfaces as
         # ``kind="report"`` (the legacy ``"turn"`` is gone — turns

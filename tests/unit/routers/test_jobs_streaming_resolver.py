@@ -474,13 +474,19 @@ class TestStreamJobEventsResolverOn:
         assert names == ["connected", "completed"]
 
         completed = events[1]["data"]
-        # Wire-format contract: same keys as the legacy branch.
+        # Wire-format contract: same keys as the legacy branch, plus
+        # the Fix C additive split-semantics fields. Consumers that
+        # branch on these keys (``job_type``) can now distinguish
+        # mission vs mirror rows; consumers that ignore them are
+        # unaffected (backward-compatible additive contract).
         assert set(completed.keys()) == {
             "job_id",
             "status",
             "result_summary",
             "error_message",
             "queue_id",
+            "job_type",
+            "mission_liveness",
         }
         assert completed["job_id"] == jid
         assert completed["status"] == "completed"

@@ -95,6 +95,40 @@ class JobResponse(BaseModel):
             "rows."
         ),
     )
+    # Fix C — read-model split (additive). Two new fields close the
+    # "is the work done?" ambiguity by answering TWO questions per
+    # row instead of one. The existing ``status`` value is preserved
+    # bit-for-bit — consumers that branched on the previous single
+    # answer are unaffected. The renderer (FE) should branch on
+    # ``job_type`` to pick the right semantic:
+    #
+    # * ``"task"`` (mission) — ``status`` IS the lifecycle status of
+    #   the spawned instance; ``mission_liveness`` is ``None`` (the
+    #   two fields would be redundant for missions).
+    # * ``"message"`` (mirror) — ``status`` is the receipt status
+    #   (the message was handled at T0); ``mission_liveness`` is
+    #   the canonical status of the linked instance (which may still
+    #   be running long after the receipt completed — the
+    #   28c6421b class). Both answers are needed to avoid the
+    #   false-"everything finished" read.
+    job_type: str | None = Field(
+        default=None,
+        description=(
+            "Fix C: JobItem-side discriminator (task=mission / "
+            "message=mirror). None when the WorkRecord is not "
+            "JobItem-backed (Task/report rows)."
+        ),
+    )
+    mission_liveness: str | None = Field(
+        default=None,
+        description=(
+            "Fix C: canonical status of the linked instance for "
+            "mirror (message-type) JobItems. None for mission "
+            "(task-type) JobItems (where 'status' is the liveness "
+            "signal) and when there is no linked instance or the "
+            "instance lookup degraded (degradation-safe contract)."
+        ),
+    )
 
     model_config = {
         "json_schema_extra": {
@@ -112,6 +146,8 @@ class JobResponse(BaseModel):
                 "result_summary": "Fixed login bug - added token refresh logic",
                 "error_message": None,
                 "terminal_reason": "completed",
+                "job_type": "task",
+                "mission_liveness": None,
                 "position": None,
                 "message": "Job completed successfully"
             }
