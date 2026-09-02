@@ -10,6 +10,12 @@ service: only READ repositories are wired in (``InstanceRepository`` and
 admission-state writes — the census stays at 23 frozen admission-state
 writers (see ``daemon/job_state/constitution.py``).
 
+M4-i extension (2026-09-02, ``feature/mission-class``): the paged batch
+path :meth:`MissionResolver.resolve_page` + :class:`MissionPage` power
+the HTTP surface ``GET /missions`` (``daemon/routers/missions.py``) —
+the user-approved pull-forward of M4(i) ahead of the M2 agent tools.
+Still read-only; still zero admission-state writers.
+
 Identity & epochs (spec §3)
 ---------------------------
 
@@ -179,6 +185,48 @@ def _reset_mission_projection_for_tests() -> None:
 # ``completed`` is revivable (per spec §3 — ``InstanceStatus.COMPLETED``
 # → mission liveness ``completed`` which can be →RUNNING again on a
 # ``send_message`` to a COMPLETED instance).
+#
+# ── M2-API list-filter vocabulary ─────────────────────────────────────────
+# Derived, NOT a parallel set: the accepted ``liveness`` filter values
+# for the HTTP list surface are exactly the canonical targets of
+# ``_STATUS_CANONICAL_MAP`` minus ``dead_letter`` (which is a
+# terminal_reason, never a liveness — §8.2 "dead_letter … never appears
+# on the liveness side"). Today that yields the ratified §8.2 value
+# space {pending, processing, paused, completed, failed, cancelled}.
+# Adding a new canonical target to the map automatically extends this
+# set — no second hand-maintained list exists.
+
+MISSION_LIVENESS_FILTER_VALUES: frozenset[str] = frozenset(
+    v
+    for v in _STATUS_CANONICAL_MAP.values()
+    if v != "dead_letter"
+)
+
+
+def _instance_statuses_for_liveness(
+    liveness_values: set[str],
+) -> set[str]:
+    """Invert :data:`_STATUS_CANONICAL_MAP` for the Instance domain.
+
+    Returns the set of ``Instance.status`` source values whose canonical
+    projection lands in ``liveness_values`` — the exact SQL ``IN``-clause
+    payload for the HTTP list's ``liveness`` filter (§8.2 batched
+    standards: filters apply in SQL, never as post-page Python
+    filtering). Restricted to the Instance-status domain so JobItem-side
+    source spellings (``dead``, ``aborted``, ``orphan_retired``, …)
+    can never leak into an instance query. ``pending`` has no
+    InstanceStatus source member today (§8.2 value-space note), so a
+    filter naming only ``pending`` yields an empty set — the caller
+    short-circuits to an honestly-empty page instead of querying.
+    """
+    from daemon.repositories.instance.models import InstanceStatus
+
+    instance_domain = {s.value for s in InstanceStatus}
+    return {
+        source
+        for source, canonical in _STATUS_CANONICAL_MAP.items()
+        if source in instance_domain and canonical in liveness_values
+    }
 
 
 # ── MissionRecord ─────────────────────────────────────────────────────────
@@ -248,6 +296,43 @@ class MissionRecord:
     linked_jobs: list[str] = field(default_factory=list)
     started_at: str | None = None
     last_activity_at: str | None = None
+
+
+@dataclass
+class MissionPage:
+    """Page-shaped result for the M2-API HTTP list surface (M4-i).
+
+    Produced by :meth:`MissionResolver.resolve_page` — one SQL-paged
+    ``Instance`` fetch + one batched ``JobItem`` fetch per call (the
+    three-SELECT page bound; see that method's docstring).
+
+    Attributes:
+        missions: The projected :class:`MissionRecord` rows for this
+            page, in SQL order (``last_activity_at DESC NULLS LAST``,
+            ``instance_id ASC`` tiebreak). Empty when the page leg
+            degraded (whole-page degrade, §8.2 style).
+        total: Total matching missions (the ``COUNT(*)`` leg), or
+            ``None`` when the count/page leg degraded. ``None`` is the
+            operator-visible "count unavailable" signal — it must NOT
+            be rendered as ``0`` (that would claim an empty mission
+            set, which is a different fact).
+        limit: The clamped page size the caller requested.
+        offset: The non-negative offset the caller requested.
+        degraded: ``True`` when the count/page SQL leg failed and the
+            response is a whole-page degrade (empty rows). ``False``
+            when the page was served fully, INCLUDING the
+            jobs-batch-degraded case (rows keep instance-derived
+            fields; only ``linked_jobs`` / the W4 sub-check degrade to
+            ``[]`` / unavailable per the §8.2
+            indistinguishable-by-design contract — the resolver logs
+            that warning, the shape stays servable).
+    """
+
+    missions: list[MissionRecord] = field(default_factory=list)
+    total: int | None = None
+    limit: int = 10
+    offset: int = 0
+    degraded: bool = False
 
 
 # ── MissionResolver ───────────────────────────────────────────────────────
@@ -444,14 +529,204 @@ class MissionResolver:
                 out[instance_id] = record
         return out
 
-    def project(self, instance: "Instance") -> MissionRecord:
-        """Public passthrough for the per-instance projection.
+    def resolve_page(
+        self,
+        *,
+        limit: int,
+        offset: int = 0,
+        liveness: list[str] | None = None,
+        agent_id: str | None = None,
+    ) -> MissionPage:
+        """SQL-paged batch mission projection — the M2-API list engine.
 
-        Wraps :meth:`_project` for callers (notably
-        ``WorkResolverService._mission_fields_for_instance``) that
-        already hold an :class:`Instance` row and want a
-        :class:`MissionRecord` without re-fetching. Use this instead of
-        reaching into ``resolver._project(instance)`` directly.
+        Production debut of the paged read path (M4-i HTTP surface,
+        ``GET /missions``). Three SELECTs per page, TOTAL, regardless
+        of page size (the hard bound the HTTP surface pins via an
+        engine event-listener, NOT mock counting):
+
+        1. ``SELECT count(*)`` — same WHERE as the page leg.
+        2. ``SELECT … FROM instances`` — filters, ordering
+           (``last_activity_at DESC NULLS LAST, instance_id ASC``) and
+           pagination ALL in SQL. Never a Python-side sort of a full
+           table. Ordering is backend-internal-consistent: the column
+           is TEXT on SQLite / tz-naive TIMESTAMP on PG, and ISO-8601
+           sorts lexicographically correctly WITHIN a backend (never
+           compared across backends in Python — the
+           ``_parse_job_created_at`` caution in
+           ``job_recovery_service.py``).
+        3. ``_batch_jobitem_lookup(page_ids)`` — one batched IN-clause
+           SELECT against ``job_queue_items`` (W4 hazard +
+           ``linked_jobs``). Zero per-row lookups.
+
+        The projection reuses ``_project`` with EXPLICIT
+        ``dead_linked`` / ``linked_jobs`` arguments from leg 3 — the
+        W4 branch fires exactly as in :meth:`resolve` /
+        :meth:`resolve_many`. ``project()`` (the pre-fetch-less
+        passthrough) is deliberately NOT used here.
+
+        **Degradation contract (§8.2 whole-page precedent,
+        exactly-one-warning):** a ``SQLAlchemyError`` on the
+        count/page leg degrades the WHOLE page — one warning, empty
+        rows, ``total=None``, ``degraded=True`` (subsequent legs are
+        skipped, so a single request can never emit two count/page
+        warnings). A ``SQLAlchemyError`` inside the jobs batch is
+        handled by ``_batch_jobitem_lookup``'s own contract (one
+        warning, ``{}``) — rows stay fully servable with
+        ``linked_jobs=[]`` and the W4 sub-check unavailable;
+        ``degraded`` stays ``False`` for that case (the §8.2
+        indistinguishable-by-design fallback: the liveness-derived
+        terminal reason stands as the W4 answer).
+
+        **Honest edge — the page leg IS the identity fetch:** when the
+        paged Instance SELECT itself fails, no ids are known, so
+        "degraded rows with ``mission_id`` preserved" is
+        information-theoretically unreachable in a three-SELECT design
+        where ordering + pagination live in that first SQL statement.
+        The whole-page degrade (empty rows + ``degraded=True``) is the
+        documented answer for that case.
+
+        Args:
+            limit: Page size. The HTTP layer clamps to
+                ``[1, MAX_PAGE_LIMIT]`` before calling; values < 1
+                raise ``ValueError`` (programmer mistake, not a DB
+                condition).
+            offset: Non-negative page offset (``ValueError`` below 0).
+            liveness: Optional canonical mission-liveness filter values
+                (``pending`` / ``processing`` / ``paused`` /
+                ``completed`` / ``failed`` / ``cancelled``). Applied in
+                SQL via the inverted
+                :data:`_STATUS_CANONICAL_MAP` (Instance domain only).
+                Unknown values are the ROUTER's 400 concern; source-less
+                values (only ``pending`` today) contribute nothing to
+                the IN-clause — a filter naming only source-less values
+                short-circuits to an honestly-empty page (``total=0``,
+                no query).
+            agent_id: Optional exact-match filter on
+                ``Instance.agent_id`` (SQL).
+
+        Returns:
+            A :class:`MissionPage`. ``total`` is ``None`` only when the
+            count/page leg degraded.
+        """
+        if limit < 1:
+            raise ValueError(f"limit must be >= 1, got {limit}")
+        if offset < 0:
+            raise ValueError(f"offset must be >= 0, got {offset}")
+
+        # Local imports — mirrors the leaf-service pattern in
+        # ``_batch_instances`` (keep the module importable without the
+        # full SQLAlchemy/SQLModel model chain).
+        from sqlmodel import Session as SQLModelSession
+
+        from sqlalchemy import func
+
+        from daemon.repositories.instance.models import Instance
+
+        filters = []
+        if liveness:
+            source_statuses = _instance_statuses_for_liveness(set(liveness))
+            if not source_statuses:
+                # Source-less filter (e.g. liveness=pending): no
+                # InstanceStatus member projects onto it today (§8.2).
+                # Honest empty page — no query, total=0, not degraded.
+                return MissionPage(
+                    missions=[],
+                    total=0,
+                    limit=limit,
+                    offset=offset,
+                    degraded=False,
+                )
+            # sorted() keeps the IN-clause deterministic across calls.
+            filters.append(Instance.status.in_(sorted(source_statuses)))
+        if agent_id is not None:
+            filters.append(Instance.agent_id == agent_id)
+
+        # ── Legs 1+2: count + paged instances (one try = one warning) ──
+        try:
+            with SQLModelSession(self._instance_repo.engine) as session:
+                count_stmt = select(func.count()).select_from(Instance)
+                page_stmt = select(Instance)
+                for condition in filters:
+                    count_stmt = count_stmt.where(condition)
+                    page_stmt = page_stmt.where(condition)
+                total = session.exec(count_stmt).one()
+                page_stmt = page_stmt.order_by(
+                    Instance.last_activity_at.desc().nulls_last(),
+                    Instance.instance_id.asc(),
+                ).offset(offset).limit(limit)
+                rows = list(session.exec(page_stmt))
+        except SQLAlchemyError as exc:
+            # §8.2 whole-page degrade — one warning, no partial page.
+            # Narrow catch: programmer mistakes propagate (same shape
+            # as ``resolve`` / ``resolve_many``).
+            logger.warning(
+                "mission_resolver: paged instance fetch failed "
+                "(limit=%d offset=%d liveness=%r agent_id=%r): %s — "
+                "degrading mission list page to empty (whole-page "
+                "degrade, total unavailable)",
+                limit,
+                offset,
+                liveness,
+                agent_id,
+                exc,
+            )
+            return MissionPage(
+                missions=[],
+                total=None,
+                limit=limit,
+                offset=offset,
+                degraded=True,
+            )
+
+        # ── Leg 3: batched JobItem fetch (its own degrade contract) ────
+        page_ids = [row.instance_id for row in rows]
+        jobitems_by_id = self._batch_jobitem_lookup(page_ids)
+
+        missions: list[MissionRecord] = []
+        for instance in rows:
+            dead_linked, linked_jobs = jobitems_by_id.get(
+                instance.instance_id, (False, [])
+            )
+            missions.append(self._project(instance, dead_linked, linked_jobs))
+
+        return MissionPage(
+            missions=missions,
+            total=total,
+            limit=limit,
+            offset=offset,
+            degraded=False,
+        )
+
+    def project(self, instance: "Instance") -> MissionRecord:
+        """Public passthrough for the per-instance projection — W4-UNSAFE.
+
+        Wraps :meth:`_project` with its ``dead_linked=False`` /
+        ``linked_jobs=None`` defaults for callers that already hold an
+        :class:`Instance` row and want a :class:`MissionRecord` without
+        re-fetching.
+
+        ⚠ **Hazard (S4, fixed at 7852aeab — do not regress):** the
+        defaults mean this method can NEVER see the ``admission_state=
+        'dead'`` flag, so a DEAD linked JobItem is silently projected
+        as a liveness-derived terminal reason (``failed``) instead of
+        ``dead_letter`` — the exact S4 defect. The historical "notable
+        caller" named here,
+        ``WorkResolverService._mission_fields_for_instance``, NO LONGER
+        goes through this method: since the S4 fix it invokes
+        ``resolver._project(instance, dead_linked, linked_jobs)``
+        directly (``work_resolver.py``, the Fix-C W4 pre-fetch), and
+        routing it back through ``project()`` would REINTRODUCE the
+        dead-letter bug.
+
+        **Caller guidance:** any W4-sensitive caller (anything that
+        feeds ``mission_terminal_reason`` to a consumer) MUST use
+        :meth:`resolve` / :meth:`resolve_many` (the dead-link
+        pre-fetch is built in) or call ``_project`` with an explicit
+        ``dead_linked`` fetched via ``_batch_jobitem_lookup`` — as
+        ``resolve_page`` and the work resolver do. ``project()`` is
+        for callers that PROVE the mission's terminal_reason cannot be
+        DEAD-influenced (e.g. test harnesses, or projections consumed
+        strictly before the W4 field exists downstream).
 
         Args:
             instance: A loaded :class:`Instance` row.
@@ -739,6 +1014,8 @@ def mission_projection_to_dict(
 __all__ = [
     "MissionResolver",
     "MissionRecord",
+    "MissionPage",
+    "MISSION_LIVENESS_FILTER_VALUES",
     "is_mission_projection_enabled",
     "mission_projection_to_dict",
     "_reset_mission_projection_for_tests",

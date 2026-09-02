@@ -1114,3 +1114,130 @@ class PlaneConfigResponse(BaseModel):
 
     enabled: bool = Field(..., description="Whether Plane integration is enabled")
     url: str = Field(..., description="The Plane base URL (empty string if disabled)")
+
+
+# ==================== Mission Schemas (M4-i pull-forward) ====================
+# HTTP surface for the mission read-model projection (docs/job-task-system.md
+# §8.4). Additive to the schema module — mirrors ``MissionRecord``
+# (``daemon/services/mission_resolver.py``) field-for-field. Gated by the
+# M1 kill-switch ``ENSEMBLE_MISSION_PROJECTION_ENABLED`` (OFF ⇒ both routes
+# answer 404 fail-closed; routes stay registered so OpenAPI shows them).
+
+
+class MissionResponse(BaseModel):
+    """Response for a single mission (identity == ``instance_id``).
+
+    Mirrors :class:`daemon.services.mission_resolver.MissionRecord`.
+    One mission per instance, permanent across terminate→revive (the
+    ``instances.parent_id`` permanence inherits onto
+    ``parent_mission_id``). ``epoch`` is constant 1 for every
+    non-degraded projection until M4(ii) ships ``mission_events`` (§8.3);
+    ``epoch``/``liveness``/``last_activity_at`` are ``None`` ONLY on a
+    degraded lookup (§8.2 degradation contract — 200 with None-fields,
+    never 500).
+    """
+
+    mission_id: str | None = Field(
+        default=None,
+        description="Mission identity == instance_id (§6.6 identity verdict)",
+    )
+    agent_id: str | None = Field(
+        default=None,
+        description="Agent this mission works on behalf of (Instance.agent_id)",
+    )
+    parent_mission_id: str | None = Field(
+        default=None,
+        description=(
+            "Parent instance id (Instance.parent_id, permanent across "
+            "revive); null for root missions. Tree-filter client-side "
+            "on this field — that is the sanctioned pattern (§8.4)"
+        ),
+    )
+    liveness: str | None = Field(
+        default=None,
+        description=(
+            "Canonical mission liveness: pending/processing/paused/"
+            "completed/failed/cancelled (§8.2 value space); null when "
+            "degraded"
+        ),
+    )
+    terminal_reason: str | None = Field(
+        default=None,
+        description=(
+            "Terminal cause for terminal missions: completed/failed/"
+            "cancelled, or dead_letter when a linked JobItem is in "
+            "admission_state='dead' (W4 hazard, §8.3); null for live "
+            "missions and degraded lookups"
+        ),
+    )
+    epoch: int | None = Field(
+        default=None,
+        description=(
+            "Current epoch number — constant 1 for every non-degraded "
+            "projection until M4(ii) mission_events (§8.3); null only "
+            "on degraded lookups"
+        ),
+    )
+    linked_jobs: list[str] = Field(
+        default_factory=list,
+        description=(
+            "JobItem.job_id values linked to this mission (best-effort; "
+            "empty on jobs-lookup degradation)"
+        ),
+    )
+    started_at: str | None = Field(
+        default=None,
+        description=(
+            "ISO-8601 last_activity_at of the instance (closest "
+            "analogue to 'work began'); falls back to created_at; null "
+            "when neither exists or degraded"
+        ),
+    )
+    last_activity_at: str | None = Field(
+        default=None,
+        description="ISO-8601 pass-through of Instance.last_activity_at; null when unset or degraded",
+    )
+
+
+class MissionListResponse(BaseModel):
+    """Envelope for GET /missions (list).
+
+    Follows the repo pagination convention (``total`` / ``limit`` /
+    ``offset`` / ``has_more``, cf. ``InstanceListResponse``) with two
+    honesty-carrying deviations documented in §8.4: ``total`` and
+    ``has_more`` are nullable (``null`` = "count unavailable" — the
+    count SQL leg degraded; must NOT be rendered as 0/false), and
+    ``degraded`` is an explicit whole-page-degrade marker (empty rows
+    because the count/page SQL leg failed).
+    """
+
+    missions: list[MissionResponse] = Field(
+        default_factory=list,
+        description="Mission rows for this page, in SQL order",
+    )
+    total: int | None = Field(
+        default=None,
+        description=(
+            "Total missions matching the filters; null when the count "
+            "leg degraded (operator signal: count unavailable, not zero)"
+        ),
+    )
+    limit: int = Field(..., description="Effective page size (clamped to [1, 100])")
+    offset: int = Field(..., description="Effective page offset (>= 0)")
+    has_more: bool | None = Field(
+        default=None,
+        description=(
+            "(offset + limit) < total; null when total is unavailable "
+            "(degraded count leg)"
+        ),
+    )
+    degraded: bool = Field(
+        default=False,
+        description=(
+            "True when the count/page SQL leg failed (§8.2 whole-page "
+            "degrade): missions is empty and total/has_more are null. "
+            "False when rows were served fully — including the "
+            "jobs-lookup-degraded case (linked_jobs=[]), whose warning "
+            "is logged server-side per §8.2 indistinguishable-by-design"
+        ),
+    )

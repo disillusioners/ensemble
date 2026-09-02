@@ -106,6 +106,7 @@ from daemon.routers import (
     skill_bank_router,        # /api/skill-bank (Skill Bank CRUD)
     blueprints_router,        # /api/projects/{project_id}/blueprints (Project Blueprints CRUD)
     recovery_router,          # /api/recovery (Phase 2: pause-report-recovery crash-recovery endpoint)
+    missions_router,          # /api/missions (M4-i pull-forward: mission read-model HTTP surface)
 )
 from daemon.routers.workspace import router as workspace_router
 
@@ -929,6 +930,23 @@ async def lifespan(app: FastAPI):
     # level global + setter + Depends factory).
     from daemon.routers.work import set_work_resolver
     set_work_resolver(work_resolver)
+
+    # Wire missions router (M4-i pull-forward, 2026-09-02): GET
+    # /api/missions + /api/missions/{id} serve the mission read-model
+    # projection through MissionResolver — the same READ-only
+    # InstanceRepository / JobRepository the WorkResolverService
+    # consumes (leaf service, zero admission-state writers; census
+    # stays at 23). Kill-switch ENSEMBLE_MISSION_PROJECTION_ENABLED
+    # (default OFF) fail-closes both routes to 404; docs §8.4 holds
+    # the endpoint contract.
+    from daemon.services.mission_resolver import MissionResolver
+    from daemon.routers.missions import set_missions_resolver
+    set_missions_resolver(
+        MissionResolver(
+            instance_repo=manager._instance_repository,
+            job_repo=job_repository,
+        )
+    )
 
     # Wire skills router services (Phase 6 Task 2 — REST API surface).
     # The skills router uses 4 service DI accessors (created via
@@ -1868,6 +1886,7 @@ def create_app() -> FastAPI:
     api_router.include_router(webhooks_router)      # /api/webhooks
     api_router.include_router(jobs_router)          # /api/jobs
     api_router.include_router(work_router)          # /api/work  (Phase 4: virtual job mgmt)
+    api_router.include_router(missions_router)      # /api/missions (M4-i pull-forward: mission read projection)
     api_router.include_router(projects_router)      # /api/projects
     api_router.include_router(queues_router)        # /api/queues
     api_router.include_router(skills_router)        # /api/skills (Phase 6: skill management REST API)
