@@ -111,6 +111,11 @@ _STATUS_CANONICAL_MAP: Final[dict[str, str]] = {
     # ``work_resolver._job_to_record`` — these are the canonical
     # targets for ``canonicalize_status(terminal_reason)``.
     "aborted": "cancelled",
+    # Fix B legacy zombies were system-retired because their live
+    # execution path no longer exists. That is a system-initiated
+    # cancellation, not an organic failure, so the public canonical
+    # surface deliberately collapses ``orphan_retired`` to cancelled.
+    "orphan_retired": "cancelled",
     # Phase 2 / T2.7 (TD-3/TD-4). A watchover 3-strike termination
     # writes ``"watchover_terminated"`` onto the JobItem
     # ``terminal_reason`` column. From the work-record consumer's POV

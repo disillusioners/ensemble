@@ -20,13 +20,13 @@ Its contract:
 Each test below pins one bullet of the contract. The whole file is
 the acceptance suite for Fix B's repository-level writer.
 
-F11 / shared-worktree hazard: file-backed SQLite via ``concurrent_engine``
-(see ``tests/job_queue/conftest.py``) — NOT StaticPool / :memory:, whose
-single shared connection trips the documented cross-thread lost-write
-hazard. The race-safety test (``test_double_fire_is_one_transition``)
-exercises the file-backed engine to produce a clean concurrent
-``rowcount == 1`` for the winning thread and ``rowcount == 0`` for the
-loser.
+F11 / shared-worktree hazard: this test intentionally builds a local
+file-backed SQLite engine under ``tmp_path`` with QueuePool. It does not
+import a sibling-directory fixture because this
+unit-test directory has no shared ``conftest.py``; the local harness gives
+each thread a real connection and exposes the cross-thread lost-write
+hazard. The test produces a clean concurrent ``rowcount == 1`` for the
+winner and ``rowcount == 0`` for the loser.
 """
 
 from __future__ import annotations
@@ -54,8 +54,8 @@ from daemon.services.job_state_machine import (
 
 # ─────────────────────────────────────────────────────────────────────
 # Fixtures — minimal engine, in-memory SQLite (StaticPool) for the
-# single-thread tests; the concurrent test uses file-backed SQLite via
-# the ``concurrent_engine`` fixture from ``tests/job_queue/conftest.py``.
+# single-thread tests; the concurrent test below builds a file-backed
+# SQLite engine from ``tmp_path`` with QueuePool.
 # ─────────────────────────────────────────────────────────────────────
 
 
@@ -63,11 +63,10 @@ from daemon.services.job_state_machine import (
 def engine():
     """Real in-memory SQLite engine (StaticPool) — single-thread tests.
 
-    The single-thread tests below do not exercise cross-thread race
-    detection; StaticPool's single shared connection is sufficient and
-    faster. The concurrent test (``test_double_fire_is_one_transition``)
-    uses ``concurrent_engine`` instead so the SQL ``IN`` predicate
-    sees real cross-connection visibility.
+    The single-thread tests do not exercise cross-thread race
+    detection.  The concurrent test builds its own file-backed
+    ``tmp_path`` engine with QueuePool so the SQL ``IN`` predicate sees
+    real cross-connection visibility.
     """
     from sqlalchemy.pool import StaticPool
 
@@ -367,6 +366,22 @@ class TestFixBMirrorTransitionScopeDiscipline:
             "TASK job must NOT receive the inline terminal_reason stamp"
         )
 
+    def test_residual_paused_message_row_is_defensively_finalized(
+        self, engine, job_repo
+    ):
+        """A residual non-canonical ``paused`` mirror is normalized to
+        the active branch, matching the observer's defensive IN-guard."""
+        iid = _seed_instance(engine, status="paused")
+        job = _seed_message_job(
+            engine, instance_id=iid, admission_state="paused"
+        )
+
+        result = job_repo.finalize_mirror_job_at_completion(job.job_id)
+
+        assert result is not None
+        assert result.admission_state == AdmissionState.DONE.value
+        assert result.terminal_reason == "completed"
+
 
 class TestFixBMirrorTransitionValidatesTransition:
     """The transition MUST go through ``validate_transition`` — the
@@ -502,11 +517,12 @@ class TestFixBMirrorTransitionValidatesTransition:
 class TestFixBMirrorTransitionConcurrentRaceSafety:
     """Concurrent double-fire: exactly one transition wins.
 
-    Uses the file-backed engine from ``tests/job_queue/conftest.py``
-    so each thread sees its own connection — StaticPool's single
-    shared connection serializes cursor access and the cross-thread
-    ``rowcount == 1`` race never fires. Same recipe as the existing
-    concurrent writers in ``tests/job_queue/``.
+    The test below builds a local file-backed SQLite database from
+    ``tmp_path`` and uses QueuePool. It deliberately does not import the
+    sibling-directory fixture: this unit-test directory
+    has no shared ``conftest.py``. StaticPool's single shared connection would
+    serialize cursor access and could hide the cross-thread
+    ``rowcount == 1`` race.
     """
 
     def test_double_fire_is_one_transition(
@@ -516,12 +532,10 @@ class TestFixBMirrorTransitionConcurrentRaceSafety:
         exactly ONE wins (``rowcount == 1``) and the other sees
         ``rowcount == 0`` (silent no-op).
 
-        Uses ``concurrent_engine`` from ``tests/job_queue/conftest.py``
-        (file-backed SQLite, default QueuePool) — StaticPool hides the
-        race because its single shared connection serializes cursor
-        access. The harness here replicates the file-backed recipe
-        directly so this test file stays runnable without the
-        conftest.
+        The test builds a file-backed SQLite database directly from
+        ``tmp_path`` with QueuePool. StaticPool is deliberately not
+        used here because its single shared connection would hide the
+        cross-thread race this test exists to pin.
         """
         from sqlalchemy.pool import QueuePool
 

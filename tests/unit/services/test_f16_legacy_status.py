@@ -90,8 +90,8 @@ class TestDeriveLegacyStatusHelper:
         "admission_state, terminal_reason, expected",
         [
             # ── done + terminal_reason — the F16 discriminator ──
-            # The four terminal_reason values that exercise the F16
-            # fix. Pre-F16, all of these would surface as
+            # The five terminal_reason values that exercise the F16/Fix B
+            # discriminator. Pre-F16, all of these would surface as
             # ``"completed"`` because the raw map collapses
             # ``done → completed``.
             ("done", "completed", "completed"),
@@ -104,6 +104,9 @@ class TestDeriveLegacyStatusHelper:
             # its parent's instance-terminate cascade) is
             # semantically a cancellation.
             ("done", "aborted", "cancelled"),
+            # Fix B: system retirement of a legacy message mirror is
+            # likewise a cancellation, not a terminal failure.
+            ("done", "orphan_retired", "cancelled"),
             # ── done + NULL terminal_reason — pre-7c backward compat ──
             # The legacy map's lossy ``done → completed`` value must
             # still be returned for pre-7c rows where the
