@@ -326,7 +326,7 @@ Drift is too much the moment **any** of these is red — each is mechanically ch
 |---|---|---|
 | **D1** | **Writer registry** — every `SET admission_state` site resolves to a registered owner; ≤2 per class | Census test against `KNOWN_ADMISSION_STATE_WRITERS` (§7) |
 | **D2** | **Event-time terminal rule** — every stateful row has an event-time terminal writer; a sweep is never primary, only loss-recovery for stale *unlabeled* rows | **Closed for mirrors by Fix B (this branch)** — `JobRepository.finalize_mirror_job_at_completion` is the event-time owner of `job_type='message'` rows; the f-sweep's mirror-slice retirement + the new `orphan_active_skipped_mirror_retired` detail prove the message row is no longer sweep-dependent. The disposition landed: the three pre-cutover legacy rows are reaped by `reap_legacy_mirror_zombies` (§8.1), and the no-age terminal-task backstop covers any missed inline transition. |
-| **D3** | **One-answer rule** — every derived status names its truthmaker + direction + bounded divergence | **Closed by Fix C (this branch)** — the read model now answers "is the work done?" with two fields per row (`status` + `mission_liveness`) keyed by `job_type` (mission vs mirror). The 28c6421b alarm-churn class is closed forward; the renderer no longer collapses two answers onto one ambiguous field. See §8.2. |
+| **D3** | **One-answer rule** — every derived status names its truthmaker + direction + bounded divergence | **Closed by Fix C (this branch)** — the read model now answers "is the work done?" with two fields per mirror row, one per mission row (`status` + `mission_liveness`) keyed by `job_type` (mission vs mirror). The 28c6421b alarm-churn class is closed forward; the renderer no longer collapses two answers onto one ambiguous field. See §8.2. |
 | **D4** | **Fail-closed handles** — `None` never auto-mints on a required job-driven path; every source `work_id` mint is a registration obligation | Review live mint sites; the subset-only `KNOWN_MINT_SITES` check (`KNOWN_MINT_SITES ⊆ source_mints`) prevents stale entries but does not enumerate every UUID call |
 
 Retro-validation: D1–D4 would have caught every historical drift event at landing
@@ -665,7 +665,7 @@ JobResponse + the SSE `_ResolvedWork` payload):
 Both fields preserve every existing `status` value bit-for-bit —
 consumers that branched on the previous single answer are
 unaffected. The split answers the previously-ambiguous question
-"is the work done?" with **two answers per row**:
+"is the work done?" with **two per mirror row, one per mission row**:
 
 * **`status`** — the same answer as before. For mission rows this
   is the lifecycle status (Phase 1, Job as Queue Proxy); for mirror
@@ -704,14 +704,20 @@ is the Part 1 liveness consult.
 
 **Batch-shape (the perf hard requirement):** the existing
 `_batch_instances` (one `SELECT … WHERE instance_id IN (…)`) is
-extended to surface `instance.status` for both the existing
+reused to surface `instance.status` for both the existing
 `status` derivation AND the new `mission_liveness` field. No
 new queries are added — the per-page instance fetch that already
 runs is reused for both fields. The single-row `resolve_work`
 path falls back to `_lookup_instance` (one query); a degradation
 contract (instance lookup failure → `mission_liveness=None`,
 warn + fall back per the message_metadata precedent) keeps the
-read path soft-failing on transient DB errors.
+read path soft-failing on transient DB errors. The batch path
+is protected by the same `SQLAlchemyError → warn + return {}`
+guard (W-1 fix; `daemon/services/work_resolver.py`), so a
+transient instance-engine outage degrades the WHOLE page to
+receipt-only view (every mirror's `mission_liveness=None`,
+every mission's `status` from the JobItem mirror) instead of
+500-ing `list_jobs` / `list_work`.
 
 The contract:
 
@@ -724,6 +730,19 @@ The contract:
 * **Mission row** (`job_type='task'`) → `mission_liveness=None`
   (the field would be redundant; the row's `status` IS the
   liveness signal).
+
+`mission_liveness=None` is documented here as
+**indistinguishable-by-design** across the four cases above (no
+mission row / mission row / degraded single-row lookup / degraded
+batch lookup) — the renderer cannot tell from the wire whether
+the absence is structural (mission row) or a lookup failure
+(transient DB error on the instance engine). A future renderer
+that needs to surface the lookup-failure case for operator UX
+would add a NEW spec'd additive field (not mutate the meaning
+of `None`); for now the renderer treats all `None`s as
+"split semantics unavailable, fall back to receipt-only view"
+(see the comments at `_job_to_response` in
+`daemon/routers/jobs_crud.py`).
 
 #### The W4 hazard — preserved
 
@@ -752,8 +771,14 @@ projection and does not consume these fields:
    path).
 2. **`routers/jobs_crud.py::_job_to_response`** (`JobResponse`)
    — sources `job_type` and `mission_liveness` from the
-   resolver-supplied `WorkRecord` when one is available; falls
-   back to `None` on the legacy branch (resolver not wired).
+   resolver-supplied `WorkRecord` when one is available; in
+   the batched `list_jobs` path, a JobItem whose row was
+   filtered out by `list_work` (e.g. `root_only` drop, status
+   mismatch) has no `WorkRecord` — the legacy fallback
+   sources `job_type` from `JobItem.job_type` and leaves
+   `mission_liveness=None` (documented consumer contract:
+   treat `None` as "split semantics unavailable, fall back to
+   receipt-only view").
 3. **`routers/jobs_streaming.py::_ResolvedWork`** (SSE payload
    — NOT a `JobResponse` schema) — emits both fields on every
    SSE payload (`connected` / `status_update` / `completed`).
@@ -762,18 +787,17 @@ projection and does not consume these fields:
    from `jobs_crud.py` (DRY: the split is defined once at the
    `_job_to_response` seam).
 
-The DLQ-replay response must surface both fields so the FE can
-distinguish "replayed, mission alive" from "replayed, mission
-dead" (W4-adjacent operator UX). The DLQ endpoint
-(`routers/dlq.py`) is **not** part of this contract: it is an
-orthogonal `DeadLetterItem` projection that uses its own
-`_dlq_to_response` and `DLQItemResponse` over `DeadLetterItem`
-rows — it does not delegate to `_job_to_response` and does not
-consume the split-semantics fields.
+The DLQ surface (`routers/dlq.py`) is **out of scope** for this
+contract — it is an orthogonal `DeadLetterItem` projection
+(`dlq.py:215-224`) using its own `_dlq_to_response` /
+`DLQItemResponse` over `DeadLetterItem` rows, and does not
+delegate to `_job_to_response` nor consume the split-semantics
+fields. Operator liveness needs that surface these fields would
+be a separate spec.
 
 #### Test surface
 
-`tests/unit/services/test_fix_c_read_model_split.py` (unit, 17
+`tests/unit/services/test_fix_c_read_model_split.py` (unit, 18
 tests) covers:
 
 * `WorkRecord` defaults + `to_dict()` additive contract.

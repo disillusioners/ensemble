@@ -46,6 +46,7 @@ resolver is the only SUT.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 import pytest
@@ -54,6 +55,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel
+from sqlmodel.main import SQLModelMetaclass
 
 # Register every model on ``SQLModel.metadata`` BEFORE ``create_all`` —
 # mirrors the harness in ``tests/unit/services/test_work_resolver.py``.
@@ -65,11 +67,11 @@ from daemon.repositories.instance.models import Instance
 from daemon.repositories.instance.repository import SQLModelInstanceRepository
 from daemon.repositories.job_queue.models import AdmissionState, JobItem
 from daemon.repositories.job_queue.repository import JobRepository
+from daemon.repositories.task.models import Task, TaskStatus
 from daemon.repositories.task.repository import TaskRepository
 from daemon.services.work_resolver import (
     WorkRecord,
     WorkResolverService,
-    _instance_started_at,
 )
 
 
@@ -135,8 +137,6 @@ def _seed_instance(
     parent_id: str | None = None,
 ) -> str:
     """Insert an Instance row. Returns ``instance_id`` (auto-generated if None)."""
-    from datetime import datetime, timezone
-
     iid = instance_id or f"inst-{uuid.uuid4().hex[:8]}"
     now_iso = datetime.now(timezone.utc).isoformat()
     with Session(engine) as s:
@@ -169,8 +169,6 @@ def _seed_job(
     job_type: str = "task",
 ) -> str:
     """Insert a JobItem row. Returns ``job_id`` (auto-generated if None)."""
-    from datetime import datetime, timezone
-
     jid = job_id or str(uuid.uuid4())
     created = datetime.now(timezone.utc).isoformat()
     with Session(engine) as s:
@@ -633,10 +631,6 @@ class TestListWorkSplitFields:
         This pins the wire contract for FE consumers that branch on
         ``kind`` to pick the right rendering shape.
         """
-        from datetime import datetime, timezone
-
-        from daemon.repositories.task.models import Task, TaskStatus
-
         iid = _seed_instance(engine, instance_id="inst-report", status="running")
         with Session(engine) as s:
             wid = f"task-{uuid.uuid4().hex[:8]}"
@@ -682,13 +676,12 @@ class TestListWorkSplitFields:
           parent_id IS NOT NULL`` for ``_batch_child_instance_ids``
           (the ``root_only`` guard — also batched).
 
-        Total: TWO queries against the instance engine (the third is
-        on the job engine and excluded by the test filter). A
-        regression to per-row lookups would push this to
-        ``1 + N`` (one parent-id query + one lookup per row).
-        We assert ``<= 3`` to leave headroom for an additional
-        batched query if a future feature adds one, while still
-        failing on a per-row regression (which would be 6+ for N=5).
+        3 queries: ``_query_jobs`` + ``_batch_instances`` +
+        ``_batch_child_instance_ids``; per-row mirror lookups
+        would breach the bound. We assert ``<= 3`` to leave
+        headroom for an additional batched query if a future
+        feature adds one, while still failing on a per-row
+        regression (which would be 6+ for N=5).
         """
         # Seed 5 mirror rows on 5 distinct instances.
         for i in range(5):
@@ -706,10 +699,8 @@ class TestListWorkSplitFields:
             )
 
         # Wrap session.exec on the instance engine with a counter.
-        from sqlmodel import Session as SQLModelSession
-
         call_count = 0
-        original_exec = SQLModelSession.exec
+        original_exec = Session.exec
 
         def counting_exec(self, *args, **kwargs):  # noqa: ANN001 — test mock
             nonlocal call_count
@@ -718,12 +709,11 @@ class TestListWorkSplitFields:
                 call_count += 1
             return original_exec(self, *args, **kwargs)
 
-        with patch.object(SQLModelSession, "exec", counting_exec):
+        with patch.object(Session, "exec", counting_exec):
             records = resolver.list_work(kind="job")
 
         # 5 mirrors, each carrying mission_liveness from a distinct
-        # instance. The batched path is bounded — N+1 would be 6+.
-        assert len(records) == 5
+        # instance. The batched path is bounded — N+1 would be 6+.        assert len(records) == 5
         for record in records:
             assert record.job_type == "message"
             assert record.mission_liveness == "processing"
@@ -739,21 +729,164 @@ class TestListWorkSplitFields:
             f"the mirror branch) to fold into _batch_instances."
         )
 
+    def test_list_work_batch_instance_lookup_failure_degrades_to_null(
+        self, engine, resolver, caplog
+    ) -> None:
+        """W-1 batch-degradation contract: a transient
+        ``SQLAlchemyError`` on the instance engine during the
+        batched ``_batch_instances`` fetch must fail soft — the
+        whole ``list_work`` call returns the page with every
+        mirror row's ``mission_liveness`` set to ``None`` and the
+        existing receipt-only ``status`` answers preserved; a
+        single warning is logged (NOT one per row); no exception
+        propagates.
+
+        Pre-W-1, the batch path was unprotected — a transient
+        DB outage on the instance engine would 500 the entire
+        ``list_jobs`` / ``list_work`` call. The single-row
+        ``_lookup_instance`` guard was already in place; the
+        batch path is now symmetric with that guard (narrow
+        catch, warn once per batch, return empty map so the
+        caller falls back to the receipt-only view).
+        """
+        # Seed a page of 3 mirror rows on 3 distinct instances.
+        # Mix of live and terminal so the "before" test could
+        # have surfaced non-null mission_liveness — proving
+        # the degradation flips them all to None.
+        seed_specs = [
+            ("inst-bd-running", "running"),
+            ("inst-bd-queued", "queued"),
+            ("inst-bd-completed", "completed"),
+        ]
+        for iid, status in seed_specs:
+            _seed_instance(engine, instance_id=iid, status=status)
+            _seed_job(
+                engine,
+                instance_id=iid,
+                admission_state=AdmissionState.DONE.value,
+                terminal_reason="completed",
+                job_type="message",
+            )
+
+        # Force the batched fetch to fail — patch ``Session``
+        # so the ``session.exec(stmt)`` call inside
+        # ``_batch_instances`` raises the same exception class the
+        # single-row guard catches. This exercises the
+        # degradation wrap IN PLACE inside ``_batch_instances``
+        # (patching the whole method would bypass the wrap, so
+        # we patch the inner SQL execution instead).
+        #
+        # Filter: only raise for the SPECIFIC ``_batch_instances``
+        # SELECT (full-Instance fetch). We differentiate by
+        # the SELECT's ``expr`` — ``_batch_instances`` projects
+        # the full ``Instance`` class while
+        # ``_batch_child_instance_ids`` projects the scalar
+        # ``Instance.instance_id`` column (an InstrumentedAttribute,
+        # not a SQLModelMetaclass). Leave the scalar SELECT
+        # alone so the ``root_only`` guard still works and the
+        # page can be filtered to its non-child rows.
+        #
+        # ALSO patch ``SQLModelInstanceRepository.get`` to
+        # simulate the per-row lookup (``_lookup_instance``)
+        # also failing — otherwise the per-row fallback inside
+        # ``_job_to_record`` would silently resolve
+        # ``mission_liveness`` via ``_instance_repo.get``,
+        # defeating the degradation contract we're verifying.
+
+        original_exec = Session.exec
+
+        def raising_exec(self, stmt, *args, **kwargs):  # noqa: ANN001 — test mock
+            try:
+                col_desc = stmt.column_descriptions[0]
+                entity = col_desc["entity"]
+                expr = col_desc["expr"]
+            except (AttributeError, IndexError, KeyError):
+                return original_exec(self, stmt, *args, **kwargs)
+            # Only fail the full-Instance SELECT (class-shaped
+            # ``expr``); leave the scalar
+            # ``select(Instance.instance_id)`` SELECT alone.
+            if entity is Instance and isinstance(expr, SQLModelMetaclass):
+                raise SQLAlchemyError("simulated batch DB outage")
+            return original_exec(self, stmt, *args, **kwargs)
+
+        with caplog.at_level("WARNING"):
+            with patch.object(Session, "exec", raising_exec), patch.object(
+                SQLModelInstanceRepository,
+                "get",
+                side_effect=SQLAlchemyError("simulated per-row DB outage"),
+            ):
+                # Must not raise — degradation-safe contract.
+                records = resolver.list_work(kind="job")
+
+        # Every seeded row still surfaces (the JobItem SELECT
+        # is unaffected by the instance-engine failure).
+        assert len(records) == 3, (
+            f"list_work should return all JobItems even when the "
+            f"instance batch fails; got {len(records)} records"
+        )
+
+        # Every mirror row's mission_liveness degrades to None
+        # (the fallback the renderer already understands).
+        for record in records:
+            assert record.job_type == "message"
+            assert record.mission_liveness is None, (
+                f"W-1 degradation violated: mirror row kept "
+                f"mission_liveness={record.mission_liveness!r} "
+                f"after instance batch failed; must degrade to "
+                f"None so the renderer falls back to receipt-only."
+            )
+
+        # Existing ``status`` answers are unchanged — the
+        # receipt IS true regardless of the instance-engine
+        # outage. ``done`` mirrors with ``terminal_reason='completed'``
+        # canonicalize to "completed".
+        statuses = sorted(r.status for r in records)
+        assert statuses == ["completed", "completed", "completed"], (
+            f"W-1 degradation violated: receipt statuses changed "
+            f"to {statuses!r}; the JobItem mirror must remain "
+            f"authoritative for the receipt field."
+        )
+
+        # ONE warning logged for the batch (not per-row).
+        warnings = [
+            r for r in caplog.records
+            if "batched instance lookup failed" in r.message
+        ]
+        assert len(warnings) == 1, (
+            f"W-1 must log exactly ONE warning per batch (not "
+            f"per row); got {len(warnings)} warnings. Per-row "
+            f"warnings would flood the logs on a 50-row page "
+            f"during a transient outage."
+        )
+
 
 # ─── Schema + response surface ──────────────────────────────────────────────
 
 
 class TestJobResponseSurface:
-    """The split-semantics additive-field contract (Fix C spec):
-    the four read surfaces — ``work_resolver`` primary
-    (WorkRecord), ``jobs_crud`` (``_job_to_response``,
-    JobResponse), ``jobs_streaming`` (``_ResolvedWork`` SSE
-    payload — NOT a JobResponse schema), and ``jobs_management``
-    (delegates to ``_job_to_response``) — must agree on the
-    split semantics; the DLQ surface is an orthogonal
-    DeadLetterItem projection and does not consume these
-    fields. These tests pin the additive-field contract at the
-    schema / router layer.
+    """The split-semantics additive-field contract (Fix C spec),
+    pinned at the two wire-shape surfaces that the FE actually
+    consumes:
+
+    * ``JobResponse`` (router schema) — produced by
+      ``_job_to_response`` in ``routers/jobs_crud.py`` and
+      reused verbatim by ``routers/jobs_management.py``. Tests
+      pin the additive field presence + ``None`` defaults so
+      older FE clients and fixtures keep working.
+    * ``_ResolvedWork`` (SSE payload in
+      ``routers/jobs_streaming.py``) — the live-stream wire
+      shape. Tests pin both ``to_payload`` (connected /
+      status_update) and ``to_completed_payload`` (terminal
+      event) emit the split-semantics keys.
+
+    The jobs_management delegation is router-level wiring
+    covered by its own suite; the underlying
+    ``WorkRecord`` primary surface is pinned by the
+    ``TestWorkRecordSplitFields`` / ``TestMissionMirrorSplit``
+    / ``TestListWorkSplitFields`` block above. These tests
+    cover ONLY the two additive-field wire shapes — the
+    schema (JobResponse) and the SSE payload
+    (_ResolvedWork) — that FE consumers branch on.
     """
 
     def test_job_response_schema_has_split_fields(self) -> None:

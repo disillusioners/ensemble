@@ -47,7 +47,7 @@ class _ResolvedWork:
     (``work_resolver`` primary + ``jobs_crud`` /
     ``jobs_management`` delegation / ``jobs_streaming`` here)
     agree on the split semantics. See
-    ``docs/job-task-system.md §6.5 / §8.1`` for the contract.
+    ``docs/job-task-system.md §8.2`` for the contract.
     """
 
     work_id: str

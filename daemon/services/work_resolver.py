@@ -1709,6 +1709,17 @@ class WorkResolverService:
         falls back to the JobItem mirror status inside
         ``_job_to_record``).
 
+        Degradation contract (W-1 fix): a transient ``SQLAlchemyError``
+        during the batched fetch degrades to a single warning + empty
+        result (not per-row), so the entire page fails soft — every
+        mirror row's ``mission_liveness`` stays ``None`` and every
+        mission row's ``status`` falls back to the JobItem mirror.
+        Same shape as the single-row ``_lookup_instance`` guard; the
+        batch path was previously unprotected and a transient outage
+        on the instance engine would 500 the whole ``list_jobs`` /
+        ``list_work`` call. Narrow catch (programmer mistakes must
+        propagate, not be masked as DB outages).
+
         Args:
             instance_ids: The distinct ``JobItem.instance_id`` values
                 to fetch. ``None`` entries are filtered out before the
@@ -1723,9 +1734,26 @@ class WorkResolverService:
             return {}
         from sqlmodel import Session as SQLModelSession
 
-        with SQLModelSession(self._instance_repo.engine) as session:
-            stmt = select(Instance).where(Instance.instance_id.in_(valid_ids))
-            return {row.instance_id: row for row in session.exec(stmt)}
+        try:
+            with SQLModelSession(self._instance_repo.engine) as session:
+                stmt = select(Instance).where(Instance.instance_id.in_(valid_ids))
+                return {row.instance_id: row for row in session.exec(stmt)}
+        except SQLAlchemyError as exc:
+            # W-1 degradation contract: a transient DB error during the
+            # batched instance fetch must not blow up the whole page.
+            # Log ONCE per batch (not per row) and return an empty map
+            # so the caller treats every requested instance as "unknown"
+            # — the existing fallback paths in ``_job_to_record`` then
+            # degrade ``mission_liveness`` to ``None`` (mirrors) and
+            # ``status`` to the JobItem mirror (missions). Same shape
+            # as the single-row ``_lookup_instance`` guard above.
+            logger.warning(
+                "work_resolver: batched instance lookup failed for "
+                "%d ids: %s — degrading page to receipt-only view",
+                len(valid_ids),
+                exc,
+            )
+            return {}
 
 
 __all__ = ["WorkRecord", "WorkResolverService", "JobStatusFilter"]

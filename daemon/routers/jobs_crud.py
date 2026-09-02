@@ -221,18 +221,21 @@ def _job_to_response(
         # JobItem-side discriminator (``"task"`` vs ``"message"``),
         # ``mission_liveness`` is the linked instance's canonical
         # status (mirror-only — ``None`` for mission rows and for
-        # degraded lookups). Both fields are sourced from the
-        # resolver-backed WorkRecord when one is supplied so all
-        # three JobResponse surfaces (work_resolver primary +
-        # jobs_crud / jobs_management fallbacks) agree on the split
-        # semantics; the DLQ surface is an orthogonal
-        # DeadLetterItem projection that does not consume these
-        # fields. When ``work_record`` is ``None`` (legacy
-        # fallback path — resolver not wired), both fields are
-        # ``None``; the consumer should treat a ``None``
-        # ``mission_liveness`` as "split semantics unavailable,
-        # fall back to receipt-only view" rather than "instance
-        # dead".
+        # degraded lookups). Both JobResponse surfaces
+        # (jobs_crud + jobs_management delegation) source the
+        # fields from the resolver-backed WorkRecord; SSE
+        # (_ResolvedWork, third surface) carries them verbatim.
+        # The DLQ surface is an orthogonal DeadLetterItem
+        # projection and does not consume these fields — see
+        # §8.2 / DLQ footnote. When ``work_record`` is ``None``
+        # (batch list path: a JobItem that the resolver filtered
+        # out — e.g. child-instance or status mismatch between
+        # ``list_jobs`` and ``list_work``), the legacy fallback
+        # sources ``job_type`` from ``JobItem.job_type`` and
+        # leaves ``mission_liveness=None``; the consumer should
+        # treat a ``None`` ``mission_liveness`` as "split
+        # semantics unavailable, fall back to receipt-only view"
+        # rather than "instance dead".
         job_type=(
             getattr(work_record, "job_type", None)
             if work_record is not None
