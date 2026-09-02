@@ -399,7 +399,7 @@ proves bidirectionality.
 ### 6.6 ADR-MISSION-01 — Mission noun split (transport/work vocabulary + read projection)
 
 > **Ratified 2026-09-02** from `.agents/shared/planning/mission-class/architecture-recommendation.md` §7.
-> **Status: ratified, M1 paper — additive fields, no code yet.** Mission-first cutover
+> **Status: M1 landed (168c9448); kill-switch default OFF; soak pending.** Mission-first cutover
 > (M1 → M2 → M3) means consumers migrate BEFORE the wire rename lands; M3 is the rename.
 > See "Directed modifications" below for the version-gate drop that supersedes one spec sentence.
 
@@ -414,9 +414,13 @@ proves bidirectionality.
 
 2. **(D3 declaration — evolution seam, no amendment)** Mission (`MissionResolver`,
    mission fields, mission tools) is a **READ projection**: truthmaker = `Instance.status`
-   (+ `JobItem.terminal_reason` for the DEAD/W4 hazard); **direction = `instance → mission`**;
+   (+ `admission_state='dead'` for the DEAD/W4 hazard); **direction = `instance → mission`**;
    **divergence = 0** (synchronous read-time consult; degradation contract
    `mission_liveness=None` unchanged, §8.2). Mission is a leaf service — **no writers**.
+   Note: `mission_terminal_reason` does NOT read from `JobItem.terminal_reason` — that
+   column is an internal discriminator (§6.7); the mission-layer terminal cause derives
+   from `Instance.status` and `admission_state='dead'` directly, with DEAD admission
+   overriding liveness (W4 hazard, see §8.3).
 
 3. **(Boundary)** Mission storage remains constitutional (amendment required) until
    declared as an append-only `mission_events` event log under D's existing trigger
@@ -432,7 +436,7 @@ at M3 only after consumers have moved off the old word.
 |---|---|---|
 | **M1** (this amendment's contract) | Additive `mission_id` / `mission_epoch` / `mission_terminal_reason` (§8.3) behind kill-switch `ENSEMBLE_MISSION_PROJECTION_ENABLED` (default OFF); FE re-anchor `mission-settled` → `mission-terminal` (CSS chain only, ~12–15 files); vocabulary table ratified (§6.7); this prose fix (line 909). | Zero impact — additive only, kill-switch OFF in prod by default; bit-for-bit wire stable. |
 | **M2** | Agent tools (`get_mission` / `await_mission` / `list_missions`) + structural guardrails (`outcome` token, `mission_ref` cross-ref, `watch_job(events='mission_terminal')`, `job_continue` mission-only gate); ari/jober prompt edits + `tools.allow` + minor version bump. | Tools migrate BEFORE the wire rename; the wrong-predicate trap (ari/soul.md L71-79, jober/soul.md L9/L54 key decisions on a single ambiguous `status`) becomes structurally hard. |
-| **M3** | Wire rename on mirror-receipt terminal status: `completed` → `settled` via per-kind dispatch in `_derive_legacy_status` on all 4 read surfaces (jobs list, jobs response, SSE `_ResolvedWork`, work list). `VALID_STATUS_VALUES`, FE switches, daemon filters, and docs are updated in this phase. | Mission tools (M2) and FE re-anchor (M1) are already in — at M3 time, no in-repo consumer treats mirror `completed` as outcome. |
+| **M3** | Wire rename on mirror-receipt terminal status: `completed` → `settled` via per-kind dispatch in `_derive_legacy_status` on all 4 read surfaces — `WorkRecord` (work resolver, `work_resolver._job_to_record`), `JobResponse` (`routers/jobs_crud.py::_job_to_response`), `_ResolvedWork` (SSE payload, `routers/jobs_streaming.py::_ResolvedWork`), and the `routers/jobs_management.py` delegation surface (response constructed via `jobs_crud.py::_job_to_response`, per §8.2). `VALID_STATUS_VALUES`, FE switches, daemon filters, and docs are updated in this phase. | Mission tools (M2) and FE re-anchor (M1) are already in — at M3 time, no in-repo consumer treats mirror `completed` as outcome. |
 
 **Why tools precede the rename (not the spec's original M2/M3 ordering):** ari/jober are
 the burning consumer class — the ambiguity is live in their prompts today
@@ -503,11 +507,15 @@ is finality OF THE EXCHANGE, not of the underlying business outcome.
 
 **The `settled` half-claim (prerequisite, lands in M1).** FE already uses
 `mission-settled` as the CSS class for mission-terminal chip styling
-(`mission-liveness-chip.component.scss:28`, `job.model.ts:173/188/223/255/264`,
-~22 of 25 repo-wide `settled` hits). **M1 renames `mission-settled` → `mission-terminal`**
-(bounded: styling chain + spec comments, ~12–15 files; the doc itself fixes
-"settled mission" → "terminal mission" at the prose site, line 909). After the
-re-anchor, `settled` has exactly one owner: transport.
+(`mission-liveness-chip.component.scss:28`, `job.model.ts:173/188/223/255/264`).
+**M1 renames `mission-settled` → `mission-terminal`** — 3 identifier files renamed
+in commit 73e7ac4d; counts at e676ddea: 78 occurrences across 36 files; ~40+ prose
+occurrences remain FE-wide and are deferred to M3 with a ledger note. The FE
+identifier-token guard test landing in `frontend/` this round covers identifier
+tokens only — prose is excluded by design. After the M3 wire rename AND the prose
+sweep complete, `settled` will have exactly one owner: transport. **Until both
+land, the "exactly one owner" claim is an M3-target, not a present-tense fact** —
+the prose half-claim is documented here as future-tense to prevent doc-truth rot.
 
 ---
 
@@ -1019,7 +1027,7 @@ the four wire cases have exactly one behaviour each:
 | Wire case | FE rendering |
 |---|---|
 | Mirror + live mission (`job_type='message'`, `mission_liveness ∈ {pending, processing, paused}`) | "message" receipt chip **and** a live `mission: <value>` chip (blue/amber tint, spinning sync icon). Reads as "handled · mission still going" — never as bare "completed". |
-| Mirror + terminal mission (`mission_liveness ∈ {completed, failed, cancelled}`) | "message" receipt chip **and** a muted `mission: <value>` chip (check icon, settled style). Distinct styling from the live case. |
+| Mirror + terminal mission (`mission_liveness ∈ {completed, failed, cancelled}`) | "message" receipt chip **and** a muted `mission: <value>` chip (check icon, mission-terminal style). Distinct styling from the live case. |
 | Mission row (`job_type='task'`) | **Nothing extra.** The row's own status chip already IS the liveness answer. |
 | `mission_liveness=None` (degraded lookup / no linked instance / Task-backed record) | **Nothing extra.** `None` is indistinguishable-by-design; the FE never invents a state for it and falls back to receipt-only semantics. |
 
@@ -1069,10 +1077,9 @@ two fields.
 
 ### 8.3 M1 — Additive Mission Response Contract (kill-switched)
 
-> **Forward-looking contract, M1 paper.** The additive fields ship behind kill-switch
-> `ENSEMBLE_MISSION_PROJECTION_ENABLED` (default OFF) — soak, then flip ON. No
-> read-surface code is added by this section; this is the spec that the consumer
-> migration (M2) and the wire rename (M3) will follow. Authoritative cross-ref:
+> **M1 landed (168c9448); kill-switch default OFF; soak pending.** The additive fields
+> ship behind kill-switch `ENSEMBLE_MISSION_PROJECTION_ENABLED` (default OFF); the
+> remaining work is the operator soak that flips it ON. Authoritative cross-ref:
 > §6.6 ADR-MISSION-01, §6.7 vocabulary table.
 
 #### The contract
@@ -1085,8 +1092,8 @@ The four read-model split-semantics surfaces (§8.2 split-semantics consistency 
 | Field | Type | Source | Meaning |
 |---|---|---|---|
 | `mission_id` | `str` | `Instance.instance_id` | Mission identity. `mission_id == instance_id` (one mission per instance, epoch-framed — §6.6 identity verdict). Present for mirror rows (`job_type='message'`); **equal to `instance_id`** for mission rows (`job_type='task'`), since task rows ARE their own mission. |
-| `mission_epoch` | `int \| None` | Derived from `Instance.status` transitions | The current epoch count — number of contiguous non-terminal intervals the instance has entered (opens on →RUNNING; closes on →{completed, failed, cancelled}; `completed` is revivable, `cancelled` ←TERMINATED is true-terminal). `None` when no current epoch is open (e.g. pre-spawn queue stage, fully terminal instance with no live epoch). |
-| `mission_terminal_reason` | `str \| None` | `JobItem.terminal_reason` (DEAD/W4 hazard) | For mirror rows: the terminal reason of the linked mission's current epoch — populated when the mission is in `{completed, failed, cancelled, dead_letter}`; `None` for live missions and for degraded lookups. For mission rows: redundant with the row's own `terminal_reason` and therefore `None` (the row IS its own mission — "task job `completed` STAYS", §6.7). |
+| `mission_epoch` | `int` (constant 1 until M4(ii); `None` only on degraded lookups) | Derived from `Instance.status` | **Constant 1 for every non-degraded projection** until M4(ii) ships `mission_events` to track real epoch history. NOT `None` when terminal — a fully terminal instance with a non-degraded lookup still emits `mission_epoch=1`. `None` is reserved for degraded lookups (single-row / batched `SQLAlchemyError` per §8.2 degradation contract) and the pre-spawn queue stage where no instance is yet bound. |
+| `mission_terminal_reason` | `str \| None` | Derived from `admission_state='dead'` + instance liveness (W4 hazard preserved: DEAD admission overrides liveness for this field) | Populated per the current implementation — **NOT mirror-only**: when the linked instance is in a terminal state (`{completed, failed, cancelled}`) OR the JobItem is in `admission_state='dead'`, the field carries the terminal cause. W4 intent kept: a mirror row whose parent mission is still live but whose own admission is `dead` stamps the dead-side terminal cause (DEAD admission overrides instance liveness for this field). `None` for live missions and degraded lookups. Mission rows (`job_type='task'`): redundant with the row's own `terminal_reason` and therefore `None` (the row IS its own mission — "task job `completed` STAYS", §6.7). The attribution is **not** to `JobItem.terminal_reason` — that column is an internal discriminator consumed by `_derive_legacy_status` (§6.7); `mission_terminal_reason` answers the mission-layer question and reads from instance + admission state directly. |
 
 All three fields are **additive** (no existing field renamed or repurposed) and
 **preserve the existing `mission_liveness` semantics bit-for-bit** (§8.2 value space
