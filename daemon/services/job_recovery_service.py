@@ -1498,10 +1498,10 @@ class JobRecoveryService:
             f"reconciled={reconciled}, "
             f"details={len(details)}"
         )
-        if reconciled == 0 and not details:
-            logger.debug(msg)
-        else:
-            logger.info(msg)
+        # Heartbeat at INFO — an operator grepping INFO must see the
+        # periodic cycle completing even when nothing reconciled;
+        # DEBUG-only empty cycles read as a hang (prod incident).
+        logger.info(msg)
 
         # ── Pattern (e): PENDING process_report Task on TERMINATED
         # / missing parent (plan §T8 (d), AF2 C1/C3) ───────────────
@@ -1654,10 +1654,10 @@ class JobRecoveryService:
             f"reconciled={reconciled}, "
             f"details={len(details)}"
         )
-        if reconciled == 0 and not details:
-            logger.debug(msg)
-        else:
-            logger.info(msg)
+        # Heartbeat at INFO — an operator grepping INFO must see the
+        # periodic cycle completing even when nothing reconciled;
+        # DEBUG-only empty cycles read as a hang (prod incident).
+        logger.info(msg)
         return {"reconciled": reconciled, "details": details}
 
     async def _pattern_e_dead_letter_dead_parent_process_reports(
