@@ -1,6 +1,9 @@
 // Inline job model types to avoid module resolution issues
 export type JobStatus = 'pending' | 'processing' | 'completed' | 'failed' | 'cancelled' | 'dead_letter';
 export type JobSource = 'api' | 'telegram' | 'scheduler' | 'webhook';
+// Fix C read-model split (§8.2)
+export type JobJobType = 'task' | 'message';
+export type MissionLiveness = 'pending' | 'processing' | 'paused' | 'completed' | 'failed' | 'cancelled';
 
 export interface Job {
   job_id: string;
@@ -20,6 +23,8 @@ export interface Job {
   cancelled_at: string | null;
   deleted_at?: string | null;
   position?: number;
+  job_type?: JobJobType | null;
+  mission_liveness?: MissionLiveness | null;
 }
 
 export function createMockJob(overrides?: Partial<Job>): Job {
@@ -42,6 +47,23 @@ export function createMockJob(overrides?: Partial<Job>): Job {
     deleted_at: null,
     ...overrides,
   };
+}
+
+/**
+ * Fix C (§8.2) — a terminal mirror receipt whose parent mission is
+ * still working. This is the 28c6421b pair: the receipt says
+ * "handled", the liveness consult says "parent still running".
+ */
+export function createMockLiveMissionReceipt(overrides?: Partial<Job>): Job {
+  return createMockJob({
+    job_id: 'mirror-live-1',
+    status: 'completed',
+    completed_at: new Date().toISOString(),
+    instance_id: 'instance-live-leader',
+    job_type: 'message',
+    mission_liveness: 'processing',
+    ...overrides,
+  });
 }
 
 export function createMockJobList(count: number): Job[] {

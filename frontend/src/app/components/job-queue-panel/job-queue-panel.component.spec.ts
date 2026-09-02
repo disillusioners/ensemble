@@ -1,6 +1,6 @@
 import { signal, computed } from '@angular/core';
-import { getStatusColor as modelGetStatusColor, Job, JobStatus } from '../../models/job.model';
-import { createMockJob } from '../../testing/job-test-helpers';
+import { getStatusColor as modelGetStatusColor, Job, JobStatus, missionLivenessChip } from '../../models/job.model';
+import { createMockJob, createMockLiveMissionReceipt } from '../../testing/job-test-helpers';
 
 /**
  * Logic-mirror of JobQueuePanelComponent.
@@ -24,12 +24,14 @@ class MockJobQueuePanelComponent {
   private readonly _runningJobs = signal<Job[]>([]);
   private readonly _recentJobs = signal<Job[]>([]);
   private readonly _projectNameMap = signal<Map<string | null, string>>(new Map());
+  private readonly _liveMissionCount = signal<number>(0);
 
   readonly MAX_RECENT = 10;
 
   runningJobs = this._runningJobs.asReadonly();
   recentJobs = this._recentJobs.asReadonly();
   projectNameMap = this._projectNameMap.asReadonly();
+  liveMissionCount = this._liveMissionCount.asReadonly();
 
   /** Mock output — mirrors the real component's `output<Job>()`. */
   readonly jobClick = { emit: jest.fn() };
@@ -39,6 +41,19 @@ class MockJobQueuePanelComponent {
     () => this._runningJobs().length === 0 && this.recentCapped().length === 0,
   );
   runningCount = computed(() => this._runningJobs().length);
+
+  /**
+   * Fix C (§8.2) mirror — mission-liveness chip for a row, or null
+   * when the row renders nothing extra. Calls the SAME model helper
+   * the real component calls.
+   */
+  missionChip(job: Job) {
+    return missionLivenessChip(job);
+  }
+
+  setLiveMissionCount(n: number): void {
+    this._liveMissionCount.set(n);
+  }
 
   /**
    * Resolves the best available title for a job. Priority chain:
@@ -493,6 +508,34 @@ describe('JobQueuePanelComponent Logic', () => {
       expect(component.jobClick.emit).toHaveBeenCalledTimes(2);
       expect(component.jobClick.emit).toHaveBeenNthCalledWith(1, jobA);
       expect(component.jobClick.emit).toHaveBeenNthCalledWith(2, jobB);
+    });
+  });
+
+  // ── Fix C (§8.2) — panel mission awareness ───────────────────────────
+
+  describe('Fix C liveMissionCount + missionChip', () => {
+    it('should default liveMissionCount to 0', () => {
+      expect(component.liveMissionCount()).toBe(0);
+    });
+
+    it('should accept a live-mission count from the parent (drives header pill + empty state)', () => {
+      component.setLiveMissionCount(2);
+      expect(component.liveMissionCount()).toBe(2);
+      // The template branches on this: >0 → header pill + "Queue is
+      // idle · N live missions" empty-state subtitle; 0 → neither.
+    });
+
+    it('missionChip: terminal receipt + live mission returns a live chip (core case)', () => {
+      const chip = component.missionChip(createMockLiveMissionReceipt());
+      expect(chip).not.toBeNull();
+      expect(chip!.live).toBe(true);
+      expect(chip!.label).toBe('mission: processing');
+    });
+
+    it('missionChip: mission rows and degraded-None rows render nothing extra', () => {
+      expect(component.missionChip(createMockJob({ job_type: 'task', mission_liveness: null }))).toBeNull();
+      expect(component.missionChip(createMockJob({ job_type: 'message', mission_liveness: null }))).toBeNull();
+      expect(component.missionChip(createMockJob())).toBeNull();
     });
   });
 });

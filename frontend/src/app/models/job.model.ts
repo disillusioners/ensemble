@@ -5,6 +5,34 @@ export type JobStatus = 'pending' | 'processing' | 'paused' | 'completed' | 'fai
 export type JobSource = 'api' | 'telegram' | 'scheduler' | 'webhook';
 
 /**
+ * JobItem-side kind discriminator (Fix C read-model split,
+ * docs/job-task-system.md §8.2).
+ *
+ * * ``'task'``    — mission row: the JobItem IS the mission; its
+ *   ``status`` is the lifecycle answer (one answer, no split).
+ * * ``'message'`` — mirror row: a receipt proving the message was
+ *   handled; its ``status`` is the receipt answer and
+ *   ``mission_liveness`` carries the parent-mission answer.
+ *
+ * ``undefined``/``null`` means the wire did not carry the field
+ * (Task-backed records — e.g. report rows synthesised from
+ * ``/api/work`` — have no JobItem, hence no job_type).
+ */
+export type JobJobType = 'task' | 'message';
+
+/**
+ * Canonical liveness of the linked instance behind a mirror row.
+ *
+ * Value space is exactly the canonical projection of InstanceStatus
+ * (``canonicalize_status``): pending, processing, paused,
+ * completed, failed, cancelled. Use values verbatim — the FE never
+ * invents a state for ``null`` (mission row / degraded lookup /
+ * no linked instance are indistinguishable by design; all ``null``s
+ * render nothing extra and fall back to receipt-only semantics).
+ */
+export type MissionLiveness = 'pending' | 'processing' | 'paused' | 'completed' | 'failed' | 'cancelled';
+
+/**
  * WorkKind subset that may appear on a Job record.
  *
  * Only ``'job'`` is meaningful for jobs surfaced through
@@ -44,6 +72,15 @@ export interface Job {
   // omit it, in which case the card treats the record as a real
   // queued job (kind === 'job') and shows the queue badge as before.
   kind?: JobWorkKind;
+  // Fix C read-model split (§8.2): JobItem-side discriminator.
+  // 'task' = mission row, 'message' = mirror/receipt row, null/
+  // undefined = Task-backed record (no JobItem) or legacy payload.
+  job_type?: JobJobType | null;
+  // Fix C read-model split (§8.2): canonical status of the linked
+  // instance, populated ONLY for mirror rows. null means mission
+  // row / degraded lookup / no linked instance — by design; render
+  // nothing extra rather than inventing a state.
+  mission_liveness?: MissionLiveness | null;
 }
 
 export interface JobCreate {
@@ -75,6 +112,10 @@ export interface JobEventPayload {
   error_message?: string;
   queue_id?: string | null;
   image_urls?: string[]; // base64 data URIs for vision support
+  // Fix C split-semantics SSE payloads (_ResolvedWork) also carry the
+  // discriminator + liveness pair. Optional — legacy payloads omit them.
+  job_type?: JobJobType | null;
+  mission_liveness?: MissionLiveness | null;
 }
 
 export interface JobEvent {
@@ -110,6 +151,100 @@ export function isActiveStatus(status: JobStatus): boolean {
 
 export function isJobDeleted(job: Job): boolean {
   return !!job.deleted_at;
+}
+
+// ── Fix C read-model split helpers (§8.2) ────────────────────────────────
+
+/**
+ * True when the row is a mirror/receipt row (JobItem kind
+ * ``'message'``). Only mirror rows carry the split semantics —
+ * receipt chip + mission-liveness indicator. Mission rows
+ * (``'task'``) and Task-backed records (no job_type) render
+ * nothing extra: a mission row's own ``status`` IS the liveness
+ * signal.
+ */
+export function isReceiptRow(job: Pick<Job, 'job_type'>): boolean {
+  return job.job_type === 'message';
+}
+
+/**
+ * Style split for ``mission_liveness`` values, used verbatim from
+ * the wire. Live = the parent mission is still working (pending /
+ * processing / paused — the non-terminal cluster). Settled = the
+ * parent mission reached a terminal canonical state (completed /
+ * failed / cancelled).
+ *
+ * ``dead_letter`` is deliberately absent: it exists in the job-row
+ * admission domain but is unreachable from the instance-status
+ * domain ``mission_liveness`` reads (see §8.2 value space).
+ */
+export function isLiveMissionLiveness(value: MissionLiveness): boolean {
+  return value === 'pending' || value === 'processing' || value === 'paused';
+}
+
+export function isSettledMissionLiveness(value: MissionLiveness): boolean {
+  return !isLiveMissionLiveness(value);
+}
+
+/**
+ * Chip colour for a ``mission_liveness`` value. Mirrors the Job
+ * status palette for the overlapping names so a live mission reads
+ * like an active job and a settled mission reads like its terminal
+ * status. ``pending`` has no InstanceStatus source today (forward-
+ * compat member of the ratified value space) and maps to gray.
+ */
+export function getMissionLivenessColor(value: MissionLiveness): string {
+  switch (value) {
+    case 'pending':
+      return '#9CA3AF'; // gray-400
+    case 'processing':
+      return '#3B82F6'; // blue-500
+    case 'paused':
+      return '#F59E0B'; // amber-500
+    case 'completed':
+      return '#22C55E'; // green-500
+    case 'failed':
+      return '#EF4444'; // red-500
+    case 'cancelled':
+      return '#F59E0B'; // amber-500
+    default:
+      return '#9CA3AF'; // gray-400
+  }
+}
+
+/**
+ * Render decision for the mission-liveness indicator on a row.
+ *
+ * Returns ``null`` — render NOTHING extra — for every case the
+ * contract keeps silent: mission rows (``job_type='task'``),
+ * Task-backed records (no ``job_type``), degraded lookups, and
+ * rows with no linked instance. All of those arrive as
+ * ``mission_liveness`` absent or ``null`` and are
+ * indistinguishable by design (§8.2); the FE never invents a state
+ * for them.
+ *
+ * For mirror rows with a non-null ``mission_liveness`` it returns
+ * the verbatim value plus the derived live/settled styling split.
+ */
+export interface MissionLivenessChip {
+  value: MissionLiveness;
+  live: boolean;
+  label: string; // "mission: processing" — canonical value verbatim
+  color: string;
+}
+
+export function missionLivenessChip(
+  job: Pick<Job, 'job_type' | 'mission_liveness'>
+): MissionLivenessChip | null {
+  if (!isReceiptRow(job)) return null;
+  const value = job.mission_liveness;
+  if (!value) return null;
+  return {
+    value,
+    live: isLiveMissionLiveness(value),
+    label: `mission: ${value}`,
+    color: getMissionLivenessColor(value),
+  };
 }
 
 export function getStatusColor(status: JobStatus): string {

@@ -271,6 +271,12 @@ export class JobsComponent implements OnInit, OnDestroy {
       queue_id: null,
       cancelled_at: null,
       kind: work.kind,
+      // Fix C read-model split (§8.2) — pass the discriminator +
+      // liveness pair through so JobCardComponent can render the
+      // receipt chip and the mission-liveness indicator. Task-backed
+      // records carry null for both and render nothing extra.
+      job_type: (work.job_type ?? null) as Job['job_type'],
+      mission_liveness: (work.mission_liveness ?? null) as Job['mission_liveness'],
     };
   }
 
@@ -641,6 +647,10 @@ export class JobsComponent implements OnInit, OnDestroy {
     // payload uses ``job_id`` as the work_id key — the backend SSE
     // endpoint already resolves work_id through WorkResolverService,
     // so the same status update is valid for both Job and Work rows.
+    // Fix C (§8.2): the split-semantics SSE payload also carries
+    // ``mission_liveness`` — patch it through so a live mission that
+    // settles while the page is open flips its indicator without a
+    // full refetch. Absent field keeps the previous value.
     this.works.update(works =>
       works.map(work =>
         work.work_id === status.job_id
@@ -650,6 +660,7 @@ export class JobsComponent implements OnInit, OnDestroy {
               instance_id: status.instance_id ?? work.instance_id,
               result_summary: status.result_summary ?? work.result_summary,
               error: status.error_message ?? work.error,
+              mission_liveness: status.mission_liveness ?? work.mission_liveness,
             }
           : work
       )

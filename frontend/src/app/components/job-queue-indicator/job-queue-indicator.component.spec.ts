@@ -1,5 +1,5 @@
 import { signal, computed } from '@angular/core';
-import { Job, JobStatus } from '../../models/job.model';
+import { Job, JobStatus, isLiveMissionLiveness } from '../../models/job.model';
 import { createMockJob, JobStatus as HelperJobStatus } from '../../testing/job-test-helpers';
 
 /**
@@ -63,17 +63,48 @@ class MockJobQueueIndicatorComponent {
 
   isIdle = computed(() => this.totalNonTerminal() === 0);
 
-  displayText = computed(
-    () => `${this.runningCount()}/${this.totalNonTerminal()}`
-  );
+  /**
+   * Fix C (§8.2) mirror — distinct live-mission ids derived from the
+   * already-polled lists: mirror rows (job_type 'message') whose
+   * mission_liveness is live, de-duplicated by instance_id.
+   */
+  liveMissionIds = computed(() => {
+    const ids = new Set<string>();
+    for (const j of [...this.activeJobs(), ...this.recentJobs()]) {
+      if (j.job_type === 'message' && j.mission_liveness && isLiveMissionLiveness(j.mission_liveness)) {
+        ids.add(j.instance_id ?? j.job_id);
+      }
+    }
+    return ids;
+  });
+
+  liveMissionCount = computed(() => this.liveMissionIds().size);
+
+  hasLiveMissions = computed(() => this.liveMissionCount() > 0);
+
+  displayText = computed(() => {
+    if (this.totalNonTerminal() === 0 && this.hasLiveMissions()) {
+      return `missions: ${this.liveMissionCount()}`;
+    }
+    return `${this.runningCount()}/${this.totalNonTerminal()}`;
+  });
 
   /**
    * Mirror of the real component's tooltip text computed.
-   * Format: ``Running: X / Pending: Y``.
+   * Format: ``Running: X / Pending: Y`` plus a live-missions line
+   * whenever the receipt window proves a parent mission is working.
    */
-  tooltipText = computed(
-    () => `Running: ${this.runningCount()} / Pending: ${this.pendingCount()}`
-  );
+  tooltipText = computed(() => {
+    const base = `Running: ${this.runningCount()} / Pending: ${this.pendingCount()}`;
+    if (!this.hasLiveMissions()) {
+      return base;
+    }
+    const plural = this.liveMissionCount() === 1 ? '' : 's';
+    return (
+      `${base} · Live missions: ${this.liveMissionCount()} ` +
+      `(message${plural === '' ? '' : 's'} handled; parent mission${plural} still working)`
+    );
+  });
 
   runningJobs = computed(() =>
     this.activeJobs().filter((j) => this.isRunningStatus(j.status))
@@ -342,6 +373,127 @@ describe('JobQueueIndicatorComponent Logic', () => {
         createMockJob({ status: 'paused' as unknown as HelperJobStatus }),
       ]);
       expect(component.isIdle()).toBe(false);
+    });
+  });
+
+  // ── Fix C (§8.2) — badge mission awareness ───────────────────────────
+
+  describe('liveMissionCount (Fix C receipt-derived missions)', () => {
+    it('CASE A — 0 jobs + live-mission receipts: badge shows "missions: N" instead of bare 0/0', () => {
+      // The 28c6421b read: leader visibly working, only terminal
+      // receipts in the window, intake queue empty.
+      component.setActiveJobs([]);
+      component.setRecentJobs([
+        createMockJob({
+          job_id: 'm1', status: 'completed', completed_at: new Date().toISOString(),
+          instance_id: 'leader-a', job_type: 'message', mission_liveness: 'processing',
+        }),
+        createMockJob({
+          job_id: 'm2', status: 'completed', completed_at: new Date().toISOString(),
+          instance_id: 'leader-b', job_type: 'message', mission_liveness: 'paused',
+        }),
+      ]);
+      expect(component.liveMissionCount()).toBe(2);
+      expect(component.displayText()).toBe('missions: 2');
+      expect(component.isIdle()).toBe(true); // intake count is still 0 — display is what changes
+    });
+
+    it('CASE B — 0 jobs + 0 missions: badge reads bare "0/0" idle', () => {
+      component.setActiveJobs([]);
+      component.setRecentJobs([
+        // Settled receipt: handled AND mission finished — must NOT count.
+        createMockJob({
+          job_id: 'm1', status: 'completed', completed_at: new Date().toISOString(),
+          instance_id: 'done-leader', job_type: 'message', mission_liveness: 'completed',
+        }),
+        // Degraded None: renders nothing, must NOT count.
+        createMockJob({
+          job_id: 'm2', status: 'failed', completed_at: new Date().toISOString(),
+          instance_id: 'gone-leader', job_type: 'message', mission_liveness: null,
+        }),
+        // Mission row: no liveness by design, must NOT count.
+        createMockJob({
+          job_id: 't1', status: 'completed', completed_at: new Date().toISOString(),
+          instance_id: 'task-row', job_type: 'task', mission_liveness: null,
+        }),
+      ]);
+      expect(component.liveMissionCount()).toBe(0);
+      expect(component.displayText()).toBe('0/0');
+      expect(component.tooltipText()).toBe('Running: 0 / Pending: 0');
+    });
+
+    it('CASE C — jobs present + live missions: X/Y display unchanged, tooltip explains both numbers', () => {
+      component.setActiveJobs([
+        createMockJob({ status: 'processing' }),
+      ]);
+      component.setRecentJobs([
+        createMockJob({
+          job_id: 'm1', status: 'completed', completed_at: new Date().toISOString(),
+          instance_id: 'leader-a', job_type: 'message', mission_liveness: 'processing',
+        }),
+      ]);
+      expect(component.displayText()).toBe('1/1'); // intake count keeps primary billing
+      expect(component.liveMissionCount()).toBe(1);
+      expect(component.tooltipText()).toContain('Running: 1 / Pending: 0');
+      expect(component.tooltipText()).toContain('Live missions: 1');
+    });
+
+    it('should de-duplicate multiple receipts from the same mission into one mission', () => {
+      component.setActiveJobs([]);
+      component.setRecentJobs([
+        createMockJob({
+          job_id: 'm1', status: 'completed', completed_at: new Date().toISOString(),
+          instance_id: 'leader-a', job_type: 'message', mission_liveness: 'processing',
+        }),
+        createMockJob({
+          job_id: 'm2', status: 'failed', completed_at: new Date().toISOString(),
+          instance_id: 'leader-a', job_type: 'message', mission_liveness: 'processing',
+        }),
+        createMockJob({
+          job_id: 'm3', status: 'cancelled', completed_at: new Date().toISOString(),
+          instance_id: 'leader-a', job_type: 'message', mission_liveness: 'processing',
+        }),
+      ]);
+      // Three receipts, ONE live mission behind them.
+      expect(component.liveMissionCount()).toBe(1);
+      expect(component.displayText()).toBe('missions: 1');
+    });
+
+    it('should count live missions found in the ACTIVE list too (defensive mirror scan)', () => {
+      component.setActiveJobs([
+        createMockJob({
+          job_id: 'a1', status: 'processing',
+          instance_id: 'leader-active', job_type: 'message', mission_liveness: 'processing',
+        }),
+      ]);
+      component.setRecentJobs([]);
+      expect(component.liveMissionCount()).toBe(1);
+    });
+
+    it('should ignore mirror rows whose liveness is a settled value even at volume', () => {
+      component.setActiveJobs([]);
+      component.setRecentJobs(
+        ['completed', 'failed', 'cancelled'].map((lv, i) =>
+          createMockJob({
+            job_id: `m${i}`, status: 'completed', completed_at: new Date().toISOString(),
+            instance_id: `leader-${i}`, job_type: 'message',
+            mission_liveness: lv as 'completed' | 'failed' | 'cancelled',
+          })
+        )
+      );
+      expect(component.liveMissionCount()).toBe(0);
+    });
+
+    it('should fall back to job_id when a live receipt carries no instance_id', () => {
+      component.setActiveJobs([]);
+      component.setRecentJobs([
+        createMockJob({
+          job_id: 'orphan-receipt', status: 'completed', completed_at: new Date().toISOString(),
+          instance_id: null, job_type: 'message', mission_liveness: 'processing',
+        }),
+      ]);
+      // Counts rather than silently vanishing.
+      expect(component.liveMissionCount()).toBe(1);
     });
   });
 

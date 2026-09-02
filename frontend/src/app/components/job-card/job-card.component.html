@@ -26,6 +26,30 @@
           {{ kindLabel() }}
         </span>
       }
+      @if (showReceiptChip()) {
+        <span
+          class="receipt-chip"
+          matTooltip="Message receipt — handled as soon as it was delivered (not queued work)">
+          <mat-icon class="receipt-icon">receipt_long</mat-icon>
+          message
+        </span>
+      }
+      @if (missionChip(); as chip) {
+        <span
+          class="mission-chip"
+          [class.mission-live]="chip.live"
+          [class.mission-settled]="!chip.live"
+          [style.backgroundColor]="chip.color + '20'"
+          [style.color]="chip.color"
+          [matTooltip]="missionChipTooltip()">
+          @if (chip.live) {
+            <mat-icon class="mission-icon">sync</mat-icon>
+          } @else {
+            <mat-icon class="mission-icon">check_circle</mat-icon>
+          }
+          {{ chip.label }}
+        </span>
+      }
       @if (showPausedBadge()) {
         <span 
           class="paused-badge"

@@ -6,7 +6,7 @@ import { MatChipsModule } from '@angular/material/chips';
 import { MatIconModule } from '@angular/material/icon';
 import { MatExpansionModule } from '@angular/material/expansion';
 import { MatTooltipModule } from '@angular/material/tooltip';
-import { Job, JobStatus, JobWorkKind, getPriorityColor, getStatusColor, isTerminalStatus, isJobDeleted } from '../../models/job.model';
+import { Job, JobStatus, JobWorkKind, getPriorityColor, getStatusColor, isTerminalStatus, isJobDeleted, isReceiptRow, missionLivenessChip } from '../../models/job.model';
 import {
   getKindColor,
   getKindIcon,
@@ -141,6 +141,37 @@ export class JobCardComponent {
    * badge even if a stale ``queue_id`` happens to be attached.
    */
   isJobKind = computed(() => this.effectiveKind() === 'job');
+
+  // ── Fix C read-model split (§8.2) — receipt + mission chips ─────────
+
+  /**
+   * Show the receipt ("message") chip only on mirror rows
+   * (``job_type === 'message'``). Mission rows already carry their
+   * own lifecycle status chip; Task-backed records render nothing
+   * extra.
+   */
+  showReceiptChip = computed(() => isReceiptRow(this.job()));
+
+  /**
+   * Mission-liveness chip for mirror rows, or ``null`` when the row
+   * renders nothing extra (mission row, Task-backed record, degraded
+   * lookup, or no linked instance — all ``null`` by design).
+   *
+   * The chip renders for BOTH live and settled liveness with
+   * distinct styling: live values pulse in their status colour,
+   * settled values render muted. This is what makes a terminal
+   * receipt beside a working parent read as "handled · mission
+   * still going" instead of a bare "completed".
+   */
+  missionChip = computed(() => missionLivenessChip(this.job()));
+
+  missionChipTooltip = computed(() => {
+    const chip = this.missionChip();
+    if (!chip) return '';
+    return chip.live
+      ? `Message receipt handled. Parent mission still working (canonical status: ${chip.value}).`
+      : `Message receipt handled. Parent mission settled (canonical status: ${chip.value}).`;
+  });
 
   canCancel = computed(() => {
     const status = this.job().status;

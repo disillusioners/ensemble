@@ -3,7 +3,7 @@ import { CommonModule } from '@angular/common';
 import { MatIconModule } from '@angular/material/icon';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatTooltipModule } from '@angular/material/tooltip';
-import { getStatusColor as modelGetStatusColor, Job, JobStatus } from '../../models/job.model';
+import { getStatusColor as modelGetStatusColor, Job, JobStatus, missionLivenessChip } from '../../models/job.model';
 
 const MAX_RECENT_JOBS = 10;
 
@@ -42,6 +42,14 @@ export class JobQueuePanelComponent {
   /** project_id → display name. Keys may be null for unassigned jobs. */
   projectNameMap = input<Map<string | null, string>>(new Map());
 
+  /**
+   * Fix C (§8.2) — number of distinct live missions derived by the
+   * parent from the receipt window. Shown in the header and the
+   * empty state so an idle queue beside a working leader does not
+   * read as "system idle" inside the dropdown either.
+   */
+  liveMissionCount = input<number>(0);
+
   /** Emitted when the user clicks any job row. */
   jobClick = output<Job>();
 
@@ -55,6 +63,17 @@ export class JobQueuePanelComponent {
 
   /** Convenience running count used in the header. */
   runningCount = computed(() => this.runningJobs().length);
+
+  /**
+   * Fix C (§8.2) — mission-liveness chip for a row, or null when the
+   * row renders nothing extra (mission rows, Task-backed records,
+   * degraded lookups, no linked instance — all null by design).
+   * Terminal receipt + live mission is exactly the pair that must
+   * NOT read as bare "completed".
+   */
+  missionChip(job: Job) {
+    return missionLivenessChip(job);
+  }
 
   /**
    * Resolves the best available title for a job. Priority chain:

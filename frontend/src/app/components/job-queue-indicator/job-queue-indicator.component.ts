@@ -18,7 +18,7 @@ import { MatTooltipModule } from '@angular/material/tooltip';
 import { JobService } from '../../services/job.service';
 import { ProjectService } from '../../services/project.service';
 import { TabStateService } from '../../services/tab-state.service';
-import { Job, JobStatus } from '../../models/job.model';
+import { Job, JobStatus, isLiveMissionLiveness } from '../../models/job.model';
 import { forkJoin } from 'rxjs';
 import { JobQueuePanelComponent } from '../job-queue-panel/job-queue-panel.component';
 
@@ -130,19 +130,79 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
   /** Idle state — drives the muted styling on the button. */
   readonly isIdle = computed(() => this.totalNonTerminal() === 0);
 
-  /** Formatted indicator text: "X/Y" where X=running, Y=total non-terminal. */
-  readonly displayText = computed(
-    () => `${this.runningCount()}/${this.totalNonTerminal()}`
-  );
+  // ── Fix C read-model split (§8.2) — mission awareness ───────────────
+
+  /**
+   * Distinct live-mission instance ids, derived from data this
+   * component ALREADY polls (no new endpoints, no extra requests):
+   *
+   * A mirror row (``job_type === 'message'``) whose
+   * ``mission_liveness`` is live (pending/processing/paused) proves
+   * its parent mission is still working — even when the mirror's own
+   * receipt status is terminal (handled at T0). This is exactly the
+   * "0/0 badge while a mission leader is visibly working" case: the
+   * leader produces only terminal receipts, so the intake count
+   * reads 0/0 while real work is ongoing.
+   *
+   * ``mission_liveness`` is computed read-time by the backend
+   * resolver, so even older terminal mirrors in the recent window
+   * carry the CURRENT instance status — a leader that finished
+   * reads settled and stops counting.
+   *
+   * Sources: the active list (defensive — mirrors are terminal at
+   * T0, but the scan is cheap) + the recent terminal window. Rows
+   * are de-duplicated by ``instance_id`` (many receipts per
+   * mission, one mission); a null instance_id falls back to the
+   * job id so the row still counts rather than silently vanishing.
+   */
+  readonly liveMissionIds = computed(() => {
+    const ids = new Set<string>();
+    for (const j of [...this.activeJobs(), ...this.recentJobs()]) {
+      if (j.job_type === 'message' && j.mission_liveness && isLiveMissionLiveness(j.mission_liveness)) {
+        ids.add(j.instance_id ?? j.job_id);
+      }
+    }
+    return ids;
+  });
+
+  /** Number of distinct live missions behind handled receipts. */
+  readonly liveMissionCount = computed(() => this.liveMissionIds().size);
+
+  /** True when at least one parent mission is still working. */
+  readonly hasLiveMissions = computed(() => this.liveMissionCount() > 0);
+
+  /**
+   * The badge shows system activity even when the intake queue is
+   * empty: jobs present → the classic ``X/Y``; queue empty but live
+   * missions exist → ``missions: N`` so a working leader never reads
+   * as a bare "0/0 = system idle"; both empty → ``0/0`` idle.
+   */
+  readonly displayText = computed(() => {
+    if (this.totalNonTerminal() === 0 && this.hasLiveMissions()) {
+      return `missions: ${this.liveMissionCount()}`;
+    }
+    return `${this.runningCount()}/${this.totalNonTerminal()}`;
+  });
 
   /**
    * Tooltip text shown on hover — exposes the raw counts so the
    * user can distinguish "all running" from "all pending" without
-   * opening the dropdown. Format: ``Running: X / Pending: Y``.
+   * opening the dropdown. Format: ``Running: X / Pending: Y``, plus
+   * a live-missions line whenever the receipt window proves a
+   * parent mission is still working. Both numbers are always
+   * explained: jobs (Running/Pending) and missions (Live missions).
    */
-  readonly tooltipText = computed(
-    () => `Running: ${this.runningCount()} / Pending: ${this.pendingCount()}`
-  );
+  readonly tooltipText = computed(() => {
+    const base = `Running: ${this.runningCount()} / Pending: ${this.pendingCount()}`;
+    if (!this.hasLiveMissions()) {
+      return base;
+    }
+    const plural = this.liveMissionCount() === 1 ? '' : 's';
+    return (
+      `${base} · Live missions: ${this.liveMissionCount()} ` +
+      `(message${plural === '' ? '' : 's'} handled; parent mission${plural} still working)`
+    );
+  });
 
   /** Running-only subset — passed to the embedded panel. */
   readonly runningJobs = computed(() =>

@@ -71,6 +71,58 @@
   }
 }
 
+// Fix C read-model split (§8.2) — receipt affordance + mission
+// liveness chips. Same pill geometry as the kind chip so the three
+// chips read as one family. Live missions pulse; settled missions
+// render muted so a terminal receipt beside a working parent reads
+// as "handled · mission still going".
+.receipt-chip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: 16px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #6b7280; // gray-500 — neutral: receipt, not state
+  background-color: rgba(107, 114, 128, 0.125);
+  border: 1px solid currentColor;
+
+  .receipt-icon {
+    font-size: 14px;
+    width: 14px;
+    height: 14px;
+  }
+}
+
+.mission-chip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: 16px;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid currentColor;
+
+  .mission-icon {
+    font-size: 14px;
+    width: 14px;
+    height: 14px;
+  }
+
+  &.mission-live .mission-icon {
+    animation: spin 1.5s linear infinite;
+  }
+
+  // Settled missions: drop the tinted pill to a muted outline so the
+  // live/settled split is readable without colour alone.
+  &.mission-settled {
+    background-color: transparent;
+    opacity: 0.75;
+  }
+}
+
 .paused-badge {
   display: flex;
   align-items: center;

@@ -96,6 +96,25 @@ mat-chip {
   text-transform: capitalize;
 }
 
+// Fix C (§8.2) — mission-liveness badge. Colour comes inline from
+// the model helper; settled missions render muted.
+.badge-mission {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 500;
+  text-transform: lowercase;
+
+  &.mission-live {
+    background: rgba(59, 130, 246, 0.15);
+  }
+
+  &.mission-settled {
+    opacity: 0.75;
+  }
+}
+
 // Section Styles
 .detail-section {
   padding: 20px;
