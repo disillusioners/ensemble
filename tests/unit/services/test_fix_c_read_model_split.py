@@ -744,11 +744,14 @@ class TestListWorkSplitFields:
 
 
 class TestJobResponseSurface:
-    """The four-surface consistency contract (Fix C spec): all four
-    surfaces — ``work_resolver`` primary, ``jobs_crud`` /
-    ``jobs_management`` / ``dlq`` routers — must agree on the split
-    semantics. These tests pin the additive-field contract at the
-    schema / router layer.
+    """The split-semantics additive-field contract (Fix C spec):
+    the three JobResponse read-model surfaces — ``work_resolver``
+    primary, ``jobs_crud`` + ``jobs_streaming`` routers, and the
+    ``jobs_management`` router (which delegates to
+    ``_job_to_response``) — must agree on the split semantics;
+    the DLQ surface is an orthogonal DeadLetterItem projection
+    and does not consume these fields. These tests pin the
+    additive-field contract at the schema / router layer.
     """
 
     def test_job_response_schema_has_split_fields(self) -> None:

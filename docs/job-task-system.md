@@ -740,9 +740,11 @@ applies (the dead-lettered mirror beside a revived instance is a
 legal orthogonal case the renderer must surface to the operator).
 The mission-row W4 guard is unaffected.
 
-#### The four-surface consistency contract
+#### The split-semantics consistency contract
 
-All four read-model surfaces MUST agree on the split semantics:
+The three JobResponse read-model surfaces MUST agree on the split
+semantics; the DLQ surface is an orthogonal DeadLetterItem
+projection and does not consume these fields:
 
 1. **`work_resolver._job_to_record`** (primary) — rows are built
    from the resolver's pre-fetched `instance` (batched path) or
@@ -754,13 +756,18 @@ All four read-model surfaces MUST agree on the split semantics:
 3. **`routers/jobs_streaming.py::_ResolvedWork`** — emits both
    fields on every SSE payload (`connected` / `status_update` /
    `completed`).
-4. **`routers/jobs_management.py` + `routers/dlq.py`** — the
-   management + DLQ endpoints delegate the response construction
-   to `_job_to_response` from `jobs_crud.py` (DRY: the split is
-   defined once at the `_job_to_response` seam). The DLQ-replay
-   response in particular must surface both fields so the FE can
-   distinguish "replayed, mission alive" from "replayed, mission
-   dead" (W4-adjacent operator UX).
+
+A fourth surface, **`routers/jobs_management.py`**, delegates
+response construction to `_job_to_response` from `jobs_crud.py`
+(DRY: the split is defined once at the `_job_to_response` seam).
+The DLQ-replay response must surface both fields so the FE can
+distinguish "replayed, mission alive" from "replayed, mission
+dead" (W4-adjacent operator UX). The DLQ endpoint
+(`routers/dlq.py`) is **not** part of this contract: it is an
+orthogonal `DeadLetterItem` projection that uses its own
+`_dlq_to_response` and `DLQItemResponse` over `DeadLetterItem`
+rows — it does not delegate to `_job_to_response` and does not
+consume the split-semantics fields.
 
 #### Test surface
 

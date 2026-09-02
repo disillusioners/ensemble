@@ -223,9 +223,11 @@ def _job_to_response(
         # status (mirror-only — ``None`` for mission rows and for
         # degraded lookups). Both fields are sourced from the
         # resolver-backed WorkRecord when one is supplied so all
-        # four surfaces (work_resolver primary + jobs_crud /
-        # jobs_management / dlq fallbacks) agree on the split
-        # semantics. When ``work_record`` is ``None`` (legacy
+        # three JobResponse surfaces (work_resolver primary +
+        # jobs_crud / jobs_management fallbacks) agree on the split
+        # semantics; the DLQ surface is an orthogonal
+        # DeadLetterItem projection that does not consume these
+        # fields. When ``work_record`` is ``None`` (legacy
         # fallback path — resolver not wired), both fields are
         # ``None``; the consumer should treat a ``None``
         # ``mission_liveness`` as "split semantics unavailable,
