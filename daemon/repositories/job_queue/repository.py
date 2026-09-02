@@ -53,6 +53,13 @@ _REMOVED_JOB_COLUMNS: frozenset[str] = frozenset({
     "cancelled_at",
 })
 
+# Soft-delete semantics: a soft-deleted JobItem (``deleted_at`` set)
+# is OUTSIDE all reconciliation BY DESIGN — every reconcile query
+# filters ``deleted_at IS NULL`` deliberately. Its ``admission_state``
+# is frozen at deletion time (a deletion-time snapshot, not a
+# liveness claim), so tombstoned rows never match a reconcile
+# predicate regardless of what the stored value says.
+
 
 # ── Fix B legacy zombie reap — cutover bound ─────────────────────────────
 #

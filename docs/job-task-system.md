@@ -551,9 +551,16 @@ loud dispatch-time error.
 
 **D2 status change:** the "every stateful row has an event-time terminal writer"
 red line flips from **RED** (07-03 → 09-01) to **GREEN** for message-mirror
-rows (this branch). The previously-flagged **3 legacy zombie ACTIVE mirror
-rows** (pre-cutover) are **RETIRED** by the one-time reconciliation method
-`JobRepository.reap_legacy_mirror_zombies` — see below.
+rows (this branch). **Disposition of the previously-flagged 3 legacy zombie
+ACTIVE mirror rows (a459e571, 5d1bd208, d23f5982): they are soft-deleted
+tombstones — `deleted_at` set with `admission_state` frozen at `'active'` —
+and sit OUTSIDE all reconciliation BY DESIGN.** Every reconcile query's
+`deleted_at IS NULL` filter is deliberate, and the stored admission value is
+a deletion-time snapshot, not a liveness claim. These 3 rows are **NOT**
+reaped by `JobRepository.reap_legacy_mirror_zombies` and receive **NO**
+`orphan_retired` stamp. The reap covers the **non-deleted** pre-cutover
+zombie class — 0 candidates in prod today; its value is forward-looking
+protection. See below.
 
 **Mechanism — `reap_legacy_mirror_zombies` (leader decision, 2026-09-02):**
 
@@ -564,8 +571,12 @@ rows** (pre-cutover) are **RETIRED** by the one-time reconciliation method
   OR `status` in `{COMPLETED, FAILED, CANCELLED}`) AND
   `deleted_at IS NULL` (soft-deleted mirrors are audit-only).
 - **`terminal_reason = 'orphan_retired'`** — NOT `'completed'`.
-  These rows did not complete organically; audit truthfulness
-  outweighs vocabulary consistency. **No enum CHECK exists yet
+  Rows this method reaps did not complete organically; audit
+  truthfulness outweighs vocabulary consistency. **Scope: the stamp
+  attaches ONLY to non-deleted rows the predicate matches — none
+  exist in prod today, and the 3 soft-deleted tombstone rows never
+  receive it** (the predicate's `deleted_at IS NULL` leg excludes
+  them by design). **No enum CHECK exists yet
   (Phase 2 of the governance path introduces it); Phase 2's
   `terminal_reason` StrEnum MUST include `'orphan_retired'`.**
   Tracked in `docs/job-task-system.md` §6.4/§8.1.
@@ -597,7 +608,9 @@ rows** (pre-cutover) are **RETIRED** by the one-time reconciliation method
   `job_id`, `terminal_reason`, instance state, task state,
   and `created_at` for the audit trail. The service's audit
   pattern is `fix_b_legacy_zombie_retired`; the durable terminal
-  reason remains `orphan_retired`.
+  reason remains `orphan_retired`. Separately, empty reconcile
+  cycles now log at INFO (post-this-change), so the healthy-cycle
+  heartbeat is visible at prod log level.
 - **Invocation:** wired into the top of
   `JobRecoveryService.reconcile_drift_states` (the existing
   300s periodic cadence). Soft-fail: any exception is logged
