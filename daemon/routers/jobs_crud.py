@@ -216,6 +216,31 @@ def _job_to_response(
         # backward-compatible with mocks / older test fixtures that
         # construct ``JobItem`` rows without the column.
         terminal_reason=getattr(job, "terminal_reason", None),
+        # Fix C — read-model split (additive). Two new fields close
+        # the "is the work done?" ambiguity: ``job_type`` is the
+        # JobItem-side discriminator (``"task"`` vs ``"message"``),
+        # ``mission_liveness`` is the linked instance's canonical
+        # status (mirror-only — ``None`` for mission rows and for
+        # degraded lookups). Both fields are sourced from the
+        # resolver-backed WorkRecord when one is supplied so all
+        # four surfaces (work_resolver primary + jobs_crud /
+        # jobs_management / dlq fallbacks) agree on the split
+        # semantics. When ``work_record`` is ``None`` (legacy
+        # fallback path — resolver not wired), both fields are
+        # ``None``; the consumer should treat a ``None``
+        # ``mission_liveness`` as "split semantics unavailable,
+        # fall back to receipt-only view" rather than "instance
+        # dead".
+        job_type=(
+            getattr(work_record, "job_type", None)
+            if work_record is not None
+            else getattr(job, "job_type", None)
+        ),
+        mission_liveness=(
+            getattr(work_record, "mission_liveness", None)
+            if work_record is not None
+            else None
+        ),
     )
 
 

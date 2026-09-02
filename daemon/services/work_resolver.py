@@ -199,6 +199,15 @@ class WorkRecord:
       the Instance columns or sourced directly from the JobItem
       mirror columns (``JobItem.started_at`` / ``JobItem.completed_at``)
       which are still populated during Phase 1's transition period.
+    * ``job_type`` / ``mission_liveness`` — Fix C read-model split.
+      ``job_type`` is the JobItem-side discriminator (``"task"`` for
+      mission, ``"message"`` for mirror; ``None`` for Task-backed
+      rows). ``mission_liveness`` is the canonical status of the
+      linked instance, populated ONLY for mirror rows so the renderer
+      can distinguish a completed message-receipt from a still-running
+      mission (I3, proxy-per-kind; closes the 28c6421b
+      false-"everything finished" read). See the field-level
+      docstring below for the degradation contract.
     """
 
     work_id: str
@@ -222,6 +231,35 @@ class WorkRecord:
     # on an instance that also has a JobItem is no longer incorrectly
     # dropped by the ``list_work`` dedup (Bug F1).
     message_id: str | None = None
+    # Fix C — read-model split (mission vs mirror rendering). Two
+    # additive fields that complete the read model without changing any
+    # existing ``status`` semantics:
+    #
+    # * ``job_type`` — the JobItem-side discriminator (``"task"`` for
+    #   mission / spawn-instance work, ``"message"`` for the
+    #   per-message mirror receipts). ``None`` for Task-backed records
+    #   (reports) where the concept does not apply. ``kind`` above
+    #   collapses both ``task`` and ``message`` JobItems onto
+    #   ``"job"``; ``job_type`` is the second discriminator that lets
+    #   consumers tell the two JobItem kinds apart without consulting
+    #   the raw ``JobItem`` row. Mirrors the ``JobItem.job_type``
+    #   column directly so the wire value is the same string callers
+    #   already see in the SQLModel.
+    #
+    # * ``mission_liveness`` — the canonical status of the linked
+    #   ``Instance`` row, ONLY meaningful for mirror (message-type)
+    #   JobItems. For mission (task-type) JobItems the row's own
+    #   ``status`` IS the liveness signal (Phase 1, Job as Queue
+    #   Proxy), so this field stays ``None``. For mirror rows the
+    #   receipt (``status``) and the mission (``mission_liveness``)
+    #   are two different answers (I3 — proxy-per-kind) and the
+    #   renderer needs both to avoid the 28c6421b false-"everything
+    #   finished" read. ``None`` when there is no linked instance
+    #   (``instance_id IS NULL`` on a queue-stage row) or when the
+    #   instance lookup degraded (degradation-safe contract —
+    #   read fails soft per the message_metadata precedent).
+    job_type: str | None = None
+    mission_liveness: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize this :class:`WorkRecord` to a JSON-friendly dict.
@@ -243,6 +281,13 @@ class WorkRecord:
         strings (already ISO on the JobItem side; ``_isoformat_or_none``
         in :meth:`_job_to_record` formats the ``Instance.last_activity_at``
         ``datetime`` value).
+
+        Fix C: ``job_type`` and ``mission_liveness`` are emitted on
+        every record (``None`` for Task-backed records, by design —
+        the values are not meaningful there). The renderer's split
+        semantics are encoded in these two fields so the read model
+        finally answers "is the work done?" with one answer per
+        question instead of one ambiguous field.
 
         Returns:
             A plain ``dict`` mirroring the WorkRecord fields, with
@@ -266,6 +311,10 @@ class WorkRecord:
             # drove it (matches the ``message_id`` field on
             # ``MessageQueue`` / ``Task`` / ``JobItem.job_metadata``).
             "message_id": self.message_id,
+            # Fix C — read-model split (additive). See the field
+            # docstring above. ``None`` for Task-backed records.
+            "job_type": self.job_type,
+            "mission_liveness": self.mission_liveness,
         }
 
 
@@ -1168,6 +1217,14 @@ class WorkResolverService:
             # Tasks have a native ``message_id`` column populated at
             # message-send time (``worker_pool`` enqueue flow).
             message_id=task.message_id,
+            # Fix C — ``job_type`` / ``mission_liveness`` are
+            # explicitly ``None`` for Task-backed records. The Task
+            # table has no mission/mirror concept (reports are
+            # delivery records, not lifecycle proxies) so surfacing
+            # these fields would be misleading — consumers should
+            # branch on ``kind == "report"`` instead.
+            job_type=None,
+            mission_liveness=None,
         )
 
     def _job_to_record(
@@ -1318,6 +1375,63 @@ class WorkResolverService:
                     )
                 )
 
+        # Fix C — read-model split (mission vs mirror). The
+        # JobItem ``job_type`` column is the discriminator between the
+        # two render kinds: ``"task"`` is a mission (the JobItem is the
+        # lifecycle proxy of the spawned instance) and ``"message"`` is
+        # a mirror (the JobItem is a per-message receipt — the
+        # instance's lifecycle is independent of the mirror).
+        #
+        # Default to ``"task"`` for legacy JobItem rows that predate
+        # the ``job_type`` column (defensive — ``getattr(..., "task")``
+        # matches the historical SQLModel default in
+        # ``daemon/repositories/job_queue/models.py``).
+        job_type = getattr(job, "job_type", "task") or "task"
+
+        # Fix C — ``mission_liveness`` consult (Part 1). For mirror
+        # (message-type) JobItems the receipt (``status`` above) and
+        # the mission (the linked instance) are TWO different answers
+        # to "is the work done?" — I3, proxy-per-kind — and the renderer
+        # needs both to avoid the 28c6421b false-"everything finished"
+        # read where a completed mirror beside a still-running mission
+        # collapsed to two ``completed`` rows.
+        #
+        # Consult the linked Instance's ``status`` regardless of the
+        # mirror's own ``admission_state`` — a DONE mirror's mission
+        # can still be active (the parent instance keeps living past
+        # the receipt). For mission (task-type) JobItems the row's own
+        # ``status`` IS the liveness signal (Phase 1, Job as Queue
+        # Proxy) so this field stays ``None``.
+        #
+        # W4 hazard (DLQ-replay × instance-revive): a DEAD mission
+        # row's derived ``status`` is hard-coded to ``"dead_letter"``
+        # above — instance liveness does NOT override that for
+        # mission rows. Mirrors in DEAD (``dead_letter`` status) still
+        # get a ``mission_liveness`` because the receipt-vs-mission
+        # split still applies (and the rare DEAD-mirror case is
+        # orthogonal to the W4 guard).
+        mission_liveness: str | None = None
+        if job_type == "message" and job.instance_id is not None:
+            # The batched list path (``list_work``) pre-fetches
+            # ``instance`` via ``_batch_instances`` for every job in
+            # the page, so ``instance`` is the authoritative source
+            # here — no per-row lookup on the hot path. The single-row
+            # ``resolve_work`` path passes ``instance=None``; for
+            # mirror rows we fall back to ``_lookup_instance`` so the
+            # field is populated consistently across both call sites.
+            # ``_lookup_instance`` is degradation-safe (catches
+            # ``SQLAlchemyError``, logs a warning, returns ``None``) —
+            # the same pattern the existing active-state path already
+            # uses (defensive contract; see the message_metadata repo
+            # access precedent referenced in the Fix C spec).
+            if instance is None:
+                instance = self._lookup_instance(job.instance_id)
+            if instance is not None:
+                mission_liveness = canonicalize_status(instance.status)
+            # else: lookup degraded; ``mission_liveness`` stays
+            # ``None`` and the renderer falls back to the
+            # receipt-only view (current behaviour stands).
+
         return WorkRecord(
             work_id=job.job_id,
             kind="job",
@@ -1360,6 +1474,14 @@ class WorkResolverService:
             # during Phase 1's transition period.
             started_at=_instance_started_at(instance, job),
             completed_at=_instance_completed_at(instance, instance_status_canonical=status, job=job),
+            # Fix C — additive read-model split fields. ``job_type``
+            # is the JobItem-side discriminator; ``mission_liveness``
+            # is the canonical status of the linked Instance for
+            # mirror rows (and ``None`` for mission rows). Both
+            # behaviour and degradation contract are documented at
+            # the field declaration and at the top of this method.
+            job_type=job_type,
+            mission_liveness=mission_liveness,
         )
 
     def _lookup_instance(self, instance_id: str | None) -> "Instance | None":

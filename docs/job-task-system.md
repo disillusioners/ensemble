@@ -287,7 +287,7 @@ marked otherwise; the **on-this-branch** column reflects Constitution Phase 0 + 
 | **I1** | `Task.work_id == JobItem.job_id` at every job-driven dispatch; handles mint **fail-closed** | **BENT** — WARN-only tripwire; auto-mint fallback alive; no FK | **Enforced** — Fix A rejects omission at job-driven dispatch; mint sites censused (§7, §8) |
 | **I2** | One transition authority per `admission_state` class; others are idempotent-readers or **declared** subordinates (≤2 per class: owner + backstop) | **BROKEN** — 20 writers (function-level; 28 line-level writes)¹ (census:
 `test_constitution_drift.py`), of which 9 are uncoordinated and 8 bypass `validate_transition`; an illegal `paused→done` exists | Unchanged (Phases 1–3 pending) — but every writer is now **visible** to the census (§7) |
-| **I3** | Proxy-per-kind: missions proxy instance lifecycle, mirrors are receipts; **one meaning per state per kind** | **BROKEN** — mirrors lack an event-time terminal write; two read answers exist (receipt-truthmaker vs liveness-only-when-active) | **Improved by Fix B (this branch)** — mirrors now have an event-time terminal write at `ProcessMessageProcessor.on_success` (T0); the inline transition is the legitimate owner. f2's mirror-slice finalization retired. Read-side reconciliation (fix C) remains for the alarm-churn reduction. |
+| **I3** | Proxy-per-kind: missions proxy instance lifecycle, mirrors are receipts; **one meaning per state per kind** | **BROKEN** — mirrors lack an event-time terminal write; two read answers exist (receipt-truthmaker vs liveness-only-when-active) | **Closed by Fix B + Fix C (this branch)** — Fix B landed the event-time terminal write at `ProcessMessageProcessor.on_success` (T0); Fix C (`§8.2`) split the read-model surface into mission rows (one answer: `status`) and mirror rows (two answers: `status` + `mission_liveness`), with `job_type` as the discriminator. f2's mirror-slice finalization retired. The two-answers defect is closed: the renderer now reads one answer per question. |
 | **I4** | Internal paths never create JobItems (JAFP boundary) | **BENT** — boundary held (zero internal creators) but convention-only | Now **censused** — `KNOWN_JOBITEM_CREATORS` makes the boundary machine-checked |
 | **I5** | `DEAD` is terminal; corrections are additive | **TRUE** + hazard — `dead→queued` only via DLQ replay; no path re-opens wrongly-`DONE` rows; revived-instance-under-`DEAD`-job unguarded | Unchanged |
 
@@ -326,7 +326,7 @@ Drift is too much the moment **any** of these is red — each is mechanically ch
 |---|---|---|
 | **D1** | **Writer registry** — every `SET admission_state` site resolves to a registered owner; ≤2 per class | Census test against `KNOWN_ADMISSION_STATE_WRITERS` (§7) |
 | **D2** | **Event-time terminal rule** — every stateful row has an event-time terminal writer; a sweep is never primary, only loss-recovery for stale *unlabeled* rows | **Closed for mirrors by Fix B (this branch)** — `JobRepository.finalize_mirror_job_at_completion` is the event-time owner of `job_type='message'` rows; the f-sweep's mirror-slice retirement + the new `orphan_active_skipped_mirror_retired` detail prove the message row is no longer sweep-dependent. The disposition landed: the three pre-cutover legacy rows are reaped by `reap_legacy_mirror_zombies` (§8.1), and the no-age terminal-task backstop covers any missed inline transition. |
-| **D3** | **One-answer rule** — every derived status names its truthmaker + direction + bounded divergence | Read-model review (fix C, always paired with B) |
+| **D3** | **One-answer rule** — every derived status names its truthmaker + direction + bounded divergence | **Closed by Fix C (this branch)** — the read model now answers "is the work done?" with two fields per row (`status` + `mission_liveness`) keyed by `job_type` (mission vs mirror). The 28c6421b alarm-churn class is closed forward; the renderer no longer collapses two answers onto one ambiguous field. See §8.2. |
 | **D4** | **Fail-closed handles** — `None` never auto-mints on a required job-driven path; every source `work_id` mint is a registration obligation | Review live mint sites; the subset-only `KNOWN_MINT_SITES` check (`KNOWN_MINT_SITES ⊆ source_mints`) prevents stale entries but does not enumerate every UUID call |
 
 Retro-validation: D1–D4 would have caught every historical drift event at landing
@@ -641,6 +641,171 @@ the EXACT prod shape); `validate_transition` path tests
 self-extinguishing shape (2 tests); argument validation (2 tests);
 cutover-constant pin (1 test); plus three exception-containment cases.
 +4 legacy suite = 3 negative-path containment tests + live-status parametrize 4→5.
+
+---
+
+### 8.2 Fix C — Read-Model Liveness Consult + Mission/Mirror Rendering Split
+
+> **[Fix C]** — landing on branch `feature/job-task-fix-c`. Closes the
+> 28c6421b alarm-churn read-model class (H2 dominance in the
+> retrospective; I3 + D3 in the Constitution). Fix A + Fix B close the
+> write-side defects; Fix C closes the corresponding read-side
+> divergence so the alarm churn is no longer a class.
+
+#### The split
+
+Two additive fields land on every read-model surface (WorkRecord +
+JobResponse + the SSE `_ResolvedWork` payload):
+
+| Field | Type | Source | Meaning |
+|---|---|---|---|
+| `job_type` | `str \| None` | `JobItem.job_type` | JobItem-side discriminator: `"task"` (mission) or `"message"` (mirror). `None` for Task-backed records. |
+| `mission_liveness` | `str \| None` | `Instance.status` (canonicalized) | Canonical status of the linked instance. **Populated ONLY for mirror rows**; `None` for mission rows and for degraded lookups. |
+
+Both fields preserve every existing `status` value bit-for-bit —
+consumers that branched on the previous single answer are
+unaffected. The split answers the previously-ambiguous question
+"is the work done?" with **two answers per row**:
+
+* **`status`** — the same answer as before. For mission rows this
+  is the lifecycle status (Phase 1, Job as Queue Proxy); for mirror
+  rows this is the receipt status (the message was handled at T0).
+* **`mission_liveness`** — for mirror rows, the canonical status of
+  the linked instance. For mission rows it stays `None` (the row's
+  own `status` IS the liveness signal — the two fields would be
+  redundant).
+
+The renderer (FE work-view) branches on `job_type` to pick the
+right semantic:
+
+| `job_type` | `status` means | `mission_liveness` means | Read together |
+|---|---|---|---|
+| `"task"` (mission) | Lifecycle of the spawned instance | `None` (redundant) | One answer (the row IS the mission). |
+| `"message"` (mirror) | Receipt — was the message handled? | Lifecycle of the parent instance | Two answers; both required to render correctly. |
+
+#### The 28c6421b read, closed
+
+Before Fix C, a mirror JobItem in `admission_state='done'` (Fix B's
+inline idempotent transition at T0) beside an instance still in
+`status='running'` rendered as **two `completed` rows**. The user
+read the pair as "everything finished" — the alarming 52-min
+live window the SSE work-view first surfaced on 09-01.
+
+Post-Fix-C, the same pair renders as one `status='completed'` mirror
+with `mission_liveness='processing'` — the renderer can now show
+"message handled, parent mission still running" without false-
+"everything finished" claims.
+
+#### The liveness consult — degradation contract
+
+`_job_to_record` consults the linked `Instance` row's `status` for
+mirror rows regardless of the mirror's own admission state. This
+is the Part 1 liveness consult.
+
+**Batch-shape (the perf hard requirement):** the existing
+`_batch_instances` (one `SELECT … WHERE instance_id IN (…)`) is
+extended to surface `instance.status` for both the existing
+`status` derivation AND the new `mission_liveness` field. No
+new queries are added — the per-page instance fetch that already
+runs is reused for both fields. The single-row `resolve_work`
+path falls back to `_lookup_instance` (one query); a degradation
+contract (instance lookup failure → `mission_liveness=None`,
+warn + fall back per the message_metadata precedent) keeps the
+read path soft-failing on transient DB errors.
+
+The contract:
+
+* **Instance lookup OK** → `mission_liveness = canonicalize_status(instance.status)`.
+* **Instance lookup fails (transient DB error)** → log a warning,
+  return `mission_liveness=None`; the renderer falls back to the
+  receipt-only view (current pre-Fix-C behaviour stands).
+* **No linked instance** (`job.instance_id IS NULL` — queue-stage
+  row) → `mission_liveness=None`.
+* **Mission row** (`job_type='task'`) → `mission_liveness=None`
+  (the field would be redundant; the row's `status` IS the
+  liveness signal).
+
+#### The W4 hazard — preserved
+
+A DEAD mission row's derived `status` is hard-coded to
+`"dead_letter"` regardless of the linked instance's status. The
+DLQ-replay × instance-revive combination can legally produce a
+revived instance under a DEAD job (a legal combination, not a
+bug); the renderer must NOT let instance liveness override DEAD
+for mission rows.
+
+Mirrors in `admission_state='dead'` (`dead_letter` status) STILL
+get a `mission_liveness` value — the receipt-vs-mission split
+applies (the dead-lettered mirror beside a revived instance is a
+legal orthogonal case the renderer must surface to the operator).
+The mission-row W4 guard is unaffected.
+
+#### The four-surface consistency contract
+
+All four read-model surfaces MUST agree on the split semantics:
+
+1. **`work_resolver._job_to_record`** (primary) — rows are built
+   from the resolver's pre-fetched `instance` (batched path) or
+   a single `_lookup_instance` (single-row path).
+2. **`routers/jobs_crud.py::_job_to_response`** — sources
+   `job_type` and `mission_liveness` from the resolver-supplied
+   `WorkRecord` when one is available; falls back to `None` on the
+   legacy branch (resolver not wired).
+3. **`routers/jobs_streaming.py::_ResolvedWork`** — emits both
+   fields on every SSE payload (`connected` / `status_update` /
+   `completed`).
+4. **`routers/jobs_management.py` + `routers/dlq.py`** — the
+   management + DLQ endpoints delegate the response construction
+   to `_job_to_response` from `jobs_crud.py` (DRY: the split is
+   defined once at the `_job_to_response` seam). The DLQ-replay
+   response in particular must surface both fields so the FE can
+   distinguish "replayed, mission alive" from "replayed, mission
+   dead" (W4-adjacent operator UX).
+
+#### Test surface
+
+`tests/unit/services/test_fix_c_read_model_split.py` (unit, 17
+tests) covers:
+
+* `WorkRecord` defaults + `to_dict()` additive contract.
+* The exact 28c6421b read reproduced and closed
+  (`test_mirror_done_with_live_mission_shows_mission_still_running`).
+* Mirror-on-terminal-mission (the contrasting positive case).
+* Mirror-on-DEAD-with-revived-instance (the DLQ-replay × revive
+  orthogonal case).
+* Mission-DEAD never overrides to instance liveness (W4 hazard).
+* Degradation contract (`SQLAlchemyError` → `mission_liveness=None`).
+* `list_work` batched shape — `job_type` / `mission_liveness` on
+  every record with bounded instance-repo query count (no N+1
+  regression on the mirror branch).
+* `JobResponse` schema additive contract.
+* `_ResolvedWork` SSE payload contract (both `to_payload` and
+  `to_completed_payload` emit the new keys).
+
+Two pre-existing pin tests are extended (additive contract):
+
+* `tests/unit/routers/test_jobs_streaming_resolver.py` —
+  `test_completed_job_via_resolver_emits_terminal_events`
+  now includes `job_type` and `mission_liveness` in the
+  expected payload key set.
+* `tests/unit/routers/test_work_router.py` —
+  `test_response_field_shape` likewise includes both keys.
+
+No existing `status` value is renamed, removed, or recased.
+
+#### D3 status change
+
+The D3 ("one-answer rule — every derived status names its
+truthmaker + direction + bounded divergence") red line flips
+from **RED** (07-03 → 09-01) to **GREEN** for the work/job read
+model. The post-Fix-C read model has **ONE answer per question**:
+
+* "Is the mission done?" → `status` (mission row) or
+  `mission_liveness` (mirror row).
+* "Was the message handled?" → `status` (mirror row).
+
+The two questions map to two fields; the renderer no longer
+collapses them onto one ambiguous answer.
 
 ---
 

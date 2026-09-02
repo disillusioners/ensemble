@@ -260,6 +260,7 @@ def _seed_job(
     deleted_at: str | None = None,
     metadata_message_id: str | None = None,
     terminal_reason: str | None = None,
+    job_type: str = "task",
 ) -> str:
     """Insert a ``JobItem`` row. Returns the ``job_id`` (auto-generated if None).
 
@@ -295,6 +296,12 @@ def _seed_job(
     pre-7c backfilled rows have ``None`` here (which surfaces under
     ``status="completed"`` per the F3 ``OR terminal_reason IS NULL``
     rule).
+
+    Fix C: ``job_type`` controls the JobItem-side discriminator
+    (``"task"`` for mission / spawn-instance work, ``"message"`` for
+    per-message mirror receipts). Defaults to ``"task"`` (the
+    pre-Fix-C behaviour — mission rows are the historical default).
+    Tests for the read-model split exercise both values.
     """
     admission_tokens = {
         AdmissionState.QUEUED.value,
@@ -329,6 +336,7 @@ def _seed_job(
             deleted_at=deleted_at,
             job_metadata=job_metadata,
             terminal_reason=terminal_reason,
+            job_type=job_type,
         )
         s.add(job)
         s.commit()
