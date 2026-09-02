@@ -1,6 +1,6 @@
 import { computed, signal } from '@angular/core';
 import { Job } from '../../models/job.model';
-import { isReceiptRow, missionLivenessChip, MissionLivenessChip } from '../../models/job.model';
+import { isReceiptRow, missionLivenessChip, MissionLivenessChip, missionLivenessChipTooltip } from '../../models/job.model';
 import { createMockJob, createMockLiveMissionReceipt } from '../../testing/job-test-helpers';
 
 /**
@@ -10,9 +10,10 @@ import { createMockJob, createMockLiveMissionReceipt } from '../../testing/job-t
  * the convention (see job-queue-indicator.component.spec.ts) is a
  * plain TS class replicating the component's signal/computed wiring.
  * The mirror deliberately calls the SAME model helpers the real
- * component calls (isReceiptRow / missionLivenessChip) so the
- * assertions exercise the production decision logic, not a copy of
- * it; only the thin computed wrapper is mirrored.
+ * component calls (isReceiptRow / missionLivenessChip /
+ * missionLivenessChipTooltip) so the assertions exercise the
+ * production decision logic, not a copy of it; only the thin
+ * computed wrapper is mirrored.
  *
  * The existing card computeds (priority/status/kind) are covered by
  * the model specs and were untouched by Fix C; this mirror covers
@@ -31,10 +32,7 @@ class MockJobCardMissionChips {
 
   missionChipTooltip = computed(() => {
     const chip = this.missionChip();
-    if (!chip) return '';
-    return chip.live
-      ? `Message receipt handled. Parent mission still working (canonical status: ${chip.value}).`
-      : `Message receipt handled. Parent mission settled (canonical status: ${chip.value}).`;
+    return chip ? missionLivenessChipTooltip(chip) : '';
   });
 
   setJob(job: Job): void {
