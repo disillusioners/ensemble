@@ -399,7 +399,7 @@ proves bidirectionality.
 ### 6.6 ADR-MISSION-01 — Mission noun split (transport/work vocabulary + read projection)
 
 > **Ratified 2026-09-02** from `.agents/shared/planning/mission-class/architecture-recommendation.md` §7.
-> **Status: M1 landed (168c9448); kill-switch default OFF; soak pending.** Mission-first cutover
+> **Status: M1 landed (168c9448); M4(i)-HTTP pull-forward landed on `feature/mission-class` (§8.4); kill-switch default OFF; soak pending.** Mission-first cutover
 > (M1 → M2 → M3) means consumers migrate BEFORE the wire rename lands; M3 is the rename.
 > See "Directed modifications" below for the version-gate drop that supersedes one spec sentence.
 
@@ -435,7 +435,8 @@ at M3 only after consumers have moved off the old word.
 | Phase | Scope | Effect on consumers |
 |---|---|---|
 | **M1** (this amendment's contract) | Additive `mission_id` / `mission_epoch` / `mission_terminal_reason` (§8.3) behind kill-switch `ENSEMBLE_MISSION_PROJECTION_ENABLED` (default OFF); FE re-anchor `mission-settled` → `mission-terminal` (CSS chain only, ~12–15 files); vocabulary table ratified (§6.7); this prose fix (line 909). | Zero impact — additive only, kill-switch OFF in prod by default; bit-for-bit wire stable. |
-| **M2** | Agent tools (`get_mission` / `await_mission` / `list_missions`) + structural guardrails (`outcome` token, `mission_ref` cross-ref, `watch_job(events='mission_terminal')`, `job_continue` mission-only gate); ari/jober prompt edits + `tools.allow` + minor version bump. | Tools migrate BEFORE the wire rename; the wrong-predicate trap (ari/soul.md L71-79, jober/soul.md L9/L54 key decisions on a single ambiguous `status`) becomes structurally hard. |
+| **M4(i)-HTTP pull-forward** (2026-09-02, `feature/mission-class`) | `GET /api/missions` + `GET /api/missions/{mission_id}` — the mission projection's **HTTP debut** (§8.4), user-approved pull-forward of the M4(i) gated option (`architecture-recommendation.md` §5 M4 row: "HTTP `GET /missions` — gate on operator demand") ahead of the M2 agent tools. Read-only; same kill-switch; census stays at 23. | Zero impact while the kill-switch is OFF — both routes fail-closed to 404. |
+| **M2** | Agent tools (`get_mission` / `await_mission` / `list_missions`) + structural guardrails (`outcome` token, `mission_ref` cross-ref, `watch_job(events='mission_terminal')`, `job_continue` mission-only gate); ari/jober prompt edits + `tools.allow` + minor version bump. **NUMBERING DISAMBIGUATION:** the spec's M2 = the *agent tools* milestone — NOT the HTTP surface. The `GET /missions` endpoint is the M4(i) pull-forward above (the implementation branch's "M2-API" label refers to its position as the second shipped deliverable of the mission program, not to spec-milestone M2). | Tools migrate BEFORE the wire rename; the wrong-predicate trap (ari/soul.md L71-79, jober/soul.md L9/L54 key decisions on a single ambiguous `status`) becomes structurally hard. |
 | **M3** | Wire rename on mirror-receipt terminal status: `completed` → `settled` via per-kind dispatch in `_derive_legacy_status` on all 4 read surfaces — `WorkRecord` (work resolver, `work_resolver._job_to_record`), `JobResponse` (`routers/jobs_crud.py::_job_to_response`), `_ResolvedWork` (SSE payload, `routers/jobs_streaming.py::_ResolvedWork`), and the `routers/jobs_management.py` delegation surface (response constructed via `jobs_crud.py::_job_to_response`, per §8.2). `VALID_STATUS_VALUES`, FE switches, daemon filters, and docs are updated in this phase. | Mission tools (M2) and FE re-anchor (M1) are already in — at M3 time, no in-repo consumer treats mirror `completed` as outcome. |
 
 **Why tools precede the rename (not the spec's original M2/M3 ordering):** ari/jober are
@@ -1146,6 +1147,138 @@ The §8.2 split-semantics surfaces are NOT modified to carry `mission_id` /
 `mission_epoch` / `mission_terminal_reason` until the kill-switch flips ON; until then,
 the additive fields are documented-but-absent (consistent with the SSE patch
 absent-keep semantics).
+
+### 8.4 M4(i)-HTTP — `GET /missions` Endpoint Contract (pull-forward, kill-switched)
+
+> **Landed on `feature/mission-class` (2026-09-02) — the user-approved pull-forward of
+> the M4(i) gated option ("HTTP `GET /missions` — gate on operator demand",
+> `architecture-recommendation.md` §5 M4 row) ahead of the M2 agent tools.** The spec is
+> SILENT on this endpoint's list contract — the "W2 design" referenced by the planning
+> tree's approach-comparison is NOT in the tree. Every list-contract choice below is a
+> **pre-directed improvisation** and is marked **[FLAGGED]**; zero silent deviations.
+> Read-only throughout: `MissionResolver` stays a leaf READ service, no JobItem
+> creation, no admission-state writes — the census stays **frozen at 23**.
+
+#### The routes
+
+Both routes live in `daemon/routers/missions.py` (`APIRouter(prefix="/missions")`,
+mounted under `/api` next to `work_router` in `daemon/api.py`), wired via the
+queues/work DI pattern (`set_missions_resolver` + `get_missions_resolver` 503 factory)
+against the same READ-only `InstanceRepository` / `JobRepository` the
+`WorkResolverService` consumes.
+
+| Route | Source path | Contract |
+|---|---|---|
+| `GET /api/missions` | `MissionResolver.resolve_page()` (new paged batch path) | Paged list of ALL instances' missions. `resolve_many`'s production debut, page-shaped. |
+| `GET /api/missions/{mission_id}` | `MissionResolver.resolve()` — the dead-link pre-fetch path | Full `MissionRecord` incl. `epoch` + `terminal_reason` (§8.3 semantics). MUST NOT route through `project()` — its `dead_linked=False` default is the S4 bug class (a DEAD linked JobItem would surface `failed` instead of `dead_letter`). Unknown id ⇒ 404. |
+
+Wire schemas (`daemon/routers/schemas.py`): `MissionResponse` mirrors `MissionRecord`
+field-for-field (`mission_id`, `agent_id`, `parent_mission_id`, `liveness`,
+`terminal_reason`, `epoch`, `linked_jobs`, `started_at`, `last_activity_at`);
+`MissionListResponse` is the list envelope.
+
+#### Kill-switch gating — [FLAGGED: spec-silent OFF behavior]
+
+| `ENSEMBLE_MISSION_PROJECTION_ENABLED` | List route | Detail route |
+|---|---|---|
+| OFF (default) | **404** | **404** |
+| ON | normal contract | normal contract |
+
+Fail-closed by design: a DEDICATED endpoint must not answer `200 []` while disabled
+(an empty page is indistinguishable from "no missions exist" — the §8.2
+absence-must-be-explicit lesson), and must not 500. Routes stay REGISTERED while OFF
+(OpenAPI still documents them); the gate is in-handler, checked first (before the 503
+not-wired guard and query validation). This is a task-directed choice — the spec's
+kill-switch section (§8.3) only covers the additive fields on the four Fix-C surfaces.
+
+#### List contract (all choices [FLAGGED] — spec-silent)
+
+- **Scope: ALL instances' missions.** One mission per instance, identity =
+  `instance_id` (§6.6 identity verdict). NO implicit non-terminal default, NO
+  leader/root filtering. Subtree filtering is a CLIENT-side concern:
+  `parent_mission_id` is carried on every record and client-side tree-filtering on it
+  is the sanctioned pattern.
+- **Ordering: `last_activity_at DESC NULLS LAST`, deterministic tiebreak
+  `mission_id` ASC** (= `instance_id` ASC) — applied IN SQL, never a Python-side sort
+  of the full table. Backend-internality caution: `instances.last_activity_at` is
+  TEXT/tz-aware on SQLite and tz-naive TIMESTAMP on PG (the
+  `_parse_job_created_at` caution in `job_recovery_service.py`); ISO-8601 sorts
+  lexicographically correctly WITHIN a backend — never compare these values across
+  backends in Python.
+- **Filters:** `liveness` — canonical mission vocabulary
+  (`pending|processing|paused|completed|failed|cancelled`), single value or
+  comma-separated multi (OR), applied IN SQL as one `IN`-clause via the INVERTED
+  `_STATUS_CANONICAL_MAP` restricted to the Instance-status domain
+  (`processing` → `{idle, queued, running, waiting, waiting_children}`, etc.).
+  `dead_letter` is NOT an accepted filter value (it is a `terminal_reason`, never a
+  liveness — §8.2); unknown values ⇒ **400** (the work-router `kind` precedent: a typo
+  must not silently return an empty list). `pending` is in the accepted vocabulary but
+  has NO InstanceStatus source member today (§8.2 value-space note) — filtering on it
+  alone honestly matches nothing (`total=0`, not degraded). `agent_id` — exact-match
+  SQL filter on `Instance.agent_id`. Filters compose with AND semantics.
+- **Pagination: bounded limit/offset** per the repo list-endpoint convention — default
+  `DEFAULT_PAGE_LIMIT` (10), clamped to `[1, MAX_PAGE_LIMIT]` (100); offset clamped to
+  ≥ 0. The page cap (100) follows the `instances.py` clamp convention.
+- **Envelope** (`MissionListResponse`): `{missions, total, limit, offset, has_more,
+  degraded}` — the `{total, limit, offset, has_more}` part follows the
+  `InstanceListResponse` convention; three honesty-carrying deviations are [FLAGGED]
+  spec-silent additions: `total` and `has_more` are NULLABLE (`null` = "count
+  unavailable" — a degraded count leg; MUST NOT be rendered as `0`/`false`, which
+  would claim a different fact), and `degraded: bool` is an explicit whole-page-degrade
+  marker (empty rows because the count/page SQL leg failed).
+
+#### Performance bound — ≤3 SELECTs per page, zero per-row lookups
+
+`resolve_page()` issues EXACTLY three SELECTs per page regardless of page size, all
+batched: (1) `SELECT count(*)` with the filter WHERE, (2) the paged `SELECT … FROM
+instances` with filters + ordering + LIMIT/OFFSET in SQL, (3) ONE batched
+`job_queue_items` SELECT via `instance_id IN (…)` for the W4 hazard + `linked_jobs`
+(the C9 combined-SELECT helper). The bound is pinned by an ENGINE event-listener
+(`before_cursor_execute` spy) counting real SELECTs during the HTTP request — NOT
+mock counting — including a flat-as-page-doubles assertion
+(`tests/unit/routers/test_missions_api.py::TestEngineBoundQueryCount`).
+
+#### Degradation contract (§8.2 shape — NO 500 anywhere in the projection path)
+
+| Failure (real `SQLAlchemyError`, e.g. instance-engine outage) | HTTP | Shape | Warnings |
+|---|---|---|---|
+| List: count OR paged-instance leg fails | **200** | empty `missions`, `total=null`, `has_more=null`, `degraded=true` (whole-page degrade; remaining legs skipped) | exactly ONE |
+| List: batched JobItem leg fails | **200** | rows SURVIVE with instance-derived fields; `linked_jobs=[]`; W4 sub-check unavailable — the liveness-derived terminal reason stands as the answer (§8.2 indistinguishable-by-design); `degraded=false` | exactly ONE |
+| Detail: instance lookup fails | **200** | the degraded None-fields shape (`mission_id=null` … `linked_jobs=[]`) — NOT 404 (the id cannot be proven missing) and NOT 500 | exactly ONE |
+| Detail: JobItem lookup fails | **200** | instance-derived fields survive; `linked_jobs=[]`; W4 sub-check skipped | exactly ONE |
+| Detail: unknown id (no Instance row) | **404** | the only true-miss shape — distinct from the degraded 200 per the §8.3 null-vs-absent discipline | — |
+
+**[FLAGGED] honest deviation:** the task framing's "degraded rows (unknown-shape:
+None-fields, `mission_id` preserved) for list" is information-theoretically UNREACHABLE
+in this design: when the count/page leg fails, no ids are known (the paged Instance
+SELECT is the identity fetch — ordering + pagination live in that same statement, per
+the SQL-only constraint), so there is no `mission_id` to preserve; when it succeeds,
+rows are FULLY populated (strictly more information than the unknown shape). The
+whole-page degrade + `degraded=true` marker is the documented answer. The detail route
+DOES honor "200 with None-fields" exactly (`resolve()`'s degraded contract).
+
+#### W4 `dead_letter` pin at the HTTP binding
+
+The S4 lesson (ON-path dead-letter scenario surfacing `failed` instead of
+`dead_letter`, fixed at 7852aeab) is pinned at the WIRE, not merely the resolver:
+`tests/unit/routers/test_missions_api.py::TestW4DeadLetterBinding` asserts
+`terminal_reason == "dead_letter"` on BOTH routes for a RUNNING instance with a DEAD
+linked JobItem, plus the soft-delete exclusion (`deleted_at IS NOT NULL` rows do not
+trigger W4). The detail route's docstring carries the same hazard note that guards
+future callers against routing through `project()`.
+
+#### Test surface
+
+`tests/unit/routers/test_missions_api.py` (unit, 37 tests, file-backed SQLite
+`tmp_path` + `NullPool` + WAL): kill-switch ON/OFF matrix (404 both routes while OFF;
+routes still in OpenAPI), list contract (identity/fields, ALL-instances scope, liveness
+single/multi/case/whitespace/unknown-400/`dead_letter`-rejected/`pending`-sourceless,
+`agent_id`, filter composition), ordering (DESC + NULLS LAST + tiebreak) and pagination
+(bounds/offset/cap/default), detail contract (404 unknown, terminal fields, epoch
+constant 1, `started_at` fallback, `linked_jobs`), W4 binding, degradation binding
+(real dropped tables, 200-not-500, exactly-one-warning), and the engine-bound
+three-SELECT page bound. Route-count floor bumped 33 → 35 in
+`tests/unit/test_api_router_extraction.py` (the two new routes).
 
 ---
 
