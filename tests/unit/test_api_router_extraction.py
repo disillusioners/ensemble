@@ -48,6 +48,7 @@ class TestRouteRegistration:
             projects_router,
             queues_router,
             dlq_router,
+            missions_router,
         )
         
         # Create API router with /api prefix
@@ -66,6 +67,7 @@ class TestRouteRegistration:
         api_router.include_router(projects_router)
         api_router.include_router(queues_router)
         api_router.include_router(dlq_router)
+        api_router.include_router(missions_router)
         
         app.include_router(api_router)
         
@@ -85,9 +87,13 @@ class TestRouteRegistration:
         for r in sorted(routes_with_methods):
             print(f"  {r}")
         
-        # We expect at least 33 endpoints based on the refactoring
-        assert len(routes_with_methods) >= 33, (
-            f"Expected at least 33 endpoints, found {len(routes_with_methods)}"
+        # We expect at least 35 endpoints based on the refactoring.
+        # Legitimate floor bump 33 → 35 (M4-i pull-forward,
+        # feature/mission-class): the missions router registers exactly
+        # two new GET routes — /api/missions (list) and
+        # /api/missions/{mission_id} (detail).
+        assert len(routes_with_methods) >= 35, (
+            f"Expected at least 35 endpoints, found {len(routes_with_methods)}"
         )
 
     def test_agents_endpoints_exist(self, app):
