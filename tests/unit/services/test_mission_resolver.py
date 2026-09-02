@@ -61,6 +61,7 @@ from daemon.repositories.instance.models import Instance, InstanceStatus
 from daemon.repositories.instance.repository import SQLModelInstanceRepository
 from daemon.repositories.job_queue.models import AdmissionState, JobItem
 from daemon.repositories.job_queue.repository import JobRepository
+from daemon.repositories.task.repository import TaskRepository
 from daemon.services.mission_resolver import (
     MissionRecord,
     MissionResolver,
@@ -196,7 +197,9 @@ def _reset_mission_kill_switch():
     prior test would leak. This fixture is ``autouse`` so every test
     in this file starts with a clean state (kill-switch OFF by
     default; explicitly flipped ON by tests that exercise the ON
-    branch via ``_set_mission_kill_switch``).
+    branch via ``monkeypatch.setenv("ENSEMBLE_MISSION_PROJECTION_ENABLED", "1")``
+    — the same shape ``TestKillSwitch`` uses for its own
+    ON-path assertions).
     """
     _reset_mission_projection_for_tests()
     # Belt and suspenders: make sure the env var is also blank — the
@@ -621,23 +624,132 @@ class TestPurity:
     """The resolver never INSERTs / UPDATEs / DELETEs.
 
     Census invariant from constitution.py: KNOWN_ADMISSION_STATE_WRITERS
-    is frozen at 23; the resolver adds ZERO new writers. This test
-    pins the invariant at the resolver layer (session-spy style) so a
-    future regression that casually adds a write call to the resolver
-    fails loudly here — the unit test catches it before the
-    constitution drift test (which guards the wider census) catches
-    it.
+    is frozen at 23; the resolver adds ZERO new writers. The pure
+    row-COUNT snapshot test missed a class of regressions (in-place
+    UPDATE on an existing row keeps the row count steady but mutates a
+    value), so this layer now uses two complementary spies:
+
+    1. **Engine event listener** — records every SQL statement the
+       engine executes during the SUT call. The assertion fails
+       loudly if any ``INSERT`` / ``UPDATE`` / ``DELETE`` /
+       ``SAVEPOINT`` statement reaches the engine. SELECTs are
+       expected (the resolver is a read-model projection) and not
+       asserted against.
+    2. **Value/content snapshot** — captures the full set of
+       ``Instance`` and ``JobItem`` column values before and after
+       the SUT call. Catches regressions that bypass the engine
+       (rare — every code path goes through the engine — but the
+       belt-and-suspenders shape costs nothing).
+
+    Together the two spies pin the invariant at the resolver layer so
+    a future regression that casually adds a write call fails loudly
+    here — the unit test catches it before the constitution drift
+    test (which guards the wider census) catches it.
     """
+
+    @staticmethod
+    def _attach_dml_spy(engine: Engine) -> tuple[list[str], callable]:
+        """Attach a before-cursor-execute listener; return (captured, detacher).
+
+        The listener records the SQL statement text for every cursor
+        execution. INSERT / UPDATE / DELETE / SAVEPOINT statements
+        trip the assertion; SELECT statements are expected and
+        recorded but not asserted against. Returns the mutable list so
+        the caller can read it after the SUT call, and a callable that
+        removes the listener when invoked (must be called in a
+        ``finally`` so subsequent tests do not see the listener).
+        """
+        captured: list[str] = []
+
+        def _before_cursor_execute(  # noqa: ANN001 — SQLAlchemy hook
+            conn, cursor, statement, parameters, context, executemany  # noqa: ARG001
+        ):
+            captured.append(statement)
+
+        event.listen(engine, "before_cursor_execute", _before_cursor_execute)
+
+        def _detacher() -> None:
+            event.remove(engine, "before_cursor_execute", _before_cursor_execute)
+
+        return captured, _detacher
+
+    def _assert_no_writes(self, captured: list[str]) -> None:
+        """Fail the test if any captured statement is a writer."""
+        write_prefixes = ("INSERT", "UPDATE", "DELETE", "SAVEPOINT", "REPLACE")
+        offenders = [
+            stmt
+            for stmt in captured
+            if stmt.lstrip().upper().startswith(write_prefixes)
+        ]
+        assert not offenders, (
+            "PURITY violated: resolver emitted a write statement(s) "
+            f"during a read-only projection. Offenders: {offenders!r}. "
+            "MissionResolver is a pure read-model projection; it must "
+            "not INSERT/UPDATE/DELETE/SAVEPOINT/REPLACE."
+        )
+
+    def _snapshot_rows(self, engine: Engine) -> tuple[list[Instance], list[JobItem]]:
+        """Capture the full Instance and JobItem column values."""
+        from sqlmodel import Session as SQLModelSession
+        from sqlmodel import select
+
+        with SQLModelSession(engine) as s:
+            inst_rows = list(s.exec(select(Instance)).all())
+            job_rows = list(s.exec(select(JobItem)).all())
+        return inst_rows, job_rows
+
+    def _assert_no_value_drift(
+        self,
+        before: tuple[list[Instance], list[JobItem]],
+        after: tuple[list[Instance], list[JobItem]],
+    ) -> None:
+        """Assert every column of every row is identical pre/post SUT call."""
+        inst_before, job_before = before
+        inst_after, job_after = after
+        assert len(inst_before) == len(inst_after), (
+            "PURITY violated: Instance row count drifted."
+        )
+        assert len(job_before) == len(job_after), (
+            "PURITY violated: JobItem row count drifted."
+        )
+
+        # Compare via column-level extraction (not raw ``__dict__``,
+        # which carries SQLAlchemy's ``_sa_instance_state`` and other
+        # ORM-internal handles that change identity between sessions
+        # even when the data is identical). Use
+        # ``_asdict_like_columns`` to extract just the schema columns.
+        inst_columns = [c.key for c in Instance.__table__.columns]
+        job_columns = [c.key for c in JobItem.__table__.columns]
+
+        def _col_values(row, columns):
+            return {col: getattr(row, col, None) for col in columns}
+
+        for inst_a, inst_b in zip(inst_before, inst_after, strict=False):
+            vals_a = _col_values(inst_a, inst_columns)
+            vals_b = _col_values(inst_b, inst_columns)
+            assert vals_a == vals_b, (
+                "PURITY violated: an Instance column drifted across "
+                "the resolver call. Before/after must be byte-equal."
+                f" Diff keys: {[k for k in vals_a if vals_a[k] != vals_b[k]]}"
+            )
+        for job_a, job_b in zip(job_before, job_after, strict=False):
+            vals_a = _col_values(job_a, job_columns)
+            vals_b = _col_values(job_b, job_columns)
+            assert vals_a == vals_b, (
+                "PURITY violated: a JobItem column drifted across "
+                "the resolver call. Before/after must be byte-equal."
+                f" Diff keys: {[k for k in vals_a if vals_a[k] != vals_b[k]]}"
+            )
 
     def test_resolve_emits_no_dml(self, engine, resolver, instance_repo, job_repo):
         """``resolve()`` over a populated instance must not write anything.
 
-        The spy sits at the engine level: row counts on the writable
-        tables must be identical before and after a ``resolve``
-        call. The resolver opens its OWN SQLModel sessions through
-        the repository wrappers, so any DML it issues would land
-        in the same engine and show up in this count — the
-        assertion fails loudly on a write-via-resolver regression.
+        Dual spy: an engine-level ``before_cursor_execute`` listener
+        catches any writer-shaped statement; a value-by-value column
+        snapshot catches any in-place mutation that slips past the
+        listener. Belt-and-suspenders — the row-COUNT snapshot test
+        the file used previously missed in-place UPDATEs (row count
+        stays steady on UPDATE).
         """
         # Seed the row BEFORE the snapshot so the snapshot already
         # includes the seeded data (any delta after the resolve call
@@ -645,45 +757,29 @@ class TestPurity:
         iid = _seed_instance(engine, instance_id="inst-purity-1")
         _seed_job(engine, instance_id=iid, admission_state=AdmissionState.ACTIVE.value)
 
-        from sqlmodel import Session as SQLModelSession
-
-        with SQLModelSession(engine) as s:
-            inst_before = s.exec(
-                __import__("sqlmodel").select(Instance)
-            ).all()
-            job_before = s.exec(
-                __import__("sqlmodel").select(JobItem)
-            ).all()
-
-        record = resolver.resolve(iid)
+        before = self._snapshot_rows(engine)
+        captured, detach = self._attach_dml_spy(engine)
+        try:
+            record = resolver.resolve(iid)
+        finally:
+            detach()
         assert record is not None
 
-        # Re-snapshot — no writes should have happened.
-        with SQLModelSession(engine) as s:
-            inst_after = s.exec(
-                __import__("sqlmodel").select(Instance)
-            ).all()
-            job_after = s.exec(
-                __import__("sqlmodel").select(JobItem)
-            ).all()
+        after = self._snapshot_rows(engine)
 
-        # Purity: row-count delta is zero. The MissionResolver is a
-        # pure reader — see module docstring "census invariant".
-        assert len(inst_after) == len(inst_before), (
-            f"PURITY violated: instance row count changed "
-            f"({len(inst_before)} → {len(inst_after)}). The resolver "
-            f"must not INSERT/UPDATE/DELETE."
-        )
-        assert len(job_after) == len(job_before), (
-            f"PURITY violated: job row count changed "
-            f"({len(job_before)} → {len(job_after)})."
-        )
+        # Spy 1: no writer-shaped SQL reached the engine.
+        self._assert_no_writes(captured)
+        # Spy 2: every column value is byte-equal before and after.
+        self._assert_no_value_drift(before, after)
 
     def test_resolve_many_emits_no_dml(self, engine, resolver):
-        """``resolve_many()`` over a populated page must not write."""
-        from sqlmodel import Session as SQLModelSession
-        from sqlmodel import select
+        """``resolve_many()`` over a populated page must not write.
 
+        Same dual-spy shape as ``test_resolve_emits_no_dml``. The
+        batched path opens its own SQLModel session via
+        ``_batch_instances`` and ``_list_linked_jobs``; every cursor
+        execution routes through the engine-level listener.
+        """
         # Populate the page with 5 instances to exercise the
         # batched path.
         ids = [
@@ -691,19 +787,18 @@ class TestPurity:
             for i in range(5)
         ]
 
-        with SQLModelSession(engine) as s:
-            inst_before = s.exec(select(Instance)).all()
-            job_before = s.exec(select(JobItem)).all()
-
-        records = resolver.resolve_many(ids)
+        before = self._snapshot_rows(engine)
+        captured, detach = self._attach_dml_spy(engine)
+        try:
+            records = resolver.resolve_many(ids)
+        finally:
+            detach()
         assert len(records) == 5
 
-        with SQLModelSession(engine) as s:
-            inst_after = s.exec(select(Instance)).all()
-            job_after = s.exec(select(JobItem)).all()
+        after = self._snapshot_rows(engine)
 
-        assert len(inst_after) == len(inst_before)
-        assert len(job_after) == len(job_before)
+        self._assert_no_writes(captured)
+        self._assert_no_value_drift(before, after)
 
 
 # ─── Kill-switch OFF/ON ────────────────────────────────────────────────────
@@ -722,14 +817,6 @@ class TestKillSwitch:
     * ON  → ``WorkRecord.to_dict`` INCLUDES the three keys with values
       populated from :class:`MissionResolver`.
     """
-
-    def _set_mission_kill_switch(self, enabled: bool):
-        """Set the kill-switch via env var and reset its cached state."""
-        if enabled:
-            os.environ["ENSEMBLE_MISSION_PROJECTION_ENABLED"] = "1"
-        else:
-            os.environ.pop("ENSEMBLE_MISSION_PROJECTION_ENABLED", None)
-        _reset_mission_projection_for_tests()
 
     def test_default_off(self, monkeypatch):
         """The default (unset env) is OFF.
@@ -854,6 +941,231 @@ class TestWorkRecordIntegration:
             # but doing it in-line makes the test self-contained.
             os.environ.pop("ENSEMBLE_MISSION_PROJECTION_ENABLED", None)
             _reset_mission_projection_for_tests()
+
+
+# ─── F1 ON-path regression: WorkResolverService with kill-switch ON ────────
+
+
+class TestWorkResolverServiceKillSwitchOn:
+    """Regression suite for the F1 fix.
+
+    The F1 finding was that ``WorkResolverService._mission_resolver_obj``
+    was read by the lazy accessor but NEVER initialised in ``__init__``
+    — with the kill-switch ON and no constructor-injected resolver, the
+    first call through the lazy accessor raised ``AttributeError``,
+    which would have bricked all four Fix-C read surfaces on the
+    operator flip. The fix seeds the attribute to ``None`` in
+    ``__init__``; these tests pin the ON-path contract end-to-end.
+
+    Each test drives the resolver with a populated engine + the
+    kill-switch ON; the assertion is that the call returns a
+    ``WorkRecord`` with the three mission fields populated and that
+    no ``AttributeError`` escapes the call. Pre-fix code (missing
+    ``__init__`` initialiser) raises ``AttributeError`` here; post-fix
+    code returns the populated ``WorkRecord``.
+    """
+
+    def test_resolve_work_on_path_populates_mission_fields(
+        self, engine, instance_repo, job_repo, monkeypatch
+    ):
+        """``WorkResolverService.resolve_work`` with the kill-switch ON
+        must return a populated ``WorkRecord`` with the three mission
+        fields — NOT raise ``AttributeError``.
+
+        Pre-fix code shape (no ``_mission_resolver_obj`` initialiser
+        in ``__init__``) raised ``AttributeError`` here on the first
+        lazy accessor call; this test would fail loudly with that
+        exception. Post-fix code shape (initialiser added) returns
+        the populated ``WorkRecord``.
+        """
+        from daemon.services.work_resolver import WorkResolverService
+
+        # Seed the Instance + JobItem so the projection has real data
+        # to surface. Use a non-terminal status so the resolver
+        # returns ``terminal_reason=None`` (the additive field is
+        # present but its value is ``None`` — see the
+        # ``test_workrecord_mission_fields_present_on`` precedent for
+        # the presence-vs-value distinction).
+        iid = _seed_instance(engine, instance_id="inst-on-path-1")
+        jid = _seed_job(
+            engine, instance_id=iid, admission_state=AdmissionState.ACTIVE.value
+        )
+
+        monkeypatch.setenv("ENSEMBLE_MISSION_PROJECTION_ENABLED", "1")
+        _reset_mission_projection_for_tests()
+
+        # Wire the resolver WITHOUT injecting a MissionResolver seed
+        # — the lazy accessor must self-construct on first ON-path
+        # call. This is the exact shape that broke pre-fix.
+        svc = WorkResolverService(
+            task_repo=_task_repo_fixture(engine),
+            job_repo=job_repo,
+            instance_repo=instance_repo,
+        )
+        record = svc.resolve_work(jid)
+        assert record is not None, (
+            "ON-path resolve_work must return a populated WorkRecord "
+            "(F1 regression: an AttributeError on the lazy accessor "
+            "would surface here as the call returning None or "
+            "raising)."
+        )
+        # The three additive mission fields are populated from
+        # MissionResolver._project — ``instance_id`` identity holds
+        # per the M1 spec §3 identity contract.
+        assert record.mission_id == iid
+        assert record.mission_epoch is not None
+        assert record.mission_terminal_reason is None
+
+    def test_resolve_work_on_path_attribute_error_absent(
+        self, engine, instance_repo, job_repo, monkeypatch
+    ):
+        """Dedicated pinpoint test for the F1 ``AttributeError`` class.
+
+        Pre-fix: ``AttributeError: 'WorkResolverService' object has
+        no attribute '_mission_resolver_obj'`` escapes the lazy
+        accessor. Post-fix: no such exception escapes. The dedicated
+        test gives the failure mode a name in the test report rather
+        than collapsing it into the generic ``record is None`` /
+        ``record.mission_id == iid`` assertions above.
+        """
+        from daemon.services.work_resolver import WorkResolverService
+
+        iid = _seed_instance(engine, instance_id="inst-on-path-2")
+        jid = _seed_job(
+            engine, instance_id=iid, admission_state=AdmissionState.ACTIVE.value
+        )
+
+        monkeypatch.setenv("ENSEMBLE_MISSION_PROJECTION_ENABLED", "1")
+        _reset_mission_projection_for_tests()
+
+        svc = WorkResolverService(
+            task_repo=_task_repo_fixture(engine),
+            job_repo=job_repo,
+            instance_repo=instance_repo,
+        )
+        try:
+            record = svc.resolve_work(jid)
+        except AttributeError as exc:  # pragma: no cover — fails the test
+            pytest.fail(
+                "F1 regression surfaced: WorkResolverService lazy "
+                "accessor raised AttributeError with the kill-switch "
+                f"ON: {exc!r}. The __init__ must initialise "
+                "_mission_resolver_obj=None so the lazy accessor has "
+                "an attribute to memoise against."
+            )
+        assert record is not None
+
+    def test_resolve_work_off_path_preserves_pre_m1_instance_timing(
+        self, engine, instance_repo, job_repo, monkeypatch
+    ):
+        """F2 byte-identical regression — OFF path must NOT do the
+        ``_lookup_instance`` call on the single-row JobItem path.
+
+        Pre-M1 behaviour for ``resolve_work`` (single-row JobItem
+        path) was: no instance lookup at all on this path, so the
+        WorkRecord's ``started_at`` / ``completed_at`` fields were
+        sourced from ``None`` (the JobItem mirror columns that
+        carried those values were dropped in Phase 5 — see the
+        ``_instance_started_at`` / ``_instance_completed_at`` doc
+        comments). The M1 commit added an unconditional
+        ``_lookup_instance`` block in ``_job_to_record`` that broke
+        the byte-identical OFF contract: DONE/DEAD rows whose
+        backing ``Instance`` had ``last_activity_at`` populated
+        started surfacing instance-derived timestamps on the
+        single-row path even with the kill-switch OFF.
+
+        The F2 fix gates the ``_lookup_instance`` block on the
+        kill-switch. This test pins the OFF shape: the WorkRecord's
+        ``started_at`` / ``completed_at`` must stay ``None`` (the
+        pre-M1 value) even when the backing ``Instance`` carries
+        timing data. Post-fix OFF passes; pre-fix OFF (the buggy
+        state) fails because the instance-derived values would
+        appear instead.
+        """
+        from daemon.repositories.instance.models import InstanceStatus
+        from daemon.services.work_resolver import WorkResolverService
+
+        # Seed a terminal Instance WITH ``last_activity_at`` populated
+        # — the F2 bug would surface the instance's timing values on
+        # the single-row resolve path even when the kill-switch was
+        # OFF. Pre-M1 the Instance was never consulted on the
+        # single-row path.
+        now_dt = datetime.now(timezone.utc)
+        iid = "inst-f2-off"
+        with Session(engine) as s:
+            inst = Instance(
+                instance_id=iid,
+                agent_id="developer",
+                agent_dir="/tmp/agents/developer",
+                agent_name="developer",
+                project_id="test-project",
+                status=InstanceStatus.COMPLETED.value,
+                created_at=now_dt.isoformat(),
+                updated_at=now_dt.isoformat(),
+                last_activity_at=now_dt,
+                paused_at=None,
+            )
+            s.add(inst)
+            s.commit()
+        jid = _seed_job(
+            engine,
+            instance_id=iid,
+            admission_state=AdmissionState.DONE.value,
+            terminal_reason="completed",
+        )
+
+        # The autouse fixture has the kill-switch OFF (no env
+        # var set; cached state cleared). The monkeypatch here is
+        # belt-and-suspenders in case a prior test in the suite
+        # leaked the env.
+        monkeypatch.delenv(
+            "ENSEMBLE_MISSION_PROJECTION_ENABLED", raising=False
+        )
+        _reset_mission_projection_for_tests()
+        assert is_mission_projection_enabled() is False
+
+        svc = WorkResolverService(
+            task_repo=_task_repo_fixture(engine),
+            job_repo=job_repo,
+            instance_repo=instance_repo,
+        )
+        record = svc.resolve_work(jid)
+        assert record is not None
+
+        # Pre-M1 shape: instance timing fields are None on the
+        # single-row path (the JobItem mirror columns were dropped
+        # in Phase 5; the F2 fix restores the OFF contract by
+        # skipping the ``_lookup_instance`` call). The mission
+        # additive fields stay None too — OFF means
+        # byte-identical to pre-M1 across the whole record.
+        assert record.started_at is None, (
+            "F2 regression: OFF path leaked an instance-derived "
+            f"started_at onto a single-row WorkRecord: {record.started_at!r}. "
+            "Pre-M1 the JobItem mirror columns were the only "
+            "started_at source and they surfaced None on this "
+            "path; the F2 fix gates the _lookup_instance block "
+            "on the kill-switch."
+        )
+        assert record.completed_at is None, (
+            "F2 regression: OFF path leaked an instance-derived "
+            f"completed_at onto a single-row WorkRecord: {record.completed_at!r}. "
+            "Same rationale as started_at — pre-M1 the single-row "
+            "path did not consult the Instance row."
+        )
+        # Mission additive fields are absent — the M1 default.
+        assert record.mission_id is None
+        assert record.mission_epoch is None
+        assert record.mission_terminal_reason is None
+
+
+def _task_repo_fixture(engine: Engine) -> TaskRepository:
+    """Build a real TaskRepository bound to the test engine.
+
+    Lives next to the F1 ON-path tests so the tests are
+    self-contained — they wire a fresh ``WorkResolverService``
+    instead of relying on a session-scoped fixture.
+    """
+    return TaskRepository(engine)
 
 
 

@@ -495,22 +495,22 @@ class MissionResolver:
     ) -> dict[str, "Instance"]:
         """Batched Instance SELECT for the resolver's batch path.
 
-        Mirrors ``WorkResolverService._batch_instances`` exactly:
-        one round-trip per batch, narrow ``SQLAlchemyError`` catch +
-        warning log + empty dict on transient DB error. The narrow
-        catch stays narrow here — programmer mistakes (TypeError,
-        etc.) must propagate.
+        Mirrors ``WorkResolverService._batch_instances``: one round-trip
+        per batch. ``SQLAlchemyError`` is deliberately NOT caught here —
+        a transient DB error on the Instance batch is a hard failure
+        that must surface to the caller (the single-row fallback in
+        :meth:`resolve` and the per-instance fallback in
+        :meth:`resolve_many` cover the partial-failure case at the next
+        layer up). Programmer mistakes (TypeError, etc.) must propagate
+        from here as well — no broad ``except Exception`` swallowing.
         """
         from sqlmodel import Session as SQLModelSession
 
         from daemon.repositories.instance.models import Instance
 
-        try:
-            with SQLModelSession(self._instance_repo.engine) as session:
-                stmt = select(Instance).where(Instance.instance_id.in_(instance_ids))
-                return {row.instance_id: row for row in session.exec(stmt)}
-        except SQLAlchemyError as exc:
-            raise
+        with SQLModelSession(self._instance_repo.engine) as session:
+            stmt = select(Instance).where(Instance.instance_id.in_(instance_ids))
+            return {row.instance_id: row for row in session.exec(stmt)}
 
     def _project(self, instance: "Instance") -> MissionRecord:
         """Project one already-loaded ``Instance`` row onto the mission.

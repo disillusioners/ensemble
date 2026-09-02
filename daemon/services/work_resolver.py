@@ -889,6 +889,15 @@ class WorkResolverService:
         # builds the actual ``MissionResolver`` instance on first call
         # when the kill-switch is ON; ``None`` here means "lazy".
         self._mission_resolver_seed: "MissionResolver | None" = mission_resolver
+        # M1 (mission-class, 2026-09-02) — lazy-accessor cache. The
+        # ``_mission_resolver`` helper reads this attribute on first
+        # access (under the kill-switch ON branch) to memoise the
+        # constructed resolver; without this initialiser the lazy
+        # accessor raises ``AttributeError`` when the kill-switch is
+        # ON and no resolver seed was injected. Keep the initialiser
+        # at the SAME place as the seed (constructor body) so the two
+        # attributes stay together at code review.
+        self._mission_resolver_obj: "MissionResolver | None" = None
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -1514,11 +1523,20 @@ class WorkResolverService:
         # wire format stays byte-identical to pre-M1. The kill-switch
         # check is inside the helper so a single answer gates both
         # the per-row and the batched paths.
-        if instance is None and job.instance_id is not None:
+        if (
+            _is_mission_projection_enabled()
+            and instance is None
+            and job.instance_id is not None
+        ):
             # Single-row ``resolve_work`` path — no pre-fetched
             # instance yet. Look it up lazily before consulting
-            # ``MissionResolver``. Skipped when the kill-switch is
-            # OFF (the helper short-circuits before needing the row).
+            # ``MissionResolver``. Gated on the kill-switch so the
+            # OFF path stays byte-identical to pre-M1: no
+            # ``_lookup_instance`` call on the single-row JobItem
+            # path means ``_instance_started_at`` /
+            # ``_instance_completed_at`` receive ``instance=None``
+            # and fall through to the ``None`` they would have
+            # surfaced before M1 added the additive fields.
             instance = self._lookup_instance(job.instance_id)
         mission_id, mission_epoch, mission_terminal_reason = (
             self._mission_fields_for_instance(instance)

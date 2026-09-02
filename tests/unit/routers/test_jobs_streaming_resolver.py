@@ -19,6 +19,7 @@ consumer does not need a corresponding change.
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -84,6 +85,28 @@ def engine() -> Engine:
         yield eng
     finally:
         eng.dispose()
+
+
+@pytest.fixture(autouse=True)
+def _reset_mission_kill_switch():
+    """Per-test: reset the M1 kill-switch so cached state doesn't leak.
+
+    The kill-switch is module-level cached state in
+    ``daemon/services/mission_resolver.py``; left over from a prior
+    test it would silently flip subsequent tests. This fixture is
+    ``autouse`` so every test in this file starts with the OFF
+    default and restores OFF on teardown — mirrors the shape used by
+    ``tests/unit/services/test_mission_resolver.py``.
+    """
+    from daemon.services.mission_resolver import (
+        _reset_mission_projection_for_tests,
+    )
+
+    _reset_mission_projection_for_tests()
+    os.environ.pop("ENSEMBLE_MISSION_PROJECTION_ENABLED", None)
+    yield
+    _reset_mission_projection_for_tests()
+    os.environ.pop("ENSEMBLE_MISSION_PROJECTION_ENABLED", None)
 
 
 @pytest.fixture
@@ -213,6 +236,7 @@ def _seed_instance(
     instance_id: str | None = None,
     agent_id: str = "developer",
     project_id: str | None = "test-project",
+    status: str = "running",
 ) -> str:
     iid = instance_id or f"inst-{uuid.uuid4().hex[:8]}"
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -223,7 +247,7 @@ def _seed_instance(
             agent_dir=f"/tmp/agents/{agent_id}",
             agent_name=agent_id,
             project_id=project_id,
-            status="running",
+            status=status,
             created_at=now_iso,
             updated_at=now_iso,
             paused_at=None,
@@ -238,11 +262,15 @@ def _seed_completed_job(
     *,
     job_id: str | None = None,
     queue_id: str | None = None,
+    instance_id: str | None = None,
 ) -> str:
     """Insert a JobItem already in the terminal ``completed`` state.
 
     If ``queue_id`` is set, also inserts a matching ``JobQueue`` row so
     the FK constraint on ``job_queue_items.queue_id`` is satisfied.
+    If ``instance_id`` is set, stamps the JobItem with that backing
+    instance — required for the M1 ON-path projection test (the
+    ``mission_id`` field resolves to ``instance_id`` per spec §3).
     """
     jid = job_id or str(uuid.uuid4())
     with Session(engine) as s:
@@ -271,7 +299,7 @@ def _seed_completed_job(
             priority=5,
 
             admission_state=AdmissionState.DONE.value,
-            instance_id=None,
+            instance_id=instance_id,
             queue_id=queue_id,
             created_at=datetime.now(timezone.utc).isoformat(),
             job_metadata={},
@@ -607,6 +635,79 @@ class TestStreamJobEventsResolverOn:
                 assert response.status_code == 200
                 assert "text/event-stream" in response.headers.get("content-type", "")
                 await response.aclose()
+
+    async def test_resolver_emits_mission_fields_when_kill_switch_on(
+        self,
+        engine: Engine,
+        app_resolver_on: FastAPI,
+        monkeypatch,
+    ):
+        """ON variant — the SSE payload includes the three M1 additive
+        mission fields when the kill-switch is ON.
+
+        Companion to
+        ``test_completed_job_via_resolver_emits_terminal_events`` —
+        that test pins the OFF shape (no mission keys in the payload);
+        this one pins the ON shape (all three keys present, with
+        values populated from the linked ``Instance`` row via
+        :class:`MissionResolver`).
+
+        The kill-switch is resolved once per process from the
+        ``ENSEMBLE_MISSION_PROJECTION_ENABLED`` env var; the
+        ``monkeypatch`` here sets the env before the streaming
+        request fires, and the reset happens on test teardown (the
+        file-level ``_reset_mission_kill_switch`` autouse fixture
+        restores the OFF default).
+        """
+        from daemon.repositories.instance.models import InstanceStatus
+        from daemon.services.mission_resolver import (
+            _reset_mission_projection_for_tests,
+        )
+
+        monkeypatch.setenv("ENSEMBLE_MISSION_PROJECTION_ENABLED", "1")
+        _reset_mission_projection_for_tests()
+
+        # Seed a backing Instance row in a TERMINAL state (so the
+        # mission projection surfaces ``mission_terminal_reason``)
+        # + a completed JobItem stamped with that ``instance_id``.
+        # Note: the W4 hazard in MissionResolver._project sources
+        # terminal_reason from the INSTANCE's liveness, not the
+        # JobItem's admission_state, so the Instance must itself
+        # be in a terminal ``InstanceStatus``.
+        iid = _seed_instance(
+            engine, instance_id="inst-mission-on", status=InstanceStatus.COMPLETED.value
+        )
+        jid = _seed_completed_job(engine, instance_id=iid)
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app_resolver_on),
+            base_url="http://test",
+            timeout=httpx.Timeout(10.0),
+        ) as async_client:
+            async with async_client.stream(
+                "GET", f"/api/jobs/{jid}/events"
+            ) as response:
+                assert response.status_code == 200
+                events = await _read_sse_events(response, max_events=2)
+                await response.aclose()
+
+        completed = events[1]["data"]
+        # Fix C fields are still present (they're always emitted on
+        # the unified path; the kill-switch only gates the M1
+        # additive keys).
+        assert completed["job_type"] == "task"
+        # ON → the three M1 additive mission keys ARE present, with
+        # ``mission_id`` equal to the backing ``instance_id`` per
+        # the M1 spec §3 identity contract.
+        assert "mission_id" in completed
+        assert completed["mission_id"] == iid
+        assert "mission_epoch" in completed
+        assert completed["mission_epoch"] is not None
+        assert "mission_terminal_reason" in completed
+        # The terminal ``completed`` Instance status maps onto the
+        # ``completed`` mission terminal_reason via the canonical
+        # liveness mapping in MissionResolver._project.
+        assert completed["mission_terminal_reason"] == "completed"
 
 
 class TestResolverFlagDefault:

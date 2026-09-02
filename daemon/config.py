@@ -1324,52 +1324,6 @@ class JobSystemConfig(BaseSettings):
     # flag.
 
 
-class MissionConfig(BaseSettings):
-    """Mission-class read-model projection settings (M1, 2026-09-02).
-
-    Per ``.agents/shared/planning/mission-class/architecture-recommendation.md``
-    §5 M1 row: ships with the additive ``MissionResolver`` (a pure
-    read-model projection keyed by ``instance_id``) plus three additive
-    fields (``mission_id`` / ``mission_epoch`` /
-    ``mission_terminal_reason``) on the four Fix-C read surfaces.
-    Default OFF — soak discipline mirroring the
-    ``ENSEMBLE_WC_WAKE_ENQUEUE`` (C2-D2.5) and
-    ``LIMITS_GOVERNOR_RECURSION_GUARD_ENABLED`` precedents. Operator flips
-    ON after ≤2 weeks of OFF soak.
-
-    The env resolution itself lives in
-    ``daemon/services/mission_resolver.py:_resolve_mission_projection_enabled``
-    (cached once per process, restart-required to pick up a flip — same
-    shape as the WC-wake resolver). The Pydantic field is the YAML /
-    programmatic surface for the same configuration.
-    """
-
-    model_config = SettingsConfigDict(env_prefix="ENSEMBLE_MISSION_")
-
-    #: Master kill-switch. When ``False`` (default — M1 ships
-    #: additive-only, projection-gated), the ``MissionResolver`` does
-    #: NOT surface additive fields on the four Fix-C read surfaces;
-    #: responses stay byte-identical to the pre-M1 wire format. When
-    #: ``True`` (operator-activated after ≤2 weeks of OFF soak), the
-    #: three additive mission fields surface on ``WorkRecord``,
-    #: ``JobResponse``, ``_ResolvedWork`` (SSE), and ``_job_to_response``
-    #: (jobs_crud delegation). Dual-read against the
-    #: ``ENSEMBLE_MISSION_PROJECTION_ENABLED`` env var resolves the
-    #: runtime state; the env wins (defensive precedence chain that
-    #: matches the governor-guard resolver).
-    projection_enabled: bool = Field(
-        default=False,
-        description=(
-            "Mission projection kill-switch (M1, default OFF). "
-            "ENV: ENSEMBLE_MISSION_PROJECTION_ENABLED. OFF = mission "
-            "additive fields absent from the four Fix-C read surfaces "
-            "(byte-identical to pre-M1); ON = mission_id / "
-            "mission_epoch / mission_terminal_reason surface on every "
-            "JobItem-backed record. Restart required to flip."
-        ),
-    )
-
-
 class McpPoolConfig(BaseSettings):
     """MCP warm-up connection pool configuration."""
 
@@ -1851,7 +1805,6 @@ class Config(BaseSettings):
     slash_commands: SlashCommandConfig = Field(default_factory=SlashCommandConfig)
     services: ServicesConfig = Field(default_factory=ServicesConfig)
     job_system: JobSystemConfig = Field(default_factory=JobSystemConfig)
-    mission: MissionConfig = Field(default_factory=MissionConfig)
     mcp_pool: McpPoolConfig = Field(default_factory=McpPoolConfig)
     skill_evolution: SkillEvolutionConfig = Field(default_factory=SkillEvolutionConfig)
     loop_breaker: LoopBreakerConfig = Field(default_factory=LoopBreakerConfig)

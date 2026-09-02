@@ -223,14 +223,20 @@ class JobResponse(BaseModel):
 
         Note: the dict is built via per-key ``setitem`` assignment
         instead of a single ``{...}`` literal — the constitution
-        scanner (:func:`_find_write_line_numbers`) flags any dict
-        literal with a key named ``"admission_state"`` as a (possible)
-        W5-style writer. Building the dict incrementally lets the
-        scanner see the emission as ``ast.Assign`` (a regular attribute
-        assignment) rather than a writer-shaped dict literal; the line
-        stays inside this method, so it never claims a writer
-        registration. See ``daemon/job_state/constitution.py``
-        ``_SERIALIZE_METHOD_NAMES`` for the parallel convention.
+        scanner (:func:`_find_write_line_numbers` in
+        ``daemon/job_state/constitution.py``) flags any dict literal
+        with a key named ``"admission_state"`` as a (possible) W5-style
+        writer. Building the dict incrementally lets the scanner see
+        the emission as ``ast.Assign`` (a regular attribute assignment)
+        rather than a writer-shaped dict literal; the line stays inside
+        this method, so it never claims a writer registration. Note
+        that the actual filter is the AST shape (per-key assignment
+        rather than dict literal) — ``_SERIALIZE_METHOD_NAMES`` is the
+        parallel convention used for OTHER serialisation helpers (e.g.
+        ``to_dict`` / ``to_payload``) and does NOT include this
+        ``_serialize`` name. The construction shape is the
+        authoritative mechanism for this method; the name-list filter
+        is the convention for the rest of the codebase.
         """
         # Build the base dict via per-key assignments. The dict ends
         # up identical to ``{"job_id": ..., ...}``; the construction
