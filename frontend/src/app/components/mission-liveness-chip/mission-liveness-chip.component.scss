@@ -1,0 +1,36 @@
+// Fix C (§8.2) — shared mission-liveness chip. ONE visual grammar
+// across job-card, job-queue-panel, and job-detail-drawer. Colour
+// comes verbatim from the chip object (no hard-coded tint); live
+// missions pulse, settled missions render muted.
+
+.mission-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 10px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+
+  .mission-chip-icon {
+    font-size: 14px;
+    width: 14px;
+    height: 14px;
+  }
+
+  &.mission-live .mission-chip-icon {
+    animation: mission-chip-spin 1.5s linear infinite;
+  }
+
+  // Settled missions stay inline (no drop) but render muted so the
+  // live/settled split is readable without colour alone.
+  &.mission-settled {
+    opacity: 0.75;
+  }
+}
+
+@keyframes mission-chip-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}

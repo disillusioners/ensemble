@@ -4,6 +4,7 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { getStatusColor as modelGetStatusColor, Job, JobStatus, missionLivenessChip } from '../../models/job.model';
+import { MissionLivenessChipComponent } from '../mission-liveness-chip/mission-liveness-chip.component';
 
 const MAX_RECENT_JOBS = 10;
 
@@ -28,6 +29,7 @@ const MAX_RECENT_JOBS = 10;
     MatIconModule,
     MatProgressSpinnerModule,
     MatTooltipModule,
+    MissionLivenessChipComponent,
   ],
   templateUrl: './job-queue-panel.component.html',
   styleUrl: './job-queue-panel.component.scss',

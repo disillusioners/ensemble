@@ -95,33 +95,9 @@
   }
 }
 
-.mission-chip {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 4px 10px;
-  border-radius: 16px;
-  font-size: 12px;
-  font-weight: 600;
-  border: 1px solid currentColor;
-
-  .mission-icon {
-    font-size: 14px;
-    width: 14px;
-    height: 14px;
-  }
-
-  &.mission-live .mission-icon {
-    animation: spin 1.5s linear infinite;
-  }
-
-  // Settled missions: drop the tinted pill to a muted outline so the
-  // live/settled split is readable without colour alone.
-  &.mission-settled {
-    background-color: transparent;
-    opacity: 0.75;
-  }
-}
+// The mission-liveness chip is rendered via ``app-mission-liveness-chip``;
+// its visual grammar lives in that component's encapsulated styles. No
+// local chip styles are needed here.
 
 .paused-badge {
   display: flex;

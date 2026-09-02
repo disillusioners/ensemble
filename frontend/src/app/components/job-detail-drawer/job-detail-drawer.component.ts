@@ -9,6 +9,7 @@ import { MatTooltipModule } from '@angular/material/tooltip';
 import { Clipboard } from '@angular/cdk/clipboard';
 import type { Job, MissionLivenessChip } from '../../models/job.model';
 import { missionLivenessChip } from '../../models/job.model';
+import { MissionLivenessChipComponent } from '../mission-liveness-chip/mission-liveness-chip.component';
 
 @Component({
   selector: 'app-job-detail-drawer',
@@ -21,6 +22,7 @@ import { missionLivenessChip } from '../../models/job.model';
     MatIconModule,
     MatDividerModule,
     MatTooltipModule,
+    MissionLivenessChipComponent,
   ],
   templateUrl: './job-detail-drawer.component.html',
   styleUrl: './job-detail-drawer.component.scss',

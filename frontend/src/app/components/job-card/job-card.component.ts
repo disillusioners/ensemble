@@ -13,6 +13,7 @@ import {
   getKindLabel,
   isTaskBackedKind,
 } from '../../models/work.model';
+import { MissionLivenessChipComponent } from '../mission-liveness-chip/mission-liveness-chip.component';
 
 @Component({
   selector: 'app-job-card',
@@ -24,7 +25,8 @@ import {
     MatChipsModule,
     MatIconModule,
     MatExpansionModule,
-    MatTooltipModule
+    MatTooltipModule,
+    MissionLivenessChipComponent,
   ],
   templateUrl: './job-card.component.html',
   styleUrl: './job-card.component.scss'
@@ -157,21 +159,11 @@ export class JobCardComponent {
    * renders nothing extra (mission row, Task-backed record, degraded
    * lookup, or no linked instance — all ``null`` by design).
    *
-   * The chip renders for BOTH live and settled liveness with
-   * distinct styling: live values pulse in their status colour,
-   * settled values render muted. This is what makes a terminal
-   * receipt beside a working parent read as "handled · mission
-   * still going" instead of a bare "completed".
+   * Rendered through the shared ``<app-mission-liveness-chip>`` so
+   * colour, tooltip wording, and live/settled styling stay in lock-
+   * step with the panel and the drawer.
    */
   missionChip = computed(() => missionLivenessChip(this.job()));
-
-  missionChipTooltip = computed(() => {
-    const chip = this.missionChip();
-    if (!chip) return '';
-    return chip.live
-      ? `Message receipt handled. Parent mission still working (canonical status: ${chip.value}).`
-      : `Message receipt handled. Parent mission settled (canonical status: ${chip.value}).`;
-  });
 
   canCancel = computed(() => {
     const status = this.job().status;

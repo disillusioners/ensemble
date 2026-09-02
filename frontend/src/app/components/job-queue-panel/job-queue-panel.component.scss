@@ -43,21 +43,6 @@
     padding: 2px 8px;
     letter-spacing: 0.3px;
   }
-
-  /* Fix C (§8.2) — live-mission pill beside the running count. Same
-     pill geometry as .header-count; shares the blue live colour. */
-  .header-missions {
-    font-size: 11px;
-    font-weight: 500;
-    border-radius: 4px;
-    padding: 2px 8px;
-    letter-spacing: 0.3px;
-
-    &.live {
-      color: #3b82f6;
-      background: rgba(59, 130, 246, 0.12);
-    }
-  }
 }
 
 .panel-list {
@@ -250,45 +235,14 @@
         letter-spacing: 0.5px;
       }
 
-      /* Fix C (§8.2) — mission-liveness tag on receipt rows. Colour
-         comes inline from the model helper; live tags show the sync
-         icon, settled tags the check icon. Muted when settled so a
-         terminal receipt beside a settled mission reads calm. */
-      .mission-tag {
-        display: inline-flex;
-        align-items: center;
-        gap: 3px;
-        font-weight: 500;
-        letter-spacing: 0.3px;
-
-        .mission-tag-icon {
-          font-size: 12px;
-          width: 12px;
-          height: 12px;
-        }
-
-        &.mission-live .mission-tag-icon {
-          animation: mission-tag-spin 1.5s linear infinite;
-        }
-
-        &.mission-settled {
-          opacity: 0.7;
-        }
-      }
+      // Mission-liveness chips on receipt rows are rendered via
+// ``app-mission-liveness-chip``; the panel just hosts the element.
+      // No local chip styles are needed here.
 
       .time-text {
         color: #64748b;
         margin-left: auto;
       }
     }
-  }
-}
-
-@keyframes mission-tag-spin {
-  from {
-    transform: rotate(0deg);
-  }
-  to {
-    transform: rotate(360deg);
   }
 }

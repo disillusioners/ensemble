@@ -99,16 +99,7 @@
         <div class="detail-item">
           <span class="label">Mission Liveness</span>
           <span class="value">
-            <span
-              class="badge badge-mission"
-              [class.mission-live]="chip.live"
-              [class.mission-settled]="!chip.live"
-              [style.color]="chip.color"
-              [matTooltip]="chip.live
-                ? 'Message handled. Parent mission still working (canonical status: ' + chip.value + ').'
-                : 'Message handled. Parent mission settled (canonical status: ' + chip.value + ').'">
-              {{ chip.label }}
-            </span>
+            <app-mission-liveness-chip [chip]="chip" />
           </span>
         </div>
       }
