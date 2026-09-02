@@ -16,6 +16,8 @@
 // queue badge. The UI does not lie about which backing table the row
 // came from.
 
+import { MissionLiveness } from './job.model';
+
 /**
  * The kind of work record.
  *
@@ -46,6 +48,20 @@ export interface Work {
   result_summary: string | null;
   error: string | null;
   created_at: string;
+  /**
+   * Fix C read-model split (docs/job-task-system.md §8.2):
+   * JobItem-side discriminator — ``'task'`` (mission) or
+   * ``'message'`` (mirror/receipt). ``null`` for Task-backed
+   * records (e.g. reports), which carry no JobItem.
+   */
+  job_type?: 'task' | 'message' | null;
+  /**
+   * Canonical status of the linked instance, populated ONLY for
+   * mirror rows. ``null`` means mission row / degraded lookup /
+   * no linked instance — indistinguishable by design; render
+   * nothing extra rather than inventing a state.
+   */
+  mission_liveness?: MissionLiveness | null;
 }
 
 /**

@@ -95,6 +95,14 @@
           <span class="value">{{ job().project_id }}</span>
         </div>
       }
+      @if (missionChip(); as chip) {
+        <div class="detail-item">
+          <span class="label">Mission Liveness</span>
+          <span class="value">
+            <app-mission-liveness-chip [chip]="chip" />
+          </span>
+        </div>
+      }
     </div>
   </section>
 

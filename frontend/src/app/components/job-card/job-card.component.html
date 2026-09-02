@@ -26,6 +26,17 @@
           {{ kindLabel() }}
         </span>
       }
+      @if (showReceiptChip()) {
+        <span
+          class="receipt-chip"
+          matTooltip="Message receipt — handled as soon as it was delivered (not queued work)">
+          <mat-icon class="receipt-icon">receipt_long</mat-icon>
+          message
+        </span>
+      }
+      @if (missionChip(); as chip) {
+        <app-mission-liveness-chip [chip]="chip" />
+      }
       @if (showPausedBadge()) {
         <span 
           class="paused-badge"

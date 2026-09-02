@@ -7,7 +7,9 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatDividerModule } from '@angular/material/divider';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { Clipboard } from '@angular/cdk/clipboard';
-import type { Job } from '../../models/job.model';
+import type { Job, MissionLivenessChip } from '../../models/job.model';
+import { missionLivenessChip } from '../../models/job.model';
+import { MissionLivenessChipComponent } from '../mission-liveness-chip/mission-liveness-chip.component';
 
 @Component({
   selector: 'app-job-detail-drawer',
@@ -20,6 +22,7 @@ import type { Job } from '../../models/job.model';
     MatIconModule,
     MatDividerModule,
     MatTooltipModule,
+    MissionLivenessChipComponent,
   ],
   templateUrl: './job-detail-drawer.component.html',
   styleUrl: './job-detail-drawer.component.scss',
@@ -29,6 +32,15 @@ export class JobDetailDrawerComponent {
 
   job = input.required<Job>();
   isDrawerMode = input<boolean>(false);
+
+  /**
+   * Fix C (§8.2) — mission-liveness chip for mirror rows, or null
+   * when the row renders nothing extra (mission rows, Task-backed
+   * records, degraded lookups — all null by design).
+   */
+  missionChip = computed<MissionLivenessChip | null>(() =>
+    missionLivenessChip(this.job())
+  );
 
   close = output<void>();
   cancelJob = output<string>();

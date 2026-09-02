@@ -1,0 +1,12 @@
+@if (chip(); as c) {
+  <span
+    class="mission-chip"
+    [class.mission-live]="c.live"
+    [class.mission-settled]="!c.live"
+    [style.backgroundColor]="c.live ? c.color + '20' : null"
+    [style.color]="c.color"
+    [matTooltip]="tooltip()">
+    <mat-icon class="mission-chip-icon">{{ c.live ? 'sync' : 'check_circle' }}</mat-icon>
+    {{ c.label }}
+  </span>
+}

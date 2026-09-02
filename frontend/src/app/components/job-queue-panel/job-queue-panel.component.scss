@@ -235,6 +235,10 @@
         letter-spacing: 0.5px;
       }
 
+      // Mission-liveness chips on receipt rows are rendered via
+// ``app-mission-liveness-chip``; the panel just hosts the element.
+      // No local chip styles are needed here.
+
       .time-text {
         color: #64748b;
         margin-left: auto;

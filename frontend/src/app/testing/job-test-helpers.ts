@@ -1,27 +1,34 @@
-// Inline job model types to avoid module resolution issues
-export type JobStatus = 'pending' | 'processing' | 'completed' | 'failed' | 'cancelled' | 'dead_letter';
-export type JobSource = 'api' | 'telegram' | 'scheduler' | 'webhook';
+// Re-export the canonical Job/Work models so specs drive the model
+// without redefining the types. Kills the stale "inline types to
+// avoid module resolution issues" rationale — the model is the
+// single source of truth.
 
-export interface Job {
-  job_id: string;
-  agent_id: string;
-  message?: string;
-  source?: JobSource;
-  project_id: string | null;
-  priority: number;
-  status: JobStatus;
-  created_at: string;
-  started_at: string | null;
-  completed_at: string | null;
-  instance_id: string | null;
-  error_message: string | null;
-  result_summary: string | null;
-  job_metadata?: Record<string, any> | null;
-  cancelled_at: string | null;
-  deleted_at?: string | null;
-  position?: number;
+import type { Job, JobStatus } from '../models/job.model';
+
+export * from '../models/job.model';
+export * from '../models/work.model';
+
+// Backwards-compatible alias for pre-round-2 specs that imported
+// the helper module under a local name.
+export type HelperJobStatus = JobStatus;
+
+/**
+ * Test-only widening of ``JobStatus`` to cover defensive-fallback
+ * strings (``'active'`` / ``'queued'``) that some backend paths
+ * still emit but are NOT canonical. Encapsulated via
+ * ``createMockJobWithStatus`` so call sites stay cast-free.
+ */
+export type MockJobStatus = JobStatus | 'active' | 'queued';
+
+export function createMockJobWithStatus(status: MockJobStatus, rest?: Partial<Job>): Job {
+  return createMockJob({ ...(rest ?? {}), status: status as JobStatus });
 }
 
+/**
+ * Build a minimal Job with sensible defaults. ``status`` is typed
+ * against the re-exported ``JobStatus`` so a missing enum member
+ * (e.g. ``'paused'``) is a type error, not a hidden cast.
+ */
 export function createMockJob(overrides?: Partial<Job>): Job {
   return {
     job_id: 'test-job-123',
@@ -42,6 +49,23 @@ export function createMockJob(overrides?: Partial<Job>): Job {
     deleted_at: null,
     ...overrides,
   };
+}
+
+/**
+ * Fix C (§8.2) — a terminal mirror receipt whose parent mission is
+ * still working. The 28c6421b pair: receipt says "handled",
+ * liveness consult says "parent still running".
+ */
+export function createMockLiveMissionReceipt(overrides?: Partial<Job>): Job {
+  return createMockJob({
+    job_id: 'mirror-live-1',
+    status: 'completed',
+    completed_at: new Date().toISOString(),
+    instance_id: 'instance-live-leader',
+    job_type: 'message',
+    mission_liveness: 'processing',
+    ...overrides,
+  });
 }
 
 export function createMockJobList(count: number): Job[] {

@@ -2,11 +2,15 @@
   <button
     mat-button
     class="queue-button"
-    [class.idle]="isIdle()"
+    [class.idle]="isIdle() && !hasLiveMissions()"
+    [class.missions-live]="isIdle() && hasLiveMissions()"
     [matMenuTriggerFor]="jobQueueMenu"
     [matTooltip]="tooltipText()"
     aria-label="View job queue">
     <span class="queue-count">{{ displayText() }}</span>
+    @if (isIdle() && hasLiveMissions()) {
+      <span class="mission-pulse-dot" aria-hidden="true"></span>
+    }
   </button>
 
   <mat-menu #jobQueueMenu="matMenu" class="job-queue-dropdown">
@@ -15,6 +19,7 @@
         [runningJobs]="runningJobs()"
         [recentJobs]="recentJobs()"
         [projectNameMap]="projectNameMap()"
+        [liveMissionCount]="liveMissionCount()"
         (jobClick)="onJobClick($event)">
       </app-job-queue-panel>
     </ng-template>

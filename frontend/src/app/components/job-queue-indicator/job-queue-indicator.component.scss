@@ -22,8 +22,37 @@
     color: #64748b; /* muted grey for 0/0 */
   }
 
+  /* Queue empty but live missions exist behind handled receipts —
+     the badge must NOT read as system idle. Active blue + pulse dot
+     distinguish it from both the idle grey and the X/Y running
+     state. */
+  &.missions-live {
+    color: #3b82f6; /* blue-500 — same live colour as processing jobs */
+  }
+
   .queue-count {
     line-height: 1;
+  }
+
+  .mission-pulse-dot {
+    width: 6px;
+    height: 6px;
+    margin-left: 6px;
+    border-radius: 50%;
+    background-color: #3b82f6; /* blue-500 */
+    animation: mission-pulse 1.5s ease-in-out infinite;
+  }
+}
+
+@keyframes mission-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.35;
+    transform: scale(0.8);
   }
 }
 

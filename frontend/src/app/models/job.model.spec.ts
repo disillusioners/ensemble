@@ -9,10 +9,16 @@ import {
   RetryAllResult,
   DLQReplayResponse,
   DLQListResponse,
+  MissionLiveness,
   isTerminalStatus,
   isJobDeleted,
   getStatusColor,
   getPriorityColor,
+  isReceiptRow,
+  isLiveMissionLiveness,
+  getMissionLivenessColor,
+  missionLivenessChip,
+  liveMissionIds,
 } from './job.model';
 
 describe('Job Model', () => {
@@ -608,6 +614,138 @@ describe('Job Model', () => {
       };
       expect(response.items).toHaveLength(1);
       expect(response.total).toBe(1);
+    });
+  });
+
+  // ── Fix C read-model split (docs/job-task-system.md §8.2) ────────────
+
+  describe('isReceiptRow', () => {
+    it('should return true for mirror rows (job_type message)', () => {
+      expect(isReceiptRow({ job_type: 'message' })).toBe(true);
+    });
+
+    it('should return false for mission rows (job_type task)', () => {
+      expect(isReceiptRow({ job_type: 'task' })).toBe(false);
+    });
+
+    it('should return false for Task-backed records (no job_type)', () => {
+      expect(isReceiptRow({ job_type: null })).toBe(false);
+      expect(isReceiptRow({ job_type: undefined })).toBe(false);
+    });
+  });
+
+  describe('isLiveMissionLiveness', () => {
+    it('should treat processing as live', () => {
+      expect(isLiveMissionLiveness('processing')).toBe(true);
+    });
+
+    it('should treat paused as live (non-terminal, resumable)', () => {
+      expect(isLiveMissionLiveness('paused')).toBe(true);
+    });
+
+    it('should treat pending as live (forward-compat member, non-terminal)', () => {
+      expect(isLiveMissionLiveness('pending')).toBe(true);
+    });
+
+    it('should treat completed/failed/cancelled as settled', () => {
+      expect(isLiveMissionLiveness('completed')).toBe(false);
+      expect(isLiveMissionLiveness('failed')).toBe(false);
+      expect(isLiveMissionLiveness('cancelled')).toBe(false);
+    });
+  });
+
+  describe('getMissionLivenessColor', () => {
+    it('should color every canonical value (no unknown fallback for the ratified space)', () => {
+      const values: MissionLiveness[] = ['pending', 'processing', 'paused', 'completed', 'failed', 'cancelled'];
+      for (const v of values) {
+        expect(getMissionLivenessColor(v)).toMatch(/^#[0-9A-Fa-f]{6}$/);
+      }
+    });
+
+    it('should match the job status palette for the overlapping names', () => {
+      expect(getMissionLivenessColor('processing')).toBe(getStatusColor('processing'));
+      expect(getMissionLivenessColor('paused')).toBe(getStatusColor('paused'));
+      expect(getMissionLivenessColor('completed')).toBe(getStatusColor('completed'));
+      expect(getMissionLivenessColor('failed')).toBe(getStatusColor('failed'));
+      expect(getMissionLivenessColor('cancelled')).toBe(getStatusColor('cancelled'));
+    });
+  });
+
+  describe('missionLivenessChip — the four wire cases (§8.2)', () => {
+    it('CASE 1 — mirror row + live mission: chip renders live with canonical value verbatim', () => {
+      const chip = missionLivenessChip({ job_type: 'message', mission_liveness: 'processing' });
+      expect(chip).not.toBeNull();
+      expect(chip!.live).toBe(true);
+      expect(chip!.label).toBe('mission: processing'); // canonical value verbatim
+      expect(chip!.value).toBe('processing');
+    });
+
+    it('CASE 2 — mirror row + settled mission: chip renders settled (distinct from live)', () => {
+      const chip = missionLivenessChip({ job_type: 'message', mission_liveness: 'completed' });
+      expect(chip).not.toBeNull();
+      expect(chip!.live).toBe(false);
+      expect(chip!.label).toBe('mission: completed');
+    });
+
+    it('CASE 2b — mirror row + every settled value stays settled', () => {
+      for (const v of ['completed', 'failed', 'cancelled'] as MissionLiveness[]) {
+        const chip = missionLivenessChip({ job_type: 'message', mission_liveness: v });
+        expect(chip!.live).toBe(false);
+      }
+    });
+
+    it('CASE 3 — mission row (job_type task): renders NOTHING extra', () => {
+      // Even a mission row hypothetically carrying a liveness value must
+      // not render the chip — the field is only meaningful on mirrors.
+      expect(missionLivenessChip({ job_type: 'task', mission_liveness: null })).toBeNull();
+      expect(missionLivenessChip({ job_type: 'task', mission_liveness: 'processing' })).toBeNull();
+    });
+
+    it('CASE 4 — degraded None (mirror row, null liveness): renders NOTHING extra, no invented state', () => {
+      expect(missionLivenessChip({ job_type: 'message', mission_liveness: null })).toBeNull();
+      expect(missionLivenessChip({ job_type: 'message', mission_liveness: undefined })).toBeNull();
+    });
+
+    it('CASE 4b — Task-backed record (no job_type, no liveness): renders NOTHING extra', () => {
+      expect(missionLivenessChip({ job_type: null, mission_liveness: null })).toBeNull();
+      expect(missionLivenessChip({})).toBeNull();
+    });
+  });
+
+  describe('liveMissionIds — exported model helper for badge delegation', () => {
+    function makeRow(over: Partial<{ job_id: string; instance_id: string | null; job_type: 'task' | 'message' | null; mission_liveness: MissionLiveness | null }> = {}) {
+      return {
+        job_id: 'job-default',
+        instance_id: 'inst-default',
+        job_type: 'message' as const,
+        mission_liveness: 'processing' as MissionLiveness,
+        ...over,
+      };
+    }
+
+    it('counts one live mirror per de-duped instance_id', () => {
+      // Full CASE-by-CASE coverage lives in
+      // job-queue-indicator.component.spec.ts (the badge spec already
+      // exercises the badge contract via this helper — the spec-level
+      // delegation is the proof against real code).
+      const ids = liveMissionIds([
+        makeRow({ job_id: 'r1', instance_id: 'leader', mission_liveness: 'processing' }),
+        makeRow({ job_id: 'r2', instance_id: 'leader', mission_liveness: 'paused' }),
+        makeRow({ job_id: 't1', instance_id: 'x', job_type: 'task', mission_liveness: 'processing' }),
+        makeRow({ instance_id: 'done', mission_liveness: 'completed' }),
+        makeRow({ instance_id: 'gone', mission_liveness: 'failed' }),
+        makeRow({ instance_id: 'null-row', mission_liveness: null }),
+      ]);
+      expect(ids.size).toBe(1);
+      expect(ids.has('leader')).toBe(true);
+    });
+
+    it('falls back to job_id when instance_id is null (defensive-only)', () => {
+      const ids = liveMissionIds([
+        makeRow({ job_id: 'orphan-receipt', instance_id: null, mission_liveness: 'processing' }),
+      ]);
+      expect(ids.size).toBe(1);
+      expect(ids.has('orphan-receipt')).toBe(true);
     });
   });
 });

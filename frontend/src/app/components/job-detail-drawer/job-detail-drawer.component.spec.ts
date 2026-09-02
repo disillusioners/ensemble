@@ -1,5 +1,5 @@
 import { signal, computed } from '@angular/core';
-import { Job, JobStatus, JobSource } from '../../models/job.model';
+import { Job, JobStatus, JobSource, MissionLivenessChip, missionLivenessChip } from '../../models/job.model';
 import { createMockJob } from '../../testing/job-test-helpers';
 
 // Simplified JobDetailDrawer component logic for testing
@@ -8,6 +8,17 @@ class MockJobDetailDrawerComponent {
   
   job = computed(() => this._job());
   isDrawerMode = signal(false);
+
+  // Fix C (§8.2) — drawer-side mission-liveness chip for mirror rows.
+  // Mirrors the real component's pipeline at job-detail-drawer.component.ts:41-43:
+  // pass `this.job()` through the model helper `missionLivenessChip`.
+  // Template binding (job-detail-drawer.component.html:98-105) renders this
+  // value verbatim into <app-mission-liveness-chip [chip]="chip" />, so
+  // asserting the color/label/live properties on the chip object proves
+  // what the drawer template binding reaches on each row.
+  missionChip = computed<MissionLivenessChip | null>(() =>
+    missionLivenessChip(this._job() as Pick<Job, 'job_type' | 'mission_liveness'>)
+  );
 
   statusColor = computed(() => {
     const status = this._job()?.status;
@@ -418,6 +429,37 @@ describe('JobDetailDrawerComponent Logic', () => {
     it('should not show retry button for completed job', () => {
       component.setJob(createMockJob({ status: 'completed' }));
       expect(component.canRetry()).toBe(false);
+    });
+  });
+
+  describe('missionChip computed (Fix C §8.2 — drawer faithfully threads mission_liveness into the chip template binding)', () => {
+    it('should return the amber chip for a message row with mission_liveness=paused (historical blue→amber regression guard)', () => {
+      component.setJob(createMockJob({
+        job_type: 'message',
+        mission_liveness: 'paused',
+      }));
+
+      const chip = component.missionChip();
+
+      // Receipt-row gate: only `job_type='message'` rows render the chip.
+      expect(chip).not.toBeNull();
+
+      // The drawer's template (job-detail-drawer.component.html:98-105) binds
+      // the chip verbatim into <app-mission-liveness-chip [chip]="chip" />.
+      // Asserting on the bound value proves the amber color reaches the render
+      // path (the jsdom-honest alternative to computed-style assertions, per
+      // the FE house style for component specs).
+      //
+      // Live cluster: 'paused' is non-terminal, so the chip styles live.
+      expect(chip!.value).toBe('paused');
+      expect(chip!.live).toBe(true);
+      expect(chip!.label).toBe('mission: paused');
+      // The amber hex — mirrors rgb(245, 158, 11). The historical
+      // hard-coded-blue→amber regression was here.
+      expect(chip!.color).toBe('#F59E0B');
+      expect(chip!.color.toLowerCase()).toBe('#f59e0b');
+      // Case-insensitive hex form is what the chip carries through the
+      // template binding into <app-mission-liveness-chip>.
     });
   });
 });

@@ -6,13 +6,14 @@ import { MatChipsModule } from '@angular/material/chips';
 import { MatIconModule } from '@angular/material/icon';
 import { MatExpansionModule } from '@angular/material/expansion';
 import { MatTooltipModule } from '@angular/material/tooltip';
-import { Job, JobStatus, JobWorkKind, getPriorityColor, getStatusColor, isTerminalStatus, isJobDeleted } from '../../models/job.model';
+import { Job, JobStatus, JobWorkKind, getPriorityColor, getStatusColor, isTerminalStatus, isJobDeleted, isReceiptRow, missionLivenessChip } from '../../models/job.model';
 import {
   getKindColor,
   getKindIcon,
   getKindLabel,
   isTaskBackedKind,
 } from '../../models/work.model';
+import { MissionLivenessChipComponent } from '../mission-liveness-chip/mission-liveness-chip.component';
 
 @Component({
   selector: 'app-job-card',
@@ -24,7 +25,8 @@ import {
     MatChipsModule,
     MatIconModule,
     MatExpansionModule,
-    MatTooltipModule
+    MatTooltipModule,
+    MissionLivenessChipComponent,
   ],
   templateUrl: './job-card.component.html',
   styleUrl: './job-card.component.scss'
@@ -141,6 +143,27 @@ export class JobCardComponent {
    * badge even if a stale ``queue_id`` happens to be attached.
    */
   isJobKind = computed(() => this.effectiveKind() === 'job');
+
+  // ── Fix C read-model split (§8.2) — receipt + mission chips ─────────
+
+  /**
+   * Show the receipt ("message") chip only on mirror rows
+   * (``job_type === 'message'``). Mission rows already carry their
+   * own lifecycle status chip; Task-backed records render nothing
+   * extra.
+   */
+  showReceiptChip = computed(() => isReceiptRow(this.job()));
+
+  /**
+   * Mission-liveness chip for mirror rows, or ``null`` when the row
+   * renders nothing extra (mission row, Task-backed record, degraded
+   * lookup, or no linked instance — all ``null`` by design).
+   *
+   * Rendered through the shared ``<app-mission-liveness-chip>`` so
+   * colour, tooltip wording, and live/settled styling stay in lock-
+   * step with the panel and the drawer.
+   */
+  missionChip = computed(() => missionLivenessChip(this.job()));
 
   canCancel = computed(() => {
     const status = this.job().status;

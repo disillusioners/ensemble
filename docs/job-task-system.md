@@ -880,6 +880,65 @@ model. The post-Fix-C read model has **ONE answer per question**:
 The two questions map to two fields; the renderer no longer
 collapses them onto one ambiguous answer.
 
+#### FE rendering contract (consumption of the split)
+
+The Angular frontend consumes the split on every surface where job
+rows render. Two additive optional fields on the FE `Job` / `Work`
+models (`frontend/src/app/models/job.model.ts`,
+`work.model.ts`) carry the wire values through unchanged; all
+rendering decisions branch on the pure model helpers
+(`isReceiptRow`, `isLiveMissionLiveness`, `missionLivenessChip`) so
+the four wire cases have exactly one behaviour each:
+
+| Wire case | FE rendering |
+|---|---|
+| Mirror + live mission (`job_type='message'`, `mission_liveness ∈ {pending, processing, paused}`) | "message" receipt chip **and** a live `mission: <value>` chip (blue/amber tint, spinning sync icon). Reads as "handled · mission still going" — never as bare "completed". |
+| Mirror + settled mission (`mission_liveness ∈ {completed, failed, cancelled}`) | "message" receipt chip **and** a muted `mission: <value>` chip (check icon, settled style). Distinct styling from the live case. |
+| Mission row (`job_type='task'`) | **Nothing extra.** The row's own status chip already IS the liveness answer. |
+| `mission_liveness=None` (degraded lookup / no linked instance / Task-backed record) | **Nothing extra.** `None` is indistinguishable-by-design; the FE never invents a state for it and falls back to receipt-only semantics. |
+
+`job_type` is set at row creation (mirror rows never become mission rows), so the work-update SSE patch path carries only `mission_liveness` (see `JobsComponent.updateJobFromSse` in `jobs.component.ts`). The patch uses present-as-null semantics on both the `jobs[]` and `works[]` paths: an explicit `null` in the payload CLEARS the field (degraded lookup), an absent key KEEPS the previous value (stale-tolerant).
+
+Canonical values are used verbatim — the FE never recases,
+translates, or fabricates a `mission_liveness` value, and the
+live/settled style split is the only FE-side interpretation.
+
+Rendering surfaces: the Jobs page cards (both the Queues view via
+`/api/jobs` and the All Work view via `/api/work`, whose
+`Work → Job` mapper passes both fields through), the badge
+dropdown's Recent rows (`job-queue-panel`), and the detail drawer.
+
+**The badge (`job-queue-indicator`).** The header badge keeps its
+existing intake count (`running/total non-terminal`) as the primary
+reading, and gains mission awareness derived from data it already
+polls (`listActiveJobs` + `listRecentJobs` — no new endpoints, no
+extra requests): a terminal mirror row whose `mission_liveness` is
+live proves its parent mission is still working. Since the resolver
+computes `mission_liveness` read-time, receipts in the recent window
+always carry the CURRENT instance status. Three display states:
+
+1. **Jobs present** → `X/Y` unchanged (tooltip additionally reports
+   live missions when any exist).
+2. **0 non-terminal JobItems + N ≥ 1 live missions** → the badge
+   shows `missions: N` in the live blue with a pulse dot instead of
+   a bare `0/0` — a visibly-working mission leader no longer reads
+   as "system idle". Tooltip explains both numbers:
+   `Running: 0 / Pending: 0 · Live missions: N (messages handled;
+   parent missions still working)`. The dropdown panel mirrors this
+   (live-missions pill in the header; the empty state reads
+   "Queue is idle · N live mission(s) still working").
+3. **0 jobs + 0 live missions** → bare `0/0`, muted idle styling.
+
+Live missions are de-duplicated by `instance_id` (many receipts per
+mission, one mission). Known bound: the derivation scans the
+already-polled recent terminal window (limit 10), so a leader that
+emits no receipts after nine newer terminal rows have landed can
+transiently read idle until its next receipt — the receipt is
+evicted at the 10th newer terminal row. This is inherent to the
+poll-based derivation; surfacing it would require a new spec'd
+aggregate field on an existing endpoint, not a mutation of these
+two fields.
+
 ---
 
 ## 9. What this means for reviewers
