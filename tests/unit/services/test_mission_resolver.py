@@ -49,6 +49,7 @@ from datetime import datetime, timezone
 import pytest
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel
 
@@ -682,6 +683,186 @@ class TestDegradation:
         result = resolver.resolve_many([None, None])
         assert result == {}
 
+    def test_resolve_instance_lookup_sqlalchemy_error_degrades(self, mocker):
+        """``InstanceRepo.get`` raising ``SQLAlchemyError`` → degraded record.
+
+        Exact-field assertions (not ``len(...) == 5`` shape checks):
+        every mission field surfaces ``None`` (or ``[]`` for
+        ``linked_jobs``) and the resolver does NOT propagate the
+        exception (no 500 — the caller's fallback to the JobItem-side
+        view is the expected behavior).
+        """
+        from daemon.repositories.instance.repository import (
+            SQLModelInstanceRepository,
+        )
+
+        # Build a real resolver first (so the JobRepository is real),
+        # then monkeypatch the InstanceRepository.get to raise.
+        from daemon.services.mission_resolver import MissionResolver
+
+        iid = "inst-err-inst"
+        # Use Mock for the repo to inject the failure on .get().
+        fake_instance_repo = mocker.MagicMock(spec=SQLModelInstanceRepository)
+        fake_instance_repo.get.side_effect = SQLAlchemyError("simulated")
+        fake_job_repo = mocker.MagicMock()
+
+        degraded_resolver = MissionResolver(
+            instance_repo=fake_instance_repo,
+            job_repo=fake_job_repo,
+        )
+
+        record = degraded_resolver.resolve(iid)
+        assert record is not None, (
+            "degraded path must NOT propagate the SQLAlchemyError; "
+            "caller treats absence as 'unknown' fallback"
+        )
+        # Exact-field assertions (not len == 5).
+        assert record.mission_id is None
+        assert record.agent_id is None
+        assert record.parent_mission_id is None
+        assert record.liveness is None
+        assert record.terminal_reason is None
+        assert record.epoch is None
+        assert record.linked_jobs == []
+        assert record.started_at is None
+        assert record.last_activity_at is None
+
+    def test_resolve_batch_jobitem_sqlalchemy_error_degrades(
+        self, engine, resolver, caplog
+    ):
+        """Single-row ``resolve`` with the batched JobItem lookup raising
+        ``SQLAlchemyError`` → record keeps instance-derived fields
+        populated but ``linked_jobs=[]`` and ``terminal_reason=None``
+        (the liveness terminal-reason stands for terminal instances;
+        a non-terminal instance yields ``None`` already).
+
+        Exact-field assertions: every field must match the expected
+        shape; the exception must NOT propagate.
+
+        The fault is injected at the SQLAlchemy layer (the cursor
+        ``execute`` hook raises ``SQLAlchemyError``) so the
+        ``_batch_jobitem_lookup`` internal ``except SQLAlchemyError``
+        branch is exercised (mocking the whole method would bypass
+        the degradation contract entirely).
+        """
+        from sqlalchemy.exc import OperationalError
+
+        iid = _seed_instance(
+            engine,
+            instance_id="inst-err-jobitems",
+            status=InstanceStatus.COMPLETED.value,
+        )
+
+        # Inject the SQLAlchemyError at the cursor level so the
+        # _batch_jobitem_lookup helper's narrow catch is exercised.
+        def _raise_on_jobitems(  # noqa: ANN001 — SQLAlchemy hook
+            conn, cursor, statement, parameters, context, executemany  # noqa: ARG001
+        ):
+            if "JOB_QUEUE_ITEMS" in statement.upper():
+                raise OperationalError("simulated", {}, Exception("boom"))
+
+        event.listen(engine, "before_cursor_execute", _raise_on_jobitems)
+        try:
+            with caplog.at_level("WARNING"):
+                record = resolver.resolve(iid)
+        finally:
+            event.remove(engine, "before_cursor_execute", _raise_on_jobitems)
+
+        assert record is not None
+        # Instance-derived fields stay populated.
+        assert record.mission_id == iid
+        assert record.liveness == "completed"
+        # No W4 lookup → liveness terminal_reason stands.
+        assert record.terminal_reason == "completed"
+        assert record.epoch == 1
+        # W4 / linked_jobs degraded to safe defaults.
+        assert record.linked_jobs == []
+        assert record.parent_mission_id is None
+        # No exception propagated — the call must succeed (no 500).
+
+    def test_resolve_many_instance_batch_sqlalchemy_error_degrades(
+        self, resolver, mocker, caplog
+    ):
+        """``resolve_many`` with the batched ``Instance`` SELECT raising
+        ``SQLAlchemyError`` → empty dict (not partial). No exception
+        propagation.
+
+        The entire page degrades soft: every requested id effectively
+        becomes "unknown", and the caller's receipt-only view takes
+        over. Mirrors the per-row fix C §8.2 contract.
+        """
+        from daemon.services.mission_resolver import MissionResolver
+
+        ids = ["inst-a", "inst-b", "inst-c"]
+        mocker.patch.object(
+            MissionResolver,
+            "_batch_instances",
+            side_effect=SQLAlchemyError("simulated instance outage"),
+        )
+
+        with caplog.at_level("WARNING"):
+            result = resolver.resolve_many(ids)
+
+        assert result == {}, (
+            "batch Instance lookup failure must degrade the entire "
+            "page to {} (not partial / not raise) — the caller's "
+            "fallback handles the receipt-only view."
+        )
+
+    def test_resolve_many_jobitem_batch_sqlalchemy_error_degrades(
+        self, engine, resolver, caplog
+    ):
+        """``resolve_many`` with the batched ``JobItem`` SELECT raising
+        ``SQLAlchemyError`` → instance-derived fields stay populated,
+        ``linked_jobs=[]``, ``terminal_reason`` from liveness only.
+
+        Exact-field assertions per row. The W4 lookup is the only
+        thing that degrades — the page does NOT become empty, and
+        the call does NOT propagate the exception. Fault is injected
+        at the cursor layer (not via mocking the whole helper) so
+        the helper's internal ``except SQLAlchemyError`` branch is
+        exercised.
+        """
+        from sqlalchemy.exc import OperationalError
+
+        ids = [
+            _seed_instance(
+                engine,
+                instance_id=f"inst-err-many-{i}",
+                status=InstanceStatus.RUNNING.value,
+            )
+            for i in range(3)
+        ]
+
+        def _raise_on_jobitems(  # noqa: ANN001 — SQLAlchemy hook
+            conn, cursor, statement, parameters, context, executemany  # noqa: ARG001
+        ):
+            if "JOB_QUEUE_ITEMS" in statement.upper():
+                raise OperationalError("simulated", {}, Exception("boom"))
+
+        event.listen(engine, "before_cursor_execute", _raise_on_jobitems)
+        try:
+            with caplog.at_level("WARNING"):
+                result = resolver.resolve_many(ids)
+        finally:
+            event.remove(engine, "before_cursor_execute", _raise_on_jobitems)
+
+        assert len(result) == 3, (
+            "JobItem batch failure must NOT empty the page; only the "
+            "W4 + linked_jobs fields degrade. The instance-derived "
+            "fields (liveness, terminal_reason from liveness) stay "
+            "populated."
+        )
+        for iid in ids:
+            rec = result[iid]
+            assert rec.mission_id == iid
+            assert rec.liveness == "processing"
+            # No W4 lookup → liveness terminal_reason stands.
+            assert rec.terminal_reason is None
+            # linked_jobs degraded to safe default.
+            assert rec.linked_jobs == []
+            assert rec.epoch == 1
+
 
 # ─── PURITY: no DML in projection paths ────────────────────────────────────
 
@@ -865,6 +1046,168 @@ class TestPurity:
 
         self._assert_no_writes(captured)
         self._assert_no_value_drift(before, after)
+
+
+# ─── Batched query-count bound (C9) ────────────────────────────────────────
+
+
+class TestBatchQueryCount:
+    """Pin the per-page query bound for the ON-path JobItem fetch.
+
+    The C9 batch standard: ``resolve_many(N)`` issues exactly ONE
+    ``SELECT`` against ``job_queue_items`` per call, regardless of
+    the page size. The pre-C9 path paid an N+1 (one per instance ×
+    two helpers — ``_has_dead_linked_job`` and ``_list_linked_jobs``).
+    The merged ``_batch_jobitem_lookup`` helper replaces both with a
+    single ``SELECT job_id, instance_id, admission_state FROM
+    job_queue_items WHERE instance_id IN (...) AND deleted_at IS NULL``.
+
+    The bound is checked via the engine event-listener spy that
+    :class:`TestPurity` also uses: count the number of
+    ``SELECT ... FROM job_queue_items`` statements captured during
+    the SUT call. Pre-C9 expected 2×N (two queries per instance);
+    post-C9 expects exactly 1 for any N ≥ 1.
+
+    Args:
+        engine: The shared StaticPool in-memory SQLite engine from
+            the file-level fixture.
+        resolver: A ``MissionResolver`` wired against the test
+            instance / job repositories.
+    """
+
+    @staticmethod
+    def _count_job_queue_selects(engine: Engine) -> callable:
+        """Attach a SQL spy that returns the count of
+        ``SELECT`` statements issued against ``job_queue_items``
+        during the SUT call.
+
+        Returns a ``(count, detach)`` tuple where ``detach`` MUST be
+        called in a ``finally`` so subsequent tests do not see the
+        listener. The count is captured by-reference.
+        """
+        count_box = {"n": 0}
+
+        def _before_cursor_execute(  # noqa: ANN001 — SQLAlchemy hook
+            conn, cursor, statement, parameters, context, executemany  # noqa: ARG001
+        ):
+            s = statement.strip().upper()
+            if s.startswith("SELECT") and "JOB_QUEUE_ITEMS" in s:
+                count_box["n"] += 1
+
+        event.listen(engine, "before_cursor_execute", _before_cursor_execute)
+
+        def _count() -> int:
+            return count_box["n"]
+
+        def _detach() -> None:
+            event.remove(engine, "before_cursor_execute", _before_cursor_execute)
+
+        return _count, _detach
+
+    def test_resolve_issues_exactly_one_jobitem_select(
+        self, engine, resolver
+    ):
+        """Single-row ``resolve`` issues exactly ONE
+        ``job_queue_items`` SELECT (C9 bound for the single-row path).
+
+        Pre-C9: 2 (one for ``_has_dead_linked_job`` + one for
+        ``_list_linked_jobs``). Post-C9: 1.
+        """
+        iid = _seed_instance(engine, instance_id="inst-batch-c9-single")
+        _seed_job(engine, instance_id=iid, admission_state=AdmissionState.ACTIVE.value)
+
+        count, detach = self._count_job_queue_selects(engine)
+        try:
+            record = resolver.resolve(iid)
+        finally:
+            detach()
+
+        assert record is not None  # sanity: SUT produced a record
+        assert count() == 1, (
+            f"single-row resolve must issue exactly 1 SELECT against "
+            f"job_queue_items (C9 bound); got {count()}. The pre-C9 "
+            f"N+1 paid 2 queries per row; the merged "
+            f"_batch_jobitem_lookup must replace both with one."
+        )
+
+    def test_resolve_many_issues_exactly_one_jobitem_select_for_any_n(
+        self, engine, resolver
+    ):
+        """``resolve_many(N)`` issues exactly ONE
+        ``job_queue_items`` SELECT for any page size N ≥ 1 (C9 bound).
+
+        Pre-C9: 2×N. Post-C9: 1 — the merged
+        ``_batch_jobitem_lookup`` with ``instance_id IN (...)`` replaces
+        the per-row queries. This is the perf invariant the bound
+        comment in ``_batch_jobitem_lookup`` references.
+        """
+        # 50 instances is the work-resolver page size; the inflight
+        # production call site. Use 50 here so a regression to
+        # N+1 would trip the assertion with margin.
+        ids = [
+            _seed_instance(
+                engine, instance_id=f"inst-batch-c9-{i}",
+            )
+            for i in range(50)
+        ]
+        # Seed at least one instance with a DEAD link so the W4
+        # branch is exercised (not silently skipped).
+        _seed_job(
+            engine,
+            instance_id=ids[0],
+            admission_state=AdmissionState.DEAD.value,
+        )
+
+        count, detach = self._count_job_queue_selects(engine)
+        try:
+            records = resolver.resolve_many(ids)
+        finally:
+            detach()
+
+        assert len(records) == 50
+        assert count() == 1, (
+            f"resolve_many(50) must issue exactly 1 SELECT against "
+            f"job_queue_items (C9 perf bound); got {count()}. A "
+            f"regression to N+1 pays 50 (or 2×50 = 100) queries per "
+            f"page; the merged _batch_jobitem_lookup must issue "
+            f"exactly one."
+        )
+
+    def test_resolve_many_w4_dead_link_surfaces_in_batched_path(
+        self, engine, resolver
+    ):
+        """Batched path still surfaces the W4 dead-link truth.
+
+        Sanity test for the merge: a page that mixes a DEAD-linked
+        instance with healthy ones produces the right
+        ``mission_terminal_reason`` per row — the W4 flag must come
+        through the batched query (not silently dropped by the
+        IN-clause filter).
+        """
+        dead_iid = _seed_instance(
+            engine, instance_id="inst-c9-dead",
+            status=InstanceStatus.RUNNING.value,
+        )
+        live_iid = _seed_instance(
+            engine, instance_id="inst-c9-live",
+            status=InstanceStatus.RUNNING.value,
+        )
+        _seed_job(
+            engine,
+            instance_id=dead_iid,
+            admission_state=AdmissionState.DEAD.value,
+        )
+        _seed_job(
+            engine,
+            instance_id=live_iid,
+            admission_state=AdmissionState.ACTIVE.value,
+        )
+
+        records = resolver.resolve_many([dead_iid, live_iid])
+        assert records[dead_iid].terminal_reason == "dead_letter"
+        assert records[dead_iid].liveness == "processing"  # instance is RUNNING
+        assert records[live_iid].terminal_reason is None
+        assert records[live_iid].liveness == "processing"
 
 
 # ─── Kill-switch OFF/ON ────────────────────────────────────────────────────

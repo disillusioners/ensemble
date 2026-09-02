@@ -365,21 +365,32 @@ class MissionResolver:
             # signal so the map only contains ids that resolved.
             return None
 
-        return self._project(instance)
+        # Single-row JobItem lookup reuses the batched helper with
+        # N=1 — keeps the wire pattern uniform with resolve_many so a
+        # future caller that switches between single-row and batched
+        # doesn't pay a per-row penalty.
+        jobitems_by_id = self._batch_jobitem_lookup([instance_id])
+        dead_linked, linked_jobs = jobitems_by_id.get(
+            instance_id, (False, [])
+        )
+
+        return self._project(instance, dead_linked, linked_jobs)
 
     def resolve_many(
         self, instance_ids: Iterable[str | None]
     ) -> dict[str, MissionRecord]:
         """Batched mission projection across many instance ids.
 
-        Mirrors :meth:`WorkResolverService._batch_instances`: one
-        batched ``Instance`` SELECT replaces the per-row ``get`` call,
-        so a 50-row page resolves all backing missions in a single
-        round-trip instead of 50. ``None`` and empty inputs short-
-        circuit to an empty dict without hitting the DB.
+        Two round-trips per page: one batched ``Instance`` SELECT +
+        one batched ``JobItem`` SELECT (fetching only the three
+        consumed columns — ``job_id``, ``instance_id``,
+        ``admission_state`` — via ``instance_id IN (...)``). The
+        per-row ``JobItem`` N+1 that the pre-C9 implementation paid
+        is gone. ``None`` and empty inputs short-circuit to an empty
+        dict without hitting the DB.
 
         **Degradation contract (matches Fix C §8.2):** a transient
-        ``SQLAlchemyError`` during the batched fetch degrades to a
+        ``SQLAlchemyError`` during either batched fetch degrades to a
         single warning + empty result (not per-row), so every
         requested instance maps to the unknown-shape record and the
         caller falls back to the JobItem-side view.
@@ -410,9 +421,25 @@ class MissionResolver:
             )
             return {}
 
+        try:
+            jobitems_by_id = self._batch_jobitem_lookup(
+                list(instances_by_id)
+            )
+        except SQLAlchemyError as exc:
+            logger.warning(
+                "mission_resolver: batched JobItem lookup failed for "
+                "%d ids: %s — degrading linked_jobs/W4 to None/[]",
+                len(instances_by_id),
+                exc,
+            )
+            jobitems_by_id = {}
+
         out: dict[str, MissionRecord] = {}
         for instance_id, instance in instances_by_id.items():
-            record = self._project(instance)
+            dead_linked, linked_jobs = jobitems_by_id.get(
+                instance_id, (False, [])
+            )
+            record = self._project(instance, dead_linked, linked_jobs)
             if record is not None:
                 out[instance_id] = record
         return out
@@ -459,39 +486,41 @@ class MissionResolver:
             stmt = select(Instance).where(Instance.instance_id.in_(instance_ids))
             return {row.instance_id: row for row in session.exec(stmt)}
 
-    def _project(self, instance: "Instance") -> MissionRecord:
+    def _project(
+        self,
+        instance: "Instance",
+        dead_linked: bool = False,
+        linked_jobs: list[str] | None = None,
+    ) -> MissionRecord:
         """Project one already-loaded ``Instance`` row onto the mission.
 
         Pure read-model: no writes, no JobItem creation, no
-        admission-state mutation. The only DB touches are:
-
-        1. ``job_repo.list_by_instance`` (degrades to ``[]`` on
-           transient error) — for the ``linked_jobs`` list and the
-           W4-hazard ``dead`` lookup.
-        2. The Instance row is consumed directly from the caller's
-           fetch (no re-read here).
+        admission-state mutation. The pre-fetched ``dead_linked`` /
+        ``linked_jobs`` arguments come from
+        :meth:`_batch_jobitem_lookup` (a single combined SELECT) so
+        ``_project`` itself does not touch the DB.
 
         Args:
             instance: A loaded ``Instance`` row from the caller
                 (single-instance or batched path).
+            dead_linked: Whether a linked JobItem in DEAD admission
+                state exists for this instance (the W4-hazard flag).
+            linked_jobs: The list of ``JobItem.job_id`` values linked
+                to this instance (non-deleted only). ``None`` is
+                tolerated as ``[]`` for callers that have not (or
+                could not) populate the field.
 
         Returns:
             A populated :class:`MissionRecord`. Never returns
             ``None`` — the caller guarantees ``instance`` is non-null.
         """
-        # Liveness — canonical from Instance.status via the same map
-        # Fix C's ``mission_liveness`` uses. Default to ``None`` when
-        # the Instance.status is unknown to the canonical map (the
-        # existing map covers every ``InstanceStatus`` enum value;
-        # the defensive fallback is for future-proofing).
         liveness = _STATUS_CANONICAL_MAP.get(instance.status, instance.status)
 
         # W4 hazard: a linked JobItem in DEAD state must surface
         # ``dead_letter`` regardless of instance liveness (revived
-        # instance + dead job = dead mission). The lookup is best-
-        # effort — transient DB error degrades to "no dead-link
-        # found" and lets the liveness terminal-reason stand.
-        dead_linked = self._has_dead_linked_job(instance.instance_id)
+        # instance + dead job = dead mission). The flag is pre-fetched
+        # via the batched helper so this branch is a pure read-model
+        # check.
         if dead_linked:
             terminal_reason: str | None = "dead_letter"
         elif liveness in {"completed", "failed", "cancelled"}:
@@ -504,19 +533,7 @@ class MissionResolver:
         else:
             terminal_reason = None
 
-        # Epoch — best-effort from observable state (no DB-stored
-        # terminal-transition timestamps; see module docstring
-        # "Known limitation"). Non-terminal instances are "in epoch 1"
-        # at minimum; terminal instances get ``epoch=1`` too because
-        # we cannot reconstruct per-epoch timestamps at read time
-        # without the M4(ii) event log. This is the honest answer
-        # today — the future event log will replace this with a
-        # precise ``epoch_count`` + ``last_epoch_at`` pair.
         epoch = self._compute_epoch(instance, liveness)
-
-        # Linked jobs — JobItem.job_id values for the instance.
-        # Best-effort: empty list on transient error.
-        linked_jobs = self._list_linked_jobs(instance.instance_id)
 
         return MissionRecord(
             mission_id=instance.instance_id,
@@ -525,13 +542,7 @@ class MissionResolver:
             liveness=liveness,
             terminal_reason=terminal_reason,
             epoch=epoch,
-            linked_jobs=linked_jobs,
-            # Started-at proxy: ``last_activity_at`` is the closest
-            # analogue to "work began" the Instance table carries
-            # (advances on the first worker heartbeat). Fallback to
-            # ``created_at`` ISO string when ``last_activity_at`` is
-            # null (no worker has touched the instance yet — common
-            # for ``idle``/``queued`` state).
+            linked_jobs=list(linked_jobs) if linked_jobs is not None else [],
             started_at=(
                 instance.last_activity_at.isoformat()
                 if instance.last_activity_at is not None
@@ -544,57 +555,79 @@ class MissionResolver:
             ),
         )
 
-    def _has_dead_linked_job(self, instance_id: str) -> bool:
-        """Return True iff a linked JobItem is in DEAD admission state.
+    def _batch_jobitem_lookup(
+        self, instance_ids: list[str]
+    ) -> dict[str, tuple[bool, list[str]]]:
+        """Single combined JobItem SELECT for the W4 + linked_jobs paths.
 
-        W4-hazard read: a single boolean check against the JobItem
-        ``admission_state='dead'`` column for any non-deleted row
-        whose ``instance_id`` matches. Transient DB errors degrade to
-        ``False`` (the liveness terminal-reason stands as the answer)
-        with a single warning log.
+        C9 batching standard: one SELECT replaces the two per-row
+        queries the pre-C9 ``_project`` path made (``select(JobItem)
+        ...`` for the dead-check + ``select(JobItem.job_id) ...``
+        for the linked_jobs list). The combined SELECT fetches only
+        the three consumed columns — ``job_id``, ``instance_id``,
+        ``admission_state`` — and groups in Python by ``instance_id``.
+
+        **Performance bound (pinned by
+        ``tests/unit/services/test_mission_resolver.py::
+        TestBatchQueryCount``):** ``resolve_many`` must issue exactly
+        ONE ``SELECT`` against ``job_queue_items`` per call,
+        regardless of the page size. The bound holds for both the
+        batched path (``resolve_many(N>1)``) and the single-row path
+        (``resolve(1)``) — both go through this helper.
+
+        Transient DB errors degrade to ``{}`` (the caller treats
+        every requested instance as "no dead link, empty
+        linked_jobs" — the liveness terminal-reason stands as the
+        answer for the W4 path). The narrow ``SQLAlchemyError`` catch
+        mirrors the single-row contract in :meth:`resolve`.
+
+        Args:
+            instance_ids: The ``Instance.instance_id`` values to
+                batch-fetch JobItem rows for. The caller filters out
+                ``None`` and missing-from-Instance entries.
+
+        Returns:
+            A mapping ``{instance_id: (has_dead_link, [job_ids])}``.
+            Missing instance ids are absent from the mapping (the
+            caller treats absence as "no jobs linked"). Soft-deleted
+            JobItem rows (``deleted_at IS NOT NULL``) are excluded.
         """
+        if not instance_ids:
+            return {}
         try:
             with _job_session(self._job_repo) as session:
                 stmt = (
-                    select(JobItem)
-                    .where(JobItem.instance_id == instance_id)
-                    .where(JobItem.admission_state == AdmissionState.DEAD.value)
+                    select(
+                        JobItem.job_id,
+                        JobItem.instance_id,
+                        JobItem.admission_state,
+                    )
+                    .where(JobItem.instance_id.in_(instance_ids))
                     .where(JobItem.deleted_at.is_(None))
+                    .order_by(
+                        JobItem.instance_id,
+                        JobItem.created_at.desc(),
+                        JobItem.job_id,
+                    )
                 )
-                return session.exec(stmt).first() is not None
+                rows = list(session.exec(stmt))
         except SQLAlchemyError as exc:
             logger.warning(
-                "mission_resolver: W4-hazard lookup failed for %r: %s — "
-                "falling back to liveness terminal_reason",
-                instance_id,
+                "mission_resolver: batched JobItem lookup failed for "
+                "%d ids: %s — degrading W4 + linked_jobs to no-data",
+                len(instance_ids),
                 exc,
             )
-            return False
+            return {}
 
-    def _list_linked_jobs(self, instance_id: str) -> list[str]:
-        """Return the ``JobItem.job_id`` list linked to ``instance_id``.
-
-        Best-effort: ``[]`` on transient DB error (a single warning
-        is logged). Soft-deleted rows (``deleted_at IS NOT NULL``)
-        are excluded — same default as ``JobRepository.list``.
-        """
-        try:
-            with _job_session(self._job_repo) as session:
-                stmt = (
-                    select(JobItem.job_id)
-                    .where(JobItem.instance_id == instance_id)
-                    .where(JobItem.deleted_at.is_(None))
-                    .order_by(JobItem.created_at.desc(), JobItem.job_id)
-                )
-                return [row for row in session.exec(stmt)]
-        except SQLAlchemyError as exc:
-            logger.warning(
-                "mission_resolver: linked_jobs lookup failed for %r: %s — "
-                "returning empty list",
-                instance_id,
-                exc,
-            )
-            return []
+        out: dict[str, tuple[bool, list[str]]] = {}
+        for job_id, instance_id, admission_state in rows:
+            has_dead, jobs = out.get(instance_id, (False, []))
+            jobs.append(job_id)
+            if admission_state == AdmissionState.DEAD.value:
+                has_dead = True
+            out[instance_id] = (has_dead, jobs)
+        return out
 
     @staticmethod
     def _compute_epoch(
