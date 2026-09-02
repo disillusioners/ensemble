@@ -159,6 +159,7 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
     const ids = new Set<string>();
     for (const j of [...this.activeJobs(), ...this.recentJobs()]) {
       if (j.job_type === 'message' && j.mission_liveness && isLiveMissionLiveness(j.mission_liveness)) {
+        // instance_id is `string | null` (required, not optional); the job_id fallback prevents null instance_ids from colliding in the Set.
         ids.add(j.instance_id ?? j.job_id);
       }
     }

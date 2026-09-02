@@ -897,6 +897,8 @@ the four wire cases have exactly one behaviour each:
 | Mission row (`job_type='task'`) | **Nothing extra.** The row's own status chip already IS the liveness answer. |
 | `mission_liveness=None` (degraded lookup / no linked instance / Task-backed record) | **Nothing extra.** `None` is indistinguishable-by-design; the FE never invents a state for it and falls back to receipt-only semantics. |
 
+`job_type` is set at row creation (mirror rows never become mission rows), so the work-update SSE patch path carries only `mission_liveness` (see `jobs.component.ts:649-662`).
+
 Canonical values are used verbatim — the FE never recases,
 translates, or fabricates a `mission_liveness` value, and the
 live/settled style split is the only FE-side interpretation.

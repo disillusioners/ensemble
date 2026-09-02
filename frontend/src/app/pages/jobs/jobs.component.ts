@@ -276,7 +276,7 @@ export class JobsComponent implements OnInit, OnDestroy {
       // receipt chip and the mission-liveness indicator. Task-backed
       // records carry null for both and render nothing extra.
       job_type: (work.job_type ?? null) as Job['job_type'],
-      mission_liveness: (work.mission_liveness ?? null) as Job['mission_liveness'],
+      mission_liveness: work.mission_liveness ?? null,
     };
   }
 

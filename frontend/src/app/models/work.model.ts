@@ -16,6 +16,8 @@
 // queue badge. The UI does not lie about which backing table the row
 // came from.
 
+import { MissionLiveness } from './job.model';
+
 /**
  * The kind of work record.
  *
@@ -59,7 +61,7 @@ export interface Work {
    * no linked instance — indistinguishable by design; render
    * nothing extra rather than inventing a state.
    */
-  mission_liveness?: string | null;
+  mission_liveness?: MissionLiveness | null;
 }
 
 /**
