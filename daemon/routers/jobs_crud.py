@@ -248,9 +248,12 @@ def _job_to_response(
         ),
         # M1 (mission-class, 2026-09-02) — additive mission projection
         # fields. Source verbatim from the WorkRecord (when one is
-        # supplied) so the four Fix-C read surfaces (this jobs_crud
-        # delegation + work_resolver primary + jobs_streaming SSE +
-        # JobResponse shape) stay in lock-step. The legacy fallback
+        # supplied) so the four Fix-C read surfaces (§8.2 canonical
+        # enumeration: this jobs_crud `_job_to_response` delegation +
+        # work_resolver primary `_job_to_record` + jobs_streaming SSE
+        # `_ResolvedWork` + jobs_management delegation, which builds
+        # its responses via this same `_job_to_response`) stay in
+        # lock-step. The legacy fallback
         # branch (``work_record is None``) returns ``None`` —
         # consistent with how ``mission_liveness`` and ``job_type``
         # already degrade in that path. Kill-switch OFF ⇒ all three
