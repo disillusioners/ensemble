@@ -54,6 +54,51 @@ _REMOVED_JOB_COLUMNS: frozenset[str] = frozenset({
 })
 
 
+# ── Fix B legacy zombie reap — cutover bound ─────────────────────────────
+#
+# The 3 pre-Fix-B legacy zombie ACTIVE message JobItems
+# (08-01 × 1; 08-14 × 2) — instances dead/gone, no driving Task
+# — must be retired by a one-time reconciliation method
+# (``reap_legacy_mirror_zombies`` below). The cutover bound
+# separates "legacy" rows (anything created BEFORE this timestamp,
+# which the reconcile cycle reaps) from "forward" rows (anything
+# created AFTER — the inline T0 writer
+# ``finalize_mirror_job_at_completion`` owns these; the reap MUST
+# NOT match them).
+#
+# Bound choice: ``2026-09-02T00:00:00+00:00`` — midnight UTC of the
+# day the leader decided to land the reap (post the Fix B ship
+# moment). The 3 zombies are dated 08-01 and 08-14; both are
+# well-before the bound. Any forward message mirror JobItem
+# created post-Fix-B has ``created_at >= now()`` which is past
+# the bound, so the reap is self-extinguishing on the first
+# complete cycle (a no-op the moment the 3 rows are gone).
+#
+# The bound is a CONSTANT, not a config knob: per the leader's
+# design note, this is a one-time reconciliation, not a load-bearing
+# correctness sweep. Pinning it in code prevents a config flip from
+# silently widening the predicate to current rows.
+LEGACY_MIRROR_ZOMBIE_CUTOVER_ISO: str = "2026-09-02T00:00:00+00:00"
+
+
+# Snapshot shape returned by ``reap_legacy_mirror_zombies``.
+#
+# The reconciler invokes the reap from a maintenance cadence
+# (300s loop); the result needs to outlive the SQLModel session
+# without triggering ``DetachedInstanceError``. A plain
+# ``NamedTuple`` gives callers stable attribute access (``r.job_id``,
+# ``r.instance_id``, ``r.admission_state``, ``r.terminal_reason``)
+# without depending on the underlying ORM instance.
+from typing import NamedTuple as _NamedTuple
+
+
+class _ReapedLegacyZombie(_NamedTuple):
+    job_id: str
+    instance_id: str | None
+    admission_state: str
+    terminal_reason: str | None
+
+
 def _statuses_to_admission(statuses: list[str | None]) -> list[str]:
     """Translate legacy status filter values to ``admission_state`` values.
 
@@ -1854,6 +1899,319 @@ SET admission_state = 'queued',
                 f"(instance={job_after.instance_id[:8] if job_after.instance_id else '?'}...)"
             )
             return job_after
+
+    # --------------------------------------------------------
+    # Fix B legacy zombie mirror reap — one-time reconciliation
+    # --------------------------------------------------------
+    #
+    # Retire the 3 pre-Fix-B legacy zombie ACTIVE message JobItems
+    # whose instances are dead/gone and whose driving Tasks are
+    # absent or terminal — the rows the inline T0 writer
+    # (``finalize_mirror_job_at_completion``) cannot reach because
+    # no Task will ever fire ``complete_task`` on them again.
+    #
+    # **D2-exempt — legacy one-time reconciliation, NOT a load-bearing
+    # correctness sweep.** Once the 3 rows are gone, the predicate
+    # never matches again (forward rows have ``created_at >= now()``
+    # which is past the ``LEGACY_MIRROR_ZOMBIE_CUTOVER_ISO`` bound).
+    # Future operators may add NEW terminal_reason values via the
+    # Phase 2 StrEnum work — ``'orphan_retired'`` is one of those.
+    # See ``docs/job-task-system.md`` §8.1 for the disposition.
+    #
+    # Idempotency is structural: once reaped, a row no longer has
+    # ``admission_state='active'`` and the SQL guard rejects any
+    # subsequent match. The second call is naturally a no-op; no
+    # marker column needed.
+    #
+    # Race-safety: same guarded UPDATE shape as the inline writer.
+    # The SQL predicate ``admission_state='active'`` is the
+    # authoritative race-safety boundary — concurrent writers
+    # (the observer, the cascade, ``force_finalize_orphan``) that
+    # already moved the row out of ACTIVE see ``rowcount == 0``
+    # and no-op.
+    #
+    # Registered in ``KNOWN_ADMISSION_STATE_WRITERS`` as
+    # ``"daemon/repositories/job_queue/repository.py:reap_legacy_mirror_zombies"``
+    # — Phase 0 census gate enforces the registration.
+
+    def reap_legacy_mirror_zombies(
+        self,
+        *,
+        task_repository: Any,
+        instance_repository: Any,
+    ) -> list["_ReapedLegacyZombie"]:
+        """Fix B — one-time reconciliation reap for the 3 pre-Fix-B
+        legacy zombie ACTIVE message JobItems.
+
+        Predicate (ALL must hold — per the leader-decision design):
+
+          * ``job_type == 'message'``
+          * ``admission_state == 'active'``
+          * ``created_at < LEGACY_MIRROR_ZOMBIE_CUTOVER_ISO``
+          * Linked ``instance`` is ``None`` (absent) OR its
+            ``status`` is in ``TERMINAL_INSTANCE_STATUSES``.
+          * Linked ``task`` (looked up via
+            ``task_repository.get_by_work_id(job_id)``) is ``None``
+            OR its ``status`` is in
+            ``{TaskStatus.COMPLETED.value, TaskStatus.FAILED.value,
+              TaskStatus.CANCELLED.value}``.
+
+        For each matching row, issues a guarded conditional
+        UPDATE — ``WHERE admission_state='active'`` — that stamps
+        ``admission_state='done'`` and
+        ``terminal_reason='orphan_retired'`` (the audit-truthful
+        stamp; these rows did NOT complete organically). The
+        UPDATE goes through ``job_state_machine.validate_transition``
+        BEFORE the SQL guard (same shape as
+        ``finalize_mirror_job_at_completion``; the example, not
+        the bypass class). An INFO log per reaped row carries
+        ``job_id`` + the reason for the audit trail.
+
+        Args:
+            task_repository: A ``TaskRepository`` (or duck-type)
+                exposing ``get_by_work_id(work_id) -> Task | None``.
+                Used to evaluate the "linked task is absent or
+                terminal" dimension of the predicate. ``None`` is
+                rejected — the predicate dimension is required.
+            instance_repository: A repository (or duck-type)
+                exposing ``get(instance_id) -> Instance | None``.
+                Used to evaluate the "linked instance is absent or
+                terminal" dimension. ``None`` is rejected.
+
+        Returns:
+            The list of reaped ``_ReapedLegacyZombie`` records
+            (post-stamp). Each record carries ``job_id``,
+            ``instance_id``, ``admission_state``, and
+            ``terminal_reason``. The records are detached,
+            immutable NamedTuples — they outlive the SQLModel
+            session without triggering ``DetachedInstanceError``.
+            Naturally empty once the 3 legacy rows are gone —
+            the predicate no longer matches forward rows.
+        """
+        if task_repository is None:
+            raise ValueError(
+                "reap_legacy_mirror_zombies: task_repository is "
+                "required (predicate dimension)"
+            )
+        if instance_repository is None:
+            raise ValueError(
+                "reap_legacy_mirror_zombies: instance_repository is "
+                "required (predicate dimension)"
+            )
+
+        # Lazy imports — the state-machine + status sets live in
+        # service / model modules that the repository otherwise
+        # doesn't import. The lazy import matches the
+        # ``finalize_mirror_job_at_completion`` style above.
+        from daemon.services.job_state_machine import job_state_machine
+        from daemon.constants import TERMINAL_INSTANCE_STATUSES
+        from daemon.repositories.task.models import TaskStatus
+
+        _TERMINAL_TASK_STATUSES: frozenset[str] = frozenset({
+            TaskStatus.COMPLETED.value,
+            TaskStatus.FAILED.value,
+            TaskStatus.CANCELLED.value,
+        })
+
+        cutover_iso = LEGACY_MIRROR_ZOMBIE_CUTOVER_ISO
+
+        reaped: list[JobItem] = []
+
+        with SQLModelSession(self.engine) as session:
+            # SQL-side candidate scan: only message-type, ACTIVE,
+            # pre-cutover rows. Instance + task status checks
+            # happen in Python (we need cross-system lookups and
+            # the cardinality is tiny — bounded by the 3 legacy
+            # rows + zero forward matches after cleanup).
+            stmt = (
+                select(JobItem)
+                .where(JobItem.job_type == "message")
+                .where(
+                    JobItem.admission_state == AdmissionState.ACTIVE.value
+                )
+                .where(JobItem.created_at < cutover_iso)
+                .where(JobItem.deleted_at.is_(None))
+                .order_by(JobItem.created_at.asc())
+            )
+            candidates = list(session.exec(stmt))
+
+            if not candidates:
+                # Self-extinguishing path — most cycles land here
+                # after the 3 zombies are reaped. Single
+                # DEBUG-level line keeps the periodic log quiet
+                # (this method runs every 300s).
+                logger.debug(
+                    "reap_legacy_mirror_zombies: no legacy "
+                    "candidates (created_at < %s); self-extinguishing",
+                    cutover_iso,
+                )
+                return reaped
+
+            logger.info(
+                "reap_legacy_mirror_zombies: scanning %d "
+                "candidate message JobItem(s) (created_at < %s)",
+                len(candidates),
+                cutover_iso,
+            )
+
+            # Capture scalar attributes into Python locals before
+            # the per-row ``session.get`` returns a (still-bound)
+            # ``JobItem`` — the SQLModel session expires attributes
+            # on commit by default, so callers that touch the
+            # returned instances AFTER the ``with`` block exits
+            # would hit ``DetachedInstanceError`` on lazy loads.
+            # Snapshotting the fields the caller + audit log need
+            # avoids the trap.
+            for candidate in candidates:
+                job_id = candidate.job_id
+                instance_id = candidate.instance_id
+                created_at = candidate.created_at
+
+                # Dimension 4: linked instance — absent or terminal.
+                instance = None
+                if instance_id is not None:
+                    try:
+                        instance = instance_repository.get(instance_id)
+                    except Exception as inst_err:
+                        # Soft-fail: a transient lookup error on
+                        # one row does NOT abort the reap. Skip
+                        # the row and log; the next cycle retries.
+                        logger.warning(
+                            "reap_legacy_mirror_zombies: instance "
+                            "lookup failed for job %s... (%s); "
+                            "skipping row",
+                            job_id[:8], inst_err,
+                        )
+                        continue
+                if instance is not None and (
+                    getattr(instance, "status", None)
+                    not in TERMINAL_INSTANCE_STATUSES
+                ):
+                    logger.debug(
+                        "reap_legacy_mirror_zombies: job %s... "
+                        "skipped — instance %s... alive "
+                        "(status=%s)",
+                        job_id[:8],
+                        (instance_id or "?")[:8],
+                        getattr(instance, "status", "?"),
+                    )
+                    continue
+
+                # Dimension 5: linked task — absent or terminal.
+                task = None
+                try:
+                    task = task_repository.get_by_work_id(job_id)
+                except Exception as task_err:
+                    logger.warning(
+                        "reap_legacy_mirror_zombies: task lookup "
+                        "failed for job %s... (%s); skipping row",
+                        job_id[:8], task_err,
+                    )
+                    continue
+                if task is not None and (
+                    getattr(task, "status", None)
+                    not in _TERMINAL_TASK_STATUSES
+                ):
+                    logger.debug(
+                        "reap_legacy_mirror_zombies: job %s... "
+                        "skipped — task %s... non-terminal "
+                        "(status=%s); inline writer owns this",
+                        job_id[:8],
+                        getattr(task, "id", "?"),
+                        getattr(task, "status", "?"),
+                    )
+                    continue
+
+                # Pre-check legal transition (active → done).
+                # ``(active, done)`` is enumerated in
+                # ``VALID_TRANSITIONS``; this is the same
+                # fail-fast the inline writer uses.
+                job_state_machine.validate_transition(
+                    AdmissionState.ACTIVE.value,
+                    AdmissionState.DONE.value,
+                    job_id=job_id,
+                )
+
+                # Guarded UPDATE — the SQL predicate is the
+                # authoritative race-safety boundary.
+                update_stmt = (
+                    sqlmodel_update(JobItem)
+                    .where(JobItem.job_id == job_id)
+                    .where(
+                        JobItem.admission_state
+                        == AdmissionState.ACTIVE.value
+                    )
+                    .values(
+                        admission_state=AdmissionState.DONE.value,
+                        terminal_reason="orphan_retired",
+                    )
+                )
+                result = session.exec(update_stmt)
+                # Per-row commit so the next iteration sees the
+                # freshly-stamped terminal_reason on a re-read
+                # AND a concurrent reader (the observer) sees the
+                # row's new state immediately. Single
+                # transaction-per-row keeps race-loss clean: if a
+                # concurrent writer flips the row first, our
+                # ``WHERE admission_state='active'`` predicate
+                # sees ``rowcount == 0`` and we no-op.
+                session.commit()
+
+                if result.rowcount == 0:
+                    logger.debug(
+                        "reap_legacy_mirror_zombies: job %s... "
+                        "SQL guard lost the race (concurrent "
+                        "writer flipped out of active first); "
+                        "no-op",
+                        job_id[:8],
+                    )
+                    continue
+
+                # Snapshot the audit fields BEFORE the next
+                # ``session.commit()`` expires attributes on the
+                # returned JobItem. The instance is detached
+                # after the ``with`` block exits.
+                instance_state = (
+                    getattr(instance, "status", "absent")
+                    if instance is not None
+                    else "absent"
+                )
+                task_state = (
+                    getattr(task, "status", "absent")
+                    if task is not None
+                    else "absent"
+                )
+                created_at_short = (created_at or "")[:19]
+                logger.info(
+                    f"Fix B legacy zombie reap: job "
+                    f"{job_id[:8]}... reaped "
+                    f"(admission_state=active→done, "
+                    f"terminal_reason='orphan_retired', "
+                    f"instance={instance_state}, task={task_state}, "
+                    f"created_at={created_at_short})"
+                )
+                # Re-read for the audit-log + return value. The
+                # attributes we need (``job_id``,
+                # ``admission_state``, ``terminal_reason``,
+                # ``instance_id``) are populated eagerly here
+                # before any subsequent commit expires them.
+                refreshed = session.get(JobItem, job_id)
+                if refreshed is None:
+                    continue
+                # Snapshot into the reaped list BEFORE the
+                # per-row commit expires any future accesses.
+                # We replace the SQLModel ORM instance with a
+                # small immutable NamedTuple so callers can read
+                # the fields without triggering lazy loads (and
+                # without ``DetachedInstanceError``).
+                reaped.append(_ReapedLegacyZombie(
+                    job_id=refreshed.job_id,
+                    instance_id=refreshed.instance_id,
+                    admission_state=refreshed.admission_state,
+                    terminal_reason=refreshed.terminal_reason,
+                ))
+
+        return reaped
 
     # --------------------------------------------------------
     # UPDATE

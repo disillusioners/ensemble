@@ -540,35 +540,75 @@ writer lands in source.
 
 **D2 status change:** the "every stateful row has an event-time terminal writer"
 red line flips from **RED** (07-03 → 09-01) to **GREEN** for message-mirror
-rows (this branch). The remaining **3 legacy zombie ACTIVE mirror rows**
-(pre-08-30) are **FLAGGED** below — the spec is silent on the exact
-disposition mechanism, so they remain as-is on this branch.
+rows (this branch). The previously-flagged **3 legacy zombie ACTIVE mirror
+rows** (pre-08-30) are **RETIRED** by the one-time reconciliation method
+`JobRepository.reap_legacy_mirror_zombies` — see below.
 
-**FLAG — 3 legacy zombie ACTIVE mirror rows:**
+**Mechanism — `reap_legacy_mirror_zombies` (leader decision, 2026-09-02):**
 
-- **What:** 3 ACTIVE message JobItems from before the 08-30 sweep-on change
-  (08-01 × 1; 08-14 × 2), each with a dead/gone instance. Pre-Fix-B they
-  were excluded from the f-sweep by what the spec calls the "blanket
-  message-skip at `:2284`" — but the spec describes the intent, not the
-  predicate logic.
-- **Why this matters:** Fix B's inline transition only fires at T0 (when a
-  Task completes). These 3 rows have no Task driving them anymore; they
-  are dead-lettered in spirit but ACTIVE in the table.
-- **What this branch does:** the new f-sweep skip
-  (`orphan_active_skipped_mirror_retired`) is observable in `details` but
-  intentionally does NOT reap the zombies. The predicate for reaping them
-  is OPEN in the spec ("liveness predicate" in
-  `approach-comparison.md` row B / `architecture-recommendation.md` row B)
-  — the spec describes the intent ("instance-liveness predicate") but does
-  not pin the exact SQL shape.
-- **Leader adjudication needed:** the spec requires a separate predicate
-  to be designed before these rows are reaped. The current branch leaves
-  them as-is (no-op skip with a distinct detail name) and FLAGS the
-  predicate design for leader decision in a follow-up commit. Pre-Fix-B
-  Incident-B frequency was zero in 09-01 (the 2 f2 finalizations were
-  f97813ae 01:22 + 80b86e51 20:03 — both message mirror but both ALREADY
-  drained by the inline transition post-Fix-B), so the residual exposure
-  on these 3 rows is bounded and self-contained.
+- **Predicate (all must hold):** `job_type='message'` AND
+  `admission_state='active'` AND `created_at < CUTOVER` AND
+  (linked `instance` is `None` OR `status` in
+  `TERMINAL_INSTANCE_STATUSES`) AND (linked `task` is `None`
+  OR `status` in `{COMPLETED, FAILED, CANCELLED}`).
+- **`terminal_reason = 'orphan_retired'`** — NOT `'completed'`.
+  These rows did not complete organically; audit truthfulness
+  outweighs vocabulary consistency. **No enum CHECK exists yet
+  (Phase 2 of the governance path introduces it); Phase 2's
+  `terminal_reason` StrEnum MUST include `'orphan_retired'`.**
+  Tracked in `.agents/shared/planning/job-task-retrospective/decisions.md`.
+- **Cutover bound:** `LEGACY_MIRROR_ZOMBIE_CUTOVER_ISO =
+  "2026-09-02T00:00:00+00:00"` (pinned at module level in
+  `daemon/repositories/job_queue/repository.py`). The leader's
+  design note: "the merge-into-latest point; the merge hasn't
+  happened, so pick and pin the constant now." The bound is
+  a CONSTANT, not a config knob — pinning it in code prevents
+  a config flip from silently widening the predicate to
+  forward rows.
+- **Race-safe:** same guarded conditional-UPDATE shape as the
+  inline writer (`WHERE admission_state='active'` is the
+  authoritative boundary). `rowcount == 0` is a silent
+  no-op. Goes through `job_state_machine.validate_transition`
+  BEFORE the SQL guard (the example, not the bypass class).
+- **D2-exempt:** legacy one-time reconciliation, NOT a
+  load-bearing correctness sweep. Self-extinguishes on the
+  cycle after the 3 rows are gone — forward rows have
+  `created_at >= now()` which is past the bound, so the
+  predicate never matches again. Periodic re-invocation
+  from the existing maintenance cadence is silent and free.
+- **Audit log:** an INFO log per reaped row carries
+  `job_id`, `terminal_reason`, instance state, task state,
+  and `created_at` for the audit trail.
+- **Invocation:** wired into the top of
+  `JobRecoveryService.reconcile_drift_states` (the existing
+  300s periodic cadence). Soft-fail: any exception is logged
+  and the sweep continues with the regular patterns.
+
+**Registered writer (§7):** `daemon/repositories/job_queue/repository.py:reap_legacy_mirror_zombies`
+— added to `KNOWN_ADMISSION_STATE_WRITERS` on this branch
+(21 → 22 writers, bidirectionally census-clean). I2 writer
+census sub-clause (≤2 writers per `admission_state` class:
+owner + declared backstop) is preserved — the reap is the
+ONE-TIME backstop for the historical class; the inline
+transition is the event-time owner for forward rows. The two
+occupy distinct temporal windows (pre-cutover vs post-cutover)
+so the census stays green.
+
+**Acceptance test surface:** `tests/unit/job_queue/test_fix_b_legacy_zombie_reap.py`
+(unit, 24 tests) — covers every predicate dimension
+(`wrong_job_type_not_reaped`, `non_active_admission_not_reaped`,
+`post_cutover_not_reaped`, `live_instance_not_reaped` +
+parametric over `ALIVE_INSTANCE_STATUSES`, `live_task_not_reaped` +
+parametric over `{PENDING, RUNNING}`, `terminal_instance_statuses_all_match` +
+parametric over `TERMINAL_INSTANCE_STATUSES`,
+`terminal_task_statuses_all_match` + parametric over
+`{COMPLETED, FAILED, CANCELLED}`); happy path
+(4 tests including `test_reaps_legacy_zombie_with_absent_instance` —
+the EXACT prod shape); `validate_transition` path tests
+(2 tests, same assertion style as
+`test_fix_b_inline_mirror_transition.py::test_illegal_transition_raises_and_blocks_write`);
+self-extinguishing shape (2 tests);
+argument validation (2 tests); cutover-constant pin (1 test).
 
 ---
 

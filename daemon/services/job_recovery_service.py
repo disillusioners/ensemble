@@ -817,6 +817,48 @@ class JobRecoveryService:
             )
             return {"reconciled": 0, "details": details}
 
+        # ── Fix B legacy zombie reap (one-time reconciliation) ──
+        # D2-EXEMPT — legacy one-time reconciliation with a fixed
+        # cutover bound; NOT a load-bearing correctness sweep. Self-
+        # extinguishes once the 3 pre-cutover rows are gone (forward
+        # rows have ``created_at >= now()`` which is past the bound).
+        # See ``docs/job-task-system.md`` §8.1 for the disposition
+        # and ``JobRepository.reap_legacy_mirror_zombies`` for the
+        # predicate. Soft-fail: any exception is logged and the
+        # periodic sweep continues with the regular patterns.
+        if (
+            self._job_repository is not None
+            and self._instance_repository is not None
+        ):
+            try:
+                reaped = await asyncio.to_thread(
+                    self._job_repository.reap_legacy_mirror_zombies,
+                    task_repository=self._task_repository,
+                    instance_repository=self._instance_repository,
+                )
+                for r in reaped:
+                    reconciled += 1
+                    details.append({
+                        "pattern": "fix_b_legacy_zombie_retired",
+                        "job_id": getattr(r, "job_id", None),
+                        "task_id": None,
+                        "instance_id": getattr(r, "instance_id", None),
+                        "reason": (
+                            f"Fix B legacy zombie reap: job "
+                            f"{getattr(r, 'job_id', '?')[:8]}... "
+                            f"reaped to admission_state='done' with "
+                            f"terminal_reason='orphan_retired' "
+                            f"(cutover-bound; D2-exempt "
+                            f"one-time reconciliation)"
+                        ),
+                    })
+            except Exception as reap_err:
+                logger.warning(
+                    f"reconcile_drift_states: Fix B legacy zombie "
+                    f"reap soft-failed: {type(reap_err).__name__}: "
+                    f"{reap_err} — periodic sweep continues"
+                )
+
         # ── Pattern (b): F10 — done JobItem + running Task ────────
         # Iterate the (small) RUNNING task set first — F10 is the
         # most observable drift (workers see the zombie task but
