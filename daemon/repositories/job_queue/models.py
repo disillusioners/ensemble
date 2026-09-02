@@ -377,8 +377,10 @@ class JobItem(SQLModel, table=True):
     # terminated when ``admission_state='done'``. One of:
     # ``"completed"`` (natural finish), ``"failed"`` (terminal error
     # not retried), ``"cancelled"`` (explicit cancel via
-    # ``cancel_job`` / route), or ``"aborted"`` (instance-terminated
-    # cascade). ``None`` for non-terminal jobs (``queued``, ``active``,
+    # ``cancel_job`` / route), ``"aborted"`` (instance-terminated
+    # cascade), or ``"orphan_retired"`` (system retirement of a
+    # legacy message mirror after its execution path disappeared).
+    # ``None`` for non-terminal jobs (``queued``, ``active``,
     # ``dead``). The Phase 5 column drop collapsed the 7-state legacy
     # ``status`` vocabulary onto a 4-value ``admission_state``, which
     # made cancelled/failed/completed indistinguishable from the

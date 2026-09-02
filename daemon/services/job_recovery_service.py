@@ -651,6 +651,57 @@ class JobRecoveryService:
         # instance-wide lock release — and any such path would be the
         # exact bug we are fixing.
 
+    async def _reconcile_terminal_message_mirrors(
+        self,
+    ) -> list[dict[str, Any]]:
+        """Run the F-1 no-age terminal-task backstop.
+
+        This leg is deliberately separate from the legacy zombie reap:
+        the latter is cutover-bounded and excludes live instances, while
+        this leg repairs any non-deleted ACTIVE message mirror whose
+        linked Task is terminal regardless of age.  The repository
+        writer owns the guarded SQL transition; the service only
+        converts its detached snapshots into the public sweep details.
+
+        The call is best-effort: a failure in this leg is logged with
+        traceback and the remaining drift patterns continue.
+        """
+        if (
+            self._job_repository is None
+            or self._task_repository is None
+        ):
+            return []
+
+        try:
+            terminal_mirrors = await asyncio.to_thread(
+                self._job_repository.reconcile_terminal_message_mirrors,
+                task_repository=self._task_repository,
+            )
+        except Exception as exc:
+            logger.error(
+                "reconcile_drift_states: F-1 terminal message-mirror "
+                "backstop soft-failed: %s",
+                exc,
+                exc_info=True,
+            )
+            return []
+
+        details: list[dict[str, Any]] = []
+        for mirror in terminal_mirrors:
+            details.append({
+                "pattern": "terminal_message_mirror_done",
+                "job_id": mirror.job_id,
+                "task_id": None,
+                "instance_id": mirror.instance_id,
+                "reason": (
+                    f"F-1 terminal message-mirror backstop: job "
+                    f"{mirror.job_id[:8]}... followed its terminal Task "
+                    f"to admission_state='done' with "
+                    f"terminal_reason='completed'"
+                ),
+            })
+        return details
+
     # ─────────────────────────────────────────────────────────────
     # Phase 3 (defer-seam bugfix, F5/F10): periodic drift reconciler
     # ─────────────────────────────────────────────────────────────
@@ -816,6 +867,58 @@ class JobRecoveryService:
                 "drift reconciliation skipped."
             )
             return {"reconciled": 0, "details": details}
+
+        # ── Fix B legacy zombie reap (one-time reconciliation) ──
+        # D2-EXEMPT — legacy one-time reconciliation with a fixed
+        # cutover bound; NOT a load-bearing correctness sweep. Self-
+        # extinguishes once the 3 pre-cutover rows are gone (forward
+        # rows have ``created_at >= now()`` which is past the bound).
+        # See ``docs/job-task-system.md`` §8.1 for the disposition
+        # and ``JobRepository.reap_legacy_mirror_zombies`` for the
+        # predicate. Soft-fail: any exception is logged and the
+        # periodic sweep continues with the regular patterns.
+        if (
+            self._job_repository is not None
+            and self._instance_repository is not None
+        ):
+            try:
+                reaped = await asyncio.to_thread(
+                    self._job_repository.reap_legacy_mirror_zombies,
+                    task_repository=self._task_repository,
+                    instance_repository=self._instance_repository,
+                )
+                for r in reaped:
+                    reconciled += 1
+                    details.append({
+                        "pattern": "fix_b_legacy_zombie_retired",
+                        "job_id": r.job_id,
+                        "task_id": None,
+                        "instance_id": r.instance_id,
+                        "reason": (
+                            f"Fix B legacy zombie reap: job "
+                            f"{r.job_id[:8]}... "
+                            f"reaped to admission_state='done' with "
+                            f"terminal_reason='orphan_retired' "
+                            f"(cutover-bound; D2-exempt "
+                            f"one-time reconciliation)"
+                        ),
+                    })
+            except Exception as reap_err:
+                logger.warning(
+                    f"reconcile_drift_states: Fix B legacy zombie "
+                    f"reap soft-failed: {type(reap_err).__name__}: "
+                    f"{reap_err} — periodic sweep continues",
+                    exc_info=True,
+                )
+
+        # ── F-1 terminal message-mirror backstop ──────────────────
+        # This permanent leg is the bounded recovery for the crash
+        # window between Task completion and the inline writer.  The
+        # linked Task is terminal, so its receipt follows regardless
+        # of age or instance liveness.
+        for detail in await self._reconcile_terminal_message_mirrors():
+            reconciled += 1
+            details.append(detail)
 
         # ── Pattern (b): F10 — done JobItem + running Task ────────
         # Iterate the (small) RUNNING task set first — F10 is the
@@ -1954,6 +2057,67 @@ class JobRecoveryService:
                         f"{job_id[:8] if job_id else '?'}... "
                         f"has no instance_id "
                         f"(startup-recovery scope)"
+                    )
+                    continue
+
+                # ── Fix B — f2's mirror slice retires ──
+                # Pattern (f) no longer owns message-mirror
+                # JobItems. The inline idempotent mirror
+                # transition at
+                # ``daemon/services/task_processor.py:on_success``
+                # is the event-time owner of mirror rows; the
+                # f-sweep only handles TASK-type drift from
+                # here on. The bounded terminal-message-mirror
+                # backstop is the residual-loss recoverer for
+                # a completed Task whose inline write was missed.
+                # RESOLVED by reap_legacy_mirror_zombie (381e355d,
+                # leader decision 09-02); see docs §8.1.
+                #
+                # Ordering is intentional: this check is before
+                # f1's no-Task/tree-alive path. The pre-B no-Task
+                # message-mirror + live-instance class was already
+                # preserved by startup recovery and the subtree-alive
+                # guard; the skip changes periodic ownership, not
+                # the safety outcome. The new backstop is the only
+                # bounded terminal repair for that cutover window.
+                #
+                # Why explicit skip (and not silent
+                # ``continue``): the new behavior must be
+                # *visible* — observability sees the
+                # ``orphan_active_skipped_mirror_retired``
+                # detail entry, which a future regression that
+                # reintroduced f2's mirror-slice finalization
+                # would silently undo.
+                if getattr(job, "job_type", None) == "message":
+                    details.append({
+                        "pattern": (
+                            "orphan_active_skipped_mirror_retired"
+                        ),
+                        "job_id": job_id,
+                        "task_id": None,
+                        "instance_id": instance_id,
+                        "reason": (
+                            f"active message JobItem "
+                            f"{job_id[:8]}... — Pattern (f) "
+                            f"mirror slice retired by Fix B; "
+                            f"inline transition owns the "
+                            f"terminal write (see "
+                            f"``JobRepository."
+                            f"finalize_mirror_job_at_completion``); "
+                            f"this skip is the explicit "
+                            f"observability seam for the "
+                            f"retirement (a future regression "
+                            f"that re-introduced f2's mirror "
+                            f"finalization would silence this "
+                            f"detail)"
+                        ),
+                    })
+                    logger.debug(
+                        f"reconcile_drift_states: Pattern (f) "
+                        f"skip — job {job_id[:8]}... is "
+                        f"job_type='message' (Fix B: f2's mirror "
+                        f"slice retired; inline transition owns "
+                        f"the terminal write)"
                     )
                     continue
 

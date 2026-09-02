@@ -886,6 +886,68 @@ class ProcessMessageProcessor(BaseProcessor):
                     task, succeeded=True
                 )
 
+            # ─── Fix B — inline idempotent mirror transition ───
+            # The T0 finalization of the message-mirror JobItem
+            # (the JobItem side of the virtual-job pair). Called
+            # AFTER ``complete_task`` commits so the Task is the
+            # authoritative "work is done" signal and the JobItem
+            # mirror is the read-model projection that follows.
+            #
+            # RACE COEXISTENCE — the inline transition is safe to
+            # race with:
+            #   * the observer's ``_finalize_job_db_sync``
+            #     (job_feedback_observer.py) — the SQL guard
+            #     ``admission_state IN ('queued','active')`` ensures
+            #     exactly one writer wins.
+            #   * ``reconcile_terminal_task`` (Step 4 post-commit).
+            #   * the instance-terminal cascade
+            #     (``_terminate_instance_db_sync`` in
+            #     ``instance_lifecycle.py``).
+            #   * ``force_finalize_orphan`` (legacy reaper path).
+            #   * f2's pre-retirement path (which the f-sweep's
+            #     message-skip now blocks for message-type rows
+            #     anyway — defense-in-depth).
+            #
+            # Soft-fail: any exception is logged and swallowed so
+            # the success path is never blocked by the mirror
+            # transition. The SQL guard makes race-loss a silent
+            # no-op so the soft-fail is purely belt-and-braces.
+            # The repo access pattern mirrors the existing
+            # ``getattr(self._manager, "_queue_repository", None)``
+            # style at the iterations-count block above — soft
+            # ``getattr`` so unit tests that wire a partial
+            # ``InstanceManager`` do not crash.
+            job_repo = None
+            job_queue_service = getattr(
+                instance_manager, "_job_queue_service", None
+            )
+            if job_queue_service is not None:
+                job_repo = getattr(job_queue_service, "_repository", None)
+            if (
+                completed_task is not None
+                and job_repo is not None
+                and getattr(completed_task, "work_id", None) is not None
+            ):
+                try:
+                    await asyncio.to_thread(
+                        job_repo.finalize_mirror_job_at_completion,
+                        completed_task.work_id,
+                    )
+                except Exception as mirror_exc:
+                    logger.warning(
+                        f"Fix B inline mirror transition soft-failed "
+                        f"for task_id={getattr(completed_task, 'id', '?')} "
+                        f"work_id={completed_task.work_id}: "
+                        f"{type(mirror_exc).__name__}: {mirror_exc} "
+                        f"— F-1 "
+                        f"``reconcile_terminal_message_mirrors`` is the "
+                        f"bounded residual recoverer; the legacy "
+                        f"``reap_legacy_mirror_zombies`` leg remains "
+                        f"pre-cutover-only, and the observer may also race "
+                        f"as a terminal writer",
+                        exc_info=True,
+                    )
+
             # W6 — usage-limit anchor clear (success ENDS the episode):
             # a successful turn means the quota window lifted; remove
             # ``usage_limit_first_seen_at`` so the next quota hit on
