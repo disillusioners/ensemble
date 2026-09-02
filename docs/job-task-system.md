@@ -1169,7 +1169,7 @@ against the same READ-only `InstanceRepository` / `JobRepository` the
 
 | Route | Source path | Contract |
 |---|---|---|
-| `GET /api/missions` | `MissionResolver.resolve_page()` (new paged batch path) | Paged list of ALL instances' missions. `resolve_many`'s production debut, page-shaped. |
+| `GET /api/missions` | `MissionResolver.resolve_page()` (new paged batch path) | Paged list of ALL instances' missions. ``resolve_page``'s production debut, page-shaped; ``resolve_many`` remains tests-only. |
 | `GET /api/missions/{mission_id}` | `MissionResolver.resolve()` — the dead-link pre-fetch path | Full `MissionRecord` incl. `epoch` + `terminal_reason` (§8.3 semantics). MUST NOT route through `project()` — its `dead_linked=False` default is the S4 bug class (a DEAD linked JobItem would surface `failed` instead of `dead_letter`). Unknown id ⇒ 404. |
 
 Wire schemas (`daemon/routers/schemas.py`): `MissionResponse` mirrors `MissionRecord`
@@ -1187,9 +1187,14 @@ field-for-field (`mission_id`, `agent_id`, `parent_mission_id`, `liveness`,
 Fail-closed by design: a DEDICATED endpoint must not answer `200 []` while disabled
 (an empty page is indistinguishable from "no missions exist" — the §8.2
 absence-must-be-explicit lesson), and must not 500. Routes stay REGISTERED while OFF
-(OpenAPI still documents them); the gate is in-handler, checked first (before the 503
-not-wired guard and query validation). This is a task-directed choice — the spec's
-kill-switch section (§8.3) only covers the additive fields on the four Fix-C surfaces.
+(OpenAPI still documents them). The gate is in-handler, but it runs **after** FastAPI's
+`Depends` resolution — an **unwired resolver answers 503 even when OFF** (Depends
+resolves the resolver singleton before the handler body executes; lifespan guarantees
+wiring in production/tests, so 503 is unreachable in those environments). The kill-
+switch wins only once the resolver is wired — that ordering is the caller-adjudicated
+contract; an OFF-but-unwired dep stays a 503, not a 404. This is a task-directed choice
+— the spec's kill-switch section (§8.3) only covers the additive fields on the four
+Fix-C surfaces.
 
 #### List contract (all choices [FLAGGED] — spec-silent)
 
@@ -1229,11 +1234,16 @@ kill-switch section (§8.3) only covers the additive fields on the four Fix-C su
 
 #### Performance bound — ≤3 SELECTs per page, zero per-row lookups
 
-`resolve_page()` issues EXACTLY three SELECTs per page regardless of page size, all
-batched: (1) `SELECT count(*)` with the filter WHERE, (2) the paged `SELECT … FROM
-instances` with filters + ordering + LIMIT/OFFSET in SQL, (3) ONE batched
-`job_queue_items` SELECT via `instance_id IN (…)` for the W4 hazard + `linked_jobs`
-(the C9 combined-SELECT helper). The bound is pinned by an ENGINE event-listener
+`resolve_page()` issues **≤3 SELECTs per page** regardless of page size, all batched:
+(1) `SELECT count(*)` with the filter WHERE, (2) the paged `SELECT … FROM instances`
+with filters + ordering + LIMIT/OFFSET in SQL, (3) ONE batched `job_queue_items` SELECT
+via `instance_id IN (…)` for the W4 hazard + `linked_jobs` (the C9 combined-SELECT
+helper). The empty-final-page case short-circuits leg 3 — when the paged Instance
+SELECT returns zero rows (e.g. filter on a source-less liveness, or offset beyond the
+total), `_batch_jobitem_lookup` exits on its empty-input guard
+(`mission_resolver.py:870-871`) without opening a session, so that page fires **2
+SELECTs**, not 3. Tests pin the flat bound against the populated-page case; an empty-
+final-page pin is the §8.4 floor note. The bound is pinned by an ENGINE event-listener
 (`before_cursor_execute` spy) counting real SELECTs during the HTTP request — NOT
 mock counting — including a flat-as-page-doubles assertion
 (`tests/unit/routers/test_missions_api.py::TestEngineBoundQueryCount`).
