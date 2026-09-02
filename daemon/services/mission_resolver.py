@@ -7,8 +7,8 @@ projection** — it derives from ``Instance.status`` (+ ``JobItem.terminal_reaso
 for the W4 DEAD hazard) and NEVER writes. ``MissionResolver`` is a leaf
 service: only READ repositories are wired in (``InstanceRepository`` and
 ``JobRepository``); no minting, no DML, no JobItem creation, no
-admission-state writes — the census stays at 23 frozen admission-state
-writers (see ``daemon/job_state/constitution.py``).
+admission-state writes — census frozen
+(``daemon/job_state/constitution.py``: ``KNOWN_ADMISSION_STATE_WRITERS``).
 
 M4-i extension (2026-09-02, ``feature/mission-class``): the paged batch
 path :meth:`MissionResolver.resolve_page` + :class:`MissionPage` power
@@ -279,9 +279,13 @@ class MissionRecord:
             populated only when the JobItem lookup succeeds (graceful
             degrade to ``[]`` on transient DB error).
         started_at: ISO-8601 ``last_activity_at`` of the linked
-            instance (closest analogue to "work began"). ``None``
-            when the instance has no recorded activity yet or when
-            degraded.
+            instance (closest analogue to "work began"). Falls back to
+            ``instance.created_at`` when ``last_activity_at`` is NULL
+            (the pre-Activity cohort — no recorded activity yet). The
+            choice is a heuristic: it tells the operator when the
+            mission was first observed, not when the underlying
+            work began. ``None`` when both are NULL or when the
+            resolver degraded (no Instance row available).
         last_activity_at: ISO-8601 pass-through of the instance's
             ``last_activity_at`` column. ``None`` when null on the
             instance, or when degraded.
@@ -609,8 +613,15 @@ class MissionResolver:
             count/page leg degraded.
         """
         if limit < 1:
+            # Defensive: unreachable from HTTP — the router clamps to
+            # ``[1, MAX_PAGE_LIMIT]`` (daemon/routers/missions.py:267)
+            # before calling. A violation here is a programmer
+            # mistake (programmer-mistake guard, not a DB condition).
             raise ValueError(f"limit must be >= 1, got {limit}")
         if offset < 0:
+            # Defensive: same as above — the router clamps to >= 0
+            # (daemon/routers/missions.py:268) before calling. A
+            # violation here is a programmer mistake.
             raise ValueError(f"offset must be >= 0, got {offset}")
 
         # Local imports — mirrors the leaf-service pattern in
