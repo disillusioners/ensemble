@@ -25,7 +25,7 @@
 
   // Settled missions stay inline (no drop) but render muted so the
   // live/settled split is readable without colour alone.
-  &.mission-settled {
+  &.mission-terminal {
     opacity: 0.75;
   }
 }

@@ -192,9 +192,9 @@ test('R1 — receipt + mission chip co-render on /jobs (message + non-null missi
   await expect(missionChipSpan).toContainText(
     `mission: ${candidates[0].mission_liveness}`
   );
-  // Settled cluster adds .mission-settled; live cluster adds .mission-live.
+  // Settled cluster adds .mission-terminal; live cluster adds .mission-live.
   const klass = (await missionChipSpan.getAttribute('class')) ?? '';
-  expect(klass).toMatch(/mission-(live|settled)/);
+  expect(klass).toMatch(/mission-(live|terminal)/);
 
   await page.screenshot({
     path: path.join(RESULTS_DIR, 'chips_R1_receipt_mission.png'),
