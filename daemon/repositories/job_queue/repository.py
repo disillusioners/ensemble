@@ -1647,6 +1647,215 @@ SET admission_state = 'queued',
             return job
 
     # --------------------------------------------------------
+    # Inline mirror terminal writer — task_processor on_success
+    # --------------------------------------------------------
+    #
+    # Fix B (2026-09-02, drift-history-and-constitution.md §4):
+    # the inline idempotent mirror transition that retires f2's
+    # mirror slice. Called from ``ProcessMessageProcessor.on_success``
+    # immediately after ``TaskRepository.complete_task`` returns the
+    # just-completed Task — the message-mirror JobItem reaches
+    # ``admission_state='done'`` at the true event time (T0) instead
+    # of waiting for the f-sweep's 300s polling window (the source of
+    # Incident B's 7-hour lag).
+    #
+    # Scope discipline: ONLY ``job_type == "message"`` JobItems get
+    # this treatment. Mission (task-type) jobs keep their existing
+    # bus-gated finalize (``_finalize_terminal`` after the parent's
+    # subtree drains); the inline transition is structurally wrong
+    # for missions because it bypasses the wait-for-children contract.
+    #
+    # The census notes 8 legacy writers bypass ``validate_transition``;
+    # this new writer goes through the legal-transition machinery
+    # (``job_state_machine.validate_transition``) BEFORE issuing the
+    # SQL guard. The transition is recorded as a registered authority
+    # in ``KNOWN_ADMISSION_STATE_WRITERS`` (Phase 0 census gate).
+    #
+    # Idempotency / race-safety contract:
+    #
+    #   * rowcount == 0 → silent no-op (the row is already terminal
+    #     OR is a non-message JobItem OR doesn't exist). The caller
+    #     must treat ``None`` as "we did not win the race — that's
+    #     fine, somebody else did".
+    #   * The SQL guard is ``admission_state IN ('queued','active')``
+    #     so the inline transition is race-safe against:
+    #       - the observer's Step-2 ``_finalize_job_db_sync``,
+    #       - ``reconcile_terminal_task`` (Step 4 post-commit),
+    #       - the instance-terminal cascade (``_terminate_instance_db_sync``),
+    #       - ``force_finalize_orphan`` (legacy reaper),
+    #       - and f2's pre-retirement path.
+    #     Whichever writer wins the SQL guard, the others see rowcount
+    #     == 0 and no-op — exactly one ``active → done`` transition
+    #     per row, ever. The post-Fix-B inline transition makes the
+    #     single winner race WIN-at-T0 instead of at-f-sweep-time.
+
+    def finalize_mirror_job_at_completion(
+        self,
+        job_id: str | None,
+    ) -> JobItem | None:
+        """Fix B — inline idempotent mirror transition.
+
+        For ``job_type == 'message'`` JobItems, transitions
+        ``admission_state IN ('queued','active') → 'done'`` with
+        ``terminal_reason='completed'`` and stamps ``completed_at``.
+        Race-safe: rowcount == 0 is a silent no-op.
+
+        Scope discipline: only message-type JobItems are transitioned.
+        For task-type JobItems (missions), ``None`` is returned and
+        the caller MUST keep the existing bus-gated finalize path —
+        missions cannot be finalized at T0 because their driving Task
+        may have live children that must drain first (Mechanism B
+        in the f-sweep design).
+
+        Args:
+            job_id: The JobItem's primary key (== ``Task.work_id`` per
+                the Fix A linkage contract). ``None`` returns
+                ``None`` — there is no JobItem to look up.
+
+        Returns:
+            The updated ``JobItem`` after the UPDATE commits, or
+            ``None`` if no row was matched (job missing, non-message
+            job_type, or already-terminal). The method NEVER raises
+            on race-loss — race-safety is the core property.
+
+        Notes:
+            Validates the transition through
+            ``job_state_machine.validate_transition`` BEFORE the
+            SQL guard (``(active, done)`` and ``(queued, done)`` are
+            both legal per the 4-value admission vocabulary in
+            ``daemon/services/job_state_machine.py:53-62``). The
+            Python pre-check is a fail-fast that surfaces programming
+            errors; the SQL ``admission_state IN (...)`` predicate
+            remains the authoritative race-safety boundary.
+
+            Registered in ``KNOWN_ADMISSION_STATE_WRITERS`` as
+            ``"daemon/repositories/job_queue/repository.py:finalize_mirror_job_at_completion"``
+            — Phase 0 census gate enforces the registration.
+        """
+        if job_id is None:
+            return None
+
+        # Lazy import — the state-machine module imports the model
+        # which imports sqlmodel; the existing ``atomic_transition``
+        # uses the same lazy pattern to avoid the cycle.
+        from daemon.services.job_state_machine import job_state_machine
+
+        with SQLModelSession(self.engine) as session:
+            # Read first to honor the SCOPE DISCIPLINE (only
+            # message-type) and to capture the current admission_state
+            # for the validate_transition pre-check. A row that is
+            # already terminal short-circuits here (no-op) without
+            # touching the SQL guard — same race-safe shape as
+            # ``finalize_active_to_done``.
+            job = session.get(JobItem, job_id)
+            if job is None:
+                return None
+            if job.job_type != "message":
+                # Scope discipline: missions keep their bus-gated
+                # finalize. The Task completed but the JobItem
+                # mirror is NOT inline-transitioned here; the
+                # observer's existing path handles it via
+                # ``_finalize_terminal`` after subtree drain.
+                logger.debug(
+                    f"finalize_mirror_job_at_completion: job "
+                    f"{job_id[:8]}... is job_type={job.job_type!r}, "
+                    f"NOT message — leaving to bus-gated finalize "
+                    f"(scope discipline)"
+                )
+                return None
+            current_admission = job.admission_state
+            # Short-circuit on already-terminal states BEFORE
+            # ``validate_transition``: ``(dead, done)`` is an illegal
+            # transition per the state-machine vocabulary, so calling
+            # ``validate_transition`` on a DEAD row would raise
+            # ``InvalidTransitionError`` — which would defeat the
+            # race-safety contract. The short-circuit is the
+            # race-loss-safe path; ``validate_transition`` only runs
+            # on rows that need it.
+            if current_admission in (
+                AdmissionState.DONE.value,
+                AdmissionState.DEAD.value,
+            ):
+                logger.debug(
+                    f"finalize_mirror_job_at_completion: job "
+                    f"{job_id[:8]}... already terminal "
+                    f"(admission_state={current_admission!r}) — "
+                    f"silent no-op (race-loss is benign)"
+                )
+                return None
+            # Pre-check legal transition. ``(queued, done)`` and
+            # ``(active, done)`` are both enumerated in
+            # ``VALID_TRANSITIONS`` (the normal Fix B T0 paths);
+            # any other ``current_admission`` (``queued``,
+            # ``active``) lands here. The Python pre-check is
+            # fail-fast for programming errors (e.g. a future
+            # ``admission_state`` value not in
+            # ``VALID_TRANSITIONS``); the SQL ``IN`` predicate
+            # below is the authoritative race-safety boundary.
+            job_state_machine.validate_transition(
+                current_admission,
+                AdmissionState.DONE.value,
+                job_id=job_id,
+            )
+
+            now = datetime.now(timezone.utc).isoformat()
+            stmt = (
+                sqlmodel_update(JobItem)
+                .where(JobItem.job_id == job_id)
+                # The SQL guard is the authoritative race-safety
+                # boundary. The Python pre-check above is fail-fast
+                # for programming errors; the SQL ``IN`` predicate
+                # is what protects against the concurrent writers
+                # enumerated in the docstring.
+                .where(
+                    JobItem.admission_state.in_([
+                        AdmissionState.QUEUED.value,
+                        AdmissionState.ACTIVE.value,
+                    ])
+                )
+                # The ``completed_at`` column was dropped from the
+                # model in Phase B; the stamp lives on the Instance
+                # row. Mirror-side stamp is ``terminal_reason='completed'``
+                # only — matches the spec's "organic-style terminal_reason"
+                # requirement and the pre-Fix-B ``_pattern_f_finalize_done``
+                # shape (``result_summary`` is no longer on JobItem).
+                .values(
+                    admission_state=AdmissionState.DONE.value,
+                    terminal_reason="completed",
+                )
+            )
+            result = session.exec(stmt)
+            session.commit()
+
+            if result.rowcount == 0:
+                # Concurrent writer beat us to the transition. The
+                # SQL guard saw a non-{queued,active} state on
+                # commit — most likely the observer's
+                # ``_finalize_job_db_sync`` or ``_terminate_instance_db_sync``.
+                # The row is now in some terminal state; either way,
+                # it is NOT our problem. Silent no-op.
+                logger.debug(
+                    f"finalize_mirror_job_at_completion: job "
+                    f"{job_id[:8]}... — SQL guard lost the race "
+                    f"(rowcount=0; concurrent writer won)"
+                )
+                return None
+
+            # Re-read to return a fully-populated JobItem AND to
+            # surface the freshly-stamped terminal_reason for the
+            # caller's logging path.
+            job_after = session.get(JobItem, job_id)
+            if job_after is None:
+                return None
+            logger.info(
+                f"Fix B: mirror JobItem finalized (inline) "
+                f"{job_id[:8]}... admission_state=active→done "
+                f"terminal_reason=completed "
+                f"(instance={job_after.instance_id[:8] if job_after.instance_id else '?'}...)"
+            )
+            return job_after
+
+    # --------------------------------------------------------
     # UPDATE
     # --------------------------------------------------------
 

@@ -118,6 +118,7 @@ KNOWN_ADMISSION_STATE_WRITERS: frozenset[str] = frozenset({
     "daemon/repositories/job_queue/repository.py:batch_cancel_queued",
     "daemon/repositories/job_queue/repository.py:cancel_job",
     "daemon/repositories/job_queue/repository.py:finalize_active_to_done",
+    "daemon/repositories/job_queue/repository.py:finalize_mirror_job_at_completion",  # Fix B — inline idempotent mirror transition (T0)
     "daemon/repositories/job_queue/repository.py:start_job",
     "daemon/repositories/job_queue/repository.py:start_job_atomic_with_lock",
     "daemon/repositories/job_queue/repository.py:rearm_with_lock",

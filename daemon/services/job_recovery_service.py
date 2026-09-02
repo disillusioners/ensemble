@@ -1957,6 +1957,70 @@ class JobRecoveryService:
                     )
                     continue
 
+                # ── Fix B — f2's mirror slice retires ──
+                # Pattern (f) no longer owns message-mirror
+                # JobItems. The inline idempotent mirror
+                # transition at
+                # ``daemon/services/task_processor.py:on_success``
+                # is the event-time owner of mirror rows; the
+                # f-sweep only handles TASK-type drift from
+                # here on. A separate liveness-gated predicate
+                # for the 3 pre-08-30 zombie ACTIVE message jobs
+                # is OPEN per the spec — see FLAG below for
+                # leader adjudication.
+                #
+                # Why explicit skip (and not silent
+                # ``continue``): the new behavior must be
+                # *visible* — observability sees the
+                # ``orphan_active_skipped_mirror_retired``
+                # detail entry, which a future regression that
+                # reintroduced f2's mirror-slice finalization
+                # would silently undo.
+                #
+                # ── FLAG for leader decision: ──
+                # The 3 legacy zombie ACTIVE message jobs
+                # (pre-08-30, sweep-excluded by this skip)
+                # need a separate liveness predicate to be
+                # reaped. The spec is silent on the exact
+                # mechanism; the dispatch task flags this for
+                # the leader. The current implementation
+                # leaves them as-is (no-op skip with a
+                # distinct detail name). See
+                # ``docs/job-task-system.md`` §6 / §7 and the
+                # Fix B report for the disposition.
+                if getattr(job, "job_type", None) == "message":
+                    details.append({
+                        "pattern": (
+                            "orphan_active_skipped_mirror_retired"
+                        ),
+                        "job_id": job_id,
+                        "task_id": None,
+                        "instance_id": instance_id,
+                        "reason": (
+                            f"active message JobItem "
+                            f"{job_id[:8]}... — Pattern (f) "
+                            f"mirror slice retired by Fix B; "
+                            f"inline transition owns the "
+                            f"terminal write (see "
+                            f"``JobRepository."
+                            f"finalize_mirror_job_at_completion``); "
+                            f"this skip is the explicit "
+                            f"observability seam for the "
+                            f"retirement (a future regression "
+                            f"that re-introduced f2's mirror "
+                            f"finalization would silence this "
+                            f"detail)"
+                        ),
+                    })
+                    logger.debug(
+                        f"reconcile_drift_states: Pattern (f) "
+                        f"skip — job {job_id[:8]}... is "
+                        f"job_type='message' (Fix B: f2's mirror "
+                        f"slice retired; inline transition owns "
+                        f"the terminal write)"
+                    )
+                    continue
+
                 # ── Task-side inspection ───────────────
                 # f1 requires "no Task rows" for this
                 # JobItem. f2 requires a COMPLETED Task.
