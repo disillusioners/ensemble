@@ -1035,7 +1035,7 @@ the four wire cases have exactly one behaviour each:
 
 Canonical values are used verbatim — the FE never recases,
 translates, or fabricates a `mission_liveness` value, and the
-live/settled style split is the only FE-side interpretation.
+live/terminal style split is the only FE-side interpretation.
 
 Rendering surfaces: the Jobs page cards (both the Queues view via
 `/api/jobs` and the All Work view via `/api/work`, whose
