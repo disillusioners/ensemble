@@ -89,7 +89,10 @@
                   <span class="agent-badge">{{ job.agent_id }}</span>
                   <span class="status-text">{{ job.status }}</span>
                   @if (missionChip(job); as chip) {
-                    <app-mission-liveness-chip [chip]="chip" />
+                    <app-mission-liveness-chip
+                      [chip]="chip"
+                      (click)="$event.stopPropagation()"
+                      (keydown.enter)="$event.stopPropagation()" />
                   }
                   <span class="time-text">{{ timeAgo(job.completed_at || job.created_at) }}</span>
                 </div>

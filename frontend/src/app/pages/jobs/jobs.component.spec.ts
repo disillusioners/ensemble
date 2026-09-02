@@ -1,6 +1,7 @@
 import { signal, computed, Component, input, output } from '@angular/core';
 import { Observable } from 'rxjs';
 import { Job, JobStatus, JobSource } from '../../models/job.model';
+import type { Work } from '../../models/work.model';
 import { Project } from '../../models/project.model';
 import { createMockJob, createMockJobList } from '../../testing/job-test-helpers';
 import { ConfirmDialogComponent } from '../../components/confirm-dialog/confirm-dialog.component';
@@ -169,7 +170,7 @@ class MockJobsComponent {
   readonly projects = mockProjectService.projects;
   // Phase 4 unified Work list — ``works()`` mirrors the real
   // component's signal so SSE patch tests can drive both surfaces.
-  readonly works = signal<import('../../models/work.model').Work[]>([]);
+  readonly works = signal<Work[]>([]);
   readonly selectedQueueId = signal<string | null>(null);
   readonly filters = signal<{ status?: JobStatus; source?: JobSource; agent_id?: string; project_id?: string; include_deleted?: boolean }>({});
   
