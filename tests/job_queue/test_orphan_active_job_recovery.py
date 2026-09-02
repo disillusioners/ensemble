@@ -149,10 +149,15 @@ def _insert_job_item(
     admission_state: str = AdmissionState.ACTIVE.value,
     job_metadata: dict | None = None,
     created_at: datetime | None = None,
+    job_type: str = "task",
 ) -> None:
     """Insert a JobItem directly via SQL. The optional
     ``created_at`` lets tests backdate the row past the
     grace period without an additional UPDATE round-trip.
+
+    The optional ``job_type`` defaults to ``"task"`` for backward
+    compatibility with the existing f1/f2 tests; the Fix B
+    message-skip tests pass ``job_type="message"``.
     """
     now = (created_at or datetime.now(timezone.utc)).isoformat()
     metadata_json = json.dumps(job_metadata or {})
@@ -184,7 +189,7 @@ def _insert_job_item(
                 "admission_state": admission_state,
                 "created_at": now,
                 "instance_id": instance_id,
-                "job_type": "task",
+                "job_type": job_type,
                 "retry_count": 0,
                 "metadata": metadata_json,
             },
@@ -871,6 +876,37 @@ class TestPatternFHealthyShapeExclusion:
             f"Active JobItem + RUNNING Task must NOT be matched by f2. "
             f"Got: {f2_corrected}"
         )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Fix B (2026-09-02) — f2's mirror slice retires
+# ─────────────────────────────────────────────────────────────────────
+#
+# The drift-history-and-constitution.md §4 spec retires f2's
+# mirror slice: message-mirror JobItems are now owned by the
+# inline idempotent mirror transition at T0
+# (``JobRepository.finalize_mirror_job_at_completion``), so the
+# f-sweep explicitly skips message-type rows. The skip must be:
+#
+#   1. **Observable** — the detail record carries the
+#      ``orphan_active_skipped_mirror_retired`` pattern name so a
+#      regression that re-introduced f2's mirror finalization
+#      would silence this signal.
+#   2. **Idempotent with the inline transition** — the inline
+#      transition is the legitimate owner; the f-sweep must not
+#      race-finalize the same row.
+#   3. **Non-blocking** — the message-skip must not abort the
+#      sweep's TASK-type processing on the same active-JobItem set.
+#
+# The test below pins all three. It uses task_id == job_id
+# (``get_by_work_id`` semantics — the linkage contract) and
+# backdates the JobItem's ``created_at`` past the grace so the
+# shape mirrors the production 7-hour-lag class (Incident B).
+#
+# Implementation note: the new skip runs BEFORE the task lookup, so
+# the test does not need to seed a Task row at all. The skip's
+# observable artifact is the ``details`` list — every detail entry
+# is the audit-trail the spec mandates.
 
         # Assert — the healthy-shape guard detail was recorded.
         healthy_records = [
@@ -3866,4 +3902,241 @@ class TestProcessorRespawnMintLinkageContract:
             f"JobItem.job_id (Pattern-f1's get_by_work_id(job_id) "
             f"depends on it). Got kwargs keys: "
             f"{sorted(kwargs.keys())}"
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Fix B (2026-09-02) — f2's mirror slice retires
+# ─────────────────────────────────────────────────────────────────────
+#
+# The drift-history-and-constitution.md §4 spec retires f2's
+# mirror slice: message-mirror JobItems are now owned by the
+# inline idempotent mirror transition at T0
+# (``JobRepository.finalize_mirror_job_at_completion``), so the
+# f-sweep explicitly skips message-type rows. The skip must be:
+#
+#   1. **Observable** — the detail record carries the
+#      ``orphan_active_skipped_mirror_retired`` pattern name so a
+#      regression that re-introduced f2's mirror finalization
+#      would silence this signal.
+#   2. **Idempotent with the inline transition** — the inline
+#      transition is the legitimate owner; the f-sweep must not
+#      race-finalize the same row.
+#   3. **Non-blocking** — the message-skip must not abort the
+#      sweep's TASK-type processing on the same active-JobItem set.
+#
+# Implementation note: the new skip runs BEFORE the task lookup, so
+# the test does not need to seed a Task row at all. The skip's
+# observable artifact is the ``details`` list — every detail entry
+# is the audit-trail the spec mandates.
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestFixBPatternFMessageSkipForMirrorSliceRetired:
+    """The f-sweep no longer finalizes message-mirror rows.
+
+    Contract (drift-history-and-constitution.md §4, Fix B):
+      * ``job_type == 'message'`` rows are skipped at the top of
+        the per-row loop in
+        ``JobRecoveryService._pattern_f_orphan_active_job_recovery``
+        with the ``orphan_active_skipped_mirror_retired`` detail
+        pattern.
+      * The JobItem is left in ``admission_state='active'`` — the
+        inline idempotent mirror transition at T0
+        (``ProcessMessageProcessor.on_success``) is the legitimate
+        owner.
+      * TASK-type rows are unaffected — the f-sweep continues to
+        process them as before.
+    """
+
+    @pytest.mark.asyncio
+    async def test_message_job_is_skipped_with_observable_detail(
+        self, engine, repository, task_repository, lock_repo,
+        instance_repo, stale_recovery, job_queue_service_mock,
+    ):
+        """An ACTIVE message JobItem is skipped by the f-sweep and
+        the skip is recorded as ``orphan_active_skipped_mirror_retired``
+        — observable, audit-trail-able, and the row stays ACTIVE
+        (the inline transition owns the terminal write)."""
+        # Seed an active message JobItem + a healthy instance.
+        # Note: _insert_job_item defaults to job_type='task'; we
+        # override to 'message' to assert the new skip path.
+        _insert_instance(engine, "inst-f-skip-msg", project_id="test-project")
+        _insert_job_item(
+            engine,
+            job_id="job-f-skip-msg",
+            instance_id="inst-f-skip-msg",
+            project_id="test-project",
+            queue_id="queue-f-skip-msg",
+            admission_state=AdmissionState.ACTIVE.value,
+            job_type="message",
+            created_at=datetime.now(timezone.utc) - timedelta(seconds=3600),
+        )
+
+        service = JobRecoveryService(
+            job_repository=repository,
+            lock_repository=lock_repo,
+            instance_repository=instance_repo,
+            job_queue_service=job_queue_service_mock,
+            task_repository=task_repository,
+            stale_task_recovery=stale_recovery,
+        )
+
+        stats = await service.reconcile_drift_states(
+            min_pending_age_seconds=0,
+            min_orphan_age_seconds=0,
+        )
+
+        # Assert — the skip is observable.
+        skip_records = [
+            d for d in stats["details"]
+            if d.get("pattern") == "orphan_active_skipped_mirror_retired"
+            and d.get("job_id") == "job-f-skip-msg"
+        ]
+        assert skip_records, (
+            f"Pattern (f) must record an "
+            f"orphan_active_skipped_mirror_retired detail for message "
+            f"job. Got details: {stats['details']}"
+        )
+
+        # Assert — no f1 / f2 finalization fires for message jobs.
+        for terminal_pattern in (
+            "orphan_active_no_task_dead",
+            "orphan_active_completed_task_done",
+        ):
+            terminal_records = [
+                d for d in stats["details"]
+                if d.get("pattern") == terminal_pattern
+                and d.get("job_id") == "job-f-skip-msg"
+            ]
+            assert not terminal_records, (
+                f"Pattern (f) MUST NOT finalize message jobs "
+                f"(Fix B: f2's mirror slice retired). Saw "
+                f"{terminal_pattern} records: {terminal_records}"
+            )
+
+        # Assert — JobItem stays ACTIVE (inline transition owns
+        # the terminal write; the f-sweep is not the owner).
+        job_after = repository.get("job-f-skip-msg")
+        assert job_after is not None
+        assert job_after.admission_state == AdmissionState.ACTIVE.value, (
+            f"Pattern (f) must NOT transition the message JobItem — "
+            f"the inline transition at T0 owns the terminal write. "
+            f"Got admission_state={job_after.admission_state!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_message_skip_does_not_block_task_processing(
+        self, engine, repository, task_repository, lock_repo,
+        instance_repo, stale_recovery, job_queue_service_mock,
+    ):
+        """The new message-skip is non-blocking: a TASK-type JobItem
+        in the same active set still gets the full f1/f2 treatment.
+
+        Proves the message-skip's scope is local to the message row
+        — the per-row try/except still wraps subsequent rows so
+        a single skip never aborts the sweep.
+        """
+        # Active TASK JobItem with a COMPLETED Task — should fire f2.
+        _insert_instance(
+            engine,
+            "inst-f-mix-task",
+            project_id="test-project",
+            created_at=datetime.now(timezone.utc) - timedelta(seconds=1800),
+        )
+        _insert_job_item(
+            engine,
+            job_id="job-f-mix-task",
+            instance_id="inst-f-mix-task",
+            project_id="test-project",
+            queue_id="queue-f-mix-task",
+            admission_state=AdmissionState.ACTIVE.value,
+            job_type="task",
+            created_at=datetime.now(timezone.utc) - timedelta(seconds=1800),
+        )
+        _insert_task_with_status(
+            engine,
+            work_id="job-f-mix-task",
+            instance_id="inst-f-mix-task",
+            status=TaskStatus.COMPLETED.value,
+            completed_at=datetime.now(timezone.utc) - timedelta(seconds=120),
+        )
+
+        # Active MESSAGE JobItem (no Task row) — should be skipped.
+        _insert_instance(
+            engine, "inst-f-mix-msg", project_id="test-project"
+        )
+        _insert_job_item(
+            engine,
+            job_id="job-f-mix-msg",
+            instance_id="inst-f-mix-msg",
+            project_id="test-project",
+            queue_id="queue-f-mix-msg",
+            admission_state=AdmissionState.ACTIVE.value,
+            job_type="message",
+        )
+
+        service = JobRecoveryService(
+            job_repository=repository,
+            lock_repository=lock_repo,
+            instance_repository=instance_repo,
+            job_queue_service=job_queue_service_mock,
+            task_repository=task_repository,
+            stale_task_recovery=stale_recovery,
+        )
+
+        from unittest.mock import patch
+        from daemon.services.dependency_bus import (
+            DependencyBus,
+            FollowUp,
+            Outcome,
+        )
+
+        class _BusStub:
+            async def pending_watchers(self, source_task_id):
+                return []
+
+        with patch(
+            "daemon.services.job_recovery_service.get_dependency_bus",
+            return_value=_BusStub(),
+        ):
+            stats = await service.reconcile_drift_states(
+                min_pending_age_seconds=0,
+                min_orphan_age_seconds=0,
+            )
+
+        # TASK row got f2'd to DONE.
+        task_job_after = repository.get("job-f-mix-task")
+        assert task_job_after is not None
+        assert task_job_after.admission_state == AdmissionState.DONE.value, (
+            "TASK-type JobItem must still be f2-finalized — the "
+            "message-skip is local to message rows. Got "
+            f"admission_state={task_job_after.admission_state!r}"
+        )
+
+        # MESSAGE row was skipped (not finalized).
+        msg_job_after = repository.get("job-f-mix-msg")
+        assert msg_job_after is not None
+        assert msg_job_after.admission_state == AdmissionState.ACTIVE.value, (
+            "MESSAGE JobItem must be skipped (not finalized) — the "
+            "inline transition at T0 is the legitimate owner"
+        )
+
+        # Both observable artifacts present in details.
+        skip_records = [
+            d for d in stats["details"]
+            if d.get("pattern") == "orphan_active_skipped_mirror_retired"
+            and d.get("job_id") == "job-f-mix-msg"
+        ]
+        f2_records = [
+            d for d in stats["details"]
+            if d.get("pattern") == "orphan_active_completed_task_done"
+            and d.get("job_id") == "job-f-mix-task"
+        ]
+        assert skip_records, (
+            "MESSAGE skip must be observable in the sweep's details"
+        )
+        assert f2_records, (
+            "TASK f2 finalization must still fire on the same sweep "
+            "(non-blocking contract)"
         )
