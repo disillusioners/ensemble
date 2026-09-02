@@ -96,7 +96,8 @@ class TestJobsRouteRegistration:
         """Verify the jobs router has the expected total route count.
 
         After the System Jobs Cleanup feature landed, the count grew
-        from 8 to 9 (the new ``POST /api/jobs/cleanup`` endpoint). The
+        from 9 to 10 (the new ``GET /api/jobs/cleanup/preflight``
+        endpoint joined the earlier ``POST /api/jobs/cleanup``). The
         original test was written pre-cleanup against the Phase 5
         split-router refactor and pinned ``len == 8``; the matching
         ``test_all_jobs_routes_exist`` pins the actual paths so the
