@@ -479,6 +479,15 @@ class TestStreamJobEventsResolverOn:
         # branch on these keys (``job_type``) can now distinguish
         # mission vs mirror rows; consumers that ignore them are
         # unaffected (backward-compatible additive contract).
+        #
+        # M1 (mission-class, 2026-09-02) — three additive mission
+        # projection fields are NOT present in the default OFF state
+        # (soak discipline; the test runs with the kill-switch OFF
+        # because mission_resolver's cached bool is OS-environ-resolved
+        # once per process). Set
+        # ``ENSEMBLE_MISSION_PROJECTION_ENABLED=1`` to flip them ON
+        # for this run; see ``test_resolver_emits_mission_fields_when_kill_switch_on``
+        # for the ON variant.
         assert set(completed.keys()) == {
             "job_id",
             "status",
@@ -498,6 +507,13 @@ class TestStreamJobEventsResolverOn:
         # payload collapses it to ``None`` instead of leaking an empty
         # string. The frontend accepts either null or a real value.
         assert completed["queue_id"] is None
+        # M1 — additive mission fields are absent from the wire
+        # format when the kill-switch is OFF (the M1 default).
+        # Conditional inclusion is the M1 contract — see
+        # ``_ResolvedWork.to_payload`` and ``JobResponse._serialize``.
+        assert "mission_id" not in completed
+        assert "mission_epoch" not in completed
+        assert "mission_terminal_reason" not in completed
 
     async def test_completed_task_via_resolver_emits_terminal_events(
         self,

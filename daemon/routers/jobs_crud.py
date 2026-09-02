@@ -246,6 +246,30 @@ def _job_to_response(
             if work_record is not None
             else None
         ),
+        # M1 (mission-class, 2026-09-02) — additive mission projection
+        # fields. Source verbatim from the WorkRecord (when one is
+        # supplied) so the four Fix-C read surfaces (this jobs_crud
+        # delegation + work_resolver primary + jobs_streaming SSE +
+        # JobResponse shape) stay in lock-step. The legacy fallback
+        # branch (``work_record is None``) returns ``None`` —
+        # consistent with how ``mission_liveness`` and ``job_type``
+        # already degrade in that path. Kill-switch OFF ⇒ all three
+        # values stay ``None`` (the M1 OFF default).
+        mission_id=(
+            getattr(work_record, "mission_id", None)
+            if work_record is not None
+            else None
+        ),
+        mission_epoch=(
+            getattr(work_record, "mission_epoch", None)
+            if work_record is not None
+            else None
+        ),
+        mission_terminal_reason=(
+            getattr(work_record, "mission_terminal_reason", None)
+            if work_record is not None
+            else None
+        ),
     )
 
 

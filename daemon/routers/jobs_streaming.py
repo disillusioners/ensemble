@@ -10,6 +10,9 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sse_starlette.sse import EventSourceResponse
 
 from daemon.services.job_queue_service import JobQueueService
+from daemon.services.mission_resolver import (
+    is_mission_projection_enabled as _is_mission_projection_enabled,
+)
 from .schemas import JobNotFoundResponse
 from .jobs_crud import get_job_queue_service, TERMINAL_STATUSES
 
@@ -59,6 +62,16 @@ class _ResolvedWork:
     job_type: str | None
     mission_liveness: str | None
 
+    # M1 (mission-class, 2026-09-02) — three additive mission
+    # projection fields mirroring ``WorkRecord``. Kill-switch gated
+    # via ``ENSEMBLE_MISSION_PROJECTION_ENABLED`` (default OFF); when
+    # OFF they stay ``None`` on every SSE payload. See
+    # ``daemon.services.mission_resolver`` for the truthmaker (Instance
+    # + W4-hazard) and the OFF/ON semantics.
+    mission_id: str | None = None
+    mission_epoch: int | None = None
+    mission_terminal_reason: str | None = None
+
     @classmethod
     def from_work_record(cls, record: Any) -> "_ResolvedWork":
         """Project a :class:`WorkRecord` (resolver path) onto the SSE view.
@@ -89,6 +102,18 @@ class _ResolvedWork:
             error_message=record.error,
             job_type=getattr(record, "job_type", None),
             mission_liveness=getattr(record, "mission_liveness", None),
+            # M1 (mission-class, 2026-09-02) — additive mission
+            # projection fields (kill-switch gated; see the field
+            # declarations above and ``mission_resolver.py``).
+            # Source verbatim from the WorkRecord so all four Fix-C
+            # read surfaces (work_resolver primary + jobs_crud /
+            # jobs_streaming here) emit the same mission values for
+            # the same row.
+            mission_id=getattr(record, "mission_id", None),
+            mission_epoch=getattr(record, "mission_epoch", None),
+            mission_terminal_reason=getattr(
+                record, "mission_terminal_reason", None
+            ),
         )
 
     def to_payload(self, *, work_id: str) -> dict[str, Any]:
@@ -107,6 +132,20 @@ class _ResolvedWork:
         # extra keys.
         payload["job_type"] = self.job_type
         payload["mission_liveness"] = self.mission_liveness
+        # M1 (mission-class, 2026-09-02) — additive mission fields.
+        # Kill-switch gated: when ``ENSEMBLE_MISSION_PROJECTION_ENABLED``
+        # is OFF (the M1 default, soak discipline), the three keys
+        # are NOT in the payload — responses stay byte-identical to
+        # the pre-M1 Fix-C wire format (``{"job_id", "status",
+        # "instance_id", "queue_id", "job_type", "mission_liveness"}``).
+        # When ON, the keys surface verbatim from the WorkRecord.
+        # Conditional inclusion (not "present-but-null") is the
+        # M1 contract — spec §5 M1 row says "OFF → responses byte-
+        # identical to pre-change (no mission fields)".
+        if _is_mission_projection_enabled():
+            payload["mission_id"] = self.mission_id
+            payload["mission_epoch"] = self.mission_epoch
+            payload["mission_terminal_reason"] = self.mission_terminal_reason
         return payload
 
     def to_completed_payload(self, *, work_id: str) -> dict[str, Any]:
@@ -123,6 +162,15 @@ class _ResolvedWork:
         # completed mirror with a still-running mission correctly.
         payload["job_type"] = self.job_type
         payload["mission_liveness"] = self.mission_liveness
+        # M1 — same additive mission fields as ``to_payload``,
+        # with the same OFF/ON conditional. The completed event is
+        # the most likely place the FE renders a mission terminal
+        # marker, so ensuring the keys are present (when ON) keeps
+        # the renderer-side branch simple.
+        if _is_mission_projection_enabled():
+            payload["mission_id"] = self.mission_id
+            payload["mission_epoch"] = self.mission_epoch
+            payload["mission_terminal_reason"] = self.mission_terminal_reason
         return payload
 
 
