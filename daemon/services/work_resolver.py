@@ -71,6 +71,7 @@ from daemon.repositories.task.models import Task
 # ``_resolve_wc_wake_enqueue_enabled`` for the WC-wake kill-switch.
 from daemon.services.mission_resolver import (
     is_mission_projection_enabled as _is_mission_projection_enabled,
+    mission_projection_to_dict as _mission_projection_to_dict,
 )
 
 from .work_status import (
@@ -357,20 +358,17 @@ class WorkRecord:
             # M1 (mission-class, 2026-09-02) — additive projection
             # fields. Kill-switch gated: the three keys are omitted
             # when ``ENSEMBLE_MISSION_PROJECTION_ENABLED`` is OFF (the
-            # M1 default — soak discipline; matches the spec §5 M1
-            # row "byte-identical to pre-change" contract); surfaced
+            # M1 default — soak discipline; the architecture-
+            # recommendation §5 M1 row says additive only, zero
+            # writers, bit-for-bit status preserved); surfaced
             # verbatim from the WorkRecord state when ON. See the
             # field declarations and ``mission_resolver.py`` for the
             # truthmaker (Instance + W4-hazard) and the OFF/ON
             # semantics.
-            **(
-                {
-                    "mission_id": self.mission_id,
-                    "mission_epoch": self.mission_epoch,
-                    "mission_terminal_reason": self.mission_terminal_reason,
-                }
-                if _is_mission_projection_enabled()
-                else {}
+            **_mission_projection_to_dict(
+                mission_id=self.mission_id,
+                mission_epoch=self.mission_epoch,
+                mission_terminal_reason=self.mission_terminal_reason,
             ),
         }
 
@@ -884,19 +882,13 @@ class WorkResolverService:
         self._task_repo = task_repo
         self._job_repo = job_repo
         self._instance_repo = instance_repo
-        # M1 — renamed to avoid clashing with the ``_mission_resolver``
-        # helper accessor. The lazy accessor ``_mission_resolver``
-        # builds the actual ``MissionResolver`` instance on first call
-        # when the kill-switch is ON; ``None`` here means "lazy".
+        # M1 mission-projection wiring: the kill-switch-gated lazy
+        # accessor ``_mission_resolver`` constructs a ``MissionResolver``
+        # on first ON-state call; the explicit seed (when provided by
+        # the lifespan wiring in ``daemon/api.py``) is reused
+        # verbatim. ``_mission_resolver_obj`` memoises the
+        # construction.
         self._mission_resolver_seed: "MissionResolver | None" = mission_resolver
-        # M1 (mission-class, 2026-09-02) — lazy-accessor cache. The
-        # ``_mission_resolver`` helper reads this attribute on first
-        # access (under the kill-switch ON branch) to memoise the
-        # constructed resolver; without this initialiser the lazy
-        # accessor raises ``AttributeError`` when the kill-switch is
-        # ON and no resolver seed was injected. Keep the initialiser
-        # at the SAME place as the seed (constructor body) so the two
-        # attributes stay together at code review.
         self._mission_resolver_obj: "MissionResolver | None" = None
 
     # ── Public API ────────────────────────────────────────────────────────
@@ -1683,8 +1675,8 @@ class WorkResolverService:
         When the kill-switch is OFF, or when the resolver degrades,
         every field is ``None``. When the kill-switch is ON and the
         instance is loadable, the helper delegates to
-        :meth:`MissionResolver._project` (private but reachable here
-        because both modules live in ``daemon.services``).
+        :meth:`MissionResolver.project` (the public passthrough;
+        reaching into ``_project`` directly is no longer required).
 
         Args:
             instance: An already-loaded :class:`Instance` row, or
@@ -1707,7 +1699,7 @@ class WorkResolverService:
         resolver = self._mission_resolver()
         if resolver is None:
             return None, None, None
-        record = resolver._project(instance)
+        record = resolver.project(instance)
         if record is None:
             return None, None, None
         return (

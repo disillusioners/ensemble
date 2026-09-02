@@ -69,24 +69,24 @@ Known limitation (must ship in docs — spec §3 ⚠)
 The DB does not store terminal-transition timestamps — full-fidelity
 historical epoch data (per-epoch ``started_at`` / ``ended_at``) is NOT
 derivable at read time for pre-existing or multi-epoch instances.
-**Current epoch + current liveness are precise**; historical epochs
-are best-effort (the resolver reports ``epoch=1`` for non-terminal
-and ``epoch=last_known`` for terminal-with-revive, without per-epoch
-timestamps). The honest cure is an append-only ``mission_events`` log
-preserving the single truthmaker; that is M4(ii), gated on D's trigger
-or the N2 revive-boundary ticket — not in M1's scope.
+**Current epoch is always ``1``** for every non-degraded projection
+(non-terminal AND terminal) until M4(ii)'s append-only ``mission_events``
+log preserves per-epoch timestamps — that is the honest answer today.
+Epoch is ``None`` ONLY when the resolver degraded (no Instance row
+available). The honest cure is the ``mission_events`` log; that is
+M4(ii), gated on D's trigger or the N2 revive-boundary ticket — not in
+M1's scope.
 """
 
 from __future__ import annotations
 
 import logging
 import os
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Iterable
 
 from sqlalchemy.exc import SQLAlchemyError
 
-from daemon.repositories.instance.models import InstanceStatus
 from daemon.services.work_status import _STATUS_CANONICAL_MAP
 
 if TYPE_CHECKING:
@@ -158,10 +158,11 @@ def _reset_mission_projection_for_tests() -> None:
 
 
 # ── Liveness mapping ──────────────────────────────────────────────────────
-# Reuse the canonical status map from ``work_status`` (the same one
-# Fix C's ``mission_liveness`` consult uses). Instance-side values map
-# onto the mission vocabulary by extending the existing canonical map
-# semantics:
+# Instance.status canonicalizes onto the mission vocabulary via
+# :data:`_STATUS_CANONICAL_MAP` (the same map Fix C's
+# ``mission_liveness`` consult uses). The mapping is the single source
+# of truth — no parallel vocabulary set is maintained here. Completes
+# to ``"completed"`` (REVIVABLE); all other terminals are true-terminal.
 #
 # * COMPLETED  → "completed"   — TERMINAL, REVIVABLE
 # * FAILED     → "failed"      — TERMINAL, true-terminal
@@ -171,63 +172,13 @@ def _reset_mission_projection_for_tests() -> None:
 # * WAITING    → "processing"
 # * WAITING_CHILDREN → "processing"
 # * QUEUED     → "processing"
-# * IDLE       → "pending"
+# * IDLE       → "processing"
 # * PAUSED     → "paused"
 #
-# The mission vocabulary is precisely the set produced by
-# :data:`_STATUS_CANONICAL_MAP`. ``revivable`` is a derived flag
-# specific to mission projection: only ``completed`` is revivable (per
-# spec §3 — ``InstanceStatus.COMPLETED`` → mission liveness
-# ``completed`` which can be →RUNNING again on a `send_message` to a
-# COMPLETED instance).
-
-# Canonical vocabulary for mission liveness — mirrors ``work_status``
-# canonical set. Keep this set aligned with
-# :data:`_STATUS_CANONICAL_MAP` so the mission projection speaks the
-# same vocabulary the rest of the read surface already uses.
-_MISSION_LIVENESS_VOCABULARY: frozenset[str] = frozenset(
-    _STATUS_CANONICAL_MAP.values()
-)
-
-
-def _instance_status_to_mission_liveness(status: str) -> str:
-    """Map an ``Instance.status`` string onto the mission liveness vocab.
-
-    Args:
-        status: The raw ``Instance.status`` string
-            (``InstanceStatus`` enum value).
-
-    Returns:
-        A canonical mission-liveness string. Unknown values pass through
-        :func:`daemon.services.work_status.canonicalize_status` so a
-        future ``Instance.status`` value the canonical map has not been
-        taught about does not crash the projection — defensive contract
-        matching Fix C's ``mission_liveness`` consult.
-    """
-    return _STATUS_CANONICAL_MAP.get(status, status)
-
-
-def _is_revivable_terminal(liveness: str) -> bool:
-    """Return True iff a terminal mission liveness is **revivable**.
-
-    Per spec §3: ``completed`` (from ``InstanceStatus.COMPLETED``) is
-    revivable; ``cancelled`` (from TERMINATED), ``failed``, and
-    ``dead_letter`` are **true-terminal**. The ``revivable`` flag is
-    derived from liveness alone because the Instance status enum value
-    that produced the liveness is the single source of truth —
-    ``COMPLETED`` always canonicalises to ``completed``, never to any
-    other terminal.
-
-    Args:
-        liveness: The canonical mission-liveness string.
-
-    Returns:
-        ``True`` if the mission's terminal liveness is revivable (only
-        ``completed``); ``False`` otherwise. Non-terminal liveness
-        values return ``False`` — revivable is meaningful only at the
-        terminal boundary.
-    """
-    return liveness == "completed"
+# ``revivable`` is a derived flag specific to mission projection: only
+# ``completed`` is revivable (per spec §3 — ``InstanceStatus.COMPLETED``
+# → mission liveness ``completed`` which can be →RUNNING again on a
+# ``send_message`` to a COMPLETED instance).
 
 
 # ── MissionRecord ─────────────────────────────────────────────────────────
@@ -262,7 +213,7 @@ class MissionRecord:
             rationale as ``mission_id``.
         liveness: Canonical mission liveness (``pending`` /
             ``processing`` / ``paused`` / ``completed`` / ``failed`` /
-            ``cancelled`` / ``dead_letter``). ``None`` when degraded.
+            ``cancelled``). ``None`` when degraded.
         terminal_reason: A non-``None`` discriminator when the mission
             is terminal — one of ``completed`` / ``failed`` /
             ``cancelled`` / ``dead_letter`` (the W4-hazard path). For
@@ -298,35 +249,12 @@ class MissionRecord:
     started_at: str | None = None
     last_activity_at: str | None = None
 
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize this :class:`MissionRecord` to a JSON-friendly dict.
-
-        Used by the additive mission_* fields on the Fix-C read
-        surfaces (:class:`WorkRecord.to_dict`,
-        :class:`JobResponse` payload, :class:`_ResolvedWork` SSE
-        payload). The three additive response keys map onto the
-        first three fields here; the rest are present for the M2
-        tool surface (not surface today).
-
-        Returns:
-            A plain ``dict`` mirroring the dataclass fields, with
-            ``linked_jobs`` coerced to a list (always present,
-            possibly empty).
-        """
-        return asdict(self)
-
 
 # ── MissionResolver ───────────────────────────────────────────────────────
 # Leaf service — reads from ``InstanceRepository`` and ``JobRepository``
 # ONLY. No mutations, no JobItem creation, no admission-state writes.
 # Census invariant: ``KNOWN_ADMISSION_STATE_WRITERS`` stays at 23; the
 # resolver touches none of them.
-
-# Status values that trigger a →RUNNING epoch-opening event (current
-# liveness non-terminal). Used by epoch inference (see _compute_epoch).
-_NON_TERMINAL_LIVENESS: frozenset[str] = frozenset(
-    {"pending", "processing", "paused"}
-)
 
 
 class MissionResolver:
@@ -346,8 +274,7 @@ class MissionResolver:
       revive in spec §3).
     * **Liveness** — :class:`Instance.status` → canonical mission
       vocabulary via :data:`_STATUS_CANONICAL_MAP`. ``completed`` is
-      revivable; ``cancelled``/``failed``/``dead_letter`` are
-      true-terminal.
+      revivable; ``cancelled``/``failed`` are true-terminal.
     * **W4 hazard** — a linked ``JobItem`` with
       ``admission_state='dead'`` flips ``terminal_reason`` to
       ``"dead_letter"`` regardless of a since-revived instance.
@@ -355,9 +282,11 @@ class MissionResolver:
     Epochs (spec §3 known-limitation): the DB has no
     terminal-transition timestamps, so historical epoch
     ``started_at`` / ``ended_at`` are NOT derivable at read time.
-    Current epoch is precise (1 for non-terminal, "last active epoch"
-    for terminal). Full per-epoch fidelity belongs to M4(ii)'s
-    append-only ``mission_events`` log — out of M1's scope.
+    Current epoch is **always ``1``** for every non-degraded projection
+    (terminal AND non-terminal) — the honest constant answer until
+    M4(ii)'s append-only ``mission_events`` log preserves per-epoch
+    truthmakers. Epoch is ``None`` only when the resolver degraded.
+    Full per-epoch fidelity belongs to M4(ii) — out of M1's scope.
     """
 
     def __init__(
@@ -488,6 +417,24 @@ class MissionResolver:
                 out[instance_id] = record
         return out
 
+    def project(self, instance: "Instance") -> MissionRecord:
+        """Public passthrough for the per-instance projection.
+
+        Wraps :meth:`_project` for callers (notably
+        ``WorkResolverService._mission_fields_for_instance``) that
+        already hold an :class:`Instance` row and want a
+        :class:`MissionRecord` without re-fetching. Use this instead of
+        reaching into ``resolver._project(instance)`` directly.
+
+        Args:
+            instance: A loaded :class:`Instance` row.
+
+        Returns:
+            A populated :class:`MissionRecord`. Same shape as
+            ``resolve(iid)`` minus the lookup step.
+        """
+        return self._project(instance)
+
     # ── Internal helpers ──────────────────────────────────────────────────
 
     def _batch_instances(
@@ -547,12 +494,12 @@ class MissionResolver:
         dead_linked = self._has_dead_linked_job(instance.instance_id)
         if dead_linked:
             terminal_reason: str | None = "dead_letter"
-        elif liveness in {"completed", "failed", "cancelled", "dead_letter"}:
+        elif liveness in {"completed", "failed", "cancelled"}:
             # For a terminal Instance the mission's terminal_reason
-            # is the liveness itself. ``dead_letter`` liveness only
-            # appears when the instance surfaced that status directly
-            # (a JobItem dead-link without an Instance status flip is
-            # already handled by the W4 branch above).
+            # is the liveness itself. ``dead_letter`` is a
+            # terminal_reason value only — it never appears on the
+            # liveness side (Instance.status enum does not include
+            # ``dead`` / ``dead_letter``).
             terminal_reason = liveness
         else:
             terminal_reason = None
@@ -588,7 +535,7 @@ class MissionResolver:
             started_at=(
                 instance.last_activity_at.isoformat()
                 if instance.last_activity_at is not None
-                else (instance.created_at or None)
+                else instance.created_at
             ),
             last_activity_at=(
                 instance.last_activity_at.isoformat()
@@ -674,8 +621,7 @@ class MissionResolver:
         # Non-terminal liveness → mission is currently in epoch 1.
         # Terminal liveness → mission is in (or just exited) epoch 1
         # (best-effort — single epoch per read-time projection today).
-        # ``dead_letter`` liveness via W4 hazard also reports 1; the
-        # mission_events log will eventually refine this.
+        # The mission_events log will eventually refine this.
         return 1
 
 
@@ -718,10 +664,50 @@ def _job_session(job_repo: "JobRepository"):
     return _SQLModelSession(job_repo.engine)
 
 
+def mission_projection_to_dict(
+    *,
+    mission_id: str | None,
+    mission_epoch: int | None,
+    mission_terminal_reason: str | None,
+) -> dict[str, Any]:
+    """Return the additive ``mission_*`` projection payload, kill-switch gated.
+
+    Used by every Fix-C read surface
+    (:class:`WorkRecord.to_dict`,
+    :meth:`daemon.routers.jobs_streaming._ResolvedWork.to_payload`,
+    :meth:`daemon.routers.jobs_streaming._ResolvedWork.to_completed_payload`,
+    and :meth:`daemon.routers.schemas.JobResponse._serialize`) so the
+    additive-on-ON / absent-on-OFF contract stays in lock-step.
+
+    Args:
+        mission_id: The mission identity (== ``instance_id`` per spec §3
+            adjudicated under pressure-test).
+        mission_epoch: The current epoch number (always ``1`` for
+            non-degraded projections per spec §3 known-limitation).
+        mission_terminal_reason: The mission-side terminal discriminator
+            (``completed`` / ``failed`` / ``cancelled`` / ``dead_letter``
+            — ``dead_letter`` is W4-hazard only).
+
+    Returns:
+        A dict with the three keys when the kill-switch is ON
+        (``ENSEMBLE_MISSION_PROJECTION_ENABLED`` truthy); an empty dict
+        when OFF (so callers can splat ``**mission_projection_to_dict(...)``
+        into their output payload without an explicit conditional).
+    """
+    if not is_mission_projection_enabled():
+        return {}
+    return {
+        "mission_id": mission_id,
+        "mission_epoch": mission_epoch,
+        "mission_terminal_reason": mission_terminal_reason,
+    }
+
+
 __all__ = [
     "MissionResolver",
     "MissionRecord",
     "is_mission_projection_enabled",
+    "mission_projection_to_dict",
     "_reset_mission_projection_for_tests",
     "_resolve_mission_projection_enabled",
 ]

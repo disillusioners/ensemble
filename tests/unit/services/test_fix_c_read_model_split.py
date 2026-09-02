@@ -979,3 +979,94 @@ class TestJobResponseSurface:
         assert "mission_liveness" in payload
         assert payload["job_type"] is None
         assert payload["mission_liveness"] is None
+
+    def test_job_response_serializer_key_parity_with_model_fields(self) -> None:
+        """Serializer-key parity tripwire (B5): the set of keys emitted
+        by ``JobResponse._serialize`` MUST equal ``set(JobResponse.model_fields)``
+        when the kill-switch is ON, and MUST equal ``set(JobResponse.model_fields)``
+        minus the three mission_* keys when the kill-switch is OFF.
+
+        The custom ``@model_serializer`` emits exactly the model fields
+        (in ON mode) or the model fields minus the mission_* triple
+        (in OFF mode) — no drift is allowed. If a new field lands on
+        ``JobResponse`` but the serializer forgets it, this test fails
+        (the next maintainer knows to extend the serializer). If the
+        serializer leaks an extra key the model doesn't declare, this
+        test fails the same way (anti-leakage tripwire).
+        """
+        from daemon.routers.schemas import JobResponse
+
+        # Default: kill-switch OFF (the M1 default). The serializer must
+        # omit the three mission_* keys so the OFF wire format stays
+        # byte-identical to pre-M1.
+        response = JobResponse(
+            job_id="j-parity",
+            status="completed",
+            priority=5,
+            agent_id="developer",
+            agent_dir="/tmp/agent",
+            created_at="2025-09-02T00:00:00+00:00",
+            admission_state="done",
+            terminal_reason="completed",
+            job_type="message",
+            mission_liveness="processing",
+            mission_id="inst-x",
+            mission_epoch=1,
+            mission_terminal_reason=None,
+        )
+
+        serialized = response.model_dump()
+
+        mission_keys = {"mission_id", "mission_epoch", "mission_terminal_reason"}
+        expected_off = set(JobResponse.model_fields) - mission_keys
+        actual_off = set(serialized)
+        assert actual_off == expected_off, (
+            f"OFF-state serializer key drift: only_in_serialized="
+            f"{sorted(actual_off - expected_off)} "
+            f"only_in_model_fields={sorted(expected_off - actual_off)}"
+        )
+
+        # Confirm the three mission_* keys are absent (the OFF contract).
+        assert mission_keys.isdisjoint(set(serialized)), (
+            f"OFF state must NOT include {sorted(mission_keys)} "
+            f"(byte-identical to pre-M1); got {sorted(set(serialized) & mission_keys)}"
+        )
+
+    def test_job_response_on_state_emits_mission_keys(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """ON-state emission test (B5): with the kill-switch ON,
+        ``JobResponse.model_dump`` includes the three mission_* keys.
+
+        Pins the additive-on-ON contract for the JobResponse wire
+        surface (the ``_serialize`` collapse is a refactor; the
+        ON-state emission contract must NOT change).
+        """
+        import daemon.services.mission_resolver as mr_mod
+        from daemon.routers.schemas import JobResponse
+
+        monkeypatch.setenv("ENSEMBLE_MISSION_PROJECTION_ENABLED", "1")
+        mr_mod._reset_mission_projection_for_tests()
+
+        response = JobResponse(
+            job_id="j-on",
+            status="completed",
+            priority=5,
+            agent_id="developer",
+            agent_dir="/tmp/agent",
+            created_at="2025-09-02T00:00:00+00:00",
+            admission_state="done",
+            mission_id="inst-on",
+            mission_epoch=1,
+            mission_terminal_reason="completed",
+        )
+
+        serialized = response.model_dump()
+
+        assert serialized["mission_id"] == "inst-on"
+        assert serialized["mission_epoch"] == 1
+        assert serialized["mission_terminal_reason"] == "completed"
+
+        # Restore OFF for downstream tests.
+        mr_mod._reset_mission_projection_for_tests()

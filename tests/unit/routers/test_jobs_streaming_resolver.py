@@ -667,13 +667,11 @@ class TestStreamJobEventsResolverOn:
         monkeypatch.setenv("ENSEMBLE_MISSION_PROJECTION_ENABLED", "1")
         _reset_mission_projection_for_tests()
 
-        # Seed a backing Instance row in a TERMINAL state (so the
-        # mission projection surfaces ``mission_terminal_reason``)
-        # + a completed JobItem stamped with that ``instance_id``.
-        # Note: the W4 hazard in MissionResolver._project sources
-        # terminal_reason from the INSTANCE's liveness, not the
-        # JobItem's admission_state, so the Instance must itself
-        # be in a terminal ``InstanceStatus``.
+        # Seed a backing Instance row in a TERMINAL state so the
+        # liveness branch of MissionResolver._project yields
+        # ``completed`` for ``mission_terminal_reason``; an
+        # admission_state='dead' link would override to 'dead_letter'
+        # (W4).
         iid = _seed_instance(
             engine, instance_id="inst-mission-on", status=InstanceStatus.COMPLETED.value
         )

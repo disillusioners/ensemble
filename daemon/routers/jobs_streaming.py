@@ -11,7 +11,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from daemon.services.job_queue_service import JobQueueService
 from daemon.services.mission_resolver import (
-    is_mission_projection_enabled as _is_mission_projection_enabled,
+    mission_projection_to_dict as _mission_projection_to_dict,
 )
 from .schemas import JobNotFoundResponse
 from .jobs_crud import get_job_queue_service, TERMINAL_STATUSES
@@ -140,12 +140,15 @@ class _ResolvedWork:
         # "instance_id", "queue_id", "job_type", "mission_liveness"}``).
         # When ON, the keys surface verbatim from the WorkRecord.
         # Conditional inclusion (not "present-but-null") is the
-        # M1 contract — spec §5 M1 row says "OFF → responses byte-
-        # identical to pre-change (no mission fields)".
-        if _is_mission_projection_enabled():
-            payload["mission_id"] = self.mission_id
-            payload["mission_epoch"] = self.mission_epoch
-            payload["mission_terminal_reason"] = self.mission_terminal_reason
+        # M1 contract — the architecture-recommendation §5 M1 row pins
+        # this as additive-only with zero writers.
+        payload.update(
+            _mission_projection_to_dict(
+                mission_id=self.mission_id,
+                mission_epoch=self.mission_epoch,
+                mission_terminal_reason=self.mission_terminal_reason,
+            )
+        )
         return payload
 
     def to_completed_payload(self, *, work_id: str) -> dict[str, Any]:
@@ -167,10 +170,13 @@ class _ResolvedWork:
         # the most likely place the FE renders a mission terminal
         # marker, so ensuring the keys are present (when ON) keeps
         # the renderer-side branch simple.
-        if _is_mission_projection_enabled():
-            payload["mission_id"] = self.mission_id
-            payload["mission_epoch"] = self.mission_epoch
-            payload["mission_terminal_reason"] = self.mission_terminal_reason
+        payload.update(
+            _mission_projection_to_dict(
+                mission_id=self.mission_id,
+                mission_epoch=self.mission_epoch,
+                mission_terminal_reason=self.mission_terminal_reason,
+            )
+        )
         return payload
 
 

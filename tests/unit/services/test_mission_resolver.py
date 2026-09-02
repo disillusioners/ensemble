@@ -423,14 +423,16 @@ class TestTerminalClassification:
 
 
 class TestEpochSemantics:
-    """Current epoch is precise (a small positive integer).
+    """Current epoch is **always ``1``** for every non-degraded projection.
 
     Per spec §3 known-limitation: precise per-epoch timestamps are
     NOT derivable at read time today — the DB has no terminal-transition
     timestamps. M1 reports ``epoch=1`` for every non-degraded
-    projection (the honest answer until M4(ii)'s ``mission_events``
-    log lands). The fields are present + non-null where you'd expect
-    so future tooling can branch on them without re-parsing.
+    projection, terminal AND non-terminal (the honest answer until
+    M4(ii)'s ``mission_events`` log lands). Epoch is ``None`` ONLY when
+    the resolver degraded (no Instance row available) — NOT when the
+    mission is terminal. The fields are present + non-null where you'd
+    expect so future tooling can branch on them without re-parsing.
     """
 
     def test_living_instance_reports_epoch_1(self, engine, resolver):
@@ -458,6 +460,70 @@ class TestEpochSemantics:
         record = resolver.resolve(iid)
         assert record is not None
         assert record.epoch == 1
+
+    def test_completed_then_revived_epoch_remains_1(self, engine, resolver):
+        """completed→revive cycle pins the current-true epoch=1 contract.
+
+        Per spec §3 known-limitation + the M1 docstring ("always 1 for
+        every non-degraded projection"), epoch is **constant 1** across
+        a complete→revive cycle — not null when terminal, not
+        incremented when revived. The mission_events log (M4 ii) is the
+        cure that will let us report ``epoch_count`` + ``last_epoch_at``
+        precisely; until then, current-true = 1 everywhere a non-degraded
+        MissionRecord surfaces.
+
+        Steps:
+          1. Seed an Instance in COMPLETED (a revivable terminal
+             state). Resolve → epoch=1, liveness="completed",
+             terminal_reason="completed".
+          2. Transition the same Instance to RUNNING (the send_message
+             revive path flips a COMPLETED instance back to RUNNING
+             in-place; ``instances.parent_id`` stays put so identity
+             is permanent). Resolve → epoch=1 (NOT bumped to 2; not
+             null), liveness="processing", terminal_reason=None.
+        """
+        iid = _seed_instance(
+            engine,
+            instance_id="inst-completed-revived",
+            status=InstanceStatus.COMPLETED.value,
+        )
+
+        # Step 1: terminal COMPLETED — current epoch is precise, = 1.
+        before = resolver.resolve(iid)
+        assert before is not None
+        assert before.liveness == "completed"
+        assert before.terminal_reason == "completed"
+        assert before.epoch == 1, (
+            "Terminal-with-revive must still report epoch=1 — the honest "
+            "constant answer until M4(ii) mission_events log preserves "
+            "per-epoch truthmakers."
+        )
+
+        # Step 2: revive in place — flip Instance.status to RUNNING.
+        # (The real revival path is ``send_message`` in
+        # ``daemon/services/instance_messaging.py``; here we simulate
+        # the post-revive state to pin the read-model projection.)
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with Session(engine) as s:
+            inst = s.get(Instance, iid)
+            assert inst is not None
+            inst.status = InstanceStatus.RUNNING.value
+            inst.updated_at = now_iso
+            s.add(inst)
+            s.commit()
+
+        after = resolver.resolve(iid)
+        assert after is not None
+        assert after.liveness == "processing"
+        assert after.terminal_reason is None
+        # Identity is permanent across the revive — same instance id,
+        # same mission_id, same epoch=1 constant.
+        assert after.mission_id == before.mission_id == iid
+        assert after.epoch == 1, (
+            "Revived mission must NOT bump epoch to 2 — the M1 contract "
+            "is epoch=1 for every non-degraded projection. Future "
+            "epoch_count fidelity belongs to M4(ii)."
+        )
 
 
 # ─── W4 hazard ────────────────────────────────────────────────────────────

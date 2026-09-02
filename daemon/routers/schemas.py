@@ -5,6 +5,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_serializer, model_validator
 
+from daemon.services.mission_resolver import mission_projection_to_dict
+
 
 # ==================== Job Queue Schemas ====================
 
@@ -221,67 +223,46 @@ class JobResponse(BaseModel):
         :meth:`_ResolvedWork.to_payload`,
         :meth:`_ResolvedWork.to_completed_payload`, and this serializer.
 
-        Note: the dict is built via per-key ``setitem`` assignment
-        instead of a single ``{...}`` literal — the constitution
-        scanner (:func:`_find_write_line_numbers` in
-        ``daemon/job_state/constitution.py``) flags any dict literal
-        with a key named ``"admission_state"`` as a (possible) W5-style
-        writer. Building the dict incrementally lets the scanner see
-        the emission as ``ast.Assign`` (a regular attribute assignment)
-        rather than a writer-shaped dict literal; the line stays inside
-        this method, so it never claims a writer registration. Note
-        that the actual filter is the AST shape (per-key assignment
-        rather than dict literal) — ``_SERIALIZE_METHOD_NAMES`` is the
-        parallel convention used for OTHER serialisation helpers (e.g.
-        ``to_dict`` / ``to_payload``) and does NOT include this
-        ``_serialize`` name. The construction shape is the
-        authoritative mechanism for this method; the name-list filter
-        is the convention for the rest of the codebase.
+        Truth rationale (one line): the return value is filtered as a
+        serialization helper because ``_is_serialization_dict`` short-
+        circuits on ``isinstance(parent, ast.Return)`` — the
+        constitution scanner never reaches the ``"admission_state"``
+        key in this dict literal.
         """
-        # Build the base dict via per-key assignments. The dict ends
-        # up identical to ``{"job_id": ..., ...}``; the construction
-        # shape is what keeps the constitution scanner green.
-        data: dict[str, Any] = {}
-        data["job_id"] = self.job_id
-        data["status"] = self.status
-        data["admission_state"] = self.admission_state
-        data["priority"] = self.priority
-        data["agent_id"] = self.agent_id
-        data["agent_dir"] = self.agent_dir
-        data["project_id"] = self.project_id
-        data["queue_id"] = self.queue_id
-        data["instance_id"] = self.instance_id
-        data["created_at"] = self.created_at
-        data["started_at"] = self.started_at
-        data["completed_at"] = self.completed_at
-        data["result_summary"] = self.result_summary
-        data["error_message"] = self.error_message
-        data["position"] = self.position
-        data["message"] = self.message
-        data["source"] = self.source
-        data["job_metadata"] = self.job_metadata
-        data["cancelled_at"] = self.cancelled_at
-        data["idempotency_key"] = self.idempotency_key
-        data["dlq_reason"] = self.dlq_reason
-        data["retry_count"] = self.retry_count
-        data["moved_to_dlq_at"] = self.moved_to_dlq_at
-        data["deleted_at"] = self.deleted_at
-        data["terminal_reason"] = self.terminal_reason
-        data["job_type"] = self.job_type
-        data["mission_liveness"] = self.mission_liveness
-        # M1 — conditional include. The lazy import keeps
-        # ``schemas.py`` importable from test fixtures that don't
-        # have the mission resolver module on the path (e.g.
-        # bare pydantic-only tests).
-        from daemon.services.mission_resolver import (
-            is_mission_projection_enabled,
-        )
-
-        if is_mission_projection_enabled():
-            data["mission_id"] = self.mission_id
-            data["mission_epoch"] = self.mission_epoch
-            data["mission_terminal_reason"] = self.mission_terminal_reason
-        return data
+        return {
+            "job_id": self.job_id,
+            "status": self.status,
+            "admission_state": self.admission_state,
+            "priority": self.priority,
+            "agent_id": self.agent_id,
+            "agent_dir": self.agent_dir,
+            "project_id": self.project_id,
+            "queue_id": self.queue_id,
+            "instance_id": self.instance_id,
+            "created_at": self.created_at,
+            "started_at": self.started_at,
+            "completed_at": self.completed_at,
+            "result_summary": self.result_summary,
+            "error_message": self.error_message,
+            "position": self.position,
+            "message": self.message,
+            "source": self.source,
+            "job_metadata": self.job_metadata,
+            "cancelled_at": self.cancelled_at,
+            "idempotency_key": self.idempotency_key,
+            "dlq_reason": self.dlq_reason,
+            "retry_count": self.retry_count,
+            "moved_to_dlq_at": self.moved_to_dlq_at,
+            "deleted_at": self.deleted_at,
+            "terminal_reason": self.terminal_reason,
+            "job_type": self.job_type,
+            "mission_liveness": self.mission_liveness,
+            **mission_projection_to_dict(
+                mission_id=self.mission_id,
+                mission_epoch=self.mission_epoch,
+                mission_terminal_reason=self.mission_terminal_reason,
+            ),
+        }
 
 
 class JobListResponse(BaseModel):
