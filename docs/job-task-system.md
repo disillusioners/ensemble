@@ -286,7 +286,7 @@ marked otherwise; the **on-this-branch** column reflects Constitution Phase 0 + 
 |---|---|---|---|
 | **I1** | `Task.work_id == JobItem.job_id` at every job-driven dispatch; handles mint **fail-closed** | **BENT** — WARN-only tripwire; auto-mint fallback alive; no FK | **Enforced** — Fix A rejects omission at job-driven dispatch; mint sites censused (§7, §8) |
 | **I2** | One transition authority per `admission_state` class; others are idempotent-readers or **declared** subordinates (≤2 per class: owner + backstop) | **BROKEN** — 20 writers (function-level; 28 line-level writes)¹, of which 9 are uncoordinated and 8 bypass `validate_transition`; an illegal `paused→done` exists | Unchanged (Phases 1–3 pending) — but every writer is now **visible** to the census (§7) |
-| **I3** | Proxy-per-kind: missions proxy instance lifecycle, mirrors are receipts; **one meaning per state per kind** | **BROKEN** — mirrors lack an event-time terminal write; two read answers exist (receipt-truthmaker vs liveness-only-when-active) | Unchanged (structural fixes B/C pending; C ships only with B) |
+| **I3** | Proxy-per-kind: missions proxy instance lifecycle, mirrors are receipts; **one meaning per state per kind** | **BROKEN** — mirrors lack an event-time terminal write; two read answers exist (receipt-truthmaker vs liveness-only-when-active) | **Improved by Fix B (this branch)** — mirrors now have an event-time terminal write at `ProcessMessageProcessor.on_success` (T0); the inline transition is the legitimate owner. f2's mirror-slice finalization retired. Read-side reconciliation (fix C) remains for the alarm-churn reduction. |
 | **I4** | Internal paths never create JobItems (JAFP boundary) | **BENT** — boundary held (zero internal creators) but convention-only | Now **censused** — `KNOWN_JOBITEM_CREATORS` makes the boundary machine-checked |
 | **I5** | `DEAD` is terminal; corrections are additive | **TRUE** + hazard — `dead→queued` only via DLQ replay; no path re-opens wrongly-`DONE` rows; revived-instance-under-`DEAD`-job unguarded | Unchanged |
 
@@ -324,7 +324,7 @@ Drift is too much the moment **any** of these is red — each is mechanically ch
 | ID | Red line | Check |
 |---|---|---|
 | **D1** | **Writer registry** — every `SET admission_state` site resolves to a registered owner; ≤2 per class | Census test against `KNOWN_ADMISSION_STATE_WRITERS` (§7) |
-| **D2** | **Event-time terminal rule** — every stateful row has an event-time terminal writer; a sweep is never primary, only loss-recovery for stale *unlabeled* rows | Design review; mirror event-time write (fix B) closes the current failure |
+| **D2** | **Event-time terminal rule** — every stateful row has an event-time terminal writer; a sweep is never primary, only loss-recovery for stale *unlabeled* rows | **Closed for mirrors by Fix B (this branch)** — `JobRepository.finalize_mirror_job_at_completion` is the event-time owner of `job_type='message'` rows; the f-sweep's mirror-slice retirement + the new `orphan_active_skipped_mirror_retired` detail prove the message row is no longer sweep-dependent. Remaining D2 risk is the **3 legacy zombie ACTIVE mirror rows** (pre-08-30): the spec is silent on the disposition mechanism; see **§8.1** for the FLAG. |
 | **D3** | **One-answer rule** — every derived status names its truthmaker + direction + bounded divergence | Read-model review (fix C, always paired with B) |
 | **D4** | **Fail-closed handles** — `None` never auto-mints on a required job-driven path; every source `work_id` mint is a registration obligation | Review live mint sites; the subset-only `KNOWN_MINT_SITES` check (`KNOWN_MINT_SITES ⊆ source_mints`) prevents stale entries but does not enumerate every UUID call |
 
@@ -333,6 +333,66 @@ Retro-validation: D1–D4 would have caught every historical drift event at land
 Pattern-f by D2+D4; dual read answers by D3). By 08-30 all four were red — and had been
 red since at least 07-03. "How much drift is too much" is not an amount; it is these
 four booleans.
+
+### 6.5 Fix B — inline idempotent mirror transition (T0)
+
+> Lands on this branch (`feature/job-task-fix-b`); supersedes the v1 §6.5 / D2 row
+> marker ("fix B closes the current failure") with the actual close.
+
+**The change in one line:** a message-mirror JobItem reaches
+`admission_state='done'` at the moment its Task completes (T0) via an inline
+idempotent transition in `ProcessMessageProcessor.on_success` — and f2's mirror slice
+retires (the sweep becomes a bounded backstop, no longer load-bearing for mirror
+correctness).
+
+**Why this matters:** pre-Fix-B, the message-mirror JobItem was created eagerly
+(job_type='message', admission_state='active'), then **no event-time writer
+existed**. The f-sweep's 300s cycle tried to reconcile via polling predicates, but
+the observer's bus_pending gate + the age floor + the instance-idle check meant a
+parent with live children sat ACTIVE for ~7 hours after the Task completed (the
+source of Incident B's 7-hour lag class). Fix B closes that class forward.
+
+**Two parts:**
+
+1. **Inline idempotent mirror transition** — `JobRepository.finalize_mirror_job_at_completion`
+   in `daemon/repositories/job_queue/repository.py`. Called from
+   `ProcessMessageProcessor.on_success` immediately after `TaskRepository.complete_task`
+   commits. The transition:
+
+   - Targets **only** `job_type='message'` rows. Mission (task-type) JobItems keep
+     their bus-gated finalize (Mechanism B in the f-sweep design — wait for
+     children, then drain); the inline transition is structurally wrong for
+     missions.
+   - Goes through `job_state_machine.validate_transition` BEFORE the SQL guard —
+     the 8 legacy writers bypass `validate_transition`; this new writer is the
+     example, not the bypass class.
+   - Uses a guarded UPDATE: `WHERE job_id = :job_id AND admission_state IN
+     ('queued','active')`. Rowcount == 0 is a silent `None` return (the core
+     race-safety property) — exactly one writer wins, every other concurrent
+     writer (the observer's `_finalize_job_db_sync`, `reconcile_terminal_task`,
+     the instance-terminal cascade, `force_finalize_orphan`, f2's pre-retirement
+     path) sees rowcount == 0 and no-ops.
+   - Stamps `terminal_reason='completed'` (organic-style — closes the old cosmetic
+     gap of empty `terminal_reason` on sweep-finalized rows).
+
+2. **Liveness-gated sweep predicate** — `JobRecoveryService._pattern_f_orphan_active_job_recovery`
+   in `daemon/services/job_recovery_service.py`. The f-sweep now explicitly skips
+   `job_type='message'` rows at the top of its per-row loop, recording the skip as
+   the new `orphan_active_skipped_mirror_retired` detail pattern. This is
+   **observable**: a future regression that re-introduced f2's mirror finalization
+   would silence this detail. TASK-type drift continues to flow through f1/f2
+   unchanged.
+
+**New registered writer (§7):** `daemon/repositories/job_queue/repository.py:finalize_mirror_job_at_completion`
+— registered in `KNOWN_ADMISSION_STATE_WRITERS` on this branch. Census test
+(`test_constitution_drift.py::test_known_admission_state_writers_matches_source_exactly_no_drift`)
+proves bidirectionality.
+
+**Acceptance test surface:** `tests/unit/job_queue/test_fix_b_inline_mirror_transition.py`
+(unit, 12 tests) + `tests/integration/test_fix_b_inline_mirror_transition_incident_b.py`
+(integration, 3 tests for the EXACT incident-B scenario) +
+`tests/job_queue/test_orphan_active_job_recovery.py::TestFixBPatternFMessageSkipForMirrorSliceRetired`
+(f-sweep contract, 2 tests).
 
 ---
 
@@ -438,6 +498,80 @@ loud dispatch-time error.
 
 ---
 
+## 8.1 Fix B — Inline Idempotent Mirror Transition (T0)
+
+> **[Fix B]** — landing on branch `feature/job-task-fix-b`. Companion to Fix A:
+> Fix A closes the linkage-phantom-handle window; Fix B closes the
+> mirror-event-time-write window. Together they retire the 7-hour-lag class
+> and the zombie-ACTIVE class.
+
+**The contract:**
+
+1. **Message-mirror JobItems reach `done` at T0.** The moment a
+   `process_message` Task completes successfully, the driving JobItem
+   transitions `admission_state IN ('queued','active') → 'done'` with
+   `terminal_reason='completed'`. The transition is **inline** (in
+   `ProcessMessageProcessor.on_success`) and **idempotent** (rowcount == 0
+   is a silent no-op).
+2. **Race-safe against every other writer.** The SQL guard
+   `WHERE admission_state IN ('queued','active')` ensures exactly one writer
+   wins among: the inline transition at T0, the observer's
+   `_finalize_job_db_sync`, `reconcile_terminal_task` (Step 4 post-commit),
+   the instance-terminal cascade (`_terminate_instance_db_sync`),
+   `force_finalize_orphan`, and f2's pre-retirement path. The losers all see
+   rowcount == 0 and no-op.
+3. **Mission (task-type) JobItems are NOT inline-transitioned.** They keep
+   the bus-gated finalize path (`_finalize_terminal` after subtree drain).
+   Scope discipline is the spec's hard rule (Part 1, §4).
+4. **The transition goes through `validate_transition`.** The 8 legacy
+   writers bypass it; this new writer is the example, not the bypass class.
+5. **The f-sweep's mirror slice retires.** The
+   `_pattern_f_orphan_active_job_recovery` per-row loop now explicitly skips
+   `job_type='message'` rows at the top, recording the skip as
+   `orphan_active_skipped_mirror_retired`. TASK-type drift continues to flow
+   through f1/f2 unchanged.
+
+**Registered writer (§7):**
+`daemon/repositories/job_queue/repository.py:finalize_mirror_job_at_completion`
+— added to `KNOWN_ADMISSION_STATE_WRITERS` on this branch. The census gate
+(`test_constitution_drift.py::test_known_admission_state_writers_matches_source_exactly_no_drift`)
+is the live test — it goes red the moment an unregistered `admission_state`
+writer lands in source.
+
+**D2 status change:** the "every stateful row has an event-time terminal writer"
+red line flips from **RED** (07-03 → 09-01) to **GREEN** for message-mirror
+rows (this branch). The remaining **3 legacy zombie ACTIVE mirror rows**
+(pre-08-30) are **FLAGGED** below — the spec is silent on the exact
+disposition mechanism, so they remain as-is on this branch.
+
+**FLAG — 3 legacy zombie ACTIVE mirror rows:**
+
+- **What:** 3 ACTIVE message JobItems from before the 08-30 sweep-on change
+  (08-01 × 1; 08-14 × 2), each with a dead/gone instance. Pre-Fix-B they
+  were excluded from the f-sweep by what the spec calls the "blanket
+  message-skip at `:2284`" — but the spec describes the intent, not the
+  predicate logic.
+- **Why this matters:** Fix B's inline transition only fires at T0 (when a
+  Task completes). These 3 rows have no Task driving them anymore; they
+  are dead-lettered in spirit but ACTIVE in the table.
+- **What this branch does:** the new f-sweep skip
+  (`orphan_active_skipped_mirror_retired`) is observable in `details` but
+  intentionally does NOT reap the zombies. The predicate for reaping them
+  is OPEN in the spec ("liveness predicate" in
+  `approach-comparison.md` row B / `architecture-recommendation.md` row B)
+  — the spec describes the intent ("instance-liveness predicate") but does
+  not pin the exact SQL shape.
+- **Leader adjudication needed:** the spec requires a separate predicate
+  to be designed before these rows are reaped. The current branch leaves
+  them as-is (no-op skip with a distinct detail name) and FLAGS the
+  predicate design for leader decision in a follow-up commit. Pre-Fix-B
+  Incident-B frequency was zero in 09-01 (the 2 f2 finalizations were
+  f97813ae 01:22 + 80b86e51 20:03 — both message mirror but both ALREADY
+  drained by the inline transition post-Fix-B), so the residual exposure
+  on these 3 rows is bounded and self-contained.
+
+---
+
 ## 9. What this means for reviewers
 
 PR-template checkboxes map to D1–D4. When reviewing a change that touches this module:
@@ -465,4 +599,6 @@ Key dates for orientation: receipts entered the JobItem table without a kind spl
 **05-24** (I3 born broken); the proxy doctrine was declared **06-28** (half-landed);
 JAFP at scale **07-06/07**; the first autonomous secondary terminal writer **08-01**;
 sweep promoted to default-ON primary transition **08-30** (fired the next day);
-invariant-restoring mint repair + this Constitution **09-01**.
+invariant-restoring mint repair + this Constitution **09-01**; Fix B (inline idempotent
+mirror transition + f2's mirror-slice retirement) **09-02** on
+`feature/job-task-fix-b`.
