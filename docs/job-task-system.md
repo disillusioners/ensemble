@@ -744,6 +744,46 @@ of `None`); for now the renderer treats all `None`s as
 (see the comments at `_job_to_response` in
 `daemon/routers/jobs_crud.py`).
 
+#### The value space
+
+`mission_liveness = canonicalize_status(instance.status)` reads
+ONLY the `Instance.status` column, so its non-`None` value space
+is exactly the canonical projection of the 10 `InstanceStatus`
+enum members (`daemon/repositories/instance/models.py:20-31`):
+
+```
+mission_liveness ∈ {pending, processing, paused, completed, failed, cancelled}
+```
+
+The active cluster (`waiting` / `waiting_children` / `idle` /
+`queued` / `running`) collapses onto `processing` per
+`_STATUS_CANONICAL_MAP` — the resolver's POV treats these as
+non-terminal "work is happening" states, with finer-grained
+detail reserved for the Instance detail view. `pending` is
+the only member of the ratified value space that has no
+current `InstanceStatus` source member — it remains in the map
+for forward-compat (Task-side canonical source), and a future
+`InstanceStatus.PENDING` enum addition would make it
+reachable from the instance-status domain.
+
+`dead_letter` exists in `_STATUS_CANONICAL_MAP` for job-row
+admission states; it is unreachable from the instance-status
+domain `mission_liveness` reads (every `instance.status` write
+in the codebase uses `InstanceStatus.X.value` for X in
+{IDLE, RUNNING, WAITING, PAUSED, COMPLETED, ERROR, TERMINATED,
+QUEUED, WAITING_CHILDREN, FAILED} — verified by grepping all
+`instance.status = …` assignments under `daemon/`; the
+`SQLModelInstanceRepository.update()` method explicitly rejects
+`status=` kwargs and routes them through
+`transition_status_if`, which only accepts valid enum values).
+The D3 single-answer rule (one canonical answer per question) is
+honored: the renderer never has to pick from more than 6
+non-`None` canonical values, and a future renderer that needs
+the distinction (e.g. "is this a child waiting on the parent?"
+vs "is the parent actively running?") MUST add a NEW spec'd
+additive field — never mutate the meaning of an existing
+canonical value in place.
+
 #### The W4 hazard — preserved
 
 A DEAD mission row's derived `status` is hard-coded to
