@@ -742,24 +742,26 @@ The mission-row W4 guard is unaffected.
 
 #### The split-semantics consistency contract
 
-The three JobResponse read-model surfaces MUST agree on the split
+The split-semantics read surfaces MUST agree on the split
 semantics; the DLQ surface is an orthogonal DeadLetterItem
 projection and does not consume these fields:
 
-1. **`work_resolver._job_to_record`** (primary) — rows are built
-   from the resolver's pre-fetched `instance` (batched path) or
-   a single `_lookup_instance` (single-row path).
-2. **`routers/jobs_crud.py::_job_to_response`** — sources
-   `job_type` and `mission_liveness` from the resolver-supplied
-   `WorkRecord` when one is available; falls back to `None` on the
-   legacy branch (resolver not wired).
-3. **`routers/jobs_streaming.py::_ResolvedWork`** — emits both
-   fields on every SSE payload (`connected` / `status_update` /
-   `completed`).
+1. **`work_resolver._job_to_record`** (primary, `WorkRecord`) —
+   rows are built from the resolver's pre-fetched `instance`
+   (batched path) or a single `_lookup_instance` (single-row
+   path).
+2. **`routers/jobs_crud.py::_job_to_response`** (`JobResponse`)
+   — sources `job_type` and `mission_liveness` from the
+   resolver-supplied `WorkRecord` when one is available; falls
+   back to `None` on the legacy branch (resolver not wired).
+3. **`routers/jobs_streaming.py::_ResolvedWork`** (SSE payload
+   — NOT a `JobResponse` schema) — emits both fields on every
+   SSE payload (`connected` / `status_update` / `completed`).
+4. **`routers/jobs_management.py`** (delegation, `JobResponse`)
+   — delegates response construction to `_job_to_response`
+   from `jobs_crud.py` (DRY: the split is defined once at the
+   `_job_to_response` seam).
 
-A fourth surface, **`routers/jobs_management.py`**, delegates
-response construction to `_job_to_response` from `jobs_crud.py`
-(DRY: the split is defined once at the `_job_to_response` seam).
 The DLQ-replay response must surface both fields so the FE can
 distinguish "replayed, mission alive" from "replayed, mission
 dead" (W4-adjacent operator UX). The DLQ endpoint

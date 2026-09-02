@@ -43,9 +43,10 @@ class _ResolvedWork:
     additive split-semantics fields (``job_type`` /
     ``mission_liveness``) so the FE work-view can render mission
     vs mirror rows distinctly. The fields are sourced from the
-    resolver's :class:`WorkRecord` so all four surfaces
+    resolver's :class:`WorkRecord` so all four read surfaces
     (``work_resolver`` primary + ``jobs_crud`` /
-    ``jobs_streaming`` here) agree on the split semantics. See
+    ``jobs_management`` delegation / ``jobs_streaming`` here)
+    agree on the split semantics. See
     ``docs/job-task-system.md §6.5 / §8.1`` for the contract.
     """
 

@@ -745,13 +745,15 @@ class TestListWorkSplitFields:
 
 class TestJobResponseSurface:
     """The split-semantics additive-field contract (Fix C spec):
-    the three JobResponse read-model surfaces — ``work_resolver``
-    primary, ``jobs_crud`` + ``jobs_streaming`` routers, and the
-    ``jobs_management`` router (which delegates to
-    ``_job_to_response``) — must agree on the split semantics;
-    the DLQ surface is an orthogonal DeadLetterItem projection
-    and does not consume these fields. These tests pin the
-    additive-field contract at the schema / router layer.
+    the four read surfaces — ``work_resolver`` primary
+    (WorkRecord), ``jobs_crud`` (``_job_to_response``,
+    JobResponse), ``jobs_streaming`` (``_ResolvedWork`` SSE
+    payload — NOT a JobResponse schema), and ``jobs_management``
+    (delegates to ``_job_to_response``) — must agree on the
+    split semantics; the DLQ surface is an orthogonal
+    DeadLetterItem projection and does not consume these
+    fields. These tests pin the additive-field contract at the
+    schema / router layer.
     """
 
     def test_job_response_schema_has_split_fields(self) -> None:
