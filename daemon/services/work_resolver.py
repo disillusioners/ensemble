@@ -1674,9 +1674,25 @@ class WorkResolverService:
 
         When the kill-switch is OFF, or when the resolver degrades,
         every field is ``None``. When the kill-switch is ON and the
-        instance is loadable, the helper delegates to
-        :meth:`MissionResolver.project` (the public passthrough;
-        reaching into ``_project`` directly is no longer required).
+        instance is loadable, the helper mirrors
+        :meth:`MissionResolver.resolve` (the single-row path): it
+        pre-fetches the linked JobItem DEAD-admission flag via
+        :meth:`MissionResolver._batch_jobitem_lookup` and then
+        delegates to :meth:`MissionResolver._project` with the
+        pre-fetched ``dead_linked`` value so the W4-hazard branch
+        (``mission_terminal_reason='dead_letter'``) is reachable on
+        this binding path.
+
+        M1 fix (2026-09-02) — previously this helper delegated to
+        :meth:`MissionResolver.project`, the public passthrough that
+        defaults ``dead_linked=False`` and so bypassed the W4 branch
+        (``work_resolver.py:1702`` defect, observed on the LIST /
+        DETAIL / SSE read surfaces for a DEAD linked JobItem +
+        terminal instance). Routing through the same pre-fetch
+        pattern as :meth:`MissionResolver.resolve` keeps the OFF
+        path byte-identical (the kill-switch gate above returns
+        before any resolver call) and confines the ON-path change
+        to the W4-bound tuple element.
 
         Args:
             instance: An already-loaded :class:`Instance` row, or
@@ -1691,7 +1707,10 @@ class WorkResolverService:
         """
         # Kill-switch OFF ⇒ all three fields stay None (the OFF state
         # is "no mission fields surface" — see the M1 spec §5 row
-        # + decisions.md §4 soak discipline).
+        # + decisions.md §4 soak discipline). The gate is the FIRST
+        # check so the pre-fetch below never runs when the OFF path
+        # is active — preserving the byte-identical OFF contract on
+        # every read surface.
         if not _is_mission_projection_enabled():
             return None, None, None
         if instance is None:
@@ -1699,7 +1718,23 @@ class WorkResolverService:
         resolver = self._mission_resolver()
         if resolver is None:
             return None, None, None
-        record = resolver.project(instance)
+        # Mirror MissionResolver.resolve() (single-row shape at
+        # ``mission_resolver.py:368-377``): pre-fetch the
+        # ``dead_linked`` flag via the combined SELECT helper, then
+        # delegate to ``_project`` so the W4-hazard branch
+        # (``mission_terminal_reason='dead_letter'``) fires for a
+        # DEAD linked JobItem regardless of instance liveness. The
+        # batched helper does one SELECT per call (C9 contract
+        # holds at N=1 too — see
+        # ``tests/unit/services/test_mission_resolver.py::
+        # TestBatchQueryCount``).
+        jobitems_by_id = resolver._batch_jobitem_lookup(
+            [instance.instance_id]
+        )
+        dead_linked, linked_jobs = jobitems_by_id.get(
+            instance.instance_id, (False, [])
+        )
+        record = resolver._project(instance, dead_linked, linked_jobs)
         if record is None:
             return None, None, None
         return (
