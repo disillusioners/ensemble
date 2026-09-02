@@ -126,9 +126,10 @@ class TestJobsRouteRegistration:
         # - POST /api/jobs/{job_id}/retry
         # - GET /api/jobs/{job_id}/events
         # - POST /api/jobs/cleanup                           (System Jobs Cleanup)
-        # = 9 endpoints
-        assert len(jobs_routes) == 9, (
-            f"Expected 9 job endpoints, found {len(jobs_routes)}"
+        # - GET /api/jobs/cleanup/preflight                  (System Jobs Cleanup preflight)
+        # = 10 endpoints
+        assert len(jobs_routes) == 10, (
+            f"Expected 10 job endpoints, found {len(jobs_routes)}"
         )
 
 
