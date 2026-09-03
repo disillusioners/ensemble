@@ -34,7 +34,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
-from sqlalchemy.pool import StaticPool
+from sqlalchemy.pool import NullPool
 from sqlmodel import Session, SQLModel
 
 from daemon.repositories.instance.models import Instance, InstanceStatus
@@ -51,22 +51,30 @@ from daemon.services.work_resolver import WorkResolverService
 
 @pytest.fixture
 def engine(tmp_path) -> Engine:
-    """File-backed SQLite at ``tmp_path`` (NullPool + FK on).
+    """File-backed SQLite at ``tmp_path`` (NullPool + FK on + WAL).
 
-    Blueprint §3 recipe — StaticPool + WriteGuardSession is FORBIDDEN
-    per QUARANTINE.md dependency_bus row.
+    Blueprint §3 recipe — NullPool + file-backed SQLite at
+    ``tmp_path`` + ``PRAGMA journal_mode=WAL`` +
+    ``PRAGMA busy_timeout=10000`` + foreign-keys ON is the
+    FORBIDDEN-PATTERN antidote for the QUARANTINE.md StaticPool +
+    WriteGuardSession dependency_bus row (which trips write-
+    corruption in dependency_bus + repository sessions). The M3
+    pin must mirror the repo-wide recipe so the test session
+    behaves like a single-process file-backed production write.
     """
     db_path = tmp_path / "m3_pin.db"
     eng = create_engine(
         f"sqlite:///{db_path}",
         connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
+        poolclass=NullPool,
     )
 
     @event.listens_for(eng, "connect")
     def _enable_fk(dbapi_conn, _connection_record):
         cursor = dbapi_conn.cursor()
         cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA busy_timeout=10000")
         cursor.close()
 
     SQLModel.metadata.create_all(eng)
