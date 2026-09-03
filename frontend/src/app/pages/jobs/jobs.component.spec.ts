@@ -1,6 +1,6 @@
 import { signal, computed, Component, input, output } from '@angular/core';
 import { Observable } from 'rxjs';
-import { Job, JobStatus, JobSource } from '../../models/job.model';
+import { Job, JobStatus, JobSource, isTerminalStatus } from '../../models/job.model';
 import type { Work } from '../../models/work.model';
 import { Project } from '../../models/project.model';
 import { createMockJob, createMockJobList } from '../../testing/job-test-helpers';
@@ -454,7 +454,13 @@ class MockJobsComponent {
               instance_id: status.instance_id || job.instance_id,
               result_summary: status.result_summary || job.result_summary,
               error_message: status.error_message || job.error_message,
-              completed_at: status.status === 'completed' || status.status === 'failed'
+              // M3 (mission-class, 2026-09-03) — ``completed_at``
+              // is stamped for any wire-terminal status, including
+              // the mirror-receipt terminal ``settled``. Mirrors the
+              // production fix at jobs.component.ts (the mock here
+              // runs the same terminal-aware check; if the production
+              // regresses this fixture will drift).
+              completed_at: status.status && isTerminalStatus(status.status)
                 ? new Date().toISOString()
                 : job.completed_at,
               started_at: status.status === 'processing' && !job.started_at
@@ -1955,11 +1961,16 @@ describe('JobsComponent Logic', () => {
 
   // ── Fix C (§8.2) — SSE patch propagation ─────────────────────────────
   //
-  // Round-1 only patched the works[] path, so a settled mirror in
+  // Round-1 only patched the works[] path, so a terminal mirror in
   // the Queues view stayed pinned to its stale live chip and the
   // header badge kept counting it as a live mission. These specs
   // drive ``updateJobFromSse`` directly so any future regression
   // that drops the patch or collapses null-vs-absent fails loudly.
+  //
+  // M3 (mission-class, 2026-09-03) — prose uses ``terminal``
+  // (mission-side vocabulary) instead of ``settled`` (transport-
+  // receipt vocabulary; belongs only to mirror rows now). The
+  // data shape (``mission_liveness``) is unchanged.
 
   describe('updateJobFromSse — mission_liveness propagation (jobs[] path)', () => {
     function seedMirrorRow(liveness: import('../../models/job.model').MissionLiveness) {
@@ -1989,7 +2000,7 @@ describe('JobsComponent Logic', () => {
       ]);
     }
 
-    it('jobs[] path: settled mission_liveness in the payload overwrites the live row', () => {
+    it('jobs[] path: terminal mission_liveness in the payload overwrites the live row', () => {
       seedMirrorRow('processing');
       component.updateJobFromSse({
         job_id: 'mirror-1',
@@ -2022,6 +2033,53 @@ describe('JobsComponent Logic', () => {
       });
       expect(component.jobs().find(j => j.job_id === 'mirror-1')!.mission_liveness).toBe('processing');
       expect(component.works().find(w => w.work_id === 'mirror-1')!.mission_liveness).toBe('processing');
+    });
+  });
+
+  // M3 (mission-class, 2026-09-03) — ``completed_at`` is stamped for
+  // every wire-terminal value, INCLUDING the mirror-receipt terminal
+  // ``settled``. The pre-M3 check only matched ``completed``/``failed``;
+  // a settled mirror slipped through and the row stayed pinned to a
+  // stale (null) ``completed_at``. These specs pin the regression so a
+  // future terminal rename cannot silently re-introduce it.
+  describe('updateJobFromSse — completed_at stamped for every wire-terminal (M3 pin)', () => {
+    function seedJob(status: import('../../models/job.model').JobStatus): string {
+      const id = `job-${status}`;
+      component.jobs.set([
+        createMockJob({ job_id: id, status, completed_at: null }),
+      ]);
+      return id;
+    }
+
+    it('stamps completed_at when status === "settled" (mirror-receipt terminal)', () => {
+      const id = seedJob('processing');
+      component.updateJobFromSse({ job_id: id, status: 'settled' });
+      const stamped = component.jobs().find(j => j.job_id === id)!.completed_at;
+      expect(stamped).not.toBeNull();
+      expect(typeof stamped).toBe('string');
+      // Sanity: ISO timestamp parses to a finite Date in the recent past.
+      expect(Number.isFinite(new Date(stamped!).getTime())).toBe(true);
+    });
+
+    it('also stamps completed_at for the legacy terminals (completed/failed/cancelled)', () => {
+      // Defensive coverage — pins the legacy terminal members so a
+      // future drift back to a hard-coded subset cannot quietly drop one.
+      for (const status of ['completed', 'failed', 'cancelled'] as const) {
+        const id = seedJob('processing');
+        component.updateJobFromSse({ job_id: id, status });
+        expect(component.jobs().find(j => j.job_id === id)!.completed_at).not.toBeNull();
+      }
+    });
+
+    it('does NOT stamp completed_at for non-terminal statuses (pending/processing/paused)', () => {
+      // Negative pin — the settled-aware check must not over-reach into
+      // the live states. A pre-M3 regression that incorrectly stamped
+      // for every status would surface here.
+      for (const status of ['pending', 'processing', 'paused'] as const) {
+        const id = seedJob('pending');
+        component.updateJobFromSse({ job_id: id, status });
+        expect(component.jobs().find(j => j.job_id === id)!.completed_at).toBeNull();
+      }
     });
   });
 });

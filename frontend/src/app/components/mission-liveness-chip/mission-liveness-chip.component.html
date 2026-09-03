@@ -2,7 +2,7 @@
   <span
     class="mission-chip"
     [class.mission-live]="c.live"
-    [class.mission-settled]="!c.live"
+    [class.mission-terminal]="!c.live"
     [style.backgroundColor]="c.live ? c.color + '20' : null"
     [style.color]="c.color"
     [matTooltip]="tooltip()">

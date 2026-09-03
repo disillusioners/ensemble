@@ -28,7 +28,7 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 FRONTEND_DIR="$PROJECT_DIR/frontend"
 BUILD_LOG="/tmp/fe_static_build.log"
 
-EXPECTED_BRANCH="feature/job-queue-fe-liveness"
+EXPECTED_BRANCH="${EXPECTED_BRANCH:-feature/mission-class}"
 
 echo "=== Test Pack: fe_static_typecheck_build_test ==="
 

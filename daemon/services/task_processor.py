@@ -867,9 +867,26 @@ class ProcessMessageProcessor(BaseProcessor):
                 and work_resolver is not None
                 and watcher_repo is not None
             ):
+                # N8 (mission-class, 2026-09-03, ``feature/mission-class``)
+                # — per-kind token at the notify site. The Task row's
+                # work_id here is also the JobItem PK for the message
+                # mirror it carries (Fix C read-model split); a mirror
+                # row's per-kind dispatch surfaces ``settled`` (NOT
+                # ``completed``). Resolve via the resolver so the
+                # rendered token matches the row's actual kind — the
+                # Task branch returns ``"completed"`` for the
+                # task-backed WorkRecord, the JobItem branch returns
+                # ``"settled"`` for a mirror. Default ``"completed"``
+                # for the un-resolvable branch keeps the prior
+                # behaviour (the wire text is the task-outcome
+                # vocabulary, which is correct for Task rows).
+                per_kind_status = work_resolver.per_kind_status_for(
+                    completed_task.work_id,
+                    default="completed",
+                )
                 await notify_work_watchers(
                     work_id=completed_task.work_id,
-                    status="completed",
+                    status=per_kind_status,
                     instance_manager=instance_manager,
                     work_resolver=work_resolver,
                     watcher_repo=watcher_repo,

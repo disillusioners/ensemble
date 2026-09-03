@@ -28,10 +28,16 @@ failure path) did NOT fire notifications at all, and the existing
 
 This module centralises the notification behind one function that:
 
-1. Uses ``watcher_repo.claim_watchers_for_job`` (DELETE...RETURNING) as
-   the natural serialization point — two concurrent callers cannot
-   both receive the same watcher row, so notifications fire exactly
-   once per watcher per terminal event.
+1. Uses ``watcher_repo.claim_watchers_for_job_for_instances``
+   (DELETE...RETURNING scoped to the matching instance_id subset) as
+   the natural serialization point — invoked CLAIM-FIRST before any
+   per-watcher ``enqueue_message``, so two concurrent terminal
+   callers cannot both deliver for the same watcher row.
+   Notifications therefore fire exactly once per watcher per
+   terminal event (N1 fix, 2026-09-03). The held-for-mission rows
+   (``mission_terminal`` opt-in with non-terminal mission liveness)
+   are excluded from the claim's WHERE clause and survive in the
+   DB for the future terminal event.
 2. Resolves the ``work_id`` through the ``WorkResolverService`` so the
    same code path serves both ``task`` and ``job`` work — the resolver
    pulls ``agent_id`` from the matching Instance (Task side) or the
@@ -60,6 +66,10 @@ orchestrator's parsing contract in
 ``in_progress`` events.) ``status_display`` mapping:
 
 * ``completed``  → ``"completed ✓"``
+* ``settled``    → ``"settled ✓"`` (M3 mission-class — mirror rows
+  carry ``settled``; the transport-receipt terminal is disjoint from
+  ``completed`` which is reserved for task rows / the work-outcome
+  vocabulary)
 * ``failed``     → ``"failed ✗"``
 * ``in_progress`` → ``"in progress ⟳"``
 * ``paused``     → ``"paused ⏸"``
@@ -90,6 +100,7 @@ logger = logging.getLogger(__name__)
 # parser contract).
 _STATUS_DISPLAY_MAP: dict[str, str] = {
     "completed": "completed ✓",
+    "settled": "settled ✓",
     "failed": "failed ✗",
     "in_progress": "in progress ⟳",
     "paused": "paused ⏸",
@@ -130,33 +141,61 @@ async def notify_work_watchers(
           at next startup — the watching instance is never
           permanently un-notified.
 
-    Ordering (resolve → notify → claim):
+    Ordering (resolve → partition → claim-first → notify):
+
         1. **Resolve FIRST.** ``work_resolver.resolve_work`` runs
            before any watcher fetch. If the work is gone, return 0
            early — watchers stay in place for reconcile cleanup.
-        2. **Read-only fetch watchers.** ``get_watchers_for_job``
-           (SELECT — no DELETE) returns the rows. No DELETE at this
-           point: a notification failure in step 3 must not silently
-           drop the watch.
-        3. **Notify each watcher.** ``enqueue_message`` delivers
-           the notification. Any exception propagates to the outer
-           ``except`` (returns 0) — watcher rows still exist because
-           step 4 has not run.
-        4. **CLAIM (delete) ONLY AFTER successful notify.** For
-           terminal statuses with ``notified > 0``,
-           ``claim_watchers_for_job`` atomically deletes the watcher
-           rows. For non-terminal statuses, watchers are NEVER
-           claimed — they stay in place so the eventual terminal
-           notification can still reach them.
+        2. **Read-only fetch + in-memory partition.** All watchers
+           are SELECTed (no DELETE). Each watcher is classified
+           into one of two buckets in memory:
 
-    Exactly-once on the happy path is preserved by the REPO-LEVEL
-    non-None gating: the atomic ``WHERE status=running`` guard on
-    ``complete_task`` / ``fail_task`` / ``cancel_task`` returns a
-    non-None row only for the caller that won the status transition
-    race. That caller is the only one that calls this function, so
-    claim-after-notify is still exactly-once under the normal path.
-    The reorder makes failure paths safe (watchers survive for
-    reconcile) without weakening the happy path.
+           * **matching** — the watcher subscribes to ``status``
+             AND (for the ``mission_terminal`` opt-in branch) its
+             mission liveness is itself terminal. This bucket
+             WILL be notified.
+           * **held** — the watcher opts in to ``mission_terminal``
+             but its mission liveness is not yet terminal. The row
+             is preserved in the DB for the future terminal event;
+             it is NEVER claimed on this call.
+
+        3. **CLAIM-FIRST for terminal statuses (N1 fix,
+           2026-09-03).** When ``status`` is terminal AND the
+           ``matching`` set is non-empty, the atomic
+           ``DELETE ... RETURNING`` on
+           ``watcher_repo.claim_watchers_for_job_for_instances``
+           runs BEFORE any ``enqueue_message``. Only the rows the
+           CAS returned are notified. Concurrent callers each
+           partition independently; only the CAS winner(s) deliver,
+           so the bounded ≤2 duplicate-delivery window the
+           notify-then-claim ordering had is closed. The held
+           (mission-not-terminal) rows are not in the CAS WHERE
+           clause, so they survive untouched.
+        4. **Notify ONLY the CAS winners.** The notify loop
+           iterates the rows the claim returned. A row that was
+           partitioned into ``matching`` but lost the CAS to a
+           concurrent caller is NOT notified here — that caller's
+           notify loop owns it. This is the exactly-once
+           guarantee at the caller level (paired with the
+           repo-level CAS).
+
+        For **non-terminal** statuses (``in_progress`` etc.),
+        ``claim`` is NEVER called: the notify loop iterates the
+        ``matching`` bucket in read-only mode, and the watcher
+        rows remain in the DB so the eventual terminal
+        notification can still reach them. The earlier
+        unconditional-claim implementation silently dropped these
+        rows before the terminal event fired.
+
+    Exactly-once invariant (post-N1):
+
+        Two concurrent callers of ``notify_work_watchers`` for the
+        same terminal ``work_id`` → exactly ONE ``[JOB_EVENT]``
+        per watcher. The repo-level CAS on
+        ``claim_watchers_for_job_for_instances`` is the only
+        primitive that enforces this — the caller MUST invoke it
+        BEFORE any ``enqueue_message``. Do not add new
+        notify-then-claim call sites that bypass this helper.
 
     Args:
         work_id: The stable cross-system UUID4 (``Task.work_id`` or
@@ -173,9 +212,12 @@ async def notify_work_watchers(
             ``result_summary``, ``error``).
         watcher_repo: The ``JobWatcherRepository`` whose
             ``get_watchers_for_job`` performs the read-only lookup
-            (always used) and whose ``claim_watchers_for_job``
-            performs the post-notify atomic delete (terminal
-            statuses only — runs only when ``notified > 0``).
+            (always used) and whose
+            ``claim_watchers_for_job_for_instances`` performs the
+            CLAIM-FIRST atomic DELETE...RETURNING (terminal statuses
+            only — scoped to the matching instance_id subset so
+            held-for-mission rows survive). Non-terminal statuses
+            never trigger a claim.
         progress: Optional progress payload for ``in_progress``
             notifications — rendered as the ``  Progress:\n{progress}``
             line that ``JobFeedbackObserver._emit_in_progress`` passes
@@ -224,10 +266,14 @@ async def notify_work_watchers(
 
         # Step 2: Read-only fetch watchers. We deliberately use the
         # SELECT path (``get_watchers_for_job``) and NOT the
-        # claim-and-delete path here — the atomic DELETE moves to
-        # step 4 below so a notification failure in step 3 cannot
-        # silently drop the watch (which would leave the watching
-        # instance permanently un-notified). Wrapped in
+        # claim-and-delete path here — the per-instance atomic CAS
+        # moves to step 3 below (claim-first for terminal statuses),
+        # where the DELETE WHERE clause is scoped to the matching
+        # instance_id subset so held-for-mission rows survive. A
+        # claim-first ordering also closes the bounded ≤2
+        # duplicate-delivery window between two concurrent terminal
+        # callers (each SELECTed the same row and delivered before
+        # either ran the DELETE in the pre-N1 flow). Wrapped in
         # ``asyncio.to_thread`` so SQLite WAL contention cannot block
         # the event loop.
         watchers = await asyncio.to_thread(
@@ -259,14 +305,141 @@ async def notify_work_watchers(
 
         status_display = _format_status_display(status)
 
-        notified = 0
+        # Step 2 (N1 — 2026-09-03): in-memory PARTITION before any
+        # notify or claim. The pre-N1 flow did a notify-then-claim
+        # over the raw SELECT, which left a bounded ≤2
+        # duplicate-delivery window between two concurrent terminal
+        # callers (each SELECTed the same row and delivered before
+        # either ran the DELETE).
+        #
+        # Here we split into two pure buckets — no side effects —
+        # so the partition itself is race-free (every caller
+        # computes the same set from the same SELECT snapshot):
+        #   * matching         → will notify (atomic CAS in step 3
+        #                        picks which caller(s) actually
+        #                        deliver for each instance_id).
+        #   * held_for_mission → ``mission_terminal`` opt-in with
+        #                        mission liveness NOT yet terminal.
+        #                        Rows stay in DB for the future
+        #                        terminal event. Never claimed here.
+        matching: list = []
+        held_for_mission = 0
         for watcher in watchers:
             # Filter by the watcher's subscribed events. The watcher's
             # ``watch_events`` is the JSONB list populated at
             # ``add_watch`` time and defaults to ``ALL_WATCHABLE_EVENTS``.
-            if status not in watcher.watch_events:
+            #
+            # M2 (mission-class, 2026-09-02) — ``mission_terminal``
+            # opt-in semantic (contract draft §3.5): a watcher that
+            # subscribes to ``mission_terminal`` wants notification
+            # on EVERY transport terminal event, gated by mission
+            # liveness. The standard ``status not in watch_events``
+            # check would otherwise miss every transport terminal
+            # event (since ``status`` is a transport value, not
+            # ``"mission_terminal"``). Treat the watcher as
+            # "matched" on any transport terminal event when
+            # ``mission_terminal`` is in its events list.
+            standard_match = status in watcher.watch_events
+            mission_terminal_opt_in = (
+                "mission_terminal" in watcher.watch_events
+            )
+            if not standard_match and not mission_terminal_opt_in:
                 continue
 
+            # M2 (mission-class, 2026-09-02, ``feature/mission-class``)
+            # — ``mission_terminal`` opt-in gating (contract draft
+            # §3.5). When a watcher opts in via ``mission_terminal``
+            # (added to ``watch_events`` at ``add_watch`` time), the
+            # notification fires ONLY when both admission AND mission
+            # liveness are terminal. The dual-terminal check uses
+            # ``work_record.mission_liveness`` (canonical mission
+            # vocabulary for mirror rows; ``None`` for task rows).
+            if mission_terminal_opt_in:
+                # Task row: ``mission_liveness`` is intentionally
+                # ``None`` by Fix C split-semantics design — the row
+                # IS its own mission. Use ``work_record.status`` as
+                # the dual-terminal check for task rows.
+                job_type = getattr(work_record, "job_type", None)
+                if job_type == "message":
+                    mission_live = getattr(
+                        work_record, "mission_liveness", None
+                    )
+                else:
+                    mission_live = getattr(work_record, "status", None)
+                if mission_live not in {"completed", "failed", "cancelled"}:
+                    # Mission not yet terminal — keep the watch alive
+                    # for the future terminal event. Skip this
+                    # notification; the watcher row stays in place
+                    # (NOT in the step-3 claim WHERE clause).
+                    held_for_mission += 1
+                    continue
+
+            matching.append(watcher)
+
+        # M2 — debug log when ``mission_terminal`` opt-in held
+        # notifications back. The watcher rows remain in place for
+        # the future terminal event; nothing claims them here.
+        if held_for_mission:
+            logger.debug(
+                "notify_work_watchers: held %d watcher(s) for "
+                "mission_terminal gating on work_id=%s status=%s — "
+                "mission liveness not yet terminal; rows preserved",
+                held_for_mission,
+                work_id[:8],
+                status,
+            )
+
+        # Step 3 (N1 — 2026-09-03): CLAIM-FIRST for terminal
+        # statuses. The atomic DELETE...RETURNING on the matching
+        # instance_id subset runs BEFORE any ``enqueue_message``.
+        # The repo-level CAS is the only primitive that closes the
+        # bounded ≤2 duplicate-delivery window the notify-then-claim
+        # ordering had. Two concurrent callers each partition
+        # independently above; only the CAS winner(s) receive the
+        # watcher rows back, and ONLY those rows are notified in
+        # step 4. The held-for-mission rows are excluded from the
+        # claim's WHERE clause, so they survive untouched for the
+        # future terminal event.
+        if _is_terminal(status):
+            if not matching:
+                return 0
+            claimed = await asyncio.to_thread(
+                watcher_repo.claim_watchers_for_job_for_instances,
+                work_id,
+                [w.instance_id for w in matching],
+            )
+            if not claimed:
+                # Lost every CAS — every matching row was already
+                # claimed by a concurrent terminal caller. Their
+                # notify loop owns delivery; ours would be a
+                # duplicate. Skip cleanly (return 0, no enqueue).
+                return 0
+            notify_list = claimed
+        else:
+            # Non-terminal (``in_progress`` etc.): NEVER claim — the
+            # watcher must stay registered so the eventual terminal
+            # notification can still reach it. The earlier
+            # implementation unconditionally claimed (deleted) all
+            # watchers on every status, which broke progress tracking
+            # by silently dropping the watch before the terminal
+            # event fired. Read-only notify on the matching bucket.
+            notify_list = matching
+            logger.debug(
+                "notify_work_watchers: non-terminal status=%s for "
+                "work_id=%s — watcher rows preserved (read-only), "
+                "terminal notification will still fire",
+                status,
+                work_id[:8],
+            )
+
+        # Step 4: notify ONLY the CAS winners (terminal) or the
+        # read-only matching bucket (non-terminal). Either way, the
+        # notify loop iterates ``notify_list`` — a set that, by
+        # construction, has no overlap with any concurrent caller's
+        # notify list on the same terminal ``work_id``. This is the
+        # caller-level exactly-once invariant.
+        notified = 0
+        for watcher in notify_list:
             notification_parts = [
                 f"[JOB_EVENT] Job {work_id[:8]}... {status_display}",
                 f"  Agent: {agent_id}",
@@ -293,41 +466,6 @@ async def notify_work_watchers(
                 source=f"internal_agent:job_event:{work_id}:{status}",
             )
             notified += 1
-
-        # Step 4: CLAIM (delete) watchers ONLY AFTER successful notify.
-        #
-        # Terminal statuses (``completed`` / ``failed`` /
-        # ``cancelled`` / ``dead_letter``): if at least one watcher
-        # was notified, atomically claim (DELETE ... RETURNING) all
-        # watcher rows for this work_id. This is the
-        # exactly-once-on-success invariant — the only caller that
-        # reaches this function is the one that won the atomic
-        # ``WHERE status=running`` guard on ``complete_task`` /
-        # ``fail_task`` / ``cancel_task`` (the repo-level non-None
-        # gating), so claim-after-notify does not weaken exactly-once.
-        # On failure (notified == 0 because every watcher filtered the
-        # event out, or because enqueue_message threw), the claim is
-        # skipped and the rows remain for reconcile cleanup.
-        #
-        # Non-terminal statuses (``in_progress`` etc.): NEVER claim —
-        # the watcher must stay registered so the eventual terminal
-        # notification can still reach it. The earlier implementation
-        # unconditionally claimed (deleted) all watchers on every
-        # status, which broke progress tracking by silently dropping
-        # the watch before the terminal event fired.
-        if _is_terminal(status):
-            if notified > 0:
-                await asyncio.to_thread(
-                    watcher_repo.claim_watchers_for_job, work_id
-                )
-        else:
-            logger.debug(
-                "notify_work_watchers: non-terminal status=%s for "
-                "work_id=%s — watcher rows preserved (read-only), "
-                "terminal notification will still fire",
-                status,
-                work_id[:8],
-            )
 
         return notified
 

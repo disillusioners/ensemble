@@ -3,7 +3,9 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_serializer, model_validator
+
+from daemon.services.mission_resolver import mission_projection_to_dict
 
 
 # ==================== Job Queue Schemas ====================
@@ -54,7 +56,7 @@ class JobResponse(BaseModel):
     """Response for a single job."""
     
     job_id: str = Field(..., description="Unique job identifier")
-    status: str = Field(..., description="Job status (pending, processing, completed, failed, cancelled, dead_letter)")
+    status: str = Field(..., description="Job status (pending, processing, completed, settled, failed, cancelled, dead_letter)")
     admission_state: str = Field(default="queued", description="Admission state (queued, active, done, dead)")
     priority: int = Field(..., description="Job priority (1-10)")
     agent_id: str = Field(..., description="Agent ID (e.g., 'developer')")
@@ -129,6 +131,95 @@ class JobResponse(BaseModel):
             "instance lookup degraded (degradation-safe contract)."
         ),
     )
+    # M1 (mission-class, 2026-09-02) — additive mission projection
+    # fields. Always-on since WS3 (the
+    # M1 mission-projection kill-switch was removed);
+    # see ``daemon/services/mission_resolver.py``. They surface
+    # identity (``mission_id`` == ``instance_id``), the current epoch
+    # number, and the mission-side terminal discriminator
+    # (``completed`` / ``failed`` / ``cancelled`` / ``dead_letter``).
+    # W4-hazard path: a linked DEAD JobItem flips
+    # ``mission_terminal_reason`` to ``dead_letter`` regardless of a
+    # since-revived instance. Pure read-model — no writes, no JobItem
+    # creation; census frozen (``daemon/job_state/constitution.py``:
+    # ``KNOWN_ADMISSION_STATE_WRITERS``).
+    mission_id: str | None = Field(
+        default=None,
+        description=(
+            "M1: mission identity == instance_id (per mission-class "
+            "spec §3 adjudicated under pressure-test). The instance "
+            "id, or None when there is no linked instance."
+        ),
+    )
+    mission_epoch: int | None = Field(
+        default=None,
+        description=(
+            "M1: current mission epoch number (None only on a "
+            "degraded lookup). Per-epoch timestamps are best-effort "
+            "today — the M4(ii) mission_events log will refine this "
+            "to a precise epoch_count + last_epoch_at."
+        ),
+    )
+    mission_terminal_reason: str | None = Field(
+        default=None,
+        description=(
+            "M1: mission-side terminal discriminator (one of "
+            "completed / failed / cancelled / dead_letter). None for "
+            "living missions. The W4-hazard path surfaces "
+            "dead_letter here regardless of a since-revived instance "
+            "— see agent-contract-draft.md §2 W4 rule."
+        ),
+    )
+    # M2 (mission-class, 2026-09-02, ``feature/mission-class``) —
+    # anti-trap guardrails (contract draft §3). Two new keys land on
+    # every transport (job) payload, additive on top of the M1
+    # mission_* trio:
+    #
+    # * ``mission_ref`` — the cross-reference payload that ties a job
+    #   row to its linked mission. ``{mission_id, agent_id,
+    #   liveness}`` — a single payload an agent can read to learn the
+    #   mission's state without a separate ``get_mission`` call. Per
+    #   draft §3.3 the cross-reference is MANDATORY on terminal job
+    #   payloads (job_get / job_list / watch_job events); the field is
+    #   also surfaced on non-terminal payloads for consistency (the
+    #   shape stays uniform across the four Fix-C surfaces — §8.2).
+    # * ``outcome`` — the asymmetric outcome token. ALWAYS ``null`` on
+    #   transport payloads (per draft §3.2: ``outcome: null`` on
+    #   transport = "NOT done" by construction); the SAME field on a
+    #   mission payload carries the outcome value when terminal.
+    #   The agent branches on a literal key: ``outcome is None`` ⇒
+    #   "use ``get_mission`` / ``await_mission`` for the work
+    #   question".
+    #
+    # Census note: both fields are derived from the same
+    # ``MissionResolver`` + ``WorkResolverService`` the existing M1
+    # fields source from — no new writers, no new admissions-state
+    # mutations, no JobItem creation. Census stays frozen at 23.
+    outcome: str | None = Field(
+        default=None,
+        description=(
+            "M2: ALWAYS null on transport payloads. The asymmetric "
+            "outcome token — ``outcome: null`` on a job means "
+            "'NOT done' (the transport layer has nothing to say "
+            "about the work). For the actual outcome, use the "
+            "mission tools (``get_mission`` / ``await_mission``) "
+            "which carry the value when terminal. A literal key "
+            "the agent can branch on."
+        ),
+    )
+    mission_ref: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "M2: cross-reference to the linked mission "
+            "({mission_id, agent_id, liveness}). MANDATORY on "
+            "terminal job payloads (contract draft §3.3). The "
+            "shape is uniform across task and message rows — for "
+            "task rows ``liveness`` is the row's own canonical "
+            "status; for mirror rows ``liveness`` is the linked "
+            "instance's canonical mission liveness. ``None`` when "
+            "the resolver degraded (no linked instance)."
+        ),
+    )
 
     model_config = {
         "json_schema_extra": {
@@ -149,10 +240,85 @@ class JobResponse(BaseModel):
                 "job_type": "task",
                 "mission_liveness": None,
                 "position": None,
-                "message": "Job completed successfully"
+                "message": "Job completed successfully",
+                # M1 (mission-class, 2026-09-02) — additive mission
+                # projection fields (always-on since WS3).
+                "mission_id": None,
+                "mission_epoch": None,
+                "mission_terminal_reason": None,
             }
         }
     }
+
+    @model_serializer
+    def _serialize(self) -> dict[str, Any]:
+        """Custom serializer: emit the M1 ``mission_*`` keys explicitly.
+
+        M1 (mission-class, 2026-09-02) contract: the three
+        ``mission_*`` keys surface verbatim from the model's state.
+        Always-on since WS3 — the former
+        the M1 mission-projection kill-switch OFF-omission gate was
+        removed with the kill-switch, so the keys are present on
+        every response serialized via this schema (additive vs the
+        pre-M1 wire format; older clients ignore the extra keys).
+
+        Without this serializer, Pydantic would emit its default
+        field ordering; the explicit dict keeps the four Fix-C read
+        surfaces (:meth:`WorkRecord.to_dict`,
+        :meth:`_ResolvedWork.to_payload`,
+        :meth:`_ResolvedWork.to_completed_payload`, and this
+        serializer) in lock-step via the shared
+        ``mission_projection_to_dict`` helper.
+
+        Truth rationale (one line): the return value is filtered as a
+        serialization helper because ``_is_serialization_dict`` short-
+        circuits on ``isinstance(parent, ast.Return)`` — the
+        constitution scanner never reaches the ``"admission_state"``
+        key in this dict literal.
+        """
+        return {
+            "job_id": self.job_id,
+            "status": self.status,
+            "admission_state": self.admission_state,
+            "priority": self.priority,
+            "agent_id": self.agent_id,
+            "agent_dir": self.agent_dir,
+            "project_id": self.project_id,
+            "queue_id": self.queue_id,
+            "instance_id": self.instance_id,
+            "created_at": self.created_at,
+            "started_at": self.started_at,
+            "completed_at": self.completed_at,
+            "result_summary": self.result_summary,
+            "error_message": self.error_message,
+            "position": self.position,
+            "message": self.message,
+            "source": self.source,
+            "job_metadata": self.job_metadata,
+            "cancelled_at": self.cancelled_at,
+            "idempotency_key": self.idempotency_key,
+            "dlq_reason": self.dlq_reason,
+            "retry_count": self.retry_count,
+            "moved_to_dlq_at": self.moved_to_dlq_at,
+            "deleted_at": self.deleted_at,
+            "terminal_reason": self.terminal_reason,
+            "job_type": self.job_type,
+            "mission_liveness": self.mission_liveness,
+            **mission_projection_to_dict(
+                mission_id=self.mission_id,
+                mission_epoch=self.mission_epoch,
+                mission_terminal_reason=self.mission_terminal_reason,
+            ),
+            # M2 (mission-class) — anti-trap guardrails. Both keys
+            # surface verbatim from the model state — the caller
+            # (``_job_to_response`` in ``daemon/routers/jobs_crud.py``)
+            # populates ``mission_ref`` from the resolver-backed
+            # :class:`WorkRecord` and leaves ``outcome`` ``None``
+            # (the contract draft §3.2 asymmetric-outcome rule:
+            # transport payloads ALWAYS carry ``outcome: null``).
+            "outcome": self.outcome,
+            "mission_ref": self.mission_ref,
+        }
 
 
 class JobListResponse(BaseModel):
@@ -1004,3 +1170,138 @@ class PlaneConfigResponse(BaseModel):
 
     enabled: bool = Field(..., description="Whether Plane integration is enabled")
     url: str = Field(..., description="The Plane base URL (empty string if disabled)")
+
+
+# ==================== Mission Schemas (M4-i pull-forward) ====================
+# HTTP surface for the mission read-model projection (docs/job-task-system.md
+# §8.4). Additive to the schema module — mirrors ``MissionRecord``
+# (``daemon/services/mission_resolver.py``) field-for-field. Always-on
+# since WS3 (the M1 mission-projection kill-switch
+# was removed; the routes serve normally with no gating).
+
+
+class MissionResponse(BaseModel):
+    """Response for a single mission (identity == ``instance_id``).
+
+    Mirrors :class:`daemon.services.mission_resolver.MissionRecord`.
+    One mission per instance, permanent across terminate→revive (the
+    ``instances.parent_id`` permanence inherits onto
+    ``parent_mission_id``). ``epoch`` is constant 1 for every
+    non-degraded projection until M4(ii) ships ``mission_events`` (§8.3);
+    ``epoch``/``liveness``/``last_activity_at`` are ``None`` ONLY on a
+    degraded lookup (§8.2 degradation contract — 200 with None-fields,
+    never 500).
+    """
+
+    mission_id: str | None = Field(
+        default=None,
+        description="Mission identity == instance_id (§6.6 identity verdict)",
+    )
+    agent_id: str | None = Field(
+        default=None,
+        description="Agent this mission works on behalf of (Instance.agent_id)",
+    )
+    parent_mission_id: str | None = Field(
+        default=None,
+        description=(
+            "Parent instance id (Instance.parent_id, permanent across "
+            "revive); null for root missions. Tree-filter client-side "
+            "on this field — that is the sanctioned pattern (§8.4)"
+        ),
+    )
+    liveness: str | None = Field(
+        default=None,
+        description=(
+            "Canonical mission liveness: pending/processing/paused/"
+            "completed/failed/cancelled (§8.2 value space); null when "
+            "degraded"
+        ),
+    )
+    terminal_reason: str | None = Field(
+        default=None,
+        description=(
+            "Terminal cause for terminal missions: completed/failed/"
+            "cancelled, or dead_letter when a linked JobItem is in "
+            "admission_state='dead' (W4 hazard, §8.3); null for live "
+            "missions and degraded lookups"
+        ),
+    )
+    epoch: int | None = Field(
+        default=None,
+        description=(
+            "Current epoch number — constant 1 for every non-degraded "
+            "projection until M4(ii) mission_events (§8.3); null only "
+            "on degraded lookups"
+        ),
+    )
+    linked_jobs: list[str] = Field(
+        default_factory=list,
+        description=(
+            "JobItem.job_id values linked to this mission (best-effort; "
+            "empty on jobs-lookup degradation)"
+        ),
+    )
+    started_at: str | None = Field(
+        default=None,
+        description=(
+            "ISO-8601 last_activity_at of the instance (closest "
+            "analogue to 'work began'); falls back to created_at; null "
+            "when neither exists or degraded"
+        ),
+    )
+    last_activity_at: str | None = Field(
+        default=None,
+        description="ISO-8601 pass-through of Instance.last_activity_at; null when unset or degraded",
+    )
+
+
+class MissionListResponse(BaseModel):
+    """Envelope for GET /missions (list).
+
+    Follows the repo pagination convention (``total`` / ``limit`` /
+    ``offset`` / ``has_more``, cf. ``InstanceListResponse``) with two
+    honesty-carrying deviations documented in §8.4: ``total`` and
+    ``has_more`` are nullable (``null`` = "count unavailable" — the
+    count SQL leg degraded; must NOT be rendered as 0/false), and
+    ``degraded`` is an explicit whole-page-degrade marker (empty rows
+    because the count/page SQL leg failed).
+    """
+
+    missions: list[MissionResponse] = Field(
+        default_factory=list,
+        description="Mission rows for this page, in SQL order",
+    )
+    total: int | None = Field(
+        default=None,
+        description=(
+            "Total missions matching the filters; null when the count "
+            "leg degraded (operator signal: count unavailable, not zero)"
+        ),
+    )
+    limit: int = Field(..., description="Effective page size (clamped to [1, 100])")
+    offset: int = Field(..., description="Effective page offset (>= 0)")
+    has_more: bool | None = Field(
+        default=None,
+        description=(
+            "(offset + limit) < total; null when total is unavailable "
+            "(degraded count leg)"
+        ),
+    )
+    degraded: bool = Field(
+        default=False,
+        description=(
+            "True when the count/page SQL leg failed (§8.2 whole-page "
+            "degrade): missions is empty and total/has_more are null. "
+            "False when rows were served fully. The two distinct "
+            "degrade shapes stay disambiguated here: (a) the count/"
+            "page-leg failure above (whole-page degrade, "
+            "degraded=True), and (b) the **jobs-leg** failure where "
+            "rows ARE servable but each row's ``linked_jobs=[]`` and "
+            "the W4 sub-check is unavailable — for that case "
+            "degraded STAYS False (§8.2 indistinguishable-by-design: "
+            "the liveness-derived terminal reason stands as the W4 "
+            "answer, the warning is logged server-side, and the "
+            "shape stays servable so the renderer does not invent a "
+            "whole-page failure from a single-leg failure)."
+        ),
+    )

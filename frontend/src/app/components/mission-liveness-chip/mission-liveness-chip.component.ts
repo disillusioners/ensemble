@@ -11,7 +11,7 @@ import {
  * Fix C (§8.2) — the ONE rendering surface for mission-liveness
  * chips. Used by ``app-job-card``, ``app-job-queue-panel``, and
  * ``app-job-detail-drawer`` so the chip's colour, tooltip wording,
- * icon choice, and live/settled styling cannot drift between
+ * icon choice, and live/terminal styling cannot drift between
  * contexts.
  *
  * Pure presentational. The parent owns the chip object — typically
@@ -23,6 +23,11 @@ import {
  * so the drawer's amber-on-blue ``paused`` regression cannot recur.
  * Tooltip wording lives in ``missionLivenessChipTooltip`` — never
  * re-derived per call site.
+ *
+ * M3 (mission-class, 2026-09-03) — prose uses ``terminal``
+ * (mission-side vocabulary) instead of ``settled`` (transport-
+ * receipt vocabulary; belongs only to mirror rows now). The
+ * ``live/settled` data split stays; only the prose wording changes.
  */
 @Component({
   selector: 'app-mission-liveness-chip',

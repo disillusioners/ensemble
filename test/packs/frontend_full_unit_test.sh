@@ -10,7 +10,7 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 echo "=== Test Pack: frontend_full_unit_test ==="
 
 # Stage-0 worktree bracket (hard gate on branch; SHA recorded as data only)
-EXPECTED_BRANCH="feature/job-queue-fe-liveness"
+EXPECTED_BRANCH="${EXPECTED_BRANCH:-feature/mission-class}"
 BRANCH="$(git -C "$PROJECT_DIR" rev-parse --abbrev-ref HEAD)"
 SHA_BEFORE="$(git -C "$PROJECT_DIR" rev-parse --short HEAD)"
 if [ "$BRANCH" != "$EXPECTED_BRANCH" ]; then

@@ -187,6 +187,7 @@ from .access_memory import create_access_memory_tool
 from .agent_mother import create_mother_tools
 from .project import create_project_tools
 from .job_queue import create_job_tools
+from .missions import create_mission_tools
 from .help import create_help_tool
 from .knowledge_tools import create_knowledge_tools
 from .blueprint import create_blueprint_tools
@@ -1680,6 +1681,35 @@ def create_job_tools_if_available(manager, current_instance_id: str, agent_id: s
         manager=manager,
         agent_tag=agent_tag,
     )
+
+
+def create_mission_tools_if_available(manager) -> list:
+    """Create mission tools if a ``MissionResolver`` is wired into the manager.
+
+    M2 (mission-class, 2026-09-02, ``feature/mission-class``) — the agent
+    tool surface for the mission read-model projection. The three
+    tools (``get_mission`` / ``await_mission`` / ``list_missions``)
+    are READ-ONLY via the resolver; no DB writes, no mission-class
+    writes of any kind. Census stays at 23.
+
+    The resolver is stored on the manager by the API lifespan startup
+    (``daemon/api.py`` — same wiring shape as
+    ``manager._work_resolver``). Test doubles and partial-wiring
+    scenarios that have not yet constructed the resolver fall back to
+    an empty tool list (fail-open: tools are unavailable, not raising).
+
+    Args:
+        manager: The :class:`InstanceManager` instance; only
+            ``getattr(manager, '_mission_resolver', None)`` is touched.
+
+    Returns:
+        A list of the three mission tools (empty when the resolver is
+        not yet wired — partial-init / test stubs).
+    """
+    resolver = getattr(manager, '_mission_resolver', None)
+    if resolver is None:
+        return []
+    return create_mission_tools(resolver)
 
 
 class SpawnInstanceInput(BaseModel):
@@ -4190,6 +4220,17 @@ Returns:
     # ``job_create`` tool resolves jobs to the correct versioned ``agent_dir``.
     job_tools = create_job_tools_if_available(manager, current_instance_id, agent_id, agent_tag=version_tag)
     tools.extend(job_tools)
+
+    # Mission tools (M2 of mission-class, 2026-09-02,
+    # ``feature/mission-class``) — additive READ-ONLY tools that
+    # answer the mission question ("is the work done?"). Wired via
+    # ``create_mission_tools_if_available``; the resolver is stored
+    # on the manager during API lifespan startup. Empty list when the
+    # resolver is not yet wired (partial-init / test stubs) so the
+    # tool registration remains additive and never blocks the agent
+    # boot.
+    mission_tools = create_mission_tools_if_available(manager)
+    tools.extend(mission_tools)
     
     # Add mother tools if this is the _mother agent
     if agent_id == "_mother":

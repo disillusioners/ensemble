@@ -4,7 +4,7 @@ import logging
 from datetime import timezone as _tz
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
@@ -12,6 +12,7 @@ from daemon.services.job_queue_service import JobQueueService, normalize_statuse
 from daemon.services.dead_letter_service import DeadLetterService
 from daemon.services.project_normalizer import normalize_project_id
 from daemon.services.work_status import _derive_legacy_status
+from daemon.services.mission_resolver import mission_ref_to_dict
 from daemon.repositories.job_queue.models import (
     AdmissionState,
     _VALID_LEGACY_STATUSES,
@@ -41,8 +42,17 @@ get_dead_letter_svc = create_service_dependency(DeadLetterService)
 # Terminal statuses for job lifecycle (legacy vocabulary — Phase 7b
 # removed the JobStatus enum; these are the inline string values the
 # API still emits / accepts for backward compatibility).
+#
+# M3 (mission-class, 2026-09-03, ``feature/mission-class``) — the
+# transport-receipt terminal for mirror rows (``job_type='message'``)
+# is ``settled`` (ADR-MISSION-01 §6.6 I3 amendment). Added here so
+# the SSE stream's terminal-state detection (``initial.status in
+# TERMINAL_STATUSES``) treats a settled mirror as terminal —
+# otherwise the WS would loop forever waiting for a never-arriving
+# completion event. Task rows keep ``completed`` unchanged.
 TERMINAL_STATUSES = frozenset({
     "completed",
+    "settled",
     "failed",
     "cancelled",
     "dead_letter",
@@ -147,9 +157,16 @@ def _job_to_response(
         # ``'cancelled'`` / ``'aborted'`` no longer mis-reports as
         # ``"completed"`` (the lossy raw-map behaviour). Mirrors the
         # F3 fix in ``WorkResolverService._job_to_record``.
+        #
+        # M3 (mission-class, 2026-09-03) — pass ``job_type`` so the
+        # per-kind dispatch in ``_derive_legacy_status`` applies:
+        # mirror rows surface ``"settled"`` instead of ``"completed"``
+        # (ADR-MISSION-01 §6.6 I3 amendment). Task rows keep
+        # ``"completed"`` unchanged (a task job IS its own mission).
         status = _derive_legacy_status(
             job.admission_state,
             getattr(job, "terminal_reason", None),
+            getattr(job, "job_type", None),
         )
         instance_id = job.instance_id
         # Phase 5: JobItem mirror columns (``result_summary``,
@@ -246,6 +263,139 @@ def _job_to_response(
             if work_record is not None
             else None
         ),
+        # M1 (mission-class, 2026-09-02) — additive mission projection
+        # fields. Source verbatim from the WorkRecord (when one is
+        # supplied) so the four Fix-C read surfaces (§8.2 canonical
+        # enumeration: this jobs_crud `_job_to_response` delegation +
+        # work_resolver primary `_job_to_record` + jobs_streaming SSE
+        # `_ResolvedWork` + jobs_management delegation, which builds
+        # its responses via this same `_job_to_response`) stay in
+        # lock-step. The legacy fallback
+        # branch (``work_record is None``) returns ``None`` —
+        # consistent with how ``mission_liveness`` and ``job_type``
+        # already degrade in that path. Kill-switch OFF ⇒ all three
+        # values stay ``None`` (the M1 OFF default).
+        mission_id=(
+            getattr(work_record, "mission_id", None)
+            if work_record is not None
+            else None
+        ),
+        mission_epoch=(
+            getattr(work_record, "mission_epoch", None)
+            if work_record is not None
+            else None
+        ),
+        mission_terminal_reason=(
+            getattr(work_record, "mission_terminal_reason", None)
+            if work_record is not None
+            else None
+        ),
+        # M2 (mission-class, 2026-09-02, ``feature/mission-class``) —
+        # anti-trap guardrails (contract draft §3). Two new keys
+        # surface on every transport (job) payload:
+        #
+        # * ``outcome`` — ALWAYS ``None`` on transport. The asymmetric
+        #   outcome token (draft §3.2): ``outcome: null`` on a job
+        #   means "NOT done" (the transport layer has nothing to say
+        #   about the work). The agent branches on this literal key.
+        # * ``mission_ref`` — the cross-reference payload that ties a
+        #   job row to its linked mission. Mandatory on terminal
+        #   payloads (draft §3.3); surfaced uniformly on every
+        #   payload for shape uniformity (the four Fix-C surfaces
+        #   agree on the key — §8.2).
+        #
+        # Derivation: ``mission_ref.liveness`` is the canonical
+        # mission vocabulary value. For task rows (where
+        # ``mission_liveness`` is ``None`` by Fix C split-semantics
+        # design) the row's own canonical ``status`` IS the mission
+        # liveness; for mirror rows the ``mission_liveness`` field
+        # already carries the canonical mission vocabulary.
+        outcome=None,
+        mission_ref=_derive_m2_mission_ref(work_record, job),
+    )
+
+
+def _derive_m2_mission_ref(
+    work_record: Any | None,
+    job: Any,
+) -> dict[str, Any] | None:
+    """Compose the M2 ``mission_ref`` cross-reference payload.
+
+    The cross-reference ties a transport (job) row to its linked
+    mission — a single payload an agent can read to learn the
+    mission's state without a separate ``get_mission`` call.
+    Mandatory on terminal job payloads per the contract draft §3.3;
+    surfaced uniformly on every payload for shape uniformity.
+
+    Args:
+        work_record: The resolver-backed :class:`WorkRecord` (``None``
+            when the resolver filtered the row out — e.g.
+            child-instance or status mismatch).
+        job: The JobItem row.
+
+    Returns:
+        A ``dict`` with ``{mission_id, agent_id, liveness}`` keys —
+        ``None`` when the resolver degraded (no Instance lookup).
+    """
+    if work_record is None:
+        # No resolver view — degrade to the legacy fallback shape:
+        # ``mission_id`` from ``job.instance_id`` (the instance the
+        # JobItem was bound to), ``agent_id`` from ``job.agent_id``,
+        # and ``liveness`` from ``job.terminal_reason`` /
+        # ``_derive_legacy_status`` (the closest the legacy branch
+        # has to a canonical value). When even those are missing the
+        # payload is ``None`` — the renderer falls back to the
+        # receipt-only view per §8.2.
+        #
+        # M3 (mission-class, 2026-09-03) — pass ``job_type`` so the
+        # per-kind dispatch in ``_derive_legacy_status`` applies:
+        # mirror rows surface ``"settled"`` (transport-receipt
+        # terminal) instead of ``"completed"`` (which now belongs
+        # only to the work/mission layer). Task rows keep
+        # ``"completed"`` (the row IS its own mission).
+        mission_id = getattr(job, "instance_id", None)
+        agent_id = getattr(job, "agent_id", None)
+        legacy_status = _derive_legacy_status(
+            getattr(job, "admission_state", None),
+            getattr(job, "terminal_reason", None),
+            getattr(job, "job_type", None),
+        )
+        if mission_id is None and agent_id is None and legacy_status is None:
+            return None
+        return mission_ref_to_dict(
+            mission_id=mission_id,
+            agent_id=agent_id,
+            liveness=legacy_status,
+        )
+
+    # Resolver-backed path — work_record already carries the canonical
+    # three fields (``mission_id``, ``agent_id``, ``mission_liveness``,
+    # ``status``). The ``liveness`` derivation: mirror rows use
+    # ``mission_liveness`` (canonical); task rows use ``status``
+    # (canonical — the row IS its own mission). Degraded rows
+    # (resolver returned ``None`` for one of the fields) pass through
+    # as ``None`` — same degrade contract as ``mission_liveness``.
+    mission_id = getattr(work_record, "mission_id", None)
+    agent_id = getattr(work_record, "agent_id", None)
+    job_type = getattr(work_record, "job_type", None)
+    mission_liveness = getattr(work_record, "mission_liveness", None)
+    row_status = getattr(work_record, "status", None)
+
+    if job_type == "task":
+        liveness = row_status  # task: row IS the mission
+    else:
+        # mirror / unknown: mission_liveness is the canonical view
+        liveness = mission_liveness if mission_liveness is not None else row_status
+
+    if mission_id is None and agent_id is None and liveness is None:
+        # The resolver degraded across all three fields — fall back to
+        # ``None`` (the renderer treats this as "split semantics
+        # unavailable").
+        return None
+    return mission_ref_to_dict(
+        mission_id=mission_id,
+        agent_id=agent_id,
+        liveness=liveness,
     )
 
 
@@ -491,18 +641,30 @@ async def list_jobs(
     queue_id: str | None = None,
     limit: int = DEFAULT_JOB_LIST_LIMIT,
     include_deleted: bool = False,
+    job_types: str | None = Query(
+        default=None,
+        description=(
+            "M2 (mission-class, 2026-09-02): optional comma-separated "
+            "filter on JobItem.job_type — accepted values are ``task`` "
+            "and ``message``. Default: BOTH kinds (no filter). "
+            "Additive vs the legacy ``status`` filter, which is RETAINED "
+            "through the M3 window."
+        ),
+    ),
     service: JobQueueService = Depends(get_job_queue_service),
     dlq_service: DeadLetterService = Depends(get_dead_letter_svc),
 ) -> JobListResponse:
     """List jobs with optional filters.
-    
+
     Query params:
         - status: Filter by status(es), comma-separated (pending, processing, completed, failed, cancelled, dead_letter)
         - project_id: Filter by project ID
         - queue_id: Filter by queue ID
         - limit: Maximum number of jobs to return (default: 50)
         - include_deleted: Include soft-deleted jobs (default: False)
-    
+        - job_types: M2 — comma-separated JobItem.job_type filter
+          (task, message). Default: BOTH kinds.
+
     Returns:
         200 with list of jobs and total count
     """
@@ -555,6 +717,26 @@ async def list_jobs(
                 detail={"error": "Queue not found", "message": f"Queue {queue_id} not found for project {project_id}"}
             )
     
+    # M2 (mission-class, 2026-09-02) — parse the ``job_types`` filter
+    # (comma-separated; default = None ⇒ both kinds). Validate against
+    # the accepted vocabulary before passing to the repository
+    # (unknown values degrade to an honestly-empty page per §8.2 /
+    # the M4(i) HTTP list's "unknown filter ⇒ empty" precedent). The
+    # legacy ``status`` filter is RETAINED through the M3 window.
+    job_types_list: list[str] | None = None
+    if job_types:
+        job_types_list = list(dict.fromkeys(
+            t.strip().lower() for t in job_types.split(",") if t.strip()
+        ))
+        valid_job_types = {"task", "message"}
+        unknown = [t for t in job_types_list if t not in valid_job_types]
+        if unknown:
+            # Source-less filter — IN-clause matches nothing,
+            # returns empty page (the §8.2 source-less degrade). The
+            # service's source-of-truth check enforces the same shape
+            # below, so this is defense-in-depth at the router layer.
+            job_types_list = []
+
     # List jobs
     jobs = await service.list_jobs(
         statuses=statuses,
@@ -562,6 +744,7 @@ async def list_jobs(
         limit=limit,
         queue_id=queue_id,
         include_deleted=include_deleted,
+        job_types=job_types_list,
     )
 
     # Phase 1 (Job as Queue Proxy): batch-resolve every JobItem

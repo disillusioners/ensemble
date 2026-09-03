@@ -106,6 +106,7 @@ from daemon.routers import (
     skill_bank_router,        # /api/skill-bank (Skill Bank CRUD)
     blueprints_router,        # /api/projects/{project_id}/blueprints (Project Blueprints CRUD)
     recovery_router,          # /api/recovery (Phase 2: pause-report-recovery crash-recovery endpoint)
+    missions_router,          # /api/missions (M4-i pull-forward: mission read-model HTTP surface)
 )
 from daemon.routers.workspace import router as workspace_router
 
@@ -929,6 +930,33 @@ async def lifespan(app: FastAPI):
     # level global + setter + Depends factory).
     from daemon.routers.work import set_work_resolver
     set_work_resolver(work_resolver)
+
+    # Wire missions router (M4-i pull-forward, 2026-09-02): GET
+    # /api/missions + /api/missions/{id} serve the mission read-model
+    # projection through MissionResolver — the same READ-only
+    # InstanceRepository / JobRepository the WorkResolverService
+    # consumes (leaf service, zero admission-state writers; census
+    # stays at 23). Always-on since WS3 (the
+    # M1 mission-projection kill-switch was removed);
+    # docs §8.4 holds the endpoint contract.
+    #
+    # M2 (mission-class, 2026-09-02, ``feature/mission-class``):
+    # the same resolver instance is also stored on the manager so
+    # ``create_mission_tools_if_available`` in
+    # ``daemon/tools/instance.py`` can inject it into the three
+    # agent tools (``get_mission`` / ``await_mission`` /
+    # ``list_missions``). The resolver is shared by the HTTP router
+    # AND the agent-tool factory — both consume the same
+    # ``InstanceRepository`` / ``JobRepository`` view, so the two
+    # surfaces stay in lock-step on the read-model shape.
+    from daemon.services.mission_resolver import MissionResolver
+    from daemon.routers.missions import set_missions_resolver
+    mission_resolver = MissionResolver(
+        instance_repo=manager._instance_repository,
+        job_repo=job_repository,
+    )
+    manager._mission_resolver = mission_resolver  # for create_mission_tools_if_available
+    set_missions_resolver(mission_resolver)
 
     # Wire skills router services (Phase 6 Task 2 — REST API surface).
     # The skills router uses 4 service DI accessors (created via
@@ -1868,6 +1896,7 @@ def create_app() -> FastAPI:
     api_router.include_router(webhooks_router)      # /api/webhooks
     api_router.include_router(jobs_router)          # /api/jobs
     api_router.include_router(work_router)          # /api/work  (Phase 4: virtual job mgmt)
+    api_router.include_router(missions_router)      # /api/missions (M4-i pull-forward: mission read projection)
     api_router.include_router(projects_router)      # /api/projects
     api_router.include_router(queues_router)        # /api/queues
     api_router.include_router(skills_router)        # /api/skills (Phase 6: skill management REST API)

@@ -10,6 +10,9 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sse_starlette.sse import EventSourceResponse
 
 from daemon.services.job_queue_service import JobQueueService
+from daemon.services.mission_resolver import (
+    mission_projection_to_dict as _mission_projection_to_dict,
+)
 from .schemas import JobNotFoundResponse
 from .jobs_crud import get_job_queue_service, TERMINAL_STATUSES
 
@@ -59,6 +62,30 @@ class _ResolvedWork:
     job_type: str | None
     mission_liveness: str | None
 
+    # M1 (mission-class, 2026-09-02) — three additive mission
+    # projection fields mirroring ``WorkRecord``. Always-on since WS3
+    # (the M1 mission-projection kill-switch was
+    # removed): they surface on every SSE payload. See
+    # ``daemon.services.mission_resolver`` for the truthmaker (Instance
+    # + W4-hazard).
+    mission_id: str | None = None
+    mission_epoch: int | None = None
+    mission_terminal_reason: str | None = None
+
+    # M2 (mission-class, 2026-09-02, ``feature/mission-class``) —
+    # anti-trap guardrails (contract draft §3). Mirrors the WorkRecord
+    # additions:
+    #
+    # * ``outcome`` — ALWAYS ``None`` on the SSE payload (transport
+    #   surface). The asymmetric outcome token: ``outcome: null`` on
+    #   transport = "NOT done" by construction (draft §3.2).
+    # * ``mission_ref`` — cross-reference payload tying the work row
+    #   to its linked mission (mandatory on terminal payloads per
+    #   draft §3.3; surfaced uniformly on every payload for shape
+    #   uniformity with the JobResponse surface).
+    outcome: str | None = None
+    mission_ref: dict[str, Any] | None = None
+
     @classmethod
     def from_work_record(cls, record: Any) -> "_ResolvedWork":
         """Project a :class:`WorkRecord` (resolver path) onto the SSE view.
@@ -89,6 +116,25 @@ class _ResolvedWork:
             error_message=record.error,
             job_type=getattr(record, "job_type", None),
             mission_liveness=getattr(record, "mission_liveness", None),
+            # M1 (mission-class, 2026-09-02) — additive mission
+            # projection fields (always-on; see the field
+            # declarations above and ``mission_resolver.py``).
+            # Source verbatim from the WorkRecord so all four Fix-C
+            # read surfaces (work_resolver primary + jobs_crud /
+            # jobs_streaming here) emit the same mission values for
+            # the same row.
+            mission_id=getattr(record, "mission_id", None),
+            mission_epoch=getattr(record, "mission_epoch", None),
+            mission_terminal_reason=getattr(
+                record, "mission_terminal_reason", None
+            ),
+            # M2 — anti-trap guardrails (contract draft §3). Source
+            # verbatim from the WorkRecord so all four Fix-C read
+            # surfaces stay in lock-step on the new keys. Both fields
+            # ride the same resolver-backed path as the M1 trio — no
+            # new writers, no new queries.
+            outcome=getattr(record, "outcome", None),
+            mission_ref=getattr(record, "mission_ref", None),
         )
 
     def to_payload(self, *, work_id: str) -> dict[str, Any]:
@@ -107,6 +153,27 @@ class _ResolvedWork:
         # extra keys.
         payload["job_type"] = self.job_type
         payload["mission_liveness"] = self.mission_liveness
+        # M1 (mission-class, 2026-09-02) — additive mission fields.
+        # Always-on since WS3: the three keys surface verbatim from
+        # the WorkRecord on every payload (the former
+        # the M1 mission-projection kill-switch OFF-omission
+        # behavior was removed with the kill-switch). Additive vs the
+        # pre-M1 Fix-C key set — older FE clients ignore the extra
+        # keys.
+        payload.update(
+            _mission_projection_to_dict(
+                mission_id=self.mission_id,
+                mission_epoch=self.mission_epoch,
+                mission_terminal_reason=self.mission_terminal_reason,
+            )
+        )
+        # M2 (mission-class) — anti-trap guardrails. ``outcome``
+        # stays ``None`` on transport (draft §3.2). ``mission_ref``
+        # is the cross-reference payload — mandatory on terminal
+        # payloads (draft §3.3), surfaced uniformly on every payload
+        # for shape uniformity with the JobResponse surface.
+        payload["outcome"] = self.outcome
+        payload["mission_ref"] = self.mission_ref
         return payload
 
     def to_completed_payload(self, *, work_id: str) -> dict[str, Any]:
@@ -123,6 +190,24 @@ class _ResolvedWork:
         # completed mirror with a still-running mission correctly.
         payload["job_type"] = self.job_type
         payload["mission_liveness"] = self.mission_liveness
+        # M1 — same additive mission fields as ``to_payload``,
+        # unconditionally included (always-on since WS3). The
+        # completed event is the most likely place the FE renders a
+        # mission terminal marker, so keeping the keys present keeps
+        # the renderer-side branch simple.
+        payload.update(
+            _mission_projection_to_dict(
+                mission_id=self.mission_id,
+                mission_epoch=self.mission_epoch,
+                mission_terminal_reason=self.mission_terminal_reason,
+            )
+        )
+        # M2 — anti-trap guardrails (same as ``to_payload``).
+        # ``outcome`` stays ``None`` on the completed-event transport
+        # payload — the FE renderer must use the mission tool for the
+        # outcome answer.
+        payload["outcome"] = self.outcome
+        payload["mission_ref"] = self.mission_ref
         return payload
 
 

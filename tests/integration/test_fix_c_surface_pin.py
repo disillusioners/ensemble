@@ -343,8 +343,12 @@ class TestRouterSurface28c6421b:
         # Additive Fix-C keys are on the wire.
         assert "job_type" in body
         assert "mission_liveness" in body
-        # The receipt — the mirror's own terminal truth.
-        assert body["status"] == "completed"
+        # The receipt — the mirror's own terminal truth. M3
+        # (mission-class, 2026-09-03): mirror terminal is ``settled``
+        # (per-kind dispatch), NOT ``completed`` (which is task-only).
+        # Task rows keep ``completed``; mirror rows carry ``settled``.
+        # See ADR-MISSION-01 §6.6 I3 amendment.
+        assert body["status"] == "settled"
         # The discriminator.
         assert body["job_type"] == "message"
         # The mission is still alive — the split that kills the
@@ -381,7 +385,10 @@ class TestSSESurface28c6421b:
         connected_payload = resolved.to_payload(work_id=jid)
         completed_payload = resolved.to_completed_payload(work_id=jid)
         for payload in (connected_payload, completed_payload):
-            assert payload["status"] == "completed"
+            # M3 (mission-class, 2026-09-03) — mirror terminal =
+            # ``settled`` (per-kind dispatch); task terminal stays
+            # ``completed``. See ADR-MISSION-01 §6.6 I3 amendment.
+            assert payload["status"] == "settled"
             assert payload["job_type"] == "message"
             assert payload["mission_liveness"] == "processing"
 
@@ -405,7 +412,10 @@ class TestSSESurface28c6421b:
         assert names == ["connected", "completed"]
 
         for event_name, data in zip(names, [e["data"] for e in events]):
-            assert data["status"] == "completed", f"{event_name} payload"
+            # M3 (mission-class, 2026-09-03) — mirror terminal =
+            # ``settled`` (per-kind dispatch); task terminal stays
+            # ``completed``. See ADR-MISSION-01 §6.6 I3 amendment.
+            assert data["status"] == "settled", f"{event_name} payload"
             assert data["job_type"] == "message", f"{event_name} payload"
             assert data["mission_liveness"] == "processing", (
                 f"{event_name} payload lost mission_liveness — the SSE "

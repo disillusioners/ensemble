@@ -1,7 +1,7 @@
 // Fix C (§8.2) — shared mission-liveness chip. ONE visual grammar
 // across job-card, job-queue-panel, and job-detail-drawer. Colour
 // comes verbatim from the chip object (no hard-coded tint); live
-// missions pulse, settled missions render muted.
+// missions pulse, terminal missions render muted.
 
 .mission-chip {
   display: inline-flex;
@@ -23,9 +23,9 @@
     animation: mission-chip-spin 1.5s linear infinite;
   }
 
-  // Settled missions stay inline (no drop) but render muted so the
-  // live/settled split is readable without colour alone.
-  &.mission-settled {
+  // Terminal missions stay inline (no drop) but render muted so the
+  // live/terminal split is readable without colour alone.
+  &.mission-terminal {
     opacity: 0.75;
   }
 }

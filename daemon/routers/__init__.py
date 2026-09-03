@@ -22,6 +22,7 @@ from .skill_bank import router as skill_bank_router
 from .workspace import router as workspace_router
 from .blueprints import router as blueprints_router
 from .recovery import router as recovery_router
+from .missions import router as missions_router
 
 __all__ = [
     "agents_router",
@@ -46,4 +47,5 @@ __all__ = [
     "workspace_router",
     "blueprints_router",
     "recovery_router",
+    "missions_router",
 ]

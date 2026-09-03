@@ -500,9 +500,17 @@ async def replay_dlq_item(
             # post-replay status reflects ``terminal_reason`` (a
             # ``done`` job with ``terminal_reason='failed'`` reports
             # ``"failed"`` instead of the lossy ``"completed"``).
+            #
+            # M3 (mission-class, 2026-09-03) — pass ``job_type`` so
+            # the per-kind dispatch in ``_derive_legacy_status``
+            # applies (mirror rows surface ``"settled"`` instead of
+            # ``"completed"``; task rows keep ``"completed"``).
+            # DLQ entries are JobItem rows so the field is always
+            # present.
             status=_derive_legacy_status(
                 job.admission_state,
                 getattr(job, "terminal_reason", None),
+                getattr(job, "job_type", None),
             ),
             message="Job queued for replay"
         )

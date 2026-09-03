@@ -213,6 +213,7 @@ def _seed_instance(
     instance_id: str | None = None,
     agent_id: str = "developer",
     project_id: str | None = "test-project",
+    status: str = "running",
 ) -> str:
     iid = instance_id or f"inst-{uuid.uuid4().hex[:8]}"
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -223,7 +224,7 @@ def _seed_instance(
             agent_dir=f"/tmp/agents/{agent_id}",
             agent_name=agent_id,
             project_id=project_id,
-            status="running",
+            status=status,
             created_at=now_iso,
             updated_at=now_iso,
             paused_at=None,
@@ -238,11 +239,15 @@ def _seed_completed_job(
     *,
     job_id: str | None = None,
     queue_id: str | None = None,
+    instance_id: str | None = None,
 ) -> str:
     """Insert a JobItem already in the terminal ``completed`` state.
 
     If ``queue_id`` is set, also inserts a matching ``JobQueue`` row so
     the FK constraint on ``job_queue_items.queue_id`` is satisfied.
+    If ``instance_id`` is set, stamps the JobItem with that backing
+    instance — required for the M1 ON-path projection test (the
+    ``mission_id`` field resolves to ``instance_id`` per spec §3).
     """
     jid = job_id or str(uuid.uuid4())
     with Session(engine) as s:
@@ -271,7 +276,7 @@ def _seed_completed_job(
             priority=5,
 
             admission_state=AdmissionState.DONE.value,
-            instance_id=None,
+            instance_id=instance_id,
             queue_id=queue_id,
             created_at=datetime.now(timezone.utc).isoformat(),
             job_metadata={},
@@ -475,10 +480,16 @@ class TestStreamJobEventsResolverOn:
 
         completed = events[1]["data"]
         # Wire-format contract: same keys as the legacy branch, plus
-        # the Fix C additive split-semantics fields. Consumers that
-        # branch on these keys (``job_type``) can now distinguish
-        # mission vs mirror rows; consumers that ignore them are
-        # unaffected (backward-compatible additive contract).
+        # the Fix C additive split-semantics fields, the M1 additive
+        # mission projection fields (always-on since WS3 — the
+        # kill-switch was removed), AND the M2 anti-trap guardrails
+        # (``outcome`` + ``mission_ref``, contract draft §3, additive
+        # — older clients ignore the extra keys). Consumers that
+        # branch on these keys (``job_type``) can distinguish mission
+        # vs mirror rows; consumers that ignore them are unaffected
+        # (backward-compatible additive contract). See
+        # ``test_resolver_emits_mission_fields_always_on`` for the
+        # populated-value variant.
         assert set(completed.keys()) == {
             "job_id",
             "status",
@@ -487,6 +498,15 @@ class TestStreamJobEventsResolverOn:
             "queue_id",
             "job_type",
             "mission_liveness",
+            "mission_id",
+            "mission_epoch",
+            "mission_terminal_reason",
+            # M2 (mission-class) — anti-trap guardrails. ``outcome``
+            # stays ``None`` on transport (draft §3.2) and
+            # ``mission_ref`` carries the cross-reference payload
+            # (draft §3.3).
+            "outcome",
+            "mission_ref",
         }
         assert completed["job_id"] == jid
         assert completed["status"] == "completed"
@@ -498,6 +518,17 @@ class TestStreamJobEventsResolverOn:
         # payload collapses it to ``None`` instead of leaking an empty
         # string. The frontend accepts either null or a real value.
         assert completed["queue_id"] is None
+        # M1 — additive mission fields are ALWAYS on the wire now
+        # (always-on since WS3). This row has no linked Instance, so
+        # the values are ``None`` — presence of the keys (not
+        # non-null values) is the wire contract. See
+        # ``_ResolvedWork.to_payload`` and ``JobResponse._serialize``.
+        assert "mission_id" in completed
+        assert "mission_epoch" in completed
+        assert "mission_terminal_reason" in completed
+        assert completed["mission_id"] is None
+        assert completed["mission_epoch"] is None
+        assert completed["mission_terminal_reason"] is None
 
     async def test_completed_task_via_resolver_emits_terminal_events(
         self,
@@ -591,6 +622,63 @@ class TestStreamJobEventsResolverOn:
                 assert response.status_code == 200
                 assert "text/event-stream" in response.headers.get("content-type", "")
                 await response.aclose()
+
+    async def test_resolver_emits_mission_fields_always_on(
+        self,
+        engine: Engine,
+        app_resolver_on: FastAPI,
+    ):
+        """Populated variant — the SSE payload includes the three M1
+        additive mission fields, always-on (WS3 removed the
+        kill-switch).
+
+        Companion to
+        ``test_completed_job_via_resolver_emits_terminal_events`` —
+        that test pins the unlinked-instance shape (keys present,
+        values ``None``); this one pins the populated shape (values
+        resolved from the linked ``Instance`` row via
+        :class:`MissionResolver`).
+        """
+        from daemon.repositories.instance.models import InstanceStatus
+
+        # Seed a backing Instance row in a TERMINAL state so the
+        # liveness branch of MissionResolver._project yields
+        # ``completed`` for ``mission_terminal_reason``; an
+        # admission_state='dead' link would override to 'dead_letter'
+        # (W4).
+        iid = _seed_instance(
+            engine, instance_id="inst-mission-on", status=InstanceStatus.COMPLETED.value
+        )
+        jid = _seed_completed_job(engine, instance_id=iid)
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app_resolver_on),
+            base_url="http://test",
+            timeout=httpx.Timeout(10.0),
+        ) as async_client:
+            async with async_client.stream(
+                "GET", f"/api/jobs/{jid}/events"
+            ) as response:
+                assert response.status_code == 200
+                events = await _read_sse_events(response, max_events=2)
+                await response.aclose()
+
+        completed = events[1]["data"]
+        # Fix C fields are present (they're always emitted on the
+        # unified path), as are the M1 additive keys (always-on).
+        assert completed["job_type"] == "task"
+        # The three M1 additive mission keys ARE present, with
+        # ``mission_id`` equal to the backing ``instance_id`` per
+        # the M1 spec §3 identity contract.
+        assert "mission_id" in completed
+        assert completed["mission_id"] == iid
+        assert "mission_epoch" in completed
+        assert completed["mission_epoch"] is not None
+        assert "mission_terminal_reason" in completed
+        # The terminal ``completed`` Instance status maps onto the
+        # ``completed`` mission terminal_reason via the canonical
+        # liveness mapping in MissionResolver._project.
+        assert completed["mission_terminal_reason"] == "completed"
 
 
 class TestResolverFlagDefault:

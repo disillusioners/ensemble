@@ -1,4 +1,34 @@
-"""Job queue management tools for LangGraph agents."""
+"""Job queue management tools for LangGraph agents.
+
+Size/seam note (M3 fix round, 2026-09-03, ``feature/mission-class``):
+this module is 2,300+ lines and hosts BOTH the LangGraph ``@tool``
+wrappers AND significant non-tool logic (the legacy ``list_jobs``
+fallback, the watch-job immediate-notify branch, the mission-tool
+opt-in helper, the WC-wake enqueue toggle resolver). Future work
+should consider splitting into:
+
+* ``job_queue_tools.py`` — the LangGraph ``@tool`` surface only
+  (the ``@register_tool_category`` entries).
+* ``job_queue_runtime.py`` — the legacy ``list_jobs`` resolver,
+  watch-job notify branches, mission opt-in helper.
+* ``job_queue_wcwake.py`` — the WC-wake enqueue toggle resolver
+  (the ``ENSEMBLE_WC_WAKE_ENQUEUE`` kill-switch consumer).
+
+The split is tracked as a follow-up; the module is intentionally
+left as-is this round to keep the M3 fix round surgical. The
+docstring + this note together form the seam marker for the
+future split.
+
+The tool surface (additive through M3 — no removal):
+job_create, job_get, job_list, job_cancel, job_retry, watch_job,
+watch_jobs, plus the M2 mission-side get_mission / await_mission
+/ list_mission helpers (re-exported from
+``daemon.tools.missions``).
+
+Tool-name discovery is frozen — adding a new tool requires a
+test_frozen_tool_name_discovery entry; the house registry scans
+the ``@register_tool_category`` decorators.
+"""
 
 import asyncio
 import logging
@@ -88,8 +118,20 @@ Args:
     offset: Number of jobs to skip (default: 0).
     limit: Maximum number of jobs to return. Default: 50.
     include_deleted: Include soft-deleted jobs. Default: False.
+    job_types: M2 (mission-class, 2026-09-02) — optional
+        ``JobItem.job_type`` filter; accepted values are ``"task"``
+        and ``"message"``. Default: BOTH kinds. Additive vs the
+        legacy ``statuses`` filter, which is RETAINED through the M3
+        window. On the resolver path the filter is applied
+        client-side.
 
 Note:
+    ``status`` answers the transport question ("was my submission
+    handled?"). For the outcome question ("is the work done?"),
+    use the mission tools (``get_mission`` / ``await_mission``).
+    The ``mission_ref`` cross-reference on every terminal job
+    payload ties the two layers together in a single read.
+
     ``job_list`` routes through ``work_resolver.list_work`` which
     only honours ``queue_id`` for JobItem rows. Task rows have no
     queue affinity and will be included in the result regardless
@@ -216,6 +258,13 @@ Args:
     job_id: The job ID to watch. Required.
     events: Specific terminal states to watch for. Optional.
         Default: all terminal states ["completed", "failed", "cancelled", "dead_letter"]
+        plus ``"in_progress"``.
+
+        M2 (mission-class, 2026-09-02): the value ``"mission_terminal"``
+        is OPT-IN — when included, the watcher fires ONLY when
+        admission AND mission liveness are BOTH terminal (contract
+        draft §3.5). Default watchers (without ``mission_terminal``)
+        keep transport-only semantics — back-compat preserved.
 
 Returns:
     Confirmation message or error.""",
@@ -240,7 +289,9 @@ Jobs already in terminal states will trigger immediate notifications.
 Args:
     job_ids: List of job IDs to watch. Required.
     events: Specific terminal states to watch for. Optional.
-        Default: all terminal states
+        Default: all terminal states. M2 (mission-class): the value
+        ``"mission_terminal"`` is OPT-IN with the same dual-terminal
+        semantics as ``watch_job`` (contract draft §3.5).
 
 Returns:
     Summary of watches registered and immediate notifications sent.""",
@@ -258,6 +309,13 @@ Args:
 
 Returns:
     Dictionary with old_job_id, instance_id, message_id, new_job_id, status.
+
+Note (M2 task-only gate — mission-class, 2026-09-02): ``job_continue``
+ONLY accepts ``job_type='task'`` (mission proxy). For
+``job_type='message'`` (mirror receipts), the tool returns a clear
+refusal pointing at ``send_message`` — the canonical mirror path.
+Contract draft §3 "Plus" clause; closes the wrong-predicate trap so
+an agent cannot accidentally use the work-side primitive to message.
 
 Note (revive-once guard — W1): a ``job_continue`` whose target instance
 status is FAILED counts as an agent-tool-initiated revival and is bound
@@ -435,6 +493,54 @@ Returns:
 Example:
     job_inject(job_id=\"job_abc123\", message=\"Also remember to add tests\")""",
 }
+
+
+def _record_mission_is_terminal(record: Optional["WorkRecord"]) -> bool:
+    """True iff a :class:`WorkRecord`'s mission-side liveness is terminal.
+
+    M2 (mission-class, 2026-09-02, ``feature/mission-class``) —
+    companion helper for the ``watch_job(events='mission_terminal')``
+    gating (contract draft §3.5). A watcher that opts in via
+    ``mission_terminal`` fires ONLY when BOTH the admission-side
+    ``status`` is terminal AND the mission-side ``mission_liveness``
+    is terminal.
+
+    ``mission_liveness`` is the canonical mission vocabulary for
+    mirror rows (JobItem.job_type='message') and ``None`` for task
+    rows (where the row IS its own mission — ``status`` is the
+    liveness signal). So:
+
+    * Mirror rows: ``mission_liveness in {completed, failed, cancelled}``
+    * Task rows: ``status in {completed, failed, cancelled}``
+    * Degraded / unresolvable rows: ``False`` — the mission
+      liveness is unknown, so the dual-terminal condition fails
+      closed (the watcher keeps its row alive for the eventual
+      terminal event).
+
+    Args:
+        record: A :class:`WorkRecord` or ``None``.
+
+    Returns:
+        ``True`` iff the mission-side liveness is terminal; ``False``
+        otherwise (live OR degraded).
+    """
+    if record is None:
+        return False
+    canonical_terminal = {"completed", "failed", "cancelled"}
+    job_type = getattr(record, "job_type", None)
+    if job_type == "message":
+        # Mirror row — ``mission_liveness`` is the canonical mission
+        # vocabulary (None means degraded ⇒ fail closed).
+        mission_liveness = getattr(record, "mission_liveness", None)
+        return mission_liveness in canonical_terminal
+    if job_type == "task":
+        # Task row — the row IS its own mission; ``status`` is the
+        # mission liveness signal.
+        return getattr(record, "status", None) in canonical_terminal
+    # Unknown / Task-backed / degraded — fall back to ``status`` (the
+    # row's canonical work-side status). For non-JobItem rows this is
+    # the only liveness signal we have.
+    return getattr(record, "status", None) in canonical_terminal
 
 
 def _check_job_access(
@@ -689,8 +795,27 @@ def create_job_tools(
         offset: Annotated[int, Field(default=0, ge=0, description="Number of jobs to skip")] = 0,
         limit: Annotated[int, Field(default=50, ge=1, le=100, description="Maximum jobs to return")] = 50,
         include_deleted: Annotated[bool, Field(default=False, description="Include soft-deleted jobs")] = False,
+        job_types: Annotated[list[str] | None, Field(
+            default=None,
+            description=(
+                "M2 (mission-class, 2026-09-02): optional JobItem.job_type "
+                "filter — accepted values are ``task`` and ``message``. "
+                "Default: BOTH kinds. Additive vs the legacy ``statuses`` "
+                "filter, which is RETAINED through the M3 window (contract "
+                "draft §4). On the resolver path the filter is applied "
+                "client-side (the resolver's ``list_work`` does not "
+                "narrow by job_type today)."
+            ),
+        )] = None,
     ) -> dict:
-        """List jobs with optional filters. Use tool_help("job_list") for details."""
+        """List jobs with optional filters. Use tool_help("job_list") for details.
+
+        ``status`` answers the transport question ("was my submission
+        handled?"). For the outcome question ("is the work done?"),
+        use the mission tools (``get_mission`` / ``await_mission``).
+        The ``mission_ref`` cross-reference on every terminal job
+        payload ties the two layers together in a single read.
+        """
         try:
             # Phase 7: resolver is always ON. Route through
             # ``work_resolver.list_work`` so the list is the UNION of
@@ -712,13 +837,35 @@ def create_job_tools(
             from daemon.services.job_queue_service import normalize_statuses
             normalised_statuses = normalize_statuses(statuses)
 
+            # M2 — narrow the M2 ``job_types`` filter to the accepted
+            # vocabulary (unknown values degrade to empty per §8.2).
+            # Applied at the service layer for the legacy branch and
+            # client-side for the resolver branch (the resolver's
+            # ``list_work`` does not narrow by ``job_type`` today).
+            normalised_job_types: list[str] | None = None
+            if job_types is not None:
+                valid = {"task", "message"}
+                normalised_job_types = [
+                    t.strip().lower() for t in job_types
+                    if t and t.strip().lower() in valid
+                ]
+                if not normalised_job_types:
+                    # Unknown / source-less filter — empty page
+                    # (degrade contract; matches the HTTP router's
+                    # shape for unknown filter values).
+                    return {
+                        "jobs": [],
+                        "count": 0,
+                    }
+
             work_resolver: "WorkResolverService | None" = getattr(
                 job_service, "_work_resolver", None
             )
             if work_resolver is None:
                 # Resolver not wired — degrade gracefully to the
                 # JobItem-only list rather than crash, so a partial-wiring
-                # daemon still serves traffic.
+                # daemon still serves traffic. The ``job_types`` filter
+                # is applied in SQL by the repository.
                 jobs = await job_service.list_jobs(
                     statuses=normalised_statuses,
                     project_id=project_id,
@@ -726,6 +873,7 @@ def create_job_tools(
                     offset=offset,
                     limit=limit,
                     include_deleted=include_deleted,
+                    job_types=normalised_job_types,
                 )
                 result = {
                     "jobs": [job.to_dict() for job in jobs],
@@ -756,6 +904,18 @@ def create_job_tools(
                 allowed_statuses = set(normalised_statuses)
                 records = [
                     r for r in records if r.status in allowed_statuses
+                ]
+
+            # M2 — same client-side narrowing on the resolver path
+            # (the resolver's ``list_work`` does not accept
+            # ``job_types`` today; the filter applies post-resolution
+            # to keep the tool surface uniform with the legacy
+            # branch).
+            if normalised_job_types is not None:
+                allowed_types = set(normalised_job_types)
+                records = [
+                    r for r in records
+                    if getattr(r, "job_type", None) in allowed_types
                 ]
 
             # ``list_work`` doesn't support pagination — the legacy
@@ -994,6 +1154,54 @@ def create_job_tools(
                         f"Job {old_job_id} is not in a terminal state (current: {record.status}). "
                         "Only completed/failed/cancelled/dead_letter jobs can be continued."
                     )
+                }
+
+            # 2a. M2 (mission-class, 2026-09-02, ``feature/mission-class``)
+            #     — task-only gate per contract draft §3 (the "Plus"
+            #     clause: ``job_continue`` accepts ``job_type='task'``
+            #     only; mirrors continue via ``send_message``, the
+            #     canonical mirror path).
+            #
+            #     Rationale: ``job_continue`` was a general-purpose
+            #     "follow up on a terminal job by sending a new
+            #     message to its instance" primitive before the
+            #     mission split. Post-M2 the two paths are distinct:
+            #
+            #     * ``job_type='task'`` → the row IS a mission proxy
+            #       (the work). ``job_continue`` is the canonical
+            #       "send a follow-up instruction to the spawned
+            #       instance" path.
+            #     * ``job_type='message'`` → the row is a mirror
+            #       receipt of a message the user sent to the
+            #       instance. ``job_continue`` was the historical
+            #       shortcut for "send another message" — but the
+            #       canonical mirror path is ``send_message`` directly
+            #       (the message itself IS the wire). Forcing
+            #       ``job_continue`` through this gate keeps the
+            #       wrong-predicate trap closed: an agent cannot
+            #       accidentally use the work-side primitive to
+            #       message.
+            #
+            #     Non-JobItem work (``kind != "job"`` — Task / report)
+            #     is unaffected: the gate only fires for JobItem rows
+            #     whose ``job_type`` is the mirror kind. ``record.job_type``
+            #     is sourced from the resolver-backed WorkRecord, so
+            #     the check is consistent with the four Fix-C read
+            #     surfaces (§8.2). The fallback to ``old_job.job_type``
+            #     covers the legacy branch when ``job_type`` is not on
+            #     the WorkRecord (older test fixtures).
+            if getattr(record, "job_type", None) == "message" or (
+                record.kind == "job"
+                and getattr(old_job, "job_type", None) == "message"
+            ):
+                return {
+                    "error": (
+                        f"job_continue is not supported for message-type jobs "
+                        f"(job_id={old_job_id}, job_type='message'). "
+                        "Use send_message(instance_id=..., message=...) "
+                        "to send a follow-up message directly to the "
+                        "instance — that is the canonical mirror path."
+                    ),
                 }
 
             # 3. Extract instance_id from the WorkRecord
@@ -1319,7 +1527,18 @@ def create_job_tools(
     @tool
     async def watch_job(
         job_id: Annotated[str, Field(description="The job ID to watch")],
-        events: Annotated[list[str] | None, Field(default=None, description="Specific events to watch for (default: all terminal states)")] = None,
+        events: Annotated[list[str] | None, Field(
+            default=None,
+            description=(
+                "Specific events to watch for (default: all terminal "
+                "states + in_progress). M2 (mission-class): the value "
+                "``mission_terminal`` is OPT-IN — when included, the "
+                "watcher fires ONLY when admission AND mission "
+                "liveness are BOTH terminal (contract draft §3.5). "
+                "Default watchers (without ``mission_terminal``) keep "
+                "transport-only semantics — back-compat preserved."
+            ),
+        )] = None,
     ) -> str:
         """Watch a job for lifecycle events. If the job is already in a terminal state, immediate notification is sent.
 
@@ -1329,6 +1548,26 @@ def create_job_tools(
                 return "Error: Watch functionality not available"
             if not current_instance_id:
                 return "Error: No instance context"
+
+            # M2 (mission-class) — events validation. ``mission_terminal``
+            # is OPT-IN; the default event set stays transport-only
+            # (``ALL_TERMINAL_STATES`` + ``in_progress``). An
+            # unknown event name is rejected with a clear list of
+            # accepted values, so a typo does not silently degrade to
+            # "match nothing" — same fail-closed discipline as the
+            # HTTP surface's unknown-filter rejection.
+            from daemon.repositories.job_queue.watcher_models import (
+                ALL_WATCHABLE_EVENTS,
+            )
+            accepted_events = set(ALL_WATCHABLE_EVENTS) | {"mission_terminal"}
+            if events is not None:
+                unknown = [e for e in events if e not in accepted_events]
+                if unknown:
+                    return (
+                        f"Error: Unknown event(s) {unknown!r}. "
+                        f"Accepted values: "
+                        f"{sorted(accepted_events)}."
+                    )
 
             # Phase 7: the only lookup path is the resolver. Unknown work_ids
             # surface as a clean not-found rather than falling back to
@@ -1361,6 +1600,32 @@ def create_job_tools(
                 record = await _enrich_terminal_record(record)
                 # Register watch first, then notify (notify_watchers sends + cleans up)
                 watcher_repo.add_watch(job_id, current_instance_id, events)
+                # M2 — mission_terminal opt-in gating. When the
+                # watcher opts in via ``events=['mission_terminal']``
+                # (with or without other terminal events), fire ONLY
+                # when both admission AND mission liveness are
+                # terminal. Default watchers (no ``mission_terminal``
+                # in their events) fire on the natural terminal
+                # transport event, preserving back-compat.
+                fire_mission_terminal = (
+                    events is not None
+                    and "mission_terminal" in events
+                )
+                if fire_mission_terminal:
+                    if not _record_mission_is_terminal(record):
+                        # Mission is not yet terminal — keep the
+                        # watch alive (the watcher wants to fire
+                        # ONLY when the mission reaches terminal, so
+                        # do NOT notify now). The future terminal
+                        # event will land via the standard
+                        # notify_watchers path (with the gating
+                        # enforced in work_notifier).
+                        return (
+                            f"Watch registered for job {job_id[:8]}... "
+                            f"with mission_terminal gating; will notify "
+                            f"when admission AND mission liveness are "
+                            f"both terminal."
+                        )
                 # notify_watchers in Phase 2 Batch 2 is itself
                 # resolver-aware — it accepts the work_id (here
                 # ``job_id``) and routes through WorkResolverService.
@@ -1449,7 +1714,15 @@ def create_job_tools(
     @tool
     async def watch_jobs(
         job_ids: Annotated[list[str], Field(description="List of job IDs to watch")],
-        events: Annotated[list[str] | None, Field(default=None, description="Specific events to watch for (default: all terminal states)")] = None,
+        events: Annotated[list[str] | None, Field(
+            default=None,
+            description=(
+                "Specific events to watch for (default: all terminal "
+                "states + in_progress). M2 (mission-class): the value "
+                "``mission_terminal`` is OPT-IN — same semantics as "
+                "``watch_job`` (contract draft §3.5)."
+            ),
+        )] = None,
     ) -> str:
         """Watch multiple jobs for lifecycle events. Bulk version of watch_job.
 
@@ -1460,6 +1733,20 @@ def create_job_tools(
             if not current_instance_id:
                 return "Error: No instance context"
 
+            # M2 — events validation (same shape as ``watch_job``).
+            from daemon.repositories.job_queue.watcher_models import (
+                ALL_WATCHABLE_EVENTS,
+            )
+            accepted_events = set(ALL_WATCHABLE_EVENTS) | {"mission_terminal"}
+            if events is not None:
+                unknown = [e for e in events if e not in accepted_events]
+                if unknown:
+                    return (
+                        f"Error: Unknown event(s) {unknown!r}. "
+                        f"Accepted values: "
+                        f"{sorted(accepted_events)}."
+                    )
+
             # Enforce max 50 watches per instance
             count = watcher_repo.count_watches_for_instance(current_instance_id)
             if count + len(job_ids) > 50:
@@ -1467,8 +1754,19 @@ def create_job_tools(
 
             from daemon.services.work_status import is_terminal as _is_terminal
 
+            # M2 — bulk ``mission_terminal`` opt-in: when the bulk
+            # watcher opts in via ``mission_terminal``, fire ONLY
+            # when both admission AND mission liveness are terminal.
+            # Default watchers (no ``mission_terminal``) fire on the
+            # natural terminal transport event — back-compat.
+            fire_mission_terminal = (
+                events is not None
+                and "mission_terminal" in events
+            )
+
             watched = []
             already_terminal = []
+            held_for_mission = []
 
             for jid in job_ids:
                 # Phase 7: resolver is the only lookup path. Unknown
@@ -1496,6 +1794,12 @@ def create_job_tools(
                     # ``Result:`` block.
                     record = await _enrich_terminal_record(record)
                     # Register watch first, then notify (notify_watchers sends + cleans up)
+                    if fire_mission_terminal and not _record_mission_is_terminal(record):
+                        # Mission is not yet terminal — keep the
+                        # watch alive for the future terminal event.
+                        watcher_repo.add_watch(jid, current_instance_id, events)
+                        held_for_mission.append(jid)
+                        continue
                     watcher_repo.add_watch(jid, current_instance_id, events)
                     await job_service.notify_watchers(
                         jid,
@@ -1513,6 +1817,12 @@ def create_job_tools(
                 parts.append(f"Registered watches for {len(watched)} job(s).")
             if already_terminal:
                 parts.append(f"{len(already_terminal)} job(s) already terminal — immediate notification sent.")
+            if held_for_mission:
+                parts.append(
+                    f"{len(held_for_mission)} job(s) terminal on transport "
+                    f"but held until mission liveness is also terminal "
+                    f"(mission_terminal opt-in)."
+                )
             return " ".join(parts) if parts else "No valid jobs found."
         except Exception as e:
             return f"Error watching jobs: {str(e)}"

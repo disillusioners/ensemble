@@ -195,7 +195,7 @@ class JobWatcherRepository:
             return result.rowcount
 
     def claim_watchers_for_job(self, job_id: str) -> list[JobWatcher]:
-        """Atomically claim and delete all watchers for a job.
+        """Atomically claim and delete ALL watchers for a job.
 
         Phase 2 (Batch 1) of feature/virtual-job-management-surface:
         replaces the read-then-delete pattern in
@@ -227,6 +227,27 @@ class JobWatcherRepository:
         execute the statement as a single round-trip; there is no
         observable interleaving on the rows between SELECT and DELETE.
 
+        N1 (duplicate-delivery window, 2026-09-03) — note on the
+        CALLER-side ordering required for this method to enforce
+        exactly-once delivery:
+
+            This repo-level CAS only prevents double-notify when the
+            caller invokes ``claim_watchers_for_job`` (or its
+            filtered sibling ``claim_watchers_for_job_for_instances``)
+            BEFORE the per-watcher ``enqueue_message`` calls. The
+            ``notify_work_watchers`` helper in
+            ``daemon.services.work_notifier`` follows this
+            claim-first ordering on every terminal status — the
+            claim runs first, the notification loop only delivers
+            for rows the claim returned. A notify-then-claim
+            ordering (the pre-N1 flow) re-opens the bounded ≤2
+            duplicate-delivery window even with this CAS, because
+            both racers pass the SELECT before either runs the
+            DELETE.
+
+            Do NOT add new notify-then-claim call sites that bypass
+            ``notify_work_watchers`` — that re-introduces the bug.
+
         Note on the RETURNING clause:
 
             Earlier versions used ``.returning(JobWatcher)`` (passing
@@ -257,6 +278,71 @@ class JobWatcherRepository:
             stmt = (
                 sql_delete(JobWatcher)
                 .where(JobWatcher.job_id == job_id)
+                .returning(*JobWatcher.__table__.c)
+            )
+            rows = db_session.exec(stmt).all()
+            db_session.commit()
+            return [
+                JobWatcher(**dict(row._mapping)) for row in rows
+            ]
+
+    def claim_watchers_for_job_for_instances(
+        self, job_id: str, instance_ids: list[str],
+    ) -> list[JobWatcher]:
+        """Atomically claim and delete ONLY the listed-instance watchers for a job.
+
+        N1 (duplicate-delivery window, 2026-09-03) — paired-with-filter
+        companion to :meth:`claim_watchers_for_job`. Same CAS
+        semantics (``DELETE ... RETURNING``), but limited to the
+        subset whose ``instance_id`` is in ``instance_ids``. This is
+        the repo primitive the new claim-first
+        ``notify_work_watchers`` flow calls for: the caller does a
+        read-only ``get_watchers_for_job`` first, partitions into
+        "will notify" vs "will hold" (e.g. ``mission_terminal``
+        opt-in with non-terminal mission liveness), and then
+        atomically claims ONLY the matching subset.
+
+        Without the filter, the alternative would be a
+        read-then-delete-all flow that loses the held-for-mission
+        rows (the mission has not yet reached terminal — the
+        watcher must remain registered for the eventual terminal
+        event). The per-instance WHERE clause preserves the
+        atomic-CAS guarantee AND keeps the held rows intact.
+
+        Race-free contract:
+
+            * Caller A reads ``get_watchers_for_job`` (sees row R for
+              instance I), partitions R into "matching".
+            * Caller B reads ``get_watchers_for_job`` (sees R), also
+              partitions R into "matching".
+            * Caller A calls ``claim_watchers_for_job_for_instances``
+              (job_id, [I]) → receives R, R is deleted.
+            * Caller B calls ``claim_watchers_for_job_for_instances``
+              (job_id, [I]) → receives ``[]`` (R already deleted)
+              — no double-notify.
+
+        Args:
+            job_id: The job (work) ID.
+            instance_ids: The ``instance_id``s to claim. Only rows
+                whose ``instance_id`` is in this list are deleted;
+                other watchers for ``job_id`` are preserved.
+
+        Returns:
+            List of JobWatcher rows that were actually deleted
+            (i.e. the CAS winners). Empty list if no matching row
+            existed or every matching row was already claimed by a
+            prior race winner. The caller iterates THIS list to
+            deliver notifications — never the pre-claim read —
+            so the notify loop is guaranteed to be a subset of
+            the rows that won the CAS.
+        """
+        if not instance_ids:
+            return []
+        with SQLModelSession(self.engine) as db_session:
+            stmt = (
+                sql_delete(JobWatcher)
+                .where(JobWatcher.job_id == job_id)
+                .where(JobWatcher.instance_id.in_(instance_ids))
                 .returning(*JobWatcher.__table__.c)
             )
             rows = db_session.exec(stmt).all()

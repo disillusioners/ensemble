@@ -628,6 +628,23 @@ class TestSerialization:
             # ``kind`` and ignore these keys for report rows.
             "job_type",
             "mission_liveness",
+            # M1 (mission-class, 2026-09-02) — additive mission
+            # projection fields (always-on since WS3; the
+            # ``ENSEMBLE_MISSION_PROJECTION_ENABLED`` kill-switch
+            # was removed). The four keys surface verbatim on every
+            # record; ``None`` on Task-backed records (the work is
+            # its own mission here).
+            "mission_id",
+            "mission_epoch",
+            "mission_terminal_reason",
+            # M2 (mission-class, 2026-09-02) — anti-trap guardrails.
+            # ``outcome`` stays ``None`` on the work (transport)
+            # surface (contract draft §3.2); ``mission_ref`` is the
+            # cross-reference payload tying the work row to its
+            # linked mission (§3.3, mandatory on terminal
+            # payloads).
+            "outcome",
+            "mission_ref",
         }
         # Phase 4 partial collapse: report Task surfaces as
         # ``kind="report"`` (the legacy ``"turn"`` is gone — turns

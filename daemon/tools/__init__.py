@@ -10,6 +10,7 @@ from .project import create_project_tools
 from .help import create_help_tool
 from .access_memory import create_access_memory_tool
 from .job_queue import create_job_tools
+from .missions import create_mission_tools
 
 __all__ = [
     "bash",
@@ -27,4 +28,5 @@ __all__ = [
     "create_help_tool",
     "create_access_memory_tool",
     "create_job_tools",
+    "create_mission_tools",
 ]

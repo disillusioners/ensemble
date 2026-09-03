@@ -64,6 +64,14 @@ from daemon.repositories.instance.models import Instance
 from daemon.repositories.job_queue.models import AdmissionState, JobItem
 from daemon.repositories.task.models import Task
 
+# M1 (mission-class, 2026-09-02) — the additive ``mission_*`` payload
+# helper is shared with the resolver module so all Fix-C read surfaces
+# emit the same keys in lock-step. Always-on since WS3 (the
+# M1 mission-projection kill-switch was removed).
+from daemon.services.mission_resolver import (
+    mission_projection_to_dict as _mission_projection_to_dict,
+)
+
 from .work_status import (
     _STATUS_CANONICAL_MAP,
     canonicalize_status,
@@ -260,6 +268,49 @@ class WorkRecord:
     #   read fails soft per the message_metadata precedent).
     job_type: str | None = None
     mission_liveness: str | None = None
+    # M1 (mission-class, 2026-09-02) — three additive mission-projection
+    # fields that complete the read model without changing any existing
+    # ``status`` semantics. Always-on since WS3 (the
+    # M1 mission-projection kill-switch was removed):
+    # they are populated by
+    # :class:`daemon.services.mission_resolver.MissionResolver` at
+    # projection time (pure read-model; no writes, no JobItem
+    # creation):
+    #
+    # * ``mission_id`` — ``instance_id`` (identity == instance_id per
+    #   spec §3 adjudicated under pressure-test).
+    # * ``mission_epoch`` — current epoch number (1 today; precise
+    #   ``epoch_count`` + ``last_epoch_at`` come with M4(ii)'s
+    #   ``mission_events`` log).
+    # * ``mission_terminal_reason`` — the mission-side terminal
+    #   discriminator (``completed`` / ``failed`` / ``cancelled`` /
+    #   ``dead_letter``). W4-hazard path: a linked DEAD JobItem
+    #   flips this to ``dead_letter`` regardless of a since-revived
+    #   instance.
+    #
+    # The values are surfaced on the four Fix-C read surfaces
+    # (this ``WorkRecord``, :class:`daemon.routers.schemas.JobResponse`,
+    # :class:`daemon.routers.jobs_streaming._ResolvedWork`, and the
+    # jobs_crud delegation) — all four use the same WorkRecord
+    # derivation so the four surfaces stay in lock-step on the
+    # additive fields.
+    mission_id: str | None = None
+    mission_epoch: int | None = None
+    mission_terminal_reason: str | None = None
+    # M2 (mission-class, 2026-09-02, ``feature/mission-class``) —
+    # anti-trap guardrails. ``outcome`` is ALWAYS ``None`` on the
+    # transport (work) read surface (contract draft §3.2:
+    # ``outcome: null`` on transport = "NOT done" by construction;
+    # the mission tools carry the value when terminal). ``mission_ref``
+    # is the cross-reference payload tying the work row to its linked
+    # mission — same shape as the JobResponse M2 addition. Derivation
+    # lives in ``daemon/routers/jobs_crud.py::_derive_m2_mission_ref``;
+    # the WorkRecord keeps the fields so all four Fix-C read surfaces
+    # (§8.2: WorkRecord + JobResponse + _ResolvedWork + jobs_management
+    # delegation) emit them in lock-step via ``to_dict`` /
+    # ``to_payload``.
+    outcome: str | None = None
+    mission_ref: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize this :class:`WorkRecord` to a JSON-friendly dict.
@@ -315,6 +366,26 @@ class WorkRecord:
             # docstring above. ``None`` for Task-backed records.
             "job_type": self.job_type,
             "mission_liveness": self.mission_liveness,
+            # M1 (mission-class, 2026-09-02) — additive projection
+            # fields. Always-on since WS3: the three keys surface
+            # verbatim from the WorkRecord state (the architecture-
+            # recommendation §5 M1 row says additive only, zero
+            # writers, bit-for-bit status preserved). See the
+            # field declarations and ``mission_resolver.py`` for the
+            # truthmaker (Instance + W4-hazard).
+            **_mission_projection_to_dict(
+                mission_id=self.mission_id,
+                mission_epoch=self.mission_epoch,
+                mission_terminal_reason=self.mission_terminal_reason,
+            ),
+            # M2 (mission-class) — anti-trap guardrails on the work
+            # (transport) surface. Both keys surface verbatim from
+            # the WorkRecord state; ``outcome`` stays ``None`` on
+            # transport (draft §3.2), ``mission_ref`` is populated
+            # by ``_job_to_record`` so consumers can read the linked
+            # mission's liveness in a single payload.
+            "outcome": self.outcome,
+            "mission_ref": self.mission_ref,
         }
 
 
@@ -449,6 +520,17 @@ _JOB_CANONICAL_TO_ADMISSION: Final[dict[str, set[str]]] = {
 # fall through to the backward-compat branch which builds a
 # ``JobStatusFilter(admission_state=<value>)`` with NO ``terminal_reason``
 # predicate — preserving the pre-F3 behaviour for those callers.
+#
+# M3 (mission-class, 2026-09-03, ``feature/mission-class``) — per-kind
+# dispatch (ADR-MISSION-01 §6.6 I3 amendment). ``completed`` now means
+# TASK terminal only; ``settled`` means MIRROR terminal. The
+# :class:`JobStatusFilter` carries an OPTIONAL ``job_type`` predicate
+# so the canonical-token → SQL filter mapping disambiguates the kind.
+# ``completed`` filters task rows; ``settled`` filters mirror rows;
+# pre-7c hedge (NULL terminal_reason) stays on ``completed`` only —
+# pre-7c rows predate the rename and never carry
+# ``job_type='message'``, so they surface under ``completed`` (not
+# ``settled``).
 @dataclass(frozen=True)
 class JobStatusFilter:
     """A single predicate on the JobItem side of ``list_work``.
@@ -456,7 +538,7 @@ class JobStatusFilter:
     Carries the ``admission_state`` value to filter on and an optional
     ``terminal_reason`` discriminator for the disambiguation done in
     F3 (see module docstring). Multiple filters are combined with OR
-    semantics; each filter's two clauses are ANDed.
+    semantics; each filter's two/three clauses are ANDed.
 
     Attributes:
         admission_state: The ``JobItem.admission_state`` value to
@@ -473,11 +555,21 @@ class JobStatusFilter:
             (used only for the ``completed`` semantic so pre-7c
             backfill rows with NULL ``terminal_reason`` still surface
             under ``status="completed"``).
+        job_type: Optional ``JobItem.job_type`` value to AND with
+            ``admission_state``. ``None`` means "no job_type filter"
+            — used for non-terminal canonical statuses and the
+            backward-compat raw ``admission_state`` fallback. M3: set
+            to ``"task"`` for the ``completed`` semantic (per-kind
+            matching — mirror rows now match ``settled``, not
+            ``completed``) and to ``"message"`` for the ``settled``
+            semantic (mirror-receipt terminal; ADR-MISSION-01 §6.6 I3
+            amendment).
     """
 
     admission_state: str
     terminal_reason: str | None = None
     terminal_reason_null_allowed: bool = False
+    job_type: str | None = None
 
 
 def _canonical_to_job_filters(canonical_statuses: list[str]) -> list[JobStatusFilter]:
@@ -516,14 +608,47 @@ def _canonical_to_job_filters(canonical_statuses: list[str]) -> list[JobStatusFi
             # pre-7c rows have NULL ``terminal_reason`` and are
             # treated as completed per the lossy ``done → completed``
             # mapping in ``_ADMISSION_TO_LEGACY_STATUS``.
+            #
+            # M3 (mission-class, 2026-09-03) — per-kind dispatch
+            # (ADR-MISSION-01 §6.6 I3 amendment). ``completed`` now
+            # means TASK terminal only — mirror rows (job_type=
+            # ``"message"``) match ``settled`` instead. The
+            # ``job_type="task"`` predicate is added here so a
+            # ``list_jobs(status="completed")`` filter returns TASK
+            # rows only. Mirror rows need ``status="settled"`` to
+            # match. Pre-7c hedge (NULL terminal_reason) stays for
+            # backward compat (pre-7c rows never carry
+            # ``job_type="message"``).
             filters.append(JobStatusFilter(
                 admission_state=AdmissionState.DONE.value,
                 terminal_reason="completed",
                 terminal_reason_null_allowed=True,
+                job_type="task",
+            ))
+        elif token == "settled":
+            # M3 (mission-class, 2026-09-03) — the mirror-receipt
+            # terminal. Strict — no NULL hedge (pre-7c rows never
+            # carry ``job_type="message"`` and the rename is CLEAN
+            # per the ADR-MISSION-01 §6.6 "Directed modifications"
+            # spec). Matches JobItem rows with
+            # ``admission_state='done'`` AND
+            # ``terminal_reason='completed'`` AND
+            # ``job_type='message'``. Task rows (with
+            # ``terminal_reason='completed'``) match ``completed``
+            # (not ``settled``); the per-kind split is the whole
+            # point of the rename.
+            filters.append(JobStatusFilter(
+                admission_state=AdmissionState.DONE.value,
+                terminal_reason="completed",
+                terminal_reason_null_allowed=False,
+                job_type="message",
             ))
         elif token == "failed":
             # F3: failed semantics — admission_state='done' AND
-            # terminal_reason='failed' (strict, no NULL).
+            # terminal_reason='failed' (strict, no NULL). M3
+            # preserves this — both task and mirror rows can fail
+            # (e.g. DLQ via admission_state='dead' is handled below;
+            # ``failed`` is a kind-agnostic terminal reason).
             filters.append(JobStatusFilter(
                 admission_state=AdmissionState.DONE.value,
                 terminal_reason="failed",
@@ -531,7 +656,8 @@ def _canonical_to_job_filters(canonical_statuses: list[str]) -> list[JobStatusFi
             ))
         elif token == "cancelled":
             # F3: cancelled semantics — admission_state='done' AND
-            # terminal_reason='cancelled' (strict, no NULL).
+            # terminal_reason='cancelled' (strict, no NULL). Same
+            # kind-agnostic rationale as ``failed`` above.
             filters.append(JobStatusFilter(
                 admission_state=AdmissionState.DONE.value,
                 terminal_reason="cancelled",
@@ -775,6 +901,74 @@ def _instance_completed_at(
 # ``create_job_repository`` plumbing the JobQueue services already use.
 
 
+def _derive_m2_mission_ref_on_work(
+    *,
+    work_record_status: str | None,
+    job_type: str | None,
+    mission_liveness: str | None,
+    mission_id: str | None,
+    agent_id: str | None,
+) -> dict[str, Any] | None:
+    """Compose the M2 ``mission_ref`` cross-reference on the work surface.
+
+    M2 (mission-class, 2026-09-02, ``feature/mission-class``) — the
+    work (transport) surface mirrors the JobResponse M2 addition. The
+    cross-reference ties a :class:`WorkRecord` to its linked mission
+    so an agent can read ``mission_ref.liveness`` from a single
+    payload (mandatory on terminal payloads per contract draft §3.3;
+    surfaced uniformly on every payload for shape uniformity with the
+    JobResponse surface).
+
+    The derivation mirrors ``_derive_m2_mission_ref`` in
+    ``daemon/routers/jobs_crud.py`` — same shape, same fields. Both
+    helpers source from the same resolver-backed fields and stay in
+    lock-step on the four Fix-C read surfaces (§8.2).
+
+    Args:
+        work_record_status: The :class:`WorkRecord` ``status`` (the
+            row's canonical work-side status — derived from
+            ``_derive_legacy_status``).
+        job_type: The ``job_type`` discriminator (``"task"`` /
+            ``"message"`` / ``None`` for Task-backed records).
+        mission_liveness: The Fix-C split-semantics field; canonical
+            mission vocabulary for mirror rows, ``None`` for task
+            rows (where ``status`` IS the liveness).
+        mission_id: The mission identity (``== instance_id``). May be
+            ``None`` when the resolver degraded.
+        agent_id: The agent on whose behalf the mission is working.
+            May be ``None`` when the resolver degraded.
+
+    Returns:
+        A ``dict`` with the three keys (``mission_id``, ``agent_id``,
+        ``liveness``) — ``None`` when the resolver degraded across all
+        three fields (the renderer falls back to the receipt-only
+        view per §8.2).
+    """
+    if job_type == "task":
+        # Task row: ``status`` IS the canonical mission liveness
+        # (the row IS its own mission — task job `completed` STAYS,
+        # §6.7). ``mission_liveness`` is intentionally ``None`` by
+        # the Fix C split-semantics contract.
+        liveness = work_record_status
+    else:
+        # Mirror row (or unknown / degraded): ``mission_liveness``
+        # is the canonical view. Fall back to ``status`` only when
+        # the resolver degraded to ``None`` (the §8.2 "split
+        # semantics unavailable" degrade — surface the row's own
+        # status so the renderer still has a value to display).
+        liveness = (
+            mission_liveness if mission_liveness is not None
+            else work_record_status
+        )
+    if mission_id is None and agent_id is None and liveness is None:
+        return None
+    return {
+        "mission_id": mission_id,
+        "agent_id": agent_id,
+        "liveness": liveness,
+    }
+
+
 class WorkResolverService:
     """Resolve and list virtual-job work records across Task and JobItem tables.
 
@@ -795,6 +989,7 @@ class WorkResolverService:
         task_repo: "TaskRepository",
         job_repo: "JobRepository",
         instance_repo: "SQLModelInstanceRepository",
+        mission_resolver: "MissionResolver | None" = None,
     ) -> None:
         """Initialize the resolver with the three repositories it needs.
 
@@ -811,10 +1006,29 @@ class WorkResolverService:
                 ``agent_id`` column — agent identity lives on the
                 instance). JobItem rows carry ``agent_id`` directly, so
                 this repo is only consulted on the Task branch.
+            mission_resolver: M1 (mission-class, 2026-09-02). When
+                supplied, the work resolver threads mission projection
+                through ``_job_to_record`` and the batched
+                ``list_work`` path. ``None`` (the default for older
+                tests that wire the resolver standalone) falls back to
+                a lazy-constructed ``MissionResolver`` backed by the
+                same ``instance_repo`` / ``job_repo`` repos; the
+                kill-switch still gates whether mission values
+                surface. Pass an explicit instance to share a single
+                ``MissionResolver`` across multiple consumers (e.g.
+                the lifespan wiring in ``daemon/api.py``).
         """
         self._task_repo = task_repo
         self._job_repo = job_repo
         self._instance_repo = instance_repo
+        # M1 mission-projection wiring: the kill-switch-gated lazy
+        # accessor ``_mission_resolver`` constructs a ``MissionResolver``
+        # on first ON-state call; the explicit seed (when provided by
+        # the lifespan wiring in ``daemon/api.py``) is reused
+        # verbatim. ``_mission_resolver_obj`` memoises the
+        # construction.
+        self._mission_resolver_seed: "MissionResolver | None" = mission_resolver
+        self._mission_resolver_obj: "MissionResolver | None" = None
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -851,6 +1065,55 @@ class WorkResolverService:
             return self._job_to_record(job)
 
         return None
+
+    def per_kind_status_for(
+        self,
+        work_id: str,
+        *,
+        default: str,
+    ) -> str:
+        """Return the per-kind canonical status of ``work_id`` for notify sites.
+
+        N8 (mission-class, 2026-09-03, ``feature/mission-class``) —
+        the hot event path's wrong-speaker bug: notify sites were
+        hardcoding ``"completed"`` when calling
+        :func:`daemon.services.work_notifier.notify_work_watchers`,
+        collapsing mirror JobItems (``job_type="message"``) onto the
+        task-side ``completed ✓` glyph. The per-kind dispatch in
+        :meth:`_job_to_record` already maps a mirror row's
+        ``(admission_state='done', terminal_reason='completed',
+        job_type='message')`` onto ``"settled"`` — this helper is the
+        thin resolver-side accessor notify sites call so the rendered
+        token matches the row's kind without duplicating the token
+        map.
+
+        Lookup order matches :meth:`resolve_work` (task-first, then
+        job). For a Task-backed WorkRecord the canonical status is the
+        Task's mapped value (``completed`` / ``failed`` / ``cancelled``
+        / ``processing`` / ``pending`` / ``paused``); for a mirror
+        JobItem the per-kind dispatch flips ``completed`` to
+        ``"settled"`` (the M3 rename). ``default`` is returned when the
+        work cannot be resolved — preserves prior behaviour at every
+        notify call site (Task rows resolve to ``"completed"``, the
+        fallback callers used to hardcode) without widening the
+        failure mode for missing rows.
+
+        Args:
+            work_id: The UUID4 work identifier (Task.work_id or
+                JobItem.job_id).
+            default: Status to return when the work cannot be resolved
+                (the row was deleted between the terminal commit and
+                the notify, or the resolver is partial-wired in a
+                test). Caller-supplied; usually ``"completed"``.
+
+        Returns:
+            The canonical status from the resolved :class:`WorkRecord`,
+            or ``default`` when the lookup returns ``None``.
+        """
+        record = self.resolve_work(work_id)
+        if record is None:
+            return default
+        return record.status
 
     def list_work(
         self,
@@ -1103,8 +1366,20 @@ class WorkResolverService:
                     j.instance_id for j in jobs if j.instance_id is not None
                 }
                 instances_by_id = self._batch_instances(instance_ids)
+                # S4 batching fix (2026-09-02, mission-class WS3):
+                # pre-compute the whole page's mission fields with ONE
+                # JobItem SELECT. Without this, ``_job_to_record`` runs
+                # ``_mission_fields_for_instance`` per row — one
+                # JobItem SELECT per row on the ``GET /api/jobs`` /
+                # ``GET /api/work`` list path. Engine-bound O(1)-per-
+                # page budget pinned by
+                # ``tests/unit/services/test_work_resolver_query_budget.py``.
+                mission_fields_by_id = self._batch_mission_fields(
+                    instances_by_id
+                )
             else:
                 instances_by_id = {}
+                mission_fields_by_id = {}
             if root_only and jobs:
                 # Batch-resolve which of the JobItems' backing
                 # instances are children (parent_id IS NOT NULL).
@@ -1118,13 +1393,21 @@ class WorkResolverService:
                     {j.instance_id for j in jobs if j.instance_id is not None}
                 )
                 records.extend(
-                    self._job_to_record(j, instance=instances_by_id.get(j.instance_id))
+                    self._job_to_record(
+                        j,
+                        instance=instances_by_id.get(j.instance_id),
+                        mission_fields=mission_fields_by_id.get(j.instance_id),
+                    )
                     for j in jobs
                     if j.instance_id is None or j.instance_id not in child_instance_ids
                 )
             else:
                 records.extend(
-                    self._job_to_record(j, instance=instances_by_id.get(j.instance_id))
+                    self._job_to_record(
+                        j,
+                        instance=instances_by_id.get(j.instance_id),
+                        mission_fields=mission_fields_by_id.get(j.instance_id),
+                    )
                     for j in jobs
                 )
 
@@ -1231,6 +1514,7 @@ class WorkResolverService:
         self,
         job: JobItem,
         instance: "Instance | None" = None,
+        mission_fields: "tuple[str | None, int | None, str | None] | None" = None,
     ) -> WorkRecord:
         """Build a :class:`WorkRecord` from a JobItem row.
 
@@ -1289,6 +1573,18 @@ class WorkResolverService:
                 reuse the same row to build each record. Defaults to
                 ``None`` (resolver performs the lookup), which keeps
                 ``resolve_work`` (single-row call site) unaffected.
+            mission_fields: Optional pre-computed
+                ``(mission_id, mission_epoch, mission_terminal_reason)``
+                tuple for this row's instance — the S4 batching path.
+                ``list_work`` computes the whole page's mission fields
+                with ONE ``MissionResolver._batch_jobitem_lookup``
+                SELECT (engine-bound pinned by
+                ``tests/unit/services/test_work_resolver_query_budget.py``)
+                and passes each row's tuple here so the per-row
+                ``_mission_fields_for_instance`` call — one JobItem
+                SELECT per row — never runs on the list path.
+                Defaults to ``None`` (per-row path; single-row call
+                sites unaffected).
         """
         # Phase 4 cleanup: the frozen ``status`` column is no longer
         # written — ``admission_state`` is the sole authority. Dead
@@ -1324,6 +1620,22 @@ class WorkResolverService:
                         job.admission_state, "pending"
                     )
                 )
+            # M3 (mission-class, 2026-09-03) — per-kind dispatch
+            # (ADR-MISSION-01 §6.6 I3 amendment). For mirror rows
+            # (``job_type == "message"``) the receipt terminal is
+            # ``settled`` (transport-receipt disjoint from work-outcome
+            # vocabulary — task rows keep ``completed``). Applied HERE
+            # on the primary path because ``_job_to_record`` does its
+            # own derivation via ``canonicalize_status(terminal_reason)``
+            # rather than routing through ``_derive_legacy_status`` —
+            # both paths must apply the same dispatch so all four
+            # read surfaces (WorkRecord / JobResponse / _ResolvedWork /
+            # jobs_management delegation) agree (§8.2 canonical
+            # enumeration). The work_resolver is the AUTHORITY for
+            # WorkRecord + downstream surfaces.
+            job_type_disp = getattr(job, "job_type", "task") or "task"
+            if status == "completed" and job_type_disp == "message":
+                status = "settled"
         else:
             # Non-terminal admission states (``queued`` / ``active``):
             # source execution status from the joined Instance when
@@ -1432,6 +1744,33 @@ class WorkResolverService:
             # ``None`` and the renderer falls back to the
             # receipt-only view (current behaviour stands).
 
+        # M1 (mission-class, 2026-09-02) — additive mission
+        # projection. Consult ``MissionResolver`` for the three
+        # fields (``mission_id`` / ``mission_epoch`` /
+        # ``mission_terminal_reason``). Always-on since WS3 (the
+        # kill-switch was removed) — the projection applies to both
+        # the per-row and the batched paths.
+        if mission_fields is not None:
+            # S4 batched path — the caller (``list_work``) computed
+            # the whole page's mission fields with ONE JobItem
+            # SELECT; reuse the caller's tuple verbatim. This also
+            # skips the lazy instance lookup below: a row whose
+            # instance is absent from the batch map would only
+            # re-discover ``None`` per-row.
+            mission_id, mission_epoch, mission_terminal_reason = mission_fields
+        else:
+            if instance is None and job.instance_id is not None:
+                # Single-row ``resolve_work`` path — no pre-fetched
+                # instance yet. Look it up lazily before consulting
+                # ``MissionResolver`` so ``_instance_started_at`` /
+                # ``_instance_completed_at`` and the mission fields
+                # all see the same row (pre-WS3 this lookup was
+                # kill-switch-gated; the gate is gone).
+                instance = self._lookup_instance(job.instance_id)
+            mission_id, mission_epoch, mission_terminal_reason = (
+                self._mission_fields_for_instance(instance)
+            )
+
         return WorkRecord(
             work_id=job.job_id,
             kind="job",
@@ -1482,6 +1821,30 @@ class WorkResolverService:
             # the field declaration and at the top of this method.
             job_type=job_type,
             mission_liveness=mission_liveness,
+            # M1 — additive mission projection fields (mission-class,
+            # 2026-09-02). Always-on since WS3; see
+            # ``_mission_fields_for_instance`` and the S4 batched
+            # ``mission_fields`` parameter for the resolution paths.
+            mission_id=mission_id,
+            mission_epoch=mission_epoch,
+            mission_terminal_reason=mission_terminal_reason,
+            # M2 (mission-class) — anti-trap guardrails.
+            # ``outcome`` stays ``None`` on the transport (work)
+            # surface (contract draft §3.2: ``outcome: null`` on
+            # transport = "NOT done" by construction). ``mission_ref``
+            # is the cross-reference payload that ties the work row
+            # to its linked mission — derived from the same instance
+            # + resolver view that produced the M1 fields above (no
+            # new writers, no new queries beyond what already runs
+            # for ``mission_liveness``).
+            outcome=None,
+            mission_ref=_derive_m2_mission_ref_on_work(
+                work_record_status=status,
+                job_type=job_type,
+                mission_liveness=mission_liveness,
+                mission_id=mission_id,
+                agent_id=job.agent_id,
+            ),
         )
 
     def _lookup_instance(self, instance_id: str | None) -> "Instance | None":
@@ -1516,6 +1879,173 @@ class WorkResolverService:
             )
             return None
         return instance
+
+    # ── M1 mission projection helpers ──────────────────────────────────────
+
+    def _mission_resolver(self) -> "MissionResolver | None":
+        """Return the :class:`MissionResolver` to use, or ``None``.
+
+        Lazy construction: the first access builds a fresh
+        ``MissionResolver`` from ``self._instance_repo`` /
+        ``self._job_repo``; subsequent accesses reuse it. Always-on
+        since WS3 — there is no kill-switch gate (the former
+        the M1 mission-projection kill-switch OFF⇒``None`` early
+        return was removed), so ``None`` is now only possible when
+        neither repo is wired.
+
+        Lazy construction is the safe default for older tests that
+        wire ``WorkResolverService`` standalone — they don't have to
+        know about ``MissionResolver``. The shared lifetime with the
+        lifespan wiring (``daemon/api.py``) is achieved by
+        constructing the resolver there once and passing it in via
+        the constructor.
+        """
+        if self._mission_resolver_obj is None:
+            # Prefer the seed (explicit constructor injection); fall
+            # back to lazy construction against ``self._instance_repo``
+            # / ``self._job_repo`` so older tests that wire the work
+            # resolver standalone still get mission projection when
+            # the kill-switch is ON.
+            if self._mission_resolver_seed is not None:
+                self._mission_resolver_obj = self._mission_resolver_seed
+            else:
+                from daemon.services.mission_resolver import MissionResolver
+
+                self._mission_resolver_obj = MissionResolver(
+                    instance_repo=self._instance_repo,
+                    job_repo=self._job_repo,
+                )
+        return self._mission_resolver_obj
+
+    def _mission_fields_for_instance(
+        self,
+        instance: "Instance | None",
+    ) -> tuple[str | None, int | None, str | None]:
+        """Return ``(mission_id, mission_epoch, mission_terminal_reason)``.
+
+        Always-on since WS3 (the kill-switch was removed). When the
+        instance is loadable, the helper mirrors
+        :meth:`MissionResolver.resolve` (the single-row path): it
+        pre-fetches the linked JobItem DEAD-admission flag via
+        :meth:`MissionResolver._batch_jobitem_lookup` and then
+        delegates to :meth:`MissionResolver._project` with the
+        pre-fetched ``dead_linked`` value so the W4-hazard branch
+        (``mission_terminal_reason='dead_letter'``) is reachable on
+        this binding path.
+
+        M1 fix (2026-09-02) — previously this helper delegated to
+        :meth:`MissionResolver.project`, the public passthrough that
+        defaults ``dead_linked=False`` and so bypassed the W4 branch
+        (``work_resolver.py:1702`` defect, observed on the LIST /
+        DETAIL / SSE read surfaces for a DEAD linked JobItem +
+        terminal instance). Routing through the same pre-fetch
+        pattern as :meth:`MissionResolver.resolve` keeps the
+        resolution identical to the single-row contract and confines
+        the change to the W4-bound tuple element.
+
+        Batched callers (``list_work``) MUST NOT call this per row —
+        one call per row = one JobItem SELECT per row (the S4 N+1).
+        Use :meth:`_batch_mission_fields` instead (one SELECT per
+        page, engine-bound pinned).
+
+        Args:
+            instance: An already-loaded :class:`Instance` row, or
+                ``None`` when the batched lookup missed or the
+                single-row path degraded.
+
+        Returns:
+            A 3-tuple matching the three additive fields on
+            :class:`WorkRecord`. All ``None`` when the resolver is
+            degraded or when no Instance row was loadable.
+        """
+        if instance is None:
+            return None, None, None
+        resolver = self._mission_resolver()
+        if resolver is None:
+            return None, None, None
+        # Mirror MissionResolver.resolve() (single-row shape at
+        # ``mission_resolver.py:368-377``): pre-fetch the
+        # ``dead_linked`` flag via the combined SELECT helper, then
+        # delegate to ``_project`` so the W4-hazard branch
+        # (``mission_terminal_reason='dead_letter'``) fires for a
+        # DEAD linked JobItem regardless of instance liveness. The
+        # batched helper does one SELECT per call (C9 contract
+        # holds at N=1 too — see
+        # ``tests/unit/services/test_mission_resolver.py::
+        # TestBatchQueryCount``).
+        jobitems_by_id = resolver._batch_jobitem_lookup(
+            [instance.instance_id]
+        )
+        dead_linked, linked_jobs = jobitems_by_id.get(
+            instance.instance_id, (False, [])
+        )
+        record = resolver._project(instance, dead_linked, linked_jobs)
+        if record is None:
+            return None, None, None
+        return (
+            record.mission_id,
+            record.epoch,
+            record.terminal_reason,
+        )
+
+    def _batch_mission_fields(
+        self,
+        instances_by_id: dict[str, "Instance"],
+    ) -> dict[str, tuple[str | None, int | None, str | None]]:
+        """Whole-page mission-fields pre-fetch (S4 batching fix).
+
+        ONE ``MissionResolver._batch_jobitem_lookup`` SELECT for the
+        entire page replaces the per-row
+        ``_mission_fields_for_instance`` call in ``_job_to_record``
+        that issued one JobItem SELECT per row (the S4 N+1 on the
+        ``GET /api/jobs`` path — ``_query_jobs`` is the no-LIMIT
+        fetch, so a large table meant a large per-row tax). Query
+        budget for the JobItem branch of ``list_work`` is O(1) per
+        page regardless of row count: ``_query_jobs`` (1) +
+        ``_batch_instances`` (1) + ``_batch_child_instance_ids``
+        (1, root_only) + this helper's JobItem lookup (1) — pinned
+        by ``tests/unit/services/test_work_resolver_query_budget.py``.
+
+        Resolution semantics per instance are IDENTICAL to
+        :meth:`_mission_fields_for_instance` (same ``dead_linked``
+        pre-fetch → ``_project`` → W4-bound tuple extraction);
+        only the SELECT is hoisted out of the row loop. ``_project``
+        itself is pure Python — the batch helper is the only DB
+        access.
+
+        Degradation contract: a transient ``SQLAlchemyError`` inside
+        ``_batch_jobitem_lookup`` degrades to ``{}`` (its own
+        contract), which maps every instance to the all-``None``
+        tuple — the same soft-fail shape as the per-row path.
+
+        Args:
+            instances_by_id: The ``{instance_id: Instance}`` map for
+                the page (the ``_batch_instances`` output). Empty map
+                short-circuits to ``{}`` without hitting the DB.
+
+        Returns:
+            A ``{instance_id: (mission_id, mission_epoch,
+            mission_terminal_reason)}`` map. Instances whose
+            projection degraded are absent — callers treat absence
+            as the all-``None`` tuple (same read as the per-row
+            path's ``None`` fields).
+        """
+        resolver = self._mission_resolver()
+        if resolver is None or not instances_by_id:
+            return {}
+        jobitems_by_id = resolver._batch_jobitem_lookup(list(instances_by_id))
+        out: dict[str, tuple[str | None, int | None, str | None]] = {}
+        for iid, instance in instances_by_id.items():
+            dead_linked, linked_jobs = jobitems_by_id.get(iid, (False, []))
+            record = resolver._project(instance, dead_linked, linked_jobs)
+            if record is None:
+                continue
+            out[iid] = (
+                record.mission_id,
+                record.epoch,
+                record.terminal_reason,
+            )
+        return out
 
     def _query_tasks(
         self,
@@ -1628,26 +2158,35 @@ class WorkResolverService:
                 for f in status_filters:
                     if f.terminal_reason is not None:
                         if f.terminal_reason_null_allowed:
-                            branches.append(
-                                sql_and(
-                                    JobItem.admission_state == f.admission_state,
-                                    or_(
-                                        JobItem.terminal_reason == f.terminal_reason,
-                                        JobItem.terminal_reason.is_(None),
-                                    ),
-                                )
-                            )
-                        else:
-                            branches.append(
-                                sql_and(
-                                    JobItem.admission_state == f.admission_state,
+                            clauses = [
+                                JobItem.admission_state == f.admission_state,
+                                or_(
                                     JobItem.terminal_reason == f.terminal_reason,
-                                )
-                            )
+                                    JobItem.terminal_reason.is_(None),
+                                ),
+                            ]
+                        else:
+                            clauses = [
+                                JobItem.admission_state == f.admission_state,
+                                JobItem.terminal_reason == f.terminal_reason,
+                            ]
                     else:
                         # No terminal_reason filter — just the
                         # admission_state predicate.
-                        branches.append(JobItem.admission_state == f.admission_state)
+                        clauses = [JobItem.admission_state == f.admission_state]
+                    # M3 (mission-class, 2026-09-03) — per-kind
+                    # dispatch (ADR-MISSION-01 §6.6 I3 amendment).
+                    # When a filter carries ``job_type`` (set by the
+                    # ``completed`` and ``settled`` canonical-token
+                    # mappings in ``_canonical_to_job_filters``), the
+                    # SQL adds ``AND job_type = ?`` to the AND-branch.
+                    # Tasks carry ``completed``; mirrors carry
+                    # ``settled``. Pre-7c NULL-hedge is on ``completed``
+                    # only — pre-7c rows never carry
+                    # ``job_type='message'``.
+                    if f.job_type is not None:
+                        clauses.append(JobItem.job_type == f.job_type)
+                    branches.append(sql_and(*clauses))
                 if branches:
                     stmt = stmt.where(or_(*branches))
             stmt = stmt.order_by(col(JobItem.created_at).desc())

@@ -1388,10 +1388,10 @@ def test_parent_child_workflow_happy_path():
             f"Expected kind='job' for message-driven work, got "
             f"kind='{work_record['kind']}'"
         )
-        assert work_record["status"] in ("completed", "processing"), (
-            f"Expected completed/processing status, got "
+        assert work_record["status"] in ("completed", "processing", "settled"), (
+            f"Expected completed/processing/settled status, got "
             f"'{work_record['status']}'"
-        )
+        )  # M3 per-kind vocabulary: mirror JobItems render terminal 'settled'
         work_id = work_record["work_id"]
         assert work_id, "WorkRecord missing work_id"
         logger.info(

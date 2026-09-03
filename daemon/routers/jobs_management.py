@@ -469,9 +469,21 @@ async def retry_job(
     # F16 fix: route the fallback through ``_derive_legacy_status``
     # so a ``done`` job with ``terminal_reason='failed'`` reports
     # ``"failed"`` instead of the lossy map's ``"completed"``.
+    #
+    # M3 (mission-class, 2026-09-03) — pass ``job_type`` so the
+    # per-kind dispatch in ``_derive_legacy_status`` applies: mirror
+    # rows surface ``"settled"`` instead of ``"completed"`` (the
+    # transport-receipt terminal). Task rows keep ``"completed"``
+    # (the row IS its own mission). The downstream branches gate on
+    # ``"dead_letter"`` / ``"completed"`` / ``"failed"`` /
+    # ``"cancelled"`` — ``"settled"`` is a NEW terminal value that
+    # does NOT match any branch and falls through to the default
+    # terminal-state handling (the M3 mirror row is already terminal
+    # by construction; no further action required).
     status_for_branches = canonical_status or _derive_legacy_status(
         job.admission_state,
         getattr(job, "terminal_reason", None),
+        getattr(job, "job_type", None),
     )
 
     # Handle DEAD_LETTER jobs - replay from DLQ

@@ -113,6 +113,16 @@ TERMINAL_CANCEL_STATUSES = frozenset([
 # ``status="paused"`` resolve to the canonical string; pause is
 # non-terminal (paused jobs keep their admission_state='active' and
 # can be resumed back to 'processing').
+#
+# M3 (mission-class, 2026-09-03, ``feature/mission-class``) — the
+# transport-receipt terminal for mirror rows (``job_type='message'``)
+# is ``settled`` (ADR-MISSION-01 §6.6 I3 amendment). Per-kind matching
+# happens in ``_canonical_to_job_filters`` / ``_derive_legacy_status``
+# — ``settled`` is a synonym for the legacy mirror-terminal path, NOT
+# a synonym for ``completed`` (which still maps task rows). Added as
+# an identity entry so ``normalize_statuses("settled") == "settled"``
+# and the legacy-statuses filter (``statuses="settled"``) round-trips
+# the way callers expect.
 STATUS_ALIASES: dict[str, str] = {
     "running": "processing",
     "active": "processing",
@@ -129,6 +139,7 @@ STATUS_ALIASES: dict[str, str] = {
     "dlq": "dead_letter",
     "dead": "dead_letter",
     "paused": "paused",  # identity — see comment above
+    "settled": "settled",  # M3 identity — mirror-receipt terminal (see above)
 }
 
 
@@ -138,11 +149,28 @@ def normalize_statuses(statuses: list[str] | None) -> list[str] | None:
     - Case-insensitive (lowercases before lookup)
     - If a status is already a canonical value, keeps it as-is (backward compatible)
     - If a status is not a known alias, passes it through unchanged (let SQL return empty)
+
+    M3 (mission-class, 2026-09-03, ``feature/mission-class``) — the
+    ``done`` alias expands to BOTH ``completed`` (task terminal) AND
+    ``settled`` (mirror terminal) so pre-M3 callers that filtered by
+    ``statuses=["done"]`` continue to see every terminal row —
+    pre-M3 alias semantics were "any terminal", which both
+    ``completed`` (task) AND ``settled`` (mirror) satisfy. The
+    expansion is applied at normalize time so the SQL filter sees
+    the canonical token list (the SQL filter is
+    ``terminal_reason/job_type``-aware via
+    ``_canonical_to_job_filters`` and per-kind matching).
     """
     if not statuses:
         return statuses
     out: list[str] = []
     for s in statuses:
+        # ``done`` is special-cased: it is the pre-M3 "any terminal"
+        # alias and must expand to BOTH task-terminal AND
+        # mirror-terminal tokens (per A6 leader adjudication).
+        if s.lower() == "done":
+            out.extend(["completed", "settled"])
+            continue
         canonical = STATUS_ALIASES.get(s.lower(), s.lower())
         out.append(canonical)
     return out
@@ -528,9 +556,18 @@ class JobQueueService:
                 # mis-reports as ``"completed"`` (the lossy raw-map
                 # behaviour). Mirrors the F3 fix in
                 # ``WorkResolverService._job_to_record``.
+                #
+                # M3 (mission-class, 2026-09-03) — pass ``job_type``
+                # so the per-kind dispatch in ``_derive_legacy_status``
+                # applies: mirror rows surface ``"settled"`` (the
+                # transport-receipt terminal) instead of ``"completed"``
+                # (which now belongs only to the work/mission layer).
+                # Task rows keep ``"completed"`` unchanged (a task job
+                # IS its own mission; the work word stays).
                 legacy_status = _derive_legacy_status(
                     job.admission_state,
                     getattr(job, "terminal_reason", None),
+                    getattr(job, "job_type", None),
                 )
                 # Phase 7: error_message column dropped; error text lives on
                 # Instance/WorkRecord via the resolver.
@@ -1593,9 +1630,10 @@ class JobQueueService:
         offset: int = 0,
         limit: int = 50,
         include_deleted: bool = False,
+        job_types: list[str] | None = None,
     ) -> list[JobItem]:
         """List jobs with optional filters.
-        
+
         Args:
             statuses: Optional list of status filters.
             project_id: Optional project ID filter.
@@ -1603,7 +1641,14 @@ class JobQueueService:
             offset: Number of jobs to skip.
             limit: Maximum number of jobs to return.
             include_deleted: Whether to include soft-deleted jobs.
-            
+            job_types: M2 (mission-class, 2026-09-02,
+                ``feature/mission-class``) — optional list of
+                ``JobItem.job_type`` values to include
+                (``"task"`` / ``"message"``). ``None`` (default)
+                returns both kinds. Additive vs the legacy
+                ``statuses`` filter, which is RETAINED through the M3
+                window (contract draft §4).
+
         Returns:
             List of JobItem objects.
         """
@@ -1616,6 +1661,7 @@ class JobQueueService:
             offset=offset,
             limit=limit,
             include_deleted=include_deleted,
+            job_types=job_types,
         )
         return jobs
     

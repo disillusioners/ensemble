@@ -48,6 +48,7 @@ class TestRouteRegistration:
             projects_router,
             queues_router,
             dlq_router,
+            missions_router,
         )
         
         # Create API router with /api prefix
@@ -66,6 +67,7 @@ class TestRouteRegistration:
         api_router.include_router(projects_router)
         api_router.include_router(queues_router)
         api_router.include_router(dlq_router)
+        api_router.include_router(missions_router)
         
         app.include_router(api_router)
         
@@ -85,9 +87,26 @@ class TestRouteRegistration:
         for r in sorted(routes_with_methods):
             print(f"  {r}")
         
-        # We expect at least 33 endpoints based on the refactoring
-        assert len(routes_with_methods) >= 33, (
-            f"Expected at least 33 endpoints, found {len(routes_with_methods)}"
+        # We expect at least 35 endpoints based on the refactoring.
+        # Legitimate floor bump 33 → 35 (M4-i pull-forward,
+        # feature/mission-class): the missions router registers exactly
+        # two new GET routes — /api/missions (list) and
+        # /api/missions/{mission_id} (detail).
+        # Note (M2-API fix round 2026-09-02): prior scoped runs that
+        # reported "66 passed, 1 deselected" for this file
+        # mis-classified the result — there is NO persistent deselect
+        # here (no ``pyproject.toml`` addopts entry, no
+        # ``@pytest.mark.skipif``, no ``--deselect`` on this file's
+        # suite). The "1 deselected" was actually a 1-failed: the
+        # sibling test ``TestApiModuleSize::test_api_module_is_small``
+        # asserts ``daemon/api.py < 1600 lines`` (the post-Phase-3
+        # extraction threshold). On ``feature/mission-class`` the file
+        # has grown to 2024 lines (the mission-class router wiring +
+        # the kill-switch + the openapi tagging) so that threshold
+        # fails hard, not deselects. The deselect attribution is
+        # corrected here; the floor-bump rationale above is unaffected.
+        assert len(routes_with_methods) >= 35, (
+            f"Expected at least 35 endpoints, found {len(routes_with_methods)}"
         )
 
     def test_agents_endpoints_exist(self, app):

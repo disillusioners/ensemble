@@ -647,7 +647,13 @@ describe('Job Model', () => {
       expect(isLiveMissionLiveness('pending')).toBe(true);
     });
 
-    it('should treat completed/failed/cancelled as settled', () => {
+    it('should treat completed/failed/cancelled as terminal', () => {
+      // M3 (mission-class, 2026-09-03) — mission-side prose MUST NOT
+      // use the word ``settled`` (transport-receipt vocabulary). The
+      // terminal-mission liveness set is ``completed`` / ``failed`` /
+      // ``cancelled``. The test name flips to ``terminal`` (the
+      // mission-side wording) to keep the prose aligned with the
+      // vocabulary table.
       expect(isLiveMissionLiveness('completed')).toBe(false);
       expect(isLiveMissionLiveness('failed')).toBe(false);
       expect(isLiveMissionLiveness('cancelled')).toBe(false);
@@ -680,14 +686,20 @@ describe('Job Model', () => {
       expect(chip!.value).toBe('processing');
     });
 
-    it('CASE 2 — mirror row + settled mission: chip renders settled (distinct from live)', () => {
+    it('CASE 2 — mirror row + terminal mission: chip renders non-live (distinct from live)', () => {
+      // M3 (mission-class, 2026-09-03) — mission-side prose reworded:
+      // ``settled`` is a transport-receipt word; the mission-side
+      // equivalent is ``terminal`` (canonical values: ``completed`` /
+      // ``failed`` / ``cancelled``). The chip's ``live`` flag still
+      // distinguishes live from terminal — the prose rename does not
+      // change the data shape, only the human-readable wording.
       const chip = missionLivenessChip({ job_type: 'message', mission_liveness: 'completed' });
       expect(chip).not.toBeNull();
       expect(chip!.live).toBe(false);
       expect(chip!.label).toBe('mission: completed');
     });
 
-    it('CASE 2b — mirror row + every settled value stays settled', () => {
+    it('CASE 2b — mirror row + every terminal value stays non-live', () => {
       for (const v of ['completed', 'failed', 'cancelled'] as MissionLiveness[]) {
         const chip = missionLivenessChip({ job_type: 'message', mission_liveness: v });
         expect(chip!.live).toBe(false);

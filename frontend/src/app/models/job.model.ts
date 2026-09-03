@@ -1,6 +1,14 @@
 // Job Queue Models for Frontend
 
-export type JobStatus = 'pending' | 'processing' | 'paused' | 'completed' | 'failed' | 'cancelled' | 'dead_letter';
+// M3 (mission-class, 2026-09-03, ``feature/mission-class``) — the
+// transport-receipt terminal for mirror rows (``job_type='message'``)
+// is ``settled`` (ADR-MISSION-01 §6.6 I3 amendment; ADR §6.7 vocabulary
+// table). Task rows (``job_type='task'``) keep ``completed`` unchanged
+// — a task job IS its own mission and ``completed`` is the work
+// outcome, not a transport signal. ``settled`` is DISJOINT from the
+// mission-side ``MissionLiveness`` vocabulary (which still carries
+// ``completed`` for a terminal instance).
+export type JobStatus = 'pending' | 'processing' | 'paused' | 'completed' | 'settled' | 'failed' | 'cancelled' | 'dead_letter';
 
 export type JobSource = 'api' | 'telegram' | 'scheduler' | 'webhook';
 
@@ -126,8 +134,12 @@ export interface JobEvent {
 
 // Helper Functions
 
+// M3 (mission-class, 2026-09-03) — ``settled`` is now a terminal
+// value (mirror-receipt terminal). Task rows still carry ``completed``.
+// Both are terminal; the per-kind split is the whole point of the
+// rename.
 export function isTerminalStatus(status: JobStatus): boolean {
-  return status === 'completed' || status === 'failed' || status === 'cancelled' || status === 'dead_letter';
+  return status === 'completed' || status === 'settled' || status === 'failed' || status === 'cancelled' || status === 'dead_letter';
 }
 
 /**
@@ -185,8 +197,8 @@ export function isLiveMissionLiveness(value: MissionLiveness): boolean {
 /**
  * Chip colour for a ``mission_liveness`` value. Mirrors the Job
  * status palette for the overlapping names so a live mission reads
- * like an active job and a settled mission reads like its terminal
- * status. ``pending`` has no InstanceStatus source today (forward-
+ * like an active job and a terminal mission reads like its canonical
+ * end status. ``pending`` has no InstanceStatus source today (forward-
  * compat member of the ratified value space) and maps to gray.
  */
 export function getMissionLivenessColor(value: MissionLiveness): string {
@@ -220,7 +232,10 @@ export function getMissionLivenessColor(value: MissionLiveness): string {
  * for them.
  *
  * For mirror rows with a non-null ``mission_liveness`` it returns
- * the verbatim value plus the derived live/settled styling split.
+ * the verbatim value plus the derived live/terminal styling split
+ * (encoded in the ``live`` boolean — true for the non-terminal
+ * cluster pending/processing/paused, false for completed/failed/
+ * cancelled).
  */
 export interface MissionLivenessChip {
   value: MissionLiveness;
@@ -252,16 +267,26 @@ export function missionLivenessChip(
  *
  * * ``live`` — message receipt handled; parent mission is still
  *   working. The canonical status is appended verbatim.
- * * ``settled`` — message receipt handled; parent mission reached a
+ * * ``terminal`` — message receipt handled; parent mission reached a
  *   terminal canonical state. Same append.
  *
  * Both keep the canonical ``chip.value`` (not a recased / fabricated
  * string) so the user can trust the parenthetical answer.
+ *
+ * M3 (mission-class, 2026-09-03) — mission-side prose MUST NOT use
+ * the word ``settled``; ``settled`` is a transport-receipt
+ * vocabulary word that now belongs only to mirror rows. The
+ * mission-side vocabulary is the canonical ``MissionLiveness`` set
+ * (pending / processing / paused / completed / failed / cancelled)
+ * — a terminal mission liveness reads as ``completed``, ``failed``,
+ * or ``cancelled``, NOT ``settled``. The tooltip prose is reworded
+ * to use the work-outcome terminal wording (the parenthetical
+ * carries the canonical value verbatim).
  */
 export function missionLivenessChipTooltip(chip: MissionLivenessChip): string {
   return chip.live
     ? `Message receipt handled. Parent mission still working (canonical status: ${chip.value}).`
-    : `Message receipt handled. Parent mission settled (canonical status: ${chip.value}).`;
+    : `Message receipt handled. Parent mission finished (canonical status: ${chip.value}).`;
 }
 
 /**
@@ -301,7 +326,14 @@ export function getStatusColor(status: JobStatus): string {
     case 'paused':
       return '#F59E0B'; // amber-500 — suspended, non-terminal
     case 'completed':
-      return '#22C55E'; // green-500
+      return '#22C55E'; // green-500 — task terminal
+    // M3 (mission-class, 2026-09-03) — mirror-receipt terminal
+    // (``settled``). Distinct colour from ``completed`` so a settled
+    // mirror reads as transport-handled (teal) rather than work-done
+    // (green) — keeps the transport/work vocabulary split visible in
+    // the badge.
+    case 'settled':
+      return '#14B8A6'; // teal-500
     case 'failed':
       return '#EF4444'; // red-500
     case 'cancelled':

@@ -58,7 +58,13 @@ describe('JobCardComponent Fix C mission/receipt chips (logic mirror)', () => {
       expect(component.missionChipTooltip()).toContain('still working');
     });
 
-    it('CASE 2 — mirror + settled mission: receipt chip ON, mission chip ON but settled', () => {
+    it('CASE 2 — mirror + terminal mission: receipt chip ON, mission chip ON but terminal', () => {
+      // M3 (mission-class, 2026-09-03) — mission-side prose reworded:
+      // ``settled`` is a transport-receipt word; the mission-side
+      // equivalent is ``terminal`` (canonical values: ``completed`` /
+      // ``failed`` / ``cancelled``). The chip's ``live`` flag still
+      // distinguishes live from terminal — the prose rename does not
+      // change the data shape, only the human-readable wording.
       component.setJob(
         createMockLiveMissionReceipt({ mission_liveness: 'completed' })
       );
@@ -67,8 +73,8 @@ describe('JobCardComponent Fix C mission/receipt chips (logic mirror)', () => {
       expect(chip).not.toBeNull();
       expect(chip!.live).toBe(false);
       expect(chip!.label).toBe('mission: completed');
-      expect(component.missionChipTooltip()).toContain('settled');
-      // The two cases must style distinctly — live !== settled.
+      expect(component.missionChipTooltip()).toContain('finished');
+      // The two cases must style distinctly — live !== terminal.
       expect(chip!.live).not.toBe(
         missionLivenessChip(createMockLiveMissionReceipt())!.live
       );

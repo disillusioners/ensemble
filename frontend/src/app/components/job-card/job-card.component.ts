@@ -160,8 +160,12 @@ export class JobCardComponent {
    * lookup, or no linked instance — all ``null`` by design).
    *
    * Rendered through the shared ``<app-mission-liveness-chip>`` so
-   * colour, tooltip wording, and live/settled styling stay in lock-
+   * colour, tooltip wording, and live/terminal styling stay in lock-
    * step with the panel and the drawer.
+   *
+   * M3 (mission-class, 2026-09-03) — prose uses ``terminal``
+   * (mission-side vocabulary) instead of ``settled`` (transport-
+   * receipt vocabulary; belongs only to mirror rows now).
    */
   missionChip = computed(() => missionLivenessChip(this.job()));
 

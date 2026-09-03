@@ -73,8 +73,8 @@
 
 // Fix C read-model split (§8.2) — receipt affordance + mission
 // liveness chips. Same pill geometry as the kind chip so the three
-// chips read as one family. Live missions pulse; settled missions
-// render muted so a terminal receipt beside a working parent reads
+// chips read as one family. Live missions pulse; terminal missions
+// render muted so a settled receipt beside a working parent reads
 // as "handled · mission still going".
 .receipt-chip {
   display: flex;

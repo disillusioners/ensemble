@@ -133,9 +133,16 @@ _STATUS_CANONICAL_MAP: Final[dict[str, str]] = {
 # non-terminal suspended state that may transition back to ``processing``
 # on resume. ``dead_letter`` is terminal even though it originated on
 # the JobItem side; from the resolver's POV nothing else happens.
-
+#
+# M3 (mission-class, 2026-09-03, ``feature/mission-class``) — the
+# mirror-receipt terminal ``settled`` is added here so
+# ``is_terminal(record.status)`` returns ``True`` for a settled
+# WorkRecord (used by watcher notifications, replay/cancel gates,
+# and the SSE terminal-state detection). Task rows still carry
+# ``completed``; mirror rows carry ``settled``. Both are terminal;
+# the set is the union of all wire-level terminal values.
 _TERMINAL_STATUSES: Final[frozenset[str]] = frozenset(
-    {"completed", "failed", "cancelled", "dead_letter"}
+    {"completed", "settled", "failed", "cancelled", "dead_letter"}
 )
 
 
@@ -148,7 +155,11 @@ def canonicalize_status(status: str) -> str:
     * ``processing`` — in flight (maps both Task ``running`` and JobItem
       ``processing`` onto this single label)
     * ``paused`` — suspended, resumable
-    * ``completed`` — terminal: succeeded
+    * ``completed`` — terminal: succeeded (TASK-row semantic; mirror
+      rows use ``settled``)
+    * ``settled`` — terminal: mirror-row receipt closed
+      (M3 mission-class — disjoint from ``completed``;
+      ADR-MISSION-01 §6.6 I3 amendment)
     * ``failed`` — terminal: errored
     * ``cancelled`` — terminal: cancelled
     * ``dead_letter`` — terminal: failed past max retries (JobItem only)
@@ -172,10 +183,12 @@ def canonicalize_status(status: str) -> str:
 def is_terminal(status: str) -> bool:
     """Return True if ``status`` is a terminal virtual-job state.
 
-    Terminal statuses are: ``completed``, ``failed``, ``cancelled``,
-    ``dead_letter``. ``paused`` is **not** terminal — a paused work
-    unit can be resumed back to ``processing``. ``pending`` and
-    ``processing`` are also non-terminal.
+    Terminal statuses are: ``completed`` (work-outcome terminal —
+    task rows), ``settled`` (transport-receipt terminal — mirror
+    rows per ADR-MISSION-01 §6.6 I3 amendment), ``failed``,
+    ``cancelled``, ``dead_letter``. ``paused`` is **not** terminal —
+    a paused work unit can be resumed back to ``processing``.
+    ``pending`` and ``processing`` are also non-terminal.
 
     The check operates on the canonical vocabulary. Callers that
     receive raw Task/JobItem status strings should first run them
@@ -212,7 +225,9 @@ def is_terminal(status: str) -> bool:
 # same priority chain:
 
 def _derive_legacy_status(
-    admission_state: str, terminal_reason: str | None
+    admission_state: str,
+    terminal_reason: str | None,
+    job_type: str | None = None,
 ) -> str:
     """Resolve the legacy API status string for a JobItem row.
 
@@ -222,6 +237,16 @@ def _derive_legacy_status(
     unwired / unreachable — see the F16 deferral note in the defer-seam
     bugfix plan) historically called the map directly and so
     mis-reported ``failed`` / ``cancelled`` jobs as ``"completed"``.
+
+    M3 (mission-class, 2026-09-03, ``feature/mission-class``) — per-kind
+    dispatch (ADR-MISSION-01 §6.6 I3 amendment): for mirror rows
+    (``job_type == "message"``), the receipt terminal is renamed from
+    ``completed`` to ``settled``. The transport-receipt terminal is
+    disjoint from the work-outcome vocabulary; mirror rows no longer
+    collide with the mission-side ``completed``. Task rows
+    (``job_type == "task"``) keep ``completed`` unchanged — a task
+    job IS its own mission and ``completed`` is the outcome, not a
+    transport signal.
 
     This helper implements the same priority chain as the F3 fix in
     :meth:`WorkResolverService._job_to_record`, applied directly to
@@ -244,19 +269,30 @@ def _derive_legacy_status(
        ``terminal_reason`` write, and ``dead`` rows have no
        ``terminal_reason`` discriminator (they're a separate queue
        endpoint).
+    4. Per-kind dispatch (M3): when the resolved value would be
+       ``"completed"`` AND ``job_type == "message"`` → return
+       ``"settled"`` instead. Applied to BOTH branches 1 and 2 above
+       (terminal_reason="completed" AND pre-7c NULL terminal_reason
+       fall-through). All other values pass through unchanged.
 
     Args:
         admission_state: The JobItem ``admission_state`` column value
             (``"queued"`` / ``"active"`` / ``"done"`` / ``"dead"``).
         terminal_reason: The JobItem ``terminal_reason`` column value,
             or ``None`` for pre-7c rows and non-terminal states.
+        job_type: The JobItem ``job_type`` discriminator
+            (``"task"`` / ``"message"`` / ``None``). ``None`` (default)
+            keeps the legacy behaviour — used by pre-M3 callers and by
+            sites that have not been migrated to pass the
+            discriminator. New code SHOULD pass ``job_type`` so the
+            per-kind dispatch applies.
 
     Returns:
         A valid legacy status string suitable for ``JobResponse.status``
         — one of ``"pending"``, ``"processing"``, ``"completed"``,
-        ``"failed"``, ``"cancelled"``, ``"dead_letter"``. Falls back
-        to ``"pending"`` for unknown ``admission_state`` values
-        (matches the pre-F16 behaviour).
+        ``"settled"``, ``"failed"``, ``"cancelled"``, ``"dead_letter"``.
+        Falls back to ``"pending"`` for unknown ``admission_state``
+        values (matches the pre-F16 behaviour).
     """
     if admission_state == "done" and terminal_reason in _STATUS_CANONICAL_MAP:
         # Phase 7c: terminal_reason is the discriminator for done rows.
@@ -270,8 +306,18 @@ def _derive_legacy_status(
         # ``canonicalize_status`` handles the ``"aborted"`` →
         # ``"cancelled"`` mapping and is a no-op for
         # ``"completed"`` / ``"failed"`` / ``"cancelled"``.
-        return canonicalize_status(terminal_reason)
-    # Backward-compat: pre-7c rows (NULL ``terminal_reason``) and all
-    # non-done states fall through the lossy map. ``"pending"`` is the
-    # default for unknown ``admission_state`` values.
-    return _ADMISSION_TO_LEGACY_STATUS.get(admission_state, "pending")
+        resolved = canonicalize_status(terminal_reason)
+    else:
+        # Backward-compat: pre-7c rows (NULL ``terminal_reason``) and all
+        # non-done states fall through the lossy map. ``"pending"`` is the
+        # default for unknown ``admission_state`` values.
+        resolved = _ADMISSION_TO_LEGACY_STATUS.get(admission_state, "pending")
+    # M3 per-kind dispatch — mirror rows' receipt terminal is
+    # ``settled`` (transport-receipt disjoint from work-outcome).
+    # Task rows keep ``completed`` (a task job IS its own mission;
+    # the work word stays). Applied to BOTH branches above — when
+    # ``terminal_reason == "completed"`` is canonicalised AND when
+    # the pre-7c NULL fall-through yields ``completed``.
+    if resolved == "completed" and job_type == "message":
+        return "settled"
+    return resolved

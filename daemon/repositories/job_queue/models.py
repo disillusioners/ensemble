@@ -91,8 +91,15 @@ _ADMISSION_TO_LEGACY_STATUS: dict[str, str] = {
 # Set of valid legacy status strings (the values the API still
 # accepts on the ``status`` query param and emits on the response).
 # Replaces the old ``JobStatus.is_valid()`` classmethod.
+#
+# M3 (mission-class, 2026-09-03, ``feature/mission-class``) — the
+# transport-receipt terminal for mirror rows (``job_type='message'``)
+# is ``settled`` (ADR-MISSION-01 §6.6 I3 amendment). The value is
+# added to the accepted vocabulary; per-kind matching (settled for
+# mirrors, completed for tasks) is enforced in
+# ``_canonical_to_job_filters`` and ``_derive_legacy_status``.
 _VALID_LEGACY_STATUSES: frozenset[str] = frozenset({
-    "pending", "processing", "completed", "failed",
+    "pending", "processing", "completed", "settled", "failed",
     "cancelled", "dead_letter", "paused",
 })
 
@@ -123,6 +130,7 @@ JobStatus = enum.Enum(
         "PROCESSING": "processing",
         "PAUSED": "paused",
         "COMPLETED": "completed",
+        "SETTLED": "settled",  # M3 (mission-class) — mirror-receipt terminal
         "FAILED": "failed",
         "CANCELLED": "cancelled",
         "DEAD_LETTER": "dead_letter",

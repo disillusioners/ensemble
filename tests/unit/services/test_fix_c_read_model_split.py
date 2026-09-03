@@ -287,11 +287,13 @@ class TestMissionMirrorSplit:
         ``completed`` and the user read the pair as "everything
         finished".
 
-        Post-Fix-C: the mirror row still says ``completed`` (the
-        receipt IS true) but the new ``mission_liveness`` field
-        surfaces ``processing`` — so the renderer can show the
-        mirror as "message handled" without falsely claiming the
-        mission is finished.
+        Post-Fix-C: the mirror row says ``settled`` (the receipt
+        IS true — M3 per-kind dispatch: mirror terminal =
+        ``settled``, ADR-MISSION-01 §6.6 I3 amendment) and the new
+        ``mission_liveness`` field surfaces ``processing`` — so the
+        renderer can show the mirror as "message handled" without
+        falsely claiming the mission is finished. The split
+        semantics are preserved across the rename.
         """
         iid = _seed_instance(engine, instance_id="inst-live-parent", status="running")
         mirror_jid = _seed_job(
@@ -305,8 +307,13 @@ class TestMissionMirrorSplit:
         record = resolver.resolve_work(mirror_jid)
 
         assert record is not None
-        # The receipt — the mirror's own terminal truth — is unchanged.
-        assert record.status == "completed"
+        # The receipt — the mirror's own terminal truth — is renamed.
+        # M3 (mission-class, 2026-09-03): mirror terminal surfaces
+        # ``settled`` (per-kind dispatch), NOT ``completed`` (which is
+        # task-only). Task rows keep ``completed``; mirror rows carry
+        # ``settled``. See ``daemon/services/work_status.py`` and
+        # ``daemon/services/work_resolver.py::_job_to_record``.
+        assert record.status == "settled"
         # The split: this is a mirror, not a mission.
         assert record.job_type == "message"
         # The mission is still running — the renderer can now tell.
@@ -320,9 +327,12 @@ class TestMissionMirrorSplit:
         self, engine, resolver
     ) -> None:
         """A mirror on a TERMINAL mission (instance.status='completed'):
-        the receipt is ``completed`` AND the mission liveness is
-        ``completed``. Both signals agree — the renderer can safely
-        mark "everything finished".
+        the receipt is ``settled`` (M3 per-kind dispatch — mirror
+        terminal = transport-receipt disjoint from work-outcome) AND
+        the mission liveness is ``completed`` (mission-side
+        vocabulary unchanged; mirrors the instance's terminal state).
+        Both signals agree — the renderer can safely mark "everything
+        finished".
 
         This is the contrasting positive case: the renderer can
         distinguish "everything finished" (both signals terminal) from
@@ -340,7 +350,10 @@ class TestMissionMirrorSplit:
         record = resolver.resolve_work(mirror_jid)
 
         assert record is not None
-        assert record.status == "completed"
+        # M3 (mission-class, 2026-09-03) — mirror terminal is
+        # ``settled`` (per-kind dispatch); mission_liveness stays
+        # ``completed`` (mission-side vocabulary unchanged).
+        assert record.status == "settled"
         assert record.job_type == "message"
         assert record.mission_liveness == "completed"
 
@@ -564,7 +577,11 @@ class TestDegradationContract:
             record = resolver.resolve_work(mirror_jid)
 
         assert record is not None
-        assert record.status == "completed"
+        # M3 (mission-class, 2026-09-03) — mirror terminal =
+        # ``settled`` (per-kind dispatch), NOT ``completed``. Task
+        # rows keep ``completed``; mirror rows carry ``settled``.
+        # See ``daemon/services/work_resolver.py::_job_to_record``.
+        assert record.status == "settled"
         assert record.job_type == "message"
         # The lookup degraded; mission_liveness stays None and the
         # renderer falls back to the receipt-only view.
@@ -667,7 +684,9 @@ class TestListWorkSplitFields:
         default for ``list_work``):
 
         * ONE ``SELECT … FROM job_queue_items`` (the page-defining
-          query, on the ``job_repo`` engine — not counted here).
+          query, on the ``job_repo`` engine — counted here only
+          because the fixture shares one engine between both
+          repositories).
         * ONE ``SELECT … FROM instances WHERE instance_id IN (…)``
           for ``_batch_instances`` (the per-page Instance fetch the
           batched path uses for both ``status`` AND
@@ -675,13 +694,18 @@ class TestListWorkSplitFields:
         * ONE ``SELECT … FROM instances WHERE instance_id IN (…) AND
           parent_id IS NOT NULL`` for ``_batch_child_instance_ids``
           (the ``root_only`` guard — also batched).
+        * ONE ``SELECT … FROM job_queue_items`` for
+          ``_batch_mission_fields`` (the S4 fix: the whole page's
+          mission fields in a single batched JobItem SELECT —
+          without it the per-row ``_mission_fields_for_instance``
+          call inside ``_job_to_record`` is one JobItem SELECT per
+          row).
 
-        3 queries: ``_query_jobs`` + ``_batch_instances`` +
-        ``_batch_child_instance_ids``; per-row mirror lookups
-        would breach the bound. We assert ``<= 3`` to leave
-        headroom for an additional batched query if a future
-        feature adds one, while still failing on a per-row
-        regression (which would be 6+ for N=5).
+        4 queries: ``_query_jobs`` + ``_batch_instances`` +
+        ``_batch_child_instance_ids`` + ``_batch_mission_fields``;
+        per-row lookups would breach the bound. We assert ``<= 4``
+        while still failing on a per-row regression (which would be
+        10+ for N=5).
         """
         # Seed 5 mirror rows on 5 distinct instances.
         for i in range(5):
@@ -713,20 +737,22 @@ class TestListWorkSplitFields:
             records = resolver.list_work(kind="job")
 
         # 5 mirrors, each carrying mission_liveness from a distinct
-        # instance. The batched path is bounded — N+1 would be 6+.        assert len(records) == 5
+        # instance. The batched path is bounded — N+1 would be 10+.
+        assert len(records) == 5
         for record in records:
             assert record.job_type == "message"
             assert record.mission_liveness == "processing"
-        assert call_count <= 3, (
+        assert call_count <= 4, (
             f"N+1 regression: list_work(5 mirror rows) issued "
-            f"{call_count} SQL queries on the instance engine. "
+            f"{call_count} SQL queries on the shared engine. "
             f"Batched path must be bounded (job_repo SELECT + at most "
             f"3 instance-repo queries — _batch_instances, "
-            f"_batch_child_instance_ids, and any future batched "
-            f"helper). A per-row regression would push this to 6+; "
-            f"fix is to extend the batched fetch in "
-            f"_job_to_record (and the inferred-instance lookup in "
-            f"the mirror branch) to fold into _batch_instances."
+            f"_batch_child_instance_ids — plus the S4 batched "
+            f"_batch_mission_fields JobItem SELECT). A per-row "
+            f"regression would push this to 10+; fix is to extend "
+            f"the batched fetch in _job_to_record (and the "
+            f"inferred-instance lookup in the mirror branch) to "
+            f"fold into _batch_instances."
         )
 
     def test_list_work_batch_instance_lookup_failure_degrades_to_null(
@@ -839,9 +865,10 @@ class TestListWorkSplitFields:
         # Existing ``status`` answers are unchanged — the
         # receipt IS true regardless of the instance-engine
         # outage. ``done`` mirrors with ``terminal_reason='completed'``
-        # canonicalize to "completed".
+        # canonicalize to ``"settled"`` (M3 per-kind dispatch — mirror
+        # terminal is ``settled``, ADR-MISSION-01 §6.6 I3 amendment).
         statuses = sorted(r.status for r in records)
-        assert statuses == ["completed", "completed", "completed"], (
+        assert statuses == ["settled", "settled", "settled"], (
             f"W-1 degradation violated: receipt statuses changed "
             f"to {statuses!r}; the JobItem mirror must remain "
             f"authoritative for the receipt field."
@@ -979,3 +1006,82 @@ class TestJobResponseSurface:
         assert "mission_liveness" in payload
         assert payload["job_type"] is None
         assert payload["mission_liveness"] is None
+
+    def test_job_response_serializer_key_parity_with_model_fields(self) -> None:
+        """Serializer-key parity tripwire (B5): the set of keys emitted
+        by ``JobResponse._serialize`` MUST equal
+        ``set(JobResponse.model_fields)`` — always-on (WS3 removed the
+        kill-switch; the former OFF-shape pin collapsed into this).
+
+        The custom ``@model_serializer`` emits exactly the model
+        fields — no drift is allowed. If a new field lands on
+        ``JobResponse`` but the serializer forgets it, this test fails
+        (the next maintainer knows to extend the serializer). If the
+        serializer leaks an extra key the model doesn't declare, this
+        test fails the same way (anti-leakage tripwire).
+        """
+        from daemon.routers.schemas import JobResponse
+
+        response = JobResponse(
+            job_id="j-parity",
+            status="completed",
+            priority=5,
+            agent_id="developer",
+            agent_dir="/tmp/agent",
+            created_at="2025-09-02T00:00:00+00:00",
+            admission_state="done",
+            terminal_reason="completed",
+            job_type="message",
+            mission_liveness="processing",
+            mission_id="inst-x",
+            mission_epoch=1,
+            mission_terminal_reason=None,
+        )
+
+        serialized = response.model_dump()
+
+        expected = set(JobResponse.model_fields)
+        actual = set(serialized)
+        assert actual == expected, (
+            f"serializer key drift: only_in_serialized="
+            f"{sorted(actual - expected)} "
+            f"only_in_model_fields={sorted(expected - actual)}"
+        )
+
+        # Confirm the three mission_* keys are present (the
+        # always-on wire contract since WS3).
+        mission_keys = {"mission_id", "mission_epoch", "mission_terminal_reason"}
+        assert mission_keys <= set(serialized), (
+            f"always-on state must include {sorted(mission_keys)}; "
+            f"got {sorted(set(serialized) & mission_keys)}"
+        )
+
+    def test_job_response_emits_mission_keys_always_on(self) -> None:
+        """Emission test (B5): ``JobResponse.model_dump`` includes the
+        three mission_* keys — always-on since WS3 (the kill-switch
+        was removed).
+
+        Pins the emission contract for the JobResponse wire surface
+        (the ``_serialize`` collapse is a refactor; the emission
+        contract must NOT change).
+        """
+        from daemon.routers.schemas import JobResponse
+
+        response = JobResponse(
+            job_id="j-on",
+            status="completed",
+            priority=5,
+            agent_id="developer",
+            agent_dir="/tmp/agent",
+            created_at="2025-09-02T00:00:00+00:00",
+            admission_state="done",
+            mission_id="inst-on",
+            mission_epoch=1,
+            mission_terminal_reason="completed",
+        )
+
+        serialized = response.model_dump()
+
+        assert serialized["mission_id"] == "inst-on"
+        assert serialized["mission_epoch"] == 1
+        assert serialized["mission_terminal_reason"] == "completed"

@@ -4,7 +4,7 @@
   "description": "Your smart general-purpose virtual assistant — the front door to ensemble. Does quick tasks directly and delegates complex work to specialist agents via the job system.",
   "icon": "🌟",
   "color": "accent-amber",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "system": false,
   "innate_skills": ["job-orchestration", "chart", "todo"],
   "tools": {
@@ -23,7 +23,8 @@
       "job_tree",
       "job_progress",
       "job_inject",
-      "system_upgrade"
+      "system_upgrade",
+      "mission"
     ],
     "deny": ["edit_file", "write_file"]
   }

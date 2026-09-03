@@ -396,6 +396,172 @@ proves bidirectionality.
 `tests/job_queue/test_orphan_active_job_recovery.py::TestFixBPatternFMessageSkipForMirrorSliceRetired`
 (f-sweep contract, 2 tests).
 
+### 6.6 ADR-MISSION-01 — Mission noun split (transport/work vocabulary + read projection)
+
+> **Ratified 2026-09-02** from `.agents/shared/planning/mission-class/architecture-recommendation.md` §7.
+> **Status: M1 landed (168c9448); M4(i)-HTTP pull-forward landed on `feature/mission-class` (§8.4); M2 agent tools LANDED (80ed6af8, 36b63be1); M3 wire rename LANDING this cycle (WS4 sibling commits); always-on since WS3 — the M1 kill-switch was removed (§8.3 deployment posture); F7 epoch amendment ratified 2026-09-03 ("Epoch semantics (F7 amendment)" below).** Mission-first cutover
+> (M1 → M2 → M3) means consumers migrate BEFORE the wire rename lands; M3 is the rename.
+> See "Directed modifications" below for the version-gate drop that supersedes one spec sentence.
+
+**The amendment in three parts:**
+
+1. **(I3 amendment — terminal-meaning)** The derived **WIRE** status of mirror rows
+   (`job_type='message'`) in terminal-receipt state is **`settled`**. `completed` /
+   `failed` / `cancelled` are work-outcome words owned by the **mission layer** (task
+   rows and `mission_liveness`). Stored `terminal_reason` values are unchanged
+   (internal discriminators, not wire vocabulary). **Per-kind dispatch in
+   `_derive_legacy_status` is MANDATORY for any future job kind** (I3 extension).
+
+2. **(D3 declaration — evolution seam, no amendment)** Mission (`MissionResolver`,
+   mission fields, mission tools) is a **READ projection**: truthmaker = `Instance.status`
+   (+ `admission_state='dead'` for the DEAD/W4 hazard); **direction = `instance → mission`**;
+   **divergence = 0** (synchronous read-time consult; degradation contract
+   `mission_liveness=None` unchanged, §8.2). Mission is a leaf service — **no writers**.
+   Note: `mission_terminal_reason` does NOT read from `JobItem.terminal_reason` — that
+   column is an internal discriminator (§6.7); the mission-layer terminal cause derives
+   from `Instance.status` and `admission_state='dead'` directly, with DEAD admission
+   overriding liveness (W4 hazard, see §8.3).
+
+3. **(Boundary)** Mission storage remains constitutional (amendment required) until
+   declared as an append-only `mission_events` event log under D's existing trigger
+   (subordinate count >4 / family regrowth, or the N2 revive-boundary ticket). The
+   census/writer count remains **frozen at 23** through M1–M3 (read-model + vocabulary only).
+
+**Migration note — mission-first cutover (mandatory sequencing).** The M1 / M2 / M3
+phases below are the constitutional migration path; the M3 wire rename is **EFFECTIVE M3,
+not now** — the additive fields ship at M1, agent tools migrate at M2, the rename lands
+at M3 only after consumers have moved off the old word.
+
+| Phase | Scope | Effect on consumers |
+|---|---|---|
+| **M1** (this amendment's contract) | Additive `mission_id` / `mission_epoch` / `mission_terminal_reason` (§8.3) — originally behind the M1 kill-switch (default OFF), soaked ON, then **always-on since WS3** (kill-switch removed; §8.3 deployment posture); FE re-anchor `mission-settled` → `mission-terminal` (CSS chain only, ~12–15 files); vocabulary table ratified (§6.7); this prose fix (line 909). | Zero impact — additive only; fields surface on every response (always-on). |
+| **M4(i)-HTTP pull-forward** (2026-09-02, `feature/mission-class`) | `GET /api/missions` + `GET /api/missions/{mission_id}` — the mission projection's **HTTP debut** (§8.4), user-approved pull-forward of the M4(i) gated option (`architecture-recommendation.md` §5 M4 row: "HTTP `GET /missions` — gate on operator demand") ahead of the M2 agent tools. Read-only; **always-on since WS3** (the same-route kill-switch was removed); census stays at 23. | Both routes serve normally (§8.4). |
+| **M2** | **LANDED on `feature/mission-class`** (80ed6af8 + 36b63be1, 2026-09-02). Agent tools (`get_mission` / `await_mission` / `list_missions`) + structural guardrails (`outcome` token, `mission_ref` cross-ref on job payloads (`job_get`/`job_list`) — NOT on watch events, which carry the `work_id` + terminal hint and resolve via `job_get`; `watch_job(events='mission_terminal')`, `job_continue` mission-only gate); ari/jober prompt edits + `tools.allow` + minor version bump. **NUMBERING DISAMBIGUATION:** the spec's M2 = the *agent tools* milestone — NOT the HTTP surface. The `GET /missions` endpoint is the M4(i) pull-forward above (the implementation branch's "M2-API" label refers to its position as the second shipped deliverable of the mission program, not to spec-milestone M2). | Tools migrate BEFORE the wire rename; the wrong-predicate trap (ari/soul.md per-kind-status caveat, jober/soul.md per-kind-status caveat — key decisions on a single ambiguous `status`) becomes structurally hard. |
+| **M3** | **LANDING this cycle on `feature/mission-class`** (WS4 sibling commits; daemon + frontend only) — ships CLEAN, no version gate (directed modification above). Wire rename on mirror-receipt terminal status: `completed` → `settled` via per-kind dispatch in `_derive_legacy_status` on all 4 read surfaces — `WorkRecord` (work resolver, `work_resolver._job_to_record`), `JobResponse` (`routers/jobs_crud.py::_job_to_response`), `_ResolvedWork` (SSE payload, `routers/jobs_streaming.py::_ResolvedWork`), and the `routers/jobs_management.py` delegation surface (response constructed via `jobs_crud.py::_job_to_response`, per §8.2). `VALID_STATUS_VALUES`, FE switches, daemon filters, and docs are updated in this phase. | Mission tools (M2) and FE re-anchor (M1) are already in — at M3 time, no in-repo consumer treats mirror `completed` as outcome. |
+
+**Why tools precede the rename (not the spec's original M2/M3 ordering):** ari/jober are
+the burning consumer class — the ambiguity is live in their prompts today
+(ari/soul.md per-kind-status caveat, jober/soul.md per-kind-status caveat — key decisions on a single ambiguous `status`);
+operators already have FE mission chips. Tools-first retires the actual pain first.
+
+#### Directed modifications (override spec text)
+
+- **The M3 one-release version-gate / dual-render window is DROPPED.** The wire rename
+  ships CLEAN (no `api_version >= X` → `settled` branch, no legacy fallback in
+  `_derive_legacy_status`). Rationale: mission-first cutover (M1 additive + M2 tools
+  migration) already retires every in-repo consumer before M3 lands; a dual-render
+  window is redundant. The per-kind dispatch is a one-line central change. The spec
+  sentences in `architecture-recommendation.md` §5 (M3 row) and §8 risk-mitigation
+  ("version-gate + one-release window") are **superseded by this amendment**.
+- **Cross-spec drift (governance):** ADR-MISSION-01 lands as an untracked entry in
+  `.agents/shared/planning/job-task-retrospective/decisions.md` (the canonical ADR
+  log per §6.3). The ratified text in this section is the binding house record; the
+  planning tree carries the same text for the worker chain. The "ADR home in
+  `.agents/shared/planning/job-task-retrospective/`" referenced by §6.3 is the
+  untracked log file at planning-tree time; the house record is this section.
+- **Epoch semantics (F7, ratified 2026-09-03): the former distinction treating
+  `cancelled` ←TERMINATED as a beyond-revive, truly-final state is DROPPED
+  entirely.** Every terminal state is revivable — a revive opens a NEW epoch of
+  the same mission; no terminal state is beyond revival, and there is no
+  revive-class hierarchy. Full teaching + the M4(ii)
+  implementation dependency: "Epoch semantics (F7 amendment)" below. Supersedes
+  any spec text (spec §7 / risk tables) that treats `cancelled` ←TERMINATED as
+  truly-final.
+
+#### Epoch semantics (F7 amendment — ratified 2026-09-03)
+
+> **F7 (ratified user decision): revive-all = new epoch from ANY terminal state.**
+> Prompts and docs teach one rule: **terminal is revivable.**
+
+**The model.** Every terminal state — `completed`, `failed`, `cancelled`,
+`dead_letter`, any — is revivable: the next `send_message` to a terminal instance
+revives it (§3.3) and opens a **NEW epoch** of the same mission (`mission_id` is
+stable — `mission_id == instance_id`; identity survives revive). No terminal state
+is beyond revival. Epoch counting is uniform across all terminal states: one rule,
+no revive classes.
+
+**Await semantics.** `await_mission` resolves on **epoch-terminal** — the linked
+instance reaching any terminal state within the current epoch. If the mission
+revives afterwards, that resolution stands, and a **NEW await** call sees the new
+epoch — each await answers exactly one epoch.
+
+**Implementation reality — the M4(ii) dependency (never claim live epoch counts).**
+The F7 model is the binding semantic; the storage backing it does not exist yet.
+Until M4(ii) ships the append-only `mission_events` event log (part 3 above), live
+surfaces carry a **degraded epoch**:
+
+- **Wire / read-model fields:** `mission_epoch` is **constant 1** on every
+  non-degraded projection (§8.3) — it does NOT increment on revive.
+- **Agent tools:** `get_mission` / `await_mission` / `list_missions` derive a
+  **best-effort single-interval** history (current epoch only); `epoch_count` and
+  `epochs` do not reconstruct past epochs.
+
+Docs and prompts must state the model AND this dependency together — never claim
+that wire or tool surfaces expose real epoch counts today. When M4(ii) lands, this
+paragraph is the acceptance spec: `mission_epoch` increments on every revive,
+per-epoch history becomes reconstructable, and the degraded-epoch wording above
+retires.
+
+### 6.7 Two-layer vocabulary (Transport × Work)
+
+> Ratified 2026-09-02 from `.agents/shared/planning/mission-class/vocabulary-table.md` §1–§2.
+> The constitutional binding glossary backing §6.6 ADR-MISSION-01. Post-M3 target state.
+
+#### The table
+
+| Layer | Vocabulary | Owner | Source of truth |
+|---|---|---|---|
+| **Transport — mirror receipts** (`job_type='message'`) | `queued` · `active` · **`settled`** · `dead` | Job (admission) | `AdmissionState` derivation, per-kind dispatch in `_derive_legacy_status` |
+| **Transport — task jobs** (`job_type='task'`) | `queued` · `active` · `completed` · `failed` · `cancelled` · `dead_letter` (derived, as today) | Job (admission) — **their terminal IS the outcome** (task job = its own mission) | `_derive_legacy_status` unchanged for task rows |
+| **Work / Mission** (projection over instances) | `pending` · `processing` · `paused` · `completed` · `failed` · `cancelled` | Mission | `Instance.status` canonicalized (`_STATUS_CANONICAL_MAP`); every terminal value is revivable — a revive opens a NEW epoch (F7, §6.6) |
+| **Instance** (existing, untouched) | 10-member `InstanceStatus` enum | Execution | `daemon/repositories/instance/models.py:20-31` |
+| **Internal discriminator** (NOT wire) | `completed` · `failed` · `cancelled` · `aborted` · `watchover_terminated` · `orphan_retired` · `orphaned_no_task` · `pattern_f1_orphan` | `terminal_reason` column | Unchanged; consumed by `_derive_legacy_status`; absorbed by Phase-4 StrEnum planning |
+
+**Same-word-two-meanings (documented, by design).** `paused` / `completed` / `failed` /
+`cancelled` appear on BOTH the work and instance layers by design — the mission layer
+IS the instance's outcome vocabulary (`_STATUS_CANONICAL_MAP` is the canonical projection;
+every terminal value is revivable — a revive opens a NEW epoch, F7 §6.6; §8.2 value space).
+The collision that mattered — mirror-receipt `completed` reading as outcome — is
+**ELIMINATED** by §6.6 ADR-MISSION-01: `settled` is disjoint from every work and
+instance value.
+
+**Task-job `completed` STAYS** — a task job IS its own mission (delivery ≡ work); its
+`completed` is the outcome, not a transport-receipt signal. Task rows are not touched
+by the M3 wire rename; `VALID_STATUS_VALUES` keeps `completed` for `job_type='task'`
+and gains `settled` for `job_type='message'`.
+
+#### Why `settled` wins for the transport receipt terminal
+
+| Candidate | Verdict | Decisive reason |
+|---|---|---|
+| **`settled`** | ✅ **WINS** | Receipt-not-outcome (payments/ledgers: final clearing, outcome-agnostic); idiomatic read-aloud ("the mirror settled"); short, chip-renderable; disjoint value space. |
+| `handled` | ❌ | Generic verb-only; never a state value; no ledger weight. |
+| `delivered` | ❌ | Collides with chat-SSE bubble vocabulary (`chat.component.ts:1460+`) and job-card tooltip prose. |
+| `acknowledged` | ❌ | Engineering jargon; awkward chip noun; verb-used in blueprint tool output. |
+| `responded` | ❌ | Outcome-adjacent (implies the agent replied = drifts toward work). |
+| `dispatched` | ❌ | Sender-POV; heavily used as recipient-facing prose in instance tools. |
+| `done_receipt` | ❌ | Cosmetic; fails read-aloud. |
+
+**Industry grounding.** SQS Received/Deleted (receipt ≠ outcome), Celery STARTED/SUCCESS
+(task = work), Temporal workflow-vs-activity split (two nouns for two layers — closest
+structural analogue), HTTP 202 Accepted (accepted ≠ done), Kafka committed offset
+(transport position). `settled` matches the payments/ledger convention where settlement
+is finality OF THE EXCHANGE, not of the underlying business outcome.
+
+**The `settled` half-claim (M1 + M3 land together).** FE already uses
+`mission-settled` as the CSS class for mission-terminal chip styling
+(`mission-liveness-chip.component.scss:28`, `job.model.ts:173/188/223/255/264`).
+**M1 renames `mission-settled` → `mission-terminal`** — 3 identifier files renamed
+in commit 73e7ac4d; counts at e676ddea: 78 occurrences across 36 files; ~40+ prose
+occurrences remain FE-wide and were deferred to M3 with a ledger note. The FE
+identifier-token guard test landing in `frontend/` this round covers identifier
+tokens only — prose is excluded by design. With the M3 wire rename (per-kind
+dispatch — `completed` → `settled` for mirror rows on all four read surfaces) AND
+the M3 prose sweep (FE mission-side prose reworded away from `settled`) complete,
+**`settled` has exactly one owner: transport. The single-owner fact is now
+present-tense** — the prose half-claim no longer needs the M3-target framing that
+prevented doc-truth rot while the rename was in flight.
+
 ---
 
 ## 7. The Census Gate (Phase 0)
@@ -906,7 +1072,7 @@ the four wire cases have exactly one behaviour each:
 | Wire case | FE rendering |
 |---|---|
 | Mirror + live mission (`job_type='message'`, `mission_liveness ∈ {pending, processing, paused}`) | "message" receipt chip **and** a live `mission: <value>` chip (blue/amber tint, spinning sync icon). Reads as "handled · mission still going" — never as bare "completed". |
-| Mirror + settled mission (`mission_liveness ∈ {completed, failed, cancelled}`) | "message" receipt chip **and** a muted `mission: <value>` chip (check icon, settled style). Distinct styling from the live case. |
+| Mirror + terminal mission (`mission_liveness ∈ {completed, failed, cancelled}`) | "message" receipt chip **and** a muted `mission: <value>` chip (check icon, mission-terminal style). Distinct styling from the live case. |
 | Mission row (`job_type='task'`) | **Nothing extra.** The row's own status chip already IS the liveness answer. |
 | `mission_liveness=None` (degraded lookup / no linked instance / Task-backed record) | **Nothing extra.** `None` is indistinguishable-by-design; the FE never invents a state for it and falls back to receipt-only semantics. |
 
@@ -914,7 +1080,7 @@ the four wire cases have exactly one behaviour each:
 
 Canonical values are used verbatim — the FE never recases,
 translates, or fabricates a `mission_liveness` value, and the
-live/settled style split is the only FE-side interpretation.
+live/terminal style split is the only FE-side interpretation.
 
 Rendering surfaces: the Jobs page cards (both the Queues view via
 `/api/jobs` and the All Work view via `/api/work`, whose
@@ -951,6 +1117,216 @@ evicted at the 10th newer terminal row. This is inherent to the
 poll-based derivation; surfacing it would require a new spec'd
 aggregate field on an existing endpoint, not a mutation of these
 two fields.
+
+---
+
+### 8.3 M1 — Additive Mission Response Contract (always-on)
+
+> **M1 landed (168c9448); always-on since WS3 (2026-09-02).** The additive fields
+> ship unconditionally — the M1 mission-projection kill-switch was REMOVED entirely
+> (ratified user decision: always-on at deploy is THE path). No replacement flag, no
+> OFF refuge, no new gating mechanism. Revert hatch: `git revert` of the removal
+> commit + restart. Authoritative cross-ref: §6.6 ADR-MISSION-01, §6.7 vocabulary table.
+
+#### The contract
+
+The four read-model split-semantics surfaces (§8.2 split-semantics consistency contract —
+`WorkRecord`, `JobResponse`, `routers/jobs_streaming.py::_ResolvedWork`,
+`routers/jobs_management.py` delegation) carry three mission fields on every
+response:
+
+| Field | Type | Source | Meaning |
+|---|---|---|---|
+| `mission_id` | `str` | `Instance.instance_id` | Mission identity. `mission_id == instance_id` (one mission per instance, epoch-framed — §6.6 identity verdict). Present for mirror rows (`job_type='message'`); **equal to `instance_id`** for mission rows (`job_type='task'`), since task rows ARE their own mission. |
+| `mission_epoch` | `int` (constant 1 until M4(ii); `None` only on degraded lookups) | Derived from `Instance.status` | **Constant 1 for every non-degraded projection** until M4(ii) ships `mission_events` to track real epoch history. NOT `None` when terminal — a fully terminal instance with a non-degraded lookup still emits `mission_epoch=1`. `None` is reserved for degraded lookups (single-row / batched `SQLAlchemyError` per §8.2 degradation contract) and the pre-spawn queue stage where no instance is yet bound. |
+| `mission_terminal_reason` | `str \| None` | Derived from `admission_state='dead'` + instance liveness (W4 hazard preserved: DEAD admission overrides liveness for this field) | Populated per the current implementation — **NOT mirror-only**: when the linked instance is in a terminal state (`{completed, failed, cancelled}`) OR the JobItem is in `admission_state='dead'`, the field carries the terminal cause. W4 intent kept: a mirror row whose parent mission is still live but whose own admission is `dead` stamps the dead-side terminal cause (DEAD admission overrides instance liveness for this field). `None` for live missions and degraded lookups. Mission rows (`job_type='task'`): redundant with the row's own `terminal_reason` and therefore `None` (the row IS its own mission — "task job `completed` STAYS", §6.7). The attribution is **not** to `JobItem.terminal_reason` — that column is an internal discriminator consumed by `_derive_legacy_status` (§6.7); `mission_terminal_reason` answers the mission-layer question and reads from instance + admission state directly. |
+
+All three fields are **additive** (no existing field renamed or repurposed) and
+**preserve the existing `mission_liveness` semantics bit-for-bit** (§8.2 value space
+and degradation contract unchanged). The §8.2 "one answer per question" guarantee is
+preserved: `mission_liveness` still answers work-outcome liveness; the three new
+fields answer the **identity, lifetime framing, and terminal-cause** of that mission —
+distinct questions that the previous single-field answer could not separate.
+
+#### Null-vs-absent semantics (consistent with §8.2)
+
+Per the §8.2 split-semantics consistency contract, the SSE patch path uses
+present-as-null on both `jobs[]` and `works[]` paths: an explicit `null` in the
+payload CLEARS the field (degraded lookup); an absent key KEEPS the previous value
+(stale-tolerant). The three mission fields inherit this contract:
+
+- **Explicit `null`** in the payload (any surface, batched or single-row) → renderer
+  CLEARS the field; falls back to "split semantics unavailable, receipt-only view"
+  (mirrors §8.2 `mission_liveness=None` semantics).
+- **Absent key** in the patch payload → renderer KEEPS the previous value
+  (stale-tolerant); does NOT invent a value.
+- **`mission_liveness=None` is still indistinguishable-by-design** across the four
+  §8.2 cases (no mission row / mission row / degraded single-row lookup / degraded
+  batch lookup). The three new fields do not change that — adding a renderer that
+  needs to surface the lookup-failure case requires a separate spec'd additive
+  field, NOT a mutation of `None`'s meaning (§8.2 future-renderer tripwire).
+
+#### Deployment posture — always-on (kill-switch removed)
+
+Mission projection ships **always-on**. The former M1 kill-switch env var
+(default OFF) was removed entirely at WS3
+(2026-09-02, ratified user decision) — always-on at deploy is THE path. There is
+**no replacement flag, no OFF refuge, and no new gating mechanism**.
+
+**Revert hatch:** if a deploy needs to unwind mission projection, the sanctioned
+path is `git revert` of the removal commit + restart. There is no runtime toggle.
+(The staged-soak discipline this flag once served — the
+`ENSEMBLE_WC_WAKE_ENQUEUE` precedent — is retired with it.)
+
+#### Migration sequencing (consistent with §6.6)
+
+1. **M1 (this section)** — additive fields landed behind the original kill-switch
+   (soaked ON in production); FE re-anchor (§6.7); vocabulary table ratified.
+   **Always-on since WS3** — the fields surface on every response.
+2. **M2** — agent tools (`get_mission` / `await_mission` / `list_missions`) consume
+   the three fields; structural guardrails (`outcome` token, `mission_ref` cross-ref).
+3. **M3** — wire rename on mirror-receipt terminal status (`completed` → `settled`)
+   per §6.6 I3 amendment. At M3 time, mission tools (M2) are already migrated; the
+   rename ships clean.
+
+The §8.2 split-semantics surfaces carry `mission_id` / `mission_epoch` /
+`mission_terminal_reason` on every response (always-on since WS3; during the M1 soak
+window they were documented-but-absent — that window is closed).
+
+### 8.4 M4(i)-HTTP — `GET /missions` Endpoint Contract (pull-forward, always-on)
+
+> **Landed on `feature/mission-class` (2026-09-02) — the user-approved pull-forward of
+> the M4(i) gated option ("HTTP `GET /missions` — gate on operator demand",
+> `architecture-recommendation.md` §5 M4 row) ahead of the M2 agent tools.** The spec is
+> SILENT on this endpoint's list contract — the "W2 design" referenced by the planning
+> tree's approach-comparison is NOT in the tree. Every list-contract choice below is a
+> **pre-directed improvisation** and is marked **[FLAGGED]**; zero silent deviations.
+> Read-only throughout: `MissionResolver` stays a leaf READ service, no JobItem
+> creation, no admission-state writes — the census stays **frozen at 23**.
+
+#### The routes
+
+Both routes live in `daemon/routers/missions.py` (`APIRouter(prefix="/missions")`,
+mounted under `/api` next to `work_router` in `daemon/api.py`), wired via the
+queues/work DI pattern (`set_missions_resolver` + `get_missions_resolver` 503 factory)
+against the same READ-only `InstanceRepository` / `JobRepository` the
+`WorkResolverService` consumes.
+
+| Route | Source path | Contract |
+|---|---|---|
+| `GET /api/missions` | `MissionResolver.resolve_page()` (new paged batch path) | Paged list of ALL instances' missions. ``resolve_page``'s production debut, page-shaped; ``resolve_many`` remains tests-only. |
+| `GET /api/missions/{mission_id}` | `MissionResolver.resolve()` — the dead-link pre-fetch path | Full `MissionRecord` incl. `epoch` + `terminal_reason` (§8.3 semantics). MUST NOT route through `project()` — its `dead_linked=False` default is the S4 bug class (a DEAD linked JobItem would surface `failed` instead of `dead_letter`). Unknown id ⇒ 404. |
+
+Wire schemas (`daemon/routers/schemas.py`): `MissionResponse` mirrors `MissionRecord`
+field-for-field (`mission_id`, `agent_id`, `parent_mission_id`, `liveness`,
+`terminal_reason`, `epoch`, `linked_jobs`, `started_at`, `last_activity_at`);
+`MissionListResponse` is the list envelope.
+
+#### Deployment posture — always-on (the OFF-gate section is retired)
+
+The endpoint serves unconditionally. The former kill-switch gating table (OFF ⇒ 404
+fail-closed on both routes, [FLAGGED] spec-silent OFF behavior) was removed at WS3
+together with the kill-switch itself — mission projection is always-on, so there is
+no OFF state to specify. An **unwired resolver still answers 503** (the Depends
+factory fires before the handler body; lifespan guarantees wiring in
+production/tests, so 503 is unreachable in those environments). Revert hatch for an
+unwind: `git revert` of the removal commit + restart (§8.3 deployment posture).
+
+#### List contract (all choices [FLAGGED] — spec-silent)
+
+- **Scope: ALL instances' missions.** One mission per instance, identity =
+  `instance_id` (§6.6 identity verdict). NO implicit non-terminal default, NO
+  leader/root filtering. Subtree filtering is a CLIENT-side concern:
+  `parent_mission_id` is carried on every record and client-side tree-filtering on it
+  is the sanctioned pattern.
+- **Ordering: `last_activity_at DESC NULLS LAST`, deterministic tiebreak
+  `mission_id` ASC** (= `instance_id` ASC) — applied IN SQL, never a Python-side sort
+  of the full table. Backend-internality caution: `instances.last_activity_at` is
+  TEXT/tz-aware on SQLite and tz-naive TIMESTAMP on PG (the
+  `_parse_job_created_at` caution in `job_recovery_service.py`); ISO-8601 sorts
+  lexicographically correctly WITHIN a backend — never compare these values across
+  backends in Python.
+- **Filters:** `liveness` — canonical mission vocabulary
+  (`pending|processing|paused|completed|failed|cancelled`), single value or
+  comma-separated multi (OR), applied IN SQL as one `IN`-clause via the INVERTED
+  `_STATUS_CANONICAL_MAP` restricted to the Instance-status domain
+  (`processing` → `{idle, queued, running, waiting, waiting_children}`, etc.).
+  `dead_letter` is NOT an accepted filter value (it is a `terminal_reason`, never a
+  liveness — §8.2); unknown values ⇒ **400** (the work-router `kind` precedent: a typo
+  must not silently return an empty list). `pending` is in the accepted vocabulary but
+  has NO InstanceStatus source member today (§8.2 value-space note) — filtering on it
+  alone honestly matches nothing (`total=0`, not degraded). `agent_id` — exact-match
+  SQL filter on `Instance.agent_id`. Filters compose with AND semantics.
+- **Pagination: bounded limit/offset** per the repo list-endpoint convention — default
+  `DEFAULT_PAGE_LIMIT` (10), clamped to `[1, MAX_PAGE_LIMIT]` (100); offset clamped to
+  ≥ 0. The page cap (100) follows the `instances.py` clamp convention.
+- **Envelope** (`MissionListResponse`): `{missions, total, limit, offset, has_more,
+  degraded}` — the `{total, limit, offset, has_more}` part follows the
+  `InstanceListResponse` convention; three honesty-carrying deviations are [FLAGGED]
+  spec-silent additions: `total` and `has_more` are NULLABLE (`null` = "count
+  unavailable" — a degraded count leg; MUST NOT be rendered as `0`/`false`, which
+  would claim a different fact), and `degraded: bool` is an explicit whole-page-degrade
+  marker (empty rows because the count/page SQL leg failed).
+
+#### Performance bound — ≤3 SELECTs per page, zero per-row lookups
+
+`resolve_page()` issues **≤3 SELECTs per page** regardless of page size, all batched:
+(1) `SELECT count(*)` with the filter WHERE, (2) the paged `SELECT … FROM instances`
+with filters + ordering + LIMIT/OFFSET in SQL, (3) ONE batched `job_queue_items` SELECT
+via `instance_id IN (…)` for the W4 hazard + `linked_jobs` (the C9 combined-SELECT
+helper). The empty-final-page case short-circuits leg 3 — when the paged Instance
+SELECT returns zero rows (e.g. filter on a source-less liveness, or offset beyond the
+total), `_batch_jobitem_lookup` exits on its empty-input guard
+(`mission_resolver.py:870-871`) without opening a session, so that page fires **2
+SELECTs**, not 3. Tests pin the flat bound against the populated-page case; an empty-
+final-page pin is the §8.4 floor note. The bound is pinned by an ENGINE event-listener
+(`before_cursor_execute` spy) counting real SELECTs during the HTTP request — NOT
+mock counting — including a flat-as-page-doubles assertion
+(`tests/unit/routers/test_missions_api.py::TestEngineBoundQueryCount`).
+
+#### Degradation contract (§8.2 shape — NO 500 anywhere in the projection path)
+
+| Failure (real `SQLAlchemyError`, e.g. instance-engine outage) | HTTP | Shape | Warnings |
+|---|---|---|---|
+| List: count OR paged-instance leg fails | **200** | empty `missions`, `total=null`, `has_more=null`, `degraded=true` (whole-page degrade; remaining legs skipped) | exactly ONE |
+| List: batched JobItem leg fails | **200** | rows SURVIVE with instance-derived fields; `linked_jobs=[]`; W4 sub-check unavailable — the liveness-derived terminal reason stands as the answer (§8.2 indistinguishable-by-design); `degraded=false` | exactly ONE |
+| Detail: instance lookup fails | **200** | the degraded None-fields shape (`mission_id=null` … `linked_jobs=[]`) — NOT 404 (the id cannot be proven missing) and NOT 500 | exactly ONE |
+| Detail: JobItem lookup fails | **200** | instance-derived fields survive; `linked_jobs=[]`; W4 sub-check skipped | exactly ONE |
+| Detail: unknown id (no Instance row) | **404** | the only true-miss shape — distinct from the degraded 200 per the §8.3 null-vs-absent discipline | — |
+
+**[FLAGGED] honest deviation:** the task framing's "degraded rows (unknown-shape:
+None-fields, `mission_id` preserved) for list" is information-theoretically UNREACHABLE
+in this design: when the count/page leg fails, no ids are known (the paged Instance
+SELECT is the identity fetch — ordering + pagination live in that same statement, per
+the SQL-only constraint), so there is no `mission_id` to preserve; when it succeeds,
+rows are FULLY populated (strictly more information than the unknown shape). The
+whole-page degrade + `degraded=true` marker is the documented answer. The detail route
+DOES honor "200 with None-fields" exactly (`resolve()`'s degraded contract).
+
+#### W4 `dead_letter` pin at the HTTP binding
+
+The S4 lesson (ON-path dead-letter scenario surfacing `failed` instead of
+`dead_letter`, fixed at 7852aeab) is pinned at the WIRE, not merely the resolver:
+`tests/unit/routers/test_missions_api.py::TestW4DeadLetterBinding` asserts
+`terminal_reason == "dead_letter"` on BOTH routes for a RUNNING instance with a DEAD
+linked JobItem, plus the soft-delete exclusion (`deleted_at IS NOT NULL` rows do not
+trigger W4). The detail route's docstring carries the same hazard note that guards
+future callers against routing through `project()`.
+
+#### Test surface
+
+`tests/unit/routers/test_missions_api.py` (unit, 37 tests, file-backed SQLite
+`tmp_path` + `NullPool` + WAL): route registration + always-on serving (the former
+kill-switch ON/OFF matrix and its OFF-path zero-query pins were removed with the
+kill-switch itself at WS3 — `TestRouteRegistrationAndAlwaysOn` asserts both routes
+serve unconditionally), list contract (identity/fields, ALL-instances scope, liveness
+single/multi/case/whitespace/unknown-400/`dead_letter`-rejected/`pending`-sourceless,
+`agent_id`, filter composition), ordering (DESC + NULLS LAST + tiebreak) and pagination
+(bounds/offset/cap/default), detail contract (404 unknown, terminal fields, epoch
+constant 1, `started_at` fallback, `linked_jobs`), W4 binding, degradation binding
+(real dropped tables, 200-not-500, exactly-one-warning), and the engine-bound
+three-SELECT page bound. Route-count floor bumped 33 → 35 in
+`tests/unit/test_api_router_extraction.py` (the two new routes).
 
 ---
 
