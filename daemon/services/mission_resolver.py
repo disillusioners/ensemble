@@ -316,8 +316,8 @@ class MissionResolver:
       canonical terminal values are revivable per F7
       (``completed`` / ``cancelled`` / ``failed`` / ``dead_letter``)
       — each opens a fresh epoch when the mission re-enters
-      RUNNING (the prior ``cancelled``/``failed`` as
-      true-terminal wording was retired by F7).
+      RUNNING (the prior wording that marked
+      ``cancelled``/``failed`` as un-revivable was retired by F7).
     * **W4 hazard** — a linked ``JobItem`` with
       ``admission_state='dead'`` flips ``terminal_reason`` to
       ``"dead_letter"`` regardless of a since-revived instance.
