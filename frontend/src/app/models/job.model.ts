@@ -197,8 +197,8 @@ export function isLiveMissionLiveness(value: MissionLiveness): boolean {
 /**
  * Chip colour for a ``mission_liveness`` value. Mirrors the Job
  * status palette for the overlapping names so a live mission reads
- * like an active job and a settled mission reads like its terminal
- * status. ``pending`` has no InstanceStatus source today (forward-
+ * like an active job and a terminal mission reads like its canonical
+ * end status. ``pending`` has no InstanceStatus source today (forward-
  * compat member of the ratified value space) and maps to gray.
  */
 export function getMissionLivenessColor(value: MissionLiveness): string {
@@ -232,7 +232,10 @@ export function getMissionLivenessColor(value: MissionLiveness): string {
  * for them.
  *
  * For mirror rows with a non-null ``mission_liveness`` it returns
- * the verbatim value plus the derived live/settled styling split.
+ * the verbatim value plus the derived live/terminal styling split
+ * (encoded in the ``live`` boolean — true for the non-terminal
+ * cluster pending/processing/paused, false for completed/failed/
+ * cancelled).
  */
 export interface MissionLivenessChip {
   value: MissionLiveness;
