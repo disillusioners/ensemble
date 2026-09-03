@@ -149,11 +149,28 @@ def normalize_statuses(statuses: list[str] | None) -> list[str] | None:
     - Case-insensitive (lowercases before lookup)
     - If a status is already a canonical value, keeps it as-is (backward compatible)
     - If a status is not a known alias, passes it through unchanged (let SQL return empty)
+
+    M3 (mission-class, 2026-09-03, ``feature/mission-class``) — the
+    ``done`` alias expands to BOTH ``completed`` (task terminal) AND
+    ``settled`` (mirror terminal) so pre-M3 callers that filtered by
+    ``statuses=["done"]`` continue to see every terminal row —
+    pre-M3 alias semantics were "any terminal", which both
+    ``completed`` (task) AND ``settled`` (mirror) satisfy. The
+    expansion is applied at normalize time so the SQL filter sees
+    the canonical token list (the SQL filter is
+    ``terminal_reason/job_type``-aware via
+    ``_canonical_to_job_filters`` and per-kind matching).
     """
     if not statuses:
         return statuses
     out: list[str] = []
     for s in statuses:
+        # ``done`` is special-cased: it is the pre-M3 "any terminal"
+        # alias and must expand to BOTH task-terminal AND
+        # mirror-terminal tokens (per A6 leader adjudication).
+        if s.lower() == "done":
+            out.extend(["completed", "settled"])
+            continue
         canonical = STATUS_ALIASES.get(s.lower(), s.lower())
         out.append(canonical)
     return out

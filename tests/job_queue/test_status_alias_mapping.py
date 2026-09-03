@@ -64,9 +64,15 @@ class TestNormalizeStatusesAliases:
         assert result == ["processing"]
 
     def test_multiple_aliases_run_done(self):
-        """Case 4: multiple aliases each resolve to their canonical value."""
+        """Case 4: multiple aliases each resolve to their canonical value.
+
+        M3 (mission-class) — ``done`` expands to BOTH ``completed``
+        (task terminal) AND ``settled`` (mirror terminal) so
+        pre-M3 callers filtering by ``statuses=["done"]`` see every
+        terminal row.
+        """
         result = normalize_statuses(["running", "done"])
-        assert result == ["processing", "completed"]
+        assert result == ["processing", "completed", "settled"]
 
     def test_unknown_value_passes_through(self):
         """Case 5: unknown status value passes through unchanged (no crash)."""
@@ -87,6 +93,32 @@ class TestNormalizeStatusesAliases:
         assert normalize_statuses(["dlq"]) == ["dead_letter"]
         assert normalize_statuses(["dead"]) == ["dead_letter"]
 
+    def test_done_alias_expands_to_completed_and_settled(self):
+        """A6 pin (mission-class, 2026-09-03) — the ``done`` alias
+        expands to BOTH task-terminal ``completed`` AND
+        mirror-terminal ``settled`` so pre-M3 ``statuses=["done"]``
+        callers see every terminal row (the pre-M3 alias
+        semantics were "any terminal").
+
+        Leader adjudication: ``STATUS_ALIASES["done"]`` previously
+        narrowed to the completed token only — pre-M3 callers
+        silently lost settled mirrors after the M3 per-kind
+        rename. The expansion restores the pre-M3 alias surface
+        while preserving the per-kind SQL dispatch (the SQL
+        filter routes ``completed`` to task rows and ``settled``
+        to mirror rows via ``_canonical_to_job_filters``).
+        """
+        # Bare ``done`` expands to BOTH tokens.
+        assert normalize_statuses(["done"]) == ["completed", "settled"]
+        # Case-insensitive — same expansion.
+        assert normalize_statuses(["DONE"]) == ["completed", "settled"]
+        assert normalize_statuses(["Done"]) == ["completed", "settled"]
+        # ``done`` coexists with other aliases in the same list —
+        # each alias is independently expanded.
+        assert normalize_statuses(["done", "running"]) == [
+            "completed", "settled", "processing",
+        ]
+
 
 class TestNormalizeStatusesCaseInsensitive:
     """Test case 2: case-insensitive alias resolution."""
@@ -99,8 +131,9 @@ class TestNormalizeStatusesCaseInsensitive:
     def test_title_and_pascal_case(self):
         """Capitalized variants still resolve."""
         result = normalize_statuses(["Done", "Completed", "FAILED"])
-        # "Done" -> "completed" (alias), "Completed" -> "completed" (canonical), "FAILED" -> "failed" (canonical)
-        assert result == ["completed", "completed", "failed"]
+        # "Done" -> ["completed", "settled"] (A6 expansion), "Completed" -> "completed"
+        # (canonical), "FAILED" -> "failed" (canonical).
+        assert result == ["completed", "settled", "completed", "failed"]
 
 
 class TestNormalizeStatusesCanonical:
@@ -124,9 +157,10 @@ class TestNormalizeStatusesCanonical:
         # Phase 5: ``STATUS_ALIASES`` treats the admission vocabulary
         # as natural-language aliases for the legacy ``JobStatus``
         # values (``queued`` → ``pending``, ``active`` →
-        # ``processing``, ``done`` → ``completed``, ``dead`` →
-        # ``dead_letter``). The canonical ``JobStatus`` values are
-        # then re-mapped back to ``AdmissionState`` values via
+        # ``processing``, ``done`` → ``completed`` + ``settled`` after
+        # A6 mission-class expansion, ``dead`` → ``dead_letter``).
+        # The canonical ``JobStatus`` values are then re-mapped back
+        # to ``AdmissionState`` values via
         # ``_JOB_STATUS_TO_ADMISSION`` in the SQL filter (round-trip
         # in ``JobRepository.list`` / ``count``). Assert the round
         # trip via the production alias map.
@@ -134,8 +168,11 @@ class TestNormalizeStatusesCanonical:
             JobStatus.PENDING.value,
             JobStatus.PROCESSING.value,
             JobStatus.COMPLETED.value,
+            JobStatus.SETTLED.value,  # A6: ``done`` expands to both
             JobStatus.COMPLETED.value,
+            JobStatus.SETTLED.value,
             JobStatus.COMPLETED.value,
+            JobStatus.SETTLED.value,
             JobStatus.DEAD_LETTER.value,
         ]
 

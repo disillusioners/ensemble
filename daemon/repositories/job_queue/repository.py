@@ -995,8 +995,6 @@ class JobRepository:
             # per-kind. ``_statuses_to_admission`` is preserved for
             # its collapsing semantic; we layer per-kind predicates
             # on top.
-            completed_terminal_reason_clauses: list = []  # OR-branches for terminal_reason
-            job_type_clauses: dict[str, list[str]] = {}  # job_type → list of tokens that bind it
             # Build per-kind predicates: when ``completed`` is in
             # statuses, restrict to ``job_type='task'`` (with NULL
             # hedge on terminal_reason); when ``settled`` is in
@@ -1022,16 +1020,18 @@ class JobRepository:
                 # the result to task rows with terminal_reason
                 # 'completed' (with NULL hedge for pre-7c rows);
                 # ``settled`` restricts to mirror rows with
-                # terminal_reason 'completed' (strict). Both are
-                # applied as additional AND-clauses so the IN-clause
-                # narrows by admission and the per-kind clause
-                # narrows by row kind.
+                # terminal_reason 'completed' (strict). The two
+                # predicates are OR-combined (a row matches when
+                # it satisfies EITHER kind) — see the corresponding
+                # list-query branch for the rationale (the post-A6
+                # ``done`` alias expansion is the primary driver).
+                per_kind_branches: list = []
                 if has_completed_token:
                     # ``completed`` ⇒ task rows only. Pre-7c hedge
                     # (terminal_reason IS NULL) is included — pre-7c
                     # rows predate the rename and never carry
                     # ``job_type='message'``.
-                    count_stmt = count_stmt.where(
+                    per_kind_branches.append(
                         and_(
                             JobItem.job_type == "task",
                             or_(
@@ -1044,12 +1044,14 @@ class JobRepository:
                     # ``settled`` ⇒ mirror rows only. Strict — no
                     # NULL hedge (pre-7c rows never carry
                     # ``job_type='message'``).
-                    count_stmt = count_stmt.where(
+                    per_kind_branches.append(
                         and_(
                             JobItem.job_type == "message",
                             JobItem.terminal_reason == "completed",
                         )
                     )
+                if per_kind_branches:
+                    count_stmt = count_stmt.where(or_(*per_kind_branches))
             if project_id:
                 count_stmt = count_stmt.where(JobItem.project_id == project_id)
             if queue_id:
@@ -1068,8 +1070,16 @@ class JobRepository:
                     stmt = stmt.where(JobItem.admission_state.in_(admission_set))
                 # M3 per-kind predicates — mirrors the count query
                 # above so the page and the total stay consistent.
+                # The two predicates are OR-combined (a row matches
+                # when it satisfies EITHER kind); an AND-combine
+                # would produce zero rows for any input that mixes
+                # ``completed`` and ``settled`` (the post-A6
+                # ``done`` alias expansion is the primary driver —
+                # but the same logic applies to any caller that
+                # passes both tokens explicitly).
+                per_kind_branches: list = []
                 if has_completed_token:
-                    stmt = stmt.where(
+                    per_kind_branches.append(
                         and_(
                             JobItem.job_type == "task",
                             or_(
@@ -1079,12 +1089,14 @@ class JobRepository:
                         )
                     )
                 if has_settled_token:
-                    stmt = stmt.where(
+                    per_kind_branches.append(
                         and_(
                             JobItem.job_type == "message",
                             JobItem.terminal_reason == "completed",
                         )
                     )
+                if per_kind_branches:
+                    stmt = stmt.where(or_(*per_kind_branches))
             if project_id:
                 stmt = stmt.where(JobItem.project_id == project_id)
             if queue_id:
