@@ -56,7 +56,7 @@ class JobResponse(BaseModel):
     """Response for a single job."""
     
     job_id: str = Field(..., description="Unique job identifier")
-    status: str = Field(..., description="Job status (pending, processing, completed, failed, cancelled, dead_letter)")
+    status: str = Field(..., description="Job status (pending, processing, completed, settled, failed, cancelled, dead_letter)")
     admission_state: str = Field(default="queued", description="Admission state (queued, active, done, dead)")
     priority: int = Field(..., description="Job priority (1-10)")
     agent_id: str = Field(..., description="Agent ID (e.g., 'developer')")
@@ -133,7 +133,7 @@ class JobResponse(BaseModel):
     )
     # M1 (mission-class, 2026-09-02) — additive mission projection
     # fields. Always-on since WS3 (the
-    # the M1 mission-projection kill-switch kill-switch was removed);
+    # M1 mission-projection kill-switch was removed);
     # see ``daemon/services/mission_resolver.py``. They surface
     # identity (``mission_id`` == ``instance_id``), the current epoch
     # number, and the mission-side terminal discriminator
@@ -1176,7 +1176,7 @@ class PlaneConfigResponse(BaseModel):
 # HTTP surface for the mission read-model projection (docs/job-task-system.md
 # §8.4). Additive to the schema module — mirrors ``MissionRecord``
 # (``daemon/services/mission_resolver.py``) field-for-field. Always-on
-# since WS3 (the the M1 mission-projection kill-switch kill-switch
+# since WS3 (the M1 mission-projection kill-switch
 # was removed; the routes serve normally with no gating).
 
 

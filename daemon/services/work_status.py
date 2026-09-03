@@ -155,7 +155,11 @@ def canonicalize_status(status: str) -> str:
     * ``processing`` — in flight (maps both Task ``running`` and JobItem
       ``processing`` onto this single label)
     * ``paused`` — suspended, resumable
-    * ``completed`` — terminal: succeeded
+    * ``completed`` — terminal: succeeded (TASK-row semantic; mirror
+      rows use ``settled``)
+    * ``settled`` — terminal: mirror-row receipt closed
+      (M3 mission-class — disjoint from ``completed``;
+      ADR-MISSION-01 §6.6 I3 amendment)
     * ``failed`` — terminal: errored
     * ``cancelled`` — terminal: cancelled
     * ``dead_letter`` — terminal: failed past max retries (JobItem only)
