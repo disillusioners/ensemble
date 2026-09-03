@@ -655,10 +655,14 @@ export class JobsComponent implements OnInit, OnDestroy {
               // Fix C (§8.2) — propagate the split-semantics fields
               // through the jobs[] patch path too (mirrors the works[]
               // path below). The previous round only patched works[],
-              // so a live mission that settled while the Queues view
+              // so a live mission that finished while the Queues view
               // was open stayed pinned to its stale live chip. See
-              // job-queue-indicator's liveMissionIds: a settled
+              // job-queue-indicator's liveMissionIds: a terminal
               // receipt must immediately drop out of the badge.
+              //
+              // M3 (mission-class, 2026-09-03) — prose uses
+              // ``terminal`` (mission-side vocabulary) instead of
+              // ``settled`` (transport-receipt vocabulary).
               ...(nextJobType !== undefined ? { job_type: nextJobType } : {}),
               ...(nextMissionLiveness !== undefined ? { mission_liveness: nextMissionLiveness } : {}),
             }

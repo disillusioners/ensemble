@@ -398,7 +398,7 @@ describe('JobQueueIndicatorComponent Logic', () => {
     it('CASE B — 0 jobs + 0 missions: badge reads bare "0/0" idle', () => {
       component.setActiveJobs([]);
       component.setRecentJobs([
-        // Settled receipt: handled AND mission finished — must NOT count.
+        // Terminal receipt: handled AND mission finished — must NOT count.
         createMockJob({
           job_id: 'm1', status: 'completed', completed_at: new Date().toISOString(),
           instance_id: 'done-leader', job_type: 'message', mission_liveness: 'completed',
@@ -467,7 +467,15 @@ describe('JobQueueIndicatorComponent Logic', () => {
       expect(component.liveMissionCount()).toBe(1);
     });
 
-    it('should ignore mirror rows whose liveness is a settled value even at volume', () => {
+    it('should ignore mirror rows whose liveness is a terminal value even at volume', () => {
+      // M3 (mission-class, 2026-09-03) — mission-side prose reworded:
+      // ``settled`` is a transport-receipt word; the mission-side
+      // equivalent is ``terminal`` (canonical values: ``completed`` /
+      // ``failed`` / ``cancelled``). The test exercises the same
+      // pre-rename logic — terminal mission liveness means the
+      // mission is no longer live, so the live-mission counter stops
+      // counting it. The data shape (``mission_liveness``) is
+      // unchanged.
       component.setActiveJobs([]);
       component.setRecentJobs(
         ['completed', 'failed', 'cancelled'].map((lv, i) =>

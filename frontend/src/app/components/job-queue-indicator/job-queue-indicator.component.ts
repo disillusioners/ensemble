@@ -147,7 +147,11 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
    * ``mission_liveness`` is computed read-time by the backend
    * resolver, so even older terminal mirrors in the recent window
    * carry the CURRENT instance status — a leader that finished
-   * reads settled and stops counting.
+   * reads terminal and stops counting.
+   *
+   * M3 (mission-class, 2026-09-03) — prose uses ``terminal``
+   * (mission-side vocabulary) instead of ``settled`` (transport-
+   * receipt vocabulary; belongs only to mirror rows now).
    *
    * Sources: the active list (defensive — mirrors are terminal at
    * T0, but the scan is cheap) + the recent terminal window. Rows

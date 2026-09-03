@@ -1955,11 +1955,16 @@ describe('JobsComponent Logic', () => {
 
   // ── Fix C (§8.2) — SSE patch propagation ─────────────────────────────
   //
-  // Round-1 only patched the works[] path, so a settled mirror in
+  // Round-1 only patched the works[] path, so a terminal mirror in
   // the Queues view stayed pinned to its stale live chip and the
   // header badge kept counting it as a live mission. These specs
   // drive ``updateJobFromSse`` directly so any future regression
   // that drops the patch or collapses null-vs-absent fails loudly.
+  //
+  // M3 (mission-class, 2026-09-03) — prose uses ``terminal``
+  // (mission-side vocabulary) instead of ``settled`` (transport-
+  // receipt vocabulary; belongs only to mirror rows now). The
+  // data shape (``mission_liveness``) is unchanged.
 
   describe('updateJobFromSse — mission_liveness propagation (jobs[] path)', () => {
     function seedMirrorRow(liveness: import('../../models/job.model').MissionLiveness) {
@@ -1989,7 +1994,7 @@ describe('JobsComponent Logic', () => {
       ]);
     }
 
-    it('jobs[] path: settled mission_liveness in the payload overwrites the live row', () => {
+    it('jobs[] path: terminal mission_liveness in the payload overwrites the live row', () => {
       seedMirrorRow('processing');
       component.updateJobFromSse({
         job_id: 'mirror-1',
