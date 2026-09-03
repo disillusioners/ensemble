@@ -31,6 +31,9 @@ cd "$PROJECT_DIR"
 # Regression partition pack — 5 min hard limit. Dual-layer timeout.
 # Layer 2 (script-internal): 280s — interrupts hung tests
 # Layer 1 (command-level): 300s via `timeout` wrapper below
+# RESULT-echo: `|| EXIT_CODE=$?` list-context capture — under `set -e`, a bare
+# `EXIT_CODE=$?` after a failing command never executes (silent exit, no RESULT).
+EXIT_CODE=0
 timeout 280s uv run pytest \
   $(ls tests/test_[a-h]*.py 2>/dev/null) \
   tests/api/ \
@@ -43,8 +46,7 @@ timeout 280s uv run pytest \
   -n auto --tb=short -q -rf \
   --deselect "tests/test_dependency_bus.py::TestGenerationCounterBump::test_per_parent_lock_serializes_db_insert" \
   --deselect "tests/property/test_turn_state_machine.py::TestTurnReconcilerStateMachine::test_state_machine" \
-  2>&1
-EXIT_CODE=$?
+  2>&1 || EXIT_CODE=$?
 if [ $EXIT_CODE -eq 124 ]; then
   echo "RESULT: TIMEOUT"
   exit 124
