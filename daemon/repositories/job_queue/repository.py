@@ -14,6 +14,12 @@ from sqlalchemy.engine import Engine
 from sqlmodel import Session as SQLModelSession, select, col, update as sqlmodel_update
 
 from .models import ACTIVE_ADMISSION_STATES, AdmissionState, JobItem, JobQueue, QueueType
+from ._idle_predicate_sql import (
+    background_busy_binds,
+    background_busy_statement,
+    defer_busy_binds,
+    defer_busy_statement,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -652,10 +658,13 @@ class JobRepository:
         ``TaskRepository.has_active_non_deferred_work`` predicate is
         task-granular — it sees the project as "idle" during the
         inter-turn ``waiting_children`` window when no task row exists.
-        This job-granular variant counts ``JobItem`` rows with
-        ``admission_state IN ('queued', 'active')`` whose owning queue
-        is either missing or NOT a defer queue, AND whose linked instance
-        is either missing or non-terminal.
+        This job-granular variant is BUSY iff any non-deleted JobItem
+        on a non-defer queue satisfies: (a) the legacy clause —
+        ``admission_state = 'active'`` AND its linked instance is
+        either missing or non-terminal — or (b) the post-Fix-B clause —
+        ``job_type='message' AND admission_state='done'`` with a
+        non-terminal instance (the settled-mirror window; see the
+        post-settle widening note below).
 
         The instance-status check matters: a job whose instance has
         already reached a terminal status (completed / error / terminated /
@@ -682,6 +691,28 @@ class JobRepository:
         2026-07-17 ``send_message``→``pause_instance``→``defer_admit``
         bug; this predicate prevents re-introducing it.
 
+        Post-settle widening (defer-gate post-settle window fix,
+        2026-09-03): the busy-set now ALSO counts the Fix-B settled
+        mirror — ``job_type='message' AND admission_state='done'`` whose
+        linked instance is non-terminal. I3: a settled mirror of a
+        non-terminal instance counts as live for the defer/background
+        gate, terminal for everything else. The busy-set's truthmaker is
+        instance liveness = mission liveness, so the gate respects the
+        Mission projection by construction: the gate now blocks on
+        non-terminal instances of non-defer jobs, not on active job rows
+        alone.
+
+        The SQL body lives in
+        ``daemon/repositories/job_queue/_idle_predicate_sql.py``
+        (``JOB_DEFER_BUSY_BODY``) and is shared with the background
+        predicate's sister body — five gate/maintenance sites consume
+        these two predicates, so the shared constant makes agreement a
+        construction property. The former two hand-copied branches
+        (system-wide / project-scoped) collapsed into the one shared
+        body via its ``:project_id IS NULL OR`` scope switch;
+        signatures, fail-OPEN error posture, and the bool return
+        contract are unchanged.
+
         Implemented via raw SQL with ``self.engine.begin()`` because
         the JOIN produces a single round-trip and the ``LEFT JOIN
         ... OR`` predicate is awkward to express (and easy to
@@ -704,60 +735,16 @@ class JobRepository:
         """
         try:
             with self.engine.begin() as conn:
-                if project_id is None:
-                    row = conn.execute(
-                        text(
-                            "SELECT EXISTS ("
-                            "  SELECT 1 FROM job_queue_items j"
-                            "  LEFT JOIN job_queues q ON j.queue_id = q.queue_id"
-                            "  LEFT JOIN instances i ON j.instance_id = i.instance_id"
-                            "  WHERE j.admission_state = 'active'"
-                            "    AND j.deleted_at IS NULL"
-                            "    AND (q.queue_type IS NULL"
-                            "         OR q.queue_type != :queue_type_defer)"
-                            "    AND (j.instance_id IS NULL"
-                            "         OR (i.status != :term_completed"
-                            "             AND i.status != :term_error"
-                            "             AND i.status != :term_terminated"
-                            "             AND i.status != :term_failed))"
-                            ")"
-                        ),
-                        {
-                            "queue_type_defer": "defer",
-                            "term_completed": "completed",
-                            "term_error": "error",
-                            "term_terminated": "terminated",
-                            "term_failed": "failed",
-                        },
-                    ).first()
-                else:
-                    row = conn.execute(
-                        text(
-                            "SELECT EXISTS ("
-                            "  SELECT 1 FROM job_queue_items j"
-                            "  LEFT JOIN job_queues q ON j.queue_id = q.queue_id"
-                            "  LEFT JOIN instances i ON j.instance_id = i.instance_id"
-                            "  WHERE j.project_id = :project_id"
-                            "    AND j.admission_state = 'active'"
-                            "    AND j.deleted_at IS NULL"
-                            "    AND (q.queue_type IS NULL"
-                            "         OR q.queue_type != :queue_type_defer)"
-                            "    AND (j.instance_id IS NULL"
-                            "         OR (i.status != :term_completed"
-                            "             AND i.status != :term_error"
-                            "             AND i.status != :term_terminated"
-                            "             AND i.status != :term_failed))"
-                            ")"
-                        ),
-                        {
-                            "project_id": project_id,
-                            "queue_type_defer": "defer",
-                            "term_completed": "completed",
-                            "term_error": "error",
-                            "term_terminated": "terminated",
-                            "term_failed": "failed",
-                        },
-                    ).first()
+                # Body: ``_idle_predicate_sql.JOB_DEFER_BUSY_BODY`` — the
+                # shared defer busy-set (legacy clause OR post-Fix-B
+                # settled-mirror clause). The single query serves both
+                # scopes: ``project_id=None`` makes the
+                # ``:project_id IS NULL OR`` disjunct pass-through
+                # (system-wide, e.g. maintenance ``_is_idle``).
+                row = conn.execute(
+                    defer_busy_statement(),
+                    defer_busy_binds(project_id),
+                ).first()
         except Exception as e:
             logger.warning(
                 f"has_active_non_deferred_work failed "
@@ -808,6 +795,17 @@ class JobRepository:
         whose background job is admitted while paused reproduces
         the dev_run.log ``pause → background_admit`` bug.
 
+        Post-settle widening (defer-gate post-settle window fix,
+        2026-09-03): the busy-set now ALSO counts the Fix-B settled
+        mirror — ``job_type='message' AND admission_state='done'``
+        whose linked instance is non-terminal (same clause as the defer
+        predicate; the settled mirror of a live parent mission holds
+        the background gate too). The SQL body lives in
+        ``daemon/repositories/job_queue/_idle_predicate_sql.py``
+        (``JOB_BACKGROUND_BUSY_BODY``) — the shared-constant module
+        that also carries the defer body, so the two predicates cannot
+        drift.
+
         The ``project_id`` argument is accepted for symmetry with
         :meth:`has_active_non_deferred_work` but is INTENTIONALLY
         IGNORED — the background predicate is system-wide (the
@@ -854,35 +852,15 @@ class JobRepository:
                 # TestJobSideBackgroundPredicateExclusion::
                 # test_queued_jobitem_without_task_returns_true``).
                 row = conn.execute(
-                    text(
-                        "SELECT EXISTS ("
-                        "  SELECT 1 FROM job_queue_items j"
-                        "  LEFT JOIN job_queues q ON j.queue_id = q.queue_id"
-                        "  LEFT JOIN instances i ON j.instance_id = i.instance_id"
-                        "  LEFT JOIN task t ON t.work_id = j.job_id"
-                        "  WHERE j.admission_state IN ('queued', 'active')"
-                        "    AND j.deleted_at IS NULL"
-                        "    AND (q.queue_type IS NULL"
-                        "         OR q.queue_type != :q_background)"
-                        "    AND (j.instance_id IS NULL"
-                        "         OR (i.status != :term_completed"
-                        "             AND i.status != :term_error"
-                        "             AND i.status != :term_terminated"
-                        "             AND i.status != :term_failed))"
-                        "    AND (j.admission_state != :state_queued"
-                        "         OR t.status IS NULL"
-                        "         OR t.status != :task_pending)"
-                        ")"
-                    ),
-                    {
-                        "q_background": "background",
-                        "term_completed": "completed",
-                        "term_error": "error",
-                        "term_terminated": "terminated",
-                        "term_failed": "failed",
-                        "state_queued": "queued",
-                        "task_pending": "pending",
-                    },
+                    # Body: ``_idle_predicate_sql.JOB_BACKGROUND_BUSY_BODY``
+                    # — the shared background busy-set. Keeps the Fix-2B
+                    # deadlock carve-out (a ``queued`` JobItem whose linked
+                    # Task is still ``pending`` is unclaimable and must not
+                    # hold the gate) and the system-wide scope (no project
+                    # clause in the shared body; ``project_id`` is `del`'d
+                    # above).
+                    background_busy_statement(),
+                    background_busy_binds(),
                 ).first()
         except Exception as e:
             logger.warning(
