@@ -23,8 +23,8 @@ Both routes are thin: the kill-switch gate (``is_mission_projection_enabled``),
 query validation, and delegation to :class:`MissionResolver` — the
 projection, ordering, pagination, and degradation contract all live in
 the resolver (``resolve_page`` / ``resolve``). No writes, no JobItem
-creation, no admission-state mutation: the census stays at 23 frozen
-admission-state writers.
+creation, no admission-state mutation; census frozen
+(``daemon/job_state/constitution.py``: ``KNOWN_ADMISSION_STATE_WRITERS``).
 
 Kill-switch (fail-closed): when ``ENSEMBLE_MISSION_PROJECTION_ENABLED``
 is unset/blank/falsy (the OFF default) BOTH routes answer **404** while
@@ -34,7 +34,6 @@ remaining registered (OpenAPI still shows them — the docstrings and
 
 from __future__ import annotations
 
-import logging
 from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -49,8 +48,6 @@ from daemon.services.mission_resolver import (
 
 if TYPE_CHECKING:
     from daemon.services.mission_resolver import MissionResolver
-
-logger = logging.getLogger(__name__)
 
 # Create router. The prefix is ``/missions`` because the router is
 # mounted under ``/api`` in ``daemon/api.py`` — the public URLs are
