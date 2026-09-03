@@ -294,11 +294,15 @@ class TestDeferGatePostSettleWindow:
         live, even though the mirror has settled).
 
         Current behaviour (the bug, if it fires): Leg 1 returns False.
-        The job predicate's ``j.admission_state = 'active'`` filter
-        (``daemon/repositories/job_queue/repository.py:741``) excludes
-        the settled mirror, so the LEFT JOIN against a non-terminal
-        instance is invisible to the predicate. The gate sees "idle"
-        even though the parent mission is still working.
+        The job predicate's ``j.admission_state = 'active'`` filter in
+        the pre-Phase-2 predicate body (now superseded by
+        ``daemon/repositories/job_queue/_idle_predicate_sql.py``) used
+        to exclude settled mirrors, so the LEFT JOIN against a
+        non-terminal instance was invisible to the predicate. The
+        post-settle widening (2026-09-03, Phase-2 fix shipped at
+        ``81e8d247``) closes this window: the shared busy-body adds the
+        ``job_type='message' AND admission_state='done'`` clause
+        explicitly.
         """
         _insert_instance(
             fb_engine,
@@ -330,11 +334,14 @@ class TestDeferGatePostSettleWindow:
             "Leg 1 (job predicate) returned False on a settled mirror + "
             "non-terminal instance — the post-settle defer-gate window "
             "is REAL. The defer queue will admit while the parent mission "
-            "is still working. The bug is the SQL filter "
-            "``j.admission_state = 'active'`` at "
-            "daemon/repositories/job_queue/repository.py:741 — it "
-            "excludes settled mirrors of non-terminal instances, so "
-            "the LEFT JOIN against ``instances.status`` is invisible."
+            "is still working. Pre-fix, the bug was the SQL filter "
+            "``j.admission_state = 'active'`` in the pre-Phase-2 "
+            "predicate body (now superseded by the shared constant at "
+            "``daemon/repositories/job_queue/_idle_predicate_sql.py``) "
+            "— it excluded settled mirrors of non-terminal instances, "
+            "so the LEFT JOIN against ``instances.status`` was invisible. "
+            "The Phase-2 fix (shipped @ 81e8d247) adds the explicit "
+            "``job_type='message' AND admission_state='done'`` clause."
         )
 
     def test_leg2_task_predicate_with_no_tasks_present(
@@ -446,9 +453,11 @@ class TestDeferGatePostSettleWindow:
         ), (
             "Baseline regression: a settled mirror of a TERMINAL "
             "instance MUST be reported 'idle' so the defer queue may "
-            "admit. The terminal-instance filter at "
-            "daemon/repositories/job_queue/repository.py:745-749 "
-            "should still gate this correctly."
+            "admit. The terminal-instance filter in the shared "
+            "busy-body (``daemon/repositories/job_queue/_idle_predicate_sql.py``) "
+            "— ``i.status NOT IN :terminal_statuses`` — must still "
+            "gate this correctly. Single-sourced from "
+            "``daemon.constants.TERMINAL_INSTANCE_STATUSES`` (W1)."
         )
 
     def test_baseline_active_mirror_of_live_instance_blocks(
@@ -458,7 +467,7 @@ class TestDeferGatePostSettleWindow:
         MUST block — this is the existing-correct case.
 
         The Phase 2 defer-gate predicate
-        (``daemon/repositories/job_queue/repository.py:645-768``) was
+        (``daemon/repositories/job_queue/_idle_predicate_sql.py``) was
         designed to block this exact shape (active + non-terminal +
         non-defer queue). This test pins that baseline so any fix to
         the post-settle window does not silently regress the
@@ -501,12 +510,14 @@ class TestDeferGatePostSettleWindow:
     ):
         """The background gate (system-wide) has the same window.
 
-        Background gate filter is
-        ``daemon/repositories/job_queue/repository.py:770-893`` —
+        Background gate body lives in the shared SQL constants module
+        (``daemon/repositories/job_queue/_idle_predicate_sql.py``,
+        ``JOB_BACKGROUND_BUSY_BODY``) —
         ``has_active_non_background_work`` is system-wide
         (project_id argument is ``del``'d). The Phase 2 background
         predicate uses ``admission_state IN ('queued', 'active')`` —
-        broader than the defer predicate's single ``active`` value,
+        broader than the defer predicate's single ``active`` value
+        (the documented defer-vs-background legacy-clause asymmetry),
         but STILL excludes ``done``. A settled mirror of a non-terminal
         instance is invisible to the background gate too. This test
         pins the parallel failure mode so the architect round has
@@ -540,10 +551,12 @@ class TestDeferGatePostSettleWindow:
         ), (
             "Background gate returned False on a settled mirror + "
             "non-terminal instance — the post-settle window is REAL "
-            "for the system-wide background gate too. The SQL filter "
-            "``j.admission_state IN ('queued', 'active')`` at "
-            "daemon/repositories/job_queue/repository.py:863 excludes "
-            "settled mirrors."
+            "for the system-wide background gate too. The legacy "
+            "clause ``j.admission_state IN ('queued', 'active')`` in "
+            "the shared busy-body "
+            "(``daemon/repositories/job_queue/_idle_predicate_sql.py``) "
+            "excludes settled mirrors; the post-Fix-B mirror clause "
+            "is what catches them (shipped @ 81e8d247)."
         )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -839,9 +852,11 @@ class TestPostSettlePhase2Fix:
         # Task) is COMPLETED, which is outside t2's
         # ``status IN (pending, running, paused)`` set. This is the
         # exact subquery shape folded into the atomic claim
-        # (``daemon/repositories/task/repository.py``, defer queue
-        # idle gate clause) — asserted directly because the claim's
-        # OUTER guards would mask t2's verdict (see below).
+        # (``daemon/repositories/task/repository.py``,
+        # ``claim_pending_task`` defer queue idle gate clause, the
+        # ``AND NOT (task.is_deferred = :is_deferred_true AND EXISTS
+        # (...))`` fold at lines 1357-1371) — asserted directly because
+        # the claim's OUTER guards would mask t2's verdict (see below).
         t2_sql = text(
             """
             SELECT EXISTS (
