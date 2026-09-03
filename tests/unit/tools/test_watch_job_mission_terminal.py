@@ -63,13 +63,16 @@ def watcher_repo() -> MagicMock:
     """``JobWatcherRepository`` mock — count + add_watch + claim.
 
     Default ``count`` is 0 (no prior watches) so the
-    ``MAX_WATCHES=50`` gate never fires.
+    ``MAX_WATCHES=50`` gate never fires. ``claim_watchers_for_job_for_instances``
+    defaults to returning an empty list (the held / not-matching
+    case). Tests that need the matching watcher to be claimed set
+    the method's ``return_value`` explicitly.
     """
     repo = MagicMock()
     repo.count_watches_for_instance = MagicMock(return_value=0)
     repo.add_watch = MagicMock()
     repo.get_watchers_for_job = MagicMock(return_value=[])
-    repo.claim_watchers_for_job = MagicMock()
+    repo.claim_watchers_for_job_for_instances = MagicMock(return_value=[])
     return repo
 
 
@@ -287,7 +290,12 @@ class TestNotifyWatchersMissionTerminalGate:
         watcher.watch_events = ["mission_terminal"]
         watcher_repo = MagicMock()
         watcher_repo.get_watchers_for_job = MagicMock(return_value=[watcher])
-        watcher_repo.claim_watchers_for_job = MagicMock()
+        # Claim-first flow: only called for the matching subset;
+        # the held-for-mission watcher is excluded so this MUST NOT
+        # be called.
+        watcher_repo.claim_watchers_for_job_for_instances = MagicMock(
+            return_value=[]
+        )
 
         notified = await notify_work_watchers(
             "job-1",
@@ -301,9 +309,10 @@ class TestNotifyWatchersMissionTerminalGate:
         # No notification fires — the gate held the watcher back.
         assert notified == 0
         instance_manager.enqueue_message.assert_not_awaited()
-        # The watcher row is NOT claimed (the ``notified == 0`` path
-        # keeps the row in place for the future terminal event).
-        watcher_repo.claim_watchers_for_job.assert_not_called()
+        # The watcher row is NOT claimed — the held path skips
+        # claim entirely (matching set is empty) so the row stays
+        # in place for the future terminal event.
+        watcher_repo.claim_watchers_for_job_for_instances.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_default_watcher_fires_on_transport_terminal(self) -> None:
@@ -333,7 +342,11 @@ class TestNotifyWatchersMissionTerminalGate:
         ]
         watcher_repo = MagicMock()
         watcher_repo.get_watchers_for_job = MagicMock(return_value=[watcher])
-        watcher_repo.claim_watchers_for_job = MagicMock()
+        # Claim-first flow: the matching watcher wins the CAS and
+        # is returned for the notify loop.
+        watcher_repo.claim_watchers_for_job_for_instances = MagicMock(
+            return_value=[watcher]
+        )
 
         notified = await notify_work_watchers(
             "job-1",
@@ -367,7 +380,11 @@ class TestNotifyWatchersMissionTerminalGate:
         watcher.watch_events = ["mission_terminal"]
         watcher_repo = MagicMock()
         watcher_repo.get_watchers_for_job = MagicMock(return_value=[watcher])
-        watcher_repo.claim_watchers_for_job = MagicMock()
+        # Claim-first flow: matching watcher (mission_terminal opt-in
+        # with mission also terminal) wins the CAS.
+        watcher_repo.claim_watchers_for_job_for_instances = MagicMock(
+            return_value=[watcher]
+        )
 
         notified = await notify_work_watchers(
             "job-1",
@@ -415,7 +432,11 @@ class TestNotifyWatchersMissionTerminalGate:
         watcher.watch_events = ["mission_terminal"]
         watcher_repo = MagicMock()
         watcher_repo.get_watchers_for_job = MagicMock(return_value=[watcher])
-        watcher_repo.claim_watchers_for_job = MagicMock()
+        # Claim-first flow: the watcher now passes the held gate
+        # (mission IS terminal) and wins the CAS.
+        watcher_repo.claim_watchers_for_job_for_instances = MagicMock(
+            return_value=[watcher]
+        )
 
         notified = await notify_work_watchers(
             "job-cancelled-1",
@@ -478,7 +499,11 @@ class TestNotifyWatchersMissionTerminalGate:
         ]
         watcher_repo = MagicMock()
         watcher_repo.get_watchers_for_job = MagicMock(return_value=[watcher])
-        watcher_repo.claim_watchers_for_job = MagicMock()
+        # Claim-first flow: matching watcher wins the CAS for the
+        # settled-mirror notification.
+        watcher_repo.claim_watchers_for_job_for_instances = MagicMock(
+            return_value=[watcher]
+        )
 
         notified = await notify_work_watchers(
             "job-settled-1",
