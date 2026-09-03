@@ -939,6 +939,60 @@ class TestPostSettlePhase2Fix:
             "regressed"
         )
 
+    def test_folding_logic_getsource_substring_pin(self):
+        """Folding-proof ``inspect.getsource`` pin.
+
+        Pins that the production source of
+        ``daemon/repositories/task/repository.py`` (the ``claim_pending_task``
+        defer queue idle gate clause) still contains the expected
+        folding-logic substring. Catches accidental rewrites of the
+        claim's task-granular atomic race-guard (the inline ``AND NOT
+        (... AND EXISTS (...))`` block at lines 1357-1371) — the
+        folding proof above relies on this exact SQL shape.
+
+        Cheap green (cheap-green reviewer item 2026-09-03):
+        ``inspect.getsource`` is the cheapest possible pin — a
+        substring match against the live source. A future refactor
+        that accidentally rewrites the EXISTS subquery shape would
+        fail this test even if the SQL still happens to evaluate
+        identically (the test catches the edit, not just the runtime
+        behavior).
+        """
+        from daemon.repositories.task import repository as task_repo_mod
+
+        src = inspect.getsource(task_repo_mod)
+        # The exact folding-logic substring that the proof-test above
+        # mirrors with t2_sql. Each line is pinned individually — a
+        # rewrite that flips the join order, drops a bind name, or
+        # inverts the WHERE would fail at least one of these.
+        expected_substrings = (
+            # Outer fold: the defer candidate is held back when there
+            # is active non-deferred work in the same project.
+            "task.is_deferred = :is_deferred_true",
+            "AND EXISTS (",
+            "SELECT 1 FROM task t2",
+            "JOIN instances i2",
+            "ON t2.instance_id = i2.instance_id",
+            "t2.status IN (:status_pending, :status_running, :status_paused)",
+            "t2.is_deferred = :is_deferred_false",
+            # The subproject scoping: the candidate's instance_id
+            # resolves to its project_id, and t2 must share it.
+            "i2.project_id = (",
+            "SELECT i_cand.project_id",
+            "FROM instances i_cand",
+            "WHERE i_cand.instance_id = task.instance_id",
+        )
+        missing = [s for s in expected_substrings if s not in src]
+        assert not missing, (
+            "the production ``claim_pending_task`` defer queue idle "
+            "gate clause at "
+            "``daemon/repositories/task/repository.py`` no longer "
+            "contains the expected folding-logic substring(s) — the "
+            "claim-guard refactored; the folding proof-test above "
+            "(t2_sql mirrors this exact shape) would silently drift. "
+            f"Missing: {missing}"
+        )
+
     def test_defer_candidate_own_live_instance_does_not_self_deadlock(
         self, fb_engine, job_repo, task_repo
     ):
