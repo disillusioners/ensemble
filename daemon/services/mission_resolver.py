@@ -24,11 +24,15 @@ Identity & epochs (spec §3)
 * ``parent_mission_id == instances.parent_id`` (permanent across
   terminate→revive; survives the JAFP/I4 boundary intact).
 * an **epoch** = contiguous non-terminal interval. Opens on →RUNNING
-  (spawn or revive); closes on terminal. ``completed`` (from
-  ``InstanceStatus.COMPLETED``) is **revivable**; ``cancelled`` (from
-  ``TERMINATED``) is **true-terminal**. Current epoch + current liveness
-  are precise; historical epoch timestamps are best-effort (the DB has
-  no terminal-transition timestamps — see :ref:`known-limitation`).
+  (spawn or revive); closes on terminal. All four canonical terminal
+  values (``completed`` from ``InstanceStatus.COMPLETED``,
+  ``cancelled`` from ``TERMINATED``, ``failed`` from ``ERROR`` /
+  ``FAILED``, ``dead_letter`` from a linked ``JobItem`` in ``DEAD``
+  admission) are **revivable** per F7 — each opens a fresh epoch
+  when the mission re-enters RUNNING (revive = new epoch). Current
+  epoch + current liveness are precise; historical epoch timestamps
+  are best-effort (the DB has no terminal-transition timestamps —
+  see :ref:`known-limitation`).
 
 W4-hazard preservation
 -----------------------
@@ -54,7 +58,7 @@ Deployment posture (always-on; WS3 removal of the M1 kill-switch)
 ------------------------------------------------------------------
 
 Mission projection ships **always-on** — there is no env flag. The
-former the M1 mission-projection kill-switch kill-switch (M1 soak
+former M1 mission-projection kill-switch (M1 soak
 discipline) was removed entirely (WS3, 2026-09-02, ratified user
 decision): the three additive fields (``mission_id`` / ``mission_epoch``
 / ``mission_terminal_reason``) are populated unconditionally on the
@@ -302,8 +306,12 @@ class MissionResolver:
       ``instances.parent_id`` is permanent by design — see Case-2
       revive in spec §3).
     * **Liveness** — :class:`Instance.status` → canonical mission
-      vocabulary via :data:`_STATUS_CANONICAL_MAP`. ``completed`` is
-      revivable; ``cancelled``/``failed`` are true-terminal.
+      vocabulary via :data:`_STATUS_CANONICAL_MAP`. All four
+      canonical terminal values are revivable per F7
+      (``completed`` / ``cancelled`` / ``failed`` / ``dead_letter``)
+      — each opens a fresh epoch when the mission re-enters
+      RUNNING (the prior ``cancelled``/``failed`` as
+      true-terminal wording was retired by F7).
     * **W4 hazard** — a linked ``JobItem`` with
       ``admission_state='dead'`` flips ``terminal_reason`` to
       ``"dead_letter"`` regardless of a since-revived instance.
@@ -949,7 +957,7 @@ def mission_projection_to_dict(
 
     Returns:
         A dict with the three keys — unconditionally (the former
-        the M1 mission-projection kill-switch kill-switch was removed
+        M1 mission-projection kill-switch was removed
         at WS3; callers splat ``**mission_projection_to_dict(...)``
         into their output payload without an explicit conditional).
     """
