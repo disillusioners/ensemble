@@ -112,8 +112,8 @@ One seeded dead_letter row (ERROR instance + DEAD JobItem): `mission_terminal_re
 - Stale M1 worktree `/private/tmp/m1-gate-base` still present (pre-existing, not removed — not this gate's).
 - `TESTER_CANT_OPTIMIZE_TEST_PACK`: **not needed** — no pack approached limits (max 68s vs 300s cap).
 
-## 8. Commit-Chain Note (verification pending in doc-commit)
-m-r and i-q runners both cited `a14f9678` as their guard-fix commit — same hash for different files is impossible; final commit sweep will paste `git log --oneline 3b0b98b6..HEAD` and RESULTS will be corrected if misattributed. Feature code is identical from `8eddeb3d` through gate HEAD (all subsequent commits touch `test/packs/*`, `tests/integration/test_m2_*`, `.agents/tester/*` only).
+## 8. Commit-Chain Note (RESOLVED)
+`git log --oneline 3b0b98b6..HEAD` verified: `a14f9678` = loose_m_r guard fix; **i_q's guard fix is `72b1edee`** (its runner mis-cited a14f9678 — both carry the generic subject "apply || EXIT_CODE=$? guard…", as does `f617fde6` = loose_s_z; file lists disambiguate). **Purity gate: `git diff --name-only 8eddeb3d..HEAD -- daemon/ frontend/` = EMPTY** — feature code identical from `8eddeb3d` through gate HEAD; all gate commits touch only `test/packs/*`, `tests/integration/test_m2_*.py`, `.agents/tester/*`.
 
 ## Addendum (ensure.md Core #2/#3)
 concurrency_atomic_unit_test pack: **✅ PASS — 98 passed / 74 skipped / 0 failed** (8.23s; wrapper + internal timers honored). Skips and failures are **baseline-exact** vs the recorded 91P/74S/0F (2026-08-24); the +7 passed delta is new test cases added to the canonical files since the baseline was recorded — recommend refreshing the recorded baseline to 98P/74S/0F. Both Core requirements (deadlock/concurrency integrity; no sync DB calls on the event loop via thread-identity tests) validated.
