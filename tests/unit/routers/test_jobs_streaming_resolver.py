@@ -480,11 +480,13 @@ class TestStreamJobEventsResolverOn:
 
         completed = events[1]["data"]
         # Wire-format contract: same keys as the legacy branch, plus
-        # the Fix C additive split-semantics fields and the M1
-        # additive mission projection fields (always-on since WS3 —
-        # the kill-switch was removed). Consumers that branch on
-        # these keys (``job_type``) can distinguish mission vs
-        # mirror rows; consumers that ignore them are unaffected
+        # the Fix C additive split-semantics fields, the M1 additive
+        # mission projection fields (always-on since WS3 — the
+        # kill-switch was removed), AND the M2 anti-trap guardrails
+        # (``outcome`` + ``mission_ref``, contract draft §3, additive
+        # — older clients ignore the extra keys). Consumers that
+        # branch on these keys (``job_type``) can distinguish mission
+        # vs mirror rows; consumers that ignore them are unaffected
         # (backward-compatible additive contract). See
         # ``test_resolver_emits_mission_fields_always_on`` for the
         # populated-value variant.
@@ -499,6 +501,12 @@ class TestStreamJobEventsResolverOn:
             "mission_id",
             "mission_epoch",
             "mission_terminal_reason",
+            # M2 (mission-class) — anti-trap guardrails. ``outcome``
+            # stays ``None`` on transport (draft §3.2) and
+            # ``mission_ref`` carries the cross-reference payload
+            # (draft §3.3).
+            "outcome",
+            "mission_ref",
         }
         assert completed["job_id"] == jid
         assert completed["status"] == "completed"
