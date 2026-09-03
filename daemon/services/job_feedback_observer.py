@@ -1312,17 +1312,42 @@ class JobFeedbackObserver:
             except Exception:
                 pass
 
+            # N8 (mission-class, 2026-09-03, ``feature/mission-class``)
+            # — per-kind token at the re-fire site. The
+            # ``notify_status`` is the caller's canonical
+            # mission-terminal token (``"cancelled"`` for TERMINATED,
+            # ``"failed"`` for FAILED). Both are kind-agnostic — the
+            # per-kind dispatch in :meth:`WorkResolverService._job_to_record`
+            # only flips ``completed`` to ``settled`` for mirror rows.
+            # We still route through ``per_kind_status_for`` so the
+            # call site stays consistent with the post-commit outbox
+            # above (a future per-kind split on ``cancelled`` /
+            # ``failed`` would land here too) and the unresolvable
+            # branch degrades to ``notify_status`` rather than
+            # hardcoding ``"completed"``.
+            _re_fire_resolver = getattr(
+                self._job_queue_service, "_work_resolver", None
+            )
             for _work_id in candidate_work_ids:
                 try:
+                    if _re_fire_resolver is not None:
+                        _per_kind_status = (
+                            _re_fire_resolver.per_kind_status_for(
+                                _work_id,
+                                default=notify_status,
+                            )
+                        )
+                    else:
+                        _per_kind_status = notify_status
                     await self._job_queue_service.notify_watchers(
-                        _work_id, notify_status,
-                        error_message if notify_status == "failed" else result_summary,
+                        _work_id, _per_kind_status,
+                        error_message if _per_kind_status == "failed" else result_summary,
                     )
                 except Exception as e:
                     logger.warning(
                         f"Observer: held-watcher re-fire failed for "
                         f"job {_work_id[:8]}... (notify_status="
-                        f"{notify_status}, instance="
+                        f"{_per_kind_status}, instance="
                         f"{instance_id[:8]}...): {e}"
                     )
         except Exception as e:
@@ -1822,70 +1847,77 @@ class JobFeedbackObserver:
             except Exception:
                 pass
 
+            # N8 (mission-class, 2026-09-03, ``feature/mission-class``)
+            # — per-kind dispatch at the notify site. The candidate
+            # work_ids span BOTH Task rows (kind="report", terminal
+            # ``completed`` / ``failed`` / ``cancelled``) and JobItem
+            # mirror rows (job_type="message", terminal ``settled``
+            # after per-kind dispatch). The previous implementation
+            # hardcoded ``"completed"`` / ``"failed"`` / ``"cancelled"``
+            # — collapsing mirror rows onto the task-side
+            # ``completed ✓` glyph and breaking the orchestrator's
+            # per-kind parser contract. Derive the per-kind token via
+            # the resolver so the rendered wire text matches the
+            # row's actual kind without duplicating the token map.
+            work_resolver_for_observ = getattr(
+                self._job_queue_service, "_work_resolver", None
+            )
+            if (
+                db_result.terminal_status
+                == InstanceStatus.COMPLETED.value
+            ):
+                _observ_default_status = "completed"
+                _observ_extra = db_result.result_summary
+            elif (
+                db_result.terminal_status
+                == InstanceStatus.ERROR.value
+            ) or (
+                db_result.terminal_status
+                == InstanceStatus.FAILED.value
+            ):
+                _observ_default_status = "failed"
+                _observ_extra = db_result.error_message
+            elif (
+                db_result.terminal_status
+                == InstanceStatus.TERMINATED.value
+            ):
+                _observ_default_status = "cancelled"
+                _observ_extra = None
+            else:
+                _observ_default_status = None
+                _observ_extra = None
+
             for _work_id in candidate_work_ids:
-                if db_result.terminal_status == InstanceStatus.COMPLETED.value:
-                    try:
-                        await self._job_queue_service.notify_watchers(
-                            _work_id, "completed",
-                            result_summary=db_result.result_summary,
+                if _observ_default_status is None:
+                    continue  # Unknown terminal status — skip silently.
+                _per_kind_status = _observ_default_status  # default for log only
+                try:
+                    if work_resolver_for_observ is not None:
+                        _per_kind_status = (
+                            work_resolver_for_observ.per_kind_status_for(
+                                _work_id,
+                                default=_observ_default_status,
+                            )
                         )
-                    except Exception as e:
-                        logger.warning(
-                            f"Observer: notify_watchers failed for job "
-                            f"{_work_id[:8]}...: {e}"
-                        )
-                elif db_result.terminal_status == InstanceStatus.ERROR.value:
-                    try:
-                        await self._job_queue_service.notify_watchers(
-                            _work_id, "failed", db_result.error_message
-                        )
-                    except Exception as e:
-                        logger.warning(
-                            f"Observer: notify_watchers failed for job "
-                            f"{_work_id[:8]}...: {e}"
-                        )
-                elif db_result.terminal_status == InstanceStatus.FAILED.value:
-                    # A3 (mission-class, 2026-09-03, ``feature/mission-class``)
-                    # — watcher re-fire for FAILED. The held
-                    # ``mission_terminal`` watchers re-fire when the
-                    # linked mission reaches FAILED; without this
-                    # branch a FAILED-instance transition leaves the
-                    # held watchers in place indefinitely (the
-                    # COMPLETED/ERROR branches above do not match).
-                    # ``failed`` is the canonical mission-terminal
-                    # token for the FAILED ``InstanceStatus``.
-                    try:
-                        await self._job_queue_service.notify_watchers(
-                            _work_id, "failed",
-                            db_result.error_message,
-                        )
-                    except Exception as e:
-                        logger.warning(
-                            f"Observer: notify_watchers failed for job "
-                            f"{_work_id[:8]}... (FAILED re-fire): {e}"
-                        )
-                elif db_result.terminal_status == InstanceStatus.TERMINATED.value:
-                    # A3 (mission-class, 2026-09-03, ``feature/mission-class``)
-                    # — watcher re-fire for TERMINATED. Mirror
-                    # completion: the held ``mission_terminal``
-                    # watchers re-fire when the mission reaches
-                    # TERMINATED with the canonical ``cancelled``
-                    # token (the ``TERMINATED`` ``InstanceStatus`` →
-                    # ``cancelled`` mapping from
-                    # ``_STATUS_CANONICAL_MAP``). Normally this is
-                    # handled by the early-return ``_fire_watcher_
-                    # notify_for_terminal`` path above; this branch
-                    # exists as a defensive catch for any
-                    # code path that bypasses the early return.
-                    try:
-                        await self._job_queue_service.notify_watchers(
-                            _work_id, "cancelled", None,
-                        )
-                    except Exception as e:
-                        logger.warning(
-                            f"Observer: notify_watchers failed for job "
-                            f"{_work_id[:8]}... (TERMINATED re-fire): {e}"
-                        )
+                    # Failed carries the error string; everything else
+                    # carries the result summary (matches the
+                    # pre-N8 contract per ``notify_work_watchers``).
+                    _per_kind_extra = (
+                        db_result.error_message
+                        if _per_kind_status == "failed"
+                        else _observ_extra
+                    )
+                    await self._job_queue_service.notify_watchers(
+                        _work_id, _per_kind_status,
+                        _per_kind_extra,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Observer: notify_watchers failed for job "
+                        f"{_work_id[:8]}... (status="
+                        f"{_per_kind_status}, terminal_status="
+                        f"{db_result.terminal_status}): {e}"
+                    )
 
             # B4: Resolve watched jobs. The bus is task-keyed, not
             # job-keyed, so there is no bus equivalent for job-level

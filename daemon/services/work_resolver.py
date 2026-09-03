@@ -1066,6 +1066,55 @@ class WorkResolverService:
 
         return None
 
+    def per_kind_status_for(
+        self,
+        work_id: str,
+        *,
+        default: str,
+    ) -> str:
+        """Return the per-kind canonical status of ``work_id`` for notify sites.
+
+        N8 (mission-class, 2026-09-03, ``feature/mission-class``) —
+        the hot event path's wrong-speaker bug: notify sites were
+        hardcoding ``"completed"`` when calling
+        :func:`daemon.services.work_notifier.notify_work_watchers`,
+        collapsing mirror JobItems (``job_type="message"``) onto the
+        task-side ``completed ✓` glyph. The per-kind dispatch in
+        :meth:`_job_to_record` already maps a mirror row's
+        ``(admission_state='done', terminal_reason='completed',
+        job_type='message')`` onto ``"settled"`` — this helper is the
+        thin resolver-side accessor notify sites call so the rendered
+        token matches the row's kind without duplicating the token
+        map.
+
+        Lookup order matches :meth:`resolve_work` (task-first, then
+        job). For a Task-backed WorkRecord the canonical status is the
+        Task's mapped value (``completed`` / ``failed`` / ``cancelled``
+        / ``processing`` / ``pending`` / ``paused``); for a mirror
+        JobItem the per-kind dispatch flips ``completed`` to
+        ``"settled"`` (the M3 rename). ``default`` is returned when the
+        work cannot be resolved — preserves prior behaviour at every
+        notify call site (Task rows resolve to ``"completed"``, the
+        fallback callers used to hardcode) without widening the
+        failure mode for missing rows.
+
+        Args:
+            work_id: The UUID4 work identifier (Task.work_id or
+                JobItem.job_id).
+            default: Status to return when the work cannot be resolved
+                (the row was deleted between the terminal commit and
+                the notify, or the resolver is partial-wired in a
+                test). Caller-supplied; usually ``"completed"``.
+
+        Returns:
+            The canonical status from the resolved :class:`WorkRecord`,
+            or ``default`` when the lookup returns ``None``.
+        """
+        record = self.resolve_work(work_id)
+        if record is None:
+            return default
+        return record.status
+
     def list_work(
         self,
         project_id: str | None = None,

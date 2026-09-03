@@ -183,10 +183,12 @@ def canonicalize_status(status: str) -> str:
 def is_terminal(status: str) -> bool:
     """Return True if ``status`` is a terminal virtual-job state.
 
-    Terminal statuses are: ``completed``, ``failed``, ``cancelled``,
-    ``dead_letter``. ``paused`` is **not** terminal — a paused work
-    unit can be resumed back to ``processing``. ``pending`` and
-    ``processing`` are also non-terminal.
+    Terminal statuses are: ``completed`` (work-outcome terminal —
+    task rows), ``settled`` (transport-receipt terminal — mirror
+    rows per ADR-MISSION-01 §6.6 I3 amendment), ``failed``,
+    ``cancelled``, ``dead_letter``. ``paused`` is **not** terminal —
+    a paused work unit can be resumed back to ``processing``.
+    ``pending`` and ``processing`` are also non-terminal.
 
     The check operates on the canonical vocabulary. Callers that
     receive raw Task/JobItem status strings should first run them
