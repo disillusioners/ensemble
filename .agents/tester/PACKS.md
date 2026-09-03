@@ -145,6 +145,14 @@ Mission-class M2 Gate pre-registration on `feature/mission-class` @ `8eddeb3d` (
 
 Notes: total **16,122 tests across 18 packs** (4 acceptance = 100 tests; 2 probe = TBD by M2 implementer; 12 regression = 16,022 tests). Regression partitions use `uv run pytest -n auto` (xdist 3.8.0 verified); house-style packs use `.venv/bin/pytest`. Pre-existing failure families (watchover cascade, sqlite migration 20260714, httpx pollution, subdirs-sweep, proxy_phase1, slash_commands, injection_api, vscode) MUST RUN and be adjudicated from failure inventory, not deselected.
 
+## Mission FINAL Gate Packs (2026-09-03)
+
+Ad-hoc final merge gate on `feature/mission-class` @ `3f9fca81` (base `e676ddea`). 1 pack covering exactly the 5 pin files added by the post-M2-gate fix rounds — no prior pack covered them.
+
+| Pack | Location | Scope | Last Run | Status |
+|------|----------|-------|----------|--------|
+| mission_pins_final_test | `test/packs/mission_pins_final_test.sh` → `tests/job_queue/test_n8_hot_path_pin.py` (N8 per-kind dispatch hot-path, 2) + `tests/job_queue/test_work_notifier_n1_pin.py` (N1 claim-first ordering, 5) + `tests/unit/tools/test_watch_job_mission_terminal.py` (N1 companion: watch tool terminal token, 14) + `tests/integration/test_n3_per_kind_filter_pin.py` (N3 per-kind filter SQL, 4) + `tests/integration/test_m3_per_kind_dispatch_pin.py` (M3 dispatch pin, 10) | Mission program FINAL gate ad-hoc pack — exactly the 5 post-M2-gate pin files, 35 tests; integration files carry their own file-backed SQLite recipe (tmp_path + NullPool + WAL), no env setup | 2026-09-03 | ✅ PASS 35/35 in 1.22s (exact: N8=2, N1=5/5, watch-tool=14, N3=4/4, m3-dispatch=10) |
+
 ## Unit Test Packs
 
 | Pack | Location | Scope | Timeout | Last Run | Status |
