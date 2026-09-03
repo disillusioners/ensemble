@@ -399,7 +399,7 @@ proves bidirectionality.
 ### 6.6 ADR-MISSION-01 — Mission noun split (transport/work vocabulary + read projection)
 
 > **Ratified 2026-09-02** from `.agents/shared/planning/mission-class/architecture-recommendation.md` §7.
-> **Status: M1 landed (168c9448); M4(i)-HTTP pull-forward landed on `feature/mission-class` (§8.4); always-on since WS3 — the M1 kill-switch was removed (§8.3 deployment posture).** Mission-first cutover
+> **Status: M1 landed (168c9448); M4(i)-HTTP pull-forward landed on `feature/mission-class` (§8.4); M2 agent tools LANDED (80ed6af8, 36b63be1); M3 wire rename LANDING this cycle (WS4 sibling commits); always-on since WS3 — the M1 kill-switch was removed (§8.3 deployment posture); F7 epoch amendment ratified 2026-09-03 ("Epoch semantics (F7 amendment)" below).** Mission-first cutover
 > (M1 → M2 → M3) means consumers migrate BEFORE the wire rename lands; M3 is the rename.
 > See "Directed modifications" below for the version-gate drop that supersedes one spec sentence.
 
@@ -436,8 +436,8 @@ at M3 only after consumers have moved off the old word.
 |---|---|---|
 | **M1** (this amendment's contract) | Additive `mission_id` / `mission_epoch` / `mission_terminal_reason` (§8.3) — originally behind the M1 kill-switch (default OFF), soaked ON, then **always-on since WS3** (kill-switch removed; §8.3 deployment posture); FE re-anchor `mission-settled` → `mission-terminal` (CSS chain only, ~12–15 files); vocabulary table ratified (§6.7); this prose fix (line 909). | Zero impact — additive only; fields surface on every response (always-on). |
 | **M4(i)-HTTP pull-forward** (2026-09-02, `feature/mission-class`) | `GET /api/missions` + `GET /api/missions/{mission_id}` — the mission projection's **HTTP debut** (§8.4), user-approved pull-forward of the M4(i) gated option (`architecture-recommendation.md` §5 M4 row: "HTTP `GET /missions` — gate on operator demand") ahead of the M2 agent tools. Read-only; **always-on since WS3** (the same-route kill-switch was removed); census stays at 23. | Both routes serve normally (§8.4). |
-| **M2** | Agent tools (`get_mission` / `await_mission` / `list_missions`) + structural guardrails (`outcome` token, `mission_ref` cross-ref, `watch_job(events='mission_terminal')`, `job_continue` mission-only gate); ari/jober prompt edits + `tools.allow` + minor version bump. **NUMBERING DISAMBIGUATION:** the spec's M2 = the *agent tools* milestone — NOT the HTTP surface. The `GET /missions` endpoint is the M4(i) pull-forward above (the implementation branch's "M2-API" label refers to its position as the second shipped deliverable of the mission program, not to spec-milestone M2). | Tools migrate BEFORE the wire rename; the wrong-predicate trap (ari/soul.md L71-79, jober/soul.md L9/L54 key decisions on a single ambiguous `status`) becomes structurally hard. |
-| **M3** | Wire rename on mirror-receipt terminal status: `completed` → `settled` via per-kind dispatch in `_derive_legacy_status` on all 4 read surfaces — `WorkRecord` (work resolver, `work_resolver._job_to_record`), `JobResponse` (`routers/jobs_crud.py::_job_to_response`), `_ResolvedWork` (SSE payload, `routers/jobs_streaming.py::_ResolvedWork`), and the `routers/jobs_management.py` delegation surface (response constructed via `jobs_crud.py::_job_to_response`, per §8.2). `VALID_STATUS_VALUES`, FE switches, daemon filters, and docs are updated in this phase. | Mission tools (M2) and FE re-anchor (M1) are already in — at M3 time, no in-repo consumer treats mirror `completed` as outcome. |
+| **M2** | **LANDED on `feature/mission-class`** (80ed6af8 + 36b63be1, 2026-09-02). Agent tools (`get_mission` / `await_mission` / `list_missions`) + structural guardrails (`outcome` token, `mission_ref` cross-ref, `watch_job(events='mission_terminal')`, `job_continue` mission-only gate); ari/jober prompt edits + `tools.allow` + minor version bump. **NUMBERING DISAMBIGUATION:** the spec's M2 = the *agent tools* milestone — NOT the HTTP surface. The `GET /missions` endpoint is the M4(i) pull-forward above (the implementation branch's "M2-API" label refers to its position as the second shipped deliverable of the mission program, not to spec-milestone M2). | Tools migrate BEFORE the wire rename; the wrong-predicate trap (ari/soul.md L71-79, jober/soul.md L9/L54 key decisions on a single ambiguous `status`) becomes structurally hard. |
+| **M3** | **LANDING this cycle on `feature/mission-class`** (WS4 sibling commits; daemon + frontend only) — ships CLEAN, no version gate (directed modification above). Wire rename on mirror-receipt terminal status: `completed` → `settled` via per-kind dispatch in `_derive_legacy_status` on all 4 read surfaces — `WorkRecord` (work resolver, `work_resolver._job_to_record`), `JobResponse` (`routers/jobs_crud.py::_job_to_response`), `_ResolvedWork` (SSE payload, `routers/jobs_streaming.py::_ResolvedWork`), and the `routers/jobs_management.py` delegation surface (response constructed via `jobs_crud.py::_job_to_response`, per §8.2). `VALID_STATUS_VALUES`, FE switches, daemon filters, and docs are updated in this phase. | Mission tools (M2) and FE re-anchor (M1) are already in — at M3 time, no in-repo consumer treats mirror `completed` as outcome. |
 
 **Why tools precede the rename (not the spec's original M2/M3 ordering):** ari/jober are
 the burning consumer class — the ambiguity is live in their prompts today
@@ -459,6 +459,48 @@ operators already have FE mission chips. Tools-first retires the actual pain fir
   planning tree carries the same text for the worker chain. The "ADR home in
   `.agents/shared/planning/job-task-retrospective/`" referenced by §6.3 is the
   untracked log file at planning-tree time; the house record is this section.
+- **Epoch semantics (F7, ratified 2026-09-03): the former distinction treating
+  `cancelled` ←TERMINATED as a beyond-revive, truly-final state is DROPPED
+  entirely.** Every terminal state is revivable — a revive opens a NEW epoch of
+  the same mission; no terminal state is beyond revival, and there is no
+  revive-class hierarchy. Full teaching + the M4(ii)
+  implementation dependency: "Epoch semantics (F7 amendment)" below. Supersedes
+  any spec text (spec §7 / risk tables) that treats `cancelled` ←TERMINATED as
+  truly-final.
+
+#### Epoch semantics (F7 amendment — ratified 2026-09-03)
+
+> **F7 (ratified user decision): revive-all = new epoch from ANY terminal state.**
+> Prompts and docs teach one rule: **terminal is revivable.**
+
+**The model.** Every terminal state — `completed`, `failed`, `cancelled`,
+`dead_letter`, any — is revivable: the next `send_message` to a terminal instance
+revives it (§3.3) and opens a **NEW epoch** of the same mission (`mission_id` is
+stable — `mission_id == instance_id`; identity survives revive). No terminal state
+is beyond revival. Epoch counting is uniform across all terminal states: one rule,
+no revive classes.
+
+**Await semantics.** `await_mission` resolves on **epoch-terminal** — the linked
+instance reaching any terminal state within the current epoch. If the mission
+revives afterwards, that resolution stands, and a **NEW await** call sees the new
+epoch — each await answers exactly one epoch.
+
+**Implementation reality — the M4(ii) dependency (never claim live epoch counts).**
+The F7 model is the binding semantic; the storage backing it does not exist yet.
+Until M4(ii) ships the append-only `mission_events` event log (part 3 above), live
+surfaces carry a **degraded epoch**:
+
+- **Wire / read-model fields:** `mission_epoch` is **constant 1** on every
+  non-degraded projection (§8.3) — it does NOT increment on revive.
+- **Agent tools:** `get_mission` / `await_mission` / `list_missions` derive a
+  **best-effort single-interval** history (current epoch only); `epoch_count` and
+  `epochs` do not reconstruct past epochs.
+
+Docs and prompts must state the model AND this dependency together — never claim
+that wire or tool surfaces expose real epoch counts today. When M4(ii) lands, this
+paragraph is the acceptance spec: `mission_epoch` increments on every revive,
+per-epoch history becomes reconstructable, and the degraded-epoch wording above
+retires.
 
 ### 6.7 Two-layer vocabulary (Transport × Work)
 
@@ -471,14 +513,14 @@ operators already have FE mission chips. Tools-first retires the actual pain fir
 |---|---|---|---|
 | **Transport — mirror receipts** (`job_type='message'`) | `queued` · `active` · **`settled`** · `dead` | Job (admission) | `AdmissionState` derivation, per-kind dispatch in `_derive_legacy_status` |
 | **Transport — task jobs** (`job_type='task'`) | `queued` · `active` · `completed` · `failed` · `cancelled` · `dead_letter` (derived, as today) | Job (admission) — **their terminal IS the outcome** (task job = its own mission) | `_derive_legacy_status` unchanged for task rows |
-| **Work / Mission** (projection over instances) | `pending` · `processing` · `paused` · `completed` · `failed` · `cancelled` | Mission | `Instance.status` canonicalized (`_STATUS_CANONICAL_MAP`); `cancelled` ←TERMINATED = true-terminal; `completed` = revivable |
+| **Work / Mission** (projection over instances) | `pending` · `processing` · `paused` · `completed` · `failed` · `cancelled` | Mission | `Instance.status` canonicalized (`_STATUS_CANONICAL_MAP`); every terminal value is revivable — a revive opens a NEW epoch (F7, §6.6) |
 | **Instance** (existing, untouched) | 10-member `InstanceStatus` enum | Execution | `daemon/repositories/instance/models.py:20-31` |
 | **Internal discriminator** (NOT wire) | `completed` · `failed` · `cancelled` · `aborted` · `watchover_terminated` · `orphan_retired` · `orphaned_no_task` · `pattern_f1_orphan` | `terminal_reason` column | Unchanged; consumed by `_derive_legacy_status`; absorbed by Phase-4 StrEnum planning |
 
 **Same-word-two-meanings (documented, by design).** `paused` / `completed` / `failed` /
 `cancelled` appear on BOTH the work and instance layers by design — the mission layer
-IS the instance's outcome vocabulary (`_STATUS_CANONICAL_MAP` is the canonical projection,
-`cancelled` ←TERMINATED = true-terminal, `completed` = revivable; §8.2 value space).
+IS the instance's outcome vocabulary (`_STATUS_CANONICAL_MAP` is the canonical projection;
+every terminal value is revivable — a revive opens a NEW epoch, F7 §6.6; §8.2 value space).
 The collision that mattered — mirror-receipt `completed` reading as outcome — is
 **ELIMINATED** by §6.6 ADR-MISSION-01: `settled` is disjoint from every work and
 instance value.
@@ -1272,8 +1314,10 @@ future callers against routing through `project()`.
 #### Test surface
 
 `tests/unit/routers/test_missions_api.py` (unit, 37 tests, file-backed SQLite
-`tmp_path` + `NullPool` + WAL): kill-switch ON/OFF matrix (404 both routes while OFF;
-routes still in OpenAPI), list contract (identity/fields, ALL-instances scope, liveness
+`tmp_path` + `NullPool` + WAL): route registration + always-on serving (the former
+kill-switch ON/OFF matrix and its OFF-path zero-query pins were removed with the
+kill-switch itself at WS3 — `TestRouteRegistrationAndAlwaysOn` asserts both routes
+serve unconditionally), list contract (identity/fields, ALL-instances scope, liveness
 single/multi/case/whitespace/unknown-400/`dead_letter`-rejected/`pending`-sourceless,
 `agent_id`, filter composition), ordering (DESC + NULLS LAST + tiebreak) and pagination
 (bounds/offset/cap/default), detail contract (404 unknown, terminal fields, epoch
