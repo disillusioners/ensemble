@@ -1,23 +1,29 @@
 #!/usr/bin/env bash
 # Test Pack: m2_missions_off_zeroquery_integration_test — M2 Mission Class probe
-# Tests: tests/integration/test_m2_missions_off_zeroquery.py (TBD by M2 implementer)
+# Tests: tests/integration/test_m2_missions_off_zeroquery.py (M2 probe, real create_app)
 # Timeout: 5 minutes (300s)
 #
-# M2 Gate probe-pack wrapper. The pytest file is NOT YET COMMITTED — a
-# later M2 implementer worker creates it at the exact path above; the
-# wrapper pre-registers the slot so the gate pack inventory is complete
-# before file land. If the file is absent at run time, pytest will
-# report "no tests ran" (collect-only exit 5) and the pack will fail
-# by design — that is the pre-registration signal, not a wrapper bug.
+# M2 Gate probe-pack wrapper. The probe file exercises the REAL app
+# assembly (daemon.api.create_app(), lifespan bypassed per the
+# vscode-integration precedent) with the mission resolver wired exactly
+# as production wiring does — proving the route-level OFF semantics:
+# 404 on both routes with ZERO SQL statements in the request window
+# (before_cursor_execute engine-spy), OpenAPI path visibility in both
+# flag states, the §8.4 ON smoke, and flip-back determinism.
 #
-# Probe scope: M2 missions flag OFF-path zero-query contract. Validates
-# that the OFF-path (kill-switch disabled / pre-flip state) issues zero
-# SQL against the missions table on a zero-query control surface, as
-# the M1 OFF-path byte-identity gate established (sha256-verified vs
-# base `e676ddea`). The integration tier exercises the live HTTP route
-# through the daemon's mission router.
+# Wrapper notes (M2 implementer, 2026-09-03):
+# * --override-ini="addopts=" — REQUIRED: the repo's default addopts is
+#   `-m 'not integration and not postgres'` (pyproject.toml), which
+#   deselects every integration test. This mirrors the house
+#   integration-pack pattern (api_messages_integration_test.sh).
+# * --timeout=240 — per-test cap ≤240s per the gate task spec (CLI
+#   overrides the ini default of 30s, leaving headroom for the heavy
+#   create_app() import path).
+# * -rP — prints captured stdout (the PROBE-CENSUS / PROBE-OPENAPI
+#   evidence lines) for PASSED tests; the gate needs pasted evidence,
+#   not just a green dot.
 #
-# Mission-class feature pack on `feature/mission-class` @ 8eddeb3d.
+# Mission-class feature pack on `feature/mission-class`.
 # Worktree-bound; relies on rev-parse bracket echo for drift guard.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -30,7 +36,9 @@ cd "$PROJECT_DIR"
 # Layer 1 (command-level): 300s via `timeout` wrapper below
 timeout 280s .venv/bin/pytest \
   tests/integration/test_m2_missions_off_zeroquery.py \
-  --tb=short -q -rf 2>&1
+  --override-ini="addopts=" \
+  --timeout=240 \
+  --tb=short -q -rf -rP 2>&1
 EXIT_CODE=$?
 if [ $EXIT_CODE -eq 124 ]; then
   echo "RESULT: TIMEOUT"
