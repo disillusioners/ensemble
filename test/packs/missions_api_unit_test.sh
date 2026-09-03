@@ -15,10 +15,12 @@ cd "$PROJECT_DIR"
 # Unit pack — 2 min hard limit. Dual-layer timeout.
 # Layer 2 (script-internal): 110s — interrupts hung tests
 # Layer 1 (command-level): 120s via `timeout` wrapper below
+# RESULT-echo: `|| EXIT_CODE=$?` list-context capture — under `set -e`, a bare
+# `EXIT_CODE=$?` after a failing command never executes (silent exit, no RESULT).
+EXIT_CODE=0
 timeout 110s .venv/bin/pytest \
   tests/unit/routers/test_missions_api.py \
-  --tb=short -q -rf 2>&1
-EXIT_CODE=$?
+  --tb=short -q -rf 2>&1 || EXIT_CODE=$?
 if [ $EXIT_CODE -eq 124 ]; then
   echo "RESULT: TIMEOUT"
   exit 124
