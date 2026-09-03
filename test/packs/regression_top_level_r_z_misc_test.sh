@@ -34,8 +34,8 @@ timeout 280s uv run pytest \
   tests/message_queue_redesign/ \
   tests/tools/ \
   -n auto --tb=short -q -rf \
-  2>&1
-EXIT_CODE=$?
+  2>&1 || EXIT_CODE=$?
+EXIT_CODE=${EXIT_CODE:-0}
 if [ $EXIT_CODE -eq 124 ]; then
   echo "RESULT: TIMEOUT"
   exit 124
