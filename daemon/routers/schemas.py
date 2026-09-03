@@ -141,7 +141,9 @@ class JobResponse(BaseModel):
     # ``cancelled`` / ``dead_letter``). W4-hazard path: a linked DEAD
     # JobItem flips ``mission_terminal_reason`` to ``dead_letter``
     # regardless of a since-revived instance. Pure read-model — no
-    # writes, no JobItem creation; census stays at 23.
+    # writes, no JobItem creation; census frozen
+    # (``daemon/job_state/constitution.py``:
+    # ``KNOWN_ADMISSION_STATE_WRITERS``).
     mission_id: str | None = Field(
         default=None,
         description=(
@@ -1236,8 +1238,16 @@ class MissionListResponse(BaseModel):
         description=(
             "True when the count/page SQL leg failed (§8.2 whole-page "
             "degrade): missions is empty and total/has_more are null. "
-            "False when rows were served fully — including the "
-            "jobs-lookup-degraded case (linked_jobs=[]), whose warning "
-            "is logged server-side per §8.2 indistinguishable-by-design"
+            "False when rows were served fully. The two distinct "
+            "degrade shapes stay disambiguated here: (a) the count/"
+            "page-leg failure above (whole-page degrade, "
+            "degraded=True), and (b) the **jobs-leg** failure where "
+            "rows ARE servable but each row's ``linked_jobs=[]`` and "
+            "the W4 sub-check is unavailable — for that case "
+            "degraded STAYS False (§8.2 indistinguishable-by-design: "
+            "the liveness-derived terminal reason stands as the W4 "
+            "answer, the warning is logged server-side, and the "
+            "shape stays servable so the renderer does not invent a "
+            "whole-page failure from a single-leg failure)."
         ),
     )
