@@ -939,14 +939,24 @@ async def lifespan(app: FastAPI):
     # stays at 23). Always-on since WS3 (the
     # the M1 mission-projection kill-switch kill-switch was removed);
     # docs §8.4 holds the endpoint contract.
+    #
+    # M2 (mission-class, 2026-09-02, ``feature/mission-class``):
+    # the same resolver instance is also stored on the manager so
+    # ``create_mission_tools_if_available`` in
+    # ``daemon/tools/instance.py`` can inject it into the three
+    # agent tools (``get_mission`` / ``await_mission`` /
+    # ``list_missions``). The resolver is shared by the HTTP router
+    # AND the agent-tool factory — both consume the same
+    # ``InstanceRepository`` / ``JobRepository`` view, so the two
+    # surfaces stay in lock-step on the read-model shape.
     from daemon.services.mission_resolver import MissionResolver
     from daemon.routers.missions import set_missions_resolver
-    set_missions_resolver(
-        MissionResolver(
-            instance_repo=manager._instance_repository,
-            job_repo=job_repository,
-        )
+    mission_resolver = MissionResolver(
+        instance_repo=manager._instance_repository,
+        job_repo=job_repository,
     )
+    manager._mission_resolver = mission_resolver  # for create_mission_tools_if_available
+    set_missions_resolver(mission_resolver)
 
     # Wire skills router services (Phase 6 Task 2 — REST API surface).
     # The skills router uses 4 service DI accessors (created via

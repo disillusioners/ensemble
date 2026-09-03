@@ -170,6 +170,56 @@ class JobResponse(BaseModel):
             "— see agent-contract-draft.md §2 W4 rule."
         ),
     )
+    # M2 (mission-class, 2026-09-02, ``feature/mission-class``) —
+    # anti-trap guardrails (contract draft §3). Two new keys land on
+    # every transport (job) payload, additive on top of the M1
+    # mission_* trio:
+    #
+    # * ``mission_ref`` — the cross-reference payload that ties a job
+    #   row to its linked mission. ``{mission_id, agent_id,
+    #   liveness}`` — a single payload an agent can read to learn the
+    #   mission's state without a separate ``get_mission`` call. Per
+    #   draft §3.3 the cross-reference is MANDATORY on terminal job
+    #   payloads (job_get / job_list / watch_job events); the field is
+    #   also surfaced on non-terminal payloads for consistency (the
+    #   shape stays uniform across the four Fix-C surfaces — §8.2).
+    # * ``outcome`` — the asymmetric outcome token. ALWAYS ``null`` on
+    #   transport payloads (per draft §3.2: ``outcome: null`` on
+    #   transport = "NOT done" by construction); the SAME field on a
+    #   mission payload carries the outcome value when terminal.
+    #   The agent branches on a literal key: ``outcome is None`` ⇒
+    #   "use ``get_mission`` / ``await_mission`` for the work
+    #   question".
+    #
+    # Census note: both fields are derived from the same
+    # ``MissionResolver`` + ``WorkResolverService`` the existing M1
+    # fields source from — no new writers, no new admissions-state
+    # mutations, no JobItem creation. Census stays frozen at 23.
+    outcome: str | None = Field(
+        default=None,
+        description=(
+            "M2: ALWAYS null on transport payloads. The asymmetric "
+            "outcome token — ``outcome: null`` on a job means "
+            "'NOT done' (the transport layer has nothing to say "
+            "about the work). For the actual outcome, use the "
+            "mission tools (``get_mission`` / ``await_mission``) "
+            "which carry the value when terminal. A literal key "
+            "the agent can branch on."
+        ),
+    )
+    mission_ref: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "M2: cross-reference to the linked mission "
+            "({mission_id, agent_id, liveness}). MANDATORY on "
+            "terminal job payloads (contract draft §3.3). The "
+            "shape is uniform across task and message rows — for "
+            "task rows ``liveness`` is the row's own canonical "
+            "status; for mirror rows ``liveness`` is the linked "
+            "instance's canonical mission liveness. ``None`` when "
+            "the resolver degraded (no linked instance)."
+        ),
+    )
 
     model_config = {
         "json_schema_extra": {
@@ -259,6 +309,15 @@ class JobResponse(BaseModel):
                 mission_epoch=self.mission_epoch,
                 mission_terminal_reason=self.mission_terminal_reason,
             ),
+            # M2 (mission-class) — anti-trap guardrails. Both keys
+            # surface verbatim from the model state — the caller
+            # (``_job_to_response`` in ``daemon/routers/jobs_crud.py``)
+            # populates ``mission_ref`` from the resolver-backed
+            # :class:`WorkRecord` and leaves ``outcome`` ``None``
+            # (the contract draft §3.2 asymmetric-outcome rule:
+            # transport payloads ALWAYS carry ``outcome: null``).
+            "outcome": self.outcome,
+            "mission_ref": self.mission_ref,
         }
 
 

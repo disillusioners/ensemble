@@ -297,6 +297,20 @@ class WorkRecord:
     mission_id: str | None = None
     mission_epoch: int | None = None
     mission_terminal_reason: str | None = None
+    # M2 (mission-class, 2026-09-02, ``feature/mission-class``) —
+    # anti-trap guardrails. ``outcome`` is ALWAYS ``None`` on the
+    # transport (work) read surface (contract draft §3.2:
+    # ``outcome: null`` on transport = "NOT done" by construction;
+    # the mission tools carry the value when terminal). ``mission_ref``
+    # is the cross-reference payload tying the work row to its linked
+    # mission — same shape as the JobResponse M2 addition. Derivation
+    # lives in ``daemon/routers/jobs_crud.py::_derive_m2_mission_ref``;
+    # the WorkRecord keeps the fields so all four Fix-C read surfaces
+    # (§8.2: WorkRecord + JobResponse + _ResolvedWork + jobs_management
+    # delegation) emit them in lock-step via ``to_dict`` /
+    # ``to_payload``.
+    outcome: str | None = None
+    mission_ref: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize this :class:`WorkRecord` to a JSON-friendly dict.
@@ -364,6 +378,14 @@ class WorkRecord:
                 mission_epoch=self.mission_epoch,
                 mission_terminal_reason=self.mission_terminal_reason,
             ),
+            # M2 (mission-class) — anti-trap guardrails on the work
+            # (transport) surface. Both keys surface verbatim from
+            # the WorkRecord state; ``outcome`` stays ``None`` on
+            # transport (draft §3.2), ``mission_ref`` is populated
+            # by ``_job_to_record`` so consumers can read the linked
+            # mission's liveness in a single payload.
+            "outcome": self.outcome,
+            "mission_ref": self.mission_ref,
         }
 
 
@@ -822,6 +844,74 @@ def _instance_completed_at(
 # ``JobQueueMgmtService`` in this package). Wired in ``daemon/api.py``
 # during application startup using the same ``manager.engine`` /
 # ``create_job_repository`` plumbing the JobQueue services already use.
+
+
+def _derive_m2_mission_ref_on_work(
+    *,
+    work_record_status: str | None,
+    job_type: str | None,
+    mission_liveness: str | None,
+    mission_id: str | None,
+    agent_id: str | None,
+) -> dict[str, Any] | None:
+    """Compose the M2 ``mission_ref`` cross-reference on the work surface.
+
+    M2 (mission-class, 2026-09-02, ``feature/mission-class``) — the
+    work (transport) surface mirrors the JobResponse M2 addition. The
+    cross-reference ties a :class:`WorkRecord` to its linked mission
+    so an agent can read ``mission_ref.liveness`` from a single
+    payload (mandatory on terminal payloads per contract draft §3.3;
+    surfaced uniformly on every payload for shape uniformity with the
+    JobResponse surface).
+
+    The derivation mirrors ``_derive_m2_mission_ref`` in
+    ``daemon/routers/jobs_crud.py`` — same shape, same fields. Both
+    helpers source from the same resolver-backed fields and stay in
+    lock-step on the four Fix-C read surfaces (§8.2).
+
+    Args:
+        work_record_status: The :class:`WorkRecord` ``status`` (the
+            row's canonical work-side status — derived from
+            ``_derive_legacy_status``).
+        job_type: The ``job_type`` discriminator (``"task"`` /
+            ``"message"`` / ``None`` for Task-backed records).
+        mission_liveness: The Fix-C split-semantics field; canonical
+            mission vocabulary for mirror rows, ``None`` for task
+            rows (where ``status`` IS the liveness).
+        mission_id: The mission identity (``== instance_id``). May be
+            ``None`` when the resolver degraded.
+        agent_id: The agent on whose behalf the mission is working.
+            May be ``None`` when the resolver degraded.
+
+    Returns:
+        A ``dict`` with the three keys (``mission_id``, ``agent_id``,
+        ``liveness``) — ``None`` when the resolver degraded across all
+        three fields (the renderer falls back to the receipt-only
+        view per §8.2).
+    """
+    if job_type == "task":
+        # Task row: ``status`` IS the canonical mission liveness
+        # (the row IS its own mission — task job `completed` STAYS,
+        # §6.7). ``mission_liveness`` is intentionally ``None`` by
+        # the Fix C split-semantics contract.
+        liveness = work_record_status
+    else:
+        # Mirror row (or unknown / degraded): ``mission_liveness``
+        # is the canonical view. Fall back to ``status`` only when
+        # the resolver degraded to ``None`` (the §8.2 "split
+        # semantics unavailable" degrade — surface the row's own
+        # status so the renderer still has a value to display).
+        liveness = (
+            mission_liveness if mission_liveness is not None
+            else work_record_status
+        )
+    if mission_id is None and agent_id is None and liveness is None:
+        return None
+    return {
+        "mission_id": mission_id,
+        "agent_id": agent_id,
+        "liveness": liveness,
+    }
 
 
 class WorkResolverService:
@@ -1618,6 +1708,23 @@ class WorkResolverService:
             mission_id=mission_id,
             mission_epoch=mission_epoch,
             mission_terminal_reason=mission_terminal_reason,
+            # M2 (mission-class) — anti-trap guardrails.
+            # ``outcome`` stays ``None`` on the transport (work)
+            # surface (contract draft §3.2: ``outcome: null`` on
+            # transport = "NOT done" by construction). ``mission_ref``
+            # is the cross-reference payload that ties the work row
+            # to its linked mission — derived from the same instance
+            # + resolver view that produced the M1 fields above (no
+            # new writers, no new queries beyond what already runs
+            # for ``mission_liveness``).
+            outcome=None,
+            mission_ref=_derive_m2_mission_ref_on_work(
+                work_record_status=status,
+                job_type=job_type,
+                mission_liveness=mission_liveness,
+                mission_id=mission_id,
+                agent_id=job.agent_id,
+            ),
         )
 
     def _lookup_instance(self, instance_id: str | None) -> "Instance | None":

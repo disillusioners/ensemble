@@ -939,9 +939,10 @@ class JobRepository:
         limit: int = 100,
         offset: int = 0,
         include_deleted: bool = False,
+        job_types: list[str] | None = None,
     ) -> tuple[list[JobItem], int]:
         """List jobs with optional filters and pagination.
-        
+
         Args:
             statuses: Optional list of status filters.
             project_id: Optional project ID filter.
@@ -949,10 +950,33 @@ class JobRepository:
             limit: Maximum number of jobs to return.
             offset: Number of jobs to skip.
             include_deleted: If False (default), exclude soft-deleted jobs.
-            
+            job_types: M2 (mission-class, 2026-09-02,
+                ``feature/mission-class``) — optional list of
+                ``JobItem.job_type`` values to include. Accepted values
+                are ``"task"`` / ``"message"``. ``None`` (the default)
+                returns BOTH kinds — backward-compatible with the
+                pre-M2 list contract. The legacy ``statuses`` filter is
+                RETAINED unchanged through the M3 window
+                (contract draft §4 — additive migration, no removal).
+
         Returns:
             Tuple of (list of jobs, total count).
         """
+        # M2 job_types validation — reject unknown values with the
+        # same honest-empty-result shape the rest of the daemon uses
+        # for filter typos (mirrors ``_statuses_to_admission`` /
+        # status-filter validation). An unknown value degrades to an
+        # empty IN-clause, so the SQL matches NOTHING (honestly-empty
+        # page, no exception). Mirrors the §8.2 / M4(i) "unknown
+        # filter value ⇒ empty" precedent.
+        valid_job_types = {"task", "message"}
+        if job_types is not None:
+            unknown_types = [t for t in job_types if t not in valid_job_types]
+            if unknown_types:
+                # Source-less filter — IN-clause matches nothing,
+                # returns empty page (the §8.2 source-less degrade).
+                job_types = []
+
         with SQLModelSession(self.engine) as db_session:
             # Build count query
             count_stmt = select(func.count()).select_from(JobItem)
@@ -968,6 +992,8 @@ class JobRepository:
                 count_stmt = count_stmt.where(JobItem.project_id == project_id)
             if queue_id:
                 count_stmt = count_stmt.where(JobItem.queue_id == queue_id)
+            if job_types is not None:
+                count_stmt = count_stmt.where(JobItem.job_type.in_(job_types))
             total = db_session.exec(count_stmt).one()
 
             # Build list query with filters
@@ -982,14 +1008,16 @@ class JobRepository:
                 stmt = stmt.where(JobItem.project_id == project_id)
             if queue_id:
                 stmt = stmt.where(JobItem.queue_id == queue_id)
-            
+            if job_types is not None:
+                stmt = stmt.where(JobItem.job_type.in_(job_types))
+
             stmt = stmt.order_by(
                 col(JobItem.created_at).desc(),
                 col(JobItem.priority).desc()
             ).offset(offset).limit(limit)
-            
+
             jobs = list(db_session.exec(stmt))
-            
+
             return jobs, total
 
     def list_pending_by_project(self, project_id: str) -> list[JobItem]:

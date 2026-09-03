@@ -72,6 +72,20 @@ class _ResolvedWork:
     mission_epoch: int | None = None
     mission_terminal_reason: str | None = None
 
+    # M2 (mission-class, 2026-09-02, ``feature/mission-class``) —
+    # anti-trap guardrails (contract draft §3). Mirrors the WorkRecord
+    # additions:
+    #
+    # * ``outcome`` — ALWAYS ``None`` on the SSE payload (transport
+    #   surface). The asymmetric outcome token: ``outcome: null`` on
+    #   transport = "NOT done" by construction (draft §3.2).
+    # * ``mission_ref`` — cross-reference payload tying the work row
+    #   to its linked mission (mandatory on terminal payloads per
+    #   draft §3.3; surfaced uniformly on every payload for shape
+    #   uniformity with the JobResponse surface).
+    outcome: str | None = None
+    mission_ref: dict[str, Any] | None = None
+
     @classmethod
     def from_work_record(cls, record: Any) -> "_ResolvedWork":
         """Project a :class:`WorkRecord` (resolver path) onto the SSE view.
@@ -114,6 +128,13 @@ class _ResolvedWork:
             mission_terminal_reason=getattr(
                 record, "mission_terminal_reason", None
             ),
+            # M2 — anti-trap guardrails (contract draft §3). Source
+            # verbatim from the WorkRecord so all four Fix-C read
+            # surfaces stay in lock-step on the new keys. Both fields
+            # ride the same resolver-backed path as the M1 trio — no
+            # new writers, no new queries.
+            outcome=getattr(record, "outcome", None),
+            mission_ref=getattr(record, "mission_ref", None),
         )
 
     def to_payload(self, *, work_id: str) -> dict[str, Any]:
@@ -146,6 +167,13 @@ class _ResolvedWork:
                 mission_terminal_reason=self.mission_terminal_reason,
             )
         )
+        # M2 (mission-class) — anti-trap guardrails. ``outcome``
+        # stays ``None`` on transport (draft §3.2). ``mission_ref``
+        # is the cross-reference payload — mandatory on terminal
+        # payloads (draft §3.3), surfaced uniformly on every payload
+        # for shape uniformity with the JobResponse surface.
+        payload["outcome"] = self.outcome
+        payload["mission_ref"] = self.mission_ref
         return payload
 
     def to_completed_payload(self, *, work_id: str) -> dict[str, Any]:
@@ -174,6 +202,12 @@ class _ResolvedWork:
                 mission_terminal_reason=self.mission_terminal_reason,
             )
         )
+        # M2 — anti-trap guardrails (same as ``to_payload``).
+        # ``outcome`` stays ``None`` on the completed-event transport
+        # payload — the FE renderer must use the mission tool for the
+        # outcome answer.
+        payload["outcome"] = self.outcome
+        payload["mission_ref"] = self.mission_ref
         return payload
 
 

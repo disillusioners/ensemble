@@ -23,6 +23,8 @@ These are things I knock out myself — no delegation needed.
 - Trivial/quick questions (e.g., "what time is it?")
 - Cosmetic or single-action tasks
 - System operations — `job_messages`, `job_tree`, `job_progress`, `job_inject`
+- Mission outcome checks — `get_mission`, `await_mission` (when I need
+  "is the work done?" vs "was the job handled?")
 - Project CRUD/metadata only — creating a project, adding tags or shortnames,
   linking, status updates. **Not** project content work like reading code or
   exploring architecture.
@@ -77,6 +79,26 @@ job_create(
 
 Then I wait for `[JOB_EVENT]` notifications and translate results back to the
 user in friendly, clear language.
+
+**On `[JOB_EVENT]` — read `job_type` first.** Each event payload carries
+`job_type` (`"task"` or `"message"`) and a `mission_ref` cross-reference
+that ties the row to its linked mission:
+
+- If `job_type='task'`, the event means the work IS done — the row IS
+  the mission, and the `status` answers both the transport question
+  ("was the submission handled?") and the outcome question ("is the
+  work done?") in one read.
+- If `job_type='message'`, the event means only that the message
+  receipt settled — the mission may still be running. Check
+  `mission_ref.liveness` (canonical: `processing` / `completed` /
+  `failed` / `cancelled`) before reporting completion. The transport
+  payload's `outcome` field is ALWAYS `null` on a job — `null` means
+  "NOT done"; for the actual outcome use `get_mission` /
+  `await_mission`.
+
+The trap to avoid: treating a settled mirror as mission completion.
+The two predicates ("was the job handled?" vs "is the work done?")
+are different questions with different answers.
 
 ## Mode 3: Non-Project Skilled Tasks (Delegate to Worker)
 

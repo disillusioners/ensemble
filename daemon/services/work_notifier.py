@@ -260,12 +260,58 @@ async def notify_work_watchers(
         status_display = _format_status_display(status)
 
         notified = 0
+        held_for_mission = 0
         for watcher in watchers:
             # Filter by the watcher's subscribed events. The watcher's
             # ``watch_events`` is the JSONB list populated at
             # ``add_watch`` time and defaults to ``ALL_WATCHABLE_EVENTS``.
-            if status not in watcher.watch_events:
+            #
+            # M2 (mission-class, 2026-09-02) — ``mission_terminal``
+            # opt-in semantic (contract draft §3.5): a watcher that
+            # subscribes to ``mission_terminal`` wants notification
+            # on EVERY transport terminal event, gated by mission
+            # liveness. The standard ``status not in watch_events``
+            # check would otherwise miss every transport terminal
+            # event (since ``status`` is a transport value, not
+            # ``"mission_terminal"``). Treat the watcher as
+            # "matched" on any transport terminal event when
+            # ``mission_terminal`` is in its events list.
+            standard_match = status in watcher.watch_events
+            mission_terminal_opt_in = (
+                "mission_terminal" in watcher.watch_events
+            )
+            if not standard_match and not mission_terminal_opt_in:
                 continue
+
+            # M2 (mission-class, 2026-09-02, ``feature/mission-class``)
+            # — ``mission_terminal`` opt-in gating (contract draft
+            # §3.5). When a watcher opts in via ``mission_terminal``
+            # (added to ``watch_events`` at ``add_watch`` time), the
+            # notification fires ONLY when both admission AND mission
+            # liveness are terminal. The dual-terminal check uses
+            # ``work_record.mission_liveness`` (canonical mission
+            # vocabulary for mirror rows; ``None`` for task rows).
+            if mission_terminal_opt_in:
+                # Task row: ``mission_liveness`` is intentionally
+                # ``None`` by Fix C split-semantics design — the row
+                # IS its own mission. Use ``work_record.status`` as
+                # the dual-terminal check for task rows.
+                job_type = getattr(work_record, "job_type", None)
+                if job_type == "message":
+                    mission_live = getattr(
+                        work_record, "mission_liveness", None
+                    )
+                else:
+                    mission_live = getattr(work_record, "status", None)
+                if mission_live not in {"completed", "failed", "cancelled"}:
+                    # Mission not yet terminal — keep the watch alive
+                    # for the future terminal event. Skip this
+                    # notification; the watcher row stays in place
+                    # (the ``notified == 0`` path keeps the
+                    # claim-after-notify out of the way so the row is
+                    # not deleted).
+                    held_for_mission += 1
+                    continue
 
             notification_parts = [
                 f"[JOB_EVENT] Job {work_id[:8]}... {status_display}",
@@ -293,6 +339,20 @@ async def notify_work_watchers(
                 source=f"internal_agent:job_event:{work_id}:{status}",
             )
             notified += 1
+
+        # M2 — debug log when ``mission_terminal`` opt-in held
+        # notifications back. The watcher rows remain in place for
+        # the future terminal event (no claim in this branch — the
+        # ``notified == 0`` path skips the DELETE).
+        if held_for_mission:
+            logger.debug(
+                "notify_work_watchers: held %d watcher(s) for "
+                "mission_terminal gating on work_id=%s status=%s — "
+                "mission liveness not yet terminal; rows preserved",
+                held_for_mission,
+                work_id[:8],
+                status,
+            )
 
         # Step 4: CLAIM (delete) watchers ONLY AFTER successful notify.
         #

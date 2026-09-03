@@ -960,10 +960,56 @@ def mission_projection_to_dict(
     }
 
 
+def mission_ref_to_dict(
+    *,
+    mission_id: str | None,
+    agent_id: str | None,
+    liveness: str | None,
+) -> dict[str, Any]:
+    """Return the M2 ``mission_ref`` cross-reference payload.
+
+    M2 (mission-class, 2026-09-02, ``feature/mission-class``) — the
+    anti-trap guardrail that ties a transport (job) row to its linked
+    mission. Contract draft §3.3 makes the cross-reference MANDATORY on
+    terminal job payloads; the field is also surfaced on non-terminal
+    payloads for shape uniformity across the four Fix-C read surfaces
+    (§8.2). The keys are always present, always ``None``-safe (the
+    convention matches ``mission_projection_to_dict`` above — no
+    conditional emission, no missing-key surprises for renderer code).
+
+    Args:
+        mission_id: The mission identity (== ``instance_id`` per
+            §6.6 identity verdict). ``None`` when the resolver
+            degraded (no Instance row) OR the row is not JobItem-backed
+            (Task / report — those rows have no linked instance).
+        agent_id: The agent on whose behalf the mission is working
+            (``Instance.agent_id``). ``None`` when the lookup
+            degraded.
+        liveness: The canonical mission vocabulary value
+            (``pending`` / ``processing`` / ``paused`` / ``completed``
+            / ``failed`` / ``cancelled``). For task rows this is the
+            row's own canonical status; for mirror rows this is the
+            linked instance's canonical mission liveness. ``None``
+            when the resolver degraded OR the row is not JobItem-
+            backed.
+
+    Returns:
+        A ``dict`` with the three keys — always present, always
+        explicit (the consumer can branch on the literal ``mission_id``
+        key without a defensive ``.get``).
+    """
+    return {
+        "mission_id": mission_id,
+        "agent_id": agent_id,
+        "liveness": liveness,
+    }
+
+
 __all__ = [
     "MissionResolver",
     "MissionRecord",
     "MissionPage",
     "MISSION_LIVENESS_FILTER_VALUES",
     "mission_projection_to_dict",
+    "mission_ref_to_dict",
 ]

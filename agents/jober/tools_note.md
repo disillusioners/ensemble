@@ -105,23 +105,115 @@ unwatch_job(job_id="abc123")
 job_get(job_id="abc123")
 ```
 
-**Returns:** Full job details including status, result, error, timestamps.
+**Returns:** Full job details including status, result, error, timestamps, `mission_ref` cross-reference, and `outcome` (always `null` on transport payloads).
 
 **Use for:** Checking status when notification is unclear, debugging.
+
+> *`status` answers transport questions only (was my submission handled?).
+> For outcome, use `get_mission` / `await_mission`.*
 
 ---
 
 ### job_list
 
-**Purpose:** List jobs, optionally filtered by status.
+**Purpose:** List jobs, optionally filtered by status, kind, project, or queue.
 
 ```raw
-job_list(statuses=["running", "pending"])
+job_list(statuses=["running", "pending"], job_types=["task"])
 ```
 
-**Statuses:** `pending`, `running`, `completed`, `failed`, `cancelled`, `terminated`, `dead_letter`
+**Statuses:** `pending`, `running`, `completed`, `failed`, `cancelled`, `terminated`, `dead_letter`. **`'completed'` is the legacy derived string** — for the canonical mission outcome use `get_mission`.
 
-**Use for:** Finding jobs, auditing active work.
+**Job types:** `task` (mission proxy) / `message` (mirror receipt). Default: both.
+
+**Use for:** Finding jobs, auditing active work. Each returned row carries
+`job_type` + `mission_ref` + `outcome: null` so the transport-vs-mission
+distinction stays explicit.
+
+---
+
+## Mission Outcome
+
+Mission tools answer the work-side question ("is the work done?"). They
+are the inverse of the job tools' transport question ("was my submission
+handled?"). Every terminal job payload carries a `mission_ref`
+cross-reference with the linked mission's liveness — the canonical
+mission vocabulary (`pending` / `processing` / `paused` / `completed` /
+`failed` / `cancelled`).
+
+> *`liveness` / `outcome` answer work questions only (is the work done?).
+> For transport (was my submission handled?), use `job_get` / `job_list`.*
+
+### get_mission
+
+**Purpose:** One-shot snapshot of a mission's current state — never blocks.
+
+```raw
+get_mission(mission_id="inst_abc123")
+```
+
+**Returns:** A JSON snapshot — identity (`mission_id == instance_id`),
+liveness, `terminal_reason` (W4-hazard aware — `dead_letter` is preserved
+even after a since-revived instance), `epoch` / `epoch_count` /
+`last_epoch_at`, `linked_jobs`, `started_at`, `last_activity_at`, and a
+single-element `epochs` summary. The `outcome` field is non-null ONLY
+when the mission is terminal; `null` when live.
+
+**Use for:** Quick check before reporting, debugging "is the work done?",
+inspecting the W4 dead-link path.
+
+**Rule:** Never report mission completion based on `status` of a
+mirror JobItem — always check the mission's `outcome` or `liveness`.
+
+---
+
+### await_mission
+
+**Purpose:** Block (asyncio poll) until the mission reaches a terminal
+state, or timeout.
+
+```raw
+await_mission(
+    mission_id="inst_abc123",
+    timeout=600,         # default 600s; on timeout returns current snapshot (no error)
+    poll_interval=2,     # default 2s
+)
+```
+
+**Returns:** The terminal snapshot when the mission reaches
+`completed` / `failed` / `cancelled`, OR the current snapshot on
+timeout. F7 semantics: terminal is revivable — if the mission revives
+later, a fresh `await_mission` sees the new epoch (current
+`mission_epoch` stays constant-1 until M4(ii)).
+
+**Use for:** Replacing the watch-and-wait loop. Pair with
+`job_create` for mission-shaped work: `job_create` →
+`await_mission` → decide → report.
+
+---
+
+### list_missions
+
+**Purpose:** List mission summaries with optional filters.
+
+```raw
+list_missions(agent_id="leader", liveness="processing", limit=50)
+```
+
+**Filters (all optional, AND-composed):** `agent_id`, `liveness`
+(canonical mission vocabulary), `parent_mission_id`, `since`
+(ISO-8601 lower bound on `last_activity_at`), `limit` (clamped to
+[1, 200]; default 50).
+
+**Returns:** A paged list of summaries (`mission_id`, `agent_id`,
+`parent_mission_id`, `liveness`, `terminal_reason`, `epoch`,
+`epoch_count`, `last_epoch_at`, `linked_jobs`, `started_at`,
+`last_activity_at`, `outcome`) — the full `epochs` array is omitted
+(use `get_mission` for that).
+
+**Use for:** Subtree scoping on `parent_mission_id`, focusing on a
+liveness cohort, scoping to a single agent, or auditing recent
+activity.
 
 ---
 

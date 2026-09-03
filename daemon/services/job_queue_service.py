@@ -1593,9 +1593,10 @@ class JobQueueService:
         offset: int = 0,
         limit: int = 50,
         include_deleted: bool = False,
+        job_types: list[str] | None = None,
     ) -> list[JobItem]:
         """List jobs with optional filters.
-        
+
         Args:
             statuses: Optional list of status filters.
             project_id: Optional project ID filter.
@@ -1603,7 +1604,14 @@ class JobQueueService:
             offset: Number of jobs to skip.
             limit: Maximum number of jobs to return.
             include_deleted: Whether to include soft-deleted jobs.
-            
+            job_types: M2 (mission-class, 2026-09-02,
+                ``feature/mission-class``) — optional list of
+                ``JobItem.job_type`` values to include
+                (``"task"`` / ``"message"``). ``None`` (default)
+                returns both kinds. Additive vs the legacy
+                ``statuses`` filter, which is RETAINED through the M3
+                window (contract draft §4).
+
         Returns:
             List of JobItem objects.
         """
@@ -1616,6 +1624,7 @@ class JobQueueService:
             offset=offset,
             limit=limit,
             include_deleted=include_deleted,
+            job_types=job_types,
         )
         return jobs
     

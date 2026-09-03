@@ -61,6 +61,13 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
     "job_tree",
     "job_progress",
     "job_inject",
+    # Mission tools (M2 of mission-class, 2026-09-02) — created by
+    # ``create_mission_tools()`` factory in ``daemon/tools/missions.py``.
+    # These are READ-ONLY readers of the mission projection; census
+    # untouched.
+    "get_mission",
+    "await_mission",
+    "list_missions",
     # system_upgrade tools — created by create_upgrade_tools() factory
     # (daemon/tools/upgrade_tools.py, P2.2 Dispatch A read pair + Dispatch B
     # actor pair).
@@ -454,6 +461,10 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     "self": ["daemon.tools.inner_soul", "daemon.tools.access_memory"],
     "project": "daemon.tools.project",
     "job": "daemon.tools.job_queue",
+    # Mission tools (M2 of mission-class, 2026-09-02) — additive
+    # READ-ONLY surface for the mission read-model projection. No
+    # writers; census stays at 23.
+    "mission": "daemon.tools.missions",
     "help": "daemon.tools.help",
     "mother": "daemon.tools.agent_mother",
     "knowledge": "daemon.tools.knowledge_tools",
@@ -521,6 +532,7 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "agent_modify",
     "agent_read",
     "ask_questions",
+    "await_mission",
     "bash",
     "blueprint_acknowledge_pending",
     "blueprint_claim_pending",
@@ -560,6 +572,7 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "external_opencode_wait_for_result",
     "generate_chart",
     "get_instance_info",
+    "get_mission",
     "glob_files",
     "grep_files",
     "infra_asset_create",
@@ -588,6 +601,7 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "list_context",
     "list_directory",
     "list_instances",
+    "list_missions",
     "list_watched_jobs",
     "plane_sync_project",
     "proc_list",

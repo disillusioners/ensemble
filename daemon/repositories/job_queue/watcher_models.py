@@ -15,6 +15,25 @@ ALL_TERMINAL_STATES: list[str] = ["completed", "failed", "cancelled", "dead_lett
 # All events a watcher can receive, including non-terminal (progress) events
 ALL_WATCHABLE_EVENTS: list[str] = ALL_TERMINAL_STATES + ["in_progress"]
 
+# M2 (mission-class, 2026-09-02, ``feature/mission-class``) — opt-in
+# mission-side terminal event per contract draft §3.5. Fires ONLY when
+# admission AND mission liveness are BOTH terminal. Watchers that
+# include ``"mission_terminal"`` in their ``watch_events`` opt in to
+# this dual-terminal semantic; default watchers (which subscribe to
+# ``ALL_WATCHABLE_EVENTS`` minus ``"mission_terminal"``) preserve
+# the existing transport-only behavior (back-compat).
+#
+# Gating lives in ``daemon/services/work_notifier.py::notify_work_watchers``
+# — when ``"mission_terminal"`` is in a watcher's events list, the
+# per-watcher filter requires the linked instance's canonical mission
+# liveness to be terminal too. The default-omission means the
+# ``ALL_WATCHABLE_EVENTS`` set stays transport-only by default — the
+# new event is strictly opt-in (a caller who wants dual-terminal
+# semantics adds ``"mission_terminal"`` explicitly).
+ALL_MISSION_TERMINAL_WATCHABLE_EVENTS: list[str] = ALL_WATCHABLE_EVENTS + [
+    "mission_terminal"
+]
+
 
 class JobWatcher(SQLModel, table=True):
     """Job watcher - subscribes to job lifecycle events.
