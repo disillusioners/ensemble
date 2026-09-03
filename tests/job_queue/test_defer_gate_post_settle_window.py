@@ -213,10 +213,20 @@ def _insert_job_item(
     project_id: str,
     queue_id: str,
     admission_state: str,
-    job_type: str = "message",
+    job_type: str = "task",
     metadata: dict[str, Any] | None = None,
 ) -> None:
-    """Insert a JobItem row directly via SQL."""
+    """Insert a JobItem row directly via SQL.
+
+    Default ``job_type='task'`` per W7 fixture realism: the realistic
+    shape of defer/background candidates in production is ``task``-type
+    (Phase-1 noted the real defer job was task-type). Callers must stamp
+    ``job_type='message'`` explicitly when the scenario is specifically
+    a Fix-B settled mirror — the busy-set's mirror clause
+    (``j.job_type = 'message' AND j.admission_state = 'done'``) only
+    matches message mirrors; without the explicit stamp the scenario
+    accidentally drops below the predicate.
+    """
     now = datetime.now(timezone.utc).isoformat()
     metadata_json = json.dumps(metadata or {})
     with engine.begin() as conn:
@@ -812,6 +822,30 @@ class TestPostSettlePhase2Fix:
             queue_id="queue-defer-f",
             admission_state=AdmissionState.QUEUED.value,
         )
+        # W7 fixture-realism pin: the defer candidate is task-typed
+        # (the realistic shape per Phase-1's note that the real defer
+        # job was task-type). Stamp ``message`` only when the scenario
+        # is specifically a Fix-B settled mirror; candidates must be
+        # task-type or the busy-set's mirror clause silently misfires.
+        with fb_engine.begin() as conn:
+            cand_kind = conn.execute(
+                text("SELECT job_type FROM job_queue_items WHERE job_id = :jid"),
+                {"jid": "job-defer-f"},
+            ).scalar_one()
+            mirror_kind = conn.execute(
+                text("SELECT job_type FROM job_queue_items WHERE job_id = :jid"),
+                {"jid": "job-mirror-f"},
+            ).scalar_one()
+        assert cand_kind == "task", (
+            "defer candidate job_type drifted from 'task' — fixture "
+            "realism broken (W7); the realistic defer shape is "
+            "task-type, not message-type"
+        )
+        assert mirror_kind == "message", (
+            "settled mirror job_type drifted from 'message' — the "
+            "mirror clause ``j.job_type = 'message'`` would silently "
+            "drop below the predicate"
+        )
         # The parent message Task is COMPLETED (reconciled) — the
         # durable task-side residue of the message work is gone.
         _insert_task(
@@ -938,6 +972,22 @@ class TestPostSettlePhase2Fix:
             project_id=project,
             queue_id="queue-defer-self",
             admission_state=AdmissionState.QUEUED.value,
+        )
+        # W7 fixture-realism pin: the defer candidate is task-typed
+        # (the realistic shape per Phase-1's note that the real defer
+        # job was task-type). The candidate's own row sits on the defer
+        # queue and is excluded by ``queue_type NOT IN :excluded_queue_types``;
+        # the test pins that the candidate shape matches what a real
+        # defer queue would carry — task-typed, not message-typed.
+        with fb_engine.begin() as conn:
+            cand_kind = conn.execute(
+                text("SELECT job_type FROM job_queue_items WHERE job_id = :jid"),
+                {"jid": "job-defer-self"},
+            ).scalar_one()
+        assert cand_kind == "task", (
+            "defer candidate job_type drifted from 'task' — fixture "
+            "realism broken (W7); the realistic defer shape is "
+            "task-type, not message-type"
         )
         # No other work anywhere — the ONLY row is the candidate itself.
         assert job_repo.has_active_non_deferred_work(project) is False, (
