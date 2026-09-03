@@ -667,7 +667,9 @@ class TestListWorkSplitFields:
         default for ``list_work``):
 
         * ONE ``SELECT … FROM job_queue_items`` (the page-defining
-          query, on the ``job_repo`` engine — not counted here).
+          query, on the ``job_repo`` engine — counted here only
+          because the fixture shares one engine between both
+          repositories).
         * ONE ``SELECT … FROM instances WHERE instance_id IN (…)``
           for ``_batch_instances`` (the per-page Instance fetch the
           batched path uses for both ``status`` AND
@@ -675,13 +677,18 @@ class TestListWorkSplitFields:
         * ONE ``SELECT … FROM instances WHERE instance_id IN (…) AND
           parent_id IS NOT NULL`` for ``_batch_child_instance_ids``
           (the ``root_only`` guard — also batched).
+        * ONE ``SELECT … FROM job_queue_items`` for
+          ``_batch_mission_fields`` (the S4 fix: the whole page's
+          mission fields in a single batched JobItem SELECT —
+          without it the per-row ``_mission_fields_for_instance``
+          call inside ``_job_to_record`` is one JobItem SELECT per
+          row).
 
-        3 queries: ``_query_jobs`` + ``_batch_instances`` +
-        ``_batch_child_instance_ids``; per-row mirror lookups
-        would breach the bound. We assert ``<= 3`` to leave
-        headroom for an additional batched query if a future
-        feature adds one, while still failing on a per-row
-        regression (which would be 6+ for N=5).
+        4 queries: ``_query_jobs`` + ``_batch_instances`` +
+        ``_batch_child_instance_ids`` + ``_batch_mission_fields``;
+        per-row lookups would breach the bound. We assert ``<= 4``
+        while still failing on a per-row regression (which would be
+        10+ for N=5).
         """
         # Seed 5 mirror rows on 5 distinct instances.
         for i in range(5):
@@ -713,20 +720,22 @@ class TestListWorkSplitFields:
             records = resolver.list_work(kind="job")
 
         # 5 mirrors, each carrying mission_liveness from a distinct
-        # instance. The batched path is bounded — N+1 would be 6+.        assert len(records) == 5
+        # instance. The batched path is bounded — N+1 would be 10+.
+        assert len(records) == 5
         for record in records:
             assert record.job_type == "message"
             assert record.mission_liveness == "processing"
-        assert call_count <= 3, (
+        assert call_count <= 4, (
             f"N+1 regression: list_work(5 mirror rows) issued "
-            f"{call_count} SQL queries on the instance engine. "
+            f"{call_count} SQL queries on the shared engine. "
             f"Batched path must be bounded (job_repo SELECT + at most "
             f"3 instance-repo queries — _batch_instances, "
-            f"_batch_child_instance_ids, and any future batched "
-            f"helper). A per-row regression would push this to 6+; "
-            f"fix is to extend the batched fetch in "
-            f"_job_to_record (and the inferred-instance lookup in "
-            f"the mirror branch) to fold into _batch_instances."
+            f"_batch_child_instance_ids — plus the S4 batched "
+            f"_batch_mission_fields JobItem SELECT). A per-row "
+            f"regression would push this to 10+; fix is to extend "
+            f"the batched fetch in _job_to_record (and the "
+            f"inferred-instance lookup in the mirror branch) to "
+            f"fold into _batch_instances."
         )
 
     def test_list_work_batch_instance_lookup_failure_degrades_to_null(
@@ -982,13 +991,12 @@ class TestJobResponseSurface:
 
     def test_job_response_serializer_key_parity_with_model_fields(self) -> None:
         """Serializer-key parity tripwire (B5): the set of keys emitted
-        by ``JobResponse._serialize`` MUST equal ``set(JobResponse.model_fields)``
-        when the kill-switch is ON, and MUST equal ``set(JobResponse.model_fields)``
-        minus the three mission_* keys when the kill-switch is OFF.
+        by ``JobResponse._serialize`` MUST equal
+        ``set(JobResponse.model_fields)`` — always-on (WS3 removed the
+        kill-switch; the former OFF-shape pin collapsed into this).
 
-        The custom ``@model_serializer`` emits exactly the model fields
-        (in ON mode) or the model fields minus the mission_* triple
-        (in OFF mode) — no drift is allowed. If a new field lands on
+        The custom ``@model_serializer`` emits exactly the model
+        fields — no drift is allowed. If a new field lands on
         ``JobResponse`` but the serializer forgets it, this test fails
         (the next maintainer knows to extend the serializer). If the
         serializer leaks an extra key the model doesn't declare, this
@@ -996,9 +1004,6 @@ class TestJobResponseSurface:
         """
         from daemon.routers.schemas import JobResponse
 
-        # Default: kill-switch OFF (the M1 default). The serializer must
-        # omit the three mission_* keys so the OFF wire format stays
-        # byte-identical to pre-M1.
         response = JobResponse(
             job_id="j-parity",
             status="completed",
@@ -1017,37 +1022,32 @@ class TestJobResponseSurface:
 
         serialized = response.model_dump()
 
+        expected = set(JobResponse.model_fields)
+        actual = set(serialized)
+        assert actual == expected, (
+            f"serializer key drift: only_in_serialized="
+            f"{sorted(actual - expected)} "
+            f"only_in_model_fields={sorted(expected - actual)}"
+        )
+
+        # Confirm the three mission_* keys are present (the
+        # always-on wire contract since WS3).
         mission_keys = {"mission_id", "mission_epoch", "mission_terminal_reason"}
-        expected_off = set(JobResponse.model_fields) - mission_keys
-        actual_off = set(serialized)
-        assert actual_off == expected_off, (
-            f"OFF-state serializer key drift: only_in_serialized="
-            f"{sorted(actual_off - expected_off)} "
-            f"only_in_model_fields={sorted(expected_off - actual_off)}"
+        assert mission_keys <= set(serialized), (
+            f"always-on state must include {sorted(mission_keys)}; "
+            f"got {sorted(set(serialized) & mission_keys)}"
         )
 
-        # Confirm the three mission_* keys are absent (the OFF contract).
-        assert mission_keys.isdisjoint(set(serialized)), (
-            f"OFF state must NOT include {sorted(mission_keys)} "
-            f"(byte-identical to pre-M1); got {sorted(set(serialized) & mission_keys)}"
-        )
+    def test_job_response_emits_mission_keys_always_on(self) -> None:
+        """Emission test (B5): ``JobResponse.model_dump`` includes the
+        three mission_* keys — always-on since WS3 (the kill-switch
+        was removed).
 
-    def test_job_response_on_state_emits_mission_keys(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """ON-state emission test (B5): with the kill-switch ON,
-        ``JobResponse.model_dump`` includes the three mission_* keys.
-
-        Pins the additive-on-ON contract for the JobResponse wire
-        surface (the ``_serialize`` collapse is a refactor; the
-        ON-state emission contract must NOT change).
+        Pins the emission contract for the JobResponse wire surface
+        (the ``_serialize`` collapse is a refactor; the emission
+        contract must NOT change).
         """
-        import daemon.services.mission_resolver as mr_mod
         from daemon.routers.schemas import JobResponse
-
-        monkeypatch.setenv("ENSEMBLE_MISSION_PROJECTION_ENABLED", "1")
-        mr_mod._reset_mission_projection_for_tests()
 
         response = JobResponse(
             job_id="j-on",
@@ -1067,6 +1067,3 @@ class TestJobResponseSurface:
         assert serialized["mission_id"] == "inst-on"
         assert serialized["mission_epoch"] == 1
         assert serialized["mission_terminal_reason"] == "completed"
-
-        # Restore OFF for downstream tests.
-        mr_mod._reset_mission_projection_for_tests()

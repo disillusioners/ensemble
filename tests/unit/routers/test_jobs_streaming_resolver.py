@@ -19,7 +19,6 @@ consumer does not need a corresponding change.
 from __future__ import annotations
 
 import json
-import os
 import uuid
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -85,28 +84,6 @@ def engine() -> Engine:
         yield eng
     finally:
         eng.dispose()
-
-
-@pytest.fixture(autouse=True)
-def _reset_mission_kill_switch():
-    """Per-test: reset the M1 kill-switch so cached state doesn't leak.
-
-    The kill-switch is module-level cached state in
-    ``daemon/services/mission_resolver.py``; left over from a prior
-    test it would silently flip subsequent tests. This fixture is
-    ``autouse`` so every test in this file starts with the OFF
-    default and restores OFF on teardown — mirrors the shape used by
-    ``tests/unit/services/test_mission_resolver.py``.
-    """
-    from daemon.services.mission_resolver import (
-        _reset_mission_projection_for_tests,
-    )
-
-    _reset_mission_projection_for_tests()
-    os.environ.pop("ENSEMBLE_MISSION_PROJECTION_ENABLED", None)
-    yield
-    _reset_mission_projection_for_tests()
-    os.environ.pop("ENSEMBLE_MISSION_PROJECTION_ENABLED", None)
 
 
 @pytest.fixture
@@ -503,19 +480,14 @@ class TestStreamJobEventsResolverOn:
 
         completed = events[1]["data"]
         # Wire-format contract: same keys as the legacy branch, plus
-        # the Fix C additive split-semantics fields. Consumers that
-        # branch on these keys (``job_type``) can now distinguish
-        # mission vs mirror rows; consumers that ignore them are
-        # unaffected (backward-compatible additive contract).
-        #
-        # M1 (mission-class, 2026-09-02) — three additive mission
-        # projection fields are NOT present in the default OFF state
-        # (soak discipline; the test runs with the kill-switch OFF
-        # because mission_resolver's cached bool is OS-environ-resolved
-        # once per process). Set
-        # ``ENSEMBLE_MISSION_PROJECTION_ENABLED=1`` to flip them ON
-        # for this run; see ``test_resolver_emits_mission_fields_when_kill_switch_on``
-        # for the ON variant.
+        # the Fix C additive split-semantics fields and the M1
+        # additive mission projection fields (always-on since WS3 —
+        # the kill-switch was removed). Consumers that branch on
+        # these keys (``job_type``) can distinguish mission vs
+        # mirror rows; consumers that ignore them are unaffected
+        # (backward-compatible additive contract). See
+        # ``test_resolver_emits_mission_fields_always_on`` for the
+        # populated-value variant.
         assert set(completed.keys()) == {
             "job_id",
             "status",
@@ -524,6 +496,9 @@ class TestStreamJobEventsResolverOn:
             "queue_id",
             "job_type",
             "mission_liveness",
+            "mission_id",
+            "mission_epoch",
+            "mission_terminal_reason",
         }
         assert completed["job_id"] == jid
         assert completed["status"] == "completed"
@@ -535,13 +510,17 @@ class TestStreamJobEventsResolverOn:
         # payload collapses it to ``None`` instead of leaking an empty
         # string. The frontend accepts either null or a real value.
         assert completed["queue_id"] is None
-        # M1 — additive mission fields are absent from the wire
-        # format when the kill-switch is OFF (the M1 default).
-        # Conditional inclusion is the M1 contract — see
+        # M1 — additive mission fields are ALWAYS on the wire now
+        # (always-on since WS3). This row has no linked Instance, so
+        # the values are ``None`` — presence of the keys (not
+        # non-null values) is the wire contract. See
         # ``_ResolvedWork.to_payload`` and ``JobResponse._serialize``.
-        assert "mission_id" not in completed
-        assert "mission_epoch" not in completed
-        assert "mission_terminal_reason" not in completed
+        assert "mission_id" in completed
+        assert "mission_epoch" in completed
+        assert "mission_terminal_reason" in completed
+        assert completed["mission_id"] is None
+        assert completed["mission_epoch"] is None
+        assert completed["mission_terminal_reason"] is None
 
     async def test_completed_task_via_resolver_emits_terminal_events(
         self,
@@ -636,36 +615,23 @@ class TestStreamJobEventsResolverOn:
                 assert "text/event-stream" in response.headers.get("content-type", "")
                 await response.aclose()
 
-    async def test_resolver_emits_mission_fields_when_kill_switch_on(
+    async def test_resolver_emits_mission_fields_always_on(
         self,
         engine: Engine,
         app_resolver_on: FastAPI,
-        monkeypatch,
     ):
-        """ON variant — the SSE payload includes the three M1 additive
-        mission fields when the kill-switch is ON.
+        """Populated variant — the SSE payload includes the three M1
+        additive mission fields, always-on (WS3 removed the
+        kill-switch).
 
         Companion to
         ``test_completed_job_via_resolver_emits_terminal_events`` —
-        that test pins the OFF shape (no mission keys in the payload);
-        this one pins the ON shape (all three keys present, with
-        values populated from the linked ``Instance`` row via
+        that test pins the unlinked-instance shape (keys present,
+        values ``None``); this one pins the populated shape (values
+        resolved from the linked ``Instance`` row via
         :class:`MissionResolver`).
-
-        The kill-switch is resolved once per process from the
-        ``ENSEMBLE_MISSION_PROJECTION_ENABLED`` env var; the
-        ``monkeypatch`` here sets the env before the streaming
-        request fires, and the reset happens on test teardown (the
-        file-level ``_reset_mission_kill_switch`` autouse fixture
-        restores the OFF default).
         """
         from daemon.repositories.instance.models import InstanceStatus
-        from daemon.services.mission_resolver import (
-            _reset_mission_projection_for_tests,
-        )
-
-        monkeypatch.setenv("ENSEMBLE_MISSION_PROJECTION_ENABLED", "1")
-        _reset_mission_projection_for_tests()
 
         # Seed a backing Instance row in a TERMINAL state so the
         # liveness branch of MissionResolver._project yields
@@ -690,11 +656,10 @@ class TestStreamJobEventsResolverOn:
                 await response.aclose()
 
         completed = events[1]["data"]
-        # Fix C fields are still present (they're always emitted on
-        # the unified path; the kill-switch only gates the M1
-        # additive keys).
+        # Fix C fields are present (they're always emitted on the
+        # unified path), as are the M1 additive keys (always-on).
         assert completed["job_type"] == "task"
-        # ON → the three M1 additive mission keys ARE present, with
+        # The three M1 additive mission keys ARE present, with
         # ``mission_id`` equal to the backing ``instance_id`` per
         # the M1 spec §3 identity contract.
         assert "mission_id" in completed

@@ -4,9 +4,9 @@
 debut of the mission read-model projection (docs/job-task-system.md
 §8.4). These tests pin the BINDING (HTTP wire), not just the resolver:
 
-* **Kill-switch matrix** — ``ENSEMBLE_MISSION_PROJECTION_ENABLED`` OFF
-  (default) ⇒ 404 on BOTH routes (fail-closed, routes still
-  registered); ON ⇒ the normal contract.
+* **Route registration** — both routes are registered unconditionally
+  (always-on since WS3: the M1 mission-projection kill-switch was
+  removed; there is no OFF gate to pin anymore).
 * **List contract** — liveness single + comma-multi filters, agent_id,
   pagination bounds/offset/cap, SQL ordering
   (``last_activity_at DESC NULLS LAST`` + ``mission_id ASC`` tiebreak).
@@ -36,17 +36,14 @@ QUARANTINE.md ``StaticPool + WriteGuardSession`` trap is not used).
 Real repositories wired into the real ``MissionResolver`` — the SQL
 level is genuinely exercised.
 
-Layout (1045+ lines — kept long intentionally as the canonical M2-API
-contract surface; split only if a new dimension arrives): contract →
-kill-switch matrix → list → ordering + pagination → detail → W4 binding
-→ degradation binding → engine-bound query-count bound. The two
-OFF-path zero-query pins live next to the kill-switch matrix (they
-share the same client/engine fixture pattern).
+Layout — contract → route registration → list → ordering + pagination
+→ detail → W4 binding → degradation binding → engine-bound query-count
+bound. (The former kill-switch matrix and its OFF-path zero-query pins
+were removed with the kill-switch itself at WS3.)
 """
 
 from __future__ import annotations
 
-import os
 import uuid
 from datetime import datetime, timezone
 
@@ -70,10 +67,7 @@ from daemon.routers.missions import (
     router as missions_router,
     set_missions_resolver,
 )
-from daemon.services.mission_resolver import (
-    MissionResolver,
-    _reset_mission_projection_for_tests,
-)
+from daemon.services.mission_resolver import MissionResolver
 
 
 # ─── Fixtures ───────────────────────────────────────────────────────────────
@@ -132,38 +126,13 @@ def client(resolver: MissionResolver) -> TestClient:
     """TestClient with the missions router mounted under /api.
 
     Mirrors the api.py registration (``/api`` parent prefix) and the
-    lifespan wiring (``set_missions_resolver``). The kill-switch is
-    consulted per-request by the routes, so ON/OFF tests flip the env
-    and reset the module cache via the autouse fixture below.
+    lifespan wiring (``set_missions_resolver``). The routes serve
+    unconditionally (always-on since WS3 — no kill-switch gate).
     """
     set_missions_resolver(resolver)
     app = FastAPI()
     app.include_router(missions_router, prefix="/api")
     return TestClient(app)
-
-
-@pytest.fixture(autouse=True)
-def _reset_mission_kill_switch():
-    """Per-test: reset the kill-switch so the OFF default is fresh.
-
-    Module-level cached state must never leak between tests (the same
-    shape as ``tests/unit/services/test_mission_resolver.py``).
-    """
-    _reset_mission_projection_for_tests()
-    os.environ.pop("ENSEMBLE_MISSION_PROJECTION_ENABLED", None)
-    yield
-    _reset_mission_projection_for_tests()
-    os.environ.pop("ENSEMBLE_MISSION_PROJECTION_ENABLED", None)
-
-
-@pytest.fixture
-def flip_on():
-    """Flip the kill-switch ON for the calling test (restart-read is
-    bypassed in tests via the reset hook — production reads it once)."""
-    os.environ["ENSEMBLE_MISSION_PROJECTION_ENABLED"] = "1"
-    _reset_mission_projection_for_tests()
-    yield
-    # restore handled by the autouse fixture
 
 
 # ─── Seed helpers (mirror test_mission_resolver.py) ────────────────────────
@@ -259,59 +228,23 @@ def _seed_mission(
 # ─── Kill-switch matrix ─────────────────────────────────────────────────────
 
 
-class TestKillSwitchMatrix:
-    """OFF ⇒ 404 on BOTH routes (fail-closed); routes stay registered."""
+class TestRouteRegistrationAndAlwaysOn:
+    """Both routes registered unconditionally; always-on contract.
 
-    def test_off_list_returns_404(self, client, engine):
-        """Default OFF: GET /missions ⇒ 404, not 200/503.
+    (Formerly ``TestKillSwitchMatrix`` — the OFF⇒404 half was removed
+    with the kill-switch at WS3; the registration + serving half
+    remains as the always-on smoke.)
+    """
 
-        Engine-bound zero-query pin: the kill-switch gate fires
-        BEFORE the resolver runs, so the route must not touch the
-        DB. A future gate-reorder (e.g. running the resolver first
-        to "degrade" the OFF path) fails this assertion loudly.
-        """
-        counts, detach = TestEngineBoundQueryCount._count_selects(engine)
-        try:
-            resp = client.get("/api/missions")
-        finally:
-            detach()
-        assert counts["total"] == 0, (
-            f"OFF path must issue ZERO SELECTs (kill-switch fires "
-            f"pre-resolver); got {counts}"
-        )
-        assert resp.status_code == 404
-        body = resp.json()
-        assert "ENSEMBLE_MISSION_PROJECTION_ENABLED" in body["detail"]["error"]
-
-    def test_off_detail_returns_404(self, client, engine):
-        """Default OFF: GET /missions/{id} ⇒ 404 even for a REAL id.
-
-        Engine-bound zero-query pin: same contract as the list OFF —
-        the kill-switch gate fires BEFORE the resolver runs, so no
-        SELECTs touch the DB even when a real id is presented.
-        """
-        iid = _seed_mission(engine, instance_id="inst-off-detail")
-        counts, detach = TestEngineBoundQueryCount._count_selects(engine)
-        try:
-            resp = client.get(f"/api/missions/{iid}")
-        finally:
-            detach()
-        assert counts["total"] == 0, (
-            f"OFF detail path must issue ZERO SELECTs (kill-switch fires "
-            f"pre-resolver); got {counts}"
-        )
-        assert resp.status_code == 404
-
-    def test_off_routes_still_registered_in_openapi(self, client):
-        """Routes stay registered so OpenAPI documents them (the OFF
-        gate is in-handler, not in-registration)."""
+    def test_routes_registered_in_openapi(self, client):
+        """Routes stay registered so OpenAPI documents them."""
         schema = client.get("/openapi.json").json()
         paths = set(schema["paths"].keys())
         assert "/api/missions" in paths
         assert "/api/missions/{mission_id}" in paths
 
-    def test_on_list_returns_200(self, client, engine, flip_on):
-        """ON: GET /missions ⇒ 200 with an (empty) page envelope."""
+    def test_list_returns_200(self, client, engine):
+        """GET /missions ⇒ 200 with an (empty) page envelope."""
         resp = client.get("/api/missions")
         assert resp.status_code == 200
         body = resp.json()
@@ -319,8 +252,8 @@ class TestKillSwitchMatrix:
         assert body["total"] == 0
         assert body["degraded"] is False
 
-    def test_on_detail_returns_200(self, client, engine, flip_on):
-        """ON: GET /missions/{id} for a real id ⇒ 200 full record."""
+    def test_detail_returns_200(self, client, engine):
+        """GET /missions/{id} for a real id ⇒ 200 full record."""
         iid = _seed_mission(
             engine,
             instance_id="inst-on-detail",
@@ -344,7 +277,7 @@ class TestListContract:
     """GET /missions — the paged batch path's production debut (resolve_page
     is the engine; resolve_many remains tests-only)."""
 
-    def test_identity_and_fields(self, client, engine, flip_on):
+    def test_identity_and_fields(self, client, engine):
         """mission_id == instance_id; parent_mission_id == parent_id."""
         parent = _seed_mission(engine, instance_id="mission-parent")
         child = _seed_mission(
@@ -361,7 +294,7 @@ class TestListContract:
         assert by_id[parent]["parent_mission_id"] is None
 
     def test_list_scope_all_instances_no_implicit_filter(
-        self, client, engine, flip_on
+        self, client, engine
     ):
         """Scope is ALL instances — terminals included, no non-terminal
         default, no root filtering (FLAGGED spec-silent choice §8.4)."""
@@ -392,7 +325,7 @@ class TestListContract:
         assert ids == {"m-live", "m-done", "m-cancelled", "m-root", "m-child"}
         assert body["total"] == 5
 
-    def test_liveness_filter_single(self, client, engine, flip_on):
+    def test_liveness_filter_single(self, client, engine):
         """liveness=processing matches the active cluster only."""
         _seed_mission(
             engine, instance_id="f-run", status=InstanceStatus.RUNNING.value
@@ -417,7 +350,7 @@ class TestListContract:
         assert ids == {"f-run", "f-idle", "f-waiting"}
         assert body["total"] == 3
 
-    def test_liveness_filter_multi_comma(self, client, engine, flip_on):
+    def test_liveness_filter_multi_comma(self, client, engine):
         """Comma-multi (OR): completed,failed matches both terminals."""
         _seed_mission(
             engine,
@@ -450,7 +383,7 @@ class TestListContract:
         assert by_id["mf-err"]["terminal_reason"] == "failed"
 
     def test_liveness_filter_whitespace_and_case_tolerant(
-        self, client, engine, flip_on
+        self, client, engine
     ):
         """Trim + lowercase each comma segment before validation."""
         _seed_mission(
@@ -465,7 +398,7 @@ class TestListContract:
         ids = {m["mission_id"] for m in resp.json()["missions"]}
         assert ids == {"ws-done"}
 
-    def test_liveness_filter_unknown_value_400(self, client, engine, flip_on):
+    def test_liveness_filter_unknown_value_400(self, client, engine):
         """A typo must 400, not silently return an empty list."""
         resp = client.get("/api/missions", params={"liveness": "runing"})
         assert resp.status_code == 400
@@ -473,7 +406,7 @@ class TestListContract:
         assert "runing" in detail["error"]
         assert "processing" in detail["accepted"]
 
-    def test_liveness_filter_dead_letter_rejected(self, client, engine, flip_on):
+    def test_liveness_filter_dead_letter_rejected(self, client, engine):
         """dead_letter is a terminal_reason, never a liveness (§8.2) —
         it is NOT in the accepted filter vocabulary.
 
@@ -490,7 +423,7 @@ class TestListContract:
         assert "processing" in detail["accepted"]
 
     def test_liveness_pending_sourceless_matches_nothing(
-        self, client, engine, flip_on
+        self, client, engine
     ):
         """pending is in the ratified value space but has NO
         InstanceStatus source today (§8.2) — the filter honestly
@@ -505,7 +438,7 @@ class TestListContract:
         assert body["total"] == 0
         assert body["degraded"] is False
 
-    def test_agent_id_filter(self, client, engine, flip_on):
+    def test_agent_id_filter(self, client, engine):
         """agent_id filters in SQL (exact match)."""
         _seed_mission(
             engine, instance_id="a-dev", agent_id="developer"
@@ -519,7 +452,7 @@ class TestListContract:
         ids = {m["mission_id"] for m in body["missions"]}
         assert ids == {"a-test"}
 
-    def test_agent_and_liveness_compose(self, client, engine, flip_on):
+    def test_agent_and_liveness_compose(self, client, engine):
         """Filters compose with AND semantics."""
         _seed_mission(
             engine,
@@ -554,7 +487,7 @@ class TestOrderingAndPagination:
     """SQL ordering (NULLS LAST + tiebreak) and bounded pagination."""
 
     def test_ordering_desc_with_nulls_last_and_tiebreak(
-        self, client, engine, flip_on
+        self, client, engine
     ):
         """last_activity_at DESC, NULLs LAST, mission_id ASC tiebreak.
 
@@ -595,7 +528,7 @@ class TestOrderingAndPagination:
             "ord-null-b",
         ]
 
-    def test_pagination_limit_offset_has_more(self, client, engine, flip_on):
+    def test_pagination_limit_offset_has_more(self, client, engine):
         """limit/offset page through; has_more tracks the remainder."""
         for i in range(5):
             t = datetime(2026, 9, 1, 10, i, tzinfo=timezone.utc)
@@ -616,19 +549,19 @@ class TestOrderingAndPagination:
         assert [m["mission_id"] for m in page3["missions"]] == ["pg-0"]
         assert page3["has_more"] is False
 
-    def test_limit_clamped_to_max_page_limit(self, client, engine, flip_on):
+    def test_limit_clamped_to_max_page_limit(self, client, engine):
         """limit=1000 clamps to MAX_PAGE_LIMIT=100 (repo convention)."""
         body = client.get("/api/missions", params={"limit": 1000}).json()
         assert body["limit"] == 100
 
-    def test_limit_clamped_to_minimum_one(self, client, engine, flip_on):
+    def test_limit_clamped_to_minimum_one(self, client, engine):
         """limit=0 / negative clamp to 1 (repo convention)."""
         for params in ({"limit": 0}, {"limit": -5}):
             resp = client.get("/api/missions", params=params)
             assert resp.status_code == 200
             assert resp.json()["limit"] == 1
 
-    def test_negative_offset_clamped_to_zero(self, client, engine, flip_on):
+    def test_negative_offset_clamped_to_zero(self, client, engine):
         """Negative offset clamps to 0."""
         _seed_mission(engine, instance_id="neg-off")
         resp = client.get("/api/missions", params={"offset": -10})
@@ -636,12 +569,12 @@ class TestOrderingAndPagination:
         assert resp.json()["offset"] == 0
         assert resp.json()["total"] == 1
 
-    def test_default_limit_is_ten(self, client, engine, flip_on):
+    def test_default_limit_is_ten(self, client, engine):
         """Default page size = DEFAULT_PAGE_LIMIT (10)."""
         body = client.get("/api/missions").json()
         assert body["limit"] == 10
 
-    def test_offset_beyond_total_returns_empty_page(self, client, engine, flip_on):
+    def test_offset_beyond_total_returns_empty_page(self, client, engine):
         """Offset beyond the total ⇒ empty ``missions``, but ``total``
         still reflects the real count (NOT zero — the §8.2
         absent-must-be-explicit discipline applied to the empty-page
@@ -670,13 +603,13 @@ class TestOrderingAndPagination:
 class TestDetailContract:
     """GET /missions/{mission_id} — full record via resolve()."""
 
-    def test_unknown_id_404(self, client, engine, flip_on):
+    def test_unknown_id_404(self, client, engine):
         """Unknown id ⇒ 404 (the only true-miss shape)."""
         resp = client.get("/api/missions/inst-does-not-exist")
         assert resp.status_code == 404
         assert "Mission not found" in resp.json()["detail"]["error"]
 
-    def test_completed_mission_terminal_fields(self, client, engine, flip_on):
+    def test_completed_mission_terminal_fields(self, client, engine):
         """Terminal mission: terminal_reason == liveness == completed;
         epoch stays 1 (§8.3: NOT None when terminal)."""
         _seed_mission(
@@ -692,7 +625,7 @@ class TestDetailContract:
         assert body["last_activity_at"] is not None
         assert body["started_at"] is not None
 
-    def test_terminated_mission_maps_cancelled(self, client, engine, flip_on):
+    def test_terminated_mission_maps_cancelled(self, client, engine):
         """TERMINATED → liveness cancelled → terminal_reason cancelled."""
         _seed_mission(
             engine,
@@ -703,7 +636,7 @@ class TestDetailContract:
         assert body["liveness"] == "cancelled"
         assert body["terminal_reason"] == "cancelled"
 
-    def test_mission_without_activity(self, client, engine, flip_on):
+    def test_mission_without_activity(self, client, engine):
         """No last_activity_at ⇒ started_at falls back to created_at,
         last_activity_at null."""
         _seed_mission(
@@ -716,7 +649,7 @@ class TestDetailContract:
         assert body["last_activity_at"] is None
         assert body["started_at"] is not None  # created_at fallback
 
-    def test_linked_jobs_surfaced(self, client, engine, flip_on):
+    def test_linked_jobs_surfaced(self, client, engine):
         """linked_jobs lists the linked JobItem ids (non-deleted)."""
         iid = _seed_mission(engine, instance_id="d-jobs")
         jid = _seed_job(engine, instance_id=iid)
@@ -733,7 +666,7 @@ class TestW4DeadLetterBinding:
     of a since-revived (RUNNING) instance. Routing the detail path
     through ``project()`` (dead_linked=False hazard) fails HERE."""
 
-    def test_detail_dead_letter(self, client, engine, flip_on):
+    def test_detail_dead_letter(self, client, engine):
         """Detail: RUNNING instance + DEAD linked job ⇒ dead_letter."""
         iid = _seed_mission(
             engine,
@@ -753,7 +686,7 @@ class TestW4DeadLetterBinding:
         assert body["liveness"] == "processing"
         # ...but the terminal cause is the dead-letter truth.
 
-    def test_list_dead_letter(self, client, engine, flip_on):
+    def test_list_dead_letter(self, client, engine):
         """List: the same W4 hazard must hold on the batched path."""
         iid = _seed_mission(
             engine,
@@ -773,7 +706,7 @@ class TestW4DeadLetterBinding:
         assert rows[iid]["terminal_reason"] == "dead_letter"
 
     def test_soft_deleted_dead_job_does_not_trigger_w4(
-        self, client, engine, flip_on
+        self, client, engine
     ):
         """Soft-deleted JobItems are excluded from the W4 lookup
         (deleted_at IS NOT NULL filter in the batched SELECT)."""
@@ -827,7 +760,7 @@ class TestDegradationBinding:
             conn.commit()
 
     def test_list_count_page_leg_degrades_not_500(
-        self, client, broken_resolver_engine, caplog, flip_on
+        self, client, broken_resolver_engine, caplog
     ):
         """Instances table gone ⇒ 200 empty page + total null +
         degraded true + exactly ONE warning (whole-page degrade)."""
@@ -858,7 +791,7 @@ class TestDegradationBinding:
         )
 
     def test_list_jobs_leg_degrades_rows_survive(
-        self, client, broken_resolver_engine, caplog, flip_on
+        self, client, broken_resolver_engine, caplog
     ):
         """job_queue_items gone ⇒ 200 rows with linked_jobs=[] (the
         liveness fields stay populated; the W4 sub-check falls back to
@@ -895,7 +828,7 @@ class TestDegradationBinding:
         assert len(warnings) == 1
 
     def test_detail_instance_leg_degrades_200_none_fields(
-        self, client, broken_resolver_engine, caplog, flip_on
+        self, client, broken_resolver_engine, caplog
     ):
         """Detail with a failing instance lookup ⇒ 200 + the degraded
         None-fields shape (NOT 404 — the id cannot be proven missing;
@@ -926,7 +859,7 @@ class TestDegradationBinding:
         assert len(warnings) == 1
 
     def test_detail_jobs_leg_degrades_instance_fields_survive(
-        self, client, broken_resolver_engine, caplog, flip_on
+        self, client, broken_resolver_engine, caplog
     ):
         """Detail with a failing JobItem lookup ⇒ 200; instance-derived
         fields stay; linked_jobs=[] and the W4 sub-check is skipped."""
@@ -1003,7 +936,7 @@ class TestEngineBoundQueryCount:
         return counts, _detach
 
     def test_list_issues_exactly_three_selects(
-        self, client, engine, flip_on
+        self, client, engine
     ):
         """One page = 3 SELECTs: count + paged instances + batched
         JobItem IN-clause. ZERO per-row lookups."""
@@ -1039,7 +972,7 @@ class TestEngineBoundQueryCount:
         )
 
     def test_list_select_count_flat_as_page_doubles(
-        self, client, engine, flip_on
+        self, client, engine
     ):
         """The bound is FLAT: page of 4 rows ⇒ 3 SELECTs; page of 8
         rows ⇒ still 3 SELECTs. Any growth with page size is an N+1."""
@@ -1067,7 +1000,7 @@ class TestEngineBoundQueryCount:
                 f"doubles (limit={limit}); got {counts}"
             )
 
-    def test_detail_issues_two_selects(self, client, engine, flip_on):
+    def test_detail_issues_two_selects(self, client, engine):
         """Detail = 2 SELECTs: instance row + batched JobItem (N=1 —
         the resolve() path reuses the batched helper)."""
         iid = _seed_mission(engine, instance_id="q-detail")
@@ -1085,7 +1018,7 @@ class TestEngineBoundQueryCount:
         assert counts["job_queue_items"] == 1
 
     def test_liveness_filtered_list_still_three_selects(
-        self, client, engine, flip_on
+        self, client, engine
     ):
         """Filters compose into the same 3-SELECT bound (no extra
         round-trips for filtering)."""

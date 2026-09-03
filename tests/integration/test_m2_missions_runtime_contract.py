@@ -6,9 +6,8 @@ runtime confirmation of the unit-level pins at
 ``TestW4DeadLetterBinding``, the 3-SELECT bound at
 ``TestEngineBoundQueryCount``, and the filter-rejection case at
 :476). It exercises the actual HTTP surface (``GET /api/missions`` +
-``GET /api/missions/{mission_id}``) under ON-path state
-(``ENSEMBLE_MISSION_PROJECTION_ENABLED=1``) — what the M2 gate
-operators want to see before flipping the kill-switch live.
+``GET /api/missions/{mission_id}``) under the always-on projection
+state (WS3 removed the kill-switch — no ON-path flip is needed).
 
 Contract probed (per ``docs/job-task-system.md`` §8.4)
 ------------------------------------------------------
@@ -56,10 +55,11 @@ Test-infra recipe (house rule, mandatory)
 * Per-test timeout ≤240 s (pytest ``--timeout=240``); whole pack
   internal 280 s.
 
-The probe runs ON-path (``ENSEMBLE_MISSION_PROJECTION_ENABLED=1``)
-end-to-end — this is the M2 mission-class runtime contract that the
-unit pins in :mod:`tests.unit.routers.test_missions_api` describe at
-the SQL level.
+The probe runs against the always-on projection (WS3 removed the
+kill-switch) end-to-end — this is the M2 mission-class runtime
+contract that the unit pins in
+:mod:`tests.unit.routers.test_missions_api` describe at the SQL
+level.
 """
 
 from __future__ import annotations
@@ -108,10 +108,6 @@ from daemon.routers.missions import (
 from daemon.services.dead_letter_service import DeadLetterService
 from daemon.services.job_lock_manager import JobLockManager
 from daemon.services.job_queue_service import JobQueueService
-from daemon.services.mission_resolver import (
-    _reset_mission_projection_for_tests,
-    is_mission_projection_enabled,
-)
 from daemon.services.work_resolver import WorkResolverService
 
 
@@ -166,32 +162,8 @@ def engine(tmp_path) -> Iterator[Engine]:
         eng.dispose()
 
 
-# ─── Kill-switch discipline (ON for every test in this file) ───────────────
-
-
-@pytest.fixture(autouse=True)
-def _mission_kill_switch_on(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Flip ``ENSEMBLE_MISSION_PROJECTION_ENABLED=1`` for every test.
-
-    The cached state lives in
-    ``mission_resolver._MISSION_PROJECTION_ENABLED`` and is OS-environ-
-    resolved once per process. Setting the env via
-    ``monkeypatch.setenv`` BEFORE any daemon import AND clearing the
-    cached state via ``_reset_mission_projection_for_tests()``
-    guarantees every test starts with the kill-switch ON, regardless
-    of test execution order. Teardown restores OFF to keep the rest
-    of the suite (where the OFF default is expected) deterministic.
-    """
-    monkeypatch.setenv("ENSEMBLE_MISSION_PROJECTION_ENABLED", "1")
-    _reset_mission_projection_for_tests()
-    assert is_mission_projection_enabled() is True, (
-        "kill-switch did not resolve ON after env+reset; "
-        f"ENSEMBLE_MISSION_PROJECTION_ENABLED="
-        f"{os.environ.get('ENSEMBLE_MISSION_PROJECTION_ENABLED')!r}"
-    )
-    yield
-    _reset_mission_projection_for_tests()
-    monkeypatch.delenv("ENSEMBLE_MISSION_PROJECTION_ENABLED", raising=False)
+# (WS3: the kill-switch ON-fixture was removed — mission projection is
+# always-on; no per-test env discipline is needed anymore.)
 
 
 # ─── Per-test fixture-level counter state (no SQL — pure Python) ───────────

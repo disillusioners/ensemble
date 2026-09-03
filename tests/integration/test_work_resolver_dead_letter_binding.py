@@ -28,8 +28,8 @@ overrides instance liveness for the mission-side terminal_reason.
 The contract is: ``mission_terminal_reason == 'dead_letter'`` for a
 JobItem in ``admission_state='dead'`` regardless of instance state.
 
-Scenarios pinned here (all ON-path, kill-switch ON)
----------------------------------------------------
+Scenarios pinned here (mission projection always-on)
+----------------------------------------------------
 
 All three pins share the S4 fixture: an ERROR-status Instance
 (canonicalizes to ``'failed'``) linked to a JobItem in
@@ -52,10 +52,9 @@ File-backed SQLite at ``tmp_path`` with ``NullPool`` +
 QUARANTINE.md dependency_bus row (cross-thread lost-write hazard).
 
 Truthmaker: real repos, real routers, real services, real
-ASGITransport. Zero mocks of the code under test. The kill-switch
-is flipped ON via the env var BEFORE any daemon module imports;
-``_reset_mission_projection_for_tests()`` re-resolves the cached
-state so module-level cache stale-doesn't bite.
+ASGITransport. Zero mocks of the code under test. (WS3: the
+kill-switch ON-flip discipline was removed — mission projection is
+always-on.)
 """
 
 from __future__ import annotations
@@ -93,10 +92,6 @@ from daemon.routers import jobs_crud, jobs_streaming
 from daemon.services.dead_letter_service import DeadLetterService
 from daemon.services.job_lock_manager import JobLockManager
 from daemon.services.job_queue_service import JobQueueService
-from daemon.services.mission_resolver import (
-    _reset_mission_projection_for_tests,
-    is_mission_projection_enabled,
-)
 from daemon.services.work_resolver import WorkResolverService
 
 
@@ -138,31 +133,8 @@ def engine(tmp_path) -> Iterator[Engine]:
         eng.dispose()
 
 
-# ── Kill-switch discipline (ON for every test in this file) ────────────────
-
-
-@pytest.fixture(autouse=True)
-def _mission_kill_switch_on(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Flip ``ENSEMBLE_MISSION_PROJECTION_ENABLED=1`` for every test.
-
-    The cached state lives in ``mission_resolver._MISSION_PROJECTION_ENABLED``
-    and is OS-environ-resolved once per process. Setting the env via
-    ``monkeypatch.setenv`` BEFORE any daemon import AND clearing the
-    cached state via ``_reset_mission_projection_for_tests()`` ensures
-    every test starts with the kill-switch ON, regardless of test
-    execution order. Teardown restores OFF to keep the rest of the
-    suite (where the OFF default is expected) deterministic.
-    """
-    monkeypatch.setenv("ENSEMBLE_MISSION_PROJECTION_ENABLED", "1")
-    _reset_mission_projection_for_tests()
-    assert is_mission_projection_enabled() is True, (
-        "kill-switch did not resolve ON after env+reset; "
-        "ENSEMBLE_MISSION_PROJECTION_ENABLED="
-        f"{monkeypatch.getenv('ENSEMBLE_MISSION_PROJECTION_ENABLED')!r}"
-    )
-    yield
-    _reset_mission_projection_for_tests()
-    monkeypatch.delenv("ENSEMBLE_MISSION_PROJECTION_ENABLED", raising=False)
+# (WS3: the kill-switch ON-fixture was removed — mission projection is
+# always-on; no per-test env discipline is needed anymore.)
 
 
 # ── Repo + service + app wiring (mirror of onpath_verify.py Phase 3-4) ──────
@@ -339,9 +311,9 @@ async def test_s4_dead_letter_list_surface_surfaces_dead_letter(
         f"{[r.get('job_id') for r in body.get('jobs', [])]}"
     )
 
-    # M1 additive keys surface verbatim when the kill-switch is ON.
+    # M1 additive keys surface verbatim (always-on since WS3).
     assert "mission_id" in s4_row, (
-        f"LIST row missing 'mission_id' (kill-switch ON contract); "
+        f"LIST row missing 'mission_id' (always-on contract); "
         f"row keys={sorted(s4_row.keys())}"
     )
     assert "mission_epoch" in s4_row, (
@@ -397,7 +369,7 @@ async def test_s4_dead_letter_detail_surface_surfaces_dead_letter(
     assert resp.status_code == 200, f"DETAIL HTTP {resp.status_code}: {resp.text[:200]}"
     detail = resp.json()
 
-    # M1 additive keys present when kill-switch is ON.
+    # M1 additive keys present (always-on since WS3).
     assert "mission_id" in detail
     assert "mission_epoch" in detail
     assert "mission_terminal_reason" in detail
@@ -424,8 +396,8 @@ async def test_s4_dead_letter_sse_completed_event_surfaces_dead_letter(
     WorkRecord at ``status='dead_letter'`` (terminal), so the SSE
     generator emits ``connected`` followed by ``completed`` at T0 —
     no polling required. Both payloads carry the mission_* fields
-    when the kill-switch is ON (the M1 contract; the OFF shape is
-    pinned by the existing SSE test suite).
+    (always-on since WS3 — the M1 contract with the kill-switch
+    removed).
 
     The completed-event assertion is the W4-hazard pin on the SSE
     surface: a DEAD linked JobItem must surface
@@ -453,7 +425,7 @@ async def test_s4_dead_letter_sse_completed_event_surfaces_dead_letter(
     connected = events[0]["data"]
     completed = events[1]["data"]
 
-    # Both payloads surface mission_* keys (kill-switch ON).
+    # Both payloads surface mission_* keys (always-on).
     assert "mission_id" in connected
     assert "mission_terminal_reason" in connected
     assert "mission_id" in completed

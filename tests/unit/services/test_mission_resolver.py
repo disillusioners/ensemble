@@ -26,9 +26,8 @@ These tests pin the M1 contract:
 * **PURITY** — the resolver never INSERTs / UPDATEs / DELETEs; the
   session-spy test asserts no writes during a full ``resolve_many``
   pass over a populated page.
-* **Kill-switch OFF/ON** — ``ENSEMBLE_MISSION_PROJECTION_ENABLED`` is
-  default OFF; the additive fields stay absent from the wire format
-  until the operator activates them.
+* **Always-on projection** — the M1 kill-switch was removed (WS3);
+  the additive fields surface unconditionally on every read surface.
 
 Harness notes
 -------------
@@ -66,10 +65,7 @@ from daemon.repositories.task.repository import TaskRepository
 from daemon.services.mission_resolver import (
     MissionRecord,
     MissionResolver,
-    is_mission_projection_enabled,
-    _reset_mission_projection_for_tests,
 )
-from daemon.services.work_resolver import _is_mission_projection_enabled
 
 
 # ─── Fixtures ───────────────────────────────────────────────────────────────
@@ -185,31 +181,6 @@ def _seed_job(
         s.add(job)
         s.commit()
     return jid
-
-
-# ─── Kill-switch harness ───────────────────────────────────────────────────
-
-
-@pytest.fixture(autouse=True)
-def _reset_mission_kill_switch():
-    """Per-test: reset the kill-switch so the OFF default is fresh.
-
-    The kill-switch is module-level cached state; left over from a
-    prior test would leak. This fixture is ``autouse`` so every test
-    in this file starts with a clean state (kill-switch OFF by
-    default; explicitly flipped ON by tests that exercise the ON
-    branch via ``monkeypatch.setenv("ENSEMBLE_MISSION_PROJECTION_ENABLED", "1")``
-    — the same shape ``TestKillSwitch`` uses for its own
-    ON-path assertions).
-    """
-    _reset_mission_projection_for_tests()
-    # Belt and suspenders: make sure the env var is also blank — the
-    # resolver is consulted at most once per process, so cached state
-    # can mask an env flip.
-    os.environ.pop("ENSEMBLE_MISSION_PROJECTION_ENABLED", None)
-    yield
-    _reset_mission_projection_for_tests()
-    os.environ.pop("ENSEMBLE_MISSION_PROJECTION_ENABLED", None)
 
 
 # ─── Identity contract ─────────────────────────────────────────────────────
@@ -1213,53 +1184,18 @@ class TestBatchQueryCount:
 # ─── Kill-switch OFF/ON ────────────────────────────────────────────────────
 
 
-class TestKillSwitch:
-    """``ENSEMBLE_MISSION_PROJECTION_ENABLED`` gates the additive fields.
-
-    Default OFF (soak discipline, mirrors the WC-wake and governor-guard
-    precedents). The wire format stays byte-identical to pre-M1 when
-    OFF; the three additive ``mission_*`` fields surface on the
-    :class:`WorkRecord` when the operator activates the switch.
-
-    M1 contract (spec §5 M1 row):
-    * OFF → ``WorkRecord.to_dict`` OMITS the three keys (byte-identical).
-    * ON  → ``WorkRecord.to_dict`` INCLUDES the three keys with values
-      populated from :class:`MissionResolver`.
-    """
-
-    def test_default_off(self, monkeypatch):
-        """The default (unset env) is OFF.
-
-        The ``autouse`` fixture ensures the env is unset at the top
-        of this test, so the freshly-resolved state is the OFF
-        default.
-        """
-        monkeypatch.delenv("ENSEMBLE_MISSION_PROJECTION_ENABLED", raising=False)
-        _reset_mission_projection_for_tests()
-        assert is_mission_projection_enabled() is False
-        assert _is_mission_projection_enabled() is False
-
-    def test_env_on_flips_resolver_to_on(self, monkeypatch):
-        monkeypatch.setenv("ENSEMBLE_MISSION_PROJECTION_ENABLED", "1")
-        _reset_mission_projection_for_tests()
-        assert is_mission_projection_enabled() is True
-
-    def test_env_off_flips_resolver_to_off(self, monkeypatch):
-        monkeypatch.setenv("ENSEMBLE_MISSION_PROJECTION_ENABLED", "0")
-        _reset_mission_projection_for_tests()
-        assert is_mission_projection_enabled() is False
-
-
 # ─── Read-surface test (WorkRecord integration) ────────────────────────────
 
 
 class TestWorkRecordIntegration:
-    """The three additive ``mission_*`` fields surface on ``WorkRecord``.
+    """The three additive ``mission_*`` fields surface on ``WorkRecord``
+    unconditionally — always-on since WS3 (the kill-switch was
+    removed; the former OFF-omission / ON-inclusion pair collapsed
+    into this single always-present pin).
 
-    When the kill-switch is OFF, the keys are absent from
-    :meth:`WorkRecord.to_dict` (the M1 OFF contract). When ON, the keys
-    surface with values populated from :class:`MissionResolver` via the
-    helper injected into :class:`WorkResolverService._mission_fields_for_instance`.
+    ``WorkRecord.to_dict`` always includes the keys, with values
+    populated from :class:`MissionResolver` via the helper injected
+    into :class:`WorkResolverService._mission_fields_for_instance`.
 
     "One read surface is enough for this test" (per the M1 task spec
     §6). WorkRecord is the primary read-surface; the other three
@@ -1268,21 +1204,17 @@ class TestWorkRecordIntegration:
     WorkRecord, so they're in lock-step by construction.
     """
 
-    def test_workrecord_mission_fields_absent_off(self):
-        """OFF (default) → ``WorkRecord.to_dict`` omits the mission keys."""
+    def test_workrecord_mission_fields_always_present(self):
+        """``WorkRecord.to_dict`` includes the mission keys (always-on)."""
         from datetime import datetime, timezone
 
         from daemon.services.work_resolver import WorkRecord
 
-        # The ``autouse`` fixture has the kill-switch OFF (no env
-        # var set; cached state cleared). Building a vanilla
-        # WorkRecord with mission_id populated but with the kill-
-        # switch OFF must NOT include the keys in the JSON output.
         record = WorkRecord(
             work_id="job-1",
             kind="job",
             status="processing",
-            instance_id="inst-wo-1",
+            instance_id="inst-wo-2",
             project_id="test",
             agent_id="developer",
             result_summary=None,
@@ -1292,94 +1224,51 @@ class TestWorkRecordIntegration:
             completed_at=None,
             job_type="message",
             mission_liveness="processing",
-            # When OFF, ``to_dict()`` should NOT include these.
-            mission_id="inst-wo-1",
+            mission_id="inst-wo-2",
             mission_epoch=1,
             mission_terminal_reason=None,
         )
         out = record.to_dict()
-        assert "mission_id" not in out, (
-            "OFF state must NOT include mission_id (byte-identical to "
-            "pre-M1 per spec §5 M1 row)."
-        )
-        assert "mission_epoch" not in out
-        assert "mission_terminal_reason" not in out
-        # Fix C fields ARE present (they were added in a prior fix;
-        # M1 only concerns itself with the new keys).
+        assert out["mission_id"] == "inst-wo-2"
+        assert out["mission_epoch"] == 1
+        # ``terminal_reason`` is None here (living mission); the key
+        # is present (always-on is about presence, not value).
+        assert "mission_terminal_reason" in out
+        assert out["mission_terminal_reason"] is None
+        # Fix C fields ARE present too (added in a prior fix).
         assert out["job_type"] == "message"
         assert out["mission_liveness"] == "processing"
 
-    def test_workrecord_mission_fields_present_on(self):
-        """ON → ``WorkRecord.to_dict`` includes the mission keys."""
-        from datetime import datetime, timezone
 
-        from daemon.services.work_resolver import WorkRecord
-
-        try:
-            os.environ["ENSEMBLE_MISSION_PROJECTION_ENABLED"] = "1"
-            _reset_mission_projection_for_tests()
-
-            record = WorkRecord(
-                work_id="job-1",
-                kind="job",
-                status="processing",
-                instance_id="inst-wo-2",
-                project_id="test",
-                agent_id="developer",
-                result_summary=None,
-                error=None,
-                created_at=datetime.now(timezone.utc),
-                started_at=None,
-                completed_at=None,
-                job_type="message",
-                mission_liveness="processing",
-                mission_id="inst-wo-2",
-                mission_epoch=1,
-                mission_terminal_reason=None,
-            )
-            out = record.to_dict()
-            assert out["mission_id"] == "inst-wo-2"
-            assert out["mission_epoch"] == 1
-            # ``terminal_reason`` is None here (living mission); the key
-            # is present (OFF/ON is about presence, not value).
-            assert "mission_terminal_reason" in out
-            assert out["mission_terminal_reason"] is None
-        finally:
-            # Reset back to OFF so subsequent tests in the suite get
-            # the OFF default. The fixture's finaliser also resets,
-            # but doing it in-line makes the test self-contained.
-            os.environ.pop("ENSEMBLE_MISSION_PROJECTION_ENABLED", None)
-            _reset_mission_projection_for_tests()
+# ─── F1 regression: WorkResolverService mission-field resolution ──────────
 
 
-# ─── F1 ON-path regression: WorkResolverService with kill-switch ON ────────
-
-
-class TestWorkResolverServiceKillSwitchOn:
+class TestWorkResolverServiceMissionFields:
     """Regression suite for the F1 fix.
 
     The F1 finding was that ``WorkResolverService._mission_resolver_obj``
     was read by the lazy accessor but NEVER initialised in ``__init__``
-    — with the kill-switch ON and no constructor-injected resolver, the
-    first call through the lazy accessor raised ``AttributeError``,
-    which would have bricked all four Fix-C read surfaces on the
-    operator flip. The fix seeds the attribute to ``None`` in
-    ``__init__``; these tests pin the ON-path contract end-to-end.
+    — with no constructor-injected resolver, the first call through
+    the lazy accessor raised ``AttributeError``, which would have
+    bricked all four Fix-C read surfaces once mission projection
+    activated. The fix seeds the attribute to ``None`` in
+    ``__init__``; these tests pin the contract end-to-end (always-on
+    since WS3 — the former kill-switch ON/OFF split collapsed here).
 
-    Each test drives the resolver with a populated engine + the
-    kill-switch ON; the assertion is that the call returns a
-    ``WorkRecord`` with the three mission fields populated and that
-    no ``AttributeError`` escapes the call. Pre-fix code (missing
-    ``__init__`` initialiser) raises ``AttributeError`` here; post-fix
-    code returns the populated ``WorkRecord``.
+    Each test drives the resolver with a populated engine; the
+    assertion is that the call returns a ``WorkRecord`` with the
+    three mission fields populated and that no ``AttributeError``
+    escapes the call. Pre-fix code (missing ``__init__`` initialiser)
+    raises ``AttributeError`` here; post-fix code returns the
+    populated ``WorkRecord``.
     """
 
-    def test_resolve_work_on_path_populates_mission_fields(
-        self, engine, instance_repo, job_repo, monkeypatch
+    def test_resolve_work_populates_mission_fields(
+        self, engine, instance_repo, job_repo
     ):
-        """``WorkResolverService.resolve_work`` with the kill-switch ON
-        must return a populated ``WorkRecord`` with the three mission
-        fields — NOT raise ``AttributeError``.
+        """``WorkResolverService.resolve_work`` must return a populated
+        ``WorkRecord`` with the three mission fields — NOT raise
+        ``AttributeError``.
 
         Pre-fix code shape (no ``_mission_resolver_obj`` initialiser
         in ``__init__``) raised ``AttributeError`` here on the first
@@ -1400,12 +1289,9 @@ class TestWorkResolverServiceKillSwitchOn:
             engine, instance_id=iid, admission_state=AdmissionState.ACTIVE.value
         )
 
-        monkeypatch.setenv("ENSEMBLE_MISSION_PROJECTION_ENABLED", "1")
-        _reset_mission_projection_for_tests()
-
         # Wire the resolver WITHOUT injecting a MissionResolver seed
-        # — the lazy accessor must self-construct on first ON-path
-        # call. This is the exact shape that broke pre-fix.
+        # — the lazy accessor must self-construct on first call.
+        # This is the exact shape that broke pre-fix.
         svc = WorkResolverService(
             task_repo=_task_repo_fixture(engine),
             job_repo=job_repo,
@@ -1425,8 +1311,8 @@ class TestWorkResolverServiceKillSwitchOn:
         assert record.mission_epoch is not None
         assert record.mission_terminal_reason is None
 
-    def test_resolve_work_on_path_attribute_error_absent(
-        self, engine, instance_repo, job_repo, monkeypatch
+    def test_resolve_work_attribute_error_absent(
+        self, engine, instance_repo, job_repo
     ):
         """Dedicated pinpoint test for the F1 ``AttributeError`` class.
 
@@ -1444,9 +1330,6 @@ class TestWorkResolverServiceKillSwitchOn:
             engine, instance_id=iid, admission_state=AdmissionState.ACTIVE.value
         )
 
-        monkeypatch.setenv("ENSEMBLE_MISSION_PROJECTION_ENABLED", "1")
-        _reset_mission_projection_for_tests()
-
         svc = WorkResolverService(
             task_repo=_task_repo_fixture(engine),
             job_repo=job_repo,
@@ -1457,50 +1340,40 @@ class TestWorkResolverServiceKillSwitchOn:
         except AttributeError as exc:  # pragma: no cover — fails the test
             pytest.fail(
                 "F1 regression surfaced: WorkResolverService lazy "
-                "accessor raised AttributeError with the kill-switch "
-                f"ON: {exc!r}. The __init__ must initialise "
-                "_mission_resolver_obj=None so the lazy accessor has "
-                "an attribute to memoise against."
+                f"accessor raised AttributeError: {exc!r}. The "
+                "__init__ must initialise _mission_resolver_obj=None "
+                "so the lazy accessor has an attribute to memoise "
+                "against."
             )
         assert record is not None
 
-    def test_resolve_work_off_path_preserves_pre_m1_instance_timing(
-        self, engine, instance_repo, job_repo, monkeypatch
+    def test_resolve_work_single_row_surfaces_instance_timing(
+        self, engine, instance_repo, job_repo
     ):
-        """F2 byte-identical regression — OFF path must NOT do the
-        ``_lookup_instance`` call on the single-row JobItem path.
+        """Always-on single-row contract (WS3): ``resolve_work`` on a
+        DONE JobItem whose backing ``Instance`` carries timing data
+        surfaces the instance-derived timestamps AND the populated
+        mission fields.
 
-        Pre-M1 behaviour for ``resolve_work`` (single-row JobItem
-        path) was: no instance lookup at all on this path, so the
-        WorkRecord's ``started_at`` / ``completed_at`` fields were
-        sourced from ``None`` (the JobItem mirror columns that
-        carried those values were dropped in Phase 5 — see the
-        ``_instance_started_at`` / ``_instance_completed_at`` doc
-        comments). The M1 commit added an unconditional
-        ``_lookup_instance`` block in ``_job_to_record`` that broke
-        the byte-identical OFF contract: DONE/DEAD rows whose
-        backing ``Instance`` had ``last_activity_at`` populated
-        started surfacing instance-derived timestamps on the
-        single-row path even with the kill-switch OFF.
-
-        The F2 fix gates the ``_lookup_instance`` block on the
-        kill-switch. This test pins the OFF shape: the WorkRecord's
-        ``started_at`` / ``completed_at`` must stay ``None`` (the
-        pre-M1 value) even when the backing ``Instance`` carries
-        timing data. Post-fix OFF passes; pre-fix OFF (the buggy
-        state) fails because the instance-derived values would
-        appear instead.
+        History: the M1 commit made ``_job_to_record`` look up the
+        Instance lazily on the single-row path; the F2 fix then
+        gated that lookup on the kill-switch so the OFF path stayed
+        byte-identical to pre-M1 (``started_at`` / ``completed_at``
+        stayed ``None``). WS3 removed the kill-switch — the lazy
+        lookup is now unconditional, so this test pins the ALWAYS-ON
+        shape: a DONE row with a terminal Instance surfaces the
+        instance's ``last_activity_at`` as ``started_at``, the
+        terminal ``Instance.updated_at`` as ``completed_at``, and
+        the mission triple (``mission_id`` == instance id, epoch 1,
+        terminal_reason ``completed``).
         """
         from daemon.repositories.instance.models import InstanceStatus
         from daemon.services.work_resolver import WorkResolverService
 
-        # Seed a terminal Instance WITH ``last_activity_at`` populated
-        # — the F2 bug would surface the instance's timing values on
-        # the single-row resolve path even when the kill-switch was
-        # OFF. Pre-M1 the Instance was never consulted on the
-        # single-row path.
+        # Seed a terminal Instance WITH ``last_activity_at`` populated —
+        # the always-on single-row path consults the Instance row.
         now_dt = datetime.now(timezone.utc)
-        iid = "inst-f2-off"
+        iid = "inst-f2-always-on"
         with Session(engine) as s:
             inst = Instance(
                 instance_id=iid,
@@ -1523,16 +1396,6 @@ class TestWorkResolverServiceKillSwitchOn:
             terminal_reason="completed",
         )
 
-        # The autouse fixture has the kill-switch OFF (no env
-        # var set; cached state cleared). The monkeypatch here is
-        # belt-and-suspenders in case a prior test in the suite
-        # leaked the env.
-        monkeypatch.delenv(
-            "ENSEMBLE_MISSION_PROJECTION_ENABLED", raising=False
-        )
-        _reset_mission_projection_for_tests()
-        assert is_mission_projection_enabled() is False
-
         svc = WorkResolverService(
             task_repo=_task_repo_fixture(engine),
             job_repo=job_repo,
@@ -1541,30 +1404,22 @@ class TestWorkResolverServiceKillSwitchOn:
         record = svc.resolve_work(jid)
         assert record is not None
 
-        # Pre-M1 shape: instance timing fields are None on the
-        # single-row path (the JobItem mirror columns were dropped
-        # in Phase 5; the F2 fix restores the OFF contract by
-        # skipping the ``_lookup_instance`` call). The mission
-        # additive fields stay None too — OFF means
-        # byte-identical to pre-M1 across the whole record.
-        assert record.started_at is None, (
-            "F2 regression: OFF path leaked an instance-derived "
-            f"started_at onto a single-row WorkRecord: {record.started_at!r}. "
-            "Pre-M1 the JobItem mirror columns were the only "
-            "started_at source and they surfaced None on this "
-            "path; the F2 fix gates the _lookup_instance block "
-            "on the kill-switch."
+        # Always-on shape: the single-row path consults the Instance,
+        # so instance-derived timing surfaces.
+        assert record.started_at == now_dt.isoformat(), (
+            "Always-on regression: single-row resolve_work did not "
+            f"surface the Instance-derived started_at: {record.started_at!r}. "
+            "The lazy _lookup_instance block must run unconditionally "
+            "since the kill-switch removal."
         )
-        assert record.completed_at is None, (
-            "F2 regression: OFF path leaked an instance-derived "
-            f"completed_at onto a single-row WorkRecord: {record.completed_at!r}. "
-            "Same rationale as started_at — pre-M1 the single-row "
-            "path did not consult the Instance row."
+        assert record.completed_at is not None, (
+            "Always-on regression: single-row resolve_work did not "
+            "surface an instance-derived completed_at."
         )
-        # Mission additive fields are absent — the M1 default.
-        assert record.mission_id is None
-        assert record.mission_epoch is None
-        assert record.mission_terminal_reason is None
+        # Mission additive fields are populated — always-on.
+        assert record.mission_id == iid
+        assert record.mission_epoch == 1
+        assert record.mission_terminal_reason == "completed"
 
 
 def _task_repo_fixture(engine: Engine) -> TaskRepository:
