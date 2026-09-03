@@ -1007,6 +1007,80 @@ class TestPostSettlePhase2Fix:
             "does not hold"
         )
 
+    def test_dangling_instance_id_done_mirror_drops_to_idle(
+        self, fb_engine, job_repo
+    ):
+        """W2(a) dangling-row pin: a done mirror whose linked
+        ``instances`` row is DELETED (a dangling ``instance_id``) MUST
+        report idle — ``NULL`` ``i.status`` evaluates to ``NULL`` under
+        ``NOT IN`` and the row is dropped.
+
+        Pinned against the docstring at
+        ``daemon/repositories/job_queue/_idle_predicate_sql.py`` ~lines
+        92-95: "NULL ``i.status`` (dangling ``instance_id``) evaluates
+        to NULL under ``NOT IN`` and the row is dropped — identical to
+        the previous ``!=`` chain's three-valued behavior."
+
+        Scenario:
+
+          * JobItem with ``job_type='message'``,
+            ``admission_state='done'`` (Fix-B settled mirror).
+          * ``instance_id`` is set, but the matching ``instances`` row
+            is NEVER inserted (or has been deleted) — the LEFT JOIN
+            yields ``i.status = NULL``.
+          * No other work anywhere.
+
+        Expected: the busy-set returns ``False`` — the dangling mirror
+        is dropped, not counted as busy. This matches the pre-Fix-B
+        ``!=`` chain's three-valued behavior (the original gate had the
+        same SQL NULL semantics; the shared-body fix preserves them).
+
+        This is NOT a regression test for the post-settle window
+        (that's covered by ``test_leg1_job_predicate_with_settled_
+        mirror_and_live_instance``); it pins the dangling-instance
+        edge case so a future change to the predicate body does not
+        silently re-interpret NULL ``i.status`` as a busy signal.
+        """
+        project = "proj-dangling"
+        # Insert ONLY a JobItem whose ``instance_id`` has no matching
+        # ``instances`` row. The mirror clause requires
+        # ``instance_id IS NOT NULL`` (which is satisfied — the column
+        # has a value), but the LEFT JOIN yields NULL ``i.status``.
+        _insert_queue(
+            fb_engine,
+            queue_id="queue-par-dangling",
+            project_id=project,
+            queue_type="parallel",
+        )
+        _insert_job_item(
+            fb_engine,
+            job_id="job-mirror-dangling",
+            instance_id="inst-dangling-missing",
+            project_id=project,
+            queue_id="queue-par-dangling",
+            admission_state=AdmissionState.DONE.value,
+            job_type="message",  # mirror, per W7 fixture realism
+        )
+
+        # Both legs must report idle: the dangling done mirror is
+        # dropped by the ``NULL NOT IN :terminal_statuses`` semantics,
+        # so the busy-set is empty.
+        assert (
+            job_repo.has_active_non_deferred_work(project) is False
+        ), (
+            "dangling instance_id + done mirror counted as busy — the "
+            "NULL i.status three-valued drop is broken; the docstring "
+            "at _idle_predicate_sql.py ~lines 92-95 promises the row is "
+            "dropped, not counted as busy"
+        )
+        assert (
+            job_repo.has_active_non_background_work(None) is False
+        ), (
+            "background gate (system-wide) wrongly counted a dangling "
+            "done mirror as busy — same NULL ``i.status`` drop, same "
+            "docstring pin"
+        )
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PG/SQLite parity (opt-in: pytest -m postgres, per repo convention).
