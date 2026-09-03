@@ -60,6 +60,10 @@ orchestrator's parsing contract in
 ``in_progress`` events.) ``status_display`` mapping:
 
 * ``completed``  → ``"completed ✓"``
+* ``settled``    → ``"settled ✓"`` (M3 mission-class — mirror rows
+  carry ``settled``; the transport-receipt terminal is disjoint from
+  ``completed`` which is reserved for task rows / the work-outcome
+  vocabulary)
 * ``failed``     → ``"failed ✗"``
 * ``in_progress`` → ``"in progress ⟳"``
 * ``paused``     → ``"paused ⏸"``
@@ -90,6 +94,7 @@ logger = logging.getLogger(__name__)
 # parser contract).
 _STATUS_DISPLAY_MAP: dict[str, str] = {
     "completed": "completed ✓",
+    "settled": "settled ✓",
     "failed": "failed ✗",
     "in_progress": "in progress ⟳",
     "paused": "paused ⏸",

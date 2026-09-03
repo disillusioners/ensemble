@@ -381,6 +381,135 @@ class TestNotifyWatchersMissionTerminalGate:
         assert notified == 1
         instance_manager.enqueue_message.assert_awaited()
 
+    @pytest.mark.asyncio
+    async def test_held_mission_terminal_watcher_fires_on_cancelled_mission(
+        self,
+    ) -> None:
+        """A3 pin (mission-class, 2026-09-03) — a held
+        ``mission_terminal`` watcher that was held because the
+        mission was non-terminal at the prior transport event
+        FIRES when the mission reaches ``cancelled`` (the
+        ``TERMINATED`` ``InstanceStatus`` canonical mapping).
+
+        Per-kind dispatch (ADR-MISSION-01 §6.6 I3 amendment) — the
+        held gate passes when ``mission_liveness in {completed,
+        failed, cancelled}``. The pin asserts the watcher sees the
+        re-fire on the cancelled mission liveness, not just the
+        natural ``completed`` / ``failed`` re-fires.
+        """
+        # Mirror row, admission terminal + mission CANCELLED.
+        work_record = _make_record(
+            status="completed",  # transport terminal
+            mission_liveness="cancelled",  # mission reached TERMINATED
+            job_type="message",
+        )
+        work_resolver = MagicMock()
+        work_resolver.resolve_work = MagicMock(return_value=work_record)
+        instance_manager = MagicMock()
+        instance_manager.enqueue_message = AsyncMock()
+
+        # Watcher opted in via ``mission_terminal`` — held earlier,
+        # now must re-fire on the cancelled-mission liveness.
+        watcher = MagicMock()
+        watcher.instance_id = "watcher-inst"
+        watcher.watch_events = ["mission_terminal"]
+        watcher_repo = MagicMock()
+        watcher_repo.get_watchers_for_job = MagicMock(return_value=[watcher])
+        watcher_repo.claim_watchers_for_job = MagicMock()
+
+        notified = await notify_work_watchers(
+            "job-cancelled-1",
+            "cancelled",
+            error=None,
+            instance_manager=instance_manager,
+            work_resolver=work_resolver,
+            watcher_repo=watcher_repo,
+            result_summary="mission terminated",
+        )
+
+        # The held gate must pass — watcher fires on cancelled.
+        assert notified == 1, (
+            f"held mission_terminal watcher must re-fire when the "
+            f"mission reaches 'cancelled' (TERMINATED InstanceStatus "
+            f"mapping); got notified={notified}"
+        )
+        instance_manager.enqueue_message.assert_awaited()
+        # The wire text MUST carry the canonical ``cancelled``
+        # token — not ``completed`` (which would mis-route the
+        # orchestrator's parser contract).
+        call_kwargs = instance_manager.enqueue_message.await_args.kwargs
+        message = call_kwargs["message"]
+        assert "cancelled" in message, (
+            f"[JOB_EVENT] text for re-fire on cancelled mission "
+            f"must carry 'cancelled'; got: {message!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_settled_mirror_renders_settled_in_job_event_text(self) -> None:
+        """A2 pin (mission-class, 2026-09-03) — the ``[JOB_EVENT]`` text
+        for a terminal MIRROR row carries the wire-accurate ``settled``
+        label, NOT ``completed``.
+
+        Per-kind dispatch (ADR-MISSION-01 §6.6 I3 amendment): the
+        transport-receipt terminal ``settled`` is disjoint from the
+        work-outcome vocabulary (``completed`` is reserved for task
+        rows / the mission-side outcome). The ``[JOB_EVENT]`` text is
+        consumed by the orchestrator's parser contract
+        (``agents/job-orchestration/skill.md``); a regression that
+        collapses mirror rows onto ``completed ✓`` in the wire text
+        would break the parser's per-kind branching.
+        """
+        work_record = _make_record(
+            status="settled",  # mirror terminal — the M3 rename
+            mission_liveness="completed",  # mission IS terminal too
+            job_type="message",
+        )
+        work_resolver = MagicMock()
+        work_resolver.resolve_work = MagicMock(return_value=work_record)
+        instance_manager = MagicMock()
+        instance_manager.enqueue_message = AsyncMock()
+
+        # Default watcher fires on terminal transport events.
+        watcher = MagicMock()
+        watcher.instance_id = "watcher-inst"
+        watcher.watch_events = [
+            "completed", "settled", "failed", "cancelled",
+            "dead_letter", "in_progress",
+        ]
+        watcher_repo = MagicMock()
+        watcher_repo.get_watchers_for_job = MagicMock(return_value=[watcher])
+        watcher_repo.claim_watchers_for_job = MagicMock()
+
+        notified = await notify_work_watchers(
+            "job-settled-1",
+            "settled",
+            error=None,
+            instance_manager=instance_manager,
+            work_resolver=work_resolver,
+            watcher_repo=watcher_repo,
+            result_summary="mirror settled",
+        )
+
+        assert notified == 1
+        instance_manager.enqueue_message.assert_awaited()
+        # Inspect the message that was enqueued — the wire text MUST
+        # carry ``settled ✓`` (the M3 per-kind dispatch), NOT
+        # ``completed ✓`` (the legacy mirror-terminal text).
+        call_kwargs = instance_manager.enqueue_message.await_args.kwargs
+        message = call_kwargs["message"]
+        assert "[JOB_EVENT]" in message
+        assert "settled ✓" in message, (
+            f"[JOB_EVENT] text for terminal mirror row must carry "
+            f"'settled ✓' (M3 per-kind dispatch); got: {message!r}"
+        )
+        # Negative assertion — the legacy ``completed ✓`` text must
+        # NOT leak onto a mirror row's notification.
+        assert "completed ✓" not in message, (
+            f"[JOB_EVENT] text for terminal mirror row must NOT carry "
+            f"legacy 'completed ✓' (settled is disjoint from completed); "
+            f"got: {message!r}"
+        )
+
 
 # ─── The ``_record_mission_is_terminal`` helper ──────────────────────────
 
