@@ -305,11 +305,17 @@ export class JobsComponent implements OnInit, OnDestroy {
   readonly workError = computed(() => this.workService.error());
 
   // Status filter options
+  // M3 (mission-class, 2026-09-03) — ``settled`` added to the
+  // dropdown so an operator can filter to mirror-receipt terminals
+  // directly. Distinct from ``completed`` (task-side terminal) and
+  // labelled "(receipt)" to surface the transport-vs-work split
+  // without requiring the chip legend.
   readonly statusOptions: { value: JobStatus; label: string }[] = [
     { value: 'pending', label: 'Pending' },
     { value: 'processing', label: 'Processing' },
     { value: 'paused', label: 'Paused' },
     { value: 'completed', label: 'Completed' },
+    { value: 'settled', label: 'Settled (receipt)' },
     { value: 'failed', label: 'Failed' },
     { value: 'cancelled', label: 'Cancelled' },
     { value: 'dead_letter', label: 'Dead Letter' }
@@ -646,7 +652,14 @@ export class JobsComponent implements OnInit, OnDestroy {
               instance_id: status.instance_id || job.instance_id,
               result_summary: status.result_summary || job.result_summary,
               error_message: status.error_message || job.error_message,
-              completed_at: status.status === 'completed' || status.status === 'failed'
+              // M3 (mission-class, 2026-09-03) — ``completed_at`` is
+              // stamped for any wire-terminal status, including the
+              // mirror-receipt terminal ``settled``. The pre-M3 check
+              // only matched ``completed``/``failed`` and missed
+              // settled terminals (rename-introduced regression); the
+              // settled-aware helper covers every wire terminal so a
+              // future terminal rename does not silently regress here.
+              completed_at: status.status && isTerminalStatus(status.status)
                 ? new Date().toISOString()
                 : job.completed_at,
               started_at: status.status === 'processing' && !job.started_at
