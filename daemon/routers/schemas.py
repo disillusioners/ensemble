@@ -132,33 +132,32 @@ class JobResponse(BaseModel):
         ),
     )
     # M1 (mission-class, 2026-09-02) — additive mission projection
-    # fields. Kill-switch-gated via
-    # ``ENSEMBLE_MISSION_PROJECTION_ENABLED`` (default OFF); see
-    # ``daemon/services/mission_resolver.py``. When OFF, all three
-    # fields stay ``None``. When ON, they surface identity (``mission_id``
-    # == ``instance_id``), the current epoch number, and the mission-
-    # side terminal discriminator (``completed`` / ``failed`` /
-    # ``cancelled`` / ``dead_letter``). W4-hazard path: a linked DEAD
-    # JobItem flips ``mission_terminal_reason`` to ``dead_letter``
-    # regardless of a since-revived instance. Pure read-model — no
-    # writes, no JobItem creation; census frozen
-    # (``daemon/job_state/constitution.py``:
+    # fields. Always-on since WS3 (the
+    # the M1 mission-projection kill-switch kill-switch was removed);
+    # see ``daemon/services/mission_resolver.py``. They surface
+    # identity (``mission_id`` == ``instance_id``), the current epoch
+    # number, and the mission-side terminal discriminator
+    # (``completed`` / ``failed`` / ``cancelled`` / ``dead_letter``).
+    # W4-hazard path: a linked DEAD JobItem flips
+    # ``mission_terminal_reason`` to ``dead_letter`` regardless of a
+    # since-revived instance. Pure read-model — no writes, no JobItem
+    # creation; census frozen (``daemon/job_state/constitution.py``:
     # ``KNOWN_ADMISSION_STATE_WRITERS``).
     mission_id: str | None = Field(
         default=None,
         description=(
             "M1: mission identity == instance_id (per mission-class "
-            "spec §3 adjudicated under pressure-test). Kill-switch "
-            "OFF = None; ON = the instance id."
+            "spec §3 adjudicated under pressure-test). The instance "
+            "id, or None when there is no linked instance."
         ),
     )
     mission_epoch: int | None = Field(
         default=None,
         description=(
-            "M1: current mission epoch number (kill-switch OFF = None; "
-            "ON = a small positive integer). Per-epoch timestamps are "
-            "best-effort today — the M4(ii) mission_events log will "
-            "refine this to a precise epoch_count + last_epoch_at."
+            "M1: current mission epoch number (None only on a "
+            "degraded lookup). Per-epoch timestamps are best-effort "
+            "today — the M4(ii) mission_events log will refine this "
+            "to a precise epoch_count + last_epoch_at."
         ),
     )
     mission_terminal_reason: str | None = Field(
@@ -166,10 +165,9 @@ class JobResponse(BaseModel):
         description=(
             "M1: mission-side terminal discriminator (one of "
             "completed / failed / cancelled / dead_letter). None for "
-            "living missions and when the kill-switch is OFF. The "
-            "W4-hazard path surfaces dead_letter here regardless of a "
-            "since-revived instance — see agent-contract-draft.md §2 "
-            "W4 rule."
+            "living missions. The W4-hazard path surfaces "
+            "dead_letter here regardless of a since-revived instance "
+            "— see agent-contract-draft.md §2 W4 rule."
         ),
     )
 
@@ -193,10 +191,8 @@ class JobResponse(BaseModel):
                 "mission_liveness": None,
                 "position": None,
                 "message": "Job completed successfully",
-                # M1 (mission-class, 2026-09-02) — kill-switch defaults
-                # OFF so a non-M1 example stays bit-for-bit pre-M1.
-                # Set ``ENSEMBLE_MISSION_PROJECTION_ENABLED=1`` to
-                # populate these on every JobItem-backed record.
+                # M1 (mission-class, 2026-09-02) — additive mission
+                # projection fields (always-on since WS3).
                 "mission_id": None,
                 "mission_epoch": None,
                 "mission_terminal_reason": None,
@@ -206,24 +202,23 @@ class JobResponse(BaseModel):
 
     @model_serializer
     def _serialize(self) -> dict[str, Any]:
-        """Custom serializer: omit M1 mission_* keys when kill-switch OFF.
+        """Custom serializer: emit the M1 ``mission_*`` keys explicitly.
 
-        M1 (mission-class, 2026-09-02) contract: when
-        ``ENSEMBLE_MISSION_PROJECTION_ENABLED`` is OFF (the M1 default —
-        soak discipline; mirrors the WC-wake and governor-guard
-        precedents), the response stays byte-identical to the pre-M1
-        wire format — the three ``mission_*`` keys are NOT present.
-        When ON, the keys surface verbatim from the model's state.
+        M1 (mission-class, 2026-09-02) contract: the three
+        ``mission_*`` keys surface verbatim from the model's state.
+        Always-on since WS3 — the former
+        the M1 mission-projection kill-switch OFF-omission gate was
+        removed with the kill-switch, so the keys are present on
+        every response serialized via this schema (additive vs the
+        pre-M1 wire format; older clients ignore the extra keys).
 
-        Without this serializer, Pydantic would always emit the keys
-        (with ``None`` values when OFF), breaking the byte-identical
-        contract on the four Fix-C read surfaces that serialize via
-        this schema. The serialization is gated on the same env-resolved
-        boolean that :func:`daemon.services.mission_resolver.is_mission_projection_enabled`
-        publishes, so callers that flip the env see consistent
-        suppression across :meth:`WorkRecord.to_dict`,
+        Without this serializer, Pydantic would emit its default
+        field ordering; the explicit dict keeps the four Fix-C read
+        surfaces (:meth:`WorkRecord.to_dict`,
         :meth:`_ResolvedWork.to_payload`,
-        :meth:`_ResolvedWork.to_completed_payload`, and this serializer.
+        :meth:`_ResolvedWork.to_completed_payload`, and this
+        serializer) in lock-step via the shared
+        ``mission_projection_to_dict`` helper.
 
         Truth rationale (one line): the return value is filtered as a
         serialization helper because ``_is_serialization_dict`` short-
@@ -1121,9 +1116,9 @@ class PlaneConfigResponse(BaseModel):
 # ==================== Mission Schemas (M4-i pull-forward) ====================
 # HTTP surface for the mission read-model projection (docs/job-task-system.md
 # §8.4). Additive to the schema module — mirrors ``MissionRecord``
-# (``daemon/services/mission_resolver.py``) field-for-field. Gated by the
-# M1 kill-switch ``ENSEMBLE_MISSION_PROJECTION_ENABLED`` (OFF ⇒ both routes
-# answer 404 fail-closed; routes stay registered so OpenAPI shows them).
+# (``daemon/services/mission_resolver.py``) field-for-field. Always-on
+# since WS3 (the the M1 mission-projection kill-switch kill-switch
+# was removed; the routes serve normally with no gating).
 
 
 class MissionResponse(BaseModel):

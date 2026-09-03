@@ -19,17 +19,17 @@ Architecture mirrors ``daemon/routers/work.py`` (which mirrors
 * ``get_missions_resolver()`` FastAPI Depends factory that raises 503
   if the service has not been wired in
 
-Both routes are thin: the kill-switch gate (``is_mission_projection_enabled``),
-query validation, and delegation to :class:`MissionResolver` — the
-projection, ordering, pagination, and degradation contract all live in
-the resolver (``resolve_page`` / ``resolve``). No writes, no JobItem
-creation, no admission-state mutation; census frozen
-(``daemon/job_state/constitution.py``: ``KNOWN_ADMISSION_STATE_WRITERS``).
+Both routes are thin: query validation and delegation to
+:class:`MissionResolver` — the projection, ordering, pagination, and
+degradation contract all live in the resolver (``resolve_page`` /
+``resolve``). No writes, no JobItem creation, no admission-state
+mutation; census frozen (``daemon/job_state/constitution.py``:
+``KNOWN_ADMISSION_STATE_WRITERS``).
 
-Kill-switch (fail-closed): when ``ENSEMBLE_MISSION_PROJECTION_ENABLED``
-is unset/blank/falsy (the OFF default) BOTH routes answer **404** while
-remaining registered (OpenAPI still shows them — the docstrings and
-§8.4 document the OFF behavior). ON ⇒ the normal contract below.
+Deployment posture: the mission projection is **always-on** — the
+former the M1 mission-projection kill-switch kill-switch was removed
+entirely (WS3). Revert hatch for an unwind: ``git revert`` + restart;
+there is no runtime OFF gate on these routes.
 """
 
 from __future__ import annotations
@@ -43,7 +43,6 @@ from daemon.routers.schemas import MissionListResponse, MissionResponse
 from daemon.services.mission_resolver import (
     MISSION_LIVENESS_FILTER_VALUES,
     MissionRecord,
-    is_mission_projection_enabled,
 )
 
 if TYPE_CHECKING:
@@ -170,7 +169,6 @@ def _mission_record_to_response(record: MissionRecord) -> MissionResponse:
     response_model=MissionListResponse,
     summary="List missions (mission read-model projection)",
     responses={
-        404: {"description": "Mission projection disabled (kill-switch OFF)"},
         503: {"description": "Mission resolver service not initialized"},
     },
 )
@@ -211,11 +209,9 @@ async def list_missions(
     ``DEFAULT_PAGE_LIMIT`` (10), clamped to ``[1, MAX_PAGE_LIMIT]``
     (100); offset clamped to >= 0.
 
-    Kill-switch: ``ENSEMBLE_MISSION_PROJECTION_ENABLED`` OFF ⇒ **404**
-    (fail-closed — the whole surface is hidden, not field-masked; the
-    spec is silent on OFF behavior for a dedicated endpoint and
-    fail-closed is the task-directed choice, FLAGGED in §8.4). The
-    route stays registered so OpenAPI documents it.
+    Deployment posture: always-on — no kill-switch gate (the former
+    the M1 mission-projection kill-switch OFF⇒404 behavior was
+    removed at WS3; see the module docstring for the revert hatch).
 
     Degradation (§8.2 contract — NO 500 anywhere in the projection
     path): a transient DB error on the count/page SQL leg ⇒ 200 with
@@ -238,26 +234,9 @@ async def list_missions(
         pagination metadata.
 
     Raises:
-        HTTPException: 404 when the kill-switch is OFF; 400 for an
-            unknown ``liveness`` value; 503 when the resolver service
-            is not wired.
+        HTTPException: 400 for an unknown ``liveness`` value; 503
+            when the resolver service is not wired.
     """
-    if not is_mission_projection_enabled():
-        # Fail-closed: the dedicated mission surface does not exist
-        # while the projection kill-switch is OFF (default). 404 — not
-        # 503 (the server is healthy; the feature is disabled) and not
-        # an empty 200 (that would be an indistinguishable-from-real
-        # empty page — the §8.2 lesson: absence must be explicit).
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "error": (
-                    "Mission projection is disabled "
-                    f"(ENSEMBLE_MISSION_PROJECTION_ENABLED OFF — fail-closed)"
-                ),
-            },
-        )
-
     liveness_values = _parse_liveness_filter(liveness)
 
     # Repo list-endpoint clamping convention (instances.py:421-422).
@@ -290,12 +269,7 @@ async def list_missions(
     response_model=MissionResponse,
     summary="Get one mission by id (identity == instance_id)",
     responses={
-        404: {
-            "description": (
-                "Mission projection disabled (kill-switch OFF) or "
-                "unknown mission id"
-            )
-        },
+        404: {"description": "Unknown mission id"},
         503: {"description": "Mission resolver service not initialized"},
     },
 )
@@ -318,8 +292,9 @@ async def get_mission(
     W4-hazard-aware incl. ``dead_letter`` (DEAD admission overrides
     instance liveness, §8.3).
 
-    Kill-switch: OFF ⇒ **404** (fail-closed, same rationale as the
-    list route; FLAGGED in §8.4).
+    Deployment posture: always-on — no kill-switch gate (the former
+    the M1 mission-projection kill-switch OFF⇒404 behavior was
+    removed at WS3; see the module docstring for the revert hatch).
 
     Degradation (§8.2 — NO 500): a transient DB error inside
     ``resolve`` ⇒ **200** with the degraded shape (every field
@@ -336,20 +311,9 @@ async def get_mission(
         None-fields shape on a transient lookup failure.
 
     Raises:
-        HTTPException: 404 when the kill-switch is OFF or the mission
-            id is unknown; 503 when the resolver service is not wired.
+        HTTPException: 404 when the mission id is unknown; 503 when
+            the resolver service is not wired.
     """
-    if not is_mission_projection_enabled():
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "error": (
-                    "Mission projection is disabled "
-                    f"(ENSEMBLE_MISSION_PROJECTION_ENABLED OFF — fail-closed)"
-                ),
-            },
-        )
-
     # resolve() (dead-link pre-fetch) — NEVER project() (S4 hazard).
     record = resolver.resolve(mission_id)
     if record is None:

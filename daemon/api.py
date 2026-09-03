@@ -936,9 +936,9 @@ async def lifespan(app: FastAPI):
     # projection through MissionResolver — the same READ-only
     # InstanceRepository / JobRepository the WorkResolverService
     # consumes (leaf service, zero admission-state writers; census
-    # stays at 23). Kill-switch ENSEMBLE_MISSION_PROJECTION_ENABLED
-    # (default OFF) fail-closes both routes to 404; docs §8.4 holds
-    # the endpoint contract.
+    # stays at 23). Always-on since WS3 (the
+    # the M1 mission-projection kill-switch kill-switch was removed);
+    # docs §8.4 holds the endpoint contract.
     from daemon.services.mission_resolver import MissionResolver
     from daemon.routers.missions import set_missions_resolver
     set_missions_resolver(

@@ -64,13 +64,11 @@ from daemon.repositories.instance.models import Instance
 from daemon.repositories.job_queue.models import AdmissionState, JobItem
 from daemon.repositories.task.models import Task
 
-# M1 (mission-class, 2026-09-02) — kill-switch access via the resolver
-# module so additive ``WorkRecord`` fields stay gated consistently with
-# the resolver. The lookup is one-shot cached per process; restart-
-# required to pick up a flip. Mirrors the shape used by
-# ``_resolve_wc_wake_enqueue_enabled`` for the WC-wake kill-switch.
+# M1 (mission-class, 2026-09-02) — the additive ``mission_*`` payload
+# helper is shared with the resolver module so all Fix-C read surfaces
+# emit the same keys in lock-step. Always-on since WS3 (the
+# the M1 mission-projection kill-switch kill-switch was removed).
 from daemon.services.mission_resolver import (
-    is_mission_projection_enabled as _is_mission_projection_enabled,
     mission_projection_to_dict as _mission_projection_to_dict,
 )
 
@@ -272,12 +270,11 @@ class WorkRecord:
     mission_liveness: str | None = None
     # M1 (mission-class, 2026-09-02) — three additive mission-projection
     # fields that complete the read model without changing any existing
-    # ``status`` semantics. All three are ``None`` when the
-    # ``ENSEMBLE_MISSION_PROJECTION_ENABLED`` kill-switch is OFF (the
-    # M1 default — soak discipline; mirrors the WC-wake and
-    # governor-guard precedents). When the kill-switch is ON they are
-    # populated by :class:`daemon.services.mission_resolver.MissionResolver`
-    # at projection time (pure read-model; no writes, no JobItem
+    # ``status`` semantics. Always-on since WS3 (the
+    # the M1 mission-projection kill-switch kill-switch was removed):
+    # they are populated by
+    # :class:`daemon.services.mission_resolver.MissionResolver` at
+    # projection time (pure read-model; no writes, no JobItem
     # creation):
     #
     # * ``mission_id`` — ``instance_id`` (identity == instance_id per
@@ -356,15 +353,12 @@ class WorkRecord:
             "job_type": self.job_type,
             "mission_liveness": self.mission_liveness,
             # M1 (mission-class, 2026-09-02) — additive projection
-            # fields. Kill-switch gated: the three keys are omitted
-            # when ``ENSEMBLE_MISSION_PROJECTION_ENABLED`` is OFF (the
-            # M1 default — soak discipline; the architecture-
+            # fields. Always-on since WS3: the three keys surface
+            # verbatim from the WorkRecord state (the architecture-
             # recommendation §5 M1 row says additive only, zero
-            # writers, bit-for-bit status preserved); surfaced
-            # verbatim from the WorkRecord state when ON. See the
+            # writers, bit-for-bit status preserved). See the
             # field declarations and ``mission_resolver.py`` for the
-            # truthmaker (Instance + W4-hazard) and the OFF/ON
-            # semantics.
+            # truthmaker (Instance + W4-hazard).
             **_mission_projection_to_dict(
                 mission_id=self.mission_id,
                 mission_epoch=self.mission_epoch,
@@ -1178,8 +1172,20 @@ class WorkResolverService:
                     j.instance_id for j in jobs if j.instance_id is not None
                 }
                 instances_by_id = self._batch_instances(instance_ids)
+                # S4 batching fix (2026-09-02, mission-class WS3):
+                # pre-compute the whole page's mission fields with ONE
+                # JobItem SELECT. Without this, ``_job_to_record`` runs
+                # ``_mission_fields_for_instance`` per row — one
+                # JobItem SELECT per row on the ``GET /api/jobs`` /
+                # ``GET /api/work`` list path. Engine-bound O(1)-per-
+                # page budget pinned by
+                # ``tests/unit/services/test_work_resolver_query_budget.py``.
+                mission_fields_by_id = self._batch_mission_fields(
+                    instances_by_id
+                )
             else:
                 instances_by_id = {}
+                mission_fields_by_id = {}
             if root_only and jobs:
                 # Batch-resolve which of the JobItems' backing
                 # instances are children (parent_id IS NOT NULL).
@@ -1193,13 +1199,21 @@ class WorkResolverService:
                     {j.instance_id for j in jobs if j.instance_id is not None}
                 )
                 records.extend(
-                    self._job_to_record(j, instance=instances_by_id.get(j.instance_id))
+                    self._job_to_record(
+                        j,
+                        instance=instances_by_id.get(j.instance_id),
+                        mission_fields=mission_fields_by_id.get(j.instance_id),
+                    )
                     for j in jobs
                     if j.instance_id is None or j.instance_id not in child_instance_ids
                 )
             else:
                 records.extend(
-                    self._job_to_record(j, instance=instances_by_id.get(j.instance_id))
+                    self._job_to_record(
+                        j,
+                        instance=instances_by_id.get(j.instance_id),
+                        mission_fields=mission_fields_by_id.get(j.instance_id),
+                    )
                     for j in jobs
                 )
 
@@ -1306,6 +1320,7 @@ class WorkResolverService:
         self,
         job: JobItem,
         instance: "Instance | None" = None,
+        mission_fields: "tuple[str | None, int | None, str | None] | None" = None,
     ) -> WorkRecord:
         """Build a :class:`WorkRecord` from a JobItem row.
 
@@ -1364,6 +1379,18 @@ class WorkResolverService:
                 reuse the same row to build each record. Defaults to
                 ``None`` (resolver performs the lookup), which keeps
                 ``resolve_work`` (single-row call site) unaffected.
+            mission_fields: Optional pre-computed
+                ``(mission_id, mission_epoch, mission_terminal_reason)``
+                tuple for this row's instance — the S4 batching path.
+                ``list_work`` computes the whole page's mission fields
+                with ONE ``MissionResolver._batch_jobitem_lookup``
+                SELECT (engine-bound pinned by
+                ``tests/unit/services/test_work_resolver_query_budget.py``)
+                and passes each row's tuple here so the per-row
+                ``_mission_fields_for_instance`` call — one JobItem
+                SELECT per row — never runs on the list path.
+                Defaults to ``None`` (per-row path; single-row call
+                sites unaffected).
         """
         # Phase 4 cleanup: the frozen ``status`` column is no longer
         # written — ``admission_state`` is the sole authority. Dead
@@ -1510,29 +1537,29 @@ class WorkResolverService:
         # M1 (mission-class, 2026-09-02) — additive mission
         # projection. Consult ``MissionResolver`` for the three
         # fields (``mission_id`` / ``mission_epoch`` /
-        # ``mission_terminal_reason``). The lookup is gated on the
-        # kill-switch — when OFF, all three stay ``None`` and the
-        # wire format stays byte-identical to pre-M1. The kill-switch
-        # check is inside the helper so a single answer gates both
+        # ``mission_terminal_reason``). Always-on since WS3 (the
+        # kill-switch was removed) — the projection applies to both
         # the per-row and the batched paths.
-        if (
-            _is_mission_projection_enabled()
-            and instance is None
-            and job.instance_id is not None
-        ):
-            # Single-row ``resolve_work`` path — no pre-fetched
-            # instance yet. Look it up lazily before consulting
-            # ``MissionResolver``. Gated on the kill-switch so the
-            # OFF path stays byte-identical to pre-M1: no
-            # ``_lookup_instance`` call on the single-row JobItem
-            # path means ``_instance_started_at`` /
-            # ``_instance_completed_at`` receive ``instance=None``
-            # and fall through to the ``None`` they would have
-            # surfaced before M1 added the additive fields.
-            instance = self._lookup_instance(job.instance_id)
-        mission_id, mission_epoch, mission_terminal_reason = (
-            self._mission_fields_for_instance(instance)
-        )
+        if mission_fields is not None:
+            # S4 batched path — the caller (``list_work``) computed
+            # the whole page's mission fields with ONE JobItem
+            # SELECT; reuse the caller's tuple verbatim. This also
+            # skips the lazy instance lookup below: a row whose
+            # instance is absent from the batch map would only
+            # re-discover ``None`` per-row.
+            mission_id, mission_epoch, mission_terminal_reason = mission_fields
+        else:
+            if instance is None and job.instance_id is not None:
+                # Single-row ``resolve_work`` path — no pre-fetched
+                # instance yet. Look it up lazily before consulting
+                # ``MissionResolver`` so ``_instance_started_at`` /
+                # ``_instance_completed_at`` and the mission fields
+                # all see the same row (pre-WS3 this lookup was
+                # kill-switch-gated; the gate is gone).
+                instance = self._lookup_instance(job.instance_id)
+            mission_id, mission_epoch, mission_terminal_reason = (
+                self._mission_fields_for_instance(instance)
+            )
 
         return WorkRecord(
             work_id=job.job_id,
@@ -1585,9 +1612,9 @@ class WorkResolverService:
             job_type=job_type,
             mission_liveness=mission_liveness,
             # M1 — additive mission projection fields (mission-class,
-            # 2026-09-02). Kill-switch gated; see
-            # ``_mission_fields_for_instance`` for the OFF/ON
-            # semantics.
+            # 2026-09-02). Always-on since WS3; see
+            # ``_mission_fields_for_instance`` and the S4 batched
+            # ``mission_fields`` parameter for the resolution paths.
             mission_id=mission_id,
             mission_epoch=mission_epoch,
             mission_terminal_reason=mission_terminal_reason,
@@ -1633,12 +1660,11 @@ class WorkResolverService:
 
         Lazy construction: the first access builds a fresh
         ``MissionResolver`` from ``self._instance_repo`` /
-        ``self._job_repo``; subsequent accesses reuse it. ``None`` is
-        returned when the kill-switch
-        (``ENSEMBLE_MISSION_PROJECTION_ENABLED``) is OFF so the
-        additive fields stay absent across all call sites (the
-        ``_job_to_record`` path checks the result of this helper and
-        skips the lookup entirely).
+        ``self._job_repo``; subsequent accesses reuse it. Always-on
+        since WS3 — there is no kill-switch gate (the former
+        the M1 mission-projection kill-switch OFF⇒``None`` early
+        return was removed), so ``None`` is now only possible when
+        neither repo is wired.
 
         Lazy construction is the safe default for older tests that
         wire ``WorkResolverService`` standalone — they don't have to
@@ -1647,8 +1673,6 @@ class WorkResolverService:
         constructing the resolver there once and passing it in via
         the constructor.
         """
-        if not _is_mission_projection_enabled():
-            return None
         if self._mission_resolver_obj is None:
             # Prefer the seed (explicit constructor injection); fall
             # back to lazy construction against ``self._instance_repo``
@@ -1672,8 +1696,7 @@ class WorkResolverService:
     ) -> tuple[str | None, int | None, str | None]:
         """Return ``(mission_id, mission_epoch, mission_terminal_reason)``.
 
-        When the kill-switch is OFF, or when the resolver degrades,
-        every field is ``None``. When the kill-switch is ON and the
+        Always-on since WS3 (the kill-switch was removed). When the
         instance is loadable, the helper mirrors
         :meth:`MissionResolver.resolve` (the single-row path): it
         pre-fetches the linked JobItem DEAD-admission flag via
@@ -1689,10 +1712,14 @@ class WorkResolverService:
         (``work_resolver.py:1702`` defect, observed on the LIST /
         DETAIL / SSE read surfaces for a DEAD linked JobItem +
         terminal instance). Routing through the same pre-fetch
-        pattern as :meth:`MissionResolver.resolve` keeps the OFF
-        path byte-identical (the kill-switch gate above returns
-        before any resolver call) and confines the ON-path change
-        to the W4-bound tuple element.
+        pattern as :meth:`MissionResolver.resolve` keeps the
+        resolution identical to the single-row contract and confines
+        the change to the W4-bound tuple element.
+
+        Batched callers (``list_work``) MUST NOT call this per row —
+        one call per row = one JobItem SELECT per row (the S4 N+1).
+        Use :meth:`_batch_mission_fields` instead (one SELECT per
+        page, engine-bound pinned).
 
         Args:
             instance: An already-loaded :class:`Instance` row, or
@@ -1701,18 +1728,9 @@ class WorkResolverService:
 
         Returns:
             A 3-tuple matching the three additive fields on
-            :class:`WorkRecord`. All ``None`` when the kill-switch is
-            OFF, when the resolver is degraded, or when no Instance
-            row was loadable.
+            :class:`WorkRecord`. All ``None`` when the resolver is
+            degraded or when no Instance row was loadable.
         """
-        # Kill-switch OFF ⇒ all three fields stay None (the OFF state
-        # is "no mission fields surface" — see the M1 spec §5 row
-        # + decisions.md §4 soak discipline). The gate is the FIRST
-        # check so the pre-fetch below never runs when the OFF path
-        # is active — preserving the byte-identical OFF contract on
-        # every read surface.
-        if not _is_mission_projection_enabled():
-            return None, None, None
         if instance is None:
             return None, None, None
         resolver = self._mission_resolver()
@@ -1742,6 +1760,65 @@ class WorkResolverService:
             record.epoch,
             record.terminal_reason,
         )
+
+    def _batch_mission_fields(
+        self,
+        instances_by_id: dict[str, "Instance"],
+    ) -> dict[str, tuple[str | None, int | None, str | None]]:
+        """Whole-page mission-fields pre-fetch (S4 batching fix).
+
+        ONE ``MissionResolver._batch_jobitem_lookup`` SELECT for the
+        entire page replaces the per-row
+        ``_mission_fields_for_instance`` call in ``_job_to_record``
+        that issued one JobItem SELECT per row (the S4 N+1 on the
+        ``GET /api/jobs`` path — ``_query_jobs`` is the no-LIMIT
+        fetch, so a large table meant a large per-row tax). Query
+        budget for the JobItem branch of ``list_work`` is O(1) per
+        page regardless of row count: ``_query_jobs`` (1) +
+        ``_batch_instances`` (1) + ``_batch_child_instance_ids``
+        (1, root_only) + this helper's JobItem lookup (1) — pinned
+        by ``tests/unit/services/test_work_resolver_query_budget.py``.
+
+        Resolution semantics per instance are IDENTICAL to
+        :meth:`_mission_fields_for_instance` (same ``dead_linked``
+        pre-fetch → ``_project`` → W4-bound tuple extraction);
+        only the SELECT is hoisted out of the row loop. ``_project``
+        itself is pure Python — the batch helper is the only DB
+        access.
+
+        Degradation contract: a transient ``SQLAlchemyError`` inside
+        ``_batch_jobitem_lookup`` degrades to ``{}`` (its own
+        contract), which maps every instance to the all-``None``
+        tuple — the same soft-fail shape as the per-row path.
+
+        Args:
+            instances_by_id: The ``{instance_id: Instance}`` map for
+                the page (the ``_batch_instances`` output). Empty map
+                short-circuits to ``{}`` without hitting the DB.
+
+        Returns:
+            A ``{instance_id: (mission_id, mission_epoch,
+            mission_terminal_reason)}`` map. Instances whose
+            projection degraded are absent — callers treat absence
+            as the all-``None`` tuple (same read as the per-row
+            path's ``None`` fields).
+        """
+        resolver = self._mission_resolver()
+        if resolver is None or not instances_by_id:
+            return {}
+        jobitems_by_id = resolver._batch_jobitem_lookup(list(instances_by_id))
+        out: dict[str, tuple[str | None, int | None, str | None]] = {}
+        for iid, instance in instances_by_id.items():
+            dead_linked, linked_jobs = jobitems_by_id.get(iid, (False, []))
+            record = resolver._project(instance, dead_linked, linked_jobs)
+            if record is None:
+                continue
+            out[iid] = (
+                record.mission_id,
+                record.epoch,
+                record.terminal_reason,
+            )
+        return out
 
     def _query_tasks(
         self,

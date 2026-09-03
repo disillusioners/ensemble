@@ -63,11 +63,11 @@ class _ResolvedWork:
     mission_liveness: str | None
 
     # M1 (mission-class, 2026-09-02) — three additive mission
-    # projection fields mirroring ``WorkRecord``. Kill-switch gated
-    # via ``ENSEMBLE_MISSION_PROJECTION_ENABLED`` (default OFF); when
-    # OFF they stay ``None`` on every SSE payload. See
+    # projection fields mirroring ``WorkRecord``. Always-on since WS3
+    # (the the M1 mission-projection kill-switch kill-switch was
+    # removed): they surface on every SSE payload. See
     # ``daemon.services.mission_resolver`` for the truthmaker (Instance
-    # + W4-hazard) and the OFF/ON semantics.
+    # + W4-hazard).
     mission_id: str | None = None
     mission_epoch: int | None = None
     mission_terminal_reason: str | None = None
@@ -103,7 +103,7 @@ class _ResolvedWork:
             job_type=getattr(record, "job_type", None),
             mission_liveness=getattr(record, "mission_liveness", None),
             # M1 (mission-class, 2026-09-02) — additive mission
-            # projection fields (kill-switch gated; see the field
+            # projection fields (always-on; see the field
             # declarations above and ``mission_resolver.py``).
             # Source verbatim from the WorkRecord so all four Fix-C
             # read surfaces (work_resolver primary + jobs_crud /
@@ -133,15 +133,12 @@ class _ResolvedWork:
         payload["job_type"] = self.job_type
         payload["mission_liveness"] = self.mission_liveness
         # M1 (mission-class, 2026-09-02) — additive mission fields.
-        # Kill-switch gated: when ``ENSEMBLE_MISSION_PROJECTION_ENABLED``
-        # is OFF (the M1 default, soak discipline), the three keys
-        # are NOT in the payload — responses stay byte-identical to
-        # the pre-M1 Fix-C wire format (``{"job_id", "status",
-        # "instance_id", "queue_id", "job_type", "mission_liveness"}``).
-        # When ON, the keys surface verbatim from the WorkRecord.
-        # Conditional inclusion (not "present-but-null") is the
-        # M1 contract — the architecture-recommendation §5 M1 row pins
-        # this as additive-only with zero writers.
+        # Always-on since WS3: the three keys surface verbatim from
+        # the WorkRecord on every payload (the former
+        # the M1 mission-projection kill-switch OFF-omission
+        # behavior was removed with the kill-switch). Additive vs the
+        # pre-M1 Fix-C key set — older FE clients ignore the extra
+        # keys.
         payload.update(
             _mission_projection_to_dict(
                 mission_id=self.mission_id,
@@ -166,9 +163,9 @@ class _ResolvedWork:
         payload["job_type"] = self.job_type
         payload["mission_liveness"] = self.mission_liveness
         # M1 — same additive mission fields as ``to_payload``,
-        # with the same OFF/ON conditional. The completed event is
-        # the most likely place the FE renders a mission terminal
-        # marker, so ensuring the keys are present (when ON) keeps
+        # unconditionally included (always-on since WS3). The
+        # completed event is the most likely place the FE renders a
+        # mission terminal marker, so keeping the keys present keeps
         # the renderer-side branch simple.
         payload.update(
             _mission_projection_to_dict(

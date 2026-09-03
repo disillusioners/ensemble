@@ -50,22 +50,24 @@ this shape — narrow ``SQLAlchemyError`` catch + ``logger.warning`` +
 return None). The caller treats the absence as "split semantics
 unavailable" and falls back to the JobItem-side view.
 
-Kill-switch (M1 soak discipline, per spec §5 M1 / decision 4)
--------------------------------------------------------------
+Deployment posture (always-on; WS3 removal of the M1 kill-switch)
+------------------------------------------------------------------
 
-``ENSEMBLE_MISSION_PROJECTION_ENABLED`` (default OFF). OFF = responses
-byte-identical to pre-M1 (no mission fields surface); ON = the three
-additive fields (``mission_id`` / ``mission_epoch`` /
-``mission_terminal_reason``) are populated on the four Fix-C read
-surfaces (:class:`WorkRecord`, :class:`JobResponse`, :class:`_ResolvedWork`
-SSE payload, and the ``_job_to_response`` delegation).
+Mission projection ships **always-on** — there is no env flag. The
+former the M1 mission-projection kill-switch kill-switch (M1 soak
+discipline) was removed entirely (WS3, 2026-09-02, ratified user
+decision): the three additive fields (``mission_id`` / ``mission_epoch``
+/ ``mission_terminal_reason``) are populated unconditionally on the
+four Fix-C read surfaces (:class:`WorkRecord`, :class:`JobResponse`,
+:class:`_ResolvedWork` SSE payload, and the ``_job_to_response``
+delegation) and the dedicated ``GET /missions`` HTTP surface serves
+normally.
 
-Why default OFF: this is the operator soak discipline (matching the
-``ENSEMBLE_WC_WAKE_ENQUEUE`` precedent — ≤2-week soak on default OFF
-then operator flip). M1 itself is read-model; the flip is the M2 tool
-migration on-ramp. The flag is resolved once per process and cached
-(``os.environ.get``; restart-required to pick up a flip), identical to
-the ``_resolve_wc_wake_enqueue_enabled`` shape.
+Revert hatch: there is no runtime OFF refuge and no replacement
+gating mechanism. If a deploy needs to unwind mission projection,
+the sanctioned path is ``git revert`` of the removal commit +
+restart. (The soak discipline this flag once served is retired with
+it — per decision, always-on at deploy is THE path.)
 
 .. _known-limitation:
 
@@ -87,7 +89,6 @@ M1's scope.
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Iterable
 
@@ -100,67 +101,6 @@ if TYPE_CHECKING:
     from daemon.repositories.job_queue.repository import JobRepository
 
 logger = logging.getLogger(__name__)
-
-
-# ── Kill-switch resolver (mirrors _resolve_wc_wake_enqueue_enabled) ────────
-# M1 ships default OFF (soak discipline). Restart-required to pick up a
-# flip — same as the WC-wake and governor-guard kill-switches. Valid
-# truthy values: ("1", "true", "yes", "on"). Valid falsy: ("0",
-# "false", "no", "off"). Blank / unset / unknown values all resolve OFF
-# (the OFF default); blanking mid-incident is the instant-revert path.
-
-_MISSION_PROJECTION_ENV = "ENSEMBLE_MISSION_PROJECTION_ENABLED"
-_MISSION_PROJECTION_ENABLED: bool | None = None
-
-
-def _resolve_mission_projection_enabled() -> bool:
-    """Resolve and cache the M1 mission-projection kill-switch.
-
-    Returns:
-        ``True`` when mission projection is enabled (``ENSEMBLE_MISSION_PROJECTION_ENABLED=1``
-        / ``true`` / ``yes`` / ``on``) — the additive fields surface on
-        the four Fix-C read surfaces. ``False`` when disabled via the
-        env's falsy values or unset (the OFF default) — responses stay
-        byte-identical to the pre-M1 wire format.
-
-    Cached for the daemon's lifetime: flipping the env mid-flight has
-    no effect on the resolved state, only a restart picks up a new
-    value. Mirrors the caching pattern in
-    ``daemon/services/instance_messaging.py:_resolve_wc_wake_enqueue_enabled``.
-    """
-    global _MISSION_PROJECTION_ENABLED
-    if _MISSION_PROJECTION_ENABLED is not None:
-        return _MISSION_PROJECTION_ENABLED
-    raw = os.environ.get(_MISSION_PROJECTION_ENV, "0").strip().lower()
-    if raw in ("0", "false", "no", "off"):
-        _MISSION_PROJECTION_ENABLED = False
-    elif raw in ("1", "true", "yes", "on"):
-        _MISSION_PROJECTION_ENABLED = True
-    else:
-        logger.warning(
-            "%s=%r is not a recognized truthy/falsy value; falling back "
-            "to OFF (default — no mission projection). Valid falsy: "
-            "0/false/no/off. Valid truthy: 1/true/yes/on.",
-            _MISSION_PROJECTION_ENV,
-            raw,
-        )
-        _MISSION_PROJECTION_ENABLED = False
-    return _MISSION_PROJECTION_ENABLED
-
-
-def is_mission_projection_enabled() -> bool:
-    """Public accessor — consult the cached kill-switch state."""
-    return _resolve_mission_projection_enabled()
-
-
-def _reset_mission_projection_for_tests() -> None:
-    """Clear the cached kill-switch state so tests can re-resolve.
-
-    Test-only — production code never invokes this. Mirrors
-    ``_reset_wc_wake_enqueue_for_tests``.
-    """
-    global _MISSION_PROJECTION_ENABLED
-    _MISSION_PROJECTION_ENABLED = None
 
 
 # ── Liveness mapping ──────────────────────────────────────────────────────
@@ -989,14 +929,14 @@ def mission_projection_to_dict(
     mission_epoch: int | None,
     mission_terminal_reason: str | None,
 ) -> dict[str, Any]:
-    """Return the additive ``mission_*`` projection payload, kill-switch gated.
+    """Return the additive ``mission_*`` projection payload (always-on).
 
     Used by every Fix-C read surface
     (:class:`WorkRecord.to_dict`,
     :meth:`daemon.routers.jobs_streaming._ResolvedWork.to_payload`,
     :meth:`daemon.routers.jobs_streaming._ResolvedWork.to_completed_payload`,
-    and :meth:`daemon.routers.schemas.JobResponse._serialize`) so the
-    additive-on-ON / absent-on-OFF contract stays in lock-step.
+    and :meth:`daemon.routers.schemas.JobResponse._serialize`) so all
+    surfaces emit the three keys in lock-step.
 
     Args:
         mission_id: The mission identity (== ``instance_id`` per spec §3
@@ -1008,13 +948,11 @@ def mission_projection_to_dict(
             — ``dead_letter`` is W4-hazard only).
 
     Returns:
-        A dict with the three keys when the kill-switch is ON
-        (``ENSEMBLE_MISSION_PROJECTION_ENABLED`` truthy); an empty dict
-        when OFF (so callers can splat ``**mission_projection_to_dict(...)``
+        A dict with the three keys — unconditionally (the former
+        the M1 mission-projection kill-switch kill-switch was removed
+        at WS3; callers splat ``**mission_projection_to_dict(...)``
         into their output payload without an explicit conditional).
     """
-    if not is_mission_projection_enabled():
-        return {}
     return {
         "mission_id": mission_id,
         "mission_epoch": mission_epoch,
@@ -1027,8 +965,5 @@ __all__ = [
     "MissionRecord",
     "MissionPage",
     "MISSION_LIVENESS_FILTER_VALUES",
-    "is_mission_projection_enabled",
     "mission_projection_to_dict",
-    "_reset_mission_projection_for_tests",
-    "_resolve_mission_projection_enabled",
 ]
