@@ -548,17 +548,19 @@ structural analogue), HTTP 202 Accepted (accepted ≠ done), Kafka committed off
 (transport position). `settled` matches the payments/ledger convention where settlement
 is finality OF THE EXCHANGE, not of the underlying business outcome.
 
-**The `settled` half-claim (prerequisite, lands in M1).** FE already uses
+**The `settled` half-claim (M1 + M3 land together).** FE already uses
 `mission-settled` as the CSS class for mission-terminal chip styling
 (`mission-liveness-chip.component.scss:28`, `job.model.ts:173/188/223/255/264`).
 **M1 renames `mission-settled` → `mission-terminal`** — 3 identifier files renamed
 in commit 73e7ac4d; counts at e676ddea: 78 occurrences across 36 files; ~40+ prose
-occurrences remain FE-wide and are deferred to M3 with a ledger note. The FE
+occurrences remain FE-wide and were deferred to M3 with a ledger note. The FE
 identifier-token guard test landing in `frontend/` this round covers identifier
-tokens only — prose is excluded by design. After the M3 wire rename AND the prose
-sweep complete, `settled` will have exactly one owner: transport. **Until both
-land, the "exactly one owner" claim is an M3-target, not a present-tense fact** —
-the prose half-claim is documented here as future-tense to prevent doc-truth rot.
+tokens only — prose is excluded by design. With the M3 wire rename (per-kind
+dispatch — `completed` → `settled` for mirror rows on all four read surfaces) AND
+the M3 prose sweep (FE mission-side prose reworded away from `settled`) complete,
+**`settled` has exactly one owner: transport. The single-owner fact is now
+present-tense** — the prose half-claim no longer needs the M3-target framing that
+prevented doc-truth rot while the rename was in flight.
 
 ---
 
