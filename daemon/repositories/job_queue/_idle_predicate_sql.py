@@ -37,6 +37,8 @@ from __future__ import annotations
 from sqlalchemy import bindparam, text
 from sqlalchemy.sql.elements import TextClause
 
+from daemon.constants import TERMINAL_INSTANCE_STATUSES
+
 #: Instance statuses that mean "the mission behind this job is over".
 #: A job whose instance holds any OTHER status (``running``,
 #: ``waiting_children``, ``idle``, ``paused``, ...) keeps the
@@ -44,7 +46,17 @@ from sqlalchemy.sql.elements import TextClause
 #: (W2 invariant, ``7ecf09e2``): pause is suspended-but-occupying, not
 #: idle. Feeds the expanding ``:terminal_statuses`` bind; order is
 #: irrelevant.
-JOB_TERMINAL_STATUSES = ("completed", "error", "terminated", "failed")
+#:
+#: Single-sourced from ``daemon.constants.TERMINAL_INSTANCE_STATUSES`` —
+#: importing ``daemon.constants`` is the sanctioned exception here
+#: because (a) that module is dependency-free by design (it imports
+#: nothing) and (b) the two-set desync is a silent-divergence trap
+#: (drift-guard test cross-asserts equality with the canonical constant
+#: in ``tests/job_queue/test_defer_gate_post_settle_window.py``). The
+#: tuple form (vs the canonical ``frozenset``) is what the SQLAlchemy
+#: ``expanding`` bindparam expects — ordering is irrelevant for
+#: ``NOT IN`` semantics.
+JOB_TERMINAL_STATUSES: tuple[str, ...] = tuple(sorted(TERMINAL_INSTANCE_STATUSES))
 
 #: The defer gate's own lane. Excluding it is what makes defer
 #: self-deadlock structurally impossible: the defer candidate's own row
