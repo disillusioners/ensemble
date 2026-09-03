@@ -35,6 +35,9 @@ cd "$PROJECT_DIR"
 # Layer 2 (script-internal): 280s — interrupts hung tests
 # Layer 1 (command-level): 300s via `timeout` wrapper below
 # Per-test timeout 240s (integration ceiling) via override-ini.
+# RESULT-echo: `|| EXIT_CODE=$?` list-context capture — under `set -e`, a bare
+# `EXIT_CODE=$?` after a failing command never executes (silent exit, no RESULT).
+EXIT_CODE=0
 timeout 280s uv run pytest \
   tests/integration/ \
   tests/opencode/ \
@@ -42,8 +45,7 @@ timeout 280s uv run pytest \
   -n auto --tb=short -q -rf \
   --override-ini="timeout=240" \
   --deselect "tests/e2e/test_e2e_workflows.py::test_pause_after_spawn_then_resume" \
-  2>&1
-EXIT_CODE=$?
+  2>&1 || EXIT_CODE=$?
 if [ $EXIT_CODE -eq 124 ]; then
   echo "RESULT: TIMEOUT"
   exit 124
