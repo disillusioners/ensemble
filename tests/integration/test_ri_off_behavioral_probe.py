@@ -58,6 +58,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -354,6 +355,13 @@ def _build_observer(engine: Engine):
     observer._bus_count_pending_for_target_sync = lambda _iid: 0
     dispatch_stub = AsyncMock(name="dispatch_instance_post_commit")
     observer._dispatch_instance_post_commit_side_effects = dispatch_stub
+    # N8 (mission-class, 2026-09-03) unconditional getattr at
+    # job_feedback_observer.py:1862-1864 reads self._job_queue_service
+    # BEFORE the per-attr getattr default — the production __init__ at
+    # :317-328 (api.py:649-657) sets it; __new__ construction here does
+    # not. Stub it with a minimal namespace whose _work_resolver is None
+    # so the legacy fallback path runs (per-kind token = default token).
+    observer._job_queue_service = SimpleNamespace(_work_resolver=None)
     return observer, manager, enqueue_spy, dispatch_stub
 
 
