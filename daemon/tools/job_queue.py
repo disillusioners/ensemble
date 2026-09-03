@@ -1,4 +1,34 @@
-"""Job queue management tools for LangGraph agents."""
+"""Job queue management tools for LangGraph agents.
+
+Size/seam note (M3 fix round, 2026-09-03, ``feature/mission-class``):
+this module is 2,300+ lines and hosts BOTH the LangGraph ``@tool``
+wrappers AND significant non-tool logic (the legacy ``list_jobs``
+fallback, the watch-job immediate-notify branch, the mission-tool
+opt-in helper, the WC-wake enqueue toggle resolver). Future work
+should consider splitting into:
+
+* ``job_queue_tools.py`` — the LangGraph ``@tool`` surface only
+  (the ``@register_tool_category`` entries).
+* ``job_queue_runtime.py`` — the legacy ``list_jobs`` resolver,
+  watch-job notify branches, mission opt-in helper.
+* ``job_queue_wcwake.py`` — the WC-wake enqueue toggle resolver
+  (the ``ENSEMBLE_WC_WAKE_ENQUEUE`` kill-switch consumer).
+
+The split is tracked as a follow-up; the module is intentionally
+left as-is this round to keep the M3 fix round surgical. The
+docstring + this note together form the seam marker for the
+future split.
+
+The tool surface (additive through M3 — no removal):
+job_create, job_get, job_list, job_cancel, job_retry, watch_job,
+watch_jobs, plus the M2 mission-side get_mission / await_mission
+/ list_mission helpers (re-exported from
+``daemon.tools.missions``).
+
+Tool-name discovery is frozen — adding a new tool requires a
+test_frozen_tool_name_discovery entry; the house registry scans
+the ``@register_tool_category`` decorators.
+"""
 
 import asyncio
 import logging
