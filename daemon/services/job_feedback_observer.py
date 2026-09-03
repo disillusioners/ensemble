@@ -932,8 +932,28 @@ class JobFeedbackObserver:
         if not instance_id or not status:
             return
 
-        # Skip "terminated" — already handled by terminate_instance()
+        # A3 (mission-class, 2026-09-03, ``feature/mission-class``) —
+        # watcher re-fire for TERMINATED. The held
+        # ``mission_terminal`` watchers for mirror rows (``job_type=
+        # 'message'``) never re-fire when an instance is terminated
+        # because ``terminate_instance()`` SKIPS message-type
+        # JobItems in its remaining-job cleanup loop
+        # (``daemon/services/instance_lifecycle.py:2280-2285``) —
+        # the JobItem is already terminal via ``complete_job()`` /
+        # ``cancel_job()`` BUT the watcher rows still exist (held for
+        # the future terminal event) and need a notify to re-fire
+        # the held gate. The job-finalization path itself is
+        # correctly handled by ``terminate_instance()`` and the
+        # post-commit outbox below is a no-op for an
+        # already-terminal instance, so we fire ONLY the watcher
+        # notify here and then early-return like before.
         if status == InstanceStatus.TERMINATED.value:
+            await self._fire_watcher_notify_for_terminal(
+                instance_id,
+                notify_status="cancelled",
+                result_summary=None,
+                error_message=None,
+            )
             logger.debug(
                 f"Skipping terminated event for instance {instance_id[:8]}... "
                 "(handled by terminate_instance)"
@@ -1217,6 +1237,97 @@ class JobFeedbackObserver:
         except Exception as e:
             logger.warning(
                 f"Observer: emit_in_progress_if_job failed for "
+                f"instance {instance_id[:8]}... (non-fatal): {e}"
+            )
+
+    async def _fire_watcher_notify_for_terminal(
+        self,
+        instance_id: str,
+        *,
+        notify_status: str,
+        result_summary: str | None,
+        error_message: str | None,
+    ) -> None:
+        """Re-fire held ``mission_terminal`` watchers on a terminal instance.
+
+        A3 (mission-class, 2026-09-03, ``feature/mission-class``).
+        The early-return path for ``TERMINATED`` /
+        ``FAILED`` instance transitions needs to deliver a single
+        watcher notification per candidate work_id so the held
+        ``mission_terminal`` watchers (held because mission
+        liveness was not yet terminal at the prior transport event)
+        re-fire when the linked mission finally reaches terminal.
+
+        This helper mirrors the candidate-work-id collection the
+        ``COMPLETED`` / ``ERROR`` branches use in ``_process_event``
+        (the linked ``JobItem.job_id`` PLUS any ``Task.work_id``s
+        for the instance) but it is invoked BEFORE the early return
+        so a TERMINATED event still fires its held watchers.
+
+        Best-effort and idempotent: a missing
+        ``JobQueueService``, a missing watcher repo, or any
+        single-work_id notify failure is logged at WARNING and
+        swallowed — the next manual ``reconcile_terminal_watches``
+        sweep picks up any watcher row that survived an exception.
+
+        Args:
+            instance_id: The instance that just reached terminal.
+            notify_status: Canonical mission-terminal token
+                (``"cancelled"`` for TERMINATED, ``"failed"`` for
+                FAILED). Maps directly to the ``[JOB_EVENT]`` text
+                the watcher receives via ``notify_work_watchers``.
+            result_summary: Optional result text for the
+                notification (typically ``None`` for TERMINATED —
+                the mission ended via external cancel, not via
+                natural completion).
+            error_message: Optional error text for the
+                notification (typically ``None`` for TERMINATED).
+        """
+        if self._job_queue_service is None:
+            return
+        try:
+            candidate_work_ids: set[str] = set()
+            try:
+                ctx = await self._get_processing_job_for_instance(
+                    instance_id, None
+                )
+                if ctx is not None and ctx.job_id is not None:
+                    candidate_work_ids.add(ctx.job_id)
+            except Exception:
+                pass
+            try:
+                task_repo = getattr(
+                    self._instance_manager, "_task_repo", None
+                )
+                if task_repo is not None and hasattr(
+                    task_repo, "get_by_instance"
+                ):
+                    inst_tasks = await asyncio.to_thread(
+                        task_repo.get_by_instance, instance_id
+                    )
+                    for _t in inst_tasks:
+                        _wid = getattr(_t, "work_id", None)
+                        if _wid:
+                            candidate_work_ids.add(_wid)
+            except Exception:
+                pass
+
+            for _work_id in candidate_work_ids:
+                try:
+                    await self._job_queue_service.notify_watchers(
+                        _work_id, notify_status,
+                        error_message if notify_status == "failed" else result_summary,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Observer: held-watcher re-fire failed for "
+                        f"job {_work_id[:8]}... (notify_status="
+                        f"{notify_status}, instance="
+                        f"{instance_id[:8]}...): {e}"
+                    )
+        except Exception as e:
+            logger.warning(
+                f"Observer: held-watcher re-fire aborted for "
                 f"instance {instance_id[:8]}... (non-fatal): {e}"
             )
 
@@ -1732,6 +1843,48 @@ class JobFeedbackObserver:
                         logger.warning(
                             f"Observer: notify_watchers failed for job "
                             f"{_work_id[:8]}...: {e}"
+                        )
+                elif db_result.terminal_status == InstanceStatus.FAILED.value:
+                    # A3 (mission-class, 2026-09-03, ``feature/mission-class``)
+                    # — watcher re-fire for FAILED. The held
+                    # ``mission_terminal`` watchers re-fire when the
+                    # linked mission reaches FAILED; without this
+                    # branch a FAILED-instance transition leaves the
+                    # held watchers in place indefinitely (the
+                    # COMPLETED/ERROR branches above do not match).
+                    # ``failed`` is the canonical mission-terminal
+                    # token for the FAILED ``InstanceStatus``.
+                    try:
+                        await self._job_queue_service.notify_watchers(
+                            _work_id, "failed",
+                            db_result.error_message,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"Observer: notify_watchers failed for job "
+                            f"{_work_id[:8]}... (FAILED re-fire): {e}"
+                        )
+                elif db_result.terminal_status == InstanceStatus.TERMINATED.value:
+                    # A3 (mission-class, 2026-09-03, ``feature/mission-class``)
+                    # — watcher re-fire for TERMINATED. Mirror
+                    # completion: the held ``mission_terminal``
+                    # watchers re-fire when the mission reaches
+                    # TERMINATED with the canonical ``cancelled``
+                    # token (the ``TERMINATED`` ``InstanceStatus`` →
+                    # ``cancelled`` mapping from
+                    # ``_STATUS_CANONICAL_MAP``). Normally this is
+                    # handled by the early-return ``_fire_watcher_
+                    # notify_for_terminal`` path above; this branch
+                    # exists as a defensive catch for any
+                    # code path that bypasses the early return.
+                    try:
+                        await self._job_queue_service.notify_watchers(
+                            _work_id, "cancelled", None,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"Observer: notify_watchers failed for job "
+                            f"{_work_id[:8]}... (TERMINATED re-fire): {e}"
                         )
 
             # B4: Resolve watched jobs. The bus is task-keyed, not
