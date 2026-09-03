@@ -35,6 +35,13 @@ File-backed SQLite at ``tmp_path`` with ``NullPool`` + WAL +
 QUARANTINE.md ``StaticPool + WriteGuardSession`` trap is not used).
 Real repositories wired into the real ``MissionResolver`` — the SQL
 level is genuinely exercised.
+
+Layout (1045+ lines — kept long intentionally as the canonical M2-API
+contract surface; split only if a new dimension arrives): contract →
+kill-switch matrix → list → ordering + pagination → detail → W4 binding
+→ degradation binding → engine-bound query-count bound. The two
+OFF-path zero-query pins live next to the kill-switch matrix (they
+share the same client/engine fixture pattern).
 """
 
 from __future__ import annotations
@@ -51,7 +58,6 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.pool import NullPool
 from sqlmodel import Session, SQLModel
 
-import daemon.services.mission_resolver as mr_mod
 import daemon.repositories.instance.models  # noqa: F401
 import daemon.repositories.job_queue.models  # noqa: F401
 import daemon.repositories.task.models  # noqa: F401  (transitive dep)
@@ -256,17 +262,44 @@ def _seed_mission(
 class TestKillSwitchMatrix:
     """OFF ⇒ 404 on BOTH routes (fail-closed); routes stay registered."""
 
-    def test_off_list_returns_404(self, client):
-        """Default OFF: GET /missions ⇒ 404, not 200/503."""
-        resp = client.get("/api/missions")
+    def test_off_list_returns_404(self, client, engine):
+        """Default OFF: GET /missions ⇒ 404, not 200/503.
+
+        Engine-bound zero-query pin: the kill-switch gate fires
+        BEFORE the resolver runs, so the route must not touch the
+        DB. A future gate-reorder (e.g. running the resolver first
+        to "degrade" the OFF path) fails this assertion loudly.
+        """
+        counts, detach = TestEngineBoundQueryCount._count_selects(engine)
+        try:
+            resp = client.get("/api/missions")
+        finally:
+            detach()
+        assert counts["total"] == 0, (
+            f"OFF path must issue ZERO SELECTs (kill-switch fires "
+            f"pre-resolver); got {counts}"
+        )
         assert resp.status_code == 404
         body = resp.json()
         assert "ENSEMBLE_MISSION_PROJECTION_ENABLED" in body["detail"]["error"]
 
     def test_off_detail_returns_404(self, client, engine):
-        """Default OFF: GET /missions/{id} ⇒ 404 even for a REAL id."""
+        """Default OFF: GET /missions/{id} ⇒ 404 even for a REAL id.
+
+        Engine-bound zero-query pin: same contract as the list OFF —
+        the kill-switch gate fires BEFORE the resolver runs, so no
+        SELECTs touch the DB even when a real id is presented.
+        """
         iid = _seed_mission(engine, instance_id="inst-off-detail")
-        resp = client.get(f"/api/missions/{iid}")
+        counts, detach = TestEngineBoundQueryCount._count_selects(engine)
+        try:
+            resp = client.get(f"/api/missions/{iid}")
+        finally:
+            detach()
+        assert counts["total"] == 0, (
+            f"OFF detail path must issue ZERO SELECTs (kill-switch fires "
+            f"pre-resolver); got {counts}"
+        )
         assert resp.status_code == 404
 
     def test_off_routes_still_registered_in_openapi(self, client):
@@ -308,7 +341,8 @@ class TestKillSwitchMatrix:
 
 
 class TestListContract:
-    """GET /missions — resolve_many's production debut (paged shape)."""
+    """GET /missions — the paged batch path's production debut (resolve_page
+    is the engine; resolve_many remains tests-only)."""
 
     def test_identity_and_fields(self, client, engine, flip_on):
         """mission_id == instance_id; parent_mission_id == parent_id."""
@@ -441,9 +475,19 @@ class TestListContract:
 
     def test_liveness_filter_dead_letter_rejected(self, client, engine, flip_on):
         """dead_letter is a terminal_reason, never a liveness (§8.2) —
-        it is NOT in the accepted filter vocabulary."""
+        it is NOT in the accepted filter vocabulary.
+
+        Sibling assertions (the 400-test twin contract): the error
+        echoes the rejected value (helps typo debugging — the
+        liveness-unknown-400 case above sets the precedent) AND the
+        accepted list names a real liveness (proves the rejection is
+        vocabulary-level, not "list is empty/missing").
+        """
         resp = client.get("/api/missions", params={"liveness": "dead_letter"})
         assert resp.status_code == 400
+        detail = resp.json()["detail"]
+        assert "dead_letter" in detail["error"]
+        assert "processing" in detail["accepted"]
 
     def test_liveness_pending_sourceless_matches_nothing(
         self, client, engine, flip_on
@@ -596,6 +640,28 @@ class TestOrderingAndPagination:
         """Default page size = DEFAULT_PAGE_LIMIT (10)."""
         body = client.get("/api/missions").json()
         assert body["limit"] == 10
+
+    def test_offset_beyond_total_returns_empty_page(self, client, engine, flip_on):
+        """Offset beyond the total ⇒ empty ``missions``, but ``total``
+        still reflects the real count (NOT zero — the §8.2
+        absent-must-be-explicit discipline applied to the empty-page
+        side too; the count leg succeeded, so the total is the truth).
+        """
+        for i in range(5):
+            t = datetime(2026, 9, 1, 12, i, tzinfo=timezone.utc)
+            _seed_mission(
+                engine,
+                instance_id=f"beyond-{i}",
+                last_activity_at=t,
+            )
+        # offset 100 against a 5-row dataset — well past the end.
+        body = client.get(
+            "/api/missions", params={"limit": 10, "offset": 100}
+        ).json()
+        assert body["missions"] == []
+        assert body["total"] == 5  # the count leg still ran and reported
+        assert body["has_more"] is False  # 100 + 10 > 5
+        assert body["degraded"] is False
 
 
 # ─── Detail contract ────────────────────────────────────────────────────────
