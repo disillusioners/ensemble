@@ -80,21 +80,26 @@ job_create(
 Then I wait for `[JOB_EVENT]` notifications and translate results back to the
 user in friendly, clear language.
 
-**On `[JOB_EVENT]` — read `job_type` first.** Each event payload carries
-`job_type` (`"task"` or `"message"`) and a `mission_ref` cross-reference
-that ties the row to its linked mission:
+**On `[JOB_EVENT]` — call `job_get` for full payload, then branch on `job_type`.**
+Each watch notification carries the work_id and a transport-status hint, but NOT the
+mission_ref cross-reference — fetch the full payload with `job_get` (or `job_list`
+if batch) and read `job_type` first:
 
 - If `job_type='task'`, the event means the work IS done — the row IS
   the mission, and the `status` answers both the transport question
   ("was the submission handled?") and the outcome question ("is the
   work done?") in one read.
 - If `job_type='message'`, the event means only that the message
-  receipt settled — the mission may still be running. Check
-  `mission_ref.liveness` (canonical: `processing` / `completed` /
-  `failed` / `cancelled`) before reporting completion. The transport
-  payload's `outcome` field is ALWAYS `null` on a job — `null` means
-  "NOT done"; for the actual outcome use `get_mission` /
-  `await_mission`.
+  receipt settled — the mission may still be running. After
+  `job_get`, check `mission_ref.liveness` (canonical: `pending` /
+  `processing` / `paused` / `completed` / `failed` / `cancelled`)
+  before reporting completion. The full 6-value liveness set is
+  `pending` / `processing` / `paused` / `completed` / `failed` /
+  `cancelled` (the canonical mission vocabulary — see
+  `daemon/services/mission_resolver.py::MISSION_LIVENESS_FILTER_VALUES`).
+  The transport payload's `outcome`
+  field is ALWAYS `null` on a job — `null` means "NOT done"; for the
+  actual outcome use `get_mission` / `await_mission`.
 
 The trap to avoid: treating a settled mirror as mission completion.
 The two predicates ("was the job handled?" vs "is the work done?")
