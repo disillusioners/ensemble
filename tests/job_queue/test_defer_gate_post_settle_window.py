@@ -71,6 +71,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 from sqlmodel import SQLModel
 
+from daemon.constants import TERMINAL_INSTANCE_STATUSES
 from daemon.repositories.instance.models import Instance, InstanceStatus
 from daemon.repositories.job_queue import _idle_predicate_sql
 from daemon.repositories.job_queue.models import AdmissionState, JobItem, JobQueue
@@ -638,13 +639,32 @@ class TestPostSettlePhase2Fix:
         )
         assert "background_busy_binds()" in bg_src
 
-        # The single-source constants themselves.
-        assert _idle_predicate_sql.JOB_TERMINAL_STATUSES == (
+        # The single-source constants themselves. The terminal-status
+        # tuple is DERIVED from the canonical
+        # ``daemon.constants.TERMINAL_INSTANCE_STATUSES`` frozenset
+        # (W1 — single-sourcing closes the two-set desync trap); the
+        # cross-assert below pins that the predicate's bind matches the
+        # canonical set exactly. Sorted for stable equality (the
+        # ``expanding`` bindparam is order-insensitive — the canonical
+        # source is a frozenset, so any equality check is order-free).
+        assert _idle_predicate_sql.JOB_TERMINAL_STATUSES == tuple(
+            sorted(TERMINAL_INSTANCE_STATUSES)
+        ), (
+            "JOB_TERMINAL_STATUSES desynced from the canonical "
+            "TERMINAL_INSTANCE_STATUSES — re-derive from "
+            "daemon.constants; the cross-assert guards the two-set "
+            "desync trap (W1)"
+        )
+        # Belt-and-suspenders: cross-check the explicit four members too
+        # — guards against a future canonical constant that silently
+        # drops or adds a member without breaking the equality check
+        # above (which would pass for symmetric additions/removals).
+        assert set(_idle_predicate_sql.JOB_TERMINAL_STATUSES) == {
             "completed",
             "error",
             "terminated",
             "failed",
-        )
+        }
         assert _idle_predicate_sql.DEFER_EXCLUDED_QUEUE_TYPES == ("defer",)
         # Background excludes ONLY 'background' — NOT 'defer': defer work
         # IS non-background work (2026-07-23 defer-leak fix, pinned by
@@ -653,6 +673,17 @@ class TestPostSettlePhase2Fix:
         assert _idle_predicate_sql.BACKGROUND_EXCLUDED_QUEUE_TYPES == (
             "background",
         )
+
+        # W1 drift-guard cross-assert: the SQL bind for the terminal
+        # statuses is the canonical constant, NOT a hand-copied literal.
+        # Captures the regression class where someone re-introduces a
+        # local literal copy of the status set inside the bind helpers.
+        from daemon.repositories.job_queue import _idle_predicate_sql as ips
+
+        defer_binds = ips.defer_busy_binds("proj-drift")
+        bg_binds = ips.background_busy_binds()
+        assert set(defer_binds["terminal_statuses"]) == TERMINAL_INSTANCE_STATUSES
+        assert set(bg_binds["terminal_statuses"]) == TERMINAL_INSTANCE_STATUSES
 
         def _norm(sql: str) -> str:
             return " ".join(sql.split())
