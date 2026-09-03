@@ -86,7 +86,7 @@ import logging
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Annotated, Any
 
-from langchain_core.tools import tool
+from langchain_core.tools import BaseTool, tool
 from pydantic import BaseModel, Field
 
 from ._tool_registry import register_tool_category
@@ -211,6 +211,10 @@ class ListMissionsInput(BaseModel):
             description=(
                 "Optional ISO-8601 lower bound on last_activity_at — "
                 "rows with last_activity_at < since are excluded. "
+                "NULL rows are excluded too: a row whose "
+                "last_activity_at is NULL (or unparseable) is dropped "
+                "by the since-filter query rather than leaking into "
+                "the page. "
                 "Stale-tolerant: a value the resolver cannot parse "
                 "silently degrades to 'no since filter' (logged at "
                 "DEBUG, not warning — same shape as the HTTP list's "
@@ -470,8 +474,7 @@ def _resolve_paged(
         # for activity since T gets rows that ACTUALLY had
         # activity since T, not rows with missing timestamps).
         # Cross-reference: the input ``since`` description above
-        # documents the same shape — the two sites MUST stay in
-        # sync; this comment is the single source of truth.
+        # documents the same NULL-row exclusion for tool consumers.
         rows = [
             r
             for r in rows
@@ -540,7 +543,7 @@ def _is_mission_terminal(record: "MissionRecord") -> bool:
 
 def create_mission_tools(
     mission_resolver: "MissionResolver",
-) -> list[Any]:
+) -> list[BaseTool]:
     """Create the three mission tools, wired against a ``MissionResolver``.
 
     Mirrors the ``create_job_tools`` factory pattern: one injectable
