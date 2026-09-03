@@ -460,6 +460,18 @@ def _resolve_paged(
         rows = [r for r in rows if r.parent_mission_id == parent_mission_id]
         truncated = len(rows) < len(page.missions)
     if since_dt is not None:
+        # NULL-exclusion contract (M3 fix round, 2026-09-03,
+        # ``feature/mission-class``): a row whose
+        # ``last_activity_at`` is NULL OR whose ``last_activity_at``
+        # is unparseable is excluded from the page. This matches
+        # the §8.4 "honest filter" precedent — a NULL activity
+        # timestamp means "no recorded activity yet" and must NOT
+        # leak into a since-filtered page (an operator querying
+        # for activity since T gets rows that ACTUALLY had
+        # activity since T, not rows with missing timestamps).
+        # Cross-reference: the input ``since`` description above
+        # documents the same shape — the two sites MUST stay in
+        # sync; this comment is the single source of truth.
         rows = [
             r
             for r in rows
@@ -528,7 +540,7 @@ def _is_mission_terminal(record: "MissionRecord") -> bool:
 
 def create_mission_tools(
     mission_resolver: "MissionResolver",
-) -> list:
+) -> list[Any]:
     """Create the three mission tools, wired against a ``MissionResolver``.
 
     Mirrors the ``create_job_tools`` factory pattern: one injectable
@@ -564,7 +576,7 @@ def create_mission_tools(
                 )
             ),
         ],
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Get a mission snapshot — never blocks, returns immediately.
 
         Use this when the agent needs to ask "is the work done?" —
@@ -652,7 +664,7 @@ def create_mission_tools(
                 ),
             ),
         ] = AWAIT_MISSION_DEFAULT_POLL_INTERVAL,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Block until the mission reaches a terminal state, or timeout.
 
         Polls the mission resolver on a fixed interval and returns
@@ -788,7 +800,7 @@ def create_mission_tools(
         parent_mission_id: str | None = None,
         since: str | None = None,
         limit: int = LIST_MISSIONS_DEFAULT_LIMIT,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """List mission summaries, optionally filtered.
 
         Returns paged mission summaries — `epoch_count` +
@@ -868,7 +880,30 @@ def create_mission_tools(
 
 
 __all__ = [
+    # Public category surface (consumed by ``daemon/tools/_tool_registry``).
     "CATEGORY_NAME",
     "CATEGORY_DOC",
+    # Public factory (consumed by ``daemon/manager.py`` tool wiring).
     "create_mission_tools",
+    # Public defaults (consumed by tests + adjacent surfaces for
+    # boundary-value assertions; documenting them in ``__all__`` makes
+    # the public/tuning surface explicit).
+    "AWAIT_MISSION_DEFAULT_TIMEOUT",
+    "AWAIT_MISSION_DEFAULT_POLL_INTERVAL",
+    "LIST_MISSIONS_DEFAULT_LIMIT",
+    "LIST_MISSIONS_MAX_LIMIT",
+    # Public Pydantic input schema (consumed by the ``list_missions``
+    # tool wrapper via ``args_schema``).
+    "ListMissionsInput",
+    # Module-private helpers (intentionally re-exported for
+    # unit-test access; the leading underscore is the
+    # "internal-but-importable" convention, NOT a hard-private
+    # marker — tests use ``from daemon.tools.missions import
+    # _mission_snapshot_dict`` etc.).
+    "_mission_snapshot_dict",
+    "_mission_summary_dict",
+    "_parse_since",
+    "_parse_iso_for_compare",
+    "_resolve_paged",
+    "_is_mission_terminal",
 ]
