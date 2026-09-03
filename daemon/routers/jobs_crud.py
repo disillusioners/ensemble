@@ -42,8 +42,17 @@ get_dead_letter_svc = create_service_dependency(DeadLetterService)
 # Terminal statuses for job lifecycle (legacy vocabulary — Phase 7b
 # removed the JobStatus enum; these are the inline string values the
 # API still emits / accepts for backward compatibility).
+#
+# M3 (mission-class, 2026-09-03, ``feature/mission-class``) — the
+# transport-receipt terminal for mirror rows (``job_type='message'``)
+# is ``settled`` (ADR-MISSION-01 §6.6 I3 amendment). Added here so
+# the SSE stream's terminal-state detection (``initial.status in
+# TERMINAL_STATUSES``) treats a settled mirror as terminal —
+# otherwise the WS would loop forever waiting for a never-arriving
+# completion event. Task rows keep ``completed`` unchanged.
 TERMINAL_STATUSES = frozenset({
     "completed",
+    "settled",
     "failed",
     "cancelled",
     "dead_letter",
@@ -148,9 +157,16 @@ def _job_to_response(
         # ``'cancelled'`` / ``'aborted'`` no longer mis-reports as
         # ``"completed"`` (the lossy raw-map behaviour). Mirrors the
         # F3 fix in ``WorkResolverService._job_to_record``.
+        #
+        # M3 (mission-class, 2026-09-03) — pass ``job_type`` so the
+        # per-kind dispatch in ``_derive_legacy_status`` applies:
+        # mirror rows surface ``"settled"`` instead of ``"completed"``
+        # (ADR-MISSION-01 §6.6 I3 amendment). Task rows keep
+        # ``"completed"`` unchanged (a task job IS its own mission).
         status = _derive_legacy_status(
             job.admission_state,
             getattr(job, "terminal_reason", None),
+            getattr(job, "job_type", None),
         )
         instance_id = job.instance_id
         # Phase 5: JobItem mirror columns (``result_summary``,
@@ -330,11 +346,19 @@ def _derive_m2_mission_ref(
         # has to a canonical value). When even those are missing the
         # payload is ``None`` — the renderer falls back to the
         # receipt-only view per §8.2.
+        #
+        # M3 (mission-class, 2026-09-03) — pass ``job_type`` so the
+        # per-kind dispatch in ``_derive_legacy_status`` applies:
+        # mirror rows surface ``"settled"`` (transport-receipt
+        # terminal) instead of ``"completed"`` (which now belongs
+        # only to the work/mission layer). Task rows keep
+        # ``"completed"`` (the row IS its own mission).
         mission_id = getattr(job, "instance_id", None)
         agent_id = getattr(job, "agent_id", None)
         legacy_status = _derive_legacy_status(
             getattr(job, "admission_state", None),
             getattr(job, "terminal_reason", None),
+            getattr(job, "job_type", None),
         )
         if mission_id is None and agent_id is None and legacy_status is None:
             return None

@@ -287,11 +287,13 @@ class TestMissionMirrorSplit:
         ``completed`` and the user read the pair as "everything
         finished".
 
-        Post-Fix-C: the mirror row still says ``completed`` (the
-        receipt IS true) but the new ``mission_liveness`` field
-        surfaces ``processing`` — so the renderer can show the
-        mirror as "message handled" without falsely claiming the
-        mission is finished.
+        Post-Fix-C: the mirror row says ``settled`` (the receipt
+        IS true — M3 per-kind dispatch: mirror terminal =
+        ``settled``, ADR-MISSION-01 §6.6 I3 amendment) and the new
+        ``mission_liveness`` field surfaces ``processing`` — so the
+        renderer can show the mirror as "message handled" without
+        falsely claiming the mission is finished. The split
+        semantics are preserved across the rename.
         """
         iid = _seed_instance(engine, instance_id="inst-live-parent", status="running")
         mirror_jid = _seed_job(
@@ -305,8 +307,13 @@ class TestMissionMirrorSplit:
         record = resolver.resolve_work(mirror_jid)
 
         assert record is not None
-        # The receipt — the mirror's own terminal truth — is unchanged.
-        assert record.status == "completed"
+        # The receipt — the mirror's own terminal truth — is renamed.
+        # M3 (mission-class, 2026-09-03): mirror terminal surfaces
+        # ``settled`` (per-kind dispatch), NOT ``completed`` (which is
+        # task-only). Task rows keep ``completed``; mirror rows carry
+        # ``settled``. See ``daemon/services/work_status.py`` and
+        # ``daemon/services/work_resolver.py::_job_to_record``.
+        assert record.status == "settled"
         # The split: this is a mirror, not a mission.
         assert record.job_type == "message"
         # The mission is still running — the renderer can now tell.
@@ -320,9 +327,12 @@ class TestMissionMirrorSplit:
         self, engine, resolver
     ) -> None:
         """A mirror on a TERMINAL mission (instance.status='completed'):
-        the receipt is ``completed`` AND the mission liveness is
-        ``completed``. Both signals agree — the renderer can safely
-        mark "everything finished".
+        the receipt is ``settled`` (M3 per-kind dispatch — mirror
+        terminal = transport-receipt disjoint from work-outcome) AND
+        the mission liveness is ``completed`` (mission-side
+        vocabulary unchanged; mirrors the instance's terminal state).
+        Both signals agree — the renderer can safely mark "everything
+        finished".
 
         This is the contrasting positive case: the renderer can
         distinguish "everything finished" (both signals terminal) from
@@ -340,7 +350,10 @@ class TestMissionMirrorSplit:
         record = resolver.resolve_work(mirror_jid)
 
         assert record is not None
-        assert record.status == "completed"
+        # M3 (mission-class, 2026-09-03) — mirror terminal is
+        # ``settled`` (per-kind dispatch); mission_liveness stays
+        # ``completed`` (mission-side vocabulary unchanged).
+        assert record.status == "settled"
         assert record.job_type == "message"
         assert record.mission_liveness == "completed"
 
@@ -564,7 +577,11 @@ class TestDegradationContract:
             record = resolver.resolve_work(mirror_jid)
 
         assert record is not None
-        assert record.status == "completed"
+        # M3 (mission-class, 2026-09-03) — mirror terminal =
+        # ``settled`` (per-kind dispatch), NOT ``completed``. Task
+        # rows keep ``completed``; mirror rows carry ``settled``.
+        # See ``daemon/services/work_resolver.py::_job_to_record``.
+        assert record.status == "settled"
         assert record.job_type == "message"
         # The lookup degraded; mission_liveness stays None and the
         # renderer falls back to the receipt-only view.
@@ -848,9 +865,10 @@ class TestListWorkSplitFields:
         # Existing ``status`` answers are unchanged — the
         # receipt IS true regardless of the instance-engine
         # outage. ``done`` mirrors with ``terminal_reason='completed'``
-        # canonicalize to "completed".
+        # canonicalize to ``"settled"`` (M3 per-kind dispatch — mirror
+        # terminal is ``settled``, ADR-MISSION-01 §6.6 I3 amendment).
         statuses = sorted(r.status for r in records)
-        assert statuses == ["completed", "completed", "completed"], (
+        assert statuses == ["settled", "settled", "settled"], (
             f"W-1 degradation violated: receipt statuses changed "
             f"to {statuses!r}; the JobItem mirror must remain "
             f"authoritative for the receipt field."

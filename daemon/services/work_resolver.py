@@ -520,6 +520,17 @@ _JOB_CANONICAL_TO_ADMISSION: Final[dict[str, set[str]]] = {
 # fall through to the backward-compat branch which builds a
 # ``JobStatusFilter(admission_state=<value>)`` with NO ``terminal_reason``
 # predicate — preserving the pre-F3 behaviour for those callers.
+#
+# M3 (mission-class, 2026-09-03, ``feature/mission-class``) — per-kind
+# dispatch (ADR-MISSION-01 §6.6 I3 amendment). ``completed`` now means
+# TASK terminal only; ``settled`` means MIRROR terminal. The
+# :class:`JobStatusFilter` carries an OPTIONAL ``job_type`` predicate
+# so the canonical-token → SQL filter mapping disambiguates the kind.
+# ``completed`` filters task rows; ``settled`` filters mirror rows;
+# pre-7c hedge (NULL terminal_reason) stays on ``completed`` only —
+# pre-7c rows predate the rename and never carry
+# ``job_type='message'``, so they surface under ``completed`` (not
+# ``settled``).
 @dataclass(frozen=True)
 class JobStatusFilter:
     """A single predicate on the JobItem side of ``list_work``.
@@ -527,7 +538,7 @@ class JobStatusFilter:
     Carries the ``admission_state`` value to filter on and an optional
     ``terminal_reason`` discriminator for the disambiguation done in
     F3 (see module docstring). Multiple filters are combined with OR
-    semantics; each filter's two clauses are ANDed.
+    semantics; each filter's two/three clauses are ANDed.
 
     Attributes:
         admission_state: The ``JobItem.admission_state`` value to
@@ -544,11 +555,21 @@ class JobStatusFilter:
             (used only for the ``completed`` semantic so pre-7c
             backfill rows with NULL ``terminal_reason`` still surface
             under ``status="completed"``).
+        job_type: Optional ``JobItem.job_type`` value to AND with
+            ``admission_state``. ``None`` means "no job_type filter"
+            — used for non-terminal canonical statuses and the
+            backward-compat raw ``admission_state`` fallback. M3: set
+            to ``"task"`` for the ``completed`` semantic (per-kind
+            matching — mirror rows now match ``settled``, not
+            ``completed``) and to ``"message"`` for the ``settled``
+            semantic (mirror-receipt terminal; ADR-MISSION-01 §6.6 I3
+            amendment).
     """
 
     admission_state: str
     terminal_reason: str | None = None
     terminal_reason_null_allowed: bool = False
+    job_type: str | None = None
 
 
 def _canonical_to_job_filters(canonical_statuses: list[str]) -> list[JobStatusFilter]:
@@ -587,14 +608,47 @@ def _canonical_to_job_filters(canonical_statuses: list[str]) -> list[JobStatusFi
             # pre-7c rows have NULL ``terminal_reason`` and are
             # treated as completed per the lossy ``done → completed``
             # mapping in ``_ADMISSION_TO_LEGACY_STATUS``.
+            #
+            # M3 (mission-class, 2026-09-03) — per-kind dispatch
+            # (ADR-MISSION-01 §6.6 I3 amendment). ``completed`` now
+            # means TASK terminal only — mirror rows (job_type=
+            # ``"message"``) match ``settled`` instead. The
+            # ``job_type="task"`` predicate is added here so a
+            # ``list_jobs(status="completed")`` filter returns TASK
+            # rows only. Mirror rows need ``status="settled"`` to
+            # match. Pre-7c hedge (NULL terminal_reason) stays for
+            # backward compat (pre-7c rows never carry
+            # ``job_type="message"``).
             filters.append(JobStatusFilter(
                 admission_state=AdmissionState.DONE.value,
                 terminal_reason="completed",
                 terminal_reason_null_allowed=True,
+                job_type="task",
+            ))
+        elif token == "settled":
+            # M3 (mission-class, 2026-09-03) — the mirror-receipt
+            # terminal. Strict — no NULL hedge (pre-7c rows never
+            # carry ``job_type="message"`` and the rename is CLEAN
+            # per the ADR-MISSION-01 §6.6 "Directed modifications"
+            # spec). Matches JobItem rows with
+            # ``admission_state='done'`` AND
+            # ``terminal_reason='completed'`` AND
+            # ``job_type='message'``. Task rows (with
+            # ``terminal_reason='completed'``) match ``completed``
+            # (not ``settled``); the per-kind split is the whole
+            # point of the rename.
+            filters.append(JobStatusFilter(
+                admission_state=AdmissionState.DONE.value,
+                terminal_reason="completed",
+                terminal_reason_null_allowed=False,
+                job_type="message",
             ))
         elif token == "failed":
             # F3: failed semantics — admission_state='done' AND
-            # terminal_reason='failed' (strict, no NULL).
+            # terminal_reason='failed' (strict, no NULL). M3
+            # preserves this — both task and mirror rows can fail
+            # (e.g. DLQ via admission_state='dead' is handled below;
+            # ``failed`` is a kind-agnostic terminal reason).
             filters.append(JobStatusFilter(
                 admission_state=AdmissionState.DONE.value,
                 terminal_reason="failed",
@@ -602,7 +656,8 @@ def _canonical_to_job_filters(canonical_statuses: list[str]) -> list[JobStatusFi
             ))
         elif token == "cancelled":
             # F3: cancelled semantics — admission_state='done' AND
-            # terminal_reason='cancelled' (strict, no NULL).
+            # terminal_reason='cancelled' (strict, no NULL). Same
+            # kind-agnostic rationale as ``failed`` above.
             filters.append(JobStatusFilter(
                 admission_state=AdmissionState.DONE.value,
                 terminal_reason="cancelled",
@@ -1516,6 +1571,22 @@ class WorkResolverService:
                         job.admission_state, "pending"
                     )
                 )
+            # M3 (mission-class, 2026-09-03) — per-kind dispatch
+            # (ADR-MISSION-01 §6.6 I3 amendment). For mirror rows
+            # (``job_type == "message"``) the receipt terminal is
+            # ``settled`` (transport-receipt disjoint from work-outcome
+            # vocabulary — task rows keep ``completed``). Applied HERE
+            # on the primary path because ``_job_to_record`` does its
+            # own derivation via ``canonicalize_status(terminal_reason)``
+            # rather than routing through ``_derive_legacy_status`` —
+            # both paths must apply the same dispatch so all four
+            # read surfaces (WorkRecord / JobResponse / _ResolvedWork /
+            # jobs_management delegation) agree (§8.2 canonical
+            # enumeration). The work_resolver is the AUTHORITY for
+            # WorkRecord + downstream surfaces.
+            job_type_disp = getattr(job, "job_type", "task") or "task"
+            if status == "completed" and job_type_disp == "message":
+                status = "settled"
         else:
             # Non-terminal admission states (``queued`` / ``active``):
             # source execution status from the joined Instance when
@@ -2038,26 +2109,35 @@ class WorkResolverService:
                 for f in status_filters:
                     if f.terminal_reason is not None:
                         if f.terminal_reason_null_allowed:
-                            branches.append(
-                                sql_and(
-                                    JobItem.admission_state == f.admission_state,
-                                    or_(
-                                        JobItem.terminal_reason == f.terminal_reason,
-                                        JobItem.terminal_reason.is_(None),
-                                    ),
-                                )
-                            )
-                        else:
-                            branches.append(
-                                sql_and(
-                                    JobItem.admission_state == f.admission_state,
+                            clauses = [
+                                JobItem.admission_state == f.admission_state,
+                                or_(
                                     JobItem.terminal_reason == f.terminal_reason,
-                                )
-                            )
+                                    JobItem.terminal_reason.is_(None),
+                                ),
+                            ]
+                        else:
+                            clauses = [
+                                JobItem.admission_state == f.admission_state,
+                                JobItem.terminal_reason == f.terminal_reason,
+                            ]
                     else:
                         # No terminal_reason filter — just the
                         # admission_state predicate.
-                        branches.append(JobItem.admission_state == f.admission_state)
+                        clauses = [JobItem.admission_state == f.admission_state]
+                    # M3 (mission-class, 2026-09-03) — per-kind
+                    # dispatch (ADR-MISSION-01 §6.6 I3 amendment).
+                    # When a filter carries ``job_type`` (set by the
+                    # ``completed`` and ``settled`` canonical-token
+                    # mappings in ``_canonical_to_job_filters``), the
+                    # SQL adds ``AND job_type = ?`` to the AND-branch.
+                    # Tasks carry ``completed``; mirrors carry
+                    # ``settled``. Pre-7c NULL-hedge is on ``completed``
+                    # only — pre-7c rows never carry
+                    # ``job_type='message'``.
+                    if f.job_type is not None:
+                        clauses.append(JobItem.job_type == f.job_type)
+                    branches.append(sql_and(*clauses))
                 if branches:
                     stmt = stmt.where(or_(*branches))
             stmt = stmt.order_by(col(JobItem.created_at).desc())

@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, NamedTuple
 
-from sqlalchemy import delete as sql_delete, func, select as sql_select, text
+from sqlalchemy import and_, delete as sql_delete, func, or_, select as sql_select, text
 from sqlalchemy import bindparam, exists, literal, not_
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
@@ -978,6 +978,35 @@ class JobRepository:
                 job_types = []
 
         with SQLModelSession(self.engine) as db_session:
+            # M3 (mission-class, 2026-09-03) — per-kind dispatch on
+            # the legacy ``statuses`` filter (ADR-MISSION-01 §6.6 I3
+            # amendment). The clean rename contract: ``completed``
+            # matches TASK rows only; ``settled`` matches MIRROR rows
+            # only. Pre-7c rows (NULL ``terminal_reason``) keep
+            # surfacing under ``completed`` — they predate the rename
+            # and never carry ``job_type='message'``. ``settled``
+            # matches strictly (no NULL hedge).
+            #
+            # The disambiguation lives here because the SQL builder
+            # uses ``admission_state IN (...)`` as its primary
+            # filter — both terminal variants collapse to
+            # ``admission_state='done'`` and need an extra
+            # ``terminal_reason`` / ``job_type`` clause to be
+            # per-kind. ``_statuses_to_admission`` is preserved for
+            # its collapsing semantic; we layer per-kind predicates
+            # on top.
+            completed_terminal_reason_clauses: list = []  # OR-branches for terminal_reason
+            job_type_clauses: dict[str, list[str]] = {}  # job_type → list of tokens that bind it
+            # Build per-kind predicates: when ``completed`` is in
+            # statuses, restrict to ``job_type='task'`` (with NULL
+            # hedge on terminal_reason); when ``settled`` is in
+            # statuses, restrict to ``job_type='message'`` (strict).
+            # Unknown values fall through the legacy admission map
+            # (the §8.2 source-less degrade precedent — unknown ⇒
+            # empty, do NOT widen).
+            has_completed_token = "completed" in (statuses or [])
+            has_settled_token = "settled" in (statuses or [])
+
             # Build count query
             count_stmt = select(func.count()).select_from(JobItem)
             if not include_deleted:
@@ -987,6 +1016,39 @@ class JobRepository:
                 if admission_set:
                     count_stmt = count_stmt.where(
                         JobItem.admission_state.in_(admission_set)
+                    )
+                # M3 per-kind predicates — applied alongside the
+                # admission-state IN-clause. ``completed`` restricts
+                # the result to task rows with terminal_reason
+                # 'completed' (with NULL hedge for pre-7c rows);
+                # ``settled`` restricts to mirror rows with
+                # terminal_reason 'completed' (strict). Both are
+                # applied as additional AND-clauses so the IN-clause
+                # narrows by admission and the per-kind clause
+                # narrows by row kind.
+                if has_completed_token:
+                    # ``completed`` ⇒ task rows only. Pre-7c hedge
+                    # (terminal_reason IS NULL) is included — pre-7c
+                    # rows predate the rename and never carry
+                    # ``job_type='message'``.
+                    count_stmt = count_stmt.where(
+                        and_(
+                            JobItem.job_type == "task",
+                            or_(
+                                JobItem.terminal_reason == "completed",
+                                JobItem.terminal_reason.is_(None),
+                            ),
+                        )
+                    )
+                if has_settled_token:
+                    # ``settled`` ⇒ mirror rows only. Strict — no
+                    # NULL hedge (pre-7c rows never carry
+                    # ``job_type='message'``).
+                    count_stmt = count_stmt.where(
+                        and_(
+                            JobItem.job_type == "message",
+                            JobItem.terminal_reason == "completed",
+                        )
                     )
             if project_id:
                 count_stmt = count_stmt.where(JobItem.project_id == project_id)
@@ -1004,6 +1066,25 @@ class JobRepository:
                 admission_set = _statuses_to_admission(statuses)
                 if admission_set:
                     stmt = stmt.where(JobItem.admission_state.in_(admission_set))
+                # M3 per-kind predicates — mirrors the count query
+                # above so the page and the total stay consistent.
+                if has_completed_token:
+                    stmt = stmt.where(
+                        and_(
+                            JobItem.job_type == "task",
+                            or_(
+                                JobItem.terminal_reason == "completed",
+                                JobItem.terminal_reason.is_(None),
+                            ),
+                        )
+                    )
+                if has_settled_token:
+                    stmt = stmt.where(
+                        and_(
+                            JobItem.job_type == "message",
+                            JobItem.terminal_reason == "completed",
+                        )
+                    )
             if project_id:
                 stmt = stmt.where(JobItem.project_id == project_id)
             if queue_id:

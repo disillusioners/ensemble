@@ -10,7 +10,7 @@ from sqlmodel import SQLModel, Field
 
 from daemon.repositories.infra.types import JSONBType
 
-ALL_TERMINAL_STATES: list[str] = ["completed", "failed", "cancelled", "dead_letter"]
+ALL_TERMINAL_STATES: list[str] = ["completed", "settled", "failed", "cancelled", "dead_letter"]
 
 # All events a watcher can receive, including non-terminal (progress) events
 ALL_WATCHABLE_EVENTS: list[str] = ALL_TERMINAL_STATES + ["in_progress"]

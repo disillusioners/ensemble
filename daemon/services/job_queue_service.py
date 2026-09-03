@@ -113,6 +113,16 @@ TERMINAL_CANCEL_STATUSES = frozenset([
 # ``status="paused"`` resolve to the canonical string; pause is
 # non-terminal (paused jobs keep their admission_state='active' and
 # can be resumed back to 'processing').
+#
+# M3 (mission-class, 2026-09-03, ``feature/mission-class``) — the
+# transport-receipt terminal for mirror rows (``job_type='message'``)
+# is ``settled`` (ADR-MISSION-01 §6.6 I3 amendment). Per-kind matching
+# happens in ``_canonical_to_job_filters`` / ``_derive_legacy_status``
+# — ``settled`` is a synonym for the legacy mirror-terminal path, NOT
+# a synonym for ``completed`` (which still maps task rows). Added as
+# an identity entry so ``normalize_statuses("settled") == "settled"``
+# and the legacy-statuses filter (``statuses="settled"``) round-trips
+# the way callers expect.
 STATUS_ALIASES: dict[str, str] = {
     "running": "processing",
     "active": "processing",
@@ -129,6 +139,7 @@ STATUS_ALIASES: dict[str, str] = {
     "dlq": "dead_letter",
     "dead": "dead_letter",
     "paused": "paused",  # identity — see comment above
+    "settled": "settled",  # M3 identity — mirror-receipt terminal (see above)
 }
 
 
@@ -528,9 +539,18 @@ class JobQueueService:
                 # mis-reports as ``"completed"`` (the lossy raw-map
                 # behaviour). Mirrors the F3 fix in
                 # ``WorkResolverService._job_to_record``.
+                #
+                # M3 (mission-class, 2026-09-03) — pass ``job_type``
+                # so the per-kind dispatch in ``_derive_legacy_status``
+                # applies: mirror rows surface ``"settled"`` (the
+                # transport-receipt terminal) instead of ``"completed"``
+                # (which now belongs only to the work/mission layer).
+                # Task rows keep ``"completed"`` unchanged (a task job
+                # IS its own mission; the work word stays).
                 legacy_status = _derive_legacy_status(
                     job.admission_state,
                     getattr(job, "terminal_reason", None),
+                    getattr(job, "job_type", None),
                 )
                 # Phase 7: error_message column dropped; error text lives on
                 # Instance/WorkRecord via the resolver.
