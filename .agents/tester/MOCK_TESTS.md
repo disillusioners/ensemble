@@ -322,3 +322,49 @@ End-to-end on real engine components (no mocks below repository/service seam): s
 - **Capstone**: PASS 4/4 (both shapes recovered; wedge = defer idle gate 2→0; C admitted via real claim)
 - **Scripts**: test/packs/pattern_f_killpath_matrix_test.{py,sh}, test/packs/defer_bus_emit_probe_test.{py,sh}, test/packs/pattern_f_capstone_test.{py,sh} — all ACTIVE, registered in PACKS.md
 - **Report**: RESULTS/2026-08-29-orphan-active-job-recovery-gate.md
+
+
+## Mock Test: defer_gate_runtime_matrix (W-round, fix/defer-gate-post-settle-window)
+
+### Metadata
+- **Created**: 2026-09-03
+- **Script**: test/packs/defer_gate_runtime_matrix_test.{py,sh}
+- **Language**: Python (+ .sh wrapper, dual-layer timeout)
+- **Status**: PLANNED (dispatched this gate; worker implements + runs)
+
+### Configuration
+- **Timeout**: 150s script-internal / 300s command-level
+- **Service Port**: none (no HTTP daemon; in-process repositories)
+- **Mock Ports**: none
+- **Cleanup**: tmp file-backed SQLite via tmp_path-style tempdir, auto-removed; no processes started, nothing to kill
+
+### What It Tests
+The widened defer-gate admission semantics at RUNTIME (real repository code, not unit-test SQL-string asserts): the three admission scenarios, the folding (claim) layering proof, and self-deadlock exclusion.
+
+### Mock Services Required
+- None. Real `JobQueueRepository` (and instance/task repositories as needed) over file-backed SQLite at a temp path (WAL, NullPool — file-backed recipe; NEVER StaticPool+WriteGuardSession).
+
+### Test Scenarios
+1. **S1 defer BLOCKED**: project P has a settled mirror (JobItem job_type='message', admission_state='done', instance_id set, on a NON-defer queue, non-deleted) whose instance is NON-terminal (waiting_children) → defer candidate on the defer queue: `_defer_idle_check`-equivalent (`has_active_non_deferred_work`) returns BUSY AND `_select_next_eligible_job` defer branch returns None.
+2. **S2 defer ADMITTED**: same shape but instance is TERMINAL (completed) → gate reads IDLE, candidate admitted via real claim path.
+3. **S3 PAUSED blocked (by-design)**: settled mirror whose instance is PAUSED → gate reads BUSY (pinned semantics `7ecf09e2`).
+4. **S4 folding layering proof**: defer candidate pending; parent message Task COMPLETED; instance waiting_children; mirror done → Gate B returns None (gate blocks on mission liveness) WHILE the task-granular claim folding (`claim_pending_task` t2 guard) correctly finds NO active task and would proceed — documenting the two-leg layering (gate = mission liveness, claim = task liveness; claim proceeding is CORRECT, gate is the fix layer).
+5. **S5 self-deadlock exclusion**: defer candidate whose OWN instance is waiting_children, candidate's own row on the defer queue → gate admits (queue-type exclusion holds; no self-block).
+
+### Success Criteria
+- [ ] All 5 scenarios pass with REAL repository/gate functions (no monkeypatched predicates)
+- [ ] S4 asserts both legs (gate None + claim finds no active task)
+- [ ] File-backed SQLite only; no StaticPool
+- [ ] Total runtime < 60s
+
+### Implementation Notes
+- Use the REAL gate entry points from the branch: `_defer_idle_check` / `_background_idle_check` (daemon/services/job_processor.py) and `_select_next_eligible_job` (daemon/services/job_queue_service.py) — or the repository predicates directly if service-level construction is impractical; state which layer was exercised in the report.
+- Terminal statuses: ('completed','error','terminated','failed').
+
+### Last Run
+- **Date**: 2026-09-03 (defer-gate FULL gate)
+- **Worker Instance**: dg-rt-matrix (5d93e67a) — mock-test skill; +4 independent re-verification runs (workers dg-p07/p10/p11/p12) all PASS 5/5 (determinism evidence)
+- **Result**: **PASS 5/5** (0.4–0.6s per run) — S1 blocked / S2 admitted / S3 paused-blocked / S4 two-leg layering (Gate B None + claim t2 proceeds) / S5 self-deadlock exclusion. Layers exercised: A repository predicate, B `_defer_idle_check`, C `_select_next_eligible_job`, D `claim_pending_task`.
+- **Quick Fixes**: 3 harness-only during authoring (import path `daemon.services.job_lock_manager`; per-scenario fresh file-backed SQLite isolation; S4 SQLite bool coercion). S5 background-sister assertion corrected to INFO (defer work IS non-background work per 2026-07-23 defer-leak fix — by-design).
+- **Commit**: ab567195 (test-code only: the pack pair)
+- **Report**: RESULTS/2026-09-03-defer-gate-full-gate.md
