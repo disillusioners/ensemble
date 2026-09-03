@@ -1283,8 +1283,23 @@ class TestIdlePredicatePgSqliteParity:
                     )
                 ).scalar_one()
         except Exception as e:
+            # Cheap-green reviewer item 2026-09-03: probe-failure path
+            # leaks the engine if we don't dispose before skipping. The
+            # bare ``pytest.skip`` would leave the engine with an open
+            # connection pool hanging — leaks the FDs across the test
+            # session and warns under SQLAlchemy 2.x with
+            # ``_ConnectionClosedError`` on next connect. Dispose first.
+            try:
+                pg_engine.dispose()
+            except Exception:
+                pass
             pytest.skip(f"PostgreSQL not available at {_PG_URL}: {e}")
         if not has_public:
+            # Same leak risk on the no-public-schema branch.
+            try:
+                pg_engine.dispose()
+            except Exception:
+                pass
             pytest.skip(
                 f"PostgreSQL test database at {_PG_URL} is not prepared: "
                 "no 'public' schema (start the docker-compose.test.yml "
