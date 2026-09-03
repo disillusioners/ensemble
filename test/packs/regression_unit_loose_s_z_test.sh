@@ -28,9 +28,8 @@ cd "$PROJECT_DIR"
 timeout 280s uv run pytest \
   $(ls tests/unit/test_s*.py tests/unit/test_t*.py tests/unit/test_u*.py tests/unit/test_v*.py tests/unit/test_w*.py tests/unit/test_x*.py tests/unit/test_y*.py tests/unit/test_z*.py 2>/dev/null) \
   -n auto --tb=short -q -rf \
-  2>&1
-EXIT_CODE=$?
-if [ $EXIT_CODE -eq 124 ]; then
+  2>&1 || EXIT_CODE=$?
+if [ ${EXIT_CODE:-1} -eq 124 ]; then
   echo "RESULT: TIMEOUT"
   exit 124
 elif [ $EXIT_CODE -eq 0 ]; then
