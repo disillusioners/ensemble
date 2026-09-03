@@ -33,6 +33,17 @@ OFF ⇒ 404 + ZERO queries but /openapi.json still documents both paths. A dispa
 "OFF-hidden/ON-visible" was wrong; the probe correctly pinned documented behavior. OFF zero-query
 verified with a live positive control (ON list = 2 SELECTs through the same engine listener).
 
+**M3 fix round (2026-09-03, ``feature/mission-class``):** the M2 OFF-path probe pack
+(`test/packs/m2_missions_off_zeroquery_integration_test.sh`) was RETIRED. The
+underlying `tests/integration/test_m2_missions_off_zeroquery.py` was removed
+when the M3 always-on posture landed (WS3) — the OFF-path zero-query contract
+no longer applies (the kill-switch is gone, not gated). The pack script
+became orphaned (pytest collects zero tests, exits 5 with
+`--override-ini="addopts="`). Both `test/packs/m2_missions_off_zeroquery_integration_test.sh`
+and the PACKS.md row (line 132) were deleted by the M3 fix round. Future
+gates that need OFF-path semantics must reintroduce the kill-switch FIRST;
+do not reintroduce this pack as-is.
+
 ## L5 — Missions pagination: limit=0 clamps to 1, not to default 10
 `resolve_page()` semantics: limit<1 ⇒ 1 (unit pin `test_limit_clamped_to_minimum_one`); default 10
 only when absent; max 100. Paraphrasing "limit=0 ⇒ default" in a dispatch produced a spec-vs-impl
