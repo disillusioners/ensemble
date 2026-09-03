@@ -27,7 +27,7 @@ mutation; census frozen (``daemon/job_state/constitution.py``:
 ``KNOWN_ADMISSION_STATE_WRITERS``).
 
 Deployment posture: the mission projection is **always-on** — the
-former the M1 mission-projection kill-switch kill-switch was removed
+former M1 mission-projection kill-switch was removed
 entirely (WS3). Revert hatch for an unwind: ``git revert`` + restart;
 there is no runtime OFF gate on these routes.
 """

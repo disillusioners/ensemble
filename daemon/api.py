@@ -937,7 +937,7 @@ async def lifespan(app: FastAPI):
     # InstanceRepository / JobRepository the WorkResolverService
     # consumes (leaf service, zero admission-state writers; census
     # stays at 23). Always-on since WS3 (the
-    # the M1 mission-projection kill-switch kill-switch was removed);
+    # M1 mission-projection kill-switch was removed);
     # docs §8.4 holds the endpoint contract.
     #
     # M2 (mission-class, 2026-09-02, ``feature/mission-class``):

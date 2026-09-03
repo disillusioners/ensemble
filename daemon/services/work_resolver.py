@@ -67,7 +67,7 @@ from daemon.repositories.task.models import Task
 # M1 (mission-class, 2026-09-02) — the additive ``mission_*`` payload
 # helper is shared with the resolver module so all Fix-C read surfaces
 # emit the same keys in lock-step. Always-on since WS3 (the
-# the M1 mission-projection kill-switch kill-switch was removed).
+# M1 mission-projection kill-switch was removed).
 from daemon.services.mission_resolver import (
     mission_projection_to_dict as _mission_projection_to_dict,
 )
@@ -271,7 +271,7 @@ class WorkRecord:
     # M1 (mission-class, 2026-09-02) — three additive mission-projection
     # fields that complete the read model without changing any existing
     # ``status`` semantics. Always-on since WS3 (the
-    # the M1 mission-projection kill-switch kill-switch was removed):
+    # M1 mission-projection kill-switch was removed):
     # they are populated by
     # :class:`daemon.services.mission_resolver.MissionResolver` at
     # projection time (pure read-model; no writes, no JobItem

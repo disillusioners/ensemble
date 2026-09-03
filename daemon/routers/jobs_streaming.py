@@ -64,7 +64,7 @@ class _ResolvedWork:
 
     # M1 (mission-class, 2026-09-02) — three additive mission
     # projection fields mirroring ``WorkRecord``. Always-on since WS3
-    # (the the M1 mission-projection kill-switch kill-switch was
+    # (the M1 mission-projection kill-switch was
     # removed): they surface on every SSE payload. See
     # ``daemon.services.mission_resolver`` for the truthmaker (Instance
     # + W4-hazard).
