@@ -159,10 +159,10 @@ def test_defer_idle_check_probe_path_with_settled_mirror(tmp_path):
             queue_repo=queue_repo,
         )
 
-        # Run the actual probe path.
-        result = asyncio.get_event_loop().run_until_complete(
-            proc._defer_idle_check("proj-probe")
-        )
+        # Run the actual probe path. ``asyncio.run`` (not the legacy
+        # ``get_event_loop().run_until_complete``, which is deprecated
+        # without a running loop on Python 3.12+ and removed in 3.14).
+        result = asyncio.run(proc._defer_idle_check("proj-probe"))
 
         # INTENDED: 1 (gate blocks — defer queue must wait).
         # ACTUAL: 0 (gate wrongly says "idle" — the bug).
@@ -241,20 +241,28 @@ def test_gate_b_select_next_eligible_with_settled_mirror(tmp_path):
             job_type="message",
         )
 
-        # Pending defer job (the defer queue's candidate).
-        from daemon.repositories.job_queue.models import JobItem
-        defer_job = MagicMock(spec=JobItem)
-        defer_job.job_id = "job-defer-pending"
-        defer_job.queue_id = "queue-defer-gate-b"
-        defer_job.project_id = "proj-gate-b"
-        defer_job.priority = 5
-        defer_job.created_at = "2026-01-01T00:00:00"
+        # Pending defer job (the defer queue's candidate) — DB-resident
+        # (Phase-1 review nit): a MagicMock(spec=JobItem) candidate does
+        # not exercise the real pending-list shape Gate B consumes; seed
+        # the row and hand Gate B the repository's actual pending list.
+        _insert_job_item(
+            eng,
+            job_id="job-defer-pending",
+            instance_id="inst-gate-b",
+            project_id="proj-gate-b",
+            queue_id="queue-defer-gate-b",
+            admission_state=AdmissionState.QUEUED.value,
+        )
 
         svc = _make_gate_b_service(eng)
+        pending = JobRepository(eng).list_all_pending()
+        assert [j.job_id for j in pending] == ["job-defer-pending"], (
+            "defer candidate not DB-resident as queued pending work"
+        )
 
-        # Run Gate B.
-        result = asyncio.get_event_loop().run_until_complete(
-            svc._select_next_eligible_job([defer_job], "proj-gate-b")
+        # Run Gate B (modern loop handling — see the Gate A probe note).
+        result = asyncio.run(
+            svc._select_next_eligible_job(pending, "proj-gate-b")
         )
 
         # INTENDED: None (Gate B blocks — defer queue must wait).
