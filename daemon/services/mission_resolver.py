@@ -111,13 +111,18 @@ logger = logging.getLogger(__name__)
 # Instance.status canonicalizes onto the mission vocabulary via
 # :data:`_STATUS_CANONICAL_MAP` (the same map Fix C's
 # ``mission_liveness`` consult uses). The mapping is the single source
-# of truth — no parallel vocabulary set is maintained here. Completes
-# to ``"completed"`` (REVIVABLE); all other terminals are true-terminal.
+# of truth — no parallel vocabulary set is maintained here. All four
+# canonical terminal targets (``completed`` / ``failed`` /
+# ``cancelled`` / ``dead_letter``) are **revivable** per F7 — each
+# opens a fresh epoch when the mission re-enters RUNNING. F7 retired
+# the prior wording that marked any terminal value as un-revivable;
+# no terminal value is un-revivable and there is no revive-class
+# hierarchy.
 #
 # * COMPLETED  → "completed"   — TERMINAL, REVIVABLE
-# * FAILED     → "failed"      — TERMINAL, true-terminal
-# * ERROR      → "failed"      — TERMINAL, true-terminal
-# * TERMINATED → "cancelled"   — TERMINAL, true-terminal
+# * FAILED     → "failed"      — TERMINAL, REVIVABLE
+# * ERROR      → "failed"      — TERMINAL, REVIVABLE
+# * TERMINATED → "cancelled"   — TERMINAL, REVIVABLE
 # * RUNNING    → "processing"
 # * WAITING    → "processing"
 # * WAITING_CHILDREN → "processing"
@@ -125,10 +130,11 @@ logger = logging.getLogger(__name__)
 # * IDLE       → "processing"
 # * PAUSED     → "paused"
 #
-# ``revivable`` is a derived flag specific to mission projection: only
-# ``completed`` is revivable (per spec §3 — ``InstanceStatus.COMPLETED``
-# → mission liveness ``completed`` which can be →RUNNING again on a
-# ``send_message`` to a COMPLETED instance).
+# ``revivable`` is a derived flag specific to mission projection: ALL
+# canonical terminal targets are revivable per F7 — ``completed``,
+# ``failed``, ``cancelled``, and the JobItem-driven ``dead_letter``
+# surface each open a fresh epoch when the linked instance
+# (re-)enters RUNNING via ``send_message``.
 #
 # ── M2-API list-filter vocabulary ─────────────────────────────────────────
 # Derived, NOT a parallel set: the accepted ``liveness`` filter values
