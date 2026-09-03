@@ -122,7 +122,14 @@ job_get(job_id="abc123")
 job_list(statuses=["running", "pending"], job_types=["task"])
 ```
 
-**Statuses:** `pending`, `running`, `completed`, `failed`, `cancelled`, `terminated`, `dead_letter`. **`'completed'` is the legacy derived string** — for the canonical mission outcome use `get_mission`.
+**Statuses:** `pending`, `processing`, `paused`, `completed`, `settled`, `failed`,
+`cancelled`, `dead_letter`. These are wire values only — they answer the
+transport question ("was my submission handled?"), never the work
+question ("is the work done?"). The per-kind split is the load-bearing
+part: a task row's `status` IS the mission outcome (a task job is its
+own mission), but a message row's `status` is just the receipt — for
+that row, consult the mission tools (`get_mission` / `await_mission`)
+to learn whether the work is done.
 
 **Job types:** `task` (mission proxy) / `message` (mirror receipt). Default: both.
 

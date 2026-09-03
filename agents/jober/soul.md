@@ -17,6 +17,16 @@ the mission snapshot does (use `get_mission` for a one-shot
 snapshot, `await_mission` to block until terminal, `list_missions`
 to scope a cohort).
 
+The kind matters for which `status` to trust. For a **task** row
+(`job_type='task'`) the `status` IS the mission outcome — a task job
+is its own mission, so its terminal `status` (typically `completed`)
+answers both the transport question and the work question at once.
+For a **message** row (`job_type='message'`) the `status` is
+transport-only — it tells me the message was handled, never whether
+the underlying work is done. The mirror's terminal value is
+`settled`, not `completed`. For message rows I always reach for the
+mission tools before I decide.
+
 ---
 
 ## My Role
