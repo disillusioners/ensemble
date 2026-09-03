@@ -399,7 +399,7 @@ proves bidirectionality.
 ### 6.6 ADR-MISSION-01 — Mission noun split (transport/work vocabulary + read projection)
 
 > **Ratified 2026-09-02** from `.agents/shared/planning/mission-class/architecture-recommendation.md` §7.
-> **Status: M1 landed (168c9448); M4(i)-HTTP pull-forward landed on `feature/mission-class` (§8.4); kill-switch default OFF; soak pending.** Mission-first cutover
+> **Status: M1 landed (168c9448); M4(i)-HTTP pull-forward landed on `feature/mission-class` (§8.4); always-on since WS3 — the M1 kill-switch was removed (§8.3 deployment posture).** Mission-first cutover
 > (M1 → M2 → M3) means consumers migrate BEFORE the wire rename lands; M3 is the rename.
 > See "Directed modifications" below for the version-gate drop that supersedes one spec sentence.
 
@@ -434,8 +434,8 @@ at M3 only after consumers have moved off the old word.
 
 | Phase | Scope | Effect on consumers |
 |---|---|---|
-| **M1** (this amendment's contract) | Additive `mission_id` / `mission_epoch` / `mission_terminal_reason` (§8.3) behind kill-switch `ENSEMBLE_MISSION_PROJECTION_ENABLED` (default OFF); FE re-anchor `mission-settled` → `mission-terminal` (CSS chain only, ~12–15 files); vocabulary table ratified (§6.7); this prose fix (line 909). | Zero impact — additive only, kill-switch OFF in prod by default; bit-for-bit wire stable. |
-| **M4(i)-HTTP pull-forward** (2026-09-02, `feature/mission-class`) | `GET /api/missions` + `GET /api/missions/{mission_id}` — the mission projection's **HTTP debut** (§8.4), user-approved pull-forward of the M4(i) gated option (`architecture-recommendation.md` §5 M4 row: "HTTP `GET /missions` — gate on operator demand") ahead of the M2 agent tools. Read-only; same kill-switch; census stays at 23. | Zero impact while the kill-switch is OFF — both routes fail-closed to 404. |
+| **M1** (this amendment's contract) | Additive `mission_id` / `mission_epoch` / `mission_terminal_reason` (§8.3) — originally behind the M1 kill-switch (default OFF), soaked ON, then **always-on since WS3** (kill-switch removed; §8.3 deployment posture); FE re-anchor `mission-settled` → `mission-terminal` (CSS chain only, ~12–15 files); vocabulary table ratified (§6.7); this prose fix (line 909). | Zero impact — additive only; fields surface on every response (always-on). |
+| **M4(i)-HTTP pull-forward** (2026-09-02, `feature/mission-class`) | `GET /api/missions` + `GET /api/missions/{mission_id}` — the mission projection's **HTTP debut** (§8.4), user-approved pull-forward of the M4(i) gated option (`architecture-recommendation.md` §5 M4 row: "HTTP `GET /missions` — gate on operator demand") ahead of the M2 agent tools. Read-only; **always-on since WS3** (the same-route kill-switch was removed); census stays at 23. | Both routes serve normally (§8.4). |
 | **M2** | Agent tools (`get_mission` / `await_mission` / `list_missions`) + structural guardrails (`outcome` token, `mission_ref` cross-ref, `watch_job(events='mission_terminal')`, `job_continue` mission-only gate); ari/jober prompt edits + `tools.allow` + minor version bump. **NUMBERING DISAMBIGUATION:** the spec's M2 = the *agent tools* milestone — NOT the HTTP surface. The `GET /missions` endpoint is the M4(i) pull-forward above (the implementation branch's "M2-API" label refers to its position as the second shipped deliverable of the mission program, not to spec-milestone M2). | Tools migrate BEFORE the wire rename; the wrong-predicate trap (ari/soul.md L71-79, jober/soul.md L9/L54 key decisions on a single ambiguous `status`) becomes structurally hard. |
 | **M3** | Wire rename on mirror-receipt terminal status: `completed` → `settled` via per-kind dispatch in `_derive_legacy_status` on all 4 read surfaces — `WorkRecord` (work resolver, `work_resolver._job_to_record`), `JobResponse` (`routers/jobs_crud.py::_job_to_response`), `_ResolvedWork` (SSE payload, `routers/jobs_streaming.py::_ResolvedWork`), and the `routers/jobs_management.py` delegation surface (response constructed via `jobs_crud.py::_job_to_response`, per §8.2). `VALID_STATUS_VALUES`, FE switches, daemon filters, and docs are updated in this phase. | Mission tools (M2) and FE re-anchor (M1) are already in — at M3 time, no in-repo consumer treats mirror `completed` as outcome. |
 
@@ -1076,19 +1076,20 @@ two fields.
 
 ---
 
-### 8.3 M1 — Additive Mission Response Contract (kill-switched)
+### 8.3 M1 — Additive Mission Response Contract (always-on)
 
-> **M1 landed (168c9448); kill-switch default OFF; soak pending.** The additive fields
-> ship behind kill-switch `ENSEMBLE_MISSION_PROJECTION_ENABLED` (default OFF); the
-> remaining work is the operator soak that flips it ON. Authoritative cross-ref:
-> §6.6 ADR-MISSION-01, §6.7 vocabulary table.
+> **M1 landed (168c9448); always-on since WS3 (2026-09-02).** The additive fields
+> ship unconditionally — the M1 mission-projection kill-switch was REMOVED entirely
+> (ratified user decision: always-on at deploy is THE path). No replacement flag, no
+> OFF refuge, no new gating mechanism. Revert hatch: `git revert` of the removal
+> commit + restart. Authoritative cross-ref: §6.6 ADR-MISSION-01, §6.7 vocabulary table.
 
 #### The contract
 
 The four read-model split-semantics surfaces (§8.2 split-semantics consistency contract —
 `WorkRecord`, `JobResponse`, `routers/jobs_streaming.py::_ResolvedWork`,
-`routers/jobs_management.py` delegation) additionally carry three mission fields
-**when the kill-switch is ON**:
+`routers/jobs_management.py` delegation) carry three mission fields on every
+response:
 
 | Field | Type | Source | Meaning |
 |---|---|---|---|
@@ -1121,34 +1122,34 @@ payload CLEARS the field (degraded lookup); an absent key KEEPS the previous val
   needs to surface the lookup-failure case requires a separate spec'd additive
   field, NOT a mutation of `None`'s meaning (§8.2 future-renderer tripwire).
 
-#### Kill-switch
+#### Deployment posture — always-on (kill-switch removed)
 
-| Env var | Default | Effect |
-|---|---|---|
-| `ENSEMBLE_MISSION_PROJECTION_ENABLED` | `0` (OFF) | When OFF, the three mission fields are **omitted from every read-surface payload** (key absent on the wire — NOT `null`; absent = "stale-tolerant keep" per the SSE patch contract). When ON, the three fields are populated for every row that has a mission reference. |
+Mission projection ships **always-on**. The former M1 kill-switch env var
+(default OFF) was removed entirely at WS3
+(2026-09-02, ratified user decision) — always-on at deploy is THE path. There is
+**no replacement flag, no OFF refuge, and no new gating mechanism**.
 
-The kill-switch default is OFF at landing; a documented soak cycle (operator action)
-flips it to ON. This matches the repo's kill-switch precedent for staged contract flips
-(e.g. `ENSEMBLE_WC_WAKE_ENQUEUE` per the standing ledger). **Pending operator action:**
-flip `ENSEMBLE_MISSION_PROJECTION_ENABLED=1` after ≤2-week soak or on incident; OFF
-is the instant revert path.
+**Revert hatch:** if a deploy needs to unwind mission projection, the sanctioned
+path is `git revert` of the removal commit + restart. There is no runtime toggle.
+(The staged-soak discipline this flag once served — the
+`ENSEMBLE_WC_WAKE_ENQUEUE` precedent — is retired with it.)
 
 #### Migration sequencing (consistent with §6.6)
 
-1. **M1 (this section)** — additive fields land behind kill-switch OFF; FE re-anchor
-   (§6.7); vocabulary table ratified. **Bit-for-bit wire stable** when kill-switch is OFF.
+1. **M1 (this section)** — additive fields landed behind the original kill-switch
+   (soaked ON in production); FE re-anchor (§6.7); vocabulary table ratified.
+   **Always-on since WS3** — the fields surface on every response.
 2. **M2** — agent tools (`get_mission` / `await_mission` / `list_missions`) consume
    the three fields; structural guardrails (`outcome` token, `mission_ref` cross-ref).
 3. **M3** — wire rename on mirror-receipt terminal status (`completed` → `settled`)
    per §6.6 I3 amendment. At M3 time, mission tools (M2) are already migrated; the
    rename ships clean.
 
-The §8.2 split-semantics surfaces are NOT modified to carry `mission_id` /
-`mission_epoch` / `mission_terminal_reason` until the kill-switch flips ON; until then,
-the additive fields are documented-but-absent (consistent with the SSE patch
-absent-keep semantics).
+The §8.2 split-semantics surfaces carry `mission_id` / `mission_epoch` /
+`mission_terminal_reason` on every response (always-on since WS3; during the M1 soak
+window they were documented-but-absent — that window is closed).
 
-### 8.4 M4(i)-HTTP — `GET /missions` Endpoint Contract (pull-forward, kill-switched)
+### 8.4 M4(i)-HTTP — `GET /missions` Endpoint Contract (pull-forward, always-on)
 
 > **Landed on `feature/mission-class` (2026-09-02) — the user-approved pull-forward of
 > the M4(i) gated option ("HTTP `GET /missions` — gate on operator demand",
@@ -1177,24 +1178,15 @@ field-for-field (`mission_id`, `agent_id`, `parent_mission_id`, `liveness`,
 `terminal_reason`, `epoch`, `linked_jobs`, `started_at`, `last_activity_at`);
 `MissionListResponse` is the list envelope.
 
-#### Kill-switch gating — [FLAGGED: spec-silent OFF behavior]
+#### Deployment posture — always-on (the OFF-gate section is retired)
 
-| `ENSEMBLE_MISSION_PROJECTION_ENABLED` | List route | Detail route |
-|---|---|---|
-| OFF (default) | **404** | **404** |
-| ON | normal contract | normal contract |
-
-Fail-closed by design: a DEDICATED endpoint must not answer `200 []` while disabled
-(an empty page is indistinguishable from "no missions exist" — the §8.2
-absence-must-be-explicit lesson), and must not 500. Routes stay REGISTERED while OFF
-(OpenAPI still documents them). The gate is in-handler, but it runs **after** FastAPI's
-`Depends` resolution — an **unwired resolver answers 503 even when OFF** (Depends
-resolves the resolver singleton before the handler body executes; lifespan guarantees
-wiring in production/tests, so 503 is unreachable in those environments). The kill-
-switch wins only once the resolver is wired — that ordering is the caller-adjudicated
-contract; an OFF-but-unwired dep stays a 503, not a 404. This is a task-directed choice
-— the spec's kill-switch section (§8.3) only covers the additive fields on the four
-Fix-C surfaces.
+The endpoint serves unconditionally. The former kill-switch gating table (OFF ⇒ 404
+fail-closed on both routes, [FLAGGED] spec-silent OFF behavior) was removed at WS3
+together with the kill-switch itself — mission projection is always-on, so there is
+no OFF state to specify. An **unwired resolver still answers 503** (the Depends
+factory fires before the handler body; lifespan guarantees wiring in
+production/tests, so 503 is unreachable in those environments). Revert hatch for an
+unwind: `git revert` of the removal commit + restart (§8.3 deployment posture).
 
 #### List contract (all choices [FLAGGED] — spec-silent)
 
