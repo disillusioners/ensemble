@@ -2695,7 +2695,7 @@ class InstanceLifecycleService:
         # table has no FK on either backend, so a fully-deleted
         # instance's rows would otherwise persist forever (cpv2
         # final-gate finding 🟡1). The canonical never-raise pattern is
-        # mirrored from ``maintenance.py:913-927`` (incl. the
+        # mirrored from ``maintenance.py:945-959`` (incl. the
         # ``asyncio.to_thread`` bridge for the SYNC repo per
         # decisions.md D14).
         #

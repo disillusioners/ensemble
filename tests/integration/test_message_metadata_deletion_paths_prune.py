@@ -33,10 +33,11 @@ the prune side uses a REAL ``MessageMetadataRepository`` on a disposable
 per-test PG database (real ``DELETE`` statement, not a mock); the
 orchestration sides use the conventions of ``test_instance_hard_delete.py``
 / ``test_maintenance.py`` (AsyncMock checkpointer, MagicMock manager,
-file-backed SQLite for the instance repo). The never-raise guard is
-proven on the **real** ``delete_for_thread`` (monkeypatched to raise) so
-a regression in the guard's swallow semantics surfaces as an exception,
-not as a side effect of a mock.
+in-memory SQLite + ``StaticPool`` for the instance repo — single shared
+connection so reads-after-writes see the latest data). The never-raise
+guard is proven on the **real** ``delete_for_thread`` (monkeypatched to
+raise) so a regression in the guard's swallow semantics surfaces as an
+exception, not as a side effect of a mock.
 
 PG unreachable → loud skip; a skip is NOT green for the cpv2 final-gate
 fold — start PostgreSQL and re-run.
