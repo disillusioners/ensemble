@@ -324,4 +324,45 @@ describe('ChatInterfaceComponent — /compact card copy (compaction-output-struc
       detail: { compacted_type: 'summary', sections_kept: 4, sections_total: 0 },
     } as never)).toBe('Context compacted');
   });
+
+  // ── commandDetailLine — noop_reason → user-facing copy ──────────────
+  // Cycle 2 (proactive-compaction-fix review W-4) added
+  // noop_reason="injections_dominate" and Cycle 3 (residual W-4.5)
+  // added noop_reason="preserved_within_threshold". The two new
+  // switch cases live at
+  //   frontend/src/app/components/chat-interface/chat-interface.component.ts:412
+  //   frontend/src/app/components/chat-interface/chat-interface.component.ts:420
+  // and the literals are pinned in the NoopReason type
+  // (frontend/src/app/models/index.ts:61). Plain-logic specs — no DOM
+  // needed; commandDetailLine is a pure function of cmd.detail.
+
+  it('success noop injections_dominate → "All messages are injections; nothing to compact"', () => {
+    const line = component.commandDetailLine({
+      ...baseCmd,
+      phase: 'success',
+      detail: { compacted_type: 'noop', noop_reason: 'injections_dominate' },
+    } as never);
+    expect(line).toBe('All messages are injections; nothing to compact');
+  });
+
+  it('success noop preserved_within_threshold → "Preserved groups still fit within the threshold"', () => {
+    const line = component.commandDetailLine({
+      ...baseCmd,
+      phase: 'success',
+      detail: { compacted_type: 'noop', noop_reason: 'preserved_within_threshold' },
+    } as never);
+    expect(line).toBe('Preserved groups still fit within the threshold');
+  });
+
+  it('success noop with a legacy reason still renders the prior copy (adjacent regression guard)', () => {
+    // One of the three pre-existing reasons (none of which had a
+    // commandDetailLine spec before this branch). Pins the prior copy
+    // so a future case shuffle cannot silently drop it.
+    const line = component.commandDetailLine({
+      ...baseCmd,
+      phase: 'success',
+      detail: { compacted_type: 'noop', noop_reason: 'below_floor' },
+    } as never);
+    expect(line).toBe('Context too small to compact');
+  });
 });
