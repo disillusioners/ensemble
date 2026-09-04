@@ -24,7 +24,8 @@ Acceptance criteria:
 * AC-3.2 / NFR-4: variance across history_depth {150, 400, 10000}
   AT page_size=100 must be < 10% relative (per-message latency).
 * AC-3.3: cells ``(100, 150)`` and ``(100, 400)`` must be within 2× of
-  v1 post-fix baselines (1.9 ms / 4.5 ms respectively).
+  the v1 post-fix baselines on a SAME-BASIS per-message comparison
+  (v1: 1.9 ms / 150 msgs and 4.5 ms / 400 msgs; v2: latency / page_size).
 * NFR-1 / NFR-2 / NFR-3: each cell reports latency_ms, peak_rss_bytes,
   transfer_bytes (the test prints them — there is NO pytest-side pass/
   fail on absolute numbers because the disposable PG's hardware may
@@ -37,11 +38,46 @@ Harness honesty contract (mirrors the binding-gate pattern):
   slow — per FR-3 / NFR-1 note in ``requirements.md``).
 * PG unreachable → loud ``pytest.skip`` (skip is NOT green for the
   binding gate).
-* Per-call measurement uses ``time.perf_counter()`` (wall-clock) AND
-  ``tracemalloc`` for peak RSS delta around the call.
+* **Two-pass measurement methodology (Phase-5 review fix F1).**
+  Latency and RSS are measured in SEPARATE passes:
+
+  (i)  LATENCY pass — ``N_WARMUPS`` warm-up calls followed by
+       ``N_TIMED`` timed iterations using ``time.perf_counter()``.
+       ``tracemalloc`` is NOT active during this pass: its allocation
+       hooks instrument every object allocation and materially inflate
+       wall-clock latency, so a tracemalloc-wrapped timing is NOT a
+       valid latency measurement. The reported ``latency_ms`` is the
+       mean of the timed iterations.
+  (ii) RSS pass — a separate traced iteration with
+       ``tracemalloc.start()`` issued BEFORE the measured call region
+       and ``tracemalloc.stop()`` AFTER it. The pass's wall time is
+       recorded but never asserted — ``tracemalloc`` numbers are for
+       peak-RSS accounting only, OUTSIDE the latency measurement
+       window.
+
 * Transfer bytes is the sum of ``len(serialized_content)`` across
   messages in the response (matches the ``bytes_estimate`` semantics
   in ``daemon/checkpoint_perf.py::log_messages_api``).
+
+Acceptance math (Phase-5 review fix F2 — same-basis per-msg on BOTH
+sides of the AC-3.3 comparison):
+
+* v1 anchors are per-call TOTALS over the FULL message set v1's bench
+  read: 1.9 ms @ 150 msgs and 4.5 ms @ 400 msgs. The v1-side per-msg
+  rate is ``v1_ms / v1_msg_count`` (divisors 150 / 400 — the messages
+  v1 actually read, NOT page_size).
+* v2-side per-msg rate is ``cell.latency_ms / page_size``.
+* AC-3.3 asserts ``v2_per_msg / v1_per_msg < 2.0``. Both sides are
+  now ms-per-message — the ratio is dimensionally valid.
+* Additionally (F2b, reported in ``phase5-perf-results.md``, NOT
+  gated): for the anchor cells the harness also times the bare
+  read-flip component — the ``saver.aget`` + message-serialization
+  portion that v1's bench actually measured — so the doc can state
+  the aget-side ratio separately from v2's total API-surface cost
+  (synthetic-system injection + context rebuild +
+  ``message_metadata`` enrichment + logging, none of which v1's
+  bench measured; the manager-less harness here skips the
+  manager-gated portions, which is why the decomposition exists).
 
 Risk-3 stop-gate (per phase5-plan.md Risk 3): if a cell exceeds the
 10-minute budget, the cell is documented as SHRUNK (the matrix is
@@ -64,6 +100,7 @@ from typing import Annotated, NamedTuple, TypedDict
 
 import pytest
 
+from tests.helpers.armed_absence import armed_alist_fixture  # noqa: F401  (T5.4/F5 fixture wiring)
 from tests.helpers.checkpoint_prune_pg import (
     create_disposable_db,
     drop_database,
@@ -96,12 +133,26 @@ def _probe_pg():
 
 
 class _CellResult(NamedTuple):
-    """One measured cell from the perf matrix."""
+    """One measured cell from the perf matrix.
+
+    ``latency_ms`` is the MEAN of the ``N_TIMED`` latency-pass
+    iterations (tracemalloc NOT active). ``rss_pass_latency_ms`` is
+    the separately-traced RSS pass's wall time — recorded for
+    diagnostics only, NEVER asserted (allocation hooks inflate it).
+    """
     page_size: int
     history_depth: int
     latency_ms: float
     peak_rss_bytes: int
     transfer_bytes: int
+    rss_pass_latency_ms: float = 0.0
+
+
+# Measurement constants (review fix F1): the latency pass runs this
+# many warm-ups / timed iterations; tracemalloc runs ONLY in the
+# separate RSS pass.
+N_WARMUPS = 5
+N_TIMED = 5
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────
@@ -288,44 +339,119 @@ async def _measure_cell(
     do NOT contribute to the aget response. Pre-PR3 the read walked ALL
     checkpoints (history_depth-many); post-PR3 the cost is bounded by
     ``page_size``, NOT ``history_depth``.
+
+    Methodology (review fix F1) — TWO separate passes:
+
+    * LATENCY pass: ``N_WARMUPS`` warm-ups + ``N_TIMED`` timed calls
+      with ``time.perf_counter()``; tracemalloc is NOT active. The
+      reported ``latency_ms`` is the MEAN of the timed iterations.
+    * RSS pass: one separately-traced call, ``tracemalloc.start()``
+      strictly BEFORE the measured call and ``tracemalloc.stop()``
+      AFTER. Its wall time is recorded on the cell
+      (``rss_pass_latency_ms``) but is NEVER asserted — allocation
+      hooks inflate latency, so this number is diagnostic only.
     """
     from daemon.persistence import get_instance_messages
 
-    # Warm-up call (clears cold-start noise; matches the v1 bench idiom).
-    # The warm-up goes through the full aget path (including JSON parsing)
-    # so the timing measurement below is pure aget + serialize cost.
-    warmup = await get_instance_messages(saver, thread_id)
+    # LATENCY pass — no tracemalloc anywhere in this block.
+    warmup = None
+    for _ in range(N_WARMUPS):
+        warmup = await get_instance_messages(saver, thread_id)
     # Sanity: the aget returned exactly ``page_size`` messages.
-    assert len(warmup) == page_size, (
-        f"populate drift: aget returned {len(warmup)} messages, expected "
+    assert warmup is not None and len(warmup) == page_size, (
+        f"populate drift: aget returned "
+        f"{len(warmup) if warmup is not None else 'n/a'} messages, expected "
         f"{page_size} (thread_id={thread_id}, history_depth={history_depth})"
     )
 
-    tracemalloc.start()
-    t0 = time.perf_counter()
-    try:
+    latencies_ms = []
+    msgs = None
+    for _ in range(N_TIMED):
+        t0 = time.perf_counter()
         msgs = await get_instance_messages(saver, thread_id)
-    finally:
-        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        latencies_ms.append((time.perf_counter() - t0) * 1000.0)
+    latency_ms = statistics.fmean(latencies_ms)
+
+    # RSS pass — separate traced iteration, start() BEFORE / stop() AFTER
+    # the measured call region. Timing recorded but NOT asserted.
+    tracemalloc.start()
+    try:
+        t0 = time.perf_counter()
+        _rss_pass_msgs = await get_instance_messages(saver, thread_id)
+        rss_pass_latency_ms = (time.perf_counter() - t0) * 1000.0
         _, peak = tracemalloc.get_traced_memory()
+    finally:
         tracemalloc.stop()
 
     # The post-PR3 read path returns just the latest checkpoint's
     # messages (already page_size in size). If a future fix changes
     # this to return MORE than page_size, the trim below keeps the
     # contract: the response is bounded by page_size.
-    if page_size < len(msgs):
+    if msgs is not None and page_size < len(msgs):
         msgs = msgs[:page_size]
 
-    transfer_bytes = sum(len(str(m.get("content", ""))) for m in msgs)
+    transfer_bytes = sum(len(str(m.get("content", ""))) for m in msgs or [])
 
     return _CellResult(
         page_size=page_size,
         history_depth=history_depth,
-        latency_ms=elapsed_ms,
+        latency_ms=latency_ms,
         peak_rss_bytes=peak,
         transfer_bytes=transfer_bytes,
+        rss_pass_latency_ms=rss_pass_latency_ms,
     )
+
+
+async def _measure_aget_component(saver, thread_id: str) -> dict[str, float]:
+    """Time the BARE read-flip component v1's bench actually measured.
+
+    Review fix F2(b): the AC-3.3 v1 anchors (1.9 ms @ 150 msgs /
+    4.5 ms @ 400 msgs) measured the saver read + message
+    deserialization portion only. v2's ``get_instance_messages`` total
+    additionally carries API-surface work v1 never measured
+    (manager-gated synthetic-system injection + context rebuild +
+    ``message_metadata`` enrichment + ``log_messages_api``). This
+    helper isolates the comparable component so the results doc can
+    report BOTH ratios:
+
+    * ``aget_ms``          — ``saver.aget(config)`` (blob read +
+                             message deserialization inside the saver).
+    * ``serialize_ms``     — the read path's serialization loop over
+                             the channel messages (mirrors
+                             ``get_instance_messages`` minus the
+                             manager-gated + logging portions).
+    * ``component_ms``     — the sum (the v1-comparable number).
+
+    NOT gated — reported via ``[PERF-AGET-COMPONENT]`` for
+    ``phase5-perf-results.md``.
+    """
+    from daemon.utils import serialize_message
+
+    config = {"configurable": {"thread_id": thread_id}}
+
+    t0 = time.perf_counter()
+    state = await saver.aget(config)
+    aget_ms = (time.perf_counter() - t0) * 1000.0
+
+    channel_values = (state or {}).get("channel_values", {})
+    messages = channel_values.get("messages", [])
+
+    t1 = time.perf_counter()
+    tool_outputs = {}
+    serialized_count = 0
+    for msg in messages:
+        if getattr(msg, "type", "unknown") == "tool":
+            continue
+        serialize_message(msg, tool_outputs)
+        serialized_count += 1
+    serialize_ms = (time.perf_counter() - t1) * 1000.0
+
+    return {
+        "aget_ms": aget_ms,
+        "serialize_ms": serialize_ms,
+        "component_ms": aget_ms + serialize_ms,
+        "serialized_count": float(serialized_count),
+    }
 
 
 # ── the matrix ───────────────────────────────────────────────────────────────
@@ -342,10 +468,21 @@ MATRIX: list[tuple[int, int]] = [
 ]
 
 # v1 post-fix baselines for the 2×-anchor check (AC-3.3).
-BASELINE_2X: dict[tuple[int, int], float] = {
-    (100, 150): 1.9,
-    (100, 400): 4.5,
+# Value = (v1_total_ms, v1_msg_count): the v1 bench's per-call TOTAL
+# and the number of messages that call actually read (v1 read the FULL
+# history — 150 and 400 msgs; NOT page_size). Same-basis per-msg on
+# both sides (review fix F2a):
+#   v1_per_msg = v1_total_ms / v1_msg_count
+#   v2_per_msg = cell.latency_ms / page_size
+#   ratio      = v2_per_msg / v1_per_msg   (assert < 2.0)
+BASELINE_2X: dict[tuple[int, int], tuple[float, int]] = {
+    (100, 150): (1.9, 150),
+    (100, 400): (4.5, 400),
 }
+
+# Anchor cells for the F2(b) decomposition measurement (reported in
+# phase5-perf-results.md, NOT gated).
+AGET_COMPONENT_CELLS: set[tuple[int, int]] = {(100, 150), (100, 400)}
 
 # The variance-anchor page_size: per-message latency variance across
 # history_depths {150, 400, 10000} must be < 10%.
@@ -394,9 +531,14 @@ class TestPerfMatrix:
         ],
     )
     async def test_cell_runs_and_records_metrics(
-        self, _probe_pg, page_size, history_depth
+        self, _probe_pg, armed_alist_fixture, page_size, history_depth
     ):
         """One cell: build, populate, measure, assert it ran.
+
+        The armed-absence fixture (T5.4 / F5) is active for every cell:
+        any ``saver.alist(…)`` invocation on the populate or read path
+        raises AssertionError — the live-path gate holds during perf
+        measurement too (and adds zero cost when alist is not called).
 
         The per-cell assertions are intentionally soft (latency <
         ``10_000`` ms as a hung-task guard; transfer_bytes >= 0). The
@@ -434,6 +576,24 @@ class TestPerfMatrix:
                 # Stash for the post-matrix tests.
                 _CELL_RESULTS[(page_size, history_depth)] = cell
 
+                # F2(b) decomposition — anchor cells only: time the bare
+                # aget + serialization component v1's bench measured.
+                # Reported in the doc, NOT gated.
+                if (page_size, history_depth) in AGET_COMPONENT_CELLS:
+                    _AGET_COMPONENT_RESULTS[(page_size, history_depth)] = (
+                        await _measure_aget_component(
+                            saver, f"thr-{page_size}-{history_depth}"
+                        )
+                    )
+                    comp = _AGET_COMPONENT_RESULTS[(page_size, history_depth)]
+                    print(
+                        f"\n[PERF-AGET-COMPONENT] cell=({page_size},{history_depth}) "
+                        f"aget_ms={comp['aget_ms']:.3f} "
+                        f"serialize_ms={comp['serialize_ms']:.3f} "
+                        f"component_ms={comp['component_ms']:.3f} "
+                        f"serialized_msgs={int(comp['serialized_count'])}"
+                    )
+
                 # Soft guards (cell RAN; did not hang).
                 assert cell.latency_ms < 10_000, (
                     f"cell ({page_size}, {history_depth}) took {cell.latency_ms:.1f} ms — "
@@ -449,7 +609,8 @@ class TestPerfMatrix:
             f"\n[PERF-CELL] page_size={page_size} history_depth={history_depth} "
             f"latency_ms={cell.latency_ms:.3f} peak_rss={cell.peak_rss_bytes} "
             f"transfer_bytes={cell.transfer_bytes} "
-            f"per_msg_latency_ms={_per_message_latency(cell):.4f}"
+            f"per_msg_latency_ms={_per_message_latency(cell):.4f} "
+            f"rss_pass_latency_ms={cell.rss_pass_latency_ms:.3f}"
         )
 
 
@@ -457,6 +618,10 @@ class TestPerfMatrix:
 
 
 _CELL_RESULTS: dict[tuple[int, int], _CellResult] = {}
+
+# F2(b) decomposition results for the anchor cells — reported in
+# phase5-perf-results.md, never gated.
+_AGET_COMPONENT_RESULTS: dict[tuple[int, int], dict[str, float]] = {}
 
 
 # ── post-matrix assertions ───────────────────────────────────────────────────
@@ -502,55 +667,87 @@ class TestPerfMatrixAcceptance:
             f"mean={mean:.4f} stdev={stdev:.4f} rel_var={relative_variance:.4f}"
         )
 
-        # DOCUMENTED DEVIATION (2026-09-04): on this hardware the
-        # variance test runs at 10-30% relative variance (the 100-msg
-        # cells at small history_depth have high run-to-run noise
-        # because the v2 read path carries fixed overhead — synthetic
-        # system message + context rebuild + log_messages_api — that
-        # dominates the ~10-15 ms per-call signal). v1's bench did
-        # not measure that fixed overhead; v2's does. The acceptance
-        # for the post-fix property is therefore relaxed to 50%
-        # relative variance (catches catastrophic regressions like
-        # 5x slowdowns while accepting the documented noise floor).
-        # The variance NUMBERS are recorded in
-        # ``phase5-perf-results.md`` for dispatcher review; the hard
-        # AC is the 2× baseline check (test_2x_baseline_anchor).
-        assert relative_variance < 0.50, (
-            f"Catastrophic regression: relative variance = {relative_variance:.4f}. "
+        # Plan AC-3.2 / NFR-4 MANDATES < 10% relative variance — restored
+        # verbatim (Phase-5 review fix F3). The prior 0.50 relaxation was a
+        # review finding, not a sanctioned deviation: the correct response
+        # to a noisy harness is a cleaner harness (more warm-ups / timed
+        # iterations, tracemalloc out of the latency window), never a
+        # relaxed threshold. If clean runs exceed 10%, this test FAILS and
+        # phase5-perf-results.md records the honest verdict — the
+        # threshold is not negotiable.
+        assert relative_variance < 0.10, (
+            f"AC-3.2 / NFR-4 violated: relative variance = "
+            f"{relative_variance:.4f} (must be < 0.10). "
             f"Per-message latencies: {per_msg_latencies}"
         )
 
     @pytest.mark.parametrize(
-        "cell_key,v1_baseline_ms",
-        list(BASELINE_2X.items()),
+        "cell_key,v1_baseline_ms,v1_msg_count",
+        [(k, ms, n) for k, (ms, n) in BASELINE_2X.items()],
         ids=[f"{ps}x{d}" for ps, d in BASELINE_2X.keys()],
     )
-    def test_2x_baseline_anchor(self, cell_key, v1_baseline_ms):
+    def test_2x_baseline_anchor(self, cell_key, v1_baseline_ms, v1_msg_count):
         """AC-3.3: v2 cell at the (100, 150) / (100, 400) anchors
-        must be within 2× of v1's post-fix baseline (1.9 ms / 4.5 ms)."""
+        must be within 2× of the v1 post-fix baseline — SAME-BASIS
+        per-message on BOTH sides (review fix F2a).
+
+        v1's bench reported per-call TOTALS (1.9 ms reading all 150
+        messages; 4.5 ms reading all 400). v2's harness reports
+        per-call totals over ``page_size`` messages. Comparing
+        v2-per-msg against the v1 TOTAL directly (the prior math) is
+        dimensionally invalid; both sides must be normalized to
+        ms-per-message first:
+
+            v1_per_msg = v1_baseline_ms / v1_msg_count   (150 / 400)
+            v2_per_msg = cell.latency_ms / page_size     (100)
+            ratio      = v2_per_msg / v1_per_msg
+        """
         cell = _CELL_RESULTS[cell_key]
-        # Per-message latency is the comparable metric (the v1 anchors
-        # were per-call latency on a 100-msg page; v2 may call the path
-        # slightly differently — per-message normalizes the comparison).
-        v2_per_msg = _per_message_latency(cell)
-        # The v1 baseline IS per-call latency for page_size=100; we
-        # compute the same way (cell.latency_ms / 100) for an apples-to-
-        # apples comparison.
-        v1_per_call = v1_baseline_ms
-        ratio = v2_per_msg / v1_per_call
+        v2_per_msg = cell.latency_ms / cell.page_size
+        v1_per_msg = v1_baseline_ms / v1_msg_count
+        ratio = v2_per_msg / v1_per_msg
 
         print(
-            f"\n[PERF-2X] cell={cell_key} v2_per_msg={v2_per_msg:.3f} ms "
-            f"v1_baseline={v1_per_call:.3f} ms ratio={ratio:.3f}"
+            f"\n[PERF-2X] cell={cell_key} v2_total={cell.latency_ms:.3f} ms "
+            f"v2_per_msg={v2_per_msg:.5f} ms/msg "
+            f"v1_total={v1_baseline_ms:.3f} ms@{v1_msg_count}msgs "
+            f"v1_per_msg={v1_per_msg:.5f} ms/msg ratio={ratio:.3f}"
         )
 
         # The 2× bound is an UPPER bound — v2 should NOT be slower
-        # than 2× the v1 fix.
+        # than 2× the v1 fix, same-basis. If the clean re-measure
+        # exceeds it, the honest FAIL verdict is recorded in
+        # phase5-perf-results.md — the assertion is NOT weakened.
         assert ratio < 2.0, (
             f"AC-3.3 violated: cell {cell_key} v2 per-msg latency "
-            f"{v2_per_msg:.3f} ms is {ratio:.2f}× v1 baseline "
-            f"{v1_per_call:.3f} ms (must be < 2×)"
+            f"{v2_per_msg:.5f} ms/msg is {ratio:.2f}× v1 per-msg baseline "
+            f"{v1_per_msg:.5f} ms/msg (must be < 2×; v2 total "
+            f"{cell.latency_ms:.3f} ms @ page_size={cell.page_size} vs "
+            f"v1 total {v1_baseline_ms:.3f} ms @ {v1_msg_count} msgs)"
         )
+
+    def test_aget_component_decomposition_reported(self):
+        """F2(b) — the anchor-cell decomposition ran and is reported.
+
+        NOT a pass/fail gate on absolute numbers (per the harness
+        honesty contract, absolute comparisons vs v1 hardware live in
+        ``phase5-perf-results.md``). This test pins that the
+        decomposition measurements EXIST for both anchor cells so the
+        doc can cite this test as their authoritative source.
+        """
+        assert set(_AGET_COMPONENT_RESULTS.keys()) == AGET_COMPONENT_CELLS, (
+            f"missing decomposition cells: "
+            f"{AGET_COMPONENT_CELLS - set(_AGET_COMPONENT_RESULTS.keys())}"
+        )
+        for cell_key, comp in sorted(_AGET_COMPONENT_RESULTS.items()):
+            assert comp["aget_ms"] >= 0 and comp["serialize_ms"] >= 0
+            assert int(comp["serialized_count"]) > 0
+            print(
+                f"\n[PERF-AGET-COMPONENT-RECAP] cell={cell_key} "
+                f"aget_ms={comp['aget_ms']:.3f} "
+                f"serialize_ms={comp['serialize_ms']:.3f} "
+                f"component_ms={comp['component_ms']:.3f}"
+            )
 
     def test_nfr_summary_print(self):
         """Print the canonical NFR-1..4 summary for ``phase5-perf-results.md``.
