@@ -1374,14 +1374,24 @@ read service in the `MissionResolver` pattern.
   instance; a legacy-clause witness whose JobItem has NO instance row
   (`j.instance_id IS NULL`) surfaces as its OWN holder with `instance_id=""`,
   `status=""` and `agent` from the JobItem row (dropping it would break the
-  holders-non-empty == gate-blocked invariant). `kind` is `"paused"` when the witness
-  instance's `Instance.status` is `paused` (W2: suspended-but-occupying), `"live"`
-  otherwise. `status` is the RAW instance status (the gate's truthmaker, not
-  canonicalized). `since` is normalized ISO-8601 (naive → UTC — the
-  `_parse_job_created_at` TEXT-timestamp pattern): `paused_at` for paused holders,
-  `last_activity_at` for live holders, `JobItem.created_at` for instance-less
-  witnesses; each falls back through `updated_at` → `created_at`. Ordering: paused
-  first, then live, ascending `instance_id`.
+  holders-non-empty == gate-blocked invariant). `kind` is purely descriptive — it is
+  `"paused"` when the witness instance's `Instance.status` is `paused` (W2:
+  suspended-but-occupying), `"live"` otherwise. The wire payload does NOT carry
+  severity — the AMBER / INFO / RED severity conjunction is a client-side read of
+  the `(kind, holders.len(), pending_count)` triple, NOT a server-derived property.
+  `status` is the RAW instance status (the gate's truthmaker, not canonicalized).
+  `since` is normalized ISO-8601 (naive → UTC — the `_parse_job_created_at`
+  TEXT-timestamp pattern): `paused_at` for paused holders, falling back through
+  `updated_at` then `created_at`; `last_activity_at` for live holders, falling back
+  through `updated_at` then `created_at`; `JobItem.created_at` for instance-less
+  witnesses (NO instance-side fallback chain — the JobItem's own `created_at` is
+  the sole source; null-or-empty is possible if even that column is NULL).
+  Ordering: paused holders first (AMBER operator-priority), then live, each
+  ascending by `instance_id` — the `_project_holders` sort key is
+  `(kind != "paused", instance_id, agent)`. Holders rows are NOT bounded by a
+  list `LIMIT` — the projection enumerates every witness (`len(witnesses)` is
+  unbounded); the FE renders every row but the render-gate below ensures the
+  affordance is invisible when there is nothing to warn about.
 
 #### THE invariant — gate-truth == display-truth, by construction
 
@@ -1410,6 +1420,17 @@ fixtures) plus the shared-tail text pin are locked in
 
 The severity conjunction is a client-side read of the payload; the surface itself
 carries only the two facts + witnesses.
+
+**FE render-gate** — the `deferBlockIndicator` helper
+(`frontend/src/app/models/defer-blocked.model.ts`) returns `null` (no render, no
+reserved space in the header) when `pending_count == 0`. Consequence: a paused
+hold with **zero** queued defer work (the operator did NOT enqueue anything yet)
+surfaces NOWHERE in the UI — that is by design. The render-gate is the
+`pending_count > 0` predicate on the FE side, NOT a BE-filtered shape; the BE
+serves the payload truthfully, the FE chooses what to surface. Holders rows are
+NOT counted or paged server-side — the projection enumerates every witness and
+the FE iterates the array to find the first paused holder; with `pending_count
+== 0`, the FE never invokes that iteration.
 
 #### Purity, bound, degradation
 
