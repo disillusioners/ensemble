@@ -58,6 +58,7 @@ from __future__ import annotations
 import uuid
 import re
 from datetime import datetime, timezone
+from typing import Final
 
 import pytest
 from fastapi import FastAPI
@@ -267,20 +268,75 @@ def _seed_defer_queue_with_pending_job(
 
 
 def _capture_statements(engine: Engine):
-    """Attach a ``before_cursor_execute`` spy; return (captured, detach)."""
+    """Attach a ``before_cursor_execute`` spy; return (captured, detach).
+
+    Captures BOTH the rendered SQL statement AND the driver-bound
+    ``parameters`` payload — the runtime shape of the latter is dialect-
+    dependent (e.g. SQLite's positional-expanded tuple from
+    ``expanding=True`` bindparams vs the dict the resolver originally
+    passed). The hardened listener returns ``captured_binds`` as a list
+    parallel to ``captured``, so consumers can pin BOTH the statement
+    text (via :func:`_normalize_sql`) AND the bind VALUES (via
+    :func:`_expected_runtime_binds`).
+    """
     captured: list[str] = []
+    captured_binds: list[object] = []
 
     def _before_cursor_execute(  # noqa: ANN001 — SQLAlchemy hook
         conn, cursor, statement, parameters, context, executemany  # noqa: ARG001
     ):
         captured.append(statement)
+        captured_binds.append(parameters)
 
     event.listen(engine, "before_cursor_execute", _before_cursor_execute)
 
     def _detach() -> None:
         event.remove(engine, "before_cursor_execute", _before_cursor_execute)
 
-    return captured, _detach
+    return captured, captured_binds, _detach
+
+
+#: Body-order bindparam sequence for the system-wide defer witness
+#: statement (and the gate statement it is derived from). The list
+#: honors each *occurrence* of a named bind in the SQL body — the same
+#: rule the SQLAlchemy ``expanding`` bindparam expansion follows when
+#: serializing to a driver positional tuple. Matches the textual order
+#: of the ``__[POSTCOMPILE_…]`` tokens in
+#: ``_idle_predicate_sql.JOB_DEFER_BUSY_BODY_SYSTEM``:
+#: ``excluded_queue_types`` (1×) → ``terminal_statuses`` (2× — once in
+#: the legacy clause, once in the mirror clause).
+_DEFER_SYSTEM_BIND_BODY_ORDER: tuple[str, ...] = (
+    "excluded_queue_types",
+    "terminal_statuses",
+    "terminal_statuses",
+)
+
+
+def _expected_runtime_binds(
+    binds_dict: dict[str, object],
+    body_order: tuple[str, ...] = _DEFER_SYSTEM_BIND_BODY_ORDER,
+) -> tuple[object, ...]:
+    """Translate a bind-DICT into the positional tuple the driver sees.
+
+    SQLAlchemy expands ``expanding=True`` bindparams into positional
+    placeholders at execution time, so the driver-bound ``parameters``
+    delivered to ``before_cursor_execute`` is a tuple (not the dict the
+    resolver passed in). The expansion walks the bind names in the order
+    they appear in the SQL body — each occurrence contributes one
+    slot per element in the bound list (a non-list bind contributes
+    one slot). This helper derives the expected tuple from the bind
+    dict in exactly that order, so the listener capture can be
+    compared value-for-value regardless of paramstyle (named / qmark /
+    pyformat).
+    """
+    expanded: list[object] = []
+    for name in body_order:
+        value = binds_dict[name]
+        if isinstance(value, list):
+            expanded.extend(value)
+        else:
+            expanded.append(value)
+    return tuple(expanded)
 
 
 _SQL_PARAM_TOKEN = re.compile(r"__\[POSTCOMPILE_\w+\]|:\w+|\?")
@@ -515,6 +571,167 @@ class TestSeverityShapes:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# FRESH-ENGINE NEGATIVE FIXTURE — terminal instance + residual active work
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestFreshEngineNegativeFixture:
+    """P0-1(b) hardening (2026-09-04): the deliberate-edit divergence case.
+
+    A TERMINATED (or ERROR) instance with a residual active work row is
+    the canary shape for a deliberate-edit regression on
+    :data:`JOB_TERMINAL_STATUSES` (e.g. someone drops ``"terminated"``
+    from the terminal set to silence noise). The shared predicate
+    ``i.status NOT IN :terminal_statuses`` excludes terminal instances
+    on BOTH the gate (``has_active_non_deferred_work``) AND the
+    enumeration (``defer_busy_witness_statement``) — proving the
+    dead-instance exclusion holds on both legs of the consistency
+    invariant at once.
+
+    Uses a fresh engine + fresh resolver wiring + fresh listener wiring
+    (NOT the file's module-level fixtures) so this test is hermetic:
+    any cross-contamination from a sibling test that holds a stale
+    ``_defer_block_resolver`` global cannot poison the assertion. The
+    fixture file (P0-1 hearing review) called this out as the gap
+    class — the assertion was already in ``test_gate_vs_surface_matrix``
+    fixture row 4 ("terminal-instance"), but that test re-uses the
+    module-scoped engine. This fresh-engine shape is the redundancy
+    that makes the canary a sentinel rather than a side-effect.
+    """
+
+    def test_terminated_instance_with_residual_active_job_is_not_a_witness(
+        self, tmp_path
+    ):
+        """TERMINATED instance + active JobItem ⇒ gate open, holders empty."""
+        from fastapi.testclient import TestClient
+        from daemon.routers.queues import (
+            router as project_queues_router,
+            system_queues_router,
+            set_defer_block_resolver,
+        )
+
+        # Fresh engine — file-backed SQLite, NullPool + WAL +
+        # busy_timeout (the standard recipe; StaticPool + WriteGuardSession
+        # is QUARANTINE.md-flagged).
+        db_path = tmp_path / "defer-blocked-negative.sqlite"
+        eng = create_engine(
+            f"sqlite:///{db_path}",
+            connect_args={"check_same_thread": False},
+            poolclass=NullPool,
+        )
+
+        @event.listens_for(eng, "connect")
+        def _configure_sqlite(dbapi_conn, _connection_record):
+            cursor = dbapi_conn.cursor()
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA busy_timeout=10000")
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.close()
+
+        SQLModel.metadata.create_all(eng)
+        try:
+            # Fresh resolver + fresh client (NOT the module-level
+            # ``resolver`` / ``client`` fixtures — hermetic by design).
+            job_repo = JobRepository(eng)
+            fresh_resolver = DeferBlockResolver(job_repo=job_repo)
+            set_defer_block_resolver(fresh_resolver)
+            app = FastAPI()
+            app.include_router(project_queues_router, prefix="/api")
+            app.include_router(system_queues_router, prefix="/api")
+            client = TestClient(app)
+
+            # Two flavors of dead instance, both with residual active
+            # work rows. The shape must surface as "not a witness" on
+            # either side of the equality.
+            _seed_queue(eng, queue_id="q-par-neg", queue_type="parallel")
+            _seed_instance(
+                eng,
+                instance_id="inst-terminated",
+                status=InstanceStatus.TERMINATED.value,
+            )
+            _seed_job(
+                eng,
+                instance_id="inst-terminated",
+                queue_id="q-par-neg",
+                job_id="job-on-terminated",
+            )
+            _seed_instance(
+                eng,
+                instance_id="inst-error",
+                status=InstanceStatus.ERROR.value,
+            )
+            _seed_job(
+                eng,
+                instance_id="inst-error",
+                queue_id="q-par-neg",
+                job_id="job-on-error",
+            )
+
+            # Listener attached to the fresh engine, distinct from the
+            # module-level listener machinery — proves the canary is
+            # the SHARED predicate, not any listener artifact.
+            captured, captured_binds, detach = _capture_statements(eng)
+            try:
+                resp = client.get("/api/queues/defer-blocked")
+            finally:
+                detach()
+            assert resp.status_code == 200
+            body = resp.json()
+
+            # Both legs of the consistency invariant agree: gate NOT
+            # blocked, holders empty. The shared ``i.status NOT IN
+            # :terminal_statuses`` filter is the single truthmaker for
+            # both sides — a deliberate edit that drops "terminated" or
+            # "error" from the set breaks this assertion on BOTH the
+            # gate call (``has_active_non_deferred_work``) AND the
+            # witness enumeration.
+            assert body["defer_blocked"] is False, (
+                "TERMINATED/ERROR instance + residual active JobItem "
+                "must NOT block the gate; the shared predicate excludes "
+                f"terminal-instance rows by ``i.status NOT IN :terminal_statuses``. "
+                f"body={body!r}"
+            )
+            assert body["holders"] == [], (
+                "TERMINATED/ERROR instance + residual active JobItem "
+                "must NOT enumerate as a holder; the witness body is "
+                "derived from the gate body so the exclusion holds "
+                f"here too. body={body!r}"
+            )
+
+            # The listener captured the SAME shared-composition
+            # witness body — proving the assertion is anchored to the
+            # production predicate, not to a test-local shortcut.
+            expected_sql = _normalize_sql(
+                str(_idle_predicate_sql.defer_busy_witness_statement(None))
+            )
+            assert any(
+                _normalize_sql(s) == expected_sql for s in captured
+            ), (
+                "Fresh-engine listener did NOT see the shared-composition "
+                "witness body — divergence risk; assert that the "
+                "assertion is anchored to the production predicate."
+            )
+            # And the bind VALUES pin holds on this fresh engine too —
+            # the same body, the same binds, no leakage from the
+            # module-level engine.
+            expected_binds = _expected_runtime_binds(
+                _idle_predicate_sql.defer_busy_binds(None)
+            )
+            paired = [
+                (s, b)
+                for s, b in zip(captured, captured_binds, strict=True)
+                if _normalize_sql(s) == expected_sql
+            ]
+            assert any(b == expected_binds for _, b in paired), (
+                "Fresh-engine bind VALUES drifted from "
+                f"defer_busy_binds(None) — expected={expected_binds!r}; "
+                f"observed={[b for _, b in paired]!r}"
+            )
+        finally:
+            eng.dispose()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # THE CONSISTENCY PIN — holders enumeration == the gate's busy-set
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -553,6 +770,146 @@ class TestConsistencyPin:
             len(_idle_predicate_sql._GATE_BODY_WITNESS_PREFIX):-1
         ]
         assert witness == expected
+
+    # ── Layer 1-LITERAL: byte-equality against a hardcoded expected ────────
+    # P0-8-BE(c) hardening (2026-09-04): the derivation pin above is
+    # tautological — both sides of the assertion come from the same
+    # ``_unwrap_exists_body`` helper, so a bug in the helper (or a
+    # future reshaping of the wrapper) keeps the assertion passing on
+    # BOTH sides at once. These two tests anchor the witness bodies to
+    # a LITERAL expected body string (with provenance comment to the
+    # round-1 commit that introduced them), so a derivation bug that
+    # survives the helper-paired pin above still flips the literal
+    # byte-equality pin below.
+
+    #: Literal expected system-wide witness body — generated from
+    #: ``6d021a8c`` (round-1 BE commit, ``feat(queues): read-only
+    #: GET /api/queues/defer-blocked`` — the defer-blocked
+    #: transparency surface) on top of the two-body split landed in
+    #: ``5e75b24f`` (round-1 hotfix ``hotfix(defer-gate):
+    #: un-collapse PG ambiguous-parameter scope body``). DO NOT edit
+    #: without updating the producing commit + rebuilding the literal
+    #: from ``_idle_predicate_sql.JOB_DEFER_BUSY_WITNESS_BODY_SYSTEM``
+    #: via the helper at the bottom of the class. NOTE: the disjunction
+    #: ``(\n      <legacy>\n      OR\n      <mirror>\n )`` becomes
+    #: ``(       <legacy>       OR       <mirror>  )`` after the
+    #: ``replace("\\n", " ")`` call (each ``\n`` is replaced by ONE
+    #: space; the original space before/after each ``\n`` is
+    #: preserved, yielding 7 spaces around ``OR`` and TWO spaces
+    #: before the closing paren — preserved verbatim here).
+    _EXPECTED_WITNESS_SYSTEM_BODY: Final[str] = (
+        "SELECT j.job_id AS job_id, j.instance_id AS instance_id,"
+        " j.agent_id AS job_agent_id, j.created_at AS job_created_at,"
+        " i.status AS instance_status, i.agent_id AS instance_agent_id,"
+        " i.paused_at AS instance_paused_at,"
+        " i.last_activity_at AS instance_last_activity_at,"
+        " i.updated_at AS instance_updated_at,"
+        " i.created_at AS instance_created_at"
+        " FROM job_queue_items j"
+        " LEFT JOIN job_queues q ON j.queue_id = q.queue_id"
+        " LEFT JOIN instances i ON j.instance_id = i.instance_id"
+        " WHERE j.deleted_at IS NULL"
+        " AND (q.queue_type IS NULL"
+        "      OR q.queue_type NOT IN :excluded_queue_types)"
+        " AND ("
+        "       (j.admission_state = 'active'"
+        " AND (j.instance_id IS NULL"
+        " OR i.status NOT IN :terminal_statuses))"
+        "       OR"
+        "       (j.job_type = 'message'"
+        " AND j.admission_state = 'done'"
+        " AND j.instance_id IS NOT NULL"
+        " AND i.status NOT IN :terminal_statuses)"
+        "  )"
+    )
+
+    #: Literal expected project-scoped witness body — generated from
+    #: ``6d021a8c`` (round-1 BE commit) on top of the two-body split
+    #: in ``5e75b24f`` (round-1 hotfix). Same provenance rule + same
+    #: trailing-whitespace note as the system-wide body above.
+    _EXPECTED_WITNESS_PROJECT_BODY: Final[str] = (
+        "SELECT j.job_id AS job_id, j.instance_id AS instance_id,"
+        " j.agent_id AS job_agent_id, j.created_at AS job_created_at,"
+        " i.status AS instance_status, i.agent_id AS instance_agent_id,"
+        " i.paused_at AS instance_paused_at,"
+        " i.last_activity_at AS instance_last_activity_at,"
+        " i.updated_at AS instance_updated_at,"
+        " i.created_at AS instance_created_at"
+        " FROM job_queue_items j"
+        " LEFT JOIN job_queues q ON j.queue_id = q.queue_id"
+        " LEFT JOIN instances i ON j.instance_id = i.instance_id"
+        " WHERE j.project_id = :project_id"
+        " AND j.deleted_at IS NULL"
+        " AND (q.queue_type IS NULL"
+        "      OR q.queue_type NOT IN :excluded_queue_types)"
+        " AND ("
+        "       (j.admission_state = 'active'"
+        " AND (j.instance_id IS NULL"
+        " OR i.status NOT IN :terminal_statuses))"
+        "       OR"
+        "       (j.job_type = 'message'"
+        " AND j.admission_state = 'done'"
+        " AND j.instance_id IS NOT NULL"
+        " AND i.status NOT IN :terminal_statuses)"
+        "  )"
+    )
+
+    def test_witness_body_byte_matches_literal_system_body(self):
+        """The system-wide witness body byte-matches a hardcoded
+        LITERAL expected string — kills the derivation-vs-derivation
+        tautology in :meth:`test_witness_body_is_derived_from_gate_body_system`.
+
+        Provenance: generated from ``6d021a8c`` (round-1 BE commit) +
+        ``5e75b24f`` (round-1 hotfix); the helper at the bottom of the
+        class can rebuild the literal from the production constant
+        when a deliberate edit moves the body — run that, paste the
+        output into :data:`_EXPECTED_WITNESS_SYSTEM_BODY`, and the
+        pin updates without losing the byte-equality sentinel."""
+        assert (
+            _idle_predicate_sql.JOB_DEFER_BUSY_WITNESS_BODY_SYSTEM
+            == self._EXPECTED_WITNESS_SYSTEM_BODY
+        ), (
+            "JOB_DEFER_BUSY_WITNESS_BODY_SYSTEM drifted from the "
+            "hardcoded literal expected — provenance: 6d021a8c + "
+            "5e75b24f. If the change is intentional, run the helper "
+            "``_regen_expected_witness_bodies`` (below) to rebuild "
+            "the literal; if accidental, the derivation bug must be "
+            "fixed in ``_idle_predicate_sql._unwrap_exists_body``."
+        )
+
+    def test_witness_body_byte_matches_literal_project_body(self):
+        """Project-scoped equivalent of
+        :meth:`test_witness_body_byte_matches_literal_system_body` —
+        kills the tautology on the project-scoped derivation pin."""
+        assert (
+            _idle_predicate_sql.JOB_DEFER_BUSY_WITNESS_BODY_PROJECT
+            == self._EXPECTED_WITNESS_PROJECT_BODY
+        ), (
+            "JOB_DEFER_BUSY_WITNESS_BODY_PROJECT drifted from the "
+            "hardcoded literal expected — provenance: 6d021a8c + "
+            "5e75b24f. Rebuild via the helper below if intentional."
+        )
+
+    @staticmethod
+    def _regen_expected_witness_bodies() -> tuple[str, str]:
+        """Print the current production bodies as Python-source-ready
+        triple-quoted strings — paste into
+        :data:`_EXPECTED_WITNESS_SYSTEM_BODY` /
+        :data:`_EXPECTED_WITNESS_PROJECT_BODY` after a deliberate
+        edit. NOT a test — call it from a REPL.
+
+        Run as::
+
+            uv run python -c "
+            from tests.unit.routers.test_defer_blocked_api import TestConsistencyPin
+            sys, proj = TestConsistencyPin._regen_expected_witness_bodies()
+            print('SYSTEM:'); print(repr(sys))
+            print('PROJECT:'); print(repr(proj))
+            "
+        """
+        sys = _idle_predicate_sql.JOB_DEFER_BUSY_WITNESS_BODY_SYSTEM
+        proj = _idle_predicate_sql.JOB_DEFER_BUSY_WITNESS_BODY_PROJECT
+        return sys, proj
 
     def test_busy_set_tail_is_byte_shared_gate_vs_witness(self):
         """FROM/JOIN/WHERE busy-set text identical on gate and witness
@@ -609,28 +966,63 @@ class TestConsistencyPin:
         normalized to a single ``?`` token before comparison, so the
         pin is on the statement TEXT (clause structure + literals),
         not the paramstyle.
+
+        P0-1 hardening (2026-09-04): the listener also captures the
+        driver-bound ``parameters`` payload and asserts it byte-matches
+        the runtime expansion of :func:`defer_busy_binds` for the same
+        scope. A hand-rolled statement that happens to share the
+        predicate TEXT with a different bind contract fails this pin —
+        e.g. someone re-binding ``excluded_queue_types`` to
+        ``("defer", "background")`` would render the same statement
+        but a different positional tuple.
         """
         _seed_queue(engine, queue_id="q-par", queue_type="parallel")
         iid = _seed_instance(engine, instance_id="inst-rt")
         _seed_job(engine, instance_id=iid, queue_id="q-par")
 
-        captured, detach = _capture_statements(engine)
+        captured, captured_binds, detach = _capture_statements(engine)
         try:
             resp = client.get("/api/queues/defer-blocked")
         finally:
             detach()
         assert resp.status_code == 200
 
-        expected = _normalize_sql(
+        expected_sql = _normalize_sql(
             str(_idle_predicate_sql.defer_busy_witness_statement(None))
         )
+        # Pair each captured statement with its captured binds so a
+        # SQL match can be matched to the exact bind VALUES the driver
+        # saw (the two arrays are kept in lockstep by the listener).
+        paired = [
+            (s, b) for s, b in zip(captured, captured_binds, strict=True)
+        ]
         witness_executions = [
-            s for s in captured if _normalize_sql(s) == expected
+            (s, b) for s, b in paired if _normalize_sql(s) == expected_sql
         ]
         assert witness_executions, (
             "The defer-blocked route did NOT execute the shared-composition "
             "witness statement. Executed SELECTs: "
             f"{[s for s in captured if s.lstrip().upper().startswith('SELECT')]!r}"
+        )
+
+        # Bind VALUES pin: the driver saw the exact positional tuple
+        # the canonical helper produces for ``project_id=None``. Any
+        # value-level divergence (extra bind, missing bind, wrong list
+        # cardinality, swapped list) fails here. The body-order
+        # expansion rule is pinned in :func:`_expected_runtime_binds`
+        # (matches the bind-NAME occurrence order in
+        # ``JOB_DEFER_BUSY_BODY_SYSTEM``).
+        expected_binds = _expected_runtime_binds(
+            _idle_predicate_sql.defer_busy_binds(None)
+        )
+        assert any(b == expected_binds for _, b in witness_executions), (
+            "The defer-blocked route executed the shared-composition "
+            "witness statement but with WRONG bound parameters — "
+            "statement-text drift is impossible without bind drift on "
+            "the same body, so this is a sentinel for either a manual "
+            "re-bind or a hand-rolled lookalike. "
+            f"expected={expected_binds!r}; observed="
+            f"{[b for _, b in witness_executions]!r}"
         )
 
     # ── Layer 3: behavioral matrix — gate decision == surface, EXACTLY ────
@@ -823,7 +1215,7 @@ class TestPurity:
             inst_before = list(s.exec(select(Instance)).all())
             job_before = list(s.exec(select(JobItem)).all())
 
-        captured, detach = _capture_statements(engine)
+        captured, _captured_binds, detach = _capture_statements(engine)
         try:
             resp = client.get("/api/queues/defer-blocked")
         finally:
@@ -857,7 +1249,7 @@ class TestPurity:
         iid = _seed_instance(engine, instance_id="inst-purity-2")
         _seed_job(engine, instance_id=iid, queue_id="q-par")
 
-        captured, detach = _capture_statements(engine)
+        captured, _captured_binds, detach = _capture_statements(engine)
         try:
             snapshot = resolver.resolve()
         finally:

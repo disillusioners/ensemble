@@ -16,7 +16,13 @@ export interface DeferBlockHolder {
   instance_id: string;
   agent: string;
   status: string;
-  since: string;
+  /**
+   * When the hold started — ISO-8601, +00:00-normalized UTC by the
+   * BE. ``null`` ONLY when every source column is NULL (rare but
+   * real): consumers must handle it explicitly
+   * (``formatDeferHoldSince`` renders "unknown time").
+   */
+  since: string | null;
   kind: DeferHolderKind;
 }
 
@@ -37,15 +43,17 @@ export interface DeferBlockIndicator {
 
 /**
  * ``<date>`` slot for the amber tooltip — deterministic (no locale
- * dependency): ISO ``2026-09-04T15:33:24Z`` renders as
- * ``2026-09-04 15:33``. Non-ISO input degrades to a truncated
- * string; missing input reads "unknown time".
+ * dependency): ISO ``2026-09-04T15:33:24+00:00`` (BE wire truth:
+ * +00:00-normalized UTC) renders as ``2026-09-04 15:33 UTC`` so the
+ * zone is unambiguous. Non-ISO input degrades to a truncated
+ * string; missing input — including the wire's ``since: null`` —
+ * reads "unknown time".
  */
 export function formatDeferHoldSince(since: string | null | undefined): string {
   if (!since) {
     return 'unknown time';
   }
-  return since.replace('T', ' ').slice(0, 16);
+  return `${since.replace('T', ' ').slice(0, 16)} UTC`;
 }
 
 /**

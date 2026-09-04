@@ -15,7 +15,8 @@ describe('defer-blocked.model — deferBlockIndicator', () => {
     instance_id: 'inst-123',
     agent: 'leader',
     status: 'processing',
-    since: '2026-09-04T15:33:24Z',
+    // BE wire truth: ISO-8601 +00:00-normalized UTC (NOT a trailing Z).
+    since: '2026-09-04T15:33:24+00:00',
     kind: 'live',
     ...(overrides ?? {}),
   });
@@ -67,16 +68,16 @@ describe('defer-blocked.model — deferBlockIndicator', () => {
 
   // ── AMBER: any paused holder ────────────────────────────────────────
 
-  it('AMBER when any holder is paused — exact tooltip names instance and since', () => {
+  it('AMBER when any holder is paused — exact tooltip names instance and since (UTC-suffixed)', () => {
     const warn = deferBlockIndicator(
       payload({
-        holders: [holder({ kind: 'paused', instance_id: 'abc-999', since: '2026-09-04T08:05:00Z' })],
+        holders: [holder({ kind: 'paused', instance_id: 'abc-999', since: '2026-09-04T08:05:00+00:00' })],
       })
     );
     expect(warn).not.toBeNull();
     expect(warn!.severity).toBe('amber');
     expect(warn!.tooltip).toBe(
-      'held by paused instance abc-999 since 2026-09-04 08:05 — resume or terminate to unblock'
+      'held by paused instance abc-999 since 2026-09-04 08:05 UTC — resume or terminate to unblock'
     );
   });
 
@@ -103,6 +104,21 @@ describe('defer-blocked.model — deferBlockIndicator', () => {
     );
   });
 
+  it('AMBER tooltip reads "unknown time" when since is null — wire contract allows null (every source column NULL)', () => {
+    // P0 type-truth: DeferBlockHolder.since is ``string | null`` on the
+    // wire; the null path must be handled explicitly and render the
+    // same degradation as the empty-string path ("unknown time", no
+    // fabricated " UTC" suffix — null is not a timestamp).
+    const warn = deferBlockIndicator(
+      payload({ holders: [holder({ kind: 'paused', since: null })] })
+    );
+    expect(warn).not.toBeNull();
+    expect(warn!.severity).toBe('amber');
+    expect(warn!.tooltip).toBe(
+      'held by paused instance inst-123 since unknown time — resume or terminate to unblock'
+    );
+  });
+
   // ── INFO: holders present, all live ─────────────────────────────────
 
   it('INFO when holders are live-only — exact tooltip (singular)', () => {
@@ -122,18 +138,21 @@ describe('defer-blocked.model — deferBlockIndicator', () => {
   // ── formatDeferHoldSince ────────────────────────────────────────────
 
   describe('formatDeferHoldSince', () => {
-    it('renders ISO input as locale-free "YYYY-MM-DD HH:MM"', () => {
-      expect(formatDeferHoldSince('2026-09-04T15:33:24Z')).toBe('2026-09-04 15:33');
+    it('renders ISO input as locale-free "YYYY-MM-DD HH:MM UTC"', () => {
+      // Wire truth: BE normalizes to +00:00 (not Z).
+      expect(formatDeferHoldSince('2026-09-04T15:33:24+00:00')).toBe('2026-09-04 15:33 UTC');
+      // Defensive parity: a trailing-Z variant truncates identically.
+      expect(formatDeferHoldSince('2026-09-04T15:33:24Z')).toBe('2026-09-04 15:33 UTC');
     });
 
-    it('returns "unknown time" for empty/null input', () => {
+    it('returns "unknown time" for empty/null input — null is not a timestamp, no UTC suffix', () => {
       expect(formatDeferHoldSince('')).toBe('unknown time');
       expect(formatDeferHoldSince(null)).toBe('unknown time');
       expect(formatDeferHoldSince(undefined)).toBe('unknown time');
     });
 
-    it('truncates non-ISO strings instead of throwing', () => {
-      expect(formatDeferHoldSince('not-a-date-but-long-enough')).toBe('not-a-date-but-l');
+    it('truncates non-ISO strings instead of throwing (degraded path keeps the zone suffix)', () => {
+      expect(formatDeferHoldSince('not-a-date-but-long-enough')).toBe('not-a-date-but-l UTC');
     });
   });
 });
