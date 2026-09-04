@@ -12,6 +12,13 @@ five-site agreement a construction property instead of a discipline
 requirement. ``tests/job_queue/test_defer_gate_post_settle_window.py::
 test_sql_body_shared_constant`` guards the wiring (drift paranoia).
 
+A sixth, READ-ONLY consumer joined (defer-blocked transparency surface,
+2026-09-04, docs §8.5): the witness-selecting body
+(:func:`defer_busy_witness_statement`) is DERIVED from the defer gate
+body constants by unwrapping ``EXISTS`` — the enumeration cannot drift
+from the gate it mirrors because there is only one copy of the
+predicate text in this module.
+
 **I3 clarifying line (defer-gate post-settle window fix, 2026-09-03):**
 a settled mirror of a non-terminal instance counts as live for the
 defer/background gate, terminal for everything else.
@@ -316,3 +323,156 @@ def background_busy_binds() -> dict[str, object]:
         "terminal_statuses": list(JOB_TERMINAL_STATUSES),
         "excluded_queue_types": list(BACKGROUND_EXCLUDED_QUEUE_TYPES),
     }
+
+
+# ── Defer busy-set WITNESS body (enumeration, read-only surfaces) ──────────
+# The defer-blocked transparency surface (``GET /api/queues/defer-blocked``,
+# ``daemon/routers/queues.py`` + ``daemon/services/defer_block_resolver.py``,
+# docs/job-task-system.md §8.5) must ENUMERATE the busy-set witnesses —
+# not merely learn that the set is non-empty — and it must enumerate them
+# with the SAME predicate composition the gate evaluates, or the warning
+# can drift from the gate it mirrors (the exact defect this module exists
+# to make impossible).
+#
+# The witness body is therefore DERIVED from the gate body constants by
+# unwrapping the ``SELECT EXISTS ( SELECT 1 … )`` wrapper at module load
+# time: the FROM/JOIN/WHERE busy-set text is byte-shared with the gate —
+# there is no second copy of the predicate anywhere in this module. Any
+# future edit to a gate body automatically flows into the witness body;
+# a refactor that reshapes the wrapper makes :func:`_unwrap_exists_body`
+# raise at IMPORT time (loud failure, not silent drift). Behavioral
+# equivalence (gate decision == witnesses non-empty across fixtures) is
+# pinned by ``tests/unit/routers/test_defer_blocked_api.py``.
+
+#: Fixed select list for the witness body. A module-private literal —
+#: no external input ever reaches this string (no injection surface).
+_WITNESS_SELECT_LIST: Final[str] = (
+    " j.job_id AS job_id,"
+    " j.instance_id AS instance_id,"
+    " j.agent_id AS job_agent_id,"
+    " j.created_at AS job_created_at,"
+    " i.status AS instance_status,"
+    " i.agent_id AS instance_agent_id,"
+    " i.paused_at AS instance_paused_at,"
+    " i.last_activity_at AS instance_last_activity_at,"
+    " i.updated_at AS instance_updated_at,"
+    " i.created_at AS instance_created_at"
+)
+
+#: The exact prefix the EXISTS-wrapper unwrap expects. Kept as a named
+#: constant so a wrapper reshape fails with a readable message.
+_GATE_BODY_WITNESS_PREFIX: Final[str] = "SELECT EXISTS ( SELECT 1"
+
+
+def _unwrap_exists_body(gate_body: str) -> str:
+    """Derive a witness body from a gate body by unwrapping ``EXISTS``.
+
+    Replaces the ``SELECT EXISTS ( SELECT 1`` prologue with the witness
+    select list and strips the wrapper's closing ``)`` — the FROM/JOIN/
+    WHERE tail is byte-identical to the gate's. Raises ``ValueError``
+    at IMPORT time if a gate body no longer carries the expected
+    wrapper shape (the loud-failure contract: a refactor that reshapes
+    the wrapper must update this derivation consciously, never drift
+    silently).
+
+    BLAST-RADIUS (P0-8-BE(d), 2026-09-04): the two module-level calls
+    below this function — :data:`JOB_DEFER_BUSY_WITNESS_BODY_PROJECT`
+    and :data:`JOB_DEFER_BUSY_WITNESS_BODY_SYSTEM` — invoke
+    :func:`_unwrap_exists_body` at module-load time, NOT lazily. A
+    wrapper reshape that fires this ``ValueError`` therefore bricks
+    the import of ``daemon.repositories.job_queue._idle_predicate_sql``
+    itself. That module is imported transitively by every consumer of
+    the shared busy-set SQL: the gate path
+    (``JobRepository.has_active_non_deferred_work`` /
+    ``has_active_non_background_work``),
+    ``JobProcessor._defer_idle_check`` /
+    ``_background_idle_check`` /
+    ``_select_next_eligible_job`` defer + background branches, the
+    maintenance ``_is_idle`` probe, and the defer-blocked transparency
+    surface (``daemon.services.defer_block_resolver``). In practice
+    the blast radius is the entire daemon entry point + every test
+    that imports anything transitively from ``daemon.repositories.job_queue``
+    — ``daemon.api`` /
+    ``daemon.manager`` /
+    ``daemon.api`` lifespan startup /
+    ``daemon.routers.queues`` /
+    ``daemon.services.defer_block_resolver`` + ~250 unit tests in
+    ``tests/job_queue/`` + ``tests/unit/routers/test_defer_blocked_api.py``
+    + ``tests/unit/job_state/test_constitution_drift.py``. The ``"loud
+    failure"`` design intent is real — a wrapper reshape that breaks
+    the derivation MUST be caught immediately, not at the first witness
+    query — but a maintainer editing this function should know the
+    failure surface spans module imports and reach for a worktree
+    before testing locally. The companion sentinel that catches a
+    *silent* helper bug (not a wrapper reshape) is the byte-equality
+    pin in
+    ``tests/unit/routers/test_defer_blocked_api.py::TestConsistencyPin::test_witness_body_byte_matches_literal_system_body``
+    (and its project-scoped sibling) — that pin anchors the witness
+    body to a hardcoded literal so a bug in this helper that produces
+    *some* body still flips the byte-equality test rather than passing
+    silently.
+    """
+    if not gate_body.startswith(_GATE_BODY_WITNESS_PREFIX):
+        raise ValueError(
+            "defer busy body no longer starts with "
+            f"{_GATE_BODY_WITNESS_PREFIX!r}; the witness-body derivation "
+            "in this module must be updated to match the new wrapper "
+            "shape (shared-composition contract, docs §8.5)"
+        )
+    if not gate_body.endswith(")"):
+        raise ValueError(
+            "defer busy body no longer ends with the EXISTS wrapper's "
+            "closing paren; the witness-body derivation in this module "
+            "must be updated to match the new wrapper shape "
+            "(shared-composition contract, docs §8.5)"
+        )
+    return (
+        "SELECT" + _WITNESS_SELECT_LIST + gate_body[len(_GATE_BODY_WITNESS_PREFIX):-1]
+    )
+
+
+#: Defer busy-set WITNESS body (project-scoped) — :data:`JOB_DEFER_BUSY_BODY_PROJECT`
+#: with ``EXISTS`` unwrapped. Same binds as the gate body.
+JOB_DEFER_BUSY_WITNESS_BODY_PROJECT: Final[str] = _unwrap_exists_body(
+    JOB_DEFER_BUSY_BODY_PROJECT
+)
+
+#: Defer busy-set WITNESS body (system-wide) — :data:`JOB_DEFER_BUSY_BODY_SYSTEM`
+#: with ``EXISTS`` unwrapped. Same binds as the gate body.
+JOB_DEFER_BUSY_WITNESS_BODY_SYSTEM: Final[str] = _unwrap_exists_body(
+    JOB_DEFER_BUSY_BODY_SYSTEM
+)
+
+
+def defer_busy_witness_statement(project_id: str | None) -> TextClause:
+    """Return the defer busy-set WITNESS body as an executable TextClause.
+
+    The enumeration counterpart of :func:`defer_busy_statement`: instead
+    of ``EXISTS(...)`` it returns one row per busy-set witness JobItem
+    (joined instance columns included). Body selection and bindparam
+    declaration follow the exact same two-body discipline as the gate
+    (project-scoped vs system-wide on ``project_id``; no bare-NULL
+    parameter comparison on either dialect).
+
+    READ-ONLY consumers only — the statement is a bare SELECT; the
+    transparency surface must never gain a write on this path (census
+    contract, docs §8.5).
+    """
+    body = (
+        JOB_DEFER_BUSY_WITNESS_BODY_PROJECT
+        if project_id is not None
+        else JOB_DEFER_BUSY_WITNESS_BODY_SYSTEM
+    )
+    if project_id is not None:
+        return _declare_expanding_binds_project(body)
+    return _declare_expanding_binds(body)
+
+
+def defer_busy_witness_binds(project_id: str | None) -> dict[str, object]:
+    """Bind values for :func:`defer_busy_witness_statement`.
+
+    Delegates to :func:`defer_busy_binds` — the witness body is derived
+    from the gate body, so the parameter contract is shared BY
+    CONSTRUCTION and cannot drift.
+    """
+    return defer_busy_binds(project_id)

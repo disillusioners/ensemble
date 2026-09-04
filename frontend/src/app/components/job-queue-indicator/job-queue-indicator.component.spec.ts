@@ -1,6 +1,8 @@
 import { signal, computed } from '@angular/core';
-import { Job, JobStatus, liveMissionIds } from '../../models/job.model';
+import { Job, JobStatus, isTerminalStatus } from '../../models/job.model';
+import { DeferBlockedStatus, DeferBlockIndicator, deferBlockIndicator } from '../../models/defer-blocked.model';
 import { createMockJob, createMockJobWithStatus } from '../../testing/job-test-helpers';
+import { firstValueFrom, forkJoin, of, throwError, catchError } from 'rxjs';
 
 /**
  * Logic-mirror of JobQueueIndicatorComponent.
@@ -9,13 +11,18 @@ import { createMockJob, createMockJobWithStatus } from '../../testing/job-test-h
  * replicate the component's signal/computed logic in a plain TS class and
  * test it directly — same pattern as job-detail-drawer.component.spec.ts.
  *
- * The mirror exposes the private helpers (isRunningStatus, isPendingStatus,
- * isTerminalStatus) that the real component keeps module-private so the
- * assertions below can exercise them directly. We also expose the
- * ``runningJobs`` computed, the public ``recentJobs`` computed (now
- * defensive via ``isTerminalStatus``), the ``tooltipText`` computed, and
- * captured ``onJobClick`` side-effects so tests can assert navigation +
- * tab-action decisions without instantiating Angular.
+ * The mirror exposes the private helpers (isRunningStatus, isPendingStatus)
+ * that the real component keeps module-private so the assertions below can
+ * exercise them directly. Terminal classification (``isTerminalStatus``) is
+ * DELEGATED to the canonical model helper — the real component imports it
+ * too, so the spec proves the badge contract against the real derivation,
+ * not a local copy (the deleted local copy predated M3 ``settled``).
+ *
+ * We also expose the ``runningJobs`` computed, the public ``recentJobs``
+ * computed (defensive via the canonical ``isTerminalStatus``), the
+ * ``tooltipText`` computed, and captured ``onJobClick`` side-effects so
+ * tests can assert navigation + tab-action decisions without instantiating
+ * Angular.
  */
 class MockJobQueueIndicatorComponent {
   /** Raw active jobs (running + paused + pending) — mirrors ``activeJobs``. */
@@ -27,6 +34,14 @@ class MockJobQueueIndicatorComponent {
    * view from this raw value.
    */
   private readonly allRecentJobs = signal<Job[]>([]);
+
+  /**
+   * Raw live-mission count from the authoritative missions projection —
+   * mirrors the private ``missionCountRaw`` signal. ``null`` = count
+   * unavailable (degraded leg / fetch failure); the last known count is
+   * RETAINED so the badge never falsely reads idle.
+   */
+  private readonly missionCountRaw = signal<number | null>(null);
 
   /** Cached project_id → project name. */
   private readonly projectNameMap = signal<Map<string | null, string>>(new Map());
@@ -43,8 +58,14 @@ class MockJobQueueIndicatorComponent {
     return s === 'pending' || (s as string) === 'queued';
   }
 
+  /**
+   * Delegates to the CANONICAL ``isTerminalStatus`` (models/job.model.ts)
+   * — mirrors the real component's import. The former mirror-local copy
+   * (completed/failed/cancelled/dead_letter only) is gone: ``settled``
+   * receipts are terminal and this delegation proves it.
+   */
   isTerminalStatus(s: JobStatus): boolean {
-    return ['completed', 'failed', 'cancelled', 'dead_letter'].includes(s);
+    return isTerminalStatus(s);
   }
 
   // ---------------------------------------------------------------------------
@@ -64,20 +85,18 @@ class MockJobQueueIndicatorComponent {
   isIdle = computed(() => this.totalNonTerminal() === 0);
 
   /**
-   * Fix C (§8.2) mirror — delegates to the exported ``liveMissionIds``
-   * model helper so the operator-facing badge contract is proven
-   * against the real derivation, not a copy of the predicate. The
-   * mirror's only input surface is the data (active + recent jobs);
-   * the derivation itself lives in the model and is exercised by
-   * ``job.model.spec.ts``.
+   * Mission-awareness mirror — the N comes from the authoritative
+   * missions projection (``GET /api/missions``), fed via
+   * ``applyFetchResult`` with mocked service payloads. ``null`` count
+   * is NOT rendered as 0: the last known value is retained so the
+   * badge never shows a false bare 0/0 while live missions exist.
    */
-  liveMissionIds = computed(() =>
-    liveMissionIds([...this.activeJobs(), ...this.recentJobs()])
-  );
-
-  liveMissionCount = computed(() => this.liveMissionIds().size);
+  liveMissionCount = computed(() => this.missionCountRaw() ?? 0);
 
   hasLiveMissions = computed(() => this.liveMissionCount() > 0);
+
+  /** Defer-gate warning — mirrors the component's ``deferBlockWarning`` signal. */
+  deferBlockWarning = signal<DeferBlockIndicator | null>(null);
 
   displayText = computed(() => {
     if (this.totalNonTerminal() === 0 && this.hasLiveMissions()) {
@@ -89,18 +108,14 @@ class MockJobQueueIndicatorComponent {
   /**
    * Mirror of the real component's tooltip text computed.
    * Format: ``Running: X / Pending: Y`` plus a live-missions line
-   * whenever the receipt window proves a parent mission is working.
+   * whenever the missions projection reports live work.
    */
   tooltipText = computed(() => {
     const base = `Running: ${this.runningCount()} / Pending: ${this.pendingCount()}`;
     if (!this.hasLiveMissions()) {
       return base;
     }
-    const plural = this.liveMissionCount() === 1 ? '' : 's';
-    return (
-      `${base} · Live missions: ${this.liveMissionCount()} ` +
-      `(message${plural === '' ? '' : 's'} handled; parent mission${plural} still working)`
-    );
+    return `${base} · Live missions: ${this.liveMissionCount()} (from missions projection)`;
   });
 
   runningJobs = computed(() =>
@@ -180,8 +195,37 @@ class MockJobQueueIndicatorComponent {
     this.projectNameMap.set(m);
   }
 
+  /**
+   * Mirror of the real component's ``applyFetchResults`` — the
+   * ``forkJoin`` next-handler body — driven with MOCKED service
+   * payloads so tests prove the intake wiring without HTTP.
+   *
+   * Parity contract with the component:
+   * - jobs (active + recent) stored verbatim;
+   * - ``missions === null`` (degraded count leg / 404-skew failure)
+   *   RETAINS the previous count — never falsely idle;
+   * - ``deferBlocked === null`` hides the warning; a payload is run
+   *   through the canonical ``deferBlockIndicator`` helper.
+   */
+  applyFetchResult(
+    active: Job[],
+    recent: Job[],
+    missions: number | null,
+    deferBlocked: DeferBlockedStatus | null
+  ): void {
+    this.activeJobs.set(active);
+    this.allRecentJobs.set(recent);
+    if (missions !== null) {
+      this.missionCountRaw.set(missions);
+    }
+    this.deferBlockWarning.set(
+      deferBlocked === null ? null : deferBlockIndicator(deferBlocked)
+    );
+  }
+
   // ---------------------------------------------------------------------------
-  // Error-path mirror — replicates ``fetchJobs()``'s forkJoin error handler.
+  // Error-path mirror — replicates ``fetchBadgeSignals()``'s forkJoin error
+  // handler.
   //
   // C3 fix: ``JobService.listActiveJobs()`` and ``listRecentJobs()`` no longer
   // swallow failures, so errors propagate to a single ``forkJoin`` error
@@ -197,9 +241,12 @@ class MockJobQueueIndicatorComponent {
   fetchErrorCount = 0;
 
   /**
-   * Mirror of the real component's ``fetchJobs()`` error handler:
-   * clears both raw signals to ``[]`` so the indicator surfaces "0/0"
-   * (not a stale snapshot) until the next successful poll tick.
+   * Mirror of the real component's ``fetchBadgeSignals()`` error handler:
+   * clears both JOB signals to ``[]`` so the indicator surfaces the
+   * intake truthfully (not a stale snapshot) until the next
+   * successful poll tick. The missions count is deliberately NOT
+   * cleared — "count unavailable" retains the last known value so a
+   * live leader mission never flips the badge to a false bare 0/0.
    */
   onFetchError(err: unknown): void {
     this.fetchErrorCount += 1;
@@ -373,132 +420,142 @@ describe('JobQueueIndicatorComponent Logic', () => {
     });
   });
 
-  // ── Fix C (§8.2) — badge mission awareness ───────────────────────────
+  // ── Mission awareness — sourced from the authoritative projection ───
 
-  describe('liveMissionCount (Fix C receipt-derived missions)', () => {
-    it('CASE A — 0 jobs + live-mission receipts: badge shows "missions: N" instead of bare 0/0', () => {
-      // The 28c6421b read: leader visibly working, only terminal
-      // receipts in the window, intake queue empty.
-      component.setActiveJobs([]);
-      component.setRecentJobs([
-        createMockJob({
-          job_id: 'm1', status: 'completed', completed_at: new Date().toISOString(),
-          instance_id: 'leader-a', job_type: 'message', mission_liveness: 'processing',
-        }),
-        createMockJob({
-          job_id: 'm2', status: 'completed', completed_at: new Date().toISOString(),
-          instance_id: 'leader-b', job_type: 'message', mission_liveness: 'paused',
-        }),
-      ]);
+  describe('liveMissionCount (missions-API sourced — Change 1)', () => {
+    it('CASE A — 0 jobs + missions projection reports 2: badge shows "missions: 2", never bare 0/0', () => {
+      // The original 28c6421b read: leader visibly working, only terminal
+      // receipts in the window, intake queue empty. The receipt-derived
+      // N went stale (badge 0/0) — the authoritative /api/missions count
+      // is now the source, so the settled receipts in the recent window
+      // are irrelevant to the badge's N.
+      component.applyFetchResult(
+        [],
+        [
+          createMockJob({
+            job_id: 'm1', status: 'settled', completed_at: new Date().toISOString(),
+            instance_id: 'leader-a', job_type: 'message', mission_liveness: 'processing',
+          }),
+          createMockJob({
+            job_id: 'm2', status: 'completed', completed_at: new Date().toISOString(),
+            instance_id: 'leader-b', job_type: 'message', mission_liveness: 'completed',
+          }),
+        ],
+        2, // mocked GET /api/missions?liveness=processing,pending,paused → total: 2
+        null
+      );
       expect(component.liveMissionCount()).toBe(2);
       expect(component.displayText()).toBe('missions: 2');
       expect(component.isIdle()).toBe(true); // intake count is still 0 — display is what changes
     });
 
-    it('CASE B — 0 jobs + 0 missions: badge reads bare "0/0" idle', () => {
-      component.setActiveJobs([]);
-      component.setRecentJobs([
-        // Terminal receipt: handled AND mission finished — must NOT count.
-        createMockJob({
-          job_id: 'm1', status: 'completed', completed_at: new Date().toISOString(),
-          instance_id: 'done-leader', job_type: 'message', mission_liveness: 'completed',
-        }),
-        // Degraded None: renders nothing, must NOT count.
-        createMockJob({
-          job_id: 'm2', status: 'failed', completed_at: new Date().toISOString(),
-          instance_id: 'gone-leader', job_type: 'message', mission_liveness: null,
-        }),
-        // Mission row: no liveness by design, must NOT count.
-        createMockJob({
-          job_id: 't1', status: 'completed', completed_at: new Date().toISOString(),
-          instance_id: 'task-row', job_type: 'task', mission_liveness: null,
-        }),
-      ]);
+    it('CASE B — missions projection reports 0: badge reads bare "0/0" idle', () => {
+      component.applyFetchResult(
+        [],
+        [
+          // Terminal receipt: handled AND mission finished — must NOT count.
+          createMockJob({
+            job_id: 'm1', status: 'settled', completed_at: new Date().toISOString(),
+            instance_id: 'done-leader', job_type: 'message', mission_liveness: 'completed',
+          }),
+        ],
+        0,
+        null
+      );
       expect(component.liveMissionCount()).toBe(0);
       expect(component.displayText()).toBe('0/0');
       expect(component.tooltipText()).toBe('Running: 0 / Pending: 0');
     });
 
-    it('CASE C — jobs present + live missions: X/Y display unchanged, tooltip explains both numbers', () => {
-      component.setActiveJobs([
-        createMockJob({ status: 'processing' }),
-      ]);
-      component.setRecentJobs([
-        createMockJob({
-          job_id: 'm1', status: 'completed', completed_at: new Date().toISOString(),
-          instance_id: 'leader-a', job_type: 'message', mission_liveness: 'processing',
-        }),
-      ]);
+    it('CASE C — jobs present + missions projection reports 1: X/Y display unchanged, tooltip explains both numbers', () => {
+      component.applyFetchResult(
+        [createMockJob({ status: 'processing' })],
+        [
+          createMockJob({
+            job_id: 'm1', status: 'settled', completed_at: new Date().toISOString(),
+            instance_id: 'leader-a', job_type: 'message', mission_liveness: 'processing',
+          }),
+        ],
+        1,
+        null
+      );
       expect(component.displayText()).toBe('1/1'); // intake count keeps primary billing
       expect(component.liveMissionCount()).toBe(1);
       expect(component.tooltipText()).toContain('Running: 1 / Pending: 0');
       expect(component.tooltipText()).toContain('Live missions: 1');
     });
 
-    it('should de-duplicate multiple receipts from the same mission into one mission', () => {
-      component.setActiveJobs([]);
-      component.setRecentJobs([
-        createMockJob({
-          job_id: 'm1', status: 'completed', completed_at: new Date().toISOString(),
-          instance_id: 'leader-a', job_type: 'message', mission_liveness: 'processing',
-        }),
-        createMockJob({
-          job_id: 'm2', status: 'failed', completed_at: new Date().toISOString(),
-          instance_id: 'leader-a', job_type: 'message', mission_liveness: 'processing',
-        }),
-        createMockJob({
-          job_id: 'm3', status: 'cancelled', completed_at: new Date().toISOString(),
-          instance_id: 'leader-a', job_type: 'message', mission_liveness: 'processing',
-        }),
-      ]);
-      // Three receipts, ONE live mission behind them.
-      expect(component.liveMissionCount()).toBe(1);
-      expect(component.displayText()).toBe('missions: 1');
+    it('retains the last known count when the missions leg degrades to null — never a false bare 0/0', () => {
+      component.applyFetchResult([], [], 2, null);
+      expect(component.displayText()).toBe('missions: 2');
+
+      // Degraded count leg (missionCountFromListResponse → null) or a
+      // failed fetch: "count unavailable" must NOT collapse to 0.
+      component.applyFetchResult([], [], null, null);
+      expect(component.liveMissionCount()).toBe(2);
+      expect(component.displayText()).toBe('missions: 2');
+
+      // ...and the next healthy tick corrects downward.
+      component.applyFetchResult([], [], 0, null);
+      expect(component.displayText()).toBe('0/0');
     });
 
-    it('should count live missions found in the ACTIVE list too (defensive mirror scan)', () => {
-      component.setActiveJobs([
-        createMockJob({
-          job_id: 'a1', status: 'processing',
-          instance_id: 'leader-active', job_type: 'message', mission_liveness: 'processing',
-        }),
-      ]);
-      component.setRecentJobs([]);
-      expect(component.liveMissionCount()).toBe(1);
-    });
-
-    it('should ignore mirror rows whose liveness is a terminal value even at volume', () => {
-      // M3 (mission-class, 2026-09-03) — mission-side prose reworded:
-      // ``settled`` is a transport-receipt word; the mission-side
-      // equivalent is ``terminal`` (canonical values: ``completed`` /
-      // ``failed`` / ``cancelled``). The test exercises the same
-      // pre-rename logic — terminal mission liveness means the
-      // mission is no longer live, so the live-mission counter stops
-      // counting it. The data shape (``mission_liveness``) is
-      // unchanged.
-      component.setActiveJobs([]);
-      component.setRecentJobs(
-        ['completed', 'failed', 'cancelled'].map((lv, i) =>
-          createMockJob({
-            job_id: `m${i}`, status: 'completed', completed_at: new Date().toISOString(),
-            instance_id: `leader-${i}`, job_type: 'message',
-            mission_liveness: lv as 'completed' | 'failed' | 'cancelled',
-          })
-        )
-      );
+    it('shows bare 0/0 before any missions payload arrives (pre-data state)', () => {
       expect(component.liveMissionCount()).toBe(0);
+      expect(component.displayText()).toBe('0/0');
+    });
+  });
+
+  describe('defer-blocked warning application (Change 2 FE)', () => {
+    const pausedHolder = {
+      instance_id: 'abc-999',
+      agent: 'leader',
+      status: 'paused',
+      // BE wire truth: ISO-8601 +00:00-normalized UTC (NOT a trailing Z).
+      since: '2026-09-04T08:05:00+00:00',
+      kind: 'paused' as const,
+    };
+
+    it('AMBER warning derived through the canonical helper when a paused holder blocks jobs', () => {
+      component.applyFetchResult([], [], null, {
+        defer_blocked: true,
+        pending_count: 1,
+        holders: [pausedHolder],
+      });
+      const warn = component.deferBlockWarning();
+      expect(warn).not.toBeNull();
+      expect(warn!.severity).toBe('amber');
+      expect(warn!.tooltip).toBe(
+        'held by paused instance abc-999 since 2026-09-04 08:05 UTC — resume or terminate to unblock'
+      );
     });
 
-    it('should fall back to job_id when a live receipt carries no instance_id', () => {
-      component.setActiveJobs([]);
-      component.setRecentJobs([
-        createMockJob({
-          job_id: 'orphan-receipt', status: 'completed', completed_at: new Date().toISOString(),
-          instance_id: null, job_type: 'message', mission_liveness: 'processing',
-        }),
-      ]);
-      // Counts rather than silently vanishing.
-      expect(component.liveMissionCount()).toBe(1);
+    it('AMBER with a null since (all source columns NULL) renders "unknown time" through the intake wiring', () => {
+      // P0 type-truth companion: the wire type is ``string | null``; the
+      // component-level intake must surface the helper's null handling
+      // verbatim (no undefined/NaN leaking into the tooltip).
+      component.applyFetchResult([], [], null, {
+        defer_blocked: true,
+        pending_count: 1,
+        holders: [{ ...pausedHolder, since: null }],
+      });
+      const warn = component.deferBlockWarning();
+      expect(warn).not.toBeNull();
+      expect(warn!.severity).toBe('amber');
+      expect(warn!.tooltip).toContain('since unknown time — resume or terminate to unblock');
+    });
+
+    it('warning hidden when the endpoint degrades to null (404/503 rollout skew)', () => {
+      component.applyFetchResult([], [], null, { defer_blocked: true, pending_count: 1, holders: [pausedHolder] });
+      expect(component.deferBlockWarning()).not.toBeNull();
+
+      component.applyFetchResult([], [], null, null);
+      expect(component.deferBlockWarning()).toBeNull();
+    });
+
+    it('no render when pending_count is 0 — the gate lives in the helper', () => {
+      component.applyFetchResult([], [], null, { defer_blocked: false, pending_count: 0, holders: [] });
+      expect(component.deferBlockWarning()).toBeNull();
     });
   });
 
@@ -556,9 +613,20 @@ describe('JobQueueIndicatorComponent Logic', () => {
         createMockJobWithStatus('paused', { job_id: 'pa' }),
         createMockJob({ job_id: 'd1', status: 'dead_letter' }),
         createMockJob({ job_id: 'x1', status: 'cancelled' }),
+        // M3 mirror-receipt terminal: ``settled`` must be treated as
+        // terminal via the CANONICAL ``isTerminalStatus`` import (the
+        // deleted module-local copy misclassified it as non-terminal).
+        createMockJob({
+          job_id: 's1',
+          status: 'settled',
+          job_type: 'message',
+          mission_liveness: 'processing',
+        }),
       ]);
       const ids = component.recentJobs().map((j) => j.job_id);
-      expect(ids).toEqual(['c1', 'f1', 'd1', 'x1']);
+      // Equal-timestamp ties keep insertion order (stable sort); the
+      // settled receipt lands in the terminal mix, not on the floor.
+      expect(ids).toEqual(['c1', 'f1', 'd1', 'x1', 's1']);
     });
 
     it('should sort by completed_at desc, falling back to created_at', () => {
@@ -775,12 +843,20 @@ describe('JobQueueIndicatorComponent Logic', () => {
     });
   });
 
-  describe('isTerminalStatus', () => {
+  describe('isTerminalStatus (canonical import — drive-by #2)', () => {
     it('should return true for terminal states', () => {
       expect(component.isTerminalStatus('completed')).toBe(true);
       expect(component.isTerminalStatus('failed')).toBe(true);
       expect(component.isTerminalStatus('cancelled')).toBe(true);
       expect(component.isTerminalStatus('dead_letter')).toBe(true);
+    });
+
+    it('should treat "settled" (M3 mirror-receipt terminal) as terminal via the canonical helper', () => {
+      // Regression proof for the deleted module-local copy: the stale
+      // component-local predicate (completed/failed/cancelled/dead_letter
+      // only) misclassified settled receipts as non-terminal. The
+      // canonical models/job.model.ts helper includes settled.
+      expect(component.isTerminalStatus('settled')).toBe(true);
     });
 
     it('should return false for active states', () => {
@@ -821,7 +897,7 @@ describe('JobQueueIndicatorComponent Logic', () => {
       expect(component.isIdle()).toBe(true);
 
       // 5. The error is captured for logging parity with
-      //    ``console.error('[JobQueueIndicator] Failed to fetch jobs:', err)``.
+      //    ``console.error('[JobQueueIndicator] Failed to fetch badge signals:', err)``.
       expect(component.fetchErrorCount).toBe(1);
       expect(component.lastFetchError).toBeInstanceOf(Error);
       expect((component.lastFetchError as Error).message).toBe('backend down');
@@ -879,6 +955,36 @@ describe('JobQueueIndicatorComponent Logic', () => {
       component.onFetchError({ code: 500, reason: 'server' });
       expect(component.displayText()).toBe('0/0');
       expect(component.lastFetchError).toEqual({ code: 500, reason: 'server' });
+    });
+
+    it('should RETAIN the missions count across a jobs-fetch error (no false bare 0/0)', () => {
+      // A live leader mission is proven by the missions projection; the
+      // jobs intake then errors (forkJoin-level failure). The badge may
+      // show stale "missions: N" — NEVER a false bare 0/0 idle.
+      component.applyFetchResult([], [], 2, null);
+      expect(component.displayText()).toBe('missions: 2');
+
+      component.onFetchError(new Error('backend down'));
+
+      expect(component.liveMissionCount()).toBe(2);
+      expect(component.displayText()).toBe('missions: 2');
+    });
+  });
+
+  describe('forkJoin participant isolation (round-1 wiring contract)', () => {
+    it('a throwing additive participant cannot kill the survivors on the same tick', async () => {
+      // Real RxJS, mirroring ``fetchBadgeSignals()`` 1:1: each additive
+      // participant isolates its own error with ``catchError(() => of(null))``
+      // so a missions/defer-blocked failure degrades to ``null`` while the
+      // jobs intake still emits.
+      const result = await firstValueFrom(forkJoin({
+        active: of([createMockJob({ status: 'processing' })]),
+        missions: throwError(() => new Error('missions 500')).pipe(catchError(() => of(null))),
+        deferBlocked: throwError(() => new Error('defer-blocked 404')).pipe(catchError(() => of(null))),
+      }));
+      expect(result.active.length).toBe(1); // jobs intake survived both failures
+      expect(result.missions).toBeNull();
+      expect(result.deferBlocked).toBeNull();
     });
   });
 });

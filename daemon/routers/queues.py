@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
@@ -17,12 +17,29 @@ from .schemas import (
     JobQueueNotFoundResponse,
     ProjectNotFoundResponse,
     EnsureSystemQueuesResponse,
+    DeferBlockResponse,
 )
+
+if TYPE_CHECKING:
+    from daemon.services.defer_block_resolver import DeferBlockResolver
+
+# Runtime import — the helper is used by the route handler below. The
+# TYPE_CHECKING-only ``DeferBlockResolver`` above is intentional
+# (avoids a circular import surface at module load — see also the
+# ``_defer_block_resolver: "DeferBlockResolver | None"`` annotation
+# below). The helper is imported at runtime because it has zero
+# resolver-side dependencies beyond the dataclass it consumes.
+from daemon.services.defer_block_resolver import _holder_to_response  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
 # Create router with /projects/{project_id}/queues prefix
 router = APIRouter(prefix="/projects/{project_id}/queues", tags=["queues"])
+
+# System-scoped queue surface (mounted under /api next to `router`):
+# endpoints that are NOT per-project live here. Current tenant:
+# GET /api/queues/defer-blocked (defer-gate transparency, §8.5).
+system_queues_router = APIRouter(prefix="/queues", tags=["queues"])
 
 
 def _get_manager(request: Request) -> Any:
@@ -532,3 +549,118 @@ async def stop_queue(
             status_code=404,
             detail={"error": "Queue not found"}
         )
+
+
+# ==================== Defer-blocked transparency surface ====================
+# Read-only mirror of the defer gate's busy-set (2026-09-04,
+# docs/job-task-system.md §8.5). Mirrors the repo's resolver DI pattern
+# (module-level resolver global + setter called from daemon/api.py
+# lifespan startup + Depends factory raising 503-if-unwired — the
+# daemon/routers/missions.py shape, which mirrors work.py, which
+# mirrors this file).
+
+
+_defer_block_resolver: "DeferBlockResolver | None" = None
+
+
+def get_defer_block_resolver() -> "DeferBlockResolver":
+    """Return the wired-in :class:`DeferBlockResolver`, or 503.
+
+    Returns:
+        The DeferBlockResolver instance.
+
+    Raises:
+        HTTPException: 503 if the resolver has not been initialized
+            via :func:`set_defer_block_resolver` during app startup.
+    """
+    if _defer_block_resolver is None:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "Defer-block resolver service not initialized"},
+        )
+    return _defer_block_resolver
+
+
+def set_defer_block_resolver(resolver: "DeferBlockResolver") -> None:
+    """Set the :class:`DeferBlockResolver` instance.
+
+    Called from ``daemon/api.py`` lifespan startup, wired against the
+    same READ-only ``JobRepository`` the missions resolver consumes.
+    Idempotent — calling multiple times replaces the singleton.
+
+    Args:
+        resolver: The DeferBlockResolver singleton (READ-only; zero
+            admission-state writers — census frozen at 23).
+    """
+    global _defer_block_resolver
+    _defer_block_resolver = resolver
+
+
+@system_queues_router.get(
+    "/defer-blocked",
+    response_model=DeferBlockResponse,
+    summary="Show the defer gate's busy-set witnesses (read-only)",
+    responses={
+        200: {"description": "Current defer-gate hold state + witnesses"},
+        503: {"description": "Defer-block resolver service not initialized"},
+    },
+)
+async def get_defer_blocked(
+    resolver: "DeferBlockResolver" = Depends(get_defer_block_resolver),
+) -> DeferBlockResponse:
+    """Report what the defer gate actually sees — its witnesses, enumerated.
+
+    The defer gate can hold indefinitely on a busy-set witness that no
+    surface shows (the live case: a paused instance occupying the
+    gate's busy-set). This endpoint enumerates those witnesses with the
+    gate's OWN predicate composition — the witness SELECT is derived
+    from the same ``_idle_predicate_sql`` body constants the gate path
+    evaluates (``JobRepository.has_active_non_deferred_work``), so
+    display truth == gate truth by construction; a re-implementation
+    of the predicate here is the defect class this surface forbids.
+
+    Severity shapes (docs §8.5, display-side reading of the payload):
+
+    * AMBER — some holder has ``kind == "paused"`` (the W2
+      suspended-but-occupying case; operator-actionable).
+    * INFO — holders exist, all ``kind == "live"`` (the gate is
+      honoring ordinary live work).
+    * RED anomaly — ``pending_count > 0`` AND ``holders == []``
+      (defer work is queued while the gate reports no witness).
+
+    Purity: zero DML on the path; two SELECTs per call (witnesses +
+    defer-lane pending count), flat regardless of witness count.
+    DB errors propagate (queues-family posture — no §8.2 degrade
+    shape): the gate itself fails CLOSED, and this surface never
+    serves a body that could falsely claim the gate is open.
+
+    Args:
+        resolver: Injected DeferBlockResolver (via Depends).
+
+    Returns:
+        :class:`DeferBlockResponse` — hold state, defer-lane pending
+        count, and the enumerated holders (paused first).
+    """
+    # Sync resolver call inside the async handler — the
+    # ``list_missions`` precedent (mission_resolver.resolve_page is
+    # sync; two fast SELECTs, no event-loop-relevant latency).
+    snapshot = resolver.resolve()
+    return DeferBlockResponse(
+        defer_blocked=snapshot.defer_blocked,
+        pending_count=snapshot.pending_count,
+        holders=[_holder_to_response(h) for h in snapshot.holders],
+    )
+
+
+__all__ = [
+    # ── Routers (mounted in daemon/api.py under /api) ───────────────────
+    "router",  # per-project /projects/{project_id}/queues prefix
+    "system_queues_router",  # system /queues prefix; hosts /defer-blocked
+    # ── Public DI symbols (consumed by daemon/api.py lifespan + tests) ──
+    "set_defer_block_resolver",  # called from api.py startup
+    "get_defer_block_resolver",  # 503-if-unwired factory
+    "set_job_queue_mgmt_service",  # called from api.py startup
+    "get_mgmt_service",  # 503-if-unwired factory
+    "set_project_repository",  # called from api.py startup
+    "get_project_repository",  # 503-if-unwired factory
+]

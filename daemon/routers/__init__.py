@@ -12,6 +12,7 @@ from .webhooks import router as webhooks_router
 from .work import router as work_router
 from .projects import router as projects_router
 from .queues import router as queues_router
+from .queues import system_queues_router
 from .skills import router as skills_router
 from .dlq import router as dlq_router
 from .mcp_servers import router as mcp_servers_router
@@ -37,6 +38,7 @@ __all__ = [
     "work_router",
     "projects_router",
     "queues_router",
+    "system_queues_router",
     "skills_router",
     "dlq_router",
     "mcp_servers_router",

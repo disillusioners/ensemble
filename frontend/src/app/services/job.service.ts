@@ -2,6 +2,8 @@ import { Injectable, inject, signal } from '@angular/core';
 import { HttpClient, HttpParams, HttpResponse } from '@angular/common/http';
 import { Observable, tap, catchError, of, map } from 'rxjs';
 import { Job, JobCreate, JobFilters, DeadLetterItem, RetryAllResult, DLQReplayResponse, DLQListResponse } from '../models/job.model';
+import { MissionListResponse, missionCountFromListResponse } from '../models/mission.model';
+import { DeferBlockedStatus } from '../models/defer-blocked.model';
 
 interface JobListResponse {
   jobs: Job[];
@@ -100,16 +102,58 @@ export class JobService {
 
   /**
    * Fetch recently completed/failed/cancelled jobs (terminal states).
+   * ``settled`` (M3) is the mirror-receipt terminal — included so
+   * settled transport receipts surface in the Recent window next to
+   * task-side ``completed`` rows.
    * Errors intentionally propagate so the caller can react via its
    * own error handler.
    */
   listRecentJobs(limit = 10): Observable<Job[]> {
     const params = new HttpParams()
-      .set('status', 'completed,failed,cancelled,dead_letter')
+      .set('status', 'completed,settled,failed,cancelled,dead_letter')
       .set('limit', limit.toString());
     return this.http.get<JobListResponse>(this.API_BASE, { params }).pipe(
       map((response) => response.jobs)
     );
+  }
+
+  /**
+   * Live-mission count from the authoritative missions projection —
+   * ``GET /api/missions?liveness=processing,pending,paused``.
+   *
+   * This is the badge's N (missions-aware display + panel live count);
+   * it REPLACES deriving live missions from recent job receipts, which
+   * went stale whenever the settled-token never reached the badge
+   * intake (badge read bare 0/0 while a leader mission was visibly
+   * working — /api/missions is correct and authoritative).
+   *
+   * ``limit=1`` keeps the payload bounded (one row); the count comes
+   * from the response's filter-aware ``total``. Returns ``null`` when
+   * the count leg degraded (per the §8.4 honesty contract, "count
+   * unavailable" is NOT zero) — callers retain their last known count.
+   * Errors propagate so the caller's per-participant error handler
+   * decides (the badge degrades to its previous value).
+   */
+  listLiveMissionCount(): Observable<number | null> {
+    const params = new HttpParams()
+      .set('liveness', 'processing,pending,paused')
+      .set('limit', '1');
+    return this.http
+      .get<MissionListResponse>('/api/missions', { params })
+      .pipe(map((response) => missionCountFromListResponse(response)));
+  }
+
+  /**
+   * Defer-gate block status — ``GET /api/queues/defer-blocked``.
+   *
+   * Consumed by the header JobQueueIndicator's warning affordance.
+   * Errors (404/503 during BE rollout skew, 500, network) propagate —
+   * the badge isolates this participant in its ``forkJoin`` so a
+   * failure degrades the icon to hidden WITHOUT killing the jobs
+   * fetch riding the same tick.
+   */
+  listDeferBlocked(): Observable<DeferBlockedStatus> {
+    return this.http.get<DeferBlockedStatus>('/api/queues/defer-blocked');
   }
 
   /**

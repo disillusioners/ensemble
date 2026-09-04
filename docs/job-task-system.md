@@ -1328,6 +1328,124 @@ constant 1, `started_at` fallback, `linked_jobs`), W4 binding, degradation bindi
 three-SELECT page bound. Route-count floor bumped 33 → 35 in
 `tests/unit/test_api_router_extraction.py` (the two new routes).
 
+### 8.5 Defer-Blocked Transparency Surface — `GET /api/queues/defer-blocked` (read-only, always-on)
+
+> **Landed on `feature/queue-status-missions-badge` (2026-09-04).** The defer gate
+> (`JobRepository.has_active_non_deferred_work`, §6.5 post-settle widening) can hold
+> indefinitely on a busy-set witness operators cannot see — the live case was a paused
+> instance sitting in the gate's busy-set with zero visibility on any surface. This
+> endpoint enumerates the gate's witnesses so the hold is visible. Read-only
+> throughout: zero DML on the path, no JobItem creation, no admission-state writes —
+> the census stays **frozen at 23**.
+
+#### The route + wiring
+
+`GET /api/queues/defer-blocked` lives in `daemon/routers/queues.py` on a system-scoped
+router (`system_queues_router`, prefix `/queues` — the per-project `router` keeps its
+`/projects/{project_id}/queues` prefix), mounted under `/api` next to `queues_router`.
+DI mirrors the missions.py resolver pattern: module-level `_defer_block_resolver` +
+`set_defer_block_resolver(...)` called from `daemon/api.py` lifespan startup (wired
+against the same READ-only `JobRepository` the missions resolver consumes) +
+`get_defer_block_resolver()` 503 factory. Unwired resolver ⇒ 503.
+
+The engine is `DeferBlockResolver` (`daemon/services/defer_block_resolver.py`), a leaf
+read service in the `MissionResolver` pattern.
+
+#### Response contract
+
+```json
+{
+  "defer_blocked": false,
+  "pending_count": 0,
+  "holders": [
+    {"instance_id": "…", "agent": "developer", "status": "paused",
+     "since": "2026-09-04T12:00:00+00:00", "kind": "paused"}
+  ]
+}
+```
+
+- **`defer_blocked`** — the defer gate's busy predicate is currently satisfied,
+  system-wide (the endpoint is unscoped ⇒ the gate's system-wide body, the
+  maintenance-`_is_idle` scope).
+- **`pending_count`** — PENDING (`admission_state='queued'`) non-deleted JobItems on
+  defer-type queues (`queue_type='defer'` — the per-project `system_defer_queue` lane),
+  system-wide.
+- **`holders`** — the busy-set witnesses ENUMERATED. One holder per distinct witness
+  instance; a legacy-clause witness whose JobItem has NO instance row
+  (`j.instance_id IS NULL`) surfaces as its OWN holder with `instance_id=""`,
+  `status=""` and `agent` from the JobItem row (dropping it would break the
+  holders-non-empty == gate-blocked invariant). `kind` is purely descriptive — it is
+  `"paused"` when the witness instance's `Instance.status` is `paused` (W2:
+  suspended-but-occupying), `"live"` otherwise. The wire payload does NOT carry
+  severity — the AMBER / INFO / RED severity conjunction is a client-side read of
+  the `(kind, holders.len(), pending_count)` triple, NOT a server-derived property.
+  `status` is the RAW instance status (the gate's truthmaker, not canonicalized).
+  `since` is normalized ISO-8601 (naive → UTC — the `_parse_job_created_at`
+  TEXT-timestamp pattern): `paused_at` for paused holders, falling back through
+  `updated_at` then `created_at`; `last_activity_at` for live holders, falling back
+  through `updated_at` then `created_at`; `JobItem.created_at` for instance-less
+  witnesses (NO instance-side fallback chain — the JobItem's own `created_at` is
+  the sole source; null-or-empty is possible if even that column is NULL).
+  Ordering: paused holders first (AMBER operator-priority), then live, each
+  ascending by `instance_id` — the `_project_holders` sort key is
+  `(kind != "paused", instance_id, agent)`. Holders rows are NOT bounded by a
+  list `LIMIT` — the projection enumerates every witness (`len(witnesses)` is
+  unbounded); the FE renders every row but the render-gate below ensures the
+  affordance is invisible when there is nothing to warn about.
+
+#### THE invariant — gate-truth == display-truth, by construction
+
+The holder enumeration is composed from the SAME exported statement builders in
+`daemon/repositories/job_queue/_idle_predicate_sql.py` that the gate path composes
+(the §8.4-neighbor hotfix's two-body discipline): `defer_busy_witness_statement()` is
+**derived from the gate body constants** (`JOB_DEFER_BUSY_BODY_PROJECT` /
+`JOB_DEFER_BUSY_BODY_SYSTEM`) by unwrapping the `SELECT EXISTS ( SELECT 1 … )` wrapper
+at module load time — the FROM/JOIN/WHERE busy-set text is byte-shared, and a wrapper
+reshape fails at IMPORT time rather than drifting silently. There is no second copy of
+the predicate SQL anywhere in the surface; re-implementing it independently is the
+defect class this design forbids. `defer_blocked` is computed from the enumerated
+witness rows (`len(witnesses) > 0`), so the boolean agrees with the gate's admission
+logic by construction. Behavioral equivalence (gate decision `has_active_non_deferred_work(None)`
+== holders non-empty, EXACTLY across paused / live / mixed / empty / instance-less
+fixtures) plus the shared-tail text pin are locked in
+`tests/unit/routers/test_defer_blocked_api.py`.
+
+#### Severity shapes (display-side reading of the payload)
+
+| Shape | Condition | Meaning |
+|---|---|---|
+| AMBER | some holder has `kind == "paused"` | a paused instance occupies the gate's busy-set — operator-actionable (resume or terminate it) |
+| INFO | holders non-empty, all `kind == "live"` | the gate is honoring ordinary live work |
+| RED anomaly | `pending_count > 0` AND `holders == []` | defer work is queued while the gate reports no witness — investigate |
+
+The severity conjunction is a client-side read of the payload; the surface itself
+carries only the two facts + witnesses.
+
+**FE render-gate** — the `deferBlockIndicator` helper
+(`frontend/src/app/models/defer-blocked.model.ts`) returns `null` (no render, no
+reserved space in the header) when `pending_count == 0`. Consequence: a paused
+hold with **zero** queued defer work (the operator did NOT enqueue anything yet)
+surfaces NOWHERE in the UI — that is by design. The render-gate is the
+`pending_count > 0` predicate on the FE side, NOT a BE-filtered shape; the BE
+serves the payload truthfully, the FE chooses what to surface. Holders rows are
+NOT counted or paged server-side — the projection enumerates every witness and
+the FE iterates the array to find the first paused holder; with `pending_count
+== 0`, the FE never invokes that iteration.
+
+#### Purity, bound, degradation
+
+- **Purity:** zero DML on the path (two SELECTs per call through
+  `engine.connect()`); census unchanged — the constitution scanner finds no writer
+  idiom in the surface (its only `admission_state` occurrences are column references
+  inside the imported gate SQL).
+- **Bound:** exactly 2 SELECTs per request — the shared-composition witness SELECT +
+  the defer-lane pending count — flat regardless of witness count (no N+1; pinned via
+  an engine event listener, NOT mock counting).
+- **Degradation:** none — DB errors propagate (⇒ 500). Queues-family posture (no
+  §8.2-style degrade shape on this router family), and the honest choice: the gate
+  itself fails CLOSED on DB error, and a surface that serves no body can never
+  falsely claim the gate is open.
+
 ---
 
 ## 9. What this means for reviewers

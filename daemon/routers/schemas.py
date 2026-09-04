@@ -1305,3 +1305,96 @@ class MissionListResponse(BaseModel):
             "whole-page failure from a single-leg failure)."
         ),
     )
+
+
+class DeferBlockHolderResponse(BaseModel):
+    """One defer-gate busy-set witness (docs/job-task-system.md §8.5).
+
+    Emitted by ``GET /api/queues/defer-blocked``. Witnesses are
+    enumerated with the gate's OWN predicate composition (the shared
+    builders in ``daemon/repositories/job_queue/_idle_predicate_sql.py``)
+    — display truth == gate truth by construction.
+    """
+
+    instance_id: str = Field(
+        description=(
+            "Witness instance id; empty string for a legacy-clause "
+            "witness whose JobItem has no instance row (the row is "
+            "kept so holders-non-empty always mirrors gate-blocked)"
+        ),
+    )
+    agent: str = Field(
+        description=(
+            "Instance.agent_id when an instance row exists, else the "
+            "witness JobItem's own agent_id"
+        ),
+    )
+    status: str = Field(
+        description=(
+            "Raw Instance.status of the witness (the gate's truthmaker, "
+            "shown un-canonicalized); empty string when there is no "
+            "instance row"
+        ),
+    )
+    since: str | None = Field(
+        default=None,
+        description=(
+            "Normalized ISO-8601 timestamp (naive → UTC, the "
+            "_parse_job_created_at pattern). Source-column fallback "
+            "chain varies by holder kind — paused holders report "
+            "instances.paused_at falling back through "
+            "instances.updated_at then instances.created_at; live "
+            "instance-backed holders report instances.last_activity_at "
+            "falling back through instances.updated_at then "
+            "instances.created_at; instance-less holders report "
+            "job_queue_items.created_at directly (no instance-side "
+            "fallback chain). None when every source column in the "
+            "applies chain is NULL — null-or-empty is possible on "
+            "instance-less witnesses whose JobItem.created_at is also "
+            "NULL (rare; surfaces un-canonicalized in the wire body)."
+        ),
+    )
+    kind: str = Field(
+        description=(
+            "Holder kind — 'paused' iff the witness instance's "
+            "Instance.status is 'paused' (the W2 suspended-but-"
+            "occupying case, AMBER severity in the FE render), 'live' "
+            "for every other witness (live instance OR a legacy-clause "
+            "witness with no instance row at all). Kind is purely "
+            "descriptive — it is NOT a wire-property severity: the "
+            "AMBER / INFO / RED severity conjunction is a client-side "
+            "read of (kind, holders.len(), pending_count) per "
+            "docs/job-task-system.md §8.5."
+        ),
+    )
+
+
+class DeferBlockResponse(BaseModel):
+    """Response for ``GET /api/queues/defer-blocked`` (docs §8.5).
+
+    Read-only transparency surface for the defer gate: what it sees,
+    enumerated. Zero DML on the path — census frozen at 23.
+    """
+
+    defer_blocked: bool = Field(
+        description=(
+            "The defer gate's busy predicate is currently satisfied — "
+            "computed from the enumerated witnesses, which share the "
+            "gate's predicate composition (gate-truth == display-truth)"
+        ),
+    )
+    pending_count: int = Field(
+        description=(
+            "PENDING (admission_state='queued') non-deleted JobItems on "
+            "defer-type queues (the system_defer_queue lane), system-wide"
+        ),
+    )
+    holders: list[DeferBlockHolderResponse] = Field(
+        default_factory=list,
+        description=(
+            "The busy-set witnesses, enumerated — paused holders first "
+            "(AMBER), then live. Empty iff the gate is NOT blocked; "
+            "pending_count > 0 AND holders empty is the RED anomaly "
+            "shape (display-side severity conjunction)"
+        ),
+    )

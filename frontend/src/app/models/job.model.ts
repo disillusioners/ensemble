@@ -304,8 +304,10 @@ export function missionLivenessChipTooltip(chip: MissionLivenessChip): string {
  * message rows; the ``job_id`` fallback is defensive-only for the
  * pathological case where the wire carries an unexpected null.
  *
- * Used by the badge (``job-queue-indicator``) and any other surface
- * that wants the live-mission derivation without re-implementing it.
+ * Round-1 badge rewiring moved the badge N to ``GET /api/missions`` —
+ * retained (NOT dead): spec-covered canonical receipt-window
+ * derivation, mirrored by e2e/fe_liveness_badge.spec.ts; the chip
+ * surfaces stay on the sibling ``missionLivenessChip`` family.
  */
 export function liveMissionIds(jobs: ReadonlyArray<Pick<Job, 'job_type' | 'mission_liveness' | 'instance_id' | 'job_id'>>): Set<string> {
   const ids = new Set<string>();
