@@ -51,11 +51,46 @@ write never blocks the asyncio event loop (matches the
 
 Failure mode
 ------------
-The hook is non-load-bearing: every call site wraps ``tap_node_return``
-in a try/except; the slot's internal ``try/except`` is the second
-line of defense. A failed upsert logs at WARNING, returns ``0``, and
-NEVER raises — the graph turn continues uninterrupted. The
-``test_message_tap_failure_is_non_fatal`` unit test pins this.
+The hook is non-load-bearing — the slot's internal
+``try / except Exception`` (around the entire ``tap_node_return``
+body, at ``daemon/services/message_tap.py`` below) is the **SOLE
+containment layer**. Call sites do NOT wrap
+``await slot.tap_node_return(...)`` in ``try / except``: they use a
+plain ``if slot is not None`` (or repo-presence) guard only. This is
+by design — ``asyncio.CancelledError`` MUST propagate through the
+await so pause cancellation reaches the outer ``agent_node`` /
+``_maybe_compact_context`` task and the turn quiesces at the next
+checkpoint boundary. On Python 3.13+ ``CancelledError`` is promoted
+to ``BaseException`` (no longer caught by ``except Exception``), so
+the internal handler's narrow ``except Exception`` already lets it
+through — but a wider ``except BaseException`` at a call site would
+SWALLOW it and break pause. The ``test_message_tap_failure_is_non_fatal``
+unit test pins that ordinary errors never propagate;
+``test_cancelled_error_propagates`` (in
+``tests/unit/services/test_message_tap_slot.py``) pins that
+``CancelledError`` MUST propagate. Together they enforce the
+"internal handler is sole containment" invariant — do NOT add a
+second ``try / except`` around the call at any of the 4 tap sites.
+
+Over-record property (benign)
+-----------------------------
+The tap fires BEFORE the node's checkpoint commit returns. If a
+pause lands between the tap-await and the node's return, the
+``message_metadata`` rows are already persisted for messages whose
+node return never completed (and therefore were never checkpointed).
+This is an **over-record only — never an under-record**: a message
+that DID reach checkpoint always has at least one tap row (revive +
+first-write-wins from the ``ON CONFLICT DO NOTHING`` PK constraint
+guarantees re-taps don't add rows), but a message whose node return
+never completed may have a tap row with no checkpoint to join to.
+
+This is benign once the PR3 read path joins ``message_metadata`` to
+the checkpoint walk (side-table is an ENRICHMENT lookup, not the
+authoritative source — extra rows are simply never joined). No
+real-time reader depends on side-table exhaustiveness. PR3-era
+reviewers should NOT flag over-records as a bug; under-records (a
+checkpoint message with no tap row) would be a bug, over-records
+are not.
 """
 from __future__ import annotations
 
