@@ -868,6 +868,7 @@ class TestPostSettlePhase2Fix:
         try:
             defer_result = job_repo.has_active_non_deferred_work("proj-x")
             background_result = job_repo.has_active_non_background_work()
+            assert job_repo.has_active_non_deferred_work(None) is True, 'fail-CLOSED on system-wide defer body'
         finally:
             job_repo.engine.begin = original_begin
 
