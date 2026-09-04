@@ -1712,3 +1712,267 @@ class TestExecutorCompactOnCompletedRealGraph:
                 )
             finally:
                 await conn.close()
+
+
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# 5. P1b T2-ext — MID-SUPERSTEP persist canary (turn-in-flight graph).
+#    ADDENDUM A.5/A.9 of
+#    ``.agents/shared/planning/proactive-compaction-fix/architecture-recommendation.md``.
+#
+#    VERDICT (2026-09-04, real langgraph 1.x + file-backed SQLite): the
+#    A.5 premise is FALSIFIED in its "durable" reading — a mid-superstep
+#    ``aupdate_state`` persist does NOT survive a NORMAL node return:
+#    the in-flight task's own commit applies against the pre-update
+#    checkpoint and SUPERSEDES the shadow checkpoint the aupdate created
+#    (both the messages AND the ``compacted_at`` stamp vanish). Without
+#    ``as_node``, a mid-superstep update does not even apply — langgraph
+#    raises ``InvalidUpdateError: Ambiguous update``.
+#
+#    Consequence encoded here + in the hook: the ONLY durable mid-turn
+#    recipe is RETURN-CARRIED persist — the node's own return emits a
+#    SENTINEL-FIRST ``messages`` list so the task commit itself lands
+#    the compaction. Nothing can supersede the commit. The CLE handler
+#    (``graph.py`` — persist → aget_state → rebuild → re-invoke →
+#    normal return) shares the supersession hazard; it is OUT OF P1b
+#    SCOPE (locked untouched) and FLAGGED for dispatcher adjudication.
+#
+#    These three tests GATE any future recipe change (A.5's stated
+#    purpose) by pinning the observed behavior of all three recipes.
+# ─────────────────────────────────────────────────────────────────────────
+
+
+class TestMidSuperstepPersistCanary:
+    """Turn-in-flight (mid-superstep) persist on a REAL graph — the
+    three recipes: naive ``as_node='agent'``, naive no-``as_node``,
+    and the P1b RETURN-CARRIED sentinel recipe."""
+
+    @pytest.mark.asyncio
+    async def test_naive_as_node_persist_superseded_by_task_commit(
+        self, tmp_path
+    ):
+        """HAZARD PIN — mid-superstep ``aupdate_state(as_node='agent')``
+        applies, the run completes, BUT the in-flight task's commit
+        SUPERSEDES the persist: neither the messages nor the
+        ``compacted_at`` stamp survive. This is why the P1b hook
+        RETURN-CARRIES the compaction instead of trusting the persist."""
+        with _RealLangGraph():
+            import aiosqlite
+            from langchain_core.messages import (
+                AIMessage,
+                HumanMessage,
+                SystemMessage,
+            )
+            from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+            from langgraph.graph import END, START, MessagesState, StateGraph
+
+            holder: dict = {}
+
+            async def _agent(state):
+                # Mid-superstep persist — the CLE-handler-shaped write.
+                cfg = holder["cfg"]
+                await holder["graph"].aupdate_state(
+                    cfg,
+                    {"messages": [SystemMessage(content="mid-superstep note")]},
+                    as_node="agent",
+                )
+                await holder["graph"].aupdate_state(
+                    cfg,
+                    {"compacted_at": "2026-09-04T00:00:00+00:00"},
+                    as_node="agent",
+                )
+                # The task returns NORMALLY — the commit supersedes.
+                return {"messages": [AIMessage(content="agent-out")]}
+
+            g = StateGraph(MessagesState)
+            g.add_node("agent", _agent)
+            g.add_edge(START, "agent")
+            g.add_edge("agent", END)
+            db_path = tmp_path / "mid_superstep_as_node.db"
+            conn = await aiosqlite.connect(str(db_path))
+            saver = AsyncSqliteSaver(conn)
+            await saver.setup()
+            try:
+                compiled = g.compile(checkpointer=saver)
+                holder["graph"] = compiled
+                cfg = {"configurable": {"thread_id": "ms-as-node"}}
+                holder["cfg"] = cfg
+
+                await compiled.ainvoke(
+                    {"messages": [HumanMessage(content="turn-1")]}, cfg
+                )
+                st = await compiled.aget_state(cfg)
+                contents = [
+                    str(getattr(m, "content", "")) for m in st.values["messages"]
+                ]
+                assert not any("mid-superstep note" in c for c in contents), (
+                    "expected the naive mid-superstep persist to be "
+                    f"SUPERSEDED (hazard pin); got {contents!r}"
+                )
+                assert st.values.get("compacted_at") is None, (
+                    "the mid-superstep stamp write must also be superseded"
+                )
+            finally:
+                await conn.close()
+
+    @pytest.mark.asyncio
+    async def test_naive_no_as_node_persist_raises_ambiguous_update(
+        self, tmp_path
+    ):
+        """A.5's untested arm, tested: a mid-superstep ``aupdate_state``
+        WITHOUT ``as_node`` does not apply at all — langgraph raises
+        ``InvalidUpdateError`` (Ambiguous update). This is why the
+        mid_turn seam arm carries ``as_node='agent'``."""
+        with _RealLangGraph():
+            import aiosqlite
+            from langchain_core.messages import (
+                AIMessage,
+                HumanMessage,
+                SystemMessage,
+            )
+            from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+            from langgraph.graph import END, START, MessagesState, StateGraph
+            from langgraph.errors import InvalidUpdateError
+
+            holder: dict = {}
+
+            async def _agent(state):
+                await holder["graph"].aupdate_state(
+                    holder["cfg"],
+                    {"messages": [SystemMessage(content="note")]},
+                )
+                return {"messages": [AIMessage(content="agent-out")]}
+
+            g = StateGraph(MessagesState)
+            g.add_node("agent", _agent)
+            g.add_edge(START, "agent")
+            g.add_edge("agent", END)
+            db_path = tmp_path / "mid_superstep_no_as_node.db"
+            conn = await aiosqlite.connect(str(db_path))
+            saver = AsyncSqliteSaver(conn)
+            await saver.setup()
+            try:
+                compiled = g.compile(checkpointer=saver)
+                holder["graph"] = compiled
+                cfg = {"configurable": {"thread_id": "ms-no-as-node"}}
+                holder["cfg"] = cfg
+
+                with pytest.raises(InvalidUpdateError):
+                    await compiled.ainvoke(
+                        {"messages": [HumanMessage(content="turn-1")]}, cfg
+                    )
+            finally:
+                await conn.close()
+
+    @pytest.mark.asyncio
+    async def test_return_carried_sentinel_persist_survives_task_commit(
+        self, tmp_path
+    ):
+        """THE P1b RECIPE — the node returns a SENTINEL-FIRST
+        ``messages`` list (``[REMOVE_ALL, *post-compaction channel,
+        response]``) plus the ``compacted_at`` stamp. The task commit
+        itself lands the compaction: durable, nothing supersedes it,
+        and the next turn starts from the compacted state (no brick)."""
+        with _RealLangGraph():
+            import aiosqlite
+            from langchain_core.messages import (
+                AIMessage,
+                HumanMessage,
+                RemoveMessage,
+                SystemMessage,
+            )
+            from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+            from langgraph.graph import END, START, MessagesState, StateGraph
+            from langgraph.graph.message import REMOVE_ALL_MESSAGES
+
+            # Minimal mirror of the production ``SessionState``: the
+            # ``compacted_at`` channel must EXIST for the node return to
+            # carry the dedup stamp (MessagesState drops unknown keys).
+            class _CompactionState(MessagesState):
+                compacted_at: str | None = None
+
+            stamp = "2026-09-04T00:00:00+00:00"
+            holder: dict = {}
+
+            async def _agent(state):
+                # Mirror the hook's step-5: the seam persist ALSO runs
+                # (shadow checkpoint — superseded harmlessly below).
+                await holder["graph"].aupdate_state(
+                    holder["cfg"],
+                    {"messages": [SystemMessage(content="shadow note")]},
+                    as_node="agent",
+                )
+                await holder["graph"].aupdate_state(
+                    holder["cfg"], {"compacted_at": stamp}, as_node="agent"
+                )
+                # RETURN-CARRIED persist — the P1b hook recipe.
+                return {
+                    "messages": [
+                        RemoveMessage(id=REMOVE_ALL_MESSAGES),
+                        SystemMessage(content="[Conversation Summary] doc"),
+                        # preserved tail: the latest human turn
+                        state_messages(state)[-1],
+                        AIMessage(content="agent-out"),
+                    ],
+                    "compacted_at": stamp,
+                }
+
+            def state_messages(state):
+                return state["messages"]
+
+            g = StateGraph(_CompactionState)
+            g.add_node("agent", _agent)
+            g.add_edge(START, "agent")
+            g.add_edge("agent", END)
+            db_path = tmp_path / "mid_superstep_return_carried.db"
+            conn = await aiosqlite.connect(str(db_path))
+            saver = AsyncSqliteSaver(conn)
+            await saver.setup()
+            try:
+                compiled = g.compile(checkpointer=saver)
+                holder["graph"] = compiled
+                cfg = {"configurable": {"thread_id": "ms-return-carried"}}
+                holder["cfg"] = cfg
+
+                await compiled.ainvoke(
+                    {
+                        "messages": [
+                            HumanMessage(content="old turn"),
+                            HumanMessage(content="recent turn"),
+                        ]
+                    },
+                    cfg,
+                )
+                st = await compiled.aget_state(cfg)
+                contents = [
+                    str(getattr(m, "content", "")) for m in st.values["messages"]
+                ]
+                assert contents == [
+                    "[Conversation Summary] doc",
+                    "recent turn",
+                    "agent-out",
+                ], (
+                    "the return-carried sentinel recipe must land the "
+                    f"compacted state + response; got {contents!r}"
+                )
+                assert st.values.get("compacted_at") == stamp, (
+                    "the dedup stamp must survive the task commit"
+                )
+
+                # NO BRICK — the next turn runs the agent normally (and
+                # the node re-compacts again by design: sentinel recipe
+                # replaces + appends the new response).
+                res = await compiled.ainvoke(
+                    {"messages": [HumanMessage(content="turn-2")]}, cfg
+                )
+                res_contents = [
+                    str(getattr(m, "content", "")) for m in res["messages"]
+                ]
+                assert res_contents[-1] == "agent-out", (
+                    "the agent must run again on the compacted state "
+                    "(no brick)"
+                )
+                assert "turn-2" in res_contents
+            finally:
+                await conn.close()

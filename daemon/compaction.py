@@ -24,6 +24,7 @@ Compaction Strategies:
 import asyncio
 import copy
 import logging
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -244,6 +245,25 @@ def _extract_previous_overview(messages: list[BaseMessage], instance_id: str) ->
         if sep != -1:
             overview = overview[sep + 2 :].lstrip("\n")
     return overview or None
+
+
+def make_remove_all_sentinel() -> "RemoveMessage":
+    """The ``REMOVE_ALL_MESSAGES`` sentinel element (P1b helper).
+
+    Same resolution as :func:`build_sentinel_replacement` (real
+    ``langgraph.graph.message`` constant, falling back to the
+    source-verified literal ``"__remove_all__"`` under the test-mocked
+    runtime). Exported so the P1b 95% hook can build a SENTINEL-FIRST
+    node-return prefix (``[sentinel, *post_compaction_channel]``) —
+    the node's own task commit then LANDS the compaction (a
+    mid-superstep ``aupdate_state`` alone is superseded when the
+    in-flight task returns; see the T2-ext canary).
+    """
+    try:
+        from langgraph.graph.message import REMOVE_ALL_MESSAGES
+    except (ImportError, ModuleNotFoundError):
+        REMOVE_ALL_MESSAGES = "__remove_all__"
+    return RemoveMessage(id=REMOVE_ALL_MESSAGES)
 
 
 def build_sentinel_replacement(
@@ -1691,6 +1711,98 @@ class ContextCompactor:
                 ),
             },
         }
+        # ── P1b: 95% pre-call hook state (proactive-compaction-fix A.4) ──
+        # Per-instance O(1) pre-filter state: ``instance_id →
+        # (msg_count, total_tokens)`` of the last LLM-bound payload
+        # estimate. Sibling of the checkpoint's ``compacted_at`` (which
+        # lives in state, not here — this dict is the only per-instance
+        # estimate cache). One entry per instance EVER SEEN (overwritten,
+        # never grown per-call); tuples are tiny so no eviction policy.
+        self._precall_estimates: dict[str, tuple[int, int]] = {}
+        # Rate-limit state for the hook's near-ceiling / skip WARN — at
+        # most one WARN per instance per ``_precall_warn_interval_s``
+        # seconds (mirrors the engine's 60s dedup window so the WARN
+        # cadence matches the refire cadence).
+        self._precall_warn_state: dict[str, float] = {}
+
+    #: P1b — minimum seconds between ``[Compaction][precall-95]`` WARN
+    #: emissions per instance (aligned with the engine's 60s dedup).
+    _precall_warn_interval_s: float = 60.0
+
+    def precall_estimate_get(
+        self, instance_id: str
+    ) -> tuple[int, int] | None:
+        """Return the cached ``(msg_count, total_tokens)`` estimate, if any."""
+        return self._precall_estimates.get(instance_id)
+
+    def precall_estimate_needs_refresh(
+        self,
+        instance_id: str,
+        msg_count: int,
+        trigger_window: int,
+    ) -> bool:
+        """O(1) pre-filter for the 95% pre-call hook (ADDENDUM A.4).
+
+        The estimator costs ~150–200 ms at 800 msgs / ~500k tokens; a
+        multi-call tool-loop turn must not pay that on EVERY call. This
+        filter says the estimator must run only when:
+
+        1. there is NO cached estimate for the instance (first call), OR
+        2. the payload message count grew since the cached estimate
+           (tool results / injections append messages), OR
+        3. the cached estimate already sat at ≥0.80× the trigger window
+           (the at-risk band — re-check every call there).
+
+        Common case (stable conversation, sub-80% occupancy) → ``False``
+        → the hook returns without touching the estimator: O(1).
+
+        Args:
+            instance_id: Target instance.
+            msg_count: Current LLM-bound payload message count.
+            trigger_window: Gated trigger window (may be 0 — then arm 3
+                never fires, arms 1–2 still work).
+
+        Returns:
+            ``True`` when the full estimator must run.
+        """
+        prev = self._precall_estimates.get(instance_id)
+        if prev is None:
+            return True
+        prev_count, prev_tokens = prev
+        if prev_count != msg_count:
+            return True
+        if trigger_window > 0 and prev_tokens >= 0.80 * trigger_window:
+            return True
+        return False
+
+    def precall_estimate_record(
+        self,
+        instance_id: str,
+        msg_count: int,
+        total_tokens: int,
+    ) -> None:
+        """Cache the ``(msg_count, total_tokens)`` estimate for an instance."""
+        self._precall_estimates[instance_id] = (msg_count, total_tokens)
+
+    def precall_warn_should_emit(self, instance_id: str) -> bool:
+        """Rate-limit gate for the hook's WARN emissions (one per interval).
+
+        ``True`` when at least ``_precall_warn_interval_s`` seconds have
+        elapsed since the last WARN for this instance (or none was ever
+        emitted); records the emission. The 60s default mirrors the
+        engine's dedup window so a stamped anti-refire skip (which
+        silences the ENGINE for 60s) cannot be accompanied by a WARN
+        storm in the same window.
+        """
+        now = time.monotonic()
+        last = self._precall_warn_state.get(instance_id)
+        if (
+            last is not None
+            and (now - last) < self._precall_warn_interval_s
+        ):
+            return False
+        self._precall_warn_state[instance_id] = now
+        return True
 
     def _effective_model_name(self, context: CompactionContext) -> str:
         """Model name for context-WINDOW math.
@@ -1706,6 +1818,57 @@ class ContextCompactor:
         byte-identical with the pre-setting behavior.
         """
         return resolve_compaction_model(context.config) or context.model_name
+
+    def _trigger_window_for_model(self, model_name: str, config: "CompactionConfig") -> int:
+        """Context window for TRIGGER math, from a bare model name.
+
+        P1b extraction (proactive-compaction-fix ADDENDUM A.4): the 95%
+        pre-call hook (``daemon/graph.py::_maybe_precall_compact_95``)
+        needs the SAME W1 gating — ``min(session_window, override_window)``
+        — for its ``0.95 × window`` math WITHOUT building a full
+        :class:`CompactionContext`. :meth:`_trigger_window` delegates here
+        so the two trigger sites cannot drift apart. The one-shot
+        override-overflow WARN stays keyed on ``self`` exactly as before
+        (fires at whichever site reaches it first; both share ``self``).
+
+        Args:
+            model_name: Session model name (window lookup key).
+            config: The :class:`CompactionConfig` driving the override
+                resolution + window registry. Callers pass the SAME config
+                they would have carried on the context (production callers
+                pass ``compactor.config``; ``_trigger_window`` passes
+                ``context.config``).
+
+        Returns:
+            The gated trigger window (see :meth:`_trigger_window`).
+        """
+        override_name = resolve_compaction_model(config)
+        if not override_name:
+            return get_model_context_limit(
+                model_name, config
+            )
+        override_window = get_model_context_limit(
+            override_name, config
+        )
+        session_window = get_model_context_limit(
+            model_name, config
+        )
+        if override_window > session_window:
+            if not getattr(self, "_w_overflow_warned", False):
+                self._w_overflow_warned = True
+                logger.warning(
+                    "Compaction override '%s' window (%d) exceeds session "
+                    "model '%s' window (%d). Auto-path threshold gated at "
+                    "the session window; internal chunking/merge/condense "
+                    "sizing still follow the override. Use /compact to "
+                    "force-recover once the session model has overflowed.",
+                    override_name,
+                    override_window,
+                    model_name,
+                    session_window,
+                )
+            return session_window
+        return override_window
 
     def _trigger_window(self, context: CompactionContext) -> int:
         """Context window for the AUTO-path threshold gate (:826-841).
@@ -1725,34 +1888,13 @@ class ContextCompactor:
         the gate site (not ``load_config``) so the operator sees BOTH
         windows in the same log line, and so it is testable without
         loading the daemon config.
+
+        P1b: the body delegates to :meth:`_trigger_window_for_model`
+        (single implementation shared with the 95% pre-call hook).
         """
-        if not resolve_compaction_model(context.config):
-            return get_model_context_limit(
-                context.model_name, context.config
-            )
-        override_name = resolve_compaction_model(context.config)
-        override_window = get_model_context_limit(
-            override_name, context.config
-        )
-        session_window = get_model_context_limit(
+        return self._trigger_window_for_model(
             context.model_name, context.config
         )
-        if override_window > session_window:
-            if not getattr(self, "_w_overflow_warned", False):
-                self._w_overflow_warned = True
-                logger.warning(
-                    "Compaction override '%s' window (%d) exceeds session "
-                    "model '%s' window (%d). Auto-path threshold gated at "
-                    "the session window; internal chunking/merge/condense "
-                    "sizing still follow the override. Use /compact to "
-                    "force-recover once the session model has overflowed.",
-                    override_name,
-                    override_window,
-                    context.model_name,
-                    session_window,
-                )
-            return session_window
-        return override_window
 
     async def compact_state(
         self,

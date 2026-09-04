@@ -765,17 +765,17 @@ class CompactionConfig(BaseSettings):
     summarization_chunk_threshold: float = Field(default=0.60, description="Fraction of context window above which summarization uses chunking")
 
     # ── Proactive-compaction kill-switch (Phase 1 of proactive-compaction-fix) ─
-    # Single-source flag governing the auto-trigger BEFORE each LLM call
-    # (the pre-dispatch proactive gate). P1b will extend this to the
-    # 95% pre-call reactive hook too (per ADDENDUM §A.8 of
-    # `.agents/shared/planning/proactive-compaction-fix/architecture-recommendation.md`)
-    # — same flag, no second kill-switch (avoiding meaningless mixed
-    # states). The CLE trigger stays ungated.
+    # Single-source flag governing BOTH auto triggers: the pre-dispatch
+    # proactive gate (P1) AND the 95% pre-call reactive hook (P1b,
+    # ``daemon/graph.py::_maybe_precall_compact_95``) — per ADDENDUM §A.8
+    # of ``.agents/shared/planning/proactive-compaction-fix/architecture-recommendation.md``
+    # (one feature, one seam, one kill-switch; no second flag). The CLE
+    # trigger stays ungated.
     #
-    # Widened semantics: the field name says "proactive" but the same
-    # flag will govern the reactive 95% hook in P1b. Name accepted
-    # without churn; semantics documented here so the surface is
-    # honest about its scope.
+    # Widened semantics (live since P1b): the field name says
+    # "proactive" but the same flag governs the reactive 95% hook. Name
+    # accepted without churn; semantics documented here so the surface
+    # is honest about its scope.
     #
     # Default ON (per ADDENDUM §A.2 — supersedes the main body's §3.7
     # OFF default). The env name is intentionally NOT
@@ -796,8 +796,8 @@ class CompactionConfig(BaseSettings):
         description=(
             "Enable the proactive context-compaction trigger. "
             "Default ON. Env: ENSEMBLE_PROACTIVE_COMPACTION (0/false "
-            "disables). P1 governs the pre-dispatch gate; P1b will "
-            "extend the same flag to the 95% pre-call reactive hook."
+            "disables). Governs the P1 pre-dispatch gate AND the P1b "
+            "95% pre-call reactive hook (single kill-switch, A.8)."
         ),
     )
 

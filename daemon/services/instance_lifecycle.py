@@ -1625,6 +1625,7 @@ class InstanceLifecycleService:
             MessageTapSlot,
             SOURCE_AGENT_NODE_RETURN,
             SOURCE_COMPACTION_REACTIVE,
+            SOURCE_COMPACTION_PRECALL_95,
         )
         graph = build_instance_graph(
             tools=tools,
@@ -1661,7 +1662,7 @@ class InstanceLifecycleService:
             # MessageTapSlot for the ``agent_node_return`` +
             # ``compaction_aupdate_reactive`` tap sites (decisions.md
             # D1 / D20). Two slot instances — one per ``source``
-            # label — so the AST gate can enumerate EXACTLY 4
+            # label — so the AST gate can enumerate the approved
             # distinct labels. Both attach to the shared
             # ``message_metadata_repo`` singleton (decisions.md D14
             # — SYNC repo, tap bridges via ``asyncio.to_thread``).
@@ -1672,6 +1673,14 @@ class InstanceLifecycleService:
             compaction_tap_slot=MessageTapSlot(
                 self._manager.message_metadata_repo,
                 SOURCE_COMPACTION_REACTIVE,
+            ),
+            # P1b (proactive-compaction-fix A.9 T-tap) — the 95%
+            # pre-call hook gets its OWN label so per-site
+            # observability stays intact (LOCKED decision: never reuse
+            # the reactive label).
+            precall_compaction_tap_slot=MessageTapSlot(
+                self._manager.message_metadata_repo,
+                SOURCE_COMPACTION_PRECALL_95,
             ),
         )
 
@@ -3639,6 +3648,7 @@ class InstanceLifecycleService:
             MessageTapSlot,
             SOURCE_AGENT_NODE_RETURN,
             SOURCE_COMPACTION_REACTIVE,
+            SOURCE_COMPACTION_PRECALL_95,
         )
         # Resolve ``parent_id`` from the restored instance metadata
         # so the ContextSlot can pass it through to
@@ -3702,6 +3712,13 @@ class InstanceLifecycleService:
             compaction_tap_slot=MessageTapSlot(
                 self._manager.message_metadata_repo,
                 SOURCE_COMPACTION_REACTIVE,
+            ),
+            # P1b — same wiring as the spawn path: the 95% pre-call
+            # hook carries its own ``SOURCE_COMPACTION_PRECALL_95``
+            # slot (A.9 T-tap LOCKED decision).
+            precall_compaction_tap_slot=MessageTapSlot(
+                self._manager.message_metadata_repo,
+                SOURCE_COMPACTION_PRECALL_95,
             ),
         )
 

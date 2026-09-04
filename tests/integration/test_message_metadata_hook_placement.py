@@ -14,10 +14,18 @@ sites, each with a DISTINCT source label:
                                     ``aupdate_state`` at
                                     ``daemon/services/instance_messaging.py``.
 
+P1b (proactive-compaction-fix ADDENDUM A.9 T-tap, LOCKED decision) adds
+a FIFTH approved site/label:
+
+* ``compaction_precall_95``        — after the 95% pre-call compaction
+                                    persist in ``daemon/graph.py``
+                                    (``_maybe_precall_compact_95``);
+                                    fired ONLY on a real compaction.
+
 This test pins:
 
-1. **EXACTLY 4** call sites for ``tap_node_return`` across the daemon
-   tree — no more, no less.
+1. **EXACTLY 5** call sites for ``tap_node_return`` across the daemon
+   tree — no more, no less (4 original + 1 P1b).
 2. Each call carries a distinct source label, used **exactly once**.
 3. ZERO ``message_tap_slot`` references inside any ``tools_node`` /
    ``ToolNode`` block (Critical 4 — no custom ToolNode wrapper).
@@ -53,12 +61,15 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DAEMON_DIR = REPO_ROOT / "daemon"
 
-# The 4 approved source-label strings, from decisions.md D1.
+# The 5 approved source-label strings: decisions.md D1's original 4 +
+# the P1b ``compaction_precall_95`` label (proactive-compaction-fix
+# ADDENDUM A.9 T-tap, LOCKED decision — never reuse the reactive label).
 EXPECTED_LABELS = {
     "user_message_entry",
     "agent_node_return",
     "compaction_aupdate_reactive",
     "compaction_aupdate_messaging",
+    "compaction_precall_95",
 }
 
 
@@ -111,11 +122,11 @@ def _resolve_source_label(call: ast.Call) -> str | None:
     ``MessageTapSlot(<repo>, <label>)`` assignment to the same name.
 
     For our purposes, we only need to assert that the SET of labels
-    across the 4 sites is exactly the 4 EXPECTED_LABELS — so we use a
+    across the sites is exactly the EXPECTED_LABELS set — so we use a
     lighter approach: collect every ``MessageTapSlot`` construction
     site AND every ``tap_node_return`` call site, then assert the
     counts line up (4 of each) and the construction sites use one of
-    the 4 expected labels each exactly once.
+    the expected labels each exactly once.
     """
     # The call carries ``(persisted, thread_id)`` as positional args
     # in our canonical pattern. The source label is captured at the
@@ -169,6 +180,7 @@ def _collect_slot_constructions(tree: ast.AST) -> list[str]:
                         "SOURCE_AGENT_NODE_RETURN",
                         "SOURCE_COMPACTION_REACTIVE",
                         "SOURCE_COMPACTION_MESSAGING",
+                        "SOURCE_COMPACTION_PRECALL_95",
                     }
                     if label_arg.id in accepted:
                         # Map the constant name → its value.
@@ -180,6 +192,9 @@ def _collect_slot_constructions(tree: ast.AST) -> list[str]:
                             ),
                             "SOURCE_COMPACTION_MESSAGING": (
                                 "compaction_aupdate_messaging"
+                            ),
+                            "SOURCE_COMPACTION_PRECALL_95": (
+                                "compaction_precall_95"
                             ),
                         }
                         labels.append(mapping[label_arg.id])
@@ -201,29 +216,32 @@ def _collect_slot_constructions(tree: ast.AST) -> list[str]:
 
 
 class TestHookPlacement:
-    """EXACTLY 4 tap sites, 4 distinct labels (decisions.md D1)."""
+    """EXACTLY 5 tap sites, 5 distinct labels (decisions.md D1 + P1b
+    A.9 T-tap)."""
 
-    def test_exactly_four_tap_node_return_call_sites(self):
-        """Across the entire ``daemon/**`` tree, EXACTLY 4 ``tap_node_return`` calls."""
+    def test_exactly_five_tap_node_return_call_sites(self):
+        """Across the entire ``daemon/**`` tree, EXACTLY 5
+        ``tap_node_return`` calls (P1b added the 95% pre-call site)."""
         total_calls = 0
         for path in _collect_daemon_python_files():
             tree = ast.parse(path.read_text(encoding="utf-8"))
             calls = _collect_tap_calls(tree)
             if calls:
                 total_calls += len(calls)
-        assert total_calls == 4, (
-            f"Expected EXACTLY 4 ``tap_node_return`` call sites in "
-            f"daemon/**, found {total_calls}. Phase 1 C2 binds to 4 "
-            f"approved sites (decisions.md D1)."
+        assert total_calls == 5, (
+            f"Expected EXACTLY 5 ``tap_node_return`` call sites in "
+            f"daemon/**, found {total_calls}. The 4 original approved "
+            f"sites (decisions.md D1) + 1 P1b pre-call site "
+            f"(proactive-compaction-fix A.9 T-tap)."
         )
 
     def test_exactly_four_distinct_source_labels(self):
-        """The SET of source labels across the daemon tree is exactly the 4 EXPECTED_LABELS.
+        """The SET of source labels across the daemon tree is exactly the 5 EXPECTED_LABELS.
 
         Note: each label may appear MULTIPLE times because the slot
         is constructed once per wiring path (spawn + restore in
         ``instance_lifecycle.py``; two compaction sites for symmetry).
-        What matters is that the SET of labels matches the 4
+        What matters is that the SET of labels matches the 5
         approved (decisions.md D1) and that the TOTAL count of
         construction sites equals the number of label-instances we
         expect to see — both checks below.
@@ -232,9 +250,10 @@ class TestHookPlacement:
         for path in _collect_daemon_python_files():
             tree = ast.parse(path.read_text(encoding="utf-8"))
             all_labels.extend(_collect_slot_constructions(tree))
-        # 1. SET equality: the 4 distinct labels.
+        # 1. SET equality: the 5 distinct labels.
         assert set(all_labels) == EXPECTED_LABELS, (
-            f"Source labels must match the 4 approved (decisions.md D1).\n"
+            f"Source labels must match the 5 approved (decisions.md D1 "
+            f"+ P1b A.9 T-tap).\n"
             f"  Expected: {sorted(EXPECTED_LABELS)}\n"
             f"  Found:    {sorted(set(all_labels))}\n"
             f"  Construction sites: {all_labels}"
@@ -438,6 +457,8 @@ class TestPerSitePresence:
             ("agent_node_return", "graph.py"),
             ("compaction_aupdate_reactive", "graph.py"),
             ("compaction_aupdate_messaging", "services/instance_messaging.py"),
+            # P1b — the 95% pre-call hook tap lives in graph.py.
+            ("compaction_precall_95", "graph.py"),
         ],
     )
     def test_label_construction_in_wiring_file(
@@ -487,7 +508,7 @@ class TestNoReadPathTap:
         """``daemon/persistence.py`` does NOT contain any ``tap_node_return`` calls.
 
         The read path is out of scope for PR2. The tap fires only at
-        the 4 write-path sites (entry path, agent_node return, 2
+        the 5 write-path sites (entry path, agent_node return, 3
         compactions). Touching ``get_instance_messages`` would
         violate Hard Constraint #1.
         """

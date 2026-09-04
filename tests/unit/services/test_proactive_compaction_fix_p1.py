@@ -376,23 +376,67 @@ class TestT3ASTPersistIdentityPin:
     """
 
     def test_seam_mid_turn_false_first_aupdate_omits_as_node(self):
-        """The first ``aupdate_state`` in the mid_turn=False arm omits
-        ``as_node=`` — Variant A, byte-equivalent to the executor's
-        pre-P1 recipe.
+        """The mid_turn=False STAMP-ONLY arm omits ``as_node=`` —
+        Variant A, byte-equivalent to the executor's pre-P1 recipe.
+
+        P1b note: the stamp-only path now has TWO arms — the
+        mid_turn=True arm (which MUST carry ``as_node='agent'``, fixed
+        in P1b: the P1 code embedded ``as_node`` inside the STATE dict)
+        and the mid_turn=False arm (which must NOT carry it). This test
+        pins the mid_turn=False arm; the mid_turn=True stamp arm is
+        pinned by ``test_seam_mid_turn_true_stamp_uses_as_node`` (P1b)
+        and the normal-path arms by the sibling tests below.
         """
         src = inspect.getsource(seam_mod.persist_compaction_result)
-        first_aupdate_idx = src.find("await graph.aupdate_state(")
-        assert first_aupdate_idx >= 0
-        # First call's args. Scan until the closing paren of the call.
-        first_call_end = src.find(")", first_aupdate_idx)
-        first_call = src[first_aupdate_idx:first_call_end]
-        # Slice off the mid_turn=True arm at the boundary.
-        slice_end = first_call.find("\n    if mid_turn:")
-        if slice_end > 0:
-            first_call = first_call[:slice_end]
-        assert "as_node" not in first_call, (
-            f"shared seam mid_turn=False arm must omit as_node "
-            f"(C1 Variant A); got: {first_call!r}"
+        # The FIRST ``if mid_turn:`` is the stamp-only path's split.
+        first_mid_turn_idx = src.find("if mid_turn:")
+        assert first_mid_turn_idx >= 0
+        # Its ``else:`` (the mid_turn=False stamp-only arm).
+        else_idx = src.find("\n            else:", first_mid_turn_idx)
+        assert else_idx >= 0, (
+            "expected an else branch after the stamp-only if mid_turn:"
+        )
+        # The arm ends at the normal-path comment/section — slice to
+        # the standard-path marker.
+        end_marker = src.find("# Standard Variant A / Variant B path.", else_idx)
+        arm = src[else_idx:end_marker if end_marker > 0 else len(src)]
+        aupdate_indices = [
+            i for i in range(len(arm))
+            if arm.startswith("await graph.aupdate_state(", i)
+        ]
+        assert len(aupdate_indices) == 1, (
+            f"mid_turn=False stamp-only arm must have exactly 1 "
+            f"aupdate_state call; got {len(aupdate_indices)}"
+        )
+        call = arm[aupdate_indices[0]:]
+        call = call[: call.find(")") + 1]
+        assert "as_node" not in call, (
+            f"shared seam mid_turn=False stamp-only arm must omit "
+            f"as_node (C1 Variant A); got: {call!r}"
+        )
+
+    def test_seam_mid_turn_true_stamp_uses_as_node(self):
+        """P1b: the mid_turn=True STAMP-ONLY arm passes ``as_node`` as
+        the langgraph KEYWORD argument (not inside the state dict — the
+        P1 bug this fixes; first exercised by the 95% hook)."""
+        src = inspect.getsource(seam_mod.persist_compaction_result)
+        first_mid_turn_idx = src.find("if mid_turn:")
+        assert first_mid_turn_idx >= 0
+        else_idx = src.find("\n            else:", first_mid_turn_idx)
+        mid_section = src[first_mid_turn_idx:else_idx]
+        assert "as_node=\"agent\"" in mid_section, (
+            "mid_turn=True stamp-only arm must pass as_node='agent' as "
+            "the aupdate_state keyword argument"
+        )
+        # And it must be a KEYWORD arg, not a state-dict key: the call
+        # must NOT embed as_node inside the update dict literal.
+        call_idx = mid_section.find("await graph.aupdate_state(")
+        call = mid_section[call_idx: mid_section.find(")", call_idx)]
+        assert "stamp_update" in call and "as_node" not in call.split(
+            "stamp_update"
+        )[0], (
+            "as_node must be passed as a keyword after the update dict, "
+            "not embedded in the state dict"
         )
 
     def test_seam_emits_two_ordered_writes_messages_then_compacted_at(self):

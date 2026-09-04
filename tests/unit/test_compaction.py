@@ -4105,20 +4105,32 @@ class TestSentinelAcrossPersistSites:
         # mid_turn=False variant for the executor). The mid_turn=True
         # branch is pinned by the T2-ext canary in
         # test_compact_executor_revive_brick_e2e.py.
-        # Locate the FIRST aupdate_state in the mid_turn=False arm.
-        # Strategy: find the first ``await graph.aupdate_state(`` then
-        # verify the kwargs do NOT carry as_node (the conditional is
-        # if mid_turn: ... else: await graph.aupdate_state(config,
-        # {"messages": replacement}) so the first call without
-        # as_node is the executor variant).
-        first_aupdate_idx = src.find("await graph.aupdate_state(")
-        assert first_aupdate_idx >= 0
-        first_call_end = src.find(")", first_aupdate_idx)
-        first_call = src[first_aupdate_idx:first_call_end]
+        # P1b: the seam's stamp-only path gained a mid_turn=True arm
+        # (the 95% hook consumer; its ``as_node='agent'`` keyword fix
+        # is the P1b latent-bug repair). Locate the mid_turn=False
+        # STAMP-ONLY arm via the FIRST ``if mid_turn:``'s else branch
+        # and assert THAT call omits as_node — the executor variant.
+        first_mid_turn_idx = src.find("if mid_turn:")
+        assert first_mid_turn_idx >= 0
+        else_idx = src.find("\n            else:", first_mid_turn_idx)
+        assert else_idx >= 0
+        end_marker = src.find(
+            "# Standard Variant A / Variant B path.", else_idx
+        )
+        arm = src[else_idx:end_marker if end_marker > 0 else len(src)]
+        aupdate_indices = [
+            i for i in range(len(arm))
+            if arm.startswith("await graph.aupdate_state(", i)
+        ]
+        assert len(aupdate_indices) == 1, (
+            f"mid_turn=False stamp-only arm must have exactly 1 "
+            f"aupdate_state call; got {len(aupdate_indices)}"
+        )
+        first_call = arm[aupdate_indices[0]:]
+        first_call = first_call[: first_call.find(")") + 1]
         # The shared seam supports BOTH recipes; this assertion
-        # checks that the FIRST ``aupdate_state`` call (in the
-        # mid_turn=False arm) omits ``as_node=``.
-        assert "as_node" not in first_call.split(",\n        if mid_turn")[0], (
+        # checks that the mid_turn=False arm call omits ``as_node=``.
+        assert "as_node" not in first_call, (
             f"shared seam mid_turn=False arm must omit as_node "
             f"(C1 Variant A); got: {first_call!r}"
         )

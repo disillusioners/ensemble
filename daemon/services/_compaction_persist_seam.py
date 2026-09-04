@@ -11,7 +11,8 @@ as parameters:
 * ``mid_turn`` — ``False`` (quiescent, out-of-frame; executor + proactive
   post-§3.3 retirement) emits Variant A (TWO ``aupdate_state`` calls
   WITHOUT ``as_node``); ``True`` (mid-superstep, in-frame; the CLE
-  handler at ``daemon/graph.py:3606-3608`` — NOT consumed in P1) emits
+  handler persist recipe at ``daemon/graph.py:3606-3608`` and — since
+  P1b — the 95% pre-call hook ``_maybe_precall_compact_95``) emits
   Variant B (``as_node='agent'``).
 
 * ``abort_policy`` — ``"raise"`` re-raises :class:`CompactionAborted`
@@ -72,8 +73,18 @@ async def persist_compaction_result(
     result: CompactionResult,
     mid_turn: bool = False,
     abort_policy: AbortPolicy = "raise",
-) -> None:
+    graph: Any = None,
+) -> bool:
     """Persist a :class:`CompactionResult` to the LangGraph checkpoint.
+
+    Returns:
+        ``True`` when a checkpoint write happened (full persist OR the
+        stamp-only anti-refire write); ``False`` when the pre-write
+        guard refused the write under ``abort_policy="fail_open"`` and
+        NOTHING was written. Callers that act on the persisted messages
+        (P1b hook: tap + rebuild) MUST check this — a ``False`` means
+        the engine's result never reached the checkpoint. The executor
+        path never sees ``False`` (it runs ``abort_policy="raise"``).
 
     Args:
         manager: The :class:`daemon.manager.InstanceManager` facade (the
@@ -89,10 +100,21 @@ async def persist_compaction_result(
             WITHOUT ``as_node`` — quiescent/out-of-frame); ``True`` →
             Variant B (TWO ``aupdate_state`` calls WITH
             ``as_node='agent'`` — mid-superstep/in-frame; consumed by
-            the future P1b 95% hook, NOT exercised in P1).
+            the CLE handler persist recipe and, since P1b, the 95%
+            pre-call hook).
         abort_policy: ``"raise"`` re-raises :class:`CompactionAborted`
             (executor path); ``"fail_open"`` swallows and logs at
             WARNING (proactive path).
+        graph: Optional PRE-RESOLVED compiled graph. P1b: the 95%
+            pre-call hook (``daemon/graph.py``) already holds the graph
+            via its late-bound ``graph_ref`` closure and has NO manager
+            reference — it passes ``manager=None`` plus the graph here,
+            avoiding a redundant ``manager.get_instance`` round-trip.
+            When ``None`` (the default, used by the executor + proactive
+            callers) the seam resolves the graph via
+            ``manager.get_instance`` exactly as before. When BOTH
+            ``manager`` and ``graph`` are ``None`` a ``ValueError``
+            raises (caller contract violation).
 
     Raises:
         CompactionAborted: When the pre-write guard refuses the write
@@ -104,7 +126,13 @@ async def persist_compaction_result(
         twice (Variant A / Variant B). Order-pinned — the messages
         call ALWAYS precedes the compacted_at call.
     """
-    graph = await manager.get_instance(instance_id)
+    if graph is None:
+        if manager is None:
+            raise ValueError(
+                "persist_compaction_result requires either `manager` "
+                "(to resolve the graph) or a pre-resolved `graph`"
+            )
+        graph = await manager.get_instance(instance_id)
     config = {"configurable": {"thread_id": instance_id}}
 
     # Anti-refire stamp-only path: the engine has nothing to write into
@@ -115,10 +143,19 @@ async def persist_compaction_result(
     # recommendation §3.5 specifically calls out.
     if not result.replacement_messages:
         if result.compacted_at:
-            kwargs: dict[str, Any] = {"compacted_at": result.compacted_at}
+            stamp_update: dict[str, Any] = {"compacted_at": result.compacted_at}
             if mid_turn:
-                kwargs["as_node"] = "agent"
-            await graph.aupdate_state(config, kwargs)
+                # P1b fix (latent P1 bug, first mid_turn=True stamp-only
+                # consumer): ``as_node`` MUST be the langgraph KEYWORD
+                # argument — the P1 code embedded it in the STATE dict
+                # (``aupdate_state(config, {..., "as_node": "agent"})``),
+                # which on a real graph writes a bogus ``as_node``
+                # channel key instead of targeting the agent node.
+                await graph.aupdate_state(
+                    config, stamp_update, as_node="agent"
+                )
+            else:
+                await graph.aupdate_state(config, stamp_update)
             logger.info(
                 "[Compaction seam] stamp-only anti-refire for "
                 "instance=%s compacted_at=%s (mid_turn=%s)",
@@ -126,7 +163,9 @@ async def persist_compaction_result(
                 result.compacted_at,
                 mid_turn,
             )
-        return
+            return True
+        # No replacement AND no stamp → nothing to write.
+        return False
 
     # Standard Variant A / Variant B path.
     pre_state = await graph.aget_state(config)
@@ -181,7 +220,7 @@ async def persist_compaction_result(
             "instance=%s: %s — failing open, no checkpoint write",
             instance_id, abort_exc,
         )
-        return
+        return False
 
     # Variant A (mid_turn=False) — quiescent / out-of-frame; NO
     # ``as_node`` so the next pointer is not touched. Pinned by
@@ -213,3 +252,4 @@ async def persist_compaction_result(
                 config,
                 {"compacted_at": result.compacted_at},
             )
+    return True
