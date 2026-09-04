@@ -121,7 +121,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from langchain_core.messages import BaseMessage, RemoveMessage
+from langchain_core.messages import BaseMessage  # noqa: F401  (preserved for downstream type re-export; the persist seam moved into _compaction_persist_seam)
 
 from ..compaction import (
     CompactionContext,
@@ -1541,6 +1541,15 @@ async def _persist_compaction_result(
 ) -> None:
     """Persist the engine result via the executor-safe recipe (C1).
 
+    Thin wrapper around the shared seam
+    (:func:`daemon.services._compaction_persist_seam.persist_compaction_result`)
+    — Phase 1 (proactive-compaction-fix) lifted the verbatim-duplicated
+    B1+B2 ``compacted_ids`` derivation block + sentinel recipe into
+    the shared seam so the executor and the proactive trigger consume
+    ONE implementation. The executor's call site is unchanged in
+    shape — the wrapper preserves the historical signature for
+    callers + tests.
+
     D3: TWO ``aupdate_state`` calls in this exact order, nothing
     between them — direct-list CONCATENATES under
     ``add_messages``, so the messages call carries
@@ -1548,27 +1557,29 @@ async def _persist_compaction_result(
     second call carries ``compacted_at`` (D12 declared schema
     field at graph.py:2433-2438).
 
-    C1 BINDING — DIFFERENT FROM PROACTIVE PATH:
+    C1 BINDING — DIFFERENT FROM MID-SUPERSTEP PERSIST:
 
-    * The proactive path (``instance_messaging.py`` ~:1190-1202)
-      uses ``as_node="agent"`` because it persists INSIDE the
-      graph-task frame, where the next pointer is already wired.
-      That path is BYTE-EQUIVALENT per the C1 binding.
-    * The executor's path persists OUTSIDE the graph-task frame —
-      the instance may be quiescent (next=() on a post-turn IDLE
+    * This seam variant (``mid_turn=False``) uses NO ``as_node`` —
+      the executor persists OUTSIDE the graph-task frame, where the
+      instance may be quiescent (``next=()`` on a post-turn IDLE
       instance). Calling ``aupdate_state(as_node="agent")`` on a
-      terminal / quiescent pointer can interact badly with
+      quiescent pointer can interact badly with
       ``interrupt_before=['agent']`` configurations (the documented
       brick collapse in
-      ``test_compact_executor_revive_brick_e2e.py`` TestBrickCollapseOnRealGraph).
+      ``test_compact_executor_revive_brick_e2e.py``
+      ``TestBrickCollapseOnRealGraph``).
 
       Empirically determined (real-graph exploration, 2026-08-31):
       for a NON-terminal ``as_node="agent"`` persistence, a
       subsequent ``astream(graph_input)`` runs the agent normally.
       But the conservative executor recipe OMITS ``as_node`` — LangGraph
-      interprets the call as an external write (the same shape as the
-      proactive path's post-brick window) so the next pointer is not
+      interprets the call as an external write so the next pointer is not
       touched and the brick interaction is impossible.
+
+    * The CLE mid-superstep site (``daemon/graph.py:3606-3608``)
+      calls the seam with ``mid_turn=True`` so the in-flight task
+      continues to the next node — DIFFERENT frame, DIFFERENT recipe
+      variant. The seam carries both via the parameter.
 
     The canary test
     ``test_compact_executor_revive_brick_e2e.py``
@@ -1578,106 +1589,14 @@ async def _persist_compaction_result(
     genuinely quiescent checkpoint; (b) a subsequent
     ``astream(graph_input)`` runs the agent.
     """
-    graph = await manager.get_instance(instance_id)
-    config = {"configurable": {"thread_id": instance_id}}
-
-    # Architect §5 — W1 fix: read the pre-compaction snapshot, then
-    # run the seam helper that emits the ``REMOVE_ALL_MESSAGES``
-    # sentinel recipe. The sentinel MUST be element 0; anything
-    # before it is discarded. NO per-id RemoveMessages are sent
-    # (eliminates the ValueError-on-absent-id class entirely).
-    pre_state = await graph.aget_state(config)
-    pre_messages: list[BaseMessage] = list(
-        (pre_state.values or {}).get("messages", []) or []
+    from ._compaction_persist_seam import persist_compaction_result as _seam
+    await _seam(
+        manager,
+        instance_id=instance_id,
+        result=result,
+        mid_turn=False,
+        abort_policy="raise",
     )
-
-    from daemon.compaction import (
-        build_sentinel_replacement,
-        CompactionAborted,
-    )
-    # §5 / B1 + B2 fix (2026-09-01) — see the docstring on
-    # :func:`build_sentinel_replacement` for the contract.
-    #
-    # The engine's ``CompactionResult.compacted_ids`` is the
-    # AUTHORITATIVE "intentionally removed" set. The site
-    # derives a fallback ONLY when the engine did not stamp it
-    # (legacy test fixtures that hand-build a result).
-    #
-    # The site-derived fallback is ``pre_ids − new_replacement_ids``
-    # where ``new_replacement_ids`` is the set of ids on
-    # non-RemoveMessage replacement messages (the "keep" set).
-    # RemoveMessage targets are declarations of loss, NOT
-    # "kept" ids — they are correctly excluded from the keep
-    # set so the derived compacted set captures the engine's
-    # intent (the engine is removing every snapshot id that
-    # is not in the keep set). This formulation is sound for
-    # ALL paths including the emergency path (where the
-    # engine populates RemoveMessages with the same ids it
-    # declares as compacted_ids).
-    pre_ids = {
-        getattr(m, "id", None)
-        for m in pre_messages
-    }
-    pre_ids.discard(None)
-    new_replacement_ids = {
-        getattr(m, "id", None)
-        for m in result.replacement_messages
-        if not isinstance(m, RemoveMessage)
-    }
-    new_replacement_ids.discard(None)
-    site_compacted_ids: set[str] = pre_ids - new_replacement_ids
-    engine_compacted_ids = getattr(result, "compacted_ids", None)
-    if engine_compacted_ids is not None:
-        # Engine is authoritative; assert disjointness so a
-        # mismatch surfaces loudly here, not as a silent loss
-        # in the checkpoint.
-        assert set(engine_compacted_ids) <= site_compacted_ids, (
-            "engine populated compacted_ids that are NOT a subset "
-            "of the site-derived set — engine and site disagree on "
-            "the removed span; refusing the write"
-        )
-        compacted_ids: set[str] = set(engine_compacted_ids)
-    else:
-        compacted_ids = site_compacted_ids
-    try:
-        replacement: list[BaseMessage] = build_sentinel_replacement(
-            result, pre_messages, compacted_ids=compacted_ids
-        )
-    except CompactionAborted as abort_exc:
-        # W1 mitigation: pre-write guard refused the write. The
-        # checkpoint is untouched, the executor surfaces a non-fatal
-        # warning, and the next attempt retries from a clean state.
-        # We DO raise — the executor surfaces the abort so the
-        # calling command-state path can fail-open at the higher
-        # layer; the checkpoint is untouched.
-        import logging
-        logging.getLogger(__name__).warning(
-            "compaction pre-write guard refused the write for "
-            "instance=%s: %s — failing open, no checkpoint write",
-            instance_id, abort_exc,
-        )
-        raise
-
-    # First call: messages (REMOVE_ALL_MESSAGES sentinel + injected +
-    # doc + tail). The sentinel forces the entire new channel value
-    # after it (langgraph 1.0.9 ``add_messages`` semantics — the
-    # ONLY order-control path).
-    # C1: NO ``as_node`` — the executor persists outside the graph-task
-    # frame; the brick-interaction window is closed by the missing
-    # ``as_node`` argument (LangGraph treats this as an external write).
-    await graph.aupdate_state(
-        config,
-        {"messages": replacement},
-    )
-
-    # Second call: compacted_at stamp (D12). Skipped if the engine
-    # didn't stamp one (shouldn't happen — the engine always stamps
-    # the timestamp).
-    if result.compacted_at:
-        await graph.aupdate_state(
-            config,
-            {"compacted_at": result.compacted_at},
-        )
 
 
 # ─────────────────────────────────────────────────────────────────────────

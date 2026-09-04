@@ -1164,38 +1164,97 @@ class InstanceMessagingService:
         graph: "CompiledStateGraph",
         config: dict[str, Any],
     ) -> None:
-        """Conditionally compact instance context if threshold is exceeded."""
+        """Conditionally compact instance context if threshold is exceeded.
+
+        Phase 1 (proactive-compaction-fix): unified with ``/compact``
+        at the lower layer (status gate + shared Variant-A persist
+        seam). The function flow is now:
+
+        1. **Kill-switch** — ``compaction.proactive_enabled`` (env
+           ``ENSEMBLE_PROACTIVE_COMPACTION``, default ON). OFF =
+           byte-identical behavior to the pre-Phase-1 path: skip
+           the whole gate, return.
+        2. **STATUS gate** — skip at INFO if instance status ∈
+           ``COMPACT_REJECT_STATUSES`` (terminated/error/failed),
+           imported from :mod:`daemon.services.command_dispatcher`.
+           ONE frozenset, THREE importers (T6 anti-drift). The
+           canonical ``TERMINAL_INSTANCE_STATUSES`` stays untouched
+           (sibling-frozenset convention).
+        3. **SHAPE gate (inverted polarity)** — skip at INFO if the
+           checkpoint is NOT quiescent (``state.next != ()``). The
+           pre-dispatch checkpoint is quiescent-shaped by
+           construction; at pre-dispatch the quiescent shape is the
+           REQUIRED precondition for compaction, NOT a rejection.
+           The OLD code skipped on the inverted polarity — every
+           quiescent checkpoint was rejected, so the gate never
+           fired. Pinning the inversion at the call site.
+        4. **Engine invocation** — ``compactor.compact_state(context,
+           force=False)``; proactive respects the dedup + recency
+           floors, unlike the command's ``force=True``. Anti-refire
+           stamp-only results (empty ``replacement_messages``) flow
+           through the shared seam and persist ONLY ``compacted_at``.
+        5. **Persist via shared seam** —
+           :func:`daemon.services._compaction_persist_seam.persist_compaction_result`
+           with ``mid_turn=False`` (Variant A — two
+           ``aupdate_state`` calls WITHOUT ``as_node``) and
+           ``abort_policy="fail_open"`` (proactive never raises).
+        6. **Message tap** — the proactive-only
+           ``MessageTapSlot`` (``SOURCE_COMPACTION_MESSAGING``) fires
+           AFTER the seam returns so the tap coverage is complete
+           across both entry points (messaging + reactive).
+        """
+        # 0. Kill-switch — flag default ON; OFF = byte-identical pre-
+        # Phase-1 (skip the whole gate, return silently).
+        if not getattr(self._config.compaction, "proactive_enabled", True):
+            return
+
         if self._compactor is None:
             return
-        
+
+        # 0b. STATUS gate — share the canonical frozenset with
+        # ``/compact`` so the two gates can never drift apart. The
+        # proactive site reads the live status (best-effort, never
+        # raises — a transient DB hiccup falls through to the
+        # shape gate below).
+        try:
+            instance = await asyncio.to_thread(
+                self._manager._instance_repository.get, instance_id
+            )
+        except Exception as e:
+            logger.debug(
+                f"[Compaction] instance status lookup failed for "
+                f"{instance_id[:8]}...: {e} — falling through to "
+                f"shape gate"
+            )
+            instance = None
+        if instance is not None:
+            instance_status = (
+                getattr(instance, "status", None) or ""
+            ).strip().lower()
+            from .command_dispatcher import COMPACT_REJECT_STATUSES
+            if instance_status in COMPACT_REJECT_STATUSES:
+                logger.info(
+                    "[Compaction] skipping proactive on terminal-"
+                    "status instance=%s (status=%s)",
+                    instance_id[:8], instance_status,
+                )
+                return
+
         try:
             # Get current state
             state = await graph.aget_state(config)
             if not state:
                 return
 
-            # ── Terminal-checkpoint guard ───────────────────────────────
-            # Skip compaction entirely when the checkpoint is terminal.
-            # On a finished graph, calling ``aupdate_state(as_node="agent")``
-            # below would clear the checkpoint's ``next=()``, causing the
-            # subsequent ``astream(graph_input)`` to return instantly
-            # without running the agent. On reuse of a completed instance
-            # this collapses the COMPLETED→RUNNING→COMPLETED cycle to
-            # <100ms so the frontend never observes RUNNING.
-            #
-            # Compaction is an optimization — skipping it here is safe:
-            # the new message is passed as ``graph_input`` to ``astream``
-            # and the agent runs against the full (uncompacted) history
-            # for this turn. Active (non-terminal) turns compact normally.
-            #
-            # Phase 1 / WS-2.4 (architect §5): the helper lives in the
-            # shared ``_checkpoint_utils`` module so this site AND the
-            # ``/compact`` executor (compact_executor.py) agree on what
-            # "terminal" means — anti-drift (see source-level grep test
-            # ``test_terminal_helper_used_by_two_sites``).
-            if _is_terminal_checkpoint(state):
-                logger.debug(
-                    f"[Compaction] Skipping on terminal checkpoint for {instance_id[:8]}..."
+            # 1. SHAPE gate (inverted polarity) — quiescent
+            # checkpoint is the required precondition. The OLD
+            # polarity skipped on the quiescent shape and
+            # therefore never fired (L1 root cause).
+            if not _is_terminal_checkpoint(state):
+                logger.info(
+                    "[Compaction] skipping proactive on non-quiescent "
+                    "checkpoint for instance=%s (next=%s)",
+                    instance_id[:8], getattr(state, "next", None),
                 )
                 return
 
@@ -1236,107 +1295,76 @@ class InstanceMessagingService:
             
             # Compact state
             result = await self._compactor.compact_state(context)
-            
-            if result is None or result.replacement_messages is None:
+
+            if result is None:
                 return
-            
+
             messages_before = len(messages)
             messages_after = len(result.replacement_messages)
             tokens_before = result.tokens_before
             tokens_saved = result.tokens_saved
-            
-            # Architect §5 — W1 fix: read the pre-compaction
-            # snapshot, then run the seam helper that emits the
-            # ``REMOVE_ALL_MESSAGES`` sentinel recipe. The sentinel
-            # MUST be element 0; anything before it is discarded.
-            # NO per-id RemoveMessages are sent (eliminates the
-            # ValueError-on-absent-id class entirely).
-            pre_state = await graph.aget_state(config)
-            pre_messages: list[BaseMessage] = list(
-                (pre_state.values or {}).get("messages", []) or []
-            )
-            from daemon.compaction import (
-                build_sentinel_replacement,
-                CompactionAborted,
-            )
-            # B1 + B2 fix (2026-09-01) — engine's compacted_ids
-            # is authoritative; site derives from
-            # ``pre_ids − new_replacement_ids`` (non-RemoveMessage
-            # keep set; RemoveMessage targets are NOT "kept").
-            # See compact_executor.py:1597 for the full rationale.
-            pre_ids = {
-                getattr(m, "id", None)
-                for m in pre_messages
-            }
-            pre_ids.discard(None)
-            new_replacement_ids = {
-                getattr(m, "id", None)
-                for m in result.replacement_messages
-                if not isinstance(m, RemoveMessage)
-            }
-            new_replacement_ids.discard(None)
-            site_compacted_ids: set[str] = pre_ids - new_replacement_ids
-            engine_compacted_ids = getattr(result, "compacted_ids", None)
-            if engine_compacted_ids is not None:
-                assert set(engine_compacted_ids) <= site_compacted_ids, (
-                    "engine populated compacted_ids that are NOT a "
-                    "subset of the site-derived set — engine and "
-                    "site disagree on the removed span"
-                )
-                compacted_ids: set[str] = set(engine_compacted_ids)
-            else:
-                compacted_ids = site_compacted_ids
+
+            # Observability — rate-limited WARN at ≥90% of threshold
+            # (proactive-only) when the engine stamped a real
+            # compaction (not an anti-refire no-op). The injected-
+            # dominate / min_messages skip paths log their own INFO
+            # from inside the engine; the proactive site does not
+            # double-log.
             try:
-                replacement_messages = build_sentinel_replacement(
-                    result, pre_messages, compacted_ids=compacted_ids
+                context_window_for_warn = self._compactor._trigger_window(context)
+                threshold_for_warn = int(
+                    context_window_for_warn * context.config.threshold
                 )
-            except CompactionAborted as abort_exc:
-                # W1 mitigation: pre-write guard refused the write.
-                # The checkpoint is untouched, the executor surfaces
-                # a non-fatal warning, and the next attempt retries
-                # from a clean state.
-                import logging
-                logging.getLogger(__name__).warning(
-                    "compaction pre-write guard refused the write "
-                    "for instance=%s: %s — failing open, no "
-                    "checkpoint write",
-                    instance_id, abort_exc,
-                )
-                return
+                if (
+                    threshold_for_warn > 0
+                    and result.replacement_messages
+                    and tokens_before >= 0.90 * threshold_for_warn
+                ):
+                    logger.warning(
+                        "[Compaction] proactive gate fired near "
+                        "ceiling: tokens=%d >= 90%% of threshold=%d "
+                        "for instance=%s (compaction_type=%s)",
+                        tokens_before,
+                        threshold_for_warn,
+                        instance_id[:8],
+                        result.compaction_type,
+                    )
+            except Exception:  # pragma: no cover — defensive
+                pass
 
-            # Update graph state with compacted messages
-            await graph.aupdate_state(
-                config,
-                {'messages': replacement_messages},
-                as_node='agent'
+            # Persist via the shared seam (Phase 1 unification —
+            # executor + proactive consume ONE implementation).
+            # mid_turn=False (Variant A — no as_node), abort_policy=
+            # "fail_open" (proactive never raises — the OLD inline
+            # behavior at lines 1299-1306 / 1355-1363 stays).
+            from ._compaction_persist_seam import (
+                persist_compaction_result as _persist_seam,
             )
-
-            # Update compaction timestamp if available
-            if result.compacted_at:
-                await graph.aupdate_state(
-                    config,
-                    {'compacted_at': result.compacted_at},
-                    as_node='agent'
-                )
+            await _persist_seam(
+                self._manager,
+                instance_id=instance_id,
+                result=result,
+                mid_turn=False,
+                abort_policy="fail_open",
+            )
 
             # C2 (Phase 1 — langgraph-checkpoint-perf): fire the
             # ``compaction_aupdate_messaging`` message_metadata tap
             # on the compaction's ``replacement_messages`` after the
-            # ``aupdate_state`` writes resolve. Idempotent RE-TAP
-            # under ``ON CONFLICT DO NOTHING`` (decisions.md D3) —
-            # any message whose id was already recorded from a
-            # previous turn / tap fires a constraint-level no-op,
-            # preserving first-appearance semantics (decisions.md D17,
-            # ``test_message_metadata_revive_stability``). The slot's
-            # ``try/except`` makes a failed upsert non-load-bearing
-            # (Critical 4). Sibling to
-            # ``compaction_aupdate_reactive`` at ``daemon/graph.py``
-            # (which fires from the in-graph reactive-compaction
-            # path); this one fires from the messaging-side
-            # pre-flight ``_maybe_compact_context`` path so the tap
-            # coverage is complete across BOTH compaction entry
-            # points.
-            if self._manager.message_metadata_repo is not None:
+            # seam's ``aupdate_state`` writes resolve. The tap is
+            # proactive-ONLY (the reactive in-graph site has its own
+            # tap with ``SOURCE_COMPACTION_REACTIVE``); it stays at
+            # this call site, NOT inside the shared seam (the seam
+            # is generic across executor + proactive). Idempotent
+            # RE-TAP under ``ON CONFLICT DO NOTHING`` (decisions.md D3).
+            # Skip the tap when the seam took the stamp-only
+            # anti-refire path (no replacement_messages) — the tap
+            # is keyed on message ids and a no-op compaction has no
+            # new ids to record.
+            if (
+                self._manager.message_metadata_repo is not None
+                and result.replacement_messages
+            ):
                 _compaction_tap = MessageTapSlot(
                     self._manager.message_metadata_repo,
                     SOURCE_COMPACTION_MESSAGING,
@@ -1346,21 +1374,26 @@ class InstanceMessagingService:
                     instance_id,
                 )
 
-            # Log compaction result
-            log_parts = [
-                f"[Compaction] instance={instance_id[:8]}...",
-                f"compaction_type={result.compaction_type}",
-                f"messages_before={messages_before}",
-                f"messages_after={messages_after}",
-                f"tokens_before={tokens_before}",
-                f"tokens_after={result.tokens_after}",
-                f"tokens_saved={tokens_saved}",
-            ]
-            if result.summarization_error:
-                log_parts.append(f"WARNING: summarization_error={result.summarization_error}")
-            
-            logger.info(" ".join(log_parts))
-            
+            # Log compaction result (only when there was an actual
+            # compaction — anti-refire no-ops log at INFO inside the
+            # engine).
+            if result.replacement_messages:
+                log_parts = [
+                    f"[Compaction] instance={instance_id[:8]}...",
+                    f"compaction_type={result.compaction_type}",
+                    f"messages_before={messages_before}",
+                    f"messages_after={messages_after}",
+                    f"tokens_before={tokens_before}",
+                    f"tokens_after={result.tokens_after}",
+                    f"tokens_saved={tokens_saved}",
+                ]
+                if result.summarization_error:
+                    log_parts.append(
+                        f"WARNING: summarization_error={result.summarization_error}"
+                    )
+
+                logger.info(" ".join(log_parts))
+
         except Exception as e:
             logger.warning(f"[Compaction] Failed to compact context for {instance_id[:8]}...: {e}")
 

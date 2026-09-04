@@ -1,0 +1,215 @@
+"""Shared compaction persist seam.
+
+Phase 1 (proactive-compaction-fix): the executor and the proactive
+trigger now share ONE persist seam so the verbatim-duplicated B1+B2
+``compacted_ids`` derivation block
+(``instance_messaging.py:1283-1307`` ≡ ``compact_executor.py:1614-1641``)
+collapses to a single site, and both callers see identical
+``aupdate_state`` semantics. The seam carries the verified asymmetries
+as parameters:
+
+* ``mid_turn`` — ``False`` (quiescent, out-of-frame; executor + proactive
+  post-§3.3 retirement) emits Variant A (TWO ``aupdate_state`` calls
+  WITHOUT ``as_node``); ``True`` (mid-superstep, in-frame; the CLE
+  handler at ``daemon/graph.py:3606-3608`` — NOT consumed in P1) emits
+  Variant B (``as_node='agent'``).
+
+* ``abort_policy`` — ``"raise"`` re-raises :class:`CompactionAborted`
+  for the executor (which surfaces the rejection to the command-state
+  path); ``"fail_open"`` swallows the abort and logs a WARNING for
+  the proactive site (current behavior
+  ``instance_messaging.py:1299-1306``).
+
+* Anti-refire stamp-only path: when ``result.replacement_messages`` is
+  empty (``engine stamped ``compacted_at`` but had no messages to
+  write — anti-refire no-op paths), the seam writes ONLY the
+  ``compacted_at`` stamp and does NOT touch messages. This is what
+  engages the 60s dedup (``daemon/compaction.py:1771-1774``) on
+  skip paths that would otherwise re-fire every dispatch.
+
+The compaction message tap (``MessageTapSlot`` /
+``SOURCE_COMPACTION_MESSAGING``, ``instance_messaging.py:1330-1345``)
+exists ONLY on the proactive path — it is NOT invoked from this seam.
+The proactive caller fires the tap after the seam returns so the seam
+stays generic across executor + proactive.
+
+The seam lives in ``daemon/services/`` rather than next to the engine
+in ``daemon/compaction.py`` because the engine must stay free of
+checkpoint-state semantics (per the architecture boundary enforced by
+:mod:`daemon.services._checkpoint_utils` — the engine never imports
+that helper). Persist is a checkpoint concern, not an engine concern.
+
+Architecture reference:
+``daemon/compaction.py:1771-1774`` (60s dedup),
+``daemon/compaction.py:1780-1793`` (all-injected skip),
+``daemon/compaction.py:1798-1804`` (min-messages skip),
+``daemon/compaction.py:1838-1849`` (selection budget),
+``daemon/compaction.py:1858`` (timestamp anchor),
+``daemon/graph.py:3606-3608`` (CLE mid-superstep persist).
+"""
+from __future__ import annotations
+
+import logging
+from typing import Any, Literal
+
+from ..compaction import (
+    CompactionAborted,
+    CompactionResult,
+    build_sentinel_replacement,
+)
+from langchain_core.messages import BaseMessage, RemoveMessage
+
+logger = logging.getLogger(__name__)
+
+
+AbortPolicy = Literal["raise", "fail_open"]
+
+
+async def persist_compaction_result(
+    manager: Any,
+    *,
+    instance_id: str,
+    result: CompactionResult,
+    mid_turn: bool = False,
+    abort_policy: AbortPolicy = "raise",
+) -> None:
+    """Persist a :class:`CompactionResult` to the LangGraph checkpoint.
+
+    Args:
+        manager: The :class:`daemon.manager.InstanceManager` facade (the
+            seam reaches ``manager.get_instance(instance_id)`` for the
+            graph + the per-instance thread config). Both consumers pass
+            the manager; the seam never reaches for the LLM seam or any
+            other daemon state.
+        instance_id: Target instance.
+        result: Engine output. ``result.replacement_messages`` may be
+            empty for the anti-refire stamp-only path (see module
+            docstring); in that case ONLY ``compacted_at`` is written.
+        mid_turn: ``False`` → Variant A (two ``aupdate_state`` calls
+            WITHOUT ``as_node`` — quiescent/out-of-frame); ``True`` →
+            Variant B (TWO ``aupdate_state`` calls WITH
+            ``as_node='agent'`` — mid-superstep/in-frame; consumed by
+            the future P1b 95% hook, NOT exercised in P1).
+        abort_policy: ``"raise"`` re-raises :class:`CompactionAborted`
+            (executor path); ``"fail_open"`` swallows and logs at
+            WARNING (proactive path).
+
+    Raises:
+        CompactionAborted: When the pre-write guard refuses the write
+            AND ``abort_policy == "raise"``. The checkpoint is left
+            untouched on abort (per ``build_sentinel_replacement``).
+
+    Side effects:
+        Calls ``graph.aupdate_state`` either once (stamp-only path) or
+        twice (Variant A / Variant B). Order-pinned — the messages
+        call ALWAYS precedes the compacted_at call.
+    """
+    graph = await manager.get_instance(instance_id)
+    config = {"configurable": {"thread_id": instance_id}}
+
+    # Anti-refire stamp-only path: the engine has nothing to write into
+    # the messages channel but stamped ``compacted_at`` so the 60s
+    # dedup (``daemon/compaction.py:1771-1774``) engages. Without the
+    # stamp, every dispatch would re-evaluate the gate and re-enter
+    # this skip — the per-dispatch refire loop the architecture
+    # recommendation §3.5 specifically calls out.
+    if not result.replacement_messages:
+        if result.compacted_at:
+            kwargs: dict[str, Any] = {"compacted_at": result.compacted_at}
+            if mid_turn:
+                kwargs["as_node"] = "agent"
+            await graph.aupdate_state(config, kwargs)
+            logger.info(
+                "[Compaction seam] stamp-only anti-refire for "
+                "instance=%s compacted_at=%s (mid_turn=%s)",
+                instance_id[:8],
+                result.compacted_at,
+                mid_turn,
+            )
+        return
+
+    # Standard Variant A / Variant B path.
+    pre_state = await graph.aget_state(config)
+    pre_messages: list[BaseMessage] = list(
+        (pre_state.values or {}).get("messages", []) or []
+    )
+
+    # B1 + B2 (2026-09-01) — engine's ``compacted_ids`` is
+    # authoritative; site derives from ``pre_ids − new_replacement_ids``
+    # (non-RemoveMessage keep set; RemoveMessage targets are NOT
+    # "kept"). See ``compact_executor.py:1597`` for the full rationale.
+    pre_ids = {
+        getattr(m, "id", None)
+        for m in pre_messages
+    }
+    pre_ids.discard(None)
+    new_replacement_ids = {
+        getattr(m, "id", None)
+        for m in result.replacement_messages
+        if not isinstance(m, RemoveMessage)
+    }
+    new_replacement_ids.discard(None)
+    site_compacted_ids: set[str] = pre_ids - new_replacement_ids
+    engine_compacted_ids = getattr(result, "compacted_ids", None)
+    if engine_compacted_ids is not None:
+        assert set(engine_compacted_ids) <= site_compacted_ids, (
+            "engine populated compacted_ids that are NOT a subset of "
+            "the site-derived set — engine and site disagree on the "
+            "removed span; refusing the write"
+        )
+        compacted_ids: set[str] = set(engine_compacted_ids)
+    else:
+        compacted_ids = site_compacted_ids
+    try:
+        replacement: list[BaseMessage] = build_sentinel_replacement(
+            result, pre_messages, compacted_ids=compacted_ids
+        )
+    except CompactionAborted as abort_exc:
+        # W1 mitigation: pre-write guard refused the write. The
+        # checkpoint is untouched. abort_policy determines whether the
+        # caller surfaces a hard raise (executor → command-state path)
+        # or fails open at WARNING (proactive → caller no-ops).
+        if abort_policy == "raise":
+            logger.warning(
+                "compaction pre-write guard refused the write for "
+                "instance=%s: %s — failing loud, caller raises",
+                instance_id, abort_exc,
+            )
+            raise
+        logger.warning(
+            "compaction pre-write guard refused the write for "
+            "instance=%s: %s — failing open, no checkpoint write",
+            instance_id, abort_exc,
+        )
+        return
+
+    # Variant A (mid_turn=False) — quiescent / out-of-frame; NO
+    # ``as_node`` so the next pointer is not touched. Pinned by
+    # ``test_compact_executor_revive_brick_e2e.py``. Variant B
+    # (mid_turn=True) — mid-superstep / in-frame; ``as_node='agent'``
+    # so the in-flight task continues to the next node. The
+    # mid-superstep canary lives at
+    # ``tests/unit/services/test_compact_executor_revive_brick_e2e.py``
+    # (T2-ext).
+    if mid_turn:
+        await graph.aupdate_state(
+            config,
+            {"messages": replacement},
+            as_node="agent",
+        )
+        if result.compacted_at:
+            await graph.aupdate_state(
+                config,
+                {"compacted_at": result.compacted_at},
+                as_node="agent",
+            )
+    else:
+        await graph.aupdate_state(
+            config,
+            {"messages": replacement},
+        )
+        if result.compacted_at:
+            await graph.aupdate_state(
+                config,
+                {"compacted_at": result.compacted_at},
+            )

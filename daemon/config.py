@@ -764,6 +764,68 @@ class CompactionConfig(BaseSettings):
     min_messages_before_compaction: int = Field(default=10, description="Minimum number of messages before compaction is considered")
     summarization_chunk_threshold: float = Field(default=0.60, description="Fraction of context window above which summarization uses chunking")
 
+    # ── Proactive-compaction kill-switch (Phase 1 of proactive-compaction-fix) ─
+    # Single-source flag governing the auto-trigger BEFORE each LLM call
+    # (the pre-dispatch proactive gate). P1b will extend this to the
+    # 95% pre-call reactive hook too (per ADDENDUM §A.8 of
+    # `.agents/shared/planning/proactive-compaction-fix/architecture-recommendation.md`)
+    # — same flag, no second kill-switch (avoiding meaningless mixed
+    # states). The CLE trigger stays ungated.
+    #
+    # Widened semantics: the field name says "proactive" but the same
+    # flag will govern the reactive 95% hook in P1b. Name accepted
+    # without churn; semantics documented here so the surface is
+    # honest about its scope.
+    #
+    # Default ON (per ADDENDUM §A.2 — supersedes the main body's §3.7
+    # OFF default). The env name is intentionally NOT
+    # ``COMPACTION_PROACTIVE_ENABLED`` (the section's
+    # ``env_prefix="COMPACTION_"``); the
+    # ``validation_alias`` keeps the documented
+    # ``ENSEMBLE_PROACTIVE_COMPACTION`` env name working without
+    # pydantic layering churn. Setting the env to ``"0"`` /
+    # ``"false"`` / ``"False"`` / ``"no"`` disables the trigger (the
+    # field is parsed through ``_parse_proactive_enabled`` for the
+    # documented permissive semantics).
+    proactive_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "proactive_enabled",
+            "ENSEMBLE_PROACTIVE_COMPACTION",
+        ),
+        description=(
+            "Enable the proactive context-compaction trigger. "
+            "Default ON. Env: ENSEMBLE_PROACTIVE_COMPACTION (0/false "
+            "disables). P1 governs the pre-dispatch gate; P1b will "
+            "extend the same flag to the 95% pre-call reactive hook."
+        ),
+    )
+
+    @field_validator("proactive_enabled", mode="before")
+    @classmethod
+    def _parse_proactive_enabled(cls, value: Any) -> Any:
+        """Permissive bool parser for ``ENSEMBLE_PROACTIVE_COMPACTION``.
+
+        Bare ``KEY=`` lines in ``.env`` reach pydantic as the empty
+        string, which would otherwise disable the trigger (defeating
+        the documented ON default). Empty / whitespace-only values
+        are normalized to ``None`` (pydantic then applies the
+        default). ``"0"`` / ``"false"`` / ``"no"`` (any case) → False;
+        ``"1"`` / ``"true"`` / ``"yes"`` → True; non-empty
+        unrecognized strings pass through (pydantic raises a clear
+        type error so a typo is caught at startup).
+        """
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        if isinstance(value, str):
+            v = value.strip().lower()
+            if v in {"0", "false", "no", "off"}:
+                return False
+            if v in {"1", "true", "yes", "on"}:
+                return True
+            # Anything else is passed through; pydantic raises.
+        return value
+
     # ── Adaptive LLM timeout (Phase 1 / WS-3) ──────────────────────────────────
     # Adaptive formula (per-call): ``min(cap, base + (tokens/100_000)*per_100k)``
     # applied at every ``_call_summarization_llm`` site. Replaces the prior
