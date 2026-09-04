@@ -11,10 +11,12 @@ Two parts:
 
 * **Part 2 (AC-13.3 — read→revive→read):** for a COMPLETED instance,
   pre-revive snapshot via the ``get_instance_messages`` read path,
-  dispatch revive-on-send (send_message to the COMPLETED instance
-  triggers the COMPLETED→RUNNING transition with checkpoint reuse
-  per the cardinal #2 scoping discipline), post-revive snapshot,
-  assert:
+  simulated revive (second ``graph.ainvoke`` on the SAME thread
+  recreates the COMPLETED→RUNNING transition with checkpoint reuse
+  per ``daemon/services/instance_messaging.py`` reuse-revive
+  semantics — the harness drives it directly because invoking the
+  production ``send_message`` path would require a full manager
+  fixture), post-revive snapshot, assert:
     a) snapshots BYTE-IDENTICAL pre/post revive for the shared prefix
     b) new tail message has non-NULL created_at
     c) ``synthetic-system-{iid}`` id is identical both reads
@@ -26,6 +28,17 @@ Per Risk 6: Part 1 uses a deterministic pause injection. If the
 deterministic pause injection proves unreproducible in this
 environment, the gap is documented + a follow-up is proposed. Part 2
 is load-bearing — it MUST pass.
+
+Production-revive coverage note. Part 1 of THIS test exercises the
+real reuse-revive path via ``is_retry=True`` (the production resume
+mechanism); ``tests/integration/test_message_metadata_lifecycle_wiring.py``
+covers the static wiring side (AST-pinning that
+``build_instance_graph`` is called with ``message_tap_slot`` +
+``compaction_tap_slot`` at both spawn and restore call sites — no
+runtime dispatch). The live ``send_message``→COMPLETED→RUNNING drive
+remains a coverage gap relative to the simulated Part 2 path above;
+flagging as a follow-up rather than silently expanding this test's
+scope.
 
 Harness honesty contract: every operation uses a real PG
 disposable DB + a real ``AsyncPostgresSaver`` + the real

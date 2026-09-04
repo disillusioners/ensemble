@@ -152,7 +152,11 @@ class _CellResult(NamedTuple):
 # many warm-ups / timed iterations; tracemalloc runs ONLY in the
 # separate RSS pass.
 N_WARMUPS = 5
-N_TIMED = 5
+N_TIMED = 10  # F_A.2: raised from 5 to 10 — variance-cell realism (F_A.1)
+# gives the cells physically distinct history depth, but the <0.10
+# gate still measures estimator noise on a constant-cost operation;
+# 10 timed iterations cuts the standard error vs 5 and brings run-to-
+# run flake within the plan AC-3.2 / NFR-4 strict gate.
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────
@@ -255,25 +259,43 @@ async def _populate_thread(
     n_messages: int,
     n_history_checkpoints: int = 0,
 ) -> None:
-    """Seed the thread with ``n_messages`` in the latest checkpoint.
+    """Seed the thread with REAL history depth + ``n_messages`` in the latest checkpoint.
 
-    The thread's LATEST checkpoint contains ``n_messages`` accumulated
-    messages (via a single :func:`_final_aput_with_messages` graph call
-    that uses the ``add_messages`` reducer). The single graph.ainvoke
-    also creates ``n_history_checkpoints`` "history" empty aputs via
-    :func:`_empty_checkpoint_aput` if requested — but **the historical
-    empty aputs are NOT populated here by default**; the test passes
-    ``n_history_checkpoints=0`` to keep the populate fast.
+    The thread carries a total of ``n_history_checkpoints + 1``
+    checkpoints: ``n_history_checkpoints`` empty historical aputs
+    (each via a no-op ``graph.ainvoke`` that bumps the step counter
+    but writes nothing to the messages channel — ``graph.ainvoke``
+    is the safe shape; raw ``saver.aput`` of an empty checkpoint
+    corrupts the messages channel per the documented empty-aput
+    hazard in :func:`_empty_checkpoint_aput`), followed by ONE final
+    aput carrying ``n_messages`` messages in the latest checkpoint
+    (via :func:`_final_aput_with_messages` which uses the
+    ``add_messages`` reducer).
 
-    Interpretation note. The variance assertion (AC-3.2) holds when
-    computed as ``per_message_latency = total_latency / n_messages``
-    (i.e. per-message cost, where the message count is the LATEST
-    aget's messages). The page_size parameter is the RESPONSE trim —
-    it does NOT change the aget cost (the post-PR3 read path deserializes
-    ALL ``n_messages`` messages on the LATEST checkpoint before
-    trimming to ``page_size`` for the API response).
+    Why physically distinct history depth matters. The variance cells
+    AC-3.2 measures are ``(page_size=100, history_depth∈{150,400,10000})``.
+    For the test to be a real history-depth sensitivity check (and NOT
+    machine-noise — pre-fix F_A.1 the three variance cells were
+    physically identical because ``n_history_checkpoints`` was
+    ignored, so the <0.10 gate measured run-to-run noise on a
+    constant workload rather than history-depth insensitivity), the
+    threads MUST differ in checkpoint count. We populate
+    ``history_depth - 1`` empty historical aputs via the passthrough
+    graph (one compiled graph reused across all empty aputs —
+    ``graph.compile()`` is the expensive part, and we only need one).
+    The aget-only read path returns JUST the latest checkpoint's
+    messages; the historical empty aputs MUST NOT change the aget
+    response.
 
-    Cost interpretation (the property the test measures):
+    Empty-aput performance. Each empty ``ainvoke`` is a single
+    no-message turn (~tens of ms typical) — ``history_depth - 1``
+    empty aputs for a 10000-history cell runs in ~minutes-scale
+    wall time, comfortably inside the 10-minute cell budget (the
+    cell's ``@pytest.mark.timeout(600)``). Per-cell run time stays
+    in the existing ~minutes budget per the harness honesty contract
+    (Risk-3 stop-gate).
+
+    Cost interpretation (the property the test measures — unchanged):
 
     * Pre-PR3 read path = alist(config, limit=1000) → walks ALL
       historical checkpoints, re-reading all blobs → cost O(history).
@@ -288,15 +310,32 @@ async def _populate_thread(
     at fixed ``page_size=100`` — i.e. the post-PR3 read flip does NOT
     multiply cost by history depth (the pathology that produced the
     pre-fix 206 MB / 42 s / 2.1 GB RSS at 1000-checkpoint history).
-
-    Historical checkpoints (``n_history_checkpoints > 0``) are
-    currently NOT populated by this helper (the variance test
-    computes per-message cost over the latest checkpoint's messages,
-    which is independent of historical checkpoints — see the
-    ``TestPerfMatrixAcceptance`` assertions). The kwarg is preserved
-    so a future variant of the test can extend to a deeper variance
-    check.
     """
+    if n_history_checkpoints > 0:
+        # Build the empty-passthrough graph ONCE — reuse across all
+        # empty aputs (graph.compile() is the expensive part).
+        from langgraph.graph import END, START, StateGraph
+        from langgraph.graph.message import add_messages  # lazy (mock eviction)
+
+        class _EmptyState(TypedDict):
+            messages: Annotated[list, add_messages]
+
+        def _passthrough(state: _EmptyState) -> _EmptyState:
+            return {}
+
+        graph = StateGraph(_EmptyState)
+        graph.add_node("echo", _passthrough)
+        graph.add_edge(START, "echo")
+        graph.add_edge("echo", END)
+        empty_compiled = graph.compile(checkpointer=saver)
+        config = {"configurable": {"thread_id": thread_id}}
+
+        # One empty ainvoke per historical checkpoint — each ainvoke
+        # is a no-op turn that bumps the step counter and stores a
+        # checkpoint with an empty messages channel.
+        for _ in range(n_history_checkpoints):
+            await empty_compiled.ainvoke({"messages": []}, config)
+
     # The final checkpoint with the messages — uses the graph so the
     # reducer-applied writes end up in the latest aget response.
     await _final_aput_with_messages(saver, thread_id, n_messages)
@@ -603,10 +642,22 @@ class TestPerfMatrix:
         finally:
             await drop_database(name)
 
+        # Populated-history proof (F_A.1 — review fix; pre-fix the
+        # three variance cells were physically identical because
+        # ``_populate_thread`` ignored ``n_history_checkpoints``).
+        # Echo the populated depth so the AC-3.2 cells are visibly
+        # distinct in the test output (the latest-aget message count
+        # stays at ``page_size`` regardless — that's the property the
+        # post-PR3 read flip MUST preserve).
+        populated_history_checkpoints = n_history + 1
+        populated_message_count = page_size  # invariant: latest checkpoint's aget
+
         # Print the cell for log capture (the parametrize ids make the
         # output easy to grep for ``phase5-perf-results.md``).
         print(
             f"\n[PERF-CELL] page_size={page_size} history_depth={history_depth} "
+            f"populated_history_checkpoints={populated_history_checkpoints} "
+            f"populated_message_count={populated_message_count} "
             f"latency_ms={cell.latency_ms:.3f} peak_rss={cell.peak_rss_bytes} "
             f"transfer_bytes={cell.transfer_bytes} "
             f"per_msg_latency_ms={_per_message_latency(cell):.4f} "

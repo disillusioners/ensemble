@@ -60,12 +60,18 @@ def armed_alist_mock() -> AsyncMock:
 def armed_alist_fixture(monkeypatch):
     """Patch ``AsyncPostgresSaver.alist`` (and friends) with an armed AsyncMock.
 
-    The fixture patches the ``alist`` attribute on the runtime saver
-    class instances used by the daemon. Because the test uses a real
-    ``AsyncPostgresSaver`` (DSN-pinned disposable PG, per
-    ``tests/helpers/checkpoint_prune_pg.py``), the fixture monkey-patches
-    the instance's ``alist`` method directly — not the class — so other
-    tests sharing the class are unaffected.
+    The fixture patches the ``alist`` attribute on the
+    ``AsyncPostgresSaver`` class (class-level, via
+    ``monkeypatch.setattr(AsyncPostgresSaver, "alist", mock)`` below)
+    so that every saver instance built against the disposable PG fires
+    the armed AssertionError on ``alist`` invocation. This is safe
+    because the fixture is function-scoped (the ``monkeypatch`` fixture
+    tears the patch down at end-of-test) — other tests sharing the
+    class are unaffected across the test boundary. Because the test
+    uses a real ``AsyncPostgresSaver`` (DSN-pinned disposable PG, per
+    ``tests/helpers/checkpoint_prune_pg.py``), the patch must target
+    the class, not the instance, so the runtime-saver's bound method
+    is replaced.
 
     Yields the armed mock so the test can:
     * assert ``armed_alist_fixture.assert_not_called()`` (the live-path

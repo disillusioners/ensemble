@@ -35,6 +35,7 @@ assertion.
 import ast
 import re
 from pathlib import Path
+from typing import Annotated, TypedDict
 from unittest.mock import MagicMock
 
 import pytest
@@ -301,6 +302,3 @@ class TestVacuousLiteralGuard:
 
 
 # ── Type stubs for the typed dict used in the seed helper ────────────────────
-
-
-from typing import Annotated, TypedDict
