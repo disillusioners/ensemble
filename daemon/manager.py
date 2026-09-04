@@ -8618,6 +8618,10 @@ class InstanceManager:
            → ``instance_hierarchy`` → ``instances``).
         4. Sweep ``checkpoints.db`` threads via the
            ``CheckpointerAdapter``.
+        4b. Prune the instances' ``message_metadata`` side-table rows
+            for the full tree snapshot — never-raise, own per-tree
+            try/except, and runs even when the checkpointer sweep is
+            skipped (T5.19).
 
         This is a destructive operator call. Use it from admin/cleanup
         paths only — the DELETE endpoint exposes it via the

@@ -3,8 +3,11 @@ construction kwarg ``message_metadata_repo``.
 
 Binding follow-up from the langgraph-checkpoint-perf-v2 final-gate
 whole-branch review (Finding 🟡3, "Unpinned construction kwarg —
-silent T5.19 revert class"): the SINGLE ``CheckpointCleanupJob(...)``
-construction site lives in ``daemon/manager.py`` inside
+silent T5.19 revert class"; scan scope widened in verify round 2):
+exactly ONE ``CheckpointCleanupJob(...)`` construction site is
+allowed across ALL of ``daemon/**/*.py`` — the scan is daemon-wide
+so a second site in ANY daemon module trips the count contract.
+Today that single site lives in ``daemon/manager.py`` inside
 ``initialize()`` (~line 2300) and wires the T5.19 prune via
 ``message_metadata_repo=self._message_metadata_repo``.
 
@@ -35,7 +38,15 @@ import ast
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-MANAGER_PATH = REPO_ROOT / "daemon" / "manager.py"
+DAEMON_DIR = REPO_ROOT / "daemon"
+
+
+def _iter_daemon_sources() -> list[Path]:
+    """Every Python source under ``daemon/`` — the widened (verify
+    round 2) scan scope: a second ``CheckpointCleanupJob(...)``
+    construction site in ANY daemon module must trip the count
+    contract, not just one planted in manager.py."""
+    return sorted(DAEMON_DIR.rglob("*.py"))
 
 CONSTRUCTOR_NAME = "CheckpointCleanupJob"
 MESSAGE_METADATA_KWARG = "message_metadata_repo"
@@ -117,19 +128,36 @@ class TestCheckpointCleanupJobWiring:
     """The ``initialize()`` construction site wires the T5.19 repo."""
 
     def setup_method(self):
-        self.source = MANAGER_PATH.read_text(encoding="utf-8")
-        self.tree = ast.parse(self.source)
-        self.calls = _find_checkpoint_cleanup_job_calls(self.tree)
+        # (path, tree, calls-in-file) for every daemon source that
+        # constructs CheckpointCleanupJob; ``self.calls`` is the
+        # daemon-wide flattening the count contract runs over, and
+        # ``self.call_sites`` carries ``<relpath>:<line>`` labels for
+        # failure messages.
+        self.sources: list[tuple[Path, ast.Module, list[ast.Call]]] = []
+        self.calls: list[ast.Call] = []
+        self.call_sites: list[str] = []
+        for path in _iter_daemon_sources():
+            tree = ast.parse(
+                path.read_text(encoding="utf-8"), filename=str(path)
+            )
+            calls = _find_checkpoint_cleanup_job_calls(tree)
+            if calls:
+                self.sources.append((path, tree, calls))
+                self.calls.extend(calls)
+                self.call_sites.extend(
+                    f"{path.relative_to(REPO_ROOT)}:{call.lineno}"
+                    for call in calls
+                )
 
     def test_exactly_one_construction_site(self):
         """Exactly ONE ``CheckpointCleanupJob(...)`` construction site
-        exists in ``daemon/manager.py`` — a second site cannot appear
-        silently unwired (the count is part of the contract; adding one
-        means extending this test)."""
+        exists across ALL of ``daemon/**/*.py`` — a second site in any
+        daemon module cannot appear silently unwired (the count is part
+        of the contract; adding one means extending this test)."""
         assert len(self.calls) == 1, (
             f"Expected exactly 1 ``{CONSTRUCTOR_NAME}`` construction "
-            f"site in manager.py; found {len(self.calls)} at lines "
-            f"{[c.lineno for c in self.calls]}. A second construction "
+            f"site across daemon/**/*.py; found {len(self.calls)} at "
+            f"{self.call_sites}. A second construction "
             f"site would not carry the ``{MESSAGE_METADATA_KWARG}`` "
             "wiring by construction — wire it and update this pin "
             "deliberately."
@@ -145,7 +173,9 @@ class TestCheckpointCleanupJobWiring:
     def test_wiring_lives_in_initialize_method(self):
         """The construction site lives inside ``initialize()`` — pins
         the intent (boot-path wiring), not just the count."""
-        info = _enclosing_function_info(self.tree, self.calls)
+        info: dict[int, str] = {}
+        for _path, tree, calls in self.sources:
+            info.update(_enclosing_function_info(tree, calls))
         names = set(info.values())
         assert names == {"initialize"}, (
             f"{CONSTRUCTOR_NAME} construction now lives in {names} — "

@@ -333,7 +333,7 @@ adjudication data, not a gate.
 | Drill "succeeds" per the log line but destructive cycle deletes rows from the WRONG DB | Same | Same — log line is misleading (F-DR1-2); gate on `pg_stat_activity` |
 
 **Pointer.** F-DR1-2 split-brain fence (root-cause):
-`daemon/persistence.py:79-89` vs `daemon/repositories/factory.py:189-198`;
+`daemon/persistence.py:136-151` vs `daemon/repositories/factory.py:189-198`;
 incident 2026-08-28 (Critical Notes row 10, this repo's standing
 ledger); `daemon/persistence.py:199-202` is the misleading-print artifact.
 
