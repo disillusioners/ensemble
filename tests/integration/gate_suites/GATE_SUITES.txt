@@ -165,6 +165,19 @@ tests/unit/persistence/test_get_instance_messages_no_alist.py
 # Frozen-fixture byte-shape contract (2 tests; poison-pill alist on
 # shape run; response byte-identical to pre-C1 6-variant fixture):
 tests/integration/test_get_instance_messages_response_shape_frozen_fixture.py
+# Phase 5 FR-4 armed-absence alist test (9 tests; fixture self-check +
+# AST call-func scan over daemon/**/*.py excluding migrator +
+# live-path exercise on real PG + helper export surface):
+tests/integration/test_armed_absence_alist.py
+# Phase 5 FR-2 observed-count-zero invariant (3 tests; N=10 threads +
+# live read path on real PG + vacuous-literal AST guard):
+tests/integration/test_get_instance_messages_observed_count_zero.py
+#
+# ── Gate concept: Phase 5 FR-3 perf matrix (perf, reported not gated) ──
+# 6-cell perf matrix on real PG (executed cells drawn from
+# page_size × history_depth axes; variance + 2×-baseline + NFR-1..3
+# checks; reported in phase5-perf-results.md):
+tests/performance/test_message_api_cost.py
 #
 # ── Gate concept: message_metadata side table + 4 tap sites (PR2 port) ──
 # AST gate (4-site/4-label/no-ToolNode contract; load-bearing):

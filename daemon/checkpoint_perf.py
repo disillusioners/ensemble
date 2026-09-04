@@ -23,6 +23,12 @@ import os
 import time
 from typing import Any, Awaitable
 
+from daemon.checkpoint_metrics import (
+    checkpoint_list_total,
+    reset_for_tests,
+    saver_op_latency_seconds,
+)
+
 logger = logging.getLogger("daemon.checkpoint_perf")
 
 
@@ -50,24 +56,91 @@ def checkpoint_perf_logs_enabled() -> bool:
     return _logs_enabled()
 
 
-def log_saver_op(op: str, thread_id: str, duration_ms: int, *, deleted: int = 0) -> None:
-    """Single source of truth for ``[CheckpointPerf]`` structured-ish logs."""
+def log_saver_op(
+    op: str,
+    thread_id: str,
+    duration_ms: int,
+    *,
+    bytes_: int = 0,
+    deleted: int = 0,
+) -> None:
+    """Single source of truth for ``[CheckpointPerf]`` structured-ish logs.
+
+    FR-5 AC-5.1 (T5.3): every saver op MUST emit one log line of shape
+    ``op=<name> latency_ms=<int> bytes=<int>``. Gated by
+    ``CHECKPOINT_PERF_LOGS``.
+
+    The full line is::
+
+        [CheckpointPerf] op=<name> thread=<8-char-prefix> latency_ms=<int> \
+            bytes=<int> deleted=<int>
+
+    ``thread=`` and ``deleted=`` are diagnostic extras (kept from the
+    v1 PR1 surface); the contract-required trio is ``op=`` /
+    ``latency_ms=`` / ``bytes=`` — verified by the per-op caplog pin in
+    ``tests/unit/persistence/test_checkpoint_perf_logging.py``.
+
+    Metric side-effect (FR-5 AC-5.2): each call also observes the
+    ``message_api_saver_op_latency_seconds`` histogram (labeled by
+    ``op``). Live-path alist calls (zero post-PR3) would also increment
+    ``message_api_checkpoint_list_total`` via
+    :func:`increment_checkpoint_list_total` — that is a REGRESSION HOOK
+    for if alist ever re-fires on the live path; today the migrator
+    (``daemon/migrations/checkpoint_migrator.py``) is the only caller
+    that should record alist, and it does NOT call this helper.
+
+    NEVER wrap in ``except BaseException:`` (C-14 — CancelledError
+    propagates by design on Python 3.13). The metric observe/inc is
+    itself exception-safe (lock + arithmetic; no I/O), so no try/except
+    is needed at this layer.
+    """
     if not _logs_enabled():
+        # Metric records REGARDLESS of the log gate — operator's SLO
+        # surface is independent of log volume. Suppressing the log
+        # line must not silently starve the histogram.
+        saver_op_latency_seconds.labels(op=op).observe(duration_ms / 1000.0)
         return
     logger.info(
-        f"[CheckpointPerf] op={op} thread={thread_id[:8] if thread_id else '?'} "
-        f"duration_ms={duration_ms} deleted={deleted}"
+        f"[CheckpointPerf] op={op} "
+        f"thread={thread_id[:8] if thread_id else '?'} "
+        f"latency_ms={duration_ms} bytes={bytes_} deleted={deleted}"
     )
+    saver_op_latency_seconds.labels(op=op).observe(duration_ms / 1000.0)
 
 
 async def time_saver_op(op: str, thread_id: str, coro: Awaitable[Any]) -> Any:
-    """Time a saver operation; emits ``[CheckpointPerf]`` and returns the result."""
+    """Time a saver operation; emits ``[CheckpointPerf]`` and returns the result.
+
+    Forwards ``bytes_=0`` and ``deleted=0`` (the existing
+    ``log_saver_op`` defaults) — call sites that have richer info
+    (e.g. ``maintenance.py`` carveouts) call :func:`log_saver_op`
+    directly with the right kwargs.
+    """
     t0 = time.perf_counter()
     try:
         return await coro
     finally:
         elapsed = int((time.perf_counter() - t0) * 1000)
         log_saver_op(op, thread_id, elapsed)
+
+
+def increment_checkpoint_list_total(amount: int = 1) -> int:
+    """Increment the ``message_api_checkpoint_list_total`` counter.
+
+    FR-5 AC-5.2 + FR-2 invariant. Post-PR3 the LIVE path makes ZERO
+    ``saver.alist(…)`` calls, so the counter's expected value is 0 (the
+    counter is a regression hook — if it ever moves off zero, alist
+    fired on a live path; the FR-2 test
+    ``tests/integration/test_get_instance_messages_observed_count_zero.py``
+    pins this). The migrator
+    (``daemon/migrations/checkpoint_migrator.py``) is exempt — it is the
+    ONE sanctioned caller of ``saver.alist(…)`` and does NOT call this
+    function (the migrator's alist is OFFLINE / non-live).
+
+    Returns the new counter value (convenient for the test harness).
+    """
+    checkpoint_list_total.inc(amount)
+    return checkpoint_list_total.get()
 
 
 def log_messages_api(

@@ -31,6 +31,11 @@ from daemon.checkpoint_perf import (
     log_saver_op,
     time_saver_op,
 )
+from daemon.checkpoint_metrics import (
+    checkpoint_list_total,
+    reset_for_tests as reset_metrics_for_tests,
+    saver_op_latency_seconds,
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -39,10 +44,22 @@ from daemon.checkpoint_perf import (
 
 
 class TestLogSaverOp:
-    """The structured ``[CheckpointPerf]`` line carries observed fields only."""
+    """The structured ``[CheckpointPerf]`` line carries observed fields only.
 
-    def test_log_saver_op_logs_duration_ms(self, caplog):
-        """``op=aget thread=<8-char-prefix> duration_ms=N`` is emitted."""
+    FR-5 AC-5.1 (T5.3): the contract format is
+    ``op=<name> latency_ms=<int> bytes=<int>``. ``thread=`` and
+    ``deleted=`` are diagnostic extras (kept from the v1 PR1 surface);
+    the trio above is the load-bearing requirement, verified by these
+    tests AND by the per-op all-four pin in
+    :class:`TestLogSaverOpPerAllFour`.
+    """
+
+    def test_log_saver_op_logs_latency_ms(self, caplog):
+        """``op=aget thread=<8-char-prefix> latency_ms=N bytes=0`` is emitted.
+
+        Verbatim FR-5 AC-5.1 format: ``op=aget``, ``latency_ms=42``,
+        ``bytes=0``. The 8-char ``thread=`` prefix is a diagnostic extra.
+        """
         with caplog.at_level(logging.INFO, logger="daemon.checkpoint_perf"):
             log_saver_op("aget", "thread-abcdef1234567890", 42)
         # The plan mandates the thread_id be sliced to 8 chars.
@@ -51,9 +68,26 @@ class TestLogSaverOp:
             "[CheckpointPerf]" in rec.message
             and "op=aget" in rec.message
             and "thread=thread-a " in rec.message  # 8-char prefix + separator space
-            and "duration_ms=42" in rec.message
+            and "latency_ms=42" in rec.message
+            and "bytes=0" in rec.message
             for rec in caplog.records
         ), f"Missing expected [CheckpointPerf] line in {[r.message for r in caplog.records]}"
+
+    def test_log_saver_op_includes_bytes_field(self, caplog):
+        """``bytes=<int>`` appears on the line — the contract field.
+
+        The bytes field carries the op's payload size where known
+        (e.g. aput's serialized blob); ``0`` is the default when the
+        caller does not have the number.
+        """
+        with caplog.at_level(logging.INFO, logger="daemon.checkpoint_perf"):
+            log_saver_op("aput", "thread-aaaa", 5, bytes_=2048)
+        matching = [r for r in caplog.records if "[CheckpointPerf]" in r.message]
+        assert len(matching) == 1
+        msg = matching[0].message
+        assert "op=aput" in msg
+        assert "latency_ms=5" in msg
+        assert "bytes=2048" in msg
 
     def test_log_saver_op_deleted_default_is_zero(self, caplog):
         """When ``deleted`` is omitted it defaults to 0 in the log line."""
@@ -62,7 +96,7 @@ class TestLogSaverOp:
         assert any("deleted=0" in r.message for r in caplog.records)
 
     def test_log_saver_op_respects_env_suppression(self, caplog, monkeypatch):
-        """``CHECKPOINT_PERF_LOGS=0`` suppresses the emit."""
+        """``CHECKPOINT_PERF_LOGS=0`` suppresses the emit (the log line, NOT the metric)."""
         monkeypatch.setenv("CHECKPOINT_PERF_LOGS", "0")
         with caplog.at_level(logging.INFO, logger="daemon.checkpoint_perf"):
             log_saver_op("aget", "thread-aaaa", 42)
@@ -73,8 +107,8 @@ class TestTimeSaverOp:
     """Async timing wrapper around any awaitable saver op."""
 
     @pytest.mark.asyncio
-    async def test_time_saver_op_logs_duration_ms(self, caplog):
-        """Wrapper emits one [CheckpointPerf] line with the measured duration."""
+    async def test_time_saver_op_logs_latency_ms(self, caplog):
+        """Wrapper emits one [CheckpointPerf] line with the measured latency."""
         async def coro():
             await asyncio.sleep(0.001)
             return "result"
@@ -88,11 +122,12 @@ class TestTimeSaverOp:
         msg = matching[0].message
         assert "op=aget" in msg
         assert "thread=thread-z" in msg  # 8-char prefix (8th char is 'z' from 'thread-zzzz' = 'thread-z')
-        assert "duration_ms=" in msg
+        assert "latency_ms=" in msg
+        assert "bytes=" in msg  # bytes field is part of the contract format
 
     @pytest.mark.asyncio
     async def test_time_saver_op_logs_even_on_exception(self, caplog):
-        """Wrapper logs even if the coro raises — duration_ms still emitted."""
+        """Wrapper logs even if the coro raises — latency_ms still emitted."""
         async def coro():
             raise RuntimeError("boom")
 
@@ -103,7 +138,7 @@ class TestTimeSaverOp:
         # Despite the exception the timing log was emitted.
         matching = [r for r in caplog.records if "[CheckpointPerf]" in r.message]
         assert len(matching) == 1
-        assert "duration_ms=" in matching[0].message
+        assert "latency_ms=" in matching[0].message
 
     @pytest.mark.asyncio
     async def test_time_saver_op_returns_coroutine_result(self):
@@ -535,3 +570,225 @@ class TestFixtureCaptureRoundTrip:
                 assert "role" in msg
                 assert "content" in msg
                 assert "instance_id" in msg
+
+        # entries, each carrying a list of message dicts.
+        data = json.loads(path.read_text(encoding="utf-8"))
+        assert isinstance(data, dict) and isinstance(data["variants"], list)
+        for entry in data["variants"]:
+            assert isinstance(entry, dict)
+            assert "variant_id" in entry
+            assert isinstance(entry.get("messages"), list)
+            assert "observed_alist_count" in entry
+            for msg in entry["messages"]:
+                assert isinstance(msg, dict)
+                # Every captured message carries a message_id (frontend
+                # #anchor contract) — either the injected stable id or the
+                # normalized "<generated-uuid>" sentinel.
+                assert "message_id" in msg
+                assert "role" in msg
+                assert "content" in msg
+                assert "instance_id" in msg
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FR-5 AC-5.1 (T5.3): per-op all-four pin — every saver op MUST emit ≥1 line
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestLogSaverOpPerAllFour:
+    """AC-5.1 caplog pin: aget / aput / adelete / alist each emit ≥1 line.
+
+    FR-5 AC-5.1 specifies the ops ``aget`` / ``aput`` / ``adelete`` /
+    ``alist`` (alist = migration-only). This test class exercises every
+    one of them through ``log_saver_op`` and asserts the
+    ``op=<name> latency_ms=<int> bytes=<int>`` shape is present.
+
+    The alist label is migration-only by design (architect §3 + C-8):
+    the live path makes ZERO alist calls post-PR3 (see
+    :class:`TestAlistCountDisappearanceGate`); the migrator
+    (``daemon/migrations/checkpoint_migrator.py``) is the ONE sanctioned
+    caller of ``saver.alist(…)`` and would record its ops through this
+    same helper if it ever wraps its alist in a timed context.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolate_metrics(self):
+        # Each test starts from a clean metric state — the helpers
+        # are module-level singletons (per the FR-5 surface), so cross-
+        # test contamination is real without isolation.
+        reset_metrics_for_tests()
+        yield
+        reset_metrics_for_tests()
+
+    @pytest.mark.parametrize(
+        "op", ["aget", "aput", "adelete", "alist"],
+        ids=["aget", "aput", "adelete", "alist-migration-only"],
+    )
+    def test_each_op_emits_contract_format(self, caplog, op):
+        """For every op, the contract format is emitted exactly once.
+
+        The format is ``op=<name> latency_ms=<int> bytes=<int>``. The
+        ``thread=`` and ``deleted=`` diagnostic extras are also present
+        but are NOT the contract — verified separately in
+        :class:`TestLogSaverOp` and :class:`TestTimeSaverOp`.
+        """
+        with caplog.at_level(logging.INFO, logger="daemon.checkpoint_perf"):
+            log_saver_op(op, "thread-aaaa", 7, bytes_=128, deleted=0)
+        matching = [r for r in caplog.records if "[CheckpointPerf]" in r.message]
+        assert len(matching) >= 1, (
+            f"op={op!r} emitted ZERO [CheckpointPerf] lines; "
+            f"records={[r.message for r in caplog.records]}"
+        )
+        msg = matching[0].message
+        assert f"op={op}" in msg, f"missing op={op} in {msg}"
+        assert "latency_ms=7" in msg, f"missing latency_ms=7 in {msg}"
+        assert "bytes=128" in msg, f"missing bytes=128 in {msg}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FR-5 AC-5.2 (T5.3): metrics surface — counter + histogram exposed + record
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestMetricsSurface:
+    """AC-5.2: the metric surface exposes both the counter and the histogram.
+
+    * ``message_api_checkpoint_list_total`` — counter. Expected normal
+      value 0 (post-PR3 alist is gone from the live path).
+    * ``message_api_saver_op_latency_seconds`` — histogram, labeled
+      by ``op``. Bucket layout is Prometheus-style (10ms..10s).
+
+    A minimal internal collector lives in
+    ``daemon/checkpoint_metrics.py``. The wire format is the Prometheus
+    text-exposition (per Gap-5 / A-8 the daemon-internal collector is
+    the canonical surface — NO HTTP endpoint is added in v2; a future
+    wiring would be a one-liner against :func:`render_metrics`).
+    """
+
+    def test_counter_and_histogram_are_exposed(self):
+        """Both singletons exist at module level with the contract names."""
+        assert checkpoint_list_total.name == "message_api_checkpoint_list_total"
+        assert saver_op_latency_seconds.name == "message_api_saver_op_latency_seconds"
+        assert saver_op_latency_seconds.label_keys == ("op",)
+
+    def test_counter_starts_at_zero(self):
+        """Fresh surface — counter reads 0 (the expected normal value)."""
+        reset_metrics_for_tests()
+        assert checkpoint_list_total.get() == 0
+
+    def test_counter_increments(self):
+        """Counter is monotonic; amount defaults to 1."""
+        reset_metrics_for_tests()
+        checkpoint_list_total.inc()
+        assert checkpoint_list_total.get() == 1
+        checkpoint_list_total.inc(3)
+        assert checkpoint_list_total.get() == 4
+
+    def test_counter_rejects_negative_amount(self):
+        """``inc(amount=-1)`` raises — counters never decrease."""
+        with pytest.raises(ValueError, match="non-negative"):
+            checkpoint_list_total.inc(-1)
+
+    def test_histogram_observe_records_count_and_sum(self):
+        """An observation is reflected in count + sum + bucket counts."""
+        reset_metrics_for_tests()
+        saver_op_latency_seconds.observe(0.003, op="aget")
+        saver_op_latency_seconds.observe(0.020, op="aget")
+        assert saver_op_latency_seconds.get_count(op="aget") == 2
+        assert abs(saver_op_latency_seconds.get_sum(op="aget") - 0.023) < 1e-9
+        # Bucket counts must be monotonic across the sorted bounds —
+        # the first bucket (≤0.001) catches 0, the 0.005 bucket catches 1
+        # (0.003), the 0.025 bucket catches both (0.003 + 0.020).
+        bucket_counts = saver_op_latency_seconds.get_bucket_counts(op="aget")
+        for prev, cur in zip(bucket_counts, bucket_counts[1:]):
+            assert prev <= cur, f"bucket_counts not monotonic: {bucket_counts}"
+
+    def test_histogram_rejects_unknown_label_keys(self):
+        """Programmer-error guard: a typo on ``op`` raises."""
+        reset_metrics_for_tests()
+        with pytest.raises(KeyError, match="unknown label keys"):
+            saver_op_latency_seconds.observe(0.001, ops="aget")  # typo
+
+    def test_histogram_separates_label_combos(self):
+        """Different ``op`` labels are independent series."""
+        reset_metrics_for_tests()
+        saver_op_latency_seconds.observe(0.005, op="aget")
+        saver_op_latency_seconds.observe(0.050, op="aput")
+        assert saver_op_latency_seconds.get_count(op="aget") == 1
+        assert saver_op_latency_seconds.get_count(op="aput") == 1
+        assert abs(saver_op_latency_seconds.get_sum(op="aget") - 0.005) < 1e-9
+        assert abs(saver_op_latency_seconds.get_sum(op="aput") - 0.050) < 1e-9
+
+    def test_log_saver_op_records_into_histogram(self, caplog):
+        """``log_saver_op`` side-effects into the histogram (NOT gated by env)."""
+        reset_metrics_for_tests()
+        with caplog.at_level(logging.INFO, logger="daemon.checkpoint_perf"):
+            log_saver_op("aget", "thread-aaaa", 42)
+        # duration_ms=42 → 0.042 s. Buckets: 0.025, 0.05, 0.1, ...
+        # Observation lands in buckets ≥ 0.05.
+        assert saver_op_latency_seconds.get_count(op="aget") == 1
+        assert abs(saver_op_latency_seconds.get_sum(op="aget") - 0.042) < 1e-9
+
+    def test_log_saver_op_records_into_histogram_even_when_log_suppressed(
+        self, caplog, monkeypatch
+    ):
+        """Metric records REGARDLESS of ``CHECKPOINT_PERF_LOGS`` — the log
+        line is suppressed, the metric is not. Operator SLO surface is
+        independent of log volume."""
+        reset_metrics_for_tests()
+        monkeypatch.setenv("CHECKPOINT_PERF_LOGS", "0")
+        with caplog.at_level(logging.INFO, logger="daemon.checkpoint_perf"):
+            log_saver_op("aput", "thread-aaaa", 100)
+        # Log line suppressed.
+        assert not any("[CheckpointPerf]" in r.message for r in caplog.records)
+        # Histogram still recorded.
+        assert saver_op_latency_seconds.get_count(op="aput") == 1
+        assert abs(saver_op_latency_seconds.get_sum(op="aput") - 0.100) < 1e-9
+
+    def test_render_metrics_is_prometheus_text_exposition(self):
+        """``render_metrics()`` emits the Prometheus text-exposition format.
+
+        Per Gap-5 / A-8 the v2 surface does NOT add an HTTP endpoint;
+        the renderer exists so (a) operators can ``import`` and print
+        and (b) a future wiring is a one-liner against this function.
+        The shape MUST be the canonical Prometheus format (lines, not
+        JSON) so a future scraper can consume it.
+        """
+        reset_metrics_for_tests()
+        checkpoint_list_total.inc()
+        saver_op_latency_seconds.observe(0.003, op="aget")
+        from daemon.checkpoint_metrics import render_metrics
+        rendered = render_metrics()
+        # Counter shape: `name <value>` (no labels on the counter).
+        assert "message_api_checkpoint_list_total 1" in rendered
+        # Histogram shape: at least one `_bucket{op="aget",le="..."}` line.
+        assert "message_api_saver_op_latency_seconds_bucket" in rendered
+        assert 'op="aget"' in rendered
+        # +Inf bucket must be present (the implicit top bucket).
+        assert 'le="+Inf"' in rendered
+
+
+class TestIncrementCheckpointListTotal:
+    """The alist counter's live-path regression hook.
+
+    FR-2 invariant + FR-5 AC-5.2: the counter MUST stay at 0 on the
+    live path (post-PR3 alist is gone). The integrator helper
+    :func:`increment_checkpoint_list_total` is the only sanctioned way
+    to increment it; if a future caller invokes it AND the live-path
+    alist guard fails, the counter moves off zero and the FR-2 test
+    (``tests/integration/test_get_instance_messages_observed_count_zero.py``)
+    fires. The migrator (``daemon/migrations/checkpoint_migrator.py``)
+    is exempt — it does NOT call this helper.
+    """
+
+    def test_increment_returns_new_value(self):
+        reset_metrics_for_tests()
+        new = checkpoint_perf.increment_checkpoint_list_total()
+        assert new == 1
+        assert checkpoint_list_total.get() == 1
+
+    def test_increment_supports_amount(self):
+        reset_metrics_for_tests()
+        new = checkpoint_perf.increment_checkpoint_list_total(amount=5)
+        assert new == 5
+        assert checkpoint_list_total.get() == 5
