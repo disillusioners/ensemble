@@ -275,6 +275,7 @@ def build_manager(engine):
     mgr.db_pool_manager = MagicMock()
     mgr.infra_repository = MagicMock()
     mgr.shared_meta_kv_repo = MagicMock()  # external: meta KV store
+    mgr.message_metadata_repo = None  # optional C2 tap repo; degradation path
 
     mgr._lifecycle_service = InstanceLifecycleService(
         mgr, cancellation_service=MagicMock()

@@ -14,6 +14,11 @@ Deletion Method Policy:
   get_checkpoint_ids / delete_checkpoints_excluding / delete_writes_excluding.
 - For listing threads or finding excess groups, use list_thread_ids and
   find_excess_checkpoint_groups respectively.
+- The one deliberate non-adapter deletion is the T5.19 ``message_metadata``
+  side-table prune in ``_cleanup_instance``: the side table lives on the
+  manager's shared engine (not the checkpoint store), so it goes through
+  the injected ``MessageMetadataRepository`` directly, wrapped in a
+  never-raise guard (orphans tolerated on failure).
 
 Why use the adapter instead of raw checkpointer.conn + checkpointer.lock?
 - AsyncSqliteSaver exposes .conn and .lock, but AsyncPostgresSaver does not.
@@ -44,6 +49,9 @@ from daemon.constants import (
 from daemon.repositories.instance.repository import SQLModelInstanceRepository
 from daemon.repositories.instance_ui_prefs.repository import (
     InstanceUiPrefsRepository,
+)
+from daemon.repositories.message_metadata.repository import (
+    MessageMetadataRepository,
 )
 from daemon.services.job_queue_service import TERMINAL_STATUSES
 
@@ -350,11 +358,14 @@ class MaintenanceService:
 class CheckpointCleanupJob:
     """Job that cleans up orphaned and expired checkpoint data.
 
-    This job runs 4 cleanup operations in sequence:
+    This job runs 5 cleanup operations in sequence:
     (A) Delete checkpoint threads with no matching instance (orphans)
     (B) Delete checkpoint data for expired terminal instances
     (C) Enforce max_instance_history cap on terminal instances
     (D) Prune per-thread checkpoints to CHECKPOINT_MAX_PER_THREAD
+    (E) Reference-aware checkpoint_blobs prune (Phase 1 C3 — dry-run by
+        default, PostgreSQL-only, isolated so blob-bucket failures can
+        never affect A-D)
 
     Error Handling:
     - Each operation is wrapped in its own try/except.
@@ -375,6 +386,7 @@ class CheckpointCleanupJob:
         instance_repo: SQLModelInstanceRepository,
         on_instance_deleted: Callable[[str], None] | None = None,
         ui_prefs_repo: InstanceUiPrefsRepository | None = None,
+        message_metadata_repo: MessageMetadataRepository | None = None,
     ):
         """Initialize the checkpoint cleanup job.
 
@@ -399,15 +411,25 @@ class CheckpointCleanupJob:
                 ``None`` (the default) disables protection so the job runs in
                 backward-compatible mode for callers that have not wired the
                 UI-prefs repo. New code should pass this as a keyword argument.
+            message_metadata_repo: Optional SYNC ``message_metadata`` side-table
+                repository (T5.19 — merge precondition, architect §3). When
+                provided, ``_cleanup_instance`` prunes the cleaned instance's
+                side-table rows (AFTER ``adelete_thread``, BEFORE the
+                in-memory callback) so the table does not grow without bound;
+                the prune is never-raise — a prune failure is logged as a
+                WARNING and tolerated (orphaned rows never join the read
+                path). ``None`` (the default) skips the prune, preserving the
+                backward-compatible behavior for existing constructors.
         """
         self._config = config
         self._checkpointer = checkpointer
         self._instance_repo = instance_repo
         self._on_instance_deleted = on_instance_deleted
         self._ui_prefs_repo = ui_prefs_repo
+        self._message_metadata_repo = message_metadata_repo
 
     async def execute(self) -> None:
-        """Run all 4 checkpoint cleanup operations.
+        """Run all 5 checkpoint cleanup operations.
 
         Each operation runs independently with its own error handling.
         Failures are logged but do not prevent subsequent operations.
@@ -446,6 +468,17 @@ class CheckpointCleanupJob:
 
         # Operation D: Prune per-thread checkpoints
         await self._prune_per_thread_checkpoints()
+
+        # Operation E (Phase 1 C3): reference-aware checkpoint_blobs prune.
+        # Isolated per the plan — a failure in the blob bucket must NEVER
+        # break the retention prune above (which has already completed)
+        # or any subsequent maintenance cycle. prune_unreferenced_blobs
+        # itself never raises; this belt-and-braces wrapper guarantees
+        # the isolation even if that contract regresses.
+        try:
+            await self._prune_unreferenced_blobs()
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Unreferenced blob prune operation failed: {e}")
 
         logger.info("Checkpoint cleanup job completed")
 
@@ -522,9 +555,41 @@ class CheckpointCleanupJob:
 
             logger.info(f"Found {len(orphaned)} orphaned checkpoint threads")
 
-            # Delete each orphaned thread using adelete_thread
+            # Delete each orphaned thread using adelete_thread, then
+            # prune the ``message_metadata`` side-table rows for the
+            # same thread. The prune is best-effort and never-raises
+            # per-thread (cpv2 final-gate finding 🟡1 — mirrors the
+            # canonical pattern in ``_cleanup_instance`` step-2.5 at
+            # ``maintenance.py:913-927``; the SYNC repo bridges via
+            # ``asyncio.to_thread`` per decisions.md D14).
             for thread_id in orphaned:
                 await self._checkpointer.adelete_thread(thread_id)
+
+                if self._message_metadata_repo is not None:
+                    try:
+                        deleted_rows = await asyncio.to_thread(
+                            self._message_metadata_repo.delete_for_thread,
+                            thread_id,
+                        )
+                        if deleted_rows:
+                            logger.info(
+                                f"_cleanup_orphaned_threads: "
+                                f"message_metadata prune deleted "
+                                f"{deleted_rows} row(s) for thread "
+                                f"{thread_id[:8]}..."
+                            )
+                    except Exception:
+                        # Never-raise guard (W3): orphan side-table
+                        # rows are over-record-only and never join the
+                        # read path; a broken sweep is not. Continue
+                        # with the next orphaned thread.
+                        logger.warning(
+                            f"_cleanup_orphaned_threads: "
+                            f"message_metadata prune failed for "
+                            f"{thread_id[:8]}... — orphans tolerated "
+                            f"(never-raise guard)",
+                            exc_info=True,
+                        )
 
             logger.info(f"Deleted {len(orphaned)} orphaned checkpoint threads")
 
@@ -696,38 +761,107 @@ class CheckpointCleanupJob:
         1. Find checkpoint_ids to KEEP (most recent N by lexicographic DESC order)
         2. Delete from checkpoints where checkpoint_id NOT IN keep list
         3. Delete from writes where checkpoint_id NOT IN keep list
+
+        PR1 (C4) — observation-only timing wrapper. We bracket the whole
+        method with ``time.perf_counter`` and emit one gated INFO line
+        per branch via ``daemon.checkpoint_perf.log_prune`` (entry-with-
+        threads / no-threads / exit) carrying the thread count + deleted
+        count + duration_ms. The exit line always emits from the finally
+        block; on the error branch it carries the PARTIAL deleted count
+        accumulated before the failure (alongside the existing
+        ``logger.error`` from the inner except). Every ``log_prune`` line
+        honors ``CHECKPOINT_PERF_LOGS=0`` (W4). The try/finally sits
+        OUTSIDE the existing try/except so error semantics stay identical
+        (the existing ``except Exception as e`` still swallows and logs
+        the error; the finally only adds timing observation).
         """
+        import time
+        from daemon.checkpoint_perf import log_prune
+
+        t0 = time.perf_counter()
+        # W7 — both counters are accumulated live: observed_total_deleted
+        # increments INSIDE the pruning loop below, so a mid-walk
+        # exception still reports the partial deletion count in the exit
+        # line (a post-loop assignment would log 0 despite partial
+        # deletes — the exact defect W7 fixes).
+        observed_thread_count = 0
+        observed_total_deleted = 0
         try:
-            max_per_thread = CHECKPOINT_MAX_PER_THREAD
+            try:
+                max_per_thread = CHECKPOINT_MAX_PER_THREAD
 
-            # Find threads with excessive checkpoints via the adapter.
-            # The SQLite adapter wraps this in AsyncSqliteSaver's lock.
-            excess_pairs = await self._checkpointer.find_excess_checkpoint_groups(
-                max_per_thread
-            )
-
-            if not excess_pairs:
-                logger.debug("No threads with excessive checkpoints found")
-                return
-
-            logger.info(
-                f"Found {len(excess_pairs)} thread/namespace pairs with > {max_per_thread} checkpoints"
-            )
-
-            # Prune each thread's checkpoints
-            total_deleted = 0
-            for thread_id, checkpoint_ns, cnt in excess_pairs:
-                deleted = await self._prune_thread_checkpoints(
-                    thread_id, checkpoint_ns, max_per_thread
+                # Find threads with excessive checkpoints via the adapter.
+                # The SQLite adapter wraps this in AsyncSqliteSaver's lock.
+                excess_pairs = await self._checkpointer.find_excess_checkpoint_groups(
+                    max_per_thread
                 )
-                total_deleted += deleted
 
-            logger.info(
-                f"Pruned {total_deleted} checkpoints from {len(excess_pairs)} thread/namespace pairs"
+                if not excess_pairs:
+                    log_prune("prune", 0, 0, 0, note="no excess threads")
+                    logger.debug("No threads with excessive checkpoints found")
+                    return
+
+                observed_thread_count = len(excess_pairs)
+                log_prune(
+                    "prune-entry",
+                    threads=observed_thread_count,
+                    deleted=0,
+                    duration_ms=0,
+                    max_per_thread=max_per_thread,
+                )
+
+                logger.info(
+                    f"Found {len(excess_pairs)} thread/namespace pairs with > {max_per_thread} checkpoints"
+                )
+
+                # Prune each thread's checkpoints. W7: the running total
+                # increments as deletions happen so the exit line reports
+                # partial progress even if a later iteration raises.
+                for thread_id, checkpoint_ns, cnt in excess_pairs:
+                    observed_total_deleted += await self._prune_thread_checkpoints(
+                        thread_id, checkpoint_ns, max_per_thread
+                    )
+
+                logger.info(
+                    f"Pruned {observed_total_deleted} checkpoints from {len(excess_pairs)} thread/namespace pairs"
+                )
+
+            except Exception as e:
+                logger.error(f"Per-thread checkpoint pruning failed: {e}")
+        finally:
+            log_prune(
+                "prune-exit",
+                threads=observed_thread_count,
+                deleted=observed_total_deleted,
+                duration_ms=int((time.perf_counter() - t0) * 1000),
             )
 
-        except Exception as e:
-            logger.error(f"Per-thread checkpoint pruning failed: {e}")
+    async def _prune_unreferenced_blobs(self) -> None:
+        """(E) Phase 1 C3 — reference-aware checkpoint_blobs prune (dry-run default).
+
+        Deletes blobs whose (channel, version) is not referenced by
+        ``checkpoint->'channel_versions'`` of any REMAINING checkpoint row
+        in the same (thread_id, checkpoint_ns) — the direct anti-join
+        (decision D1: no reference-table machinery). The algorithm, the
+        zero-refs fail-safe, and the destructive env-flag gate all live in
+        ``daemon/services/checkpoint_prune.py`` (single owner per the C3
+        file table); this wrapper only delegates to it.
+
+        Conservative ladder: DRY-RUN ONLY by default (reports would-delete
+        counts + bytes, deletes nothing). The destructive arm requires
+        BOTH ``CHECKPOINT_BLOB_PRUNE_DRY_RUN=0`` AND
+        ``CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE=1`` and is structurally
+        unreachable otherwise (see checkpoint_prune module docstring).
+        PostgreSQL-only — no-ops with a WARNING on SQLite backends.
+
+        Candidates are enumerated via ``find_all_thread_ns_pairs`` (D21) —
+        ALL (thread_id, checkpoint_ns) pairs, NOT
+        ``find_excess_checkpoint_groups`` whose HAVING clause would skip
+        single-checkpoint threads.
+        """
+        from daemon.services.checkpoint_prune import prune_unreferenced_blobs
+
+        await prune_unreferenced_blobs(self._checkpointer)
 
     # ── Helper Methods ─────────────────────────────────────────────────────────
 
@@ -743,6 +877,12 @@ class CheckpointCleanupJob:
         1. Delete instance record from instances.db (cascades to hierarchy,
            tasks, events, message_queue tables).
         2. Delete checkpoint data from checkpoints.db (via adelete_thread).
+        2.5. Prune the ``message_metadata`` side-table rows for the thread
+           (T5.19 — merge precondition, architect §3). The side table has no
+           FK on either backend, so without this step a deleted instance's
+           rows would accumulate forever. Never-raise: a prune failure is
+           logged as a WARNING and tolerated — orphaned rows are
+           over-record-only and never join the read path.
         3. Invoke the on_instance_deleted callback to release in-memory state
            (graph cache, graph tasks, request registry) — only if the
            instance record was actually deleted.
@@ -753,6 +893,9 @@ class CheckpointCleanupJob:
         - If instance delete succeeds but checkpoint deletion fails → the
           orphan checkpoint thread is naturally swept by Operation A
           (_cleanup_orphaned_threads) on the next cycle.
+        - The side-table prune (2.5) runs only after checkpoint deletion
+          succeeded and before in-memory state is released, mirroring the
+          architect §3 anchor ordering.
 
         If the instance record is not found in the DB (deleted by another
         process between query and delete), a warning is logged and both the
@@ -785,6 +928,35 @@ class CheckpointCleanupJob:
 
         # 2. Delete checkpoint data from checkpoints.db
         await self._checkpointer.adelete_thread(instance_id)
+
+        # 2.5. Prune the message_metadata side-table rows for this thread
+        # (T5.19 — merge precondition, architect §3). The side table has
+        # no FK on either backend, so a deleted instance's rows would
+        # otherwise persist forever (growth ≈ 2–4 rows/turn × turns ×
+        # instances). Positioned AFTER adelete_thread / BEFORE the
+        # in-memory callback per the architect §3 anchor.
+        #
+        # NEVER-RAISE GUARD (W3): adelete_thread already succeeded above;
+        # a prune failure MUST NOT raise out of _cleanup_instance —
+        # orphaned side-table rows are tolerated (over-record-only, they
+        # never join the read path), a broken instance teardown is not.
+        # The repo is SYNC (decisions.md D14) — bridged via
+        # asyncio.to_thread like every other consumer of this repo.
+        if self._message_metadata_repo is not None:
+            try:
+                deleted_rows = await asyncio.to_thread(
+                    self._message_metadata_repo.delete_for_thread, instance_id
+                )
+                logger.info(
+                    f"message_metadata prune: deleted {deleted_rows} row(s) "
+                    f"for thread {instance_id[:8]}..."
+                )
+            except Exception:
+                logger.warning(
+                    f"message_metadata prune failed for {instance_id[:8]}... "
+                    "— orphans tolerated (never-raise guard)",
+                    exc_info=True,
+                )
 
         # 3. Clean up in-memory state via callback (if provided).
         # The callback is best-effort in-memory cleanup, so we isolate it

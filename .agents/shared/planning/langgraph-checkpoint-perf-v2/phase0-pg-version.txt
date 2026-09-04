@@ -1,0 +1,37 @@
+# Phase 0 — PostgreSQL Version Capture (T0.3)
+
+> Captured: 2026-09-03 against `ensemble_cpv2_test` (dedicated disposable DB per dispatcher adjudication).
+> Both DSN paths converge on the same DB per the per-invocation pinning rule (`POSTGRES_URL` step 1 wins in `_build_pg_connection_string`).
+
+## Env-path DSN (POSTGRES_URL pinned)
+
+```
+$ POSTGRES_URL=postgresql://ensemble:***@localhost:5432/ensemble_cpv2_test \
+  POSTGRES_DB=ensemble_cpv2_test \
+  psql -h localhost -p 5432 -U ensemble -d ensemble_cpv2_test -c "SELECT version();"
+```
+
+```
+                                                            version
+-------------------------------------------------------------------------------------------------------------------------------
+ PostgreSQL 14.22 (Homebrew) on aarch64-apple-darwin23.6.0, compiled by Apple clang version 16.0.0 (clang-1600.0.26.6), 64-bit
+(1 row)
+```
+
+## yaml-assembly DSN (env override -> ensemble.json fallback)
+
+Per `_build_pg_connection_string` resolution logic, the yaml-assembly path WITHOUT env pinning would have produced `postgresql://ensemble:***@localhost:5432/ensemble_prod` (STOP source). Per dispatcher adjudication, the per-invocation pinning rule forces `POSTGRES_URL=postgresql://...:5432/ensemble_cpv2_test` first, which short-circuits the yaml-assembly branch.
+
+Under the adjudication, the yaml-assembly path resolves to **the same DB** (`ensemble_cpv2_test`) via the `POSTGRES_URL` step-1 short-circuit. PG version is identical: 14.22.
+
+## Assert: major.minor >= 14.22
+
+- Parsed: major=14, minor=22
+- Threshold: 14.22
+- Result: **PASS (equality satisfies >=)**.
+
+## Binding-gate eligibility for Phase 5
+
+PG 14.22 meets the binding-gate threshold (>= 14.22). Phase 5 PR5 acceptance gate is eligible as a real-PG binding gate, not a "passes for degenerate reasons" run. Phase 5 T5.x may proceed without the binding-validity flag.
+
+If PG were < 14.22, port can still land (NOT an execution blocker), but the Phase 5 binding run would validate the wrong regime (PG14 pipeline-mode two-implicit-transaction `aput` semantics differ below 14.22).

@@ -1,0 +1,166 @@
+{
+  "_meta": {
+    "schema": "get_instance_messages_pre_phase1:v2",
+    "captured": "2026-08-26",
+    "branch": "feature/langgraph-checkpoint-perf",
+    "code_path": "pre-C1 (alist walk present) \u2014 daemon/persistence.py::get_instance_messages",
+    "packages": {
+      "langgraph": "1.0.9",
+      "langgraph-checkpoint": "4.1.1",
+      "langchain": "not-installed",
+      "langchain-core": "1.2.16"
+    },
+    "regeneration": "REGENERATE_FIXTURE=1 uv run pytest tests/integration/test_messages_response_fixture_capture.py"
+  },
+  "variants": [
+    {
+      "variant_id": "id_less_human",
+      "messages": [
+        {
+          "message_id": "<generated-uuid>",
+          "type": "human",
+          "role": "user",
+          "content": "<str:16>",
+          "thinking": null,
+          "thinking_extracted": null,
+          "tool_calls": null,
+          "images": null,
+          "created_at": "__TIMESTAMP_NORMALIZED__",
+          "instance_id": "v1-idless"
+        }
+      ],
+      "observed_alist_count": 1,
+      "bytes_estimate": 16
+    },
+    {
+      "variant_id": "multimodal_human",
+      "messages": [
+        {
+          "message_id": "v2-human-img",
+          "type": "human",
+          "role": "user",
+          "content": "<str:22>",
+          "thinking": null,
+          "thinking_extracted": null,
+          "tool_calls": null,
+          "images": [
+            "<image_url:28>"
+          ],
+          "created_at": "__TIMESTAMP_NORMALIZED__",
+          "instance_id": "v2-multimodal"
+        }
+      ],
+      "observed_alist_count": 1,
+      "bytes_estimate": 22
+    },
+    {
+      "variant_id": "ai_tool_calls",
+      "messages": [
+        {
+          "message_id": "v3-human",
+          "type": "human",
+          "role": "user",
+          "content": "<str:20>",
+          "thinking": null,
+          "thinking_extracted": null,
+          "tool_calls": null,
+          "images": null,
+          "created_at": "__TIMESTAMP_NORMALIZED__",
+          "instance_id": "v3-toolcalls"
+        },
+        {
+          "message_id": "v3-ai-toolcall",
+          "type": "ai",
+          "role": "assistant",
+          "content": "<str:0>",
+          "thinking": null,
+          "thinking_extracted": null,
+          "tool_calls": [
+            {
+              "id": "call_v3_1",
+              "name": "search",
+              "arguments": {
+                "query": "documents"
+              },
+              "output": null
+            }
+          ],
+          "images": null,
+          "created_at": "__TIMESTAMP_NORMALIZED__",
+          "instance_id": "v3-toolcalls"
+        }
+      ],
+      "observed_alist_count": 1,
+      "bytes_estimate": 20
+    },
+    {
+      "variant_id": "ai_thinking",
+      "messages": [
+        {
+          "message_id": "v4-human",
+          "type": "human",
+          "role": "user",
+          "content": "<str:12>",
+          "thinking": null,
+          "thinking_extracted": null,
+          "tool_calls": null,
+          "images": null,
+          "created_at": "__TIMESTAMP_NORMALIZED__",
+          "instance_id": "v4-thinking"
+        },
+        {
+          "message_id": "v4-ai-think",
+          "type": "ai",
+          "role": "assistant",
+          "content": "<str:16>",
+          "thinking": "<thinking:37>",
+          "thinking_extracted": null,
+          "tool_calls": null,
+          "images": null,
+          "created_at": "__TIMESTAMP_NORMALIZED__",
+          "instance_id": "v4-thinking"
+        }
+      ],
+      "observed_alist_count": 1,
+      "bytes_estimate": 28
+    },
+    {
+      "variant_id": "empty_history",
+      "messages": [],
+      "observed_alist_count": 0,
+      "bytes_estimate": 0
+    },
+    {
+      "variant_id": "synthetic_system",
+      "messages": [
+        {
+          "message_id": "synthetic-system-v6-synth",
+          "type": "system",
+          "role": "system",
+          "content": "<str:93>",
+          "thinking": null,
+          "thinking_extracted": null,
+          "tool_calls": null,
+          "images": null,
+          "created_at": "__TIMESTAMP_NORMALIZED__",
+          "instance_id": "v6-synth",
+          "is_synthetic": true
+        },
+        {
+          "message_id": "v6-human",
+          "type": "human",
+          "role": "user",
+          "content": "<str:5>",
+          "thinking": null,
+          "thinking_extracted": null,
+          "tool_calls": null,
+          "images": null,
+          "created_at": "__TIMESTAMP_NORMALIZED__",
+          "instance_id": "v6-synth"
+        }
+      ],
+      "observed_alist_count": 1,
+      "bytes_estimate": 5
+    }
+  ]
+}

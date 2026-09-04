@@ -174,15 +174,9 @@ KNOWN_MINT_SITES: frozenset[str] = frozenset({
     # ── child reports — no JobItem). The job-driven path raises
     # ── LinkageContractError instead of minting. See
     # ── approach-comparison.md row A.
-    "daemon/services/instance_messaging.py:702:uuid.uuid4",
     # ── message_id mints (4 sites in _prepare_enqueued_message prelude) ──
-    "daemon/services/instance_messaging.py:1596:uuid.uuid4",
-    "daemon/services/instance_messaging.py:1600:uuid.uuid4",
-    "daemon/services/instance_messaging.py:1604:uuid.uuid4",
-    "daemon/services/instance_messaging.py:1608:uuid.uuid4",
     # ── The structurally-safe enqueue_message_job mint (joins the
     # ── shared linkage UUID into both the Task row and the JobItem) ──
-    "daemon/services/instance_messaging.py:2241:uuid.uuid4",
 })
 
 

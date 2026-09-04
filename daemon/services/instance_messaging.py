@@ -28,6 +28,11 @@ from ..write_pause_guard import WriteGuardSession
 from .cancellation import CancellationService
 from .main_loop_bridge import MainLoopBridge
 from .messaging_types import AsyncMessageResult, LinkageContractError
+from .message_tap import (  # Phase 1 C2 — langgraph-checkpoint-perf
+    MessageTapSlot,
+    SOURCE_USER_MESSAGE_ENTRY,
+    SOURCE_COMPACTION_MESSAGING,
+)
 from .project_normalizer import normalize_project_id
 from .skill_meta_parser import extract_load_skill, parse_meta_tag
 from .skill_metrics_service import (
@@ -1313,7 +1318,34 @@ class InstanceMessagingService:
                     {'compacted_at': result.compacted_at},
                     as_node='agent'
                 )
-            
+
+            # C2 (Phase 1 — langgraph-checkpoint-perf): fire the
+            # ``compaction_aupdate_messaging`` message_metadata tap
+            # on the compaction's ``replacement_messages`` after the
+            # ``aupdate_state`` writes resolve. Idempotent RE-TAP
+            # under ``ON CONFLICT DO NOTHING`` (decisions.md D3) —
+            # any message whose id was already recorded from a
+            # previous turn / tap fires a constraint-level no-op,
+            # preserving first-appearance semantics (decisions.md D17,
+            # ``test_message_metadata_revive_stability``). The slot's
+            # ``try/except`` makes a failed upsert non-load-bearing
+            # (Critical 4). Sibling to
+            # ``compaction_aupdate_reactive`` at ``daemon/graph.py``
+            # (which fires from the in-graph reactive-compaction
+            # path); this one fires from the messaging-side
+            # pre-flight ``_maybe_compact_context`` path so the tap
+            # coverage is complete across BOTH compaction entry
+            # points.
+            if self._manager.message_metadata_repo is not None:
+                _compaction_tap = MessageTapSlot(
+                    self._manager.message_metadata_repo,
+                    SOURCE_COMPACTION_MESSAGING,
+                )
+                await _compaction_tap.tap_node_return(
+                    result.replacement_messages,
+                    instance_id,
+                )
+
             # Log compaction result
             log_parts = [
                 f"[Compaction] instance={instance_id[:8]}...",
@@ -3801,6 +3833,37 @@ class InstanceMessagingService:
                     f"instance {instance_id[:8]}... (oldest-first)."
                 )
         # ── end D2 seam drain ─────────────────────────────────────────────
+
+        # C2 (Phase 1 — langgraph-checkpoint-perf, F1 fix): fire the
+        # entry-path message_metadata tap on the ``graph_input_messages``
+        # list the graph START receives. This is the PRIMARY call site
+        # for the user's turn-start ``HumanMessage`` — without it,
+        # ``astream``-invoked user messages would silently fall to the
+        # ``state.ts`` fallback (``persistence.py:414-416``) and never
+        # receive a ``message_metadata`` row. Idempotent RE-TAP under
+        # ``ON CONFLICT DO NOTHING`` (decisions.md D3): a re-tap on a
+        # resume / retry collapses to a no-op at the constraint level,
+        # preserving first-appearance semantics (decisions.md D17,
+        # ``test_message_metadata_revive_stability``). The slot's
+        # ``try/except`` makes a failed upsert non-load-bearing
+        # (Critical 4). Tap covers the ``astream`` invocation path
+        # (``graph.astream(graph_input, ...)`` at line ~3501). The
+        # direct ``ainvoke`` invocation at line ~1055 is
+        # accepted-degradation OOS per decisions.md D19 + B1 — it
+        # constructs ``{"messages": [message]}`` INLINE and bypasses
+        # ``_build_graph_input``; zero production callers; id-less
+        # inline dict; ``state.ts`` fallback applies; mirrors the
+        # watchover handling (LD-D2). See ``daemon/services/message_tap.py``
+        # docstring for the full OOS list.
+        if graph_input is not None and self._manager.message_metadata_repo is not None:
+            _entry_tap = MessageTapSlot(
+                self._manager.message_metadata_repo,
+                SOURCE_USER_MESSAGE_ENTRY,
+            )
+            await _entry_tap.tap_node_return(
+                graph_input.get("messages", []),
+                instance_id,
+            )
 
         # Persistent context HumanMessages are graph inputs rather than normal
         # user turns, so they are not seen by the streaming loop's HumanMessage

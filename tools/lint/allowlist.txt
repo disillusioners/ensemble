@@ -1,0 +1,10 @@
+# checkpoint_perf lint allowlist — Flag A suppression entries.
+#
+# Format: one entry per line, `<file>:<lineno>` or `<file>:` (whole file),
+# where <file> is relative to the repo root.
+#
+# Phase 1 ships this file EMPTY (plan line 865). Adding entries requires
+# an explicit justification in the PR that adds them — the default answer
+# for a `langgraph.checkpoint` import or `saver.alist(` call in
+# `daemon/routers/**` is NO (Hard Constraint #3: repository pattern,
+# factory injection only).

@@ -19,6 +19,9 @@ PostgreSQL Notes:
 import asyncio
 import logging
 import os
+import threading
+import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote_plus
@@ -27,9 +30,64 @@ import aiosqlite
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from daemon.checkpoint_adapter import CheckpointerAdapter, SqliteCheckpointerAdapter
+from daemon.checkpoint_perf import (
+    checkpoint_perf_logs_enabled,
+    log_messages_api,
+    time_saver_op,
+)
 from daemon.ensemble_config import EnsembleConfig
 
 logger = logging.getLogger(__name__)
+
+
+# ── row_absent WARNING emission gate (Phase-5 review fix F7) ─────────────────
+#
+# The ``row_absent`` WARNING in :func:`get_instance_messages` fires when the
+# ``message_metadata`` side table has no rows for a thread. That is the NORMAL
+# state for a fresh / pre-tap thread (no turn has run yet, or the instance
+# predates the side table), and GET /messages is POLLED — so an unconditional
+# warning degenerates into per-poll production log spam. FR-6 / AC-6.1 require
+# the reason category to stay observable, so the fix is a bounded
+# once-per-thread_id emission cache, not a level drop: the FIRST row_absent
+# lookup for a thread warns, subsequent lookups for the SAME thread stay
+# silent, and a different thread_id warns again. The cache is a capped
+# LRU (OrderedDict) so unbounded thread churn cannot grow memory; evicted
+# thread ids simply become eligible to warn again.
+_ROW_ABSENT_EMITTED_CAP = 1024
+_row_absent_emitted: "OrderedDict[str, None]" = OrderedDict()
+_row_absent_lock = threading.Lock()
+
+
+def _row_absent_should_emit(thread_id: str) -> bool:
+    """Return True only for the first (or post-eviction) row_absent lookup
+    of ``thread_id``.
+
+    Thread-safe; O(1) per call. Fail-open on any internal error — a broken
+    gate must never suppress (or break) the read path, so the fallback is
+    to warn. NEVER catches ``BaseException`` (C-14): ``CancelledError``
+    must propagate.
+    """
+    try:
+        with _row_absent_lock:
+            if thread_id in _row_absent_emitted:
+                # LRU refresh — an actively-polled thread stays pinned so
+                # the cap cannot silence a hot thread's one guaranteed
+                # emission by evicting it between polls.
+                _row_absent_emitted.move_to_end(thread_id)
+                return False
+            _row_absent_emitted[thread_id] = None
+            while len(_row_absent_emitted) > _ROW_ABSENT_EMITTED_CAP:
+                _row_absent_emitted.popitem(last=False)
+            return True
+    except Exception:  # noqa: BLE001 — fail-open gate, see docstring
+        return True
+
+
+def _reset_row_absent_gate_for_tests() -> None:
+    """Reset the once-per-thread emission cache (test seam, mirroring
+    ``daemon.checkpoint_metrics.reset_for_tests``)."""
+    with _row_absent_lock:
+        _row_absent_emitted.clear()
 
 
 # ── SQLite Path ───────────────────────────────────────────────────────────────
@@ -265,9 +323,12 @@ async def get_instance_messages(
 
     Args:
         checkpointer: Raw LangGraph checkpointer, or a ``CheckpointerAdapter``
-                      wrapping one. Must support ``aget(config)`` and
-                      ``alist(config, limit=...)`` (both ``AsyncSqliteSaver``
-                      and ``AsyncPostgresSaver`` do).
+                      wrapping one. Must support ``aget(config)`` (both
+                      ``AsyncSqliteSaver`` and ``AsyncPostgresSaver`` do).
+                      Since Phase 1 C1 (PR3) the ``alist()`` history walk is
+                      GONE — this function makes ZERO ``alist`` calls; message
+                      timestamps come from the ``message_metadata`` side table
+                      (see the C1 block below).
         instance_id: Instance identifier to retrieve messages for.
         manager: Optional ``InstanceManager`` reference. When provided, the
                  function attempts to reconstruct the agent's system prompt
@@ -277,6 +338,16 @@ async def get_instance_messages(
                  "View system message" toggle. Any failure is swallowed and
                  the function returns the original list — the synthetic
                  message is best-effort, never load-bearing.
+
+                 Phase 1 C1 (PR3): when provided, the manager's
+                 ``message_metadata_repo`` (a SYNC repository; decisions.md
+                 D14) is ALSO used to look up per-message first-appearance
+                 timestamps for the thread — one indexed read via
+                 ``asyncio.to_thread``, replacing the pre-C1 ``alist()``
+                 checkpoint-history walk. A missing/None repo degrades to
+                 the ``state.ts`` fallback for every message (the accepted
+                 degradation, mirroring old threads that predate the side
+                 table).
 
                  When the resolved injection mode is ``"human_messages"``
                  (Phase 4 add), the function additionally calls
@@ -298,9 +369,6 @@ async def get_instance_messages(
         saw before; only ``is_synthetic`` + ``context_kind`` fields are
         added on the new entries.
     """
-    from typing import cast
-    from langgraph.checkpoint.memory import CheckpointTuple
-
     from daemon.utils import serialize_message
 
     # Accept either a raw saver or a CheckpointerAdapter.
@@ -308,8 +376,16 @@ async def get_instance_messages(
 
     config = {"configurable": {"thread_id": instance_id}}
 
+    # PR1 (C4) — observation-only timing for the GET /messages read path.
+    # The t0 anchor lets us report total wall time including the side-table
+    # lookup + serialize + every downstream hook; the per-op
+    # ``time_saver_op`` wrapper around ``aget`` reports just the aget
+    # cost. (Pre-C1 this bracket also covered the alist walk — Phase 1
+    # C1 (PR3) deleted that walk.)
+    t0 = time.perf_counter()
+
     # Get the current state from async checkpointer
-    state = await saver.aget(config)
+    state = await time_saver_op("aget", instance_id, saver.aget(config))
     if state is None:
         return []
 
@@ -317,33 +393,115 @@ async def get_instance_messages(
     channel_values = state.get("channel_values", {})
     messages = channel_values.get("messages", [])
     if not messages:
+        # Emit a single observation line so the [/Messages] stream stays
+        # searchable in dev even when the instance has no persisted messages
+        # yet (the frontend polls /messages after instance creation). Pass
+# 0 for alist_count — post-C1 there is no alist walk at all, so 0
+        # is the permanent truth on this early-return path (0 by absence).
+        log_messages_api(
+            instance_id,
+            int((time.perf_counter() - t0) * 1000),
+            0,
+            0,
+            0,
+        )
         return []
 
-    # Collect all checkpoints with timestamps
-    # We need to iterate oldest-to-newest to track when messages first appeared
-    checkpoints_data: list[tuple[str | None, list[Any]]] = []
-
-    async for checkpoint_tuple in saver.alist(config, limit=1000):
-        ct = cast(CheckpointTuple, checkpoint_tuple)
-        checkpoint = ct.checkpoint
-        if not isinstance(checkpoint, dict):
-            continue
-        ts = checkpoint.get("ts")
-        checkpoint_messages = checkpoint.get("channel_values", {}).get("messages", [])
-        checkpoints_data.append((ts, checkpoint_messages))
-
-    # Reverse to get oldest-to-newest order
-    checkpoints_data.reverse()
-
-    # Track when each message first appeared
-    msg_timestamps: dict[str, str] = {}
-    for ts, checkpoint_messages in checkpoints_data:
-        if not ts:
-            continue
-        for msg in checkpoint_messages:
-            msg_id = getattr(msg, 'id', None)
-            if msg_id and msg_id not in msg_timestamps:
-                msg_timestamps[msg_id] = ts
+    # ── Phase 1 C1 (PR3) — the read flip ─────────────────────────────────
+    # Timestamps now come from the C2 ``message_metadata`` side table
+    # instead of enumerating checkpoint history. ZERO ``alist()`` calls
+    # on this path — the alist walk that formerly reconstructed
+    # first-appearance timestamps from up to 1000 checkpoint tuples
+    # (the ~206MB/42s GET /messages hot spot) is deleted.
+    #
+    # JOIN DIRECTION — checkpoint side: the serialization loop below
+    # iterates the ``aget`` messages and enriches each from this dict,
+    # so side-table rows for messages NOT in the latest checkpoint
+    # simply never join. That is the over-record property documented
+    # in ``daemon/services/message_tap.py`` (a pause landing between
+    # the tap and the node's checkpoint commit leaves rows for
+    # messages that were never checkpointed) — benign by construction
+    # here because the side table is an ENRICHMENT lookup, never the
+    # authoritative message source.
+    #
+    # Under-record (a checkpoint message with no tap row — id-less
+    # nudge/language_check messages, direct-ainvoke entries, threads
+    # predating the side table) is NOT a bug: it falls through to the
+    # ``state.ts`` fallback in the loop below, the same degradation
+    # the pre-C1 walk produced for id-less messages.
+    msgs_repo = (
+        getattr(manager, "message_metadata_repo", None)
+        if manager is not None
+        else None
+    )
+    metadata: dict[str, tuple[str, int | None]] = {}
+    if msgs_repo is not None:
+        # SYNC repo bridged via asyncio.to_thread (decisions.md D14) —
+        # the same bridge the ``MessageTapSlot`` write side uses. One
+        # indexed per-thread lookup; the (ts, seq) tuple keeps seq for
+        # potential future ordering use.
+        try:
+            metadata = await asyncio.to_thread(
+                msgs_repo.get_for_thread, instance_id
+            )
+            if not metadata:
+                # Repo lookup succeeded but returned ZERO rows. This is
+                # distinct from "repo missing" / "repo exception" —
+                # the side table exists, the connection works, but
+                # this specific thread has no rows. Could be a fresh
+                # thread (no taps yet — benign) OR a regression that
+                # would silently produce wrong timestamps. Warn with
+                # reason=``row_absent`` so the operator can disambiguate.
+                # FR-6 AC-6.1 reason categories are recorded verbatim in
+                # the message.
+                #
+                # F7 — GET /messages is POLLED and pre-tap threads are the
+                # NORMAL row_absent case, so the warning emits ONCE PER
+                # thread_id (bounded 1024-entry LRU gate) instead of on
+                # every poll. Level + reason category are unchanged (the
+                # FR-6 contract is observability, not per-poll spam).
+                if _row_absent_should_emit(instance_id):
+                    logger.warning(
+                        f"get_instance_messages: message_metadata row_absent "
+                        f"for {instance_id[:8] if instance_id else '?'} — "
+                        f"reason=row_absent (side table has no rows for this "
+                        f"thread; falling back to state.ts; emitted once per "
+                        f"thread)"
+                    )
+        except Exception as exc:
+            # Enrichment-only lookup: a side-table failure degrades to
+            # the state.ts fallback (the accepted degradation for a
+            # missing repo), never fails GET /messages. Warned, not
+            # silent, so a persistent DB issue stays observable. Catch
+            # is ``except Exception:`` ONLY (NEVER ``except BaseException:``
+            # per C-14 — CancelledError must propagate on Python 3.13).
+            logger.warning(
+                f"get_instance_messages: message_metadata lookup failed "
+                f"for {instance_id[:8] if instance_id else '?'} — "
+                f"reason={type(exc).__name__} (falling back to state.ts "
+                f"timestamps): {exc}"
+            )
+            metadata = {}
+    else:
+        # PR3 external review — the None-guard short-circuit used to
+        # degrade SILENTLY: messages>0 with no resolvable repo (manager
+        # is None, or the manager shape lacks ``message_metadata_repo``)
+        # stamps every timestamp from state.ts with no trace. Warn once
+        # per call so a mis-wired manager stays observable — a single
+        # concise line, no rate-limiter (per review scope). FR-6 AC-6.1
+        # reason category is recorded verbatim.
+        reason = (
+            "manager_missing" if manager is None
+            else "repo_missing"
+        )
+        logger.warning(
+            f"get_instance_messages: {reason} for "
+            f"{instance_id[:8] if instance_id else '?'} — "
+            f"all timestamps fall back to state.ts"
+        )
+    msg_timestamps: dict[str, str] = {
+        mid: ts for mid, (ts, _seq) in metadata.items()
+    }
 
     # Build a map of tool_call_id -> output from ToolMessages
     tool_outputs = {}
@@ -374,6 +532,47 @@ async def get_instance_messages(
         serialized["created_at"] = created_at
 
         result.append(serialized)
+
+    # PR1 (C4) — emit ONE [/Messages] line per request. Placement:
+    # after the result list is finalized but BEFORE synthetic
+    # system-prompt / context-message injection so the message_count we
+    # report equals the persisted messages (not the API-shape with
+    # synthetics prepended).
+    #
+    # S4 — message_count and bytes_estimate derive from the SAME source:
+    # the post-serialization response ``result`` list (NOT the raw
+    # pre-serialization ``messages`` channel). This keeps the pair
+    # coherent — a ToolMessage present in the channel but excluded from
+    # ``result`` is counted by neither. bytes_estimate is the summed
+    # length of the serialized content strings, not a wire-format byte
+    # count.
+    #
+    # Phase 1 C1 (PR3) — the alist walk is gone, so the observed
+    # alist_count on this path is the literal 0 (grep-friendly
+    # post-flip invariant; the pre-C1 observation collapsed to zero
+    # by construction).
+    if checkpoint_perf_logs_enabled():
+        try:
+            bytes_estimate = sum(
+                len(str(m.get("content", ""))) for m in result
+            )
+        except Exception:
+            # Defensive: content is heterogeneous (str / list[dict] / bytes);
+            # str() coercion is best-effort. Never let the log emit fail the
+            # API call — the response shape is the contract.
+            bytes_estimate = 0
+    else:
+        # W3 — the [/Messages] emit below no-ops when logging is disabled;
+        # do not pay the O(total-content) walk for a line that will never
+        # be written. Pass 0 (the emit is suppressed anyway).
+        bytes_estimate = 0
+    log_messages_api(
+        instance_id,
+        int((time.perf_counter() - t0) * 1000),
+        len(result),
+        bytes_estimate,
+        0,
+    )
 
     # ── Phase 4: resolve instance/agent metadata + injection mode once ─────────
     # ``get_instance_messages`` may need to do TWO things with this

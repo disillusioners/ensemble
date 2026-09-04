@@ -1,0 +1,249 @@
+# GATE_SUITES.txt — Phase 5 PR5-closure gate-suite manifest (single source of truth).
+# ── Enumeration record (FINAL closure manifest — regenerated post-PR5) ──
+# Date: 2026-09-04 (UTC) | Branch: feature/langgraph-checkpoint-perf-v2 |
+# Regen SHA: e1d3e630 (Phase 5 review-fix batch F1..F9 landed; F6 regen
+# commit itself is the child of this SHA).
+# Provenance: this is the v2 PR5-CLOSURE / FINAL manifest. Per the
+# phase5-plan (T5.8) the table was REGENERATED post-PR5-closure per the
+# file's own header method (per-file collect-only + aggregate
+# cross-check; both recorded below).
+# History: v2 PR3 manifest (commit 1642c5b6) had 33 rows; PR4 added 4
+# rows (37); the 3cadcaf2 Phase-5 batch added 3 rows (armed-absence,
+# observed-count-zero, perf matrix) but did NOT regenerate the header
+# or the per-file counts (header still said "37 files / 484 tests").
+# This regen: +1 row (tests/integration/
+# test_message_metadata_retry_recovery.py — the T5.11 D-3 /
+# AC-13.3 test, which 3cadcaf2 missed adding) and fresh counts.
+# The 513-vs-524 figures that circulated during review were
+# intermediate pre-fix snapshots (before the F7 +4 perf-logging tests
+# and the F2 +1 perf-matrix test landed); they are superseded by the
+# authoritative numbers below.
+# Method (collection-only; replicates v1's per-PR regen method in the
+# main worktree pinned at the regen SHA above): one pytest subprocess per
+# file — uv run pytest <file> -o addopts= --collect-only -q -p
+# no:cacheprovider --no-header — which strips the v2 default marker
+# filter. DSN pinned for every invocation: POSTGRES_URL +
+# POSTGRES_DB → postgresql://ensemble@localhost:5432/ensemble_cpv2_test
+# (BOTH env vars — persistence.py reads POSTGRES_DB; postgres-marked
+# files resolve DSNs at collection). ensemble_prod / ensemble_dev never
+# touched.
+# Cross-check: one aggregate collect-only subprocess over all 41 paths
+# (the gate-runner method): identical total (535).
+# Result: 41/41 files collect — 535 tests total (per-file sum = 535 =
+# aggregate collect-only; EXACT MATCH).
+# v1's pre-existing-
+# failure gate-run exclusions (test_cold_resume_ttl.py ×2,
+# test_question_deferred_pause_edge_cases.py ×1,
+# test_pause_race_w7_jobitem_skip.py ×1) remain per Phase 1 decision:
+# .agents/tester/QUARANTINE.md is tester-owned; Phase 5 did not edit it.
+# The T0.3 dialect-parity (16) + T0.6 isolation (20 + 7 = 27) Phase-0
+# SKIP-LOUDLY items remain COLLECT AND PASS per T2.11.
+# Missing-vs-v1: v1's PR1-era 37-row manifest included PR2/PR3/PR4
+# surface that arrived in v1's later commits; v2's per-PR manifest
+# increments keep parity. Entries are never silently removed.
+#
+# NOTE — capture-suite marker: tests/integration/
+# test_messages_response_fixture_capture.py carries pytestmark so bare
+# pytest with default v2 addopts does not collect it. Not a manifest row
+# — non-manifest companion (same treatment as v1).
+#
+# N = tests collected at the regen SHA (2026-09-04, collect-only). No
+# dur(s) column in this regen — execution timings belong to the
+# tester-phase gate runs and are deliberately not fabricated here.
+# File                                                           N
+# tests/e2e/test_full_chain_turn_reconciler.py                    3
+# tests/e2e/test_pause_resume_unchanged.py                        1
+# tests/integration/checkpoint_prune_real_saver.py                9
+# tests/integration/checkpoint_prune_restore_rehearsal.py         1
+# tests/integration/test_api_messages.py                          7
+# tests/integration/test_armed_absence_alist.py                   9
+# tests/integration/test_compaction_e2e.py                        3
+# tests/integration/test_crash_recovery_paused.py                 10
+# tests/integration/test_get_instance_messages_observed_count_zero.py 3
+# tests/integration/test_get_instance_messages_response_shape_frozen_fixture.py 2
+# tests/integration/test_message_metadata_hook_placement.py       10
+# tests/integration/test_message_metadata_lifecycle_wiring.py     4
+# tests/integration/test_message_metadata_liveness.py             3
+# tests/integration/test_message_metadata_retry_recovery.py       1
+# tests/integration/test_multi_turn_resume.py                     3
+# tests/integration/test_pause_race_enqueue_resume_flow.py        1
+# tests/integration/test_pause_race_resume_drain.py               1
+# tests/integration/test_pause_race_resume_flow.py                1
+# tests/integration/test_pause_race_resume_reenqueue.py           1
+# tests/integration/test_pause_race_window_held.py                1
+# tests/integration/test_pause_race_window_held_enqueue.py        1
+# tests/performance/test_message_api_cost.py                      12
+# tests/repositories/test_turn_reconciler.py                      25
+# tests/repositories/test_turn_reconciler_paused_race.py          5
+# tests/services/test_instance_messaging_compaction_guard.py      8
+# tests/test_maintenance.py                                       69
+# tests/test_persistence.py                                       23
+# tests/unit/checkpoint_adapter/test_direct_anti_join.py          11
+# tests/unit/persistence/test_checkpoint_perf_logging.py          45
+# tests/unit/persistence/test_get_instance_messages_no_alist.py   16
+# tests/unit/repositories/test_message_metadata_paused_question_flow.py 3
+# tests/unit/repositories/test_message_metadata_repository.py     16
+# tests/unit/repositories/test_message_metadata_revive_stability.py 2
+# tests/unit/repositories/test_message_tap_to_repo_liveness.py    7
+# tests/unit/services/test_maintenance_prune_direct_anti_join.py  24
+# tests/unit/services/test_message_tap_slot.py                    20
+# tests/unit/test_compaction.py                                   129
+# tests/unit/test_pause_resume_root.py                            18
+# tests/unit/test_paused_auto_resume_fallback.py                  5
+# tests/unit/test_terminal_reason_mirror_set_regression.py        1
+# tests/unit/test_turn_handle_transitions.py                      21
+
+# Non-manifest companions (ported with PR1/PR2; green-run verification
+# is tester-phase surface):
+# tests/integration/test_messages_response_fixture_capture.py  (drift-check mode)
+# tests/integration/test_no_saver_imports_in_routers.py      (Flag A, AST scan)
+# tests/integration/gate_suites/test_gate_suite_pause_resume.py (this file's
+#     enumeration dry-run gate — bounded collect-only over the manifest)
+#
+# Spec: .agents/shared/planning/langgraph-checkpoint-perf-v2/phase3-plan.md
+# (T3.6) + phase5-plan.md (T5.8) + v1 structure per fc908945. PR1 (C4)
+# created this file on v2; PR2 re-ran the enumeration gate at the
+# post-port HEAD; PR3 re-ran at the post-PR3 HEAD; PR4 appended entries;
+# the Phase-5 3cadcaf2 batch appended rows without regenerating; THIS
+# regen (F6) is the FINAL closure regeneration. Entries are never
+# silently removed.
+#
+# Format: one path per line, relative to the repo root. '#' starts a comment.
+#
+# ── Gate concept: pause/resume ──
+# Canonical pause/resume no-drift suite (named-transition wrappers):
+tests/e2e/test_pause_resume_unchanged.py
+# Root-instance pause/resume:
+tests/unit/test_pause_resume_root.py
+# Paused-race regression family (f5e4b79a lineage) — resume flows:
+tests/integration/test_pause_race_resume_flow.py
+tests/integration/test_pause_race_resume_drain.py
+tests/integration/test_pause_race_resume_reenqueue.py
+tests/integration/test_pause_race_enqueue_resume_flow.py
+tests/integration/test_pause_race_window_held.py
+tests/integration/test_pause_race_window_held_enqueue.py
+# Full-chain turn reconciler e2e + per-mirror reconciler unit + paused-race:
+tests/e2e/test_full_chain_turn_reconciler.py
+tests/repositories/test_turn_reconciler.py
+tests/repositories/test_turn_reconciler_paused_race.py
+#
+# ── Gate concept: multi-turn resume-from-checkpoint ──
+#  resume-from-checkpoint coverage lives in these files — checkpoint-based
+#  multi-turn resume, crash-recovery-while-paused, turn-handle transitions,
+#  and auto-resume fallback)
+tests/integration/test_multi_turn_resume.py
+tests/integration/test_crash_recovery_paused.py
+tests/unit/test_turn_handle_transitions.py
+tests/unit/test_paused_auto_resume_fallback.py
+#
+# ── Gate concept: 8 mirror tables ──
+# tests/repositories/test_turn_reconciler.py (above) is the canonical
+#  per-mirror-table suite. Terminal-reason mirror-set regression:
+tests/unit/test_terminal_reason_mirror_set_regression.py
+#
+# ── Gate concept: aupdate_state idempotent ──
+# Compaction guard (aupdate_state compaction sites) + compaction unit +
+# real-graph compaction e2e (aupdate_state against real AsyncSqliteSaver):
+tests/services/test_instance_messaging_compaction_guard.py
+tests/unit/test_compaction.py
+tests/integration/test_compaction_e2e.py
+#
+# ── Gate concept: get_messages lifecycle ──
+# GET /messages API contract + get_instance_messages unit + PR1 perf logging:
+tests/integration/test_api_messages.py
+tests/test_persistence.py
+tests/unit/persistence/test_checkpoint_perf_logging.py
+#
+# ── Gate concept: checkpoint maintenance (prune / cleanup) ──
+# Canonical maintenance-job suite (CheckpointCleanupJob operations A-D,
+# history cap, per-thread prune + the PR1 timing/log-line wrap):
+tests/test_maintenance.py
+#
+# ── Gate concept: get_instance_messages read flip (PR3 port) ──
+# Armed-absence alist proof (no-alist call sites on get_instance_messages
+# path; PRIMARY C1 boundary; 16 tests incl. assert_not_called +
+# messages>0 disappearance gate + caplog pin for None-repo warning):
+tests/unit/persistence/test_get_instance_messages_no_alist.py
+# Frozen-fixture byte-shape contract (2 tests; poison-pill alist on
+# shape run; response byte-identical to pre-C1 6-variant fixture):
+tests/integration/test_get_instance_messages_response_shape_frozen_fixture.py
+# Phase 5 FR-4 armed-absence alist test (9 tests; fixture self-check +
+# AST call-func scan over daemon/**/*.py excluding migrator +
+# live-path exercise on real PG + helper export surface):
+tests/integration/test_armed_absence_alist.py
+# Phase 5 FR-2 observed-count-zero invariant (3 tests; N=10 threads +
+# live read path on real PG + vacuous-literal AST guard):
+tests/integration/test_get_instance_messages_observed_count_zero.py
+# Phase 5 T5.11 D-3 retry-recovery + AC-13.3 read→revive→read (1 test;
+# never-under-record deviation doc + full manager-harness read shape
+# with the four plan sub-assertions + armed fixture; real PG):
+tests/integration/test_message_metadata_retry_recovery.py
+#
+# ── Gate concept: Phase 5 FR-3 perf matrix (perf, reported not gated) ──
+# 6-cell perf matrix on real PG (executed cells drawn from
+# page_size × history_depth axes; variance + 2×-baseline + NFR-1..3
+# checks; reported in phase5-perf-results.md):
+tests/performance/test_message_api_cost.py
+#
+# ── Gate concept: message_metadata side table + 4 tap sites (PR2 port) ──
+# AST gate (4-site/4-label/no-ToolNode contract; load-bearing):
+tests/integration/test_message_metadata_hook_placement.py
+# Lifecycle wiring pin (both build_instance_graph call sites wire both
+# MessageTapSlot kwargs; PR3 source — binding fold from PR2 review):
+tests/integration/test_message_metadata_lifecycle_wiring.py
+# Round-trip liveness (tap-side to DB read primitive):
+tests/integration/test_message_metadata_liveness.py
+# Repo dialect parity (16 tests covering SQLite + PG dialect branches,
+# composite PK, index existence, dual-driver shape):
+tests/unit/repositories/test_message_metadata_repository.py
+# Pause mid-flow + idempotency + RemoveMessage safety:
+tests/unit/repositories/test_message_metadata_paused_question_flow.py
+# Re-tap stability (revive + compaction collapse to no-ops via
+# ON CONFLICT DO NOTHING):
+tests/unit/repositories/test_message_metadata_revive_stability.py
+# Tap-to-repo liveness (7 integration tests bridging slot → repo → DB):
+tests/unit/repositories/test_message_tap_to_repo_liveness.py
+# MessageTapSlot unit (20 tests; RemoveMessage filter, async bridge,
+# CancelledError propagation, log-line observability):
+tests/unit/services/test_message_tap_slot.py
+#
+# ── Gate concept: C3 reference-aware checkpoint_blobs prune (PR4 port) ──
+# Direct anti-join unit — REAL PostgreSQL SQL fixtures (referenced
+# survive / unreferenced die / thread+ns boundaries / zero-refs fail-safe
+# signal / count-vs-delete parity / jsonb_typeof drift guard) + REAL
+# aiosqlite find_all_thread_ns_pairs (D21) + SQLite no-op WARNING
+# stubs. PG-backed rows skip loudly when PostgreSQL is unreachable
+# (never a mock) (11 tests):
+tests/unit/checkpoint_adapter/test_direct_anti_join.py
+# Service-layer prune logic with mock adapter — fail-safe detection AND
+# prevention asserted separately; D21 iteration (find_all_thread_ns_
+# pairs, NOT find_excess); env-flag matrix (8 parametrized); AST
+# structural gate (the DELETE call is dominated by `if not destructive:
+# continue`); runtime gate-off sentinel; maintenance wiring + failure
+# isolation (24 tests):
+tests/unit/services/test_maintenance_prune_direct_anti_join.py
+# BINDING GATE (PR4 external-review CRITICAL #1) — REAL
+# AsyncPostgresSaver + REAL checkpoint_blobs on a disposable PG
+# database: real-graph write→retention→dry-run→destructive→aget/resume
+# reconstruction, _DeltaSnapshot chains via real aput, zero-refs fail-
+# safe with destructive armed, concurrent aput safety, process-restart
+# reconstruction, dry-run report line shape, SQLite no-op WARNING. Plus
+# TestRealSaverRaceWindow (bidirectional race coverage) +
+# TestRealSaverSerializableRetry (real-40001 retry). BLOCKS PR4 merge
+# AND destructive enable; PG skip is NOT green (9 tests):
+tests/integration/checkpoint_prune_real_saver.py
+# Automated restore-rehearsal roundtrip — backup table → destructive
+# prune → restore (ON CONFLICT DO NOTHING) → BYTE-equality on md5 of
+# every blob row + post-restore aget liveness (1 test):
+tests/integration/checkpoint_prune_restore_rehearsal.py
+#
+# ── Exclusions note (v2, PR3 port) ──
+# v1's PR1 registered 3 pre-existing-failure files as gate-run exclusions
+# (test_cold_resume_ttl.py ×2, test_question_deferred_pause_edge_cases.py ×1,
+# test_pause_race_w7_jobitem_skip.py ×1) via .agents/tester/QUARANTINE.md.
+# Those QUARANTINE rows were NOT ported to v2 (tester-owned ledger; v2's
+# ledger already carries its own row touching test_pause_race_w7_jobitem_skip
+# with a different attribution). Disposition + reason:
+# .agents/shared/planning/langgraph-checkpoint-perf-v2/phase1-results.md §QUARANTINE.
+# v2's authoritative quarantine ledger remains .agents/tester/QUARANTINE.md.
+# Phase 3 also SKIPPED the QUARANTINE.md port per the same decision rule.

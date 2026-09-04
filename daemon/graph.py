@@ -2730,6 +2730,8 @@ def create_agent_node(
     loop_repairer: LoopRepairer | None = None,
     loop_breaker_config: "LoopBreakerConfig | None" = None,
     context_slot: "ContextSlot | None" = None,
+    message_tap_slot: "MessageTapSlot | None" = None,
+    compaction_tap_slot: "MessageTapSlot | None" = None,
 ):
     """Create the agent node function with optional reactive compaction.
 
@@ -2790,6 +2792,27 @@ def create_agent_node(
             ``excluded_tools``, ``summarization_timeout_seconds``.
             ``None`` (or omitted) implies a default-enabled config
             (``LoopBreakerConfig()``).
+        message_tap_slot: Optional :class:`MessageTapSlot` handle
+            (Phase 1 C2 — langgraph-checkpoint-perf) that fires the
+            ``tap_node_return`` upsert against the ``message_metadata``
+            side table at the F2 single-return site. Constructed
+            once at factory time (one per source label) so the
+            agent_node closure captures the SAME slot for every
+            turn. ``None`` disables the tap entirely (the F2
+            single-return refactor still ships — it's just a no-op
+            return); backward compatible for any test or call site
+            that does not thread the slot. See
+            ``daemon/services/message_tap.py`` and decisions.md D1 /
+            D19 / D20 for the 4 approved source labels.
+        compaction_tap_slot: Optional :class:`MessageTapSlot` handle
+            (Phase 1 C2 — langgraph-checkpoint-perf) for the
+            ``compaction_aupdate_reactive`` site (after the
+            reactive-compaction ``aupdate_state`` at
+            ``daemon/graph.py:3248-3250``). Distinct from
+            ``message_tap_slot`` so the per-site source label is
+            preserved — the AST gate (``test_hook_placement``)
+            enumerates EXACTLY 4 distinct labels. ``None`` disables
+            the tap entirely (no-op); backward compatible.
     """
 
     # Resolve once at factory time so the closure does not rebuild a
@@ -3584,6 +3607,29 @@ def create_agent_node(
             if result.compacted_at:
                 await graph.aupdate_state(thread_config, {'compacted_at': result.compacted_at}, as_node='agent')
 
+            # C2 (Phase 1 — langgraph-checkpoint-perf): fire the
+            # ``compaction_aupdate_reactive`` message_metadata tap on
+            # the compaction's ``replacement_messages`` after the
+            # ``aupdate_state`` writes resolve. Idempotent RE-TAP under
+            # ``ON CONFLICT DO NOTHING`` — any message whose id was
+            # already recorded from a previous turn / tap fires a
+            # constraint-level no-op, preserving first-appearance
+            # semantics (decisions.md D3 + D17). The slot's
+            # ``try/except`` makes a failed upsert non-load-bearing
+            # (Critical 4); ``None`` slot disables the tap entirely
+            # (test fixtures + backward compat).
+            #
+            # Note: ``compaction_tap_slot`` is a SEPARATE
+            # ``MessageTapSlot`` from ``message_tap_slot`` so each tap
+            # site carries its distinct source label — the AST gate
+            # (``test_hook_placement``) requires EXACTLY 4 distinct
+            # labels (decisions.md D1).
+            if compaction_tap_slot is not None:
+                await compaction_tap_slot.tap_node_return(
+                    result.replacement_messages,
+                    instance_id,
+                )
+
             logger.info(f'[LLM] Reactive compaction complete: {result.messages_before} -> {result.messages_after} messages, {result.tokens_saved} tokens saved ({result.compaction_type})')
 
             updated_state = await graph.aget_state(thread_config)
@@ -3718,18 +3764,47 @@ def create_agent_node(
         # the poisoned tail permanently. Without this, the next turn
         # would re-encounter the same unanswered ``AIMessage(tc)`` and
         # re-trigger the 2013 gateway error indefinitely.
+        #
+        # F2 binding refactor (Phase 1 C2 — langgraph-checkpoint-perf):
+        # the pre-F2 code had TWO ``return`` statements here — one for
+        # the injected/report/pairing branch (:3396) and one for the
+        # plain-turn branch (:3397) — and any post-return hook had to
+        # land on BOTH sites. The refactor hoists both branches into a
+        # single ``outgoing`` variable so a single ``tap_node_return``
+        # call covers both. The data flow is byte-identical: when any
+        # injected/report/pairing list is non-empty, the ``response``
+        # is APPENDED last (matching the pre-F2 ordering:
+        # pairing_synthesized_msgs → injected_msgs → injected_report_msgs
+        # → response). The mechanical-ness proof is in the PR2 report —
+        # branch conditions are unchanged; only the variable name +
+        # single-exit shape change.
+        outgoing: list[BaseMessage] = [response]
         if (
             injected_msgs
             or injected_report_msgs
             or pairing_synthesized_msgs
         ):
-            persisted: list[BaseMessage] = []
-            persisted.extend(pairing_synthesized_msgs)
-            persisted.extend(injected_msgs)
-            persisted.extend(injected_report_msgs)
-            persisted.append(response)
-            return {**watchover_state_reset, 'messages': persisted}
-        return {**watchover_state_reset, 'messages': [response]}
+            outgoing = (
+                list(pairing_synthesized_msgs)
+                + list(injected_msgs)
+                + list(injected_report_msgs)
+                + outgoing  # response stays last (matches pre-F2 :3391-3395)
+            )
+        # C2 (Phase 1): fire the message_metadata tap on the
+        # NODE-RETURN persisted list (decisions.md D1 + D10 +
+        # D17). ``RemoveMessage`` markers are filtered inside the slot
+        # (see ``MessageTapSlot._extract_ids``); ``tool_calls`` AI
+        # messages and the ``AIMessage`` response are tapped normally
+        # — the tool-message display-invisibility is the
+        # ``serialize_message`` ``type=='tool'`` skip at
+        # ``daemon/persistence.py:405-407`` (LD-D2), not a tap-side
+        # mechanism (D10 + D18). The slot's ``try/except`` makes a
+        # failed upsert non-load-bearing (Critical 4 — never breaks the
+        # graph turn); ``None`` slot disables the tap entirely (test
+        # fixtures + backward compat).
+        if message_tap_slot is not None:
+            await message_tap_slot.tap_node_return(outgoing, instance_id)
+        return {**watchover_state_reset, 'messages': outgoing}
 
     return agent_node
 
@@ -5759,6 +5834,8 @@ def build_instance_graph(
     loop_repairer: LoopRepairer | None = None,
     loop_breaker_config: "LoopBreakerConfig | None" = None,
     context_slot: "ContextSlot | None" = None,
+    message_tap_slot: "MessageTapSlot | None" = None,
+    compaction_tap_slot: "MessageTapSlot | None" = None,
 ):
     """Build and return a compiled instance graph with LLM-level retry.
 
@@ -5820,6 +5897,22 @@ def build_instance_graph(
             prompt and the state messages. ``None`` disables context
             assembly (backward-compatible default — legacy agents
             keep their system-prompt-baked context).
+        message_tap_slot: Optional :class:`MessageTapSlot` (Phase 1
+            C2 — langgraph-checkpoint-perf) threaded into
+            ``create_agent_node`` so the F2 single-return site
+            fires the ``tap_node_return`` upsert against
+            ``message_metadata``. ``None`` disables the tap
+            entirely (the F2 single-return refactor still ships —
+            it's just a no-op return); see
+            ``daemon/services/message_tap.py`` and decisions.md D1 /
+            D19 / D20.
+        compaction_tap_slot: Optional :class:`MessageTapSlot`
+            (Phase 1 C2 — langgraph-checkpoint-perf) for the
+            ``compaction_aupdate_reactive`` site inside
+            ``create_agent_node``. Distinct from ``message_tap_slot``
+            so each site carries its own source label (the AST
+            gate requires EXACTLY 4 distinct labels). ``None``
+            disables the tap (no-op); backward compatible.
     """
     # Add proxy headers (x-proxy-app + x-proxy-interleaved-thinking) to all LLM requests.
     # X-LLMProxy-Buffer-Response: sent by default; omitted entirely (never
@@ -5885,6 +5978,20 @@ def build_instance_graph(
         loop_repairer=loop_repairer,
         loop_breaker_config=loop_breaker_config,
         context_slot=context_slot,
+        # Phase 1 C2 — langgraph-checkpoint-perf. Thread the
+        # MessageTapSlot into the agent_node closure so the F2
+        # single-return site AND the
+        # ``compaction_aupdate_reactive`` site both fire the
+        # ``tap_node_return`` upsert against ``message_metadata``.
+        # ``None`` disables the tap entirely (the F2 single-return
+        # refactor still ships — it's just a no-op return); the
+        # actual slot construction lives at the
+        # ``build_instance_graph`` callers in
+        # ``daemon/services/instance_lifecycle.py`` (both the
+        # spawn-instance path AND the restore-from-checkpoint
+        # path). See decisions.md D1 / D19 / D20.
+        message_tap_slot=message_tap_slot,
+        compaction_tap_slot=compaction_tap_slot,
     ))
     graph.add_node("tools", ToolNode(tools, handle_tool_errors=True))
     graph.add_node("nudge", nudge_node)

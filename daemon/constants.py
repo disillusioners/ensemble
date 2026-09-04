@@ -74,6 +74,23 @@ MAX_INSTANCE_HISTORY: int = 500  # Max terminal instances to keep checkpoint dat
 MAINTENANCE_CHECK_INTERVAL_MINUTES: int = 15  # Maintenance service check interval
 IDEMPOTENCY_KEY_TTL_HOURS: int = 24  # Idempotency key deduplication TTL
 
+# ── Checkpoint Blob Prune (Phase 1 C3 — reference-aware checkpoint_blobs prune) ───
+# Conservative ladder: the maintenance blob prune starts DRY-RUN ONLY (reports
+# what would be deleted, deletes nothing). Destructive execution requires BOTH
+# env flags set together — CHECKPOINT_BLOB_PRUNE_DRY_RUN=0 AND
+# CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE=1 — and even then the destructive code
+# path is structurally unreachable unless that conjunction holds at call time
+# (daemon/services/checkpoint_prune.py::blob_prune_destructive_enabled).
+CHECKPOINT_BLOB_PRUNE_DRY_RUN: bool = True  # default dry-run; set false only via env (CHECKPOINT_BLOB_PRUNE_DRY_RUN=0)
+CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE: bool = False  # destructive kill-switch; env-overridden (CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE=1); default OFF
+CHECKPOINT_BLOB_PRUNE_MAX_REFS_PER_THREAD: int = 100_000  # safety cap — skip pairs with more refs than this
+# Max RETRY attempts for the destructive anti-join DELETE after a PostgreSQL
+# serialization failure (SQLSTATE 40001) or deadlock (SQLSTATE 40P01); total
+# attempts = 1 + this. Exhaustion logs ERROR and skips the pair with zero rows
+# deleted (never raises into the maintenance loop). See
+# daemon/checkpoint_adapter.py::PostgresCheckpointerAdapter.delete_blobs_anti_join.
+CHECKPOINT_BLOB_PRUNE_DELETE_RETRIES: int = 3
+
 # ── Graph & LLM ──────────────────────────────────────────────────────────────────
 GRAPH_RECURSION_LIMIT: int = 100  # LangGraph recursion limit
 LLM_CONCURRENCY: int = 10  # Max concurrent LLM calls

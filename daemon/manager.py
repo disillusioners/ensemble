@@ -49,6 +49,8 @@ from .repositories import (
     create_skill_trigger_repository,
     create_skill_ab_test_repository,
     create_skill_bank_repository,
+    create_message_metadata_repository,
+    MessageMetadataRepository,
     ReportInjectionRepository,
     InstanceUiPrefsRepository,
 )
@@ -576,6 +578,20 @@ class InstanceManager:
         # ``SQLModel.metadata.create_all()`` (model registered via
         # ``daemon/repositories/__init__.py``).
         self._report_injection_repo = ReportInjectionRepository(engine=self._engine)
+
+        # Message-metadata side table (Phase 1 C2 — langgraph-checkpoint-perf).
+        # SYNC repo (decisions.md D14) that backs the ``MessageTapSlot``
+        # at the 4 approved tap sites (entry path, agent_node single-return,
+        # 2 compaction sites — decisions.md D1). ``create_tables=False``
+        # because the manager-level ``SQLModel.metadata.create_all()``
+        # at line ~445 already created the table from the registered
+        # model — see ``daemon/repositories/message_metadata/__init__.py``.
+        # The repo is the read primitive for the PR3 C1 read-flip (PR2
+        # ships the primitive without callers — Hard Constraint #1).
+        self._message_metadata_repo = create_message_metadata_repository(
+            engine=self._engine,
+            create_tables=False,
+        )
 
         # Instance UI preferences (pin + color tag). Global-scope table
         # keyed by instance_id; merge happens at the API router layer so
@@ -2021,6 +2037,20 @@ class InstanceManager:
         return self._db_connection_repository
 
     @property
+    def message_metadata_repo(self):
+        """Public read-only access to the ``MessageMetadataRepository``.
+
+        Phase 1 C2 of the langgraph-checkpoint-perf plan. The repo is
+        SYNC (decisions.md D14) — the 4 ``MessageTapSlot`` tap sites
+        bridge via ``asyncio.to_thread`` (see
+        ``daemon/services/message_tap.py``). The read primitive
+        ``get_for_thread`` is exposed for the PR3 C1 read-flip; PR2
+        ships the primitive without callers (Hard Constraint #1 — no
+        read-path changes in PR2).
+        """
+        return self._message_metadata_repo
+
+    @property
     def db_pool_manager(self):
         """Public read-only access to the shared :class:`ConnectionPoolManager`.
 
@@ -2272,6 +2302,12 @@ class InstanceManager:
             checkpointer=self._checkpointer,
             instance_repo=self._instance_repository,
             ui_prefs_repo=self._instance_ui_prefs_repo,
+            # T5.19 (merge precondition, architect §3): the cleanup job
+            # prunes the instance's message_metadata side-table rows
+            # (never-raise) during _cleanup_instance, so the table does
+            # not grow without bound. The repo singleton exists since
+            # __init__ above (line ~591) — safe to pass here.
+            message_metadata_repo=self._message_metadata_repo,
             on_instance_deleted=self._release_cached_instance,
         )
         self._maintenance_service.register(
@@ -5511,6 +5547,37 @@ class InstanceManager:
                 "      AND ji.deleted_at IS NULL"
                 ");"
             ),
+            # ── Phase 1 C2 — message_metadata side table (2026-08-25) ─
+            # SQLite counterpart:
+            # ``daemon/migrations/versions/20260825_000001_create_message_metadata.sql``.
+            # The migration runner is a NO-OP on PostgreSQL
+            # (runner.py lines 446-448), so the equivalent CREATE TABLE
+            # IF NOT EXISTS + CREATE INDEX IF NOT EXISTS statements run
+            # here at startup for existing PG databases. Fresh PG
+            # databases pick up the table + index from
+            # ``SQLModel.metadata.create_all()`` via the
+            # ``MessageMetadata`` model field + ``__table_args__``
+            # declaration in
+            # ``daemon/repositories/message_metadata/models.py``. The
+            # dual-driver contract (decisions.md D2) is "table exists
+            # + index name matches" — the index name here MUST be
+            # byte-identical to the SQLModel ``__table_args__`` and
+            # to the SQLite migration's CREATE INDEX statement. The
+            # CREATE INDEX IF NOT EXISTS makes the call idempotent on
+            # re-runs.
+            (
+                "CREATE TABLE IF NOT EXISTS message_metadata ("
+                "thread_id TEXT NOT NULL, "
+                "message_id TEXT NOT NULL, "
+                "created_at TEXT NOT NULL, "
+                "seq INTEGER, "
+                "PRIMARY KEY (thread_id, message_id)"
+                ")"
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS ix_message_metadata_thread "
+                "ON message_metadata (thread_id)"
+            ),
         ]
         with self._engine.begin() as conn:
             for stmt in statements:
@@ -8551,6 +8618,10 @@ class InstanceManager:
            → ``instance_hierarchy`` → ``instances``).
         4. Sweep ``checkpoints.db`` threads via the
            ``CheckpointerAdapter``.
+        4b. Prune the instances' ``message_metadata`` side-table rows
+            for the full tree snapshot — never-raise, own per-tree
+            try/except, and runs even when the checkpointer sweep is
+            skipped (T5.19).
 
         This is a destructive operator call. Use it from admin/cleanup
         paths only — the DELETE endpoint exposes it via the

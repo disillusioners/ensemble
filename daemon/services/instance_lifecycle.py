@@ -1618,6 +1618,14 @@ class InstanceLifecycleService:
         # (C2 fix — ``pause_instance_cascade`` runs from the post-graph
         # completion path, not from inside the graph task).
         from ..graph import InjectionSlot, ReportInjectionSlot, ToolThrottleSlot, LoopBreakerSlot, LoopRepairer, ContextSlot
+        # Phase 1 C2 — langgraph-checkpoint-perf. Import the
+        # MessageTapSlot + the agent-node + compaction source labels
+        # so the ``create_agent_node`` closure picks them up.
+        from ..services.message_tap import (
+            MessageTapSlot,
+            SOURCE_AGENT_NODE_RETURN,
+            SOURCE_COMPACTION_REACTIVE,
+        )
         graph = build_instance_graph(
             tools=tools,
             checkpointer=self._checkpointer,
@@ -1648,6 +1656,22 @@ class InstanceLifecycleService:
                 metadata,
                 self._manager._instance_repository,
                 parent_id,
+            ),
+            # Phase 1 C2 — langgraph-checkpoint-perf. Thread the
+            # MessageTapSlot for the ``agent_node_return`` +
+            # ``compaction_aupdate_reactive`` tap sites (decisions.md
+            # D1 / D20). Two slot instances — one per ``source``
+            # label — so the AST gate can enumerate EXACTLY 4
+            # distinct labels. Both attach to the shared
+            # ``message_metadata_repo`` singleton (decisions.md D14
+            # — SYNC repo, tap bridges via ``asyncio.to_thread``).
+            message_tap_slot=MessageTapSlot(
+                self._manager.message_metadata_repo,
+                SOURCE_AGENT_NODE_RETURN,
+            ),
+            compaction_tap_slot=MessageTapSlot(
+                self._manager.message_metadata_repo,
+                SOURCE_COMPACTION_REACTIVE,
             ),
         )
 
@@ -2665,6 +2689,50 @@ class InstanceLifecycleService:
                 f"checkpoint sweep for {instance_id[:8]}..."
             )
 
+        # 4b. Prune the ``message_metadata`` side-table rows for every
+        # tree_id. Sibling to ``CheckpointCleanupJob._cleanup_instance``
+        # step-2.5 (T5.19) and ``_cleanup_orphaned_threads` — the side
+        # table has no FK on either backend, so a fully-deleted
+        # instance's rows would otherwise persist forever (cpv2
+        # final-gate finding 🟡1). The canonical never-raise pattern is
+        # mirrored from ``maintenance.py:945-959`` (incl. the
+        # ``asyncio.to_thread`` bridge for the SYNC repo per
+        # decisions.md D14).
+        #
+        # Placement subtlety (cpv2 acceptance criterion): the prune
+        # runs UNCONDITIONALLY per tree_id — even when the checkpointer
+        # adapter is None (the ``else`` branch above skips the
+        # checkpoint sweep entirely, but the instance rows are gone
+        # regardless, so side-table rows are orphans unconditionally)
+        # and regardless of whether ``adelete_thread`` for that thread
+        # succeeded. The prune does NOT share a per-tree_id try block
+        # with the checkpoint sweep — its own per-tree_id try/except
+        # keeps the prune decoupled from checkpoint-sweep success/failure.
+        meta_repo = getattr(self._manager, "message_metadata_repo", None)
+        if meta_repo is not None:
+            for tree_id in tree_ids:
+                try:
+                    deleted_rows = await asyncio.to_thread(
+                        meta_repo.delete_for_thread, tree_id
+                    )
+                    if deleted_rows:
+                        logger.info(
+                            f"hard_delete_instance: message_metadata prune "
+                            f"deleted {deleted_rows} row(s) for thread "
+                            f"{tree_id[:8]}..."
+                        )
+                except Exception:
+                    # Never-raise guard (W3 / D14): side-table prune
+                    # failure MUST NOT abort the hard-delete — orphan
+                    # rows are over-record-only and never join the read
+                    # path; a broken instance teardown is not.
+                    logger.warning(
+                        f"hard_delete_instance: message_metadata prune "
+                        f"failed for {tree_id[:8]}... — orphans tolerated "
+                        f"(never-raise guard)",
+                        exc_info=True,
+                    )
+
         logger.info(
             f"[TRACE] hard_delete_instance: {instance_id[:8]}... complete "
             f"(tree_size={len(tree_ids)}, db_deleted={cascade_result.get('deleted')}, "
@@ -3564,6 +3632,14 @@ class InstanceLifecycleService:
         # reasons as the spawn path — conditional post-tools edge and
         # ``question_pause_node`` both need the manager reference.
         from ..graph import InjectionSlot, ReportInjectionSlot, ToolThrottleSlot, LoopBreakerSlot, LoopRepairer, ContextSlot
+        # Phase 1 C2 — langgraph-checkpoint-perf. Import the
+        # MessageTapSlot + the agent-node + compaction source labels
+        # so the ``create_agent_node`` closure picks them up.
+        from ..services.message_tap import (
+            MessageTapSlot,
+            SOURCE_AGENT_NODE_RETURN,
+            SOURCE_COMPACTION_REACTIVE,
+        )
         # Resolve ``parent_id`` from the restored instance metadata
         # so the ContextSlot can pass it through to
         # ``assemble_context_messages`` for tree-root resolution. Root
@@ -3611,6 +3687,21 @@ class InstanceLifecycleService:
                 agent_meta,
                 self._manager._instance_repository,
                 _restore_parent_id,
+            ),
+            # Phase 1 C2 — langgraph-checkpoint-perf. Same wiring as
+            # the spawn path above — one MessageTapSlot per
+            # ``agent_node_return`` label, plus a separate
+            # ``compaction_aupdate_reactive`` slot for the
+            # reactive-compaction site inside ``create_agent_node``
+            # (decisions.md D1 / D14 / D20). Both attach to the
+            # shared ``message_metadata_repo`` singleton.
+            message_tap_slot=MessageTapSlot(
+                self._manager.message_metadata_repo,
+                SOURCE_AGENT_NODE_RETURN,
+            ),
+            compaction_tap_slot=MessageTapSlot(
+                self._manager.message_metadata_repo,
+                SOURCE_COMPACTION_REACTIVE,
             ),
         )
 
