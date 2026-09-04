@@ -887,6 +887,147 @@ class TestPostSettlePhase2Fix:
             f"30s tick. Got: {background_result!r}."
         )
 
+    def test_db_error_through_service_layer_defer_job_stays_pending(
+        self, fb_engine, job_repo
+    ):
+        """A DB error reaches Gate B and must block a defer candidate.
+
+        This is the wrapper-level companion to
+        ``test_predicate_fails_closed_on_db_error``: the repository is
+        real, but the engine boundary is replaced with a narrow proxy so
+        only the job-side gate sees the injected error.  The candidate is
+        seeded as a queued defer JobItem beside a settled message mirror of
+        a non-terminal parent, matching the incident shape.
+
+        The positive control first wires the same service defer branch with
+        a clean (False) job-predicate result.  It proves the fixture can
+        admit the candidate when the gate is healthy, rather than passing
+        because the candidate/queue wiring is dead.
+        """
+        from unittest.mock import MagicMock
+
+        from sqlalchemy.exc import OperationalError as SAOperationalError
+
+        from daemon.repositories.job_queue.queue_repository import JobQueueRepository
+        from daemon.services.job_lock_manager import JobLockManager
+        from daemon.services.job_queue_service import JobQueueService
+
+        project = "proj-service-db-error"
+        _insert_instance(
+            fb_engine,
+            instance_id="inst-parent-service-db-error",
+            project_id=project,
+            status=InstanceStatus.WAITING_CHILDREN.value,
+        )
+        _insert_queue(
+            fb_engine,
+            queue_id="queue-parallel-service-db-error",
+            project_id=project,
+            queue_type="parallel",
+        )
+        _insert_job_item(
+            fb_engine,
+            job_id="job-mirror-service-db-error",
+            instance_id="inst-parent-service-db-error",
+            project_id=project,
+            queue_id="queue-parallel-service-db-error",
+            admission_state=AdmissionState.DONE.value,
+            job_type="message",
+        )
+        _insert_instance(
+            fb_engine,
+            instance_id="inst-candidate-service-db-error",
+            project_id=project,
+            status=InstanceStatus.RUNNING.value,
+        )
+        _insert_queue(
+            fb_engine,
+            queue_id="queue-defer-service-db-error",
+            project_id=project,
+            queue_type="defer",
+        )
+        _insert_job_item(
+            fb_engine,
+            job_id="job-defer-service-db-error",
+            instance_id="inst-candidate-service-db-error",
+            project_id=project,
+            queue_id="queue-defer-service-db-error",
+            admission_state=AdmissionState.QUEUED.value,
+        )
+
+        pending = job_repo.list_all_pending()
+        assert [job.job_id for job in pending] == [
+            "job-defer-service-db-error"
+        ]
+
+        queue_repo = JobQueueRepository(fb_engine)
+        lock_manager = JobLockManager(lock_repo=MagicMock())
+
+        # Positive control: same pending list and real service/queue repo;
+        # the only difference is a healthy job predicate reporting IDLE.
+        control_repo = JobRepository(fb_engine)
+        control_repo.has_active_non_deferred_work = MagicMock(
+            return_value=False
+        )
+        control_svc = JobQueueService(
+            control_repo, lock_manager, queue_repo
+        )
+        control_result = asyncio.run(
+            control_svc._select_next_eligible_job(pending, project)
+        )
+        assert control_result is not None
+        assert control_result.job_id == "job-defer-service-db-error", (
+            "positive control could not admit the seeded defer candidate; "
+            "the service/queue setup is vacuous"
+        )
+
+        class _BoomEngine:
+            """Delegate ordinary engine attributes while failing at begin()."""
+
+            def __init__(self, delegate):
+                self._delegate = delegate
+
+            def begin(self):
+                raise SAOperationalError(
+                    "boom", {}, Exception("injected service-layer DB error")
+                )
+
+            def __getattr__(self, name):
+                return getattr(self._delegate, name)
+
+        # Keep queue metadata and the post-call row re-query on the real
+        # file-backed engine; only the service's job repository sees the
+        # error at its engine boundary.
+        original_engine = job_repo.engine
+        job_repo.engine = _BoomEngine(fb_engine)
+        try:
+            error_svc = JobQueueService(
+                job_repo, lock_manager, queue_repo
+            )
+            error_result = asyncio.run(
+                error_svc._select_next_eligible_job(pending, project)
+            )
+        finally:
+            job_repo.engine = original_engine
+
+        assert error_result is None, (
+            "service-layer Gate B admitted a defer candidate after the "
+            "job predicate's DB error failed open; candidate must stay "
+            "pending until the next retry tick"
+        )
+        with fb_engine.begin() as conn:
+            persisted_state = conn.execute(
+                text(
+                    "SELECT admission_state FROM job_queue_items "
+                    "WHERE job_id = :job_id"
+                ),
+                {"job_id": "job-defer-service-db-error"},
+            ).scalar_one()
+        assert persisted_state == AdmissionState.QUEUED.value, (
+            "service-layer admission changed the defer candidate's durable "
+            f"state after the DB error: got {persisted_state!r}"
+        )
+
     def test_post_settle_admission_gate_catches_what_claim_cannot(
         self, fb_engine, job_repo, task_repo
     ):
