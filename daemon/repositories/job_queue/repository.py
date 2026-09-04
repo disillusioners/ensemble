@@ -735,23 +735,38 @@ class JobRepository:
         """
         try:
             with self.engine.begin() as conn:
-                # Body: ``_idle_predicate_sql.JOB_DEFER_BUSY_BODY`` — the
+                # Body: ``_idle_predicate_sql.defer_busy_statement`` — the
                 # shared defer busy-set (legacy clause OR post-Fix-B
-                # settled-mirror clause). The single query serves both
-                # scopes: ``project_id=None`` makes the
-                # ``:project_id IS NULL OR`` disjunct pass-through
-                # (system-wide, e.g. maintenance ``_is_idle``).
+                # settled-mirror clause). The two-body helper selects
+                # between the project-scoped body (``j.project_id =
+                # :project_id``, plain STRING bind, no NULL trick) and
+                # the system-wide body (NO project parameter at all) on
+                # ``project_id`` — the bare ``:project_id IS NULL`` shape
+                # that produced the PG ``AmbiguousParameter`` incident is
+                # gone by construction.
                 row = conn.execute(
-                    defer_busy_statement(),
+                    defer_busy_statement(project_id),
                     defer_busy_binds(project_id),
                 ).first()
         except Exception as e:
+            # W3 (fail-CLOSED, hotfix 2026-09-04): the predicate's own
+            # DB-error posture is FAIL-CLOSED — a transient error is
+            # treated as BUSY (return True) so defer/background queues
+            # wait for the next 30s tick instead of admitting while work
+            # is live. The two call-site wrappers
+            # (``JobProcessor._defer_idle_check`` / ``_background_idle_check``)
+            # are also already fail-CLOSED, but the predicate call must
+            # agree with them — returning False on error would silently
+            # release the defer queue while the rest of the call chain
+            # is honoring the closed posture. Mirror change in
+            # ``has_active_non_background_work`` below.
             logger.warning(
                 f"has_active_non_deferred_work failed "
                 f"(project_id={project_id!r}): {e} — "
-                "treating as False (fail-OPEN on DB error)"
+                "treating as True (fail-CLOSED on DB error; defer queue "
+                "waits for the next tick instead of admitting)"
             )
-            return False
+            return True
         return bool(row[0]) if row is not None else False
 
     def has_active_non_background_work(
@@ -852,22 +867,35 @@ class JobRepository:
                 # TestJobSideBackgroundPredicateExclusion::
                 # test_queued_jobitem_without_task_returns_true``).
                 row = conn.execute(
-                    # Body: ``_idle_predicate_sql.JOB_BACKGROUND_BUSY_BODY``
+                    # Body: ``_idle_predicate_sql.background_busy_statement``
                     # — the shared background busy-set. Keeps the Fix-2B
                     # deadlock carve-out (a ``queued`` JobItem whose linked
                     # Task is still ``pending`` is unclaimable and must not
                     # hold the gate) and the system-wide scope (no project
-                    # clause in the shared body; ``project_id`` is `del`'d
-                    # above).
+                    # parameter at all in the shared body; ``project_id``
+                    # is `del`'d above).
                     background_busy_statement(),
                     background_busy_binds(),
                 ).first()
         except Exception as e:
+            # W3 (fail-CLOSED, hotfix 2026-09-04): the predicate's own
+            # DB-error posture is FAIL-CLOSED — a transient error is
+            # treated as BUSY (return True) so the background queue
+            # waits for the next 30s tick instead of admitting while
+            # work is live. Symmetric with
+            # ``has_active_non_deferred_work``. The higher-level
+            # ``JobProcessor._background_idle_check`` and
+            # ``JobQueueService._select_next_eligible_job`` (background
+            # branch) are also already fail-CLOSED; the predicate must
+            # agree — a False return on error would silently release
+            # the background queue while the rest of the call chain
+            # holds the closed posture.
             logger.warning(
                 f"has_active_non_background_work failed: {e} — "
-                "treating as False (fail-OPEN on DB error)"
+                "treating as True (fail-CLOSED on DB error; background "
+                "queue waits for the next tick instead of admitting)"
             )
-            return False
+            return True
         return bool(row[0]) if row is not None else False
 
     def backfill_system_default_project_id(self, project_id: str) -> int:
