@@ -72,7 +72,6 @@ claims the gate is open.
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Final
@@ -82,11 +81,10 @@ from sqlalchemy import TextClause
 
 from daemon.repositories.instance.models import InstanceStatus
 from daemon.repositories.job_queue import _idle_predicate_sql
+from daemon.routers.schemas import DeferBlockHolderResponse
 
 if TYPE_CHECKING:
     from daemon.repositories.job_queue.repository import JobRepository
-
-logger = logging.getLogger(__name__)
 
 
 # ── Vocabulary ─────────────────────────────────────────────────────────────
@@ -360,4 +358,30 @@ def _project_holders(witness_rows: Any) -> list[DeferBlockHolder]:
     return sorted(
         merged.values(),
         key=lambda h: (h.kind != HOLDER_KIND_PAUSED, h.instance_id, h.agent),
+    )
+
+
+# ── Holder → wire-schema projection ────────────────────────────────────────
+
+
+def _holder_to_response(
+    holder: "DeferBlockHolder",
+) -> "DeferBlockHolderResponse":
+    """Map a :class:`DeferBlockHolder` onto the wire schema (explicit).
+
+    Mirrors the :func:`daemon.routers.missions._mission_record_to_response`
+    precedent: explicit field-by-field construction (greppable on
+    either side) rather than a dict-literal comprehension or
+    ``model_validate(from_attributes=True)``. The dict-literal shape
+    previously lived inline in the ``GET /api/queues/defer-blocked``
+    handler — the helper makes the conversion a single source so the
+    schema contract and the resolver dataclass drift cannot both
+    change without a conscious edit here.
+    """
+    return DeferBlockHolderResponse(
+        instance_id=holder.instance_id,
+        agent=holder.agent,
+        status=holder.status,
+        since=holder.since,
+        kind=holder.kind,
     )

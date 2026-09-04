@@ -14,12 +14,7 @@ from sqlalchemy.engine import Engine
 from sqlmodel import Session as SQLModelSession, select, col, update as sqlmodel_update
 
 from .models import ACTIVE_ADMISSION_STATES, AdmissionState, JobItem, JobQueue, QueueType
-from ._idle_predicate_sql import (
-    background_busy_binds,
-    background_busy_statement,
-    defer_busy_binds,
-    defer_busy_statement,
-)
+from ._idle_predicate_sql import background_busy_binds, background_busy_statement, defer_busy_binds, defer_busy_statement
 
 logger = logging.getLogger(__name__)
 

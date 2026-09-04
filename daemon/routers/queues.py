@@ -23,6 +23,14 @@ from .schemas import (
 if TYPE_CHECKING:
     from daemon.services.defer_block_resolver import DeferBlockResolver
 
+# Runtime import — the helper is used by the route handler below. The
+# TYPE_CHECKING-only ``DeferBlockResolver`` above is intentional
+# (avoids a circular import surface at module load — see also the
+# ``_defer_block_resolver: "DeferBlockResolver | None"`` annotation
+# below). The helper is imported at runtime because it has zero
+# resolver-side dependencies beyond the dataclass it consumes.
+from daemon.services.defer_block_resolver import _holder_to_response  # noqa: E402
+
 logger = logging.getLogger(__name__)
 
 # Create router with /projects/{project_id}/queues prefix
@@ -640,14 +648,19 @@ async def get_defer_blocked(
     return DeferBlockResponse(
         defer_blocked=snapshot.defer_blocked,
         pending_count=snapshot.pending_count,
-        holders=[
-            {
-                "instance_id": h.instance_id,
-                "agent": h.agent,
-                "status": h.status,
-                "since": h.since,
-                "kind": h.kind,
-            }
-            for h in snapshot.holders
-        ],
+        holders=[_holder_to_response(h) for h in snapshot.holders],
     )
+
+
+__all__ = [
+    # ── Routers (mounted in daemon/api.py under /api) ───────────────────
+    "router",  # per-project /projects/{project_id}/queues prefix
+    "system_queues_router",  # system /queues prefix; hosts /defer-blocked
+    # ── Public DI symbols (consumed by daemon/api.py lifespan + tests) ──
+    "set_defer_block_resolver",  # called from api.py startup
+    "get_defer_block_resolver",  # 503-if-unwired factory
+    "set_job_queue_mgmt_service",  # called from api.py startup
+    "get_mgmt_service",  # 503-if-unwired factory
+    "set_project_repository",  # called from api.py startup
+    "get_project_repository",  # 503-if-unwired factory
+]

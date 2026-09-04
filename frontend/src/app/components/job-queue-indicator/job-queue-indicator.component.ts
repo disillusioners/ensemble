@@ -226,8 +226,8 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
 
   ngOnInit(): void {
     this.loadProjectNames();
-    this.fetchJobs();
-    this.pollHandle = setInterval(() => this.fetchJobs(), this.POLL_INTERVAL_MS);
+    this.fetchBadgeSignals();
+    this.pollHandle = setInterval(() => this.fetchBadgeSignals(), this.POLL_INTERVAL_MS);
   }
 
   ngOnDestroy(): void {
@@ -258,10 +258,12 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Fetch every header snapshot in ONE parallel ``forkJoin`` on the
-   * same 8s tick — active + recent jobs (intake) PLUS the two
-   * additive participants (no separate pollers, no extra intervals):
+   * Fetch every header badge signal in ONE parallel ``forkJoin`` on
+   * the same 8s tick — the name says "badge signals" because this is
+   * THREE families, not just jobs (the pre-round-1 ``fetchJobs``
+   * name understated it):
    *
+   * - jobs intake — active + recent (``X/Y`` + the Recent section);
    * - ``missions`` — authoritative live-mission count
    *   (``GET /api/missions?liveness=processing,pending,paused``);
    * - ``deferBlocked`` — defer-gate warning payload
@@ -283,7 +285,7 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
    * error handler here (those service methods no longer swallow
    * failures) so we can log and reset both job signals to ``[]``.
    */
-  private fetchJobs(): void {
+  private fetchBadgeSignals(): void {
     forkJoin({
       active: this.jobService.listActiveJobs(),
       recent: this.jobService.listRecentJobs(10),
@@ -299,7 +301,7 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
         next: ({ active, recent, missions, deferBlocked }) =>
           this.applyFetchResults(active, recent, missions, deferBlocked),
         error: (err) => {
-          console.error('[JobQueueIndicator] Failed to fetch jobs:', err);
+          console.error('[JobQueueIndicator] Failed to fetch badge signals:', err);
           this.activeJobs.set([]);
           this.allRecentJobs.set([]);
         }

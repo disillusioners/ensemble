@@ -2,6 +2,7 @@ import { signal, computed } from '@angular/core';
 import { Job, JobStatus, isTerminalStatus } from '../../models/job.model';
 import { DeferBlockedStatus, DeferBlockIndicator, deferBlockIndicator } from '../../models/defer-blocked.model';
 import { createMockJob, createMockJobWithStatus } from '../../testing/job-test-helpers';
+import { firstValueFrom, forkJoin, of, throwError, catchError } from 'rxjs';
 
 /**
  * Logic-mirror of JobQueueIndicatorComponent.
@@ -223,7 +224,8 @@ class MockJobQueueIndicatorComponent {
   }
 
   // ---------------------------------------------------------------------------
-  // Error-path mirror — replicates ``fetchJobs()``'s forkJoin error handler.
+  // Error-path mirror — replicates ``fetchBadgeSignals()``'s forkJoin error
+  // handler.
   //
   // C3 fix: ``JobService.listActiveJobs()`` and ``listRecentJobs()`` no longer
   // swallow failures, so errors propagate to a single ``forkJoin`` error
@@ -239,7 +241,7 @@ class MockJobQueueIndicatorComponent {
   fetchErrorCount = 0;
 
   /**
-   * Mirror of the real component's ``fetchJobs()`` error handler:
+   * Mirror of the real component's ``fetchBadgeSignals()`` error handler:
    * clears both JOB signals to ``[]`` so the indicator surfaces the
    * intake truthfully (not a stale snapshot) until the next
    * successful poll tick. The missions count is deliberately NOT
@@ -509,7 +511,8 @@ describe('JobQueueIndicatorComponent Logic', () => {
       instance_id: 'abc-999',
       agent: 'leader',
       status: 'paused',
-      since: '2026-09-04T08:05:00Z',
+      // BE wire truth: ISO-8601 +00:00-normalized UTC (NOT a trailing Z).
+      since: '2026-09-04T08:05:00+00:00',
       kind: 'paused' as const,
     };
 
@@ -523,8 +526,23 @@ describe('JobQueueIndicatorComponent Logic', () => {
       expect(warn).not.toBeNull();
       expect(warn!.severity).toBe('amber');
       expect(warn!.tooltip).toBe(
-        'held by paused instance abc-999 since 2026-09-04 08:05 — resume or terminate to unblock'
+        'held by paused instance abc-999 since 2026-09-04 08:05 UTC — resume or terminate to unblock'
       );
+    });
+
+    it('AMBER with a null since (all source columns NULL) renders "unknown time" through the intake wiring', () => {
+      // P0 type-truth companion: the wire type is ``string | null``; the
+      // component-level intake must surface the helper's null handling
+      // verbatim (no undefined/NaN leaking into the tooltip).
+      component.applyFetchResult([], [], null, {
+        defer_blocked: true,
+        pending_count: 1,
+        holders: [{ ...pausedHolder, since: null }],
+      });
+      const warn = component.deferBlockWarning();
+      expect(warn).not.toBeNull();
+      expect(warn!.severity).toBe('amber');
+      expect(warn!.tooltip).toContain('since unknown time — resume or terminate to unblock');
     });
 
     it('warning hidden when the endpoint degrades to null (404/503 rollout skew)', () => {
@@ -595,9 +613,20 @@ describe('JobQueueIndicatorComponent Logic', () => {
         createMockJobWithStatus('paused', { job_id: 'pa' }),
         createMockJob({ job_id: 'd1', status: 'dead_letter' }),
         createMockJob({ job_id: 'x1', status: 'cancelled' }),
+        // M3 mirror-receipt terminal: ``settled`` must be treated as
+        // terminal via the CANONICAL ``isTerminalStatus`` import (the
+        // deleted module-local copy misclassified it as non-terminal).
+        createMockJob({
+          job_id: 's1',
+          status: 'settled',
+          job_type: 'message',
+          mission_liveness: 'processing',
+        }),
       ]);
       const ids = component.recentJobs().map((j) => j.job_id);
-      expect(ids).toEqual(['c1', 'f1', 'd1', 'x1']);
+      // Equal-timestamp ties keep insertion order (stable sort); the
+      // settled receipt lands in the terminal mix, not on the floor.
+      expect(ids).toEqual(['c1', 'f1', 'd1', 'x1', 's1']);
     });
 
     it('should sort by completed_at desc, falling back to created_at', () => {
@@ -868,7 +897,7 @@ describe('JobQueueIndicatorComponent Logic', () => {
       expect(component.isIdle()).toBe(true);
 
       // 5. The error is captured for logging parity with
-      //    ``console.error('[JobQueueIndicator] Failed to fetch jobs:', err)``.
+      //    ``console.error('[JobQueueIndicator] Failed to fetch badge signals:', err)``.
       expect(component.fetchErrorCount).toBe(1);
       expect(component.lastFetchError).toBeInstanceOf(Error);
       expect((component.lastFetchError as Error).message).toBe('backend down');
@@ -939,6 +968,23 @@ describe('JobQueueIndicatorComponent Logic', () => {
 
       expect(component.liveMissionCount()).toBe(2);
       expect(component.displayText()).toBe('missions: 2');
+    });
+  });
+
+  describe('forkJoin participant isolation (round-1 wiring contract)', () => {
+    it('a throwing additive participant cannot kill the survivors on the same tick', async () => {
+      // Real RxJS, mirroring ``fetchBadgeSignals()`` 1:1: each additive
+      // participant isolates its own error with ``catchError(() => of(null))``
+      // so a missions/defer-blocked failure degrades to ``null`` while the
+      // jobs intake still emits.
+      const result = await firstValueFrom(forkJoin({
+        active: of([createMockJob({ status: 'processing' })]),
+        missions: throwError(() => new Error('missions 500')).pipe(catchError(() => of(null))),
+        deferBlocked: throwError(() => new Error('defer-blocked 404')).pipe(catchError(() => of(null))),
+      }));
+      expect(result.active.length).toBe(1); // jobs intake survived both failures
+      expect(result.missions).toBeNull();
+      expect(result.deferBlocked).toBeNull();
     });
   });
 });

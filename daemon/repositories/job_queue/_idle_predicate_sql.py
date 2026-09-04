@@ -370,10 +370,47 @@ def _unwrap_exists_body(gate_body: str) -> str:
     Replaces the ``SELECT EXISTS ( SELECT 1`` prologue with the witness
     select list and strips the wrapper's closing ``)`` — the FROM/JOIN/
     WHERE tail is byte-identical to the gate's. Raises ``ValueError``
-    at import time if a gate body no longer carries the expected
+    at IMPORT time if a gate body no longer carries the expected
     wrapper shape (the loud-failure contract: a refactor that reshapes
     the wrapper must update this derivation consciously, never drift
     silently).
+
+    BLAST-RADIUS (P0-8-BE(d), 2026-09-04): the two module-level calls
+    below this function — :data:`JOB_DEFER_BUSY_WITNESS_BODY_PROJECT`
+    and :data:`JOB_DEFER_BUSY_WITNESS_BODY_SYSTEM` — invoke
+    :func:`_unwrap_exists_body` at module-load time, NOT lazily. A
+    wrapper reshape that fires this ``ValueError`` therefore bricks
+    the import of ``daemon.repositories.job_queue._idle_predicate_sql``
+    itself. That module is imported transitively by every consumer of
+    the shared busy-set SQL: the gate path
+    (``JobRepository.has_active_non_deferred_work`` /
+    ``has_active_non_background_work``),
+    ``JobProcessor._defer_idle_check`` /
+    ``_background_idle_check`` /
+    ``_select_next_eligible_job`` defer + background branches, the
+    maintenance ``_is_idle`` probe, and the defer-blocked transparency
+    surface (``daemon.services.defer_block_resolver``). In practice
+    the blast radius is the entire daemon entry point + every test
+    that imports anything transitively from ``daemon.repositories.job_queue``
+    — ``daemon.api`` /
+    ``daemon.manager`` /
+    ``daemon.api`` lifespan startup /
+    ``daemon.routers.queues`` /
+    ``daemon.services.defer_block_resolver`` + ~250 unit tests in
+    ``tests/job_queue/`` + ``tests/unit/routers/test_defer_blocked_api.py``
+    + ``tests/unit/job_state/test_constitution_drift.py``. The ``"loud
+    failure"`` design intent is real — a wrapper reshape that breaks
+    the derivation MUST be caught immediately, not at the first witness
+    query — but a maintainer editing this function should know the
+    failure surface spans module imports and reach for a worktree
+    before testing locally. The companion sentinel that catches a
+    *silent* helper bug (not a wrapper reshape) is the byte-equality
+    pin in
+    ``tests/unit/routers/test_defer_blocked_api.py::TestConsistencyPin::test_witness_body_byte_matches_literal_system_body``
+    (and its project-scoped sibling) — that pin anchors the witness
+    body to a hardcoded literal so a bug in this helper that produces
+    *some* body still flips the byte-equality test rather than passing
+    silently.
     """
     if not gate_body.startswith(_GATE_BODY_WITNESS_PREFIX):
         raise ValueError(
