@@ -21,6 +21,12 @@ The two primitives the tap site needs:
   will eventually call (PR3 scope; the call site is wired in PR2
   readiness, but the actual call from ``get_instance_messages`` is the
   PR3 PR).
+* :meth:`MessageMetadataRepository.delete_for_thread` — per-thread
+  bulk delete returning the affected rowcount. T5.19 (merge
+  precondition, architect §3): wired into
+  ``maintenance.py::_cleanup_instance`` so a fully-cleaned instance
+  leaves no side-table rows behind. Bridges via ``asyncio.to_thread``
+  like the other consumers.
 
 Both methods are SYNC. The engine is the shared
 ``daemon.repos...factory.create_engine_from_config()`` engine — same
@@ -32,7 +38,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
@@ -135,6 +141,44 @@ class MessageMetadataRepository:
             ).where(MessageMetadata.thread_id == thread_id)
             rows = conn.execute(stmt).fetchall()
             return {r[0]: (r[1], r[2]) for r in rows}
+
+    def delete_for_thread(self, thread_id: str) -> int:
+        """Delete every ``message_metadata`` row for ``thread_id``.
+
+        Returns the number of rows deleted (0 when the thread has no
+        rows — DELETE matching zero rows is a no-op, not an error,
+        mirroring :meth:`get_for_thread`'s empty-dict contract).
+
+        T5.19 (🔴 merge precondition — architect §3): the sole caller
+        is ``maintenance.py::_cleanup_instance``, wired AFTER
+        ``adelete_thread`` and BEFORE the in-memory cleanup callback so
+        a fully-cleaned instance leaves ZERO side-table rows behind
+        (the side table has no FK on either backend, so without this
+        call a deleted instance's rows accumulate forever — growth ≈
+        2–4 rows/turn × turns × instances).
+
+        Deliberate-non-action semantics: Operation D checkpoint-prune
+        orphans are TOLERATED by design — rows whose parent checkpoints
+        were pruned by Operation D are over-record-only and never join
+        the read path (the read flip resolves timestamps only for
+        messages surfaced from LIVE checkpoints; per PR2 review §3).
+        Pinned / revivable instances keep their rows permanently by
+        design: there is NO FK from ``message_metadata`` to ``instances``
+        on either backend, so nothing cascades into this table except
+        this explicit delete.
+
+        Dialect note: :meth:`upsert_batch` branches on the connection
+        dialect because ``INSERT ... ON CONFLICT`` syntax differs
+        between PostgreSQL and SQLite; the DELETE here needs no branch —
+        it is dialect-portable core SQL, so this single statement
+        serves both the PG path and the SQLite path.
+        """
+        with self._engine.begin() as conn:  # SYNC transaction
+            stmt = delete(MessageMetadata).where(
+                MessageMetadata.thread_id == thread_id
+            )
+            result = conn.execute(stmt)
+            return result.rowcount or 0
 
 
 __all__ = ["MessageMetadataRepository", "Items"]

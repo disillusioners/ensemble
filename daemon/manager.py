@@ -2302,6 +2302,12 @@ class InstanceManager:
             checkpointer=self._checkpointer,
             instance_repo=self._instance_repository,
             ui_prefs_repo=self._instance_ui_prefs_repo,
+            # T5.19 (merge precondition, architect §3): the cleanup job
+            # prunes the instance's message_metadata side-table rows
+            # (never-raise) during _cleanup_instance, so the table does
+            # not grow without bound. The repo singleton exists since
+            # __init__ above (line ~591) — safe to pass here.
+            message_metadata_repo=self._message_metadata_repo,
             on_instance_deleted=self._release_cached_instance,
         )
         self._maintenance_service.register(

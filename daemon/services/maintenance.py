@@ -14,6 +14,11 @@ Deletion Method Policy:
   get_checkpoint_ids / delete_checkpoints_excluding / delete_writes_excluding.
 - For listing threads or finding excess groups, use list_thread_ids and
   find_excess_checkpoint_groups respectively.
+- The one deliberate non-adapter deletion is the T5.19 ``message_metadata``
+  side-table prune in ``_cleanup_instance``: the side table lives on the
+  manager's shared engine (not the checkpoint store), so it goes through
+  the injected ``MessageMetadataRepository`` directly, wrapped in a
+  never-raise guard (orphans tolerated on failure).
 
 Why use the adapter instead of raw checkpointer.conn + checkpointer.lock?
 - AsyncSqliteSaver exposes .conn and .lock, but AsyncPostgresSaver does not.
@@ -44,6 +49,9 @@ from daemon.constants import (
 from daemon.repositories.instance.repository import SQLModelInstanceRepository
 from daemon.repositories.instance_ui_prefs.repository import (
     InstanceUiPrefsRepository,
+)
+from daemon.repositories.message_metadata.repository import (
+    MessageMetadataRepository,
 )
 from daemon.services.job_queue_service import TERMINAL_STATUSES
 
@@ -378,6 +386,7 @@ class CheckpointCleanupJob:
         instance_repo: SQLModelInstanceRepository,
         on_instance_deleted: Callable[[str], None] | None = None,
         ui_prefs_repo: InstanceUiPrefsRepository | None = None,
+        message_metadata_repo: MessageMetadataRepository | None = None,
     ):
         """Initialize the checkpoint cleanup job.
 
@@ -402,12 +411,22 @@ class CheckpointCleanupJob:
                 ``None`` (the default) disables protection so the job runs in
                 backward-compatible mode for callers that have not wired the
                 UI-prefs repo. New code should pass this as a keyword argument.
+            message_metadata_repo: Optional SYNC ``message_metadata`` side-table
+                repository (T5.19 — merge precondition, architect §3). When
+                provided, ``_cleanup_instance`` prunes the cleaned instance's
+                side-table rows (AFTER ``adelete_thread``, BEFORE the
+                in-memory callback) so the table does not grow without bound;
+                the prune is never-raise — a prune failure is logged as a
+                WARNING and tolerated (orphaned rows never join the read
+                path). ``None`` (the default) skips the prune, preserving the
+                backward-compatible behavior for existing constructors.
         """
         self._config = config
         self._checkpointer = checkpointer
         self._instance_repo = instance_repo
         self._on_instance_deleted = on_instance_deleted
         self._ui_prefs_repo = ui_prefs_repo
+        self._message_metadata_repo = message_metadata_repo
 
     async def execute(self) -> None:
         """Run all 5 checkpoint cleanup operations.
@@ -826,6 +845,12 @@ class CheckpointCleanupJob:
         1. Delete instance record from instances.db (cascades to hierarchy,
            tasks, events, message_queue tables).
         2. Delete checkpoint data from checkpoints.db (via adelete_thread).
+        2.5. Prune the ``message_metadata`` side-table rows for the thread
+           (T5.19 — merge precondition, architect §3). The side table has no
+           FK on either backend, so without this step a deleted instance's
+           rows would accumulate forever. Never-raise: a prune failure is
+           logged as a WARNING and tolerated — orphaned rows are
+           over-record-only and never join the read path.
         3. Invoke the on_instance_deleted callback to release in-memory state
            (graph cache, graph tasks, request registry) — only if the
            instance record was actually deleted.
@@ -836,6 +861,9 @@ class CheckpointCleanupJob:
         - If instance delete succeeds but checkpoint deletion fails → the
           orphan checkpoint thread is naturally swept by Operation A
           (_cleanup_orphaned_threads) on the next cycle.
+        - The side-table prune (2.5) runs only after checkpoint deletion
+          succeeded and before in-memory state is released, mirroring the
+          architect §3 anchor ordering.
 
         If the instance record is not found in the DB (deleted by another
         process between query and delete), a warning is logged and both the
@@ -868,6 +896,35 @@ class CheckpointCleanupJob:
 
         # 2. Delete checkpoint data from checkpoints.db
         await self._checkpointer.adelete_thread(instance_id)
+
+        # 2.5. Prune the message_metadata side-table rows for this thread
+        # (T5.19 — merge precondition, architect §3). The side table has
+        # no FK on either backend, so a deleted instance's rows would
+        # otherwise persist forever (growth ≈ 2–4 rows/turn × turns ×
+        # instances). Positioned AFTER adelete_thread / BEFORE the
+        # in-memory callback per the architect §3 anchor.
+        #
+        # NEVER-RAISE GUARD (W3): adelete_thread already succeeded above;
+        # a prune failure MUST NOT raise out of _cleanup_instance —
+        # orphaned side-table rows are tolerated (over-record-only, they
+        # never join the read path), a broken instance teardown is not.
+        # The repo is SYNC (decisions.md D14) — bridged via
+        # asyncio.to_thread like every other consumer of this repo.
+        if self._message_metadata_repo is not None:
+            try:
+                deleted_rows = await asyncio.to_thread(
+                    self._message_metadata_repo.delete_for_thread, instance_id
+                )
+                logger.info(
+                    f"message_metadata prune: deleted {deleted_rows} row(s) "
+                    f"for thread {instance_id[:8]}..."
+                )
+            except Exception:
+                logger.warning(
+                    f"message_metadata prune failed for {instance_id[:8]}... "
+                    "— orphans tolerated (never-raise guard)",
+                    exc_info=True,
+                )
 
         # 3. Clean up in-memory state via callback (if provided).
         # The callback is best-effort in-memory cleanup, so we isolate it
