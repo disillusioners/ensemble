@@ -1761,6 +1761,15 @@ def create_app() -> FastAPI:
             ("GET", "/api/jobs"),
         ]
 
+        # Exact paths to HIDE on success (2xx/3xx) only — error responses
+        # (4xx/5xx) still log so polling failures stay visible.
+        # Frontend queue-status badge polls these endpoints at high
+        # frequency; success traffic is pure noise in the access log.
+        HIDE_PATTERNS_SUCCESS_ONLY = [
+            "/api/missions",
+            "/api/queues/defer-blocked",
+        ]
+
         # ANSI color codes
         RESET = "\033[0m"
         BOLD = "\033[1m"
@@ -1810,6 +1819,10 @@ def create_app() -> FastAPI:
             if (
                 path in self.HIDE_PATTERNS
                 or (method, path) in self.HIDE_METHOD_PATH
+                or (
+                    path in self.HIDE_PATTERNS_SUCCESS_ONLY
+                    and 200 <= status_code < 400
+                )
             ):
                 return
 
