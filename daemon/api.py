@@ -97,6 +97,7 @@ from daemon.routers import (
     work_router,
     projects_router,
     queues_router,
+    system_queues_router,    # /api/queues (system-scoped queue surface: defer-blocked §8.5)
     skills_router,        # /api/skills (Phase 6: skill management REST API)
     dlq_router,
     mcp_servers_router,
@@ -957,6 +958,17 @@ async def lifespan(app: FastAPI):
     )
     manager._mission_resolver = mission_resolver  # for create_mission_tools_if_available
     set_missions_resolver(mission_resolver)
+
+    # Wire defer-blocked transparency surface (2026-09-04, Change 2
+    # backend): GET /api/queues/defer-blocked enumerates the defer
+    # gate's busy-set witnesses through DeferBlockResolver — the
+    # witness SELECT is DERIVED from the same `_idle_predicate_sql`
+    # body constants the gate path composes, so display truth ==
+    # gate truth by construction. READ-only (two SELECTs, zero DML;
+    # census stays at 23). Contract + severity shapes: docs §8.5.
+    from daemon.services.defer_block_resolver import DeferBlockResolver
+    from daemon.routers.queues import set_defer_block_resolver
+    set_defer_block_resolver(DeferBlockResolver(job_repo=job_repository))
 
     # Wire skills router services (Phase 6 Task 2 — REST API surface).
     # The skills router uses 4 service DI accessors (created via
@@ -1899,6 +1911,7 @@ def create_app() -> FastAPI:
     api_router.include_router(missions_router)      # /api/missions (M4-i pull-forward: mission read projection)
     api_router.include_router(projects_router)      # /api/projects
     api_router.include_router(queues_router)        # /api/queues
+    api_router.include_router(system_queues_router) # /api/queues (defer-blocked §8.5)
     api_router.include_router(skills_router)        # /api/skills (Phase 6: skill management REST API)
     api_router.include_router(dlq_router)           # /api/dlq
     api_router.include_router(mcp_servers_router)    # /api/mcp-servers
