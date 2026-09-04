@@ -13,6 +13,22 @@
     }
   </button>
 
+  <!-- Defer-gate warning — renders ONLY when pending defer jobs exist
+       (deferBlockWarning() is null otherwise, so no reserved space).
+       Tooltip text comes from the pure deferBlockIndicator helper. -->
+  @if (deferBlockWarning(); as warn) {
+    <span
+      class="defer-block-warning"
+      [class.amber]="warn.severity === 'amber'"
+      [class.info]="warn.severity === 'info'"
+      [class.red]="warn.severity === 'red'"
+      [matTooltip]="warn.tooltip"
+      [attr.aria-label]="warn.tooltip"
+      role="img">
+      <mat-icon inline>{{ deferBlockIcon() }}</mat-icon>
+    </span>
+  }
+
   <mat-menu #jobQueueMenu="matMenu" class="job-queue-dropdown">
     <ng-template matMenuContent>
       <app-job-queue-panel

@@ -18,8 +18,9 @@ import { MatTooltipModule } from '@angular/material/tooltip';
 import { JobService } from '../../services/job.service';
 import { ProjectService } from '../../services/project.service';
 import { TabStateService } from '../../services/tab-state.service';
-import { Job, JobStatus, liveMissionIds } from '../../models/job.model';
-import { forkJoin } from 'rxjs';
+import { Job, JobStatus, isTerminalStatus } from '../../models/job.model';
+import { DeferBlockedStatus, DeferBlockIndicator, DeferBlockSeverity, deferBlockIndicator } from '../../models/defer-blocked.model';
+import { forkJoin, catchError, of } from 'rxjs';
 import { JobQueuePanelComponent } from '../job-queue-panel/job-queue-panel.component';
 
 /**
@@ -32,15 +33,22 @@ import { JobQueuePanelComponent } from '../job-queue-panel/job-queue-panel.compo
  * the menu; clicking a row inside the panel triggers navigation
  * to the underlying instance via ``onJobClick``.
  *
- * Data sources:
- *   - ``JobService.listActiveJobs()``   — running + pending jobs
- *   - ``JobService.listRecentJobs(10)`` — terminal jobs for the
+ * Data sources (all on ONE 8s tick — no separate pollers):
+ *   - ``JobService.listActiveJobs()``        — running + pending jobs
+ *   - ``JobService.listRecentJobs(10)``      — terminal jobs for the
  *     ``Recent`` section of the embedded panel
+ *   - ``JobService.listLiveMissionCount()``  — authoritative
+ *     ``GET /api/missions`` live count (the badge's N)
+ *   - ``JobService.listDeferBlocked()``      — defer-gate warning
+ *     payload for the severity icon beside the badge
  *
- * Both requests fire together via ``forkJoin`` on the same 8s tick
- * so the snapshot stays internally consistent. Project names are
- * resolved once on init via ``ProjectService.listProjects()`` and
- * cached in ``projectNameMap`` for the lifetime of the component.
+ * All four fire together via ``forkJoin`` on the same 8s tick so the
+ * snapshot stays internally consistent. The two additive participants
+ * isolate their own errors (degrade to ``null``) so a rollout-skew
+ * 404 on ``/api/queues/defer-blocked`` can never kill the jobs intake.
+ * Project names are resolved once on init via
+ * ``ProjectService.listProjects()`` and cached in ``projectNameMap``
+ * for the lifetime of the component.
  *
  * Lifecycle: all subscriptions are tied to ``DestroyRef`` via
  * ``takeUntilDestroyed`` so polling stops when the component is
@@ -130,48 +138,55 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
   /** Idle state — drives the muted styling on the button. */
   readonly isIdle = computed(() => this.totalNonTerminal() === 0);
 
-  // ── Fix C read-model split (§8.2) — mission awareness ───────────────
+  // ── Mission awareness — sourced from the authoritative projection ───
 
   /**
-   * Distinct live-mission instance ids, derived from data this
-   * component ALREADY polls (no new endpoints, no extra requests).
-   *
-   * A mirror row (``job_type === 'message'``) whose
-   * ``mission_liveness`` is live (pending/processing/paused) proves
-   * its parent mission is still working — even when the mirror's own
-   * receipt status is terminal (handled at T0). This is exactly the
-   * "0/0 badge while a mission leader is visibly working" case: the
-   * leader produces only terminal receipts, so the intake count
-   * reads 0/0 while real work is ongoing.
-   *
-   * ``mission_liveness`` is computed read-time by the backend
-   * resolver, so even older terminal mirrors in the recent window
-   * carry the CURRENT instance status — a leader that finished
-   * reads terminal and stops counting.
-   *
-   * M3 (mission-class, 2026-09-03) — prose uses ``terminal``
-   * (mission-side vocabulary) instead of ``settled`` (transport-
-   * receipt vocabulary; belongs only to mirror rows now).
-   *
-   * Sources: the active list (defensive — mirrors are terminal at
-   * T0, but the scan is cheap) + the recent terminal window. Rows
-   * are de-duplicated by ``instance_id`` (many receipts per
-   * mission, one mission); a null instance_id falls back to the
-   * job id so the row still counts rather than silently vanishing.
-   *
-   * Delegates to the exported ``liveMissionIds`` model helper so
-   * the operator-facing badge contract is proven against the real
-   * derivation, not a copy.
+   * Live-mission count as reported by ``GET /api/missions``
+   * (``liveness=processing,pending,paused``) — the authoritative
+   * missions projection. ``null`` = count unavailable (degraded count
+   * leg or fetch failure) and is deliberately NOT rendered as 0: the
+   * last known count is RETAINED so a transient missions failure can
+   * never flip a working system's badge back to a false "bare 0/0".
    */
-  readonly liveMissionIds = computed(() =>
-    liveMissionIds([...this.activeJobs(), ...this.recentJobs()])
-  );
+  private readonly missionCountRaw = signal<number | null>(null);
 
-  /** Number of distinct live missions behind handled receipts. */
-  readonly liveMissionCount = computed(() => this.liveMissionIds().size);
+  /**
+   * Distinct live missions, from the missions projection this
+   * component polls alongside its job intake (same 8s tick, no
+   * separate poller).
+   *
+   * REPLACES the former receipt-window derivation
+   * (``liveMissionIds(active + recent)``): settled tokens that never
+   * reached the receipt intake made that N read 0 while a leader
+   * mission was visibly working. ``/api/missions`` is correct and
+   * authoritative — one mission per instance, liveness-filtered
+   * server-side.
+   */
+  readonly liveMissionCount = computed(() => this.missionCountRaw() ?? 0);
 
-  /** True when at least one parent mission is still working. */
+  /** True when the missions projection reports at least one live mission. */
   readonly hasLiveMissions = computed(() => this.liveMissionCount() > 0);
+
+  /**
+   * Defer-gate warning affordance, derived via the pure
+   * ``deferBlockIndicator`` model helper. ``null`` = no render (zero
+   * pending defer jobs, or the endpoint degraded/404 during rollout
+   * skew — the icon hides silently).
+   */
+  readonly deferBlockWarning = signal<DeferBlockIndicator | null>(null);
+
+  /** Material icon name per severity — presentation-only mapping. */
+  private static readonly DEFER_BLOCK_ICONS: Record<DeferBlockSeverity, string> = {
+    amber: 'warning',
+    info: 'info',
+    red: 'error',
+  };
+
+  /** Icon shown in the warning affordance ('' when hidden). */
+  readonly deferBlockIcon = computed(() => {
+    const warning = this.deferBlockWarning();
+    return warning ? JobQueueIndicatorComponent.DEFER_BLOCK_ICONS[warning.severity] : '';
+  });
 
   /**
    * The badge shows system activity even when the intake queue is
@@ -190,20 +205,16 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
    * Tooltip text shown on hover — exposes the raw counts so the
    * user can distinguish "all running" from "all pending" without
    * opening the dropdown. Format: ``Running: X / Pending: Y``, plus
-   * a live-missions line whenever the receipt window proves a
-   * parent mission is still working. Both numbers are always
-   * explained: jobs (Running/Pending) and missions (Live missions).
+   * a live-missions line whenever the missions projection reports
+   * live work. Both numbers are always explained: jobs
+   * (Running/Pending) and missions (Live missions).
    */
   readonly tooltipText = computed(() => {
     const base = `Running: ${this.runningCount()} / Pending: ${this.pendingCount()}`;
     if (!this.hasLiveMissions()) {
       return base;
     }
-    const plural = this.liveMissionCount() === 1 ? '' : 's';
-    return (
-      `${base} · Live missions: ${this.liveMissionCount()} ` +
-      `(message${plural === '' ? '' : 's'} handled; parent mission${plural} still working)`
-    );
+    return `${base} · Live missions: ${this.liveMissionCount()} (from missions projection)`;
   });
 
   /** Running-only subset — passed to the embedded panel. */
@@ -247,34 +258,79 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Fetch active + recent jobs in parallel via ``forkJoin`` so the
-   * active and recent snapshots stay consistent on each tick. The
-   * raw recent payload is stored in ``allRecentJobs`` and a
+   * Fetch every header snapshot in ONE parallel ``forkJoin`` on the
+   * same 8s tick — active + recent jobs (intake) PLUS the two
+   * additive participants (no separate pollers, no extra intervals):
+   *
+   * - ``missions`` — authoritative live-mission count
+   *   (``GET /api/missions?liveness=processing,pending,paused``);
+   * - ``deferBlocked`` — defer-gate warning payload
+   *   (``GET /api/queues/defer-blocked``).
+   *
+   * The two additive participants carry their own ``catchError`` so a
+   * failure (404/503 during BE rollout skew, 500, network) degrades
+   * THAT participant to ``null`` without failing the whole
+   * ``forkJoin`` — the jobs intake keeps flowing. ``null`` missions ⇒
+   * the last known count is retained (never falsely idle); ``null``
+   * deferBlocked ⇒ the warning icon hides.
+   *
+   * The raw recent payload is stored in ``allRecentJobs`` and a
    * derived ``recentJobs`` computed filters/sorts/slices it for
    * the panel — see the field docs for why the public surface is
    * defensive.
    *
-   * Errors propagate through the single ``forkJoin`` error handler
-   * here (the underlying service methods no longer swallow
-   * failures) so we can log and reset both signals to ``[]``.
+   * Active/recent errors still propagate to the single ``forkJoin``
+   * error handler here (those service methods no longer swallow
+   * failures) so we can log and reset both job signals to ``[]``.
    */
   private fetchJobs(): void {
     forkJoin({
       active: this.jobService.listActiveJobs(),
       recent: this.jobService.listRecentJobs(10),
+      missions: this.jobService
+        .listLiveMissionCount()
+        .pipe(catchError(() => of(null))),
+      deferBlocked: this.jobService
+        .listDeferBlocked()
+        .pipe(catchError(() => of(null))),
     })
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
-        next: ({ active, recent }) => {
-          this.activeJobs.set(active);
-          this.allRecentJobs.set(recent);
-        },
+        next: ({ active, recent, missions, deferBlocked }) =>
+          this.applyFetchResults(active, recent, missions, deferBlocked),
         error: (err) => {
           console.error('[JobQueueIndicator] Failed to fetch jobs:', err);
           this.activeJobs.set([]);
           this.allRecentJobs.set([]);
         }
       });
+  }
+
+  /**
+   * Apply one poll tick's results to the component signals. Kept as
+   * its own method so the logic-mirror spec can replicate it 1:1
+   * with mocked service payloads.
+   *
+   * - jobs (active + recent) are stored verbatim;
+   * - ``missions === null`` (degraded count leg / fetch failure)
+   *   RETAINS the previous count — "count unavailable" must not read
+   *   as 0, so the badge never falsely reports an idle system;
+   * - ``deferBlocked === null`` hides the warning affordance.
+   */
+  private applyFetchResults(
+    active: Job[],
+    recent: Job[],
+    missions: number | null,
+    deferBlocked: DeferBlockedStatus | null
+  ): void {
+    this.activeJobs.set(active);
+    this.allRecentJobs.set(recent);
+    if (missions !== null) {
+      this.missionCountRaw.set(missions);
+    }
+    this.deferBlockWarning.set(
+      deferBlocked === null ? null : deferBlockIndicator(deferBlocked)
+    );
   }
 
   /**
@@ -321,6 +377,11 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
  * it as non-terminal and the Jobs UI surfaces paused rows in the
  * active queue. Counting it as "running" keeps the header badge
  * in sync with the underlying queue state.
+ *
+ * Terminal classification is NOT redefined here: the canonical
+ * ``isTerminalStatus`` (models/job.model.ts) is imported directly —
+ * the former module-private copy predated the M3 ``settled`` token
+ * and silently misclassified settled receipts as non-terminal.
  */
 function isRunningStatus(status: JobStatus): boolean {
   return (
@@ -332,13 +393,4 @@ function isRunningStatus(status: JobStatus): boolean {
 
 function isPendingStatus(status: JobStatus): boolean {
   return status === 'pending' || (status as string) === 'queued';
-}
-
-function isTerminalStatus(status: JobStatus): boolean {
-  return (
-    status === 'completed' ||
-    status === 'failed' ||
-    status === 'cancelled' ||
-    status === 'dead_letter'
-  );
 }

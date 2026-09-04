@@ -44,6 +44,30 @@
   }
 }
 
+/* Defer-gate warning affordance — severity-coloured icon beside the
+   badge. Colour palette matches the app's status colours (amber-500 /
+   blue-500 / red-500, same values the Jobs page uses). Rendered only
+   when a warning exists (@if in the template), so no reserved space. */
+.defer-block-warning {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 4px;
+  vertical-align: middle;
+  cursor: default;
+
+  &.amber {
+    color: #f59e0b; /* amber-500 — paused instance holds the block */
+  }
+
+  &.info {
+    color: #3b82f6; /* blue-500 — live-only holders, working as designed */
+  }
+
+  &.red {
+    color: #ef4444; /* red-500 — pending defer jobs with no holder */
+  }
+}
+
 @keyframes mission-pulse {
   0%,
   100% {
