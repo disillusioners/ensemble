@@ -1202,6 +1202,17 @@ class InstanceMessagingService:
            ``MessageTapSlot`` (``SOURCE_COMPACTION_MESSAGING``) fires
            AFTER the seam returns so the tap coverage is complete
            across both entry points (messaging + reactive).
+
+        P2 (proactive-compaction-fix): the call site in
+        ``_process_message_with_tracking`` is UNCONDITIONAL — the
+        pre-P2 ``if not is_retry:`` blanket skip (WARN-5) is removed,
+        so resume-mode dispatches (cascade-resume ``waiting_children``
+        wake via the manager resume lane, pause-resume,
+        revive-on-send) also reach this gate. This gate chain is the
+        SOLE arbiter of skip/proceed on every lane. The watchover
+        graph-restart fallback lane (``watchover_service`` /
+        ``task_processor`` enqueue without ``resume_mode``) arrives
+        ``is_retry=False`` and is unchanged.
         """
         # 0. Kill-switch — flag default ON; OFF = byte-identical pre-
         # Phase-1 (skip the whole gate, return silently).
@@ -3779,10 +3790,25 @@ class InstanceMessagingService:
                 )
             )
 
-        # Build input - on retry with checkpoint, resume from None
-        if not is_retry:
-            await self._maybe_compact_context(instance_id, graph, config)
+        # ── Proactive compaction trigger (P2, proactive-compaction-fix) ──
+        # Fires on EVERY dispatch lane — first-attempt AND
+        # resume/retry. The pre-P2 blanket ``if not is_retry:`` skip
+        # (WARN-5) excluded the flagship waiting-children orchestrator
+        # class, whose turns dispatch on the cascade-resume lane
+        # (``is_retry=True``, ``manager._resume_processing_background``).
+        # Its rationale (don't compact a mid-flight resume) is moot at
+        # pre-dispatch: the checkpoint here is quiescent-shaped by
+        # construction, and where it is NOT (pause-cancelled mid-node →
+        # ``next=('agent',)``) the inverted SHAPE gate inside
+        # ``_maybe_compact_context`` INFO-skips unharmed; terminal
+        # statuses still reject via the STATUS gate. The P1 gate chain
+        # inside ``_maybe_compact_context`` (flag → status → shape →
+        # engine) is the SOLE arbiter of skip/proceed on all lanes.
+        await self._maybe_compact_context(instance_id, graph, config)
 
+        # Build input — on retry with checkpoint, resume from it; on
+        # first attempt, build a fresh graph_input (persistent block +
+        # user message).
         if is_retry:
             has_ckpt = await self._has_checkpoint(instance_id)
             if has_ckpt:
