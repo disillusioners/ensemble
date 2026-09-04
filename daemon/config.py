@@ -703,6 +703,21 @@ class AgentsConfig(BaseSettings):
     directory: str = Field(default="./agents")
 
 
+# Permissive bool-spelling vocabularies for ``proactive_enabled``.
+# Shared by ``CompactionConfig._parse_proactive_enabled`` (the
+# field validator — empty/raw env-var normalization) AND
+# ``_resolve_proactive_enabled`` (the load_config resolver — the
+# only production caller today, but the field validator must stay
+# in sync so a direct ``CompactionConfig()`` construction (e.g. a
+# test, an internal caller, a future second boot path) does NOT
+# diverge from the boot path). Centralized here so the two sites
+# cannot drift (cycle-3 cleanup — pre-cycle-3 each site had its
+# own copy of these literals; the validator was unaware of the
+# resolver's permissiveness and vice-versa).
+_PROACTIVE_FALSE_BOOLS: frozenset[str] = frozenset({"0", "false", "no", "off"})
+_PROACTIVE_TRUE_BOOLS: frozenset[str] = frozenset({"1", "true", "yes", "on"})
+
+
 class CompactionConfig(BaseSettings):
     """Context compaction configuration."""
 
@@ -807,21 +822,42 @@ class CompactionConfig(BaseSettings):
         """Permissive bool parser for ``ENSEMBLE_PROACTIVE_COMPACTION``.
 
         Bare ``KEY=`` lines in ``.env`` reach pydantic as the empty
-        string, which would otherwise disable the trigger (defeating
-        the documented ON default). Empty / whitespace-only values
-        are normalized to ``None`` (pydantic then applies the
-        default). ``"0"`` / ``"false"`` / ``"no"`` (any case) → False;
-        ``"1"`` / ``"true"`` / ``"yes"`` → True; non-empty
-        unrecognized strings pass through (pydantic raises a clear
-        type error so a typo is caught at startup).
+        string. Pre-cycle-3 the validator normalized empty →
+        ``None`` (pydantic treats ``None`` as an explicit value and
+        raises ``bool_type`` validation error — boot crashes).
+        Cycle 3 / W-1 fix: empty / whitespace-only values are
+        normalized to the documented ``True`` default DIRECTLY so a
+        direct ``CompactionConfig()`` construction (test, internal
+        caller, future boot path) does NOT diverge from the
+        resolver path. ``"0"`` / ``"false"`` / ``"no"`` /
+        ``"off"`` (any case) → False; ``"1"`` / ``"true"`` /
+        ``"yes"`` / ``"on"`` → True; non-empty unrecognized strings
+        pass through (pydantic raises a clear type error so a typo
+        is caught at startup).
+
+        The spellings live in module-level
+        :data:`_PROACTIVE_TRUE_BOOLS` / :data:`_PROACTIVE_FALSE_BOOLS`
+        — shared with :func:`_resolve_proactive_enabled` so the
+        field validator cannot drift from the resolver.
         """
         if value is None or (isinstance(value, str) and not value.strip()):
-            return None
+            # Empty / whitespace-only → documented ON default.
+            # Returning the default explicitly (rather than ``None``)
+            # is required: in a ``mode="before"`` validator, ``None``
+            # is an EXPLICIT value (pydantic treats it as a user-set
+            # value and applies the field type check), NOT a signal
+            # to fall back to the Field default. The resolver at
+            # :func:`_resolve_proactive_enabled` has the same
+            # empty-string normalization contract — this validator
+            # mirrors it so a direct ``CompactionConfig()``
+            # construction (bypassing ``load_config``) does NOT
+            # crash boot with a stray ``.env`` ``KEY=`` line.
+            return True
         if isinstance(value, str):
             v = value.strip().lower()
-            if v in {"0", "false", "no", "off"}:
+            if v in _PROACTIVE_FALSE_BOOLS:
                 return False
-            if v in {"1", "true", "yes", "on"}:
+            if v in _PROACTIVE_TRUE_BOOLS:
                 return True
             # Anything else is passed through; pydantic raises.
         return value
@@ -2078,10 +2114,14 @@ def _resolve_compaction_model(yaml_value: Any, *, env_value: str | None) -> str:
 # (the field validator relied on pydantic's downstream type error;
 # here, the resolver is called from ``load_config`` BEFORE the model is
 # constructed, so the explicit error is more operator-friendly).
-_PROACTIVE_TRUE = frozenset({"1", "true", "yes", "on"})
-_PROACTIVE_FALSE = frozenset({"0", "false", "no", "off"})
-
-
+#
+# Cycle 3 — the bool-spelling vocabularies now live at module scope
+# (see :data:`_PROACTIVE_TRUE_BOOLS` / :data:`_PROACTIVE_FALSE_BOOLS`
+# at the top of this module) and are SHARED between this resolver
+# and the field validator. Pre-cycle-3 each site had its own copy
+# of the literals; a future spelling added to one site but not
+# the other would silently diverge (e.g. accepting "yes" at the
+# field but rejecting it at the resolver).
 def _parse_proactive_str(v: str) -> bool:
     """Parse a permissive proactive_enabled env value to ``bool``.
 
@@ -2094,9 +2134,9 @@ def _parse_proactive_str(v: str) -> bool:
     re-raised so the operator sees a clear boot failure).
     """
     s = v.strip().lower()
-    if s in _PROACTIVE_FALSE:
+    if s in _PROACTIVE_FALSE_BOOLS:
         return False
-    if s in _PROACTIVE_TRUE:
+    if s in _PROACTIVE_TRUE_BOOLS:
         return True
     raise ValueError(
         f"Invalid proactive_enabled value {v!r} — expected one of "

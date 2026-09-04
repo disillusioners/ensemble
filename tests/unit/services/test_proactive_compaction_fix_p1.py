@@ -1167,6 +1167,59 @@ class TestProactiveEnabledFlag:
         cfg = load_config(config_path=str(path))
         assert cfg.compaction.proactive_enabled is False
 
+    def test_field_validator_empty_string_normalizes_to_default(self):
+        """Cycle 3 / W-1 cleanup — direct ``CompactionConfig()``
+        construction with ``proactive_enabled=''`` MUST NOT raise.
+
+        The boot path (``load_config`` → :func:`_resolve_proactive_enabled`)
+        already normalizes empty env to the documented ON default
+        (cycle-2 W-1 fix). Cycle 3 closes the divergence trap:
+        the field validator
+        (:meth:`CompactionConfig._parse_proactive_enabled`) now
+        normalizes empty/whitespace at the validator level so a
+        direct ``CompactionConfig()`` construction (test, internal
+        caller, future second boot path) does NOT crash boot with
+        ``ValidationError: bool_type``.
+
+        Pre-cycle-3 the validator returned ``None`` for empty
+        strings (intending "use the field default"), but pydantic
+        treats ``None`` from a ``mode="before"`` validator as an
+        EXPLICIT value and applies the field type check (``bool``),
+        which fails with ``bool_type``. The fix: return the
+        documented ``True`` default directly. Mirrors the
+        resolver's empty-string normalization contract.
+        """
+        from daemon.config import CompactionConfig as CC
+
+        # Empty string → default ON, no raise.
+        cfg = CC(proactive_enabled="")
+        assert cfg.proactive_enabled is True, (
+            "empty string must normalize to the documented ON default "
+            "(cycle 3 / W-1 — direct CompactionConfig() construction "
+            "must NOT crash boot with ValidationError)"
+        )
+
+        # Whitespace-only string → default ON, no raise.
+        cfg = CC(proactive_enabled="   ")
+        assert cfg.proactive_enabled is True
+
+        # None → default ON (the validator's pre-existing None path
+        # returns True now; pre-cycle-3 it returned None which
+        # crashed pydantic).
+        cfg = CC(proactive_enabled=None)
+        assert cfg.proactive_enabled is True
+
+        # Sanity: the spelled forms still work — empty→default
+        # didn't accidentally flip them.
+        for v in ["0", "false", "no", "off"]:
+            assert CC(proactive_enabled=v).proactive_enabled is False, (
+                f"{v!r} must still resolve to False"
+            )
+        for v in ["1", "true", "yes", "on"]:
+            assert CC(proactive_enabled=v).proactive_enabled is True, (
+                f"{v!r} must still resolve to True"
+            )
+
 
 class TestProactiveGateKillSwitch:
     """When ``proactive_enabled=False``, the proactive site short-

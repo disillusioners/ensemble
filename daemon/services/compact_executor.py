@@ -214,6 +214,7 @@ _NOOP_REASON_BELOW_FLOOR = "below_floor"
 _NOOP_REASON_RECENTLY_COMPACTED = "recently_compacted"
 _NOOP_REASON_TOO_FEW_MESSAGES = "too_few_messages"
 _NOOP_REASON_INJECTIONS_DOMINATE = "injections_dominate"
+_NOOP_REASON_PRESERVED_WITHIN_THRESHOLD = "preserved_within_threshold"
 
 # Cycle 2 (proactive-compaction-fix review W-4) — engine "skipped_*"
 # compaction_type values are user-facing no-ops, NOT a separate wire
@@ -225,9 +226,24 @@ _NOOP_REASON_INJECTIONS_DOMINATE = "injections_dominate"
 # ``skipped_*`` value has a noop reason; any unforeseen value
 # falls through to the wire layer with the raw engine string as
 # diagnostic detail (forward-compat).
+#
+# Cycle 3 (proactive-compaction-fix residual W-4.5) added the
+# ``skipped_preserved_within_threshold`` key — the emergency-bail
+# path on ``daemon/compaction.py:2129-2138`` when preserved-groups
+# still fit within the threshold. Pre-cycle-3 the raw engine
+# string leaked through the wire (``compacted_type=
+# "skipped_preserved_within_threshold"``, outside the FE
+# ``CompactedType`` enum) AND the user-facing /compact invoked the
+# 60s dedup stamp seam on the no-op. Both halves are fixed by the
+# new key: the wire mapping produces
+# ``compacted_type="noop"`` + ``noop_reason=
+# "preserved_within_threshold"``, and the seam-skip call-site at
+# :func:`execute_compact` keys on this same dict membership, so
+# the seam is NOT invoked on this path.
 _ENGINE_SKIPPED_TYPES_TO_NOOP_REASON: dict[str, str] = {
     "skipped_injections_dominate": _NOOP_REASON_INJECTIONS_DOMINATE,
     "skipped_below_min_messages": _NOOP_REASON_TOO_FEW_MESSAGES,
+    "skipped_preserved_within_threshold": _NOOP_REASON_PRESERVED_WITHIN_THRESHOLD,
 }
 
 _FAILURE_KIND_TIMEOUT = "timeout"

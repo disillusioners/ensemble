@@ -1067,11 +1067,24 @@ class TestEnums:
         # ``{summary, partial_summary, truncation, noop}`` —
         # the W-4 fix is on the noop REASON side, not the
         # noop TYPE side.
+        #
+        # Cycle 3 (proactive-compaction-fix residual W-4.5) —
+        # ``preserved_within_threshold`` is added to mirror the
+        # engine's emergency-bail emitter
+        # (``skipped_preserved_within_threshold``,
+        # ``daemon/compaction.py:2129-2138``). Without this enum
+        # member, the executor's wire mapping has no FE-enum-
+        # compatible value to stamp on the user-facing /compact
+        # no-op, and the raw engine string leaks through the wire
+        # (the pre-cycle-3 W-4 enum-contract residual). The
+        # ``CompactedType`` enum stays unchanged — the W-4.5
+        # fix is on the noop REASON side, same shape as cycle 2.
         assert {n.value for n in NoopReason} == {
             "below_floor",
             "recently_compacted",
             "too_few_messages",
             "injections_dominate",
+            "preserved_within_threshold",
         }
 
 
