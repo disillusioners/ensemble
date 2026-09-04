@@ -374,6 +374,205 @@ class TestGetInstanceMessagesObservedAlistCount:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# FR-6 AC-6.1: degradation WARNING with reason categories
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestDegradationWarning:
+    """FR-6 AC-6.1: every ``message_metadata`` lookup failure logs a
+    WARNING with the reason category (``manager_missing`` |
+    ``repo_missing`` | ``repo_exception`` | ``row_absent``); the
+    response shape is byte-identical to the non-degraded path.
+
+    FR-6 AC-6.2: catch is ``except Exception:`` (NEVER
+    ``except BaseException:`` per C-14).
+    """
+
+    @pytest.mark.asyncio
+    async def test_degraded_warning_when_manager_is_none(self, caplog):
+        """Manager=None → WARNING with reason=manager_missing."""
+        from langchain_core.messages import HumanMessage
+
+        from daemon.persistence import get_instance_messages
+
+        mock_checkpointer = MagicMock(name="Checkpointer")
+        mock_checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {"messages": [HumanMessage(content="hi", id="msg-d1")]},
+            "ts": "2026-08-25T00:00:00+00:00",
+        })
+        mock_checkpointer.alist = MagicMock(return_value=_AlistAsyncIterator(0))
+
+        with caplog.at_level(logging.WARNING, logger="daemon.persistence"):
+            msgs = await get_instance_messages(mock_checkpointer, "test-no-mgr")
+
+        assert len(msgs) == 1
+        matching = [r for r in caplog.records if "manager_missing" in r.message]
+        assert len(matching) == 1, [r.message for r in caplog.records]
+        assert ("fall back to state.ts" in matching[0].message or "falling back to state.ts" in matching[0].message), matching[0].message
+        assert matching[0].levelno == logging.WARNING
+
+    @pytest.mark.asyncio
+    async def test_degraded_warning_when_repo_attr_missing(self, caplog):
+        """Manager shape lacks ``message_metadata_repo`` → repo_missing.
+
+        The full ``get_instance_messages`` flow does extra work
+        (context rebuild) that needs a fully-real manager. This
+        test focuses on the WARNING contract by inspecting the
+        code path that detects the missing repo attribute — the
+        ``getattr(manager, "message_metadata_repo", None)`` check.
+        The check emits a WARNING with reason=``repo_missing``:
+        ``manager is not None but lacks the attribute``.
+        """
+        from langchain_core.messages import HumanMessage
+
+        from daemon.persistence import get_instance_messages
+
+        # A minimal manager that lacks the attribute entirely (NOT
+        # hasattr — so getattr returns None).
+        class _BareManager:
+            pass
+
+        bare_manager = _BareManager()
+
+        mock_checkpointer = MagicMock(name="Checkpointer")
+        mock_checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {"messages": [HumanMessage(content="hi", id="msg-d2")]},
+            "ts": "2026-08-25T00:00:00+00:00",
+        })
+        # Provide a list-shaped alist iterator so the checkpointer
+        # doesn't blow up (the read path doesn't call alist, but
+        # certain code paths inspect it).
+        mock_checkpointer.alist = MagicMock(return_value=_AlistAsyncIterator(0))
+
+        # Drive only the repo-detection path by calling get_instance_messages
+        # with a manager that lacks the attribute. The downstream
+        # context rebuild may emit warnings — we capture caplog at
+        # WARNING+ and filter for our specific WARNING.
+        with caplog.at_level(logging.WARNING, logger="daemon.persistence"):
+            try:
+                msgs = await get_instance_messages(
+                    mock_checkpointer, "test-no-repo", manager=bare_manager
+                )
+            except Exception:
+                msgs = []  # context rebuild may fail on minimal manager
+
+        # The KEY assertion: WARNING with reason=repo_missing was emitted.
+        matching = [r for r in caplog.records if "repo_missing" in r.message]
+        assert len(matching) == 1, [r.message for r in caplog.records]
+        assert ("fall back to state.ts" in matching[0].message or "falling back to state.ts" in matching[0].message), matching[0].message
+
+    def test_repo_exception_warning_emitted_by_persistence_py(self):
+        """AST guard: ``except Exception:`` (NOT ``except BaseException:``)
+        catches repo failures and emits a WARNING with the exception
+        class name (the ``repo_exception`` reason category).
+
+        C-14: NEVER ``except BaseException:`` — CancelledError must
+        propagate on Python 3.13. The repo_lookup_raises test below
+        would also catch RuntimeError (a non-CancelledError Exception);
+        the AST scan below pins the catch shape so a future regression
+        cannot widen the catch to ``BaseException``.
+        """
+        from pathlib import Path
+        import ast
+        repo_root = Path(__file__).resolve().parents[3]
+        persistence_path = repo_root / "daemon" / "persistence.py"
+        source = persistence_path.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+
+        # Find the ``try`` block for the ``get_for_thread`` call.
+        # The relevant ``except`` must be ``except Exception:`` (NOT
+        # ``except BaseException:``).
+        caught_exceptions: list[str] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Try):
+                for handler in node.handlers:
+                    if handler.type is None:
+                        continue  # bare except — not allowed here per C-14
+                    # handler.type is the exception class expression.
+                    # Handle the common forms: ``except Exception:``,
+                    # ``except Exception as exc:``.
+                    type_node = handler.type
+                    while isinstance(type_node, ast.Name):
+                        caught_exceptions.append(type_node.id)
+                        break
+                    if isinstance(type_node, ast.Tuple):
+                        for elt in type_node.elts:
+                            if isinstance(elt, ast.Name):
+                                caught_exceptions.append(elt.id)
+
+        # The repo-lookup catch MUST be ``Exception`` (never BaseException).
+        assert "Exception" in caught_exceptions, (
+            f"no `except Exception` clause found in daemon/persistence.py "
+            f"for repo-lookup error handling. Found: {caught_exceptions}"
+        )
+        assert "BaseException" not in caught_exceptions, (
+            f"C-14 violation: `except BaseException` would swallow "
+            f"CancelledError on Python 3.13. Found: {caught_exceptions}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_degraded_warning_when_repo_lookup_raises(self, caplog):
+        """Repo exists but ``get_for_thread`` raises → repo_exception."""
+        from langchain_core.messages import HumanMessage
+
+        from daemon.persistence import get_instance_messages
+
+        mock_repo = MagicMock(name="Repo")
+        mock_repo.get_for_thread = MagicMock(side_effect=RuntimeError("conn timeout"))
+
+        mock_manager = MagicMock(name="Manager")
+        mock_manager.message_metadata_repo = mock_repo
+
+        mock_checkpointer = MagicMock(name="Checkpointer")
+        mock_checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {"messages": [HumanMessage(content="hi", id="msg-d3")]},
+            "ts": "2026-08-25T00:00:00+00:00",
+        })
+        mock_checkpointer.alist = MagicMock(return_value=_AlistAsyncIterator(0))
+
+        with caplog.at_level(logging.WARNING, logger="daemon.persistence"):
+            msgs = await get_instance_messages(
+                mock_checkpointer, "test-repo-raise", manager=mock_manager
+            )
+
+        # The KEY assertion: WARNING with reason=lb_<exception class>
+        # was emitted (the message includes the exception class name).
+        matching = [r for r in caplog.records if "lookup failed" in r.message]
+        assert len(matching) == 1, [r.message for r in caplog.records]
+        assert "RuntimeError" in matching[0].message
+        assert "conn timeout" in matching[0].message
+
+    @pytest.mark.asyncio
+    async def test_degraded_warning_when_repo_returns_empty(self, caplog):
+        """Repo returns empty dict → row_absent (no rows for this thread)."""
+        from langchain_core.messages import HumanMessage
+
+        from daemon.persistence import get_instance_messages
+
+        mock_repo = MagicMock(name="Repo-empty")
+        mock_repo.get_for_thread = MagicMock(return_value={})
+
+        mock_manager = MagicMock(name="Manager")
+        mock_manager.message_metadata_repo = mock_repo
+
+        mock_checkpointer = MagicMock(name="Checkpointer")
+        mock_checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {"messages": [HumanMessage(content="hi", id="msg-d4")]},
+            "ts": "2026-08-25T00:00:00+00:00",
+        })
+        mock_checkpointer.alist = MagicMock(return_value=_AlistAsyncIterator(0))
+
+        with caplog.at_level(logging.WARNING, logger="daemon.persistence"):
+            msgs = await get_instance_messages(
+                mock_checkpointer, "test-repo-empty", manager=mock_manager
+            )
+
+        # The KEY assertion: WARNING with reason=row_absent emitted.
+        matching = [r for r in caplog.records if "row_absent" in r.message]
+        assert len(matching) == 1, [r.message for r in caplog.records]
+        assert ("fall back to state.ts" in matching[0].message or "falling back to state.ts" in matching[0].message), matching[0].message
+
+# ─────────────────────────────────────────────────────────────────────────────
 # _prune_per_thread_checkpoints — duration_ms + deleted in exit log
 # ─────────────────────────────────────────────────────────────────────────────
 

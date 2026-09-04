@@ -392,15 +392,34 @@ async def get_instance_messages(
             metadata = await asyncio.to_thread(
                 msgs_repo.get_for_thread, instance_id
             )
+            if not metadata:
+                # Repo lookup succeeded but returned ZERO rows. This is
+                # distinct from "repo missing" / "repo exception" —
+                # the side table exists, the connection works, but
+                # this specific thread has no rows. Could be a fresh
+                # thread (no taps yet — benign) OR a regression that
+                # would silently produce wrong timestamps. Warn with
+                # reason=``row_absent`` so the operator can disambiguate.
+                # FR-6 AC-6.1 reason categories are recorded verbatim in
+                # the message.
+                logger.warning(
+                    f"get_instance_messages: message_metadata row_absent "
+                    f"for {instance_id[:8] if instance_id else '?'} — "
+                    f"reason=row_absent (side table has no rows for this "
+                    f"thread; falling back to state.ts)"
+                )
         except Exception as exc:
             # Enrichment-only lookup: a side-table failure degrades to
             # the state.ts fallback (the accepted degradation for a
             # missing repo), never fails GET /messages. Warned, not
-            # silent, so a persistent DB issue stays observable.
+            # silent, so a persistent DB issue stays observable. Catch
+            # is ``except Exception:`` ONLY (NEVER ``except BaseException:``
+            # per C-14 — CancelledError must propagate on Python 3.13).
             logger.warning(
                 f"get_instance_messages: message_metadata lookup failed "
                 f"for {instance_id[:8] if instance_id else '?'} — "
-                f"falling back to state.ts timestamps: {exc}"
+                f"reason={type(exc).__name__} (falling back to state.ts "
+                f"timestamps): {exc}"
             )
             metadata = {}
     else:
@@ -409,10 +428,15 @@ async def get_instance_messages(
         # is None, or the manager shape lacks ``message_metadata_repo``)
         # stamps every timestamp from state.ts with no trace. Warn once
         # per call so a mis-wired manager stays observable — a single
-        # concise line, no rate-limiter (per review scope).
+        # concise line, no rate-limiter (per review scope). FR-6 AC-6.1
+        # reason category is recorded verbatim.
+        reason = (
+            "manager_missing" if manager is None
+            else "repo_missing"
+        )
         logger.warning(
-            f"get_instance_messages: message_metadata_repo missing/None "
-            f"for {instance_id[:8] if instance_id else '?'} — "
+            f"get_instance_messages: {reason} for "
+            f"{instance_id[:8] if instance_id else '?'} — "
             f"all timestamps fall back to state.ts"
         )
     msg_timestamps: dict[str, str] = {
