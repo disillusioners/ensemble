@@ -179,7 +179,7 @@ For backfill (Solution N), v2 MUST define explicit "coverage sufficient" criteri
 | NFR-1 | Performance | `GET /instances/{id}/messages` wall-clock latency at 1000-checkpoint history, page size 100 | ms | < 50 ms (v1 baseline: 4.5 ms at 400 msgs — v2 scales linearly with page size) | `tests/performance/test_message_api_cost.py` matrix |
 | NFR-2 | Performance | Peak RSS delta during `GET /messages` at 1000-checkpoint history | MB | < 50 MB (v1 baseline: 762 KB transfer) | `tracemalloc` peak in the perf harness |
 | NFR-3 | Performance | Transfer size at 1000-checkpoint history, page size 100 | bytes | < 1 MB (v1 baseline: 206 MB pre-fix; 762 KB post-fix at 100 msgs) | response body byte count |
-| NFR-4 | Correctness | The perf improvement holds across history depths {100, 150, 400, 1000, 10000} (the executed matrix's depth axis) | variance | < 10% relative across depths {150,400,10000} at page_size=100 (the variance-anchor column) | bench matrix (FR-3) |
+| NFR-4 | Correctness | The perf improvement holds across history depths {100, 150, 400, 1000, 10000} (the executed matrix's depth axis) | variance | < 10% relative across depths {150,400,10000} at page_size=100 (the variance-anchor column) — **dispatcher adjudication 2026-09-04, Option a**: gated metric is the aget/DB-exec component (`_measure_aget_component` over N_TIMED iterations) AFTER `ANALYZE checkpoints / checkpoint_blobs / checkpoint_writes` precondition; threshold is OR-logic `rel_var < 0.10 OR abs_delta < 1.0 ms`; wall-clock end-to-end stays reported (not gated). Honest-red `98d0df49` (variance-cell realism + N_TIMED=10) superseded by the new-commit green — see `phase5-perf-depth-diagnosis.md` §Executive Root-Cause + `phase5-perf-results.md` §AC-3.2 RESOLUTION. | bench matrix (FR-3) |
 | NFR-5 | Safety | Destructive DELETE on `checkpoint_blobs` MUST NOT delete a blob referenced by a remaining checkpoint | byte-equality | 100% survival across all real-saver binding-gate tests | `tests/integration/checkpoint_prune_real_saver.py::TestRealSaverRaceWindow` (v1) |
 | NFR-6 | Safety | Destructive DELETE MUST abort-and-retry on SSI conflict | sqlstate | 40001/40P01 detected, retry succeeds, exhaustion skips | `tests/integration/checkpoint_prune_real_saver.py::TestSerializableRetryPath` (v1) |
 | NFR-7 | Safety | The lone-READ-COMMITTED-racer µs-window MUST be acknowledged in code comments and runbook | docs presence | `aio.py:82, 280-304, 393-399` cited verbatim; runbook §7 disclosure present | grep on `daemon/services/checkpoint_prune.py` + `docs/runbooks/checkpoint-blob-prune-restore.md` |
@@ -275,6 +275,28 @@ For backfill (Solution N), v2 MUST define explicit "coverage sufficient" criteri
 - **When:** variance across history_depth is computed at page_size=100 across depths {150,400,10000} (the variance-across-depth anchor column at fixed page_size)
 - **Then:** relative variance < 10% across depths {150,400,10000} at page_size=100 — proves the property
 - **Test type:** performance
+
+> **Measurement basis (dispatcher adjudication 2026-09-04, Option a) —
+> additive, 2026-09-04; honest-red history at `98d0df49` (variance-cell
+> realism + N_TIMED=10) stays untouched.** The load-bearing metric is
+> the **aget/DB-exec component** (`_measure_aget_component` over
+> N_TIMED iterations) across depths {150, 400, 10000} at page_size=100,
+> NOT wall-clock end-to-end. The harness issues `ANALYZE checkpoints /
+> checkpoint_blobs / checkpoint_writes` AFTER `_populate_thread` and
+> BEFORE every measurement (`_analyze_after_populate` in
+> `tests/performance/test_message_api_cost.py`); the depth-spread
+> carrier was identified as a planner-cache artifact on the saver's
+> prepared statement (generic-plan seq-scan over `checkpoint_blobs`
+> under stale/absent stats) plus a ±2–6 ms process-noise floor —
+> see `phase5-perf-depth-diagnosis.md` §Executive Root-Cause for the
+> 8.557 ms → 0.064 ms collapse at depth 10000 post-ANALYZE.
+>
+> The threshold rule is `pass if EITHER (rel_var < 0.10) OR
+> (abs_delta < 1.0 ms)` — relative is plan-faithful, absolute is the
+> sub-ms fallback when estimator noise dominates the relative CoV even
+> though the depth-spread is bounded (1.0 ms ≫ 6× the observed
+> pkey-probe floor). Wall-clock per cell stays printed + recorded in
+> `phase5-perf-results.md` but is NOT the load-bearing metric.
 
 **AC-3.3** (baseline re-confirmation)
 - **Given:** v1 baseline: 150 msgs 63.9→1.9 ms (33×); 400 msgs 510→4.5 ms (114×)

@@ -202,6 +202,84 @@ export CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE=1
 
 ---
 
+## §9 Planner-cache / statistics note (prod ops — read-latency regime on long-lived saver connections)
+
+> Added 2026-09-04 in response to the Phase5 T5.5 depth-growth
+> diagnosis (`phase5-perf-depth-diagnosis.md` §Executive Root-Cause +
+> H1). Operator-terse; the full evidence base lives in the linked
+> doc.
+
+**The trap.** `AsyncPostgresSaver` runs on a long-lived psycopg
+connection with `prepare_threshold=0` (production topology,
+mirrored by `tests/helpers/checkpoint_prune_pg.py::real_pg_checkpointer`).
+Server-side prepared statements on that connection are still cached —
+after PG's 5-execution custom→generic boundary, the cached generic
+plan is re-elected from whatever statistics (`pg_stats`) were current
+at election time. With stale/absent statistics on `checkpoint_blobs`,
+the cached generic plan's `channel_values` subplan becomes a **Seq
+Scan over the entire `checkpoint_blobs` table per read** — cost
+grows linearly with history depth.
+
+**Measured impact (depth 10000, pre-fix).** `EXPLAIN (ANALYZE,
+BUFFERS) EXECUTE` of the `SELECT_SQL` latest-checkpoint query on the
+saver connection: `Seq Scan on checkpoint_blobs … rows=14330 est
+(actual rows=20001)`, subplan 3.371 ms, **8.557 ms total execution
+per read**. The fresh-plan equivalent is 0.064 ms (a ~133×
+collapse after a single `ANALYZE`).
+
+**Symptom signature.** Read latency grows with thread history depth
+even though the v2 read-flip path is O(tip) under a sane plan.
+Per-cell v2 wall-clock at depth 10000 sits 5–13× ms (versus
+0.3–1.5 ms at depth 150) when stats are stale.
+
+**Operational guidance.**
+
+* Periodic `ANALYZE` on the saver tables, OR rely on
+  `autovacuum`/`autoanalyze` running at a tighter-than-default
+  `autoanalyze_scale_factor` for `checkpoints` and `checkpoint_blobs`:
+  ```sql
+  ANALYZE checkpoints;
+  ANALYZE checkpoint_blobs;
+  ANALYZE checkpoint_writes;
+  ```
+  Issuing these on a low-traffic cadence (e.g. hourly via cron or a
+  lightweight job, NOT inside the read hot path) keeps the
+  plancache honest.
+* On-call checklist when "deep threads feel slow":
+  ```sql
+  SELECT relname, last_autoanalyze, last_analyze, n_live_tup
+  FROM pg_stat_user_tables
+  WHERE relname IN ('checkpoints','checkpoint_blobs','checkpoint_writes');
+  ```
+  If `last_autoanalyze` is `NULL` or older than the longest
+  populate interval, run `ANALYZE` manually.
+* After any large `INSERT` / `DELETE` batch (including the
+  `CHECKPOINT_BLOB_PRUNE_DRY_RUN=0` destructive cycle above),
+  issue `ANALYZE checkpoint_blobs` — the new row distribution
+  changes the index-vs-seqscan breakeven and the cached plan may
+  need re-election.
+
+**What this does NOT change.** The honest failure mode remains the
+same: the read path is O(tip) when statistics are current; a stale
+plancache is environmental noise, not a read-path defect. No
+`daemon/**` change is implicated by the depth-growth signature —
+the v2 read-flip is correct.
+
+**Symptom-vs-fix at a glance.**
+
+| Symptom | Check | Fix |
+|---------|-------|-----|
+| `GET /instances/{id}/messages` latency grows with thread history depth | `pg_stat_user_tables.last_autoanalyze` for `checkpoints` / `checkpoint_blobs` | `ANALYZE checkpoints; ANALYZE checkpoint_blobs;` |
+| Single-tenant deep-thread regression after a bulk prune | Same | `ANALYZE checkpoint_blobs;` after each destructive prune cycle |
+
+**Pointer.** Full evidence (H1–H4, M3/M3b plan-regime introspection,
+E5/E6 numbers): `phase5-perf-depth-diagnosis.md`. Perf matrix
+methodology (ANALYZE precondition + component-gated variance):
+`tests/performance/test_message_api_cost.py::_analyze_after_populate`
++ `phase5-perf-results.md` §AC-3.2 RESOLUTION.
+
+---
+
 ## ROLLBACK (post-enable breakage)
 
 1. **Unset both flags** (`CHECKPOINT_BLOB_PRUNE_DRY_RUN`,
