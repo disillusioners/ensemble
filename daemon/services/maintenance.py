@@ -696,38 +696,80 @@ class CheckpointCleanupJob:
         1. Find checkpoint_ids to KEEP (most recent N by lexicographic DESC order)
         2. Delete from checkpoints where checkpoint_id NOT IN keep list
         3. Delete from writes where checkpoint_id NOT IN keep list
+
+        PR1 (C4) — observation-only timing wrapper. We bracket the whole
+        method with ``time.perf_counter`` and emit one gated INFO line
+        per branch via ``daemon.checkpoint_perf.log_prune`` (entry-with-
+        threads / no-threads / exit) carrying the thread count + deleted
+        count + duration_ms. The exit line always emits from the finally
+        block; on the error branch it carries the PARTIAL deleted count
+        accumulated before the failure (alongside the existing
+        ``logger.error`` from the inner except). Every ``log_prune`` line
+        honors ``CHECKPOINT_PERF_LOGS=0`` (W4). The try/finally sits
+        OUTSIDE the existing try/except so error semantics stay identical
+        (the existing ``except Exception as e`` still swallows and logs
+        the error; the finally only adds timing observation).
         """
+        import time
+        from daemon.checkpoint_perf import log_prune
+
+        t0 = time.perf_counter()
+        # W7 — both counters are accumulated live: observed_total_deleted
+        # increments INSIDE the pruning loop below, so a mid-walk
+        # exception still reports the partial deletion count in the exit
+        # line (a post-loop assignment would log 0 despite partial
+        # deletes — the exact defect W7 fixes).
+        observed_thread_count = 0
+        observed_total_deleted = 0
         try:
-            max_per_thread = CHECKPOINT_MAX_PER_THREAD
+            try:
+                max_per_thread = CHECKPOINT_MAX_PER_THREAD
 
-            # Find threads with excessive checkpoints via the adapter.
-            # The SQLite adapter wraps this in AsyncSqliteSaver's lock.
-            excess_pairs = await self._checkpointer.find_excess_checkpoint_groups(
-                max_per_thread
-            )
-
-            if not excess_pairs:
-                logger.debug("No threads with excessive checkpoints found")
-                return
-
-            logger.info(
-                f"Found {len(excess_pairs)} thread/namespace pairs with > {max_per_thread} checkpoints"
-            )
-
-            # Prune each thread's checkpoints
-            total_deleted = 0
-            for thread_id, checkpoint_ns, cnt in excess_pairs:
-                deleted = await self._prune_thread_checkpoints(
-                    thread_id, checkpoint_ns, max_per_thread
+                # Find threads with excessive checkpoints via the adapter.
+                # The SQLite adapter wraps this in AsyncSqliteSaver's lock.
+                excess_pairs = await self._checkpointer.find_excess_checkpoint_groups(
+                    max_per_thread
                 )
-                total_deleted += deleted
 
-            logger.info(
-                f"Pruned {total_deleted} checkpoints from {len(excess_pairs)} thread/namespace pairs"
+                if not excess_pairs:
+                    log_prune("prune", 0, 0, 0, note="no excess threads")
+                    logger.debug("No threads with excessive checkpoints found")
+                    return
+
+                observed_thread_count = len(excess_pairs)
+                log_prune(
+                    "prune-entry",
+                    threads=observed_thread_count,
+                    deleted=0,
+                    duration_ms=0,
+                    max_per_thread=max_per_thread,
+                )
+
+                logger.info(
+                    f"Found {len(excess_pairs)} thread/namespace pairs with > {max_per_thread} checkpoints"
+                )
+
+                # Prune each thread's checkpoints. W7: the running total
+                # increments as deletions happen so the exit line reports
+                # partial progress even if a later iteration raises.
+                for thread_id, checkpoint_ns, cnt in excess_pairs:
+                    observed_total_deleted += await self._prune_thread_checkpoints(
+                        thread_id, checkpoint_ns, max_per_thread
+                    )
+
+                logger.info(
+                    f"Pruned {observed_total_deleted} checkpoints from {len(excess_pairs)} thread/namespace pairs"
+                )
+
+            except Exception as e:
+                logger.error(f"Per-thread checkpoint pruning failed: {e}")
+        finally:
+            log_prune(
+                "prune-exit",
+                threads=observed_thread_count,
+                deleted=observed_total_deleted,
+                duration_ms=int((time.perf_counter() - t0) * 1000),
             )
-
-        except Exception as e:
-            logger.error(f"Per-thread checkpoint pruning failed: {e}")
 
     # ── Helper Methods ─────────────────────────────────────────────────────────
 

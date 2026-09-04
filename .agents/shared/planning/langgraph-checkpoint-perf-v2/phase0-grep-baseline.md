@@ -42,7 +42,8 @@ docs/job-task-system.md:1188:3. **M3** — wire rename on mirror-receipt termina
 ```
 
 **Exit code:** 0
-**Match count:** 14 lines
+**Match count:** 17 lines
+> **Erratum (2026-09-04 reviewer pass):** the prior "14 lines" reading was a recount slip during T0.7 capture; the verbatim block above already enumerates 17 `docs/job-task-system.md:` lines, and `git show 2f80d45b:docs/job-task-system.md | grep -c settled` independently confirms 17. Single-line factual correction only — no other edit; §7 summary table aligned 2026-09-04 (`14 matches` → `17 matches`, same erratum).
 **v2-base interpretation:** Docs already document the `settled` vocabulary (M1/M3 narrative has been merged to `latest` and `feature/mission-class`). The guard documents the canonical-vocabulary state of `docs/job-task-system.md`; post-port drift detection watches for new occurrences that violate the single-owner rule.
 
 ---
@@ -189,7 +190,7 @@ The 2 dropped guards duplicate work already done by:
 
 | Guard | v2-base @ 2f80d45b | Post-port expectation | Anchor |
 |-------|--------------------|------------------------|--------|
-| 1. `settled` in `docs/job-task-system.md` | 14 matches | Same-or-fewer (single-owner rule: transport only) | stable; no expected growth |
+| 1. `settled` in `docs/job-task-system.md` | 17 matches | Same-or-fewer (single-owner rule: transport only) | stable; no expected growth |
 | 2. `tap_node_return` call sites | 0 | Exactly 4 (Phase 2) | Phase 2 PR deliverable |
 | 3. Latest migration ID | `20260819_000001_report_injections_deferred_marker.sql` | Strictly greater; monotonic | Each phase adds ≥1 migration |
 | 4. `atomic` in checkpoint_prune.py / checkpoint_adapter.py | exit 2 (file-not-found) + 0 in adapter | Each `atomic` mention cites retraction + `aio.py:82, 280-304, 393-399` | Phase 4 PR deliverable |

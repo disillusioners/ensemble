@@ -19,6 +19,7 @@ PostgreSQL Notes:
 import asyncio
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote_plus
@@ -27,6 +28,12 @@ import aiosqlite
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from daemon.checkpoint_adapter import CheckpointerAdapter, SqliteCheckpointerAdapter
+from daemon.checkpoint_perf import (
+    checkpoint_perf_logs_enabled,
+    log_messages_api,
+    log_saver_op,
+    time_saver_op,
+)
 from daemon.ensemble_config import EnsembleConfig
 
 logger = logging.getLogger(__name__)
@@ -308,8 +315,15 @@ async def get_instance_messages(
 
     config = {"configurable": {"thread_id": instance_id}}
 
+    # PR1 (C4) — observation-only timing for the GET /messages read path.
+    # The t0 anchor lets us report total wall time including alist + serialize
+    # + every downstream hook; the per-op ``time_saver_op`` wrapper around
+    # ``aget`` reports just the aget cost. Behavior is byte-identical to
+    # before; only the structured-log emission is new.
+    t0 = time.perf_counter()
+
     # Get the current state from async checkpointer
-    state = await saver.aget(config)
+    state = await time_saver_op("aget", instance_id, saver.aget(config))
     if state is None:
         return []
 
@@ -317,20 +331,51 @@ async def get_instance_messages(
     channel_values = state.get("channel_values", {})
     messages = channel_values.get("messages", [])
     if not messages:
+        # Emit a single observation line so the [/Messages] stream stays
+        # searchable in dev even when the instance has no persisted messages
+        # yet (the frontend polls /messages after instance creation). Pass
+        # 0 for alist_count because the alist walk below is intentionally
+        # skipped on this early-return — observed value, not hardcoded.
+        log_messages_api(
+            instance_id,
+            int((time.perf_counter() - t0) * 1000),
+            0,
+            0,
+            0,
+        )
         return []
 
     # Collect all checkpoints with timestamps
     # We need to iterate oldest-to-newest to track when messages first appeared
     checkpoints_data: list[tuple[str | None, list[Any]]] = []
 
-    async for checkpoint_tuple in saver.alist(config, limit=1000):
-        ct = cast(CheckpointTuple, checkpoint_tuple)
-        checkpoint = ct.checkpoint
-        if not isinstance(checkpoint, dict):
-            continue
-        ts = checkpoint.get("ts")
-        checkpoint_messages = checkpoint.get("channel_values", {}).get("messages", [])
-        checkpoints_data.append((ts, checkpoint_messages))
+    # PR1 (C4) — observation-only counter + timing for the alist walk.
+    # CRITICAL: this loop is NOT removed (C1 will remove it in a later
+    # PR). PR1 only counts the tuples the walk observes so the [/Messages]
+    # log line carries the real pre-C1 baseline. The plan requires this
+    # observed value to be reported upward for the production gate.
+    #
+    # W2 — the walk is also TIMED so the aget-vs-alist cost split (what
+    # C1's flip gets judged on) is measurable. The async-for loop cannot
+    # go through ``time_saver_op`` (it is not a single awaitable), so we
+    # bracket it manually with perf_counter and emit the same structured
+    # line via ``log_saver_op("alist", …)``.
+    alist_count = 0
+    t_alist = time.perf_counter()
+    try:
+        async for checkpoint_tuple in saver.alist(config, limit=1000):
+            alist_count += 1
+            ct = cast(CheckpointTuple, checkpoint_tuple)
+            checkpoint = ct.checkpoint
+            if not isinstance(checkpoint, dict):
+                continue
+            ts = checkpoint.get("ts")
+            checkpoint_messages = checkpoint.get("channel_values", {}).get("messages", [])
+            checkpoints_data.append((ts, checkpoint_messages))
+    finally:
+        # W2 symmetry with time_saver_op: the op=alist line must emit even
+        # when the walk raises; the exception still propagates unchanged.
+        log_saver_op("alist", instance_id, int((time.perf_counter() - t_alist) * 1000))
 
     # Reverse to get oldest-to-newest order
     checkpoints_data.reverse()
@@ -374,6 +419,43 @@ async def get_instance_messages(
         serialized["created_at"] = created_at
 
         result.append(serialized)
+
+    # PR1 (C4) — emit ONE [/Messages] line per request with the OBSERVED
+    # alist_count + bytes_estimate. Placement: after the result list is
+    # finalized but BEFORE synthetic system-prompt / context-message
+    # injection so the message_count we report equals the persisted
+    # messages (not the API-shape with synthetics prepended). behavior is
+    # byte-identical otherwise — the alist walk stays.
+    #
+    # S4 — message_count and bytes_estimate derive from the SAME source:
+    # the post-serialization response ``result`` list (NOT the raw
+    # pre-serialization ``messages`` channel). This keeps the pair
+    # coherent — a ToolMessage present in the channel but excluded from
+    # ``result`` is counted by neither. bytes_estimate is the summed
+    # length of the serialized content strings, not a wire-format byte
+    # count.
+    if checkpoint_perf_logs_enabled():
+        try:
+            bytes_estimate = sum(
+                len(str(m.get("content", ""))) for m in result
+            )
+        except Exception:
+            # Defensive: content is heterogeneous (str / list[dict] / bytes);
+            # str() coercion is best-effort. Never let the log emit fail the
+            # API call — the response shape is the contract.
+            bytes_estimate = 0
+    else:
+        # W3 — the [/Messages] emit below no-ops when logging is disabled;
+        # do not pay the O(total-content) walk for a line that will never
+        # be written. Pass 0 (the emit is suppressed anyway).
+        bytes_estimate = 0
+    log_messages_api(
+        instance_id,
+        int((time.perf_counter() - t0) * 1000),
+        len(result),
+        bytes_estimate,
+        alist_count,
+    )
 
     # ── Phase 4: resolve instance/agent metadata + injection mode once ─────────
     # ``get_instance_messages`` may need to do TWO things with this

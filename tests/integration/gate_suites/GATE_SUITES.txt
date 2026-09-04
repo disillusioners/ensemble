@@ -1,0 +1,142 @@
+# GATE_SUITES.txt — Phase 1 gate-suite manifest (single source of truth).
+# ── Enumeration record (regenerated fresh on v2 — PR1 port) ──────────────
+# Date: 2026-09-03 (UTC) | Branch: feature/langgraph-checkpoint-perf-v2 |
+# HEAD: 901d96e5cdf9902c44953f753dd377aa9222ace2 (docs-only commit on code
+# baseline 2f80d45b — the PR1 instrumentation port does not move HEAD; it
+# lands UNCOMMITTED and a commit worker follows).
+# Provenance: this is the v2 PORT of v1's PR1 manifest (v1 commit
+# 0db1a768, structure per fc908945). Per the port plan (T1.6) the table
+# was REGENERATED on v2 — v1's counts are stale by construction (v1 ran
+# under "no addopts" defaults; v2 carries
+# addopts = "-m 'not integration and not postgres'").
+# Method (collection-only; replicates v1's per-PR regen method in the
+# main worktree pinned at the HEAD sha above): one pytest subprocess per
+# file — uv run pytest <file> -o addopts= --collect-only -q -p
+# no:cacheprovider --no-header — which strips the v2 default marker
+# filter. DSN pinned for every invocation: POSTGRES_URL +
+# POSTGRES_DB → postgresql://ensemble:***@localhost:5432/ensemble_cpv2_test
+# (BOTH env vars — persistence.py reads POSTGRES_DB; postgres-marked
+# files resolve DSNs at collection). ensemble_prod / ensemble_dev never
+# touched.
+# Cross-check: one aggregate collect-only subprocess over all 23 paths
+# (the gate-runner method): identical total (356).
+# Result: 23/23 files collect — 356 tests total (337 across the 22
+# v2-existing files, matching phase0-pre-counts.md at 2f80d45b exactly,
+# + 19 from the newly ported tests/unit/persistence/
+# test_checkpoint_perf_logging.py).
+# Missing-vs-v1: 14 rows of v1's 37-row manifest are PR2/PR3/PR4 surface
+# and arrive with their phases (see
+# .agents/shared/planning/langgraph-checkpoint-perf-v2/phase0-pre-counts.md
+# rows 24-37). Entries are never silently removed; later PRs append.
+# NOTE — capture-suite marker: tests/integration/
+# test_messages_response_fixture_capture.py carries `pytestmark` so bare
+# pytest with default v2 addopts does not collect it. Not a manifest row
+# — non-manifest companion (same treatment as v1).
+#
+# N = tests collected at HEAD (2026-09-03, collect-only). No dur(s)
+# column in this regen — execution timings belong to the tester-phase
+# gate runs and are deliberately not fabricated here.
+# File                                                           N
+# tests/e2e/test_pause_resume_unchanged.py                        1
+# tests/unit/test_pause_resume_root.py                           18
+# tests/integration/test_pause_race_resume_flow.py                1
+# tests/integration/test_pause_race_resume_drain.py               1
+# tests/integration/test_pause_race_resume_reenqueue.py           1
+# tests/integration/test_pause_race_enqueue_resume_flow.py        1
+# tests/integration/test_pause_race_window_held.py                1
+# tests/integration/test_pause_race_window_held_enqueue.py        1
+# tests/e2e/test_full_chain_turn_reconciler.py                    3
+# tests/repositories/test_turn_reconciler.py                     25
+# tests/repositories/test_turn_reconciler_paused_race.py          5
+# tests/integration/test_multi_turn_resume.py                     3
+# tests/integration/test_crash_recovery_paused.py                10
+# tests/unit/test_turn_handle_transitions.py                     21
+# tests/unit/test_paused_auto_resume_fallback.py                  5
+# tests/unit/test_terminal_reason_mirror_set_regression.py        1
+# tests/services/test_instance_messaging_compaction_guard.py      8
+# tests/unit/test_compaction.py                                 129
+# tests/integration/test_compaction_e2e.py                        3
+# tests/integration/test_api_messages.py                          7
+# tests/test_persistence.py                                      23
+# tests/unit/persistence/test_checkpoint_perf_logging.py         19
+# tests/test_maintenance.py                                      69
+#
+# Non-manifest companions (ported with PR1; green-run verification is
+# tester-phase surface):
+# tests/integration/test_messages_response_fixture_capture.py  (drift-check mode)
+# tests/integration/test_no_saver_imports_in_routers.py      (Flag A, AST scan)
+# tests/integration/gate_suites/test_gate_suite_pause_resume.py (this file's
+#     enumeration dry-run gate — bounded collect-only over the manifest)
+#
+# Spec: .agents/shared/planning/langgraph-checkpoint-perf-v2/phase1-plan.md
+# (T1.6) + v1 structure per fc908945. PR1 (C4) creates this file on v2;
+# PR2/PR3/PR4 re-run the enumeration gate
+# (tests/integration/gate_suites/test_gate_suite_pause_resume.py) and may
+# append entries; entries are never silently removed.
+#
+# Format: one path per line, relative to the repo root. '#' starts a comment.
+#
+# ── Gate concept: pause/resume ──
+# Canonical pause/resume no-drift suite (named-transition wrappers):
+tests/e2e/test_pause_resume_unchanged.py
+# Root-instance pause/resume:
+tests/unit/test_pause_resume_root.py
+# Paused-race regression family (f5e4b79a lineage) — resume flows:
+tests/integration/test_pause_race_resume_flow.py
+tests/integration/test_pause_race_resume_drain.py
+tests/integration/test_pause_race_resume_reenqueue.py
+tests/integration/test_pause_race_enqueue_resume_flow.py
+tests/integration/test_pause_race_window_held.py
+tests/integration/test_pause_race_window_held_enqueue.py
+#
+# ── Gate concept: turn-reconciler ──
+# Full-chain end-to-end (claim → process → pause → resume → answer → complete):
+tests/e2e/test_full_chain_turn_reconciler.py
+# reconcile_turn_mirror(work_id) repository suite — also the canonical
+# 8-mirror-tables unit suite (see its docstring) + idempotency tests:
+tests/repositories/test_turn_reconciler.py
+# Paused-race guard for the reconciler:
+tests/repositories/test_turn_reconciler_paused_race.py
+#
+# ── Gate concept: interrupt / human-approval / is_retry resume-from-checkpoint ──
+# (no verbatim interrupt/human-approval suites exist; the canonical
+#  resume-from-checkpoint coverage lives in these files — checkpoint-based
+#  multi-turn resume, crash-recovery-while-paused, turn-handle transitions,
+#  and auto-resume fallback)
+tests/integration/test_multi_turn_resume.py
+tests/integration/test_crash_recovery_paused.py
+tests/unit/test_turn_handle_transitions.py
+tests/unit/test_paused_auto_resume_fallback.py
+#
+# ── Gate concept: 8 mirror tables ──
+# tests/repositories/test_turn_reconciler.py (above) is the canonical
+#  per-mirror-table suite. Terminal-reason mirror-set regression:
+tests/unit/test_terminal_reason_mirror_set_regression.py
+#
+# ── Gate concept: aupdate_state idempotent ──
+# Compaction guard (aupdate_state compaction sites) + compaction unit +
+# real-graph compaction e2e (aupdate_state against real AsyncSqliteSaver):
+tests/services/test_instance_messaging_compaction_guard.py
+tests/unit/test_compaction.py
+tests/integration/test_compaction_e2e.py
+#
+# ── Gate concept: get_messages lifecycle ──
+# GET /messages API contract + get_instance_messages unit + PR1 perf logging:
+tests/integration/test_api_messages.py
+tests/test_persistence.py
+tests/unit/persistence/test_checkpoint_perf_logging.py
+#
+# ── Gate concept: checkpoint maintenance (prune / cleanup) ──
+# Canonical maintenance-job suite (CheckpointCleanupJob operations A-D,
+# history cap, per-thread prune + the PR1 timing/log-line wrap):
+tests/test_maintenance.py
+#
+# ── Exclusions note (v2, PR1 port) ──
+# v1's PR1 registered 3 pre-existing-failure files as gate-run exclusions
+# (test_cold_resume_ttl.py ×2, test_question_deferred_pause_edge_cases.py ×1,
+# test_pause_race_w7_jobitem_skip.py ×1) via .agents/tester/QUARANTINE.md.
+# Those QUARANTINE rows were NOT ported to v2 (tester-owned ledger; v2's
+# ledger already carries its own row touching test_pause_race_w7_jobitem_skip
+# with a different attribution). Disposition + reason:
+# .agents/shared/planning/langgraph-checkpoint-perf-v2/phase1-results.md §QUARANTINE.
+# v2's authoritative quarantine ledger remains .agents/tester/QUARANTINE.md.
