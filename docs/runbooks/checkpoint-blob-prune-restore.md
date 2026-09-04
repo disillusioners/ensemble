@@ -280,6 +280,64 @@ methodology (ANALYZE precondition + component-gated variance):
 
 ---
 
+## §10 Pinned-drill `.env` clobber + persistence.py checkpointer log misleading-print (prod ops — pre-flight hygiene)
+
+> Added 2026-09-04 per tester Note A (`.agents/tester/RESULTS/2026-09-04-cpv2-tester-validation.md:87`).
+> Operator-terse; both items are environment hygiene, not runbook-logic changes.
+
+**The trap (dev.sh + `.env` clobber).** `./dev.sh` cannot carry `POSTGRES_*`
+DSN pins. `dev.sh:58-63` runs `set -a; source .env` and `.env:57` declares
+`POSTGRES_DB=ensemble_dev`. The `set -a` flag auto-exports every `.env`
+variable, which **clobbers** the operator's exported `POSTGRES_*` pins
+before uvicorn starts — the result is split-brain: `POSTGRES_URL`
+(operator-set) survives in the environment, but `POSTGRES_DB` (operator-set)
+gets overwritten by `.env:57`'s `ensemble_dev`. Because the
+`PostgreSQLEngineFactory` (`daemon/repositories/factory.py:189-198`) reads
+the `POSTGRES_*` *parts* independently of `POSTGRES_URL` (F-DR1-2 — the
+factory honors `POSTGRES_URL` env directly but builds the DSN from the
+parts otherwise), a clobbered `POSTGRES_DB` lands the daemon on
+`ensemble_dev`, not the operator's pinned `ensemble_cpv2_test`. **Pinned
+drills MUST boot uvicorn directly** (e.g.
+`POSTGRES_URL=... POSTGRES_DB=... uv run uvicorn daemon.__main__:app
+--port 8079`) — `daemon` core never loads `.env`; the clobber is purely a
+`dev.sh` concern.
+
+**The misleading-print (persistence.py checkpointer log).** The
+checkpointer-boot log line at `daemon/persistence.py:142-144` prints the
+DB name from `POSTGRES_URL` even when the factory subsequently routes to
+`POSTGRES_DB` (the F-DR1-2 split-brain log artifact). The DSN actually
+LANDED on may differ from what the log line announces. **Do NOT gate
+DB-landing on the `daemon/persistence.py` checkpointer log line.** Gate
+on `pg_stat_activity` instead:
+
+```sql
+SELECT datname, usename, application_name, state, query_start
+FROM pg_stat_activity
+WHERE datname = current_setting('ensemble.expected_db') -- replace
+                                                              -- with your
+                                                              -- pinned
+                                                              -- DB
+  AND application_name LIKE '%uvicorn%' OR query LIKE '%ensemble%';
+```
+
+A row with `datname = <pinned DB>` and a recent `query_start` is the
+positive landing signal. The `daemon/persistence.py` log line is
+adjudication data, not a gate.
+
+**Symptom-vs-fix at a glance.**
+
+| Symptom | Check | Fix |
+|---------|-------|-----|
+| Drill boots, `daemon/persistence.py` log announces `<pin>`, but PG `pg_stat_activity` shows no connection to `<pin>` (only `ensemble_dev` or similar) | `pg_stat_activity.datname` for the uvicorn session | Boot uvicorn directly; `unset POSTGRES_*` first if `.env` was sourced |
+| Drill "succeeds" per the log line but destructive cycle deletes rows from the WRONG DB | Same | Same — log line is misleading (F-DR1-2); gate on `pg_stat_activity` |
+
+**Pointer.** F-DR1-2 split-brain fence (root-cause):
+`daemon/persistence.py:79-89` vs `daemon/repositories/factory.py:189-198`;
+incident 2026-08-28 (Critical Notes row 10, this repo's standing
+ledger); `daemon/persistence.py:142-144` is the misleading-print artifact.
+
+---
+
 ## ROLLBACK (post-enable breakage)
 
 1. **Unset both flags** (`CHECKPOINT_BLOB_PRUNE_DRY_RUN`,
