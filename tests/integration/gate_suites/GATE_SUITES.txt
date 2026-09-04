@@ -29,10 +29,21 @@
 # Result: 37/37 files collect — 484 tests total (439 from the 33
 # Phase 3 rows + 45 from the 4 new PR4 rows = 484; EXACT MATCH).
 # The PR4 additions are:
-#   * test_get_instance_messages_no_alist.py — armed-absence alist
-#     proof (16 tests; PRIMARY C1 boundary)
-#   * test_get_instance_messages_response_shape_frozen_fixture.py —
-#     frozen-fixture byte-shape contract (2 tests; poison-pill alist)
+#   * tests/unit/checkpoint_adapter/test_direct_anti_join.py —
+#     anti-join unit surface (11 tests; referenced survive /
+#     unreferenced die / thread+ns boundaries / count-vs-delete parity
+#     / jsonb_typeof drift guard)
+#   * tests/unit/services/test_maintenance_prune_direct_anti_join.py —
+#     service-layer prune (24 tests; env-flag matrix + zero-refs
+#     fail-safe detection + prevention asserted separately + AST
+#     structural gate)
+#   * tests/integration/checkpoint_prune_real_saver.py — BINDING GATE
+#     on real PG (9 tests; real AsyncPostgresSaver + disposable DB;
+#     PG skip is NOT green)
+#   * tests/integration/checkpoint_prune_restore_rehearsal.py —
+#     restore-rehearsal roundtrip (1 test; backup → prune → restore
+#     byte-equality; sum 45)
+# (header corrected 2026-09-04 post-review: prior text listed PR3-surface files here)
 # The T0.3 dialect-parity (16) + T0.6 isolation (20 + 7 = 27) Phase-0
 # SKIP-LOUDLY items remain COLLECT AND PASS per T2.11.
 # Missing-vs-v1: v1's PR1-era 37-row manifest included PR2/PR3/PR4

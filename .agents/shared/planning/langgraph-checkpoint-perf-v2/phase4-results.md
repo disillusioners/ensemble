@@ -405,3 +405,38 @@ Phase 4 acceptance criteria all met:
 - ✅ Zero `git push` (all commits local on `feature/langgraph-checkpoint-perf-v2`).
 
 Phase 5 (PR5 — acceptance gate + PR4 formal re-review + deferred-item disposition + corrected backfill criteria + `message_metadata` side-table prune (MERGE PRECONDITION per risk R1)) can start.
+### Post-review correction (2026-09-04)
+
+T4.1's wording ("Ap ut non-atomicity RETRACTION verified verbatim" and the
+surrounding bullet that reads as a singular retraction note) is imprecise
+about WHERE the retraction lives in `daemon/checkpoint_adapter.py` — the
+report's phrasing is module-level-adjacent, but there is **no** top-of-file
+retraction note in that module. A `grep -n -i "retract" daemon/checkpoint_adapter.py`
+returns no module-level retraction anchor; the disclosure is split across two
+method-level / doc-level locations, and the report's wording needs the same
+correction as the rest of the corpus:
+
+1. **Method-level wrap-rationale block — `daemon/checkpoint_adapter.py:686-712`**
+   (inside `delete_blobs_anti_join`). The `aio.py` citations live inside this
+   block: line `:689` cites `aio.py:82` + `aio.py:280-304` (the non-atomic
+   default-pipeline path); line `:693` cites `aio.py:393-399` (the atomic
+   non-pipeline fallback). The `HONEST LIMIT…` paragraph (lines 716-727)
+   closes with the same empirical claim used elsewhere ("a lone rw-out-edge
+   is not a dangerous structure and READ COMMITTED reads never register in
+   the SSI graph").
+2. **Runbook §7 — `docs/runbooks/checkpoint-blob-prune-restore.md:163-191`**
+   (`**Residual intra-process race disclosure (PR4 external review,
+   2026-08-26).**`). The same three `aio.py` anchors are stacked at
+   `:167-168`; the §7 paragraph is the operator-facing version of the
+   method-level rationale and carries the explicit "Do not arm destructive
+   without it." closer at line 191.
+
+Audit-trail discipline: this section APPENDS the correction; the original
+T4.1 text is not silently rewritten, per the post-review rule
+(`annotate corrections, never silently rewrite prior report text`). The
+line anchors above (`daemon/checkpoint_adapter.py:689` / `:693` /
+`:686-712`, and `docs/runbooks/checkpoint-blob-prune-restore.md:163-191`
+with `:167-168` for the citation stack) are the verifiable pointers for
+future readers — verify against HEAD, since prior commit-counts would have
+shifted the file straight off these line numbers if the wrap rationale or
+runbook §7 ever moves.
