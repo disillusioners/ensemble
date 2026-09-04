@@ -303,21 +303,22 @@ drills MUST boot uvicorn directly** (e.g.
 `dev.sh` concern.
 
 **The misleading-print (persistence.py checkpointer log).** The
-checkpointer-boot log line at `daemon/persistence.py:142-144` prints the
-DB name from `POSTGRES_URL` even when the factory subsequently routes to
-`POSTGRES_DB` (the F-DR1-2 split-brain log artifact). The DSN actually
-LANDED on may differ from what the log line announces. **Do NOT gate
+checkpointer-boot log line at `daemon/persistence.py:199-202` prints the
+file-config DB name (`config.postgres.db` from `ensemble.json`) — NOT
+the DSN actually landed. Because `_build_pg_connection_string`
+(`daemon/persistence.py:136-151`) can resolve via the `POSTGRES_URL`
+shortcut OR compose from env vars with `config.postgres.*` as fallback,
+the DSN actually LANDED on may differ from what the log line announces
+(either F-DR1-2 split-brain direction: log announces file-config, real
+DSN came from `POSTGRES_URL`; or vice-versa). **Do NOT gate
 DB-landing on the `daemon/persistence.py` checkpointer log line.** Gate
 on `pg_stat_activity` instead:
 
 ```sql
 SELECT datname, usename, application_name, state, query_start
 FROM pg_stat_activity
-WHERE datname = current_setting('ensemble.expected_db') -- replace
-                                                              -- with your
-                                                              -- pinned
-                                                              -- DB
-  AND application_name LIKE '%uvicorn%' OR query LIKE '%ensemble%';
+WHERE datname = 'ensemble_cpv2_test'   -- replace the literal with YOUR pinned DB
+  AND (application_name LIKE '%uvicorn%' OR query LIKE '%ensemble%');
 ```
 
 A row with `datname = <pinned DB>` and a recent `query_start` is the
@@ -334,7 +335,7 @@ adjudication data, not a gate.
 **Pointer.** F-DR1-2 split-brain fence (root-cause):
 `daemon/persistence.py:79-89` vs `daemon/repositories/factory.py:189-198`;
 incident 2026-08-28 (Critical Notes row 10, this repo's standing
-ledger); `daemon/persistence.py:142-144` is the misleading-print artifact.
+ledger); `daemon/persistence.py:199-202` is the misleading-print artifact.
 
 ---
 
