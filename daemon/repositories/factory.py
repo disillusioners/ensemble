@@ -30,6 +30,7 @@ from .skill.repository import (
     SkillUsageRepository,
 )
 from .skill.skill_bank_repository import SkillBankRepository
+from .message_metadata.repository import MessageMetadataRepository
 from .blueprint.repository import BlueprintRepository
 from .blueprint.embedding_repository import (
     BlueprintEmbeddingRepository,
@@ -1030,6 +1031,66 @@ def create_skill_bank_repository(
     return SkillBankRepository(engine)
 
 
+def create_message_metadata_repository(
+    config: DatabaseConfig | None = None,
+    engine: Engine | None = None,
+    create_tables: bool = True,
+) -> MessageMetadataRepository:
+    """Create a MessageMetadataRepository from configuration or shared engine.
+
+    Persistence layer for the C2 ``message_metadata`` side table
+    (Phase 1 of the langgraph-checkpoint-perf plan). The repo is
+    SYNC (decisions.md D14) — it matches the shared engine factory
+    contract at :func:`create_engine_from_config`. The 4 tap sites
+    in :mod:`daemon.services.message_tap` bridge via
+    ``asyncio.to_thread``.
+
+    One table is created on first use via
+    ``SQLModel.metadata.create_all`` (the ``message_metadata`` model
+    is registered at module-import time via
+    ``daemon/repositories/message_metadata/__init__.py``):
+
+    * ``message_metadata`` — per-(``thread_id``, ``message_id``)
+      timestamp rows + a nullable ``seq`` column reserved for
+      Phase 2 PERF-2 cursor pagination (decisions.md D5). The
+      companion ``ix_message_metadata_thread`` index on
+      ``thread_id`` backs the ``get_for_thread`` read primitive
+      (PR3 C1 read-flip will consume it).
+
+    SQLite databases receive the table + index from the
+    ``MigrationRunner`` via
+    ``daemon/migrations/versions/20260825_000001_create_message_metadata.sql``;
+    existing PG databases receive the equivalent idempotent DDL from
+    ``daemon/manager.py::_ensure_postgres_columns()`` (decisions.md
+    D2 — dual-driver convention is intentional; the contract is
+    "table exists + index name matches").
+
+    Args:
+        config: Database configuration (required if engine not provided).
+        engine: Shared engine instance (recommended for avoiding
+            lock contention with the other singleton repositories).
+        create_tables: If True, run ``SQLModel.metadata.create_all``
+            before returning. Callers that already triggered the
+            manager-level create_all pass ``False``.
+
+    Returns:
+        Configured :class:`MessageMetadataRepository` instance.
+
+    Note:
+        Either config or engine must be provided. If both are provided,
+        engine takes precedence.
+    """
+    if engine is None:
+        if config is None:
+            raise ValueError("Either config or engine must be provided")
+        engine = create_engine_from_config(config)
+
+    if create_tables:
+        SQLModel.metadata.create_all(engine)
+
+    return MessageMetadataRepository(engine)
+
+
 # Backward compatibility alias
 create_task_repository = create_job_repository
 
@@ -1054,5 +1115,6 @@ __all__ = [
     "create_skill_embedding_repository",
     "create_skill_ab_test_repository",
     "create_skill_bank_repository",
+    "create_message_metadata_repository",
     "run_migrations",
 ]

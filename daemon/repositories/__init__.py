@@ -71,6 +71,17 @@ from .skill.models import (
 from .dependency_bus.models import DependencyWatcher, DependencyWatcherState
 from .dependency_bus.repository import DependencyWatcherRepository
 
+# Message metadata side table (Phase 1 C2 — langgraph-checkpoint-perf).
+# Imported here so ``SQLModel.metadata.create_all()`` (called from
+# ``daemon/manager.py``) registers the ``message_metadata`` table on
+# fresh PostgreSQL databases. Fresh SQLite databases pick the table up
+# from the MigrationRunner via
+# ``daemon/migrations/versions/20260825_000001_create_message_metadata.sql``.
+# The repo is intentionally SYNC (decisions.md D14) to match the shared
+# engine factory contract.
+from .message_metadata.models import MessageMetadata
+from .message_metadata.repository import MessageMetadataRepository
+
 # Report Injection queue.
 # Imported here so ``SQLModel.metadata.create_all()`` registers the
 # ``report_injections`` table. This is a brand-new table (not an
@@ -126,6 +137,7 @@ from .factory import (
     create_skill_embedding_repository,
     create_skill_ab_test_repository,
     create_skill_bank_repository,
+    create_message_metadata_repository,
     run_migrations,
 )
 
@@ -200,6 +212,9 @@ __all__ = [
     "DependencyWatcher",
     "DependencyWatcherState",
     "DependencyWatcherRepository",
+    # Message metadata side table (Phase 1 C2)
+    "MessageMetadata",
+    "MessageMetadataRepository",
     # Report Injection queue
     "ReportInjection",
     "ReportInjectionState",
@@ -237,5 +252,6 @@ __all__ = [
     "create_skill_embedding_repository",
     "create_skill_ab_test_repository",
     "create_skill_bank_repository",
+    "create_message_metadata_repository",
     "run_migrations",
 ]
