@@ -362,6 +362,8 @@ Two mechanisms cooperate to keep defer/background queues from running while work
 
    > **I3 clarifying line.** A settled mirror of a non-terminal instance counts as **live** for the defer/background gate, terminal for everything else. The busy-set's truthmaker is `Instance.status` — instance liveness IS mission liveness — and the two predicate bodies are shared SQL constants (`daemon/repositories/job_queue/_idle_predicate_sql.py`) so all five gate/maintenance consumers cannot drift.
 
+   > **Dialect note (hotfix 2026-09-04, PG `AmbiguousParameter`).** The defer body is split into two SQL forms — a project-scoped body with a plain `j.project_id = :project_id` equality (a STRING bind, no NULL trick) and a system-wide body with NO project parameter at all — so no NULL-typed bind ever reaches PG; the predicates themselves also fail-CLOSED on DB error so a transient failure holds the gate (returning True / BUSY) instead of silently releasing it.
+
 ### Belt-and-Suspenders Pattern
 
 The two signals layer for safety, but each consumer has a distinct role:

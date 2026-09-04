@@ -651,7 +651,11 @@ class TestPostSettlePhase2Fix:
         bg_src = inspect.getsource(JobRepository.has_active_non_background_work)
 
         # The wiring: each predicate executes its shared statement + binds.
-        assert "defer_busy_statement()" in defer_src, (
+        # Hotfix 2026-09-04: defer_busy_statement now takes the
+        # project_id arg (selects between the two-body split). The pin
+        # still verifies the production code routes through the helper
+        # rather than hand-coding its own SQL.
+        assert "defer_busy_statement(" in defer_src, (
             "has_active_non_deferred_work no longer consumes the shared "
             "defer busy-body — two-SQL-site drift risk"
         )
@@ -703,20 +707,36 @@ class TestPostSettlePhase2Fix:
         # local literal copy of the status set inside the bind helpers.
         from daemon.repositories.job_queue import _idle_predicate_sql as ips
 
-        defer_binds = ips.defer_busy_binds("proj-drift")
+        defer_binds_proj = ips.defer_busy_binds("proj-drift")
+        defer_binds_sys = ips.defer_busy_binds(None)
         bg_binds = ips.background_busy_binds()
-        assert set(defer_binds["terminal_statuses"]) == TERMINAL_INSTANCE_STATUSES
+        assert set(defer_binds_proj["terminal_statuses"]) == TERMINAL_INSTANCE_STATUSES
+        assert set(defer_binds_sys["terminal_statuses"]) == TERMINAL_INSTANCE_STATUSES
         assert set(bg_binds["terminal_statuses"]) == TERMINAL_INSTANCE_STATUSES
 
         def _norm(sql: str) -> str:
             return " ".join(sql.split())
 
-        defer_sql = _norm(_idle_predicate_sql.JOB_DEFER_BUSY_BODY)
+        # PG hardening (hotfix 2026-09-04): the defer busy-set split into
+        # TWO bodies — the project-scoped form and the system-wide form.
+        # The legacy single-body collapse bound :project_id under a bare
+        # ``:project_id IS NULL OR`` scope switch which PG rejects with
+        # ``AmbiguousParameter`` (no type context for a bare NULL bind).
+        # Both new bodies carry identical busy-set semantics; the
+        # assertion below pins that and ALSO rules out a regression to
+        # the collapsed form.
+        defer_sql_proj = _norm(_idle_predicate_sql.JOB_DEFER_BUSY_BODY_PROJECT)
+        defer_sql_sys = _norm(_idle_predicate_sql.JOB_DEFER_BUSY_BODY_SYSTEM)
         bg_sql = _norm(_idle_predicate_sql.JOB_BACKGROUND_BUSY_BODY)
 
-        # Both bodies carry the post-Fix-B settled-mirror clause (twice
-        # referenced terminal filter: legacy clause + mirror clause).
-        for label, sql in (("defer", defer_sql), ("background", bg_sql)):
+        # All three bodies carry the post-Fix-B settled-mirror clause
+        # (twice referenced terminal filter: legacy clause + mirror
+        # clause).
+        for label, sql in (
+            ("defer-project", defer_sql_proj),
+            ("defer-system", defer_sql_sys),
+            ("background", bg_sql),
+        ):
             assert "j.job_type = 'message'" in sql, label
             assert "j.admission_state = 'done'" in sql, label
             assert "j.instance_id IS NOT NULL" in sql, label
@@ -724,19 +744,29 @@ class TestPostSettlePhase2Fix:
                 sql.count("i.status NOT IN :terminal_statuses") == 2
             ), label
 
-        # §4.1 asymmetry: defer body is scope-switchable via the
-        # :project_id bind; the background body has NO project clause.
-        assert ":project_id IS NULL OR j.project_id = :project_id" in defer_sql
+        # §4.1 asymmetry, hotfix 2026-09-04 un-collapse: the project-
+        # scoped defer body uses a plain :project_id EQUALITY (NO NULL
+        # trick — STRING bind, PG infers the type from the comparison
+        # column); the system-wide defer body has NO project parameter
+        # at all (NULL-typed parameter is impossible by construction);
+        # the background body already had no project clause and now
+        # declares no project parameter either.
+        assert "j.project_id = :project_id" in defer_sql_proj
+        # The old collapsed form is GONE — this is the static regression
+        # guard for the incident's SQL shape.
+        assert ":project_id IS NULL OR" not in defer_sql_proj
+        assert ":project_id" not in defer_sql_sys
         assert ":project_id" not in bg_sql
 
         # Background keeps the Fix-2B deadlock carve-out (queued JobItem
         # with a still-pending Task is unclaimable → must not hold the
-        # gate); the defer body needs no task join (legacy clause is
+        # gate); the defer bodies need no task join (legacy clause is
         # active-only).
         assert "LEFT JOIN task t ON t.work_id = j.job_id" in bg_sql
         assert "t.status IS NULL" in bg_sql
         assert "t.status != 'pending'" in bg_sql
-        assert "LEFT JOIN task" not in defer_sql
+        assert "LEFT JOIN task" not in defer_sql_proj
+        assert "LEFT JOIN task" not in defer_sql_sys
 
         # I3 clarifying line lives in the shared module's docstring.
         module_doc = " ".join(
@@ -746,6 +776,258 @@ class TestPostSettlePhase2Fix:
             "a settled mirror of a non-terminal instance counts as live "
             "for the defer/background gate, terminal for everything else"
         ) in module_doc
+
+    def test_no_bare_param_is_null_comparison_in_busy_bodies(self):
+        """Static regression guard for the 2026-09-04 PG incident.
+
+        The incident's SQL shape was a bare ``:project_id IS NULL OR``
+        parameter comparison inside the defer busy-body. PostgreSQL
+        rejected that with
+        ``psycopg.errors.AmbiguousParameter: could not determine data
+        type of parameter $1`` because a bare ``NULL`` bind carries no
+        type context. SQLite tolerates the untyped NULL and the
+        PG-parity leg had been SKIPPED, so the breakage shipped.
+
+        The hotfix UN-COLLAPSES the body into two SQL forms — a
+        project-scoped body with a plain ``j.project_id = :project_id``
+        equality (STRING bind, type inferred from the column) and a
+        system-wide body with NO project parameter at all. With no
+        NULL-typed parameter binding on either dialect, the ambiguity
+        class is impossible by construction; this test pins that
+        invariant.
+
+        The static guard searches the three busy-body constants for any
+        ":<name> IS NULL" pattern (parameter-vs-literal-NULL comparison).
+        A future refactor that re-introduces the collapse shape — even
+        in a different gate, even under a different parameter name —
+        fails this test before the bug can ship.
+        """
+        import re as _re
+
+        pattern = _re.compile(r":\w+\s+IS\s+NULL")
+        bodies = (
+            ("JOB_DEFER_BUSY_BODY_PROJECT",
+             _idle_predicate_sql.JOB_DEFER_BUSY_BODY_PROJECT),
+            ("JOB_DEFER_BUSY_BODY_SYSTEM",
+             _idle_predicate_sql.JOB_DEFER_BUSY_BODY_SYSTEM),
+            ("JOB_BACKGROUND_BUSY_BODY",
+             _idle_predicate_sql.JOB_BACKGROUND_BUSY_BODY),
+        )
+        violations: list[tuple[str, str]] = []
+        for label, body in bodies:
+            for match in pattern.finditer(body):
+                violations.append((label, match.group(0)))
+        assert not violations, (
+            "bare-parameter IS NULL pattern detected in a busy body — "
+            "this is the 2026-09-04 PG AmbiguousParameter incident's "
+            "SQL shape. The un-collapsed two-body fix in "
+            "_idle_predicate_sql.py must hold; collapse back into a "
+            "single body with a `:project_id IS NULL OR` scope switch "
+            "and PG will reject the SQL with AmbiguousParameter again. "
+            f"violations: {violations}"
+        )
+
+    def test_predicate_fails_closed_on_db_error(self, fb_engine, job_repo):
+        """W3 (hotfix 2026-09-04) fail-CLOSED pin.
+
+        The previous incarnation of
+        ``JobRepository.has_active_non_deferred_work`` caught every
+        ``Exception`` in its inner try/except and returned False (idle)
+        — a fail-OPEN posture for the predicate itself. Even though
+        every higher-level call-site
+        (``JobProcessor._defer_idle_check``,
+        ``JobProcessor._background_idle_check``,
+        ``JobQueueService._select_next_eligible_job``) wraps the
+        predicate call in its own try/except and already fails CLOSED,
+        the predicate's own False return was silently consumed — the
+        gate opened, the defer queue admitted a message while the
+        mission was live. The production incident of 2026-09-04
+        reproduced exactly that sequence (PG ``AmbiguousParameter``
+        under the gate, defer admitted while work was live).
+
+        The hotfix flips the predicate's own posture to FAIL-CLOSED —
+        on a DB error the predicate returns True (BUSY), letting the
+        next 30s tick retry. This test injects a DB error via the
+        engine and asserts the gate HOLDS (True).
+        """
+        from sqlalchemy.exc import OperationalError as SAOperationalError
+
+        # Inject a DB error by replacing ``self.engine.begin()`` with a
+        # context manager that raises on enter. ``job_repo`` is bound to
+        # the file-backed SQLite engine from the ``fb_engine`` fixture.
+        class _BoomCM:
+            def __enter__(self):
+                raise SAOperationalError(
+                    "boom", {}, Exception("injected DB error")
+                )
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        original_begin = job_repo.engine.begin
+        job_repo.engine.begin = lambda: _BoomCM()  # noqa: ARG005
+        try:
+            defer_result = job_repo.has_active_non_deferred_work("proj-x")
+            background_result = job_repo.has_active_non_background_work()
+            assert job_repo.has_active_non_deferred_work(None) is True, 'fail-CLOSED on system-wide defer body'
+        finally:
+            job_repo.engine.begin = original_begin
+
+        assert defer_result is True, (
+            "W3 invariant (hotfix 2026-09-04): on DB error, "
+            "has_active_non_deferred_work must fail CLOSED (return True "
+            f"/ BUSY) so the defer queue waits for the next 30s tick. "
+            f"Got: {defer_result!r}. Returning False would silently "
+            "release the defer queue while a transient DB failure is "
+            "in flight — the exact failure mode the production incident "
+            "reproduced."
+        )
+        assert background_result is True, (
+            "W3 invariant (hotfix 2026-09-04): on DB error, "
+            "has_active_non_background_work must fail CLOSED (return "
+            f"True / BUSY) so the background queue waits for the next "
+            f"30s tick. Got: {background_result!r}."
+        )
+
+    def test_db_error_through_service_layer_defer_job_stays_pending(
+        self, fb_engine, job_repo
+    ):
+        """A DB error reaches Gate B and must block a defer candidate.
+
+        This is the wrapper-level companion to
+        ``test_predicate_fails_closed_on_db_error``: the repository is
+        real, but the engine boundary is replaced with a narrow proxy so
+        only the job-side gate sees the injected error.  The candidate is
+        seeded as a queued defer JobItem beside a settled message mirror of
+        a non-terminal parent, matching the incident shape.
+
+        The positive control first wires the same service defer branch with
+        a clean (False) job-predicate result.  It proves the fixture can
+        admit the candidate when the gate is healthy, rather than passing
+        because the candidate/queue wiring is dead.
+        """
+        from unittest.mock import MagicMock
+
+        from sqlalchemy.exc import OperationalError as SAOperationalError
+
+        from daemon.repositories.job_queue.queue_repository import JobQueueRepository
+        from daemon.services.job_lock_manager import JobLockManager
+        from daemon.services.job_queue_service import JobQueueService
+
+        project = "proj-service-db-error"
+        _insert_instance(
+            fb_engine,
+            instance_id="inst-parent-service-db-error",
+            project_id=project,
+            status=InstanceStatus.WAITING_CHILDREN.value,
+        )
+        _insert_queue(
+            fb_engine,
+            queue_id="queue-parallel-service-db-error",
+            project_id=project,
+            queue_type="parallel",
+        )
+        _insert_job_item(
+            fb_engine,
+            job_id="job-mirror-service-db-error",
+            instance_id="inst-parent-service-db-error",
+            project_id=project,
+            queue_id="queue-parallel-service-db-error",
+            admission_state=AdmissionState.DONE.value,
+            job_type="message",
+        )
+        _insert_instance(
+            fb_engine,
+            instance_id="inst-candidate-service-db-error",
+            project_id=project,
+            status=InstanceStatus.RUNNING.value,
+        )
+        _insert_queue(
+            fb_engine,
+            queue_id="queue-defer-service-db-error",
+            project_id=project,
+            queue_type="defer",
+        )
+        _insert_job_item(
+            fb_engine,
+            job_id="job-defer-service-db-error",
+            instance_id="inst-candidate-service-db-error",
+            project_id=project,
+            queue_id="queue-defer-service-db-error",
+            admission_state=AdmissionState.QUEUED.value,
+        )
+
+        pending = job_repo.list_all_pending()
+        assert [job.job_id for job in pending] == [
+            "job-defer-service-db-error"
+        ]
+
+        queue_repo = JobQueueRepository(fb_engine)
+        lock_manager = JobLockManager(lock_repo=MagicMock())
+
+        # Positive control: same pending list and real service/queue repo;
+        # the only difference is a healthy job predicate reporting IDLE.
+        control_repo = JobRepository(fb_engine)
+        control_repo.has_active_non_deferred_work = MagicMock(
+            return_value=False
+        )
+        control_svc = JobQueueService(
+            control_repo, lock_manager, queue_repo
+        )
+        control_result = asyncio.run(
+            control_svc._select_next_eligible_job(pending, project)
+        )
+        assert control_result is not None
+        assert control_result.job_id == "job-defer-service-db-error", (
+            "positive control could not admit the seeded defer candidate; "
+            "the service/queue setup is vacuous"
+        )
+
+        class _BoomEngine:
+            """Delegate ordinary engine attributes while failing at begin()."""
+
+            def __init__(self, delegate):
+                self._delegate = delegate
+
+            def begin(self):
+                raise SAOperationalError(
+                    "boom", {}, Exception("injected service-layer DB error")
+                )
+
+            def __getattr__(self, name):
+                return getattr(self._delegate, name)
+
+        # Keep queue metadata and the post-call row re-query on the real
+        # file-backed engine; only the service's job repository sees the
+        # error at its engine boundary.
+        original_engine = job_repo.engine
+        job_repo.engine = _BoomEngine(fb_engine)
+        try:
+            error_svc = JobQueueService(
+                job_repo, lock_manager, queue_repo
+            )
+            error_result = asyncio.run(
+                error_svc._select_next_eligible_job(pending, project)
+            )
+        finally:
+            job_repo.engine = original_engine
+
+        assert error_result is None, (
+            "service-layer Gate B admitted a defer candidate after the "
+            "job predicate's DB error failed open; candidate must stay "
+            "pending until the next retry tick"
+        )
+        with fb_engine.begin() as conn:
+            persisted_state = conn.execute(
+                text(
+                    "SELECT admission_state FROM job_queue_items "
+                    "WHERE job_id = :job_id"
+                ),
+                {"job_id": "job-defer-service-db-error"},
+            ).scalar_one()
+        assert persisted_state == AdmissionState.QUEUED.value, (
+            "service-layer admission changed the defer candidate's durable "
+            f"state after the DB error: got {persisted_state!r}"
+        )
 
     def test_post_settle_admission_gate_catches_what_claim_cannot(
         self, fb_engine, job_repo, task_repo
@@ -1402,6 +1684,187 @@ class TestIdlePredicatePgSqliteParity:
             sq_engine.dispose()
             try:
                 self._clear_work_tables(pg_engine)
+            except Exception:
+                pass
+            pg_engine.dispose()
+
+    def test_pg_project_scoped_incident_shape_pin(self, tmp_path):
+        """Hotfix 2026-09-04: the exact PG incident shape is pinned here.
+
+        The production incident was
+        ``psycopg.errors.AmbiguousParameter: could not determine data
+        type of parameter $1`` raised when calling
+        ``has_active_non_deferred_work(project_id)`` on PostgreSQL —
+        PG rejected the bare ``:project_id IS NULL OR`` parameter
+        comparison inside the collapsed defer busy-body. SQLite
+        tolerated the untyped NULL and the PG-parity leg had been
+        SKIPPED, so the breakage shipped.
+
+        This test pins the FIX: a project-scoped predicate call
+        (``has_active_non_deferred_work(<project>)``) SUCCEEDS against
+        PostgreSQL and returns the correct busy-set, end to end. No
+        bare ``IS NULL`` parameter comparison survives.
+
+        Schema provisioning (hotfix scope only): this test creates its
+        own disposable schema (``hotfix_test_amb_param``) on the
+        `ensemble_test` DB rather than fighting the well-known fragile
+        `public`-schema GRANT state (a pre-existing project debt, NOT
+        a hotfix concern). The schema is dropped at teardown and is
+        per-test so parallel runs do not collide. The PG test packs
+        under `tests/postgres/` keep the public-schema path; this
+        HOTFIX-scoped test does not.
+        """
+        url = (
+            f"postgresql+psycopg://{_PG_USER}:{_PG_PASSWORD}"
+            f"@{_PG_HOST}:{_PG_PORT}/{_PG_DB}"
+        )
+        try:
+            pg_engine = create_engine(
+                url,
+                connect_args={
+                    "options": "-c search_path=hotfix_test_amb_param,public",
+                },
+                future=True,
+            )
+            with pg_engine.begin() as conn:
+                conn.execute(
+                    text("CREATE SCHEMA IF NOT EXISTS hotfix_test_amb_param")
+                )
+                conn.execute(text("SELECT 1"))
+        except Exception as e:
+            try:
+                pg_engine.dispose()
+            except Exception:
+                pass
+            pytest.skip(f"PostgreSQL not available at {url}: {e}")
+
+        try:
+            SQLModel.metadata.create_all(pg_engine)
+
+            # Seed the exact incident shape: a settled mirror on a
+            # parallel queue whose instance is non-terminal
+            # (``waiting_children``). The pre-fix predicate collapsed
+            # the project_id NULL trick AND routed the project_id bind
+            # under an untyped NULL — PG raised AmbiguousParameter
+            # before ever evaluating any row. The fix routes the
+            # project-scoped predicate call through the
+            # ``j.project_id = :project_id`` equality, a STRING bind
+            # that PG types from the column; the test asserts the call
+            # returns True.
+            #
+            # The shared ``_insert_queue`` / ``_insert_job`` helpers
+            # bind is_system/is_paused as integers (`1, 0`); PG rejects
+            # integer→boolean binds strictly. This test inlines the
+            # inserts with PG-compatible BOOLEAN literals so the
+            # hotfix leg is fully self-contained.
+            now = datetime.now(timezone.utc).isoformat()
+            with pg_engine.begin() as conn:
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO instances (
+                            instance_id, agent_id, agent_dir, status,
+                            project_id, created_at, updated_at, version)
+                        VALUES (
+                            'inst-pg-incident', 'developer',
+                            'agents/developer', :status,
+                            'proj-pg-incident', :now, :now, 1)
+                        """
+                    ),
+                    {
+                        "status": InstanceStatus.WAITING_CHILDREN.value,
+                        "now": now,
+                    },
+                )
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO job_queues (
+                            queue_id, project_id, queue_name,
+                            queue_name_lower, queue_type,
+                            concurrency_limit, is_system, is_paused,
+                            description, created_at, updated_at)
+                        VALUES (
+                            'queue-pg-incident', 'proj-pg-incident',
+                            'queue-pg-incident', 'queue-pg-incident',
+                            :queue_type, 1, FALSE, FALSE, NULL,
+                            :now, :now)
+                        """
+                    ),
+                    {"queue_type": "parallel", "now": now},
+                )
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO job_queue_items (
+                            job_id, agent_id, agent_dir, message, source,
+                            project_id, queue_id, priority,
+                            admission_state, created_at, instance_id,
+                            job_type, retry_count)
+                        VALUES (
+                            'job-pg-incident-mirror', 'developer',
+                            'agents/developer', 'p', 'api',
+                            'proj-pg-incident', 'queue-pg-incident', 5,
+                            :admission_state, :now, 'inst-pg-incident',
+                            'message', 0)
+                        """
+                    ),
+                    {"admission_state": AdmissionState.DONE.value, "now": now},
+                )
+
+            pg_repo = JobRepository(pg_engine)
+            # The exact call shape from the production hotfix scope:
+            # a STRING project_id argument. Pre-fix this raised
+            # AmbiguousParameter on PG; post-fix it must return True
+            # (the mirrored parent is non-terminal → busy).
+            result_proj = pg_repo.has_active_non_deferred_work(
+                "proj-pg-incident"
+            )
+            assert result_proj is True, (
+                "PG incident-shape pin: project-scoped "
+                "has_active_non_deferred_work('proj-pg-incident') on "
+                "PostgreSQL must return True (parent mission live, "
+                "mirror settled). Got "
+                f"{result_proj!r}. If this raises "
+                "psycopg.errors.AmbiguousParameter the collapsed "
+                ":project_id IS NULL OR shape silently returned."
+            )
+            # The system-wide legs must also work — the two-body split
+            # routes ``project_id=None`` through the no-project body,
+            # which carries no :project_id parameter at all.
+            result_sys = pg_repo.has_active_non_deferred_work(None)
+            result_bg = pg_repo.has_active_non_background_work(None)
+            assert result_sys is True, (
+                "PG project-scoped incident-shape: system-wide "
+                f"has_active_non_deferred_work(None) must return True "
+                f"(busy set is identical scope, same row visible). "
+                f"Got {result_sys!r}."
+            )
+            assert result_bg is True, (
+                "PG project-scoped incident-shape: system-wide "
+                f"has_active_non_background_work(None) must return True "
+                f"(same row visible system-wide). Got {result_bg!r}."
+            )
+
+            # A different project must NOT see the row — same
+            # project-scoped predicate call but with an unrelated
+            # project_id. Catches a regression where the project-scope
+            # filter leaks and the project_id is silently dropped.
+            other_result = pg_repo.has_active_non_deferred_work(
+                "proj-other"
+            )
+            assert other_result is False, (
+                "PG project-scoped incident-shape: an unrelated "
+                "project must NOT see the row — the project_id filter "
+                f"leaked. Got {other_result!r}."
+            )
+        finally:
+            try:
+                with pg_engine.begin() as conn:
+                    conn.execute(
+                        text("DROP SCHEMA IF EXISTS "
+                             "hotfix_test_amb_param CASCADE")
+                    )
             except Exception:
                 pass
             pg_engine.dispose()
