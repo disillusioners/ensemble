@@ -1,17 +1,19 @@
-# GATE_SUITES.txt — Phase 3 gate-suite manifest (single source of truth).
-# ── Enumeration record (regenerated fresh on v2 — PR3 port closure) ───
+# GATE_SUITES.txt — Phase 4 gate-suite manifest (single source of truth).
+# ── Enumeration record (regenerated fresh on v2 — PR4 port closure) ───
 # Date: 2026-09-04 (UTC) | Branch: feature/langgraph-checkpoint-perf-v2 |
-# HEAD: 4f8b072985e3b369a90ec8548976e165ccaa83b6
-# Provenance: this is the v2 PR3-CLOSURE manifest. Per the port plan
-# (T3.6) the table was REGENERATED on v2 post-PR3. v2 PR2 manifest
-# (commit dc39ae6d) had 31 rows; v2 PR3 adds 2 new rows for the read-
-# flip surface (no-alist armed-absence + frozen-fixture shape) = 33
-# manifest rows.
+# HEAD: a1ae0f914a293a9870a2e8acd95fc5f23195114c
+# Provenance: this is the v2 PR4-CLOSURE manifest. Per the port plan
+# (T4.7) the table was REGENERATED on v2 post-PR4 (Operation E:
+# reference-aware checkpoint_blobs prune + SERIALIZABLE wrap + race
+# disclosure retraction).
+# v2 PR3 manifest (commit 1642c5b6) had 33 rows; v2 PR4 adds 4 new rows
+# for the blob-prune surface (anti-join unit + service-layer prune +
+# binding real-saver + restore-rehearsal) = 37 manifest rows.
 # v1's pre-existing-
 # failure gate-run exclusions (test_cold_resume_ttl.py ×2,
 # test_question_deferred_pause_edge_cases.py ×1,
 # test_pause_race_w7_jobitem_skip.py ×1) remain per Phase 1 decision:
-# .agents/tester/QUARANTINE.md is tester-owned; Phase 3 did not
+# .agents/tester/QUARANTINE.md is tester-owned; Phase 4 did not
 # edit it.
 # Method (collection-only; replicates v1's per-PR regen method in the
 # main worktree pinned at the HEAD sha above): one pytest subprocess per
@@ -22,11 +24,11 @@
 # (BOTH env vars — persistence.py reads POSTGRES_DB; postgres-marked
 # files resolve DSNs at collection). ensemble_prod / ensemble_dev never
 # touched.
-# Cross-check: one aggregate collect-only subprocess over all 33 paths
-# (the gate-runner method): identical total (439).
-# Result: 33/33 files collect — 439 tests total (421 from the 31
-# Phase 2 rows + 18 from the 2 new PR3 rows = 439; EXACT MATCH).
-# The PR3 additions are:
+# Cross-check: one aggregate collect-only subprocess over all 37 paths
+# (the gate-runner method): identical total (484).
+# Result: 37/37 files collect — 484 tests total (439 from the 33
+# Phase 3 rows + 45 from the 4 new PR4 rows = 484; EXACT MATCH).
+# The PR4 additions are:
 #   * test_get_instance_messages_no_alist.py — armed-absence alist
 #     proof (16 tests; PRIMARY C1 boundary)
 #   * test_get_instance_messages_response_shape_frozen_fixture.py —
@@ -174,6 +176,36 @@ tests/unit/repositories/test_message_tap_to_repo_liveness.py
 # MessageTapSlot unit (20 tests; RemoveMessage filter, async bridge,
 # CancelledError propagation, log-line observability):
 tests/unit/services/test_message_tap_slot.py
+#
+# ── Gate concept: C3 reference-aware checkpoint_blobs prune (PR4 port) ──
+# Direct anti-join unit — REAL PostgreSQL SQL fixtures (referenced
+# survive / unreferenced die / thread+ns boundaries / zero-refs fail-safe
+# signal / count-vs-delete parity / jsonb_typeof drift guard) + REAL
+# aiosqlite find_all_thread_ns_pairs (D21) + SQLite no-op WARNING
+# stubs. PG-backed rows skip loudly when PostgreSQL is unreachable
+# (never a mock) (11 tests):
+tests/unit/checkpoint_adapter/test_direct_anti_join.py
+# Service-layer prune logic with mock adapter — fail-safe detection AND
+# prevention asserted separately; D21 iteration (find_all_thread_ns_
+# pairs, NOT find_excess); env-flag matrix (8 parametrized); AST
+# structural gate (the DELETE call is dominated by `if not destructive:
+# continue`); runtime gate-off sentinel; maintenance wiring + failure
+# isolation (24 tests):
+tests/unit/services/test_maintenance_prune_direct_anti_join.py
+# BINDING GATE (PR4 external-review CRITICAL #1) — REAL
+# AsyncPostgresSaver + REAL checkpoint_blobs on a disposable PG
+# database: real-graph write→retention→dry-run→destructive→aget/resume
+# reconstruction, _DeltaSnapshot chains via real aput, zero-refs fail-
+# safe with destructive armed, concurrent aput safety, process-restart
+# reconstruction, dry-run report line shape, SQLite no-op WARNING. Plus
+# TestRealSaverRaceWindow (bidirectional race coverage) +
+# TestRealSaverSerializableRetry (real-40001 retry). BLOCKS PR4 merge
+# AND destructive enable; PG skip is NOT green (9 tests):
+tests/integration/checkpoint_prune_real_saver.py
+# Automated restore-rehearsal roundtrip — backup table → destructive
+# prune → restore (ON CONFLICT DO NOTHING) → BYTE-equality on md5 of
+# every blob row + post-restore aget liveness (1 test):
+tests/integration/checkpoint_prune_restore_rehearsal.py
 #
 # ── Exclusions note (v2, PR3 port) ──
 # v1's PR1 registered 3 pre-existing-failure files as gate-run exclusions
