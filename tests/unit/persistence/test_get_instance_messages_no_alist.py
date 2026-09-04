@@ -200,7 +200,7 @@ class TestZeroAlist:
         # the [:8] truncation in the log formatter).
         warns = [
             r.message for r in caplog.records
-            if "message_metadata_repo missing/None" in r.message
+            if "repo_missing" in r.message  # T5.16 closure: aligned to FR-6 structured reason category emitted at daemon/persistence.py:497 (commit 8281acc2 — refactor from "message_metadata_repo missing/None" to {manager_missing|repo_missing|repo_exception|row_absent}). See phase5-final-results.md §T5.16 new-delta entry.
         ]
         assert len(warns) == 1, [r.message for r in caplog.records]
         assert "state.ts" in warns[0] and "thr-attr" in warns[0]
