@@ -19,7 +19,9 @@ PostgreSQL Notes:
 import asyncio
 import logging
 import os
+import threading
 import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote_plus
@@ -36,6 +38,56 @@ from daemon.checkpoint_perf import (
 from daemon.ensemble_config import EnsembleConfig
 
 logger = logging.getLogger(__name__)
+
+
+# ── row_absent WARNING emission gate (Phase-5 review fix F7) ─────────────────
+#
+# The ``row_absent`` WARNING in :func:`get_instance_messages` fires when the
+# ``message_metadata`` side table has no rows for a thread. That is the NORMAL
+# state for a fresh / pre-tap thread (no turn has run yet, or the instance
+# predates the side table), and GET /messages is POLLED — so an unconditional
+# warning degenerates into per-poll production log spam. FR-6 / AC-6.1 require
+# the reason category to stay observable, so the fix is a bounded
+# once-per-thread_id emission cache, not a level drop: the FIRST row_absent
+# lookup for a thread warns, subsequent lookups for the SAME thread stay
+# silent, and a different thread_id warns again. The cache is a capped
+# LRU (OrderedDict) so unbounded thread churn cannot grow memory; evicted
+# thread ids simply become eligible to warn again.
+_ROW_ABSENT_EMITTED_CAP = 1024
+_row_absent_emitted: "OrderedDict[str, None]" = OrderedDict()
+_row_absent_lock = threading.Lock()
+
+
+def _row_absent_should_emit(thread_id: str) -> bool:
+    """Return True only for the first (or post-eviction) row_absent lookup
+    of ``thread_id``.
+
+    Thread-safe; O(1) per call. Fail-open on any internal error — a broken
+    gate must never suppress (or break) the read path, so the fallback is
+    to warn. NEVER catches ``BaseException`` (C-14): ``CancelledError``
+    must propagate.
+    """
+    try:
+        with _row_absent_lock:
+            if thread_id in _row_absent_emitted:
+                # LRU refresh — an actively-polled thread stays pinned so
+                # the cap cannot silence a hot thread's one guaranteed
+                # emission by evicting it between polls.
+                _row_absent_emitted.move_to_end(thread_id)
+                return False
+            _row_absent_emitted[thread_id] = None
+            while len(_row_absent_emitted) > _ROW_ABSENT_EMITTED_CAP:
+                _row_absent_emitted.popitem(last=False)
+            return True
+    except Exception:  # noqa: BLE001 — fail-open gate, see docstring
+        return True
+
+
+def _reset_row_absent_gate_for_tests() -> None:
+    """Reset the once-per-thread emission cache (test seam, mirroring
+    ``daemon.checkpoint_metrics.reset_for_tests``)."""
+    with _row_absent_lock:
+        _row_absent_emitted.clear()
 
 
 # ── SQLite Path ───────────────────────────────────────────────────────────────
@@ -402,12 +454,20 @@ async def get_instance_messages(
                 # reason=``row_absent`` so the operator can disambiguate.
                 # FR-6 AC-6.1 reason categories are recorded verbatim in
                 # the message.
-                logger.warning(
-                    f"get_instance_messages: message_metadata row_absent "
-                    f"for {instance_id[:8] if instance_id else '?'} — "
-                    f"reason=row_absent (side table has no rows for this "
-                    f"thread; falling back to state.ts)"
-                )
+                #
+                # F7 — GET /messages is POLLED and pre-tap threads are the
+                # NORMAL row_absent case, so the warning emits ONCE PER
+                # thread_id (bounded 1024-entry LRU gate) instead of on
+                # every poll. Level + reason category are unchanged (the
+                # FR-6 contract is observability, not per-poll spam).
+                if _row_absent_should_emit(instance_id):
+                    logger.warning(
+                        f"get_instance_messages: message_metadata row_absent "
+                        f"for {instance_id[:8] if instance_id else '?'} — "
+                        f"reason=row_absent (side table has no rows for this "
+                        f"thread; falling back to state.ts; emitted once per "
+                        f"thread)"
+                    )
         except Exception as exc:
             # Enrichment-only lookup: a side-table failure degrades to
             # the state.ts fallback (the accepted degradation for a

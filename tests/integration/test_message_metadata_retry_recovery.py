@@ -30,8 +30,15 @@ is load-bearing — it MUST pass.
 Harness honesty contract: every operation uses a real PG
 disposable DB + a real ``AsyncPostgresSaver`` + the real
 ``daemon.persistence.get_instance_messages`` function (the same
-production code the router calls). No mocks; the alist hook is
-verified via the live-path T5.6 metric capture.
+production code the router calls). The manager harness is minimal but
+real-repo-backed: a REAL ``MessageMetadataRepository`` on the same
+disposable PG (rows written via the production ``upsert_batch`` write
+path) + the REAL ``agents/worker`` prompt files loaded through the
+real ``load_and_cache_prompt`` / ``PromptCache`` — only the instance
+ROW is synthesized (the disposable DB carries no ensemble schema).
+The alist live-path gate is enforced TWICE: the T5.6 metric capture
+AND the T5.4 armed-absence fixture (class-patched AsyncMock whose
+invocation raises AssertionError).
 """
 from __future__ import annotations
 
@@ -39,10 +46,14 @@ import asyncio
 import json
 import time
 import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Annotated, TypedDict
 
 import pytest
 
+from tests.helpers.armed_absence import armed_alist_fixture, armed_alist_mock  # noqa: F401  (F5: fixture wiring)
 from tests.helpers.checkpoint_prune_pg import (
     create_disposable_db,
     drop_database,
@@ -51,6 +62,108 @@ from tests.helpers.checkpoint_prune_pg import (
     require_postgres,
     restore_langgraph_mocks,
 )
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# Fixed clock for the synthetic-system prompt's "Current Time" append —
+# ``append_current_time`` documents ``now`` as "Provide a fixed value for
+# deterministic tests". Without the freeze, two reads seconds apart embed
+# different timestamps in the synthetic system message and the AC-13.3 (a)
+# byte-identical check would flake on the clock, not on the code.
+_FIXED_NOW = datetime(2026, 9, 4, 12, 0, 0, tzinfo=timezone.utc)
+
+
+# ── F4 manager harness (minimal, real-repo-backed) ──────────────────────────
+
+
+class _StaticInstanceRepo:
+    """Real-file-backed minimal stand-in for the instance repository.
+
+    ``get()`` returns a metadata namespace built from the REAL
+    ``agents/worker/`` directory on disk, so
+    ``_reconstruct_full_system_prompt`` → ``load_and_cache_prompt`` loads
+    the actual agent prompt files (no prompt text is mocked). Only the
+    DB-backed instance ROW is synthesized — the disposable checkpoint DB
+    has no ensemble schema, and creating one would test migrations, not
+    the read path.
+    """
+
+    def __init__(self, instance_meta: SimpleNamespace) -> None:
+        self._meta = instance_meta
+
+    def get(self, instance_id: str):
+        return self._meta
+
+    def get_tree_root_id(self, parent_id: str):
+        return parent_id
+
+
+class _ManagerHarness:
+    """The manager shape ``get_instance_messages`` actually consumes.
+
+    Attributes (verbatim names per ``daemon/persistence.py``):
+    * ``message_metadata_repo``   — REAL ``MessageMetadataRepository`` on
+      the disposable PG (side table created via ``MessageMetadata``
+      metadata create; rows written via the production ``upsert_batch``
+      write path — the same call ``MessageTapSlot`` makes).
+    * ``_instance_repository``    — :class:`_StaticInstanceRepo`.
+    * ``prompt_cache``            — REAL ``PromptCache``.
+    * ``shared_meta_kv_repo`` / ``_project_repository`` /
+      ``_skill_injection_service`` — deliberately ABSENT/None so the
+      Phase-4 context rebuild deterministically emits zero context
+      messages (project=None, no KV repo, no skill service →
+      ``_run_skill_search`` returns ``(None, [])``).
+    """
+
+    def __init__(
+        self,
+        message_metadata_repo,
+        instance_repo,
+        prompt_cache,
+    ) -> None:
+        self.message_metadata_repo = message_metadata_repo
+        self._instance_repository = instance_repo
+        self.prompt_cache = prompt_cache
+
+
+def _build_manager_harness(dsn: str) -> tuple:
+    """Build the manager harness on the disposable PG + real agent files.
+
+    Creates the ``message_metadata`` side table in the SAME disposable
+    database the checkpoints live in (the production layout is one PG
+    instance serving both), and returns ``(manager, metadata_repo,
+    engine)``.
+    """
+    from sqlalchemy import create_engine
+
+    from daemon.loader import PromptCache
+    from daemon.repositories.message_metadata.models import MessageMetadata
+    from daemon.repositories.message_metadata.repository import (
+        MessageMetadataRepository,
+    )
+
+    engine = create_engine(
+        dsn.replace("postgresql://", "postgresql+psycopg://", 1)
+    )
+    MessageMetadata.__table__.create(engine, checkfirst=True)
+    metadata_repo = MessageMetadataRepository(engine)
+
+    instance_meta = SimpleNamespace(
+        agent_id="worker",
+        agent_dir=str(REPO_ROOT / "agents" / "worker"),
+        agent_tag=None,
+        parent_id=None,
+        project_id=None,
+        instance_metadata={"mcp_tool_names": None, "source_type": None},
+        created_at=_FIXED_NOW,
+    )
+    manager = _ManagerHarness(
+        message_metadata_repo=metadata_repo,
+        instance_repo=_StaticInstanceRepo(instance_meta),
+        prompt_cache=PromptCache(),
+    )
+    return manager, metadata_repo, engine
 
 
 # ── fixtures ─────────────────────────────────────────────────────────────────
@@ -169,44 +282,68 @@ class TestReadReviveRead:
 
     Steps:
       1. Populate a thread with N messages; the thread is COMPLETED.
-      2. Pre-revive snapshot: ``get_instance_messages`` returns the
+      2. Wire the manager harness (F4): REAL ``MessageMetadataRepository``
+         on the disposable PG + real ``agents/worker`` prompt files +
+         real ``PromptCache``, so ``get_instance_messages`` runs the
+         FULL production read shape (side-table enrichment + synthetic
+         system message) — not the bare-saver degradation.
+      3. Write the pre-revive side-table rows via the production
+         ``upsert_batch`` write path (the tap's write).
+      4. Pre-revive snapshot: ``get_instance_messages`` returns the
          messages list + the alist_count metric (= 0, FR-2 invariant).
-      3. Simulate the revive: a second ``graph.ainvoke`` against the
+      5. Simulate the revive: a second ``graph.ainvoke`` against the
          SAME thread (in production this would be triggered by
          ``send_message`` to a COMPLETED instance — the reuse-revive
-         path transitions COMPLETED→RUNNING with checkpoint reuse).
-      4. Post-revive snapshot: same ``get_instance_messages`` call.
-      5. Assert:
-         a) shared-prefix byte-identical
-         b) new tail message has non-NULL created_at
-         c) ``synthetic-system-{iid}`` id identical both reads
-         d) alist_count == 0 on both reads
+         path transitions COMPLETED→RUNNING with checkpoint reuse);
+         then write the revive-turn side-table row (the tap fires at
+         message entry, i.e. BEFORE the post-revive read).
+      6. Post-revive snapshot: same ``get_instance_messages`` call.
+      7. Assert the FOUR plan sub-assertions (T5.11):
+         a) pre-revive snapshot BYTE-IDENTICAL to the shared prefix of
+            the post-revive snapshot (full dict equality — every field,
+            not just content; read path shares zero code with the
+            revive path; the synthetic-system id is deterministic per
+            instance, and the Current-Time append is clock-frozen).
+         b) the new tail message has non-NULL ``created_at`` — and it
+            equals the side-table row (proving the REAL repo join, not
+            the state.ts fallback).
+         c) ``synthetic-system-{iid}`` id identical on BOTH reads.
+         d) ``alist_count == 0`` on BOTH reads (FR-2 invariant preserved
+            across the revive) — plus the ARMED alist fixture (F5)
+            makes any alist call a hard failure regardless of counters.
 
-    NOTE: For ``get_instance_messages`` to populate ``created_at`` +
-    ``synthetic-system-{iid}``, it needs the ``manager`` argument
-    (which carries the ``message_metadata_repo`` + instance meta).
-    We test the bare saver path here (no manager) — the FR-2
-    invariant (alist_count == 0) is what the bare path proves; the
-    created_at / synthetic-system assertions require the full
-    manager shape which is exercised by sibling integration tests.
+    The armed-absence fixture (T5.4 / F5) is wired via test parameter —
+    ``AsyncPostgresSaver.alist`` is class-patched with an AsyncMock
+    whose side_effect raises AssertionError, so ANY alist invocation on
+    this live path fails the test LOUDLY, independent of the metric
+    counter in (d).
     """
 
     @pytest.mark.asyncio
-    async def test_read_revive_read_preserves_shared_prefix(self, _probe_pg):
-        """Read → revive → read: shared prefix byte-identical; alist stays 0.
-
-        The load-bearing AC-13.3 assertions in this harness:
-        * (a) shared-prefix IDENTICAL — the messages that existed
-              pre-revive are byte-equal to those same positions
-              post-revive (read path does NOT mutate the source).
-        * (d) alist_count == 0 on BOTH reads — the FR-2 invariant
-              (saver.alist is NEVER called on the live path) holds
-              across the revive.
-        """
+    async def test_read_revive_read_preserves_shared_prefix(
+        self, _probe_pg, armed_alist_fixture, monkeypatch
+    ):
+        """Read → revive → read: the FOUR AC-13.3 sub-assertions (a)-(d)."""
         from daemon.persistence import get_instance_messages
         from daemon.checkpoint_metrics import (
             checkpoint_list_total,
             reset_for_tests,
+        )
+
+        # Freeze the Current-Time append inside the synthetic-system
+        # reconstruction (the deterministic-tests seam documented on
+        # ``append_current_time`` itself). Patching the module attribute
+        # is effective because ``_apply_post_cache_appends`` resolves the
+        # name from its module globals at call time.
+        import daemon.services.instance_lifecycle as lifecycle_mod
+
+        real_append_current_time = lifecycle_mod.append_current_time
+        monkeypatch.setattr(
+            lifecycle_mod,
+            "append_current_time",
+            lambda prompt, now=None: real_append_current_time(
+                prompt, now=_FIXED_NOW
+            ),
         )
 
         name, dsn = await create_disposable_db()
@@ -215,19 +352,56 @@ class TestReadReviveRead:
                 thread_id = f"thr-revive-{uuid.uuid4().hex[:8]}"
                 await _populate_completed_thread(saver, thread_id, n_messages=5)
 
-                # PRE-revive snapshot
+                # F4 manager harness: real side-table repo + real prompt
+                # files (agents/worker) + real PromptCache.
+                manager, metadata_repo, _engine = _build_manager_harness(dsn)
+
+                # Pre-revive side-table rows — the production tap write
+                # (MessageTapSlot → repo.upsert_batch), fixed timestamps.
+                pre_ids = [f"m-{thread_id}-{i:06d}" for i in range(5)]
+                pre_rows = [
+                    (mid, f"2026-09-04T11:00:0{i}+00:00", i)
+                    for i, mid in enumerate(pre_ids)
+                ]
+                metadata_repo.upsert_batch(
+                    thread_id,
+                    [(mid, ts, seq) for (mid, ts, seq) in pre_rows],
+                )
+
+                # PRE-revive snapshot (full production read shape).
                 reset_for_tests()
-                msgs_before = await get_instance_messages(saver, thread_id)
+                msgs_before = await get_instance_messages(
+                    saver, thread_id, manager=manager
+                )
                 alist_count_before = checkpoint_list_total.get()
                 ids_before = [m["message_id"] for m in msgs_before]
-                content_before = [m["content"] for m in msgs_before]
+
+                # (d) pre-revive: alist_count == 0 (FR-2 invariant).
                 assert alist_count_before == 0, (
                     f"alist_count BEFORE revive = {alist_count_before}, "
                     f"must be 0 (FR-2 invariant violation on initial read)"
                 )
-                assert len(msgs_before) == 5, (
-                    f"pre-revive msgs = {len(msgs_before)}, expected 5"
+                # F4 wiring proof: the synthetic system message IS present
+                # (this is what the bare-saver path could not assert).
+                assert len(msgs_before) == 6, (
+                    f"pre-revive msgs = {len(msgs_before)}, expected 6 "
+                    f"(1 synthetic-system + 5 persisted)"
                 )
+                assert ids_before[0] == f"synthetic-system-{thread_id}", (
+                    f"first message_id = {ids_before[0]!r}, expected "
+                    f"synthetic-system-{thread_id} (manager harness did "
+                    f"NOT wire the synthetic injection)"
+                )
+                # Side-table join proof: persisted timestamps come from
+                # the REAL repo rows, not the state.ts fallback.
+                for i, mid in enumerate(pre_ids):
+                    msg = msgs_before[i + 1]
+                    assert msg["message_id"] == mid
+                    assert msg["created_at"] == f"2026-09-04T11:00:0{i}+00:00", (
+                        f"created_at for {mid} = {msg['created_at']!r}, "
+                        f"expected the upserted side-table row "
+                        f"(state.ts fallback leaked through pre-revive)"
+                    )
 
                 # REVIVE: a second graph.ainvoke against the same
                 # thread simulates the COMPLETED→RUNNING transition
@@ -238,7 +412,6 @@ class TestReadReviveRead:
                 # "running" via the standard pregel-loop flow.
                 from langchain_core.messages import HumanMessage
                 from langgraph.graph import END, START, StateGraph
-                from typing import Annotated, TypedDict
                 from langgraph.graph.message import add_messages
 
                 class _State(TypedDict):
@@ -255,60 +428,92 @@ class TestReadReviveRead:
 
                 # The new message after revive — this is the "tail"
                 # that should appear in the post-revive snapshot.
+                tail_id = f"m-{thread_id}-post"
                 new_message = HumanMessage(
                     content=f"msg-{thread_id}-after-revive",
-                    id=f"m-{thread_id}-post",
+                    id=tail_id,
                 )
                 await compiled.ainvoke(
                     {"messages": [new_message]},
                     {"configurable": {"thread_id": thread_id}},
                 )
 
-                # POST-revive snapshot
-                msgs_after = await get_instance_messages(saver, thread_id)
+                # The revive turn's tap write — fires at message entry
+                # (BEFORE the post-revive read), per the production order.
+                revive_ts = "2026-09-04T11:05:00+00:00"
+                metadata_repo.upsert_batch(thread_id, [(tail_id, revive_ts, 5)])
+
+                # POST-revive snapshot.
+                msgs_after = await get_instance_messages(
+                    saver, thread_id, manager=manager
+                )
                 alist_count_after = checkpoint_list_total.get()
                 ids_after = [m["message_id"] for m in msgs_after]
-                content_after = [m["content"] for m in msgs_after]
 
-                # AC-13.3 (a) — shared prefix is byte-identical
+                # AC-13.3 (d) — alist_count == 0 on BOTH reads.
                 assert alist_count_after == 0, (
                     f"alist_count AFTER revive = {alist_count_after}, "
                     f"must be 0 (FR-2 invariant violation post-revive — "
                     f"the read flip did NOT survive the COMPLETED→RUNNING "
                     f"transition)"
                 )
-                # The pre-revive IDs should all be present in the
-                # post-revive ID list (same thread, same messages
-                # accumulated by the reducer).
+                # F5 — the ARMED gate: zero alist calls on the live path,
+                # enforced by the fixture itself (AssertionError on any
+                # invocation), independent of the metric counter.
+                armed_alist_fixture.assert_not_called()
+
+                # AC-13.3 (a) — the pre-revive snapshot is BYTE-IDENTICAL
+                # to the shared prefix of the post-revive snapshot: full
+                # dict equality, every field (message_id, content,
+                # created_at, instance_id, ...). The read path shares
+                # zero code with the revive path; the only sanctioned
+                # difference is the +1 tail message.
+                assert len(msgs_after) == len(msgs_before) + 1, (
+                    f"expected post-revive to have +1 message "
+                    f"(pre={len(msgs_before)} post={len(msgs_after)})"
+                )
+                assert msgs_after[: len(msgs_before)] == msgs_before, (
+                    "shared prefix is NOT byte-identical across the "
+                    "revive (AC-13.3a violated)"
+                )
+                # Shared-prefix membership, explicit (redundant with the
+                # list equality above but keeps the historical contract
+                # readable in failure output).
                 for pre_id in ids_before:
                     assert pre_id in ids_after, (
                         f"message_id {pre_id} disappeared post-revive "
                         f"(shared prefix not preserved)"
                     )
-                # Content for the shared prefix matches.
-                for pre_msg, post_msg in zip(msgs_before, msgs_after[:len(msgs_before)]):
-                    assert pre_msg["content"] == post_msg["content"], (
-                        f"shared-prefix content drift: pre={pre_msg['content']!r} "
-                        f"post={post_msg['content']!r}"
-                    )
 
-                # AC-13.3 (b) — there is a NEW tail message
-                # (post-revive has 1 more message than pre-revive, since
-                # the second ainvoke added 1).
-                assert len(msgs_after) == len(msgs_before) + 1, (
-                    f"expected post-revive to have +1 message "
-                    f"(pre={len(msgs_before)} post={len(msgs_after)})"
+                # AC-13.3 (b) — the NEW tail message has non-NULL
+                # created_at, stamped by the REAL side-table row.
+                tail = msgs_after[-1]
+                assert tail["message_id"] == tail_id, (
+                    f"tail message_id = {tail['message_id']!r}, expected "
+                    f"{tail_id!r}"
                 )
-                # AC-13.3 (c) — the synthetic-system id is identical
-                # both reads. ``daemon.persistence.get_instance_messages``
-                # prepends a synthetic ``synthetic-system-{iid}`` system
-                # message; with manager=None (bare saver path) the
-                # reconstruction is skipped, so this assertion is
-                # ONLY valid when manager is provided. In the bare
-                # path, the first message_id IS the first persisted
-                # message; we assert it's identical between reads.
-                assert ids_after[0] == ids_before[0], (
-                    f"first message_id drift: pre={ids_before[0]} post={ids_after[0]}"
+                assert tail["created_at"] is not None, (
+                    "AC-13.3b violated: new tail message has NULL "
+                    "created_at"
+                )
+                assert tail["created_at"] == revive_ts, (
+                    f"tail created_at = {tail['created_at']!r}, expected "
+                    f"the side-table row {revive_ts!r} (state.ts fallback "
+                    f"leaked through — side-table join broken post-revive)"
+                )
+
+                # AC-13.3 (c) — the synthetic-system-{iid} id is
+                # identical on BOTH reads (deterministic per instance).
+                synthetic_id = f"synthetic-system-{thread_id}"
+                assert ids_before[0] == synthetic_id
+                assert ids_after[0] == synthetic_id, (
+                    f"synthetic-system id drift: pre={ids_before[0]!r} "
+                    f"post={ids_after[0]!r}"
+                )
+                assert msgs_after[0] == msgs_before[0], (
+                    "synthetic-system message content drift across the "
+                    "revive (clock-freeze or prompt reconstruction is "
+                    "non-deterministic)"
                 )
         finally:
             await drop_database(name)

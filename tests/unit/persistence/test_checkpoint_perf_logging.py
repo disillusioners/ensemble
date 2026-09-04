@@ -572,6 +572,98 @@ class TestDegradationWarning:
         assert len(matching) == 1, [r.message for r in caplog.records]
         assert ("fall back to state.ts" in matching[0].message or "falling back to state.ts" in matching[0].message), matching[0].message
 
+
+class TestRowAbsentOncePerThreadGate:
+    """F7 pin: the ``row_absent`` WARNING emits ONCE per thread_id.
+
+    GET /messages is polled and pre-tap threads are the NORMAL row_absent
+    case, so the warning is gated by a bounded once-per-thread emission
+    cache (``daemon.persistence._row_absent_should_emit``). Level + the
+    ``reason=row_absent`` category are UNCHANGED (FR-6 contract) — only
+    the per-poll repetition is suppressed.
+    """
+
+    def setup_method(self):
+        from daemon.persistence import _reset_row_absent_gate_for_tests
+
+        _reset_row_absent_gate_for_tests()
+
+    def teardown_method(self):
+        from daemon.persistence import _reset_row_absent_gate_for_tests
+
+        _reset_row_absent_gate_for_tests()
+
+    @staticmethod
+    def _make_checkpointer(message_id: str) -> MagicMock:
+        from langchain_core.messages import HumanMessage
+
+        mock_checkpointer = MagicMock(name="Checkpointer")
+        mock_checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {"messages": [
+                HumanMessage(content="hi", id=message_id)
+            ]},
+            "ts": "2026-08-25T00:00:00+00:00",
+        })
+        mock_checkpointer.alist = MagicMock(return_value=_AlistAsyncIterator(0))
+        return mock_checkpointer
+
+    @staticmethod
+    def _make_empty_repo_manager() -> MagicMock:
+        mock_repo = MagicMock(name="Repo-empty")
+        mock_repo.get_for_thread = MagicMock(return_value={})
+        mock_manager = MagicMock(name="Manager")
+        mock_manager.message_metadata_repo = mock_repo
+        return mock_manager
+
+    async def _row_absent_records(self, caplog, instance_id: str) -> list:
+        from daemon.persistence import get_instance_messages
+
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="daemon.persistence"):
+            await get_instance_messages(
+                self._make_checkpointer(f"msg-{instance_id}"),
+                instance_id,
+                manager=self._make_empty_repo_manager(),
+            )
+        return [r for r in caplog.records if "row_absent" in r.message]
+
+    @pytest.mark.asyncio
+    async def test_first_lookup_for_thread_warns(self, caplog):
+        """First row_absent lookup for a thread emits the WARNING."""
+        records = await self._row_absent_records(caplog, "f7-gate-first-thread")
+        assert len(records) == 1, [r.message for r in caplog.records]
+        assert "reason=row_absent" in records[0].message
+        assert records[0].levelno == logging.WARNING
+
+    @pytest.mark.asyncio
+    async def test_second_lookup_same_thread_does_not_warn(self, caplog):
+        """Second (polled) row_absent lookup for the SAME thread is silent."""
+        await self._row_absent_records(caplog, "f7-gate-repeat-thread")
+        records = await self._row_absent_records(caplog, "f7-gate-repeat-thread")
+        assert records == [], [r.message for r in caplog.records]
+
+    @pytest.mark.asyncio
+    async def test_different_thread_warns_again(self, caplog):
+        """A different thread_id is a fresh emission — warns again."""
+        await self._row_absent_records(caplog, "f7-gate-thread-a")
+        records_b = await self._row_absent_records(caplog, "f7-gate-thread-b")
+        assert len(records_b) == 1, [r.message for r in caplog.records]
+        assert "reason=row_absent" in records_b[0].message
+
+    def test_gate_is_bounded_at_cap(self):
+        """The emission cache cannot grow unboundedly (LRU cap 1024)."""
+        from daemon import persistence as persistence_mod
+
+        assert persistence_mod._ROW_ABSENT_EMITTED_CAP <= 1024
+        for i in range(persistence_mod._ROW_ABSENT_EMITTED_CAP + 10):
+            assert persistence_mod._row_absent_should_emit(f"f7-cap-{i}")
+        assert (
+            len(persistence_mod._row_absent_emitted)
+            <= persistence_mod._ROW_ABSENT_EMITTED_CAP
+        )
+        # The OLDEST entry was evicted → eligible to warn again.
+        assert persistence_mod._row_absent_should_emit("f7-cap-0")
+
 # ─────────────────────────────────────────────────────────────────────────────
 # _prune_per_thread_checkpoints — duration_ms + deleted in exit log
 # ─────────────────────────────────────────────────────────────────────────────

@@ -25,7 +25,12 @@ checkpoints via the binding-gate ``real_pg_checkpointer``; the read
 path is the production ``get_instance_messages`` function; the metric
 capture is via the daemon's internal ``checkpoint_list_total`` counter
 (post-T5.3 instrumentation; pre-PR3 the counter would have been
-non-zero; post-PR3 it MUST be 0).
+non-zero; post-PR3 it MUST be 0). Per T5.4 (F5) the live-path test
+ALSO wires the armed-absence fixture: ``AsyncPostgresSaver.alist`` is
+class-patched with an AsyncMock whose side_effect raises
+``AssertionError("alist called on live path")`` — so any alist
+invocation fails the test LOUDLY, independent of the counter
+assertion.
 """
 import ast
 import re
@@ -39,6 +44,7 @@ from daemon.checkpoint_metrics import (
     reset_for_tests as reset_metrics_for_tests,
 )
 
+from tests.helpers.armed_absence import armed_alist_fixture  # noqa: F401  (T5.4/F5 fixture wiring)
 from tests.helpers.checkpoint_prune_pg import (
     create_disposable_db,
     drop_database,
@@ -151,7 +157,7 @@ class TestObservedCountZero:
 
     @pytest.mark.asyncio
     async def test_n_ten_threads_have_zero_metric_after_get_instance_messages(
-        self, _probe_pg, disposable_db
+        self, _probe_pg, disposable_db, armed_alist_fixture
     ):
         """N=10 seeded threads; ``get_instance_messages`` per thread; metric stays 0.
 
@@ -159,6 +165,11 @@ class TestObservedCountZero:
         to prove the live path), runs ``get_instance_messages`` on each,
         captures the ``message_api_checkpoint_list_total`` counter
         AFTER each call, asserts all 10 captured values are 0.
+
+        Per T5.4 (F5) the armed-absence fixture is ALSO active: any
+        ``saver.alist(…)`` invocation raises AssertionError mid-test —
+        the counter assertion below is the belt, the armed fixture is
+        the suspenders.
 
         Pre-PR3 this counter would have been ≥ 10 (one alist per call);
         post-PR3 it MUST stay at 0 (the alist walk is gone from the live
@@ -199,6 +210,11 @@ class TestObservedCountZero:
         assert checkpoint_list_total.get() == 0, (
             f"final counter = {checkpoint_list_total.get()}, expected 0"
         )
+
+        # T5.4 (F5) — the armed gate, explicit close-out: zero alist
+        # invocations across all 10 live-path reads (the fixture itself
+        # would already have raised on ANY call; this documents intent).
+        armed_alist_fixture.assert_not_called()
 
 
 class TestVacuousLiteralGuard:
