@@ -125,7 +125,7 @@ Supplementary reviewer-personal runs (same DSN discipline):
 | Field | Value |
 |---|---|
 | Reviewer-instance ID | `reviewer[v2]` controller under tree-root `347fa33b-b135-4f20-b1f4-f61aad722924`; council governor spawned by this reviewer: `06ac38f1-3156-4d36-89e1-6e6ec5c33b8e` |
-| Artifact commit SHA | **PENDING** — file deliberately left UNTRACKED per dispatch constraint; the developer commits it (record the commit SHA here at commit time). Reviewed code SHA: `e52d845e` |
+| Artifact commit SHA | `e2c15f99` — `docs(review): T5.7 PR4 re-review artifact — reviewer-authored, APPROVED, loop closed` (171 insertions, 1 file). This fill-in is post-commit bookkeeping per step 1c of the closure brief; the reviewer's verdict was recorded against `e52d845e` and is unchanged by this administrative edit. Reviewed code SHA: `e52d845e` |
 | Verdict stamp | ✅ APPROVED (0 🔴 / 0 🟡 / 0 🟢 new findings from the port) |
 | Reviewer model | Controller: `agentic` (session `OPENAI_MODEL`). Council: `agentic` + `coding` (2 councilors — see composition note) |
 
