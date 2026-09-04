@@ -46,7 +46,6 @@ Architecture references:
 from __future__ import annotations
 
 import ast
-import asyncio
 import inspect
 import logging
 import sys

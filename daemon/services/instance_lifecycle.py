@@ -1661,9 +1661,10 @@ class InstanceLifecycleService:
             # Phase 1 C2 — langgraph-checkpoint-perf. Thread the
             # MessageTapSlot for the ``agent_node_return`` +
             # ``compaction_aupdate_reactive`` tap sites (decisions.md
-            # D1 / D20). Two slot instances — one per ``source``
+            # D1 / D20). Three slot instances — one per ``source``
             # label — so the AST gate can enumerate the approved
-            # distinct labels. Both attach to the shared
+            # distinct labels (5 approved labels: D1 + P1b A.9 T-tap).
+            # Both attach to the shared
             # ``message_metadata_repo`` singleton (decisions.md D14
             # — SYNC repo, tap bridges via ``asyncio.to_thread``).
             message_tap_slot=MessageTapSlot(

@@ -165,7 +165,8 @@ class NoopReason(str, Enum):
     Cycle 2 (proactive-compaction-fix review W-4) added
     ``INJECTIONS_DOMINATE``: the engine emits
     ``compaction_type="skipped_injections_dominate"`` on the
-    all-injected anti-refire path (``daemon/compaction.py:1994-2004``).
+    all-injected anti-refire path (the ``if not regular_messages:``
+    block through the ``anti_refire_skip`` call).
     The executor's wire mapping translates that to
     ``compacted_type="noop"`` + ``noop_reason="injections_dominate"``
     so the FE enum contract (``CompactedType.NOOP``) is preserved

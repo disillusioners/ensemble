@@ -11,7 +11,8 @@ fires at the four approved tap sites (decisions.md D1):
 * ``"agent_node_return"``           — post-F2 single-return refactor of
   the dual-return block at ``daemon/graph.py:3386-3397``.
 * ``"compaction_aupdate_reactive"`` — after the reactive-compaction
-  ``aupdate_state`` at ``daemon/graph.py:3248-3250``.
+  ``aupdate_state`` inside the CLE handler's in-frame persist block
+  (``compaction_tap_slot.tap_node_return``).
 * ``"compaction_aupdate_messaging"`` — after the messaging-side
   ``aupdate_state`` at ``daemon/services/instance_messaging.py:810-822``.
 

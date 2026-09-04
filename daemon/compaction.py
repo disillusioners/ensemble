@@ -1716,8 +1716,11 @@ class ContextCompactor:
         # (msg_count, total_tokens)`` of the last LLM-bound payload
         # estimate. Sibling of the checkpoint's ``compacted_at`` (which
         # lives in state, not here — this dict is the only per-instance
-        # estimate cache). One entry per instance EVER SEEN (overwritten,
-        # never grown per-call); tuples are tiny so no eviction policy.
+        # estimate cache). One entry per instance EVER SEEN (overwritten
+        # per instance, never grown per-call); the dictionary grows
+        # unbounded for the daemon lifetime — accepted as trivial while
+        # values remain a two-int tuple (no eviction policy); revisit if
+        # per-instance fields grow.
         self._precall_estimates: dict[str, tuple[int, int]] = {}
         # Rate-limit state for the hook's near-ceiling / skip WARN — at
         # most one WARN per instance per ``_precall_warn_interval_s``

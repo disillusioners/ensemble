@@ -2,35 +2,36 @@
 
 Phase 1 (proactive-compaction-fix): the executor and the proactive
 trigger now share ONE persist seam so the verbatim-duplicated B1+B2
-``compacted_ids`` derivation block
-(``instance_messaging.py:1283-1307`` ≡ ``compact_executor.py:1614-1641``)
-collapses to a single site, and both callers see identical
+``compacted_ids`` derivation blocks in the messaging and executor
+callers — superseded by this seam's Variant-A persist (P1 unification) —
+collapse to a single site, and both callers see identical
 ``aupdate_state`` semantics. The seam carries the verified asymmetries
 as parameters:
 
 * ``mid_turn`` — ``False`` (quiescent, out-of-frame; executor + proactive
   post-§3.3 retirement) emits Variant A (TWO ``aupdate_state`` calls
   WITHOUT ``as_node``); ``True`` (mid-superstep, in-frame; the CLE
-  handler persist recipe at ``daemon/graph.py:3606-3608`` and — since
+  handler's in-frame persist block and — since
   P1b — the 95% pre-call hook ``_maybe_precall_compact_95``) emits
   Variant B (``as_node='agent'``).
 
 * ``abort_policy`` — ``"raise"`` re-raises :class:`CompactionAborted`
   for the executor (which surfaces the rejection to the command-state
   path); ``"fail_open"`` swallows the abort and logs a WARNING for
-  the proactive site (current behavior
-  ``instance_messaging.py:1299-1306``).
+  the proactive site; the former caller-local fail-open abort block is
+  superseded by this seam's Variant-A persist (P1 unification).
 
 * Anti-refire stamp-only path: when ``result.replacement_messages`` is
   empty (``engine stamped ``compacted_at`` but had no messages to
   write — anti-refire no-op paths), the seam writes ONLY the
   ``compacted_at`` stamp and does NOT touch messages. This is what
-  engages the 60s dedup (``daemon/compaction.py:1771-1774``) on
-  skip paths that would otherwise re-fire every dispatch.
+  engages the 60s dedup via ``_is_recently_compacted`` in
+  ``ContextCompactor.compact_state`` on skip paths that would otherwise
+  re-fire every dispatch.
 
 The compaction message tap (``MessageTapSlot`` /
-``SOURCE_COMPACTION_MESSAGING``, ``instance_messaging.py:1330-1345``)
-exists ONLY on the proactive path — it is NOT invoked from this seam.
+``SOURCE_COMPACTION_MESSAGING``) exists ONLY on the proactive path — it is
+NOT invoked from this seam.
 The proactive caller fires the tap after the seam returns so the seam
 stays generic across executor + proactive.
 
@@ -41,12 +42,12 @@ checkpoint-state semantics (per the architecture boundary enforced by
 that helper). Persist is a checkpoint concern, not an engine concern.
 
 Architecture reference:
-``daemon/compaction.py:1771-1774`` (60s dedup),
-``daemon/compaction.py:1780-1793`` (all-injected skip),
-``daemon/compaction.py:1798-1804`` (min-messages skip),
-``daemon/compaction.py:1838-1849`` (selection budget),
-``daemon/compaction.py:1858`` (timestamp anchor),
-``daemon/graph.py:3606-3608`` (CLE mid-superstep persist).
+``daemon/compaction.py::ContextCompactor.compact_state``:
+60s dedup via ``_is_recently_compacted``; all-injected skip in the
+``if not regular_messages:`` guard; min-messages skip; selection budget
+via ``select_compactable_groups``; timestamp stamp.
+``daemon/graph.py`` CLE handler's in-frame persist block.
+Anchors are semantic — line numbers drift; do not re-pin.
 """
 from __future__ import annotations
 
@@ -59,6 +60,8 @@ from ..compaction import (
     build_sentinel_replacement,
 )
 from langchain_core.messages import BaseMessage, RemoveMessage
+
+__all__ = ["persist_compaction_result"]
 
 logger = logging.getLogger(__name__)
 

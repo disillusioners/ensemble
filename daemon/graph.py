@@ -2788,6 +2788,7 @@ class _PreCall95Outcome(NamedTuple):
 _PRECALL_NOOP = _PreCall95Outcome(None, None, None)
 
 
+# P1b proactive-compaction addition; this block lives in an already-large module.
 async def _maybe_precall_compact_95(
     *,
     instance_id: str,
@@ -2968,8 +2969,10 @@ async def _maybe_precall_compact_95(
                     instance_id,
                 )
             logger.info(
-                "[Compaction][precall-95] complete: %d -> %d messages, "
+                "[Compaction][precall-95] complete: instance=%s, "
+                "%d -> %d messages, "
                 "%d tokens saved (%s)",
+                instance_short,
                 result.messages_before,
                 result.messages_after,
                 result.tokens_saved,
@@ -3154,9 +3157,10 @@ def create_agent_node(
             D19 / D20 for the 4 approved source labels.
         compaction_tap_slot: Optional :class:`MessageTapSlot` handle
             (Phase 1 C2 — langgraph-checkpoint-perf) for the
-            ``compaction_aupdate_reactive`` site (after the
-            reactive-compaction ``aupdate_state`` at
-            ``daemon/graph.py:3248-3250``). Distinct from
+            ``compaction_aupdate_reactive`` site after the
+            reactive-compaction ``aupdate_state``, inside the CLE handler's
+            in-frame persist block (``compaction_tap_slot.tap_node_return``).
+            Distinct from
             ``message_tap_slot`` so the per-site source label is
             preserved — the AST gate (``test_hook_placement``)
             enumerates the approved labels. ``None`` disables
@@ -4006,8 +4010,8 @@ def create_agent_node(
             # Note: ``compaction_tap_slot`` is a SEPARATE
             # ``MessageTapSlot`` from ``message_tap_slot`` so each tap
             # site carries its distinct source label — the AST gate
-            # (``test_hook_placement``) requires EXACTLY 4 distinct
-            # labels (decisions.md D1).
+            # (``test_hook_placement``) enumerates the approved labels (5
+            # as of P1b: decisions.md D1 + A.9 T-tap).
             if compaction_tap_slot is not None:
                 await compaction_tap_slot.tap_node_return(
                     result.replacement_messages,
@@ -6318,8 +6322,9 @@ def build_instance_graph(
             (Phase 1 C2 — langgraph-checkpoint-perf) for the
             ``compaction_aupdate_reactive`` site inside
             ``create_agent_node``. Distinct from ``message_tap_slot``
-            so each site carries its own source label (the AST
-            gate requires EXACTLY 4 distinct labels). ``None``
+            so each site carries its own source label. The AST gate
+            (``test_hook_placement``) enumerates the approved labels (5 as
+            of P1b: decisions.md D1 + A.9 T-tap). ``None``
             disables the tap (no-op); backward compatible.
     """
     # Add proxy headers (x-proxy-app + x-proxy-interleaved-thinking) to all LLM requests.

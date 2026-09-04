@@ -28,17 +28,19 @@ Architecture references:
   stamp mechanics.
 * ``daemon/config.py`` — ``proactive_enabled`` flag (env
   ``ENSEMBLE_PROACTIVE_COMPACTION``, default ON).
+
+Intentionally a single large module: the P1 acceptance contract spans seam
+behavior, proactive dispatch, and source-level regression guards that must be
+reviewed together.
 """
 from __future__ import annotations
 
-import asyncio
 import inspect
 import logging
 import os
 import textwrap
-from datetime import datetime, timezone
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -54,14 +56,9 @@ from daemon.config import CompactionConfig as CompactionConfigModel
 from daemon.config import load_config
 from daemon.loader import estimate_messages_tokens
 from daemon.services import _compaction_persist_seam as seam_mod
-from daemon.services import compact_executor as ce
 from daemon.services import instance_messaging as im
-from daemon.services.command_dispatcher import (
-    COMPACT_REJECT_STATUSES,
-    CommandDispatcher,
-)
+from daemon.services.command_dispatcher import COMPACT_REJECT_STATUSES
 from daemon.services.instance_messaging import InstanceMessagingService
-from daemon.services.cancellation import CancellationService
 from langchain_core.messages import AIMessage, HumanMessage
 
 
