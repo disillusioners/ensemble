@@ -1992,7 +1992,18 @@ class ContextCompactor:
         # engages the dedup so the gate does not re-fire every
         # dispatch — the warning is rate-limited at the call site.
         if not regular_messages:
-            logger.info(
+            # Cycle 2 (review suggestion 4) — the
+            # injection-dominated skip log is now WARN, matching
+            # the 95% pre-call hook's skip-without-relief WARN
+            # (``daemon/graph.py``). Operators triaging
+            # "compaction never fires" alerts should see the
+            # skip in the WARN stream (was INFO, invisible in
+            # 6d of prod data prior to the L3 fix). The 95% site
+            # still has its own rate-limited WARN with a
+            # different message — this is a separate signal that
+            # fires for all call sites (proactive + 95% +
+            # /compact) so the WARN-level signal is uniform.
+            logger.warning(
                 "[Compaction] skipping: every message carries "
                 "injected_message flag (n=%d, injected_tokens=%d); "
                 "anti-refire stamp engaged",
@@ -2008,7 +2019,7 @@ class ContextCompactor:
         # compacted away). ANTI-REFIRE stamp engages the dedup so the
         # gate does not re-fire every dispatch.
         if len(regular_messages) < context.config.min_messages_before_compaction:
-            logger.info(
+            logger.warning(
                 "[Compaction] skipping: %d non-injected messages "
                 "(minimum: %d, injected=%d); anti-refire stamp engaged",
                 len(regular_messages),

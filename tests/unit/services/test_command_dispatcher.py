@@ -1059,10 +1059,19 @@ class TestEnums:
         }
 
     def test_noop_reason_values(self):
+        # Cycle 2 (proactive-compaction-fix review W-4) —
+        # ``injections_dominate`` is added to ``NoopReason`` so
+        # the engine ``skipped_injections_dominate`` value can be
+        # mapped to a FE-enum-compatible noop reason. The
+        # ``CompactedType`` enum stays
+        # ``{summary, partial_summary, truncation, noop}`` —
+        # the W-4 fix is on the noop REASON side, not the
+        # noop TYPE side.
         assert {n.value for n in NoopReason} == {
             "below_floor",
             "recently_compacted",
             "too_few_messages",
+            "injections_dominate",
         }
 
 

@@ -1263,7 +1263,25 @@ class InstanceMessagingService:
             # checkpoint is the required precondition. The OLD
             # polarity skipped on the quiescent shape and
             # therefore never fired (L1 root cause).
-            if not _is_terminal_checkpoint(state):
+            #
+            # Cycle 2 (review suggestion 2) — local alias
+            # ``_is_quiescent_shape`` for the shared helper. The
+            # helper's name (``_is_terminal_checkpoint``) describes
+            # the executor's use case (post-turn quiescent ==
+            # completed terminal). At THIS call site the
+            # semantics are inverted: the function returns True
+            # on a quiescent shape (the proceed condition), NOT
+            # on a terminal state. The alias expresses intent at
+            # the read site so a future maintainer reading
+            # ``if not _is_quiescent_shape(state): return`` sees
+            # "skip if NOT quiescent" rather than parsing the
+            # helper's name + the negative. The shared helper is
+            # unchanged — its other consumers
+            # (``compact_executor`` and the executor's
+            # ``_is_terminal_checkpoint`` import) keep the
+            # original name.
+            _is_quiescent_shape = _is_terminal_checkpoint
+            if not _is_quiescent_shape(state):
                 logger.info(
                     "[Compaction] skipping proactive on non-quiescent "
                     "checkpoint for instance=%s (next=%s)",

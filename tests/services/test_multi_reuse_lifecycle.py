@@ -1,51 +1,68 @@
 """Multi-reuse lifecycle scenario tests.
 
-Background
-----------
+Cycle 2 of ``feature/proactive-compaction-fix`` (review W-3) — these
+tests pin the OBSERVABLE multi-reuse behavior under the NEW
+inverted-polarity contract:
 
-The original bug (branch ``feature/instance-status-reuse-bug``, commit
-``52133a14``): when a parent agent reuses a completed child instance via
-``send_message`` a 2nd, 3rd, or 4th time, the child's status did not show
-as ``running`` for any observable duration. Root cause was in
-:meth:`InstanceMessagingService._maybe_compact_context` at
-``daemon/services/instance_messaging.py:539-557`` (the "Terminal-checkpoint
-guard"):
+* Status gate (``COMPACT_REJECT_STATUSES`` = ``{terminated, error,
+  failed}``): instance.status ∈ reject-set → INFO skip; engine +
+  graph NEVER touched. ``completed`` is NOT in the reject set
+  (C1 compact-on-COMPLETED policy), so reuse of a completed
+  instance PROCEEDS through the engine.
+* Shape gate (inverted polarity): a QUIESCENT checkpoint
+  (``state.next == ()``) is the REQUIRED precondition for
+  compaction to proceed; non-quiescent → INFO skip.
+* Variant-A persist: the proactive site writes through the
+  shared seam at ``daemon/services/_compaction_persist_seam.py``
+  with ``mid_turn=False`` and ``abort_policy="fail_open"``. The
+  seam itself issues zero ``aupdate_state(as_node=...)`` writes
+  from the proactive site (the bug-class property the original
+  suite caught).
 
-    Compaction called ``graph.aupdate_state(config, {'messages':
-    result.replacement_messages}, as_node='agent')`` unconditionally on
-    every non-retry graph turn. On a terminal checkpoint this clears the
-    checkpoint's ``next=()``, causing the subsequent ``astream(graph_input)``
-    to return instantly without running the graph. The
-    ``COMPLETED → RUNNING → COMPLETED`` cycle then collapsed to <100 ms so
-    the frontend never observed ``RUNNING``.
-
-The fix added ``if not state.next: return`` to skip compaction on terminal
-checkpoints. Active (non-terminal) turns compact normally.
+The previous file pinned the OLD inverted polarity (terminal =
+skip). Cycle 2 of the feature FLIPPED the polarity: quiescent
+(``next=()``) is now the PROCEED condition, and the seam (not
+direct ``aupdate_state`` from the call site) is the writer. The
+load-bearing invariant the original suite caught — no
+``aupdate_state(as_node="agent")`` from the proactive site — is
+re-pinned under the new contract via the
+``aupdate_state_calls_with_as_node_agent`` counter on the graph
+stats dict. The user-facing signal the original suite caught
+(``ainvoke`` yields events on every reuse cycle, so the
+frontend observes ``RUNNING`` for a non-trivial window) is
+unchanged.
 
 What this file covers
 ---------------------
 
-These tests follow the same mocking pattern as
-``tests/services/test_instance_messaging_compaction_guard.py``
-(``_make_graph`` builds a LangGraph mock with controlled ``aget_state``,
-``aupdate_state``, and ``ainvoke``). The focus here is on the OBSERVABLE
-behavior of the multi-reuse lifecycle, not just the internal guard:
+* ``TestMultiReuseNoCheckpointCorruption`` — across N reuse
+  cycles of a completed instance, the proactive path NEVER
+  issues ``aupdate_state(..., as_node="agent")``. The
+  ``aupdate_state_calls_with_as_node_agent`` counter is the
+  property the original 2nd+ reuse bug violated; the
+  ``aupdate_state_calls`` total is now allowed to be >0
+  (the seam does the messages write, WITHOUT ``as_node``).
+* ``TestMultiReuseStreamingBehavior`` — the follow-up
+  ``ainvoke`` / ``astream`` runs normally on each reuse
+  (yields events, takes non-zero time). This is the
+  observable signal the frontend was missing.
+* ``TestMultiReuseLifecycleEndToEnd`` — drives the full reuse
+  sequence (compact + ainvoke) three times in a row and
+  asserts on the accumulated behavior: aupdate_state
+  zero times WITH ``as_node="agent"``, ainvoke invoked once
+  per cycle, each cycle yields at least one event.
+* ``TestNonQuiescentShapeSkipsAsNewNegativeControl`` —
+  replaces the OLD ``TestActiveTurnStillCompacts`` (which
+  pinned the OLD inverted polarity). The NEW negative
+  control pins the inverted-polarity SHAPE gate: a
+  non-quiescent checkpoint (``state.next = ("agent",)``)
+  is now a SKIP — engine NOT invoked, aupdate_state NOT
+  called (with or without ``as_node``).
 
-* ``TestMultiReuseNoCheckpointCorruption`` — across N reuse cycles of a
-  completed instance, ``graph.aupdate_state`` is NEVER called. This is
-  the direct invariant the fix introduces.
-* ``TestMultiReuseStreamingBehavior`` — the follow-up ``ainvoke`` /
-  ``astream`` runs normally on each reuse (yields events, takes
-  non-zero time). This is the observable signal the frontend was missing:
-  the cycle has to actually run the graph so ``RUNNING`` is visible.
-* ``TestMultiReuseLifecycleEndToEnd`` — drives the full reuse sequence
-  (compact + ainvoke) three times in a row and asserts on the accumulated
-  behavior: ``aupdate_state`` zero times, ``ainvoke`` invoked once per
-  cycle, and each cycle yields at least one event. This is the exact
-  scenario from the bug report.
-* ``TestActiveTurnStillCompacts`` — negative control: non-terminal
-  checkpoints still compact. Without this, a regression that *always*
-  skipped compaction would silently pass the lifecycle tests.
+The seam is patched at the import site in this file so the
+``manager.get_instance`` round-trip is bypassed; the test
+focuses on the gate behavior, not the seam's internal
+``aupdate_state`` shape.
 """
 
 from __future__ import annotations
@@ -53,7 +70,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
@@ -104,6 +121,7 @@ def _make_graph(
     """
     stats: dict = {
         "aupdate_state_calls": 0,
+        "aupdate_state_calls_with_as_node_agent": 0,
         "ainvoke_calls": 0,
         "ainvoke_events_yielded": 0,
         "aget_state_calls": 0,
@@ -116,6 +134,20 @@ def _make_graph(
 
     async def fake_aupdate_state(*args, **kwargs):
         stats["aupdate_state_calls"] += 1
+        # Cycle 2 (proactive-compaction-fix review W-3) — track the
+        # ``as_node`` kwarg. The pre-fix bug was
+        # ``aupdate_state(config, {...}, as_node="agent")`` on a
+        # terminal-shaped between-turns checkpoint; that call cleared
+        # ``next=()`` and the next ``astream(graph_input)`` returned
+        # instantly without running the graph. The fix is the
+        # shared seam (Variant A — no ``as_node``). The new
+        # contract permits ``aupdate_state`` calls on quiescent
+        # checkpoints (the seam does the messages write) but
+        # FORBIDS ``as_node="agent"`` from the proactive path
+        # (a never-call site that re-introduces the 2nd+ reuse
+        # bug).
+        if kwargs.get("as_node") == "agent":
+            stats["aupdate_state_calls_with_as_node_agent"] += 1
         return None
 
     async def fake_ainvoke(*args, **kwargs):
@@ -177,6 +209,14 @@ def _make_manager(*, compactor: MagicMock | None = None) -> MagicMock:
     ``send_message`` would ``ainvoke``; ``_instance_repository.get``
     returns the instance metadata so ``is_first_message`` can be
     evaluated.
+
+    Cycle 2 (W-3 migration) — set ``proactive_enabled=True``
+    explicitly. The pre-cycle-2 mock used a bare
+    ``MagicMock()`` for ``config.compaction`` whose
+    ``proactive_enabled`` auto-attr is a truthy MagicMock — the
+    gate is open either way, but the explicit value makes the
+    test's intent grep-able and protects against a future
+    refactor that flips the kill-switch default.
     """
     manager = MagicMock()
     manager._compactor = compactor
@@ -187,6 +227,7 @@ def _make_manager(*, compactor: MagicMock | None = None) -> MagicMock:
     manager.config.llm.temperature = 0.0
     manager.config.llm.request_timeout = 60.0
     manager.config.compaction = MagicMock()  # threaded into CompactionContext
+    manager.config.compaction.proactive_enabled = True  # gate open
     manager.config.limits.graph_recursion_limit = 50
     manager._instance_repository = MagicMock()
     manager._instance_repository.get = MagicMock(
@@ -235,30 +276,41 @@ def _make_service(manager: MagicMock) -> InstanceMessagingService:
 
 
 class TestMultiReuseNoCheckpointCorruption:
-    """Across multiple reuse cycles of a completed instance,
-    ``graph.aupdate_state`` is NEVER called.
+    """Across multiple reuse cycles of a completed instance, the
+    proactive path NEVER issues ``aupdate_state(..., as_node="agent")``.
 
-    This is the direct invariant the fix introduces. The original bug
-    called ``aupdate_state(as_node="agent")`` on the terminal
-    checkpoint, which cleared ``next=()`` and caused the next
-    ``ainvoke`` to return instantly. By skipping compaction entirely
-    on terminal checkpoints, the guard preserves the checkpoint's
-    ``next=()`` so subsequent ``ainvoke`` calls have a graph to run.
+    Cycle 2 (W-3 migration) — the OLD assertion
+    (``aupdate_state_calls == 0``) is no longer correct: the new
+    contract's quiescent+completed scenario PROCEEDS through the
+    engine and the shared seam. The seam itself issues
+    ``aupdate_state(config, ..., as_node=...)`` (Variant A: NO
+    ``as_node``), so the total ``aupdate_state_calls`` may be >0.
+    The load-bearing property the original suite caught is the
+    absence of ``as_node="agent"`` (the call form that clears
+    ``next=()`` on a terminal-shaped between-turns checkpoint and
+    breaks the follow-up ``astream``). The new
+    ``aupdate_state_calls_with_as_node_agent`` counter on the
+    graph stats dict is the migrated assertion.
     """
 
     @pytest.mark.asyncio
-    async def test_first_reuse_terminal_skips_aupdate_state(self):
-        """First reuse of a completed instance — no ``aupdate_state``.
+    async def test_first_reuse_no_as_node_agent_writes(self):
+        """First reuse of a completed instance — no
+        ``aupdate_state(as_node="agent")``.
 
-        The lifecycle: instance completed → user/parent sends a new
-        message → ``send_message`` is invoked → ``_maybe_compact_context``
-        is called with a terminal checkpoint. The guard must short-
-        circuit before ``aupdate_state`` is called.
+        Lifecycle: instance completed → user/parent sends a new
+        message → ``send_message`` is invoked →
+        ``_maybe_compact_context`` is called with a quiescent
+        checkpoint + status=completed (not in reject set) → engine
+        invoked → seam called → seam writes
+        ``aupdate_state(config, {messages: replacement})`` WITHOUT
+        ``as_node``. The follow-up ``ainvoke`` sees the intact
+        ``next=()`` and runs the graph normally.
         """
         graph, stats = _make_graph(
             state=_MockGraphState(
                 values={"messages": [HumanMessage(content="m")] * 50},
-                next=(),  # terminal — graph finished
+                next=(),  # quiescent — proceed condition (new contract)
             ),
         )
         compactor = _make_compactor()
@@ -266,33 +318,46 @@ class TestMultiReuseNoCheckpointCorruption:
         manager.get_instance = AsyncMock(return_value=graph)
         svc = _make_service(manager)
 
-        await svc._maybe_compact_context(
-            instance_id="inst-multi-reuse-1",
-            graph=graph,
-            config={"configurable": {"thread_id": "inst-multi-reuse-1"}},
-        )
+        with patch(
+            "daemon.services._compaction_persist_seam."
+            "persist_compaction_result",
+            new=AsyncMock(return_value=True),
+        ):
+            await svc._maybe_compact_context(
+                instance_id="inst-multi-reuse-1",
+                graph=graph,
+                config={"configurable": {"thread_id": "inst-multi-reuse-1"}},
+            )
 
-        # The critical invariant — no aupdate_state on terminal.
-        assert stats["aupdate_state_calls"] == 0, (
-            "aupdate_state must not be called on terminal checkpoints; "
-            "doing so clears next=() and breaks the subsequent ainvoke"
+        # The critical invariant — the proactive site NEVER issued
+        # ``aupdate_state(..., as_node="agent")``. The seam's
+        # Variant A writes go through the patched seam (not
+        # graph.aupdate_state) so the graph's own
+        # ``aupdate_state_calls_with_as_node_agent`` counter
+        # stays at 0.
+        assert stats["aupdate_state_calls_with_as_node_agent"] == 0, (
+            "aupdate_state(as_node='agent') on a quiescent checkpoint "
+            "clears next=() and breaks the subsequent ainvoke; the "
+            "proactive path MUST go through the seam (Variant A — no "
+            "as_node) instead"
         )
-        # And the compactor itself should not have been invoked either.
-        compactor.compact_state.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_second_reuse_terminal_skips_aupdate_state(self):
-        """Second reuse of a completed instance — still no ``aupdate_state``.
+    async def test_second_reuse_no_as_node_agent_writes(self):
+        """Second reuse of a completed instance — still no
+        ``aupdate_state(as_node="agent")``.
 
         This is the key scenario from the bug report. The first reuse
-        may have a smaller message history and not cross the compaction
-        threshold; the second reuse is where accumulated messages tip
-        over the threshold. The original bug fired here.
+        may have a smaller message history; the second reuse is where
+        accumulated messages tip over the threshold. The original bug
+        fired here — the in-call-site ``aupdate_state(as_node="agent")``
+        cleared ``next=()`` and the next ``astream`` returned
+        instantly.
         """
         graph, stats = _make_graph(
             state=_MockGraphState(
                 values={"messages": [HumanMessage(content="m")] * 120},
-                next=(),  # terminal — completed for the 2nd time
+                next=(),
             ),
         )
         compactor = _make_compactor()
@@ -300,23 +365,27 @@ class TestMultiReuseNoCheckpointCorruption:
         manager.get_instance = AsyncMock(return_value=graph)
         svc = _make_service(manager)
 
-        await svc._maybe_compact_context(
-            instance_id="inst-multi-reuse-2",
-            graph=graph,
-            config={"configurable": {"thread_id": "inst-multi-reuse-2"}},
-        )
+        with patch(
+            "daemon.services._compaction_persist_seam."
+            "persist_compaction_result",
+            new=AsyncMock(return_value=True),
+        ):
+            await svc._maybe_compact_context(
+                instance_id="inst-multi-reuse-2",
+                graph=graph,
+                config={"configurable": {"thread_id": "inst-multi-reuse-2"}},
+            )
 
-        assert stats["aupdate_state_calls"] == 0
-        compactor.compact_state.assert_not_awaited()
+        assert stats["aupdate_state_calls_with_as_node_agent"] == 0
 
     @pytest.mark.asyncio
-    async def test_third_reuse_terminal_skips_aupdate_state(self):
-        """Third reuse — still no ``aupdate_state``.
+    async def test_third_reuse_no_as_node_agent_writes(self):
+        """Third reuse — still no ``aupdate_state(as_node="agent")``.
 
-        The guard must remain effective across many reuse cycles. A
-        regression that worked for the first reuse but failed on the
-        third (e.g. due to message-count accumulation in a side cache)
-        would be caught here.
+        The guard / seam discipline must remain effective across many
+        reuse cycles. A regression that worked for the first reuse
+        but failed on the third (e.g. due to message-count
+        accumulation in a side cache) would be caught here.
         """
         graph, stats = _make_graph(
             state=_MockGraphState(
@@ -329,24 +398,35 @@ class TestMultiReuseNoCheckpointCorruption:
         manager.get_instance = AsyncMock(return_value=graph)
         svc = _make_service(manager)
 
-        await svc._maybe_compact_context(
-            instance_id="inst-multi-reuse-3",
-            graph=graph,
-            config={"configurable": {"thread_id": "inst-multi-reuse-3"}},
-        )
+        with patch(
+            "daemon.services._compaction_persist_seam."
+            "persist_compaction_result",
+            new=AsyncMock(return_value=True),
+        ):
+            await svc._maybe_compact_context(
+                instance_id="inst-multi-reuse-3",
+                graph=graph,
+                config={"configurable": {"thread_id": "inst-multi-reuse-3"}},
+            )
 
-        assert stats["aupdate_state_calls"] == 0
-        compactor.compact_state.assert_not_awaited()
+        assert stats["aupdate_state_calls_with_as_node_agent"] == 0
 
     @pytest.mark.asyncio
-    async def test_repeated_reuses_never_call_aupdate_state(self):
-        """Five sequential reuse cycles → zero ``aupdate_state`` calls total.
+    async def test_repeated_reuses_never_call_aupdate_state_with_as_node_agent(
+        self,
+    ):
+        """Five sequential reuse cycles → zero
+        ``aupdate_state(..., as_node="agent")`` calls total.
 
-        Single big check that accumulates the multi-reuse invariant:
-        after N invocations of ``_maybe_compact_context`` on the same
-        (terminal) checkpoint, the graph's checkpoint state has been
-        touched zero times. This is the precise property the bug-fix
-        introduction was meant to enforce.
+        Single big check that accumulates the multi-reuse invariant
+        under the new contract: after N invocations of
+        ``_maybe_compact_context`` on the same (quiescent, completed)
+        checkpoint, the proactive path has never directly invoked
+        ``aupdate_state(as_node="agent")`` on the graph. The seam's
+        Variant A (no as_node) writes go through the patched seam;
+        only a regression that bypasses the seam (call-site direct
+        ``aupdate_state`` with ``as_node="agent"``) would push this
+        counter above 0 and fail the test.
         """
         graph, stats = _make_graph(
             state=_MockGraphState(
@@ -359,19 +439,28 @@ class TestMultiReuseNoCheckpointCorruption:
         manager.get_instance = AsyncMock(return_value=graph)
         svc = _make_service(manager)
 
-        for cycle in range(5):
-            await svc._maybe_compact_context(
-                instance_id=f"inst-cycle-{cycle}",
-                graph=graph,
-                config={"configurable": {"thread_id": f"inst-cycle-{cycle}"}},
-            )
+        with patch(
+            "daemon.services._compaction_persist_seam."
+            "persist_compaction_result",
+            new=AsyncMock(return_value=True),
+        ):
+            for cycle in range(5):
+                await svc._maybe_compact_context(
+                    instance_id=f"inst-cycle-{cycle}",
+                    graph=graph,
+                    config={
+                        "configurable": {
+                            "thread_id": f"inst-cycle-{cycle}"
+                        }
+                    },
+                )
 
-        assert stats["aupdate_state_calls"] == 0, (
-            f"After 5 reuse cycles on a terminal checkpoint, "
-            f"aupdate_state must have been called 0 times, "
-            f"got {stats['aupdate_state_calls']}"
+        assert stats["aupdate_state_calls_with_as_node_agent"] == 0, (
+            f"After 5 reuse cycles on a quiescent + completed "
+            f"checkpoint, aupdate_state(as_node='agent') must have "
+            f"been called 0 times, got "
+            f"{stats['aupdate_state_calls_with_as_node_agent']}"
         )
-        assert compactor.compact_state.await_count == 0
 
 
 # ---------------------------------------------------------------------------
@@ -384,22 +473,28 @@ class TestMultiReuseStreamingBehavior:
     ``ainvoke`` must actually run the graph — yielding events and
     taking non-zero wall-clock time.
 
-    This is the OBSERVABLE signal the frontend was missing. Before the
-    fix, ``aupdate_state`` cleared ``next=()`` and ``ainvoke`` returned
-    instantly with zero events. The frontend saw
-    ``COMPLETED → RUNNING → COMPLETED`` collapse to <100 ms and never
-    observed the running state.
+    This is the OBSERVABLE signal the frontend was missing. The
+    pre-fix bug: ``aupdate_state(as_node="agent")`` from the
+    call site (NOT the seam) cleared ``next=()`` and ``ainvoke``
+    returned instantly with zero events. The frontend saw
+    ``COMPLETED → RUNNING → COMPLETED`` collapse to <100 ms and
+    never observed the running state.
 
-    After the fix, ``_maybe_compact_context`` skips compaction on
-    terminal checkpoints, ``next=()`` remains intact, and ``ainvoke``
-    runs the graph normally — yielding events over a non-trivial
-    duration.
+    After the new-contract fix: the seam's Variant A writes
+    (``aupdate_state(config, ..., as_node=...)`` — no ``as_node``)
+    leave ``next=()`` intact, and ``ainvoke`` runs the graph
+    normally — yielding events over a non-trivial duration. The
+    new contract ALLOWS the engine + seam to run on
+    quiescent+completed (the previous file's "skipped entirely"
+    expectation was the OLD inverted polarity); these tests
+    continue to assert the user-facing signal (events + wall
+    time) and remain load-bearing under the new contract.
     """
 
     @pytest.mark.asyncio
     async def test_first_reuse_ainvoke_runs_graph_normally(self):
-        """First reuse: ``ainvoke`` yields events after the (skipped)
-        compaction guard.
+        """First reuse: ``ainvoke`` yields events after the
+        (proceed + seam-Variant-A) compaction path.
 
         We verify two things:
         1. ``ainvoke`` is invoked exactly once.
@@ -420,12 +515,18 @@ class TestMultiReuseStreamingBehavior:
         manager.get_instance = AsyncMock(return_value=graph)
         svc = _make_service(manager)
 
-        # Step 1: send_message → _maybe_compact_context (must skip).
-        await svc._maybe_compact_context(
-            instance_id="inst-stream-1",
-            graph=graph,
-            config={"configurable": {"thread_id": "inst-stream-1"}},
-        )
+        # Step 1: send_message → _maybe_compact_context (proceeds
+        # on quiescent+completed, goes through the seam).
+        with patch(
+            "daemon.services._compaction_persist_seam."
+            "persist_compaction_result",
+            new=AsyncMock(return_value=True),
+        ):
+            await svc._maybe_compact_context(
+                instance_id="inst-stream-1",
+                graph=graph,
+                config={"configurable": {"thread_id": "inst-stream-1"}},
+            )
         # Step 2: ainvoke runs the graph normally (we drain the
         # async generator to completion).
         events = []
@@ -435,18 +536,19 @@ class TestMultiReuseStreamingBehavior:
         assert stats["ainvoke_calls"] == 1
         assert stats["ainvoke_events_yielded"] >= 1, (
             "ainvoke must yield events to signal that the graph actually "
-            "ran (the broken path yielded 0 because next=() was cleared)"
+            "ran (the broken path yielded 0 because next=() was cleared "
+            "by a direct aupdate_state(as_node='agent'))"
         )
         assert len(events) >= 1
 
     @pytest.mark.asyncio
     async def test_second_reuse_ainvoke_runs_graph_normally(self):
-        """Second reuse: same behavioral check after a second compact
-        attempt.
+        """Second reuse: same behavioral check after a second
+        compact attempt.
 
         This is the EXACT scenario from the bug report: instance
-        completes → reused → completes again → reused again, and on
-        the second reuse ``ainvoke`` must still run normally.
+        completes → reused → completes again → reused again, and
+        on the second reuse ``ainvoke`` must still run normally.
         """
         graph, stats = _make_graph(
             state=_MockGraphState(
@@ -460,14 +562,20 @@ class TestMultiReuseStreamingBehavior:
         manager.get_instance = AsyncMock(return_value=graph)
         svc = _make_service(manager)
 
-        await svc._maybe_compact_context(
-            instance_id="inst-stream-2",
-            graph=graph,
-            config={"configurable": {"thread_id": "inst-stream-2"}},
-        )
+        with patch(
+            "daemon.services._compaction_persist_seam."
+            "persist_compaction_result",
+            new=AsyncMock(return_value=True),
+        ):
+            await svc._maybe_compact_context(
+                instance_id="inst-stream-2",
+                graph=graph,
+                config={"configurable": {"thread_id": "inst-stream-2"}},
+            )
 
-        # Drain ainvoke — the broken code path yielded 0 events because
-        # aupdate_state had cleared next=().
+        # Drain ainvoke — the broken code path yielded 0 events
+        # because the call-site aupdate_state(as_node='agent')
+        # had cleared next=().
         start = asyncio.get_event_loop().time()
         events = []
         async for event in graph.ainvoke({"messages": [HumanMessage(content="hi")]}, config=None):
@@ -503,11 +611,16 @@ class TestMultiReuseStreamingBehavior:
         manager.get_instance = AsyncMock(return_value=graph)
         svc = _make_service(manager)
 
-        await svc._maybe_compact_context(
-            instance_id="inst-stream-3",
-            graph=graph,
-            config={"configurable": {"thread_id": "inst-stream-3"}},
-        )
+        with patch(
+            "daemon.services._compaction_persist_seam."
+            "persist_compaction_result",
+            new=AsyncMock(return_value=True),
+        ):
+            await svc._maybe_compact_context(
+                instance_id="inst-stream-3",
+                graph=graph,
+                config={"configurable": {"thread_id": "inst-stream-3"}},
+            )
 
         events = []
         async for event in graph.ainvoke({"messages": [HumanMessage(content="hi")]}, config=None):
@@ -526,7 +639,9 @@ class TestMultiReuseStreamingBehavior:
 class TestMultiReuseLifecycleEndToEnd:
     """The complete multi-reuse lifecycle, driven end-to-end:
 
-        1. Instance completes (status=COMPLETED, checkpoint terminal)
+        1. Instance completes (status=COMPLETED, checkpoint
+           quiescent — the shape is the same as IDLE between-turns
+           under the new contract)
         2. send_message → status flips to RUNNING, graph runs to
            completion
         3. Instance completes again
@@ -534,25 +649,35 @@ class TestMultiReuseLifecycleEndToEnd:
         5. Instance completes a third time
         6. send_message → status flips to RUNNING, graph runs again
 
-    On every reuse cycle the graph MUST run (yielding events) so the
-    frontend observes ``RUNNING`` for a non-trivial duration. This is
-    the precise scenario the bug broke.
+    On every reuse cycle the graph MUST run (yielding events) so
+    the frontend observes ``RUNNING`` for a non-trivial duration.
+    This is the precise scenario the bug broke.
+
+    Cycle 2 (W-3 migration) — the OLD ``aupdate_state_calls == 0``
+    assertion is replaced with
+    ``aupdate_state_calls_with_as_node_agent == 0`` (the
+    load-bearing fix property: no direct
+    ``aupdate_state(as_node="agent")`` from the proactive site).
+    The user-facing signal (events yielded, ainvoke runs) is
+    unchanged.
     """
 
     @pytest.mark.asyncio
     async def test_three_reuse_cycles_no_checkpoint_corruption(self):
-        """Three full reuse cycles: ``aupdate_state`` called 0 times,
-        ``ainvoke`` called 3 times, events yielded on every cycle.
+        """Three full reuse cycles: aupdate_state zero times
+        WITH ``as_node="agent"``, ainvoke called 3 times, events
+        yielded on every cycle.
 
-        This is the consolidated behavioral check. It mirrors how the
-        bug manifested in production: a parent agent reuses a child
-        multiple times and on the 2nd reuse the child's status flips
-        back to COMPLETED before the frontend can observe RUNNING.
+        This is the consolidated behavioral check. It mirrors how
+        the bug manifested in production: a parent agent reuses a
+        child multiple times and on the 2nd reuse the child's
+        status flips back to COMPLETED before the frontend can
+        observe RUNNING.
         """
         graph, stats = _make_graph(
             state=_MockGraphState(
                 values={"messages": [HumanMessage(content="m")] * 80},
-                next=(),  # terminal — instance completed
+                next=(),  # quiescent — proceed condition (new contract)
             ),
             ainvoke_delay=0.005,  # 5ms — non-trivial but fast for tests
         )
@@ -563,63 +688,75 @@ class TestMultiReuseLifecycleEndToEnd:
 
         config_template = {"configurable": {"thread_id": "inst-lifecycle"}}
 
-        # Three reuse cycles. Each cycle: _maybe_compact_context then
-        # ainvoke (drained to completion). Before the fix, cycle 2 and
-        # 3 would have aupdate_state called and ainvoke would yield 0
-        # events. After the fix: aupdate_state is never called, and
-        # every ainvoke yields events.
-        for cycle in range(3):
-            # Reuse N: simulate the instance being terminal (completed).
-            # In production this is the same checkpoint; in the test we
-            # keep next=() so the guard logic is exercised identically.
-            await svc._maybe_compact_context(
-                instance_id="inst-lifecycle",
-                graph=graph,
-                config=config_template,
-            )
+        # Three reuse cycles. Each cycle: _maybe_compact_context
+        # (proceeds under the new contract → seam-Variant-A)
+        # then ainvoke (drained to completion). Before the fix,
+        # the call-site aupdate_state(as_node='agent') cleared
+        # next=() and ainvoke yielded 0 events. After the fix:
+        # the seam's Variant A leaves next=() intact, and every
+        # ainvoke yields events.
+        with patch(
+            "daemon.services._compaction_persist_seam."
+            "persist_compaction_result",
+            new=AsyncMock(return_value=True),
+        ):
+            for cycle in range(3):
+                # Reuse N: simulate the instance being terminal
+                # (completed). In production this is the same
+                # checkpoint; in the test we keep next=() so the
+                # gate logic is exercised identically.
+                await svc._maybe_compact_context(
+                    instance_id="inst-lifecycle",
+                    graph=graph,
+                    config=config_template,
+                )
 
-            # send_message then ainvoke — drain the async generator.
-            events = []
-            async for event in graph.ainvoke(
-                {"messages": [HumanMessage(content=f"reuse {cycle}")]},
-                config_template,
-            ):
-                events.append(event)
+                # send_message then ainvoke — drain the async
+                # generator.
+                events = []
+                async for event in graph.ainvoke(
+                    {"messages": [HumanMessage(content=f"reuse {cycle}")]},
+                    config_template,
+                ):
+                    events.append(event)
 
-            # Per-cycle observable behavior.
-            assert stats["ainvoke_calls"] == cycle + 1, (
-                f"ainvoke must be called once per reuse cycle (cycle={cycle})"
-            )
-            assert len(events) >= 1, (
-                f"ainvoke must yield events on every reuse cycle "
-                f"(cycle={cycle}); 0 events = the bug"
-            )
+                # Per-cycle observable behavior.
+                assert stats["ainvoke_calls"] == cycle + 1, (
+                    f"ainvoke must be called once per reuse cycle "
+                    f"(cycle={cycle})"
+                )
+                assert len(events) >= 1, (
+                    f"ainvoke must yield events on every reuse cycle "
+                    f"(cycle={cycle}); 0 events = the bug"
+                )
 
-        # Cross-cycle invariant: aupdate_state was NEVER called.
-        assert stats["aupdate_state_calls"] == 0, (
-            f"aupdate_state must not be called on terminal checkpoints "
-            f"across reuse cycles; got {stats['aupdate_state_calls']} calls"
-        )
-        # And the compactor itself should not have been invoked.
-        assert compactor.compact_state.await_count == 0, (
-            "compactor.compact_state must not be called on terminal "
-            "checkpoints; the guard short-circuits before it"
+        # Cross-cycle invariant: aupdate_state was NEVER called
+        # WITH ``as_node="agent"``. The total
+        # ``aupdate_state_calls`` may be >0 (the seam's Variant A
+        # does the messages write) but the call form that
+        # reintroduces the bug is the only thing pinned here.
+        assert stats["aupdate_state_calls_with_as_node_agent"] == 0, (
+            f"aupdate_state(as_node='agent') must not be called on "
+            f"quiescent checkpoints across reuse cycles; got "
+            f"{stats['aupdate_state_calls_with_as_node_agent']} "
+            f"calls (this re-introduces the 2nd+ reuse bug)"
         )
 
     @pytest.mark.asyncio
     async def test_reuse_cycles_take_non_trivial_wall_clock_time(self):
-        """Each reuse cycle takes non-trivial wall-clock time, so the
-        frontend CAN observe RUNNING.
+        """Each reuse cycle takes non-trivial wall-clock time, so
+        the frontend CAN observe RUNNING.
 
         The bug's signature: the cycle collapsed to <100ms so the
-        frontend never observed ``RUNNING``. After the fix, the cycle
-        takes whatever time the graph actually needs (mocked here at
-        20ms per ainvoke event).
+        frontend never observed ``RUNNING``. After the fix, the
+        cycle takes whatever time the graph actually needs
+        (mocked here at 20ms per ainvoke event).
 
-        We sum the elapsed time across 3 cycles and assert it's well
-        above the broken-path signature (<100ms total). A regression
-        that re-introduces the instant-return path would yield a
-        sub-millisecond total and fail this assertion.
+        We sum the elapsed time across 3 cycles and assert it's
+        well above the broken-path signature (<100ms total). A
+        regression that re-introduces the instant-return path
+        would yield a sub-millisecond total and fail this
+        assertion.
         """
         graph, stats = _make_graph(
             state=_MockGraphState(
@@ -635,51 +772,63 @@ class TestMultiReuseLifecycleEndToEnd:
 
         config_template = {"configurable": {"thread_id": "inst-timing"}}
 
-        cycle_times = []
-        for cycle in range(3):
-            await svc._maybe_compact_context(
-                instance_id="inst-timing",
-                graph=graph,
-                config=config_template,
-            )
+        with patch(
+            "daemon.services._compaction_persist_seam."
+            "persist_compaction_result",
+            new=AsyncMock(return_value=True),
+        ):
+            cycle_times = []
+            for cycle in range(3):
+                await svc._maybe_compact_context(
+                    instance_id="inst-timing",
+                    graph=graph,
+                    config=config_template,
+                )
 
-            start = asyncio.get_event_loop().time()
-            async for _event in graph.ainvoke(
-                {"messages": [HumanMessage(content=f"reuse {cycle}")]},
-                config_template,
-            ):
-                pass
-            elapsed = asyncio.get_event_loop().time() - start
-            cycle_times.append(elapsed)
+                start = asyncio.get_event_loop().time()
+                async for _event in graph.ainvoke(
+                    {"messages": [HumanMessage(content=f"reuse {cycle}")]},
+                    config_template,
+                ):
+                    pass
+                elapsed = asyncio.get_event_loop().time() - start
+                cycle_times.append(elapsed)
 
         # Every cycle must take at least ~80% of the mock delay
-        # (20ms → ≥16ms expected; we allow ≥10ms for test-loop slack).
+        # (20ms → ≥16ms expected; we allow ≥10ms for test-loop
+        # slack).
         for cycle, t in enumerate(cycle_times):
             assert t >= 0.010, (
                 f"reuse cycle {cycle} returned in {t*1000:.2f}ms — "
                 f"this is the instant-return symptom of the original bug"
             )
 
-        # And no checkpoint corruption across the whole sequence.
-        assert stats["aupdate_state_calls"] == 0
+        # The load-bearing fix property: zero aupdate_state calls
+        # with ``as_node="agent"`` across the whole sequence.
+        # (The seam does the messages write WITHOUT ``as_node``.)
+        assert stats["aupdate_state_calls_with_as_node_agent"] == 0
         assert stats["ainvoke_calls"] == 3
         assert stats["ainvoke_events_yielded"] == 3
 
     @pytest.mark.asyncio
-    async def test_reuse_status_changes_observable_via_aupdate_state_count(self):
-        """A consolidated invariant check using ``aupdate_state``
-        call count as the proxy for "the lifecycle was clean."
+    async def test_reuse_status_changes_observable_via_ainvoke_yield(self):
+        """A consolidated invariant check using ``ainvoke``
+        event-yield as the proxy for "the lifecycle was clean."
 
-        Specifically: in the broken code path,
-        ``_maybe_compact_context`` would call ``aupdate_state`` on
-        every reuse cycle once message count crossed the compaction
-        threshold. In the fixed code path, ``aupdate_state`` is never
-        called. The status of the instance therefore does not flip
-        instant-return to COMPLETED, and the frontend observes
-        ``RUNNING`` for the full graph-execution window.
+        Cycle 2 (W-3 migration) — the OLD meta-test used
+        ``aupdate_state_calls == 0`` as the proxy. Under the new
+        contract the total ``aupdate_state_calls`` may be >0
+        (the seam's Variant A does the messages write), so the
+        proxy moves to the user-facing signal: every reuse cycle
+        must have a non-zero ``ainvoke_events_yielded`` count.
+        The ``as_node="agent"`` discipline is the load-bearing
+        property the call-site regression would violate.
 
-        This is the meta-test: if a future regression re-introduces
-        the bug on the reuse path, this test fails loudly.
+        This is the meta-test: if a future regression
+        re-introduces the bug on the reuse path, this test fails
+        loudly via the ainvoke event-yield assertion (the
+        instant-return symptom that originally made the
+        COMPLETED → RUNNING → COMPLETED cycle collapse to <100ms).
         """
         graph, stats = _make_graph(
             state=_MockGraphState(
@@ -688,11 +837,6 @@ class TestMultiReuseLifecycleEndToEnd:
             ),
             ainvoke_delay=0.005,
         )
-        # Provide a compactor that, if the guard were missing, would
-        # issue an aupdate_state. This makes the test maximally
-        # sensitive to the regression: if a single aupdate_state
-        # sneaks through, the count would jump from 0 to ≥1 and the
-        # test fails.
         compactor = _make_compactor()
         manager = _make_manager(compactor=compactor)
         manager.get_instance = AsyncMock(return_value=graph)
@@ -701,25 +845,32 @@ class TestMultiReuseLifecycleEndToEnd:
         config_template = {"configurable": {"thread_id": "inst-meta"}}
 
         # Run 4 reuse cycles (1st, 2nd, 3rd, 4th reuse).
-        for cycle in range(4):
-            await svc._maybe_compact_context(
-                instance_id="inst-meta",
-                graph=graph,
-                config=config_template,
-            )
-            async for _event in graph.ainvoke(
-                {"messages": [HumanMessage(content=f"msg {cycle}")]},
-                config_template,
-            ):
-                pass
+        with patch(
+            "daemon.services._compaction_persist_seam."
+            "persist_compaction_result",
+            new=AsyncMock(return_value=True),
+        ):
+            for cycle in range(4):
+                await svc._maybe_compact_context(
+                    instance_id="inst-meta",
+                    graph=graph,
+                    config=config_template,
+                )
+                async for _event in graph.ainvoke(
+                    {"messages": [HumanMessage(content=f"msg {cycle}")]},
+                    config_template,
+                ):
+                    pass
 
-        # Hard invariant: zero aupdate_state calls across 4 reuse
-        # cycles on a terminal checkpoint.
-        assert stats["aupdate_state_calls"] == 0, (
-            f"Across 4 reuse cycles on a terminal checkpoint, "
-            f"aupdate_state was called {stats['aupdate_state_calls']} "
-            f"time(s). This re-introduces the 2nd+ reuse bug — the "
-            f"frontend will not observe RUNNING."
+        # Hard invariant: zero aupdate_state calls WITH
+        # ``as_node="agent"`` across 4 reuse cycles on a
+        # quiescent checkpoint.
+        assert stats["aupdate_state_calls_with_as_node_agent"] == 0, (
+            f"Across 4 reuse cycles on a quiescent checkpoint, "
+            f"aupdate_state(as_node='agent') was called "
+            f"{stats['aupdate_state_calls_with_as_node_agent']} "
+            f"time(s). This re-introduces the 2nd+ reuse bug — "
+            f"the frontend will not observe RUNNING."
         )
         # Each cycle ran the graph and yielded at least one event.
         assert stats["ainvoke_calls"] == 4
@@ -731,25 +882,35 @@ class TestMultiReuseLifecycleEndToEnd:
 # ---------------------------------------------------------------------------
 
 
-class TestActiveTurnStillCompacts:
-    """When the checkpoint is NOT terminal (the graph has a pending
-    node), compaction must run normally.
+class TestNonQuiescentShapeSkipsAsNewNegativeControl:
+    """Cycle 2 (W-3 migration) — the OLD ``TestActiveTurnStillCompacts``
+    pinned the OLD inverted polarity (non-terminal shape → engine
+    invoked → aupdate_state called). The new contract FLIPS the
+    polarity: non-quiescent (``state.next = ("agent",)``) is now a
+    SKIP at INFO (the engine is NEVER called; aupdate_state is
+    NEVER touched).
 
-    Without this negative control, a regression that *always* skipped
-    compaction (e.g. broke the guard condition) would silently pass
-    the multi-reuse tests above and disable compaction on active
-    conversations — a much worse failure mode.
+    This class replaces ``TestActiveTurnStillCompacts`` with the
+    inverted-polarity negative control. It pins the SHAPE gate
+    explicitly: a non-quiescent checkpoint MUST short-circuit
+    before the engine, regardless of the status. Without this
+    control, a regression that *always* allowed the engine to run
+    (e.g. dropping the shape gate) would silently enable
+    mid-superstep compaction and re-introduce the
+    mid-turn-state disturbance the gate is designed to prevent.
     """
 
     @pytest.mark.asyncio
-    async def test_active_turn_runs_compactor_and_writes_compaction(self):
-        """Non-terminal checkpoint with high message count →
-        ``compact_state`` is awaited and ``aupdate_state`` runs.
+    async def test_non_quiescent_shape_skips_engine_and_writes(self):
+        """Non-quiescent shape → engine NOT invoked; aupdate_state
+        NOT called (with or without ``as_node``).
 
-        This is the inverse of the multi-reuse bug scenario: the
-        checkpoint has work pending (``state.next = ("agent",)``), so
-        the guard does NOT short-circuit, and compaction proceeds
-        normally.
+        The OLD negative control asserted the inverse: non-terminal
+        + compactor result → ``aupdate_state`` called. The new
+        contract's SHAPE gate rejects non-quiescent BEFORE the
+        engine, so the compactor mock is not awaited and the
+        graph's aupdate_state counter stays at 0 (including the
+        ``as_node="agent"`` sub-counter).
         """
         graph, stats = _make_graph(
             state=_MockGraphState(
@@ -757,26 +918,36 @@ class TestActiveTurnStillCompacts:
                     "messages": [HumanMessage(content="m")] * 50,
                     "compacted_at": None,
                 },
-                next=("agent",),  # active — has work pending
+                next=("agent",),  # NOT quiescent — has a pending node
             ),
         )
         compactor = _make_compactor()
         manager = _make_manager(compactor=compactor)
         manager.get_instance = AsyncMock(return_value=graph)
-        # _instance_repository.get is called by _get_system_prompt_tokens.
-        manager._instance_repository.get = MagicMock(return_value=None)
         svc = _make_service(manager)
 
-        await svc._maybe_compact_context(
-            instance_id="inst-active-control",
-            graph=graph,
-            config={"configurable": {"thread_id": "inst-active-control"}},
-        )
+        with patch(
+            "daemon.services._compaction_persist_seam."
+            "persist_compaction_result",
+            new=AsyncMock(return_value=True),
+        ) as seam_mock:
+            await svc._maybe_compact_context(
+                instance_id="inst-active-control",
+                graph=graph,
+                config={
+                    "configurable": {"thread_id": "inst-active-control"}
+                },
+            )
 
-        # The guard did NOT short-circuit — compactor was invoked.
-        compactor.compact_state.assert_awaited_once()
-        # aupdate_state was called to write the replacement messages.
-        assert stats["aupdate_state_calls"] >= 1, (
-            "non-terminal checkpoint with non-None compactor result "
-            "must write the replacement back via aupdate_state"
+        # The SHAPE gate short-circuited BEFORE the engine.
+        compactor.compact_state.assert_not_awaited()
+        # No aupdate_state at all (with or without ``as_node``).
+        assert stats["aupdate_state_calls"] == 0, (
+            "non-quiescent shape MUST skip the engine and any "
+            "aupdate_state write; the bug-class property is a "
+            "mid-superstep disturbance, not just the as_node='agent' "
+            "form"
         )
+        assert stats["aupdate_state_calls_with_as_node_agent"] == 0
+        # The seam is also untouched (no engine result to persist).
+        seam_mock.assert_not_awaited()

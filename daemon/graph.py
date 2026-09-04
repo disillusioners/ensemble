@@ -2896,12 +2896,23 @@ async def _maybe_precall_compact_95(
         current_state = await graph.aget_state(thread_config)
         state_values = (current_state.values or {}) if current_state else {}
         current_messages = state_values.get("messages", []) or []
+        # Cycle 2 (review suggestion 3) — guard ``llm_config=None``.
+        # ``ContextCompactor.llm_config`` is typed ``dict | None``
+        # at construction; if a custom builder forgot to wire it
+        # the prior code would propagate ``None`` to
+        # :class:`CompactionContext` (typed ``llm_config: dict``,
+        # required) and crash on the engine's first access. Treat
+        # ``None`` as "session not configured for compaction" and
+        # fall through to the noop — the rest of the LLM call
+        # will use the session LLM (which is independently
+        # configured; the 95% hook is opt-in).
+        hook_llm_config = compactor.llm_config or {}
         ctx = CompactionContext(
             messages=current_messages,
             system_prompt_tokens=estimate_tokens(system_prompt),
             model_name=model_name,
             config=compactor.config,
-            llm_config=compactor.llm_config,
+            llm_config=hook_llm_config,
             last_compacted_at=state_values.get("compacted_at"),
             instance_id=instance_id,
             msg_timestamps=_extract_msg_timestamps(current_messages),

@@ -984,34 +984,174 @@ class TestProactiveEnabledFlag:
         assert cfg0.proactive_enabled is False
         assert cfg1.proactive_enabled is True
 
-    def test_env_blank_uses_default(self, monkeypatch):
+    def test_env_blank_uses_default(self, monkeypatch, tmp_path):
         """Bare ``KEY=`` line in .env → default ON (not False).
 
-        Implementation note: pydantic-settings converts empty env
-        strings to ``None`` for non-string types BEFORE the
-        ``mode="before"`` field validator runs, so we cannot
-        intercept ``""`` for the bool field at the validator level.
-        The user-facing behavior is preserved because pydantic's
-        default (when the env resolves to ``None``) is the field
-        default — which is ``True`` here. Pin the runtime behavior
-        via the YAML path (no env, no yaml value → default ON).
+        Cycle 2 / review W-1 — the previous covering test dodged the
+        actual bug with ``monkeypatch.delenv`` (no env at all, so
+        pydantic-settings never saw the env var; the default kicked
+        in trivially). The real bug reproduced only via
+        ``setenv("")``: ``os.environ['ENSEMBLE_PROACTIVE_COMPACTION']
+        = ''`` is the exact operator typo a stray ``.env`` line
+        produces after ``launcher.sh`` ``load_env_file`` re-exports
+        it verbatim. The pre-fix code crashed boot with
+        ``ValidationError`` (pydantic-settings converts ``""`` → ``None``
+        for a bool field; the ``mode="before"`` validator returns
+        ``None``; pydantic then fails to coerce ``None`` to ``bool``
+        because the field default is shadowed by the explicit env-set
+        intent).
+
+        The W-1 fix in :func:`daemon.config.load_config` (via
+        :func:`_resolve_proactive_enabled`) resolves the env var
+        FIRST, so the model field receives the explicit bool init
+        kwarg and pydantic-settings never re-reads the env. We test
+        the fix through the boot path (``load_config``) — the only
+        path operators exercise.
         """
-        # No env / no yaml → default ON.
-        monkeypatch.delenv("ENSEMBLE_PROACTIVE_COMPACTION", raising=False)
-        cfg = CompactionConfigModel()
-        assert cfg.proactive_enabled is True, (
-            "no-env / no-yaml must fall through to the documented "
-            "ON default"
+        text = textwrap.dedent("""
+            llm:
+              base_url: "https://api.openai.com/v1"
+              api_key: "k"
+              model: "gpt-4"
+            persistence:
+              db_path: "./data/instances.db"
+        """).strip()
+        path = tmp_path / "config.yaml"
+        path.write_text(text)
+        # The bug: bare ``ENSEMBLE_PROACTIVE_COMPACTION=`` in .env.
+        monkeypatch.setenv("ENSEMBLE_PROACTIVE_COMPACTION", "")
+        cfg = load_config(config_path=str(path))
+        assert cfg.compaction.proactive_enabled is True, (
+            "empty ENSEMBLE_PROACTIVE_COMPACTION must fall through to "
+            "the documented ON default (W-1 — empty env MUST NOT brick "
+            "boot)"
         )
-        # Sanity: an explicit env override wins regardless of empty
-        # values cleared earlier.
+        # Sanity: an explicit env override still wins when the
+        # operator types a value (not a bare ``KEY=``).
         monkeypatch.setenv("ENSEMBLE_PROACTIVE_COMPACTION", "0")
-        cfg_off = CompactionConfigModel()
-        assert cfg_off.proactive_enabled is False
+        cfg_off = load_config(config_path=str(path))
+        assert cfg_off.compaction.proactive_enabled is False
+
+    def test_env_blank_uses_default_legacy_spelling(self, monkeypatch, tmp_path):
+        """W-1 mirror for the legacy ``COMPACTION_PROACTIVE_ENABLED``
+        env name. Same empty-string normalization applies.
+        """
+        text = textwrap.dedent("""
+            llm:
+              base_url: "https://api.openai.com/v1"
+              api_key: "k"
+              model: "gpt-4"
+            persistence:
+              db_path: "./data/instances.db"
+        """).strip()
+        path = tmp_path / "config.yaml"
+        path.write_text(text)
+        monkeypatch.delenv("ENSEMBLE_PROACTIVE_COMPACTION", raising=False)
+        monkeypatch.setenv("COMPACTION_PROACTIVE_ENABLED", "")
+        cfg = load_config(config_path=str(path))
+        assert cfg.compaction.proactive_enabled is True
+
+    def test_env_beats_yaml_precedence(self, tmp_path, monkeypatch):
+        """W-2 — ``ENSEMBLE_PROACTIVE_COMPACTION=0`` + yaml
+        ``proactive_enabled: true`` → False (env wins).
+
+        Pre-fix, this DID NOT hold: pydantic-settings treats the YAML
+        value (passed as init kwarg) as taking priority over the env
+        var — silently inverting the documented env>yaml contract and
+        weakening the incident-revert path. The
+        :func:`_resolve_proactive_enabled` resolver reads the env
+        first and passes the effective bool as init kwarg, restoring
+        the documented precedence.
+        """
+        text = textwrap.dedent("""
+            llm:
+              base_url: "https://api.openai.com/v1"
+              api_key: "k"
+              model: "gpt-4"
+            persistence:
+              db_path: "./data/instances.db"
+            compaction:
+              proactive_enabled: true
+        """).strip()
+        path = tmp_path / "config.yaml"
+        path.write_text(text)
+        monkeypatch.setenv("ENSEMBLE_PROACTIVE_COMPACTION", "0")
+        cfg = load_config(config_path=str(path))
+        assert cfg.compaction.proactive_enabled is False, (
+            "W-2 — env=0 must win over yaml proactive_enabled: true"
+        )
+
+    def test_legacy_env_beats_yaml_precedence(self, tmp_path, monkeypatch):
+        """W-2 mirror for the legacy ``COMPACTION_PROACTIVE_ENABLED``
+        env name. Both env spellings win over yaml.
+        """
+        text = textwrap.dedent("""
+            llm:
+              base_url: "https://api.openai.com/v1"
+              api_key: "k"
+              model: "gpt-4"
+            persistence:
+              db_path: "./data/instances.db"
+            compaction:
+              proactive_enabled: true
+        """).strip()
+        path = tmp_path / "config.yaml"
+        path.write_text(text)
+        monkeypatch.delenv("ENSEMBLE_PROACTIVE_COMPACTION", raising=False)
+        monkeypatch.setenv("COMPACTION_PROACTIVE_ENABLED", "0")
+        cfg = load_config(config_path=str(path))
+        assert cfg.compaction.proactive_enabled is False, (
+            "W-2 — legacy COMPACTION_PROACTIVE_ENABLED=0 must also win "
+            "over yaml"
+        )
+
+    def test_ens_env_beats_legacy_env(self, tmp_path, monkeypatch):
+        """When BOTH env names are set, ``ENSEMBLE_PROACTIVE_COMPACTION``
+        is the documented primary and wins.
+        """
+        text = textwrap.dedent("""
+            llm:
+              base_url: "https://api.openai.com/v1"
+              api_key: "k"
+              model: "gpt-4"
+            persistence:
+              db_path: "./data/instances.db"
+        """).strip()
+        path = tmp_path / "config.yaml"
+        path.write_text(text)
+        monkeypatch.setenv("ENSEMBLE_PROACTIVE_COMPACTION", "0")
+        monkeypatch.setenv("COMPACTION_PROACTIVE_ENABLED", "1")
+        cfg = load_config(config_path=str(path))
+        assert cfg.compaction.proactive_enabled is False, (
+            "ENSEMBLE_PROACTIVE_COMPACTION=0 must beat "
+            "COMPACTION_PROACTIVE_ENABLED=1 when both are set"
+        )
+
+    def test_env_unset_yaml_absent_uses_default(self, tmp_path, monkeypatch):
+        """No env / no yaml → documented ON default (regression
+        guard for the default)."""
+        text = textwrap.dedent("""
+            llm:
+              base_url: "https://api.openai.com/v1"
+              api_key: "k"
+              model: "gpt-4"
+            persistence:
+              db_path: "./data/instances.db"
+        """).strip()
+        path = tmp_path / "config.yaml"
+        path.write_text(text)
+        monkeypatch.delenv("ENSEMBLE_PROACTIVE_COMPACTION", raising=False)
+        monkeypatch.delenv("COMPACTION_PROACTIVE_ENABLED", raising=False)
+        cfg = load_config(config_path=str(path))
+        assert cfg.compaction.proactive_enabled is True, (
+            "no-env / no-yaml must fall through to the documented ON default"
+        )
 
     def test_yaml_can_set_explicitly(self, tmp_path, monkeypatch):
-        """``compaction.proactive_enabled: false`` in yaml → False."""
+        """``compaction.proactive_enabled: false`` in yaml → False
+        (when env is unset)."""
         monkeypatch.delenv("ENSEMBLE_PROACTIVE_COMPACTION", raising=False)
+        monkeypatch.delenv("COMPACTION_PROACTIVE_ENABLED", raising=False)
         text = textwrap.dedent("""
             llm:
               base_url: "https://api.openai.com/v1"

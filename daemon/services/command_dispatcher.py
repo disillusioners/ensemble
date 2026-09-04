@@ -160,11 +160,25 @@ class CompactedType(str, Enum):
 
 
 class NoopReason(str, Enum):
-    """noop_reason enum — WS-5 §7."""
+    """noop_reason enum — WS-5 §7.
+
+    Cycle 2 (proactive-compaction-fix review W-4) added
+    ``INJECTIONS_DOMINATE``: the engine emits
+    ``compaction_type="skipped_injections_dominate"`` on the
+    all-injected anti-refire path (``daemon/compaction.py:1994-2004``).
+    The executor's wire mapping translates that to
+    ``compacted_type="noop"`` + ``noop_reason="injections_dominate"``
+    so the FE enum contract (``CompactedType.NOOP``) is preserved
+    (the raw engine string was previously leaking through the wire
+    as ``compacted_type="skipped_injections_dominate"`` — outside
+    the FE enum). Engine-side ``compacted_at`` stamping for the
+    AUTO path is unaffected (T4/T4-ext acceptance).
+    """
 
     BELOW_FLOOR = "below_floor"
     RECENTLY_COMPACTED = "recently_compacted"
     TOO_FEW_MESSAGES = "too_few_messages"
+    INJECTIONS_DOMINATE = "injections_dominate"
 
 
 # ─────────────────────────────────────────────────────────────────────────

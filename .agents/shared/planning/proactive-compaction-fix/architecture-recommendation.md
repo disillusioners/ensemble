@@ -200,6 +200,16 @@ Facts (`daemon/loader.py:450-520`): no cache, up to 4 sub-encodes/message, pure-
 
 Evidence — three persist sites, two frames: proactive (in-frame, quiescent) `instance_messaging.py:1308-1320`; executor (out-of-frame, quiescent) `compact_executor.py:1668-1680`; CLE (in-frame, **mid-superstep**) `graph.py:3606-3608`. The C1 docstring (`compact_executor.py:1551-1571`) explicitly distinguishes the frames; §1.1's `interrupt_before` finding covers **quiescent** checkpoints only — mid-superstep `aupdate_state` without `as_node` is untested here. **AMENDMENT to §3.3:** the seam's parameter list is now (abort policy, `force`, tap, **`mid_turn`**). Gate any future recipe change at the CLE handler on the mid-superstep canary (A.9 T2-ext).
 
+#### A.5.1 Cycle 2 amendment (2026-09-04) — `mid_turn=True` is a rebuild-seed shadow
+The mid-superstep durability premise that justified the `mid_turn=True` branch is **falsified on real langgraph 1.0.9** (T2-ext canary `test_compact_executor_revive_brick_e2e.py:1712-1979`):
+
+* mid-flight `aupdate_state` (any `as_node`) is **superseded by the running task's own commit** when the in-flight node returns — the running task's outgoing-prefix commit lands LAST and overwrites the mid-flight write;
+* mid-flight `aupdate_state` WITHOUT `as_node` raises `InvalidUpdateError` on the real graph (no in-flight node to anchor the write to).
+
+**Proven replacement (P1b):** durability is owned by the **return-carried prefix** — the node's return value carries the sentinel-first compaction prefix (`graph.py:4151-4203`); the running task's commit lands the compaction atomically; the dedup stamp rides the return. The `mid_turn=True` seam call (the "rebuild-seed shadow") is **NO LONGER LOAD-BEARING for durability** — it persists in case the task is killed before its commit (rebuild-from-checkpoint path). A future simplification can drop the `mid_turn=True` writes entirely once the rebuild-seed value is empirically zero; the seam parameter is kept now to preserve the existing seam contract and the `_compaction_persist_seam` two-frame taxonomy.
+
+**Concrete follow-up:** the pre-existing CLE handler at `graph.py:3951-3955` (outside this branch's scope, locked byte-unchanged in this round) still uses superseded mid-flight persist — it is the **next** migration target and the T2-ext canary template for future mid-superstep recipe changes.
+
 ### A.6 Composition + refire safety (Q3) — VERIFIED
 - **Abort → no stamp:** `build_sentinel_replacement` raises `CompactionAborted` (`compaction.py:412`) before any `aupdate_state`; the stamp happens inside `compact_state` on success (`:1851`, `:3339`). So a proactive 80% abort does NOT engage the 60s dedup (`:3391-3407`) — the 95% hook can fire later in the same turn. Compose confirmed.
 - **Success stops refire:** `compacted_at` written mid-turn (`:3607-3608`) → subsequent same-turn calls read it (`:3524`) → `_is_recently_compacted` (`:1771-1773`) returns None → stop re-triggering. Emergency truncation always lands at `target_ratio` (≤ ~0.5×window) below 95% (`:1860-1922`) → durable relief even for the 810-msg class.
