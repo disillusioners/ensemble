@@ -212,8 +212,8 @@ compaction:
   # the registry matches the active model. 0 = use built-in default (180k).
   context_window_default: 0
   context_window_overrides:
-    "agentic": 600000
-    "vision": 120000
+    "agentic": 700000
+    "vision": 700000
   target_ratio: 0.40
   # Compaction model override. When set, the compaction engine's
   # summarization LLM calls use this model AND token/window math follows
