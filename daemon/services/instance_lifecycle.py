@@ -2689,6 +2689,50 @@ class InstanceLifecycleService:
                 f"checkpoint sweep for {instance_id[:8]}..."
             )
 
+        # 4b. Prune the ``message_metadata`` side-table rows for every
+        # tree_id. Sibling to ``CheckpointCleanupJob._cleanup_instance``
+        # step-2.5 (T5.19) and ``_cleanup_orphaned_threads` — the side
+        # table has no FK on either backend, so a fully-deleted
+        # instance's rows would otherwise persist forever (cpv2
+        # final-gate finding 🟡1). The canonical never-raise pattern is
+        # mirrored from ``maintenance.py:913-927`` (incl. the
+        # ``asyncio.to_thread`` bridge for the SYNC repo per
+        # decisions.md D14).
+        #
+        # Placement subtlety (cpv2 acceptance criterion): the prune
+        # runs UNCONDITIONALLY per tree_id — even when the checkpointer
+        # adapter is None (the ``else`` branch above skips the
+        # checkpoint sweep entirely, but the instance rows are gone
+        # regardless, so side-table rows are orphans unconditionally)
+        # and regardless of whether ``adelete_thread`` for that thread
+        # succeeded. The prune does NOT share a per-tree_id try block
+        # with the checkpoint sweep — its own per-tree_id try/except
+        # keeps the prune decoupled from checkpoint-sweep success/failure.
+        meta_repo = getattr(self._manager, "message_metadata_repo", None)
+        if meta_repo is not None:
+            for tree_id in tree_ids:
+                try:
+                    deleted_rows = await asyncio.to_thread(
+                        meta_repo.delete_for_thread, tree_id
+                    )
+                    if deleted_rows:
+                        logger.info(
+                            f"hard_delete_instance: message_metadata prune "
+                            f"deleted {deleted_rows} row(s) for thread "
+                            f"{tree_id[:8]}..."
+                        )
+                except Exception:
+                    # Never-raise guard (W3 / D14): side-table prune
+                    # failure MUST NOT abort the hard-delete — orphan
+                    # rows are over-record-only and never join the read
+                    # path; a broken instance teardown is not.
+                    logger.warning(
+                        f"hard_delete_instance: message_metadata prune "
+                        f"failed for {tree_id[:8]}... — orphans tolerated "
+                        f"(never-raise guard)",
+                        exc_info=True,
+                    )
+
         logger.info(
             f"[TRACE] hard_delete_instance: {instance_id[:8]}... complete "
             f"(tree_size={len(tree_ids)}, db_deleted={cascade_result.get('deleted')}, "

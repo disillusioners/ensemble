@@ -555,9 +555,41 @@ class CheckpointCleanupJob:
 
             logger.info(f"Found {len(orphaned)} orphaned checkpoint threads")
 
-            # Delete each orphaned thread using adelete_thread
+            # Delete each orphaned thread using adelete_thread, then
+            # prune the ``message_metadata`` side-table rows for the
+            # same thread. The prune is best-effort and never-raises
+            # per-thread (cpv2 final-gate finding 🟡1 — mirrors the
+            # canonical pattern in ``_cleanup_instance`` step-2.5 at
+            # ``maintenance.py:913-927``; the SYNC repo bridges via
+            # ``asyncio.to_thread`` per decisions.md D14).
             for thread_id in orphaned:
                 await self._checkpointer.adelete_thread(thread_id)
+
+                if self._message_metadata_repo is not None:
+                    try:
+                        deleted_rows = await asyncio.to_thread(
+                            self._message_metadata_repo.delete_for_thread,
+                            thread_id,
+                        )
+                        if deleted_rows:
+                            logger.info(
+                                f"_cleanup_orphaned_threads: "
+                                f"message_metadata prune deleted "
+                                f"{deleted_rows} row(s) for thread "
+                                f"{thread_id[:8]}..."
+                            )
+                    except Exception:
+                        # Never-raise guard (W3): orphan side-table
+                        # rows are over-record-only and never join the
+                        # read path; a broken sweep is not. Continue
+                        # with the next orphaned thread.
+                        logger.warning(
+                            f"_cleanup_orphaned_threads: "
+                            f"message_metadata prune failed for "
+                            f"{thread_id[:8]}... — orphans tolerated "
+                            f"(never-raise guard)",
+                            exc_info=True,
+                        )
 
             logger.info(f"Deleted {len(orphaned)} orphaned checkpoint threads")
 
