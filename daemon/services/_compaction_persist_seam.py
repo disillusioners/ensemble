@@ -191,15 +191,31 @@ async def persist_compaction_result(
     site_compacted_ids: set[str] = pre_ids - new_replacement_ids
     engine_compacted_ids = getattr(result, "compacted_ids", None)
     if engine_compacted_ids is not None:
-        assert set(engine_compacted_ids) <= site_compacted_ids, (
-            "engine populated compacted_ids that are NOT a subset of "
-            "the site-derived set — engine and site disagree on the "
-            "removed span; refusing the write"
-        )
         compacted_ids: set[str] = set(engine_compacted_ids)
     else:
         compacted_ids = site_compacted_ids
     try:
+        # Engine-vs-site invariant: engine's ``compacted_ids`` MUST be
+        # a subset of the site-derived set, otherwise the engine and
+        # site disagree on the removed span. This was previously an
+        # ``assert`` — but ``python -O`` strips asserts, so an
+        # invariant break would silently proceed (the pre-write guard
+        # inside ``build_sentinel_replacement`` checks
+        # ``pre_ids − kept``, NOT engine-vs-site agreement). Raising
+        # :class:`CompactionAborted` here integrates with the
+        # ``abort_policy`` machinery below (raise for executor;
+        # fail_open → WARNING + return False for proactive + precall).
+        if (
+            engine_compacted_ids is not None
+            and not set(engine_compacted_ids) <= site_compacted_ids
+        ):
+            raise CompactionAborted(
+                f"engine populated compacted_ids that are NOT a subset "
+                f"of the site-derived set — engine and site disagree on "
+                f"the removed span; refusing the write "
+                f"(engine={sorted(engine_compacted_ids)!r}, "
+                f"site={sorted(site_compacted_ids)!r})"
+            )
         replacement: list[BaseMessage] = build_sentinel_replacement(
             result, pre_messages, compacted_ids=compacted_ids
         )

@@ -1214,8 +1214,10 @@ class InstanceMessagingService:
         ``task_processor`` enqueue without ``resume_mode``) arrives
         ``is_retry=False`` and is unchanged.
         """
-        # 0. Kill-switch — flag default ON; OFF = byte-identical pre-
-        # Phase-1 (skip the whole gate, return silently).
+        # 0. Kill-switch — flag default ON; OFF = no-op (skip the
+        # whole gate, return silently). Pre-Phase-1 there was no gate
+        # at all, so OFF is outcome-equivalent to that pre-Phase-1
+        # state — the gate is simply never evaluated.
         if not getattr(self._config.compaction, "proactive_enabled", True):
             return
 
