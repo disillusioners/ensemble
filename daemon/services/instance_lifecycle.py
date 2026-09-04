@@ -1615,8 +1615,8 @@ class InstanceLifecycleService:
         # post-tools edge (``create_post_tools_router``) can read the
         # ``_question_pause_requested`` flag and the
         # ``question_pause_node`` can set the deferred-pause marker
-        # reasons as the spawn path — conditional post-tools edge and
-        # ``question_pause_node`` both need the manager reference).
+        # (C2 fix — ``pause_instance_cascade`` runs from the post-graph
+        # completion path, not from inside the graph task).
         from ..graph import InjectionSlot, ReportInjectionSlot, ToolThrottleSlot, LoopBreakerSlot, LoopRepairer, ContextSlot
         # Phase 1 C2 — langgraph-checkpoint-perf. Import the
         # MessageTapSlot + the agent-node + compaction source labels

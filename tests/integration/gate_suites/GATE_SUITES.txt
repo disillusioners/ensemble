@@ -5,8 +5,9 @@
 # Provenance: this is the v2 PR2-CLOSURE manifest. Per the port plan
 # (T2.8) the table was REGENERATED on v2 post-PR2. v1's PR1/PR2
 # manifests (v1 commits 0db1a768 / fa31a520) had 23/37 rows; v2 PR2
-# adds 8 new rows for the PR2 port + 1 new row for the lifecycle
-# wiring pin (PR3 source) = 32 manifest rows. v1's pre-existing-
+# adds 8 new rows for the PR2 port (one of which is the lifecycle
+# wiring pin, ported from PR3 source dbfbf812) = 31 manifest rows.
+# v1's pre-existing-
 # failure gate-run exclusions (test_cold_resume_ttl.py ×2,
 # test_question_deferred_pause_edge_cases.py ×1,
 # test_pause_race_w7_jobitem_skip.py ×1) remain per Phase 1 decision:
@@ -21,9 +22,9 @@
 # (BOTH env vars — persistence.py reads POSTGRES_DB; postgres-marked
 # files resolve DSNs at collection). ensemble_prod / ensemble_dev never
 # touched.
-# Cross-check: one aggregate collect-only subprocess over all 32 paths
+# Cross-check: one aggregate collect-only subprocess over all 31 paths
 # (the gate-runner method): identical total (421).
-# Result: 32/32 files collect — 421 tests total (356 from the 23
+# Result: 31/31 files collect — 421 tests total (356 from the 23
 # Phase 1 rows + 65 from the 8 new PR2 rows = 421; EXACT MATCH).
 # The PR2 additions are:
 #   * test_message_metadata_hook_placement.py — AST gate (10 tests)
