@@ -1,17 +1,17 @@
-# GATE_SUITES.txt — Phase 2 gate-suite manifest (single source of truth).
-# ── Enumeration record (regenerated fresh on v2 — PR2 port closure) ───
+# GATE_SUITES.txt — Phase 3 gate-suite manifest (single source of truth).
+# ── Enumeration record (regenerated fresh on v2 — PR3 port closure) ───
 # Date: 2026-09-04 (UTC) | Branch: feature/langgraph-checkpoint-perf-v2 |
-# HEAD: dc39ae6dacd76e16fe14f70df18b0da270d191a5
-# Provenance: this is the v2 PR2-CLOSURE manifest. Per the port plan
-# (T2.8) the table was REGENERATED on v2 post-PR2. v1's PR1/PR2
-# manifests (v1 commits 0db1a768 / fa31a520) had 23/37 rows; v2 PR2
-# adds 8 new rows for the PR2 port (one of which is the lifecycle
-# wiring pin, ported from PR3 source dbfbf812) = 31 manifest rows.
+# HEAD: 4f8b072985e3b369a90ec8548976e165ccaa83b6
+# Provenance: this is the v2 PR3-CLOSURE manifest. Per the port plan
+# (T3.6) the table was REGENERATED on v2 post-PR3. v2 PR2 manifest
+# (commit dc39ae6d) had 31 rows; v2 PR3 adds 2 new rows for the read-
+# flip surface (no-alist armed-absence + frozen-fixture shape) = 33
+# manifest rows.
 # v1's pre-existing-
 # failure gate-run exclusions (test_cold_resume_ttl.py ×2,
 # test_question_deferred_pause_edge_cases.py ×1,
 # test_pause_race_w7_jobitem_skip.py ×1) remain per Phase 1 decision:
-# .agents/tester/QUARANTINE.md is tester-owned; Phase 2 did not
+# .agents/tester/QUARANTINE.md is tester-owned; Phase 3 did not
 # edit it.
 # Method (collection-only; replicates v1's per-PR regen method in the
 # main worktree pinned at the HEAD sha above): one pytest subprocess per
@@ -22,21 +22,17 @@
 # (BOTH env vars — persistence.py reads POSTGRES_DB; postgres-marked
 # files resolve DSNs at collection). ensemble_prod / ensemble_dev never
 # touched.
-# Cross-check: one aggregate collect-only subprocess over all 31 paths
-# (the gate-runner method): identical total (421).
-# Result: 31/31 files collect — 421 tests total (356 from the 23
-# Phase 1 rows + 65 from the 8 new PR2 rows = 421; EXACT MATCH).
-# The PR2 additions are:
-#   * test_message_metadata_hook_placement.py — AST gate (10 tests)
-#   * test_message_metadata_lifecycle_wiring.py — wiring pin (4 tests)
-#   * test_message_metadata_liveness.py — round-trip (3 tests)
-#   * test_message_metadata_repository.py — dialect parity (16 tests)
-#   * test_message_metadata_paused_question_flow.py — pause mid-flow (3 tests)
-#   * test_message_metadata_revive_stability.py — re-tap no-op (2 tests)
-#   * test_message_tap_to_repo_liveness.py — tap-to-repo (7 tests)
-#   * test_message_tap_slot.py — MessageTapSlot unit (20 tests)
+# Cross-check: one aggregate collect-only subprocess over all 33 paths
+# (the gate-runner method): identical total (439).
+# Result: 33/33 files collect — 439 tests total (421 from the 31
+# Phase 2 rows + 18 from the 2 new PR3 rows = 439; EXACT MATCH).
+# The PR3 additions are:
+#   * test_get_instance_messages_no_alist.py — armed-absence alist
+#     proof (16 tests; PRIMARY C1 boundary)
+#   * test_get_instance_messages_response_shape_frozen_fixture.py —
+#     frozen-fixture byte-shape contract (2 tests; poison-pill alist)
 # The T0.3 dialect-parity (16) + T0.6 isolation (20 + 7 = 27) Phase-0
-# SKIP-LOUDLY items are now COLLECT AND PASS per T2.11.
+# SKIP-LOUDLY items remain COLLECT AND PASS per T2.11.
 # Missing-vs-v1: v1's PR1-era 37-row manifest included PR2/PR3/PR4
 # surface that arrived in v1's later commits; v2's per-PR manifest
 # increments keep parity. Entries are never silently removed.
@@ -81,6 +77,8 @@
 # tests/unit/repositories/test_message_metadata_revive_stability.py 2
 # tests/unit/repositories/test_message_tap_to_repo_liveness.py    7
 # tests/unit/services/test_message_tap_slot.py                   20
+# tests/unit/persistence/test_get_instance_messages_no_alist.py  16
+# tests/integration/test_get_instance_messages_response_shape_frozen_fixture.py  2
 #
 # Non-manifest companions (ported with PR1/PR2; green-run verification
 # is tester-phase surface):
@@ -89,10 +87,11 @@
 # tests/integration/gate_suites/test_gate_suite_pause_resume.py (this file's
 #     enumeration dry-run gate — bounded collect-only over the manifest)
 #
-# Spec: .agents/shared/planning/langgraph-checkpoint-perf-v2/phase2-plan.md
-# (T2.8) + v1 structure per fc908945. PR1 (C4) created this file on v2;
-# PR2 (this commit) re-runs the enumeration gate at the post-port HEAD;
-# PR3/PR4 may append entries; entries are never silently removed.
+# Spec: .agents/shared/planning/langgraph-checkpoint-perf-v2/phase3-plan.md
+# (T3.6) + v1 structure per fc908945. PR1 (C4) created this file on v2;
+# PR2 re-runs the enumeration gate at the post-port HEAD; PR3 (this
+# commit) re-runs at the post-PR3 HEAD; PR4 may append entries;
+# entries are never silently removed.
 #
 # Format: one path per line, relative to the repo root. '#' starts a comment.
 #
@@ -145,6 +144,15 @@ tests/unit/persistence/test_checkpoint_perf_logging.py
 # history cap, per-thread prune + the PR1 timing/log-line wrap):
 tests/test_maintenance.py
 #
+# ── Gate concept: get_instance_messages read flip (PR3 port) ──
+# Armed-absence alist proof (no-alist call sites on get_instance_messages
+# path; PRIMARY C1 boundary; 16 tests incl. assert_not_called +
+# messages>0 disappearance gate + caplog pin for None-repo warning):
+tests/unit/persistence/test_get_instance_messages_no_alist.py
+# Frozen-fixture byte-shape contract (2 tests; poison-pill alist on
+# shape run; response byte-identical to pre-C1 6-variant fixture):
+tests/integration/test_get_instance_messages_response_shape_frozen_fixture.py
+#
 # ── Gate concept: message_metadata side table + 4 tap sites (PR2 port) ──
 # AST gate (4-site/4-label/no-ToolNode contract; load-bearing):
 tests/integration/test_message_metadata_hook_placement.py
@@ -167,7 +175,7 @@ tests/unit/repositories/test_message_tap_to_repo_liveness.py
 # CancelledError propagation, log-line observability):
 tests/unit/services/test_message_tap_slot.py
 #
-# ── Exclusions note (v2, PR2 port) ──
+# ── Exclusions note (v2, PR3 port) ──
 # v1's PR1 registered 3 pre-existing-failure files as gate-run exclusions
 # (test_cold_resume_ttl.py ×2, test_question_deferred_pause_edge_cases.py ×1,
 # test_pause_race_w7_jobitem_skip.py ×1) via .agents/tester/QUARANTINE.md.
@@ -176,4 +184,4 @@ tests/unit/services/test_message_tap_slot.py
 # with a different attribution). Disposition + reason:
 # .agents/shared/planning/langgraph-checkpoint-perf-v2/phase1-results.md §QUARANTINE.
 # v2's authoritative quarantine ledger remains .agents/tester/QUARANTINE.md.
-# Phase 2 also SKIPPED the QUARANTINE.md port per the same decision rule.
+# Phase 3 also SKIPPED the QUARANTINE.md port per the same decision rule.
