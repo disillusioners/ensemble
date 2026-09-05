@@ -405,10 +405,10 @@ A single boot log line announces resolved effective values (FR-12), including `m
 - **Then:** the resolver emits a one-time WARN line (`N_le_min_recent_window=WARN`), AND the gate continues running with the configured WINDOW (no hard-fail). The WARN is operator-visible in the boot log per AC-7.7.
 - **Test type:** integration.
 
-**AC-7.9** (forbid legacy single-bool surface — C-5/C-12)
-- **Given:** a legacy single-bool env (under any prior canonical name) is set in the daemon environment, with any single-bool value (`0`, `1`, `true`, `false`, `off`, or `on`).
+**AC-7.9** (Pattern C fail-OPEN posture — single tri-state key only, C-5/C-12)
+- **Given:** the resolver sees a legacy single-bool env surface (under any prior canonical name) AND/OR a typo'd value for the canonical key `ENSEMBLE_LEADER_ATTESTATION_MODE` (`enabled`, `enabled=true`, `True`, etc.).
 - **When:** the resolver parses the environment.
-- **Then:** **the resolver raises a `ResolverError` at boot** (fail-CLOSED — the legacy key is rejected, not silently ignored). The legacy key is NOT honored; the canonical key is `ENSEMBLE_LEADER_ATTESTATION_MODE`. The test target is unambiguous: the resolver raises, the daemon refuses to start (mirrors the WC-wake resolver's fail-closed posture for typo'd keys per `daemon/services/instance_messaging.py:114-191`).
+- **Then:** **the resolver fails OPEN to the default (`mode=dry`) with a one-shot WARN log line.** The legacy key is NOT consumed (the canonical key is `ENSEMBLE_LEADER_ATTESTATION_MODE` and only that is honored); the typo'd value falls back to `dry` with WARN. **The daemon DOES NOT refuse to start** — this mirrors the WC-wake resolver's Pattern C fail-OPEN posture for typo'd keys per `daemon/services/instance_messaging.py:114-191` (the same one-shot WARN + default fallback shape). The test target is unambiguous: the resolver returns `mode=dry`, a one-shot WARN is logged, the daemon boots normally. (Note: this AC supersedes the original "fail-CLOSED + raise ResolverError" prose — ruling 4 mandates Pattern C fail-OPEN; the canonical resolver module ships that contract.)
 - **Test type:** unit.
 
 ### FR-13: Fail-open on scanner/gate exceptions

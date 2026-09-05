@@ -87,6 +87,7 @@ from .services.instance_messaging import emit_wc_wake_enqueue_boot_log
 from .services.report_integrity_guard import (
     emit_report_integrity_b_guard_boot_log,
 )
+from .services.attestation_resolver import emit_attestation_boot_log
 from .services.messaging_types import AsyncMessageResult  # re-exported for `from daemon.manager import AsyncMessageResult`
 from .services.child_reports import ChildReportsService
 from .services.error_reporting import ErrorReportingService
@@ -800,6 +801,18 @@ class InstanceManager:
         # OPERATOR-OWNED flip per C2-D2.5-FLIP — no auto-flip exists.
         # Mirrors the governor-guard / WC-wake wrapper precedents.
         emit_report_integrity_b_guard_boot_log()
+
+        # Leader completion attestation (feature/leader-completion-
+        # attestation, Phase 4 task 4.2): one-time INFO log naming
+        # the resolved tri-state mode (off|dry|enforce), the window
+        # knob, the deny-bound knob, the derived attestation_enabled
+        # flag, and the O1 N_le_min_recent_window boot-assert verdict.
+        # Default mode=dry at ship (D2 RESOLVED); restart-required to
+        # flip. Mirrors the WC-wake / governor-guard wrapper precedents.
+        # The resolver itself is Pattern C — fail-OPEN with one-shot
+        # WARN for invalid env values (ruling 4); the daemon never
+        # refuses to start on a typo'd attestation env.
+        emit_attestation_boot_log()
 
         # NEW: Pluggable message sources system
         self.source_registry = SourceRegistry(

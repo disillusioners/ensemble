@@ -73,7 +73,6 @@ config shape carries NO ``checkpoint_ns`` key.
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any, NamedTuple
@@ -84,6 +83,29 @@ from .attestation_scanner import (
     DEFAULT_ATTESTATION_TOOL_NAME,
     attestation_seen_outside_window,
     scan_for_attestation_detailed,
+)
+
+# Phase 4 — canonical resolver lives in its own module (Pattern C, single
+# source of truth for the mode/window/deny_bound env triple). The gate
+# re-imports the resolver via ``resolve_gate_settings`` below (back-compat
+# shim) and via :func:`attestation_resolver.record_promotion_metric` for
+# the dry-mode and enforce-denied promotion metrics (task 4.6). Anything
+# that needs the boot log calls :func:`attestation_resolver.emit_attestation_boot_log`
+# directly from the manager-init path — keeping the resolver as the
+# single source of truth.
+from .attestation_resolver import (
+    DEFAULT_MODE,
+    DEFAULT_WINDOW,
+    DEFAULT_DENY_BOUND,
+    ENSEMBLE_ATTESTATION_MODE_ENV,
+    ENSEMBLE_ATTESTATION_WINDOW_ENV,
+    ENSEMBLE_ATTESTATION_DENY_BOUND_ENV,
+    METRIC_DRY_LOG_TOTAL,
+    METRIC_DRY_LOG_DENY_PREDICATE_TOTAL,
+    METRIC_ENFORCE_DENIED_TOTAL,
+    AttestationConfig,
+    get_config as _resolver_get_config,
+    record_promotion_metric,
 )
 
 logger = logging.getLogger(__name__)
@@ -119,120 +141,101 @@ class Decision(str, Enum):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Settings (minimal Phase 2 stand-in for the Phase 4 resolver input)
+# Settings — Phase 4 canonical resolver lives in
+# ``daemon.services.attestation_resolver``. The legacy NamedTuple below
+# is preserved as the public seam the gate (``build_instance_graph``,
+# ``create_attestation_gate_node``) and Phase 2 unit tests
+# (``tests/unit/test_attestation_gate.py``) already consume.
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 class GateSettings(NamedTuple):
-    """Resolver-like input consumed by :func:`evaluate` (Phase 2 stand-in).
+    """Public seam: the NamedTuple the gate consumes (Phase 2 stand-in,
+    Phase 4-preserved shape).
 
-    Phase 4 ships the real Pattern-C resolver module (restart-read,
-    cached global, one-time boot log). Until then this NamedTuple IS
-    the resolver input shape: ``window``/``deny_bound``/``mode`` with
-    defaults 3/3/dry per the leader ruling. Phase 4 may extend the
-    NamedTuple; :func:`evaluate` reads only these three attributes.
+    Phase 4 ships the real Pattern-C resolver module
+    (:mod:`daemon.services.attestation_resolver`) as the SINGLE home of
+    the three env knobs. This NamedTuple IS the resolver output shape
+    that ``build_instance_graph`` threads through to the gate node;
+    Phase 4 keeps it so the gate seam is unchanged (the resolver
+    produces an :class:`AttestationConfig`; :func:`resolve_gate_settings`
+    maps it to a :class:`GateSettings`).
     """
 
     #: tri-state mode: "off" | "dry" | "enforce" (D2, default dry)
-    mode: str = "dry"
+    mode: str = DEFAULT_MODE
     #: attestation window N (D4, default 3)
-    window: int = 3
+    window: int = DEFAULT_WINDOW
     #: deny bound (D5, default 3)
-    deny_bound: int = 3
+    deny_bound: int = DEFAULT_DENY_BOUND
 
 
-#: The Phase 2 defaults (window 3 / bound 3 / mode dry).
-DEFAULT_GATE_SETTINGS = GateSettings()
-
-_VALID_MODES = ("off", "dry", "enforce")
-
-_ATTESTATION_MODE_ENV = "ENSEMBLE_LEADER_ATTESTATION_MODE"
-_ATTESTATION_WINDOW_ENV = "ENSEMBLE_LEADER_ATTESTATION_WINDOW"
-_ATTESTATION_BOUND_ENV = "ENSEMBLE_LEADER_ATTESTATION_DENY_BOUND"
-
-# Pattern C cached-global state (restart-read; flip requires restart).
-_CACHED_SETTINGS: GateSettings | None = None
-_SETTINGS_WARN_EMITTED = False
+def _config_to_settings(config: AttestationConfig) -> GateSettings:
+    """Map the canonical resolver output to the legacy NamedTuple shape."""
+    return GateSettings(
+        mode=config.mode,
+        window=config.window,
+        deny_bound=config.deny_bound,
+    )
 
 
-def _reset_gate_settings_for_tests() -> None:
-    """Clear the cached resolver state so tests can re-resolve after
-    mutating the env. Test-only — production code never invokes this."""
-    global _CACHED_SETTINGS, _SETTINGS_WARN_EMITTED
-    _CACHED_SETTINGS = None
-    _SETTINGS_WARN_EMITTED = False
-
-
-def _warn_once(message: str) -> None:
-    """One-shot WARN for invalid env values (fail-open resolver, ruling 4)."""
-    global _SETTINGS_WARN_EMITTED
-    if not _SETTINGS_WARN_EMITTED:
-        _SETTINGS_WARN_EMITTED = True
-        logger.warning(message)
-
-
-def _resolve_env_settings(env: Any = None) -> GateSettings:
-    """Resolve settings from env, failing OPEN on invalid values.
-
-    Ruling 4: an invalid env value MUST NOT disable the gate nor crash
-    the boot — the resolver logs a one-shot WARN and falls back to the
-    default (mode → ``dry``, window → ``3``, bound → ``3``). This is
-    the minimal Phase 2 stand-in; the full resolver (boot log line,
-    ``min_recent_window`` floor coupling, docs) is Phase 4 task 4.1.
-    """
-    source = os.environ if env is None else env
-
-    mode_raw = str(source.get(_ATTESTATION_MODE_ENV, "") or "").strip().lower()
-    if not mode_raw:
-        mode = "dry"
-    elif mode_raw in _VALID_MODES:
-        mode = mode_raw
-    else:
-        mode = "dry"
-        _warn_once(
-            "%s=%r is not a recognized mode (off|dry|enforce); "
-            "failing OPEN to the default 'dry'. Restart required after "
-            "fixing the env value." % (_ATTESTATION_MODE_ENV, mode_raw)
-        )
-
-    window = _resolve_positive_int(source, _ATTESTATION_WINDOW_ENV, 3)
-    deny_bound = _resolve_positive_int(source, _ATTESTATION_BOUND_ENV, 3)
-
-    return GateSettings(mode=mode, window=window, deny_bound=deny_bound)
-
-
-def _resolve_positive_int(source: Any, key: str, default: int) -> int:
-    raw = str(source.get(key, "") or "").strip()
-    if not raw:
-        return default
-    try:
-        value = int(raw)
-    except ValueError:
-        _warn_once(
-            "%s=%r is not a valid integer; failing OPEN to the default "
-            "%d." % (key, raw, default)
-        )
-        return default
-    if value < 1:
-        _warn_once(
-            "%s=%r is < 1; failing OPEN to the default %d."
-            % (key, raw, default)
-        )
-        return default
-    return value
+#: Cache the NamedTuple view so identity comparisons
+#: (``first is second``) survive — preserves the Phase 2 unit-test
+#: contract that "the cached value wins across calls". The cache is
+#: invalidated by :func:`_reset_gate_settings_for_tests` (test-only).
+_CACHED_GATE_SETTINGS: GateSettings | None = None
 
 
 def resolve_gate_settings() -> GateSettings:
-    """Resolve and cache the gate settings (Pattern C, restart-read).
+    """Resolve the gate settings (Phase 4 back-compat shim).
 
-    The cache mirrors the WC-wake kill-switch convention: the value is
-    resolved once per process and cached; flipping the env mid-flight
-    has no effect until restart.
+    Phase 2 introduced this function as the minimal stand-in resolver;
+    Phase 4 replaces its body with a thin delegation to the canonical
+    Pattern-C resolver in :mod:`daemon.services.attestation_resolver`.
+    The function signature, return shape, restart-read semantics, AND
+    identity preservation (``first is second`` after env mutation —
+    the Phase 2 unit-test contract) are preserved — the gate node and
+    the existing unit tests (``tests/unit/test_attestation_gate.py``)
+    keep working unchanged.
+
+    Returns:
+        :class:`GateSettings` — a NamedTuple view of the canonical
+        resolver's :class:`AttestationConfig` (mode/window/deny_bound).
     """
-    global _CACHED_SETTINGS
-    if _CACHED_SETTINGS is None:
-        _CACHED_SETTINGS = _resolve_env_settings()
-    return _CACHED_SETTINGS
+    global _CACHED_GATE_SETTINGS
+    if _CACHED_GATE_SETTINGS is None:
+        _CACHED_GATE_SETTINGS = _config_to_settings(_resolver_get_config())
+    return _CACHED_GATE_SETTINGS
+
+
+#: Default Phase 4 settings — equivalent to ``resolve_gate_settings()``
+#: when no env is set (window 3 / bound 3 / mode dry per D2/D4/D5).
+#: Back-compat export for tests that import ``DEFAULT_GATE_SETTINGS``
+#: to thread through ``build_gate_config`` / ``evaluate`` without going
+#: through the resolver (which mutates the cache).
+DEFAULT_GATE_SETTINGS = GateSettings(
+    mode=DEFAULT_MODE,
+    window=DEFAULT_WINDOW,
+    deny_bound=DEFAULT_DENY_BOUND,
+)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Back-compat test helpers — Phase 2 unit tests reset the stand-in cache
+# by calling ``_reset_gate_settings_for_tests``. Phase 4 delegates to the
+# canonical resolver's reset helper; the function name is preserved so
+# the existing tests do not need to change.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _reset_gate_settings_for_tests() -> None:
+    """Clear the canonical resolver cache so tests can re-resolve after
+    mutating the env. Test-only — production code never invokes this."""
+    global _CACHED_GATE_SETTINGS
+    _CACHED_GATE_SETTINGS = None
+    from .attestation_resolver import reset_attestation_resolver_for_tests
+
+    reset_attestation_resolver_for_tests()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -410,6 +413,34 @@ GATE_CONFIG_KEYS = (
 
 #: Canonical ``gate_location`` value (Phase 4 task 4.5 schema).
 GATE_LOCATION_GRAPH_END_CANDIDATE = "graph_end_candidate"
+
+#: Canonical log schema field set (Phase 4 task 4.5 — single source of truth).
+#:
+#: Every ``event=leader_completion_gate`` log line emitted by
+#: :func:`evaluate` MUST carry every field below — the
+#: ``tests/integration/test_attestation_runbook_drift.py`` drift
+#: assertion and the Phase 5 matrix inspect the literal log line, so
+#: a missing key trips the audit. The schema is the SINGLE shared
+#: definition — Phase 2/3/4/5 tasks reference this tuple, not a
+#: paraphrase. Fields in display order (matches the format string in
+#: :func:`evaluate`).
+CANONICAL_LOG_SCHEMA_FIELDS: tuple[str, ...] = (
+    "event",
+    "decision",
+    "instance_id",
+    "attestation_present",
+    "denied_count",
+    "gate_location",
+    "leader_prompt_version",
+    "pending_children",
+    "queued_or_expected_wakeups",
+    "attest_seen_outside_window",
+    "messages_scanned",
+    "scanned_window_size",
+    "mode",
+    "scanner_window_truncated",
+    "scanner_summary_seen",
+)
 
 
 def build_gate_config(
@@ -655,6 +686,33 @@ def evaluate(
             result.should_inject_nudge,
             extra=meta,
         )
+
+        # (v) promotion-metric increments (Phase 4 task 4.6). Only the
+        # THREE canonical metric names are emitted; counter math lives in
+        # ``daemon.services.attestation_resolver``. Dry-mode passive
+        # observer: ``dry_log_total`` ticks on every dry evaluation;
+        # ``dry_log_deny_predicate_total`` ticks on the SUBSET whose R2
+        # deny predicate would have fired under ``enforce``
+        # (``not attested AND pending_children == 0 AND
+        # queued_or_expected_wakeups == 0``). Enforce-mode denied:
+        # ``enforce_denied_total`` ticks on ``Decision.DENIED`` only —
+        # ``terminal_after_bound`` is the escalation path, NOT a "denied
+        # under enforce" event.
+        if attestation_enabled and scope_applicable:
+            if mode_resolver.mode == "dry":
+                record_promotion_metric(METRIC_DRY_LOG_TOTAL)
+                if (
+                    not result.attestation_present
+                    and result.pending_children == 0
+                    and result.queued_or_expected_wakeups == 0
+                ):
+                    record_promotion_metric(METRIC_DRY_LOG_DENY_PREDICATE_TOTAL)
+            elif (
+                mode_resolver.mode == "enforce"
+                and result.decision is Decision.DENIED
+            ):
+                record_promotion_metric(METRIC_ENFORCE_DENIED_TOTAL)
+
         return result
 
     except Exception as exc:  # noqa: BLE001 — C3 fail-open (scanner/decide)
