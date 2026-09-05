@@ -211,6 +211,7 @@ from .infra import create_infra_tools
 from .system import create_system_tools
 from .system_log_tools import create_system_log_tools
 from .upgrade_tools import create_upgrade_tools
+from .attestation import create_attestation_tools
 from .language_tools import create_language_tools
 from .proc_tools import create_proc_tools
 from ._tool_registry import (
@@ -4438,6 +4439,19 @@ Returns:
         manager, current_instance_id, agent_id, agent_tag=version_tag
     )
     tools.extend(upgrade_tool_list)
+
+    # ── Attestation tools (Leader Completion Attestation, Phase 1, 2026-09-05) ──
+    # Same critical list-append pattern as upgrade_tool_list above.
+    # Leader-scoped via explicit tools.allow opt-in; NOT privileged
+    # per D7 (CLOSED) — full boundary argument in
+    # daemon/tools/attestation.py module docstring header.
+    # Decorator-only registration is SILENTLY INVISIBLE — missing this
+    # extend means the leader cannot call attest_completion even though
+    # it appears in tools.allow.
+    attestation_tool_list = create_attestation_tools(
+        manager, current_instance_id, agent_id
+    )
+    tools.extend(attestation_tool_list)
 
     # ── MCP tools: load BEFORE creating help tool so we have the names ──
     # IMPORTANT: MCP tools MUST be loaded BEFORE help tool creation

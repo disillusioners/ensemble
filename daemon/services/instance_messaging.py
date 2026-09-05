@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, ToolMessage
-from sqlmodel import Session
+from sqlmodel import Session, func, select
 
 from ..cancellation import CancellationToken
 from ..compaction import ContextCompactor, CompactionContext, get_model_context_limit
@@ -21,6 +21,7 @@ from ..loader import estimate_messages_tokens
 from ..persistence import get_instance_messages
 from ..repositories.event.models import Event, EventKind
 from ..repositories.instance.models import Instance, InstanceStatus
+from ..repositories.job_queue.models import AdmissionState, JobItem
 from ..repositories.message_queue.models import MessageQueue, MessageStatus, MessageType
 from ..repositories.task.models import SuspensionReason, Task, TaskStatus, TaskType
 from ..utils import parse_think_tags, serialize_message
@@ -1900,6 +1901,52 @@ class InstanceMessagingService:
                             f"Reactivating terminal instance {instance_id[:8]}... "
                             f"(was {previous_status}) for new message{suffix}"
                         )
+                        # ─── Phase 3 — leader completion attestation,
+                        # reset trigger (3): revive-from-COMPLETED via a
+                        # NEW top-level user/mission message (fresh
+                        # episode). The SAME single reset op clears
+                        # ``attestation_denied_count`` AND
+                        # ``completion_gate_escalated`` (leader ruling 2
+                        # — both columns share the per-mission
+                        # lifecycle). Discriminator: a user-driven fresh
+                        # episode has BOTH ``priority == 1`` (default
+                        # user — 0 is preempt) AND ``msg_type ==
+                        # MessageType.HUMAN.value``. Internal reports
+                        # (``internal_report:`` → COMPLETION_REPORT),
+                        # error reports (``internal_error_report:`` →
+                        # ERROR_REPORT), and agent-to-agent messages
+                        # (``internal_agent:`` → AGENT) carry a different
+                        # msg_type — those are NOT new missions and must
+                        # NOT reset the counter (the counter SURVIVES
+                        # internal revive — only the next user-driven
+                        # fresh episode resets it).
+                        #
+                        # Same-transaction write: rides along with the
+                        # status=RUNNING update above so the reset is
+                        # atomic with the revive (no torn-write race
+                        # window). The dispatch's "default else-branch
+                        # stamps HUMAN" defect is acknowledged but NOT
+                        # fixed here — the conjunction of priority==1
+                        # AND msg_type==HUMAN guards against it (an
+                        # internal caller stamping HUMAN with priority=0
+                        # fails the priority check; an internal caller
+                        # stamping HUMAN with priority=1 still passes,
+                        # which is acceptable since the dispatch
+                        # classifies that as a known bounded risk).
+                        is_fresh_episode_user_message = (
+                            priority == 1
+                            and msg_type == MessageType.HUMAN.value
+                        )
+                        if is_fresh_episode_user_message:
+                            instance.attestation_denied_count = 0
+                            instance.completion_gate_escalated = False
+                            logger.info(
+                                f"Attestation ledger reset on fresh-episode "
+                                f"revive: instance={instance_id[:8]}... "
+                                f"(was {previous_status}) cleared "
+                                f"attestation_denied_count and "
+                                f"completion_gate_escalated"
+                            )
                 instance.last_activity_at = datetime.now(timezone.utc)
                 instance.version = (instance.version or 1) + 1
             else:
@@ -4492,6 +4539,164 @@ class InstanceMessagingService:
                 self._checkpointer, instance_id, manager=self._manager
             )
         return []
+
+    # ------------------------------------------------------------------
+    # Attestation gate R2 input — queued-or-expected wakeups (Phase 2,
+    # leader-completion-attestation task 2.3 / CR-1)
+    # ------------------------------------------------------------------
+
+    def get_queued_or_expected_wakeups(self, instance_id: str) -> int:
+        """Count wakeups that will (or may) re-activate this instance.
+
+        SYNC method (plain repo reads; the attestation gate bridges the
+        whole evaluation via ``asyncio.to_thread`` at its node call
+        site — the same thread→loop pattern as the message-queue stats
+        path). Returns the SUM of five counts — the three
+        ``next_retry_at``-scheduled (held, not-yet-due) wakeup families
+        PLUS two expected-not-scheduled held wakeup counts (defer-held
+        and pause-held):
+
+          1. ``task`` — PENDING rows with ``next_retry_at > now``
+             (retry children minted by ``TaskRepository.schedule_retry``
+             whose due-gate at ``claim_pending_task`` has not yet
+             opened). String ISO comparison mirrors the exact
+             ``strftime("%Y-%m-%dT%H:%M:%S.%f") + "%z"`` format the
+             retry writer stamps.
+          2. ``message_queue`` — ``pending``/``retrying`` rows with
+             ``next_retry_at > now`` (scheduled message retries not yet
+             due; the due-gates live at the dequeue / retry-claim
+             queries of ``message_queue/repository.py``).
+          3. ``job_queue_items`` — ``queued`` rows with
+             ``next_retry_at > now`` (JobRetryEngine's retry window;
+             mirrors ``find_retryable_jobs``' ``isoformat()``
+             comparison and its ``deleted_at IS NULL`` liveness guard).
+          4. ``task`` — PENDING rows held WITHOUT a schedule because
+             they are deferred (``is_deferred=True``; idle-gate holds
+             until non-defer queues empty).
+          5. ``task`` — PENDING rows held WITHOUT a schedule because
+             the owning instance is PAUSED (pause-gate holds until
+             resume — the new-message-during-pause behaviour of
+             ``enqueue_message``).
+
+          Counts (4) and (5) are independent SELECTs — an INNER JOIN
+          here would silently drop deferred tasks whose instance row is
+          absent (e.g. mid-cascade), and the deferred condition needs
+          no instance row at all.
+
+        Deliberately NOT counted: currently-claimable rows
+        (``next_retry_at IS NULL`` and not pause/defer-held). Those are
+        the worker pipeline's normal in-flight fuel — they are claimed
+        the moment the instance's current graph task releases — and the
+        R2 input is about EXPECTED (held/scheduled) wakeups, per the
+        phase plan's five-count enumeration.
+
+        Gate semantics (R2): ``0`` means NO expected wakeup exists —
+        one of the three simultaneous conditions required for the
+        attestation gate to DENY. Any non-zero allows the would-be END
+        without attestation (nudge-flood kill).
+
+        TOCTOU note (CR-2 read sequence): the gate calls this AFTER the
+        scanner and AFTER ``count_pending_children`` — the ordering is
+        documented in ``daemon/services/attestation_gate.evaluate``.
+
+        Args:
+            instance_id: The instance whose wakeups to count.
+
+        Returns:
+            Non-negative int — the sum of the five counts. Never raises
+            on empty/unknown instance (count of zero rows is 0).
+        """
+        engine = self._manager._engine
+        now = datetime.now(timezone.utc)
+        # Task.next_retry_at is a str column stamped by schedule_retry /
+        # requeue_task_with_backoff as
+        # strftime("%Y-%m-%dT%H:%M:%S.%f") + strftime("%z") — compare
+        # with the exact same rendering (mirrors claim_pending_task's
+        # now_str binding at task/repository.py:1301).
+        now_str_task = now.strftime("%Y-%m-%dT%H:%M:%S.%f") + now.strftime("%z")
+        # JobItem.next_retry_at is a str column compared via
+        # datetime.isoformat() in find_retryable_jobs — same here.
+        now_str_job = now.isoformat()
+
+        with Session(engine) as session:
+            # (1) Task — scheduled retry children, not yet due.
+            scheduled_tasks = session.scalar(
+                select(func.count())
+                .select_from(Task)
+                .where(Task.instance_id == instance_id)
+                .where(Task.status == TaskStatus.PENDING.value)
+                .where(Task.next_retry_at.is_not(None))
+                .where(Task.next_retry_at > now_str_task)
+            )
+
+            # (2) message_queue — scheduled retries not yet due.
+            scheduled_messages = session.scalar(
+                select(func.count())
+                .select_from(MessageQueue)
+                .where(MessageQueue.instance_id == instance_id)
+                .where(
+                    MessageQueue.status.in_(
+                        [MessageStatus.PENDING.value, MessageStatus.RETRYING.value]
+                    )
+                )
+                .where(MessageQueue.next_retry_at.is_not(None))
+                .where(MessageQueue.next_retry_at > now)
+            )
+
+            # (3) job_queue_items — retried jobs waiting for their
+            # retry window (live rows only).
+            scheduled_jobs = session.scalar(
+                select(func.count())
+                .select_from(JobItem)
+                .where(JobItem.instance_id == instance_id)
+                .where(JobItem.admission_state == AdmissionState.QUEUED.value)
+                .where(JobItem.next_retry_at.is_not(None))
+                .where(JobItem.next_retry_at > now_str_job)
+                .where(JobItem.deleted_at.is_(None))
+            )
+
+            # (4) Task — held WITHOUT a schedule: deferred (idle-gate)
+            # or pause-held (instance PAUSED until resume). Two
+            # independent counts — an INNER JOIN here would silently
+            # drop deferred tasks whose instance row is absent
+            # (e.g. mid-cascade), and the deferred condition needs no
+            # instance row at all.
+            deferred_held = session.scalar(
+                select(func.count())
+                .select_from(Task)
+                .where(Task.instance_id == instance_id)
+                .where(Task.status == TaskStatus.PENDING.value)
+                .where(Task.is_deferred.is_(True))
+            )
+            paused_held = session.scalar(
+                select(func.count())
+                .select_from(Task)
+                .join(Instance, Task.instance_id == Instance.instance_id)
+                .where(Task.instance_id == instance_id)
+                .where(Task.status == TaskStatus.PENDING.value)
+                .where(Instance.status == InstanceStatus.PAUSED.value)
+            )
+
+        total = int(
+            (scheduled_tasks or 0)
+            + (scheduled_messages or 0)
+            + (scheduled_jobs or 0)
+            + (deferred_held or 0)
+            + (paused_held or 0)
+        )
+        logger.debug(
+            "get_queued_or_expected_wakeups: instance=%s total=%d "
+            "(scheduled_tasks=%s scheduled_messages=%s scheduled_jobs=%s "
+            "deferred_held=%s paused_held=%s)",
+            instance_id,
+            total,
+            scheduled_tasks,
+            scheduled_messages,
+            scheduled_jobs,
+            deferred_held,
+            paused_held,
+        )
+        return total
 
     async def get_queue_stats(self, instance_id: str) -> dict:
         """Get queue statistics for an instance.

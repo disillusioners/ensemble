@@ -1099,6 +1099,329 @@ class SQLModelInstanceRepository:
         return self.set_metadata(instance_id, "title", title)
 
     # --------------------------------------------------------
+    # LEADER COMPLETION ATTESTATION — Phase 3 ledger methods
+    # --------------------------------------------------------
+    #
+    # The four ledger methods that back the gate node's
+    # ``denied_count_getter`` plus the four reset triggers per leader
+    # rulings 1+2:
+    #
+    #   * (1) attested allow (canonical ``Decision.ALLOWED`` under enforce)
+    #   * (2) ``terminal_after_bound`` finalization (clears BOTH columns)
+    #   * (3) revive-from-COMPLETED via a NEW top-level user/mission
+    #         message (clears BOTH columns — wired in
+    #         ``daemon/services/instance_messaging.py:_prepare_enqueued_
+    #         message``, the same-transaction status=RUNNING site)
+    #   * (4) instance creation (column default 0; no method needed —
+    #         the Instance row's default value is the trigger)
+    #
+    # ``allowed_legitimate_pending_wakeup`` (R2 un-attested allow) MUST
+    # NOT reset the counter — that non-reset IS the loop protection.
+    #
+    # O4 (Pause-mid-gate double-increment): ``increment_attestation_
+    # denied_count`` is keyed by ``(instance_id, denial_epoch)`` — the
+    # epoch is derived deterministically from checkpoint-stable state
+    # material by the caller (the gate node) so a checkpoint re-run of
+    # the node reproduces the SAME key. A pause-mid-gate resume that
+    # replays the same deny MUST NOT double-increment.
+    #
+    # All four methods fail-OPEN at the call site (the gate node wraps
+    # them in ``except Exception`` and degrades deny → allow + emits
+    # ``leader_completion_gate_db_error`` per C3/AC-6.6). The methods
+    # themselves raise on DB failure so the caller's ``except Exception``
+    # sees the original exception class (SQLAlchemy OperationalError,
+    # etc.) for the structured error log.
+    #
+    # The reset is a single UPDATE that clears BOTH columns in one
+    # statement (leader ruling 2: ``completion_gate_escalated`` shares
+    # the counter's per-mission lifecycle). Atomic at the row level —
+    # no torn write under concurrent deny paths.
+
+    def increment_attestation_denied_count(
+        self,
+        instance_id: str,
+        denial_epoch: str,
+    ) -> int:
+        """O4 idempotent per-denial-epoch increment (Phase 3 task 3.3).
+
+        Atomically increments ``attestation_denied_count`` for the
+        instance, keyed by ``(instance_id, denial_epoch)`` — replaying
+        the SAME deny (checkpoint re-run / pause-mid-gate resume) MUST
+        NOT double-increment.
+
+        Single-transaction guarantee (review must-fix 2): the ENTIRE
+        operation — row lock, O4 dedup decision, epochs-array append,
+        counter increment, commit — runs in ONE session/transaction.
+        The predecessor ran TWO (a ``set_metadata`` self-commit followed
+        by a second UPDATE), so a crash between them persisted the
+        epochs array WITHOUT the counter bump — a permanently lost deny.
+
+        Concurrency: ``Session.get(..., with_for_update=True)`` takes a
+        row lock on PostgreSQL from the read through the commit, so a
+        concurrent reset/increment/set_metadata UPDATE on the same row
+        serializes BEHIND this commit (the read-modify-write lost-update
+        window against a concurrent reset is closed). On SQLite the
+        clause is a no-op (dialect renders no ``FOR UPDATE``) and the
+        database's single-writer lock provides the same serialization:
+        a competing writer either waits or fails LOUD (``OperationalError``
+        → the gate's C3 fail-open) instead of silently interleaving.
+        No PG-only syntax exists on the SQLite path — the array is
+        written through ORM column assignment, which serializes
+        dialect-independently (the ``jsonb_set``/``json_set`` raw-SQL
+        handling in :meth:`set_metadata` is NOT needed here precisely
+        because the row lock makes the read-modify-write safe).
+
+        Args:
+            instance_id: Leader instance under evaluation.
+            denial_epoch: Caller-supplied key identifying THIS deny
+                (the gate node derives it deterministically from
+                checkpoint-stable state material). Replays of the same
+                key are no-ops.
+
+        Returns:
+            The post-increment counter value (the unchanged current
+            value on an O4 replay). ``-1`` if the instance is missing
+            (caller treats as DB error → fail-open). The ``-1``
+            literal is the family's int-sentinel (see the
+            missing-row sentinel convention note on
+            :meth:`_update_attestation_columns`).
+
+        Raises:
+            Exception: any DB-level error (SQLAlchemy OperationalError
+                etc.) propagates — the gate node wraps in
+                ``except Exception`` per C3/AC-6.6 and degrades
+                deny → allow + emits ``leader_completion_gate_db_error``.
+        """
+        with SQLModelSession(self.engine) as db_session:
+            instance = db_session.get(
+                Instance, instance_id, with_for_update=True
+            )
+            if instance is None:
+                return -1
+            # O4 idempotency — the dedup decision happens INSIDE the
+            # locked transaction: read the seen-epochs JSON array from
+            # ``instance_metadata``. A pre-existing epoch = no-op
+            # (returns the current counter unchanged). First-seen epoch
+            # = append + increment, both committed together.
+            current_count = int(instance.attestation_denied_count or 0)
+            existing = instance.instance_metadata.get(
+                "attestation:denial_epochs"
+            ) if instance.instance_metadata else None
+            if existing is None:
+                seen_epochs: list[str] = []
+            elif isinstance(existing, list):
+                seen_epochs = [str(e) for e in existing]
+            else:
+                # Corrupt legacy payload — reset (defensive; treat as
+                # empty list to keep O4 semantics bounded). LOUD: a
+                # corrupt array silently disabling dedup is observable.
+                logger.warning(
+                    "attestation_denied_count: corrupt "
+                    "'attestation:denial_epochs' metadata (type=%s) for "
+                    "instance=%s; resetting seen-epochs to [] — O4 dedup "
+                    "will re-count until the next reset",
+                    type(existing).__name__,
+                    instance_id,
+                )
+                seen_epochs = []
+            if denial_epoch in seen_epochs:
+                # O4 replay — same deny, no double-increment.
+                return current_count
+            seen_epochs.append(denial_epoch)
+            # ORM write of BOTH columns in the SAME transaction. The
+            # metadata dict must be REASSIGNED (not mutated in place):
+            # ``instance_metadata`` is a plain ``JSONBType`` column
+            # without mutable tracking, so in-place key writes would not
+            # be detected as a change.
+            new_metadata = dict(instance.instance_metadata or {})
+            new_metadata["attestation:denial_epochs"] = seen_epochs
+            instance.instance_metadata = new_metadata
+            instance.attestation_denied_count = current_count + 1
+            instance.updated_at = datetime.now(timezone.utc).isoformat()
+            db_session.commit()
+            return current_count + 1
+
+    def _update_attestation_columns(
+        self, instance_id: str, **values: Any
+    ) -> bool:
+        """Shared UPDATE skeleton for the attestation ledger writes.
+
+        One session, one ``UPDATE``: load the row, bail with the
+        family's missing-row sentinel when absent, apply the caller's
+        column values, commit.
+
+        Missing-row sentinel convention (family-wide, deliberate — do
+        NOT unify to a single literal): BOOL-returning writes return
+        ``False`` when the row is missing; the INT-returning
+        :meth:`increment_attestation_denied_count` returns ``-1``
+        (``0`` is a legitimate post-O4-replay count, so the increment
+        needs an out-of-band sentinel — the gate's ``< 0`` guard
+        depends on it); the read accessor
+        :meth:`get_attestation_denied_count` returns ``0`` by design
+        (a fresh instance folds to an empty counter). The gate node
+        consumes these via identity checks (``is False`` / ``is
+        None``) and ``< 0`` — changing any literal would flip
+        caller-visible behavior.
+
+        Returns:
+            ``True`` when the row was found and the UPDATE committed;
+            ``False`` when the instance is missing.
+
+        Raises:
+            Exception: any DB-level error propagates — see fail-open
+                wrapper note on
+                :meth:`increment_attestation_denied_count`.
+        """
+        from sqlmodel import update as sqlmodel_update
+
+        with SQLModelSession(self.engine) as db_session:
+            instance = db_session.get(Instance, instance_id)
+            if instance is None:
+                return False
+            stmt = (
+                sqlmodel_update(Instance)
+                .where(Instance.instance_id == instance_id)
+                .values(**values)
+            )
+            db_session.exec(stmt)
+            db_session.commit()
+            return True
+
+    def reset_attestation_denied_count(self, instance_id: str) -> bool:
+        """Ruling-2 single reset op — clears BOTH columns (Phase 3 task 3.3).
+
+        Sets ``attestation_denied_count = 0`` AND
+        ``completion_gate_escalated = False`` in a single UPDATE. This
+        is the canonical reset for:
+
+        * (1) attested allow — wired in the gate node on
+          ``Decision.ALLOWED`` under enforce;
+        * (2) ``terminal_after_bound`` finalization — wired in the gate
+          node on ``Decision.TERMINAL_AFTER_BOUND`` (the same op also
+          sets the escalation flag via :meth:`set_completion_gate_
+          escalated` BEFORE this reset lands — see the atomic variant
+          below);
+        * (3) revive-from-COMPLETED via a NEW top-level user/mission
+          message — wired in
+          ``daemon/services/instance_messaging.py:_prepare_enqueued_
+          message`` at the same-transaction status=RUNNING site
+          (only fires on ``is_terminal_revival`` AND ``msg_type ==
+          HUMAN.value`` AND ``priority == 1`` — internal reports and
+          agent-to-agent revives are NOT new episodes).
+
+        Returns:
+            ``True`` when the row was found and reset; ``False`` when
+            the instance is missing (caller treats as DB error →
+            fail-open).
+
+        Raises:
+            Exception: any DB-level error propagates — see fail-open
+                wrapper note on :meth:`increment_attestation_denied_count`.
+        """
+        return self._update_attestation_columns(
+            instance_id,
+            attestation_denied_count=0,
+            completion_gate_escalated=False,
+            updated_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+    def reset_attestation_ledger_with_escalation(
+        self,
+        instance_id: str,
+    ) -> bool:
+        """Atomic (2) terminal_after_bound finalization: set flag + reset.
+
+        Same single transaction semantics as the ruling-2 reset — sets
+        ``completion_gate_escalated = True`` AND
+        ``attestation_denied_count = 0`` in one UPDATE so a concurrent
+        read sees a consistent (flag=True, count=0) state. The
+        gate node calls THIS for the ``terminal_after_bound`` decision
+        path; the plain :meth:`reset_attestation_denied_count` is for
+        the attested-allow and trigger-3 paths (where the flag is
+        already False).
+
+        Returns:
+            ``True`` when the row was found and the atomic write
+            landed; ``False`` when the instance is missing.
+
+        Raises:
+            Exception: any DB-level error propagates — see fail-open
+                wrapper note on :meth:`increment_attestation_denied_count`.
+        """
+        return self._update_attestation_columns(
+            instance_id,
+            attestation_denied_count=0,
+            completion_gate_escalated=True,
+            updated_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+    def set_completion_gate_escalated(self, instance_id: str) -> bool:
+        """Terminal-after-bound flag setter (no counter change).
+
+        Caller: ``completion_gate_escalated`` is a postmortem marker
+        that persists for the rest of the instance's life unless reset.
+        Per leader ruling 2, the SAME reset op clears BOTH columns;
+        callers that want both columns flipped atomically should use
+        :meth:`reset_attestation_ledger_with_escalation` (terminal_after
+        _bound path) instead.
+
+        Returns:
+            ``True`` when the row was found and the flag set;
+            ``False`` when the instance is missing.
+
+        Raises:
+            Exception: any DB-level error propagates — see fail-open
+                wrapper note on :meth:`increment_attestation_denied_count`.
+        """
+        return self._update_attestation_columns(
+            instance_id,
+            completion_gate_escalated=True,
+            updated_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+    def get_attestation_denied_count(self, instance_id: str) -> int:
+        """Read the current deny counter for the gate node's
+        ``denied_count_getter`` (Phase 3 task 3.3).
+
+        Returns:
+            Current ``attestation_denied_count`` value; ``0`` when the
+            row is missing — BY DESIGN, not an error (a fresh instance
+            simply has no counter yet: the read folds the missing row
+            to ``0`` exactly like ``int(... or 0)`` folds a NULL
+            column). Callers fail-open only on RAISED exceptions (via
+            ``except Exception`` at the gate's count getter), never on
+            a missing row.
+
+        Raises:
+            Exception: any DB-level error propagates — see fail-open
+                wrapper note on :meth:`increment_attestation_denied_count`.
+        """
+        from sqlmodel import select as sqlmodel_select
+
+        with SQLModelSession(self.engine) as db_session:
+            row = db_session.exec(
+                sqlmodel_select(Instance.attestation_denied_count).where(
+                    Instance.instance_id == instance_id
+                )
+            ).first()
+            if row is None:
+                return 0
+            return int(row[0] if isinstance(row, tuple) else row)
+
+    # Short protocol aliases consumed by the in-graph gate.  The public
+    # repository methods above are intentionally descriptive; these aliases
+    # keep the graph's small AttestationLedger protocol honest when it is
+    # given the real SQLModelInstanceRepository.
+    def increment(self, instance_id: str, denial_epoch: str) -> int:
+        return self.increment_attestation_denied_count(instance_id, denial_epoch)
+
+    def reset(self, instance_id: str) -> bool:
+        return self.reset_attestation_denied_count(instance_id)
+
+    def set_escalated_and_reset(self, instance_id: str) -> bool:
+        return self.reset_attestation_ledger_with_escalation(instance_id)
+
+    # --------------------------------------------------------
     # ZOMBIE-INSTANCE SCAN — System Cleanup Bucket 5
     # --------------------------------------------------------
 

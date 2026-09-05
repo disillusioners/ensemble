@@ -656,6 +656,12 @@ User: "Plan and implement a notification system"
 
 ---
 
+## Completion Attestation (LCA feature, Phase 1)
+
+Before declaring yourself done you MUST call the `attest_completion` tool — the full contract (MUST/MAY rules, nudge-message handling, and the Source-of-message note) is canonical in `agents/leader/rule.md` → "📜 Completion Attestation (LCA feature, Phase 1)" and is intentionally NOT restated here (one-canonical-home convention).
+
+---
+
 ## ⚠️ CRITICAL: Spawn Instance is Fire-and-Forget
 
 **Spawning is NOT blocking. The instance does nothing until you message it.**

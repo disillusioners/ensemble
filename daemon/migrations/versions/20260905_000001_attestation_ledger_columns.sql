@@ -1,0 +1,62 @@
+-- Migration: leader completion attestation ledger columns on instances
+-- Created: 2026-09-05
+-- Author: planner[v2] + coder
+-- Description:
+--   Phase 3 of the leader completion attestation feature. Adds two row-
+--   scoped columns on the ``instances`` table that persist across instance
+--   revives (terminal → RUNNING per ``daemon/services/instance_messaging
+--   .py:1867-1909``):
+--
+--     * ``attestation_denied_count INTEGER NOT NULL DEFAULT 0`` — the
+--       per-instance deny counter. Resets ONLY on the four triggers per
+--       leader ruling 1: (1) attested allow, (2) ``terminal_after_bound``
+--       finalization, (3) revive-from-COMPLETED via a NEW top-level
+--       user/mission message (fresh episode), (4) instance creation. The
+--       non-reset on ``allowed_legitimate_pending_wakeup`` (R2) IS the
+--       loop protection — a leader that keeps hallucinating completions
+--       between legitimate wakeups still accumulates toward the bound.
+--
+--     * ``completion_gate_escalated BOOLEAN NOT NULL DEFAULT FALSE`` — the
+--       terminal-after-bound marker (leader ruling 2 — shares the
+--       counter's per-mission lifecycle; cleared by the SAME single
+--       reset op that clears the counter).
+--
+--   DUAL-DRIVER NOTES (mirrors the convention used by the other recent
+--   additive migrations — see ``20260724_000001_add_agent_tag_to_instances
+--   .sql``):
+--
+--     * This .sql is applied by MigrationRunner ONLY when the engine
+--       dialect is sqlite (``daemon/migrations/runner.py`` skips non-
+--       SQLite; PG schema evolution is handled inline by
+--       ``daemon/manager.py::_ensure_postgres_columns``).
+--     * Fresh PG databases pick up the columns via ``SQLModel.metadata
+--       .create_all()`` (the columns are declared on the Instance
+--       SQLModel at ``daemon/repositories/instance/models.py``).
+--     * Existing PG databases get the columns via the matching idempotent
+--       ALTER statements in ``_ensure_postgres_columns``.
+--     * Fresh-SQLite boot hazard — LESSONS/2026-09-04-fresh-sqlite-boot-
+--       migration-20260714-pg-only: the prior migration
+--       ``20260714_000001`` uses a PG-only table-constraint removal
+--       statement syntax that fails on SQLite. This migration
+--       deliberately uses plain ``ALTER TABLE ... ADD COLUMN`` (PG+SQLite
+--       portable) so fresh-SQLite boots remain healthy.
+--     * The MigrationRunner treats "duplicate column name" errors as
+--       idempotent (runner.py:350) so re-running this file is safe on
+--       any SQLite database that already received the columns from
+--       create_all().
+--
+--   The columns have ``NOT NULL DEFAULT`` so existing rows acquire
+--   ``0`` / ``0`` (false) on apply — no backfill query is required.
+
+-- UP
+
+ALTER TABLE instances ADD COLUMN attestation_denied_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE instances ADD COLUMN completion_gate_escalated BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- DOWN
+-- Reverse the column additions. SQLite 3.35+ supports DROP COLUMN; older
+-- versions will leave the columns in place but they are unused by code.
+-- Trailing semicolons are deliberately omitted below because runner.py
+-- splits DOWN SQL on the statement-terminator character.
+-- ALTER TABLE instances DROP COLUMN attestation_denied_count  -- SQLite <3.35 cannot drop columns
+-- ALTER TABLE instances DROP COLUMN completion_gate_escalated  -- SQLite <3.35 cannot drop columns

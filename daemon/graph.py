@@ -14,11 +14,12 @@ from langchain_core.runnables import RunnableLambda
 from langchain_core.runnables.config import RunnableConfig
 from langchain_core.messages.ai import AIMessageChunk, UsageMetadata
 from langchain_core.outputs import ChatGenerationChunk
-from typing import Any, ClassVar, Mapping, NamedTuple, Optional, cast
+from typing import Any, Callable, ClassVar, Mapping, NamedTuple, Optional, cast
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -128,6 +129,11 @@ from .config import LoopBreakerConfig
 # Phase 2 will extend this same handle with ``set()`` for the API path; for
 # now the ``set`` side lives on ``InstanceManager`` because no agent-node
 # code path needs to write.
+#
+# NB: the C3 denied-count READ helper (``safe_get_denied_count``) lives
+# in ``daemon/services/attestation_ledger.py`` — the canonical home of
+# the C3 fail-open wrappers. Import it lazily at each use site (see the
+# graph ↔ services import-cycle note).
 
 
 def _reassemble_with_context(
@@ -2458,6 +2464,26 @@ class SessionState(MessagesState):
     # the key for checkpoint-stability; Phase 2 populates it.
     watchover_route: str | None = None
 
+    # Attestation-gate route hint computed by the ``attestation_gate``
+    # node and read by the ``should_end_attestation`` router
+    # (leader-completion-attestation Phase 2, D1=B). Set to ``"agent"``
+    # on Deny (the nudge HumanMessage rides in the same return so the
+    # injection is checkpoint-durable); left ``None`` on every allow
+    # value (allowed / terminal_after_bound / dry_log /
+    # allowed_legitimate_pending_wakeup) — absent hint ⇒ route to END.
+    # Declared on the session schema so the update is a known channel
+    # and persists at the node-boundary checkpoint (same pattern as
+    # ``watchover_route``).
+    attestation_route: str | None = None
+    # Persisted diagnostic companion to the in-state nudge marker.  It is
+    # intentionally a channel in SessionState (rather than only a transient
+    # return value) so checkpoint assertions and crash-replay tests can read
+    # the denial count without scraping the message history.
+    attestation_nudge_denied_count: int | None = None
+    # Transient error marker carried in the checkpoint so a fail-open
+    # evaluation remains visible across a crash/resume boundary.
+    gate_exception_seen: bool = False
+
 
 def should_continue(state: MessagesState) -> str:
     """Determine if we should continue or end.
@@ -2725,6 +2751,559 @@ def create_should_continue(language_check_enabled: bool):
         return result
 
     return should_continue_with_language_check
+
+
+# ============================================================================
+# Leader completion attestation — in-graph pre-END gate (Phase 2, D1=B)
+# ============================================================================
+#
+# Feature: leader-completion-attestation, Phase 2 task 2.5 (THE wiring).
+# Plans: .agents/shared/planning/leader-completion-attestation/ (D1=B
+# RESOLVED; R1/R2/C1b/C2/C3 applied; leader rulings 1–4 supersede plan
+# prose where they conflict).
+#
+# Architecture (requirements.md glossary, authoritative shape): a
+# ``create_should_continue``-style wrapper translates the would-be END
+# into the ``attestation_gate`` route; the ``attestation_gate`` NODE
+# evaluates the R2 gate ONCE, and on deny returns the plain-dict
+# ``{"messages": [nudge], "attestation_route": "agent"}`` — the exact
+# language_check plain-dict return precedent (graph.py language_check
+# node). ``should_end_attestation`` reads the route hint and routes
+# back to ``agent`` or END. NO ``Command`` import anywhere in this file
+# (hard constraint): routing is plain strings, state updates are plain
+# dicts from node returns.
+#
+# Composition shape: **(Y)** — the attestation wrapper is applied at
+# the CALL SITE (the branch wiring inside ``build_instance_graph``),
+# unconditionally with respect to ``language_check_enabled`` (the
+# gate's own INDEPENDENT ``attestation_enabled`` flag decides), and is
+# applied to whichever router governs the TRUE terminal END in that
+# branch:
+#
+#   * language_check_enabled=True : agent → create_should_continue(True)
+#     → "end_candidate" → language_check node →
+#     ``should_end_language_check`` (wrapped here) → attestation_gate.
+#   * language_check_enabled=False: agent → ``should_continue``
+#     (wrapped here) → attestation_gate.
+#
+# Shape (Y) was chosen over (X) for the plan-recommended reasons: a
+# single wrapper factory applied at one call site per branch, no
+# branch-conditional behavior inside the factory itself. Order of
+# composition: language_check first (cheapest), attestation second —
+# the gate only sees ENDs that survived language check.
+#
+# Fail-open (C3): the gate node wraps ``evaluate`` in
+# ``except Exception`` ⇒ allow END + ``event=leader_completion_gate_error``
+# structured log. ``KeyboardInterrupt``/``SystemExit`` are BaseException
+# and propagate (fail-closed on shutdown).
+#
+# aget_state is BANNED from this seam: the gate reads
+# ``state["messages"]`` from the in-node argument only (the known live
+# defect — namespace-mismatched ``aget_state`` reads returning EMPTY
+# checkpoint state — is exactly what this avoids).
+
+#: Server-authored nudge text (R1 / NFR-6 — EXACT constant; Phase 6's
+#: recovery injector reuses the same text).
+ATTESTATION_NUDGE_TEXT = (
+    "The work is not yet finished — check current progress and continue."
+)
+
+#: Graph node name + conditional-route name for the attestation gate.
+ATTESTATION_GATE_NODE_NAME = "attestation_gate"
+
+
+def create_attestation_should_continue(
+    base_should_continue: Callable,
+    *,
+    attestation_enabled: bool,
+) -> Callable:
+    """Wrap a routing fn so a would-be END routes to ``attestation_gate``.
+
+    This is the D1=B interception wrapper (shape Y — applied at the
+    wiring call site, unconditional w.r.t. ``language_check_enabled``).
+    When ``attestation_enabled`` is False the base router is returned
+    UNWRAPPED — the graph never gains the attestation route and the
+    gate node is not added (legacy behavior preserved).
+
+    Args:
+        base_should_continue: The router governing the terminal END in
+            the current branch — ``should_continue`` itself when
+            language check is off, ``should_end_language_check`` when
+            language check is on (the gate sits AFTER language check).
+        attestation_enabled: The gate's INDEPENDENT master flag (C2).
+
+    Returns:
+        A routing fn ``(state, config) -> str`` that maps a base END
+        verdict to ``ATTESTATION_GATE_NODE_NAME`` and passes every
+        other verdict through unchanged.
+    """
+    if not attestation_enabled:
+        return base_should_continue
+
+    def should_continue_with_attestation(
+        state: MessagesState, config: Optional[RunnableConfig] = None
+    ) -> str:
+        result = base_should_continue(state)
+        if result == END:
+            return ATTESTATION_GATE_NODE_NAME
+        return result
+
+    return should_continue_with_attestation
+
+
+def should_end_attestation(state: Any) -> str:
+    """Router for the ``attestation_gate`` conditional edge.
+
+    The gate node computes the decision ONCE and writes the route hint
+    (``"agent"`` on deny — the nudge HumanMessage rides in the SAME
+    plain-dict return so the injection is checkpoint-durable). Absent
+    hint ⇒ END (allow path: allowed / terminal_after_bound / dry_log /
+    allowed_legitimate_pending_wakeup all end the graph — the nudge
+    fires ONLY on ``denied``, never on terminal_after_bound, never on
+    dry_log).
+    """
+    if isinstance(state, dict):
+        route = state.get("attestation_route")
+    else:
+        route = getattr(state, "attestation_route", None)
+    if route == "agent":
+        return "agent"
+    return END
+
+
+def _persist_gate_exception_marker(ledger: Any, instance_id: str) -> None:
+    """Persist the transient gate-error marker when a ledger supports metadata.
+
+    WHY this writes in DRY mode too (review fix 4b — choice pinned by
+    ``tests/unit/test_attestation_gate.py::TestGateExceptionMarkerDry``):
+    the marker records an operational FAULT (the gate failed open), not a
+    decision side effect. Dry mode's zero-side-effects contract (D2/D8)
+    covers decision OUTPUTS — nudge injection, counter/escalation writes,
+    terminal writes — not failure diagnostics. Suppressing the marker in
+    dry would hide fail-open events from postmortem in exactly the mode
+    whose purpose is soak observation, and would make the dry-mode
+    ``gate_exception_seen`` channel unverifiable against durable state.
+    The write is itself fail-open (``except Exception`` below — a marker
+    is diagnostic only and never errors the mission). The failure is
+    LOUD: WARNING level + the canonical
+    ``leader_completion_gate_db_error`` event with
+    ``method=persist_gate_exception_marker`` (diagnostic-write failures
+    must be observable like every other gate-seam DB failure).
+    """
+    set_exception_metadata = getattr(ledger, "set_metadata", None)
+    if set_exception_metadata is None:
+        return
+    try:
+        set_exception_metadata(
+            instance_id,
+            "attestation_gate_exception_seen",
+            True,
+        )
+    except Exception as exc:  # noqa: BLE001 — marker is diagnostic only
+        logger.warning(
+            "event=leader_completion_gate_db_error "
+            "method=persist_gate_exception_marker instance_id=%s "
+            "error_class=%s error_message=%s decision=fail_open_allowed",
+            instance_id,
+            type(exc).__name__,
+            exc,
+        )
+
+
+# ============================================================================
+# Deterministic denial-epoch derivation (review must-fix 1)
+# ============================================================================
+#
+# The predecessor minted ``str(uuid.uuid4())`` per gate-node invocation.
+# The repository's O4 dedup matches IDENTICAL epoch strings, but a
+# checkpoint re-run of the node (pause-mid-gate resume, or a crash between
+# the ledger commit and the node-output checkpoint write) re-enters the
+# node with IDENTICAL input state and minted a NEW UUID — the dedup never
+# matched, so one logical deny counted TWICE and escalation could fire
+# 1-2 denials early. The phase-3-era unit test replayed a hand-fed epoch
+# string the production caller never produced, so the defect was invisible.
+#
+# The epoch is now a PURE FUNCTION of the gate node's input state:
+# uuid5 (SHA-1 based — process-stable, restart-stable, and immune to
+# PYTHONHASHSEED unlike ``hash()``) over (material version, instance id,
+# message count, last-message fingerprint, second-to-last fingerprint,
+# in-state nudge count). Properties guaranteed:
+#
+# * IDENTICAL input state (any replay) ⇒ identical material ⇒ the SAME
+#   epoch ⇒ the repository's seen-epochs dedup engages (counts once).
+# * A genuinely NEW logical deny ⇒ the agent produced a new AIMessage
+#   after the injected nudge ⇒ a NEW unique message id enters the
+#   material (the new message's id+content digest becomes the last
+#   fingerprint) ⇒ a DIFFERENT epoch (counted). ``len(messages)`` also
+#   changes but is NOT load-bearing: it is not monotonic — see below.
+# * Message ids are checkpoint-stable; when absent (hand-built test
+#   states) the content digest stands in. Both inputs are byte-stable
+#   across processes and restarts.
+# * Cross-denial aliasing is PROBABILISTICALLY excluded, not
+#   structurally: distinct logical denies differ in their newest
+#   messages' unique ids / content digests, and uuid5 over distinct
+#   material collides only with SHA-1-scale improbability. Mission
+#   history is NOT guaranteed to only grow — LoopRepairer
+#   RemoveMessage, reactive compaction, and the pre-call 95% REMOVE_ALL
+#   sentinel all SHRINK it — so a shrink could in principle
+#   re-materialize an earlier input state; the seen-epochs dedup then
+#   intentionally counts that replay-like state ONCE (the conservative
+#   failure direction). Trade-off caveat (unbounded denial_epochs
+#   growth): KG-3 in the phase-6 fast-follow plan
+#   (.agents/shared/planning/leader-completion-attestation/
+#   phase6-fastfollow-plan.md).
+#
+# Regression test (the acceptance proof): re-invoking the ACTUAL gate
+# node on identical input state — see
+# ``tests/unit/test_attestation_epoch_replay.py``.
+
+#: Material version tag — bump when the fingerprint inputs change so
+#: epochs minted under an older scheme can never alias a new one.
+_ATTESTATION_EPOCH_MATERIAL_VERSION = "v1"
+
+
+def _attestation_message_fingerprint(message: Any) -> str:
+    """Checkpoint-stable fingerprint of one message (type, id, content).
+
+    Content may be a string or structured (multimodal) parts; non-str
+    content is canonicalized with sort_keys JSON so identical parts hash
+    identically. The digest is truncated to 16 hex chars — collision
+    resistance well beyond the deny-loop scale, and the epoch as a whole
+    is additionally bound to the message count and neighbor fingerprint.
+    """
+    content = getattr(message, "content", "")
+    if not isinstance(content, str):
+        content = json.dumps(content, sort_keys=True, default=str)
+    digest = hashlib.sha256(content.encode("utf-8", "replace")).hexdigest()[:16]
+    return (
+        f"{getattr(message, 'type', '')}:"
+        f"{getattr(message, 'id', '') or ''}:{digest}"
+    )
+
+
+def _derive_denial_epoch(
+    instance_id: str | None, messages: Any, state: Any
+) -> str:
+    """Derive the O4 dedup key deterministically from input state.
+
+    See the module block above for the determinism argument (review
+    must-fix 1). The derivation must stay a pure function of the gate
+    node's input state — no clock, no randomness, no environment.
+    """
+    msgs = list(messages) if messages else []
+    parts = [
+        _ATTESTATION_EPOCH_MATERIAL_VERSION,
+        instance_id or "",
+        str(len(msgs)),
+        _attestation_message_fingerprint(msgs[-1]) if msgs else "-",
+        _attestation_message_fingerprint(msgs[-2]) if len(msgs) > 1 else "-",
+    ]
+    if isinstance(state, dict):
+        nudge_channel = state.get("attestation_nudge_denied_count")
+    else:
+        nudge_channel = getattr(state, "attestation_nudge_denied_count", None)
+    parts.append(str(nudge_channel))
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, "|".join(parts)))
+
+
+def create_attestation_gate_node(
+    gate_config: dict,
+    settings: Any,
+    manager: Any,
+    instance_id: str | None,
+    denied_count_getter: Callable[[], int] | None = None,
+    ledger: Any | None = None,
+) -> Callable:
+    """Build the ``attestation_gate`` node (factory-closure capture).
+
+    Mirrors ``create_question_pause_node(manager)`` (graph.py:4596
+    precedent): the closure captures the per-instance manager handle,
+    instance id, settings and gate config at GRAPH-BUILD time; the node
+    receives ``state`` (and config) only at run time.
+
+    Run-time flow (single evaluation per would-be END):
+
+    1. Read the in-node ``state["messages"]`` (NO ``aget_state`` — the
+       namespace-mismatched-empty-state defect class is banned here).
+    2. Read the current denied count via ``denied_count_getter`` (Phase
+       3 threads the ledger repository getter; Phase 2 stand-in
+       defaulted to ``lambda: 0``).
+    3. Bridge the WHOLE sync ``evaluate()`` (scanner + the two manager
+       facade reads + decide + log) to a worker thread via
+       ``asyncio.to_thread`` — the message-queue-stats threading
+       pattern — so the event loop never blocks on the DB reads.
+    4. **Phase 3 ledger writes (C3 fail-open wrapper)**: based on the
+       decision value, call the matching :class:`AttestationLedger`
+       method via the ``ledger`` argument. All three writes are wrapped
+       in ``try/except Exception``; on DB error the deny/terminal
+       degrades to allow + a ``leader_completion_gate_db_error``
+       structured log line is emitted (leader mission never errors
+       per D2's outage class).
+    5. On ``Decision.DENIED`` ONLY: return the checkpoint-durable
+       nudge (HumanMessage with the ``attestation_nudge`` marker, the
+       language_check ``additional_kwargs`` precedent) + the
+       ``attestation_route`` hint. NO ``manager.enqueue_message`` call
+       (C1b forbidden dual-delivery); the instance stays RUNNING.
+    6. On every other decision value: return END routing with ZERO
+       side effects (dry_log included — dry is a passive observer).
+    7. C3 fail-open: any ``evaluate`` exception ⇒ allow END +
+       structured error log. ``except Exception`` only —
+       KeyboardInterrupt stays fail-closed.
+
+    Args:
+        gate_config: The O8-audited config dict from
+            ``attestation_gate.build_gate_config`` (carries NO
+            ``checkpoint_ns``; attached to the returned fn for the
+            unit-level O8 assertion).
+        settings: :class:`attestation_gate.GateSettings` (mode/window/
+            deny_bound — Phase 2 stand-in; Phase 4 swaps the resolver).
+        manager: The per-instance manager handle exposing the two R2
+            facades.
+        instance_id: Build-time instance id (thread_id at build). The
+            node falls back to the run-time ``configurable.thread_id``
+            when the build-time value is absent (test embeddings that
+            build one graph and invoke with several ids).
+        denied_count_getter: Optional zero-arg callable returning the
+            current attestation denial count (Phase 3 wires a closure
+            over :meth:`SQLModelInstanceRepository.get_attestation_
+            denied_count` at the graph build site). When ``None``
+            because the build-time thread_id was absent, the node falls
+            back to a RUN-TIME read through the ``ledger`` using the
+            same id resolution as the write path (review fix 4a) — the
+            read and write can no longer disagree; with no ledger either
+            the count defaults to ``0`` (Phase 2 stand-in).
+        ledger: Optional Phase 3 ``AttestationLedger`` (any object
+            exposing ``increment(instance_id, denial_epoch)``,
+            ``reset(instance_id)``, ``set_escalated(instance_id)``,
+            ``set_escalated_and_reset(instance_id)``, and
+            ``get(instance_id) -> int``). When ``None`` the gate
+            performs ZERO writes (Phase 2 stand-in semantics for tests
+            that build the node without the manager's repository). All
+            ledger writes are wrapped in C3 fail-open ``except
+            Exception``; DB errors degrade deny → allow and emit the
+            ``leader_completion_gate_db_error`` log line.
+
+    Returns:
+        An async callable suitable for ``graph.add_node`` with the
+        gate config attached as ``attestation_config``.
+    """
+    # Lazy import — see the top-of-file note about the graph ↔ services
+    # import cycle.
+    from .services.attestation_gate import (
+        DEFAULT_ATTESTATION_TOOL_NAME,
+        Decision,
+        evaluate,
+    )
+    from .services.attestation_ledger import (
+        safe_get_denied_count,
+        safe_increment,
+        safe_reset,
+        safe_set_escalated_and_reset,
+    )
+
+    getter = denied_count_getter
+
+    async def attestation_gate_node(
+        state: Any, config: Optional[RunnableConfig] = None
+    ) -> dict:
+        effective_instance_id = instance_id or _extract_instance_id(config)
+
+        try:
+            # The in-node state read lives INSIDE the C3 try — it is the
+            # first evaluation input, and any failure reading it is a
+            # gate fault like any other (fail-open allow + marker), not
+            # a mission error.
+            messages = state["messages"]
+            # Review fix 4a: mirror the WRITE path's id resolution. When
+            # the build-time thread_id is absent the wiring passes
+            # ``denied_count_getter=None``; the predecessor defaulted the
+            # read to 0 while the write path (``effective_instance_id``,
+            # resolved from the run-time ``configurable.thread_id``
+            # above) still wrote to the real row — read and write
+            # disagreed. Fall back to a run-time ledger read through the
+            # SAME resolved id (C3 fail-open inside the helper); without
+            # a ledger (Phase-2 stand-in) the count stays 0.
+            if getter is not None:
+                denied_count = getter()
+            elif ledger is not None:
+                denied_count = safe_get_denied_count(
+                    ledger, effective_instance_id
+                )
+            else:
+                denied_count = 0
+            decision = await asyncio.to_thread(
+                evaluate,
+                effective_instance_id,
+                denied_count,
+                messages,
+                settings,
+                manager,
+                attestation_enabled=gate_config.get("attestation_enabled", True),
+                scope_applicable=gate_config.get("scope_applicable", True),
+                tool_name=gate_config.get(
+                    "tool_name", DEFAULT_ATTESTATION_TOOL_NAME
+                ),
+                leader_prompt_version=gate_config.get(
+                    "leader_prompt_version", ""
+                ),
+            )
+            if decision.gate_exception_seen:
+                _persist_gate_exception_marker(ledger, effective_instance_id)
+                return {
+                    "attestation_route": None,
+                    "gate_exception_seen": True,
+                }
+        except Exception as gate_exc:  # noqa: BLE001 — C3 fail-open
+            logger.error(
+                "event=leader_completion_gate_error error_class=%s "
+                "instance_id=%s gate_location=%s decision=fail_open_allowed "
+                "gate_exception_seen=true detail=node-level catch: %s: %s",
+                type(gate_exc).__name__,
+                effective_instance_id,
+                gate_config.get("gate_location", "graph_end_candidate"),
+                type(gate_exc).__name__,
+                gate_exc,
+            )
+            _persist_gate_exception_marker(ledger, effective_instance_id)
+            return {
+                "attestation_route": None,
+                "gate_exception_seen": True,
+            }
+
+        # Phase 3 — ledger writes (C3 fail-open wrapper). NO writes on
+        # the meta-conditions / dry / R2 un-attested allow paths. The
+        # denial_epoch is DERIVED from the input state (review must-fix
+        # 1 — see the determinism block above); replay dedup is handled
+        # by the ledger-side seen-epochs idempotency (O4), which now
+        # engages on real checkpoint re-runs because a replay reproduces
+        # the SAME epoch.
+        counted_denied_count: int = decision.next_denied_count
+        if ledger is not None:
+            denial_epoch = _derive_denial_epoch(
+                effective_instance_id, messages, state
+            )
+            try:
+                if decision.decision is Decision.DENIED:
+                    increment_result = safe_increment(
+                        ledger,
+                        effective_instance_id,
+                        denial_epoch,
+                        log_context={
+                            "instance_id": effective_instance_id,
+                            "denial_epoch": denial_epoch,
+                        },
+                    )
+                    # A failed ledger increment degrades this would-be
+                    # denial to an allow.  In particular, do not return a
+                    # nudge that the graph cannot persist safely.
+                    if increment_result is None or (
+                        isinstance(increment_result, int) and increment_result < 0
+                    ):
+                        return {"attestation_route": None}
+                    # The increment's return is the post-dedup committed
+                    # count: on a first-seen epoch it equals
+                    # ``next_denied_count``; on an O4 replay it is the
+                    # UNCHANGED count for this already-counted deny —
+                    # the true number the re-emitted nudge must claim.
+                    # Adopt it ONLY when it is a real int: duck-typed
+                    # ledgers (test embeddings pass a MagicMock via the
+                    # manager auto-attr) return non-int sentinels, and
+                    # the decision-level count must stay the fallback so
+                    # the nudge kwargs remain checkpoint-serializable.
+                    if isinstance(increment_result, int):
+                        counted_denied_count = increment_result
+                elif decision.decision is Decision.TERMINAL_AFTER_BOUND:
+                    terminal_result = safe_set_escalated_and_reset(
+                        ledger,
+                        effective_instance_id,
+                        log_context={
+                            "instance_id": effective_instance_id,
+                            "decision": decision.decision.value,
+                        },
+                    )
+                    if terminal_result is False or terminal_result is None:
+                        return {"attestation_route": None}
+                elif decision.decision is Decision.ALLOWED:
+                    # Attested allow only — R2 un-attested allow arrives
+                    # as ALLOWED_LEGITIMATE_PENDING_WAKEUP, which is its
+                    # own enum value and does NOT reset the counter
+                    # (ruling 1 loop protection). decision.attestation_present
+                    # is True ONLY for the attested path (the deny path
+                    # sets it False via scanner diagnostics).
+                    if decision.attestation_present:
+                        safe_reset(
+                            ledger,
+                            effective_instance_id,
+                            log_context={
+                                "instance_id": effective_instance_id,
+                                "decision": decision.decision.value,
+                            },
+                        )
+                # else: ALLOWED_LEGITIMATE_PENDING_WAKEUP, DRY_LOG,
+                # ALLOWED (meta-condition bypass) — NO ledger write.
+            except Exception:  # noqa: BLE001 — defense-in-depth
+                # The safe_* helpers already swallow + log, but a
+                # non-leak path here guarantees the leader mission
+                # never errors. (Final belt-and-suspenders.)
+                logger.exception(
+                    "event=leader_completion_gate_db_error "
+                    "instance_id=%s detail=unexpected ledger wrapper failure",
+                    effective_instance_id,
+                )
+                return {"attestation_route": None}
+
+        if decision.decision is Decision.TERMINAL_AFTER_BOUND:
+            # Terminal escalation is a distinct operator event from the
+            # canonical decision line.  Keep it one-shot by placing the
+            # event at this decision branch (not in the per-evaluation log).
+            logger.info(
+                "event=leader_completion_gate_terminal_after_bound "
+                "instance_id=%s "
+                "attestation_denied_count=%s completion_gate_escalated=true",
+                effective_instance_id,
+                decision.next_denied_count,
+            )
+
+        if decision.decision is Decision.DENIED:
+            # R1 — the deny path is the checkpoint-durable in-graph
+            # nudge ONLY. Plain-dict return (language_check precedent):
+            # the message rides the node-boundary checkpoint, the route
+            # hint sends the SAME execution back to ``agent``. No
+            # enqueue, no revive, no terminal write. Counter increments
+            # were committed by safe_increment above; the ledger write
+            # lands in the same decision path.
+            logger.info(
+                "[AttestationGate] deny instance=%s denied_count=%s -> "
+                "next=%s; injecting in-graph nudge",
+                effective_instance_id,
+                decision.denied_count,
+                decision.next_denied_count,
+            )
+            nudge = HumanMessage(
+                content=ATTESTATION_NUDGE_TEXT,
+                id=str(uuid.uuid4()),
+                additional_kwargs={
+                    "attestation_nudge": True,
+                    "attestation_nudge_denied_count": counted_denied_count,
+                },
+            )
+            return {
+                "messages": [nudge],
+                "attestation_route": "agent",
+                "attestation_nudge_denied_count": counted_denied_count,
+            }
+
+        # allow / terminal_after_bound / dry_log /
+        # allowed_legitimate_pending_wakeup — allow the END, zero side
+        # effects on the routing. The canonical decision log line was
+        # already emitted inside evaluate(); the ledger writes (or
+        # skips) happened above.
+        return {"attestation_route": None}
+
+    # O8 surface: the exact config the gate will run with, auditable in
+    # tests (must carry NO checkpoint_ns key).
+    attestation_gate_node.attestation_config = gate_config  # type: ignore[attr-defined]
+    return attestation_gate_node
 
 
 # ============================================================================
@@ -6273,6 +6852,8 @@ def build_instance_graph(
     message_tap_slot: "MessageTapSlot | None" = None,
     compaction_tap_slot: "MessageTapSlot | None" = None,
     precall_compaction_tap_slot: "MessageTapSlot | None" = None,
+    attestation_enabled: bool = False,
+    attestation_prompt_version: str = "",
 ):
     """Build and return a compiled instance graph with LLM-level retry.
 
@@ -6351,6 +6932,20 @@ def build_instance_graph(
             (``test_hook_placement``) enumerates the approved labels (5 as
             of P1b: decisions.md D1 + A.9 T-tap). ``None``
             disables the tap (no-op); backward compatible.
+        attestation_enabled: Independent master flag for the
+            leader-completion-attestation in-graph pre-END gate
+            (Phase 2, D1=B + C2). Computed by the CALLER
+            (``instance_lifecycle``) as ``agent_id == "leader"`` (D3
+            leader-only, enforced at graph-build time so non-leader
+            graphs are untouched) — the gate's tri-state mode
+            short-circuit and the manager presence check happen
+            inside. Default False (legacy behavior: no gate node, no
+            route, both wiring branches unchanged). The gate is wired
+            in BOTH return paths of the ``language_check_enabled``
+            branch — a single-branch gate is structurally inert (C2).
+        attestation_prompt_version: ``agents/leader/meta.json`` version
+            stamped into the gate's canonical decision log entries
+            (Phase 4 task 4.5 schema field ``leader_prompt_version``).
     """
     # Add proxy headers (x-proxy-app + x-proxy-interleaved-thinking) to all LLM requests.
     # X-LLMProxy-Buffer-Response: sent by default; omitted entirely (never
@@ -6456,11 +7051,133 @@ def build_instance_graph(
     watchover_active = manager is not None
     tools_target = "watchover_check" if watchover_active else "tools"
 
+    # ------------------------------------------------------------------
+    # Attestation gate wiring (Phase 2, D1=B + C2 + R1).
+    #
+    # The gate is INDEPENDENT of language_check_enabled and active in
+    # BOTH wiring branches below (a single-branch gate is structurally
+    # inert — the False branch of create_should_continue returns the
+    # original router unchanged). Composition shape (Y): the
+    # create_attestation_should_continue wrapper is applied HERE, at
+    # the call site, to whichever router governs the TRUE terminal END
+    # in each branch; order of composition is language_check first
+    # (cheapest), attestation second.
+    #
+    # Off-mode and manager-less graphs keep the legacy wiring exactly:
+    # mode="off" ⇒ gate does not run (D2 legacy preservation); without
+    # a manager handle the R2 inputs are unreadable, so the gate is
+    # skipped rather than wired deaf (fail-open by absence — logged).
+    # ------------------------------------------------------------------
+    attestation_gate_active = False
+    if attestation_enabled:
+        from .services.attestation_gate import (
+            DEFAULT_GATE_SETTINGS,
+            build_gate_config,
+            resolve_gate_settings,
+        )
+
+        settings = resolve_gate_settings()
+        if settings.mode == "off":
+            logger.info(
+                "[AttestationGate] mode=off — gate NOT wired "
+                "(legacy behavior preserved)"
+            )
+        elif manager is None:
+            logger.warning(
+                "[AttestationGate] attestation_enabled=True but manager "
+                "is None — R2 inputs unreadable; gate NOT wired "
+                "(fail-open by absence)"
+            )
+        else:
+            # Build-time closure capture (precedent
+            # create_question_pause_node(manager)): instance id from
+            # the graph config's thread_id, manager handle, settings.
+            build_instance_id = None
+            if isinstance(graph_config, dict):
+                build_instance_id = (graph_config.get("configurable") or {}).get(
+                    "thread_id"
+                )
+            gate_config = build_gate_config(
+                build_instance_id,
+                settings,
+                attestation_enabled=True,
+                scope_applicable=True,
+                leader_prompt_version=attestation_prompt_version,
+            )
+            # Phase 3 — wire the ledger repository into the gate factory
+            # (replacing the Phase-2 ``lambda: 0`` stand-in for the
+            # ``denied_count_getter``). The ledger object exposes the
+            # three Phase-3 task-3.3 gate-consumed methods
+            # (``increment`` / ``reset`` /
+            # ``set_escalated_and_reset``); the gate node calls them via
+            # the C3 fail-open ``safe_*`` wrappers at
+            # ``daemon/services/attestation_ledger.py``. When ``manager``
+            # has no ``_instance_repository`` attribute (test embeddings
+            # / Phase-2 stand-in), the ledger is ``None`` and the gate
+            # performs ZERO writes — preserving backward compatibility
+            # with every existing test.
+            from .services.attestation_ledger import safe_get_denied_count
+
+            ledger_repo = getattr(manager, "_instance_repository", None)
+            if ledger_repo is not None:
+                # The factory consumes the repository AS the ledger
+                # (the three gate-consumed method names match the
+                # protocol). The
+                # ``denied_count_getter`` closure captures
+                # ``build_instance_id`` so a missing build-time id
+                # still resolves via the run-time config in the node.
+                effective_id_for_getter = build_instance_id or ""
+                if effective_id_for_getter:
+                    def _denied_count_getter(
+                        _repo: Any = ledger_repo,
+                        _eid: str = effective_id_for_getter,
+                    ) -> int:
+                        return safe_get_denied_count(_repo, _eid)
+                    denied_count_getter = _denied_count_getter
+                else:
+                    # Review fix 4a: a missing build-time id no longer
+                    # pins the READ to 0 — the node falls back to a
+                    # run-time ledger read via the same id resolution as
+                    # the write path (see the gate node body).
+                    denied_count_getter = None  # build-time id missing
+            else:
+                denied_count_getter = None  # Phase-2 stand-in semantics
+            graph.add_node(
+                ATTESTATION_GATE_NODE_NAME,
+                create_attestation_gate_node(
+                    gate_config,
+                    settings,
+                    manager,
+                    build_instance_id,
+                    denied_count_getter=denied_count_getter,
+                    ledger=ledger_repo,
+                ),
+            )
+            graph.add_conditional_edges(
+                ATTESTATION_GATE_NODE_NAME,
+                should_end_attestation,
+                {"agent": "agent", END: END},
+            )
+            attestation_gate_active = True
+
     if language_check_enabled:
         graph.add_node("language_check", create_language_check_node(user_language))
 
         # Closure wrapper: routes END -> "end_candidate"
         routing_fn = create_should_continue(language_check_enabled=True)
+
+        if attestation_gate_active:
+            # Shape (Y): intercept the TRUE END — i.e. the END that
+            # SURVIVES language check — by wrapping the
+            # language_check node's out-edge router. The agent-side
+            # wrapper still ends at "end_candidate"; the gate node was
+            # added once above.
+            language_check_router = create_attestation_should_continue(
+                should_end_language_check,
+                attestation_enabled=True,
+            )
+        else:
+            language_check_router = should_end_language_check
 
         graph.add_conditional_edges("agent", routing_fn, {
             "tools": tools_target,      # Watchover interception (or direct when no manager)
@@ -6469,19 +7186,45 @@ def build_instance_graph(
             "end_candidate": "language_check",  # Would-be END: validate language
         })
 
-        # Language check -> retry or END
-        graph.add_conditional_edges("language_check", should_end_language_check, {
-            "retry": "agent",
-            END: END,
-        })
+        # Language check -> retry or END (END detours through the
+        # attestation gate when the gate is active). The path map only
+        # carries the gate destination when the gate node exists —
+        # LangGraph validates map targets against the node set.
+        language_check_paths = {"retry": "agent"}
+        if attestation_gate_active:
+            language_check_paths[ATTESTATION_GATE_NODE_NAME] = (
+                ATTESTATION_GATE_NODE_NAME
+            )
+        language_check_paths[END] = END
+        graph.add_conditional_edges(
+            "language_check", language_check_router, language_check_paths
+        )
     else:
         # Language check disabled: use original should_continue, no language_check node
-        graph.add_conditional_edges("agent", should_continue, {
+        if attestation_gate_active:
+            # Shape (Y), no-language_check branch: the gate wrapper is
+            # applied to the ORIGINAL should_continue — the
+            # independent-flag interception this branch needs (the
+            # False branch of create_should_continue returns the
+            # original UNCHANGED, so piggybacking there would leave the
+            # gate structurally inert for auto-language leaders).
+            agent_router = create_attestation_should_continue(
+                should_continue,
+                attestation_enabled=True,
+            )
+        else:
+            agent_router = should_continue
+
+        agent_paths = {
             "tools": tools_target,      # Watchover interception (or direct when no manager)
             "agent": "agent",          # Ghost promise: LLM promised but no tool_call, retry
             "nudge": "nudge",          # Empty after tool: inject prompt to continue
-            END: END,
-        })
+        }
+        if attestation_gate_active:
+            # Would-be END: attestation gate (would have been END)
+            agent_paths[ATTESTATION_GATE_NODE_NAME] = ATTESTATION_GATE_NODE_NAME
+        agent_paths[END] = END
+        graph.add_conditional_edges("agent", agent_router, agent_paths)
 
     # Watchover interception nodes — sits between agent and tools.
     # Added only when a manager is provided. Non-watched instances pass

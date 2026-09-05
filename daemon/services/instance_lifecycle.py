@@ -1347,7 +1347,14 @@ class InstanceLifecycleService:
         else:
             metadata = registry.get_version(resolved_agent_id, None)
             if metadata is None:
-                metadata = registry.get(resolved_agent_id)
+                # Audit-fold N2 (2026-09-05): use ``get_resolved`` here to
+                # match the restore site + the blueprint rule "all meta
+                # lookups MUST use ``get_version()`` w/ fallback to
+                # ``get_resolved()``". Logging-field-only impact (the
+                # same metadata is returned when ``AGENT_ID_ALIASES`` is
+                # empty — current state); the canonical call shape
+                # future-proofs against future aliases.
+                metadata = registry.get_resolved(resolved_agent_id)
         if metadata is None:
             raise ValueError(f"Agent not found: {resolved_agent_id}")
         resolved_agent_dir = str(metadata.path)
@@ -1683,6 +1690,14 @@ class InstanceLifecycleService:
                 self._manager.message_metadata_repo,
                 SOURCE_COMPACTION_PRECALL_95,
             ),
+            # Leader completion attestation (Phase 2, D3 leader-only):
+            # the gate is wired at graph-build time ONLY for leader
+            # graphs — non-leader graphs are structurally untouched.
+            # The tri-state mode short-circuit (off ⇒ legacy wiring)
+            # and the manager presence check live in
+            # ``build_instance_graph``.
+            attestation_enabled=(resolved_agent_id == "leader"),
+            attestation_prompt_version=(metadata.version or "") if metadata else "",
         )
 
         # Save metadata to DB using instance repository
@@ -3721,6 +3736,12 @@ class InstanceLifecycleService:
                 self._manager.message_metadata_repo,
                 SOURCE_COMPACTION_PRECALL_95,
             ),
+            # Leader completion attestation (Phase 2, D3 leader-only) —
+            # restore path: same wiring rule as the spawn path (gate
+            # only for leader graphs; mode/manager checks inside
+            # ``build_instance_graph``).
+            attestation_enabled=(resolved_agent_id == "leader"),
+            attestation_prompt_version=(agent_meta.version or "") if agent_meta else "",
         )
 
         # Store in instances dict before watchover crash recovery. The regular

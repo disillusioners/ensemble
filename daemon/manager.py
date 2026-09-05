@@ -87,6 +87,7 @@ from .services.instance_messaging import emit_wc_wake_enqueue_boot_log
 from .services.report_integrity_guard import (
     emit_report_integrity_b_guard_boot_log,
 )
+from .services.attestation_resolver import emit_attestation_boot_log
 from .services.messaging_types import AsyncMessageResult  # re-exported for `from daemon.manager import AsyncMessageResult`
 from .services.child_reports import ChildReportsService
 from .services.error_reporting import ErrorReportingService
@@ -811,6 +812,18 @@ class InstanceManager:
         # OPERATOR-OWNED flip per C2-D2.5-FLIP — no auto-flip exists.
         # Mirrors the governor-guard / WC-wake wrapper precedents.
         emit_report_integrity_b_guard_boot_log()
+
+        # Leader completion attestation (feature/leader-completion-
+        # attestation, Phase 4 task 4.2): one-time INFO log naming
+        # the resolved tri-state mode (off|dry|enforce), the window
+        # knob, the deny-bound knob, the derived attestation_enabled
+        # flag, and the O1 N_le_min_recent_window boot-assert verdict.
+        # Default mode=dry at ship (D2 RESOLVED); restart-required to
+        # flip. Mirrors the WC-wake / governor-guard wrapper precedents.
+        # The resolver itself is Pattern C — fail-OPEN with one-shot
+        # WARN for invalid env values (ruling 4); the daemon never
+        # refuses to start on a typo'd attestation env.
+        emit_attestation_boot_log()
 
         # NEW: Pluggable message sources system
         self.source_registry = SourceRegistry(
@@ -4803,6 +4816,28 @@ class InstanceManager:
             "ALTER TABLE instance_ui_prefs ADD COLUMN IF NOT EXISTS icon_tag VARCHAR",
             # instances.agent_tag: agent version tag for directory-suffix versioning
             "ALTER TABLE instances ADD COLUMN IF NOT EXISTS agent_tag VARCHAR",
+            # instances.attestation_denied_count (Phase 3, 2026-09-05):
+            # row-scoped per-instance counter for the leader completion
+            # attestation gate (D5). NOT NULL DEFAULT 0 — existing rows
+            # pick up the default; fresh databases get the column from
+            # SQLModel.metadata.create_all() via the Instance SQLModel
+            # declaration at
+            # daemon/repositories/instance/models.py. The SQLite
+            # companion migration is
+            # daemon/migrations/versions/20260905_000001_attestation_ledger_columns.sql.
+            (
+                "ALTER TABLE instances ADD COLUMN IF NOT EXISTS "
+                "attestation_denied_count INTEGER NOT NULL DEFAULT 0"
+            ),
+            # instances.completion_gate_escalated (Phase 3, 2026-09-05):
+            # terminal-after-bound escalation flag (leader ruling 2 — the
+            # same single reset op clears this AND the counter above).
+            # NOT NULL DEFAULT FALSE — existing rows pick up the default.
+            # SQLite companion migration as above.
+            (
+                "ALTER TABLE instances ADD COLUMN IF NOT EXISTS "
+                "completion_gate_escalated BOOLEAN NOT NULL DEFAULT FALSE"
+            ),
             # instance_execution_leases: the Execution Gate's per-instance
             # lease table. SQLite gets it via the .sql migration at
             # ``daemon/migrations/versions/20260614_000002_create_instance_execution_leases.sql``;
@@ -8496,6 +8531,66 @@ class InstanceManager:
         and oldest_message_age_seconds attributes.
         """
         return await self._messaging_service.get_queue_stats(instance_id)
+
+    # ------------------------------------------------------------------
+    # Attestation gate R2 facades (Phase 2, leader-completion-attestation
+    # task 2.3 / CR-1). Both are SYNC `def` on purpose: the gate node is
+    # async and bridges the whole evaluate() call via asyncio.to_thread,
+    # so the facades themselves stay plain blocking reads (same split as
+    # bus.count_pending_for_target_sync — the sync convenience API for
+    # callers inside worker threads).
+    # ------------------------------------------------------------------
+
+    def count_pending_children(self, instance_id: str) -> int:
+        """Count PENDING dependency watchers targeting this instance.
+
+        Attestation-gate R2 input (``pending_children``). Forwards to
+        ``DependencyBus.count_pending_for_target_sync`` (the bus's sync
+        convenience API — the completion gate is the critical reader of
+        pending-children state). Returns 0 when the bus singleton is
+        absent (no bus ⇒ no watcher was ever registered ⇒ genuinely
+        zero pending children, not a fail-open dodge).
+
+        TOCTOU contract (CR-2): watcher registration commits
+        POST-COMMIT in its own transaction BEFORE the dispatch tool
+        result returns to the LLM, so a legitimately-delegating leader
+        has its PENDING row visible here. There is NO
+        same-txn-with-spawn atomicity — see
+        ``daemon/services/attestation_gate.evaluate`` for the full
+        contract; do NOT cite the child_reports deferral reads as
+        same-txn precedents.
+
+        Args:
+            instance_id: The target (parent) instance id.
+
+        Returns:
+            Non-negative int count of PENDING watchers.
+        """
+        bus = get_dependency_bus()
+        if bus is None:
+            return 0
+        return bus.count_pending_for_target_sync(instance_id)
+
+    def get_queued_or_expected_wakeups(self, instance_id: str) -> int:
+        """Count queued/expected wakeups for this instance.
+
+        Attestation-gate R2 input (``queued_or_expected_wakeups``).
+        Forwards to the messaging-service helper that sums the three
+        ``next_retry_at``-held wakeup families (task / message_queue /
+        job_queue_items) PLUS the expected-not-scheduled held wakeups
+        (deferred + pause-held PENDING tasks). SYNC read — see the
+        facade note above for the threading contract.
+
+        Args:
+            instance_id: The instance whose wakeups to count.
+
+        Returns:
+            Non-negative int sum (0 = no expected wakeup — one of the
+            three simultaneous R2 deny conditions).
+        """
+        return self._messaging_service.get_queued_or_expected_wakeups(
+            instance_id
+        )
 
     async def _has_checkpoint(self, instance_id: str) -> bool:
         """Check if a checkpoint exists for this instance.

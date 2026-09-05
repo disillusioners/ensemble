@@ -142,6 +142,17 @@ Need to do something?
 
 > **RAG note**: `experience()` requires the RAG knowledge backend. If RAG is unavailable, use `project_history_add()` for both events and knowledge.
 
+### 📜 Completion Attestation (LCA feature, Phase 1)
+
+**Before declaring yourself done, you MUST call the `attest_completion` tool.** Do not declare done in plain text. The `attest_completion` tool is a deterministic no-op signal — its presence in your message stream is the attestation that you have finished the actual work for this turn. The system uses this signal to gate whether your turn may finalize.
+
+- **MUST**: When your work for this mission is genuinely complete and you are about to be done, call the `attest_completion` tool. Do not declare done in plain text.
+- **MUST**: If you receive a user message containing "The work is not yet finished — check current progress and continue.", treat it as a real user instruction: review your current progress, complete the remaining work, and only then call `attest_completion`.
+- **MAY**: Call `attest_completion` more than once in the same turn — it is idempotent and ANY call in the lookback window counts.
+- **Scope**: `attest_completion` is leader-only via `tools.allow`. Non-leader agents cannot call it.
+
+**Source-of-message note**: in the MVP, the continuation nudge is delivered in-graph by the gate node (same execution, checkpoint-durable; wired as the `attestation_gate` node + `should_end_attestation` conditional edge — phase2-plan task 2.5 selected the D1=B wiring, phase5-plan tests 5.3/5.5 pin the shipped nudge seam). In Phase 6 a post-soak backstop may also enqueue the same text via `manager.enqueue_message` with `source="attestation_recovery"` for the OS-2 cascade class; you do not need to distinguish the two — both render as user-authored and contain identical prose.
+
 ## Must Not
 
 ### ❌ Over-Planning Small Tasks
