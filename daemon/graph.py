@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -2891,7 +2892,20 @@ def should_end_attestation(state: Any) -> str:
 
 
 def _persist_gate_exception_marker(ledger: Any, instance_id: str) -> None:
-    """Persist the transient gate-error marker when a ledger supports metadata."""
+    """Persist the transient gate-error marker when a ledger supports metadata.
+
+    WHY this writes in DRY mode too (review fix 4b — choice pinned by
+    ``tests/unit/test_attestation_gate.py::TestGateExceptionMarkerDry``):
+    the marker records an operational FAULT (the gate failed open), not a
+    decision side effect. Dry mode's zero-side-effects contract (D2/D8)
+    covers decision OUTPUTS — nudge injection, counter/escalation writes,
+    terminal writes — not failure diagnostics. Suppressing the marker in
+    dry would hide fail-open events from postmortem in exactly the mode
+    whose purpose is soak observation, and would make the dry-mode
+    ``gate_exception_seen`` channel unverifiable against durable state.
+    The write is itself fail-open (``except Exception`` below — a marker
+    is diagnostic only and never errors the mission).
+    """
     set_exception_metadata = getattr(ledger, "set_metadata", None)
     if set_exception_metadata is None:
         return
@@ -2906,6 +2920,90 @@ def _persist_gate_exception_marker(ledger: Any, instance_id: str) -> None:
             "could not persist gate_exception_seen metadata for instance=%s",
             instance_id,
         )
+
+
+# ============================================================================
+# Deterministic denial-epoch derivation (review must-fix 1)
+# ============================================================================
+#
+# The predecessor minted ``str(uuid.uuid4())`` per gate-node invocation.
+# The repository's O4 dedup matches IDENTICAL epoch strings, but a
+# checkpoint re-run of the node (pause-mid-gate resume, or a crash between
+# the ledger commit and the node-output checkpoint write) re-enters the
+# node with IDENTICAL input state and minted a NEW UUID — the dedup never
+# matched, so one logical deny counted TWICE and escalation could fire
+# 1-2 denials early. The phase-3-era unit test replayed a hand-fed epoch
+# string the production caller never produced, so the defect was invisible.
+#
+# The epoch is now a PURE FUNCTION of the gate node's input state:
+# uuid5 (SHA-1 based — process-stable, restart-stable, and immune to
+# PYTHONHASHSEED unlike ``hash()``) over (material version, instance id,
+# message count, last-message fingerprint, second-to-last fingerprint,
+# in-state nudge count). Properties guaranteed:
+#
+# * IDENTICAL input state (any replay) ⇒ identical material ⇒ the SAME
+#   epoch ⇒ the repository's seen-epochs dedup engages (counts once).
+# * A genuinely NEW logical deny ⇒ the agent produced a new AIMessage
+#   after the injected nudge ⇒ ``len(messages)`` grows by 2 and the last
+#   message's fingerprint changes ⇒ a DIFFERENT epoch (counted).
+# * Message ids are checkpoint-stable; when absent (hand-built test
+#   states) the content digest stands in. Both inputs are byte-stable
+#   across processes and restarts.
+# * Cross-mission collisions are structurally excluded: mission history
+#   only grows, so two denies yielding the same material ARE the same
+#   checkpoint state — i.e. a replay, exactly the case dedup must catch.
+#
+# Regression test (the acceptance proof): re-invoking the ACTUAL gate
+# node on identical input state — see
+# ``tests/unit/test_attestation_epoch_replay.py``.
+
+#: Material version tag — bump when the fingerprint inputs change so
+#: epochs minted under an older scheme can never alias a new one.
+_ATTESTATION_EPOCH_MATERIAL_VERSION = "v1"
+
+
+def _attestation_message_fingerprint(message: Any) -> str:
+    """Checkpoint-stable fingerprint of one message (type, id, content).
+
+    Content may be a string or structured (multimodal) parts; non-str
+    content is canonicalized with sort_keys JSON so identical parts hash
+    identically. The digest is truncated to 16 hex chars — collision
+    resistance well beyond the deny-loop scale, and the epoch as a whole
+    is additionally bound to the message count and neighbor fingerprint.
+    """
+    content = getattr(message, "content", "")
+    if not isinstance(content, str):
+        content = json.dumps(content, sort_keys=True, default=str)
+    digest = hashlib.sha256(content.encode("utf-8", "replace")).hexdigest()[:16]
+    return (
+        f"{getattr(message, 'type', '')}:"
+        f"{getattr(message, 'id', '') or ''}:{digest}"
+    )
+
+
+def _derive_denial_epoch(
+    instance_id: str | None, messages: Any, state: Any
+) -> str:
+    """Derive the O4 dedup key deterministically from input state.
+
+    See the module block above for the determinism argument (review
+    must-fix 1). The derivation must stay a pure function of the gate
+    node's input state — no clock, no randomness, no environment.
+    """
+    msgs = list(messages) if messages else []
+    parts = [
+        _ATTESTATION_EPOCH_MATERIAL_VERSION,
+        instance_id or "",
+        str(len(msgs)),
+        _attestation_message_fingerprint(msgs[-1]) if msgs else "-",
+        _attestation_message_fingerprint(msgs[-2]) if len(msgs) > 1 else "-",
+    ]
+    if isinstance(state, dict):
+        nudge_channel = state.get("attestation_nudge_denied_count")
+    else:
+        nudge_channel = getattr(state, "attestation_nudge_denied_count", None)
+    parts.append(str(nudge_channel))
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, "|".join(parts)))
 
 
 def create_attestation_gate_node(
@@ -2966,10 +3064,14 @@ def create_attestation_gate_node(
             when the build-time value is absent (test embeddings that
             build one graph and invoke with several ids).
         denied_count_getter: Optional zero-arg callable returning the
-            current attestation denial count. Defaults to ``0`` when
-            absent (Phase 2 stand-in). Phase 3 wires a closure over
-            :meth:`SQLModelInstanceRepository.get_attestation_denied_count`
-            at the graph build site.
+            current attestation denial count (Phase 3 wires a closure
+            over :meth:`SQLModelInstanceRepository.get_attestation_
+            denied_count` at the graph build site). When ``None``
+            because the build-time thread_id was absent, the node falls
+            back to a RUN-TIME read through the ``ledger`` using the
+            same id resolution as the write path (review fix 4a) — the
+            read and write can no longer disagree; with no ledger either
+            the count defaults to ``0`` (Phase 2 stand-in).
         ledger: Optional Phase 3 ``AttestationLedger`` (any object
             exposing ``increment(instance_id, denial_epoch)``,
             ``reset(instance_id)``, ``set_escalated(instance_id)``,
@@ -2995,7 +3097,7 @@ def create_attestation_gate_node(
         safe_set_escalated_and_reset,
     )
 
-    getter = denied_count_getter or (lambda: 0)
+    getter = denied_count_getter
 
     async def attestation_gate_node(
         state: Any, config: Optional[RunnableConfig] = None
@@ -3004,7 +3106,23 @@ def create_attestation_gate_node(
         messages = state["messages"]
 
         try:
-            denied_count = getter()
+            # Review fix 4a: mirror the WRITE path's id resolution. When
+            # the build-time thread_id is absent the wiring passes
+            # ``denied_count_getter=None``; the predecessor defaulted the
+            # read to 0 while the write path (``effective_instance_id``,
+            # resolved from the run-time ``configurable.thread_id``
+            # above) still wrote to the real row — read and write
+            # disagreed. Fall back to a run-time ledger read through the
+            # SAME resolved id (C3 fail-open inside the helper); without
+            # a ledger (Phase-2 stand-in) the count stays 0.
+            if getter is not None:
+                denied_count = getter()
+            elif ledger is not None:
+                denied_count = _safe_get_denied_count(
+                    ledger, effective_instance_id
+                )
+            else:
+                denied_count = 0
             decision = await asyncio.to_thread(
                 evaluate,
                 effective_instance_id,
@@ -3046,10 +3164,16 @@ def create_attestation_gate_node(
 
         # Phase 3 — ledger writes (C3 fail-open wrapper). NO writes on
         # the meta-conditions / dry / R2 un-attested allow paths. The
-        # denial_epoch is per-gate-evaluation (UUID4); replay dedup is
-        # handled by the ledger-side seen-epochs idempotency (O4).
+        # denial_epoch is DERIVED from the input state (review must-fix
+        # 1 — see the determinism block above); replay dedup is handled
+        # by the ledger-side seen-epochs idempotency (O4), which now
+        # engages on real checkpoint re-runs because a replay reproduces
+        # the SAME epoch.
+        counted_denied_count: int = decision.next_denied_count
         if ledger is not None:
-            denial_epoch = str(uuid.uuid4())
+            denial_epoch = _derive_denial_epoch(
+                effective_instance_id, messages, state
+            )
             try:
                 if decision.decision is Decision.DENIED:
                     increment_result = safe_increment(
@@ -3068,6 +3192,18 @@ def create_attestation_gate_node(
                         isinstance(increment_result, int) and increment_result < 0
                     ):
                         return {"attestation_route": None}
+                    # The increment's return is the post-dedup committed
+                    # count: on a first-seen epoch it equals
+                    # ``next_denied_count``; on an O4 replay it is the
+                    # UNCHANGED count for this already-counted deny —
+                    # the true number the re-emitted nudge must claim.
+                    # Adopt it ONLY when it is a real int: duck-typed
+                    # ledgers (test embeddings pass a MagicMock via the
+                    # manager auto-attr) return non-int sentinels, and
+                    # the decision-level count must stay the fallback so
+                    # the nudge kwargs remain checkpoint-serializable.
+                    if isinstance(increment_result, int):
+                        counted_denied_count = increment_result
                 elif decision.decision is Decision.TERMINAL_AFTER_BOUND:
                     terminal_result = safe_set_escalated_and_reset(
                         ledger,
@@ -3139,13 +3275,13 @@ def create_attestation_gate_node(
                 id=str(uuid.uuid4()),
                 additional_kwargs={
                     "attestation_nudge": True,
-                    "attestation_nudge_denied_count": decision.next_denied_count,
+                    "attestation_nudge_denied_count": counted_denied_count,
                 },
             )
             return {
                 "messages": [nudge],
                 "attestation_route": "agent",
-                "attestation_nudge_denied_count": decision.next_denied_count,
+                "attestation_nudge_denied_count": counted_denied_count,
             }
 
         # allow / terminal_after_bound / dry_log /
@@ -6987,6 +7123,10 @@ def build_instance_graph(
                         return _safe_get_denied_count(_repo, _eid)
                     denied_count_getter = _denied_count_getter
                 else:
+                    # Review fix 4a: a missing build-time id no longer
+                    # pins the READ to 0 — the node falls back to a
+                    # run-time ledger read via the same id resolution as
+                    # the write path (see the gate node body).
                     denied_count_getter = None  # build-time id missing
             else:
                 denied_count_getter = None  # Phase-2 stand-in semantics

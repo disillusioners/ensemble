@@ -151,7 +151,7 @@ Need to do something?
 - **MAY**: Call `attest_completion` more than once in the same turn — it is idempotent and ANY call in the lookback window counts.
 - **Scope**: `attest_completion` is leader-only via `tools.allow`. Non-leader agents cannot call it.
 
-**Source-of-message note**: in the MVP, the continuation nudge is delivered in-graph by the gate node (same execution, checkpoint-durable; Phase 2 task 2.5 — the in-graph deny nudge wiring, per CR-1 alignment). In Phase 6 a post-soak backstop may also enqueue the same text via `manager.enqueue_message` with `source="attestation_recovery"` for the OS-2 cascade class; you do not need to distinguish the two — both render as user-authored and contain identical prose.
+**Source-of-message note**: in the MVP, the continuation nudge is delivered in-graph by the gate node (same execution, checkpoint-durable; wired as the `attestation_gate` node + `should_end_attestation` conditional edge — phase2-plan task 2.5 selected the D1=B wiring, phase5-plan tests 5.3/5.5 pin the shipped nudge seam). In Phase 6 a post-soak backstop may also enqueue the same text via `manager.enqueue_message` with `source="attestation_recovery"` for the OS-2 cascade class; you do not need to distinguish the two — both render as user-authored and contain identical prose.
 
 ## Must Not
 

@@ -4551,9 +4551,10 @@ class InstanceMessagingService:
         SYNC method (plain repo reads; the attestation gate bridges the
         whole evaluation via ``asyncio.to_thread`` at its node call
         site — the same thread→loop pattern as the message-queue stats
-        path). Returns the SUM of four counts — the three
+        path). Returns the SUM of five counts — the three
         ``next_retry_at``-scheduled (held, not-yet-due) wakeup families
-        PLUS the expected-not-scheduled held wakeups:
+        PLUS two expected-not-scheduled held wakeup counts (defer-held
+        and pause-held):
 
           1. ``task`` — PENDING rows with ``next_retry_at > now``
              (retry children minted by ``TaskRepository.schedule_retry``
@@ -4569,11 +4570,18 @@ class InstanceMessagingService:
              ``next_retry_at > now`` (JobRetryEngine's retry window;
              mirrors ``find_retryable_jobs``' ``isoformat()``
              comparison and its ``deleted_at IS NULL`` liveness guard).
-          4. ``task`` — PENDING rows held WITHOUT a schedule:
-             ``is_deferred=True`` (idle-gate holds until non-defer
-             queues empty) OR the owning instance is PAUSED
-             (pause-gate holds until resume — the
-             new-message-during-pause behaviour of ``enqueue_message``).
+          4. ``task`` — PENDING rows held WITHOUT a schedule because
+             they are deferred (``is_deferred=True``; idle-gate holds
+             until non-defer queues empty).
+          5. ``task`` — PENDING rows held WITHOUT a schedule because
+             the owning instance is PAUSED (pause-gate holds until
+             resume — the new-message-during-pause behaviour of
+             ``enqueue_message``).
+
+          Counts (4) and (5) are independent SELECTs — an INNER JOIN
+          here would silently drop deferred tasks whose instance row is
+          absent (e.g. mid-cascade), and the deferred condition needs
+          no instance row at all.
 
         Deliberately NOT counted: currently-claimable rows
         (``next_retry_at IS NULL`` and not pause/defer-held). Those are

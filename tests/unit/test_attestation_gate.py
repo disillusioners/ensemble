@@ -16,6 +16,7 @@ graph-side gate config contract (task 2.5 / O8):
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from unittest.mock import MagicMock
 
@@ -469,3 +470,60 @@ def test_default_tool_name_matches_scanner():
             fromlist=["DEFAULT_ATTESTATION_TOOL_NAME"],
         ).DEFAULT_ATTESTATION_TOOL_NAME
     )
+
+
+# =============================================================================
+# Review fix 4b — the gate-exception marker persists in DRY mode (pinned)
+# =============================================================================
+
+
+class TestGateExceptionMarkerDry:
+    """Pins the dry-mode marker choice made in ``daemon/graph.py``.
+
+    The marker records an operational FAULT (the gate failed open), not
+    a decision side effect: dry's zero-side-effects contract covers
+    decision OUTPUTS (nudge / counter / escalation / terminal), not
+    failure diagnostics. This test locks that choice — if someone gates
+    the marker on enforce, this fails and the docstring in
+    ``_persist_gate_exception_marker`` must change with it.
+    """
+
+    def test_dry_mode_facade_failure_still_persists_marker(self):
+        from daemon.graph import create_attestation_gate_node
+
+        manager = make_manager()
+        manager.count_pending_children.side_effect = RuntimeError("db down")
+        ledger = MagicMock()
+
+        settings = GateSettings(mode="dry", window=3, deny_bound=3)
+        config = build_gate_config("inst-dry-marker", settings)
+        node = create_attestation_gate_node(
+            config,
+            settings,
+            manager,
+            "inst-dry-marker",
+            denied_count_getter=lambda: 0,
+            ledger=ledger,
+        )
+
+        result = asyncio.run(
+            node(
+                {"messages": plain_messages()},
+                config={"configurable": {"thread_id": "inst-dry-marker"}},
+            )
+        )
+
+        # fail-open shape: allow-END with the transient marker raised
+        assert result["gate_exception_seen"] is True
+        assert result["attestation_route"] is None
+        # THE pinned choice: the marker write happens EVEN IN DRY.
+        ledger.set_metadata.assert_called_once_with(
+            "inst-dry-marker",
+            "attestation_gate_exception_seen",
+            True,
+        )
+        # ...and nothing else was written (dry has no ledger side effects
+        # beyond the fault marker).
+        ledger.increment.assert_not_called()
+        ledger.reset.assert_not_called()
+        ledger.set_escalated_and_reset.assert_not_called()

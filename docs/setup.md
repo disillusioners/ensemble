@@ -558,13 +558,13 @@ The escalation flag is the per-instance row column `completion_gate_escalated=tr
 
 ```sql
 -- PostgreSQL (production)
-SELECT id, attestation_denied_count, completion_gate_escalated, updated_at
+SELECT instance_id, attestation_denied_count, completion_gate_escalated, updated_at
 FROM instances
 WHERE completion_gate_escalated = TRUE
 ORDER BY updated_at DESC;
 ```
 
-The companion log event on the escalation path is `event=leader_completion_gate_terminal_after_bound`, carrying the same canonical schema fields plus `last_denial_reason`.
+The companion log event on the escalation path is `event=gate_terminal_after_bound` (emitted by the gate node in `daemon/graph.py`), carrying `instance_id`, `attestation_denied_count`, and `completion_gate_escalated=true`.
 
 **Fail-open posture (ruling 4 — Pattern C)**
 

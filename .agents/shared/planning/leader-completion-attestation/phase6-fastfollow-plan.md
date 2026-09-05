@@ -198,3 +198,56 @@ The MVP ships without the backstop — the common case is covered. The backstop 
 Items in this list are recorded here ONLY so a future phase can pick them up cleanly. None are in scope for this plan set; none have committed owners; none have scheduled work. If/when scope is opened, they graduate into proper Phase 6 tasks with full spec.
 
 - **Broadening gate scope to non-leader parents** (planner / developer / reviewer / tidier / approver / architect / tester / etc.) — CANDIDATE, not committed. MVP scope is leader-only per FR-11 / D3 (graph-build-time `agent_id == "leader"` check). A future broadening would need its own D-set, its own incident data, and its own scope-handling for `attestation_nudge` — none of which is in this plan. Cross-reference: `requirements.md` FR-11 + §G1.
+
+---
+
+## Known-Gaps Register (post-review record — 2026-09-05, review-fix commit)
+
+RECORD ONLY — none of these are implemented on this branch. Captured from
+the downstream code review of the LCA MVP so phase 6 picks them up with
+anchors intact.
+
+### KG-1 — exact-string leader match in lifecycle wiring (phase 6)
+
+`daemon/services/instance_lifecycle.py` wires the gate via
+`attestation_enabled=(resolved_agent_id == "leader")` at BOTH the spawn
+path (~line 1699) and the restore path (~line 3742). The exact-string
+comparison is a versioned-agent unwire hazard: once agent versioning
+issues resolved ids like `leader[v2]`, the comparison is False and the
+gate silently unwires for the leader (fail-open by accident). Fix shape:
+compare the PARSED BASE id (strip the version suffix) or WARN-on-disable
+when the parsed base matches `leader` but the exact match failed.
+
+### KG-2 — meta.json drift-guard sweep before the enforce flip (pre-flip)
+
+Add a drift-guard test sweeping `agents/*/meta.json` for
+`attest_completion` exposure (tools.allow / tool registration) before the
+`ENSEMBLE_LEADER_ATTESTATION_MODE=enforce` flip, so a meta.json edit that
+exposes the tool to non-leader agents (or drops it from the leader) fails
+CI instead of surfacing as an authz surprise at flip time. Companion to
+the existing runbook drift test (`tests/integration/test_attestation_runbook_drift.py`).
+
+### KG-3 — `attestation:denial_epochs` array growth cap (phase 6)
+
+The seen-epochs array in `instance_metadata` grows unbounded across
+missions (resets clear the two counter columns, not the array). Likely
+COLLAPSED by review must-fix 1: the deterministic epoch makes one array
+entry per LOGICAL deny (bounded by the deny bound between resets) instead
+of one per node invocation, so the cap may be unnecessary — re-measure
+array growth under enforce soak before implementing a cap. If a cap is
+still wanted, prefer pruning entries older than the current mission over
+a hard truncate (a truncate could re-admit a replayed epoch).
+
+### KG-4 — decision-stability micro-window at the bound (review-fix observation)
+
+Recorded by the review-fix commit (record only, NOT fixed): the
+deterministic epoch makes the COUNT fully replay-safe, but if a crash
+lands AFTER the deny increment commits and BEFORE the node-output
+checkpoint write, the replay re-evaluates with the ALREADY-incremented
+count. At the exact bound (`denied_count + 1 > bound`) that re-evaluation
+resolves `terminal_after_bound` one nudge cycle early — count integrity
+is unaffected (dedup holds; no double-count), but the escalation decision
+inputs are stale-relative. Window is intra-node (sub-second) and requires
+the bound-exact deny; fix shape (phase 6 if ever observed): consult the
+seen-epochs array BEFORE `evaluate()` and short-circuit a replayed deny to
+nudge re-emission.

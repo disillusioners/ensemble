@@ -1120,9 +1120,10 @@ class SQLModelInstanceRepository:
     #
     # O4 (Pause-mid-gate double-increment): ``increment_attestation_
     # denied_count`` is keyed by ``(instance_id, denial_epoch)`` — the
-    # epoch is monotonic across leader missions and is supplied by the
-    # caller (the gate node). A pause-mid-gate resume that replays the
-    # same deny MUST NOT double-increment.
+    # epoch is derived deterministically from checkpoint-stable state
+    # material by the caller (the gate node) so a checkpoint re-run of
+    # the node reproduces the SAME key. A pause-mid-gate resume that
+    # replays the same deny MUST NOT double-increment.
     #
     # All four methods fail-OPEN at the call site (the gate node wraps
     # them in ``except Exception`` and degrades deny → allow + emits
@@ -1136,12 +1137,6 @@ class SQLModelInstanceRepository:
     # the counter's per-mission lifecycle). Atomic at the row level —
     # no torn write under concurrent deny paths.
 
-    _ATTESTATION_LEDGER_FAIL_OPEN_HINT = (
-        "SQLite-not-supported PG upsert; the gate node wraps all four "
-        "methods in except Exception and degrades deny → allow + emits "
-        "leader_completion_gate_db_error per C3/AC-6.6"
-    )
-
     def increment_attestation_denied_count(
         self,
         instance_id: str,
@@ -1151,29 +1146,42 @@ class SQLModelInstanceRepository:
 
         Atomically increments ``attestation_denied_count`` for the
         instance, keyed by ``(instance_id, denial_epoch)`` — replaying
-        the SAME deny (pause-mid-gate resume) MUST NOT double-increment.
+        the SAME deny (checkpoint re-run / pause-mid-gate resume) MUST
+        NOT double-increment.
 
-        Implementation note (idempotency): a side ledger of seen
-        ``denial_epoch`` keys (``attestation_denied_count_denial_epochs``
-        — instance-row JSONB metadata, ``attestation:denial_epochs``
-        array). The increment path checks presence first and short-
-        circuits on a duplicate epoch; on first-seen epoch it appends
-        the epoch to the array AND increments the counter, both in one
-        ``jsonb_set`` + arithmetic UPDATE. This is per-instance, bounded
-        by the missions-per-instance lifespan, and avoids PG-only
-        ``ON CONFLICT DO UPDATE`` syntax that would break fresh-SQLite
-        boot (the LESSONS/2026-09-04-fresh-sqlite-boot-migration-2026
-        0714-pg-only trap).
+        Single-transaction guarantee (review must-fix 2): the ENTIRE
+        operation — row lock, O4 dedup decision, epochs-array append,
+        counter increment, commit — runs in ONE session/transaction.
+        The predecessor ran TWO (a ``set_metadata`` self-commit followed
+        by a second UPDATE), so a crash between them persisted the
+        epochs array WITHOUT the counter bump — a permanently lost deny.
+
+        Concurrency: ``Session.get(..., with_for_update=True)`` takes a
+        row lock on PostgreSQL from the read through the commit, so a
+        concurrent reset/increment/set_metadata UPDATE on the same row
+        serializes BEHIND this commit (the read-modify-write lost-update
+        window against a concurrent reset is closed). On SQLite the
+        clause is a no-op (dialect renders no ``FOR UPDATE``) and the
+        database's single-writer lock provides the same serialization:
+        a competing writer either waits or fails LOUD (``OperationalError``
+        → the gate's C3 fail-open) instead of silently interleaving.
+        No PG-only syntax exists on the SQLite path — the array is
+        written through ORM column assignment, which serializes
+        dialect-independently (the ``jsonb_set``/``json_set`` raw-SQL
+        handling in :meth:`set_metadata` is NOT needed here precisely
+        because the row lock makes the read-modify-write safe).
 
         Args:
             instance_id: Leader instance under evaluation.
-            denial_epoch: Monotonic key identifying THIS deny (caller-
-                supplied; the gate node mints one per would-be-END
-                routing). Replays of the same key are no-ops.
+            denial_epoch: Caller-supplied key identifying THIS deny
+                (the gate node derives it deterministically from
+                checkpoint-stable state material). Replays of the same
+                key are no-ops.
 
         Returns:
-            The post-increment counter value. ``-1`` if the instance is
-            missing (caller treats as DB error → fail-open).
+            The post-increment counter value (the unchanged current
+            value on an O4 replay). ``-1`` if the instance is missing
+            (caller treats as DB error → fail-open).
 
         Raises:
             Exception: any DB-level error (SQLAlchemy OperationalError
@@ -1181,16 +1189,17 @@ class SQLModelInstanceRepository:
                 ``except Exception`` per C3/AC-6.6 and degrades
                 deny → allow + emits ``leader_completion_gate_db_error``.
         """
-        from sqlmodel import select as sqlmodel_select
-
         with SQLModelSession(self.engine) as db_session:
-            instance = db_session.get(Instance, instance_id)
+            instance = db_session.get(
+                Instance, instance_id, with_for_update=True
+            )
             if instance is None:
                 return -1
-            # O4 idempotency: read the seen-epochs JSON array from
-            # ``instance_metadata`` (dialect-portable via json_extract /
-            # ``->>``). A pre-existing epoch = no-op (returns current
-            # counter unchanged). First-seen epoch = append + increment.
+            # O4 idempotency — the dedup decision happens INSIDE the
+            # locked transaction: read the seen-epochs JSON array from
+            # ``instance_metadata``. A pre-existing epoch = no-op
+            # (returns the current counter unchanged). First-seen epoch
+            # = append + increment, both committed together.
             current_count = int(instance.attestation_denied_count or 0)
             existing = instance.instance_metadata.get(
                 "attestation:denial_epochs"
@@ -1207,32 +1216,18 @@ class SQLModelInstanceRepository:
                 # O4 replay — same deny, no double-increment.
                 return current_count
             seen_epochs.append(denial_epoch)
-            # Persist the augmented array via the dialect-aware atomic
-            # metadata-write path so a concurrent ``set_metadata`` on a
-            # different key does not clobber the array. We then issue a
-            # second UPDATE for the counter column itself.
-            self.set_metadata(
-                instance_id,
-                "attestation:denial_epochs",
-                seen_epochs,
-            )
-            # Re-load the row (set_metadata committed in its own
-            # transaction) and increment the counter column.
-            db_session.refresh(instance)
-            from sqlmodel import update as sqlmodel_update
-
-            stmt = (
-                sqlmodel_update(Instance)
-                .where(Instance.instance_id == instance_id)
-                .values(
-                    attestation_denied_count=current_count + 1,
-                    updated_at=datetime.now(timezone.utc).isoformat(),
-                )
-            )
-            db_session.exec(stmt)
+            # ORM write of BOTH columns in the SAME transaction. The
+            # metadata dict must be REASSIGNED (not mutated in place):
+            # ``instance_metadata`` is a plain ``JSONBType`` column
+            # without mutable tracking, so in-place key writes would not
+            # be detected as a change.
+            new_metadata = dict(instance.instance_metadata or {})
+            new_metadata["attestation:denial_epochs"] = seen_epochs
+            instance.instance_metadata = new_metadata
+            instance.attestation_denied_count = current_count + 1
+            instance.updated_at = datetime.now(timezone.utc).isoformat()
             db_session.commit()
-            db_session.refresh(instance)
-            return int(instance.attestation_denied_count or 0)
+            return current_count + 1
 
     def reset_attestation_denied_count(self, instance_id: str) -> bool:
         """Ruling-2 single reset op — clears BOTH columns (Phase 3 task 3.3).

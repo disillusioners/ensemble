@@ -259,3 +259,67 @@ class TestNoPhantomEnvVar:
                 f"runbook documents phantom legacy env var {phantom!r} "
                 "(AC-7.9 forbids the legacy single-bool surface)"
             )
+
+# =============================================================================
+# Escalation-path doc truth (review must-fix / same-pass fix 3 — branch
+# feature/leader-completion-attestation). The postmortem section's log
+# event name, field claims, and SQL are pinned against the EMITTED code
+# (daemon/graph.py gate node) so the doc cannot drift from production
+# truth again. Cross-checked bidirectionally: doc ↔ graph source.
+# =============================================================================
+
+GRAPH_PY = REPO_ROOT / "daemon" / "graph.py"
+
+#: The literal event name emitted by the gate node's escalation branch.
+EMITTED_TERMINAL_EVENT = "event=gate_terminal_after_bound"
+
+
+class TestEscalationPathDocTruth:
+    @pytest.fixture(autouse=True)
+    def _sources(self):
+        assert SETUP_MD.is_file(), f"missing runbook doc: {SETUP_MD}"
+        assert GRAPH_PY.is_file(), f"missing graph source: {GRAPH_PY}"
+        self.text = SETUP_MD.read_text(encoding="utf-8")
+        self.graph_src = GRAPH_PY.read_text(encoding="utf-8")
+        return self.text
+
+    def test_emitted_event_name_is_canonical_in_graph(self):
+        """Sanity anchor: the graph DOES emit event=gate_terminal_after_bound.
+
+        If this fails, the emitter was renamed — update the runbook AND
+        EMITTED_TERMINAL_EVENT together.
+        """
+        assert EMITTED_TERMINAL_EVENT in self.graph_src
+
+    def test_doc_names_the_emitted_event(self):
+        # (a) event-name truth: the doc must name the event the gate
+        # node ACTUALLY emits (not the phantom
+        # leader_completion_gate_terminal_after_bound).
+        assert EMITTED_TERMINAL_EVENT in self.text, (
+            "runbook escalation section must name the emitted event "
+            f"{EMITTED_TERMINAL_EVENT!r}"
+        )
+        assert "leader_completion_gate_terminal_after_bound" not in self.text, (
+            "runbook documents the phantom event "
+            "'leader_completion_gate_terminal_after_bound' — the gate "
+            "node emits 'gate_terminal_after_bound'"
+        )
+
+    def test_doc_does_not_claim_last_denial_reason_field(self):
+        # (b) field truth: the escalation log line carries instance_id,
+        # attestation_denied_count, completion_gate_escalated — there is
+        # NO last_denial_reason field anywhere in the emitter.
+        assert "last_denial_reason" not in self.text, (
+            "runbook claims a last_denial_reason field that the "
+            "gate_terminal_after_bound emitter never produces"
+        )
+        assert "last_denial_reason" not in self.graph_src
+
+    def test_postmortem_sql_selects_the_primary_key(self):
+        # (c) SQL truth: the instances table PK is instance_id; the
+        # postmortem query must not select a nonexistent "id" column.
+        assert "SELECT instance_id, attestation_denied_count" in self.text
+        assert "SELECT id," not in self.text, (
+            "runbook postmortem SQL selects a nonexistent 'id' column — "
+            "the instances PK is instance_id"
+        )
