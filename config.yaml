@@ -209,7 +209,7 @@ compaction:
   # touching code. Example: the leader uses 'gpt-4o' (128k) but a vision
   # sub-agent uses 'gpt-4o-mini-vision' with a tighter 32k window.
   # context_window_default is the fallback when neither an override nor
-  # the registry matches the active model. 0 = use built-in default (180k).
+  # the registry matches the active model. 0 = use built-in default (700k).
   context_window_default: 0
   context_window_overrides:
     "agentic": 700000
