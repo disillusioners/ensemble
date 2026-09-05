@@ -2494,6 +2494,14 @@ class SessionState(MessagesState):
     # and persists at the node-boundary checkpoint (same pattern as
     # ``watchover_route``).
     attestation_route: str | None = None
+    # Persisted diagnostic companion to the in-state nudge marker.  It is
+    # intentionally a channel in SessionState (rather than only a transient
+    # return value) so checkpoint assertions and crash-replay tests can read
+    # the denial count without scraping the message history.
+    attestation_nudge_denied_count: int | None = None
+    # Transient error marker carried in the checkpoint so a fail-open
+    # evaluation remains visible across a crash/resume boundary.
+    gate_exception_seen: bool = False
 
 
 def should_continue(state: MessagesState) -> str:
@@ -2882,6 +2890,24 @@ def should_end_attestation(state: Any) -> str:
     return END
 
 
+def _persist_gate_exception_marker(ledger: Any, instance_id: str) -> None:
+    """Persist the transient gate-error marker when a ledger supports metadata."""
+    set_exception_metadata = getattr(ledger, "set_metadata", None)
+    if set_exception_metadata is None:
+        return
+    try:
+        set_exception_metadata(
+            instance_id,
+            "attestation_gate_exception_seen",
+            True,
+        )
+    except Exception:  # noqa: BLE001 — marker is diagnostic only
+        logger.debug(
+            "could not persist gate_exception_seen metadata for instance=%s",
+            instance_id,
+        )
+
+
 def create_attestation_gate_node(
     gate_config: dict,
     settings: Any,
@@ -2995,18 +3021,28 @@ def create_attestation_gate_node(
                     "leader_prompt_version", ""
                 ),
             )
+            if decision.gate_exception_seen:
+                _persist_gate_exception_marker(ledger, effective_instance_id)
+                return {
+                    "attestation_route": None,
+                    "gate_exception_seen": True,
+                }
         except Exception as gate_exc:  # noqa: BLE001 — C3 fail-open
             logger.error(
                 "event=leader_completion_gate_error error_class=%s "
                 "instance_id=%s gate_location=%s decision=fail_open_allowed "
-                "detail=node-level catch: %s: %s",
+                "gate_exception_seen=true detail=node-level catch: %s: %s",
                 type(gate_exc).__name__,
                 effective_instance_id,
                 gate_config.get("gate_location", "graph_end_candidate"),
                 type(gate_exc).__name__,
                 gate_exc,
             )
-            return {"attestation_route": None}
+            _persist_gate_exception_marker(ledger, effective_instance_id)
+            return {
+                "attestation_route": None,
+                "gate_exception_seen": True,
+            }
 
         # Phase 3 — ledger writes (C3 fail-open wrapper). NO writes on
         # the meta-conditions / dry / R2 un-attested allow paths. The
@@ -3016,7 +3052,7 @@ def create_attestation_gate_node(
             denial_epoch = str(uuid.uuid4())
             try:
                 if decision.decision is Decision.DENIED:
-                    safe_increment(
+                    increment_result = safe_increment(
                         ledger,
                         effective_instance_id,
                         denial_epoch,
@@ -3025,8 +3061,15 @@ def create_attestation_gate_node(
                             "denial_epoch": denial_epoch,
                         },
                     )
+                    # A failed ledger increment degrades this would-be
+                    # denial to an allow.  In particular, do not return a
+                    # nudge that the graph cannot persist safely.
+                    if increment_result is None or (
+                        isinstance(increment_result, int) and increment_result < 0
+                    ):
+                        return {"attestation_route": None}
                 elif decision.decision is Decision.TERMINAL_AFTER_BOUND:
-                    safe_set_escalated_and_reset(
+                    terminal_result = safe_set_escalated_and_reset(
                         ledger,
                         effective_instance_id,
                         error_class_context={
@@ -3034,6 +3077,8 @@ def create_attestation_gate_node(
                             "decision": decision.decision.value,
                         },
                     )
+                    if terminal_result is False or terminal_result is None:
+                        return {"attestation_route": None}
                 elif decision.decision is Decision.ALLOWED:
                     # Attested allow only — R2 un-attested allow arrives
                     # as ALLOWED_LEGITIMATE_PENDING_WAKEUP, which is its
@@ -3061,6 +3106,18 @@ def create_attestation_gate_node(
                     "instance_id=%s detail=unexpected ledger wrapper failure",
                     effective_instance_id,
                 )
+                return {"attestation_route": None}
+
+        if decision.decision is Decision.TERMINAL_AFTER_BOUND:
+            # Terminal escalation is a distinct operator event from the
+            # canonical decision line.  Keep it one-shot by placing the
+            # event at this decision branch (not in the per-evaluation log).
+            logger.info(
+                "event=gate_terminal_after_bound instance_id=%s "
+                "attestation_denied_count=%s completion_gate_escalated=true",
+                effective_instance_id,
+                decision.next_denied_count,
+            )
 
         if decision.decision == Decision.DENIED:
             # R1 — the deny path is the checkpoint-durable in-graph
@@ -3080,9 +3137,16 @@ def create_attestation_gate_node(
             nudge = HumanMessage(
                 content=ATTESTATION_NUDGE_TEXT,
                 id=str(uuid.uuid4()),
-                additional_kwargs={"attestation_nudge": True},
+                additional_kwargs={
+                    "attestation_nudge": True,
+                    "attestation_nudge_denied_count": decision.next_denied_count,
+                },
             )
-            return {"messages": [nudge], "attestation_route": "agent"}
+            return {
+                "messages": [nudge],
+                "attestation_route": "agent",
+                "attestation_nudge_denied_count": decision.next_denied_count,
+            }
 
         # allow / terminal_after_bound / dry_log /
         # allowed_legitimate_pending_wakeup — allow the END, zero side

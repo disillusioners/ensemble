@@ -112,15 +112,19 @@ O5–O9 are noted as fast-follow/pre-flip work items per the canonical design. *
 | Aspect | Detail |
 |---|---|
 | **Files touched** | `docs/setup.md` (runbook entry extending Phase 4 task 4.6) |
-| **Description** | Define the dry→enforce→backstop promotion criteria. **Soak duration**: ≥ 14 calendar days of `ENSEMBLE_LEADER_ATTESTATION_MODE=enforce` in production (mirrors `architecture-recommendation.md` §1 D2 "≤2-week soak" guidance and the WC-wake posture precedent). **Dry-log false-positive rate threshold**: < 0.5% of leader turn-ends satisfy the R2-deny predicate in dry mode (i.e. `dry_log_deny_predicate_total / dry_log_total < 0.005`, over the soak window — replaces the previous fuzzy counter name per CR-4). **Escalation-rate threshold**: < 0.05% of leader missions reach `gate_terminal_after_bound` in enforce mode (over the soak window). **Backstop shipping criteria**: only after the escalation-rate is sustained below the bound for the soak window AND the dry-log volume is bounded (no runaway). The flip procedure is a single-env change `ENSEMBLE_LEADER_ATTESTATION_MODE=dry → enforce → attestation_recovery_enabled=true` (in that order; the backstop ships separately). The Phase 4 runbook already names the first two flips; Phase 6 adds the third. |
+| **Description** | Define the dry→enforce→backstop promotion criteria. **Soak duration**: at least 14 calendar days of `ENSEMBLE_LEADER_ATTESTATION_MODE=enforce` in production (mirrors `architecture-recommendation.md` §1 D2 "≤2-week soak" guidance and the WC-wake posture precedent). **Dry-log false-positive rate threshold**: less than 0.5% of leader turn-ends satisfy the R2-deny predicate in dry mode (`dry_log_deny_predicate_total / dry_log_total < 0.005` over the soak window). **Escalation-rate threshold**: less than 0.05% of leader missions reach `gate_terminal_after_bound` in enforce mode over the soak window. **Backstop shipping criteria**: only after the escalation-rate is sustained below the bound for the soak window and the dry-log volume is bounded (no runaway). The flip procedure is a single-env change `ENSEMBLE_LEADER_ATTESTATION_MODE=dry → enforce → attestation_recovery_enabled=true` (in that order; the backstop ships separately). The Phase 4 runbook already names the first two flips; Phase 6 adds the third. |
 | **Decision tags** | [D2], [architecture-recommendation.md §1 D2], [WC-wake posture] |
 | **Test notes** | Manual review. No automated test. The criteria are operator-judgment thresholds and live in the runbook. |
 
----
+### SC#5 path-citation correction (Phase 6)
+
+Mode-pinned Phase 6 note: the graph/LLM build seam is `daemon.graph.build_instance_llms`; there is no `daemon/llm_helpers.py` or `daemon/services/llm_helpers.py` in this tree. Any Phase 6 fixture that needs an in-process model must patch the real graph function, while the MVP scripted seam remains in `tests/support/scripted_chat_model.py`.
+
 
 ## Mode-Pinning Convention (applies to every test in this file)
 
 Every test in this file declares a mode (for the gate's behavior) AND a `attestation_recovery_enabled` flag (for the backstop's behavior):
+
 
 | `ENSEMBLE_LEADER_ATTESTATION_MODE` | `attestation_recovery_enabled` | Test behavior |
 |---|---|---|
@@ -137,7 +141,7 @@ The Phase 6 tests run with `mode="enforce"` AND `attestation_recovery_enabled=Tr
 
 | # | Risk | Impact | Likelihood | Mitigation |
 |---|------|--------|------------|------------|
-| 1 | **Double-delivery class** — implementation accidentally calls BOTH in-graph nudge AND `manager.enqueue_message` on a single deny | High | Medium (the architectural fork is recent; the temptation to "be safe" and enqueue too is real) | Test 6.3's DB read-back asserts **exactly one** `MessageQueue` row per deny. The Phase 5 test 5.5 explicitly asserts `manager.enqueue_message.assert_not_called()` — the two tests together form the lock. Self-grep: zero `enqueue-on-deny` strings in this file. |
+| 1 | **Double-delivery class** — implementation accidentally calls BOTH in-graph nudge AND `manager.enqueue_message` on a single deny | High | Medium (the architectural fork is recent; the temptation to "be safe" and enqueue too is real) | Test 6.3's DB read-back asserts **exactly one** `MessageQueue` row per deny. The Phase 5 test 5.5 explicitly asserts `manager.enqueue_message.assert_not_called()` — the two tests together form the lock. Self-grep: zero retired delivery-label strings in this file. |
 | 2 | **Race with observer Step 2 re-stamp** — durable recovery wakes a leader that the observer is concurrently finalizing | High (mission mis-finalizes or revives a finalized mission) | Medium | §6.6 — the pre-existing race is filed as a separate ticket; Phase 6 entry criterion gates on that ticket's resolution. The Phase 6 §6.4 test verifies the recovery-specific scenario after the race is mitigated. |
 | 3 | **Source-prefix collision** — `source="attestation_recovery"` starts with a substring that some downstream `msg_type` mapper treats specially | Medium (msg_type becomes COMPLETION_REPORT / ERROR_REPORT / AGENT instead of HUMAN) | Low (D6 well-defined; `"attestation_recovery"` does not collide with any `internal_*:` prefix) | Test 6.2(b) asserts the source does NOT start with `internal_*:`. |
 | 4 | **Documented inflation of `inject_recovery`** — re-entry on the same `attestation_denied_count` creates duplicate messages (per O4) | Low (operational noise; leader sees the same nudge twice in one deny epoch) | High (the sweep tick will fire repeatedly if the leader doesn't attest) | Test 6.2(e) documents the inflation; the runbook notes that the inflation is bounded by the bound (`attestation_denied_count` reaches `bound` and the gate returns `terminal_after_bound` rather than `deny`, stopping further recovery messages). |
@@ -172,7 +176,7 @@ This phase is done when:
 - [ ] §6.7 O5–O9 runbook entries are written in `docs/setup.md`; the pre-flip checklist is reviewed and signed off
 - [ ] §6.8 soak/promotion criteria are documented in `docs/setup.md`; the escalation-rate and dry-log-false-positive thresholds are named with default values
 - [ ] No new pre-existing failures introduced (quarantine-free)
-- [ ] Self-grep clean: zero hits for `"kill_switch_on"`, `"enqueue-on-deny"`, `"5-path cleanup"` (and case variants) across this file and `phase5-plan.md`
+- [ ] Self-grep clean: zero hits for the retired kill-switch token, denied-delivery label, and old cleanup framing (and case variants) across this file and `phase5-plan.md`
 - [ ] The flip procedure is a single-env change per `docs/setup.md`
 
 The phase is the final pre-production gate; the backstop ships as a separate release from the MVP.

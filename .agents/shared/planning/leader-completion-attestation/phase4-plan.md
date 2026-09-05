@@ -110,7 +110,7 @@ scanner_summary_seen:           bool     # diagnostic — was a compaction summa
 | Aspect | Detail |
 |---|---|
 | **Files touched** | `docs/setup.md` (extend); new section under "Kill-switches" or "Operational toggles" |
-| **Description** | Document the three env vars + dry-run with deployment guidance: (a) ship default mode=`dry` (D2 RESOLVED); (b) flip mode=`enforce` after ≤2-week soak or on incident (WC-wake precedent); (c) recommended soak procedure: enable `dry` mode at ship, observe `event=leader_completion_gate` log lines with `decision=dry_log` (canonical enum per Phase 4 task 4.5) for false positives, then flip to `enforce`. Document the boot log line operators should look for, including the O1 WARN message ("`WINDOW > min_recent_window`"). Document the escalation flag and how to query for `completion_gate_escalated=true` instances postmortem. **Promotion metrics** (this task): a metrics emitter reports `dry_log_total` (canonical name), `dry_log_deny_predicate_total` (subdivision of `dry_log_total` with R2-deny predicate satisfied — i.e. would have denied under `enforce`; replaces the previous fuzzy counter name per CR-4), and `enforce_denied_total` — operators query these to adjudicate the dry→enforce flip. **The promotion metrics + operator runbook satisfy the instrumented dry-run** (the dry default at ship is the ship posture; metrics + runbook are the dry-run SOPs). This is NOT a pre-Phase-2 blocking activity — Phase 4 ships this; Phase 2 ships the gate with `mode=dry` already active. |
+| **Description** | Document the three env vars + dry-run with deployment guidance: (a) ship default mode=`dry` (D2 RESOLVED); (b) flip mode=`enforce` after ≤2-week soak or on incident (WC-wake precedent); (c) recommended soak procedure: enable `dry` mode at ship, observe `event=leader_completion_gate` log lines with `decision=dry_log` (canonical enum per Phase 4 task 4.5) for false positives, then flip to `enforce`. Document the boot log line operators should look for, including the O1 WARN message ("`WINDOW > min_recent_window`"). Document the escalation flag and how to query for `completion_gate_escalated=true` instances postmortem. **Promotion metrics** (this task): a metrics emitter reports `dry_log_total` (canonical name), `dry_log_deny_predicate_total` (subdivision of `dry_log_total` with R2-deny predicate satisfied — i.e. would deny under `enforce`; the canonical metric is), and `enforce_denied_total` — operators query these to adjudicate the dry→enforce flip. **The promotion metrics + operator runbook satisfy the instrumented dry-run** (the dry default at ship is the ship posture; metrics + runbook are the dry-run SOPs). This is NOT a pre-Phase-2 blocking activity — Phase 4 ships this; Phase 2 ships the gate with `mode=dry` already active. |
 | **Decision tags** | [D2] (deploy plan + promotion metrics) |
 | **Test notes** | Manual review. Drift test asserts the env var names + default values documented in `docs/setup.md` match the resolver implementation (`tests/integration/test_attestation_runbook_drift.py`). |
 
@@ -157,22 +157,22 @@ This phase is reversible per resolver + observability:
 
 This phase is done when:
 
-- [ ] `tests/unit/test_attestation_resolver.py` passes (tri-state mode env resolution, blank→off parsing, restart-read)
-- [ ] `tests/integration/test_attestation_o1_boot_assert.py` (new) passes (WARN fires when `WINDOW > min_recent_window`; no WARN under default config)
-- [ ] Boot log line emitted on every daemon startup with the three resolved values (`mode`, `window`, `deny_bound`)
-- [ ] `tests/integration/test_attestation_config.py` (Phase 5) passes (env var → config wiring)
-- [ ] AC-7.1 (window N from resolver) verified
-- [ ] AC-7.2 (window default = 3) verified
-- [ ] AC-7.3 (mode=`off` → byte-equivalent baseline) verified
-- [ ] AC-7.4 (mode=`enforce` → enforcement) verified
-- [ ] AC-7.6 (restart-read: behavior does not change until restart) verified
-- [ ] AC-7.7 (boot log line announces resolved values) verified
-- [ ] AC-10.1 (every gate decision logged with full schema — incl. R2 fields + O8 `messages_scanned>0` + the canonical `Decision` enum from Phase 4 task 4.5) verified
-- [ ] AC-10.2 (escalation event unique per instance) verified
-- [ ] AC-10.3 (dry-mode would-have-denied schema — `decision=dry_log` with R2-deny predicate satisfied and R2 input fields present) verified
-- [ ] AC-10.4 (gate_exception log entry on scanner exception — `event=leader_completion_gate_error` carries exception type, stack-trace summary, `instance_id`, `gate_location`, `error_class`; fail-open is a PATH, not a separate decision value) verified
-- [ ] `tests/integration/test_attestation_dry_mode.py` (new) passes (dry mode: counter unchanged, no nudge, no flag change, leader turn ends normally, `decision=dry_log` log emitted per the canonical enum)
-- [ ] `tests/integration/test_attestation_runbook_drift.py` (new) passes (env var names + default values in `docs/setup.md` match the resolver)
-- [ ] Promotion metrics (`dry_log_total`, `dry_log_deny_predicate_total` — counts dry evals with R2-deny predicate satisfied, i.e. would have denied under `enforce`; replaces the previous fuzzy counter name; `enforce_denied_total`) emit and are queryable
+- [x] `tests/unit/test_attestation_resolver.py` passes (tri-state mode env resolution, blank→off parsing, restart-read)
+- [x] `tests/integration/test_attestation_o1_boot_assert.py` (new) passes (WARN fires when `WINDOW > min_recent_window`; no WARN under default config)
+- [x] Boot log line emitted on every daemon startup with the three resolved values (`mode`, `window`, `deny_bound`)
+- [x] `tests/integration/test_attestation_config.py` (Phase 5) passes (env var → config wiring)
+- [x] AC-7.1 (window N from resolver) verified
+- [x] AC-7.2 (window default = 3) verified
+- [x] AC-7.3 (mode=`off` → byte-equivalent baseline) verified
+- [x] AC-7.4 (mode=`enforce` → enforcement) verified
+- [x] AC-7.6 (restart-read: behavior does not change until restart) verified
+- [x] AC-7.7 (boot log line announces resolved values) verified
+- [x] AC-10.1 (every gate decision logged with full schema — incl. R2 fields + O8 `messages_scanned>0` + the canonical `Decision` enum from Phase 4 task 4.5) verified
+- [x] AC-10.2 (escalation event unique per instance) verified
+- [x] AC-10.3 (dry-mode R2-deny-predicate schema — `decision=dry_log` with R2-deny predicate satisfied and R2 input fields present) verified
+- [x] AC-10.4 (gate_exception log entry on scanner exception — `event=leader_completion_gate_error` carries exception type, stack-trace summary, `instance_id`, `gate_location`, `error_class`; fail-open is a PATH, not a separate decision value) verified
+- [x] `tests/integration/test_attestation_dry_mode.py` (new) passes (dry mode: counter unchanged, no nudge, no flag change, leader turn ends normally, `decision=dry_log` log emitted per the canonical enum)
+- [x] `tests/integration/test_attestation_runbook_drift.py` (new) passes (env var names + default values in `docs/setup.md` match the resolver)
+- [x] Promotion metrics (`dry_log_total`, `dry_log_deny_predicate_total` — counts dry evals with the R2-deny predicate satisfied; the canonical `enforce_denied_total`) emit and are queryable
 
 The phase is the precondition for Phase 5 (the test matrix exercises the resolver across all ACs). The default mode at ship is `dry`; operators adjudicate the dry→enforce flip using the promotion metrics + runbook (NOT a pre-Phase-2 activity).

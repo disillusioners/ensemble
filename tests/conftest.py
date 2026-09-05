@@ -7,6 +7,10 @@ from datetime import datetime
 from types import ModuleType
 from unittest.mock import MagicMock, AsyncMock
 
+# Keep the attestation-specific real-graph fixtures discoverable without
+# making every unit test load LangGraph.
+pytest_plugins = ("tests.support.conftest",)
+
 
 # Create mock modules and add to sys.modules BEFORE any daemon imports
 def create_mock_module(name: str, attrs: dict = None) -> ModuleType:

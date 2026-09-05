@@ -262,6 +262,9 @@ class GateDecision:
     #: this, never the raw enum, so ``terminal_after_bound`` and
     #: ``dry_log`` structurally cannot nudge.
     should_inject_nudge: bool
+    # Transient error marker: a fail-open evaluation remains visible in the
+    # checkpoint and in the operator log after a crash/resume.
+    gate_exception_seen: bool = False
     # ——— scanner diagnostics (canonical schema fields) ———
     scanner_window_truncated: bool = False
     scanner_summary_seen: bool = False
@@ -546,6 +549,18 @@ def evaluate(
         "mode": mode_resolver.mode,
     }
 
+    # A meta-condition bypass is not a gate evaluation.  In particular,
+    # off-mode must not even enter the scanner/facade path or emit a
+    # decision entry; this is the byte-equivalent OFF baseline.
+    if not attestation_enabled or not scope_applicable or mode_resolver.mode == "off":
+        return GateDecision(
+            decision=Decision.ALLOWED,
+            next_denied_count=denied_count,
+            should_inject_nudge=False,
+            scanned_window_size=mode_resolver.window,
+            denied_count=denied_count,
+        )
+
     # Fail-open for degenerate embeddings: without a manager handle the
     # R2 inputs are unreadable. Allow + note (never raise).
     if manager is None:
@@ -630,6 +645,7 @@ def evaluate(
                 pending_children=-1,
                 queued_or_expected_wakeups=-1,
                 denied_count=denied_count,
+                gate_exception_seen=True,
             )
 
         # (iii) the pure decision.
@@ -719,7 +735,7 @@ def evaluate(
         logger.error(
             "event=leader_completion_gate_error error_class=%s "
             "instance_id=%s gate_location=%s mode=%s "
-            "leader_prompt_version=%s denied_count=%s "
+            "leader_prompt_version=%s denied_count=%s gate_exception_seen=true "
             "decision=fail_open_allowed detail=%s: %s",
             type(exc).__name__,
             instance_id,
@@ -736,4 +752,5 @@ def evaluate(
             should_inject_nudge=False,
             denied_count=denied_count,
             scanned_window_size=mode_resolver.window,
+            gate_exception_seen=True,
         )

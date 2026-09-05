@@ -1387,6 +1387,22 @@ class SQLModelInstanceRepository:
                 return 0
             return int(row[0] if isinstance(row, tuple) else row)
 
+    # Short protocol aliases consumed by the in-graph gate.  The public
+    # repository methods above are intentionally descriptive; these aliases
+    # keep the graph's small AttestationLedger protocol honest when it is
+    # given the real SQLModelInstanceRepository.
+    def increment(self, instance_id: str, denial_epoch: str) -> int:
+        return self.increment_attestation_denied_count(instance_id, denial_epoch)
+
+    def reset(self, instance_id: str) -> bool:
+        return self.reset_attestation_denied_count(instance_id)
+
+    def set_escalated(self, instance_id: str) -> bool:
+        return self.set_completion_gate_escalated(instance_id)
+
+    def set_escalated_and_reset(self, instance_id: str) -> bool:
+        return self.reset_attestation_ledger_with_escalation(instance_id)
+
     # --------------------------------------------------------
     # ZOMBIE-INSTANCE SCAN — System Cleanup Bucket 5
     # --------------------------------------------------------

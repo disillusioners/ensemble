@@ -139,7 +139,7 @@ This phase is done when:
 - [x] `agents/leader/rule.md` has the `### Must` block under `## Must` with the contract text
 - [x] `agents/leader/workflow.md` has the mirror contract
 - [x] Unit test asserts all 13 non-leader agents do NOT have `attestation` in `tools.allow`
-- [x] `tests/integration/test_attestation_compaction_precondition.py` (new) characterizes the default-config safe zone AND the aggressive-path case; report goes to the architect
+- [ ] `tests/integration/test_attestation_compaction_precondition.py` (new) characterizes the default-config safe zone AND the aggressive-path case; report goes to the architect
 - [x] Boot log (added in Phase 4) announces the new tool category as `present` (sanity)
 
 The phase is the precondition for Phase 2; Phase 2 cannot start until the compaction-spike result is known (gates D10 mitigation choice for D1=B path).
