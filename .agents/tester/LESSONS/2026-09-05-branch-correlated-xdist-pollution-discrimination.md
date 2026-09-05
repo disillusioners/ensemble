@@ -21,3 +21,6 @@ ReviveGuard-scope gate: `regression_unit_tools` pack (pytest-xdist `-n auto`) fa
 
 ## Discovered by
 Workers `fd5ae94f` (detection) + `4a62cea4` (attribution + budget), gate 2026-09-05. RESULTS/2026-09-05-revive-guard-scope-empirical-gate.md §5.
+
+## RESOLUTION (2026-09-05, R3 @ 1d166d54)
+Fixed at the VICTIM, not the suspected polluter — and that was correct: bisection showed serial `-n 1` green while a failing xdist worker ran ZERO new guard tests; the true root was the victim's latent missing isolation (the `system_upgrade` category is lazily registered at factory-build time — `_tool_registry.py:18` empty-at-import, `instance.py:4475` — so any test reading the global registry needs its own populated-registry precondition). Fix shape: class-scoped autouse fixture that conditionally builds the registry + hard-asserts the precondition (non-vacuous), idempotent via conditional skip, no teardown (populated == booted-daemon invariant). **Lesson addendum**: when the suspected polluter's 2-file combo does not reproduce, check whether the VICTIM lacks its own precondition before hunting xdist adjacency — a victim-side autouse precondition is the deterministic fix; polluter-side fixtures cannot guarantee worker co-location.
