@@ -1683,6 +1683,14 @@ class InstanceLifecycleService:
                 self._manager.message_metadata_repo,
                 SOURCE_COMPACTION_PRECALL_95,
             ),
+            # Leader completion attestation (Phase 2, D3 leader-only):
+            # the gate is wired at graph-build time ONLY for leader
+            # graphs — non-leader graphs are structurally untouched.
+            # The tri-state mode short-circuit (off ⇒ legacy wiring)
+            # and the manager presence check live in
+            # ``build_instance_graph``.
+            attestation_enabled=(resolved_agent_id == "leader"),
+            attestation_prompt_version=(metadata.version or "") if metadata else "",
         )
 
         # Save metadata to DB using instance repository
@@ -3721,6 +3729,12 @@ class InstanceLifecycleService:
                 self._manager.message_metadata_repo,
                 SOURCE_COMPACTION_PRECALL_95,
             ),
+            # Leader completion attestation (Phase 2, D3 leader-only) —
+            # restore path: same wiring rule as the spawn path (gate
+            # only for leader graphs; mode/manager checks inside
+            # ``build_instance_graph``).
+            attestation_enabled=(resolved_agent_id == "leader"),
+            attestation_prompt_version=(agent_meta.version or "") if agent_meta else "",
         )
 
         # Store in instances dict before watchover crash recovery. The regular

@@ -8432,6 +8432,66 @@ class InstanceManager:
         """
         return await self._messaging_service.get_queue_stats(instance_id)
 
+    # ------------------------------------------------------------------
+    # Attestation gate R2 facades (Phase 2, leader-completion-attestation
+    # task 2.3 / CR-1). Both are SYNC `def` on purpose: the gate node is
+    # async and bridges the whole evaluate() call via asyncio.to_thread,
+    # so the facades themselves stay plain blocking reads (same split as
+    # bus.count_pending_for_target_sync — the sync convenience API for
+    # callers inside worker threads).
+    # ------------------------------------------------------------------
+
+    def count_pending_children(self, instance_id: str) -> int:
+        """Count PENDING dependency watchers targeting this instance.
+
+        Attestation-gate R2 input (``pending_children``). Forwards to
+        ``DependencyBus.count_pending_for_target_sync`` (the bus's sync
+        convenience API — the completion gate is the critical reader of
+        pending-children state). Returns 0 when the bus singleton is
+        absent (no bus ⇒ no watcher was ever registered ⇒ genuinely
+        zero pending children, not a fail-open dodge).
+
+        TOCTOU contract (CR-2): watcher registration commits
+        POST-COMMIT in its own transaction BEFORE the dispatch tool
+        result returns to the LLM, so a legitimately-delegating leader
+        has its PENDING row visible here. There is NO
+        same-txn-with-spawn atomicity — see
+        ``daemon/services/attestation_gate.evaluate`` for the full
+        contract; do NOT cite the child_reports deferral reads as
+        same-txn precedents.
+
+        Args:
+            instance_id: The target (parent) instance id.
+
+        Returns:
+            Non-negative int count of PENDING watchers.
+        """
+        bus = get_dependency_bus()
+        if bus is None:
+            return 0
+        return bus.count_pending_for_target_sync(instance_id)
+
+    def get_queued_or_expected_wakeups(self, instance_id: str) -> int:
+        """Count queued/expected wakeups for this instance.
+
+        Attestation-gate R2 input (``queued_or_expected_wakeups``).
+        Forwards to the messaging-service helper that sums the three
+        ``next_retry_at``-held wakeup families (task / message_queue /
+        job_queue_items) PLUS the expected-not-scheduled held wakeups
+        (deferred + pause-held PENDING tasks). SYNC read — see the
+        facade note above for the threading contract.
+
+        Args:
+            instance_id: The instance whose wakeups to count.
+
+        Returns:
+            Non-negative int sum (0 = no expected wakeup — one of the
+            three simultaneous R2 deny conditions).
+        """
+        return self._messaging_service.get_queued_or_expected_wakeups(
+            instance_id
+        )
+
     async def _has_checkpoint(self, instance_id: str) -> bool:
         """Check if a checkpoint exists for this instance.
 

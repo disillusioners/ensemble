@@ -14,7 +14,7 @@ from langchain_core.runnables import RunnableLambda
 from langchain_core.runnables.config import RunnableConfig
 from langchain_core.messages.ai import AIMessageChunk, UsageMetadata
 from langchain_core.outputs import ChatGenerationChunk
-from typing import Any, ClassVar, Mapping, NamedTuple, Optional, cast
+from typing import Any, Callable, ClassVar, Mapping, NamedTuple, Optional, cast
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -2458,6 +2458,18 @@ class SessionState(MessagesState):
     # the key for checkpoint-stability; Phase 2 populates it.
     watchover_route: str | None = None
 
+    # Attestation-gate route hint computed by the ``attestation_gate``
+    # node and read by the ``should_end_attestation`` router
+    # (leader-completion-attestation Phase 2, D1=B). Set to ``"agent"``
+    # on Deny (the nudge HumanMessage rides in the same return so the
+    # injection is checkpoint-durable); left ``None`` on every allow
+    # value (allowed / terminal_after_bound / dry_log /
+    # allowed_legitimate_pending_wakeup) — absent hint ⇒ route to END.
+    # Declared on the session schema so the update is a known channel
+    # and persists at the node-boundary checkpoint (same pattern as
+    # ``watchover_route``).
+    attestation_route: str | None = None
+
 
 def should_continue(state: MessagesState) -> str:
     """Determine if we should continue or end.
@@ -2725,6 +2737,258 @@ def create_should_continue(language_check_enabled: bool):
         return result
 
     return should_continue_with_language_check
+
+
+# ============================================================================
+# Leader completion attestation — in-graph pre-END gate (Phase 2, D1=B)
+# ============================================================================
+#
+# Feature: leader-completion-attestation, Phase 2 task 2.5 (THE wiring).
+# Plans: .agents/shared/planning/leader-completion-attestation/ (D1=B
+# RESOLVED; R1/R2/C1b/C2/C3 applied; leader rulings 1–4 supersede plan
+# prose where they conflict).
+#
+# Architecture (requirements.md glossary, authoritative shape): a
+# ``create_should_continue``-style wrapper translates the would-be END
+# into the ``attestation_gate`` route; the ``attestation_gate`` NODE
+# evaluates the R2 gate ONCE, and on deny returns the plain-dict
+# ``{"messages": [nudge], "attestation_route": "agent"}`` — the exact
+# language_check plain-dict return precedent (graph.py language_check
+# node). ``should_end_attestation`` reads the route hint and routes
+# back to ``agent`` or END. NO ``Command`` import anywhere in this file
+# (hard constraint): routing is plain strings, state updates are plain
+# dicts from node returns.
+#
+# Composition shape: **(Y)** — the attestation wrapper is applied at
+# the CALL SITE (the branch wiring inside ``build_instance_graph``),
+# unconditionally with respect to ``language_check_enabled`` (the
+# gate's own INDEPENDENT ``attestation_enabled`` flag decides), and is
+# applied to whichever router governs the TRUE terminal END in that
+# branch:
+#
+#   * language_check_enabled=True : agent → create_should_continue(True)
+#     → "end_candidate" → language_check node →
+#     ``should_end_language_check`` (wrapped here) → attestation_gate.
+#   * language_check_enabled=False: agent → ``should_continue``
+#     (wrapped here) → attestation_gate.
+#
+# Shape (Y) was chosen over (X) for the plan-recommended reasons: a
+# single wrapper factory applied at one call site per branch, no
+# branch-conditional behavior inside the factory itself. Order of
+# composition: language_check first (cheapest), attestation second —
+# the gate only sees ENDs that survived language check.
+#
+# Fail-open (C3): the gate node wraps ``evaluate`` in
+# ``except Exception`` ⇒ allow END + ``event=leader_completion_gate_error``
+# structured log. ``KeyboardInterrupt``/``SystemExit`` are BaseException
+# and propagate (fail-closed on shutdown).
+#
+# aget_state is BANNED from this seam: the gate reads
+# ``state["messages"]`` from the in-node argument only (the known live
+# defect — namespace-mismatched ``aget_state`` reads returning EMPTY
+# checkpoint state — is exactly what this avoids).
+
+#: Server-authored nudge text (R1 / NFR-6 — EXACT constant; Phase 6's
+#: recovery injector reuses the same text).
+ATTESTATION_NUDGE_TEXT = (
+    "The work is not yet finished — check current progress and continue."
+)
+
+#: Graph node name + conditional-route name for the attestation gate.
+ATTESTATION_GATE_NODE_NAME = "attestation_gate"
+
+
+def create_attestation_should_continue(
+    base_should_continue: Callable,
+    *,
+    attestation_enabled: bool,
+):
+    """Wrap a routing fn so a would-be END routes to ``attestation_gate``.
+
+    This is the D1=B interception wrapper (shape Y — applied at the
+    wiring call site, unconditional w.r.t. ``language_check_enabled``).
+    When ``attestation_enabled`` is False the base router is returned
+    UNWRAPPED — the graph never gains the attestation route and the
+    gate node is not added (legacy behavior preserved).
+
+    Args:
+        base_should_continue: The router governing the terminal END in
+            the current branch — ``should_continue`` itself when
+            language check is off, ``should_end_language_check`` when
+            language check is on (the gate sits AFTER language check).
+        attestation_enabled: The gate's INDEPENDENT master flag (C2).
+
+    Returns:
+        A routing fn ``(state, config) -> str`` that maps a base END
+        verdict to ``ATTESTATION_GATE_NODE_NAME`` and passes every
+        other verdict through unchanged.
+    """
+    if not attestation_enabled:
+        return base_should_continue
+
+    def should_continue_with_attestation(
+        state: MessagesState, config: Optional[RunnableConfig] = None
+    ) -> str:
+        result = base_should_continue(state)
+        if result == END:
+            return ATTESTATION_GATE_NODE_NAME
+        return result
+
+    return should_continue_with_attestation
+
+
+def should_end_attestation(state: Any) -> str:
+    """Router for the ``attestation_gate`` conditional edge.
+
+    The gate node computes the decision ONCE and writes the route hint
+    (``"agent"`` on deny — the nudge HumanMessage rides in the SAME
+    plain-dict return so the injection is checkpoint-durable). Absent
+    hint ⇒ END (allow path: allowed / terminal_after_bound / dry_log /
+    allowed_legitimate_pending_wakeup all end the graph — the nudge
+    fires ONLY on ``denied``, never on terminal_after_bound, never on
+    dry_log).
+    """
+    if isinstance(state, dict):
+        route = state.get("attestation_route")
+    else:
+        route = getattr(state, "attestation_route", None)
+    if route == "agent":
+        return "agent"
+    return END
+
+
+def create_attestation_gate_node(
+    gate_config: dict,
+    settings: Any,
+    manager: Any,
+    instance_id: str | None,
+    denied_count_getter: Callable[[], int] | None = None,
+):
+    """Build the ``attestation_gate`` node (factory-closure capture).
+
+    Mirrors ``create_question_pause_node(manager)`` (graph.py:4596
+    precedent): the closure captures the per-instance manager handle,
+    instance id, settings and gate config at GRAPH-BUILD time; the node
+    receives ``state`` (and config) only at run time.
+
+    Run-time flow (single evaluation per would-be END):
+
+    1. Read the in-node ``state["messages"]`` (NO ``aget_state`` — the
+       namespace-mismatched-empty-state defect class is banned here).
+    2. Read the current denied count via ``denied_count_getter`` (the
+       Phase 2 stand-in defaults to ``lambda: 0``; Phase 3 threads the
+       ledger repository getter).
+    3. Bridge the WHOLE sync ``evaluate()`` (scanner + the two manager
+       facade reads + decide + log) to a worker thread via
+       ``asyncio.to_thread`` — the message-queue-stats threading
+       pattern — so the event loop never blocks on the DB reads.
+    4. On ``Decision.DENIED`` ONLY: return the checkpoint-durable
+       nudge (HumanMessage with the ``attestation_nudge`` marker, the
+       language_check ``additional_kwargs`` precedent) + the
+       ``attestation_route`` hint. NO ``manager.enqueue_message`` call
+       (C1b forbidden dual-delivery); the instance stays RUNNING.
+    5. On every other decision value: return END routing with ZERO
+       side effects (dry_log included — dry is a passive observer).
+    6. C3 fail-open: any ``evaluate`` exception ⇒ allow END +
+       structured error log. ``except Exception`` only —
+       KeyboardInterrupt stays fail-closed.
+
+    Args:
+        gate_config: The O8-audited config dict from
+            ``attestation_gate.build_gate_config`` (carries NO
+            ``checkpoint_ns``; attached to the returned fn for the
+            unit-level O8 assertion).
+        settings: :class:`attestation_gate.GateSettings` (mode/window/
+            deny_bound — Phase 2 stand-in; Phase 4 swaps the resolver).
+        manager: The per-instance manager handle exposing the two R2
+            facades.
+        instance_id: Build-time instance id (thread_id at build). The
+            node falls back to the run-time ``configurable.thread_id``
+            when the build-time value is absent (test embeddings that
+            build one graph and invoke with several ids).
+        denied_count_getter: Optional zero-arg callable returning the
+            current attestation denial count. Defaults to ``0`` until
+            Phase 3 lands the ledger.
+
+    Returns:
+        An async callable suitable for ``graph.add_node`` with the
+        gate config attached as ``attestation_config``.
+    """
+    # Lazy import — see the top-of-file note about the graph ↔ services
+    # import cycle.
+    from .services.attestation_gate import Decision, evaluate
+
+    getter = denied_count_getter or (lambda: 0)
+
+    async def attestation_gate_node(
+        state: Any, config: Optional[RunnableConfig] = None
+    ) -> dict:
+        effective_instance_id = instance_id or _extract_instance_id(config)
+        messages = state["messages"]
+
+        try:
+            denied_count = getter()
+            decision = await asyncio.to_thread(
+                evaluate,
+                effective_instance_id,
+                denied_count,
+                messages,
+                settings,
+                manager,
+                attestation_enabled=gate_config.get("attestation_enabled", True),
+                scope_applicable=gate_config.get("scope_applicable", True),
+                tool_name=gate_config.get(
+                    "tool_name", "attest_completion"
+                ),
+                leader_prompt_version=gate_config.get(
+                    "leader_prompt_version", ""
+                ),
+            )
+        except Exception as gate_exc:  # noqa: BLE001 — C3 fail-open
+            logger.error(
+                "event=leader_completion_gate_error error_class=%s "
+                "instance_id=%s gate_location=%s decision=fail_open_allowed "
+                "detail=node-level catch: %s: %s",
+                type(gate_exc).__name__,
+                effective_instance_id,
+                gate_config.get("gate_location", "graph_end_candidate"),
+                type(gate_exc).__name__,
+                gate_exc,
+            )
+            return {"attestation_route": None}
+
+        if decision.decision == Decision.DENIED:
+            # R1 — the deny path is the checkpoint-durable in-graph
+            # nudge ONLY. Plain-dict return (language_check precedent):
+            # the message rides the node-boundary checkpoint, the route
+            # hint sends the SAME execution back to ``agent``. No
+            # enqueue, no revive, no terminal write. Counter increments
+            # are Phase 3 (evaluate() already computed
+            # next_denied_count; the ledger write lands with it).
+            logger.info(
+                "[AttestationGate] deny instance=%s denied_count=%s -> "
+                "next=%s; injecting in-graph nudge",
+                effective_instance_id,
+                decision.denied_count,
+                decision.next_denied_count,
+            )
+            nudge = HumanMessage(
+                content=ATTESTATION_NUDGE_TEXT,
+                id=str(uuid.uuid4()),
+                additional_kwargs={"attestation_nudge": True},
+            )
+            return {"messages": [nudge], "attestation_route": "agent"}
+
+        # allow / terminal_after_bound / dry_log /
+        # allowed_legitimate_pending_wakeup — allow the END, zero side
+        # effects (the canonical decision log line was already emitted
+        # inside evaluate()).
+        return {"attestation_route": None}
+
+    # O8 surface: the exact config the gate will run with, auditable in
+    # tests (must carry NO checkpoint_ns key).
+    attestation_gate_node.attestation_config = gate_config  # type: ignore[attr-defined]
+    return attestation_gate_node
 
 
 # ============================================================================
@@ -6273,6 +6537,8 @@ def build_instance_graph(
     message_tap_slot: "MessageTapSlot | None" = None,
     compaction_tap_slot: "MessageTapSlot | None" = None,
     precall_compaction_tap_slot: "MessageTapSlot | None" = None,
+    attestation_enabled: bool = False,
+    attestation_prompt_version: str = "",
 ):
     """Build and return a compiled instance graph with LLM-level retry.
 
@@ -6351,6 +6617,20 @@ def build_instance_graph(
             (``test_hook_placement``) enumerates the approved labels (5 as
             of P1b: decisions.md D1 + A.9 T-tap). ``None``
             disables the tap (no-op); backward compatible.
+        attestation_enabled: Independent master flag for the
+            leader-completion-attestation in-graph pre-END gate
+            (Phase 2, D1=B + C2). Computed by the CALLER
+            (``instance_lifecycle``) as ``agent_id == "leader"`` (D3
+            leader-only, enforced at graph-build time so non-leader
+            graphs are untouched) — the gate's tri-state mode
+            short-circuit and the manager presence check happen
+            inside. Default False (legacy behavior: no gate node, no
+            route, both wiring branches unchanged). The gate is wired
+            in BOTH return paths of the ``language_check_enabled``
+            branch — a single-branch gate is structurally inert (C2).
+        attestation_prompt_version: ``agents/leader/meta.json`` version
+            stamped into the gate's canonical decision log entries
+            (Phase 4 task 4.5 schema field ``leader_prompt_version``).
     """
     # Add proxy headers (x-proxy-app + x-proxy-interleaved-thinking) to all LLM requests.
     # X-LLMProxy-Buffer-Response: sent by default; omitted entirely (never
@@ -6456,11 +6736,93 @@ def build_instance_graph(
     watchover_active = manager is not None
     tools_target = "watchover_check" if watchover_active else "tools"
 
+    # ------------------------------------------------------------------
+    # Attestation gate wiring (Phase 2, D1=B + C2 + R1).
+    #
+    # The gate is INDEPENDENT of language_check_enabled and active in
+    # BOTH wiring branches below (a single-branch gate is structurally
+    # inert — the False branch of create_should_continue returns the
+    # original router unchanged). Composition shape (Y): the
+    # create_attestation_should_continue wrapper is applied HERE, at
+    # the call site, to whichever router governs the TRUE terminal END
+    # in each branch; order of composition is language_check first
+    # (cheapest), attestation second.
+    #
+    # Off-mode and manager-less graphs keep the legacy wiring exactly:
+    # mode="off" ⇒ gate does not run (D2 legacy preservation); without
+    # a manager handle the R2 inputs are unreadable, so the gate is
+    # skipped rather than wired deaf (fail-open by absence — logged).
+    # ------------------------------------------------------------------
+    attestation_gate_active = False
+    if attestation_enabled:
+        from .services.attestation_gate import (
+            DEFAULT_GATE_SETTINGS,
+            build_gate_config,
+            resolve_gate_settings,
+        )
+
+        settings = resolve_gate_settings()
+        if settings.mode == "off":
+            logger.info(
+                "[AttestationGate] mode=off — gate NOT wired "
+                "(legacy behavior preserved)"
+            )
+        elif manager is None:
+            logger.warning(
+                "[AttestationGate] attestation_enabled=True but manager "
+                "is None — R2 inputs unreadable; gate NOT wired "
+                "(fail-open by absence)"
+            )
+        else:
+            # Build-time closure capture (precedent
+            # create_question_pause_node(manager)): instance id from
+            # the graph config's thread_id, manager handle, settings.
+            build_instance_id = None
+            if isinstance(graph_config, dict):
+                build_instance_id = (graph_config.get("configurable") or {}).get(
+                    "thread_id"
+                )
+            gate_config = build_gate_config(
+                build_instance_id,
+                settings,
+                attestation_enabled=True,
+                scope_applicable=True,
+                leader_prompt_version=attestation_prompt_version,
+            )
+            graph.add_node(
+                ATTESTATION_GATE_NODE_NAME,
+                create_attestation_gate_node(
+                    gate_config,
+                    settings,
+                    manager,
+                    build_instance_id,
+                ),
+            )
+            graph.add_conditional_edges(
+                ATTESTATION_GATE_NODE_NAME,
+                should_end_attestation,
+                {"agent": "agent", END: END},
+            )
+            attestation_gate_active = True
+
     if language_check_enabled:
         graph.add_node("language_check", create_language_check_node(user_language))
 
         # Closure wrapper: routes END -> "end_candidate"
         routing_fn = create_should_continue(language_check_enabled=True)
+
+        if attestation_gate_active:
+            # Shape (Y): intercept the TRUE END — i.e. the END that
+            # SURVIVES language check — by wrapping the
+            # language_check node's out-edge router. The agent-side
+            # wrapper still ends at "end_candidate"; the gate node was
+            # added once above.
+            language_check_router = create_attestation_should_continue(
+                should_end_language_check,
+                attestation_enabled=True,
+            )
+        else:
+            language_check_router = should_end_language_check
 
         graph.add_conditional_edges("agent", routing_fn, {
             "tools": tools_target,      # Watchover interception (or direct when no manager)
@@ -6469,19 +6831,45 @@ def build_instance_graph(
             "end_candidate": "language_check",  # Would-be END: validate language
         })
 
-        # Language check -> retry or END
-        graph.add_conditional_edges("language_check", should_end_language_check, {
-            "retry": "agent",
-            END: END,
-        })
+        # Language check -> retry or END (END detours through the
+        # attestation gate when the gate is active). The path map only
+        # carries the gate destination when the gate node exists —
+        # LangGraph validates map targets against the node set.
+        language_check_paths = {"retry": "agent"}
+        if attestation_gate_active:
+            language_check_paths[ATTESTATION_GATE_NODE_NAME] = (
+                ATTESTATION_GATE_NODE_NAME
+            )
+        language_check_paths[END] = END
+        graph.add_conditional_edges(
+            "language_check", language_check_router, language_check_paths
+        )
     else:
         # Language check disabled: use original should_continue, no language_check node
-        graph.add_conditional_edges("agent", should_continue, {
+        if attestation_gate_active:
+            # Shape (Y), no-language_check branch: the gate wrapper is
+            # applied to the ORIGINAL should_continue — the
+            # independent-flag interception this branch needs (the
+            # False branch of create_should_continue returns the
+            # original UNCHANGED, so piggybacking there would leave the
+            # gate structurally inert for auto-language leaders).
+            agent_router = create_attestation_should_continue(
+                should_continue,
+                attestation_enabled=True,
+            )
+        else:
+            agent_router = should_continue
+
+        agent_paths = {
             "tools": tools_target,      # Watchover interception (or direct when no manager)
             "agent": "agent",          # Ghost promise: LLM promised but no tool_call, retry
             "nudge": "nudge",          # Empty after tool: inject prompt to continue
-            END: END,
-        })
+        }
+        if attestation_gate_active:
+            # Would-be END: attestation gate (would have been END)
+            agent_paths[ATTESTATION_GATE_NODE_NAME] = ATTESTATION_GATE_NODE_NAME
+        agent_paths[END] = END
+        graph.add_conditional_edges("agent", agent_router, agent_paths)
 
     # Watchover interception nodes — sits between agent and tools.
     # Added only when a manager is provided. Non-watched instances pass
