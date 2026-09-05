@@ -759,7 +759,7 @@ class CompactionConfig(BaseSettings):
         description=(
             "Fallback context window used when neither context_window_overrides "
             "nor the built-in MODEL_CONTEXT_LIMITS registry match the active model. "
-            "0 = fall through to the hard-coded DEFAULT_CONTEXT_LIMIT (180k)."
+            "0 = fall through to the hard-coded DEFAULT_CONTEXT_LIMIT (700k)."
         ),
     )
     target_ratio: float = Field(default=0.40, description="Target token usage after compaction as fraction of context window")

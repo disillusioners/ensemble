@@ -101,7 +101,7 @@ def _build_context(messages: list, model: str = "test-model"):
     config.summarization_chunk_threshold = 1.0
     # Match _make_compactor: small context window so threshold is reachable
     # by short test messages. Without this, get_model_context_limit falls
-    # back to DEFAULT_CONTEXT_LIMIT=180000 and 6 short messages never
+    # back to DEFAULT_CONTEXT_LIMIT=700000 and 6 short messages never
     # exceed the threshold.
     config.context_window_overrides = {"test-model": 200}
     config.context_window_default = 0
