@@ -750,8 +750,19 @@ class InstanceManager:
         # v1 limitation). Incremented ONLY via
         # :meth:`note_agent_tool_revive`, which is called solely from
         # the agent-tool ``send_message`` terminal-revive branch
-        # (``daemon/tools/instance.py``); the user-API revive path
-        # (``daemon/services/instance_messaging.py``) never touches it.
+        # (``daemon/tools/instance.py``) AND the FAILED branch of
+        # ``job_continue`` (``daemon/tools/job_queue.py``); the user-API
+        # revive path (``daemon/services/instance_messaging.py``) never
+        # touches it.
+        #
+        # SCOPE (fix-revive-guard-scope, 2026-09-05): single-sourced on
+        # the canonical "REVIVE-ONCE GUARD (quick-win #7, scoped)" block
+        # at the ``send_message`` terminal-revive call site in
+        # ``daemon/tools/instance.py``. Mental model: the counter is a
+        # FAILURE-revive budget — ERROR / FAILED prior consumes;
+        # COMPLETED / TERMINATED are free follow-ups; a burned budget
+        # refuses every later agent-tool revive (accepted-edge,
+        # INTENTIONAL).
         # Full contract on the accessor methods below.
         self._agent_tool_revive_counts: dict[str, int] = {}
 
@@ -2745,11 +2756,20 @@ class InstanceManager:
     # this guard. FAILED-continue DOES count against the once-bound and
     # is refused on the second attempt with the same wording as
     # ``send_message``'s refusal (W1).
+    #
+    # SCOPE (fix-revive-guard-scope, 2026-09-05): single-sourced on the
+    # canonical "REVIVE-ONCE GUARD (quick-win #7, scoped)" block at the
+    # ``send_message`` terminal-revive call site in
+    # ``daemon/tools/instance.py``. Mental model: the counter is a
+    # FAILURE-revive budget — ERROR / FAILED prior consumes,
+    # COMPLETED / TERMINATED are free follow-ups, and the user-API path
+    # stays uncounted and unblocked. See :meth:`note_agent_tool_revive`
+    # for the call-site contract.
 
     def get_agent_tool_revive_count(self, instance_id: str) -> int:
         """Return the cumulative agent-tool revive count for ``instance_id``.
 
-        Contract (quick-win #7):
+        Contract (quick-win #7 + scope-fix 2026-09-05):
           * IN-MEMORY ONLY — no DB persistence; a daemon restart resets
             every counter to zero (accepted v1 limitation).
           * AGENT-TOOL PATH ONLY — the count is bumped exclusively by
@@ -2758,21 +2778,28 @@ class InstanceManager:
             ``daemon/tools/instance.py`` AND the FAILED branch of
             ``job_continue`` in ``daemon/tools/job_queue.py`` — both
             W1 callers). User-API revives do not touch it.
-          * CUMULATIVE per child — no episode reset: a child revived once
-            that errored again after working is exactly the
-            spawn-a-replacement case the guard exists to force.
+          * CUMULATIVE per child — no reset on success, completion,
+            or a later terminal transition (this preserves "one revive
+            per error child"; see the ACCEPTED EDGE note in the
+            counter-storage block above for the rationale).
 
         Args:
             instance_id: The CHILD instance id (the revive target).
 
         Returns:
-            The number of agent-tool revives already granted for the
-            child; ``0`` when none (or after a daemon restart).
+            The number of agent-tool revives already consumed for the
+            child; ``0`` when none (or after a daemon restart, or when
+            every prior revive was a non-consuming COMPLETED / TERMINATED
+            revive).
         """
         return self._agent_tool_revive_counts.get(instance_id, 0)
 
-    def note_agent_tool_revive(self, instance_id: str) -> int:
-        """Increment the agent-tool revive counter; return the new count.
+    def note_agent_tool_revive(
+        self,
+        instance_id: str,
+        prior_status: str | None = None,
+    ) -> int:
+        """Record an agent-tool revive grant and return the new count.
 
         Called from the agent-tool revive call sites at the moment a
         terminal child is about to be revived and dispatched:
@@ -2786,9 +2813,20 @@ class InstanceManager:
         The shared service-layer revive path
         (``daemon/services/instance_messaging.py``) must NEVER call
         this; user-API revives stay uncounted and unblocked.
-          * IN-MEMORY ONLY — daemon restart resets the counter (v1).
-          * CUMULATIVE per child — never reset on success, completion,
-            or a later terminal transition.
+
+        SCOPE (fix-revive-guard-scope, 2026-09-05): single-sourced on
+        the canonical "REVIVE-ONCE GUARD (quick-win #7, scoped)" block
+        at the ``send_message`` terminal-revive call site in
+        ``daemon/tools/instance.py``. Mental model: the counter is a
+        FAILURE-revive budget — a ``prior_status`` of ERROR / FAILED
+        consumes it, COMPLETED / TERMINATED are free follow-ups, a
+        burned budget refuses every later agent-tool revive, and a
+        ``None`` ``prior_status`` falls back to the v1 always-consume.
+
+        Grant-log formats (verbatim, for log-grep audits — placeholders
+        shown as the f-string expressions that render them):
+          * consuming: ``"[ReviveGuard] Agent-tool revive #{count} granted (consumed, prior={prior_status or 'unknown'}) for instance {instance_id[:8]}..."``
+          * non-consuming: ``"[ReviveGuard] Agent-tool revive granted (non-consuming, prior={prior_status}) for instance {instance_id[:8]}... counter={current}"``
 
         Like the ``_pending_injections`` helpers these methods are
         synchronous and ``await``-free, relying on cooperative
@@ -2797,16 +2835,43 @@ class InstanceManager:
 
         Args:
             instance_id: The CHILD instance id being revived.
+            prior_status: The child instance's terminal status at the
+                moment of the revive (the ``prior_status`` returned by
+                :func:`_route_send_message` in ``daemon/tools/instance.py``,
+                or ``InstanceStatus.FAILED.value`` from the
+                ``job_continue`` FAILED branch). When ``None`` (legacy
+                call sites only) the consume-behavior is the v1
+                always-consume fallback.
 
         Returns:
-            The new cumulative count (``1`` for the first granted
-            revive, ``2`` for a second grant, ...).
+            The new cumulative consumed-count (``1`` for the first
+            consuming grant, ``2`` for a second, ...). Non-consuming
+            revives (COMPLETED / TERMINATED) do NOT change the counter
+            and return the current value verbatim — callers MUST treat
+            the return value as a count of consumed budget, not of
+            grants.
         """
+        # SCOPE gate — only failure-prior revives consume the budget.
+        # See the SCOPE pointer above / the canonical call-site block in
+        # ``daemon/tools/instance.py`` for the full semantics.
+        if prior_status is not None and prior_status not in (
+            InstanceStatus.ERROR.value,
+            InstanceStatus.FAILED.value,
+        ):
+            current = self._agent_tool_revive_counts.get(instance_id, 0)
+            logger.info(
+                f"[ReviveGuard] Agent-tool revive granted (non-consuming, "
+                f"prior={prior_status}) for instance {instance_id[:8]}... "
+                f"counter={current}"
+            )
+            return current
+
         count = self._agent_tool_revive_counts.get(instance_id, 0) + 1
         self._agent_tool_revive_counts[instance_id] = count
         logger.info(
-            f"[ReviveGuard] Agent-tool revive #{count} granted for "
-            f"instance {instance_id[:8]}..."
+            f"[ReviveGuard] Agent-tool revive #{count} granted (consumed, "
+            f"prior={prior_status or 'unknown'}) for instance "
+            f"{instance_id[:8]}..."
         )
         return count
 

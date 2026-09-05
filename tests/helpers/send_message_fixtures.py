@@ -88,8 +88,10 @@ def make_send_message_manager(*, status: str) -> MagicMock:
         RUNNING / WAITING_CHILDREN targets route through here).
       * ``get_agent_tool_revive_count`` / ``note_agent_tool_revive``
         (sync) — quick-win #7 revive-once guard, backed by a REAL
-        per-manager dict (first agent-tool revive granted, second
-        refused) with MagicMock call tracking.
+        per-manager dict (an ERROR / FAILED revive is granted and
+        consumes the budget; once consumed, the next agent-tool revive
+        is refused; COMPLETED / TERMINATED revives neither consume nor
+        refuse) with MagicMock call tracking.
       * Plus infra attributes the production code touches in the
         post-enqueue path: ``_instance_repository``, ``engine``,
         ``write_guard``, ``_live_hub``.
@@ -122,16 +124,30 @@ def make_send_message_manager(*, status: str) -> MagicMock:
     manager.write_guard = MagicMock()
     manager._live_hub = MagicMock()
 
-    # Quick-win #7 (revive-once guard): REAL in-memory counter wired
-    # behind the two manager methods the agent-tool ``send_message``
-    # terminal-revive branch consults. Fresh dict per manager (fresh
-    # per test) mirrors the production ``InstanceManager`` lifetime:
-    # the first agent-tool revive of a child is granted (0→1), the
-    # second is refused. ``MagicMock`` wrappers keep call tracking so
-    # tests can assert increment/no-increment per path.
+    # Quick-win #7 (revive-once guard, scoped — feature/fix-revive-guard-scope
+    # 2026-09-05): REAL in-memory counter wired behind the two manager
+    # methods the agent-tool ``send_message`` terminal-revive branch
+    # consults. Fresh dict per manager (fresh per test) mirrors the
+    # production ``InstanceManager`` lifetime: only revives whose prior
+    # status is ERROR / FAILED consume the budget — COMPLETED /
+    # TERMINATED revives are granted without incrementing. The
+    # ``MagicMock`` wrappers keep call tracking so tests can assert
+    # increment/no-increment per path.
     revive_counts: dict[str, int] = {}
 
-    def _note_revive(instance_id: str) -> int:
+    def _note_revive(instance_id: str, prior_status: str | None = None) -> int:
+        # SCOPE: only ERROR / FAILED prior statuses consume the budget;
+        # COMPLETED / TERMINATED do not. ``None`` is NOT in the
+        # non-consuming set — it falls through and CONSUMES, mirroring
+        # production's fail-closed fallback for the defensive default.
+        # Mirrors ``InstanceManager.note_agent_tool_revive`` exactly.
+        from daemon.repositories.instance.models import InstanceStatus
+
+        if prior_status is not None and prior_status not in (
+            InstanceStatus.ERROR.value,
+            InstanceStatus.FAILED.value,
+        ):
+            return revive_counts.get(instance_id, 0)
         revive_counts[instance_id] = revive_counts.get(instance_id, 0) + 1
         return revive_counts[instance_id]
 

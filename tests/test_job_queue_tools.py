@@ -1556,19 +1556,23 @@ class TestJobContinueTool:
         old_job = self._make_old_job(status=status, instance_id=instance_id)
         return record, old_job
 
-    @pytest.mark.asyncio
-    async def test_w1_t1_first_failed_continue_succeeds_and_increments(
-        self, mock_services, mock_manager, tools
+    def _setup_w1_failed_happy_path(
+        self,
+        mock_services,
+        mock_manager,
+        tools,
+        *,
+        count: int = 0,
+        message_id: str = "msg-1",
+        job_id: str = "new-job-1",
     ):
-        """W1-T1: first FAILED-continue succeeds; counter 0→1; revive proceeds.
+        """Shared FAILED-continue happy-path scaffold (W1-T1 + the
+        scope-fix call-shape test): stage a terminal-FAILED record, a
+        FAILED instance with no live Task, the revive guard at
+        ``count``, and an armed ``enqueue_message_job`` returning an
+        ``AsyncMessageResult`` carrying ``job_id``.
 
-        The terminal job's instance is in FAILED — the only path the
-        W1 guard consults. ``get_agent_tool_revive_count`` returns 0
-        (no prior revive), so the refusal check passes; ``enqueue``
-        fires and the post-enqueue increment bumps the counter to 1.
-        This is the once-bound semantics in its happy form: the first
-        FAILED-continue is granted exactly as the prior behavior would
-        have granted it.
+        Returns ``(job_continue, note_mock)``.
         """
         from daemon.manager import AsyncMessageResult
 
@@ -1583,16 +1587,35 @@ class TestJobContinueTool:
         mock_manager._instance_repository.get = MagicMock(return_value=instance)
         # No live Task driving this instance (gate is closed).
         mock_manager._task_repo.has_inflight_task = MagicMock(return_value=False)
-        # W1 guard: counter is 0 (first FAILED-continue of this child).
-        note_mock = self._wire_revive_guard(mock_manager, count=0)
+        # W1 guard: per-test counter (first vs later FAILED-continue).
+        note_mock = self._wire_revive_guard(mock_manager, count=count)
         # Phase 5 cutover: ``manager.enqueue_message_job`` returns an
         # ``AsyncMessageResult`` with the new ``job_id``.
         mock_manager.enqueue_message_job = AsyncMock(return_value=AsyncMessageResult(
-            message_id="msg-1",
+            message_id=message_id,
             instance_id="inst-1",
             status="queued",
-            job_id="new-job-1",
+            job_id=job_id,
         ))
+        return job_continue, note_mock
+
+    @pytest.mark.asyncio
+    async def test_w1_t1_first_failed_continue_succeeds_and_increments(
+        self, mock_services, mock_manager, tools
+    ):
+        """W1-T1: first FAILED-continue succeeds; counter 0→1; revive proceeds.
+
+        The terminal job's instance is in FAILED — the only path the
+        W1 guard consults. ``get_agent_tool_revive_count`` returns 0
+        (no prior revive), so the refusal check passes; ``enqueue``
+        fires and the post-enqueue increment bumps the counter to 1.
+        This is the once-bound semantics in its happy form: the first
+        FAILED-continue is granted exactly as the prior behavior would
+        have granted it.
+        """
+        job_continue, note_mock = self._setup_w1_failed_happy_path(
+            mock_services, mock_manager, tools,
+        )
 
         result = await job_continue.ainvoke({
             "old_job_id": "old-job-1",
@@ -1610,7 +1633,13 @@ class TestJobContinueTool:
         mock_manager.get_agent_tool_revive_count.assert_called_once_with("inst-1")
         # Counter incremented AFTER the successful enqueue (6b,
         # matches W2/Polish#1 ordering convention in instance.py).
-        note_mock.assert_called_once_with("inst-1")
+        # Scope-fix (feature/fix-revive-guard-scope, 2026-09-05): the
+        # FAILED branch now passes ``prior_status="failed"`` explicitly
+        # so the gate in ``InstanceManager.note_agent_tool_revive`` can
+        # emit a truthful grant log without re-reading status.
+        note_mock.assert_called_once_with(
+            "inst-1", prior_status="failed"
+        )
 
     @pytest.mark.asyncio
     async def test_w1_t2_second_failed_continue_refused_with_guidance(
@@ -1755,6 +1784,43 @@ class TestJobContinueTool:
         # And the increment was NEVER called either — the give-more-work
         # flow does not consume the once-bound budget.
         mock_manager.note_agent_tool_revive.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_w1_scope_fix_failed_branch_passes_prior_status_kwarg(
+        self, mock_services, mock_manager, tools
+    ):
+        """Scope-fix (feature/fix-revive-guard-scope, 2026-09-05):
+        ``job_continue``'s FAILED branch passes ``prior_status="failed"``
+        explicitly when it calls ``note_agent_tool_revive``. This locks
+        the call-shape contract so the consume gate in
+        ``InstanceManager.note_agent_tool_revive`` can branch on
+        ``prior_status`` without re-reading status.
+
+        The W1 gate (``if instance_meta.status == InstanceStatus.FAILED.value``)
+        is the ONLY path that reaches ``note_agent_tool_revive`` from
+        this tool — by construction, prior_status is always "failed"
+        here, so the gate always increments. The call-shape assertion
+        below is the new contract added by the scope-fix; the FAILED
+        consume / COMPLETED no-consume behaviors are locked by
+        ``test_w1_t1`` / ``test_w1_t3`` above.
+        """
+        job_continue, note_mock = self._setup_w1_failed_happy_path(
+            mock_services, mock_manager, tools,
+            message_id="msg-scope", job_id="new-job-scope",
+        )
+
+        result = await job_continue.ainvoke({
+            "old_job_id": "old-job-1",
+            "message": "Retry with explicit prior_status",
+        })
+
+        assert "error" not in result, (
+            f"first FAILED-continue must succeed; got {result!r}"
+        )
+        # The scope-fix call shape — ``prior_status="failed"`` is
+        # explicit so the gate in ``InstanceManager.note_agent_tool_revive``
+        # can emit a truthful grant log without re-reading status.
+        note_mock.assert_called_once_with("inst-1", prior_status="failed")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 2 (Batch 4a) — resolver-routed tool tests
