@@ -15,7 +15,7 @@ Target branch: `feature/leader-completion-attestation`
 > - **R1** — the deny path is an in-graph checkpoint-durable `HumanMessage` nudge routed back into the same execution (exact `language_check` reminder precedent). NO `manager.enqueue_message` on deny, NO revive on deny. The durable-enqueue recovery injector is relocated to phase6 (fast-follow backstop, post-soak).
 > - **R2** — the gate's deny input ALSO requires `pending_children == 0` AND `queued_or_expected_wakeups == 0` (the pending-wakeup input). Legitimate delegation turn-ends are allowed un-attested. Log schema carries `pending_children` + `attest_seen_outside_window` (+ `messages_scanned>0`).
 > - **Mode config** — tri-state `ENSEMBLE_LEADER_ATTESTATION_MODE=off|dry|enforce`, default `dry`. The single-bool / two-env-pair design is gone; only the tri-state surface is supported.
-> - **Fail-open** — any exception in scanner/gate ⇒ allow completion + structured error log, EXCEPT the `denied_count` ledger DB seam (which raises `OperationalError`); the bootstrap exception set is the narrow set in `graph.py:2663-2688` and explicitly does NOT cover SQLAlchemy `OperationalError`.
+> - **Fail-open** — any exception in scanner/gate ⇒ allow completion + structured error log, EXCEPT the `attestation_denied_count` ledger DB seam (which raises `OperationalError`); the bootstrap exception set is the narrow set in `graph.py:2663-2688` and explicitly does NOT cover SQLAlchemy `OperationalError`.
 >
 > Treat this file as the architectural trade-off ledger. For the SPEC layer of what to build, read `requirements.md` + `decisions.md` (post-reconciliation) instead.
 
@@ -182,7 +182,7 @@ flowchart TD
 | 8 | Revive semantics on recovery | sync (within txn) | terminal instance → RUNNING; `status_changed_to_running=True` | n/a | PAUSED instance is excluded — recovery enqueue to PAUSED leader does NOT flip; user must use explicit resume | `daemon/services/instance_messaging.py:1867-1909` |
 | 9 | Report-injection claim machine | async | atomic PENDING→INJECTED claim; drain → append checkpoint | n/a | If recovery message lands in same checkpoint turn as report injection, ordering matters | `daemon/graph.py:414-490`; `:3622-3658` |
 | 10 | Loop-breaker cap (max_repairs + auto-reset) | sync | counter increment, threshold check, terminal complete + flag | n/a | Counter persists in state; reset at the `_loop_breaker_state` cleanup sites (`daemon/manager.py:3734, :3798, :8548`) avoids stale-trip on new instance | `daemon/graph.py:1836-1847` |
-| 11 | Compaction folding | sync (post-graph-tick) | summary message replaces N preceding; tool_calls may be dropped | n/a | **Scanner must search pre-compaction messages OR compaction must preserve attestation tool_call shape** | `daemon/services/compaction.py` (to verify) |
+| 11 | Compaction folding | sync (post-graph-tick) | summary message replaces N preceding; tool_calls may be dropped | n/a | **Scanner must search pre-compaction messages OR compaction must preserve attestation tool_call shape** | `daemon/compaction.py` (to verify) |
 | 12 | WC-wake kill-switch env | sync | `ENSEMBLE_WC_WAKE_ENQUEUE` resolved at boot, one-time log | n/a | Default OFF; flip-on is operator decision | `daemon/services/instance_messaging.py:114-191` |
 
 ### Integration Details — Critical Notes
@@ -388,7 +388,7 @@ The user-supplied candidates are A–E. Each is analyzed below with mechanism, h
 |---|------------|-----------|-----------|--------|
 | 1 | Observer Step 2 unconditional terminal re-stamp over RUNNING after revive | rare race (TOCTOU between revive and observer finalize) | `daemon/services/job_feedback_observer.py:3703-3758` vs `daemon/services/instance_messaging.py:1867-1909` | Mis-finalizes a resumed mission |
 | 2 | Premature-finalize window where bus gate + pending-tasks gate both pass on a hallucinated report | rare but reproducible | `daemon/services/job_feedback_observer.py:259-277` (gate_deferred) | User-visible: "done" while work unfinished |
-| 3 | Compaction folding drops historical `AIMessage.tool_calls` from scanner view | any compaction event post-attestation | `daemon/services/compaction.py` (to verify) | Scanner sees no attestation → false-positive recovery |
+| 3 | Compaction folding drops historical `AIMessage.tool_calls` from scanner view | any compaction event post-attestation | `daemon/compaction.py` (to verify) | Scanner sees no attestation → false-positive recovery |
 | 4 | Sweep tick vs. observer finalize race | async vs. sync mismatch | n/a (candidate-specific) | Candidate C: recovery can fire on already-revived instance |
 
 ### Scaling Characteristics
@@ -409,13 +409,13 @@ The user-supplied candidates are A–E. Each is analyzed below with mechanism, h
 | # | Debt Item | Impact on Recommendation | Severity | File:Line |
 |---|-----------|--------------------------|----------|-----------|
 | 1 | Origin else-branch stamps HUMAN for internal callers (cascade_resume, internal_invoke_and_wait) — anti-forgery rests on caller discipline | Recovery must NOT use the defective origin path; P2.2 adds `USER_ORIGIN_SOURCES` whitelist | High | `daemon/services/instance_messaging.py:1685-1704` (drifted from `:1310-1319`) |
-| 2 | Loop-breaker counter cleanup pattern | The new `denied_count` is a **row-scoped DB column** (per D5 architect ruling) — it persists across instance revival, so it does NOT need in-state cleanup hooks (the loop-breaker cleanup is for in-memory dicts). It DOES need **`denied_count` reset-to-0 on every allow** and reset on terminal-after-bound; otherwise a revived leader starts its next mission pre-burdened. | Medium (false-positive escalation if not reset) | `daemon/graph.py:1836-1847`; `_loop_breaker_state` reset sites `daemon/manager.py:3734, :3798, :8548` (in-memory precedent only — different domain) |
+| 2 | Loop-breaker counter cleanup pattern | The new `attestation_denied_count` is a **row-scoped DB column** (per D5 architect ruling) — it persists across instance revival, so it does NOT need in-state cleanup hooks (the loop-breaker cleanup is for in-memory dicts). It DOES need **`attestation_denied_count` reset-to-0 on every allow** and reset on terminal-after-bound; otherwise a revived leader starts its next mission pre-burdened. | Medium (false-positive escalation if not reset) | `daemon/graph.py:1836-1847`; `_loop_breaker_state` reset sites `daemon/manager.py:3734, :3798, :8548` (in-memory precedent only — different domain) |
 | 3 | Sweep tick + observer finalize race | Candidate C must use TOCTOU re-query right before enqueue | Medium | n/a (architectural) |
 | 4 | `[SYSTEM NOTE: ...]` data-frame convention in report-injection | Recovery message MUST NOT use this framing (leader hallucinates from it) | High | `daemon/graph.py:216-224` |
 | 5 | Loop-breaker max_repairs + auto-reset precedent | Recovery retry cap should mirror this — bounded + auto-reset | Low | `daemon/graph.py:1840-1847, :1836-1837` |
 | 6 | WC-wake env resolver pattern (cached global + one-time boot log) | Kill-switch resolver should reuse this pattern | Low | `daemon/services/instance_messaging.py:114-191` |
 | 7 | Decorator-only tool = SILENTLY INVISIBLE | Attestation tool MUST follow the 10-step checklist | High | `daemon/tools/upgrade_tools.py:110-143` |
-| 8 | Compaction folding may drop `tool_calls` | Scanner must search pre-compaction OR compaction must preserve | Medium | `daemon/services/compaction.py` (to verify) |
+| 8 | Compaction folding may drop `tool_calls` | Scanner must search pre-compaction OR compaction must preserve | Medium | `daemon/compaction.py` (to verify) |
 | 9 | Facade-forwarding discipline for new kwargs | If `enqueue_message` gains a new kwarg, manager.py must forward; real-dispatch integration test required | Medium | `daemon/manager.py:6530-6626`; precedent `tests/unit/test_manager_enqueue_message_work_id_required.py` |
 | 10 | `adopt_stale_txn` + launcher journal sweep — none in scope | n/a (out of scope for this feature) | n/a | n/a |
 
@@ -428,7 +428,7 @@ The user-supplied candidates are A–E. Each is analyzed below with mechanism, h
 
 ### Recommended Paydown (in priority order)
 
-1. **Verify `daemon/services/compaction.py` behavior on `AIMessage.tool_calls` folding** — single most important debt to address before recommending Candidate B. The scanner depends on seeing the tool_call post-compaction, or the gate is unreliable.
+1. **Verify `daemon/compaction.py` behavior on `AIMessage.tool_calls` folding** — single most important debt to address before recommending Candidate B. The scanner depends on seeing the tool_call post-compaction, or the gate is unreliable.
 2. **Add `USER_ORIGIN_SOURCES` whitelist to `_prepare_enqueued_message`** — addresses debt item 1; the P2.2 plan covers it. Attestation recovery must use the whitelist.
 3. **Define a kill-switch env resolver module** matching the WC-wake pattern (`daemon/services/instance_messaging.py:114-191`) — provides the cached global + one-time boot log for the new kill-switches (kill-switch for the gate; per-lane kill-switch if Candidate C).
 
@@ -496,7 +496,7 @@ The user-supplied candidates are A–E. Each is analyzed below with mechanism, h
 | Scanner | `tests/unit/test_attestation_scanner.py` — N-messages window; tool_call name match; summary message handling; compaction-folded messages |
 | Gate decision | `tests/unit/test_attestation_gate.py` — pass/fail/no-state cases; compaction-folded; language_check composition |
 | Recovery injection | `tests/unit/test_attestation_recovery.py` — source value → HUMAN stamp; msg_type; revive set; PAUSED exempt |
-| Loop-guard bounds | `tests/unit/test_attestation_loop_guard.py` — counter increment; threshold; terminal fallback; **`denied_count` reset-on-allow** (instance-row column, per D5); **`denied_count` reset on terminal-after-bound** (escalation path skips inject_recovery, then resets); counter survives revive (no in-memory cleanup hook required) |
+| Loop-guard bounds | `tests/unit/test_attestation_loop_guard.py` — counter increment; threshold; terminal fallback; **`attestation_denied_count` reset-on-allow** (instance-row column, per D5); **`attestation_denied_count` reset on terminal-after-bound** (escalation path skips inject_recovery, then resets); counter survives revive (no in-memory cleanup hook required) |
 | Mode resolver (kill-switch) | `tests/unit/test_attestation_resolver.py` — env-resolved tri-state mode; typo validation; restart-read; boot log |
 | Tool registration | `tests/unit/tools/test_attestation_registration.py` — `CATEGORY_MODULES` entry; `DYNAMIC_TOOL_NAMES`; `KNOWN_TOOL_NAMES` regen; `tools.allow` opt-in |
 | Source/HUMAN stamp | `tests/unit/test_attestation_source_authorship.py` — source prefix NOT starting with `internal_*:`; HUMAN stamp; user-origin window side-effects |
@@ -542,7 +542,7 @@ For attestation: a real-dispatch integration test with DB read-back (gate fires 
 - **Leader docs:** `agents/leader/rule.md` (must-call-tool convention precedent = planner/tidier skill_feedback); `agents/leader/meta.json:14-15` (13-category tools.allow); `agents/leader/workflow.md`
 - **JAFP (Job-As-Front-Primitive):** `daemon/services/instance_messaging.py:1960`; manager facade `:6530-6626`
 - **Facade-forwarding discipline:** `tests/unit/test_manager_enqueue_message_work_id_required.py`; `tests/integration/test_job_driven_enqueue_work_id_facade.py`
-- **Compaction:** `daemon/services/compaction.py` (default context limit 700k, `e14f09f9`); `daemon/graph.py:1174` (reactive compaction pattern)
+- **Compaction:** `daemon/compaction.py` (default context limit 700k, `e14f09f9`); `daemon/graph.py:1174` (reactive compaction pattern)
 
 ---
 

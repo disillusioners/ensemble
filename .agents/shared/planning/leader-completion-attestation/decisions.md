@@ -24,7 +24,7 @@ These are the hard constraints the user fixed. Recorded here so the architect do
 
 ### C1 — Loop safety: bounded per-instance retry + terminal fallback
 
-**Constraint:** The recovery path MUST have a bounded per-instance retry count with a terminal fallback (let the instance complete + flag/escalate). The precedent is the `loop-breaker` (`max_repairs` cap + counter auto-reset at `daemon/graph.py:1840-1847, :1836-1837`; `_loop_breaker_state` reset hooks at `daemon/manager.py:3734, :3798, :8548`). For THIS feature, `denied_count` is a row-scoped instance column (per D5 architect ruling), so the in-memory-dict cleanup precedent does not apply; the equivalent is `denied_count` reset-on-allow and reset-on-terminal-after-bound (C-11 in `requirements.md`).
+**Constraint:** The recovery path MUST have a bounded per-instance retry count with a terminal fallback (let the instance complete + flag/escalate). The precedent is the `loop-breaker` (`max_repairs` cap + counter auto-reset at `daemon/graph.py:1840-1847, :1836-1837`; `_loop_breaker_state` reset hooks at `daemon/manager.py:3734, :3798, :8548`). For THIS feature, `attestation_denied_count` is a row-scoped instance column (per D5 architect ruling), so the in-memory-dict cleanup precedent does not apply; the equivalent is `attestation_denied_count` reset-on-allow and reset-on-terminal-after-bound (C-11 in `requirements.md`).
 
 **Implication:** No unbounded recovery loops. The terminal fallback must be observable (the user must be able to detect a recovery-capped instance).
 
@@ -129,10 +129,10 @@ These are the rulings fixed by the leader (architect + reviewer chain) during th
 The leader's review pass also ratified the following architecture-recommendation rulings; these are documented in `requirements.md` (Resolved Decisions) and `architecture-recommendation.md` §4 + §5:
 
 - **O1** — Boot assert `N ≤ min_recent_window`: WARN-only (per FR-7 / AC-7.8); gate continues running; violation is operator-visible.
-- **O2** — Reset-on-allow + reset-on-terminal_after_bound + documented reset triggers. The earlier planner-stage in-memory-dict cleanup precedent (loop-breaker counter cleanup) is DROPPED — row-scoped DB columns need no per-instance in-memory cleanup hooks. Actual `_loop_breaker_state.pop` sites are `daemon/manager.py:3734, :3798, :8548` (and apply to the loop-breaker, not to the gate's `denied_count`).
+- **O2** — Reset-on-allow + reset-on-terminal_after_bound + documented reset triggers. The earlier planner-stage in-memory-dict cleanup precedent (loop-breaker counter cleanup) is DROPPED — row-scoped DB columns need no per-instance in-memory cleanup hooks. Actual `_loop_breaker_state.pop` sites are `daemon/manager.py:3734, :3798, :8548` (and apply to the loop-breaker, not to the gate's `attestation_denied_count`).
 - **O4** — Pause-mid-gate double-increment: idempotent per-denial-epoch upsert OR documented inflation (implementation-defined within FR-13/AC-6.6 constraints).
 - **O5–O9** — fast-follow / pre-flip notes handled in `phase6-fastfollow-plan.md` (a different worker's deliverable).
-- **Fail-open (C3 → C7)** — any exception in scanner/gate ⇒ allow completion + structured error log; the bootstrap exception set (W4 precedent `graph.py:2663-2688`) deliberately does NOT cover SQLAlchemy `OperationalError` raised by the `denied_count` ledger DB seam.
+- **Fail-open (C3 → C7)** — any exception in scanner/gate ⇒ allow completion + structured error log; the bootstrap exception set (W4 precedent `graph.py:2663-2688`) deliberately does NOT cover SQLAlchemy `OperationalError` raised by the `attestation_denied_count` ledger DB seam.
 - **Mode config** — single tri-state env `ENSEMBLE_LEADER_ATTESTATION_MODE=off|dry|enforce`, default `dry`. The single-state-mode env shape is NOT supported on any legacy key.
 
 **Decision-owner:** leader (CLOSED).
@@ -218,8 +218,8 @@ The single-state-mode env shape (under any prior canonical name) is **NOT a supp
 
 ### D3 — Gate scope: leaders only, all parents, or all instances
 
-- **Status:** OPEN
-- **Decision-owner:** architect
+- **Status:** RESOLVED (CLOSED-by-leader, 2026-09-05 — confirms architect ruling per `architecture-recommendation.md` §1 D3: leader-only, enforced at graph-build time via `agent_id == "leader"` check; non-leader graphs are untouched)
+- **Decision-owner:** leader (CLOSED, confirming architect)
 - **Dependencies:** D1
 - **Related:** none
 
@@ -256,8 +256,8 @@ The user requested "leaders" specifically; leader-only is the minimal interpreta
 
 ### D4 — Window N default value + config surface
 
-- **Status:** OPEN
-- **Decision-owner:** architect
+- **Status:** RESOLVED (CLOSED-by-leader, 2026-09-05 — confirms architect ruling per `architecture-recommendation.md` §1 D4: N=3 default, configurable via `ENSEMBLE_LEADER_ATTESTATION_WINDOW` env with Pattern C resolver (restart-read, cached global, one-time boot log))
+- **Decision-owner:** leader (CLOSED, confirming architect)
 - **Dependencies:** D1
 - **Related:** D10 (compaction interaction)
 
@@ -303,34 +303,38 @@ What is the default value of N (number of trailing messages scanned for the atte
 
 ### D5 — Retry bound default + counter storage + ledger semantics + terminal fallback
 
-- **Status:** RESOLVED (CLOSED-by-architect, 2026-09-05 — see `architecture-recommendation.md` §1 D5)
-- **Decision-owner:** architect
+- **Status:** RESOLVED (CLOSED-by-leader, 2026-09-05 — confirms architect ruling per `architecture-recommendation.md` §1 D5; sub-item close on reset semantics per leader ruling below — overrides the prior vague "instance-revival transitions" wording)
+- **Decision-owner:** leader (CLOSED, confirming architect)
 - **Dependencies:** D1, D3
 - **Related:** D8 (dry-run mode for observability)
 
 #### Question
 
-What is the default max recovery attempts per instance? Where is the attempt counter stored? What is the terminal fallback behavior when the cap is hit?
+What is the default max recovery attempts per instance? Where is the attempt counter stored? What is the terminal fallback behavior when the cap is hit? What are the exact reset triggers?
 
 #### Resolution
 
-Per the architect's adjudication (`architecture-recommendation.md` §1 D5 + §4 + §5 phasing adjustments + C-11 in `requirements.md`):
+Per the architect's adjudication (`architecture-recommendation.md` §1 D5 + §4 + §5 phasing adjustments + C-11 in `requirements.md`), CLOSED-by-leader for reset semantics:
 
 | Sub-decision | Resolution | Notes |
 |---|---|---|
 | **Retry bound default** | **3** (env `ENSEMBLE_LEADER_ATTESTATION_DENY_BOUND`) | Mirrors loop-breaker precedent (`daemon/graph.py:1840-1847`); aggressive but safe. Configurable via env (Pattern C resolver). |
-| **Counter storage** | **Row-scoped DB columns on the instance row**: `denied_count` (int) + `completion_gate_escalated` (bool). PG+SQLite-safe migration (fresh-SQLite boot trap is a live hazard — `LESSONS/2026-09-04-fresh-sqlite-boot-migration-20260714-pg-only.md`). | The 5-path / in-memory-dict precedent does NOT apply to row-scoped DB columns. |
-| **Reset semantics (O2)** | `denied_count` is reset to 0 on every allow (FR-3 attested path) AND on `terminal_after_bound` AND on instance-revival transitions. Rows survive revive, so reset-on-allow is critical — without it a revived leader starts the next mission pre-burdened. | Architect ruling added to council verdict. |
-| **Pause-mid-gate double-increment (O4)** | Idempotent per-denial-epoch upsert OR documented inflation is implementation-defined within FR-13/AC-6.6 constraints (i.e., the gate MUST NOT silently inflate `denied_count` on `OperationalError`). | See C-7 / NFR-15 / AC-6.6 / AC-13.2. |
+| **Counter storage** | **Row-scoped DB columns on the instance row**: `attestation_denied_count` (int) + `completion_gate_escalated` (bool). PG+SQLite-safe migration (fresh-SQLite boot trap is a live hazard — `LESSONS/2026-09-04-fresh-sqlite-boot-migration-20260714-pg-only.md`). | The 5-path / in-memory-dict precedent does NOT apply to row-scoped DB columns. |
+| **Reset semantics (O2) — LEADER RULING (VERBATIM)** | **`attestation_denied_count` has PER-MISSION (per-work-episode) semantics. It accumulates within a mission — in-graph deny-nudges NEVER reset it (this is the loop protection). It resets on exactly four triggers: (1) attested allow; (2) `terminal_after_bound` finalization; (3) revive-from-COMPLETED via a NEW top-level user/mission message (fresh episode); (4) instance creation. It does NOT reset on pause/resume or checkpoint reload.** | Leader ruling 2026-09-05 (closed-by-leader). Supersedes the prior "instance-revival transitions" wording. The four triggers must be reproduced verbatim at every carrier: phase3-plan.md entry criteria + task 3.3 reset enumeration; phase5-plan.md task 5.7 trigger reconciliation; plan-overview.md D5 row + risk row 8; the `attestation_denied_count` reset method `reset_attestation_denied_count(instance_id)` is invoked at trigger #1 and trigger #2 only; triggers #3 and #4 fire at instance-state transitions (instance creation sets the column to 0 by column default; revive-from-COMPLETED-with-fresh-episode is invoked from the `send_message`-revive path per `daemon/services/instance_messaging.py:1867-1909`). |
+| **Pause-mid-gate double-increment (O4)** | Idempotent per-denial-epoch upsert OR documented inflation is implementation-defined within FR-13/AC-6.6 constraints (i.e., the gate MUST NOT silently inflate `attestation_denied_count` on `OperationalError`). | See C-7 / NFR-15 / AC-6.6 / AC-13.2. |
 | **Terminal fallback** | Complete (allow END) + structured `gate_terminal_after_bound` event + persistent `completion_gate_escalated=true` flag. Crit-note addition is **OPTIONAL** (per the optional observability hardening question in `architecture-recommendation.md` §8 — default NO). | Mission-marker and SSE-alert variants discarded; flag + structured event suffice at MVP. |
 
 The earlier _loop_breaker_state.pop() in-memory-dict cleanup precedent is **DROPPED** for this feature — actual loop-breaker reset sites are `daemon/manager.py:3734, :3798, :8548` (3 sites, not 5), and the in-memory-dict cleanup precedent does NOT apply to row-scoped DB columns anyway.
 
+#### Drift disclosure (per leader ruling)
+
+The previous D5 enumeration named "instance-revive-from-TERMINATED" as a trigger. Per the leader ruling above, revive-from-TERMINATED is REMOVED as a named trigger (it is not in the leader's four). The new enumeration replaces it with "instance creation" as trigger #4. All carrier locations have been reconciled.
+
 #### Impacted Components
 
-- Counter columns: instance row (`daemon/repositories/instance/`); migration at `daemon/migrations/<ts>_attestation_ledger.py` (PG+SQLite-safe).
+- Counter columns: instance row (`daemon/repositories/instance/`); migration at `daemon/migrations/<ts>_attestation_ledger.py` (PG+SQLite-safe); default value of `attestation_denied_count` column is 0 (fires trigger #4 at instance creation).
 - Terminal fallback: instance row column (`completion_gate_escalated`); gate decision log schema (`leader_completion_gate` event with `decision=terminal_after_bound`).
-- Reset hooks: gate decision function (`attestation_gate`) — both allow-write and terminal-after-bound-write are in the same tx as the `denied_count = 0` UPDATE.
+- Reset hooks: gate decision function (`attestation_gate`) — attested-allow write (trigger #1) and `terminal_after_bound` write (trigger #2) are in the same tx as the `attestation_denied_count = 0` UPDATE. Triggers #3 and #4 fire at instance-state transitions (NOT inside the gate node).
 
 ---
 
@@ -377,8 +381,8 @@ User-provided draft: `"The work is not yet finished — check current progress a
 
 ### D7 — Attestation tool semantics
 
-- **Status:** OPEN
-- **Decision-owner:** architect
+- **Status:** RESOLVED (CLOSED-by-leader, 2026-09-05 — confirms architect ruling per `architecture-recommendation.md` §1 D7: `attest_completion`, no-arg, idempotent (any call in window counts), short confirmation ToolMessage return, NOT privileged)
+- **Decision-owner:** leader (CLOSED, confirming architect)
 - **Dependencies:** D1, D3
 - **Related:** none
 
@@ -456,7 +460,7 @@ Should there be a dry-run mode that logs would-have-recovered events without enq
 **D8 = the tri-state `dry` mode IS the dry-run.** Per the architect's adjudication:
 
 - `mode=off`: legacy behavior (no gate evaluation).
-- `mode=dry`: gate evaluates every would-be END, emits structured `leader_completion_gate` decision-log entries with scanner diagnostics (`would_have_denied`, `pending_children`, `queued_or_expected_wakeups`, `attest_seen_outside_window`, `messages_scanned`, `scanned_window_size`), but allows all END (zero side effects).
+- `mode=dry`: gate evaluates every would-be END, emits structured `leader_completion_gate` decision-log entries with scanner diagnostics (`dry_log_deny_predicate_total`-computable values per Phase 4 task 4.5 canonical schema — i.e. the R2 inputs `pending_children`, `queued_or_expected_wakeups`, `attest_seen_outside_window`, `messages_scanned`, `scanned_window_size`; the canonical metric name per CR-4 is `dry_log_deny_predicate_total`), but allows all END (zero side effects).
 - `mode=enforce`: gate denies per FR-3.
 
 There is no separate pre-Phase-2 dry-run activity. The instrumented dry-mode observability is in the gate from Phase-1 onward. Dry lines carry scanner diagnostics so the dry→enforce promotion decision is adjudicated on data (per `requirements.md` NFR-16: adjudicated dry-log false-positive rate is the gate to promotion), not conjecture.
@@ -471,8 +475,8 @@ There is no separate pre-Phase-2 dry-run activity. The instrumented dry-mode obs
 
 ### D9 — Mission finalize ordering: does recovery need to land before observer Step 2 commits?
 
-- **Status:** OPEN
-- **Decision-owner:** architect
+- **Status:** RESOLVED (CLOSED-by-leader, 2026-09-05 — moot for D1=B per `architecture-recommendation.md` §1 D9: recovery lands before finalize by construction because denied turn never ENDs, so observer Step 2 never fires on it)
+- **Decision-owner:** leader (CLOSED, confirming architect)
 - **Dependencies:** D1
 - **Related:** none
 
@@ -504,8 +508,8 @@ For candidates that gate at finalize time (E) or near it (A), does the recovery 
 
 ### D10 — Tool-call visibility edge cases
 
-- **Status:** OPEN
-- **Decision-owner:** architect
+- **Status:** RESOLVED (CLOSED-by-leader, 2026-09-05 — confirms architect ruling per `architecture-recommendation.md` §1 D10: (a) ANY-in-last-3-AIMessages scanner window semantics, (b) scan current post-compaction state — safe at default config with N≤min_recent_window coupling enforced, (c) report-injection immunity by construction)
+- **Decision-owner:** leader (CLOSED, confirming architect)
 - **Dependencies:** D1, D4 (window N)
 - **Related:** none
 
@@ -550,7 +554,7 @@ How does the gate handle: (a) attestation call followed by more turns (window se
 #### Impacted Components
 
 - Scanner function (new): pure function over `state['messages']`.
-- `daemon/services/compaction.py` — preserve tool_call shape (if option b2).
+- `daemon/compaction.py` — preserve tool_call shape (if option b2).
 - `daemon/graph.py:414-490` — report-injection marker (if option c3).
 
 ---
@@ -596,7 +600,7 @@ OPEN (genuine — no "default if unresolved"):
 - **R1** — Deny path semantics: in-graph checkpoint-durable `HumanMessage` nudge, no `manager.enqueue_message`, no revive on deny. Durable-enqueue recovery injector RELOCATED to `phase6-fastfollow-plan.md` (C backstop, post-soak).
 - **R2** — Gate deny input requires pending-wakeup input: `pending_children == 0` AND `queued_or_expected_wakeups == 0` AND `attestation_present == false`. Legitimate delegation turn-ends allowed un-attested.
 - **O1** — Boot assert `N ≤ min_recent_window`: WARN-only (per FR-7 / AC-7.8).
-- **O2** — Reset semantics: `denied_count` reset on every allow + reset on terminal-after-bound. The planner-stage in-memory-dict cleanup precedent is DROPPED (row-scoped DB columns need no per-instance in-memory cleanup hooks).
+- **O2** — Reset semantics: `attestation_denied_count` reset on every allow + reset on terminal-after-bound. The planner-stage in-memory-dict cleanup precedent is DROPPED (row-scoped DB columns need no per-instance in-memory cleanup hooks).
 - **O4** — Pause-mid-gate double-increment: idempotent per-denial-epoch upsert or documented inflation, implementation-defined within FR-13/AC-6.6.
 - **O5–O9** — fast-follow / pre-flip notes handled in `phase6-fastfollow-plan.md`.
 
@@ -626,5 +630,4 @@ OPEN (genuine — no "default if unresolved"):
 - `daemon/graph.py:414-490` (report-injection claim machine)
 - `daemon/graph.py:1836-1847` (loop-breaker cap); `_loop_breaker_state.pop` reset hooks at `daemon/manager.py:3734, :3798, :8548` (in-memory precedent only — does NOT apply to row-scoped DB columns; per D5 reset-on-allow)
 - `daemon/graph.py:216-224` (`[SYSTEM NOTE: ...]` data-frame convention — MUST NOT be used for recovery)
-- `daemon/services/compaction.py` (compaction folding behavior — to verify pre-implementation)NOT be used for recovery)
-- `daemon/services/compaction.py` (compaction folding behavior — to verify pre-implementation)
+- `daemon/compaction.py` (compaction folding behavior — to verify pre-implementation)

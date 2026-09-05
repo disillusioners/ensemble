@@ -74,7 +74,7 @@ The plan's bounded-retry counter is modeled directly on the loop-breaker.
 | LoopDetector backwards scan | `daemon/graph.py:960-1054` (alias `:1037-1044`) | Walks backwards through messages looking for repeated tool-call patterns |
 | `_loop_breaker_state` cleanup | `daemon/manager.py:3734`, `:3798`, `:8548` | Cleanup in 3 paths to avoid stale-trip on new instance |
 
-**Implication for the plan:** the attestation denied-count counter uses **row-scoped DB columns** (`denied_count`, `completion_gate_escalated`) with **reset-on-allow** semantics (an `attest_completion` tool call succeeds → counter zeroed) plus **reset-on-terminal_after_bound** semantics (a terminal commit lands past the bound → counter zeroed). The in-memory `_loop_breaker_state` precedent (3 pop sites at `daemon/manager.py:3734`, `:3798`, `:8548`) does **not** apply to DB columns — DB rows persist across instance reuse, so the reset lives in the writer paths, not in a parallel cleanup pattern. See `decisions.md` D5 (RESOLVED) and `architecture-recommendation.md`.
+**Implication for the plan:** the attestation denied-count counter uses **row-scoped DB columns** (`attestation_denied_count`, `completion_gate_escalated`) with **reset-on-allow** semantics (an `attest_completion` tool call succeeds → counter zeroed) plus **reset-on-terminal_after_bound** semantics (a terminal commit lands past the bound → counter zeroed). The in-memory `_loop_breaker_state` precedent (3 pop sites at `daemon/manager.py:3734`, `:3798`, `:8548`) does **not** apply to DB columns — DB rows persist across instance reuse, so the reset lives in the writer paths, not in a parallel cleanup pattern. See `decisions.md` D5 (RESOLVED) and `architecture-recommendation.md`.
 
 ---
 
