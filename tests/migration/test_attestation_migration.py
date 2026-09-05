@@ -36,6 +36,7 @@ Run with::
 
 from __future__ import annotations
 
+import re
 import shutil
 import tempfile
 from collections.abc import Iterator
@@ -448,4 +449,74 @@ class TestMigrationIsPgSqliteSafe:
             f"Phase 3 migration contains PG-only construct "
             f"'{forbidden_construct}' — would break fresh-SQLite boot "
             f"per LESSONS/2026-09-04-fresh-sqlite-boot-migration-20260714-pg-only"
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5. Boolean int-literal default guard (LCA merge-blocker defect class)
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: Legacy migrations carrying the historical ``BOOLEAN ... DEFAULT 0``
+#: form. ALL are pre-existing, already-applied, checksummed migrations —
+#: editing any of them would break the migration checksum ledger
+#: (``schema_migrations.checksum``, runner.py:57), so they are pinned
+#: here and EXCLUDED from the guard. New migrations must NOT join this
+#: list. See LESSONS/2026-09-06-lca-pg-boolean-default-defect.md.
+_LEGACY_BOOLEAN_DEFAULT_0_ALLOWLIST: frozenset[str] = frozenset({
+    # job_queue_paused flag column (2024-01-01 — pre-dates the rule).
+    "20240101_000001_add_job_queue_paused.sql",
+    # job-queues table — the pattern named by the LCA hotfix manifest.
+    "20260409_000001_add_job_queues_table.sql",
+    # MCP-server builtin fields (latent: the ORM/PG create_all path
+    # already uses the correct boolean literal).
+    "20260517_000001_add_builtin_fields_to_mcp_servers.sql",
+    # task.is_deferred / task.is_background (latent: task/models.py
+    # already declares server_default=text("false") — the .sql files
+    # are the SQLite-dialect leftovers only).
+    "20260627_000003_task_is_deferred.sql",
+    "20260627_000004_task_is_background.sql",
+})
+
+#: Int-literal default on a BOOLEAN column — PostgreSQL rejects it at
+#: DDL time (psycopg.errors.DatatypeMismatch, SQLSTATE 42P16) while
+#: SQLite's loose typing silently accepts it. Matches BOTH the
+#: ``BOOLEAN NOT NULL DEFAULT 0`` and bare ``BOOLEAN DEFAULT 0`` forms,
+#: within a single statement (never crosses ``;`` or a newline).
+_BOOLEAN_DEFAULT_0_PATTERN = re.compile(r"(?i)\bBOOLEAN\b[^;\n]*\bDEFAULT\s+0\b")
+
+
+class TestNoBooleanIntegerDefaultInShippedMigrations:
+    """Guard the LCA merge-blocker defect class at the source level.
+
+    ``completion_gate_escalated`` shipped with an int-literal default at
+    2 of its 3 registration sites; PostgreSQL rejects the DDL
+    (``DatatypeMismatch``) while every SQLite-backed test stayed green
+    (313/313) — a guard that only greps the fresh-SQLite direction
+    (PG-only syntax) cannot see this class, because it is the OTHER
+    dialect that explodes
+    (LESSONS/2026-09-06-lca-pg-boolean-default-defect.md). This test
+    scans every shipped migration .sql for the
+    int-literal-default-on-BOOLEAN pattern and fails with ALL offenders
+    named. Deterministic source-level grep — no DB required.
+    """
+
+    def test_no_boolean_int_literal_default(self):
+        versions_dir = (
+            Path(__file__).resolve().parents[2] / "daemon/migrations/versions"
+        )
+        offenders: list[str] = []
+        for sql_path in sorted(versions_dir.glob("*.sql")):
+            if sql_path.name in _LEGACY_BOOLEAN_DEFAULT_0_ALLOWLIST:
+                continue
+            match = _BOOLEAN_DEFAULT_0_PATTERN.search(sql_path.read_text())
+            if match:
+                offenders.append(f"{sql_path.name}: {match.group(0)!r}")
+        assert not offenders, (
+            "BOOLEAN column(s) with int-literal DEFAULT 0 found in "
+            f"shipped migrations: {offenders}. PostgreSQL rejects "
+            "``DEFAULT 0`` on BOOLEAN (psycopg.errors.DatatypeMismatch); "
+            "use ``DEFAULT FALSE``. Legacy already-applied migrations are "
+            "added to _LEGACY_BOOLEAN_DEFAULT_0_ALLOWLIST only with "
+            "justification — NEVER edited (checksum ledger). "
+            "Ref: LESSONS/2026-09-06-lca-pg-boolean-default-defect.md"
         )

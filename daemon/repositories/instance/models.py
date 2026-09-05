@@ -109,7 +109,7 @@ class Instance(SQLModel, table=True):
             Boolean,
             nullable=False,
             default=False,
-            server_default=text("0"),
+            server_default=text("false"),
         ),
     )
 

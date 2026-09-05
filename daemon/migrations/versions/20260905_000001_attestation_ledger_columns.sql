@@ -16,7 +16,7 @@
 --       loop protection — a leader that keeps hallucinating completions
 --       between legitimate wakeups still accumulates toward the bound.
 --
---     * ``completion_gate_escalated BOOLEAN NOT NULL DEFAULT 0`` — the
+--     * ``completion_gate_escalated BOOLEAN NOT NULL DEFAULT FALSE`` — the
 --       terminal-after-bound marker (leader ruling 2 — shares the
 --       counter's per-mission lifecycle; cleared by the SAME single
 --       reset op that clears the counter).
@@ -51,7 +51,7 @@
 -- UP
 
 ALTER TABLE instances ADD COLUMN attestation_denied_count INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE instances ADD COLUMN completion_gate_escalated BOOLEAN NOT NULL DEFAULT 0;
+ALTER TABLE instances ADD COLUMN completion_gate_escalated BOOLEAN NOT NULL DEFAULT FALSE;
 
 -- DOWN
 -- Reverse the column additions. SQLite 3.35+ supports DROP COLUMN; older
