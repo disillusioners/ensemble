@@ -75,6 +75,11 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
     "upgrade_status",
     "system_restart",
     "system_upgrade",
+    # Leader completion attestation (Phase 1 of LCA feature, 2026-09-05) —
+    # created by create_attestation_tools() factory
+    # (daemon/tools/attestation.py). Single no-arg idempotent tool; the
+    # attestation is the tool-call's presence in the message stream.
+    "attest_completion",
 })
 
 
@@ -490,6 +495,12 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     "plane": "daemon.tools.plane_tools",
     "plane_sync": "daemon.tools.plane_sync",
     "system_upgrade": "daemon.tools.upgrade_tools",
+    # Leader completion attestation (Phase 1 of LCA feature, 2026-09-05) —
+    # opt-in via agents/leader/meta.json tools.allow. NOT in
+    # PRIVILEGED_TOOL_CATEGORIES (only system_upgrade is privileged); the
+    # attestation category is opt-in-only by convention (fail-closed
+    # authz), not because it is privileged.
+    "attestation": "daemon.tools.attestation",
 }
 
 
@@ -532,6 +543,7 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "agent_modify",
     "agent_read",
     "ask_questions",
+    "attest_completion",
     "await_mission",
     "bash",
     "blueprint_acknowledge_pending",
