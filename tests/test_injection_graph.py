@@ -13,6 +13,18 @@ These tests construct ``create_agent_node`` directly with stub LLMs and
 mock injection_slot / live_hub handles — no LangGraph, no LangChain
 runtime, no daemon manager. The goal is to verify the slot consumption
 contract in isolation.
+
+Beyond the slot-consumption contract, this 1000+-line module also owns:
+    * ``MessageTapSlot`` tap-firing proofs (the F2 single-return site at
+      ``daemon/graph.py:4232-4233`` writes a ``message_metadata`` side-
+      table row keyed on the message id).
+    * Child-report drain identity (``daemon/graph.py:3660-3706`` — the
+      uuid4 stamp at ``graph.py:3703`` is what makes the drain-side id
+      equal the F2-tap id).
+    * SSE ↔ checkpoint ↔ side-table id-alignment tests
+      (``TestChildReportSseIdentity`` etc.) — the id surfaced by the
+      SSE envelope, the id recorded in the checkpoint, and the id
+      recorded in ``message_metadata`` MUST all be the same uuid.
 """
 
 from __future__ import annotations
@@ -102,9 +114,9 @@ def _make_agent(
     ``message_tap_slot`` threads the :class:`MessageTapSlot` handle into
     the ``create_agent_node`` closure so tests can assert against the
     ``message_metadata`` side-table writes the F2 single-return site
-    fires (``daemon/graph.py:4196-4209``). ``report_injection_slot``
+    fires (``daemon/graph.py:4232-4233``). ``report_injection_slot``
     is the duck-typed ``drain(instance_id) -> list[dict]`` handle used
-    by the child-report pre-LLM drain (``daemon/graph.py:3642-3693``).
+    by the child-report pre-LLM drain (``daemon/graph.py:3660-3706``).
     """
     from daemon.graph import create_agent_node
 
@@ -889,7 +901,7 @@ class TestDrainEchoId:
     async def test_echo_id_entry_tap_writes_metadata_row(self):
         """Acceptance criterion (2) — tap-firing proof: the
         ``message_metadata`` side-table tap at the F2 single-return
-        site (``daemon/graph.py:4196-4209``) MUST record a row for a
+        site (``daemon/graph.py:4232-4233``) MUST record a row for a
         FIFO entry that carries ``echo_id``, and the recorded id MUST
         equal the FIFO entry's ``echo_id`` (NOT a fresh uuid4 — that
         would be the seam-drain identity regression the MAJ-1 fix
@@ -1004,10 +1016,10 @@ class TestDrainEchoId:
 
 # ---------------------------------------------------------------------------
 # Child-report injection — the DB-backed report drain at
-# ``daemon/graph.py:3642-3693`` stamps a uuid4 id on each
-# ``HumanMessage`` BEFORE the F2 single-return tap at :4196-4209 fires.
+# ``daemon/graph.py:3660-3706`` stamps a uuid4 id on each
+# ``HumanMessage`` BEFORE the F2 single-return tap at :4232-4233 fires.
 # The id-stamp change (the ``+id=str(uuid.uuid4())`` line at
-# graph.py:3687-3692 in this branch) is the same correctness fix the
+# graph.py:3703 in this branch) is the same correctness fix the
 # MAJ-1 / seam-drain branches already carry; this class proves the
 # side-table write also fires for child reports.
 # ---------------------------------------------------------------------------
@@ -1043,13 +1055,13 @@ class TestChildReportTapFires:
     metadata_liveness_round_trip`` in
     ``tests/unit/repositories/test_message_tap_to_repo_liveness.py``)
     cover the in-memory repo, but no test in the corpus pins that the
-    ``agent_node`` closure at ``daemon/graph.py:3642-3693`` actually
+    ``agent_node`` closure at ``daemon/graph.py:3660-3706`` actually
     gets the row through the F2 single-return tap. Without this, a
     regression that drops the report's id (returns to pre-fix
     id-less ``HumanMessage``) would slip past the existing
     LLM/SSE/path tests.
 
-    The id-stamp at ``daemon/graph.py:3687-3692`` (the diff
+    The id-stamp at ``daemon/graph.py:3703`` (the diff
     ``+id=str(uuid.uuid4())`` on the child-report branch) is the
     correctness hinge: the id is stamped BEFORE the F2 tap, so the
     tap records the same id the LLM/SSE/path surfaces. Pre-fix
@@ -1105,7 +1117,7 @@ class TestChildReportTapFires:
         ids = [mid for mid, _ts, _seq in items]
         # The stamped id (NOT a fresh uuid4) is the row the side-table
         # records — this is the LLM/SSE/side-table alignment the
-        # report-injection id-stamp at graph.py:3687-3692 closed.
+        # report-injection id-stamp at graph.py:3703 closed.
         assert report_hm.id in ids
         for _mid, ts, seq in items:
             assert isinstance(ts, str) and len(ts) > 0
@@ -1113,7 +1125,7 @@ class TestChildReportTapFires:
 
 
 class TestChildReportSseIdentity:
-    """Regression (iter-2 remediation): the child-report SSE pre-emit
+    """Regression (iter-2 identity remediation): the child-report SSE pre-emit
     must carry the CHECKPOINTED report id.
 
     9674b95b stamped a uuid4 on the checkpointed copy (``report_msg``,

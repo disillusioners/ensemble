@@ -20,6 +20,12 @@ from fastapi import HTTPException
 # Default max edit distance for fuzzy instance matching
 DEFAULT_FUZZY_MATCH_DISTANCE: int = 7
 
+# Module-level logger — hoisted here (post-imports) so the first
+# ``logger_utils.debug(...)`` call inside ``serialize_message`` no
+# longer has to wait until line ~543 for the assignment. Idempotent
+# vs. the prior late binding (see git log).
+logger_utils = logging.getLogger(__name__)
+
 # Pattern for parsing <think/> tags
 _THINK_PATTERN = re.compile(r'<think[^>]*>(.*?)</think\s*>', re.DOTALL | re.IGNORECASE)
 
@@ -70,8 +76,14 @@ def _extract_timestamp(msg) -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def serialize_message(msg, tool_outputs: dict | None = None, message_id: str | None = None) -> dict:
+def serialize_message(msg: Any, tool_outputs: dict | None = None, message_id: str | None = None) -> dict:
     """Serialize a LangChain message to dict matching REST API format.
+
+    ``msg`` is intentionally typed as ``Any`` (deliberate duck-typing
+    via :func:`getattr`) so this serializer accepts any LangChain
+    message class plus duck-typed shims the test suite uses — adding
+    a strict ``BaseMessage`` annotation would force every test stub
+    to inherit from the real LangChain class for no behavioral gain.
     
     Must handle all 5 thinking extraction paths:
       1. additional_kwargs.get("reasoning_content")
@@ -540,7 +552,6 @@ def validate_agent_id(agent_id: str) -> tuple[str, Path]:
 # ── Agent-as-Tool: Synchronous Invoke ────────────────────────────────────────
 
 _invoke_semaphore: asyncio.Semaphore | None = None
-logger_utils = logging.getLogger(__name__)
 
 
 def _get_invoke_semaphore() -> asyncio.Semaphore:

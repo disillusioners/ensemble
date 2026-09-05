@@ -424,11 +424,10 @@ async def get_instance_messages(
     # here because the side table is an ENRICHMENT lookup, never the
     # authoritative message source.
     #
-    # Under-record (a checkpoint message with no tap row — id-less
-    # nudge/language_check messages, direct-ainvoke entries, threads
-    # predating the side table) is NOT a bug: it falls through to the
-    # ``state.ts`` fallback in the loop below, the same degradation
-    # the pre-C1 walk produced for id-less messages.
+    # Under-record (a checkpoint message with no tap row — direct-ainvoke
+    # entries, threads predating the side table) is NOT a bug: it falls
+    # through to the ``state.ts`` fallback in the loop below, the same
+    # degradation the pre-C1 walk produced for id-less messages.
     msgs_repo = (
         getattr(manager, "message_metadata_repo", None)
         if manager is not None

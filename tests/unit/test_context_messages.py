@@ -28,7 +28,31 @@ Test breakdown:
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import uuid
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+from langchain_core.messages import HumanMessage, RemoveMessage
+
+from daemon.registry import ContextInjectionConfig
+from daemon.services.context_messages import (
+    CONTEXT_KIND_BLUEPRINT,
+    CONTEXT_KIND_PROJECT,
+    CONTEXT_KIND_SHARED_CONTEXT,
+    CONTEXT_KIND_SKILLS,
+    CONTEXT_PREFIX,
+    CONTEXT_SUFFIX,
+    assemble_context_messages,
+    build_project_context_message,
+    build_project_scope_guide_message,
+    build_shared_context_message,
+    build_skills_message,
+    escape_for_context_block,
+)
+from daemon.utils import serialize_message
 
 
 def _flatten_context_result(
@@ -47,30 +71,6 @@ def _flatten_context_result(
     """
     persistent, ephemeral = t
     return list(persistent) + list(ephemeral)
-import json
-import logging
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
-
-import pytest
-from langchain_core.messages import HumanMessage, RemoveMessage
-
-from daemon.registry import ContextInjectionConfig
-from daemon.utils import serialize_message
-from daemon.services.context_messages import (
-    CONTEXT_KIND_BLUEPRINT,
-    CONTEXT_KIND_PROJECT,
-    CONTEXT_KIND_SHARED_CONTEXT,
-    CONTEXT_KIND_SKILLS,
-    CONTEXT_PREFIX,
-    CONTEXT_SUFFIX,
-    assemble_context_messages,
-    build_project_context_message,
-    build_project_scope_guide_message,
-    build_shared_context_message,
-    build_skills_message,
-    escape_for_context_block,
-)
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -734,7 +734,7 @@ class TestAssembleContextMessages:
         ]
         assert len(blueprint_messages) == 1
         message = blueprint_messages[0]
-        # Construction-time identity (iter-2 remediation gap): the
+        # Construction-time identity (iter-2 identity remediation): the
         # factory-minted id must exist BEFORE the first serialization —
         # otherwise this test could pass purely via serialize_message's
         # mint write-back instead of proving construction-time stability.
@@ -807,10 +807,9 @@ class TestAssembleContextMessages:
         # (see ``_make_context_message`` in
         # ``daemon/services/context_messages.py``) — that uuid is the
         # row the side-table should record.
-        import uuid as _uuid
         blueprint_id = blueprint_msg.id
         assert blueprint_id is not None
-        _uuid.UUID(blueprint_id)  # raises if not a uuid4
+        uuid.UUID(blueprint_id)  # raises if not a uuid4
 
         # Mirror the entry-tap call site at instance_messaging.py:3942-3950:
         # build graph_input (the persistent block + the user turn), then

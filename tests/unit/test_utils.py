@@ -196,7 +196,7 @@ class TestInvokeAgentAndWaitRouting:
         assert "invoke_agent_and_wait failed" in caplog.text
 
 
-def test_serialize_message_mints_id_once_for_idless_message():
+def test_serialize_message_mints_id_once_for_id_less_message():
     """An id-less message keeps one identity across repeated reads."""
     message = HumanMessage(content="context")
     first = serialize_message(message)
