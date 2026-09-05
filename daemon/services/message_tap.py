@@ -11,7 +11,8 @@ fires at the four approved tap sites (decisions.md D1):
 * ``"agent_node_return"``           — post-F2 single-return refactor of
   the dual-return block at ``daemon/graph.py:3386-3397``.
 * ``"compaction_aupdate_reactive"`` — after the reactive-compaction
-  ``aupdate_state`` at ``daemon/graph.py:3248-3250``.
+  ``aupdate_state`` inside the CLE handler's in-frame persist block
+  (``compaction_tap_slot.tap_node_return``).
 * ``"compaction_aupdate_messaging"`` — after the messaging-side
   ``aupdate_state`` at ``daemon/services/instance_messaging.py:810-822``.
 
@@ -109,13 +110,19 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# The 4 source-label values are part of the contract — see decisions.md
+# The source-label values are part of the contract — see decisions.md
 # D1 and the ``test_message_metadata_hook_placement`` AST scan (which
-# asserts EXACTLY 4 sites, each with EXACTLY 1 of these labels).
+# asserts the site count and that each label is used).
+# P1b (proactive-compaction-fix ADDENDUM A.9 T-tap): a FIFTH label was
+# added for the 95% pre-call compaction hook (LOCKED decision — the
+# hook must NOT reuse ``SOURCE_COMPACTION_REACTIVE`` so per-site
+# observability stays intact). The gate test now enumerates 5 sites /
+# 5 labels.
 SOURCE_USER_MESSAGE_ENTRY = "user_message_entry"
 SOURCE_AGENT_NODE_RETURN = "agent_node_return"
 SOURCE_COMPACTION_REACTIVE = "compaction_aupdate_reactive"
 SOURCE_COMPACTION_MESSAGING = "compaction_aupdate_messaging"
+SOURCE_COMPACTION_PRECALL_95 = "compaction_precall_95"
 
 
 class MessageTapSlot:
@@ -251,4 +258,5 @@ __all__ = [
     "SOURCE_AGENT_NODE_RETURN",
     "SOURCE_COMPACTION_REACTIVE",
     "SOURCE_COMPACTION_MESSAGING",
+    "SOURCE_COMPACTION_PRECALL_95",
 ]

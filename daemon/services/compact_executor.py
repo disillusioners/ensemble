@@ -121,7 +121,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from langchain_core.messages import BaseMessage, RemoveMessage
+from langchain_core.messages import BaseMessage  # noqa: F401  (preserved for downstream type re-export; the persist seam moved into _compaction_persist_seam)
 
 from ..compaction import (
     CompactionContext,
@@ -212,6 +212,39 @@ _ENGINE_FALLBACK_COMPACTION_TYPES: frozenset[str] = frozenset({
 
 _NOOP_REASON_BELOW_FLOOR = "below_floor"
 _NOOP_REASON_RECENTLY_COMPACTED = "recently_compacted"
+_NOOP_REASON_TOO_FEW_MESSAGES = "too_few_messages"
+_NOOP_REASON_INJECTIONS_DOMINATE = "injections_dominate"
+_NOOP_REASON_PRESERVED_WITHIN_THRESHOLD = "preserved_within_threshold"
+
+# Cycle 2 (proactive-compaction-fix review W-4) — engine "skipped_*"
+# compaction_type values are user-facing no-ops, NOT a separate wire
+# enum. The mapping is by string (no enum dep on the executor side
+# — same convention as the rest of this module's wire enum surface)
+# to keep this file free of a hard dependency on
+# ``daemon.services.command_dispatcher`` (which already imports
+# helpers from here). The mapping is TOTAL: every engine
+# ``skipped_*`` value has a noop reason; any unforeseen value
+# falls through to the wire layer with the raw engine string as
+# diagnostic detail (forward-compat).
+#
+# Cycle 3 (proactive-compaction-fix residual W-4.5) added the
+# ``skipped_preserved_within_threshold`` key — the emergency-bail
+# path on ``daemon/compaction.py:2129-2138`` when preserved-groups
+# still fit within the threshold. Pre-cycle-3 the raw engine
+# string leaked through the wire (``compacted_type=
+# "skipped_preserved_within_threshold"``, outside the FE
+# ``CompactedType`` enum) AND the user-facing /compact invoked the
+# 60s dedup stamp seam on the no-op. Both halves are fixed by the
+# new key: the wire mapping produces
+# ``compacted_type="noop"`` + ``noop_reason=
+# "preserved_within_threshold"``, and the seam-skip call-site at
+# :func:`execute_compact` keys on this same dict membership, so
+# the seam is NOT invoked on this path.
+_ENGINE_SKIPPED_TYPES_TO_NOOP_REASON: dict[str, str] = {
+    "skipped_injections_dominate": _NOOP_REASON_INJECTIONS_DOMINATE,
+    "skipped_below_min_messages": _NOOP_REASON_TOO_FEW_MESSAGES,
+    "skipped_preserved_within_threshold": _NOOP_REASON_PRESERVED_WITHIN_THRESHOLD,
+}
 
 _FAILURE_KIND_TIMEOUT = "timeout"
 _FAILURE_KIND_ERROR = "error"
@@ -1105,20 +1138,60 @@ async def execute_compact(
                 )
                 return
 
-            # 10. Persist (D3 recipe — TWO aupdate_state calls in
-            # order; nothing between them).
-            await _persist_compaction_result(
-                manager,
-                instance_id=instance_id,
-                result=result,
+            # Cycle 2 (proactive-compaction-fix review W-4) —
+            # engine-side no-op split. The engine may return a
+            # ``CompactionResult`` with EMPTY ``replacement_messages``
+            # on the anti-refire / min-messages paths
+            # (``compaction_type="skipped_injections_dominate"`` /
+            # ``"skipped_below_min_messages"``;
+            # ``daemon/compaction.py:1994-2020``). The engine stamps
+            # ``compacted_at`` so the AUTO path (proactive + 95% hook)
+            # can engage the 60s dedup — that stamping is the
+            # load-bearing T4/T4-ext acceptance for the auto
+            # triggers. For the USER-FACING ``/compact`` response,
+            # however, engaging the dedup would be a UX regression:
+            # the user typed ``/compact`` explicitly and got
+            # "nothing to do"; a fresh ``/compact`` 5 seconds later
+            # should be allowed to re-attempt (the user might have
+            # added new state in the meantime). The /compact wire
+            # response is mapped to :class:`NoopReason` by
+            # :func:`_map_engine_result_to_wire` (W-4 main
+            # contract). The seam call below is skipped for the
+            # user-facing no-op so the 60s dedup stays available
+            # for the next ``/compact``.
+            is_user_facing_noop = (
+                not result.replacement_messages
+                and result.compaction_type in _ENGINE_SKIPPED_TYPES_TO_NOOP_REASON
             )
+            if is_user_facing_noop:
+                # No seam call — no checkpoint write of any kind.
+                # The engine's internal ``compacted_at`` stamp is
+                # dropped for this path; the AUTO path still gets
+                # the stamp (its caller is the proactive site in
+                # ``instance_messaging._maybe_compact_context``,
+                # which calls the seam directly with the result).
+                # The wire response carries the NoopReason; tokens
+                # accounting passes through unmodified (N1 — honest
+                # delta, no clamping).
+                wire = _map_engine_result_to_wire(result)
+            else:
+                # 10. Persist (D3 recipe — TWO aupdate_state calls
+                # in order; nothing between them) for a real engine
+                # success (or stamp-only anti-refire for non-user
+                # noop paths the engine might still surface in
+                # future).
+                await _persist_compaction_result(
+                    manager,
+                    instance_id=instance_id,
+                    result=result,
+                )
 
-            # 11. Map engine result → executor outcome via the
-            # dedicated engine→wire mapping function (approver
-            # note 1). The mapping covers every engine
-            # ``compaction_type`` value + both ``failure_kind``
-            # values + the wire-only ``noop``.
-            wire = _map_engine_result_to_wire(result)
+                # 11. Map engine result → executor outcome via the
+                # dedicated engine→wire mapping function (approver
+                # note 1). The mapping covers every engine
+                # ``compaction_type`` value + both ``failure_kind``
+                # values + the wire-only ``noop``.
+                wire = _map_engine_result_to_wire(result)
 
             # 12. Emit context_usage_for_instance — FE token-drop refresh.
             try:
@@ -1374,6 +1447,42 @@ def _map_engine_result_to_wire(result: CompactionResult) -> WireOutcome:
     is_success_type = ctype in _ENGINE_SUCCESS_COMPACTION_TYPES
     is_fallback_type = ctype in _ENGINE_FALLBACK_COMPACTION_TYPES
     is_known_type = ctype in _ENGINE_TYPE_TO_WIRE_COMPACTED_TYPE
+    is_skipped_noop_type = ctype in _ENGINE_SKIPPED_TYPES_TO_NOOP_REASON
+
+    # Cycle 2 (proactive-compaction-fix review W-4) — the engine
+    # emits ``skipped_*`` values on the anti-refire / min-messages
+    # paths (``daemon/compaction.py:1994-2020``). The pre-fix wire
+    # mapping fell through to the W-4.4 default branch and emitted
+    # ``compacted_type="skipped_<reason>"`` (raw engine string) +
+    # ``success: true`` — outside the FE ``CompactedType`` enum
+    # (``summary | partial_summary | truncation | noop``). The
+    # branch below translates the engine value to
+    # ``compacted_type="noop"`` + the appropriate
+    # :class:`NoopReason`, preserving the FE enum contract. The
+    # engine-side ``compacted_at`` stamp is the AUTO-path
+    # anti-refire mechanism (T4/T4-ext acceptance — UNCHANGED
+    # here); the /compact wire response just maps the
+    # user-facing vocabulary. The executor skip on the seam
+    # (separate change at the call site) is what prevents the
+    # 60s dedup from engaging on a /compact user no-op.
+    if is_skipped_noop_type:
+        noop_reason = _ENGINE_SKIPPED_TYPES_TO_NOOP_REASON[ctype]
+        return WireOutcome(
+            terminal_phase=_PHASE_SUCCESS,
+            detail={
+                "compacted_type": _COMPACTED_TYPE_NOOP,
+                "noop_reason": noop_reason,
+                "failure_kind": fk,
+                "tokens_before": result.tokens_before,
+                "tokens_after": result.tokens_after,
+                "tokens_saved": result.tokens_saved,
+                # Preserve the engine raw value as a diagnostic so
+                # the FE / operator can still see WHICH skip path
+                # fired (forward-compat with future engine values
+                # that may not be in the explicit dict).
+                "engine_compacted_type": ctype,
+            },
+        )
 
     # Diagnostic: surface the RAW engine value whenever it differs from
     # the wire value (engine emission not 1:1 wire-compatible, or the
@@ -1541,6 +1650,15 @@ async def _persist_compaction_result(
 ) -> None:
     """Persist the engine result via the executor-safe recipe (C1).
 
+    Thin wrapper around the shared seam
+    (:func:`daemon.services._compaction_persist_seam.persist_compaction_result`)
+    — Phase 1 (proactive-compaction-fix) lifted the verbatim-duplicated
+    B1+B2 ``compacted_ids`` derivation block + sentinel recipe into
+    the shared seam so the executor and the proactive trigger consume
+    ONE implementation. The executor's call site is unchanged in
+    shape — the wrapper preserves the historical signature for
+    callers + tests.
+
     D3: TWO ``aupdate_state`` calls in this exact order, nothing
     between them — direct-list CONCATENATES under
     ``add_messages``, so the messages call carries
@@ -1548,27 +1666,29 @@ async def _persist_compaction_result(
     second call carries ``compacted_at`` (D12 declared schema
     field at graph.py:2433-2438).
 
-    C1 BINDING — DIFFERENT FROM PROACTIVE PATH:
+    C1 BINDING — DIFFERENT FROM MID-SUPERSTEP PERSIST:
 
-    * The proactive path (``instance_messaging.py`` ~:1190-1202)
-      uses ``as_node="agent"`` because it persists INSIDE the
-      graph-task frame, where the next pointer is already wired.
-      That path is BYTE-EQUIVALENT per the C1 binding.
-    * The executor's path persists OUTSIDE the graph-task frame —
-      the instance may be quiescent (next=() on a post-turn IDLE
+    * This seam variant (``mid_turn=False``) uses NO ``as_node`` —
+      the executor persists OUTSIDE the graph-task frame, where the
+      instance may be quiescent (``next=()`` on a post-turn IDLE
       instance). Calling ``aupdate_state(as_node="agent")`` on a
-      terminal / quiescent pointer can interact badly with
+      quiescent pointer can interact badly with
       ``interrupt_before=['agent']`` configurations (the documented
       brick collapse in
-      ``test_compact_executor_revive_brick_e2e.py`` TestBrickCollapseOnRealGraph).
+      ``test_compact_executor_revive_brick_e2e.py``
+      ``TestBrickCollapseOnRealGraph``).
 
       Empirically determined (real-graph exploration, 2026-08-31):
       for a NON-terminal ``as_node="agent"`` persistence, a
       subsequent ``astream(graph_input)`` runs the agent normally.
       But the conservative executor recipe OMITS ``as_node`` — LangGraph
-      interprets the call as an external write (the same shape as the
-      proactive path's post-brick window) so the next pointer is not
+      interprets the call as an external write so the next pointer is not
       touched and the brick interaction is impossible.
+
+    * The CLE mid-superstep site (``daemon/graph.py:3606-3608``)
+      calls the seam with ``mid_turn=True`` so the in-flight task
+      continues to the next node — DIFFERENT frame, DIFFERENT recipe
+      variant. The seam carries both via the parameter.
 
     The canary test
     ``test_compact_executor_revive_brick_e2e.py``
@@ -1578,106 +1698,14 @@ async def _persist_compaction_result(
     genuinely quiescent checkpoint; (b) a subsequent
     ``astream(graph_input)`` runs the agent.
     """
-    graph = await manager.get_instance(instance_id)
-    config = {"configurable": {"thread_id": instance_id}}
-
-    # Architect §5 — W1 fix: read the pre-compaction snapshot, then
-    # run the seam helper that emits the ``REMOVE_ALL_MESSAGES``
-    # sentinel recipe. The sentinel MUST be element 0; anything
-    # before it is discarded. NO per-id RemoveMessages are sent
-    # (eliminates the ValueError-on-absent-id class entirely).
-    pre_state = await graph.aget_state(config)
-    pre_messages: list[BaseMessage] = list(
-        (pre_state.values or {}).get("messages", []) or []
+    from ._compaction_persist_seam import persist_compaction_result as _seam
+    await _seam(
+        manager,
+        instance_id=instance_id,
+        result=result,
+        mid_turn=False,
+        abort_policy="raise",
     )
-
-    from daemon.compaction import (
-        build_sentinel_replacement,
-        CompactionAborted,
-    )
-    # §5 / B1 + B2 fix (2026-09-01) — see the docstring on
-    # :func:`build_sentinel_replacement` for the contract.
-    #
-    # The engine's ``CompactionResult.compacted_ids`` is the
-    # AUTHORITATIVE "intentionally removed" set. The site
-    # derives a fallback ONLY when the engine did not stamp it
-    # (legacy test fixtures that hand-build a result).
-    #
-    # The site-derived fallback is ``pre_ids − new_replacement_ids``
-    # where ``new_replacement_ids`` is the set of ids on
-    # non-RemoveMessage replacement messages (the "keep" set).
-    # RemoveMessage targets are declarations of loss, NOT
-    # "kept" ids — they are correctly excluded from the keep
-    # set so the derived compacted set captures the engine's
-    # intent (the engine is removing every snapshot id that
-    # is not in the keep set). This formulation is sound for
-    # ALL paths including the emergency path (where the
-    # engine populates RemoveMessages with the same ids it
-    # declares as compacted_ids).
-    pre_ids = {
-        getattr(m, "id", None)
-        for m in pre_messages
-    }
-    pre_ids.discard(None)
-    new_replacement_ids = {
-        getattr(m, "id", None)
-        for m in result.replacement_messages
-        if not isinstance(m, RemoveMessage)
-    }
-    new_replacement_ids.discard(None)
-    site_compacted_ids: set[str] = pre_ids - new_replacement_ids
-    engine_compacted_ids = getattr(result, "compacted_ids", None)
-    if engine_compacted_ids is not None:
-        # Engine is authoritative; assert disjointness so a
-        # mismatch surfaces loudly here, not as a silent loss
-        # in the checkpoint.
-        assert set(engine_compacted_ids) <= site_compacted_ids, (
-            "engine populated compacted_ids that are NOT a subset "
-            "of the site-derived set — engine and site disagree on "
-            "the removed span; refusing the write"
-        )
-        compacted_ids: set[str] = set(engine_compacted_ids)
-    else:
-        compacted_ids = site_compacted_ids
-    try:
-        replacement: list[BaseMessage] = build_sentinel_replacement(
-            result, pre_messages, compacted_ids=compacted_ids
-        )
-    except CompactionAborted as abort_exc:
-        # W1 mitigation: pre-write guard refused the write. The
-        # checkpoint is untouched, the executor surfaces a non-fatal
-        # warning, and the next attempt retries from a clean state.
-        # We DO raise — the executor surfaces the abort so the
-        # calling command-state path can fail-open at the higher
-        # layer; the checkpoint is untouched.
-        import logging
-        logging.getLogger(__name__).warning(
-            "compaction pre-write guard refused the write for "
-            "instance=%s: %s — failing open, no checkpoint write",
-            instance_id, abort_exc,
-        )
-        raise
-
-    # First call: messages (REMOVE_ALL_MESSAGES sentinel + injected +
-    # doc + tail). The sentinel forces the entire new channel value
-    # after it (langgraph 1.0.9 ``add_messages`` semantics — the
-    # ONLY order-control path).
-    # C1: NO ``as_node`` — the executor persists outside the graph-task
-    # frame; the brick-interaction window is closed by the missing
-    # ``as_node`` argument (LangGraph treats this as an external write).
-    await graph.aupdate_state(
-        config,
-        {"messages": replacement},
-    )
-
-    # Second call: compacted_at stamp (D12). Skipped if the engine
-    # didn't stamp one (shouldn't happen — the engine always stamps
-    # the timestamp).
-    if result.compacted_at:
-        await graph.aupdate_state(
-            config,
-            {"compacted_at": result.compacted_at},
-        )
 
 
 # ─────────────────────────────────────────────────────────────────────────

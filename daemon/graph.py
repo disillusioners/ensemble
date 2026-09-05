@@ -14,7 +14,7 @@ from langchain_core.runnables import RunnableLambda
 from langchain_core.runnables.config import RunnableConfig
 from langchain_core.messages.ai import AIMessageChunk, UsageMetadata
 from langchain_core.outputs import ChatGenerationChunk
-from typing import Any, ClassVar, Mapping, Optional, cast
+from typing import Any, ClassVar, Mapping, NamedTuple, Optional, cast
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -2713,6 +2713,356 @@ def create_should_continue(language_check_enabled: bool):
     return should_continue_with_language_check
 
 
+# ============================================================================
+# P1b — 95% pre-call reactive compaction hook (proactive-compaction-fix)
+# ============================================================================
+#
+# ADDENDUM A.1 of
+# ``.agents/shared/planning/proactive-compaction-fix/architecture-recommendation.md``:
+# a SECOND reactive trigger at ``0.95 × _trigger_window(...)`` evaluated
+# BEFORE each LLM call, mid-turn — catching mid-turn context explosions
+# (huge tool results, injected child reports) that the pre-dispatch
+# proactive 80% gate structurally cannot see, BEFORE the provider call
+# fails with CLE. Coverage ladder: 80% pre-dispatch → 95% pre-call →
+# CLE ~600k (the ungated last-resort handler below).
+#
+# Site pinned by A.3: inside the agent_node ``try:``, AFTER
+# ``_maybe_repair_loop`` (post-repair payload) and AFTER the
+# injected-report / ephemeral re-appends, BEFORE the
+# ``run_in_executor(... invoke(full_messages))`` — the only vantage that
+# observes the exact LLM-bound ``full_messages``. NOT a middleware slot
+# (middleware sees the channel dict, not the payload), NOT inside the
+# CLE handler (post-failure is too late; the CLE single-retry must stay
+# untouched — A.7).
+#
+# Persist: the SHARED seam with ``mid_turn=True`` (Variant B —
+# ``as_node='agent'``, A.5). DURABILITY (evidence-overrides-doc, see
+# the T2-ext canary): a mid-superstep ``aupdate_state`` persist alone
+# is SUPERSEDED when the in-flight node returns normally — the task
+# commit applies against the pre-update checkpoint. The hook therefore
+# RETURN-CARRIES the compaction: the F2 return emits a SENTINEL-FIRST
+# ``messages`` prefix (``[REMOVE_ALL, *post-compaction channel]``) so
+# the node's own commit lands the compacted state atomically, plus the
+# ``compacted_at`` stamp so the 60s dedup survives. Trigger semantics
+# mirror the proactive path (A.1/A.8): ``force=False`` (dedup + recency
+# floors respected), single kill-switch ``compaction.proactive_enabled``,
+# injection-dominated no-op → skip + rate-limited WARN + stamp (A.6,
+# T4-ext).
+#
+# The tap uses its OWN label (``SOURCE_COMPACTION_PRECALL_95``) — LOCKED
+# decision, A.9 T-tap — so per-site observability stays intact.
+
+#: Fraction of the trigger window at which the pre-call hook fires.
+PRECALL_COMPACTION_RATIO: float = 0.95
+
+
+class _PreCall95Outcome(NamedTuple):
+    """Result of the 95% pre-call hook (all ``None`` = plain no-op).
+
+    Attributes:
+        rebuilt_payload: The REBUILT LLM-bound payload (post-compaction
+            state + system prompt + injected/report re-appends) to use
+            for THIS invoke — ``None`` when the original payload stands.
+        outgoing_prefix: SENTINEL-FIRST prefix
+            (``[REMOVE_ALL, *post-compaction channel]``) that the F2
+            return must put at the head of ``outgoing`` so the TASK
+            COMMIT ITSELF lands the compaction. This is the load-bearing
+            durability mechanism: a mid-superstep ``aupdate_state``
+            persist alone is SUPERSEDED when the in-flight node returns
+            normally (the task commit applies against the pre-update
+            checkpoint — verified by the T2-ext canary). Carrying the
+            compaction in the return makes the commit atomic and
+            unsuperseded. Injected + report messages are already inside
+            the prefix (they were re-appended to the rebuilt payload).
+        compacted_at: The engine stamp to carry on the node return
+            (``compacted_at`` channel) so the 60s dedup survives the
+            commit — set for BOTH real compactions and stamp-only
+            anti-refire skips (no refire across calls/turns).
+    """
+
+    rebuilt_payload: list | None
+    outgoing_prefix: list | None
+    compacted_at: str | None
+
+
+_PRECALL_NOOP = _PreCall95Outcome(None, None, None)
+
+
+# P1b proactive-compaction addition; this block lives in an already-large module.
+async def _maybe_precall_compact_95(
+    *,
+    instance_id: str,
+    instance_short: str,
+    compactor: Any | None,
+    graph_ref: Any | None,
+    thread_config: dict,
+    full_messages: list,
+    system_prompt: str,
+    llm_config: dict | None,
+    injected_msgs: list,
+    injected_report_msgs: list,
+    ephemeral_context_msgs: list,
+    pairing_synthesized_msgs: list,
+    precall_compaction_tap_slot: Any | None = None,
+) -> "_PreCall95Outcome":
+    """95% pre-call reactive compaction (P1b) — returns a
+    :class:`_PreCall95Outcome`.
+
+    Evaluated before EVERY LLM call. The outcome carries:
+
+    * ``rebuilt_payload`` — the payload for THIS invoke after a
+      successful mid-turn compaction (persist → ``aget_state`` →
+      rebuild, the CLE handler's in-frame pattern), or ``None`` to
+      proceed with the original ``full_messages``.
+    * ``outgoing_prefix`` — the SENTINEL-FIRST list the F2 return must
+      head ``outgoing`` with so the task commit LANDS the compaction
+      (durability: a mid-superstep persist alone is superseded when the
+      in-flight node returns — pinned by the T2-ext canary).
+    * ``compacted_at`` — the dedup stamp to carry on the node return.
+
+    Never raises in normal operation: the whole body is guarded, and
+    the seam runs ``abort_policy="fail_open"`` (the call MUST proceed
+    even if the compaction pre-write guard refuses — failing the turn
+    here would be strictly worse than the CLE it prevents).
+
+    Args mirror the agent_node closure locals at the pinned site.
+    ``pairing_synthesized_msgs`` is MUTATED (placeholders appended) so
+    the C2 return persists them — same contract as the CLE handler.
+    """
+    # 0. Availability + kill-switch (A.8 — single flag governs both
+    # auto triggers; OFF = hook is a no-op).
+    if compactor is None or graph_ref is None or graph_ref[0] is None:
+        return _PRECALL_NOOP
+    if not getattr(compactor.config, "proactive_enabled", True):
+        return _PRECALL_NOOP
+
+    graph = graph_ref[0]
+
+    # Lazy imports (module-level would create a graph ↔ services cycle —
+    # same pattern as the CLE handler below).
+    from .loader import estimate_messages_tokens, estimate_tokens
+    from .compaction import (
+        CompactionContext,
+        _extract_msg_timestamps,
+        make_remove_all_sentinel,
+    )
+    from .services._compaction_persist_seam import persist_compaction_result
+
+    try:
+        # 1. O(1) pre-filter (A.4): skip the ~150–200 ms estimator in
+        # the common case. The estimator runs only when the payload
+        # message count grew since the cached estimate OR the cached
+        # estimate already sat in the ≥80% at-risk band.
+        model_name = llm_config.get("model", "") if llm_config else ""
+        trigger_window = compactor._trigger_window_for_model(
+            model_name, compactor.config
+        )
+        payload_count = len(full_messages)
+        if not compactor.precall_estimate_needs_refresh(
+            instance_id, payload_count, trigger_window
+        ):
+            return _PRECALL_NOOP
+
+        # 2. Unified token estimate of the LLM-bound payload — primary
+        # signal (``usage_metadata`` is a stale/undercounting proxy,
+        # A.3; never the primary). ALL messages incl. injected + the
+        # system prompt: consistent with P1's unified numerator.
+        payload_tokens = estimate_messages_tokens(full_messages)
+        compactor.precall_estimate_record(
+            instance_id, payload_count, payload_tokens
+        )
+
+        # 3. The 95% gate (A.1). Float math (no int() truncation) so the
+        # boundary is ">= 0.95 × window" exactly as documented.
+        if payload_tokens < trigger_window * PRECALL_COMPACTION_RATIO:
+            return _PRECALL_NOOP
+
+        logger.info(
+            "[Compaction][precall-95] instance=%s payload_tokens=%d >= "
+            "95%% of trigger_window=%d (%d messages) — attempting "
+            "pre-call compaction",
+            instance_short,
+            payload_tokens,
+            trigger_window,
+            payload_count,
+        )
+
+        # 4. Engine invocation — force=False (dedup + recency floors
+        # respected, mirrors the proactive path; A.1/A.8). The context
+        # carries the CHECKPOINT state messages (injected HumanMessages
+        # of THIS turn are local-only and re-attached at rebuild time,
+        # exactly like the CLE handler); the system prompt tokens are
+        # computed from the in-scope prompt so the engine's numerator
+        # matches the payload estimate above.
+        current_state = await graph.aget_state(thread_config)
+        state_values = (current_state.values or {}) if current_state else {}
+        current_messages = state_values.get("messages", []) or []
+        # Cycle 2 (review suggestion 3) — guard ``llm_config=None``.
+        # ``ContextCompactor.llm_config`` is typed ``dict | None``
+        # at construction; if a custom builder forgot to wire it
+        # the prior code would propagate ``None`` to
+        # :class:`CompactionContext` (typed ``llm_config: dict``,
+        # required) and crash on the engine's first access. Treat
+        # ``None`` as "session not configured for compaction" and
+        # fall through to the noop — the rest of the LLM call
+        # will use the session LLM (which is independently
+        # configured; the 95% hook is opt-in).
+        hook_llm_config = compactor.llm_config or {}
+        ctx = CompactionContext(
+            messages=current_messages,
+            system_prompt_tokens=estimate_tokens(system_prompt),
+            model_name=model_name,
+            config=compactor.config,
+            llm_config=hook_llm_config,
+            last_compacted_at=state_values.get("compacted_at"),
+            instance_id=instance_id,
+            msg_timestamps=_extract_msg_timestamps(current_messages),
+        )
+        result = await compactor.compact_state(ctx, force=False)
+        if result is None:
+            # Dedup held (recently compacted) or engine declined —
+            # proceed with the original payload; the 60s dedup prevents
+            # this from re-firing per call (A.6).
+            return _PRECALL_NOOP
+
+        # 5. Persist via the SHARED seam — mid_turn=True (Variant B,
+        # ``as_node='agent'``, A.5) + fail_open (never break the call).
+        # The graph is passed pre-resolved (the closure has graph_ref,
+        # not the manager). ``persisted`` is False on a fail_open abort
+        # (pre-write guard refused) — NOTHING was written then, so the
+        # tap/rebuild below must be skipped: proceed with the original
+        # payload.
+        persisted = await persist_compaction_result(
+            None,
+            instance_id=instance_id,
+            result=result,
+            mid_turn=True,
+            abort_policy="fail_open",
+            graph=graph,
+        )
+        if not persisted:
+            return _PRECALL_NOOP
+
+        # 6. Observability + tap.
+        #  - Real compaction: rate-limited WARN (we are ≥95% of the
+        #    window — above the proactive site's 90%-of-threshold WARN
+        #    bar) + INFO result line + the P1b tap
+        #    (``SOURCE_COMPACTION_PRECALL_95``) on the replacement
+        #    messages.
+        #  - Injection-dominated / min-messages stamp-only skip:
+        #    rate-limited WARN + the stamp (carried on the node return
+        #    so the dedup survives the commit — A.6, T4-ext: no
+        #    per-call refire, single WARN).
+        if result.replacement_messages:
+            if compactor.precall_warn_should_emit(instance_id):
+                logger.warning(
+                    "[Compaction][precall-95] instance=%s compacted near "
+                    "ceiling: tokens=%d (window=%d, compaction_type=%s)",
+                    instance_short,
+                    payload_tokens,
+                    trigger_window,
+                    result.compaction_type,
+                )
+            if precall_compaction_tap_slot is not None:
+                await precall_compaction_tap_slot.tap_node_return(
+                    result.replacement_messages,
+                    instance_id,
+                )
+            logger.info(
+                "[Compaction][precall-95] complete: instance=%s, "
+                "%d -> %d messages, "
+                "%d tokens saved (%s)",
+                instance_short,
+                result.messages_before,
+                result.messages_after,
+                result.tokens_saved,
+                result.compaction_type,
+            )
+        else:
+            if compactor.precall_warn_should_emit(instance_id):
+                logger.warning(
+                    "[Compaction][precall-95] skip without relief for "
+                    "instance=%s (compaction_type=%s) — anti-refire "
+                    "stamp engaged (rate-limited WARN, no per-call "
+                    "refire)",
+                    instance_short,
+                    result.compaction_type,
+                )
+            # Stamp-only: the messages channel is unchanged — proceed
+            # with the ORIGINAL payload; carry the dedup stamp on the
+            # node return (supersession-proof).
+            return _PreCall95Outcome(
+                None, None, result.compacted_at
+            )
+
+        # 7. Rebuild the LLM-bound payload from the post-compaction
+        # state — the CLE handler's in-frame pattern (persist →
+        # aget_state → rebuild → invoke; A.7).
+        updated_state = await graph.aget_state(thread_config)
+        compacted_channel = list(
+            ((updated_state.values or {}) if updated_state else {}).get(
+                "messages", []
+            )
+            or []
+        )
+        compact_messages = [
+            SystemMessage(content=system_prompt)
+        ] + compacted_channel
+
+        # Tool-call pairing guard (same as the CLE retry path): the
+        # compacted checkpoint tail may end on an unanswered
+        # ``AIMessage(tool_calls)``; synthesize placeholders BEFORE the
+        # injections are appended and accumulate them so the C2 return
+        # persists them. The helper inserts IN PLACE — so the
+        # placeholders land inside ``compacted_channel`` (they are part
+        # of the outgoing prefix below) AND in the accumulator.
+        pairing_synthesized_msgs.extend(
+            _ensure_tool_result_pairing(compact_messages, instance_short)
+        )
+
+        # C3 re-appends (same as the CLE handler): injected messages and
+        # just-drained child reports live only in the local closure —
+        # ``aget_state`` cannot see them.
+        if injected_msgs:
+            compact_messages.extend(injected_msgs)
+        for rmsg in injected_report_msgs:
+            compact_messages.append(rmsg)
+        # Ephemeral-context re-append: documented no-op since the
+        # 2026-07-29 refactor (ephemeral is always []) — preserved for
+        # parity with the CLE handler and the B1 re-append.
+        if ephemeral_context_msgs:
+            compact_messages = _reassemble_with_context(
+                compact_messages, ephemeral_context_msgs, system_prompt
+            )
+
+        # 8. DURABILITY — the node's return must carry the compaction.
+        # A mid-superstep ``aupdate_state`` persist (step 5) is
+        # superseded when this in-flight task returns normally; the F2
+        # return therefore emits a SENTINEL-FIRST prefix
+        # (``[REMOVE_ALL, *post-compaction channel]``) so the task
+        # commit itself lands the compacted state (single atomic write,
+        # nothing to supersede). Injected + report are already inside
+        # (they were re-appended above); response is appended by the F2
+        # return path.
+        outgoing_prefix = [make_remove_all_sentinel()] + list(
+            compact_messages[1:]
+        )
+        return _PreCall95Outcome(
+            rebuilt_payload=compact_messages,
+            outgoing_prefix=outgoing_prefix,
+            compacted_at=result.compacted_at,
+        )
+    except Exception as e:  # noqa: BLE001 — the hook must NEVER break the call
+        logger.warning(
+            "[Compaction][precall-95] failed for %s: %s: %s — "
+            "proceeding with the original payload",
+            instance_short,
+            type(e).__name__,
+            e,
+        )
+        return _PRECALL_NOOP
+
+
 def create_agent_node(
     llm_with_tools,
     system_prompt: str,
@@ -2732,6 +3082,7 @@ def create_agent_node(
     context_slot: "ContextSlot | None" = None,
     message_tap_slot: "MessageTapSlot | None" = None,
     compaction_tap_slot: "MessageTapSlot | None" = None,
+    precall_compaction_tap_slot: "MessageTapSlot | None" = None,
 ):
     """Create the agent node function with optional reactive compaction.
 
@@ -2806,13 +3157,22 @@ def create_agent_node(
             D19 / D20 for the 4 approved source labels.
         compaction_tap_slot: Optional :class:`MessageTapSlot` handle
             (Phase 1 C2 — langgraph-checkpoint-perf) for the
-            ``compaction_aupdate_reactive`` site (after the
-            reactive-compaction ``aupdate_state`` at
-            ``daemon/graph.py:3248-3250``). Distinct from
+            ``compaction_aupdate_reactive`` site after the
+            reactive-compaction ``aupdate_state``, inside the CLE handler's
+            in-frame persist block (``compaction_tap_slot.tap_node_return``).
+            Distinct from
             ``message_tap_slot`` so the per-site source label is
             preserved — the AST gate (``test_hook_placement``)
-            enumerates EXACTLY 4 distinct labels. ``None`` disables
+            enumerates the approved labels. ``None`` disables
             the tap entirely (no-op); backward compatible.
+        precall_compaction_tap_slot: Optional :class:`MessageTapSlot`
+            handle for the P1b 95% pre-call compaction hook
+            (``SOURCE_COMPACTION_PRECALL_95`` — A.9 T-tap LOCKED
+            decision; the hook must NOT reuse the reactive label so
+            per-site observability stays intact). Fired on the
+            replacement messages after the shared seam persists a real
+            compaction. ``None`` disables the tap (the hook still
+            compacts); backward compatible.
     """
 
     # Resolve once at factory time so the closure does not rebuild a
@@ -3502,6 +3862,34 @@ def create_agent_node(
             )
 
         try:
+            # ── P1b: 95% pre-call reactive compaction (A.3 pinned site) ──
+            # Runs AFTER the loop-breaker repair + the injected-report /
+            # ephemeral re-appends so it observes the exact post-repair,
+            # LLM-bound payload (``full_messages`` with system prompt +
+            # injections prepended). Fires the shared seam with
+            # ``mid_turn=True`` and, on a real compaction, REBUILDS the
+            # payload from the post-compaction checkpoint state (the CLE
+            # handler's in-frame pattern). No-op outcome = proceed
+            # unchanged. Gated by the SAME kill-switch as the proactive
+            # gate (``compaction.proactive_enabled``); never raises.
+            _precall_outcome = await _maybe_precall_compact_95(
+                instance_id=instance_id,
+                instance_short=instance_short,
+                compactor=compactor,
+                graph_ref=graph_ref,
+                thread_config=config or {},
+                full_messages=full_messages,
+                system_prompt=system_prompt,
+                llm_config=llm_config,
+                injected_msgs=injected_msgs,
+                injected_report_msgs=injected_report_msgs,
+                ephemeral_context_msgs=ephemeral_context_msgs,
+                pairing_synthesized_msgs=pairing_synthesized_msgs,
+                precall_compaction_tap_slot=precall_compaction_tap_slot,
+            )
+            if _precall_outcome.rebuilt_payload is not None:
+                full_messages = _precall_outcome.rebuilt_payload
+
             # Use run_in_executor to avoid blocking the event loop.
             # This allows SSE streaming to continue while LLM processes.
             loop = asyncio.get_running_loop()
@@ -3622,8 +4010,8 @@ def create_agent_node(
             # Note: ``compaction_tap_slot`` is a SEPARATE
             # ``MessageTapSlot`` from ``message_tap_slot`` so each tap
             # site carries its distinct source label — the AST gate
-            # (``test_hook_placement``) requires EXACTLY 4 distinct
-            # labels (decisions.md D1).
+            # (``test_hook_placement``) enumerates the approved labels (5
+            # as of P1b: decisions.md D1 + A.9 T-tap).
             if compaction_tap_slot is not None:
                 await compaction_tap_slot.tap_node_return(
                     result.replacement_messages,
@@ -3778,18 +4166,32 @@ def create_agent_node(
         # → response). The mechanical-ness proof is in the PR2 report —
         # branch conditions are unchanged; only the variable name +
         # single-exit shape change.
-        outgoing: list[BaseMessage] = [response]
-        if (
-            injected_msgs
-            or injected_report_msgs
-            or pairing_synthesized_msgs
-        ):
-            outgoing = (
-                list(pairing_synthesized_msgs)
-                + list(injected_msgs)
-                + list(injected_report_msgs)
-                + outgoing  # response stays last (matches pre-F2 :3391-3395)
-            )
+        # P1b — 95% pre-call compaction: when the hook fired, the node's
+        # OWN commit must LAND the compaction (a mid-superstep
+        # ``aupdate_state`` persist is superseded when the in-flight
+        # task returns — see the T2-ext canary). The SENTINEL-FIRST
+        # prefix carries the post-compaction channel (injected + report
+        # already inside; response stays last); pairing placeholders
+        # re-add as id-keyed upserts (deterministic ids).
+        if _precall_outcome.outgoing_prefix is not None:
+            outgoing: list[BaseMessage] = [
+                *_precall_outcome.outgoing_prefix,
+                *pairing_synthesized_msgs,
+                response,
+            ]
+        else:
+            outgoing = [response]
+            if (
+                injected_msgs
+                or injected_report_msgs
+                or pairing_synthesized_msgs
+            ):
+                outgoing = (
+                    list(pairing_synthesized_msgs)
+                    + list(injected_msgs)
+                    + list(injected_report_msgs)
+                    + outgoing  # response stays last (matches pre-F2 :3391-3395)
+                )
         # C2 (Phase 1): fire the message_metadata tap on the
         # NODE-RETURN persisted list (decisions.md D1 + D10 +
         # D17). ``RemoveMessage`` markers are filtered inside the slot
@@ -3804,7 +4206,16 @@ def create_agent_node(
         # fixtures + backward compat).
         if message_tap_slot is not None:
             await message_tap_slot.tap_node_return(outgoing, instance_id)
-        return {**watchover_state_reset, 'messages': outgoing}
+        return_value: dict[str, Any] = {
+            **watchover_state_reset,
+            'messages': outgoing,
+        }
+        # P1b — carry the compaction dedup stamp on the node return so
+        # it survives the task commit (the seam's mid-superstep stamp
+        # write alone is superseded with the rest of the persist).
+        if _precall_outcome.compacted_at is not None:
+            return_value['compacted_at'] = _precall_outcome.compacted_at
+        return return_value
 
     return agent_node
 
@@ -5836,6 +6247,7 @@ def build_instance_graph(
     context_slot: "ContextSlot | None" = None,
     message_tap_slot: "MessageTapSlot | None" = None,
     compaction_tap_slot: "MessageTapSlot | None" = None,
+    precall_compaction_tap_slot: "MessageTapSlot | None" = None,
 ):
     """Build and return a compiled instance graph with LLM-level retry.
 
@@ -5910,8 +6322,9 @@ def build_instance_graph(
             (Phase 1 C2 — langgraph-checkpoint-perf) for the
             ``compaction_aupdate_reactive`` site inside
             ``create_agent_node``. Distinct from ``message_tap_slot``
-            so each site carries its own source label (the AST
-            gate requires EXACTLY 4 distinct labels). ``None``
+            so each site carries its own source label. The AST gate
+            (``test_hook_placement``) enumerates the approved labels (5 as
+            of P1b: decisions.md D1 + A.9 T-tap). ``None``
             disables the tap (no-op); backward compatible.
     """
     # Add proxy headers (x-proxy-app + x-proxy-interleaved-thinking) to all LLM requests.
@@ -5992,6 +6405,9 @@ def build_instance_graph(
         # path). See decisions.md D1 / D19 / D20.
         message_tap_slot=message_tap_slot,
         compaction_tap_slot=compaction_tap_slot,
+        # P1b — 95% pre-call compaction hook tap (distinct label,
+        # constructed by the wiring helper in instance_lifecycle.py).
+        precall_compaction_tap_slot=precall_compaction_tap_slot,
     ))
     graph.add_node("tools", ToolNode(tools, handle_tool_errors=True))
     graph.add_node("nudge", nudge_node)

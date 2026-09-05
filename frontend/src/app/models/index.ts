@@ -44,7 +44,26 @@ export type RejectionReason =
  *  noop → success (+ noop_reason). */
 export type CompactedType = 'summary' | 'partial_summary' | 'truncation' | 'noop';
 
-export type NoopReason = 'below_floor' | 'recently_compacted' | 'too_few_messages';
+/** Cycle 2 (proactive-compaction-fix review W-4) added
+ *  ``injections_dominate`` — the engine emits
+ *  ``compaction_type="skipped_injections_dominate"`` on the
+ *  all-injected anti-refire path; the BE executor's wire mapping
+ *  translates that to ``compacted_type="noop"`` +
+ *  ``noop_reason="injections_dominate"``. Cycle 3 (residual
+ *  W-4.5) added ``preserved_within_threshold`` — the engine
+ *  emits ``compaction_type="skipped_preserved_within_threshold"``
+ *  on the emergency-bail path when preserved-groups still fit
+ *  within the threshold; the BE executor maps that to
+ *  ``compacted_type="noop"`` +
+ *  ``noop_reason="preserved_within_threshold"``. Both literals are
+ *  pinned in ``daemon/services/command_dispatcher.py:NoopReason``
+ *  and must agree here. */
+export type NoopReason =
+  | 'below_floor'
+  | 'recently_compacted'
+  | 'too_few_messages'
+  | 'injections_dominate'
+  | 'preserved_within_threshold';
 
 export type CommandFailureKind = 'timeout' | 'error' | null;
 

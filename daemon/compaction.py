@@ -24,6 +24,7 @@ Compaction Strategies:
 import asyncio
 import copy
 import logging
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -244,6 +245,25 @@ def _extract_previous_overview(messages: list[BaseMessage], instance_id: str) ->
         if sep != -1:
             overview = overview[sep + 2 :].lstrip("\n")
     return overview or None
+
+
+def make_remove_all_sentinel() -> "RemoveMessage":
+    """The ``REMOVE_ALL_MESSAGES`` sentinel element (P1b helper).
+
+    Same resolution as :func:`build_sentinel_replacement` (real
+    ``langgraph.graph.message`` constant, falling back to the
+    source-verified literal ``"__remove_all__"`` under the test-mocked
+    runtime). Exported so the P1b 95% hook can build a SENTINEL-FIRST
+    node-return prefix (``[sentinel, *post_compaction_channel]``) —
+    the node's own task commit then LANDS the compaction (a
+    mid-superstep ``aupdate_state`` alone is superseded when the
+    in-flight task returns; see the T2-ext canary).
+    """
+    try:
+        from langgraph.graph.message import REMOVE_ALL_MESSAGES
+    except (ImportError, ModuleNotFoundError):
+        REMOVE_ALL_MESSAGES = "__remove_all__"
+    return RemoveMessage(id=REMOVE_ALL_MESSAGES)
 
 
 def build_sentinel_replacement(
@@ -1449,13 +1469,14 @@ def select_compactable_groups(
     context_window: int,
     system_prompt_tokens: int,
     estimate_fn: callable,
-    config_threshold: float = 0.80
+    config_threshold: float = 0.80,
+    injected_tokens: int = 0,
 ) -> tuple[list[MessageGroup], list[MessageGroup], int]:
     """Select which groups to compact vs preserve using progressive window reduction.
-    
+
     This function iteratively reduces the preserved window size until the total
     token count falls below the threshold, ensuring recent messages are kept intact.
-    
+
     Args:
         groups: All message groups from identify_boundary_groups.
         recent_window: Desired number of recent groups to preserve.
@@ -1464,27 +1485,40 @@ def select_compactable_groups(
         system_prompt_tokens: Token count of system prompt (excluded from compaction).
         estimate_fn: Function to estimate tokens for a message list.
         config_threshold: Fraction of context window that triggers compaction.
-        
+        injected_tokens: Tokens occupied by messages that MUST survive
+            compaction (Phase 1 / L3 of proactive-compaction-fix —
+            honest budget math). Injected messages are re-attached
+            verbatim by every engine exit path, so the budget that
+            decides whether compacting all regular groups brings the
+            conversation under the threshold must include them —
+            otherwise the engine would re-fire every dispatch on an
+            injection-heavy instance. Default ``0`` preserves the
+            pre-Phase-1 math for callers that don't pass it (notably
+            the partial-summary tests that pre-date the fix).
+
     Returns:
         Tuple of (compactable_groups, preserved_groups, actual_window_size).
     """
     window = recent_window
-    
+
     while window >= min_window:
         if len(groups) <= window:
             return [], groups, window
-        
+
         preserved = groups[-window:]
         compactable = groups[:-window]
-        preserved_tokens = estimate_fn([msg for g in preserved for msg in g.messages])
+        preserved_tokens = (
+            estimate_fn([msg for g in preserved for msg in g.messages])
+            + injected_tokens
+        )
         total = preserved_tokens + system_prompt_tokens
         threshold = context_window * config_threshold
-        
+
         if total <= threshold:
             return compactable, preserved, window
-        
+
         window -= 1
-    
+
     # Fallback: use minimum window
     preserved = groups[-min_window:]
     compactable = groups[:-min_window] if len(groups) > min_window else []
@@ -1677,6 +1711,101 @@ class ContextCompactor:
                 ),
             },
         }
+        # ── P1b: 95% pre-call hook state (proactive-compaction-fix A.4) ──
+        # Per-instance O(1) pre-filter state: ``instance_id →
+        # (msg_count, total_tokens)`` of the last LLM-bound payload
+        # estimate. Sibling of the checkpoint's ``compacted_at`` (which
+        # lives in state, not here — this dict is the only per-instance
+        # estimate cache). One entry per instance EVER SEEN (overwritten
+        # per instance, never grown per-call); the dictionary grows
+        # unbounded for the daemon lifetime — accepted as trivial while
+        # values remain a two-int tuple (no eviction policy); revisit if
+        # per-instance fields grow.
+        self._precall_estimates: dict[str, tuple[int, int]] = {}
+        # Rate-limit state for the hook's near-ceiling / skip WARN — at
+        # most one WARN per instance per ``_precall_warn_interval_s``
+        # seconds (mirrors the engine's 60s dedup window so the WARN
+        # cadence matches the refire cadence).
+        self._precall_warn_state: dict[str, float] = {}
+
+    #: P1b — minimum seconds between ``[Compaction][precall-95]`` WARN
+    #: emissions per instance (aligned with the engine's 60s dedup).
+    _precall_warn_interval_s: float = 60.0
+
+    def precall_estimate_get(
+        self, instance_id: str
+    ) -> tuple[int, int] | None:
+        """Return the cached ``(msg_count, total_tokens)`` estimate, if any."""
+        return self._precall_estimates.get(instance_id)
+
+    def precall_estimate_needs_refresh(
+        self,
+        instance_id: str,
+        msg_count: int,
+        trigger_window: int,
+    ) -> bool:
+        """O(1) pre-filter for the 95% pre-call hook (ADDENDUM A.4).
+
+        The estimator costs ~150–200 ms at 800 msgs / ~500k tokens; a
+        multi-call tool-loop turn must not pay that on EVERY call. This
+        filter says the estimator must run only when:
+
+        1. there is NO cached estimate for the instance (first call), OR
+        2. the payload message count grew since the cached estimate
+           (tool results / injections append messages), OR
+        3. the cached estimate already sat at ≥0.80× the trigger window
+           (the at-risk band — re-check every call there).
+
+        Common case (stable conversation, sub-80% occupancy) → ``False``
+        → the hook returns without touching the estimator: O(1).
+
+        Args:
+            instance_id: Target instance.
+            msg_count: Current LLM-bound payload message count.
+            trigger_window: Gated trigger window (may be 0 — then arm 3
+                never fires, arms 1–2 still work).
+
+        Returns:
+            ``True`` when the full estimator must run.
+        """
+        prev = self._precall_estimates.get(instance_id)
+        if prev is None:
+            return True
+        prev_count, prev_tokens = prev
+        if prev_count != msg_count:
+            return True
+        if trigger_window > 0 and prev_tokens >= 0.80 * trigger_window:
+            return True
+        return False
+
+    def precall_estimate_record(
+        self,
+        instance_id: str,
+        msg_count: int,
+        total_tokens: int,
+    ) -> None:
+        """Cache the ``(msg_count, total_tokens)`` estimate for an instance."""
+        self._precall_estimates[instance_id] = (msg_count, total_tokens)
+
+    def precall_warn_should_emit(self, instance_id: str) -> bool:
+        """Rate-limit gate for the hook's WARN emissions (one per interval).
+
+        ``True`` when at least ``_precall_warn_interval_s`` seconds have
+        elapsed since the last WARN for this instance (or none was ever
+        emitted); records the emission. The 60s default mirrors the
+        engine's dedup window so a stamped anti-refire skip (which
+        silences the ENGINE for 60s) cannot be accompanied by a WARN
+        storm in the same window.
+        """
+        now = time.monotonic()
+        last = self._precall_warn_state.get(instance_id)
+        if (
+            last is not None
+            and (now - last) < self._precall_warn_interval_s
+        ):
+            return False
+        self._precall_warn_state[instance_id] = now
+        return True
 
     def _effective_model_name(self, context: CompactionContext) -> str:
         """Model name for context-WINDOW math.
@@ -1692,6 +1821,57 @@ class ContextCompactor:
         byte-identical with the pre-setting behavior.
         """
         return resolve_compaction_model(context.config) or context.model_name
+
+    def _trigger_window_for_model(self, model_name: str, config: "CompactionConfig") -> int:
+        """Context window for TRIGGER math, from a bare model name.
+
+        P1b extraction (proactive-compaction-fix ADDENDUM A.4): the 95%
+        pre-call hook (``daemon/graph.py::_maybe_precall_compact_95``)
+        needs the SAME W1 gating — ``min(session_window, override_window)``
+        — for its ``0.95 × window`` math WITHOUT building a full
+        :class:`CompactionContext`. :meth:`_trigger_window` delegates here
+        so the two trigger sites cannot drift apart. The one-shot
+        override-overflow WARN stays keyed on ``self`` exactly as before
+        (fires at whichever site reaches it first; both share ``self``).
+
+        Args:
+            model_name: Session model name (window lookup key).
+            config: The :class:`CompactionConfig` driving the override
+                resolution + window registry. Callers pass the SAME config
+                they would have carried on the context (production callers
+                pass ``compactor.config``; ``_trigger_window`` passes
+                ``context.config``).
+
+        Returns:
+            The gated trigger window (see :meth:`_trigger_window`).
+        """
+        override_name = resolve_compaction_model(config)
+        if not override_name:
+            return get_model_context_limit(
+                model_name, config
+            )
+        override_window = get_model_context_limit(
+            override_name, config
+        )
+        session_window = get_model_context_limit(
+            model_name, config
+        )
+        if override_window > session_window:
+            if not getattr(self, "_w_overflow_warned", False):
+                self._w_overflow_warned = True
+                logger.warning(
+                    "Compaction override '%s' window (%d) exceeds session "
+                    "model '%s' window (%d). Auto-path threshold gated at "
+                    "the session window; internal chunking/merge/condense "
+                    "sizing still follow the override. Use /compact to "
+                    "force-recover once the session model has overflowed.",
+                    override_name,
+                    override_window,
+                    model_name,
+                    session_window,
+                )
+            return session_window
+        return override_window
 
     def _trigger_window(self, context: CompactionContext) -> int:
         """Context window for the AUTO-path threshold gate (:826-841).
@@ -1711,34 +1891,13 @@ class ContextCompactor:
         the gate site (not ``load_config``) so the operator sees BOTH
         windows in the same log line, and so it is testable without
         loading the daemon config.
+
+        P1b: the body delegates to :meth:`_trigger_window_for_model`
+        (single implementation shared with the 95% pre-call hook).
         """
-        if not resolve_compaction_model(context.config):
-            return get_model_context_limit(
-                context.model_name, context.config
-            )
-        override_name = resolve_compaction_model(context.config)
-        override_window = get_model_context_limit(
-            override_name, context.config
-        )
-        session_window = get_model_context_limit(
+        return self._trigger_window_for_model(
             context.model_name, context.config
         )
-        if override_window > session_window:
-            if not getattr(self, "_w_overflow_warned", False):
-                self._w_overflow_warned = True
-                logger.warning(
-                    "Compaction override '%s' window (%d) exceeds session "
-                    "model '%s' window (%d). Auto-path threshold gated at "
-                    "the session window; internal chunking/merge/condense "
-                    "sizing still follow the override. Use /compact to "
-                    "force-recover once the session model has overflowed.",
-                    override_name,
-                    override_window,
-                    context.model_name,
-                    session_window,
-                )
-            return session_window
-        return override_window
 
     async def compact_state(
         self,
@@ -1767,7 +1926,15 @@ class ContextCompactor:
             ``failure_kind`` ∈ ``{None, "timeout", "error"}`` on the
             engine result (WS-3.4 binding).
         """
-        # 1. Deduplication: skip if recently compacted
+        # 1. Deduplication: skip if recently compacted.
+        # Anti-refire stamp is written by the call site (see
+        # ``daemon/services/_compaction_persist_seam.py``); the
+        # engine itself returns stamped CompactionResults with
+        # empty replacement_messages for the anti-refire skip paths
+        # (all-injected / min_messages / threshold) so the per-
+        # dispatch refire loop closes even when the engine cannot
+        # do useful work. The dedup here is a hard 60s window —
+        # honored by BOTH the proactive trigger and ``/compact``.
         if context.last_compacted_at and self._is_recently_compacted(context.last_compacted_at):
             logger.debug("Skipping compaction: recently compacted")
             return None
@@ -1781,30 +1948,98 @@ class ContextCompactor:
             context.messages
         )
 
-        # If every message is an injection, there is nothing to compact
-        # (the injected messages will be left in place by the unchanged
-        # conversation state). Bail early.
-        if not regular_messages:
-            logger.debug(
-                "Skipping compaction: every message carries "
-                "injected_message flag (n=%d)",
-                len(context.messages),
+        # Pre-compute injected tokens — included in the GATE NUMERATOR
+        # and the SELECTION BUDGET (honest trigger; matches what the
+        # LLM sees) but NOT selectable for compaction (they must
+        # survive; re-attach paths unchanged). This is L3 of the
+        # proactive-compaction-fix root-cause stack: the prior gate
+        # excluded injections from the numerator, so a long-
+        # orchestrating instance accumulating injected child reports
+        # NEVER crossed the threshold even at 800+ messages.
+        injected_tokens = (
+            estimate_messages_tokens(injected_messages)
+            if injected_messages else 0
+        )
+
+        # Helper: build the anti-refire stamp-only result so every
+        # skip path closes the dedup window. Callers stamp the
+        # ``compacted_at`` via the shared seam; the engine signals
+        # the stamp via a CompactionResult with empty
+        # replacement_messages. The proactive call site uses this to
+        # engage the dedup at ``compaction.py:1771-1774`` on the next
+        # dispatch.
+        anti_refire_skip = (
+            lambda *, skip_reason: CompactionResult(
+                replacement_messages=[],
+                tokens_before=int(
+                    estimate_messages_tokens(regular_messages)
+                    + injected_tokens
+                    + context.system_prompt_tokens
+                ),
+                tokens_after=int(
+                    estimate_messages_tokens(regular_messages)
+                    + injected_tokens
+                    + context.system_prompt_tokens
+                ),
+                tokens_saved=0,
+                messages_before=len(context.messages),
+                messages_after=len(context.messages),
+                compaction_type=skip_reason,
+                compacted_at=datetime.now(timezone.utc).isoformat(),
             )
-            return None
+        )
+
+        # If every message is an injection, there is nothing to
+        # compact (the injected messages will be left in place by
+        # the unchanged conversation state). ANTI-REFIRE stamp
+        # engages the dedup so the gate does not re-fire every
+        # dispatch — the warning is rate-limited at the call site.
+        if not regular_messages:
+            # Cycle 2 (review suggestion 4) — the
+            # injection-dominated skip log is now WARN, matching
+            # the 95% pre-call hook's skip-without-relief WARN
+            # (``daemon/graph.py``). Operators triaging
+            # "compaction never fires" alerts should see the
+            # skip in the WARN stream (was INFO, invisible in
+            # 6d of prod data prior to the L3 fix). The 95% site
+            # still has its own rate-limited WARN with a
+            # different message — this is a separate signal that
+            # fires for all call sites (proactive + 95% +
+            # /compact) so the WARN-level signal is uniform.
+            logger.warning(
+                "[Compaction] skipping: every message carries "
+                "injected_message flag (n=%d, injected_tokens=%d); "
+                "anti-refire stamp engaged",
+                len(context.messages),
+                injected_tokens,
+            )
+            return anti_refire_skip(
+                skip_reason="skipped_injections_dominate"
+            )
 
         # 2. Eligibility: minimum messages check (against the non-injected
         # subset so an injection-heavy conversation doesn't get spuriously
-        # compacted away).
+        # compacted away). ANTI-REFIRE stamp engages the dedup so the
+        # gate does not re-fire every dispatch.
         if len(regular_messages) < context.config.min_messages_before_compaction:
-            logger.debug(
-                f"Skipping compaction: {len(regular_messages)} non-injected messages "
-                f"(minimum: {context.config.min_messages_before_compaction}, "
-                f"injected={len(injected_messages)})"
+            logger.warning(
+                "[Compaction] skipping: %d non-injected messages "
+                "(minimum: %d, injected=%d); anti-refire stamp engaged",
+                len(regular_messages),
+                context.config.min_messages_before_compaction,
+                len(injected_messages),
             )
-            return None
+            return anti_refire_skip(
+                skip_reason="skipped_below_min_messages"
+            )
 
-        # 3. Token calculation (regular messages only)
-        history_tokens = estimate_messages_tokens(regular_messages)
+        # 3. Token calculation — NUMERATOR includes injected tokens
+        # (L3 fix; matches what the LLM sees — the FE badge at
+        # ``_compute_context_usage`` already counts all messages).
+        history_tokens = (
+            estimate_messages_tokens(regular_messages)
+            + injected_tokens
+        )
         total_tokens = history_tokens + context.system_prompt_tokens
 
         # 4. Context window and threshold check.
@@ -1820,24 +2055,38 @@ class ContextCompactor:
         # INTERNAL sizing (:1094 chunking, :1414 merge/condense) keeps
         # following the OVERRIDE window via ``_effective_model_name``.
         context_window = self._trigger_window(context)
-        if not force and total_tokens <= context_window * context.config.threshold:
+        threshold_tokens = int(context_window * context.config.threshold)
+        if not force and total_tokens <= threshold_tokens:
             logger.debug(
                 f"Skipping compaction: {total_tokens} tokens "
-                f"<= threshold {int(context_window * context.config.threshold)}"
+                f"<= threshold {threshold_tokens}"
             )
             return None
 
+        # Threshold crossed — log at INFO so the operator sees the
+        # gate fire in prod (was DEBUG; invisible in 6d of prod data).
+        # Rate-limited WARN fires at ≥90% of threshold from the call
+        # site (instance_messaging._maybe_compact_context).
         logger.info(
             f"Compaction triggered: {total_tokens} tokens "
-            f"(threshold: {int(context_window * context.config.threshold)}, "
+            f"(threshold: {threshold_tokens}, "
             f"force={force}, regular={len(regular_messages)}, "
-            f"injected={len(injected_messages)})"
+            f"injected={len(injected_messages)}, "
+            f"injected_tokens={injected_tokens})"
         )
 
         # 5. Boundary groups (regular messages only)
         groups = identify_boundary_groups(regular_messages)
 
-        # 6. Select compactable vs preserved
+        # 6. Select compactable vs preserved. Pass injected tokens so
+        # the budget math (`preserved_tokens <= threshold`) reflects
+        # the real surviving occupancy — L3 honesty at the budget
+        # side too. Without this, an injection-heavy conversation
+        # could compact all regular groups and STILL exceed the
+        # threshold (because the injections survive un-reduced),
+        # producing a per-dispatch refire loop. The selection math
+        # now bails out cleanly when the regular-pool cannot reach
+        # target.
         compactable, preserved, actual_window = select_compactable_groups(
             groups,
             context.config.recent_message_window,
@@ -1846,6 +2095,7 @@ class ContextCompactor:
             context.system_prompt_tokens,
             estimate_messages_tokens,
             config_threshold=context.config.threshold,
+            injected_tokens=injected_tokens,
         )
 
         timestamp = datetime.now(timezone.utc).isoformat()
@@ -1860,10 +2110,35 @@ class ContextCompactor:
         if not compactable:
             # Emergency path: even preserved groups exceed threshold
             preserved_msgs = [msg for g in preserved for msg in g.messages]
-            preserved_tokens = estimate_messages_tokens(preserved_msgs) + context.system_prompt_tokens
+            preserved_tokens = (
+                estimate_messages_tokens(preserved_msgs)
+                + injected_tokens  # L3 honesty: surviving injected
+                + context.system_prompt_tokens
+            )
 
+            # ANTI-REFIRE stamp engages the dedup so the emergency
+            # bail does not re-fire every dispatch. The engine
+            # stamps CompactionResult with empty replacement_messages
+            # for the proactive site to persist via the shared seam.
             if preserved_tokens <= context_window * context.config.threshold:
-                return None
+                logger.info(
+                    "[Compaction] skipping: preserved (%d) + "
+                    "injected_tokens=%d + system=%d still within "
+                    "threshold; anti-refire stamp engaged",
+                    estimate_messages_tokens(preserved_msgs),
+                    injected_tokens,
+                    context.system_prompt_tokens,
+                )
+                return CompactionResult(
+                    replacement_messages=[],
+                    tokens_before=total_tokens,
+                    tokens_after=preserved_tokens,
+                    tokens_saved=0,
+                    messages_before=len(context.messages),
+                    messages_after=len(context.messages),
+                    compaction_type="skipped_preserved_within_threshold",
+                    compacted_at=datetime.now(timezone.utc).isoformat(),
+                )
 
             logger.warning(
                 f"Emergency truncation: {preserved_tokens} tokens exceed threshold "

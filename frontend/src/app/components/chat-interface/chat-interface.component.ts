@@ -404,6 +404,20 @@ export class ChatInterfaceComponent implements AfterViewChecked, OnChanges, OnDe
         case 'recently_compacted': return 'Already compacted recently';
         case 'below_floor': return 'Context too small to compact';
         case 'too_few_messages': return 'Too few messages';
+        // Cycle 2 (proactive-compaction-fix review W-4) — all-injected
+        // anti-refire path; the engine emits
+        // ``compaction_type="skipped_injections_dominate"`` and the BE
+        // executor maps that to ``compacted_type="noop"`` +
+        // ``noop_reason="injections_dominate"``.
+        case 'injections_dominate': return 'All messages are injections; nothing to compact';
+        // Cycle 3 (proactive-compaction-fix residual W-4.5) — the
+        // emergency-bail path on ``daemon/compaction.py:2129-2138``
+        // emits ``skipped_preserved_within_threshold`` when preserved
+        // groups still fit within the threshold. The BE executor maps
+        // that to ``compacted_type="noop"`` +
+        // ``noop_reason="preserved_within_threshold"`` (mirror of the
+        // other two mapped noops).
+        case 'preserved_within_threshold': return 'Preserved groups still fit within the threshold';
         default: return 'No compaction was needed';
       }
     }

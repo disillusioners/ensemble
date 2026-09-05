@@ -168,3 +168,77 @@ Replace the blanket `if not is_retry` with the same status+shape gate. The origi
 `context_messages.py`: :106-110 (injected stamp) · `graph.py`: :3512-3547 (CLE backstop) · `config.py`: :787-791 (`timeout_cap_s`)
 Tests: `test_compact_executor_revive_brick_e2e.py` (:14-19 header, :192-311 brick, :580-655 canary) · `tests/unit/tools/test_instance_tools.py:199-201` (canonical tripwire)
 Prior art: `.agents/shared/planning/compact-on-completed/architecture-recommendation.md` (2026-08-31) — revive-location drift corrected to `:1820-1838` by verification.
+
+
+---
+
+## ADDENDUM (2026-09-04): Mid-Turn 95% Pre-Call Reactive Trigger
+
+Added post-main-recommendation per user requirement. Verified on the current tree by worker `08d6dfe8` (`data-flow-design`); all line pins below are from that pass (tree had moved — CLE persist re-pinned `graph.py:3583` → `:3606-3608`). Main recommendation body above is NOT rewritten; this section amends it where noted.
+
+### A.1 Requirement
+A SECOND reactive trigger at **0.95 × `_trigger_window(...)`** (0.95 × min(session, override) = 570k on a 600k window), evaluated **before each LLM call, mid-turn**, in addition to (not replacing) the CLE trigger. Purpose: catch mid-turn context explosions (huge tool results, injected child reports) that the pre-dispatch proactive 80% check structurally cannot see — BEFORE the provider call fails.
+
+### A.2 Decision-register updates (supersede main-doc §8 where stated)
+- **Open Decision #1 RESOLVED (user, 2026-09-04):** `ENSEMBLE_PROACTIVE_COMPACTION` ships **default ON**, single kill-switch semantics preserved (OFF = one-flag revert path; see A.8).
+- Open Decision #2 (P2 `is_retry` scope) and #3–#5 remain open.
+
+### A.3 Hook site (Q1) — pinned: `daemon/graph.py:3504-3511`
+Insert immediately inside the `try:`, **after `_maybe_repair_loop`** (`:3424-3437`) and **before the invoke** (`run_in_executor(..., current_llm.invoke(full_messages))`, `:3508-3511`). NOT a middleware slot, NOT inside the CLE handler. Rationale: the check must observe the post-repair LLM-bound payload (the loop breaker rebuilds/drops items, `graph.py:1771-1778`); the site is a sibling of the CLE handler so `compactor`/`graph_ref`/`thread_config` are already in scope (closure locals of `create_agent_node`, `:2716-2734`); middleware sees the channel dict, not `full_messages` with system prompt + injections prepended (`:2830`) — wrong abstraction layer.
+
+**`usage_metadata` verdict:** reachable (captured `:2282-2283`, survives the reducer into the checkpoint `:2110-2111`) but a **stale/undercounting proxy** — first call in a turn has no same-turn AIMessage; mid-loop the last AIMessage undercounts by the new tool result; non-compliant backends return None (`:2347-2381`). The drift is exactly the explosion the hook exists to catch. **Use only as a secondary cross-check; primary signal = estimator.**
+
+### A.4 Estimator cost (Q2)
+Facts (`daemon/loader.py:450-520`): no cache, up to 4 sub-encodes/message, pure-Python loop → **~150–200 ms at 800 msgs / ~500k tokens** (encode ~3–10 ms + ~160 ms loop overhead). Non-trivial on every call of a multi-call tool-loop turn.
+
+**Adopted mitigation:** (c) **O(1) pre-filter** — per-instance `last_estimate: (msg_count, total_tokens)` on the compactor (sibling of `last_compacted_at`); skip the estimator unless the message count grew OR the last estimate was ≥0.80×window; plus (b) `usage_metadata` as cross-check only. Common case O(1); the ~200 ms worst case is confined to the 80–95% band, where the call is already at risk. **Rejected:** (a) incremental id-hash cache — fragile across sentinel re-ids (`compaction.py:1880-1882` re-mints ids) and cache-lookup cost approaches encoding cost.
+
+### A.5 Persist-recipe resolution (CRITICAL — amends §3.3)
+**KEEP `as_node='agent'` for mid-turn sites; do NOT adopt Variant A mid-superstep (unproven in this codebase). The shared seam gains a `mid_turn: bool` parameter:**
+- `mid_turn=True` → `as_node='agent'` (CLE handler `:3606-3608` + the new 95% hook)
+- `mid_turn=False` → no `as_node` (Variant A: executor; proactive path post-§3.3 retirement)
+
+Evidence — three persist sites, two frames: proactive (in-frame, quiescent) `instance_messaging.py:1308-1320`; executor (out-of-frame, quiescent) `compact_executor.py:1668-1680`; CLE (in-frame, **mid-superstep**) `graph.py:3606-3608`. The C1 docstring (`compact_executor.py:1551-1571`) explicitly distinguishes the frames; §1.1's `interrupt_before` finding covers **quiescent** checkpoints only — mid-superstep `aupdate_state` without `as_node` is untested here. **AMENDMENT to §3.3:** the seam's parameter list is now (abort policy, `force`, tap, **`mid_turn`**). Gate any future recipe change at the CLE handler on the mid-superstep canary (A.9 T2-ext).
+
+#### A.5.1 Cycle 2 amendment (2026-09-04) — `mid_turn=True` is a rebuild-seed shadow
+The mid-superstep durability premise that justified the `mid_turn=True` branch is **falsified on real langgraph 1.0.9** (T2-ext canary `test_compact_executor_revive_brick_e2e.py:1712-1979`):
+
+* mid-flight `aupdate_state` (any `as_node`) is **superseded by the running task's own commit** when the in-flight node returns — the running task's outgoing-prefix commit lands LAST and overwrites the mid-flight write;
+* mid-flight `aupdate_state` WITHOUT `as_node` raises `InvalidUpdateError` on the real graph (no in-flight node to anchor the write to).
+
+**Proven replacement (P1b):** durability is owned by the **return-carried prefix** — the node's return value carries the sentinel-first compaction prefix (`graph.py:4151-4203`); the running task's commit lands the compaction atomically; the dedup stamp rides the return. The `mid_turn=True` seam call (the "rebuild-seed shadow") is **NO LONGER LOAD-BEARING for durability** — it persists in case the task is killed before its commit (rebuild-from-checkpoint path). A future simplification can drop the `mid_turn=True` writes entirely once the rebuild-seed value is empirically zero; the seam parameter is kept now to preserve the existing seam contract and the `_compaction_persist_seam` two-frame taxonomy.
+
+**Concrete follow-up:** the pre-existing CLE handler at `graph.py:3951-3955` (outside this branch's scope, locked byte-unchanged in this round) still uses superseded mid-flight persist — it is the **next** migration target and the T2-ext canary template for future mid-superstep recipe changes.
+
+### A.6 Composition + refire safety (Q3) — VERIFIED
+- **Abort → no stamp:** `build_sentinel_replacement` raises `CompactionAborted` (`compaction.py:412`) before any `aupdate_state`; the stamp happens inside `compact_state` on success (`:1851`, `:3339`). So a proactive 80% abort does NOT engage the 60s dedup (`:3391-3407`) — the 95% hook can fire later in the same turn. Compose confirmed.
+- **Success stops refire:** `compacted_at` written mid-turn (`:3607-3608`) → subsequent same-turn calls read it (`:3524`) → `_is_recently_compacted` (`:1771-1773`) returns None → stop re-triggering. Emergency truncation always lands at `target_ratio` (≤ ~0.5×window) below 95% (`:1860-1922`) → durable relief even for the 810-msg class.
+- **Injection-dominated no-op paths do NOT stamp** (all-injected early-return `:1793`; `min_messages` `:1798-1804`) → the per-call refire risk exists here too; the §3.5 anti-refire policy (skip + WARN + **stamp**) applies to the 95% hook identically (covered by T4-ext).
+- **Same-call conflict impossible** (95% is pre-call, CLE is post-failure); same-turn sequences safe per Q3c analysis.
+
+### A.7 CLE isolation (Q7) — VERIFIED
+CLE is not transient (`llm_error_classifier.py:387, 433-479`); tenacity does not retry it; the "single retry" is purely the in-handler re-invoke (`graph.py:3717-3720`). The 95% hook is a disjoint path before `:3508`; the CLE persist (`:3606-3608`) and retry are untouched. Turn resumability: same in-invocation pattern (persist → `aget_state` → rebuild → re-invoke → return; `:3606-3608`, `:3635`, `:3704-3712`, `:3717-3720`) — no re-dispatch, no graph restart.
+
+### A.8 Flag + phase (Q4, Q5)
+- **Q4 — single flag governs both triggers** (`ENSEMBLE_PROACTIVE_COMPACTION`, default ON): both are one feature (the auto-compaction safety net) consuming one seam; independent flags create a meaningless mixed state (proactive ON + 95% OFF re-opens the exact mid-turn hole this requirement closes) and double the revert matrix — against the user's one-kill-switch preference and house kill-switch doctrine. The **CLE trigger stays ungated** (pre-existing last-resort behavior; gating it would change today's behavior — out of scope). 🟢 Naming note: the flag name says "proactive" but now governs a reactive trigger; accept the name (avoid churn), document the widened semantics at the config site.
+- **Q5 — own small phase P1b, immediately after P1** (it consumes P1's seam + numerator fix; independent of P2). P1b scope: hook + `mid_turn` seam param + tap label + pre-filter state + anchors. Resulting coverage ladder: **80% pre-dispatch → 95% pre-call → CLE ~600k**.
+
+### A.9 Test anchors (Q6) — extends §6
+- **T2-ext (mid-superstep canary):** extend `test_compact_executor_revive_brick_e2e.py` with a turn-in-flight graph exercising `as_node='agent'` AND no-`as_node` mid-superstep; gates any future recipe change (A.5).
+- **T4-ext (multi-call refire loop):** a turn with N LLM calls crossing 95% compacts ONCE (dedup stamped); injection-dominated no-op stamps + single WARN (no per-call refire).
+- **T-estimator (perf):** below-80% pre-filter path invokes the estimator ZERO times across a multi-call turn (assert call count); estimator runs only when count grew or last estimate ≥0.80×window.
+- **T-boundary:** 0.9499×window no-fire / 0.9501×window fire (≈569.9k / 570.1k on 600k).
+- **T-isolation (CLE):** 95% fire does not consume/reset the CLE single-retry; CLE persist site byte-unchanged; hook-then-CLE in one turn behaves per A.6/A.7.
+- **T-tap (gate — missed by the leader's sketch):** `compaction_tap_slot`'s AST gate (`test_hook_placement`) requires EXACTLY 4 distinct source labels; adding the hook without a label decision fails the gate. Add `SOURCE_COMPACTION_PRECALL_95` (or document reuse of the reactive label) — decide in P1b.
+
+### A.10 Risks added
+- 🟡 Seam must carry the `mid_turn` parameter (A.5) — §3.3 as written covers only quiescent sites; P1b amends it before a third consumer exists.
+- 🟡 Tap-label AST gate (exactly 4 labels) — a P1b-blocking detail absent from the leader's sketch.
+- 🟢 `usage_metadata` staleness — documented; never the primary signal.
+- 🟢 Estimator latency ~150–200 ms worst case — confined to the 80–95% band by the O(1) pre-filter.
+- 🟢 Rare stuck case (even emergency truncation CLEs) — pre-existing CLE behavior; the 95% hook does not worsen it (A.6).
+
+### A.11 Corrections to the leader's sketch
+1. "Wherever the full message list is available" → pinned to the post-loop-repair pre-invoke site (`graph.py:3504-3511`); middleware and CLE-neighborhood placements rejected with reasons (A.3).
+2. "Mid-turn-proven persist approach" → confirmed as `as_node='agent'`, NOT the lifted Variant-A recipe; the seam is parameterized per-site instead (A.5).
+3. Sketch omissions surfaced by verification: tap-label AST gate, estimator cost mitigation, injection-dominated refire stamping — all specified above (A.4, A.6, A.9).

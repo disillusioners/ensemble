@@ -864,7 +864,15 @@ class TestCompactState:
 
     @pytest.mark.asyncio
     async def test_skips_when_under_minimum_messages(self, mock_llm):
-        """Test that compaction is skipped when message count is below min_messages_before_compaction."""
+        """Test that compaction is skipped when message count is below min_messages_before_compaction.
+
+        Phase 1 (proactive-compaction-fix) — anti-refire: the engine
+        now returns a stamped CompactionResult with empty
+        replacement_messages for this skip path so the 60s dedup
+        (``compaction.py:1771-1774``) engages and the per-dispatch
+        refire loop closes. The ``compaction_type`` carries the
+        skip reason verbatim so callers + tests can identify it.
+        """
         config = make_compaction_config(
             min_messages_before_compaction=10,
             threshold=0.01,
@@ -878,7 +886,15 @@ class TestCompactState:
         )
         compactor = ContextCompactor(config, {})
         result = await compactor.compact_state(context)
-        assert result is None
+        # ANTI-REFIRE: stamped no-op, NOT None.
+        assert result is not None, (
+            "anti-refire: engine must stamp compacted_at so the dedup "
+            "engages on the next dispatch — return None un-stamped "
+            "would re-fire the gate every dispatch"
+        )
+        assert result.compaction_type == "skipped_below_min_messages"
+        assert result.replacement_messages == []
+        assert result.compacted_at, "anti-refire stamp must be set"
 
     @pytest.mark.asyncio
     async def test_successful_compaction_returns_result(self, mock_llm):
@@ -1467,7 +1483,13 @@ class TestForceFlagWS2:
 
     @pytest.mark.asyncio
     async def test_force_does_not_bypass_min_messages(self, mock_llm):
-        """Min-messages check still applies under force."""
+        """Min-messages check still applies under force.
+
+        Phase 1 (proactive-compaction-fix) — anti-refire: even with
+        ``force=True`` the engine stamps ``compacted_at`` on this
+        skip path so the 60s dedup engages. The skip reason is
+        carried in ``compaction_type``.
+        """
         config = make_compaction_config(
             min_messages_before_compaction=100,  # big so we trip it
             threshold=0.99,
@@ -1485,7 +1507,11 @@ class TestForceFlagWS2:
         compactor = ContextCompactor(config, {})
         result = await compactor.compact_state(context, force=True)
         # Min-messages wins; force does not bypass it.
-        assert result is None
+        # ANTI-REFIRE: stamped no-op, NOT None.
+        assert result is not None
+        assert result.compaction_type == "skipped_below_min_messages"
+        assert result.replacement_messages == []
+        assert result.compacted_at, "anti-refire stamp must be set"
 
     @pytest.mark.asyncio
     async def test_auto_paths_byte_identical_forced_false(self, mock_llm):
@@ -3994,8 +4020,16 @@ class TestPassTwoSeedConvergence:
 
 class TestSentinelAcrossPersistSites:
     """Item 8 — parametrized across persist sites: on-demand
-    (no ``as_node``), proactive (``as_node='agent'``), reactive
-    (``as_node='agent'``) → identical landed order.
+    (no ``as_node``), proactive (no ``as_node`` — Phase 1
+    unification), reactive (``as_node='agent'``, mid-superstep)
+    → identical landed order.
+
+    Phase 1 (proactive-compaction-fix): the proactive site
+    retired its ``as_node='agent'`` persist (§1.1, §3.3) — it
+    now consumes the shared seam with ``mid_turn=False``. The
+    mid-superstep CLE handler (reactive) keeps ``as_node='agent'``
+    because its frame is IN-FLIGHT — pinned by the seam's
+    ``mid_turn=True`` arm (T2-ext).
     """
 
     def test_sentinel_recipe_is_site_agnostic(self):
@@ -4056,42 +4090,122 @@ class TestSentinelAcrossPersistSites:
         seam helper does not need to know; the call site
         passes the recipe to ``aupdate_state`` with no
         ``as_node`` keyword.
+
+        Phase 1 (proactive-compaction-fix): the executor is now a
+        thin wrapper around the shared seam
+        (:mod:`daemon.services._compaction_persist_seam`); the
+        wrapper delegates with ``mid_turn=False`` so the seam
+        emits Variant A. We check the SEAM directly, not the
+        wrapper — the wrapper is glue only.
         """
         import inspect
-        from daemon.services import compact_executor as ce
-        src = inspect.getsource(ce._persist_compaction_result)
-        # First aupdate_state call: no as_node (C1).
-        first_aupdate_idx = src.find("await graph.aupdate_state(")
-        assert first_aupdate_idx >= 0
-        # Find the closing paren / comma for the first call's
-        # args. Look for the absence of as_node.
-        first_call_end = src.find(")", first_aupdate_idx)
-        first_call = src[first_aupdate_idx:first_call_end]
+        from daemon.services import _compaction_persist_seam as seam_mod
+        src = inspect.getsource(seam_mod.persist_compaction_result)
+        # Strip the mid_turn=True branch (we exercise the
+        # mid_turn=False variant for the executor). The mid_turn=True
+        # branch is pinned by the T2-ext canary in
+        # test_compact_executor_revive_brick_e2e.py.
+        # P1b: the seam's stamp-only path gained a mid_turn=True arm
+        # (the 95% hook consumer; its ``as_node='agent'`` keyword fix
+        # is the P1b latent-bug repair). Locate the mid_turn=False
+        # STAMP-ONLY arm via the FIRST ``if mid_turn:``'s else branch
+        # and assert THAT call omits as_node — the executor variant.
+        first_mid_turn_idx = src.find("if mid_turn:")
+        assert first_mid_turn_idx >= 0
+        else_idx = src.find("\n            else:", first_mid_turn_idx)
+        assert else_idx >= 0
+        end_marker = src.find(
+            "# Standard Variant A / Variant B path.", else_idx
+        )
+        arm = src[else_idx:end_marker if end_marker > 0 else len(src)]
+        aupdate_indices = [
+            i for i in range(len(arm))
+            if arm.startswith("await graph.aupdate_state(", i)
+        ]
+        assert len(aupdate_indices) == 1, (
+            f"mid_turn=False stamp-only arm must have exactly 1 "
+            f"aupdate_state call; got {len(aupdate_indices)}"
+        )
+        first_call = arm[aupdate_indices[0]:]
+        first_call = first_call[: first_call.find(")") + 1]
+        # The shared seam supports BOTH recipes; this assertion
+        # checks that the mid_turn=False arm call omits ``as_node=``.
         assert "as_node" not in first_call, (
-            f"compact_executor first aupdate must omit as_node "
+            f"shared seam mid_turn=False arm must omit as_node "
             f"(C1 Variant A); got: {first_call!r}"
         )
 
-    def test_persist_site_invariants_instance_messaging_uses_as_node(self):
-        """The instance_messaging (proactive) site uses
-        ``as_node='agent'`` because it persists INSIDE the
-        graph-task frame.
+    def test_persist_site_invariants_instance_messaging_uses_shared_seam(self):
+        """Phase 1 (proactive-compaction-fix): the proactive path
+        in ``instance_messaging._maybe_compact_context`` consumes
+        the shared persist seam
+        (:mod:`daemon.services._compaction_persist_seam`) with
+        ``mid_turn=False`` and ``abort_policy="fail_open"`` — NOT
+        a hand-rolled ``aupdate_state`` call. This is the
+        unification contract: ONE seam implementation, TWO
+        consumers (executor wrapper + proactive call).
+
+        Pinned here so a future revert to a hand-rolled proactive
+        persist (which re-introduces the duplicate B1/B2 derivation
+        block) is caught at code-review time.
         """
         import inspect
         from daemon.services import instance_messaging as im
-        src = inspect.getsource(im)
-        # Find the compaction aupdate_state in instance_messaging.
-        # Look for "as_node='agent'" after aupdate_state.
-        idx = src.find("'messages': replacement_messages")
-        assert idx >= 0
-        # The call to aupdate_state should have as_node='agent'.
-        # Look backwards for the call start.
-        call_idx = src.rfind("await graph.aupdate_state(", 0, idx)
-        assert call_idx >= 0
-        call_end = src.find(")", call_idx)
-        call = src[call_idx:call_end]
-        assert "as_node='agent'" in call, (
-            f"proactive path must use as_node='agent'; got: {call!r}"
+        from daemon.services import _compaction_persist_seam as seam_mod
+        # ``_maybe_compact_context`` is a method on InstanceMessagingService.
+        # Walk the InstanceMessagingService class source for the seam import.
+        cls = getattr(im, "InstanceMessagingService", None)
+        assert cls is not None, (
+            "InstanceMessagingService class must be importable from "
+            "daemon.services.instance_messaging"
+        )
+        src = inspect.getsource(cls._maybe_compact_context)
+        # The seam is imported (lazy import is acceptable).
+        seam_import_idx = src.find(seam_mod.__name__)
+        if seam_import_idx < 0:
+            seam_import_idx = src.find("_compaction_persist_seam")
+        assert seam_import_idx >= 0, (
+            "proactive path must import the shared persist seam "
+            "(Phase 1 unification); found neither module name nor "
+            "the lazy import path"
+        )
+        # The seam call site passes mid_turn=False.
+        seam_call_idx = src.find("persist_compaction_result")
+        assert seam_call_idx >= 0, (
+            "proactive path must call the shared seam's "
+            "persist_compaction_result helper"
+        )
+        # The proactive path MUST NOT hand-roll its own
+        # ``aupdate_state`` call against the messages channel —
+        # that re-introduces the duplicate B1/B2 derivation block.
+        first_aupdate_idx = src.find("await graph.aupdate_state(")
+        assert first_aupdate_idx == -1 or first_aupdate_idx > seam_call_idx, (
+            "proactive path must not hand-roll aupdate_state for "
+            "messages before invoking the shared seam; got an "
+            "earlier aupdate_state at idx "
+            f"{first_aupdate_idx} vs seam call at {seam_call_idx}"
+        )
+        # And: the proactive path no longer uses ``as_node='agent'``
+        # for messages (Variant A post-P1 retirement, §3.3 / §1.1).
+        # Inspect the call site of the seam for the mid_turn=False
+        # kwarg — proves the proactive site uses Variant A.
+        seam_kwargs_idx = src.find(
+            "persist_compaction_result as _persist_seam",
+        )
+        if seam_kwargs_idx < 0:
+            # Fallback: detect the alias call site by looking for
+            # ``_persist_seam(``.
+            seam_kwargs_idx = src.find("_persist_seam(")
+        seam_call_window = src[seam_kwargs_idx:seam_kwargs_idx + 400]
+        assert "mid_turn=False" in seam_call_window, (
+            "proactive path must call the shared seam with "
+            "mid_turn=False (Variant A — no as_node); got: "
+            f"{seam_call_window!r}"
+        )
+        assert "abort_policy=\"fail_open\"" in seam_call_window, (
+            "proactive path must call the shared seam with "
+            "abort_policy=\"fail_open\"; got: "
+            f"{seam_call_window!r}"
         )
 
     def test_persist_site_invariants_graph_reactive_uses_as_node(self):

@@ -703,6 +703,21 @@ class AgentsConfig(BaseSettings):
     directory: str = Field(default="./agents")
 
 
+# Permissive bool-spelling vocabularies for ``proactive_enabled``.
+# Shared by ``CompactionConfig._parse_proactive_enabled`` (the
+# field validator — empty/raw env-var normalization) AND
+# ``_resolve_proactive_enabled`` (the load_config resolver — the
+# only production caller today, but the field validator must stay
+# in sync so a direct ``CompactionConfig()`` construction (e.g. a
+# test, an internal caller, a future second boot path) does NOT
+# diverge from the boot path). Centralized here so the two sites
+# cannot drift (cycle-3 cleanup — pre-cycle-3 each site had its
+# own copy of these literals; the validator was unaware of the
+# resolver's permissiveness and vice-versa).
+_PROACTIVE_FALSE_BOOLS: frozenset[str] = frozenset({"0", "false", "no", "off"})
+_PROACTIVE_TRUE_BOOLS: frozenset[str] = frozenset({"1", "true", "yes", "on"})
+
+
 class CompactionConfig(BaseSettings):
     """Context compaction configuration."""
 
@@ -763,6 +778,89 @@ class CompactionConfig(BaseSettings):
     summarization_model: str = Field(default="", description="Legacy alias for ``model``. Kept for backwards compatibility; ignored when ``model`` is set")
     min_messages_before_compaction: int = Field(default=10, description="Minimum number of messages before compaction is considered")
     summarization_chunk_threshold: float = Field(default=0.60, description="Fraction of context window above which summarization uses chunking")
+
+    # ── Proactive-compaction kill-switch (Phase 1 of proactive-compaction-fix) ─
+    # Single-source flag governing BOTH auto triggers: the pre-dispatch
+    # proactive gate (P1) AND the 95% pre-call reactive hook (P1b,
+    # ``daemon/graph.py::_maybe_precall_compact_95``) — per ADDENDUM §A.8
+    # of ``.agents/shared/planning/proactive-compaction-fix/architecture-recommendation.md``
+    # (one feature, one seam, one kill-switch; no second flag). The CLE
+    # trigger stays ungated.
+    #
+    # Widened semantics (live since P1b): the field name says
+    # "proactive" but the same flag governs the reactive 95% hook. Name
+    # accepted without churn; semantics documented here so the surface
+    # is honest about its scope.
+    #
+    # Default ON (per ADDENDUM §A.2 — supersedes the main body's §3.7
+    # OFF default). The env name is intentionally NOT
+    # ``COMPACTION_PROACTIVE_ENABLED`` (the section's
+    # ``env_prefix="COMPACTION_"``); the
+    # ``validation_alias`` keeps the documented
+    # ``ENSEMBLE_PROACTIVE_COMPACTION`` env name working without
+    # pydantic layering churn. Setting the env to ``"0"`` /
+    # ``"false"`` / ``"False"`` / ``"no"`` disables the trigger (the
+    # field is parsed through ``_parse_proactive_enabled`` for the
+    # documented permissive semantics).
+    proactive_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "proactive_enabled",
+            "ENSEMBLE_PROACTIVE_COMPACTION",
+        ),
+        description=(
+            "Enable the proactive context-compaction trigger. "
+            "Default ON. Env: ENSEMBLE_PROACTIVE_COMPACTION (0/false "
+            "disables). Governs the P1 pre-dispatch gate AND the P1b "
+            "95% pre-call reactive hook (single kill-switch, A.8)."
+        ),
+    )
+
+    @field_validator("proactive_enabled", mode="before")
+    @classmethod
+    def _parse_proactive_enabled(cls, value: Any) -> Any:
+        """Permissive bool parser for ``ENSEMBLE_PROACTIVE_COMPACTION``.
+
+        Bare ``KEY=`` lines in ``.env`` reach pydantic as the empty
+        string. Pre-cycle-3 the validator normalized empty →
+        ``None`` (pydantic treats ``None`` as an explicit value and
+        raises ``bool_type`` validation error — boot crashes).
+        Cycle 3 / W-1 fix: empty / whitespace-only values are
+        normalized to the documented ``True`` default DIRECTLY so a
+        direct ``CompactionConfig()`` construction (test, internal
+        caller, future boot path) does NOT diverge from the
+        resolver path. ``"0"`` / ``"false"`` / ``"no"`` /
+        ``"off"`` (any case) → False; ``"1"`` / ``"true"`` /
+        ``"yes"`` / ``"on"`` → True; non-empty unrecognized strings
+        pass through (pydantic raises a clear type error so a typo
+        is caught at startup).
+
+        The spellings live in module-level
+        :data:`_PROACTIVE_TRUE_BOOLS` / :data:`_PROACTIVE_FALSE_BOOLS`
+        — shared with :func:`_resolve_proactive_enabled` so the
+        field validator cannot drift from the resolver.
+        """
+        if value is None or (isinstance(value, str) and not value.strip()):
+            # Empty / whitespace-only → documented ON default.
+            # Returning the default explicitly (rather than ``None``)
+            # is required: in a ``mode="before"`` validator, ``None``
+            # is an EXPLICIT value (pydantic treats it as a user-set
+            # value and applies the field type check), NOT a signal
+            # to fall back to the Field default. The resolver at
+            # :func:`_resolve_proactive_enabled` has the same
+            # empty-string normalization contract — this validator
+            # mirrors it so a direct ``CompactionConfig()``
+            # construction (bypassing ``load_config``) does NOT
+            # crash boot with a stray ``.env`` ``KEY=`` line.
+            return True
+        if isinstance(value, str):
+            v = value.strip().lower()
+            if v in _PROACTIVE_FALSE_BOOLS:
+                return False
+            if v in _PROACTIVE_TRUE_BOOLS:
+                return True
+            # Anything else is passed through; pydantic raises.
+        return value
 
     # ── Adaptive LLM timeout (Phase 1 / WS-3) ──────────────────────────────────
     # Adaptive formula (per-call): ``min(cap, base + (tokens/100_000)*per_100k)``
@@ -2010,6 +2108,113 @@ def _resolve_compaction_model(yaml_value: Any, *, env_value: str | None) -> str:
     return yaml_value
 
 
+# Permissive parse for proactive_enabled env values. Mirrors the legacy
+# ``_parse_proactive_enabled`` field validator but raises a clear
+# ``ValueError`` on an unrecognized string so a typo is caught at boot
+# (the field validator relied on pydantic's downstream type error;
+# here, the resolver is called from ``load_config`` BEFORE the model is
+# constructed, so the explicit error is more operator-friendly).
+#
+# Cycle 3 — the bool-spelling vocabularies now live at module scope
+# (see :data:`_PROACTIVE_TRUE_BOOLS` / :data:`_PROACTIVE_FALSE_BOOLS`
+# at the top of this module) and are SHARED between this resolver
+# and the field validator. Pre-cycle-3 each site had its own copy
+# of the literals; a future spelling added to one site but not
+# the other would silently diverge (e.g. accepting "yes" at the
+# field but rejecting it at the resolver).
+def _parse_proactive_str(v: str) -> bool:
+    """Parse a permissive proactive_enabled env value to ``bool``.
+
+    Accepts (case-insensitive, leading/trailing whitespace ignored):
+    ``"0"`` / ``"false"`` / ``"no"`` / ``"off"`` → ``False``;
+    ``"1"`` / ``"true"`` / ``"yes"`` / ``"on"`` → ``True``.
+
+    Any other non-empty string raises :class:`ValueError` with a
+    message naming the bad value (caught by ``load_config`` and
+    re-raised so the operator sees a clear boot failure).
+    """
+    s = v.strip().lower()
+    if s in _PROACTIVE_FALSE_BOOLS:
+        return False
+    if s in _PROACTIVE_TRUE_BOOLS:
+        return True
+    raise ValueError(
+        f"Invalid proactive_enabled value {v!r} — expected one of "
+        f"0/false/no/off (disable) or 1/true/yes/on (enable)"
+    )
+
+
+def _resolve_proactive_enabled(
+    yaml_value: Any,
+    *,
+    ens_value: str | None,
+    cpe_value: str | None,
+) -> bool:
+    """Pure resolver for the ``compaction.proactive_enabled`` kill-switch.
+
+    Cycle 2 of ``feature/proactive-compaction-fix`` (review W-1 + W-2).
+    Explicit resolution for the SAME reason as
+    :func:`_resolve_compaction_model` (pydantic-settings treats a
+    passed-in init kwarg as taking priority over env vars — a YAML
+    ``proactive_enabled: true`` would silently defeat an operator
+    ``ENSEMBLE_PROACTIVE_COMPACTION=0`` kill-switch and weaken the
+    incident-revert path). ``load_config`` reads the env once, calls
+    this function, and passes the resolved ``bool`` as an init kwarg
+    so pydantic-settings never re-reads the env itself.
+
+    Precedence (documented contract for the kill-switch):
+
+      1. ``ens_value`` (``ENSEMBLE_PROACTIVE_COMPACTION``) — when SET
+         and NON-EMPTY (empty/whitespace treated as UNSET, per
+         :func:`_clean_env_value` shell-style ``:-`` semantics), wins
+         outright. This is the documented env name.
+      2. ``cpe_value`` (``COMPACTION_PROACTIVE_ENABLED``) — when SET
+         and NON-EMPTY AND ``ens_value`` is unset/empty. The legacy
+         alias kept for back-compat with operators who use the
+         section's ``env_prefix="COMPACTION_"``-style name; no
+         deprecation warning (single kill-switch — minimal surprise).
+      3. ``yaml_value`` (``compaction.proactive_enabled``) — when env
+         is unset/empty, used as-is if it's already a ``bool``;
+         parsed via :func:`_parse_proactive_str` if it's a string.
+      4. Default ``True`` (documented ON; ADDENDUM §A.2) — only
+         reached when env is unset/empty AND yaml is absent or
+         explicit ``None``.
+
+    Empty env normalization (W-1): a bare ``KEY=`` line in ``.env``
+    (re-exported as empty string via ``launcher.sh``
+    ``load_env_file``) used to crash the daemon at boot —
+    pydantic-settings converts the empty string to ``None`` for a
+    ``bool`` field, which the field validator cannot recover into the
+    documented default. Resolving in ``load_config`` first means the
+    model field receives the explicit resolved ``bool``, bypassing
+    pydantic-settings env-var handling entirely. An operator typo on
+    the kill-switch itself MUST NEVER brick boot — the empty string
+    falls through to the yaml value (or the documented ON default).
+    """
+    ens_clean = _clean_env_value(ens_value)
+    if ens_clean is not None:
+        return _parse_proactive_str(ens_clean)
+    cpe_clean = _clean_env_value(cpe_value)
+    if cpe_clean is not None:
+        return _parse_proactive_str(cpe_clean)
+    # Env unset / empty → yaml or default.
+    if isinstance(yaml_value, bool):
+        return yaml_value
+    if yaml_value is None:
+        return True  # documented default ON
+    if isinstance(yaml_value, str):
+        if not yaml_value.strip():
+            # Defensive — yaml shipped an empty string. Same as unset.
+            return True
+        return _parse_proactive_str(yaml_value)
+    # Anything else (int, etc.) — coerce via truthiness; the field
+    # type is ``bool`` and the upstream pydantic layer is the
+    # canonical truthy check site. Booleans and strings cover the
+    # realistic yaml shapes; an int is treated as truthy to match
+    # the prior validator's pass-through.
+    return bool(yaml_value)
+
+
 def load_config(config_path: str | None = None) -> Config:
     """
     Load configuration from YAML file with environment variable substitution.
@@ -2137,6 +2342,24 @@ def load_config(config_path: str | None = None) -> Config:
     compaction_config["model"] = _resolve_compaction_model(
         compaction_config.get("model", ""),
         env_value=os.environ.get("COMPACTION_MODEL"),
+    )
+    # Cycle 2 (proactive-compaction-fix review W-1 + W-2) — explicit
+    # resolution for ``proactive_enabled`` mirrors
+    # ``_resolve_compaction_model`` above. pydantic-settings treats an
+    # init kwarg as beating the env var, so a YAML
+    # ``proactive_enabled: true`` would silently defeat an operator
+    # ``ENSEMBLE_PROACTIVE_COMPACTION=0`` kill-switch and weaken the
+    # incident-revert path. Resolving in load_config passes the
+    # effective bool as an init kwarg; pydantic-settings never
+    # re-reads the env. The resolver also normalizes a bare ``KEY=``
+    # in .env (empty string) to the documented default — the
+    # previously-unhandled crash on ``ENSEMBLE_PROACTIVE_COMPACTION=``
+    # (W-1) is fixed here. See ``_resolve_proactive_enabled`` for the
+    # precedence + empty-string normalization contract.
+    compaction_config["proactive_enabled"] = _resolve_proactive_enabled(
+        compaction_config.get("proactive_enabled"),
+        ens_value=os.environ.get("ENSEMBLE_PROACTIVE_COMPACTION"),
+        cpe_value=os.environ.get("COMPACTION_PROACTIVE_ENABLED"),
     )
     config_dict["compaction"] = compaction_config
     if "slash_commands" in processed_config:

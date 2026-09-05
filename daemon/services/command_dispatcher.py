@@ -160,11 +160,41 @@ class CompactedType(str, Enum):
 
 
 class NoopReason(str, Enum):
-    """noop_reason enum — WS-5 §7."""
+    """noop_reason enum — WS-5 §7.
+
+    Cycle 2 (proactive-compaction-fix review W-4) added
+    ``INJECTIONS_DOMINATE``: the engine emits
+    ``compaction_type="skipped_injections_dominate"`` on the
+    all-injected anti-refire path (the ``if not regular_messages:``
+    block through the ``anti_refire_skip`` call).
+    The executor's wire mapping translates that to
+    ``compacted_type="noop"`` + ``noop_reason="injections_dominate"``
+    so the FE enum contract (``CompactedType.NOOP``) is preserved
+    (the raw engine string was previously leaking through the wire
+    as ``compacted_type="skipped_injections_dominate"`` — outside
+    the FE enum). Engine-side ``compacted_at`` stamping for the
+    AUTO path is unaffected (T4/T4-ext acceptance).
+
+    Cycle 3 (proactive-compaction-fix residual W-4.5) added
+    ``PRESERVED_WITHIN_THRESHOLD``: the engine emits
+    ``compaction_type="skipped_preserved_within_threshold"`` on the
+    emergency-bail path when the preserved-groups token count still
+    fits within ``context_window * threshold``
+    (``daemon/compaction.py:2129-2138``). The executor's wire
+    mapping translates that to ``compacted_type="noop"`` +
+    ``noop_reason="preserved_within_threshold"`` for the SAME
+    reason as ``INJECTIONS_DOMINATE`` — the raw engine string was
+    previously leaking through the wire AND the user-facing
+    ``/compact`` was invoking the 60s dedup stamp seam on a
+    no-op. The seam is now skipped for this path (mirror of the
+    other two mapped noops) and the FE enum contract is preserved.
+    """
 
     BELOW_FLOOR = "below_floor"
     RECENTLY_COMPACTED = "recently_compacted"
     TOO_FEW_MESSAGES = "too_few_messages"
+    INJECTIONS_DOMINATE = "injections_dominate"
+    PRESERVED_WITHIN_THRESHOLD = "preserved_within_threshold"
 
 
 # ─────────────────────────────────────────────────────────────────────────

@@ -52,7 +52,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, call
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 from langchain_core.messages import (
@@ -75,6 +75,7 @@ from daemon.services.command_dispatcher import (
     CommandPhase,
 )
 from daemon.services.compact_executor import (
+    _ENGINE_SKIPPED_TYPES_TO_NOOP_REASON,
     _HEARTBEAT_INTERVAL_S,
     _QUIESCENCE_TIMEOUT_S,
     _is_recently_compacted,
@@ -1052,6 +1053,653 @@ class TestEngineToWireMapping:
         # That string is reserved for genuinely-failed engine results.
         if expected_phase == "success":
             assert wire.detail.get("reason") != "unknown_compaction_type"
+
+
+class TestEngineSkippedTypesWireMapping:
+    """Cycle 2 (proactive-compaction-fix review W-4) — the engine
+    emits ``compaction_type="skipped_<reason>"`` on the
+    anti-refire / min-messages paths
+    (``daemon/compaction.py:1994-2020``). The pre-fix wire mapping
+    fell through to the W-4.4 default branch and emitted
+    ``compacted_type="skipped_<reason>"`` (raw engine string) +
+    ``success: true`` — outside the FE ``CompactedType`` enum.
+
+    This class pins the W-4 fix: every engine ``skipped_*`` value
+    maps to ``compacted_type="noop"`` + the appropriate
+    :class:`NoopReason` (FE enum contract preserved). The engine
+    raw value is preserved under ``engine_compacted_type`` as a
+    diagnostic.
+
+    Acceptance contract: the FE ``CompactedType`` enum is
+    ``summary | partial_summary | truncation | noop`` — the wire
+    response must use one of these literal strings. The
+    pre-W-4 regression emitted
+    ``compacted_type="skipped_injections_dominate"`` /
+    ``"skipped_below_min_messages"`` which the FE had to filter
+    out as a special case (a forward-compat landmine for future
+    ``skipped_*`` values).
+    """
+
+    @pytest.mark.parametrize(
+        "engine_value,expected_noop_reason",
+        [
+            # Every engine ``skipped_*`` value has an explicit
+            # wire mapping; the parametrize enumeration IS the
+            # acceptance test.
+            (
+                "skipped_injections_dominate",
+                "injections_dominate",
+            ),
+            (
+                "skipped_below_min_messages",
+                "too_few_messages",
+            ),
+        ],
+    )
+    def test_engine_skipped_type_maps_to_noop_enum(
+        self, engine_value, expected_noop_reason
+    ):
+        """W-4 main contract — engine ``skipped_*`` → wire
+        ``compacted_type="noop"`` + ``noop_reason=<NoopReason>``.
+
+        Both the wire enum (``noop``) and the noop_reason
+        vocabulary (the existing :class:`NoopReason` string enum)
+        are honored. The raw engine value is preserved as a
+        diagnostic detail (``engine_compacted_type``) so the FE
+        and operator can still see WHICH skip path fired without
+        a forward-compat surprise (a future engine
+        ``skipped_<x>`` value with no explicit mapping would
+        still leak through the wire, but that path is gated
+        behind the explicit dict; a forward-compat surprise is
+        a "someone added a new skipped_* branch and forgot the
+        mapping" failure, not a silent wire enum break).
+        """
+        result = _make_compaction_result(
+            compaction_type=engine_value,
+            failure_kind=None,
+        )
+        # Engine-side no-op path stamps ``compacted_at`` (this is
+        # the AUTO path's anti-refire mechanic — T4/T4-ext
+        # acceptance). The wire mapping does NOT touch that
+        # stamp; the executor's call site is what decides whether
+        # to engage the seam.
+        wire = _map_engine_result_to_wire(result)
+        assert wire.terminal_phase == CommandPhase.SUCCESS.value, (
+            f"engine={engine_value!r}: skipped_* is a USER-FACING "
+            f"no-op (NOT a failure); wire phase MUST be 'success' so "
+            f"the FE shows a noop card, not an error. got "
+            f"{wire.terminal_phase!r}"
+        )
+        # FE enum contract: wire ``compacted_type`` MUST be one
+        # of the canonical strings — not the raw engine value.
+        assert wire.detail["compacted_type"] == "noop", (
+            f"engine={engine_value!r}: wire compacted_type must be "
+            f"'noop' (FE enum); got {wire.detail['compacted_type']!r}"
+        )
+        assert wire.detail["noop_reason"] == expected_noop_reason, (
+            f"engine={engine_value!r}: expected noop_reason="
+            f"{expected_noop_reason!r}, got "
+            f"{wire.detail['noop_reason']!r}"
+        )
+        # Diagnostic: raw engine value preserved.
+        assert wire.detail["engine_compacted_type"] == engine_value
+
+    def test_engine_skipped_with_failure_kind_error_is_still_noop(self):
+        """An engine ``skipped_*`` + ``failure_kind="error"`` is
+        still a wire noop, not a failed outcome.
+
+        The engine's "skipped" path is a USER-FACING noop
+        (anti-refire / min-messages), NOT a genuine failure. The
+        W-4.4 carve-out (failure_kind="error" → failed) was
+        designed for fallback-path types
+        (``partial_summary | truncation | emergency_truncation``)
+        where a real LLM error applied a truncate fallback. The
+        skipped_* paths are engine-side skip decisions, not
+        LLM-call errors — so the W-4.4 carve-out must NOT fire
+        here.
+        """
+        result = _make_compaction_result(
+            compaction_type="skipped_injections_dominate",
+            failure_kind="error",
+            summarization_error="none — but engine stamped error anyway",
+        )
+        wire = _map_engine_result_to_wire(result)
+        assert wire.terminal_phase == CommandPhase.SUCCESS.value
+        assert wire.detail["compacted_type"] == "noop"
+        assert wire.detail["noop_reason"] == "injections_dominate"
+
+    def test_unknown_engine_value_does_not_match_skipped_mapping(self):
+        """Regression guard: an engine value with a different
+        prefix (e.g. ``"skipped_foo_bar"``) MUST NOT match the
+        explicit skipped mapping (only the documented
+        ``skipped_injections_dominate`` and
+        ``skipped_below_min_messages`` do). It falls through to
+        the W-4.4 default (success + raw engine value as
+        diagnostic) — NOT to the noop mapping.
+
+        This is a forward-compat guard: a future engine value
+        that LOOKS like a skip but isn't in the explicit dict
+        should NOT silently be re-mapped to noop. The wire
+        response carries the raw value so the FE / operator
+        sees the new engine vocabulary, and the next code
+        review adds the explicit mapping.
+        """
+        result = _make_compaction_result(
+            compaction_type="skipped_some_new_reason",
+            failure_kind=None,
+        )
+        wire = _map_engine_result_to_wire(result)
+        # The skipped_some_new_reason does NOT match the
+        # explicit dict → falls through to the W-4.4 default.
+        # The wire phase is success (no failure_kind) and the
+        # wire compacted_type is the raw engine value (forward
+        # diagnostic).
+        assert wire.terminal_phase == CommandPhase.SUCCESS.value
+        assert wire.detail["compacted_type"] == "skipped_some_new_reason"
+        # No noop_reason (we didn't match the noop mapping).
+        assert wire.detail.get("noop_reason") is None
+        # unknown_compaction_type is set so the FE / operator
+        # sees this is a new engine vocabulary.
+        assert wire.detail.get("unknown_compaction_type") is True
+
+    def test_engine_skipped_preserved_within_threshold_maps_to_noop(self):
+        """Cycle 3 (proactive-compaction-fix residual W-4.5) — wire
+        mapping for the emergency-bail path.
+
+        The engine emits ``compaction_type=
+        "skipped_preserved_within_threshold"`` at
+        ``daemon/compaction.py:2129-2138`` when preserved-groups
+        still fit within the threshold (the no-compaction-needed
+        short-circuit on the emergency path). Pre-cycle-3 the raw
+        engine string leaked through the wire as
+        ``compacted_type="skipped_preserved_within_threshold"``
+        (outside the FE ``CompactedType`` enum) AND the user-facing
+        ``/compact`` invoked the 60s dedup stamp seam on the no-op.
+
+        The fix: this value is in
+        :data:`_ENGINE_SKIPPED_TYPES_TO_NOOP_REASON`, so the wire
+        mapping at :func:`_map_engine_result_to_wire` translates
+        it to ``compacted_type="noop"`` +
+        ``noop_reason="preserved_within_threshold"`` (mirror of
+        the other two mapped noops). The seam-skip call-site at
+        :func:`execute_compact` keys on the same dict membership,
+        so the seam is NOT invoked on this path. See
+        :class:`TestUserFacingNoopSkipsSeam` for the seam-skip
+        half of the contract.
+        """
+        result = _make_compaction_result(
+            compaction_type="skipped_preserved_within_threshold",
+            failure_kind=None,
+        )
+        wire = _map_engine_result_to_wire(result)
+        assert wire.terminal_phase == CommandPhase.SUCCESS.value, (
+            "skipped_preserved_within_threshold is a USER-FACING "
+            "no-op (NOT a failure); wire phase MUST be 'success' "
+            f"so the FE shows a noop card, not an error. got "
+            f"{wire.terminal_phase!r}"
+        )
+        # FE enum contract: wire ``compacted_type`` MUST be one
+        # of the canonical strings — not the raw engine value.
+        assert wire.detail["compacted_type"] == "noop", (
+            "wire compacted_type must be 'noop' (FE enum); got "
+            f"{wire.detail['compacted_type']!r}"
+        )
+        assert wire.detail["noop_reason"] == "preserved_within_threshold", (
+            "expected noop_reason='preserved_within_threshold' "
+            f"(the new NoopReason member); got "
+            f"{wire.detail['noop_reason']!r}"
+        )
+        # Diagnostic: raw engine value preserved.
+        assert (
+            wire.detail["engine_compacted_type"]
+            == "skipped_preserved_within_threshold"
+        )
+        # Forward-compat flag NOT set (this value is in the
+        # explicit mapping; the W-4.4 default branch did NOT
+        # fire).
+        assert wire.detail.get("unknown_compaction_type") is not True
+
+    def test_engine_skipped_preserved_within_threshold_no_raw_string_in_wire(self):
+        """W-4.5 negative control — the raw engine string
+        ``skipped_preserved_within_threshold`` MUST NOT appear in
+        any user-facing wire field that the FE consumes.
+
+        The pre-cycle-3 regression emitted
+        ``compacted_type="skipped_preserved_within_threshold"``
+        (raw engine value) on the user-facing /compact no-op —
+        the FE ``CompactedType`` enum is ``summary |
+        partial_summary | truncation | noop`` and the raw engine
+        string is outside that contract. The fix routes the
+        engine value through the explicit mapping; this test
+        pins that NO user-facing wire field carries the raw
+        engine string.
+
+        Note: ``engine_compacted_type`` IS allowed to carry the
+        raw engine string — it's a diagnostic detail the FE /
+        operator can read but is not bound by the ``CompactedType``
+        enum (see :class:`TestEngineSkippedTypesWireMapping`
+        docstring).
+        """
+        result = _make_compaction_result(
+            compaction_type="skipped_preserved_within_threshold",
+            failure_kind=None,
+        )
+        wire = _map_engine_result_to_wire(result)
+        # Walk every wire field the FE consumes (per the FE
+        # ``CompactedType`` / ``NoopReason`` contract). The
+        # ``compacted_type`` and ``noop_reason`` fields are the
+        # ones the FE renders; ``engine_compacted_type`` is a
+        # diagnostic the FE may ignore.
+        assert wire.detail["compacted_type"] == "noop"
+        assert wire.detail["noop_reason"] == "preserved_within_threshold"
+        # The raw engine string is allowed ONLY under the
+        # diagnostic key (not in the user-facing enum fields).
+        assert (
+            wire.detail.get("engine_compacted_type")
+            == "skipped_preserved_within_threshold"
+        )
+        # No other wire field carries the raw engine string.
+        for key, value in wire.detail.items():
+            if key == "engine_compacted_type":
+                continue
+            assert value != "skipped_preserved_within_threshold", (
+                f"raw engine string leaked into user-facing wire "
+                f"field {key!r}={value!r} — FE CompactedType "
+                f"enum is summary | partial_summary | truncation "
+                f"| noop; the raw engine string is OUTSIDE the "
+                f"enum and must NOT appear in user-facing fields"
+            )
+
+    def test_engine_skipped_mapping_is_complete_against_engine_emitters(self):
+        """W-4.5 forward-compat / completeness guard — the
+        ``_ENGINE_SKIPPED_TYPES_TO_NOOP_REASON`` mapping MUST be
+        EQUAL to the set of every ``skipped_*`` ``compaction_type``
+        emitted by the engine.
+
+        The pre-cycle-3 bug was a PRESENT-value gap: the engine
+        emitted ``skipped_preserved_within_threshold`` but the
+        mapping dict did NOT have that key, so the raw engine
+        string leaked through the wire AND the user-facing
+        ``/compact`` invoked the dedup stamp seam on the no-op.
+        Both halves violate the W-4 enum contract. The previous
+        future-value guard (a test that asserted the dict is
+        non-empty) DID NOT catch this gap — it pinned the dict's
+        shape but not its completeness.
+
+        This guard pins COMPLETENESS both directions via set
+        equality: every engine emitter is mapped AND every dict
+        key corresponds to a real engine emitter (no orphan /
+        typo keys that the engine will never produce). The
+        engine emitter set is derived STATICALLY from
+        ``daemon/compaction.py`` — the source of truth — by
+        scanning for the two ``skipped_*`` emit patterns:
+        ``skip_reason="skipped_<x>"`` (the anti-refire helper
+        lambda at line 1968-1987) and ``compaction_type=
+        "skipped_<x>"`` (direct emit at line 2136 for the
+        emergency-bail path).
+
+        If a future contributor adds a 4th ``skipped_*`` emitter
+        WITHOUT adding the mapping key, this test fails LOUDLY
+        with a clear diff (mapped-vs-emitted vs
+        emitted-vs-mapped) so the gap is caught at CI time, not
+        in production.
+        """
+        import re
+        from pathlib import Path
+
+        engine_path = (
+            Path(__file__).resolve().parents[3]
+            / "daemon"
+            / "compaction.py"
+        )
+        text = engine_path.read_text(encoding="utf-8")
+
+        # Two emit patterns: ``skip_reason="skipped_<x>"`` (the
+        # anti-refire helper lambda) and
+        # ``compaction_type="skipped_<x>"`` (direct emit on
+        # emergency-bail). The patterns are anchored on the
+        # string literal in the engine source — a future
+        # contributor adding a new ``skipped_<x>`` MUST use one
+        # of these two patterns or the guard won't fire
+        # (intentional: a new pattern warrants a new guard).
+        emitted: set[str] = set()
+        for pattern in (
+            r'skip_reason="(skipped_[a-z_]+)"',
+            r'compaction_type="(skipped_[a-z_]+)"',
+        ):
+            for match in re.finditer(pattern, text):
+                emitted.add(match.group(1))
+
+        # Defensive — the guard MUST see at least one emitter.
+        # If a refactor renames / removes the helper, this
+        # assertion trips first so the operator investigates
+        # before relying on the rest of the test.
+        assert emitted, (
+            "engine emitter scan returned empty set — "
+            "daemon/compaction.py no longer emits any "
+            "skipped_* values, OR the guard's regex patterns "
+            "are stale. Investigate before relying on the "
+            "completeness assertion below."
+        )
+
+        mapped = set(_ENGINE_SKIPPED_TYPES_TO_NOOP_REASON.keys())
+
+        # Set-equality both directions — present-value gaps
+        # (engine emits, dict misses) AND orphan / typo keys
+        # (dict has, engine never emits). The pre-cycle-3 bug
+        # was a present-value gap; this guard catches both.
+        missing_from_mapping = emitted - mapped
+        orphans_in_mapping = mapped - emitted
+        assert not missing_from_mapping, (
+            "engine emits skipped_* values that the executor "
+            "mapping does NOT cover — the raw engine string "
+            "will leak through the wire AND the user-facing "
+            "/compact will invoke the dedup stamp seam on the "
+            "no-op. Add the missing keys to "
+            "_ENGINE_SKIPPED_TYPES_TO_NOOP_REASON in "
+            "daemon/services/compact_executor.py. "
+            f"missing={sorted(missing_from_mapping)!r} "
+            f"emitted={sorted(emitted)!r} "
+            f"mapped={sorted(mapped)!r}"
+        )
+        assert not orphans_in_mapping, (
+            "executor mapping has skipped_* keys that the "
+            "engine NEVER emits — orphan / typo keys (the dict "
+            "key would never match an engine result and the "
+            "wire enum would fall through to the W-4.4 default "
+            "on a non-existent value). Remove the orphans or "
+            "fix the engine emitter. "
+            f"orphans={sorted(orphans_in_mapping)!r} "
+            f"emitted={sorted(emitted)!r} "
+            f"mapped={sorted(mapped)!r}"
+        )
+        # Both directions clean → set equality.
+        assert mapped == emitted, (
+            "set equality sanity check — the two preceding "
+            "assertions already pin both directions; this is "
+            "the explicit equality assertion for clarity. "
+            f"emitted={sorted(emitted)!r} "
+            f"mapped={sorted(mapped)!r}"
+        )
+
+
+class TestUserFacingNoopSkipsSeam:
+    """Cycle 2 (proactive-compaction-fix review W-4) — the
+    executor's USER-FACING ``/compact`` response must NOT engage
+    the 60s dedup when the engine returns a skip-path
+    ``CompactionResult`` (anti-refire / min-messages). The engine
+    stamps ``compacted_at`` for the AUTO path (proactive + 95%
+    hook) — that stamping is the load-bearing T4/T4-ext
+    acceptance. The executor splits at the call site: when the
+    result is a noop (``replacement_messages`` empty +
+    ``compaction_type`` in ``_ENGINE_SKIPPED_TYPES_TO_NOOP_REASON``),
+    the seam is NOT called and no checkpoint write happens.
+    The next ``/compact`` is allowed to re-attempt (the user
+    might have added new state in the meantime).
+
+    This is the SEMANTIC SPLIT the review called for: the engine
+    stamps for the auto path; the executor drops the stamp for
+    the user-facing noop. The wire response still carries
+    ``NoopReason`` (see :class:`TestEngineSkippedTypesWireMapping`)
+    so the FE has a clean enum-compatible contract.
+    """
+
+    @pytest.mark.asyncio
+    async def test_injections_dominate_noop_skips_seam_and_writes(self):
+        """Engine returns ``skipped_injections_dominate`` →
+        executor does NOT call the seam, does NOT call
+        ``aupdate_state`` on the graph, terminal phase is
+        ``success`` with ``compacted_type="noop"`` +
+        ``noop_reason="injections_dominate"``.
+
+        The seam is patched out at the import site; if the
+        executor regresses to call it on a noop, the patch
+        records the call and the assertion below fails.
+        """
+        dispatcher = _make_dispatcher()
+        command_id = _make_active_command(dispatcher)
+        mgr = _make_manager(instance_status="idle")
+
+        graph = MagicMock()
+        graph.aupdate_state = AsyncMock()
+        mgr.get_instance = AsyncMock(return_value=graph)
+
+        # Big enough to exceed the noop floor so the
+        # executor's pre-checks pass and we reach the engine.
+        async def _aget_state(_config):
+            return _make_checkpoint_state(
+                next=(),
+                messages=_big_messages(n=15, char_count=4000),
+                compacted_at=None,
+            )
+        graph.aget_state = AsyncMock(side_effect=_aget_state)
+
+        # Engine returns a noop result with the
+        # anti-refire stamp.
+        async def _fake_compact_state(ctx, force=False):
+            return _make_compaction_result(
+                compaction_type="skipped_injections_dominate",
+                replacement_messages=[],
+            )
+        mgr._compactor.compact_state = _fake_compact_state
+
+        ctx = CommandContext(
+            dispatcher=dispatcher, command_id=command_id, instance_id="inst-test"
+        )
+        dispatcher._manager = mgr
+
+        with patch(
+            "daemon.services.compact_executor._persist_compaction_result",
+            new=AsyncMock(return_value=True),
+        ) as seam_mock:
+            await execute_compact(
+                mgr,
+                instance_id="inst-test",
+                command_id=command_id,
+                context=ctx,
+            )
+
+        # The seam is the load-bearing property: it MUST NOT
+        # be called for a user-facing noop. If a regression
+        # re-introduces the seam call here, the dedup
+        # 60s-window would engage and the next /compact
+        # within 60s would noop-out (a UX regression).
+        seam_mock.assert_not_awaited()
+        # The graph's aupdate_state is never called either
+        # (Variant A AND the stamp-only path go through the
+        # seam; if the seam is skipped, no aupdate_state).
+        graph.aupdate_state.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_below_min_messages_noop_skips_seam(self):
+        """Engine returns ``skipped_below_min_messages`` → seam
+        skipped, no checkpoint write, wire carries
+        ``noop_reason="too_few_messages"``.
+
+        The ``min_messages_before_compaction`` skip is the
+        other engine-side noop path; the executor mirrors the
+        seam-skip behavior for symmetry.
+        """
+        dispatcher = _make_dispatcher()
+        command_id = _make_active_command(dispatcher)
+        mgr = _make_manager(instance_status="idle")
+
+        graph = MagicMock()
+        graph.aupdate_state = AsyncMock()
+        mgr.get_instance = AsyncMock(return_value=graph)
+
+        async def _aget_state(_config):
+            return _make_checkpoint_state(
+                next=(),
+                messages=_big_messages(n=15, char_count=4000),
+                compacted_at=None,
+            )
+        graph.aget_state = AsyncMock(side_effect=_aget_state)
+
+        async def _fake_compact_state(ctx, force=False):
+            return _make_compaction_result(
+                compaction_type="skipped_below_min_messages",
+                replacement_messages=[],
+            )
+        mgr._compactor.compact_state = _fake_compact_state
+
+        ctx = CommandContext(
+            dispatcher=dispatcher, command_id=command_id, instance_id="inst-test"
+        )
+        dispatcher._manager = mgr
+
+        with patch(
+            "daemon.services.compact_executor._persist_compaction_result",
+            new=AsyncMock(return_value=True),
+        ) as seam_mock:
+            await execute_compact(
+                mgr,
+                instance_id="inst-test",
+                command_id=command_id,
+                context=ctx,
+            )
+
+        seam_mock.assert_not_awaited()
+        graph.aupdate_state.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_preserved_within_threshold_noop_skips_seam(self):
+        """Cycle 3 (proactive-compaction-fix residual W-4.5) — the
+        emergency-bail path's no-op must skip the seam, mirroring
+        the other two mapped paths.
+
+        The engine emits ``skipped_preserved_within_threshold`` at
+        ``daemon/compaction.py:2129-2138`` when preserved-groups
+        still fit within the threshold (the no-compaction-needed
+        short-circuit on the emergency path). Pre-cycle-3 the
+        user-facing ``/compact`` invoked the 60s dedup stamp seam
+        on this no-op — a UX regression (the next ``/compact``
+        within 60s would noop-out even though the user might have
+        added new state).
+
+        The fix: this engine value is in
+        :data:`_ENGINE_SKIPPED_TYPES_TO_NOOP_REASON`, so the
+        seam-skip check at :func:`execute_compact` keys on this
+        membership and the seam is NOT invoked on this path.
+        Mirrors :meth:`test_injections_dominate_noop_skips_seam_and_writes`
+        and :meth:`test_below_min_messages_noop_skips_seam` for
+        the other two mapped paths.
+        """
+        dispatcher = _make_dispatcher()
+        command_id = _make_active_command(dispatcher)
+        mgr = _make_manager(instance_status="idle")
+
+        graph = MagicMock()
+        graph.aupdate_state = AsyncMock()
+        mgr.get_instance = AsyncMock(return_value=graph)
+
+        async def _aget_state(_config):
+            return _make_checkpoint_state(
+                next=(),
+                messages=_big_messages(n=15, char_count=4000),
+                compacted_at=None,
+            )
+        graph.aget_state = AsyncMock(side_effect=_aget_state)
+
+        async def _fake_compact_state(ctx, force=False):
+            return _make_compaction_result(
+                compaction_type="skipped_preserved_within_threshold",
+                replacement_messages=[],
+            )
+        mgr._compactor.compact_state = _fake_compact_state
+
+        ctx = CommandContext(
+            dispatcher=dispatcher, command_id=command_id, instance_id="inst-test"
+        )
+        dispatcher._manager = mgr
+
+        with patch(
+            "daemon.services.compact_executor._persist_compaction_result",
+            new=AsyncMock(return_value=True),
+        ) as seam_mock:
+            await execute_compact(
+                mgr,
+                instance_id="inst-test",
+                command_id=command_id,
+                context=ctx,
+            )
+
+        # The seam is the load-bearing property: it MUST NOT
+        # be called for a user-facing noop. If a regression
+        # re-introduces the seam call here, the dedup 60s-window
+        # would engage and the next /compact within 60s would
+        # noop-out (a UX regression).
+        seam_mock.assert_not_awaited()
+        # The graph's aupdate_state is never called either
+        # (Variant A AND the stamp-only path go through the
+        # seam; if the seam is skipped, no aupdate_state).
+        graph.aupdate_state.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_real_engine_success_still_calls_seam(self):
+        """Regression guard — a REAL engine success
+        (``compaction_type="summarization"`` with non-empty
+        ``replacement_messages``) MUST still call the seam.
+
+        The W-4 split is ONLY for the skip-path noops; the
+        happy path is unchanged. A future regression that
+        routes the happy path through the new noop branch
+        (e.g. a too-broad condition on the split) would lose
+        the messages write — catastrophic.
+        """
+        dispatcher = _make_dispatcher()
+        command_id = _make_active_command(dispatcher)
+        mgr = _make_manager(instance_status="idle")
+
+        graph = MagicMock()
+        graph.aupdate_state = AsyncMock()
+        mgr.get_instance = AsyncMock(return_value=graph)
+
+        _orig_messages = _big_messages(n=15, char_count=4000)
+
+        async def _aget_state(_config):
+            return _make_checkpoint_state(
+                next=(),
+                messages=list(_orig_messages),
+                compacted_at=None,
+            )
+        graph.aget_state = AsyncMock(side_effect=_aget_state)
+
+        async def _fake_compact_state(ctx, force=False):
+            # Real engine success — non-empty replacement.
+            return _make_compaction_result(
+                compaction_type="summarization",
+                replacement_messages=[
+                    SystemMessage(
+                        content=(
+                            "[CONTEXT COMPACTION — mode=summary]\n"
+                            "GLOBAL OVERVIEW\nx\n"
+                        ),
+                        id="compaction-global-inst-test-1",
+                    ),
+                    *list(_orig_messages),
+                ],
+            )
+        mgr._compactor.compact_state = _fake_compact_state
+
+        ctx = CommandContext(
+            dispatcher=dispatcher, command_id=command_id, instance_id="inst-test"
+        )
+        dispatcher._manager = mgr
+
+        with patch(
+            "daemon.services.compact_executor._persist_compaction_result",
+            new=AsyncMock(return_value=True),
+        ) as seam_mock:
+            await execute_compact(
+                mgr,
+                instance_id="inst-test",
+                command_id=command_id,
+                context=ctx,
+            )
+
+        # The seam IS called for real engine success.
+        seam_mock.assert_awaited_once()
 
 
 class TestPhaseSeqMonotonicity:
