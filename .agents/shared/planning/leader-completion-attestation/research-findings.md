@@ -124,8 +124,8 @@ Decorator-only registration is SILENTLY INVISIBLE. The 10-step checklist is mand
 
 | Step | File:Line | What |
 |---|---|---|
-| 1 | `daemon/tools/_tool_registry.py:454-493` | `@register_tool_category("attestation")` ABOVE `@tool` decorator |
-| 2 | `daemon/tools/_tool_registry.py:454-493` | `CATEGORY_MODULES` entry pointing at the new module |
+| 1 | `daemon/tools/_tool_registry.py:106` | `@register_tool_category("attestation")` ABOVE `@tool` decorator |
+| 2 | `daemon/tools/_tool_registry.py:106` | `CATEGORY_MODULES` entry pointing at the new module |
 | 3 | `daemon/tools/_tool_registry.py:23-78` | `DYNAMIC_TOOL_NAMES` regen |
 | 4 | `daemon/tools/_tool_registry.py` | `KNOWN_TOOL_NAMES` regen (drift test fails if skipped) |
 | 5 | `daemon/tools/instance.py:1752` | `tools.extend(create_instance_tools(...))` in `create_instance_tools()` |
@@ -312,7 +312,7 @@ The plan reuses the project's test conventions.
 
 - **Companion docs:** [`requirements.md`](./requirements.md), [`technical-analysis.md`](./technical-analysis.md), [`decisions.md`](./decisions.md)
 - **Architecture blueprint:** `agents/ensemble` core architecture doc (Core Architecture section)
-- **Tool registration:** `daemon/tools/_tool_registry.py:454-493`; `daemon/tools/upgrade_tools.py:110-143`; `tests/unit/tools/test_upgrade_registration.py`
+- **Tool registration:** `daemon/tools/_tool_registry.py:106`; `daemon/tools/upgrade_tools.py:110-143`; `tests/unit/tools/test_upgrade_registration.py`
 - **Completion writes:** `daemon/services/child_reports.py:1983`, `:2545`, `:2737`, `:2895`
 - **Observer finalize:** `daemon/services/job_feedback_observer.py:3083`, `:3703-3758`; `:259-277` gate_deferred; `:1698` re-arm
 - **In-graph END interception:** `daemon/graph.py:2462-2533` should_continue; `:2707-2734` create_should_continue; `:6463` wiring; `:2666-2685` HumanMessage reminder; `:414-490` report-injection claim machine

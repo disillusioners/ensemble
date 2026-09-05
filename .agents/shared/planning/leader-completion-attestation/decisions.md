@@ -32,28 +32,28 @@ These are the hard constraints the user fixed. Recorded here so the architect do
 
 ### C2 — Kill-switch via env, restart-read resolver pattern
 
-**Constraint:** The kill-switch MUST be env-resolved, read at restart. The DEFAULT (ON vs OFF) is an OPEN decision (see D2). Three patterns are available:
+**Constraint:** The kill-switch MUST be env-resolved, read at restart. The DEFAULT is **`dry`** at ship (D2, RESOLVED closed-by-architect: tri-state `ENSEMBLE_LEADER_ATTESTATION_MODE=off|dry|enforce`). Three patterns are available:
 - **Pattern A** — `pydantic validation_alias` + explicit `load_config` resolver, env > legacy alias > yaml > default, typo-safe (`daemon/config.py:805-844, :2155-2215`).
 - **Pattern B** — dual-read cfg AND env (`daemon/config.py:463-506`).
 - **Pattern C** — module env resolver + cached global + one-time boot log (WC-wake variant at `daemon/services/instance_messaging.py:114-191`).
 
 **Implication:** No dynamic reload; restart required to flip. Pattern C is the WC-wake precedent and produces a one-time boot log; recommended for the new kill-switches (gate-disable + per-lane-disable for sweep backstop).
 
-**Decision-owner:** user (CLOSED — pattern shape), OPEN for default value (D2).
+**Decision-owner:** user (CLOSED — pattern shape, default value closed per D2: tri-state MODE, default dry).
 
 ### C3 — Window N configurable (env/config), not hardcoded
 
-**Constraint:** N (the scanner's lookback window in messages) MUST be configurable via env or config. Default value is OPEN (D4).
+**Constraint:** N (the scanner's lookback window in messages) MUST be configurable via env or config. Default value = N=3 (D4, RESOLVED closed-by-leader: `ENSEMBLE_LEADER_ATTESTATION_WINDOW` Pattern C resolver, restart-read).
 
-**Decision-owner:** user (CLOSED — configurability), OPEN for default value.
+**Decision-owner:** user (CLOSED — configurability, default value closed per D4: N=3).
 
 ### C4 — Leader-scoped tool via meta.json tools.allow opt-in + fail-closed authz
 
-**Constraint:** The attestation tool MUST be opt-in via `meta.json` `tools.allow` (`agents/leader/meta.json:14-15`) + fail-closed authz (`daemon/tools/_auth.py`). The `PRIVILEGED_TOOL_CATEGORIES` consideration (`daemon/tools/_tool_registry.py:101-103`, currently listing only `system_upgrade`) is OPEN (sub-question of D7).
+**Constraint:** The attestation tool MUST be opt-in via `meta.json` `tools.allow` (`agents/leader/meta.json:14-15`) + fail-closed authz (`daemon/tools/_auth.py`). The `PRIVILEGED_TOOL_CATEGORIES` consideration (`daemon/tools/_tool_registry.py:101-103`, currently listing only `system_upgrade`) is closed as **NOT privileged** per D7 ruling (sub-question of D7, RESOLVED closed-by-leader).
 
 **Implication:** The tool cannot be enabled globally; agents that have not opted in will not see it. The 10-step tool-registration checklist (`daemon/tools/upgrade_tools.py:110-143`) is mandatory; missing `CATEGORY_MODULES` entry = SILENTLY INVISIBLE.
 
-**Decision-owner:** user (CLOSED — opt-in shape), OPEN for sub-question on PRIVILEGED_TOOL_CATEGORIES.
+**Decision-owner:** user (CLOSED — opt-in shape, sub-question on PRIVILEGED_TOOL_CATEGORIES also closed per D7: NOT privileged).
 
 ### C5 — Recovery via durable manager.enqueue_message
 
@@ -73,9 +73,9 @@ The known deferred defect: the else-branch stamps HUMAN for internal callers (ca
 
 The recovery MUST NOT use the `[SYSTEM NOTE: ...]` data-frame convention (`daemon/graph.py:216-224`) — leaders hallucinate from system-framed reports.
 
-**Implication:** Source value selection has side-effect implications. The exact `source` value to pass to `enqueue_message` is OPEN (D6).
+**Implication:** Source value selection has side-effect implications. The exact `source` value to pass to `enqueue_message` is DEFERRED-to-phase6 (D6, moot in MVP per R1: MVP deny path is in-graph only; the durable-enqueue source mapping is the C backstop, post-soak).
 
-**Decision-owner:** user (CLOSED — must render as user-authored), OPEN for source value + side-effect analysis.
+**Decision-owner:** user (CLOSED — must render as user-authored), DEFERRED-to-phase6 source value + side-effect analysis (D6).
 
 ### C7 — Must-not-break (non-negotiable)
 
@@ -437,7 +437,7 @@ Candidates:
 
 #### Impacted Components
 
-- Tool registration: `daemon/tools/_tool_registry.py:454-493`; `CATEGORY_MODULES`; `DYNAMIC_TOOL_NAMES` (`:23-78`); `KNOWN_TOOL_NAMES` regen.
+- Tool registration: `daemon/tools/_tool_registry.py:106`; `CATEGORY_MODULES`; `DYNAMIC_TOOL_NAMES` (`:23-78`); `KNOWN_TOOL_NAMES` regen.
 - `agents/leader/meta.json:14-15` — `tools.allow` entry.
 - `daemon/tools/_auth.py` — fail-closed authz.
 - `PRIVILEGED_TOOL_CATEGORIES` (`daemon/tools/_tool_registry.py:101-103`) — open sub-question: should attestation be privileged (visible only to leader agents)?
@@ -565,20 +565,18 @@ How does the gate handle: (a) attestation call followed by more turns (window se
 RESOLVED upstream (post-reconciliation):
   D1 → RESOLVED (B in-graph)
   D2 → RESOLVED (tri-state MODE, default dry)
+  D3 → RESOLVED (CLOSED-by-leader, leader-only scope)
+  D4 → RESOLVED (CLOSED-by-leader, N=3 default + Pattern C resolver)
   D5 → RESOLVED (row-scoped columns; reset-on-allow + reset-on-terminal_after_bound; O2)
   D6 → DEFERRED-to-phase6 (per R1; C backstop, post-soak)
+  D7 → RESOLVED (CLOSED-by-leader, attest_completion / no-arg / idempotent / NOT privileged)
   D8 → RESOLVED (tri-state dry IS the dry-run)
+  D9 → RESOLVED (CLOSED-by-leader, moot per D1=B — recovery lands before finalize by construction)
+  D10 → RESOLVED (CLOSED-by-leader, ANY-in-last-3-AIMessages scanner + post-compaction scan + report-injection immunity by construction)
   R1, R2 → CLOSED-by-leader (architect adjudication)
-
-OPEN (genuine — no "default if unresolved"):
-  D3 (gate scope: leader-only vs all parents vs all instances)
-  D4 (window N default value + config surface pattern)
-  D7 (attestation tool semantics — confirm name/args)
-  D9 (mission finalize ordering — moot per R1/D1=B but kept for phase6 forensics)
-  D10 (tool-call visibility edge cases — compaction, report-injection)
 ```
 
-**Decision-order reality (post-reconciliation):** D1, D2, D5, D6, D8, R1, R2 are CLOSED and the SPEC layer (`requirements.md`) reflects them. D3, D4, D7, D9, D10 are OPEN — architect confirmation or default-value selection pending. There is no implicit fallback for any of these open decisions; they remain OPEN until explicitly closed.
+**Decision-order reality (post-reconciliation):** D1, D2, D3, D4, D5, D6, D7, D8, D9, D10 are ALL CLOSED-or-DEFERRED and the SPEC layer (`requirements.md`) reflects them. D3, D4, D7, D9, D10 are CLOSED-by-leader per R-2; D6 is DEFERRED-to-phase6 per R1. There is no implicit fallback for any open decision — all ten decisions are now closed or explicitly deferred.
 
 ---
 
@@ -621,7 +619,7 @@ OPEN (genuine — no "default if unresolved"):
 - `daemon/services/job_feedback_observer.py:3083` (`_finalize_job_db_sync`); Step 2 `:3703-3758`; gate_deferred `:259-277`; re-arm `:1698`
 - `daemon/services/instance_messaging.py:1685-1704` (source→HUMAN stamp; moot for MVP per R1); `:1867-1909` (revive); `:1960-2073` (`enqueue_message`)
 - `daemon/manager.py:6530-6626` (facade); `:3159-3197` (user-origin window; not used per R1 in MVP)
-- `daemon/tools/_tool_registry.py:101-103` (`PRIVILEGED_TOOL_CATEGORIES`); `:454-493` (`@register_tool_category`); `:23-78` (`DYNAMIC_TOOL_NAMES`)
+- `daemon/tools/_tool_registry.py:101-103` (`PRIVILEGED_TOOL_CATEGORIES`); `:106` (`@register_tool_category`); `:23-78` (`DYNAMIC_TOOL_NAMES`)
 - `daemon/tools/upgrade_tools.py:110-143` (10-step checklist)
 - `daemon/services/report_delivery_recovery.py:207` (5-lane); `daemon/services/waiting_children_watchdog.py:312` (hourly)
 - `daemon/config.py:805-844`, `:2155-2215` (Pattern A); `:463-506` (Pattern B); `:1107-1185` (per-lane kill-switches)

@@ -32,7 +32,7 @@ Exit criterion: `tests/unit/tools/test_upgrade_registration.py` passes with the 
 
 | Aspect | Detail |
 |---|---|
-| **Files touched** | `daemon/tools/_tool_registry.py:454-493` (new `@register_tool_category("attestation")`); `daemon/tools/_tool_registry.py:23-78` (`DYNAMIC_TOOL_NAMES`); `daemon/tools/_tool_registry.py` (`KNOWN_TOOL_NAMES` regen); `daemon/tools/upgrade_tools.py:110-143` (10-step checklist) |
+| **Files touched** | `daemon/tools/_tool_registry.py:106` (new `@register_tool_category("attestation")`); `daemon/tools/_tool_registry.py:23-78` (`DYNAMIC_TOOL_NAMES`); `daemon/tools/_tool_registry.py` (`KNOWN_TOOL_NAMES` regen); `daemon/tools/upgrade_tools.py:110-143` (10-step checklist) |
 | **Description** | Follow the 10-step checklist in `daemon/tools/upgrade_tools.py:110-143`. Decorator-only registration is SILENTLY INVISIBLE — every step is mandatory. The new category name is `attestation`; `CATEGORY_MODULES` entry points at `daemon/tools/attestation.py`. |
 | **Decision tags** | [D7] (name, args, idempotency, return shape) |
 | **Test notes** | Drift test `tests/unit/tools/test_upgrade_registration.py` must pass; new test `tests/unit/tools/test_attestation_registration.py` asserts (a) `@register_tool_category` above `@tool`, (b) entry in `CATEGORY_MODULES`, (c) tool name in `KNOWN_TOOL_NAMES`, (d) `DYNAMIC_TOOL_NAMES` includes it. |

@@ -119,6 +119,7 @@ This phase is done when:
 - [x] `tests/unit/test_attestation_gate.py` passes (R2 inputs, mode tri-state, C2 `attestation_enabled`, fail-open wrapper)
 - [x] `tests/integration/test_attestation_ledger_flow.py` (Phase 5) passes (full flow: deny path increments + nudges + does NOT enqueue; `terminal_after_bound` sets flag + resets counter; allow-with-attest resets counter; allow-without-attest [R2] does NOT change counter; mode="dry" does NOT change counter)
 - [x] `tests/integration/test_attestation_fail_open_db.py` (Phase 5) passes (DB OperationalError → allow + error log)
+- [x] AC-13.2 (OperationalError is NOT in the bootstrap exception set — emits `gate_ledger_db_error`, no silent allow/inflation; C7 carve-out) verified
 - [x] Migration `2026XXXX_xxxxxx_attestation_columns.py` applies + rolls back cleanly on BOTH PG and SQLite
 - [x] AC-6.1 (counter increments on deny) verified
 - [x] AC-6.2 (allow at bound: terminal + escalation event + flag + counter reset) verified

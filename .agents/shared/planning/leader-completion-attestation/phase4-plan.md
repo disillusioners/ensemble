@@ -13,7 +13,7 @@ Ship the **single tri-state mode env** `ENSEMBLE_LEADER_ATTESTATION_MODE=off|dry
 
 Entry criterion: D2 (RESOLVED — tri-state default `dry`), D4 (default N=3), D8 (RESOLVED via D2 — dry = allow + log only) are decided. Phase 2 (gate wiring + R2 inputs) is merged.
 
-Exit criterion: AC-7.1, AC-7.2, AC-7.3, AC-7.4, AC-7.5, AC-7.6 (restart-read), AC-7.7 (boot log), AC-7.8 (boot assert) all pass; AC-10.1, AC-10.2 (observability + escalation event uniqueness) all pass; NFR-1 (P95 20 ms) verified; O1 boot assert verified; O8 log schema includes R2 fields.
+Exit criterion: AC-7.1, AC-7.2, AC-7.3, AC-7.4, AC-7.5 (mode=dry allows every END with full decision log), AC-7.6 (restart-read), AC-7.7 (boot log), AC-7.8 (boot assert) all pass; AC-10.1, AC-10.2 (observability + escalation event uniqueness) all pass; NFR-1 (P95 20 ms) verified; O1 boot assert verified; O8 log schema includes R2 fields.
 
 ---
 
@@ -34,7 +34,7 @@ Exit criterion: AC-7.1, AC-7.2, AC-7.3, AC-7.4, AC-7.5, AC-7.6 (restart-read), A
 | **Files touched** | `daemon/services/attestation_resolver.py` (new); `daemon/services/instance_messaging.py:114-191` (mirror the WC-wake pattern) |
 | **Description** | Pattern C: module env resolver + cached global + one-time boot log. Reads the three env vars at module import time, caches them in a module-level global, emits one boot log line announcing resolved effective values. Function signature: `get_config() -> AttestationConfig` (returns dataclass with `mode: Literal["off", "dry", "enforce"]`, `window: int`, `deny_bound: int`, `attestation_enabled: bool`). Env vars: `ENSEMBLE_LEADER_ATTESTATION_MODE` (tri-state, default `dry`; blank → `off`), `ENSEMBLE_LEADER_ATTESTATION_WINDOW` (int, default 3), `ENSEMBLE_LEADER_ATTESTATION_DENY_BOUND` (int, default 3). **No live flip — restart required** (per C-2). **O1 boot assert (Phase 4 task 4.2)** validates `WINDOW ≤ min_recent_window` at boot time (warn if violated). Typo-safety: prefer Pattern A (`pydantic validation_alias`); recommend migrating from Pattern C to Pattern A if typo-safety becomes a concern. **Reconciliation across docs**: the same default values (`dry` / 3 / 3) appear in [`requirements.md`](./requirements.md), [`plan-overview.md`](./plan-overview.md), and [`architecture-recommendation.md`](./architecture-recommendation.md); a drift test asserts consistency. |
 | **Decision tags** | [D2] (tri-state mode RESOLVED — default `dry`), [D4] (window N default + Pattern A vs B vs C), [D8] (RESOLVED via D2) |
-| **Test notes** | Unit test `tests/unit/test_attestation_resolver.py` asserts: (a) mode env set to `dry`/`enforce`/`off` → resolver returns that mode; (b) mode env unset → resolver returns `dry` (D2 default); (c) mode env blank → resolver returns `off` (mirror WC-wake resolver shape); (d) mode env typo (e.g. `enabled`) → fails closed (if Pattern A) or fails open (if Pattern B/C); (e) window env set/unset → resolver returns configured value or 3; (f) restart-read: change env var, call `get_config()` in same process → returns cached value (no live flip). Integration test AC-7.5 verifies restart-read. |
+| **Test notes** | Unit test `tests/unit/test_attestation_resolver.py` asserts: (a) mode env set to `dry`/`enforce`/`off` → resolver returns that mode; (b) mode env unset → resolver returns `dry` (D2 default); (c) mode env blank → resolver returns `off` (mirror WC-wake resolver shape); (d) mode env typo (e.g. `enabled`) → fails closed (if Pattern A) or fails open (if Pattern B/C); (e) window env set/unset → resolver returns configured value or 3; (f) restart-read: change env var, call `get_config()` in same process → returns cached value (no live flip). Integration test AC-7.6 verifies restart-read. |
 
 ### 4.2 — One-time boot log + O1 boot assert
 
@@ -165,10 +165,12 @@ This phase is done when:
 - [ ] AC-7.2 (window default = 3) verified
 - [ ] AC-7.3 (mode=`off` → byte-equivalent baseline) verified
 - [ ] AC-7.4 (mode=`enforce` → enforcement) verified
-- [ ] AC-7.5 (restart-read: behavior does not change until restart) verified
+- [ ] AC-7.6 (restart-read: behavior does not change until restart) verified
 - [ ] AC-7.7 (boot log line announces resolved values) verified
 - [ ] AC-10.1 (every gate decision logged with full schema — incl. R2 fields + O8 `messages_scanned>0` + the canonical `Decision` enum from Phase 4 task 4.5) verified
 - [ ] AC-10.2 (escalation event unique per instance) verified
+- [ ] AC-10.3 (dry-mode would-have-denied schema — `decision=dry_log` with R2-deny predicate satisfied and R2 input fields present) verified
+- [ ] AC-10.4 (gate_exception log entry on scanner exception — `event=leader_completion_gate_error` carries exception type, stack-trace summary, `instance_id`, `gate_location`, `error_class`; fail-open is a PATH, not a separate decision value) verified
 - [ ] `tests/integration/test_attestation_dry_mode.py` (new) passes (dry mode: counter unchanged, no nudge, no flag change, leader turn ends normally, `decision=dry_log` log emitted per the canonical enum)
 - [ ] `tests/integration/test_attestation_runbook_drift.py` (new) passes (env var names + default values in `docs/setup.md` match the resolver)
 - [ ] Promotion metrics (`dry_log_total`, `dry_log_deny_predicate_total` — counts dry evals with R2-deny predicate satisfied, i.e. would have denied under `enforce`; replaces the previous fuzzy counter name; `enforce_denied_total`) emit and are queryable

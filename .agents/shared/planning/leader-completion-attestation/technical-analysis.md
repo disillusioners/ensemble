@@ -69,7 +69,7 @@ Known blind spot: the inter-report gap where both the bus gate AND the pending-t
 | 9 | **JAFP (Job-As-Front-Primitive)** — public entry creates JobItem; internal paths (`send_message`, cascade-resume, reports, recovery) use `enqueue_message` only, no JobItem | `daemon/services/instance_messaging.py:1960` (`enqueue_message` internal); manager facade `:6530-6626` |
 | 10 | **Source-based message-type stamping** in `_prepare_enqueued_message` — `internal_report:*` → COMPLETION_REPORT, `internal_error_report:*` → ERROR_REPORT, `internal_agent:*` → AGENT, **else → HUMAN** | `daemon/services/instance_messaging.py:1685-1704` |
 | 11 | **Revive semantics** in `_prepare_enqueued_message` — terminal instance (COMPLETED/TERMINATED/ERROR/FAILED) auto-revives on new message; PAUSED is exempt | `daemon/services/instance_messaging.py:1867-1909` |
-| 12 | **Tool registration discipline** — `@register_tool_category` ABOVE `@tool` + `CATEGORY_MODULES` entry + `DYNAMIC_TOOL_NAMES` (`:23-78`) + `KNOWN_TOOL_NAMES` regen (drift test); `tools.extend(create_...())` in `create_instance_tools()`. Decorator-only = SILENTLY INVISIBLE | `daemon/tools/_tool_registry.py:454-493`; 10-step checklist `daemon/tools/upgrade_tools.py:110-143`; enforced by `tests/unit/tools/test_upgrade_registration.py` |
+| 12 | **Tool registration discipline** — `@register_tool_category` ABOVE `@tool` + `CATEGORY_MODULES` entry + `DYNAMIC_TOOL_NAMES` (`:23-78`) + `KNOWN_TOOL_NAMES` regen (drift test); `tools.extend(create_...())` in `create_instance_tools()`. Decorator-only = SILENTLY INVISIBLE | `daemon/tools/_tool_registry.py:106`; 10-step checklist `daemon/tools/upgrade_tools.py:110-143`; enforced by `tests/unit/tools/test_upgrade_registration.py` |
 
 ### Module Boundaries
 
@@ -172,7 +172,7 @@ flowchart TD
 
 | # | Integration | Type | Contract | Auth | Failure Mode | File:Line |
 |---|-------------|------|----------|------|--------------|-----------|
-| 1 | Tool registration (attestation tool) | additive | `@register_tool_category("...new...")` ABOVE `@tool`; `CATEGORY_MODULES` entry; `DYNAMIC_TOOL_NAMES` (`:23-78`); `KNOWN_TOOL_NAMES` regen; `tests/unit/tools/test_upgrade_registration.py` enforces | leader `meta.json:14-15` `tools.allow` opt-in; `get_version→get_resolved` fallback `instance.py:4475-4477`; `_auth.py` fail-closed | Decorator-only = SILENTLY INVISIBLE (drift test catches it) | `daemon/tools/_tool_registry.py:454-493`; `daemon/tools/upgrade_tools.py:110-143` |
+| 1 | Tool registration (attestation tool) | additive | `@register_tool_category("...new...")` ABOVE `@tool`; `CATEGORY_MODULES` entry; `DYNAMIC_TOOL_NAMES` (`:23-78`); `KNOWN_TOOL_NAMES` regen; `tests/unit/tools/test_upgrade_registration.py` enforces | leader `meta.json:14-15` `tools.allow` opt-in; `get_version→get_resolved` fallback `instance.py:4475-4477`; `_auth.py` fail-closed | Decorator-only = SILENTLY INVISIBLE (drift test catches it) | `daemon/tools/_tool_registry.py:106`; `daemon/tools/upgrade_tools.py:110-143` |
 | 2 | In-graph `end_candidate` interception | sync | `create_should_continue`-style wrapper; conditional edge to new node | n/a (graph-level) | If wrapper misroutes, original `END` path executes — bypasses gate entirely | `daemon/graph.py:2707-2734`; wiring `:6463` |
 | 3 | Pre-commit gate at child_reports | sync, atomic | conditional UPDATE extended with `attested` predicate; TOCTOU composed | n/a | If UPDATE rowcount=0 already (paused/completed), gate must skip side effects | `daemon/services/child_reports.py:1983, :2545, :2737, :2895` |
 | 4 | Observer Step 2 gate | sync | `_finalize_job_db_sync` extended; `gate_deferred` reused/extended | n/a | **Defer-starvation footgun**: gate_deferred must re-arm or job strands in `admission_state='active'` | `daemon/services/job_feedback_observer.py:3083`; `:3703-3758`; defer re-arm `:1698` |
@@ -527,7 +527,7 @@ For attestation: a real-dispatch integration test with DB read-back (gate fires 
 
 ## References
 
-- **Tool registration discipline:** `daemon/tools/_tool_registry.py:454-493`; 10-step checklist `daemon/tools/upgrade_tools.py:110-143`; enforced by `tests/unit/tools/test_upgrade_registration.py`
+- **Tool registration discipline:** `daemon/tools/_tool_registry.py:106`; 10-step checklist `daemon/tools/upgrade_tools.py:110-143`; enforced by `tests/unit/tools/test_upgrade_registration.py`
 - **Authz (fail-closed):** `daemon/tools/_auth.py`; `daemon/tools/instance.py:4475-4477` (get_version→get_resolved)
 - **Completion writes (atomic):** `daemon/services/child_reports.py:1983` (`_process_child_completion_db_sync`); atomic UPDATEs at `:2545`, `:2737`, `:2895`
 - **Observer finalize (Step 2):** `daemon/services/job_feedback_observer.py:3083` (`_finalize_job_db_sync`); Step 2 `:3703-3758`; gate_deferred field `:259-277`; re-arm `:1698`

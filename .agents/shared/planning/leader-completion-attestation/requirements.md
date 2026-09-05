@@ -73,7 +73,7 @@ The feature fixes step 6 by requiring an explicit attestation tool call between 
 - **Priority:** Must.
 - **Notes:**
   - The tool body is a no-op aside from returning a structured success payload (e.g. `{"attested": true, "timestamp": "<iso>"}`). It does not mutate any persistent state by itself — attestation is recorded in the message history by virtue of the tool call existing there.
-  - Registration MUST follow the three-step + statics discipline (`daemon/tools/_tool_registry.py:454-493`; `DYNAMIC_TOOL_NAMES`; `KNOWN_TOOL_NAMES` drift test; decorator-only registration is silently invisible).
+  - Registration MUST follow the three-step + statics discipline (`daemon/tools/_tool_registry.py:106`; `DYNAMIC_TOOL_NAMES`; `KNOWN_TOOL_NAMES` drift test; decorator-only registration is silently invisible).
   - Tool surface placed in a new file under `daemon/tools/attestation.py` (or co-located with the gate — architect decides).
 
 ### Theme: Attestation Check (Scanner)
@@ -181,7 +181,7 @@ A single boot log line announces resolved effective values (FR-12), including `m
 | C-3 | Technical | The deny path MUST inject an in-state `HumanMessage` directly into the leader's graph (mirroring the `language_check` reminder precedent at `daemon/graph.py:2666-2685`); the durable-enqueue recovery path (`manager.enqueue_message`) is RELOCATED to `phase6-fastfollow-plan.md` as a C backstop. The MVP path MUST NOT call `manager.enqueue_message` on deny and MUST NOT revive the leader. | R1 (architecture recommendation §3) | Enqueue on deny would reintroduce the observer-vs-revive race B is meant to eliminate, and would double-deliver once the leader does attest. |
 | C-4 | Technical | The gate's deny input MUST require `attestation_present == false` AND `pending_children == 0` AND `queued_or_expected_wakeups == 0` simultaneously. If any of the three is non-zero, the gate allows without attestation. | R2 (architecture recommendation §3) | Without the pending-wakeup input the gate would nudge-flood legitimate delegation turn-ends. |
 | C-5 | Business | The tri-state `ENSEMBLE_LEADER_ATTESTATION_MODE` default (`dry` at ship) and the promote-to-`enforce` criterion (≤2-week soak on dry-log false-positive rate) are RESOLVED per architect ruling D2. | Architect | The default governs the initial rollout; the promote-runbook entry must ship with the gate. |
-| C-6 | Business | Scope (leader-only vs. all parents) is an **OPEN decision**; recommended default is leader-only for v1. | Architect | Determines which instances are gated (D3 OPEN). |
+| C-6 | Business | Scope (leader-only vs. all parents) is RESOLVED closed-by-leader per D3 — leader-only v1 (graph-build-time `agent_id == "leader"` check; non-leader graphs are untouched). | D3 record (`decisions.md:221`) | Determines which instances are gated (D3 RESOLVED closed-by-leader). |
 | C-7 | Technical | The gate's `except Exception` (W4 precedent `graph.py:2663-2688`) MUST NOT cover SQLAlchemy `OperationalError` raised by the `attestation_denied_count` ledger DB seam — that path emits `gate_ledger_db_error` and is implementation-defined within idempotency constraints. | Architecture recommendation §4 | If the wider `except Exception` covered `OperationalError`, the leader counter could silently inflate on transient DB failures, causing spurious escalation. |
 | C-8 | Technical | The feature MUST coexist with the WC-wake variant (`ENSEMBLE_WC_WAKE_ENQUEUE` default OFF, module-level env resolver + cached global + one-time boot log — `instance_messaging.py:114-191`). The new tri-state MODE env resolver MUST use the same Pattern C shape (cached global + one-time boot log). | Architecture blueprint + critical notes | Both envs and both boot logs must not interfere; orthogonal concerns. |
 | C-9 | Technical | The feature MUST coexist with the existing known blind spot: during the inter-report gap (previous child report processed, next not arrived), bus gate and pending-tasks gate can BOTH pass — premature finalize window. This feature addresses the leader's hallucinated case; the inter-report gap case is **out of scope** (see Out of Scope §OS-2). The C fast-follow (phase6) addresses the parent-cascade no-leader-turn path (OS-2) and ships only after the in-graph gate soak data is adjudicated. | Research / incident analysis | Other completion paths remain vulnerable to a different bug class; do not promise a fix for that class in the MVP. |
@@ -667,15 +667,12 @@ These were OPEN at the planner stage and are resolved by the architect's review 
 | KNOWN_TOOL_NAMES drift test | C-1, FR-9, AC-1.3, AC-9.3 |
 | Performance bound (P95 ≤ 20 ms) | NFR-1, NFR-2 |
 | Observability (log signature + boot line + W5 dry-adjudication) | FR-10, FR-12, NFR-8, NFR-9, NFR-16, AC-10.1, AC-10.2, AC-10.3, AC-10.4, AC-7.7 |
-| Scope (leader-only vs all parents) — OPEN | FR-11, C-6, G1, AC-11.1 (D3 OPEN) |
-| Tool canonical name — OPEN | G3 (D7 RESOLVED: `attest_completion`, recommend; canonical name confirmation pending) |
-| Window N default — OPEN | G5 (architect to confirm default; FR-7 boot-assert ties it to compaction floor) |
-| Bound default — OPEN | G6 (architect to confirm; D5 recommends 3) |
+| Scope (leader-only vs all parents) — RESOLVED → D3 (leader-only v1, closed-by-leader) | FR-11, C-6, G1, AC-11.1 |
+| Tool canonical name — RESOLVED → D7 (closed-by-leader: `attest_completion`, no-arg, idempotent, NOT privileged) | G3 |
+| Window N default — RESOLVED → D4 (closed-by-leader: N=3, env `ENSEMBLE_LEADER_ATTESTATION_WINDOW`, Pattern C resolver, restart-read) | G5, FR-7 |
+| Bound default — RESOLVED → D5 (closed-by-leader: bound=3, env `ENSEMBLE_LEADER_ATTESTATION_DENY_BOUND`, Pattern C resolver, restart-read; sub-resolution at `decisions.md:321`) | G6 |
 | Per-instance attempt ledger storage — RESOLVED → D5 | FR-6, AC-6.5, C-11 |
 | Operator termination bypass — OPEN | G12 |
 | Inter-report gap bug class — separate | C-9, OS-2 |
 | Phase6 backstop (durable-enqueue recovery; out of MVP) | C-3, AC-E2E-8, OS-1, OS-2 |
 | Test strategy (unit for scanner/decision/fail-open; integration for full E2E + dry-adjudication) | AC-2.1..AC-2.5, AC-3.1..AC-3.4, AC-4.1..AC-4.5, AC-6.1..AC-6.6, AC-7.1..AC-7.9, AC-9.1..AC-9.3, AC-10.1..AC-10.4, AC-11.1, AC-13.1, AC-13.2, AC-E2E-1..AC-E2E-8 |
-.AC-E2E-8 |
-1..AC-7.9, AC-9.1..AC-9.3, AC-10.1..AC-10.4, AC-11.1, AC-13.1, AC-13.2, AC-E2E-1..AC-E2E-8 |
-.AC-E2E-8 |

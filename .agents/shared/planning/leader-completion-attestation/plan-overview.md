@@ -85,7 +85,7 @@ Single sentence: *A leader instance cannot transition to terminal status unless 
 
 **D2 (RESOLVED)**: tri-state `ENSEMBLE_LEADER_ATTESTATION_MODE=off|dry|enforce`, default **`dry`** at ship. Promote to `enforce` after ≤2-week soak on adjudicated dry-log false-positive rate.
 
-**C2 (critical)**: `create_should_continue(language_check_enabled)` returns the ORIGINAL `should_continue` UNCHANGED when `False` (verify: `graph.py:2718-2721`; live wiring for auto-language leaders `graph.py:6379-6383`). A single-branch gate is STRUCTURALLY INERT. Phase 2 wires an INDEPENDENT `attestation_enabled` flag active in BOTH return paths; parameterized activation test over `language_check_enabled ∈ {True, False}` is a Phase-2 EXIT CRITERION.
+**C2 (critical)**: `create_should_continue(language_check_enabled)` returns the ORIGINAL `should_continue` UNCHANGED when `False` (verify: `graph.py:2718-2721`; live wiring for auto-language leaders `graph.py:6459-6484`). A single-branch gate is STRUCTURALLY INERT. Phase 2 wires an INDEPENDENT `attestation_enabled` flag active in BOTH return paths; parameterized activation test over `language_check_enabled ∈ {True, False}` is a Phase-2 EXIT CRITERION.
 
 **C3 (critical)**: fail-OPEN — any exception in scanner/gate ⇒ `allow` + structured error log; `except Exception` at the attestation_denied_count ledger DB seam (W4 precedent's narrow set at `graph.py:2663-2688` does NOT cover SQLAlchemy `OperationalError`).
 
@@ -161,7 +161,7 @@ The plan must preserve behavior on these surfaces whether the gate is `off`, `dr
 | ~~Revive semantics~~ | ~~`daemon/services/instance_messaging.py:1867-1909`~~ | ~~Phase 6 integration test AC-E2E-5~~ — moved because the MVP deny path does NOT use `manager.enqueue_message` and therefore does not trigger revive |
 | ~~JAFP no-JobItem for internal messages~~ | ~~`daemon/services/instance_messaging.py:1960`~~ | ~~Phase 6 integration test AC-4.5 JAFP clause~~ — moved with the recovery injector |
 | ~~Facade-forwarding discipline (recovery injection path)~~ | ~~`daemon/manager.py:6530-6626`~~ | ~~Phase 6 facade-forwarding test~~ — moved with the recovery injector |
-| ~~Defer-starvation footgun~~ | ~~`daemon/services/job_feedback_observer.py:1698` re-arm~~ | ~~Moot in MVP (D1=E disqualified)~~ |
+| ~~Defer-starvation footgun~~ | ~~`daemon/services/job_feedback_observer.py:1698-1737` defer-early-return; `instance.status = terminal_status` Step-2 write at `:3753`~~ | ~~Moot in MVP (D1=E disqualified)~~ |
 
 ---
 
@@ -171,7 +171,7 @@ Top risks, ordered by severity × likelihood. Full register in `technical-analys
 
 | # | Risk | Impact | Likelihood | Mitigation |
 |---|---|---|---|---|
-| 1 | **C2 — Single-branch gate is structurally inert**: `create_should_continue(language_check_enabled)` returns the ORIGINAL `should_continue` UNCHANGED when `False` (verify `graph.py:2718-2721`; live wiring for auto-language leaders `graph.py:6379-6383`). Piggybacking on `language_check` wiring silently disables the gate for most instances. | High | Medium (silent failure mode) | Phase 2 wires an INDEPENDENT `attestation_enabled` flag active in BOTH return paths of `create_should_continue(language_check_enabled)`; explicit composition choice documented; **parameterized activation test over `language_check_enabled ∈ {True, False}` is a Phase-2 EXIT CRITERION**. |
+| 1 | **C2 — Single-branch gate is structurally inert**: `create_should_continue(language_check_enabled)` returns the ORIGINAL `should_continue` UNCHANGED when `False` (verify `graph.py:2718-2721`; live wiring for auto-language leaders `graph.py:6459-6484`). Piggybacking on `language_check` wiring silently disables the gate for most instances. | High | Medium (silent failure mode) | Phase 2 wires an INDEPENDENT `attestation_enabled` flag active in BOTH return paths of `create_should_continue(language_check_enabled)`; explicit composition choice documented; **parameterized activation test over `language_check_enabled ∈ {True, False}` is a Phase-2 EXIT CRITERION**. |
 | 2 | **C3 — Gate failure crashes every leader mission**: any unhandled exception in scanner/gate on the routing path errors the leader. | High | Medium (scanner touches LLM-shaped messages; resolver env-parse may fail on a future value) | Fail-OPEN wrapper spec: `try/except Exception` around scanner + gate call ⇒ `allow` + structured error log (`event=leader_completion_gate_error`); `except Exception` at the attestation_denied_count ledger DB seam (W4 precedent's narrow set at `graph.py:2663-2688` does NOT cover SQLAlchemy `OperationalError` — Phase 3 widens the exception class). Integration test: inject scanner exception, assert allow + error log. |
 | 3 | ~~**Nudge-flood on legitimate delegation turn-ends**~~ — RESOLVED-by-R2. | (resolved) | (resolved) | R2 input condition `(attestation missing in window) AND (pending_children == 0) AND (queued_or_expected_wakeups == 0)` — legitimate delegation turn-ends (children active / wakeups pending) ALLOW without attestation. Original bug class: children all TERMINAL → leader turn-end leads to instance COMPLETED → gate must catch; the R2 condition catches exactly that case. |
 | 4 | **C1b — Double-delivery via nudge + enqueue**: doing both the in-graph nudge AND `manager.enqueue_message` on one deny double-delivers; the enqueued task fires after the attested END and spuriously revives a COMPLETED instance. | High | High (architectural) | **Forbidden dual-delivery**: in MVP, deny path is in-graph nudge ONLY; `manager.enqueue_message` recovery is RELOCATED to Phase 6 and used only as a post-completion backstop (TOCTOU re-query required before enqueue). Self-grep guard forbids the dual-delivery pattern in MVP plan files (the pattern: `enqueue_message` called from a deny path). |
@@ -186,13 +186,13 @@ Top risks, ordered by severity × likelihood. Full register in `technical-analys
 
 ## Success Criteria
 
-Mapped to `requirements.md` ACs. Every AC must be testable.
+Mapped to `requirements.md` ACs. Every AC must be testable. Full AC coverage is tracked per phase exit-criterion checklists; this table summarizes headline criteria only.
 
 | # | Criterion | Test method | Pass threshold |
 |---|---|---|---|
 | 1 | Attestation tool exists, registered, opted-in by leader | Unit AC-1.1, AC-1.2, AC-9.1, AC-9.2, AC-9.3 | All unit tests pass; `KNOWN_TOOL_NAMES` regenerated; `tools.allow` opt-in verified |
 | 2 | Scanner detects attestation in last N messages; window bounded | Unit AC-2.1, AC-2.2, AC-2.3, AC-2.4, AC-2.5 | All window-semantics unit tests pass; 1000-message state scanned in N=3 |
-| 3 | Gate denies non-attested completion; no terminal write | Integration AC-3.1 | `attestation_denied_count` increments; recovery enqueued; terminal-status write skipped |
+| 3 | Gate denies non-attested completion; no terminal write | Integration AC-3.1 | `attestation_denied_count` increments; in-graph `HumanMessage` nudge injected (durable via LangGraph checkpoint, no durable-recovery off-ramp on deny); terminal-status write skipped |
 | 4 | Gate allows attested completion; no recovery | Integration AC-3.2 | Terminal-status write proceeds; no recovery; `allowed` log emitted |
 | 5 | Recovery message is durable + user-authored | Integration AC-4.5 (durable-path AC, per the renumbering fix in this revision — MVP nudge ACs are AC-4.1 + AC-4.2 + AC-4.3 + AC-4.4 in `requirements.md:276-298`) | `MessageQueue`+`Task` rows in single txn; `HumanMessage` rendered; survives restart; NO `JobItem` row |
 | 6 | Prompt contract in `agents/leader/rule.md` | Manual + grep AC-5.1, AC-5.2 | Tool name + recovery text both appear in `### Must` block under `## Must` |
@@ -203,7 +203,7 @@ Mapped to `requirements.md` ACs. Every AC must be testable.
 | 11 | Scope (leader-only v1) | Integration AC-11.1 | Non-leader parent is not gated; behavior byte-equivalent to baseline |
 | 12 | **NFR-1**: Gate decision overhead ≤ P95 20 ms | Integration | Daemon log timing around gate; ≤ 20 ms P95 |
 | 13 | **NFR-4**: Recovery survives crash between gate decision and durable write | Integration AC-4.5 (chaos clause — RELOCATED to Phase 6) | After simulated crash + restart, recovery delivered on next boot |
-| 14 | **NFR-5**: Kill-switch restart-read | Integration AC-7.5 | Env change requires restart |
+| 14 | **NFR-5**: Kill-switch restart-read | Integration AC-7.6 | Env change requires restart |
 | 15 | **NFR-6**: Recovery text is a server-authored constant | Unit | Constant text hard-coded; injection attempts rejected |
 | 16 | **NFR-10**: Feature OFF = byte-equivalent behavior to baseline | Integration AC-7.3, AC-E2E-4 | Identical logs + DB writes |
 | 17 | **NFR-11**: Must-not-break regression — normal attested completion, mission finalize, revive, WC-wake, sweeps, report-injection claim machine | Integration AC-E2E-5 | All surfaces behave identically with ON and OFF |

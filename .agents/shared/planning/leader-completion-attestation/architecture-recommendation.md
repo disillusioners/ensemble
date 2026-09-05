@@ -3,7 +3,7 @@
 Date: 2026-09-05
 Status: **DECIDED** — resolved by architect council `lca-d1-council-20260905-6f2a91` (governor `3387fa8d`, 2/2 councilors completed, both read-only compliant, models `coding`+`agentic`, skill `trade-off-analysis`), adjudicated and independently spot-verified by the architect (pattern-level greps at HEAD).
 Branch: `feature/leader-completion-attestation`
-Companion: this file resolves the OPEN decisions in [`decisions.md`](./decisions.md); C1–C8 CLOSED-by-user constraints stand unmodified.
+Companion: this file records the resolution of the decisions in [`decisions.md`](./decisions.md); C1–C8 CLOSED-by-user constraints stand unmodified.
 
 ---
 
