@@ -13,19 +13,30 @@ decide whether to allow or deny the END transition.
 Scope and authorization
 -----------------------
 
-The category is **leader-only** and **NOT privileged**:
+The category is leader-scoped via explicit ``tools.allow`` opt-in
+(``agents/leader/meta.json``), and is **NOT privileged** per the
+``decisions.md`` D7 ruling (CLOSED-by-leader):
 
-* The tool is opt-in via ``agents/leader/meta.json`` ``tools.allow``
-  (``attestation`` is added in Phase 1 of the leader completion
-  attestation feature). All other agents (developer, reviewer,
-  tidier, approver, architect, tester, giter, devops, explorer,
-  wanderer, kb-writer, doc-writer) do NOT have ``attestation`` in
-  their ``tools.allow`` and therefore cannot call it.
+* Every current non-leader agent (developer, reviewer, tidier,
+  approver, architect, tester, giter, devops, explorer, wanderer,
+  kb-writer, doc-writer) has an explicit ``tools.allow`` that does
+  NOT list ``attestation``, so they cannot reach this category.
+  However, this is **convention-based scoping**, not a structural
+  guarantee — the boundary rests on every new agent author
+  maintaining an explicit ``tools.allow`` that excludes the
+  category.
 * ``PRIVILEGED_TOOL_CATEGORIES`` (``daemon/tools/_tool_registry.py``)
-  stays at its current single entry (``system_upgrade``). The
-  attestation category is opt-in-only by convention (fail-closed
-  authz), not because it is privileged — this distinction matters
-  for the empty-allow default-deny seam.
+  currently contains a single entry (``system_upgrade``). Because
+  ``attestation`` is intentionally NOT privileged, a hypothetical
+  future agent with no explicit ``tools.allow`` (or an empty one)
+  WOULD receive ``attest_completion`` via the default-allow path in
+  ``daemon/tools/instance.py``. The structural privilege boundary
+  protects ``system_upgrade`` only — it does NOT cover
+  ``attestation``.
+* D7 (CLOSED-by-leader) deliberately rejected promoting
+  ``attestation`` to privileged status. Any future hardening
+  change (privilege promotion) requires reopening that closed
+  decision.
 * The tool does NOT mutate state, enqueue work, or write to the
   journal. It is a pure signal.
 
@@ -73,10 +84,14 @@ tri-state env ``ENSEMBLE_LEADER_ATTESTATION_MODE`` defaults to
 ``enforce`` after a ≤2-week soak with adjudicated dry-log
 false-positive rate.
 
-Scope: leader-only via ``agents/leader/meta.json`` ``tools.allow``.
-NOT in ``PRIVILEGED_TOOL_CATEGORIES`` (only ``system_upgrade`` is
-privileged today). Fail-closed authz means non-leader agents cannot
-reach this category.
+Scope: leader-scoped via explicit ``agents/leader/meta.json``
+``tools.allow`` opt-in. NOT privileged per D7 (CLOSED-by-leader)
+— ``PRIVILEGED_TOOL_CATEGORIES`` intentionally excludes
+``attestation`` (only ``system_upgrade`` is privileged today), so
+the boundary is convention-based: a hypothetical future agent
+without an explicit ``tools.allow`` WOULD receive
+``attest_completion`` via the default-allow path. Future
+hardening (privilege promotion) requires reopening D7.
 """
 
 
