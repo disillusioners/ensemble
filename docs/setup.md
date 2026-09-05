@@ -554,7 +554,7 @@ N_le_min_recent_window=WARN: WINDOW=<N> > min_recent_window=<floor>;
 
 **Postmortem query — escalation flag**
 
-The escalation flag is the per-instance row column `completion_gate_escalated=true`. The gate sets it when the deny bound is reached; the gate clears it on the next attested allow or on `terminal_after_bound` finalization (the same atomic UPDATE that resets the counter clears the flag — leader ruling 2). To find escalations post-incident:
+The escalation flag is the per-instance row column `completion_gate_escalated`. The gate SETS it on `terminal_after_bound` (the deny bound was reached — the same atomic UPDATE that sets the flag also resets the counter; leader ruling 2); the gate CLEARS it on the next attested allow or on a fresh-episode revive (both route through the reset op, which clears the flag together with the counter). To find escalations post-incident:
 
 ```sql
 -- PostgreSQL (production)
@@ -564,7 +564,7 @@ WHERE completion_gate_escalated = TRUE
 ORDER BY updated_at DESC;
 ```
 
-The companion log event on the escalation path is `event=gate_terminal_after_bound` (emitted by the gate node in `daemon/graph.py`), carrying `instance_id`, `attestation_denied_count`, and `completion_gate_escalated=true`.
+The companion log event on the escalation path is `event=leader_completion_gate_terminal_after_bound` (emitted by the gate node in `daemon/graph.py`), carrying `instance_id`, `attestation_denied_count`, and `completion_gate_escalated=true`.
 
 **Fail-open posture (ruling 4 — Pattern C)**
 
@@ -882,6 +882,12 @@ make clean                         # Clean build artifacts
 |------|---------|
 | 8079 | Development server |
 | 8088 | Production server |
+| 4199 | Frontend dev server |
+
+---
+
+*Last updated: Version 0.3.6*
+ver |
 | 4199 | Frontend dev server |
 
 ---

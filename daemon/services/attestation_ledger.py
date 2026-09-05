@@ -113,7 +113,7 @@ def safe_increment(
     instance_id: str | None,
     denial_epoch: str,
     *,
-    error_class_context: dict[str, Any] | None = None,
+    log_context: dict[str, Any] | None = None,
 ) -> int | None:
     """C3 fail-open wrapper around ``ledger.increment``.
 
@@ -123,10 +123,11 @@ def safe_increment(
         carries the original ``denied_count`` for the decision).
 
     Raises:
-        Nothing — every exception is swallowed, logged, and converted
-            to a ``None`` return value (C3 fail-open contract).
+        Nothing — C3 fail-open: any exception is swallowed, emitted as
+            the canonical ``leader_completion_gate_db_error`` event,
+            and surfaced as the ``None`` return (never re-raised).
     """
-    ctx = dict(error_class_context or {})
+    ctx = dict(log_context or {})
     if instance_id is not None:
         ctx.setdefault("instance_id", instance_id)
     try:
@@ -146,7 +147,7 @@ def safe_reset(
     ledger: Any,
     instance_id: str | None,
     *,
-    error_class_context: dict[str, Any] | None = None,
+    log_context: dict[str, Any] | None = None,
 ) -> bool | None:
     """C3 fail-open wrapper around ``ledger.reset``.
 
@@ -158,10 +159,11 @@ def safe_reset(
         bounded known risk (next allow will reset it again).
 
     Raises:
-        Nothing — every exception is swallowed, logged, and converted
-            to a ``None`` return value (C3 fail-open contract).
+        Nothing — C3 fail-open: any exception is swallowed, emitted as
+            the canonical ``leader_completion_gate_db_error`` event,
+            and surfaced as the ``None`` return (never re-raised).
     """
-    ctx = dict(error_class_context or {})
+    ctx = dict(log_context or {})
     if instance_id is not None:
         ctx.setdefault("instance_id", instance_id)
     try:
@@ -181,7 +183,7 @@ def safe_set_escalated(
     ledger: Any,
     instance_id: str | None,
     *,
-    error_class_context: dict[str, Any] | None = None,
+    log_context: dict[str, Any] | None = None,
 ) -> bool | None:
     """C3 fail-open wrapper around ``ledger.set_escalated``.
 
@@ -191,10 +193,11 @@ def safe_set_escalated(
         already emitted by ``evaluate()``.
 
     Raises:
-        Nothing — every exception is swallowed, logged, and converted
-            to a ``None`` return value (C3 fail-open contract).
+        Nothing — C3 fail-open: any exception is swallowed, emitted as
+            the canonical ``leader_completion_gate_db_error`` event,
+            and surfaced as the ``None`` return (never re-raised).
     """
-    ctx = dict(error_class_context or {})
+    ctx = dict(log_context or {})
     if instance_id is not None:
         ctx.setdefault("instance_id", instance_id)
     try:
@@ -214,7 +217,7 @@ def safe_set_escalated_and_reset(
     ledger: Any,
     instance_id: str | None,
     *,
-    error_class_context: dict[str, Any] | None = None,
+    log_context: dict[str, Any] | None = None,
 ) -> bool | None:
     """C3 fail-open wrapper around ``ledger.set_escalated_and_reset``.
 
@@ -230,10 +233,11 @@ def safe_set_escalated_and_reset(
         already emitted by ``evaluate()``.
 
     Raises:
-        Nothing — every exception is swallowed, logged, and converted
-            to a ``None`` return value (C3 fail-open contract).
+        Nothing — C3 fail-open: any exception is swallowed, emitted as
+            the canonical ``leader_completion_gate_db_error`` event,
+            and surfaced as the ``None`` return (never re-raised).
     """
-    ctx = dict(error_class_context or {})
+    ctx = dict(log_context or {})
     if instance_id is not None:
         ctx.setdefault("instance_id", instance_id)
     try:

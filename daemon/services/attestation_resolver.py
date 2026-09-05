@@ -152,6 +152,11 @@ _BOOT_LOG_EMITTED: bool = False
 #: resolution that encounters an invalid value; subsequent resolutions
 #: are silent (the cached global makes invalid-env WARNs idempotent).
 _INVALID_VALUE_WARN_EMITTED: bool = False
+#: One-shot WARN flag for the O1-floor import fallback — if
+#: ``daemon.constants.MIN_RECENT_WINDOW`` cannot be imported, the
+#: fallback to the documented default ``3`` is LOUD (exactly one WARN
+#: per process), never a silent except.
+_MIN_RECENT_WINDOW_FALLBACK_WARNED: bool = False
 #: Per-metric monotonic counters — emitted via INFO log on first request
 #: (idempotent on subsequent requests) so operators can grep for the
 #: canonical names. The Phase 5/6 enforcement will swap to a real
@@ -178,9 +183,11 @@ def reset_attestation_resolver_for_tests() -> None:
     re-resolve under the new env.
     """
     global _CACHED_CONFIG, _BOOT_LOG_EMITTED, _INVALID_VALUE_WARN_EMITTED
+    global _MIN_RECENT_WINDOW_FALLBACK_WARNED
     _CACHED_CONFIG = None
     _BOOT_LOG_EMITTED = False
     _INVALID_VALUE_WARN_EMITTED = False
+    _MIN_RECENT_WINDOW_FALLBACK_WARNED = False
     for key in _METRIC_COUNTERS:
         _METRIC_COUNTERS[key] = 0
         _METRIC_LOG_EMITTED[key] = False
@@ -191,7 +198,7 @@ def reset_attestation_resolver_for_tests() -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _parse_mode(source: dict[str, str]) -> str:
+def _parse_mode(source: dict[str, str]) -> Literal["off", "dry", "enforce"]:
     """Parse the tri-state mode env, failing OPEN to ``"dry"``.
 
     Per ruling 4: invalid values resolve to ``"dry"`` (the default) and
@@ -208,8 +215,16 @@ def _parse_mode(source: dict[str, str]) -> str:
     raw = str(raw).strip().lower()
     if not raw:
         return DEFAULT_MODE
-    if raw in _VALID_MODES:
-        return raw
+    # Explicit per-value returns (rather than a bare ``raw in
+    # _VALID_MODES`` pass-through) so mypy narrows each return to the
+    # Literal — no cast / type-ignore needed. ``_VALID_MODES`` remains
+    # the single source of truth for the WARN collector.
+    if raw == "off":
+        return "off"
+    if raw == "dry":
+        return "dry"
+    if raw == "enforce":
+        return "enforce"
     return DEFAULT_MODE  # fail-OPEN; caller logs WARN
 
 
@@ -252,7 +267,7 @@ def _resolve_config_from_env(source: dict[str, str]) -> AttestationConfig:
         source, ENSEMBLE_ATTESTATION_DENY_BOUND_ENV, DEFAULT_DENY_BOUND
     )
     return AttestationConfig(
-        mode=mode,  # type: ignore[arg-type]
+        mode=mode,
         window=window,
         deny_bound=deny_bound,
         attestation_enabled=(mode != "off"),
@@ -290,26 +305,29 @@ def get_config() -> AttestationConfig:
     )}
     config = _resolve_config_from_env(source)
 
-    # Emit any invalid-value WARNs (one-shot across the process).
-    for warning in _collect_invalid_warnings(source):
-        _emit_one_shot_warn(warning)
+    # Emit any invalid-value WARNs (one-shot across the process — the
+    # whole collected list travels in the single WARN).
+    _emit_one_shot_warn(_collect_invalid_warnings(source))
 
     _CACHED_CONFIG = config
     return config
 
 
-def _emit_one_shot_warn(detail: str) -> None:
-    """Emit a one-shot WARN naming any invalid env value encountered.
+def _emit_one_shot_warn(details: list[str]) -> None:
+    """Emit ONE one-shot WARN carrying ALL collected invalid env values.
 
     Mirrors the WC-wake resolver's "_resolve_wc_wake_enqueue_enabled"
     one-shot WARN on unknown values — the cache makes the WARN idempotent
-    across calls within the same process lifetime.
+    across calls within the same process lifetime. Every collected entry
+    travels in that single WARN (joined) — emitting only the first entry
+    would silently starve its siblings (e.g. a typo'd WINDOW hiding a
+    typo'd DENY_BOUND).
     """
     global _INVALID_VALUE_WARN_EMITTED
-    if _INVALID_VALUE_WARN_EMITTED:
+    if _INVALID_VALUE_WARN_EMITTED or not details:
         return
     _INVALID_VALUE_WARN_EMITTED = True
-    logger.warning(detail)
+    logger.warning("\n".join(details))
 
 
 def _collect_invalid_warnings(source: dict[str, str]) -> list[str]:
@@ -358,17 +376,31 @@ def _collect_invalid_warnings(source: dict[str, str]) -> list[str]:
 def _resolve_min_recent_window() -> int:
     """Resolve the compaction floor at boot time.
 
-    Reads ``daemon.constants.MIN_RECENT_WINDOW`` lazily (import-time
-    failure would defeat the resolver's fail-OPEN contract — the
-    daemon should boot even if the constants module is broken). Returns
-    the documented default ``3`` on import failure so the O1 assert
-    degrades to WARN-once when ``WINDOW > 3``.
+    Reads ``daemon.constants.MIN_RECENT_WINDOW`` — the REAL home is
+    ``daemon/constants.py``; a relative ``.constants`` would point at
+    ``daemon/services/constants.py``, which does not exist (that broken
+    path is what made the O1 assert structurally blind — the import
+    failed on every call and the floor silently pinned at 3). The read
+    stays lazy (import-time failure would defeat the resolver's
+    fail-OPEN contract — the daemon should boot even if the constants
+    module is broken), but the remaining fallback to the documented
+    default ``3`` is LOUD — exactly one WARN per process via the
+    module-level flag — so the O1 assert can never degrade silently.
     """
+    global _MIN_RECENT_WINDOW_FALLBACK_WARNED
     try:
-        from .constants import MIN_RECENT_WINDOW
+        from daemon.constants import MIN_RECENT_WINDOW
 
         return int(MIN_RECENT_WINDOW)
-    except Exception:  # noqa: BLE001 — O1 floor must not break boot
+    except Exception as exc:  # noqa: BLE001 — O1 floor must not break boot
+        if not _MIN_RECENT_WINDOW_FALLBACK_WARNED:
+            _MIN_RECENT_WINDOW_FALLBACK_WARNED = True
+            logger.warning(
+                "daemon.constants.MIN_RECENT_WINDOW import failed (%s); "
+                "O1 boot assert falling back to the documented default "
+                "floor 3.",
+                exc,
+            )
         return 3
 
 

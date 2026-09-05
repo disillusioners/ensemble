@@ -4588,7 +4588,7 @@ class InstanceMessagingService:
         the worker pipeline's normal in-flight fuel — they are claimed
         the moment the instance's current graph task releases — and the
         R2 input is about EXPECTED (held/scheduled) wakeups, per the
-        phase plan's four-count enumeration.
+        phase plan's five-count enumeration.
 
         Gate semantics (R2): ``0`` means NO expected wakeup exists —
         one of the three simultaneous conditions required for the
@@ -4603,7 +4603,7 @@ class InstanceMessagingService:
             instance_id: The instance whose wakeups to count.
 
         Returns:
-            Non-negative int — the sum of the four counts. Never raises
+            Non-negative int — the sum of the five counts. Never raises
             on empty/unknown instance (count of zero rows is 0).
         """
         engine = self._manager._engine

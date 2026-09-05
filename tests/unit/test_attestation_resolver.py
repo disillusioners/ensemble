@@ -28,7 +28,6 @@ from daemon.services.attestation_resolver import (
     METRIC_DRY_LOG_DENY_PREDICATE_TOTAL,
     METRIC_DRY_LOG_TOTAL,
     METRIC_ENFORCE_DENIED_TOTAL,
-    AttestationConfig,
     emit_attestation_boot_log,
     get_config,
     get_promotion_metrics,
@@ -160,6 +159,36 @@ class TestInvalidModeFailsOpen:
             if "is not a recognized mode" in record.message
         )
         assert warn_count == 1
+
+    def test_multiple_invalid_values_share_single_warn(
+        self, monkeypatch, clean_env, caplog
+    ):
+        """Sibling collected entries all travel in the ONE one-shot WARN.
+
+        Regression: the emitter took a single ``detail`` string, so when
+        several env values were invalid only the FIRST collected entry
+        was emitted — a typo'd WINDOW silently starved the DENY_BOUND
+        warning. Both entries must appear in the single WARN record.
+        """
+        monkeypatch.setenv(ENSEMBLE_ATTESTATION_MODE_ENV, "enforse")
+        monkeypatch.setenv(ENSEMBLE_ATTESTATION_WINDOW_ENV, "banana")
+        monkeypatch.setenv(ENSEMBLE_ATTESTATION_DENY_BOUND_ENV, "banana")
+        with caplog.at_level(
+            logging.WARNING, logger="daemon.services.attestation_resolver"
+        ):
+            get_config()
+        warn_records = [
+            r
+            for r in caplog.records
+            if r.levelno == logging.WARNING
+            and r.name == "daemon.services.attestation_resolver"
+        ]
+        # Exactly ONE WARN record carrying ALL THREE entries.
+        assert len(warn_records) == 1
+        joined = warn_records[0].message
+        assert "is not a recognized mode" in joined
+        assert "ENSEMBLE_LEADER_ATTESTATION_WINDOW" in joined
+        assert "ENSEMBLE_LEADER_ATTESTATION_DENY_BOUND" in joined
 
 
 # =============================================================================
@@ -377,6 +406,64 @@ class TestBootLog:
         assert not any(
             r.levelno == logging.WARNING for r in caplog.records
         )
+
+    def test_floor_follows_real_daemon_constants_value(
+        self, monkeypatch, clean_env, caplog
+    ):
+        """The O1 floor FLOWS from the real ``daemon.constants.MIN_RECENT_WINDOW``.
+
+        Regression: the resolver imported a relative ``.constants``
+        (``daemon/services/constants.py`` — nonexistent), so the import
+        failed on EVERY call and the floor was silently pinned at 3,
+        making the O1 boot assert structurally blind. Patch the real
+        constant to a sentinel ≠ 3 and assert the resolver follows it
+        (under the broken import this test cannot pass — the hardcoded
+        3 always won).
+        """
+        import daemon.constants as daemon_constants
+
+        monkeypatch.setattr(daemon_constants, "MIN_RECENT_WINDOW", 7)
+        # Direct: the resolver floor follows the sentinel.
+        assert resolver_module._resolve_min_recent_window() == 7
+        # Behavioral: WINDOW=5 would WARN against the old hardcoded-3
+        # floor but PASSES against the sentinel floor 7.
+        monkeypatch.setenv(ENSEMBLE_ATTESTATION_WINDOW_ENV, "5")
+        with caplog.at_level(
+            logging.INFO, logger="daemon.services.attestation_resolver"
+        ):
+            emit_attestation_boot_log()
+        assert any(
+            "N_le_min_recent_window=PASS" in r.message
+            for r in caplog.records
+        )
+        assert not any(
+            r.levelno == logging.WARNING for r in caplog.records
+        )
+
+    def test_floor_import_failure_is_loud_one_shot_warn(
+        self, monkeypatch, clean_env, caplog
+    ):
+        """If ``daemon.constants`` cannot be imported the fallback is LOUD.
+
+        Fail-OPEN contract preserved (returns the documented default 3,
+        boot never breaks) but NEVER silently — exactly one WARN per
+        process via the module-level flag.
+        """
+        import sys
+
+        monkeypatch.setitem(sys.modules, "daemon.constants", None)
+        with caplog.at_level(
+            logging.WARNING, logger="daemon.services.attestation_resolver"
+        ):
+            assert resolver_module._resolve_min_recent_window() == 3
+            assert resolver_module._resolve_min_recent_window() == 3
+        warn_records = [
+            r
+            for r in caplog.records
+            if r.levelno == logging.WARNING and "import failed" in r.message
+        ]
+        assert len(warn_records) == 1
+        assert "MIN_RECENT_WINDOW" in warn_records[0].message
 
     def test_boot_log_carries_env_unset_marker(
         self, clean_env, caplog

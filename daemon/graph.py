@@ -2836,7 +2836,7 @@ def create_attestation_should_continue(
     base_should_continue: Callable,
     *,
     attestation_enabled: bool,
-):
+) -> Callable:
     """Wrap a routing fn so a would-be END routes to ``attestation_gate``.
 
     This is the D1=B interception wrapper (shape Y — applied at the
@@ -2904,7 +2904,11 @@ def _persist_gate_exception_marker(ledger: Any, instance_id: str) -> None:
     whose purpose is soak observation, and would make the dry-mode
     ``gate_exception_seen`` channel unverifiable against durable state.
     The write is itself fail-open (``except Exception`` below — a marker
-    is diagnostic only and never errors the mission).
+    is diagnostic only and never errors the mission). The failure is
+    LOUD: WARNING level + the canonical
+    ``leader_completion_gate_db_error`` event with
+    ``method=persist_gate_exception_marker`` (diagnostic-write failures
+    must be observable like every other gate-seam DB failure).
     """
     set_exception_metadata = getattr(ledger, "set_metadata", None)
     if set_exception_metadata is None:
@@ -2915,10 +2919,14 @@ def _persist_gate_exception_marker(ledger: Any, instance_id: str) -> None:
             "attestation_gate_exception_seen",
             True,
         )
-    except Exception:  # noqa: BLE001 — marker is diagnostic only
-        logger.debug(
-            "could not persist gate_exception_seen metadata for instance=%s",
+    except Exception as exc:  # noqa: BLE001 — marker is diagnostic only
+        logger.warning(
+            "event=leader_completion_gate_db_error "
+            "method=persist_gate_exception_marker instance_id=%s "
+            "error_class=%s error_message=%s decision=fail_open_allowed",
             instance_id,
+            type(exc).__name__,
+            exc,
         )
 
 
@@ -2944,14 +2952,26 @@ def _persist_gate_exception_marker(ledger: Any, instance_id: str) -> None:
 # * IDENTICAL input state (any replay) ⇒ identical material ⇒ the SAME
 #   epoch ⇒ the repository's seen-epochs dedup engages (counts once).
 # * A genuinely NEW logical deny ⇒ the agent produced a new AIMessage
-#   after the injected nudge ⇒ ``len(messages)`` grows by 2 and the last
-#   message's fingerprint changes ⇒ a DIFFERENT epoch (counted).
+#   after the injected nudge ⇒ a NEW unique message id enters the
+#   material (the new message's id+content digest becomes the last
+#   fingerprint) ⇒ a DIFFERENT epoch (counted). ``len(messages)`` also
+#   changes but is NOT load-bearing: it is not monotonic — see below.
 # * Message ids are checkpoint-stable; when absent (hand-built test
 #   states) the content digest stands in. Both inputs are byte-stable
 #   across processes and restarts.
-# * Cross-mission collisions are structurally excluded: mission history
-#   only grows, so two denies yielding the same material ARE the same
-#   checkpoint state — i.e. a replay, exactly the case dedup must catch.
+# * Cross-denial aliasing is PROBABILISTICALLY excluded, not
+#   structurally: distinct logical denies differ in their newest
+#   messages' unique ids / content digests, and uuid5 over distinct
+#   material collides only with SHA-1-scale improbability. Mission
+#   history is NOT guaranteed to only grow — LoopRepairer
+#   RemoveMessage, reactive compaction, and the pre-call 95% REMOVE_ALL
+#   sentinel all SHRINK it — so a shrink could in principle
+#   re-materialize an earlier input state; the seen-epochs dedup then
+#   intentionally counts that replay-like state ONCE (the conservative
+#   failure direction). Trade-off caveat (unbounded denial_epochs
+#   growth): KG-3 in the phase-6 fast-follow plan
+#   (.agents/shared/planning/leader-completion-attestation/
+#   phase6-fastfollow-plan.md).
 #
 # Regression test (the acceptance proof): re-invoking the ACTUAL gate
 # node on identical input state — see
@@ -3013,7 +3033,7 @@ def create_attestation_gate_node(
     instance_id: str | None,
     denied_count_getter: Callable[[], int] | None = None,
     ledger: Any | None = None,
-):
+) -> Callable:
     """Build the ``attestation_gate`` node (factory-closure capture).
 
     Mirrors ``create_question_pause_node(manager)`` (graph.py:4596
@@ -3089,11 +3109,14 @@ def create_attestation_gate_node(
     """
     # Lazy import — see the top-of-file note about the graph ↔ services
     # import cycle.
-    from .services.attestation_gate import Decision, evaluate
+    from .services.attestation_gate import (
+        DEFAULT_ATTESTATION_TOOL_NAME,
+        Decision,
+        evaluate,
+    )
     from .services.attestation_ledger import (
         safe_increment,
         safe_reset,
-        safe_set_escalated,
         safe_set_escalated_and_reset,
     )
 
@@ -3103,9 +3126,13 @@ def create_attestation_gate_node(
         state: Any, config: Optional[RunnableConfig] = None
     ) -> dict:
         effective_instance_id = instance_id or _extract_instance_id(config)
-        messages = state["messages"]
 
         try:
+            # The in-node state read lives INSIDE the C3 try — it is the
+            # first evaluation input, and any failure reading it is a
+            # gate fault like any other (fail-open allow + marker), not
+            # a mission error.
+            messages = state["messages"]
             # Review fix 4a: mirror the WRITE path's id resolution. When
             # the build-time thread_id is absent the wiring passes
             # ``denied_count_getter=None``; the predecessor defaulted the
@@ -3133,7 +3160,7 @@ def create_attestation_gate_node(
                 attestation_enabled=gate_config.get("attestation_enabled", True),
                 scope_applicable=gate_config.get("scope_applicable", True),
                 tool_name=gate_config.get(
-                    "tool_name", "attest_completion"
+                    "tool_name", DEFAULT_ATTESTATION_TOOL_NAME
                 ),
                 leader_prompt_version=gate_config.get(
                     "leader_prompt_version", ""
@@ -3180,7 +3207,7 @@ def create_attestation_gate_node(
                         ledger,
                         effective_instance_id,
                         denial_epoch,
-                        error_class_context={
+                        log_context={
                             "instance_id": effective_instance_id,
                             "denial_epoch": denial_epoch,
                         },
@@ -3208,7 +3235,7 @@ def create_attestation_gate_node(
                     terminal_result = safe_set_escalated_and_reset(
                         ledger,
                         effective_instance_id,
-                        error_class_context={
+                        log_context={
                             "instance_id": effective_instance_id,
                             "decision": decision.decision.value,
                         },
@@ -3226,7 +3253,7 @@ def create_attestation_gate_node(
                         safe_reset(
                             ledger,
                             effective_instance_id,
-                            error_class_context={
+                            log_context={
                                 "instance_id": effective_instance_id,
                                 "decision": decision.decision.value,
                             },
@@ -3249,13 +3276,14 @@ def create_attestation_gate_node(
             # canonical decision line.  Keep it one-shot by placing the
             # event at this decision branch (not in the per-evaluation log).
             logger.info(
-                "event=gate_terminal_after_bound instance_id=%s "
+                "event=leader_completion_gate_terminal_after_bound "
+                "instance_id=%s "
                 "attestation_denied_count=%s completion_gate_escalated=true",
                 effective_instance_id,
                 decision.next_denied_count,
             )
 
-        if decision.decision == Decision.DENIED:
+        if decision.decision is Decision.DENIED:
             # R1 — the deny path is the checkpoint-durable in-graph
             # nudge ONLY. Plain-dict return (language_check precedent):
             # the message rides the node-boundary checkpoint, the route

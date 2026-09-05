@@ -97,9 +97,6 @@ from .attestation_resolver import (
     DEFAULT_MODE,
     DEFAULT_WINDOW,
     DEFAULT_DENY_BOUND,
-    ENSEMBLE_ATTESTATION_MODE_ENV,
-    ENSEMBLE_ATTESTATION_WINDOW_ENV,
-    ENSEMBLE_ATTESTATION_DENY_BOUND_ENV,
     METRIC_DRY_LOG_TOTAL,
     METRIC_DRY_LOG_DENY_PREDICATE_TOTAL,
     METRIC_ENFORCE_DENIED_TOTAL,
@@ -751,6 +748,14 @@ def evaluate(
             next_denied_count=denied_count,
             should_inject_nudge=False,
             denied_count=denied_count,
+            # Scanner/R2 diagnostics UNKNOWN on this path — report the
+            # -1 "unknown due to error" sentinel (the DB-seam fail-open
+            # convention above), never the 0 default: 0 is a MEANINGFUL
+            # R2 value ("no wakeups") and would feed the dry-mode
+            # deny-predicate metric a false positive.
+            messages_scanned=-1,
             scanned_window_size=mode_resolver.window,
+            pending_children=-1,
+            queued_or_expected_wakeups=-1,
             gate_exception_seen=True,
         )

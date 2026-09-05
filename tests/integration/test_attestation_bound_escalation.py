@@ -87,7 +87,7 @@ async def test_bound_plus_one_escalates_once_without_fourth_nudge(
     assert _nudge_count(state["messages"]) == 3
     assert caplog.text.count("decision=denied") == 3
     assert caplog.text.count("decision=terminal_after_bound") == 1
-    assert caplog.text.count("event=gate_terminal_after_bound") == 1
+    assert caplog.text.count("event=leader_completion_gate_terminal_after_bound") == 1
     assert "decision=allowed" not in caplog.text
 
     row = repo.get(INSTANCE_ID)

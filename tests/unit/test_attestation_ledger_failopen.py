@@ -207,7 +207,7 @@ class TestKeyboardInterruptPropagates:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Context plumbing (error_class_context is logged verbatim)
+# Context plumbing (log_context is logged verbatim)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -220,7 +220,7 @@ class TestContextPropagatesToLog:
                 ledger,
                 "inst-1",
                 "ep-1",
-                error_class_context={"denial_epoch": "ep-1", "extra": "ctx"},
+                log_context={"denial_epoch": "ep-1", "extra": "ctx"},
             )
         assert any(
             "denial_epoch" in r.message and "ep-1" in r.message

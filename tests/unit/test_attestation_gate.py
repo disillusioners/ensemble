@@ -33,10 +33,7 @@ from daemon.services.attestation_gate import (
     evaluate,
     resolve_gate_settings,
 )
-from daemon.services.attestation_scanner import (
-    DEFAULT_ATTESTATION_TOOL_NAME,
-    scan_for_attestation,
-)
+from daemon.services.attestation_scanner import DEFAULT_ATTESTATION_TOOL_NAME
 
 
 def ai(content="working", tool_calls=None):

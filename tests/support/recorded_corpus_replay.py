@@ -120,7 +120,6 @@ def replay_corpus(
         from daemon.services.attestation_resolver import (
             METRIC_DRY_LOG_DENY_PREDICATE_TOTAL,
             METRIC_DRY_LOG_TOTAL,
-            METRIC_ENFORCE_DENIED_TOTAL,
             record_promotion_metric,
         )
 
@@ -129,7 +128,11 @@ def replay_corpus(
             METRIC_DRY_LOG_DENY_PREDICATE_TOTAL,
             increment=deny_total,
         )
-        record_promotion_metric(METRIC_ENFORCE_DENIED_TOTAL, increment=deny_total)
+        # NB: deliberately NO METRIC_ENFORCE_DENIED_TOTAL increment — a
+        # dry replay is NOT a real enforce-mode deny, and polluting the
+        # production counter would corrupt the dry→enforce promotion
+        # adjudication (would-have-denied attribution stays in the
+        # CorpusAdjudication report field only).
     return CorpusAdjudication(
         mission_count=total,
         dry_log_total=total,

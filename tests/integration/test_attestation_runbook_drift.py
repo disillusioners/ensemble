@@ -271,7 +271,7 @@ class TestNoPhantomEnvVar:
 GRAPH_PY = REPO_ROOT / "daemon" / "graph.py"
 
 #: The literal event name emitted by the gate node's escalation branch.
-EMITTED_TERMINAL_EVENT = "event=gate_terminal_after_bound"
+EMITTED_TERMINAL_EVENT = "event=leader_completion_gate_terminal_after_bound"
 
 
 class TestEscalationPathDocTruth:
@@ -284,7 +284,7 @@ class TestEscalationPathDocTruth:
         return self.text
 
     def test_emitted_event_name_is_canonical_in_graph(self):
-        """Sanity anchor: the graph DOES emit event=gate_terminal_after_bound.
+        """Sanity anchor: the graph DOES emit the canonical terminal event.
 
         If this fails, the emitter was renamed — update the runbook AND
         EMITTED_TERMINAL_EVENT together.
@@ -293,16 +293,17 @@ class TestEscalationPathDocTruth:
 
     def test_doc_names_the_emitted_event(self):
         # (a) event-name truth: the doc must name the event the gate
-        # node ACTUALLY emits (not the phantom
-        # leader_completion_gate_terminal_after_bound).
+        # node ACTUALLY emits, in the canonical
+        # ``leader_completion_gate*`` prefix family (the unprefixed
+        # 'gate_terminal_after_bound' spelling is retired).
         assert EMITTED_TERMINAL_EVENT in self.text, (
             "runbook escalation section must name the emitted event "
             f"{EMITTED_TERMINAL_EVENT!r}"
         )
-        assert "leader_completion_gate_terminal_after_bound" not in self.text, (
-            "runbook documents the phantom event "
-            "'leader_completion_gate_terminal_after_bound' — the gate "
-            "node emits 'gate_terminal_after_bound'"
+        assert "event=gate_terminal_after_bound" not in self.text, (
+            "runbook documents the retired unprefixed event "
+            "'gate_terminal_after_bound' — the gate node emits "
+            "'leader_completion_gate_terminal_after_bound'"
         )
 
     def test_doc_does_not_claim_last_denial_reason_field(self):

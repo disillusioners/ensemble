@@ -41,7 +41,9 @@ def test_recorded_dry_corpus_replays_to_promotion_adjudication(tmp_path):
         metrics = get_promotion_metrics()
         assert metrics["dry_log_total"] == 4
         assert metrics["dry_log_deny_predicate_total"] == 2
-        assert metrics["enforce_denied_total"] == 2
+        # Dry replay must NOT touch the production enforce counter —
+        # dry runs are not real denies (attribution contract).
+        assert metrics["enforce_denied_total"] == 0
     finally:
         reset_attestation_resolver_for_tests()
     assert set(result.would_have_denied_mission_ids) == {

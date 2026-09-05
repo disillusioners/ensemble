@@ -9,17 +9,20 @@ The LCA contract instructs the leader LLM to:
    finished — check current progress and continue.") as a real user
    instruction.
 
-Both pieces of prose live in TWO files (the contract has TWO
-canonical homes per the prompt-writing-guide one-canonical-home
-convention adjusted for prompt mirroring — see ``docs/agent-prompt-writing-guide.md``):
+The contract has ONE canonical home:
 
-* ``agents/leader/rule.md`` — canonical home under ``## Must`` as a
-  ``### Must`` block.
-* ``agents/leader/workflow.md`` — mirror block at the workflow
-  stage so the leader sees the contract in both prompt contexts.
+* ``agents/leader/rule.md`` — the full contract prose under ``## Must``
+  as a ``### Must`` block.
+* ``agents/leader/workflow.md`` — a ONE-LINE POINTER to the rule.md
+  contract (no verbatim restatement). The former full mirror was
+  collapsed in the 2026-09-05 LCA post-approval quality pass: the copy
+  had already drifted (it omitted the Source-of-message note while
+  duplicating the rest), so the one-canonical-home convention now
+  applies without the mirror exception.
 
-These tests pin (a) that both files contain the contract text, and
-(b) that the rule.md block sits under a ``## Must`` heading. Drift
+These tests pin (a) that rule.md contains the contract text under a
+``## Must`` heading, and (b) that workflow.md's pointer names the tool
+and the canonical home WITHOUT duplicating the contract prose. Drift
 here is silent — the contract disappears from the leader's prompt
 without any test failure unless the contract text is pinned.
 """
@@ -113,14 +116,15 @@ class TestRuleMdContract:
         )
 
 
-# ── workflow.md: prompt-context mirror ───────────────────────────────────────
+# ── workflow.md: one-line pointer to the canonical home ──────────────────────
 
 
-class TestWorkflowMdMirror:
-    """The contract MUST be mirrored in ``agents/leader/workflow.md``
-    so the leader sees it during dispatch-time instructions (the
-    rule.md block is rules-time; the workflow.md block is
-    workflow-time — both prompt contexts must carry the contract)."""
+class TestWorkflowMdPointer:
+    """``agents/leader/workflow.md`` carries a ONE-LINE POINTER to the
+    canonical rule.md contract — it must name the tool and the canonical
+    home, and must NOT duplicate the contract prose (the former verbatim
+    mirror drifted: it omitted the Source-of-message note while copying
+    the rest)."""
 
     @pytest.fixture
     def source(self) -> str:
@@ -129,23 +133,31 @@ class TestWorkflowMdMirror:
     def test_file_exists(self) -> None:
         assert WORKFLOW_MD.exists(), f"missing workflow.md at {WORKFLOW_MD}"
 
-    @pytest.mark.parametrize("fragment", CONTRACT_FRAGMENTS)
-    def test_contract_fragment_present(self, source: str, fragment: str) -> None:
-        assert fragment in source, (
-            f"workflow.md is missing contract fragment: {fragment!r}. "
-            f"The mirror is required so the contract appears in both "
-            f"prompt contexts (rules + workflow)."
+    def test_pointer_names_tool_and_canonical_home(
+        self, source: str
+    ) -> None:
+        """The pointer must name the tool AND point at rule.md —
+        otherwise a workflow-context reader has no route to the
+        contract."""
+        assert "attest_completion" in source, (
+            "workflow.md pointer must name the attest_completion tool"
+        )
+        assert "rule.md" in source, (
+            "workflow.md pointer must name the canonical home (rule.md)"
         )
 
-    def test_mirror_callout_present(self, source: str) -> None:
-        """The mirror MUST explicitly note that it is a mirror of
-        the canonical-home contract in rule.md — so a maintainer
-        editing one side knows to edit the other. One-canonical-home
-        convention forbids divergent copies; the callout is the
-        operational enforcement mechanism."""
-        assert "mirror" in source.lower() and (
-            "rule.md" in source or "rule.md" in source
-        ), (
-            "workflow.md must explicitly note the mirror relationship "
-            "to rule.md so edits stay in sync"
+    def test_no_verbatim_contract_duplication(self, source: str) -> None:
+        """The contract prose must live ONLY in rule.md — workflow.md
+        must not restate the nudge text or the MUST/MAY language."""
+        assert "The work is not yet finished" not in source, (
+            "workflow.md duplicates the canonical nudge prose — collapse "
+            "to the one-line pointer (one-canonical-home convention)"
+        )
+        assert "Do not declare done in plain text" not in source, (
+            "workflow.md duplicates the canonical contract sentence — "
+            "collapse to the one-line pointer"
+        )
+        assert "treat it as a real user instruction" not in source, (
+            "workflow.md duplicates the canonical nudge rule — collapse "
+            "to the one-line pointer"
         )

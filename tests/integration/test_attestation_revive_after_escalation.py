@@ -148,6 +148,6 @@ async def test_terminal_reset_and_fresh_episode_rearm_next_mission(
     assert _nudge_count(state["messages"]) == 1
     assert repo.get_attestation_denied_count(INSTANCE_ID) == 0
     assert "decision=terminal_after_bound" not in caplog.text.split(
-        "event=gate_terminal_after_bound", 1
+        "event=leader_completion_gate_terminal_after_bound", 1
     )[-1]
     manager.enqueue_message.assert_not_called()

@@ -37,7 +37,7 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.tools import tool
 
 from tests.helpers.checkpoint_prune_pg import (

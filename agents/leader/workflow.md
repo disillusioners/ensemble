@@ -658,14 +658,7 @@ User: "Plan and implement a notification system"
 
 ## Completion Attestation (LCA feature, Phase 1)
 
-**Before declaring yourself done, you MUST call the `attest_completion` tool.** Do not declare done in plain text. The `attest_completion` tool is a deterministic no-op signal — its presence in your message stream is the attestation that you have finished the actual work for this turn. The system uses this signal to gate whether your turn may finalize.
-
-- **MUST**: When your work for this mission is genuinely complete and you are about to be done, call the `attest_completion` tool. Do not declare done in plain text.
-- **MUST**: If you receive a user message containing "The work is not yet finished — check current progress and continue.", treat it as a real user instruction: review your current progress, complete the remaining work, and only then call `attest_completion`.
-- **MAY**: Call `attest_completion` more than once in the same turn — it is idempotent and ANY call in the lookback window counts.
-- **Scope**: `attest_completion` is leader-only via `tools.allow`. Non-leader agents cannot call it.
-
-This block is the canonical mirror of the `agents/leader/rule.md` prompt contract — one canonical home for the prose is `rule.md` (per the one-canonical-home convention); the mirror here ensures the contract appears in both prompt contexts (rules + workflow).
+Before declaring yourself done you MUST call the `attest_completion` tool — the full contract (MUST/MAY rules, nudge-message handling, and the Source-of-message note) is canonical in `agents/leader/rule.md` → "📜 Completion Attestation (LCA feature, Phase 1)" and is intentionally NOT restated here (one-canonical-home convention).
 
 ---
 

@@ -1210,7 +1210,16 @@ class SQLModelInstanceRepository:
                 seen_epochs = [str(e) for e in existing]
             else:
                 # Corrupt legacy payload — reset (defensive; treat as
-                # empty list to keep O4 semantics bounded).
+                # empty list to keep O4 semantics bounded). LOUD: a
+                # corrupt array silently disabling dedup is observable.
+                logger.warning(
+                    "attestation_denied_count: corrupt "
+                    "'attestation:denial_epochs' metadata (type=%s) for "
+                    "instance=%s; resetting seen-epochs to [] — O4 dedup "
+                    "will re-count until the next reset",
+                    type(existing).__name__,
+                    instance_id,
+                )
                 seen_epochs = []
             if denial_epoch in seen_epochs:
                 # O4 replay — same deny, no double-increment.
@@ -1241,8 +1250,8 @@ class SQLModelInstanceRepository:
         * (2) ``terminal_after_bound`` finalization — wired in the gate
           node on ``Decision.TERMINAL_AFTER_BOUND`` (the same op also
           sets the escalation flag via :meth:`set_completion_gate_
-          escalated` BEFORE this reset lands; OR vice versa — see the
-          atomic variant below);
+          escalated` BEFORE this reset lands — see the atomic variant
+          below);
         * (3) revive-from-COMPLETED via a NEW top-level user/mission
           message — wired in
           ``daemon/services/instance_messaging.py:_prepare_enqueued_
@@ -1362,9 +1371,13 @@ class SQLModelInstanceRepository:
         ``denied_count_getter`` (Phase 3 task 3.3).
 
         Returns:
-            Current ``attestation_denied_count`` value; ``0`` if the
-            row is missing (the caller treats a missing row as a DB
-            error — fail-open via ``except Exception`` at the gate).
+            Current ``attestation_denied_count`` value; ``0`` when the
+            row is missing — BY DESIGN, not an error (a fresh instance
+            simply has no counter yet: the read folds the missing row
+            to ``0`` exactly like ``int(... or 0)`` folds a NULL
+            column). Callers fail-open only on RAISED exceptions (via
+            ``except Exception`` at the gate's count getter), never on
+            a missing row.
 
         Raises:
             Exception: any DB-level error propagates — see fail-open
