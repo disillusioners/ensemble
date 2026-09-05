@@ -2578,16 +2578,25 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
             (``daemon/services/instance_messaging.py:1522-1540``); the
             tool result pre-pends ``"Instance was {prior_status} —
             revived and message dispatched."``
-            REVIVE-ONCE GUARD (quick-win #7): an agent-tool-initiated
-            revive of the SAME child is granted AT MOST ONCE per daemon
-            lifetime. The manager keeps an in-memory cumulative counter
-            keyed by child instance id — a daemon restart resets it, and
-            the user-API revive path neither increments it nor is
-            blocked by it (agent-tool path only). The SECOND
-            agent-tool revive attempt for a child is refused with
-            guidance to spawn a replacement (mirroring
+            REVIVE-ONCE GUARD (quick-win #7, scoped — feature/fix-revive-guard-scope
+            2026-09-05): only revives whose prior status is ``ERROR`` or
+            ``FAILED`` CONSUME the manager's per-child revive counter;
+            revives from ``COMPLETED`` or ``TERMINATED`` are GRANTED
+            without incrementing (they are normal follow-up turns on a
+            successful / cleanly-stopped child, not failure revives).
+            The manager keeps an in-memory cumulative counter keyed by
+            child instance id — a daemon restart resets it, and the
+            user-API revive path neither increments it nor is blocked
+            by it (agent-tool path only). Once a real ERROR / FAILED
+            revive has consumed the budget (counter >= 1), the next
+            agent-tool revive attempt of ANY terminal kind is refused
+            with guidance to spawn a replacement (mirroring
             ``RECOVERY_GUIDANCE_HINT`` semantics) and dispatches
-            nothing.
+            nothing. The accepted-edge case (a child whose first revive
+            was an ERROR-revive that consumed the budget, which later
+            transitions to ``COMPLETED`` — a subsequent ``COMPLETED``
+            revive is still refused by the stale counter) is
+            INTENTIONAL; it preserves "one revive per error child".
           * ``IDLE`` / ``WAITING`` / ``QUEUED`` (and any other
             non-eligible non-terminal state) → ENQUEUE parity with the
             pre-Phase 1 behavior.
@@ -2678,8 +2687,12 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
             "Instance was completed — revived and message dispatched.
             Message queued and sent to <id>. The completion report …"
 
-            # revive-once refusal (SECOND agent-tool revive attempt —
-            # no dispatch; spawn a replacement instead):
+            # revive-once refusal (SECOND agent-tool revive attempt after
+            # a real ERROR / FAILED revive consumed the budget — no
+            # dispatch; spawn a replacement instead. Same wording applies
+            # to a subsequent COMPLETED / TERMINATED revive attempt when
+            # the counter is already >= 1 from a prior failure revive
+            # — the accepted-edge case documented at the call site):
             "Refused: Instance '<id>' has already been revived once
             and failed again. Spawn a replacement instance instead."
 
@@ -2932,6 +2945,21 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         # The user-API revive path (daemon/services/instance_messaging.py)
         # is a different authority — it neither increments the counter nor
         # is blocked by it (spec quick-win #7, agent-tool-path-only).
+        #
+        # SCOPE (feature/fix-revive-guard-scope, 2026-09-05): the
+        # per-child counter is only CONSUMED by revives whose prior
+        # status is ERROR / FAILED. COMPLETED / TERMINATED revives
+        # (the non-failure terminal states) are GRANTED without
+        # incrementing the counter — they are normal follow-up turns on
+        # a successful / cleanly-stopped child, not failure revives.
+        # The refusal check (``counter >= 1``) stays unchanged; once a
+        # real ERROR / FAILED revive has consumed the budget, the next
+        # agent-tool revive of any terminal kind is refused. The
+        # consume/no-consume decision lives in
+        # ``InstanceManager.note_agent_tool_revive`` (scoped on
+        # ``prior_status``), not here, so this call site stays a thin
+        # refuse-then-enqueue-then-record sequencing glue.
+        #
         # ORDERING (W2 + Polish#1): the refusal check sits AFTER the
         # queue-busy guard deliberately (a busy queue must not consume the
         # revive budget), and the counter increment sits AFTER the
@@ -2965,8 +2993,21 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         # the agent-tool revive grant is only consumed when the dispatch
         # has actually happened. A transient ``enqueue_message`` exception
         # above leaves the child eligible for a future revive attempt.
+        #
+        # SCOPE (feature/fix-revive-guard-scope, 2026-09-05): only
+        # revives whose prior status is ERROR / FAILED consume the
+        # per-child budget. COMPLETED / TERMINATED revives are GRANTED
+        # but do NOT increment the counter — they are normal follow-up
+        # turns on a successful / cleanly-stopped child, not failure
+        # revives. ``prior_status`` is the routing helper's authoritative
+        # snapshot of the child's terminal status at the moment of
+        # routing; passing it through keeps the gate in
+        # ``InstanceManager.note_agent_tool_revive`` semantically aligned
+        # with this call site (no status re-read, no race window).
         if routed_via == "enqueue-revive":
-            manager.note_agent_tool_revive(instance_id)
+            manager.note_agent_tool_revive(
+                instance_id, prior_status=prior_status
+            )
         message_id = result.message_id
 
         # Task 3b: provenance INFO logging at the call site (mirrors the
@@ -3064,14 +3105,23 @@ status at the moment of invocation:
     (``daemon/services/instance_messaging.py:1522-1540``). The tool
     result pre-pends ``"Instance was {prior_status} — revived and
     message dispatched."``
-    REVIVE-ONCE GUARD (quick-win #7): an agent-tool-initiated revive
-    of the SAME child is granted AT MOST ONCE per daemon lifetime.
-    The manager keeps an in-memory cumulative counter keyed by child
-    instance id — a daemon restart resets it, and the user-API revive
-    path neither increments it nor is blocked by it (agent-tool path
-    only). The SECOND agent-tool revive attempt for a child is
-    refused with guidance to spawn a replacement (mirroring
-    ``RECOVERY_GUIDANCE_HINT`` semantics) and dispatches nothing.
+    REVIVE-ONCE GUARD (quick-win #7, scoped — feature/fix-revive-guard-scope
+    2026-09-05): only revives whose prior status is ``ERROR`` or
+    ``FAILED`` CONSUME the manager's per-child revive counter; revives
+    from ``COMPLETED`` or ``TERMINATED`` are GRANTED without incrementing
+    (they are normal follow-up turns on a successful / cleanly-stopped
+    child, not failure revives). The manager keeps an in-memory
+    cumulative counter keyed by child instance id — a daemon restart
+    resets it, and the user-API revive path neither increments it nor is
+    blocked by it (agent-tool path only). Once a real ERROR / FAILED
+    revive has consumed the budget (counter >= 1), the next agent-tool
+    revive attempt of ANY terminal kind is refused with guidance to
+    spawn a replacement (mirroring ``RECOVERY_GUIDANCE_HINT`` semantics)
+    and dispatches nothing. The accepted-edge case (a child whose first
+    revive was an ERROR-revive that consumed the budget, which later
+    transitions to ``COMPLETED`` — a subsequent ``COMPLETED`` revive is
+    still refused by the stale counter) is INTENTIONAL; it preserves
+    "one revive per error child".
 
   * ``IDLE`` / ``WAITING`` / ``QUEUED`` (and any other non-eligible
     non-terminal state) → ENQUEUE parity with the pre-Phase 1
@@ -3179,8 +3229,12 @@ Example outputs::
     "Instance was completed — revived and message dispatched. Message
     queued and sent to <id>. …"
 
-    # revive-once refusal (SECOND agent-tool revive attempt — no
-    # dispatch; spawn a replacement instead):
+    # revive-once refusal (SECOND agent-tool revive attempt after a
+    # real ERROR / FAILED revive consumed the budget — no dispatch;
+    # spawn a replacement instead. Same wording applies to a subsequent
+    # COMPLETED / TERMINATED revive attempt when the counter is already
+    # >= 1 from a prior failure revive — the accepted-edge case
+    # documented at the call site):
     "Refused: Instance '<id>' has already been revived once
     and failed again. Spawn a replacement instance instead."
 

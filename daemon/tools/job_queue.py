@@ -317,17 +317,22 @@ refusal pointing at ``send_message`` — the canonical mirror path.
 Contract draft §3 "Plus" clause; closes the wrong-predicate trap so
 an agent cannot accidentally use the work-side primitive to message.
 
-Note (revive-once guard — W1): a ``job_continue`` whose target instance
-status is FAILED counts as an agent-tool-initiated revival and is bound
-by the manager's revive-once guard (quick-win #7). The first
-FAILED-continue of an instance is granted and increments the per-child
-counter; the SECOND FAILED-continue is refused with the same wording as
-``send_message``'s terminal-revive refusal ("Refused: Instance '<id>'
-has already been revived once and failed again. Spawn a replacement
-instance instead."). The COMPLETED-continue path is DELIBERATELY
-EXCLUDED — it is the designed give-more-work continue flow on a
+Note (revive-once guard — W1, scoped — feature/fix-revive-guard-scope
+2026-09-05): a ``job_continue`` whose target instance status is FAILED
+counts as an agent-tool-initiated revival and is bound by the manager's
+revive-once guard (quick-win #7). The first FAILED-continue of an
+instance CONSUMES the per-child counter (granted and incremented,
+counter 0→1); the SECOND FAILED-continue is refused with the same
+wording as ``send_message``'s terminal-revive refusal ("Refused: Instance
+'<id>' has already been revived once and failed again. Spawn a
+replacement instance instead."). SCOPE: FAILED is the ONLY
+``job_continue`` status that consumes the budget — ``job_continue`` is
+not routed through the four-state ``send_message`` terminal-revive
+branch, so COMPLETED / TERMINATED / ERROR ``job_continue`` cases do
+NOT reach this guard. The COMPLETED-continue path is DELIBERATELY
+EXCLUDED (it is the designed give-more-work continue flow on a
 successful child, not a failure revive, so it neither increments nor
-is blocked by the guard.
+is blocked by the guard).
 
 Example:
     job_continue(
@@ -1330,8 +1335,21 @@ def create_job_tools(
             #     this increment; it is the excluded give-more-work
             #     flow. A transient ``enqueue_message_job`` exception
             #     above leaves the child eligible for a future attempt.
+            #
+            #     SCOPE (feature/fix-revive-guard-scope, 2026-09-05):
+            #     ``instance_meta.status`` is FAILED here by definition
+            #     (the W1 gate guards on ``InstanceStatus.FAILED.value``),
+            #     so this branch ALWAYS passes ``prior_status="failed"``
+            #     to ``note_agent_tool_revive`` — a consuming revive.
+            #     We pass it explicitly so the gate in
+            #     ``InstanceManager.note_agent_tool_revive`` can emit a
+            #     truthful grant log without re-reading status, and so
+            #     the consume-vs-non-consume decision stays in one place
+            #     (the manager) regardless of which tool called it.
             if instance_meta.status == InstanceStatus.FAILED.value:
-                manager.note_agent_tool_revive(instance_id)
+                manager.note_agent_tool_revive(
+                    instance_id, prior_status=InstanceStatus.FAILED.value
+                )
 
             # 7. Return new job_id (provided by AsyncMessageResult)
             return {

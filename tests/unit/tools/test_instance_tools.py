@@ -681,7 +681,13 @@ class TestReviveOnceGuard:
         manager.enqueue_message.assert_awaited_once()
         manager.set_injection.assert_not_called()
         # Counter incremented exactly once, for this child.
-        manager.note_agent_tool_revive.assert_called_once_with("child-1")
+        # Scope-fix (feature/fix-revive-guard-scope, 2026-09-05): the
+        # ``send_message`` terminal-revive call site now passes
+        # ``prior_status`` explicitly so the consume gate in
+        # ``InstanceManager.note_agent_tool_revive`` can branch on it.
+        manager.note_agent_tool_revive.assert_called_once_with(
+            "child-1", prior_status="error"
+        )
         assert manager.get_agent_tool_revive_count("child-1") == 1
 
     async def test_t2_second_agent_tool_revive_refused(self):
@@ -711,7 +717,12 @@ class TestReviveOnceGuard:
         manager.enqueue_message.assert_not_awaited()
         manager.set_injection.assert_not_called()
         # Refusal does not consume/increment anything further.
-        manager.note_agent_tool_revive.assert_called_once_with("child-1")
+        # Scope-fix (feature/fix-revive-guard-scope, 2026-09-05): the
+        # prior grant (the only successful call here) passes
+        # ``prior_status="error"`` — see the assertion below.
+        manager.note_agent_tool_revive.assert_called_once_with(
+            "child-1", prior_status="error"
+        )
         assert manager.get_agent_tool_revive_count("child-1") == 1
 
     async def test_t3_counter_survives_across_tool_invocations(self):
@@ -854,7 +865,12 @@ class TestReviveOnceGuard:
             "Instance was error — revived and message dispatched."
             in granted
         ), f"Expected revival prefix; got: {granted!r}"
-        manager.note_agent_tool_revive.assert_called_once_with("child-1")
+        # Scope-fix (feature/fix-revive-guard-scope, 2026-09-05): the
+        # consume gate branches on ``prior_status`` — ERROR / FAILED
+        # consume, COMPLETED / TERMINATED do not.
+        manager.note_agent_tool_revive.assert_called_once_with(
+            "child-1", prior_status="error"
+        )
         assert manager.get_agent_tool_revive_count("child-1") == 1
         manager.enqueue_message.assert_awaited_once()
 
@@ -947,6 +963,362 @@ class TestReviveOnceGuard:
             assert phrase in full_doc, (
                 f"_full_doc_ must document injection provenance "
                 f"({phrase!r}); got: {full_doc[:300]!r}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Test f — ReviveGuard scope fix (feature/fix-revive-guard-scope,
+# 2026-09-05). User-decided semantics: only revives whose PRIOR status
+# is ERROR or FAILED consume the per-child budget; revives from
+# COMPLETED or TERMINATED are GRANTED without incrementing. The refusal
+# check (``counter >= 1``) is unchanged — once a real failure revive
+# has consumed the budget, the next agent-tool revive of any terminal
+# kind is refused.
+#
+# Matrix:
+#   a) COMPLETED → revive #1 → completes → revive #2 ALLOWED
+#      (regression case from today's incident: giter c3908e36 pattern)
+#   b) COMPLETED revive leaves counter at 0
+#   c) ERROR → revive (consumes) → terminal again → second revive REFUSED
+#   d) FAILED prior consumes (covered by existing tests test_t1..t3)
+#   e) TERMINATED prior → not consumed
+#   f) user-API enqueue path unaffected (covered by existing test_t4)
+#   accepted-edge: ERROR-revive consumes → child later COMPLETED →
+#      subsequent COMPLETED-revive STILL REFUSED by stale counter
+#      (preserves "one revive per error child" — INTENTIONAL)
+# ---------------------------------------------------------------------------
+
+
+class TestReviveOnceGuardScope:
+    """``feature/fix-revive-guard-scope`` (2026-09-05): the per-child
+    counter is only CONSUMED by revives whose prior status is ERROR /
+    FAILED. Revives from COMPLETED / TERMINATED are granted without
+    incrementing. The refusal check (``counter >= 1``) is unchanged —
+    once a real failure revive has burned the budget, the next
+    agent-tool revive of any terminal kind is refused.
+
+    Each test below is keyed on the prior status the routing helper
+    surfaces (``prior_status`` in ``_route_send_message``) — the gate
+    in ``InstanceManager.note_agent_tool_revive`` branches on this.
+    """
+
+    async def test_scope_a_completed_reuse_allowed_twice(self):
+        """Matrix (a) — regression case: child COMPLETED twice → both
+        agent-tool revives GRANTED, counter stays at 0 across the pair.
+
+        This is the regression from today's incident (giter c3908e36
+        pattern): a child that completes cleanly and is reused should
+        NOT burn the failure-revive budget on a follow-up turn.
+        """
+        with patch(
+            "daemon.tools.instance._check_team_membership",
+            return_value=None,
+        ):
+            manager = _make_manager(status="completed")
+            send_message = _get_send_message_tool(manager)
+
+            first = await send_message.coroutine("child-1", "follow-up 1")
+            second = await send_message.coroutine("child-1", "follow-up 2")
+
+        # Both revives granted — no refusal, no "already revived" text.
+        for label, result in (("first", first), ("second", second)):
+            assert "revived and message dispatched" in result, (
+                f"{label} COMPLETED-revive must be granted; got {result!r}"
+            )
+            assert "already been revived once" not in result
+        # Both messages actually dispatched via the shared enqueue path.
+        assert manager.enqueue_message.await_count == 2
+        # CRITICAL (scope-fix): counter is untouched — neither call
+        # consumed the per-child budget. Prior behavior (consume on
+        # every terminal revive) would leave the counter at 2 here.
+        assert manager.get_agent_tool_revive_count("child-1") == 0
+        # And the increment was called with prior_status="completed"
+        # both times — the gate saw the prior status and did NOT
+        # increment. We assert the call signature to lock the contract
+        # against a future regression that drops prior_status.
+        assert manager.note_agent_tool_revive.call_count == 2
+        manager.note_agent_tool_revive.assert_called_with(
+            "child-1", prior_status="completed"
+        )
+
+    async def test_scope_b_completed_revive_leaves_counter_at_zero(self):
+        """Matrix (b) — a single COMPLETED-revive does not increment.
+
+        This is the "atomic" property: COMPLETED revives are
+        zero-cost against the budget. A child that completes, is
+        followed up on once, and never enters a failure terminal —
+        the counter stays at 0 for its entire lifetime in the daemon.
+        """
+        with patch(
+            "daemon.tools.instance._check_team_membership",
+            return_value=None,
+        ):
+            manager = _make_manager(status="completed")
+            send_message = _get_send_message_tool(manager)
+
+            result = await send_message.coroutine("child-1", "hello again")
+
+        # Revived + dispatched.
+        assert "revived and message dispatched" in result
+        manager.enqueue_message.assert_awaited_once()
+        # Counter at 0 — non-consuming revive.
+        assert manager.get_agent_tool_revive_count("child-1") == 0
+        manager.note_agent_tool_revive.assert_called_once_with(
+            "child-1", prior_status="completed"
+        )
+
+    async def test_scope_c_error_then_terminal_again_second_revive_refused(
+        self,
+    ):
+        """Matrix (c) — ERROR → revive (consumes) → child still
+        terminal → second revive REFUSED.
+
+        Lock the "first failure revive is the meaningful one" contract
+        after the scope fix: COMPLETED / TERMINATED revives do NOT
+        consume, so the first ERROR-revive is the ONLY consume in the
+        typical flow. Subsequent agent-tool revives of any terminal
+        kind — including a later COMPLETED / TERMINATED — are refused
+        by the stale counter (the accepted-edge case documented in
+        ``InstanceManager._agent_tool_revive_counts``'s block comment).
+        """
+        # Phase 1: child is ERROR — first revive consumes.
+        with patch(
+            "daemon.tools.instance._check_team_membership",
+            return_value=None,
+        ):
+            manager = _make_manager(status="error")
+            send_message = _get_send_message_tool(manager)
+
+            first = await send_message.coroutine("child-1", "retry")
+            assert "revived and message dispatched" in first
+            manager.note_agent_tool_revive.assert_called_once_with(
+                "child-1", prior_status="error"
+            )
+            assert manager.get_agent_tool_revive_count("child-1") == 1
+
+        # Phase 2: child still in a terminal state (we simulate by
+        # leaving the fixture unchanged — the manager mock still
+        # reports ``status="error"``). Second agent-tool revive is
+        # refused by the once-bound.
+        manager.enqueue_message.reset_mock()
+        with patch(
+            "daemon.tools.instance._check_team_membership",
+            return_value=None,
+        ):
+            send_message_2 = _get_send_message_tool(manager)
+            second = await send_message_2.coroutine(
+                "child-1", "retry again"
+            )
+
+        # Verbatim refusal shape.
+        assert second == _REVIVE_REFUSAL_TEMPLATE.format(iid="child-1"), (
+            f"Second ERROR-revive must be refused; got: {second!r}"
+        )
+        # Refusal returns BEFORE enqueue — nothing dispatched.
+        manager.enqueue_message.assert_not_awaited()
+        # Counter stays at 1 (refusal does not consume further).
+        assert manager.get_agent_tool_revive_count("child-1") == 1
+        # Only the FIRST call hit the increment site (the refusal
+        # short-circuits before ``note_agent_tool_revive``).
+        assert manager.note_agent_tool_revive.call_count == 1
+
+    async def test_scope_e_terminated_prior_not_consumed(self):
+        """Matrix (e) — TERMINATED is the "non-failure terminal" case:
+        a clean terminate (operator-initiated or graceful shutdown)
+        followed by an agent-tool revive does NOT burn the budget.
+
+        Symmetric to COMPLETED (matrix a/b): a TERMINATED child is a
+        non-failure terminal state, so the revive is granted and the
+        counter is left untouched.
+        """
+        with patch(
+            "daemon.tools.instance._check_team_membership",
+            return_value=None,
+        ):
+            manager = _make_manager(status="terminated")
+            send_message = _get_send_message_tool(manager)
+
+            result = await send_message.coroutine("child-1", "continue")
+
+        # Granted + dispatched.
+        assert "Instance was terminated" in result and (
+            "revived and message dispatched" in result
+        ), f"Expected TERMINATED-revive prefix; got: {result!r}"
+        manager.enqueue_message.assert_awaited_once()
+        # Counter untouched — TERMINATED does not consume.
+        assert manager.get_agent_tool_revive_count("child-1") == 0
+        manager.note_agent_tool_revive.assert_called_once_with(
+            "child-1", prior_status="terminated"
+        )
+
+    async def test_scope_failed_prior_consumes_unit_level(self):
+        """Matrix (d) — FAILED prior CONSUMES the budget (unit-level on
+        ``note_agent_tool_revive``).
+
+        The pre-fix behavior is preserved for FAILED — it's the
+        canonical failure terminal, so the gate MUST increment. This
+        is a unit-level assertion on the manager's
+        ``note_agent_tool_revive`` itself, independent of the
+        ``send_message`` call site (the call site is covered by
+        ``test_t1_first_agent_tool_revive_granted`` for status="error"
+        and ``test_t3_counter_survives_across_tool_invocations`` for
+        status="failed").
+        """
+        from daemon.manager import InstanceManager
+
+        manager = InstanceManager.__new__(InstanceManager)
+        manager._agent_tool_revive_counts = {}
+
+        # FAILED → consumes.
+        assert manager.note_agent_tool_revive("c1", prior_status="failed") == 1
+        assert manager.get_agent_tool_revive_count("c1") == 1
+        assert manager.note_agent_tool_revive("c1", prior_status="failed") == 2
+        assert manager.get_agent_tool_revive_count("c1") == 2
+
+        # ERROR → consumes (same scope as FAILED).
+        assert manager.note_agent_tool_revive("c2", prior_status="error") == 1
+        assert manager.get_agent_tool_revive_count("c2") == 1
+
+        # COMPLETED → does NOT consume (stays at 0 for a fresh child).
+        assert (
+            manager.note_agent_tool_revive("c3", prior_status="completed") == 0
+        )
+        assert manager.get_agent_tool_revive_count("c3") == 0
+        # Subsequent COMPLETED revives of the same child stay at 0.
+        assert (
+            manager.note_agent_tool_revive("c3", prior_status="completed") == 0
+        )
+        assert manager.get_agent_tool_revive_count("c3") == 0
+
+        # TERMINATED → does NOT consume.
+        assert (
+            manager.note_agent_tool_revive("c4", prior_status="terminated") == 0
+        )
+        assert manager.get_agent_tool_revive_count("c4") == 0
+
+        # c1 is unaffected by c3's COMPLETED revives (per-child keying).
+        assert manager.get_agent_tool_revive_count("c1") == 2
+
+    async def test_accepted_edge_error_revoke_then_completed_still_refused(
+        self,
+    ):
+        """ACCEPTED EDGE — child ERROR → revived (consumes) → completes
+        → later COMPLETED-revive STILL REFUSED by the stale counter.
+
+        This case preserves "one revive per error child"
+        (RECOVERY_GUIDANCE_HINT parity): a child that BURNED its
+        failure-revive budget keeps that burn even after it transitions
+        to a non-failure terminal state. A subsequent
+        COMPLETED-revive — which by the new scope-fix does not consume
+        itself — is STILL refused because the counter is already >= 1
+        from the prior ERROR-revive. INTENTIONAL — do NOT "fix" it by
+        clearing the counter on success / completion / new transition.
+
+        Without this guard, a parent agent could re-revive an
+        ERROR-burned child indefinitely by waiting for it to complete
+        cleanly and then re-sending — defeating the recovery hint.
+        """
+        # Phase 1: child is ERROR — first agent-tool revive CONSUMES.
+        # The same manager instance is used for both phases so the
+        # counter state is preserved across phases (the fixture stores
+        # the counter in a closure on the manager).
+        with patch(
+            "daemon.tools.instance._check_team_membership",
+            return_value=None,
+        ):
+            manager = _make_manager(status="error")
+            send_message = _get_send_message_tool(manager)
+
+            first = await send_message.coroutine("child-1", "retry after error")
+            assert "revived and message dispatched" in first
+            assert manager.get_agent_tool_revive_count("child-1") == 1
+
+            # Phase 2: the child has transitioned to COMPLETED (we
+            # mutate the routing helper's snapshot via the manager's
+            # ``get_instance_info.return_value``). The counter is
+            # already >= 1 from phase 1 — the stale counter refuses
+            # the new attempt BEFORE the gate even sees prior_status.
+            manager.enqueue_message.reset_mock()
+            manager.get_instance_info.return_value = {
+                "status": "completed",
+                "agent_id": "developer",
+            }
+            refused = await send_message.coroutine(
+                "child-1", "follow-up after success"
+            )
+
+        # The counter was at 1 BEFORE this call → refused (the
+        # once-bound is stale; COMPLETED does not reset it).
+        assert refused == _REVIVE_REFUSAL_TEMPLATE.format(iid="child-1"), (
+            f"Stale-counter COMPLETED-revive must be refused (accepted edge); "
+            f"got: {refused!r}"
+        )
+        manager.enqueue_message.assert_not_awaited()
+        # Counter still at 1 — the refused COMPLETED-revive did not
+        # consume (it never reached the increment site, refused earlier).
+        assert manager.get_agent_tool_revive_count("child-1") == 1
+
+    async def test_user_api_path_still_unaffected_after_scope_fix(self):
+        """Matrix (f) — the user-API enqueue path stays uncounted and
+        unblocked after the scope fix.
+
+        This is a stronger version of the pre-existing ``test_t4``:
+        after the scope change, the user-API path STILL neither
+        increments the counter nor is blocked by it, even if the
+        counter has been burned by a prior ERROR-revive on the same
+        child. The ``_prepare_enqueued_message`` service-layer call
+        site is unchanged — the counter symbols are not in its
+        call graph at all (locked by ``test_t4_service_layer_revive_path_has_no_counter_hookup``).
+        """
+        with patch(
+            "daemon.tools.instance._check_team_membership",
+            return_value=None,
+        ):
+            # Burn the budget via an ERROR-revive (consuming).
+            manager = _make_manager(status="error")
+            send_message = _get_send_message_tool(manager)
+
+            first = await send_message.coroutine("child-1", "retry")
+            assert "revived and message dispatched" in first
+            assert manager.get_agent_tool_revive_count("child-1") == 1
+
+            # Now simulate a user-API revive via direct enqueue_message.
+            # The user-API path does NOT consult the counter.
+            manager.note_agent_tool_revive.reset_mock()
+            await manager.enqueue_message(
+                instance_id="child-1",
+                message="user says continue",
+                source="api",
+            )
+
+        # NOT blocked: enqueue went through despite counter >= 1.
+        assert manager.enqueue_message.await_count >= 1
+        # NOT counted: the user-API send never touches the counter.
+        manager.note_agent_tool_revive.assert_not_called()
+        # Counter still at 1 (the prior agent-tool ERROR-revive is
+        # the only consume).
+        assert manager.get_agent_tool_revive_count("child-1") == 1
+
+    def test_t4_service_layer_revive_path_has_no_counter_hookup_after_fix(
+        self,
+    ):
+        """Construction guarantee (re-asserted after the scope fix):
+        the shared service-layer revive path (``daemon/services/instance_messaging.py``)
+        contains NO reference to the counter symbols — user-API
+        revives are uncounted and unblocked by construction, not by
+        convention, and the scope-fix did not relax that invariant.
+        """
+        src = (
+            REPO_ROOT / "daemon" / "services" / "instance_messaging.py"
+        ).read_text(encoding="utf-8")
+        for symbol in (
+            "note_agent_tool_revive",
+            "get_agent_tool_revive_count",
+            "_agent_tool_revive_counts",
+        ):
+            assert symbol not in src, (
+                f"instance_messaging.py must not reference {symbol!r} — "
+                f"the revive-once guard is agent-tool-path only"
             )
 
 

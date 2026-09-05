@@ -122,16 +122,23 @@ def make_send_message_manager(*, status: str) -> MagicMock:
     manager.write_guard = MagicMock()
     manager._live_hub = MagicMock()
 
-    # Quick-win #7 (revive-once guard): REAL in-memory counter wired
-    # behind the two manager methods the agent-tool ``send_message``
-    # terminal-revive branch consults. Fresh dict per manager (fresh
-    # per test) mirrors the production ``InstanceManager`` lifetime:
-    # the first agent-tool revive of a child is granted (0→1), the
-    # second is refused. ``MagicMock`` wrappers keep call tracking so
-    # tests can assert increment/no-increment per path.
+    # Quick-win #7 (revive-once guard, scoped — feature/fix-revive-guard-scope
+    # 2026-09-05): REAL in-memory counter wired behind the two manager
+    # methods the agent-tool ``send_message`` terminal-revive branch
+    # consults. Fresh dict per manager (fresh per test) mirrors the
+    # production ``InstanceManager`` lifetime: only revives whose prior
+    # status is ERROR / FAILED consume the budget — COMPLETED /
+    # TERMINATED revives are granted without incrementing. The
+    # ``MagicMock`` wrappers keep call tracking so tests can assert
+    # increment/no-increment per path.
     revive_counts: dict[str, int] = {}
 
-    def _note_revive(instance_id: str) -> int:
+    def _note_revive(instance_id: str, prior_status: str | None = None) -> int:
+        # SCOPE: only ERROR / FAILED prior statuses consume the budget;
+        # COMPLETED / TERMINATED / None (defensive default) do not.
+        # Mirrors ``InstanceManager.note_agent_tool_revive`` exactly.
+        if prior_status is not None and prior_status not in ("error", "failed"):
+            return revive_counts.get(instance_id, 0)
         revive_counts[instance_id] = revive_counts.get(instance_id, 0) + 1
         return revive_counts[instance_id]
 
