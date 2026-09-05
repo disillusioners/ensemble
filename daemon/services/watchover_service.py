@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from typing import TYPE_CHECKING, Any
 
 from daemon.repositories.task.models import SuspensionReason
@@ -367,7 +368,17 @@ class WatchoverService:
             ) == last_human_content:
                 # Already represented in the checkpoint — skip.
                 continue
-            recovered.append(HumanMessage(content=row_content))
+            recovered.append(
+                HumanMessage(
+                    content=row_content,
+                    # Identity: prefer the queue row's persisted
+                    # ``message_id`` (the echo-id passthrough pattern
+                    # from the D2 seam drain) so the recovered copy
+                    # carries the identity the enqueued message already
+                    # has; mint only when the row predates the column.
+                    id=getattr(row, "message_id", None) or str(uuid.uuid4()),
+                )
+            )
 
         if recovered:
             logger.info(
@@ -1343,7 +1354,14 @@ class WatchoverService:
             if next_command:
                 from langchain_core.messages import HumanMessage
 
-                extra_messages = [HumanMessage(content=next_command)]
+                # Construction-time stable id (same contract as the
+                # child-report / seam-drain stamps). This copy is a
+                # transient builder input — it is never checkpointed —
+                # but it is a constructed HumanMessage entering the
+                # message flow, so it carries an explicit identity.
+                extra_messages = [
+                    HumanMessage(content=next_command, id=str(uuid.uuid4()))
+                ]
             context_text = await self._build_watchover_context(
                 instance_id,
                 requirement=requirement,

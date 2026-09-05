@@ -28,6 +28,31 @@ Test breakdown:
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
+import uuid
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+from langchain_core.messages import HumanMessage, RemoveMessage
+
+from daemon.registry import ContextInjectionConfig
+from daemon.services.context_messages import (
+    CONTEXT_KIND_BLUEPRINT,
+    CONTEXT_KIND_PROJECT,
+    CONTEXT_KIND_SHARED_CONTEXT,
+    CONTEXT_KIND_SKILLS,
+    CONTEXT_PREFIX,
+    CONTEXT_SUFFIX,
+    assemble_context_messages,
+    build_project_context_message,
+    build_project_scope_guide_message,
+    build_shared_context_message,
+    build_skills_message,
+    escape_for_context_block,
+)
+from daemon.utils import serialize_message
 
 
 def _flatten_context_result(
@@ -46,28 +71,6 @@ def _flatten_context_result(
     """
     persistent, ephemeral = t
     return list(persistent) + list(ephemeral)
-import json
-import logging
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
-
-import pytest
-from langchain_core.messages import HumanMessage, RemoveMessage
-
-from daemon.registry import ContextInjectionConfig
-from daemon.services.context_messages import (
-    CONTEXT_KIND_PROJECT,
-    CONTEXT_KIND_SHARED_CONTEXT,
-    CONTEXT_KIND_SKILLS,
-    CONTEXT_PREFIX,
-    CONTEXT_SUFFIX,
-    assemble_context_messages,
-    build_project_context_message,
-    build_project_scope_guide_message,
-    build_shared_context_message,
-    build_skills_message,
-    escape_for_context_block,
-)
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -651,6 +654,12 @@ class TestAssembleContextMessages:
         lazily inside :func:`assemble_context_messages`.
         """
         agent_meta = MagicMock()
+        # MagicMock auto-attributes are truthy by default; the
+        # ``blueprint_inactive`` gate would therefore block the
+        # blueprint context block from being assembled, so pin it
+        # to ``False`` here. Tests that want the inactive branch
+        # should set it explicitly to ``True``.
+        agent_meta.blueprint_inactive = False
         agent_meta.context_injection = ContextInjectionConfig(
             heuristic_match_shared_md_files=True,
         )
@@ -695,6 +704,150 @@ class TestAssembleContextMessages:
         semantics for our purposes, no deprecation noise.
         """
         return asyncio.run(coro)
+
+    def test_blueprint_message_id_is_stable_when_serialized_twice(self) -> None:
+        """Blueprint context uses the factory's construction-time identity."""
+        manager, instance_repo, agent_meta = self._make_manager()
+        agent_meta.skill_injection = False
+        manager._project_repository.get_metadata.return_value = True
+        blueprint = MagicMock()
+        blueprint.kind = "core"
+        blueprint.name = "Core Architecture"
+        blueprint.score = 1.0
+        blueprint.content = "The architecture body."
+        blueprint.file_refs = []
+        manager._blueprint_matcher.match = AsyncMock(return_value=[blueprint])
+
+        persistent, _ = self._run(
+            assemble_context_messages(
+                instance_id="inst-blueprint",
+                user_query="Explain the architecture",
+                project_id="project-1",
+                agent_meta=agent_meta,
+                manager=manager,
+                instance_repository=instance_repo,
+            )
+        )
+        blueprint_messages = [
+            msg for msg in persistent
+            if msg.additional_kwargs.get("context_kind") == CONTEXT_KIND_BLUEPRINT
+        ]
+        assert len(blueprint_messages) == 1
+        message = blueprint_messages[0]
+        # Construction-time identity (iter-2 identity remediation): the
+        # factory-minted id must exist BEFORE the first serialization —
+        # otherwise this test could pass purely via serialize_message's
+        # mint write-back instead of proving construction-time stability.
+        assert message.id is not None
+        uuid.UUID(message.id)  # raises if not a uuid
+        first = serialize_message(message)
+        second = serialize_message(message)
+        assert first["message_id"] == second["message_id"] == message.id
+
+    @pytest.mark.asyncio
+    async def test_blueprint_context_prepend_tap_fires_upsert_batch(self) -> None:
+        """Acceptance criterion (2) — entry-tap contract: the
+        ``message_metadata`` side-table tap at the user-message entry
+        site (``daemon/services/instance_messaging.py:3942-3950``) MUST
+        fire for a prepended blueprint context message, recording a
+        ``(message_id, first_seen_ts)`` row keyed on the blueprint's
+        factory-minted uuid (NOT the state.ts fallback).
+
+        Mirrors the review-flagged gap: existing
+        ``test_message_metadata_timestamp_precedes_state_fallback``
+        covers the read path (side-table wins over state.ts), but no
+        test in the corpus proved the write path actually fires for
+        the blueprint context-prepend branch — without this, a
+        regression that silently disables the entry-tap for
+        ``persistent_context_msgs`` would slip past CI.
+
+        The harness shape follows
+        ``tests/test_persistence.py:862-887`` (MagicMock
+        ``message_metadata_repo``); here we drive the tap end-to-end
+        by hand rather than via the real ``instance_messaging``
+        service so the test stays in the unit scope and does not
+        pull in a manager / DB / RAG fixture.
+        """
+        from daemon.services.instance_messaging import _build_graph_input
+        from daemon.services.message_tap import (
+            MessageTapSlot,
+            SOURCE_USER_MESSAGE_ENTRY,
+        )
+
+        manager, instance_repo, agent_meta = self._make_manager()
+        agent_meta.skill_injection = False
+        manager._project_repository.get_metadata.return_value = True
+        blueprint = MagicMock()
+        blueprint.kind = "core"
+        blueprint.name = "Core Architecture"
+        blueprint.score = 1.0
+        blueprint.content = "The architecture body."
+        blueprint.file_refs = []
+        manager._blueprint_matcher.match = AsyncMock(return_value=[blueprint])
+
+        # Inside a pytest-asyncio test we already have a running event
+        # loop, so drive the coroutine directly with ``await`` (NOT
+        # ``self._run`` which wraps ``asyncio.run`` and would raise
+        # "asyncio.run() cannot be called from a running event loop").
+        persistent, _ = await assemble_context_messages(
+            instance_id="inst-blueprint-tap",
+            user_query="Explain the architecture",
+            project_id="project-1",
+            agent_meta=agent_meta,
+            manager=manager,
+            instance_repository=instance_repo,
+        )
+        blueprint_messages = [
+            msg for msg in persistent
+            if msg.additional_kwargs.get("context_kind") == CONTEXT_KIND_BLUEPRINT
+        ]
+        assert len(blueprint_messages) == 1
+        blueprint_msg = blueprint_messages[0]
+        # Identity contract: the factory mints a uuid4 at construction
+        # (see ``_make_context_message`` in
+        # ``daemon/services/context_messages.py``) — that uuid is the
+        # row the side-table should record.
+        blueprint_id = blueprint_msg.id
+        assert blueprint_id is not None
+        uuid.UUID(blueprint_id)  # raises if not a uuid4
+
+        # Mirror the entry-tap call site at instance_messaging.py:3942-3950:
+        # build graph_input (the persistent block + the user turn), then
+        # fire the tap on the messages the graph START receives.
+        graph_input = _build_graph_input(
+            content="Explain the architecture",
+            message_id="user-msg-id-blueprint-tap",
+            persistent_context_msgs=persistent,
+        )
+        metadata_repo = MagicMock()
+        metadata_repo.upsert_batch = MagicMock(return_value=1)
+        tap = MessageTapSlot(metadata_repo, SOURCE_USER_MESSAGE_ENTRY)
+        await tap.tap_node_return(
+            graph_input["messages"],
+            "inst-blueprint-tap",
+        )
+
+        # Contract: exactly one upsert_batch call keyed on thread_id,
+        # containing the blueprint id (and the user-message id, which
+        # the entry tap also records on the same graph_input list).
+        # The first-seen ts is a truthful ``datetime.now(UTC).isoformat()``
+        # from ``MessageTapSlot`` — NOT the empty-string sentinel or
+        # the message-tap ``None`` used by the legacy state.ts fallback.
+        metadata_repo.upsert_batch.assert_called_once()
+        args, _ = metadata_repo.upsert_batch.call_args
+        assert args[0] == "inst-blueprint-tap"
+        items = args[1]
+        assert isinstance(items, list) and len(items) >= 1
+        recorded_ids = [mid for mid, _ts, _seq in items]
+        # The blueprint id is in the side-table batch — this is the
+        # acceptance-criterion assertion: a row for the prepended
+        # blueprint context message was written.
+        assert blueprint_id in recorded_ids
+        for _mid, recorded_ts, recorded_seq in items:
+            assert isinstance(recorded_ts, str) and len(recorded_ts) > 0
+            # The third tuple slot is the optional source_seq (None
+            # for the entry tap — see ``MessageTapSlot.tap_node_return``).
+            assert recorded_seq is None
 
     def test_returns_project_only_when_skills_disabled(self) -> None:
         """Skills flag off → only project (no skills message)."""

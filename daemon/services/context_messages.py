@@ -2,8 +2,9 @@
 
 Phase 1 of the Context Injection Restructure plan. This module is a
 standalone foundation that produces ``[SYSTEM CONTEXT: ...]`` tagged
-``HumanMessage`` instances for the three context kinds (project,
-shared_context, skills).
+``HumanMessage`` instances for all ``CONTEXT_KIND_*`` kinds
+(``project``, ``shared_context``, ``auto_load_skills``, ``skills``,
+``task_context``, ``blueprint``, ``project_scope_guide``).
 
 The builders are intentionally pure and unit-testable in isolation —
 they accept already-fetched data and return either a ``HumanMessage``
@@ -84,8 +85,8 @@ CONTEXT_KIND_PROJECT_SCOPE_GUIDE = "project_scope_guide"
 def _make_context_message(kind: str, title: str, content: str) -> HumanMessage:
     """Factory for any ``[SYSTEM CONTEXT: …]`` tagged HumanMessage.
 
-    Forces prefix and ``additional_kwargs`` consistency across all
-    three builders so downstream consumers can rely on them. Per
+    Forces prefix and ``additional_kwargs`` consistency across all builders
+    so downstream consumers can rely on them. Per
     ADR-5, every injected context message carries
     ``injected_message=True`` and the ``context_kind`` enum value.
 
@@ -1481,16 +1482,13 @@ async def assemble_context_messages(
 
             if matched:
                 blueprint_text = _build_blueprint_block_text(matched)
-                persistent_msgs.append(HumanMessage(
-                    content=(
-                        f"[SYSTEM CONTEXT: Project Blueprint]\n\n"
-                        f"{blueprint_text}"
-                    ),
-                    additional_kwargs={
-                        "injected_message": True,
-                        "context_kind": CONTEXT_KIND_BLUEPRINT,
-                    },
-                ))
+                persistent_msgs.append(
+                    _make_context_message(
+                        CONTEXT_KIND_BLUEPRINT,
+                        "Project Blueprint",
+                        blueprint_text,
+                    )
+                )
 
     # ── 4. Skills message — PERSISTENT (2026-07-29 refactor) ─────────────
     # Ephemeral skill injection is currently disabled. Skills are

@@ -5,6 +5,7 @@ import asyncio
 import sys
 from unittest.mock import patch, MagicMock, AsyncMock
 from pathlib import Path
+from types import SimpleNamespace
 
 
 class EmptyAsyncIterator:
@@ -856,3 +857,31 @@ class TestGetInstanceMessagesHumanMessagesContext:
         assert serialized["context_kind"] == "task_context"
         assert serialized["source"] == "internal_agent:caller-iid"
         assert serialized["role"] == "user"
+
+
+@pytest.mark.asyncio
+async def test_message_metadata_timestamp_precedes_state_fallback():
+    """A tapped context/injection message uses first-seen metadata time."""
+    from langchain_core.messages import HumanMessage
+
+    checkpointer = AsyncMock()
+    checkpointer.aget.return_value = {
+        "channel_values": {
+            "messages": [HumanMessage(content="injected", id="msg-1")],
+        },
+        "ts": "latest-checkpoint-time",
+    }
+    metadata_repo = MagicMock()
+    metadata_repo.get_for_thread.return_value = {
+        "msg-1": ("first-seen-time", None),
+    }
+    manager = SimpleNamespace(message_metadata_repo=metadata_repo)
+
+    messages = await get_instance_messages(
+        checkpointer, "thread-1", manager=manager
+    )
+
+    user_messages = [message for message in messages if message["role"] == "user"]
+    assert len(user_messages) == 1
+    assert user_messages[0]["created_at"] == "first-seen-time"
+    assert user_messages[0]["created_at"] != "latest-checkpoint-time"

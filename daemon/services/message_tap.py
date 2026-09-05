@@ -24,8 +24,9 @@ OOS / explicitly NOT tapped
 * ``tools_node`` (no custom ToolNode wrapper; Critical 4; the
   serializer skip at persistence.py:405-407 handles the display).
 * ``question_pause_node`` (no tap there).
-* ``nudge`` / ``language_check`` (id-less; never tapped; fall to
-  ``state.ts`` if surfaced — no lag mechanism).
+* ``nudge`` / ``language_check`` (construction-stamped since the
+  iter-2 identity remediation; no longer id-less — see :228-231
+  for the current id-less scope).
 * Direct ``ainvoke`` invocation at ``instance_messaging.py:1055``
   (B1 / D19; inline ``{"messages": [message]}`` bypasses
   ``_build_graph_input``; zero production callers; id-less input;
@@ -226,7 +227,10 @@ class MessageTapSlot:
             if not ids:
                 # No-op path: the persisted list contained only
                 # RemoveMessage markers or id-less messages
-                # (nudge / language_check). Log nothing — there is
+                # (nudge / language_check are construction-stamped since
+                # the iter-2 identity remediation; direct-ainvoke entries
+                # and pre-side-table threads remain the id-less cases).
+                # Log nothing — there is
                 # nothing to record and a noisy log would multiply
                 # by the per-turn volume.
                 return 0

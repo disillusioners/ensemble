@@ -689,3 +689,116 @@ class TestS9TerminalAfterTurn1:
         assert row.status == IS.RUNNING.value, (
             "the row's status must have been written back as RUNNING"
         )
+
+
+# ---------------------------------------------------------------------------
+# Iter-2 remediation (stale-message identity): the D2 seam-drain stamps
+# construction-time ids (instance_messaging.py drain site). The W5 order
+# pin above checked contents + markers only; these classes pin the
+# STAMPED id itself and the entry tap, driven through the REAL
+# ``_process_message_with_tracking`` production seam.
+# ---------------------------------------------------------------------------
+
+
+class TestSeamDrainStampedIdentity:
+    """D2 seam-drain id stamps — both branches, production seam.
+
+    Iter-2 remediation gap: the drain's
+    ``id=entry.get("echo_id") or str(uuid.uuid4())`` line had no test
+    asserting the STAMPED id itself. Both branches are pinned here by
+    driving the real ``InstanceMessagingService._process_message_
+    with_tracking`` and inspecting the graph_input the fake graph
+    captured — the drained HumanMessage is produced by production code,
+    not hand-built in the test.
+    """
+
+    @pytest.mark.asyncio
+    async def test_echo_id_passthrough_stamps_entry_id(self):
+        """An entry carrying echo_id drains with id == echo_id."""
+        echo_id = "aabbccdd-1122-4333-8444-556677889900"
+        leftovers = [
+            {"content": "left-echo", "echo_id": echo_id, "timestamp": "t1"},
+        ]
+        service, _manager, captured, _graph = _make_capture_service(leftovers)
+
+        result = await service._process_message_with_tracking(
+            instance_id="iid-seam-echo",
+            message="wake",
+            message_id="msg-wake",
+            is_retry=True,
+            silent=False,
+        )
+        assert result is not None
+
+        messages = captured["graph_input"]["messages"]
+        drained = next(m for m in messages if m.content == "left-echo")
+        assert drained.id == echo_id, (
+            "Seam-drain echo passthrough: the drained HumanMessage must "
+            "carry the FIFO entry's echo_id, not a fresh mint"
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_echo_id_entry_mints_uuid4(self):
+        """An entry without echo_id drains with a minted uuid4 id."""
+        leftovers = [{"content": "left-mint", "timestamp": "t1"}]
+        service, _manager, captured, _graph = _make_capture_service(leftovers)
+
+        result = await service._process_message_with_tracking(
+            instance_id="iid-seam-mint",
+            message="wake",
+            message_id="msg-wake",
+            is_retry=True,
+            silent=False,
+        )
+        assert result is not None
+
+        messages = captured["graph_input"]["messages"]
+        drained = next(m for m in messages if m.content == "left-mint")
+        assert drained.id is not None
+        assert uuid.UUID(drained.id).version == 4
+
+
+class TestSeamDrainEntryTapThroughProductionSeam:
+    """The entry tap fires on PRODUCTION-constructed messages.
+
+    The pre-existing tap tests hand-build the tapped list (the blueprint
+    tap test builds graph_input in the test and fires the slot by hand).
+    This class drives the real ``InstanceMessagingService._process_
+    message_with_tracking`` end to end so every tapped message is
+    produced by production code (the D2 seam drain + ``_build_graph_
+    input``), then asserts the side-table batch records the STAMPED
+    identities.
+    """
+
+    @pytest.mark.asyncio
+    async def test_entry_tap_records_drained_echo_id_and_user_turn_id(self):
+        echo_id = "1122aabb-4333-4222-8444-556677889900"
+        leftovers = [
+            {"content": "left-tap", "echo_id": echo_id, "timestamp": "t1"},
+        ]
+        service, manager, _captured, _graph = _make_capture_service(leftovers)
+        metadata_repo = MagicMock()
+        metadata_repo.upsert_batch = MagicMock(return_value=1)
+        manager.message_metadata_repo = metadata_repo
+
+        result = await service._process_message_with_tracking(
+            instance_id="iid-seam-tap",
+            message="wake",
+            message_id="user-turn-id",
+            is_retry=True,
+            silent=False,
+        )
+        assert result is not None
+
+        metadata_repo.upsert_batch.assert_called_once()
+        args, _ = metadata_repo.upsert_batch.call_args
+        assert args[0] == "iid-seam-tap"
+        recorded_ids = {mid for mid, _ts, _seq in args[1]}
+        # The drained leftover is recorded under its STAMPED echo id and
+        # the user turn under its dispatch message_id — both messages
+        # were constructed by production code, not hand-built here.
+        assert echo_id in recorded_ids
+        assert "user-turn-id" in recorded_ids
+        for _mid, ts, seq in args[1]:
+            assert isinstance(ts, str) and len(ts) > 0
+            assert seq is None

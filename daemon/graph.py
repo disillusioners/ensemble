@@ -2566,7 +2566,14 @@ NUDGE_MESSAGE = "Continue with your task, or provide your final response if you 
 
 def nudge_node(state):
     """Inject a nudge message to prompt the agent to continue or finish."""
-    return {'messages': [HumanMessage(content=NUDGE_MESSAGE)]}
+    # Construction-time stable id (same contract as the child-report /
+    # seam-drain stamps): the checkpointed nudge carries one identity
+    # across every later serialization instead of re-minting per read.
+    return {
+        'messages': [
+            HumanMessage(content=NUDGE_MESSAGE, id=str(uuid.uuid4()))
+        ]
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -2658,6 +2665,13 @@ def create_language_check_node(user_language: str):
             if detect_wrong_language(content, user_language):
                 reminder = HumanMessage(
                     content=LANGUAGE_REMINDER_TEMPLATE.format(language=user_language),
+                    # Construction-time stable id (same contract as the
+                    # child-report / seam-drain stamps) — the checkpointed
+                    # reminder is identifiable across serializations. The
+                    # retry-counter scan keys on the
+                    # ``language_check_reminder`` kwarg, not the id, so
+                    # stamping changes no routing behavior.
+                    id=str(uuid.uuid4()),
                     additional_kwargs={"language_check_reminder": True},
                 )
                 logger.info(
@@ -3686,6 +3700,7 @@ def create_agent_node(
                     )
                 report_msg = HumanMessage(
                     content=_frame_injected_report(report_content),
+                    id=str(uuid.uuid4()),
                     additional_kwargs=report_extra_kwargs,
                 )
                 full_messages.append(report_msg)
@@ -3703,7 +3718,17 @@ def create_agent_node(
                 # here must not block the LLM call.
                 if live_hub is not None:
                     try:
-                        report_sse = HumanMessage(content=report_content)
+                        # Identity: serialize the SAME id the checkpointed
+                        # ``report_msg`` carries. A separate id-less
+                        # throwaway would make serialize_message mint a
+                        # fresh uuid, so the live report bubble could
+                        # never reconcile by id with the checkpoint/GET
+                        # row (orphan duplicate until reload — the same
+                        # Variant-B defect class this branch fixes).
+                        report_sse = HumanMessage(
+                            content=report_content,
+                            id=report_msg.id,
+                        )
                         report_serialized = serialize_message(report_sse)
                         report_serialized["instance_id"] = instance_id
                         await live_hub.stream_message(
