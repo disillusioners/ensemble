@@ -1901,6 +1901,52 @@ class InstanceMessagingService:
                             f"Reactivating terminal instance {instance_id[:8]}... "
                             f"(was {previous_status}) for new message{suffix}"
                         )
+                        # ─── Phase 3 — leader completion attestation,
+                        # reset trigger (3): revive-from-COMPLETED via a
+                        # NEW top-level user/mission message (fresh
+                        # episode). The SAME single reset op clears
+                        # ``attestation_denied_count`` AND
+                        # ``completion_gate_escalated`` (leader ruling 2
+                        # — both columns share the per-mission
+                        # lifecycle). Discriminator: a user-driven fresh
+                        # episode has BOTH ``priority == 1`` (default
+                        # user — 0 is preempt) AND ``msg_type ==
+                        # MessageType.HUMAN.value``. Internal reports
+                        # (``internal_report:`` → COMPLETION_REPORT),
+                        # error reports (``internal_error_report:`` →
+                        # ERROR_REPORT), and agent-to-agent messages
+                        # (``internal_agent:`` → AGENT) carry a different
+                        # msg_type — those are NOT new missions and must
+                        # NOT reset the counter (the counter SURVIVES
+                        # internal revive — only the next user-driven
+                        # fresh episode resets it).
+                        #
+                        # Same-transaction write: rides along with the
+                        # status=RUNNING update above so the reset is
+                        # atomic with the revive (no torn-write race
+                        # window). The dispatch's "default else-branch
+                        # stamps HUMAN" defect is acknowledged but NOT
+                        # fixed here — the conjunction of priority==1
+                        # AND msg_type==HUMAN guards against it (an
+                        # internal caller stamping HUMAN with priority=0
+                        # fails the priority check; an internal caller
+                        # stamping HUMAN with priority=1 still passes,
+                        # which is acceptable since the dispatch
+                        # classifies that as a known bounded risk).
+                        is_fresh_episode_user_message = (
+                            priority == 1
+                            and msg_type == MessageType.HUMAN.value
+                        )
+                        if is_fresh_episode_user_message:
+                            instance.attestation_denied_count = 0
+                            instance.completion_gate_escalated = False
+                            logger.info(
+                                f"Attestation ledger reset on fresh-episode "
+                                f"revive: instance={instance_id[:8]}... "
+                                f"(was {previous_status}) cleared "
+                                f"attestation_denied_count and "
+                                f"completion_gate_escalated"
+                            )
                 instance.last_activity_at = datetime.now(timezone.utc)
                 instance.version = (instance.version or 1) + 1
             else:

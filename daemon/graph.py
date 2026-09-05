@@ -130,6 +130,31 @@ from .config import LoopBreakerConfig
 # code path needs to write.
 
 
+def _safe_get_denied_count(ledger_repo: Any, instance_id: str) -> int:
+    """Phase 3 wiring helper — read the deny counter via the repo (C3).
+
+    Returns ``0`` on any DB error (fail-open at the read seam mirrors
+    the C3 write-seam contract: the gate must NEVER error a leader
+    mission on transient DB issues — D2 outage class). The error is
+    logged as ``leader_completion_gate_db_error`` so operators can
+    detect sustained DB issues without losing leader completions.
+    """
+    if not instance_id:
+        return 0
+    try:
+        return int(ledger_repo.get_attestation_denied_count(instance_id) or 0)
+    except Exception as exc:  # noqa: BLE001 — C3 fail-open
+        logger.error(
+            "event=leader_completion_gate_db_error method=get_denied_count "
+            "instance_id=%s error_class=%s error_message=%s "
+            "decision=fail_open_allowed",
+            instance_id,
+            type(exc).__name__,
+            exc,
+        )
+        return 0
+
+
 def _reassemble_with_context(
     messages: list,
     context_msgs: list,
@@ -2863,6 +2888,7 @@ def create_attestation_gate_node(
     manager: Any,
     instance_id: str | None,
     denied_count_getter: Callable[[], int] | None = None,
+    ledger: Any | None = None,
 ):
     """Build the ``attestation_gate`` node (factory-closure capture).
 
@@ -2875,21 +2901,28 @@ def create_attestation_gate_node(
 
     1. Read the in-node ``state["messages"]`` (NO ``aget_state`` — the
        namespace-mismatched-empty-state defect class is banned here).
-    2. Read the current denied count via ``denied_count_getter`` (the
-       Phase 2 stand-in defaults to ``lambda: 0``; Phase 3 threads the
-       ledger repository getter).
+    2. Read the current denied count via ``denied_count_getter`` (Phase
+       3 threads the ledger repository getter; Phase 2 stand-in
+       defaulted to ``lambda: 0``).
     3. Bridge the WHOLE sync ``evaluate()`` (scanner + the two manager
        facade reads + decide + log) to a worker thread via
        ``asyncio.to_thread`` — the message-queue-stats threading
        pattern — so the event loop never blocks on the DB reads.
-    4. On ``Decision.DENIED`` ONLY: return the checkpoint-durable
+    4. **Phase 3 ledger writes (C3 fail-open wrapper)**: based on the
+       decision value, call the matching :class:`AttestationLedger`
+       method via the ``ledger`` argument. All four writes are wrapped
+       in ``try/except Exception``; on DB error the deny/terminal
+       degrades to allow + a ``leader_completion_gate_db_error``
+       structured log line is emitted (leader mission never errors
+       per D2's outage class).
+    5. On ``Decision.DENIED`` ONLY: return the checkpoint-durable
        nudge (HumanMessage with the ``attestation_nudge`` marker, the
        language_check ``additional_kwargs`` precedent) + the
        ``attestation_route`` hint. NO ``manager.enqueue_message`` call
        (C1b forbidden dual-delivery); the instance stays RUNNING.
-    5. On every other decision value: return END routing with ZERO
+    6. On every other decision value: return END routing with ZERO
        side effects (dry_log included — dry is a passive observer).
-    6. C3 fail-open: any ``evaluate`` exception ⇒ allow END +
+    7. C3 fail-open: any ``evaluate`` exception ⇒ allow END +
        structured error log. ``except Exception`` only —
        KeyboardInterrupt stays fail-closed.
 
@@ -2907,8 +2940,20 @@ def create_attestation_gate_node(
             when the build-time value is absent (test embeddings that
             build one graph and invoke with several ids).
         denied_count_getter: Optional zero-arg callable returning the
-            current attestation denial count. Defaults to ``0`` until
-            Phase 3 lands the ledger.
+            current attestation denial count. Defaults to ``0`` when
+            absent (Phase 2 stand-in). Phase 3 wires a closure over
+            :meth:`SQLModelInstanceRepository.get_attestation_denied_count`
+            at the graph build site.
+        ledger: Optional Phase 3 ``AttestationLedger`` (any object
+            exposing ``increment(instance_id, denial_epoch)``,
+            ``reset(instance_id)``, ``set_escalated(instance_id)``,
+            ``set_escalated_and_reset(instance_id)``, and
+            ``get(instance_id) -> int``). When ``None`` the gate
+            performs ZERO writes (Phase 2 stand-in semantics for tests
+            that build the node without the manager's repository). All
+            ledger writes are wrapped in C3 fail-open ``except
+            Exception``; DB errors degrade deny → allow and emit the
+            ``leader_completion_gate_db_error`` log line.
 
     Returns:
         An async callable suitable for ``graph.add_node`` with the
@@ -2917,6 +2962,12 @@ def create_attestation_gate_node(
     # Lazy import — see the top-of-file note about the graph ↔ services
     # import cycle.
     from .services.attestation_gate import Decision, evaluate
+    from .services.attestation_ledger import (
+        safe_increment,
+        safe_reset,
+        safe_set_escalated,
+        safe_set_escalated_and_reset,
+    )
 
     getter = denied_count_getter or (lambda: 0)
 
@@ -2957,14 +3008,68 @@ def create_attestation_gate_node(
             )
             return {"attestation_route": None}
 
+        # Phase 3 — ledger writes (C3 fail-open wrapper). NO writes on
+        # the meta-conditions / dry / R2 un-attested allow paths. The
+        # denial_epoch is per-gate-evaluation (UUID4); replay dedup is
+        # handled by the ledger-side seen-epochs idempotency (O4).
+        if ledger is not None:
+            denial_epoch = str(uuid.uuid4())
+            try:
+                if decision.decision is Decision.DENIED:
+                    safe_increment(
+                        ledger,
+                        effective_instance_id,
+                        denial_epoch,
+                        error_class_context={
+                            "instance_id": effective_instance_id,
+                            "denial_epoch": denial_epoch,
+                        },
+                    )
+                elif decision.decision is Decision.TERMINAL_AFTER_BOUND:
+                    safe_set_escalated_and_reset(
+                        ledger,
+                        effective_instance_id,
+                        error_class_context={
+                            "instance_id": effective_instance_id,
+                            "decision": decision.decision.value,
+                        },
+                    )
+                elif decision.decision is Decision.ALLOWED:
+                    # Attested allow only — R2 un-attested allow arrives
+                    # as ALLOWED_LEGITIMATE_PENDING_WAKEUP, which is its
+                    # own enum value and does NOT reset the counter
+                    # (ruling 1 loop protection). decision.attestation_present
+                    # is True ONLY for the attested path (the deny path
+                    # sets it False via scanner diagnostics).
+                    if decision.attestation_present:
+                        safe_reset(
+                            ledger,
+                            effective_instance_id,
+                            error_class_context={
+                                "instance_id": effective_instance_id,
+                                "decision": decision.decision.value,
+                            },
+                        )
+                # else: ALLOWED_LEGITIMATE_PENDING_WAKEUP, DRY_LOG,
+                # ALLOWED (meta-condition bypass) — NO ledger write.
+            except Exception:  # noqa: BLE001 — defense-in-depth
+                # The safe_* helpers already swallow + log, but a
+                # non-leak path here guarantees the leader mission
+                # never errors. (Final belt-and-suspenders.)
+                logger.exception(
+                    "event=leader_completion_gate_db_error "
+                    "instance_id=%s detail=unexpected ledger wrapper failure",
+                    effective_instance_id,
+                )
+
         if decision.decision == Decision.DENIED:
             # R1 — the deny path is the checkpoint-durable in-graph
             # nudge ONLY. Plain-dict return (language_check precedent):
             # the message rides the node-boundary checkpoint, the route
             # hint sends the SAME execution back to ``agent``. No
             # enqueue, no revive, no terminal write. Counter increments
-            # are Phase 3 (evaluate() already computed
-            # next_denied_count; the ledger write lands with it).
+            # were committed by safe_increment above; the ledger write
+            # lands in the same decision path.
             logger.info(
                 "[AttestationGate] deny instance=%s denied_count=%s -> "
                 "next=%s; injecting in-graph nudge",
@@ -2981,8 +3086,9 @@ def create_attestation_gate_node(
 
         # allow / terminal_after_bound / dry_log /
         # allowed_legitimate_pending_wakeup — allow the END, zero side
-        # effects (the canonical decision log line was already emitted
-        # inside evaluate()).
+        # effects on the routing. The canonical decision log line was
+        # already emitted inside evaluate(); the ledger writes (or
+        # skips) happened above.
         return {"attestation_route": None}
 
     # O8 surface: the exact config the gate will run with, auditable in
@@ -6789,6 +6895,37 @@ def build_instance_graph(
                 scope_applicable=True,
                 leader_prompt_version=attestation_prompt_version,
             )
+            # Phase 3 — wire the ledger repository into the gate factory
+            # (replacing the Phase-2 ``lambda: 0`` stand-in for the
+            # ``denied_count_getter``). The ledger object exposes the
+            # four Phase-3 task-3.3 methods
+            # (``increment`` / ``reset`` / ``set_escalated`` /
+            # ``set_escalated_and_reset``); the gate node calls them via
+            # the C3 fail-open ``safe_*`` wrappers at
+            # ``daemon/services/attestation_ledger.py``. When ``manager``
+            # has no ``_instance_repository`` attribute (test embeddings
+            # / Phase-2 stand-in), the ledger is ``None`` and the gate
+            # performs ZERO writes — preserving backward compatibility
+            # with every existing test.
+            ledger_repo = getattr(manager, "_instance_repository", None)
+            if ledger_repo is not None:
+                # The factory consumes the repository AS the ledger
+                # (the four method names match the protocol). The
+                # ``denied_count_getter`` closure captures
+                # ``build_instance_id`` so a missing build-time id
+                # still resolves via the run-time config in the node.
+                effective_id_for_getter = build_instance_id or ""
+                if effective_id_for_getter:
+                    def _denied_count_getter(
+                        _repo: Any = ledger_repo,
+                        _eid: str = effective_id_for_getter,
+                    ) -> int:
+                        return _safe_get_denied_count(_repo, _eid)
+                    denied_count_getter = _denied_count_getter
+                else:
+                    denied_count_getter = None  # build-time id missing
+            else:
+                denied_count_getter = None  # Phase-2 stand-in semantics
             graph.add_node(
                 ATTESTATION_GATE_NODE_NAME,
                 create_attestation_gate_node(
@@ -6796,6 +6933,8 @@ def build_instance_graph(
                     settings,
                     manager,
                     build_instance_id,
+                    denied_count_getter=denied_count_getter,
+                    ledger=ledger_repo,
                 ),
             )
             graph.add_conditional_edges(

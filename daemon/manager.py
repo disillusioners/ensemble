@@ -4738,6 +4738,28 @@ class InstanceManager:
             "ALTER TABLE instance_ui_prefs ADD COLUMN IF NOT EXISTS icon_tag VARCHAR",
             # instances.agent_tag: agent version tag for directory-suffix versioning
             "ALTER TABLE instances ADD COLUMN IF NOT EXISTS agent_tag VARCHAR",
+            # instances.attestation_denied_count (Phase 3, 2026-09-05):
+            # row-scoped per-instance counter for the leader completion
+            # attestation gate (D5). NOT NULL DEFAULT 0 — existing rows
+            # pick up the default; fresh databases get the column from
+            # SQLModel.metadata.create_all() via the Instance SQLModel
+            # declaration at
+            # daemon/repositories/instance/models.py. The SQLite
+            # companion migration is
+            # daemon/migrations/versions/20260905_000001_attestation_ledger_columns.sql.
+            (
+                "ALTER TABLE instances ADD COLUMN IF NOT EXISTS "
+                "attestation_denied_count INTEGER NOT NULL DEFAULT 0"
+            ),
+            # instances.completion_gate_escalated (Phase 3, 2026-09-05):
+            # terminal-after-bound escalation flag (leader ruling 2 — the
+            # same single reset op clears this AND the counter above).
+            # NOT NULL DEFAULT FALSE — existing rows pick up the default.
+            # SQLite companion migration as above.
+            (
+                "ALTER TABLE instances ADD COLUMN IF NOT EXISTS "
+                "completion_gate_escalated BOOLEAN NOT NULL DEFAULT FALSE"
+            ),
             # instance_execution_leases: the Execution Gate's per-instance
             # lease table. SQLite gets it via the .sql migration at
             # ``daemon/migrations/versions/20260614_000002_create_instance_execution_leases.sql``;

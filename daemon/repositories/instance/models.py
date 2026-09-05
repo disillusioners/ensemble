@@ -11,7 +11,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import Column, String, event
+from sqlalchemy import Boolean, Column, Integer, String, event, text
 from sqlmodel import SQLModel, Field
 
 from daemon.repositories.infra.types import JSONBType
@@ -75,6 +75,44 @@ class Instance(SQLModel, table=True):
     updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     paused_at: str | None = Field(default=None, index=True)
 
+    # ─── Leader Completion Attestation (Phase 3) ──────────────────────────
+    # Row-scoped counter — resets ONLY on the four triggers per leader
+    # ruling 1: (1) attested allow, (2) terminal_after_bound finalization,
+    # (3) revive-from-COMPLETED via a NEW top-level user/mission message,
+    # (4) instance creation. The same single reset op also clears the
+    # ``completion_gate_escalated`` flag below (leader ruling 2 — the
+    # escalation flag shares the per-mission lifecycle).
+    #
+    # Schema mirrors ``daemon/migrations/versions/20260905_000001_
+    # attestation_ledger_columns.sql`` (SQLite path) and the matching
+    # ``ALTER TABLE`` block in
+    # ``daemon/manager.py::_ensure_postgres_columns`` (PostgreSQL path).
+    # Existing instance rows receive defaults via the migration's column
+    # default (``0`` / ``False``); fresh DBs get them via
+    # ``SQLModel.metadata.create_all()``.
+    attestation_denied_count: int = Field(
+        default=0,
+        sa_column=Column(
+            "attestation_denied_count",
+            Integer,
+            nullable=False,
+            default=0,
+            server_default=text("0"),
+        ),
+    )
+    #: Terminal-after-bound escalation flag (leader ruling 2 — persists
+    #: for postmortem until cleared by the same single reset op).
+    completion_gate_escalated: bool = Field(
+        default=False,
+        sa_column=Column(
+            "completion_gate_escalated",
+            Boolean,
+            nullable=False,
+            default=False,
+            server_default=text("0"),
+        ),
+    )
+
     @property
     def title(self) -> str | None:
         """Extract title from instance_metadata."""
@@ -104,6 +142,11 @@ class Instance(SQLModel, table=True):
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "paused_at": self.paused_at,
+            # Leader Completion Attestation Phase 3 — surfaced for
+            # operator visibility (the FE mission badge and dry-log
+            # promotion adjudicator read these directly).
+            "attestation_denied_count": self.attestation_denied_count,
+            "completion_gate_escalated": self.completion_gate_escalated,
         }
 
 

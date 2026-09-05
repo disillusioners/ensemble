@@ -598,7 +598,7 @@ RESOLVED upstream (post-reconciliation):
 - **R1** — Deny path semantics: in-graph checkpoint-durable `HumanMessage` nudge, no `manager.enqueue_message`, no revive on deny. Durable-enqueue recovery injector RELOCATED to `phase6-fastfollow-plan.md` (C backstop, post-soak).
 - **R2** — Gate deny input requires pending-wakeup input: `pending_children == 0` AND `queued_or_expected_wakeups == 0` AND `attestation_present == false`. Legitimate delegation turn-ends allowed un-attested.
 - **O1** — Boot assert `N ≤ min_recent_window`: WARN-only (per FR-7 / AC-7.8).
-- **O2** — Reset semantics: `attestation_denied_count` reset on every allow + reset on terminal-after-bound. The planner-stage in-memory-dict cleanup precedent is DROPPED (row-scoped DB columns need no per-instance in-memory cleanup hooks).
+- **O2** — Reset semantics (leader ruling 1, SUPERSEDES prior "every allow" wording): `attestation_denied_count` reset on **attested allow only** (`allowed_legitimate_pending_wakeup` MUST NOT reset — that non-reset IS the loop protection) + reset on `terminal_after_bound` finalization + reset on revive-from-COMPLETED via a NEW top-level user/mission message + reset on instance creation. The planner-stage in-memory-dict cleanup precedent is DROPPED (row-scoped DB columns need no per-instance in-memory cleanup hooks).
 - **O4** — Pause-mid-gate double-increment: idempotent per-denial-epoch upsert or documented inflation, implementation-defined within FR-13/AC-6.6.
 - **O5–O9** — fast-follow / pre-flip notes handled in `phase6-fastfollow-plan.md`.
 

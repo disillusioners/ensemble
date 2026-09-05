@@ -1347,7 +1347,14 @@ class InstanceLifecycleService:
         else:
             metadata = registry.get_version(resolved_agent_id, None)
             if metadata is None:
-                metadata = registry.get(resolved_agent_id)
+                # Audit-fold N2 (2026-09-05): use ``get_resolved`` here to
+                # match the restore site + the blueprint rule "all meta
+                # lookups MUST use ``get_version()`` w/ fallback to
+                # ``get_resolved()``". Logging-field-only impact (the
+                # same metadata is returned when ``AGENT_ID_ALIASES`` is
+                # empty — current state); the canonical call shape
+                # future-proofs against future aliases.
+                metadata = registry.get_resolved(resolved_agent_id)
         if metadata is None:
             raise ValueError(f"Agent not found: {resolved_agent_id}")
         resolved_agent_dir = str(metadata.path)
