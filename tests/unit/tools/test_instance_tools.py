@@ -985,7 +985,7 @@ class TestReviveOnceGuard:
 #
 # Matrix:
 #   a) COMPLETED → revive #1 → completes → revive #2 ALLOWED
-#      (regression case from today's incident: giter c3908e36 pattern)
+#      (regression case from today's incident: git c3908e36 pattern)
 #   b) COMPLETED revive leaves counter at 0
 #   c) ERROR → revive (consumes) → terminal again → second revive REFUSED
 #   d) FAILED prior consumes (covered by existing tests test_t1..t3)
@@ -1014,7 +1014,7 @@ class TestReviveOnceGuardScope:
         """Matrix (a) — regression case: child COMPLETED twice → both
         agent-tool revives GRANTED, counter stays at 0 across the pair.
 
-        This is the regression from today's incident (giter c3908e36
+        This is the regression from today's incident (git c3908e36
         pattern): a child that completes cleanly and is reused should
         NOT burn the failure-revive budget on a follow-up turn.
         """
@@ -1088,6 +1088,8 @@ class TestReviveOnceGuardScope:
         kind — including a later COMPLETED / TERMINATED — are refused
         by the stale counter (the accepted-edge case documented in
         ``InstanceManager._agent_tool_revive_counts``'s block comment).
+        (Real-counter end-to-end variant of this chain:
+        ``test_accepted_edge_real_manager_counter_through_send_path``.)
         """
         # Phase 1: child is ERROR — first revive consumes.
         with patch(
@@ -1287,15 +1289,20 @@ class TestReviveOnceGuardScope:
         from daemon.manager import InstanceManager
 
         class _RealCounterBareManager(InstanceManager):
-            """Bare ``InstanceManager`` (skips ``__init__``): the
+            """Bare ``InstanceManager`` (skips ``InstanceManager.__init__``
+            — defines its own minimal ``__init__``): the
             counter methods + ``_agent_tool_revive_counts`` are the REAL
             inherited production surface; ONLY attribute misses
             (transport infra the factory / post-enqueue path touches)
             fall back to auto-``MagicMock`` via ``__getattr__``. Real
-            attributes and properties always win — including the
-            read-only ``engine`` / ``write_guard`` properties, whose
-            internal ``self._engine`` / ``self._write_guard`` misses
-            resolve to mocks."""
+            attributes always win. Class-level ``@property`` getters are
+            found by normal lookup — ``__getattr__`` is bypassed for
+            their names, and an ``AttributeError`` raised inside a
+            getter propagates rather than re-entering ``__getattr__``;
+            the inherited read-only ``engine`` / ``write_guard``
+            properties work here because their internal
+            ``self._engine`` / ``self._write_guard`` misses fall through
+            to ``__getattr__`` inside the getter."""
 
             def __init__(self) -> None:
                 # Deliberately does NOT call InstanceManager.__init__
@@ -1342,6 +1349,9 @@ class TestReviveOnceGuardScope:
             assert "revived and message dispatched" in first, (
                 f"Expected revival prefix; got: {first!r}"
             )
+            # House pattern (11 sibling sites): the dispatch actually
+            # went through the enqueue path exactly once.
+            real_manager.enqueue_message.assert_awaited_once()
             # The REAL dict holds the consume — not a stub side_effect.
             assert real_manager._agent_tool_revive_counts == {"child-1": 1}
             assert real_manager.get_agent_tool_revive_count("child-1") == 1

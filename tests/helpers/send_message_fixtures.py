@@ -141,7 +141,12 @@ def make_send_message_manager(*, status: str) -> MagicMock:
         # non-consuming set — it falls through and CONSUMES, mirroring
         # production's fail-closed fallback for the defensive default.
         # Mirrors ``InstanceManager.note_agent_tool_revive`` exactly.
-        if prior_status is not None and prior_status not in ("error", "failed"):
+        from daemon.repositories.instance.models import InstanceStatus
+
+        if prior_status is not None and prior_status not in (
+            InstanceStatus.ERROR.value,
+            InstanceStatus.FAILED.value,
+        ):
             return revive_counts.get(instance_id, 0)
         revive_counts[instance_id] = revive_counts.get(instance_id, 0) + 1
         return revive_counts[instance_id]

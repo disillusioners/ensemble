@@ -755,23 +755,14 @@ class InstanceManager:
         # revive path (``daemon/services/instance_messaging.py``) never
         # touches it.
         #
-        # SCOPE (feature/fix-revive-guard-scope, user-decided semantics):
-        # the counter is only CONSUMED by revives whose prior status is
-        # ``ERROR`` or ``FAILED`` (failure revives). Revives from
-        # ``COMPLETED`` or ``TERMINATED`` (the "non-failure" terminal
-        # states) are GRANTED but do NOT increment the counter — they
-        # are normal follow-up turns on a successful / cleanly-stopped
-        # child, not failure revives, and treating them as revive
-        # attempts would burn the one allowed error-revive budget.
-        # The refusal check (``get_agent_tool_revive_count`` >= 1) stays
-        # unchanged — the bound only kicks in once a real ERROR / FAILED
-        # revive has consumed the budget. ACCEPTED EDGE: a child whose
-        # first revive was an ERROR-revive (consumed) and later transitions
-        # to ``COMPLETED`` keeps the stale counter — a subsequent
-        # ``COMPLETED`` revive attempt is refused. This preserves
-        # "one revive per error child" (RECOVERY_GUIDANCE_HINT parity)
-        # and is INTENTIONAL; do NOT widen the clear-on-success path
-        # here without a spec change.
+        # SCOPE (fix-revive-guard-scope, 2026-09-05): single-sourced on
+        # the canonical "REVIVE-ONCE GUARD (quick-win #7, scoped)" block
+        # at the ``send_message`` terminal-revive call site in
+        # ``daemon/tools/instance.py``. Mental model: the counter is a
+        # FAILURE-revive budget — ERROR / FAILED prior consumes;
+        # COMPLETED / TERMINATED are free follow-ups; a burned budget
+        # refuses every later agent-tool revive (accepted-edge,
+        # INTENTIONAL).
         # Full contract on the accessor methods below.
         self._agent_tool_revive_counts: dict[str, int] = {}
 
@@ -2766,15 +2757,14 @@ class InstanceManager:
     # is refused on the second attempt with the same wording as
     # ``send_message``'s refusal (W1).
     #
-    # SCOPE (feature/fix-revive-guard-scope, user-decided semantics —
-    # 2026-09-05): only revives whose PRIOR status is ``ERROR`` or
-    # ``FAILED`` CONSUME the budget; revives from ``COMPLETED`` /
-    # ``TERMINATED`` are GRANTED without incrementing. The refusal
-    # check (``get_agent_tool_revive_count`` >= 1) is unchanged — once
-    # a real failure revive has consumed the budget, the next agent-tool
-    # revive of any terminal kind is refused. The user-API path stays
-    # uncounted and unblocked. See :meth:`note_agent_tool_revive` for
-    # the full call-site contract.
+    # SCOPE (fix-revive-guard-scope, 2026-09-05): single-sourced on the
+    # canonical "REVIVE-ONCE GUARD (quick-win #7, scoped)" block at the
+    # ``send_message`` terminal-revive call site in
+    # ``daemon/tools/instance.py``. Mental model: the counter is a
+    # FAILURE-revive budget — ERROR / FAILED prior consumes,
+    # COMPLETED / TERMINATED are free follow-ups, and the user-API path
+    # stays uncounted and unblocked. See :meth:`note_agent_tool_revive`
+    # for the call-site contract.
 
     def get_agent_tool_revive_count(self, instance_id: str) -> int:
         """Return the cumulative agent-tool revive count for ``instance_id``.
@@ -2824,30 +2814,19 @@ class InstanceManager:
         (``daemon/services/instance_messaging.py``) must NEVER call
         this; user-API revives stay uncounted and unblocked.
 
-        SCOPE (feature/fix-revive-guard-scope, 2026-09-05 — user-decided
-        semantics):
-          * ``prior_status in {"error", "failed"}`` → CONSUMING revive.
-            Counter is incremented (0→1 on first, 1→2 on second, etc.)
-            and the grant log records ``"#N consumed"``.
-          * ``prior_status in {"completed", "terminated"}`` → NON-CONSUMING
-            revive. Counter is NOT incremented (stays at 0 for a fresh
-            child, stays at the prior value for a child that has already
-            burned its budget). The grant log records
-            ``"[ReviveGuard] Agent-tool revive granted (non-consuming,
-            prior=<status>) ... counter=<current>"`` (no ``#N`` prefix)
-            so future audits can grep
-            "agent-tool grant but no budget burn".
-          * ``prior_status is None`` (defensive default — old call sites)
-            → falls back to the prior "always consume" behavior, which
-            is the v1 contract; production call sites always pass an
-            explicit value post-fix, so the fallback only fires for
-            stale test harnesses. New callers SHOULD pass ``prior_status``
-            explicitly.
-          * IN-MEMORY ONLY — daemon restart resets the counter (v1).
-          * CUMULATIVE per child — never reset on success, completion,
-            or a later terminal transition (preserves "one revive per
-            error child"; the ACCEPTED EDGE note in the counter-storage
-            block above documents the intentional scope).
+        SCOPE (fix-revive-guard-scope, 2026-09-05): single-sourced on
+        the canonical "REVIVE-ONCE GUARD (quick-win #7, scoped)" block
+        at the ``send_message`` terminal-revive call site in
+        ``daemon/tools/instance.py``. Mental model: the counter is a
+        FAILURE-revive budget — a ``prior_status`` of ERROR / FAILED
+        consumes it, COMPLETED / TERMINATED are free follow-ups, a
+        burned budget refuses every later agent-tool revive, and a
+        ``None`` ``prior_status`` falls back to the v1 always-consume.
+
+        Grant-log formats (verbatim, for log-grep audits — placeholders
+        shown as the f-string expressions that render them):
+          * consuming: ``"[ReviveGuard] Agent-tool revive #{count} granted (consumed, prior={prior_status or 'unknown'}) for instance {instance_id[:8]}..."``
+          * non-consuming: ``"[ReviveGuard] Agent-tool revive granted (non-consuming, prior={prior_status}) for instance {instance_id[:8]}... counter={current}"``
 
         Like the ``_pending_injections`` helpers these methods are
         synchronous and ``await``-free, relying on cooperative
@@ -2873,7 +2852,8 @@ class InstanceManager:
             grants.
         """
         # SCOPE gate — only failure-prior revives consume the budget.
-        # See the docstring above for the full semantics.
+        # See the SCOPE pointer above / the canonical call-site block in
+        # ``daemon/tools/instance.py`` for the full semantics.
         if prior_status is not None and prior_status not in (
             InstanceStatus.ERROR.value,
             InstanceStatus.FAILED.value,

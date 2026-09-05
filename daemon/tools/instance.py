@@ -2999,16 +2999,11 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         # has actually happened. A transient ``enqueue_message`` exception
         # above leaves the child eligible for a future revive attempt.
         #
-        # SCOPE (feature/fix-revive-guard-scope, 2026-09-05): only
-        # revives whose prior status is ERROR / FAILED consume the
-        # per-child budget. COMPLETED / TERMINATED revives are GRANTED
-        # but do NOT increment the counter — they are normal follow-up
-        # turns on a successful / cleanly-stopped child, not failure
-        # revives. ``prior_status`` is the routing helper's authoritative
-        # snapshot of the child's terminal status at the moment of
-        # routing; passing it through keeps the gate in
-        # ``InstanceManager.note_agent_tool_revive`` semantically aligned
-        # with this call site (no status re-read, no race window).
+        # SCOPE (fix-revive-guard-scope, 2026-09-05): single-sourced on
+        # the canonical "REVIVE-ONCE GUARD (quick-win #7, scoped)" block
+        # above. Mental model: a FAILURE-revive budget — ERROR / FAILED
+        # prior consumes; ``prior_status`` flows from the routing
+        # snapshot so the gate decides without a status re-read.
         if routed_via == "enqueue-revive":
             manager.note_agent_tool_revive(
                 instance_id, prior_status=prior_status
@@ -3111,22 +3106,18 @@ status at the moment of invocation:
     result pre-pends ``"Instance was {prior_status} — revived and
     message dispatched."``
     REVIVE-ONCE GUARD (quick-win #7, scoped — feature/fix-revive-guard-scope
-    2026-09-05): only revives whose prior status is ``ERROR`` or
-    ``FAILED`` CONSUME the manager's per-child revive counter; revives
-    from ``COMPLETED`` or ``TERMINATED`` are GRANTED without incrementing
-    (they are normal follow-up turns on a successful / cleanly-stopped
-    child, not failure revives). The manager keeps an in-memory
-    cumulative counter keyed by child instance id — a daemon restart
-    resets it, and the user-API revive path neither increments it nor is
-    blocked by it (agent-tool path only). Once a real ERROR / FAILED
-    revive has consumed the budget (counter >= 1), the next agent-tool
-    revive attempt of ANY terminal kind is refused with guidance to
-    spawn a replacement (mirroring ``RECOVERY_GUIDANCE_HINT`` semantics)
-    and dispatches nothing. The accepted-edge case (a child whose first
-    revive was an ERROR-revive that consumed the budget, which later
-    transitions to ``COMPLETED`` — a subsequent ``COMPLETED`` revive is
-    still refused by the stale counter) is INTENTIONAL; it preserves
-    "one revive per error child".
+    2026-09-05; full semantics single-sourced on the manager's
+    ``note_agent_tool_revive`` revive-guard): the counter is a
+    FAILURE-revive budget — an in-memory cumulative counter keyed by
+    child instance id (a daemon restart resets it; agent-tool path
+    only). Mental model: only ERROR / FAILED prior revives consume it;
+    COMPLETED / TERMINATED revives are free follow-up turns; once a
+    real failure revive has burned the budget, the next agent-tool
+    revive attempt of any terminal kind is refused (spawn a
+    replacement); the user-API enqueue path neither increments the
+    counter nor is blocked by it; the stale-counter refusal after a
+    later COMPLETED transition is INTENTIONAL (one revive per error
+    child).
 
   * ``IDLE`` / ``WAITING`` / ``QUEUED`` (and any other non-eligible
     non-terminal state) → ENQUEUE parity with the pre-Phase 1

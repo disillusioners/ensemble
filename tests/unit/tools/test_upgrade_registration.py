@@ -317,6 +317,45 @@ class TestDocsDefaultDeny:
     """The help/loader docs carry-in must not advertise privileged tools to
     agents that cannot call them (the system-prompt side of R-SR16)."""
 
+    @pytest.fixture(autouse=True)
+    def _ensure_upgrade_category_populated(self):
+        """Make this class's process-global registry reads deterministic.
+
+        The 4 ``system_upgrade`` tools are factory-created — they are NOT
+        import-time registered, so ``_tool_metadata`` (the process-global
+        singleton behind ``list_tools_by_category()``) only carries the
+        category after some test in THIS pytest worker has run the REAL
+        ``create_instance_tools()`` end-of-build
+        ``scan_tools_for_full_docs(tools)`` (``daemon/tools/instance.py``,
+        unpatched). Under ``-n auto`` the dynamic scheduler can land this
+        class on a worker whose predecessors never did (the two-file
+        suite reads the singleton directly; solo runs only pass because
+        ``TestFunctionalRegistration`` happens to precede it in file
+        order) — manifesting as ``KeyError: 'system_upgrade'`` /
+        category-name-as-literal-tool leakage. Observed 2026-09-05 as the
+        branch-correlated ``regression_unit_tools`` 2/4 flake
+        (feature/fix-revive-guard-scope round 3): the branch's added
+        instance-tools tests shifted the worker fill, exposing the latent
+        missing-isolation defect; nothing was mutated.
+
+        Fix: probe the singleton and, when the category is absent, run
+        ONE real factory build (the same mechanism
+        ``TestFunctionalRegistration`` uses) so the canonical entries
+        exist before any read. Idempotent + additive — the entries are
+        byte-identical to what production boot writes
+        (``validate_tool_configs`` / ``_ensure_tool_metadata_populated``),
+        so leaving them populated matches a booted daemon and needs no
+        teardown.
+        """
+        from daemon.tools._tool_registry import list_tools_by_category
+
+        if UPGRADE_CATEGORY not in list_tools_by_category():
+            _build_instance_tools("docs-default-deny-bootstrap")
+        assert UPGRADE_CATEGORY in list_tools_by_category(), (
+            "system_upgrade category must be registered in the global "
+            "_tool_metadata singleton after a real factory build"
+        )
+
     @pytest.fixture
     def staged(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         def _stage(agent_id: str, tools_cfg: dict | None) -> None:

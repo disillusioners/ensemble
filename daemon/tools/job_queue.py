@@ -1336,16 +1336,15 @@ def create_job_tools(
             #     flow. A transient ``enqueue_message_job`` exception
             #     above leaves the child eligible for a future attempt.
             #
-            #     SCOPE (feature/fix-revive-guard-scope, 2026-09-05):
-            #     ``instance_meta.status`` is FAILED here by definition
-            #     (the W1 gate guards on ``InstanceStatus.FAILED.value``),
-            #     so this branch ALWAYS passes ``prior_status="failed"``
-            #     to ``note_agent_tool_revive`` — a consuming revive.
-            #     We pass it explicitly so the gate in
-            #     ``InstanceManager.note_agent_tool_revive`` can emit a
-            #     truthful grant log without re-reading status, and so
-            #     the consume-vs-non-consume decision stays in one place
-            #     (the manager) regardless of which tool called it.
+            #     SCOPE (fix-revive-guard-scope, 2026-09-05):
+            #     single-sourced on the canonical "REVIVE-ONCE GUARD
+            #     (quick-win #7, scoped)" block in
+            #     ``daemon/tools/instance.py``. Mental model: a
+            #     FAILURE-revive budget; this branch always passes
+            #     ``prior_status="failed"`` (the W1 gate already guards
+            #     on ``InstanceStatus.FAILED.value``) so the
+            #     consume-vs-non-consume decision stays in the manager
+            #     without a status re-read.
             if instance_meta.status == InstanceStatus.FAILED.value:
                 manager.note_agent_tool_revive(
                     instance_id, prior_status=InstanceStatus.FAILED.value
