@@ -166,8 +166,32 @@ def serialize_message(msg, tool_outputs: dict | None = None, message_id: str | N
                     "output": tool_outputs.get(tc_id),
                 })
     
+    # Message ids are part of the persisted identity contract.  Older
+    # call-sites can still construct an id-less message, so when the
+    # serializer has to mint an id, write it back to the message as well.
+    # Otherwise two reads of the same in-memory message would produce two
+    # different ids (and an SSE echo could not be joined to GET /messages).
+    resolved_message_id = (
+        str(message_id) if message_id else getattr(msg, 'id', None)
+    )
+    if not resolved_message_id:
+        resolved_message_id = str(uuid.uuid4())
+        try:
+            msg.id = resolved_message_id
+        except (AttributeError, TypeError) as exc:
+            # Serialization remains usable for immutable/duck-typed message
+            # objects; normal LangChain BaseMessage instances are mutable.
+            # DEBUG-only: silent write-back failures used to be invisible.
+            # Surfacing the failure here turns a debugging dead-end
+            # ("why does the same message surface two different ids?")
+            # into a fast trace without changing the user-facing shape.
+            logger_utils.debug(
+                f"[serialize_message] could not write back minted id on "
+                f"{type(msg).__name__}: {type(exc).__name__}: {exc}"
+            )
+
     serialized = {
-        "message_id": str(message_id) if message_id else getattr(msg, 'id', None) or str(uuid.uuid4()),
+        "message_id": resolved_message_id,
         "type": msg.type,
         "role": role,
         "content": content_str,

@@ -3686,6 +3686,7 @@ def create_agent_node(
                     )
                 report_msg = HumanMessage(
                     content=_frame_injected_report(report_content),
+                    id=str(uuid.uuid4()),
                     additional_kwargs=report_extra_kwargs,
                 )
                 full_messages.append(report_msg)

@@ -281,15 +281,27 @@ describe('mergeMessagesById (union-by-id)', () => {
       }),
     ];
     const merged = mergeMessagesById([localProvisional], serverView);
-    expect(merged.map(m => m.message_id)).toEqual(['older-1', 'echo-local']);
+    // Preservation is the contract; ORDER is arrival-based (no
+    // created_at re-sort): the provisional stays at its append
+    // position and the not-yet-known server row appends after it.
+    // (A history-after-provisional sequence only occurs in the
+    // send-races-initial-load race; it heals on the next replace-mode
+    // load.)
+    expect(merged.map(m => m.message_id)).toEqual(['echo-local', 'older-1']);
     expect(merged.find(m => m.message_id === 'echo-local')?.pending).toBe(true);
   });
 
-  it('should sort by created_at after merging', () => {
+  it('appends a new row in arrival position — NO created_at re-sort (order contract, 2026-09-05)', () => {
+    // CONTRACT CHANGE (stale-message fix): the merge used to re-sort
+    // the whole transcript by ``created_at``. Server stamps for
+    // metadata-less checkpoint rows are unstable, so that re-sort let
+    // history time-travel. Order is now array-order-based: existing
+    // order preserved, genuinely-new rows appended — even when the new
+    // row's stamp is EARLIER than existing rows'.
     const existing = [makeMessage({ message_id: 'b', created_at: '2026-08-30T12:00:00Z' })];
     const incoming = [makeMessage({ message_id: 'a', created_at: '2026-08-30T11:00:00Z' })];
     const merged = mergeMessagesById(existing, incoming);
-    expect(merged.map(m => m.message_id)).toEqual(['a', 'b']);
+    expect(merged.map(m => m.message_id)).toEqual(['b', 'a']);
   });
 
   it('should not mutate the inputs', () => {
@@ -376,6 +388,128 @@ describe('mergeMessagesById — single-document compaction doc (compaction-outpu
       makeMessage({ message_id: 'u-3', created_at: '2026-08-30T11:02:00Z' }),
     ]);
     expect(merged.map(m => m.message_id)).toEqual(['u-1', 'compaction-global-inst-1-3', 'u-2', 'u-3']);
+  });
+});
+
+describe('mergeMessagesById — merge order (stale-message fix, 2026-09-05)', () => {
+  // Post-send ordering contract: transcript order is the server's ARRAY
+  // order (checkpoint order), captured at seed time, plus arrival-order
+  // appends. ``created_at`` NEVER drives position — the backend
+  // re-stamps metadata-less checkpoint messages with the latest
+  // checkpoint-commit time on every read (a moving value), which the
+  // previous full-transcript re-sort turned into history time-travel.
+
+  it('preserves server array order through a post-send refetch — an old row re-stamped LATER than the new message must NOT jump above it', () => {
+    // THE regression: local list seeded from GET (server array order),
+    // user sends d, refetch returns b with a re-stamped created_at
+    // (latest checkpoint commit — later than d's stamp). The old
+    // re-sort placed b directly above d; the merge must upsert in
+    // place instead.
+    const local = [
+      makeMessage({ message_id: 'a', created_at: '2026-08-30T10:00:00Z' }),
+      makeMessage({ message_id: 'b', created_at: '2026-08-30T10:05:00Z' }),
+      makeMessage({ message_id: 'c', created_at: '2026-08-30T10:10:00Z' }),
+      makeMessage({ message_id: 'd', created_at: '2026-08-30T12:00:00Z' }),
+    ];
+    const refetch = [
+      makeMessage({ message_id: 'a', created_at: '2026-08-30T11:58:00Z' }), // re-stamped
+      makeMessage({ message_id: 'b', created_at: '2026-08-30T11:59:59Z' }), // re-stamped LATER than d
+      makeMessage({ message_id: 'c', created_at: '2026-08-30T11:59:00Z' }), // re-stamped
+      makeMessage({ message_id: 'd', created_at: '2026-08-30T12:00:00Z' }),
+      makeMessage({ message_id: 'e', created_at: '2026-08-30T12:01:00Z' }), // new row
+    ];
+    const merged = mergeMessagesById(local, refetch);
+    // Array order untouched by the unstable stamps; e appends at the end.
+    expect(merged.map(m => m.message_id)).toEqual(['a', 'b', 'c', 'd', 'e']);
+  });
+
+  it('appends genuinely-new unknown rows in incoming array order', () => {
+    const local = [makeMessage({ message_id: 'a', created_at: '2026-08-30T10:00:00Z' })];
+    const incoming = [
+      makeMessage({ message_id: 'x', created_at: '2026-08-30T10:05:00Z' }),
+      makeMessage({ message_id: 'y', created_at: '2026-08-30T10:03:00Z' }), // stamps not monotonic
+      makeMessage({ message_id: 'a', created_at: '2026-08-30T10:00:00Z' }), // known — upserts in place
+    ];
+    const merged = mergeMessagesById(local, incoming);
+    expect(merged.map(m => m.message_id)).toEqual(['a', 'x', 'y']);
+  });
+
+  it('095156b4 semantics preserved: provisional → SSE echo → refetch keeps ONE confirmed bubble in its send position', () => {
+    // Full post-send sequence ON TOP of the quick-display feature:
+    // 1. optimistic append (pending provisional at the end of history),
+    // 2. SSE echo with the same id (spinner cleared — MIN-1b / TOCTOU
+    //    contract intact),
+    // 3. refetch re-stamps every row later (moving checkpoint stamps).
+    // Outcome: exactly one bubble, confirmed (no resurrection), stable
+    // displayed stamp, position never moves.
+    const sendStamp = '2026-08-30T12:00:00Z';
+    const provisional = makeProvisionalMessage({
+      messageId: 'echo-1',
+      content: 'hello',
+      createdAt: sendStamp,
+      instanceId: 'inst-1',
+    });
+    const history = [
+      makeMessage({ message_id: 'h1', created_at: '2026-08-30T11:00:00Z' }),
+      makeMessage({ message_id: 'h2', created_at: '2026-08-30T11:30:00Z' }),
+    ];
+
+    // Step 1: optimistic append lands at the end of the seeded history.
+    const afterSend = mergeMessagesById(history, [provisional]);
+    expect(afterSend.map(m => m.message_id)).toEqual(['h1', 'h2', 'echo-1']);
+    expect(afterSend[2].pending).toBe(true);
+
+    // Step 2: SSE echo collapses onto the provisional (same id) and
+    // clears the spinner.
+    const afterEcho = mergeMessagesById(afterSend, [
+      makeMessage({ message_id: 'echo-1', content: 'hello', created_at: sendStamp }),
+    ]);
+    expect(afterEcho).toHaveLength(3);
+    expect(afterEcho[2].pending).toBeUndefined();
+    expect(afterEcho.map(m => m.message_id)).toEqual(['h1', 'h2', 'echo-1']);
+
+    // Step 3: refetch re-stamps EVERY row (moving checkpoint stamps,
+    // which in the real system move FORWARD — commit time is always
+    // later). Still one confirmed bubble, send position, stable stamp.
+    const afterRefetch = mergeMessagesById(afterEcho, [
+      makeMessage({ message_id: 'h1', created_at: '2026-08-30T11:59:00Z' }),
+      makeMessage({ message_id: 'h2', created_at: '2026-08-30T11:59:30Z' }),
+      makeMessage({ message_id: 'echo-1', content: 'hello', created_at: '2026-08-30T12:30:00Z' }),
+    ]);
+    expect(afterRefetch.map(m => m.message_id)).toEqual(['h1', 'h2', 'echo-1']);
+    expect(afterRefetch[2].pending).toBeUndefined();
+    // earlierOf keeps the earliest-seen stamp — the displayed send time
+    // does not chase the forward-moving checkpoint stamp.
+    expect(afterRefetch[2].created_at).toBe(sendStamp);
+  });
+
+  it('earlierOf pinning cannot freeze a wrong POSITION from unstable timestamps — order is array-derived', () => {
+    // Under the old regime a wrong-derived stamp FROZE a wrong sorted
+    // position (earlierOf pinned it there). With array-order semantics
+    // the stamp only affects the displayed time: repeatedly merging
+    // rows whose stamps wander (forward AND backward, including
+    // future-dated garbage that lexicographically sorts past
+    // everything) must leave every position untouched.
+    let list: Message[] = [
+      makeMessage({ message_id: 'a', created_at: '2026-08-30T10:00:00Z' }),
+      makeMessage({ message_id: 'b', created_at: '2026-08-30T10:05:00Z' }),
+    ];
+    const wanderingStamps: Array<[string, string]> = [
+      ['2026-08-30T13:00:00Z', '2026-08-30T09:00:00Z'],
+      ['2027-01-01T00:00:00Z', '2026-08-30T12:00:00Z'],
+      ['2026-08-30T10:30:00Z', '2029-12-31T23:59:59Z'],
+    ];
+    for (const [stampA, stampB] of wanderingStamps) {
+      list = mergeMessagesById(list, [
+        makeMessage({ message_id: 'a', created_at: stampA }),
+        makeMessage({ message_id: 'b', created_at: stampB }),
+      ]);
+      expect(list.map(m => m.message_id)).toEqual(['a', 'b']);
+    }
+    // Stamps stabilized at the earliest-seen value (display-only;
+    // the backward wander self-corrected b's displayed time).
+    expect(list[0].created_at).toBe('2026-08-30T10:00:00Z');
+    expect(list[1].created_at).toBe('2026-08-30T09:00:00Z');
   });
 });
 

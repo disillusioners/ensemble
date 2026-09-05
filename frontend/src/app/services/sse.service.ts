@@ -222,9 +222,16 @@ export class SseService {
 
   /**
    * Append or update a message in the list with deduplication by message_id.
-   * Messages are sorted by created_at to maintain correct chronological order.
-   * Also flushes any pending tool_result outputs that match tool_calls in the
-   * upserted message, then clears the buffer for the consumed tool_call_ids.
+   * Existing rows are replaced IN PLACE; new rows append in ARRIVAL order
+   * (arrival order = emission order = checkpoint order). The list is
+   * deliberately NOT re-sorted by ``created_at`` (stale-message fix,
+   * 2026-09-05): server stamps for metadata-less checkpoint messages are
+   * unstable — re-stamped with the latest checkpoint-commit time — so a
+   * re-sort would let old rows time-travel around freshly arrived ones.
+   * Consumers reading the last element ("most recent arrival") rely on
+   * this append semantics. Also flushes any pending tool_result outputs
+   * that match tool_calls in the upserted message, then clears the buffer
+   * for the consumed tool_call_ids.
    */
   private upsertMessage(message: Message): void {
     if (message.tool_calls && message.tool_calls.length > 0) {
@@ -244,8 +251,9 @@ export class SseService {
       } else {
         result = [...msgs, message];
       }
-      // Sort by created_at to maintain correct chronological order
-      result.sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
+      // NO ``created_at`` re-sort: unstable checkpoint re-stamps must
+      // not reorder history (see the doc comment above). The chat
+      // component's ``mergeMessagesById`` mirrors this contract.
       return result;
     });
   }

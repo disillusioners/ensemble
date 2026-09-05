@@ -6,8 +6,9 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from langchain_core.messages import HumanMessage
 
-from daemon.utils import parse_utc_datetime
+from daemon.utils import parse_utc_datetime, serialize_message
 
 
 class TestParseUtcDatetime:
@@ -193,3 +194,11 @@ class TestInvokeAgentAndWaitRouting:
         assert "spawn refused by guard" not in caplog.text
         # Generic error log line MUST fire on this path.
         assert "invoke_agent_and_wait failed" in caplog.text
+
+
+def test_serialize_message_mints_id_once_for_idless_message():
+    """An id-less message keeps one identity across repeated reads."""
+    message = HumanMessage(content="context")
+    first = serialize_message(message)
+    second = serialize_message(message)
+    assert first["message_id"] == second["message_id"] == message.id

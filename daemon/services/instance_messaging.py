@@ -3806,6 +3806,11 @@ class InstanceMessagingService:
             leftover_fifo_msgs.append(
                 HumanMessage(
                     content=entry.get("content", ""),
+                    # FIFO entries are persisted by the D2 seam drain. Give
+                    # them their identity before the entry tap runs so the
+                    # side-table row is recorded on this first checkpoint
+                    # entry (rather than falling back to state.ts).
+                    id=entry.get("echo_id") or str(uuid.uuid4()),
                     additional_kwargs=kwargs,
                 )
             )

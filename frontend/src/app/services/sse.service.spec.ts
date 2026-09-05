@@ -88,9 +88,11 @@ class TestSseService {
   ]);
 
   /**
-   * Id-keyed upsert with sort by ``created_at`` — the canonical merge
-   * behavior the SSE mirror effect relies on (mirrors
-   * ``SseService.upsertMessage``).
+   * Id-keyed upsert with ARRIVAL-ORDER append — existing rows are
+   * replaced in place, new rows append at the end, NO ``created_at``
+   * re-sort (mirrors ``SseService.upsertMessage``; stale-message fix
+   * 2026-09-05: unstable checkpoint re-stamps must not reorder
+   * history).
    */
   private upsertMessage(message: Message): void {
     this.messages.update(msgs => {
@@ -102,7 +104,6 @@ class TestSseService {
       } else {
         result = [...msgs, message];
       }
-      result.sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
       return result;
     });
   }
@@ -698,8 +699,10 @@ describe('SseService', () => {
    * ("dedup collapse: POST-echo + drain-echo same id → single
    * bubble with POST created_at").
    *
-   * The SSE-side contract here is the id-keyed upsert with sort by
-   * ``created_at``. The chat component's merge contract (clears the
+   * The SSE-side contract here is the id-keyed upsert with
+   * arrival-order append (NO ``created_at`` re-sort — unstable
+   * checkpoint re-stamps must not reorder history; stale-message fix
+   * 2026-09-05). The chat component's merge contract (clears the
    * ``pending`` flag, preserves local-only entries) is exercised in
    * ``message-merge.util.spec.ts`` because it's a pure function.
    */
@@ -760,6 +763,40 @@ describe('SseService', () => {
       const msgs = service.messages();
       expect(msgs.length).toBe(2);
       expect(msgs.map(m => m.message_id)).toEqual(['a', 'b']);
+    });
+
+    it('preserves ARRIVAL order regardless of created_at (no re-sort — unstable checkpoint stamps)', () => {
+      // Stale-message fix (2026-09-05): the upsert used to re-sort by
+      // ``created_at``. Server stamps for metadata-less checkpoint
+      // rows are unstable (re-stamped with the latest checkpoint-commit
+      // time), so a re-sort could swap genuinely arrival-ordered rows.
+      // Arrival order (= emission order = checkpoint order) must win.
+      service.connect('instance-123');
+
+      // First arrival carries a LATER stamp; second arrival an
+      // EARLIER one.
+      service.getEventSource()?.simulateEvent('user_message', {
+        message: {
+          message_id: 'first',
+          role: 'user',
+          content: 'first',
+          created_at: '2024-01-01T02:00:00Z',
+          instance_id: 'instance-123',
+        },
+      });
+      service.getEventSource()?.simulateEvent('user_message', {
+        message: {
+          message_id: 'second',
+          role: 'user',
+          content: 'second',
+          created_at: '2024-01-01T01:00:00Z',
+          instance_id: 'instance-123',
+        },
+      });
+
+      const msgs = service.messages();
+      expect(msgs.length).toBe(2);
+      expect(msgs.map(m => m.message_id)).toEqual(['first', 'second']);
     });
   });
 });

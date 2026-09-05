@@ -94,8 +94,18 @@ def _make_agent(
     llm: Any | None = None,
     compactor: Any = None,
     graph_ref: Any = None,
+    message_tap_slot: Any | None = None,
+    report_injection_slot: Any | None = None,
 ):
-    """Build a fresh agent_node for a test, bypassing build_instance_graph."""
+    """Build a fresh agent_node for a test, bypassing build_instance_graph.
+
+    ``message_tap_slot`` threads the :class:`MessageTapSlot` handle into
+    the ``create_agent_node`` closure so tests can assert against the
+    ``message_metadata`` side-table writes the F2 single-return site
+    fires (``daemon/graph.py:4196-4209``). ``report_injection_slot``
+    is the duck-typed ``drain(instance_id) -> list[dict]`` handle used
+    by the child-report pre-LLM drain (``daemon/graph.py:3642-3693``).
+    """
     from daemon.graph import create_agent_node
 
     if llm is None:
@@ -116,7 +126,9 @@ def _make_agent(
         retry_config={"transient_attempts": 1, "timeout_attempts": 1},
         llm_standard=None,
         injection_slot=injection_slot,
+        report_injection_slot=report_injection_slot,
         live_hub=live_hub,
+        message_tap_slot=message_tap_slot,
     )
     return agent_node, llm
 
@@ -872,3 +884,230 @@ class TestDrainEchoId:
             "injected_message": True,
             "source": "internal_agent:caller-1",
         }
+
+    @pytest.mark.asyncio
+    async def test_echo_id_entry_tap_writes_metadata_row(self):
+        """Acceptance criterion (2) — tap-firing proof: the
+        ``message_metadata`` side-table tap at the F2 single-return
+        site (``daemon/graph.py:4196-4209``) MUST record a row for a
+        FIFO entry that carries ``echo_id``, and the recorded id MUST
+        equal the FIFO entry's ``echo_id`` (NOT a fresh uuid4 — that
+        would be the seam-drain identity regression the MAJ-1 fix
+        closed at the SSE layer).
+
+        Extends ``test_echo_id_entry_sets_human_message_id`` (which
+        asserted the LLM-bound HumanMessage.id): this test wires the
+        ``MessageTapSlot`` into ``create_agent_node`` via the
+        ``message_tap_slot`` parameter and asserts the side-table
+        write fired. Without this assertion, a regression that
+        mints a fresh uuid inside the tap (decoupled from the
+        drain's id) would slip past the existing LLM/SSE assertions.
+        """
+        from daemon.services.message_tap import (
+            MessageTapSlot,
+            SOURCE_AGENT_NODE_RETURN,
+        )
+
+        echo_id = "aabbccdd-1122-4333-8444-556677889900"
+        slot = _StubInjectionSlot(initial={
+            "iid-tap-echo": [{
+                "content": "stable id message",
+                "timestamp": "2026-08-30T00:00:00+00:00",
+                "echo_id": echo_id,
+            }],
+        })
+        metadata_repo = MagicMock()
+        metadata_repo.upsert_batch = MagicMock(return_value=1)
+        tap = MessageTapSlot(metadata_repo, SOURCE_AGENT_NODE_RETURN)
+        agent_node, _ = _make_agent(
+            injection_slot=slot, message_tap_slot=tap,
+        )
+
+        await agent_node(
+            {"messages": []},
+            config={"configurable": {"thread_id": "iid-tap-echo"}},
+        )
+
+        # Exactly one upsert_batch, threaded with (thread_id, [(id, ts, None)]).
+        metadata_repo.upsert_batch.assert_called_once()
+        args, _ = metadata_repo.upsert_batch.call_args
+        assert args[0] == "iid-tap-echo"
+        items = args[1]
+        assert isinstance(items, list) and len(items) >= 1
+        ids = [mid for mid, _ts, _seq in items]
+        # Identity contract: the tap records the drain's HumanMessage.id,
+        # which is the FIFO entry's echo_id (NOT a fresh uuid).
+        assert echo_id in ids
+        # Truthful first-seen ts: a non-empty ISO string from
+        # ``datetime.now(UTC).isoformat()`` inside MessageTapSlot —
+        # not the empty-string sentinel and not None.
+        for _mid, ts, seq in items:
+            assert isinstance(ts, str) and len(ts) > 0
+            assert seq is None
+
+    @pytest.mark.asyncio
+    async def test_no_echo_id_entry_tap_records_minted_uuid(self):
+        """Acceptance criterion (2) — tap-firing proof for the
+        tool-path (no ``echo_id``) seam-drain branch: the
+        ``message_metadata`` side-table tap MUST record the drain's
+        minted uuid4 (the same id the LLM-bound HumanMessage and
+        the SSE re-emit carry — see MAJ-1). Pre-MAJ-1, the drain
+        produced an id-less HumanMessage; the id-less shape
+        silently fell to the state.ts fallback on read, which
+        is exactly the bug the PR1 read-path fix is built around.
+
+        Extends ``test_no_echo_id_entry_mints_uuid_in_drain``:
+        the LLM/SSE layer is already pinned, but the side-table
+        write was never proven.
+        """
+        from daemon.services.message_tap import (
+            MessageTapSlot,
+            SOURCE_AGENT_NODE_RETURN,
+        )
+
+        slot = _StubInjectionSlot(initial={
+            "iid-tap-mint": [{"content": "tool msg", "timestamp": "ts"}],
+        })
+        metadata_repo = MagicMock()
+        metadata_repo.upsert_batch = MagicMock(return_value=1)
+        tap = MessageTapSlot(metadata_repo, SOURCE_AGENT_NODE_RETURN)
+        agent_node, llm = _make_agent(
+            injection_slot=slot, message_tap_slot=tap,
+        )
+
+        await agent_node(
+            {"messages": []},
+            config={"configurable": {"thread_id": "iid-tap-mint"}},
+        )
+
+        # The LLM-bound HumanMessage.id is the drain's minted uuid4.
+        drained_hm = llm.calls[0][-1]
+        assert isinstance(drained_hm, HumanMessage)
+        assert drained_hm.id is not None
+        minted = uuid.UUID(drained_hm.id)
+        assert minted.version == 4
+
+        # The tap must have written the SAME id (NOT a fresh uuid4
+        # — that would be a regression that decouples the side-table
+        # row from the SSE/LLM contract).
+        metadata_repo.upsert_batch.assert_called_once()
+        args, _ = metadata_repo.upsert_batch.call_args
+        assert args[0] == "iid-tap-mint"
+        items = args[1]
+        assert isinstance(items, list) and len(items) >= 1
+        ids = [mid for mid, _ts, _seq in items]
+        assert drained_hm.id in ids
+        for _mid, ts, seq in items:
+            assert isinstance(ts, str) and len(ts) > 0
+            assert seq is None
+
+
+# ---------------------------------------------------------------------------
+# Child-report injection — the DB-backed report drain at
+# ``daemon/graph.py:3642-3693`` stamps a uuid4 id on each
+# ``HumanMessage`` BEFORE the F2 single-return tap at :4196-4209 fires.
+# The id-stamp change (the ``+id=str(uuid.uuid4())`` line at
+# graph.py:3687-3692 in this branch) is the same correctness fix the
+# MAJ-1 / seam-drain branches already carry; this class proves the
+# side-table write also fires for child reports.
+# ---------------------------------------------------------------------------
+
+
+class _StubReportInjectionSlot:
+    """Duck-typed handle for the child-report drain.
+
+    The agent_node contract is only ``drain(instance_id) -> list[dict]``;
+    each dict must carry at least ``content`` (the report text) and
+    optionally ``child_instance_id`` (used for the
+    ``internal_report:<iid>`` source provenance).
+    """
+
+    def __init__(self, reports: list[dict[str, str]]):
+        self._reports = list(reports)
+        self.drain_calls: list[str] = []
+
+    def drain(self, instance_id: str) -> list[dict[str, str]]:
+        self.drain_calls.append(instance_id)
+        # Drain is single-shot: the production ``ReportInjectionSlot``
+        # atomically claims rows PENDING→INJECTED; the test surrogate
+        # just returns the prepared list and empties itself, mirroring
+        # the production contract.
+        drained, self._reports = self._reports, []
+        return drained
+
+
+class TestChildReportTapFires:
+    """Child-report pre-LLM drain writes a ``message_metadata`` row.
+
+    The pre-existing report-injection tests (e.g. ``test_message_
+    metadata_liveness_round_trip`` in
+    ``tests/unit/repositories/test_message_tap_to_repo_liveness.py``)
+    cover the in-memory repo, but no test in the corpus pins that the
+    ``agent_node`` closure at ``daemon/graph.py:3642-3693`` actually
+    gets the row through the F2 single-return tap. Without this, a
+    regression that drops the report's id (returns to pre-fix
+    id-less ``HumanMessage``) would slip past the existing
+    LLM/SSE/path tests.
+
+    The id-stamp at ``daemon/graph.py:3687-3692`` (the diff
+    ``+id=str(uuid.uuid4())`` on the child-report branch) is the
+    correctness hinge: the id is stamped BEFORE the F2 tap, so the
+    tap records the same id the LLM/SSE/path surfaces. Pre-fix
+    the report was id-less and the side-table row would either
+    carry an empty id (broken PK) or be skipped entirely.
+    """
+
+    @pytest.mark.asyncio
+    async def test_child_report_drain_writes_metadata_row(self):
+        from daemon.services.message_tap import (
+            MessageTapSlot,
+            SOURCE_AGENT_NODE_RETURN,
+        )
+
+        report_slot = _StubReportInjectionSlot(reports=[{
+            "content": "child finished with answer X",
+            "child_instance_id": "child-iid-1",
+            "report_message_id": "child-msg-1",
+        }])
+        metadata_repo = MagicMock()
+        metadata_repo.upsert_batch = MagicMock(return_value=1)
+        tap = MessageTapSlot(metadata_repo, SOURCE_AGENT_NODE_RETURN)
+        agent_node, llm = _make_agent(
+            report_injection_slot=report_slot,
+            message_tap_slot=tap,
+        )
+
+        await agent_node(
+            {"messages": []},
+            config={"configurable": {"thread_id": "iid-parent"}},
+        )
+
+        # Drain ran for the parent instance.
+        assert report_slot.drain_calls == ["iid-parent"]
+
+        # The LLM saw a HumanMessage carrying the report content AND
+        # the report's stamped uuid id (NOT None — the pre-fix shape).
+        llm_messages = llm.calls[0]
+        report_hm = next(
+            m for m in llm_messages
+            if isinstance(m, HumanMessage) and "child finished" in m.content
+        )
+        assert report_hm.id is not None
+        report_id = uuid.UUID(report_hm.id)
+        assert report_id.version == 4
+
+        # Tap fired: exactly one upsert_batch on the parent's thread_id.
+        metadata_repo.upsert_batch.assert_called_once()
+        args, _ = metadata_repo.upsert_batch.call_args
+        assert args[0] == "iid-parent"
+        items = args[1]
+        assert isinstance(items, list) and len(items) >= 1
+        ids = [mid for mid, _ts, _seq in items]
+        # The stamped id (NOT a fresh uuid4) is the row the side-table
+        # records — this is the LLM/SSE/side-table alignment the
+        # report-injection id-stamp at graph.py:3687-3692 closed.
+        assert report_hm.id in ids
+        for _mid, ts, seq in items:
+            assert isinstance(ts, str) and len(ts) > 0
+            assert seq is None
+

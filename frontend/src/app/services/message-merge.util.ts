@@ -40,10 +40,18 @@ export function isTerminalStatus(status: string | null | undefined): boolean {
  * earlier; when only one is truthy, return that one; when neither is
  * truthy (both empty / zero-like), return ``a`` so the merge stays
  * string-typed for ``Message.created_at``. Used by ``mergeMessagesById``
- * to keep the pre-refetch timestamp for confirmed entries (MIN-4) —
- * the GET re-stamp is later than the POST stamp, and re-sorting on
- * every refetch would push the bubble below inter-streamed assistant
- * messages.
+ * to stabilize the DISPLAYED stamp for confirmed entries (MIN-4): the
+ * GET re-stamp for metadata-less checkpoint rows is a moving value
+ * (latest checkpoint-commit time), and earliest-seen is the stablest
+ * available display heuristic.
+ *
+ * Positional note (stale-message fix, 2026-09-05): this helper has NO
+ * effect on list order. Transcript order is array-order-based
+ * everywhere (server seed + arrival appends); before this fix the
+ * helper co-existed with a full ``created_at`` re-sort it was pinning
+ * positions against — that re-sort is gone, so a wrong-derived stamp
+ * can no longer freeze a wrong position. It only affects what the
+ * bubble displays.
  */
 function earlierOf(a: string, b: string): string {
   if (a && b) return a <= b ? a : b;
@@ -62,8 +70,9 @@ function earlierOf(a: string, b: string): string {
  * The returned message is keyed by the server-minted id (which the
  * id-keyed dedup collapses onto when the POST-time ``user_message`` SSE
  * echo lands and the drain-time re-emit later) and carries the POST
- * timestamp so FE sort-by-``created_at`` keeps the bubble in send
- * position relative to mid-stream assistant messages (§6 edge case 1).
+ * timestamp for ``earlierOf`` display-stamp stabilization; send
+ * position is preserved by array-order semantics in
+ * ``mergeMessagesById`` (§6 edge case 1).
  */
 export function makeProvisionalMessage(input: {
   messageId: string;
@@ -96,8 +105,23 @@ export function makeProvisionalMessage(input: {
  * single canonical implementation across the REST and SSE paths and a
  * single unit-tested surface.
  *
+ * ORDERING (stale-message fix, 2026-09-05): the merged list preserves
+ * the EXISTING array order — server-known rows upsert IN PLACE,
+ * genuinely-new rows append at the end in incoming array order. There
+ * is NO ``created_at`` re-sort. The previous implementation re-sorted
+ * the whole transcript after every merge, which let UNSTABLE server
+ * stamps reorder history: the backend re-stamps metadata-less
+ * checkpoint messages with the latest checkpoint-commit time on every
+ * read (a moving value), so an old row could time-travel to directly
+ * above the freshly sent message — and a reload (server array order)
+ * would then disagree with what the user saw. Server ARRAY order is
+ * checkpoint order and is the authority; ``created_at`` is display
+ * metadata and must never drive position. (Trade-off: a locally
+ * scrambled order — possible only from a pre-fix session — heals on
+ * the next replace-mode load, not on merge.)
+ *
  * Top-level fields from ``incoming`` win on conflict (so SSE / server
- * can patch a tool_calls[].output in place), with two corrections:
+ * can patch a tool_calls[].output in place), with corrections:
  *
  * MIN-1b (pending-flag resurrection): the ``pending`` flag survives a
  * merge ONLY when BOTH copies are pending. The previous rule (clear
@@ -108,13 +132,16 @@ export function makeProvisionalMessage(input: {
  * on a bubble the server had already confirmed. Now either side being
  * confirmed clears the flag, in both arrival orders.
  *
- * MIN-4 (GET ``created_at`` re-stamp): for server-confirmed (non-
+ * MIN-4 (display-stamp stabilization): for server-confirmed (non-
  * pending) entries the merge keeps the EARLIER of the local/incoming
- * timestamps instead of incoming-wins. GET read-back re-stamps rows
- * with the checkpoint-commit timestamp (later than the original POST
- * stamp), which re-sorted the user bubble below inter-streamed
- * assistant messages on every refetch. Keeping the earlier stamp pins
- * the bubble in its original send position.
+ * timestamps. GET read-back re-stamps rows with the checkpoint-commit
+ * timestamp — a MOVING value for metadata-less rows — so keeping the
+ * earliest-seen stamp stops the displayed time from drifting forward
+ * on every refetch. Because the ordering contract above removed the
+ * ``created_at`` re-sort, this rule can no longer affect POSITION
+ * (its original purpose was pinning send-position under the old sort
+ * regime); it now only stabilizes what the bubble displays. Pending
+ * merges keep incoming-wins so the 202 body stamp rules.
  */
 export function mergeMessagesById(
   existing: readonly Message[],
@@ -171,9 +198,12 @@ export function mergeMessagesById(
         merged.retry_content = result[idx].retry_content;
       }
       // MIN-4: for CONFIRMED (non-pending) entries keep the earlier of
-      // the local/incoming timestamps so a GET re-stamp
-      // (checkpoint-commit ts) cannot re-sort the bubble. Pending
-      // merges keep incoming-wins so the 202 body stamp rules.
+      // the local/incoming timestamps so the moving GET re-stamp
+      // (checkpoint-commit ts) cannot churn the displayed time. This
+      // is display-metadata stabilization ONLY — with the ``created_at``
+      // re-sort removed (ordering contract in the doc above) it cannot
+      // affect bubble position. Pending merges keep incoming-wins so
+      // the 202 body stamp rules.
       if (!merged.pending) {
         merged.created_at = earlierOf(result[idx].created_at, msg.created_at);
       }
@@ -182,7 +212,11 @@ export function mergeMessagesById(
       result.push(msg);
     }
   }
-  result.sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
+  // NO re-sort here. Transcript order = existing array order (seeded
+  // from the server's array = checkpoint order) + arrival-order
+  // appends above. Re-sorting by ``created_at`` let unstable
+  // checkpoint re-stamps time-travel old rows around the freshly sent
+  // message — the stale-message display bug this fixes.
   return result;
 }
 

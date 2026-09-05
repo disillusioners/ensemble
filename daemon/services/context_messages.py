@@ -1481,16 +1481,13 @@ async def assemble_context_messages(
 
             if matched:
                 blueprint_text = _build_blueprint_block_text(matched)
-                persistent_msgs.append(HumanMessage(
-                    content=(
-                        f"[SYSTEM CONTEXT: Project Blueprint]\n\n"
-                        f"{blueprint_text}"
-                    ),
-                    additional_kwargs={
-                        "injected_message": True,
-                        "context_kind": CONTEXT_KIND_BLUEPRINT,
-                    },
-                ))
+                persistent_msgs.append(
+                    _make_context_message(
+                        CONTEXT_KIND_BLUEPRINT,
+                        "Project Blueprint",
+                        blueprint_text,
+                    )
+                )
 
     # ── 4. Skills message — PERSISTENT (2026-07-29 refactor) ─────────────
     # Ephemeral skill injection is currently disabled. Skills are

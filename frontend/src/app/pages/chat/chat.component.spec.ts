@@ -759,7 +759,11 @@ class TestableChatComponent {
           result.push(msg);
         }
       }
-      result.sort((a: Message, b: Message) => (a.created_at || '').localeCompare(b.created_at || ''));
+      // NO ``created_at`` re-sort (stale-message fix, 2026-09-05):
+      // mirrors production — the effect delegates to
+      // ``mergeMessagesById``, whose ordering contract is
+      // existing-array-order + arrival-order appends. Unstable
+      // checkpoint re-stamps must not reorder history.
       return result;
     });
   }
