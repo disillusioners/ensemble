@@ -28,6 +28,7 @@ Test breakdown:
 from __future__ import annotations
 
 import asyncio
+import uuid
 
 
 def _flatten_context_result(
@@ -733,6 +734,12 @@ class TestAssembleContextMessages:
         ]
         assert len(blueprint_messages) == 1
         message = blueprint_messages[0]
+        # Construction-time identity (iter-2 remediation gap): the
+        # factory-minted id must exist BEFORE the first serialization —
+        # otherwise this test could pass purely via serialize_message's
+        # mint write-back instead of proving construction-time stability.
+        assert message.id is not None
+        uuid.UUID(message.id)  # raises if not a uuid
         first = serialize_message(message)
         second = serialize_message(message)
         assert first["message_id"] == second["message_id"] == message.id

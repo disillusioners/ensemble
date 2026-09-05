@@ -226,7 +226,10 @@ class MessageTapSlot:
             if not ids:
                 # No-op path: the persisted list contained only
                 # RemoveMessage markers or id-less messages
-                # (nudge / language_check). Log nothing — there is
+                # (nudge / language_check are construction-stamped since
+                # the iter-2 identity remediation; direct-ainvoke entries
+                # and pre-side-table threads remain the id-less cases).
+                # Log nothing — there is
                 # nothing to record and a noisy log would multiply
                 # by the per-turn volume.
                 return 0

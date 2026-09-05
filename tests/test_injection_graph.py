@@ -21,7 +21,7 @@ import asyncio
 import logging
 import uuid
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -1111,3 +1111,77 @@ class TestChildReportTapFires:
             assert isinstance(ts, str) and len(ts) > 0
             assert seq is None
 
+
+class TestChildReportSseIdentity:
+    """Regression (iter-2 remediation): the child-report SSE pre-emit
+    must carry the CHECKPOINTED report id.
+
+    9674b95b stamped a uuid4 on the checkpointed copy (``report_msg``,
+    ``daemon/graph.py`` child-report drain) but the SSE pre-emit
+    constructed a SEPARATE id-less ``report_sse`` — ``serialize_message``
+    minted a fresh uuid for the throwaway, so the live report bubble
+    could never reconcile by id with the checkpoint/GET row (orphan
+    duplicate until reload). No existing test compared the two ids,
+    which is why the suite green-lit the defect. This class pins all
+    three surfaces to ONE id: SSE envelope == checkpointed copy ==
+    side-table row.
+    """
+
+    @pytest.mark.asyncio
+    async def test_report_sse_envelope_id_equals_checkpoint_and_tap_id(self):
+        from daemon.services.message_tap import (
+            MessageTapSlot,
+            SOURCE_AGENT_NODE_RETURN,
+        )
+
+        hub = MagicMock()
+        hub.stream_message = AsyncMock()
+        report_slot = _StubReportInjectionSlot(reports=[{
+            "content": "child finished with answer X",
+            "child_instance_id": "child-iid-1",
+            "report_message_id": "child-msg-1",
+        }])
+        metadata_repo = MagicMock()
+        metadata_repo.upsert_batch = MagicMock(return_value=1)
+        tap = MessageTapSlot(metadata_repo, SOURCE_AGENT_NODE_RETURN)
+        agent_node, llm = _make_agent(
+            report_injection_slot=report_slot,
+            message_tap_slot=tap,
+            live_hub=hub,
+        )
+
+        await agent_node(
+            {"messages": []},
+            config={"configurable": {"thread_id": "iid-parent"}},
+        )
+
+        # The checkpointed copy — the HumanMessage appended to
+        # full_messages and returned via the C2 single-return contract.
+        report_hm = next(
+            m for m in llm.calls[0]
+            if isinstance(m, HumanMessage) and "child finished" in m.content
+        )
+        checkpoint_id = report_hm.id
+        assert checkpoint_id is not None
+        assert uuid.UUID(checkpoint_id).version == 4
+
+        # Exactly ONE user_message SSE event fired for the report.
+        user_events = [
+            c for c in hub.stream_message.await_args_list
+            if c.kwargs.get("event_type") == "user_message"
+        ]
+        assert len(user_events) == 1
+        payload = user_events[0].kwargs["message"]
+        # SSE carries the RAW report content (not the framed wrapper).
+        assert payload["content"] == "child finished with answer X"
+
+        # THE CONTRACT: the SSE envelope id == the checkpointed copy id —
+        # NOT a freshly minted uuid from a separate id-less throwaway.
+        assert payload["message_id"] == checkpoint_id
+
+        # And the side-table row records the SAME id — one identity
+        # across the SSE bubble, the checkpoint row, and the metadata row.
+        args, _ = metadata_repo.upsert_batch.call_args
+        assert args[0] == "iid-parent"
+        recorded_ids = {mid for mid, _ts, _seq in args[1]}
+        assert checkpoint_id in recorded_ids
