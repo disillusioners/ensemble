@@ -85,13 +85,10 @@ tri-state env ``ENSEMBLE_LEADER_ATTESTATION_MODE`` defaults to
 false-positive rate.
 
 Scope: leader-scoped via explicit ``agents/leader/meta.json``
-``tools.allow`` opt-in. NOT privileged per D7 (CLOSED-by-leader)
-— ``PRIVILEGED_TOOL_CATEGORIES`` intentionally excludes
-``attestation`` (only ``system_upgrade`` is privileged today), so
-the boundary is convention-based: a hypothetical future agent
-without an explicit ``tools.allow`` WOULD receive
-``attest_completion`` via the default-allow path. Future
-hardening (privilege promotion) requires reopening D7.
+``tools.allow`` opt-in; NOT privileged per D7 (CLOSED-by-leader).
+The full boundary argument (convention-based scoping vs structural
+privilege) lives ONCE in this module's docstring header — see
+"Scope and authorization" above.
 """
 
 
@@ -140,9 +137,10 @@ has the same effect as calling it once. The Phase 2 scanner contract
 counts ANY call in the lookback window as an attestation; this is
 the contract implemented here.
 
-Scope: leader-only via ``agents/leader/meta.json`` ``tools.allow``.
-NOT privileged (only ``system_upgrade`` is privileged today). Does
-NOT mutate state, enqueue work, or write to the journal.
+Scope: leader-only via ``agents/leader/meta.json`` ``tools.allow``;
+NOT privileged per D7 (CLOSED-by-leader) — full argument in the
+``daemon/tools/attestation.py`` module docstring header. The tool
+does NOT mutate state, enqueue work, or write to the journal.
 
 Usage:
 - Call exactly once when the leader's work is genuinely complete

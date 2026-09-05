@@ -497,12 +497,9 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     "system_upgrade": "daemon.tools.upgrade_tools",
     # Leader completion attestation (Phase 1 of LCA feature, 2026-09-05) —
     # leader-scoped via explicit agents/leader/meta.json tools.allow
-    # opt-in. NOT privileged per D7 (CLOSED-by-leader) — intentionally
-    # excluded from PRIVILEGED_TOOL_CATEGORIES (only system_upgrade is
-    # privileged). The boundary is convention-based: a future agent
-    # without an explicit tools.allow WOULD receive attest_completion
-    # via the default-allow path. Privilege promotion requires
-    # reopening D7.
+    # opt-in; deliberately NOT in PRIVILEGED_TOOL_CATEGORIES per D7
+    # (CLOSED-by-leader) — full boundary argument in
+    # daemon/tools/attestation.py module docstring header.
     "attestation": "daemon.tools.attestation",
 }
 

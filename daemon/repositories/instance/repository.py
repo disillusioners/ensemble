@@ -1181,7 +1181,10 @@ class SQLModelInstanceRepository:
         Returns:
             The post-increment counter value (the unchanged current
             value on an O4 replay). ``-1`` if the instance is missing
-            (caller treats as DB error → fail-open).
+            (caller treats as DB error → fail-open). The ``-1``
+            literal is the family's int-sentinel (see the
+            missing-row sentinel convention note on
+            :meth:`_update_attestation_columns`).
 
         Raises:
             Exception: any DB-level error (SQLAlchemy OperationalError
@@ -1238,6 +1241,52 @@ class SQLModelInstanceRepository:
             db_session.commit()
             return current_count + 1
 
+    def _update_attestation_columns(
+        self, instance_id: str, **values: Any
+    ) -> bool:
+        """Shared UPDATE skeleton for the attestation ledger writes.
+
+        One session, one ``UPDATE``: load the row, bail with the
+        family's missing-row sentinel when absent, apply the caller's
+        column values, commit.
+
+        Missing-row sentinel convention (family-wide, deliberate — do
+        NOT unify to a single literal): BOOL-returning writes return
+        ``False`` when the row is missing; the INT-returning
+        :meth:`increment_attestation_denied_count` returns ``-1``
+        (``0`` is a legitimate post-O4-replay count, so the increment
+        needs an out-of-band sentinel — the gate's ``< 0`` guard
+        depends on it); the read accessor
+        :meth:`get_attestation_denied_count` returns ``0`` by design
+        (a fresh instance folds to an empty counter). The gate node
+        consumes these via identity checks (``is False`` / ``is
+        None``) and ``< 0`` — changing any literal would flip
+        caller-visible behavior.
+
+        Returns:
+            ``True`` when the row was found and the UPDATE committed;
+            ``False`` when the instance is missing.
+
+        Raises:
+            Exception: any DB-level error propagates — see fail-open
+                wrapper note on
+                :meth:`increment_attestation_denied_count`.
+        """
+        from sqlmodel import update as sqlmodel_update
+
+        with SQLModelSession(self.engine) as db_session:
+            instance = db_session.get(Instance, instance_id)
+            if instance is None:
+                return False
+            stmt = (
+                sqlmodel_update(Instance)
+                .where(Instance.instance_id == instance_id)
+                .values(**values)
+            )
+            db_session.exec(stmt)
+            db_session.commit()
+            return True
+
     def reset_attestation_denied_count(self, instance_id: str) -> bool:
         """Ruling-2 single reset op — clears BOTH columns (Phase 3 task 3.3).
 
@@ -1269,24 +1318,12 @@ class SQLModelInstanceRepository:
             Exception: any DB-level error propagates — see fail-open
                 wrapper note on :meth:`increment_attestation_denied_count`.
         """
-        from sqlmodel import update as sqlmodel_update
-
-        with SQLModelSession(self.engine) as db_session:
-            instance = db_session.get(Instance, instance_id)
-            if instance is None:
-                return False
-            stmt = (
-                sqlmodel_update(Instance)
-                .where(Instance.instance_id == instance_id)
-                .values(
-                    attestation_denied_count=0,
-                    completion_gate_escalated=False,
-                    updated_at=datetime.now(timezone.utc).isoformat(),
-                )
-            )
-            db_session.exec(stmt)
-            db_session.commit()
-            return True
+        return self._update_attestation_columns(
+            instance_id,
+            attestation_denied_count=0,
+            completion_gate_escalated=False,
+            updated_at=datetime.now(timezone.utc).isoformat(),
+        )
 
     def reset_attestation_ledger_with_escalation(
         self,
@@ -1311,24 +1348,12 @@ class SQLModelInstanceRepository:
             Exception: any DB-level error propagates — see fail-open
                 wrapper note on :meth:`increment_attestation_denied_count`.
         """
-        from sqlmodel import update as sqlmodel_update
-
-        with SQLModelSession(self.engine) as db_session:
-            instance = db_session.get(Instance, instance_id)
-            if instance is None:
-                return False
-            stmt = (
-                sqlmodel_update(Instance)
-                .where(Instance.instance_id == instance_id)
-                .values(
-                    attestation_denied_count=0,
-                    completion_gate_escalated=True,
-                    updated_at=datetime.now(timezone.utc).isoformat(),
-                )
-            )
-            db_session.exec(stmt)
-            db_session.commit()
-            return True
+        return self._update_attestation_columns(
+            instance_id,
+            attestation_denied_count=0,
+            completion_gate_escalated=True,
+            updated_at=datetime.now(timezone.utc).isoformat(),
+        )
 
     def set_completion_gate_escalated(self, instance_id: str) -> bool:
         """Terminal-after-bound flag setter (no counter change).
@@ -1348,23 +1373,11 @@ class SQLModelInstanceRepository:
             Exception: any DB-level error propagates — see fail-open
                 wrapper note on :meth:`increment_attestation_denied_count`.
         """
-        from sqlmodel import update as sqlmodel_update
-
-        with SQLModelSession(self.engine) as db_session:
-            instance = db_session.get(Instance, instance_id)
-            if instance is None:
-                return False
-            stmt = (
-                sqlmodel_update(Instance)
-                .where(Instance.instance_id == instance_id)
-                .values(
-                    completion_gate_escalated=True,
-                    updated_at=datetime.now(timezone.utc).isoformat(),
-                )
-            )
-            db_session.exec(stmt)
-            db_session.commit()
-            return True
+        return self._update_attestation_columns(
+            instance_id,
+            completion_gate_escalated=True,
+            updated_at=datetime.now(timezone.utc).isoformat(),
+        )
 
     def get_attestation_denied_count(self, instance_id: str) -> int:
         """Read the current deny counter for the gate node's
@@ -1404,9 +1417,6 @@ class SQLModelInstanceRepository:
 
     def reset(self, instance_id: str) -> bool:
         return self.reset_attestation_denied_count(instance_id)
-
-    def set_escalated(self, instance_id: str) -> bool:
-        return self.set_completion_gate_escalated(instance_id)
 
     def set_escalated_and_reset(self, instance_id: str) -> bool:
         return self.reset_attestation_ledger_with_escalation(instance_id)

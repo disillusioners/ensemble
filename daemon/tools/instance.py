@@ -4392,12 +4392,9 @@ Returns:
 
     # ── Attestation tools (Leader Completion Attestation, Phase 1, 2026-09-05) ──
     # Same critical list-append pattern as upgrade_tool_list above.
-    # Leader-scoped via explicit tools.allow opt-in. NOT privileged per
-    # D7 (CLOSED) — `attestation` is intentionally excluded from
-    # PRIVILEGED_TOOL_CATEGORIES (only `system_upgrade` is privileged),
-    # so the boundary is convention-based: a future agent without an
-    # explicit tools.allow WOULD receive attest_completion via the
-    # default-allow path. Privilege promotion requires reopening D7.
+    # Leader-scoped via explicit tools.allow opt-in; NOT privileged
+    # per D7 (CLOSED) — full boundary argument in
+    # daemon/tools/attestation.py module docstring header.
     # Decorator-only registration is SILENTLY INVISIBLE — missing this
     # extend means the leader cannot call attest_completion even though
     # it appears in tools.allow.

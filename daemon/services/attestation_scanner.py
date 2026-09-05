@@ -37,7 +37,7 @@ only) so it stays unit-testable in isolation and importable from
 from __future__ import annotations
 
 import logging
-from typing import Any, NamedTuple
+from typing import Any, Iterator, NamedTuple
 
 from langchain_core.messages import AIMessage, BaseMessage
 
@@ -117,6 +117,29 @@ def _tool_call_names(message: BaseMessage) -> list[str]:
     return names
 
 
+def _backward_scan_entries(
+    messages: list[BaseMessage],
+) -> Iterator[tuple[int, BaseMessage, bool]]:
+    """Yield ``(index, message, is_summary)`` walking BACKWARD.
+
+    Shared traversal primitive for both scanner walks. Covers exactly
+    the entries either walk inspects or crosses: compaction summary
+    docs (``is_summary=True`` — crossed, never inspected; walk 1 turns
+    these into the ``summary_seen`` diagnostic) and ``AIMessages``
+    (``is_summary=False`` — the inspectable entries). Everything else
+    (ToolMessages, HumanMessages, injected reports) is invisible to
+    both walks and skipped entirely.
+    """
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if is_compaction_summary_doc(message):
+            yield index, message, True
+            continue
+        if not isinstance(message, AIMessage):
+            continue
+        yield index, message, False
+
+
 def scan_for_attestation_detailed(
     messages: list[BaseMessage],
     window: int,
@@ -161,14 +184,9 @@ def scan_for_attestation_detailed(
     # Backward walk — O(window AIMessages) inspections, NOT O(len(messages)).
     # We stop the moment the window is full; the remainder of the list is
     # never touched (bounded-scan invariant, AC-2.5 / AC-3.4).
-    for index in range(len(messages) - 1, -1, -1):
-        message = messages[index]
-
-        if is_compaction_summary_doc(message):
+    for index, message, is_summary in _backward_scan_entries(messages):
+        if is_summary:
             summary_seen = True
-            continue
-
-        if not isinstance(message, AIMessage):
             continue
 
         total_aimessages += 1
@@ -240,11 +258,8 @@ def attestation_seen_outside_window(
         window = 1
 
     seen_in_window = 0
-    for index in range(len(messages) - 1, -1, -1):
-        message = messages[index]
-        if is_compaction_summary_doc(message):
-            continue
-        if not isinstance(message, AIMessage):
+    for _index, message, is_summary in _backward_scan_entries(messages):
+        if is_summary:
             continue
         seen_in_window += 1
         if seen_in_window <= window:

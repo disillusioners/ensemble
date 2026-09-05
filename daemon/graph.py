@@ -129,31 +129,11 @@ from .config import LoopBreakerConfig
 # Phase 2 will extend this same handle with ``set()`` for the API path; for
 # now the ``set`` side lives on ``InstanceManager`` because no agent-node
 # code path needs to write.
-
-
-def _safe_get_denied_count(ledger_repo: Any, instance_id: str) -> int:
-    """Phase 3 wiring helper — read the deny counter via the repo (C3).
-
-    Returns ``0`` on any DB error (fail-open at the read seam mirrors
-    the C3 write-seam contract: the gate must NEVER error a leader
-    mission on transient DB issues — D2 outage class). The error is
-    logged as ``leader_completion_gate_db_error`` so operators can
-    detect sustained DB issues without losing leader completions.
-    """
-    if not instance_id:
-        return 0
-    try:
-        return int(ledger_repo.get_attestation_denied_count(instance_id) or 0)
-    except Exception as exc:  # noqa: BLE001 — C3 fail-open
-        logger.error(
-            "event=leader_completion_gate_db_error method=get_denied_count "
-            "instance_id=%s error_class=%s error_message=%s "
-            "decision=fail_open_allowed",
-            instance_id,
-            type(exc).__name__,
-            exc,
-        )
-        return 0
+#
+# NB: the C3 denied-count READ helper (``safe_get_denied_count``) lives
+# in ``daemon/services/attestation_ledger.py`` — the canonical home of
+# the C3 fail-open wrappers. Import it lazily at each use site (see the
+# graph ↔ services import-cycle note).
 
 
 def _reassemble_with_context(
@@ -3054,7 +3034,7 @@ def create_attestation_gate_node(
        pattern — so the event loop never blocks on the DB reads.
     4. **Phase 3 ledger writes (C3 fail-open wrapper)**: based on the
        decision value, call the matching :class:`AttestationLedger`
-       method via the ``ledger`` argument. All four writes are wrapped
+       method via the ``ledger`` argument. All three writes are wrapped
        in ``try/except Exception``; on DB error the deny/terminal
        degrades to allow + a ``leader_completion_gate_db_error``
        structured log line is emitted (leader mission never errors
@@ -3115,6 +3095,7 @@ def create_attestation_gate_node(
         evaluate,
     )
     from .services.attestation_ledger import (
+        safe_get_denied_count,
         safe_increment,
         safe_reset,
         safe_set_escalated_and_reset,
@@ -3145,7 +3126,7 @@ def create_attestation_gate_node(
             if getter is not None:
                 denied_count = getter()
             elif ledger is not None:
-                denied_count = _safe_get_denied_count(
+                denied_count = safe_get_denied_count(
                     ledger, effective_instance_id
                 )
             else:
@@ -7126,8 +7107,8 @@ def build_instance_graph(
             # Phase 3 — wire the ledger repository into the gate factory
             # (replacing the Phase-2 ``lambda: 0`` stand-in for the
             # ``denied_count_getter``). The ledger object exposes the
-            # four Phase-3 task-3.3 methods
-            # (``increment`` / ``reset`` / ``set_escalated`` /
+            # three Phase-3 task-3.3 gate-consumed methods
+            # (``increment`` / ``reset`` /
             # ``set_escalated_and_reset``); the gate node calls them via
             # the C3 fail-open ``safe_*`` wrappers at
             # ``daemon/services/attestation_ledger.py``. When ``manager``
@@ -7135,10 +7116,13 @@ def build_instance_graph(
             # / Phase-2 stand-in), the ledger is ``None`` and the gate
             # performs ZERO writes — preserving backward compatibility
             # with every existing test.
+            from .services.attestation_ledger import safe_get_denied_count
+
             ledger_repo = getattr(manager, "_instance_repository", None)
             if ledger_repo is not None:
                 # The factory consumes the repository AS the ledger
-                # (the four method names match the protocol). The
+                # (the three gate-consumed method names match the
+                # protocol). The
                 # ``denied_count_getter`` closure captures
                 # ``build_instance_id`` so a missing build-time id
                 # still resolves via the run-time config in the node.
@@ -7148,7 +7132,7 @@ def build_instance_graph(
                         _repo: Any = ledger_repo,
                         _eid: str = effective_id_for_getter,
                     ) -> int:
-                        return _safe_get_denied_count(_repo, _eid)
+                        return safe_get_denied_count(_repo, _eid)
                     denied_count_getter = _denied_count_getter
                 else:
                     # Review fix 4a: a missing build-time id no longer

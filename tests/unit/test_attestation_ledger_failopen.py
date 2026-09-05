@@ -1,9 +1,12 @@
 """Unit tests for the C3 fail-open wrapper at the attestation ledger DB seam.
 
-Covers :mod:`daemon.services.attestation_ledger` — the four ``safe_*``
+Covers :mod:`daemon.services.attestation_ledger` — the three ``safe_*``
 wrappers added in Phase 3 task 3.6 to extend the Phase-2 fail-open
 layer (the scanner/gate ``except Exception`` + ``leader_completion_gate_
-error``) to the new DB seam (the four ledger methods). The wrappers:
+error``) to the new DB seam (the three gate-consumed ledger methods;
+the flag-only ``safe_set_escalated`` wrapper was folded into
+``safe_set_escalated_and_reset`` — production never sets the flag
+without the paired counter reset). The wrappers:
 
 * widen the W4 precedent's narrow exception set to ``except Exception``
   (so SQLAlchemy ``OperationalError`` IS caught);
@@ -27,7 +30,6 @@ from daemon.services.attestation_ledger import (
     AttestationLedger,
     safe_increment,
     safe_reset,
-    safe_set_escalated,
     safe_set_escalated_and_reset,
 )
 
@@ -38,13 +40,12 @@ from daemon.services.attestation_ledger import (
 
 
 class TestAttestationLedgerProtocol:
-    def test_protocol_lists_four_methods(self):
-        # The Protocol declares the four methods the gate node consumes;
+    def test_protocol_lists_three_methods(self):
+        # The Protocol declares the three methods the gate node consumes;
         # assert the names exist (so a repo rename would break this test).
         method_names = {
             "increment",
             "reset",
-            "set_escalated",
             "set_escalated_and_reset",
         }
         assert hasattr(AttestationLedger, "__annotations__") or True
@@ -54,6 +55,11 @@ class TestAttestationLedgerProtocol:
             assert hasattr(AttestationLedger, name), (
                 f"Protocol missing method: {name}"
             )
+
+    def test_protocol_does_not_list_folded_flag_only_method(self):
+        # safe_set_escalated was folded into safe_set_escalated_and_reset
+        # (production-dead); the Protocol must not re-widen to it.
+        assert not hasattr(AttestationLedger, "set_escalated")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -75,12 +81,6 @@ class TestSafeDelegation:
         ledger = MagicMock()
         ledger.reset.return_value = True
         result = safe_reset(ledger, "inst-1")
-        assert result is True
-
-    def test_safe_set_escalated_returns_true(self):
-        ledger = MagicMock()
-        ledger.set_escalated.return_value = True
-        result = safe_set_escalated(ledger, "inst-1")
         assert result is True
 
     def test_safe_set_escalated_and_reset_returns_true(self):
@@ -109,9 +109,6 @@ class TestFailOpenOnOperationalError:
         ledger.reset.side_effect = OperationalError(
             "statement", {}, Exception("db down")
         )
-        ledger.set_escalated.side_effect = OperationalError(
-            "statement", {}, Exception("db down")
-        )
         ledger.set_escalated_and_reset.side_effect = OperationalError(
             "statement", {}, Exception("db down")
         )
@@ -136,16 +133,6 @@ class TestFailOpenOnOperationalError:
         assert any(
             "event=leader_completion_gate_db_error" in r.message
             and "method=reset" in r.message
-            for r in caplog.records
-        )
-
-    def test_safe_set_escalated_swallows_operational_error(self, failing_ledger, caplog):
-        with caplog.at_level(logging.ERROR, logger="daemon.services.attestation_ledger"):
-            result = safe_set_escalated(failing_ledger, "inst-1")
-        assert result is None
-        assert any(
-            "event=leader_completion_gate_db_error" in r.message
-            and "method=set_escalated" in r.message
             for r in caplog.records
         )
 
