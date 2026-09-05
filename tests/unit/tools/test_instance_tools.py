@@ -15,10 +15,12 @@ These tests lock in the contract introduced by the Phase 1 changes:
     via the shared ``_prepare_enqueued_message`` path
     (Task 4 / D2). Tool result pre-pends ``"Instance was X — revived
     and message dispatched."``
-  * Quick-win #7 revive-once guard: the SECOND agent-tool revive of
-    the same child is refused with spawn-a-replacement guidance
-    (mechanical ``RECOVERY_GUIDANCE_HINT`` bound, in-memory counter on
-    the manager); the user-API revive path is neither counted nor
+  * Quick-win #7 revive-once guard (scoped): the NEXT agent-tool
+    revive after a real ERROR / FAILED revive consumed the budget is
+    refused with spawn-a-replacement guidance (mechanical
+    ``RECOVERY_GUIDANCE_HINT`` bound, in-memory counter on the
+    manager; COMPLETED / TERMINATED revives are granted without
+    consuming); the user-API revive path is neither counted nor
     blocked (``TestReviveOnceGuard``).
   * IDLE / WAITING / QUEUED → enqueue parity (Task 3 e-bis).
   * PAUSED → REJECT (Task 5, R-O1 — NO auto-resume, NO
@@ -642,9 +644,10 @@ class TestTerminalRevive:
 # Quick-win #7 — Revive-once guard for agent-tool-initiated revives
 # ---------------------------------------------------------------------------
 
-# The exact refusal string the tool returns on a SECOND agent-tool
-# revive attempt (single-string, child id interpolated). Locked here so
-# the phrasing mirrors RECOVERY_GUIDANCE_HINT semantics verbatim.
+# The exact refusal string the tool returns on the agent-tool revive
+# attempt AFTER a real ERROR / FAILED revive consumed the budget
+# (single-string, child id interpolated). Locked here so the phrasing
+# mirrors RECOVERY_GUIDANCE_HINT semantics verbatim.
 _REVIVE_REFUSAL_TEMPLATE = (
     "Refused: Instance '{iid}' has already been revived once and "
     "failed again. Spawn a replacement instance instead."
@@ -652,19 +655,24 @@ _REVIVE_REFUSAL_TEMPLATE = (
 
 
 class TestReviveOnceGuard:
-    """Quick-win #7: ``RECOVERY_GUIDANCE_HINT``
-    (``daemon/services/error_reporting.py``) bounds child revives to
-    AT MOST ONE via the agent tool; a second attempt is REFUSED with
-    spawn-a-replacement guidance and dispatches nothing. The bound is
-    enforced by an in-memory cumulative counter on the manager
-    (``_agent_tool_revive_counts``), keyed by child instance id —
-    agent-tool path ONLY; the user-API revive path neither increments
-    it nor is blocked by it.
+    """Quick-win #7 (scoped — feature/fix-revive-guard-scope):
+    ``RECOVERY_GUIDANCE_HINT`` (``daemon/services/error_reporting.py``)
+    bounds child FAILURE revives to AT MOST ONE via the agent tool.
+    Only revives whose prior status is ERROR / FAILED consume the
+    per-child budget (COMPLETED / TERMINATED revives are granted
+    without incrementing); once a real ERROR / FAILED revive has
+    consumed the budget, the next agent-tool revive of any terminal
+    kind is REFUSED with spawn-a-replacement guidance and dispatches
+    nothing. The bound is enforced by an in-memory cumulative counter
+    on the manager (``_agent_tool_revive_counts``), keyed by child
+    instance id — agent-tool path ONLY; the user-API revive path
+    neither increments it nor is blocked by it.
     """
 
     async def test_t1_first_agent_tool_revive_granted(self):
-        """T1: first agent-tool revive of a terminal child succeeds —
-        counter 0→1, child revived, message dispatched."""
+        """T1: first agent-tool revive of a terminal child (ERROR — a
+        consuming failure revive) succeeds — counter 0→1, child
+        revived, message dispatched."""
         with patch(
             "daemon.tools.instance._check_team_membership",
             return_value=None,
@@ -691,9 +699,9 @@ class TestReviveOnceGuard:
         assert manager.get_agent_tool_revive_count("child-1") == 1
 
     async def test_t2_second_agent_tool_revive_refused(self):
-        """T2: the SECOND agent-tool revive attempt is refused with the
-        guidance message; child NOT revived again; message NOT
-        dispatched."""
+        """T2: the SECOND agent-tool revive attempt (after the first
+        ERROR-revive consumed the budget) is refused with the guidance
+        message; child NOT revived again; message NOT dispatched."""
         with patch(
             "daemon.tools.instance._check_team_membership",
             return_value=None,
@@ -1257,6 +1265,108 @@ class TestReviveOnceGuardScope:
         # Counter still at 1 — the refused COMPLETED-revive did not
         # consume (it never reached the increment site, refused earlier).
         assert manager.get_agent_tool_revive_count("child-1") == 1
+
+    async def test_accepted_edge_real_manager_counter_through_send_path(
+        self,
+    ):
+        """F3 (review round 2) — the ERROR → consume →
+        COMPLETED-still-refused chain driven through the REAL
+        ``send_message`` path against a REAL ``InstanceManager``
+        counter.
+
+        Unlike every other tool-path test in this class, the manager is
+        a bare ``InstanceManager`` (built via ``__new__``) whose
+        ``note_agent_tool_revive`` / ``get_agent_tool_revive_count``
+        are the REAL production methods mutating the REAL
+        ``_agent_tool_revive_counts`` dict — only transport attributes
+        (enqueue / stats / routing snapshot / watcher infra) are
+        mocked. This closes the stub-counter gap: the refused
+        COMPLETED-revive is refused by production counter state, not a
+        fixture ``side_effect``.
+        """
+        from daemon.manager import InstanceManager
+
+        class _RealCounterBareManager(InstanceManager):
+            """Bare ``InstanceManager`` (skips ``__init__``): the
+            counter methods + ``_agent_tool_revive_counts`` are the REAL
+            inherited production surface; ONLY attribute misses
+            (transport infra the factory / post-enqueue path touches)
+            fall back to auto-``MagicMock`` via ``__getattr__``. Real
+            attributes and properties always win — including the
+            read-only ``engine`` / ``write_guard`` properties, whose
+            internal ``self._engine`` / ``self._write_guard`` misses
+            resolve to mocks."""
+
+            def __init__(self) -> None:
+                # Deliberately does NOT call InstanceManager.__init__
+                # (no engine / repositories / services needed here).
+                self._agent_tool_revive_counts = {}
+                self._transport_mocks: dict = {}
+
+            def __getattr__(self, name: str):
+                if name.startswith("__"):
+                    raise AttributeError(name)
+                try:
+                    mocks = object.__getattribute__(self, "_transport_mocks")
+                except AttributeError:
+                    raise AttributeError(name) from None
+                if name not in mocks:
+                    mocks[name] = MagicMock(name=f"transport.{name}")
+                return mocks[name]
+
+        with patch(
+            "daemon.tools.instance._check_team_membership",
+            return_value=None,
+        ):
+            real_manager = _RealCounterBareManager()
+            # Async / precisely-shaped transport attrs are explicit;
+            # everything else falls back to __getattr__ mocks.
+            async def _get_instance(instance_id):
+                return MagicMock(instance_id=instance_id)
+
+            real_manager.get_instance = _get_instance
+            real_manager.get_instance_info = MagicMock(
+                return_value={"status": "error", "agent_id": "developer"}
+            )
+            real_manager.get_queue_stats = AsyncMock(
+                return_value={"pending_count": 0, "processing_count": 0}
+            )
+            real_manager.enqueue_message = AsyncMock(
+                return_value=MagicMock(message_id="msg-real-1")
+            )
+
+            send_message = _get_send_message_tool(real_manager)
+
+            # Phase 1: child is ERROR — the REAL gate consumes (0→1).
+            first = await send_message.coroutine("child-1", "retry")
+            assert "revived and message dispatched" in first, (
+                f"Expected revival prefix; got: {first!r}"
+            )
+            # The REAL dict holds the consume — not a stub side_effect.
+            assert real_manager._agent_tool_revive_counts == {"child-1": 1}
+            assert real_manager.get_agent_tool_revive_count("child-1") == 1
+
+            # Phase 2: child transitions to COMPLETED — the routing
+            # snapshot flips; the REAL counter keeps the stale 1.
+            real_manager.enqueue_message.reset_mock()
+            real_manager.get_instance_info.return_value = {
+                "status": "completed",
+                "agent_id": "developer",
+            }
+            refused = await send_message.coroutine(
+                "child-1", "follow-up after success"
+            )
+
+        # The REAL counter state (stale 1 from the ERROR-revive) refuses
+        # the COMPLETED-revive — the accepted edge, driven against
+        # production counter semantics end to end.
+        assert refused == _REVIVE_REFUSAL_TEMPLATE.format(iid="child-1"), (
+            f"Real-counter stale state must refuse the COMPLETED-revive; "
+            f"got: {refused!r}"
+        )
+        real_manager.enqueue_message.assert_not_awaited()
+        assert real_manager.get_agent_tool_revive_count("child-1") == 1
+        assert real_manager._agent_tool_revive_counts == {"child-1": 1}
 
     async def test_user_api_path_still_unaffected_after_scope_fix(self):
         """Matrix (f) — the user-API enqueue path stays uncounted and

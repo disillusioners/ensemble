@@ -88,8 +88,10 @@ def make_send_message_manager(*, status: str) -> MagicMock:
         RUNNING / WAITING_CHILDREN targets route through here).
       * ``get_agent_tool_revive_count`` / ``note_agent_tool_revive``
         (sync) — quick-win #7 revive-once guard, backed by a REAL
-        per-manager dict (first agent-tool revive granted, second
-        refused) with MagicMock call tracking.
+        per-manager dict (an ERROR / FAILED revive is granted and
+        consumes the budget; once consumed, the next agent-tool revive
+        is refused; COMPLETED / TERMINATED revives neither consume nor
+        refuse) with MagicMock call tracking.
       * Plus infra attributes the production code touches in the
         post-enqueue path: ``_instance_repository``, ``engine``,
         ``write_guard``, ``_live_hub``.
@@ -135,7 +137,9 @@ def make_send_message_manager(*, status: str) -> MagicMock:
 
     def _note_revive(instance_id: str, prior_status: str | None = None) -> int:
         # SCOPE: only ERROR / FAILED prior statuses consume the budget;
-        # COMPLETED / TERMINATED / None (defensive default) do not.
+        # COMPLETED / TERMINATED do not. ``None`` is NOT in the
+        # non-consuming set — it falls through and CONSUMES, mirroring
+        # production's fail-closed fallback for the defensive default.
         # Mirrors ``InstanceManager.note_agent_tool_revive`` exactly.
         if prior_status is not None and prior_status not in ("error", "failed"):
             return revive_counts.get(instance_id, 0)

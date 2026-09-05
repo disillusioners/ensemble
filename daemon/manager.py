@@ -2833,8 +2833,10 @@ class InstanceManager:
             revive. Counter is NOT incremented (stays at 0 for a fresh
             child, stays at the prior value for a child that has already
             burned its budget). The grant log records
-            ``"#N non-consuming (prior=<status>)"`` so future audits can
-            grep "agent-tool grant but no budget burn".
+            ``"[ReviveGuard] Agent-tool revive granted (non-consuming,
+            prior=<status>) ... counter=<current>"`` (no ``#N`` prefix)
+            so future audits can grep
+            "agent-tool grant but no budget burn".
           * ``prior_status is None`` (defensive default — old call sites)
             → falls back to the prior "always consume" behavior, which
             is the v1 contract; production call sites always pass an

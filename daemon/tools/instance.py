@@ -2665,8 +2665,9 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
                 (terminal-revive).
               * ``"Refused: Instance '<id>' has already been revived
                 once and failed again. Spawn a replacement instance
-                instead."`` (revive-once refusal
-                — second agent-tool revive attempt; no dispatch).
+                instead."`` (revive-once refusal — the next agent-tool
+                revive after a real ERROR / FAILED revive consumed the
+                budget; no dispatch).
               * ``"Message queued and sent to <id>. …"`` (enqueue
                 parity — IDLE / WAITING / QUEUED / future additions).
 
@@ -2934,17 +2935,21 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
 
         # ── Revive-once guard (quick-win #7, enqueue-revive only) ──────────
         # ``RECOVERY_GUIDANCE_HINT`` (daemon/services/error_reporting.py)
-        # bounds child revives to AT MOST ONE, then spawn-a-replacement —
-        # previously LLM-enforced only. This makes the bound mechanical on
-        # the agent-tool path: the manager keeps an IN-MEMORY cumulative
-        # counter keyed by child instance id (daemon restart resets it).
-        # The FIRST agent-tool revive of a child is granted; the SECOND is
-        # refused with guidance mirroring the hint's semantics. The
-        # refusal is a well-formed tool result (never a raise) and returns
-        # BEFORE ``enqueue_message`` so a refused send dispatches NOTHING.
-        # The user-API revive path (daemon/services/instance_messaging.py)
-        # is a different authority — it neither increments the counter nor
-        # is blocked by it (spec quick-win #7, agent-tool-path-only).
+        # bounds child FAILURE revives to AT MOST ONE, then
+        # spawn-a-replacement — previously LLM-enforced only. This makes
+        # the bound mechanical on the agent-tool path: the manager keeps
+        # an IN-MEMORY cumulative counter keyed by child instance id
+        # (daemon restart resets it). Only revives whose prior status is
+        # ERROR / FAILED consume the budget (see the SCOPE block below):
+        # the FIRST ERROR / FAILED revive of a child is granted and burns
+        # the budget; the NEXT agent-tool revive of any terminal kind,
+        # once the budget is consumed, is refused with guidance mirroring
+        # the hint's semantics. The refusal is a well-formed tool result
+        # (never a raise) and returns BEFORE ``enqueue_message`` so a
+        # refused send dispatches NOTHING. The user-API revive path
+        # (daemon/services/instance_messaging.py) is a different
+        # authority — it neither increments the counter nor is blocked by
+        # it (spec quick-win #7, agent-tool-path-only).
         #
         # SCOPE (feature/fix-revive-guard-scope, 2026-09-05): the
         # per-child counter is only CONSUMED by revives whose prior
@@ -2965,9 +2970,9 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         # revive budget), and the counter increment sits AFTER the
         # successful ``enqueue_message`` call deliberately — an enqueue
         # failure must not consume the revive grant either. Both guards
-        # leave the counter at zero on a given attempt; the FIRST revive
-        # is the meaningful one and is recorded only once the dispatch
-        # has actually gone through.
+        # leave the counter at zero on a given attempt; the FIRST
+        # ERROR / FAILED revive is the meaningful (consuming) one and is
+        # recorded only once the dispatch has actually gone through.
         if routed_via == "enqueue-revive":
             if manager.get_agent_tool_revive_count(instance_id) >= 1:
                 return (
