@@ -42,7 +42,13 @@ logger = logging.getLogger(__name__)
 
 
 def _normalize_option(value: Any) -> str:
-    """Coerce a single question option to a plain string.
+    """Defense-in-depth — the ``ask_questions`` tool boundary normalizes
+    options to plain strings before they reach this helper. These
+    branches only fire when the manager is called directly (e.g. from
+    tests or a future non-tool entry); they are unreachable via the
+    tool path.
+
+    Coerce a single question option to a plain string.
 
     LLMs occasionally pass option entries as ``{"text": "Option A"}``
     dicts (or other JSON-object shapes) instead of plain strings. When
@@ -80,7 +86,15 @@ def _normalize_option(value: Any) -> str:
 
 
 def _normalize_options(values: Any) -> list[str]:
-    """Normalize an ``options`` field to a fresh ``list[str]``.
+    """Defense-in-depth — the ``ask_questions`` tool boundary enforces
+    ``options: list`` and rejects str / tuple / set / int at the
+    validation layer. These branches only fire when the manager is
+    called directly (e.g. from tests or a future non-tool entry);
+    set-iteration order is non-deterministic but acceptable because
+    the values never reach the wire path without tool-boundary
+    normalization first.
+
+    Normalize an ``options`` field to a fresh ``list[str]``.
 
     Behavior:
 

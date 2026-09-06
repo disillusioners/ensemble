@@ -136,7 +136,11 @@ def validate_and_normalize_questions(
           single pack, two questions MAY NOT share the same explicit
           id — collision is a validation failure pointing at the
           later index.
-        * ``options``: optional list; absent → normalized to ``[]``.
+        * ``options``: optional list. Absent OR explicit ``None`` →
+          normalized to ``[]`` (symmetric with ``id: None`` above —
+          silently treated as omitted; contrast with the
+          ``allow_custom`` / ``required`` flag rules below, which
+          reject explicit ``None``).
           MIXED lists (some plain strings, some label-objects) are
           accepted — RATIFIED CHOICE: each element is validated and
           normalized independently. Per element:
@@ -338,6 +342,12 @@ def create_question_tools(
         NOT paused. Unknown extra keys on question dicts and option
         objects are dropped.
 
+        ``options`` follows the same ``id`` convention above — explicit
+        ``None`` is silently treated as omitted and normalized to ``[]``.
+        The ``allow_custom`` / ``required`` flags are stricter: explicit
+        ``None`` is rejected (a silent ``bool(None)`` would flip the True
+        default).
+
         Note: payloads rejected by the tool's pydantic args-schema layer
         BEFORE the body runs (e.g. ``questions="not-a-list"``) surface
         as a deterministic, side-effect-free error ToolMessage from the
@@ -489,6 +499,11 @@ effect):
     normalizing to the same string) with differing descriptions → last
     writer wins: only one ``option_descriptions`` entry survives;
     duplicates are accepted, NOT rejected.
+  * Asymmetric ``None`` handling — ``id`` and ``options`` accept explicit
+    ``None`` as a synonym for "omitted" (``options`` → ``[]``; ``id``
+    is dropped, falling back to the manager's UUID4 default). The
+    ``allow_custom`` / ``required`` flag rules above REJECT explicit
+    ``None``, since a silent ``bool(None)`` would flip the True default.
   * Unknown extra keys on question dicts and option objects are
     dropped.
 
