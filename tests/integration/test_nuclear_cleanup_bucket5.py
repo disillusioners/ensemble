@@ -79,7 +79,7 @@ import daemon.repositories.task.models  # noqa: F401
 
 from daemon.repositories.instance.models import Instance, InstanceStatus
 from daemon.repositories.instance.repository import SQLModelInstanceRepository
-from daemon.repositories.job_queue.models import AdmissionState, JobItem
+from daemon.repositories.job_queue.models import AdmissionState, JobItem, JobQueue
 from daemon.repositories.job_queue.queue_repository import JobQueueRepository
 from daemon.repositories.job_queue.repository import JobRepository
 from daemon.repositories.task.models import Task, TaskStatus
@@ -181,7 +181,37 @@ def service(
     mgr = MagicMock()
     mgr._instance_repository = instance_repo
     mgr._task_repo = task_repo
-    mgr.terminate_instance = AsyncMock(return_value=None)
+    # WS4 fixture repair (2026-09-06): the C2 change (2026-08-12)
+    # routed Bucket 5 through the FULL ``terminate_instance`` cascade
+    # instead of the raw ``transition_status_if`` UPDATE. A bare
+    # ``AsyncMock(return_value=None)`` swallows the cascade's DB
+    # write, so the assertions that read the instance status back
+    # from the DB could never observe the termination — 6 scenarios
+    # failed at base afd7c387 (attribution proven in a base worktree)
+    # and the suite could not anchor the WS4 mission-lens scenarios.
+    # The side_effect below performs the DB-VISIBLE portion of the
+    # real cascade (the race-safe terminal transition through the
+    # same repo method the pre-C2 code called) while keeping the
+    # graph-task / MCP / child-cascade logic out of scope. The
+    # allowed-from set is the full non-terminal set — mirroring the
+    # cascade's own short-circuit-on-terminal idempotency.
+    _ALL_NON_TERMINAL = (
+        "running", "paused", "idle", "queued", "waiting",
+        "waiting_children", "initializing", "resuming",
+    )
+
+    async def _terminate_like_cascade(instance_id: str) -> None:
+        instance_repo.transition_status_if(
+            instance_id,
+            InstanceStatus.TERMINATED.value,
+            _ALL_NON_TERMINAL,
+        )
+
+    mgr.terminate_instance = AsyncMock(side_effect=_terminate_like_cascade)
+    # Holder actions (WS4) re-enqueue foreground messages through the
+    # manager's public front primitive; tests that exercise the
+    # re-send path override this per-test.
+    mgr.enqueue_message_job = AsyncMock(return_value=None)
     svc._instance_manager = mgr
     svc._retry_engine = None
     svc._dlq_service = None
@@ -248,6 +278,8 @@ def make_job_item(
     job_type: str = "task",
     terminal_reason: str | None = None,
     deleted_at: str | None = None,
+    queue_id: str | None = None,
+    message: str = "test-job",
 ) -> str:
     """Insert a single JobItem row with the given admission_state.
 
@@ -255,6 +287,9 @@ def make_job_item(
     ``admission_state='queued'``) by inserting via a raw SQL UPDATE on
     a freshly-created row. This lets the test seed terminal
     (``done``) and active (``active``) rows directly.
+
+    WS4 additions: ``queue_id`` (lane classification for the mission
+    lens) and ``message`` (the content the re-send action re-enqueues).
 
     Returns:
         ``job_id`` of the inserted JobItem.
@@ -266,7 +301,7 @@ def make_job_item(
             job_id=jid,
             agent_id="developer",
             agent_dir="/tmp/agents/developer",
-            message="test-job",
+            message=message,
             source="test",
             project_id=project_id,
             admission_state=AdmissionState.QUEUED.value,
@@ -275,6 +310,7 @@ def make_job_item(
             terminal_reason=None,
             deleted_at=None,
             created_at=now_iso,
+            queue_id=queue_id,
         )
         s.add(job)
         s.commit()
@@ -470,6 +506,15 @@ class TestBucket5ZombieReaper:
             admission_state="active",
             project_id=project_id,
         )
+
+        # WS4 fixture note: neutralize Bucket 2 so the scenario
+        # isolates what it documents — the Bucket 5 SCAN protection
+        # an ``active`` row provides. (The fixture repair made
+        # ``terminate_instance`` DB-visible, so the REAL Bucket 2
+        # cancel cascade now legitimately terminates the instance —
+        # correct production behaviour, but it would mask the scan
+        # predicate this scenario exists to pin.)
+        service.cancel_job = AsyncMock(return_value=True)
 
         result = await service.cleanup_non_terminal_jobs()
 
@@ -790,3 +835,505 @@ class TestBucket5ZombieReaper:
             "terminated_instances": 0,
             "total_processed": 0,
         }
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# WS4 mission lens (fix/defer-self-witness-and-cleanup, 2026-09-06)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def make_queue(
+    engine: Engine,
+    *,
+    project_id: str,
+    queue_type: str = "defer",
+    queue_name: str = "system_defer_queue",
+    queue_id: str | None = None,
+) -> str:
+    """Insert a JobQueue row and return its ``queue_id``."""
+    qid = queue_id or f"queue-{uuid.uuid4().hex[:8]}"
+    now_iso = _now_iso()
+    with Session(engine) as s:
+        s.add(
+            JobQueue(
+                queue_id=qid,
+                project_id=project_id,
+                queue_name=queue_name,
+                queue_name_lower=queue_name.lower(),
+                queue_type=queue_type,
+                concurrency_limit=1 if queue_type in ("defer", "background") else 3,
+                is_system=True,
+                created_at=now_iso,
+                updated_at=now_iso,
+            )
+        )
+        s.commit()
+    return qid
+
+
+def get_job(engine: Engine, job_id: str) -> dict:
+    """Read a JobItem row back as a plain dict (raw SQL, no ORM cache)."""
+    with engine.begin() as conn:
+        row = conn.execute(
+            text(
+                "SELECT admission_state, terminal_reason FROM job_queue_items "
+                "WHERE job_id = :job_id"
+            ),
+            {"job_id": job_id},
+        ).fetchone()
+    assert row is not None, f"job {job_id} vanished"
+    return {"admission_state": row[0], "terminal_reason": row[1]}
+
+
+class TestWS4MissionLens:
+    """WS4 self-shield exemption + holder actions (integration, real SQL).
+
+    The mission lens: an instance's OWN queued defer-lane rows no
+    longer shield it from the Bucket 5 reaper (the stalled-holder
+    self-shield). Everything else that shielded before STILL shields
+    (fail-CLOSED posture): active rows on any lane, queued rows on
+    non-defer / unknown lanes, live Tasks, live children.
+    """
+
+    @pytest.mark.asyncio
+    async def test_13_stalled_holder_own_defer_mirrors_reaped(
+        self,
+        service: JobQueueService,
+        instance_repo: SQLModelInstanceRepository,
+        engine: Engine,
+        project_id: str,
+    ):
+        """THE mission lens: stalled holder (only own queued defer
+        mirrors) is reap-eligible — the incident 6bc61f42 shape."""
+        inst = make_instance(engine, status="running", project_id=project_id)
+        defer_qid = make_queue(engine, project_id=project_id, queue_type="defer")
+        make_job_item(
+            engine,
+            instance_id=inst.instance_id,
+            admission_state="queued",
+            job_type="message",
+            project_id=project_id,
+            queue_id=defer_qid,
+            message="the deferred message",
+        )
+
+        result = await service.cleanup_non_terminal_jobs()
+
+        assert result["terminated_instances"] == 1
+        assert result["total_processed"] == 0
+        inst_after = instance_repo.get(inst.instance_id)
+        assert inst_after.status == InstanceStatus.TERMINATED.value
+        # Mirror protection STAYS: cleanup must NOT have cancelled the
+        # queued defer mirror (start_job's terminal-instance abort path
+        # owns it later).
+        job_after = get_job(engine, _only_job_id(engine))
+        assert job_after["admission_state"] == "queued"
+
+    @pytest.mark.asyncio
+    async def test_14_queued_non_defer_lane_still_shields(
+        self,
+        service: JobQueueService,
+        instance_repo: SQLModelInstanceRepository,
+        engine: Engine,
+        project_id: str,
+    ):
+        """Fail-CLOSED half of the lens: a queued mirror on a NON-defer
+        lane still shields (bucket 1 skips mirrors; the lens only
+        exempts the defer lane)."""
+        inst = make_instance(engine, status="running", project_id=project_id)
+        fifo_qid = make_queue(
+            engine, project_id=project_id, queue_type="fifo",
+            queue_name="system_parallel_queue",
+        )
+        make_job_item(
+            engine,
+            instance_id=inst.instance_id,
+            admission_state="queued",
+            job_type="message",
+            project_id=project_id,
+            queue_id=fifo_qid,
+        )
+
+        service.cancel_job = AsyncMock(return_value=True)  # isolate scan
+
+        result = await service.cleanup_non_terminal_jobs()
+
+        assert result["terminated_instances"] == 0
+        inst_after = instance_repo.get(inst.instance_id)
+        assert inst_after.status == InstanceStatus.RUNNING.value
+
+    @pytest.mark.asyncio
+    async def test_15_active_defer_row_still_shields(
+        self,
+        service: JobQueueService,
+        instance_repo: SQLModelInstanceRepository,
+        engine: Engine,
+        project_id: str,
+    ):
+        """An ACTIVE defer-lane row (any job_type) still shields — the
+        exemption is for QUEUED defer rows only."""
+        inst = make_instance(engine, status="running", project_id=project_id)
+        defer_qid = make_queue(engine, project_id=project_id, queue_type="defer")
+        make_job_item(
+            engine,
+            instance_id=inst.instance_id,
+            admission_state="active",
+            job_type="message",
+            project_id=project_id,
+            queue_id=defer_qid,
+        )
+
+        service.cancel_job = AsyncMock(return_value=True)  # isolate scan
+
+        result = await service.cleanup_non_terminal_jobs()
+
+        assert result["terminated_instances"] == 0
+        inst_after = instance_repo.get(inst.instance_id)
+        assert inst_after.status == InstanceStatus.RUNNING.value
+
+    @pytest.mark.asyncio
+    async def test_16_unknown_lane_queued_row_still_shields(
+        self,
+        service: JobQueueService,
+        instance_repo: SQLModelInstanceRepository,
+        engine: Engine,
+        project_id: str,
+    ):
+        """A queued row with NO lane (``queue_id`` NULL → LEFT JOIN
+        miss → ``queue_type IS NULL``) still shields — fail-CLOSED on
+        unknown lanes. (The FK makes a dangling non-null queue_id
+        unconstructible; the NULL lane and the queue-row-deleted lane
+        are the same LEFT-JOIN-miss shape the SQL arm covers.)"""
+        inst = make_instance(engine, status="running", project_id=project_id)
+        make_job_item(
+            engine,
+            instance_id=inst.instance_id,
+            admission_state="queued",
+            job_type="message",
+            project_id=project_id,
+            queue_id=None,
+        )
+
+        service.cancel_job = AsyncMock(return_value=True)  # isolate scan
+
+        result = await service.cleanup_non_terminal_jobs()
+
+        assert result["terminated_instances"] == 0
+        inst_after = instance_repo.get(inst.instance_id)
+        assert inst_after.status == InstanceStatus.RUNNING.value
+
+    @pytest.mark.asyncio
+    async def test_17_live_children_still_protect_stalled_holder(
+        self,
+        service: JobQueueService,
+        instance_repo: SQLModelInstanceRepository,
+        engine: Engine,
+        project_id: str,
+    ):
+        """W1 live-children guard survives the lens: a stalled holder
+        with a non-terminal child is NOT reaped."""
+        parent = make_instance(engine, status="waiting_children", project_id=project_id)
+        child = make_instance(engine, status="running", project_id=project_id)
+        # Point the child at the parent, and give the child a running
+        # Task so it is genuinely live — then the parent's survival is
+        # attributable to the W1 live-children anti-join, not to a
+        # shared zombie shape.
+        with engine.begin() as conn:
+            conn.execute(
+                text("UPDATE instances SET parent_id = :p WHERE instance_id = :c"),
+                {"p": parent.instance_id, "c": child.instance_id},
+            )
+        make_task(engine, instance_id=child.instance_id, status="running")
+        defer_qid = make_queue(engine, project_id=project_id, queue_type="defer")
+        make_job_item(
+            engine,
+            instance_id=parent.instance_id,
+            admission_state="queued",
+            job_type="message",
+            project_id=project_id,
+            queue_id=defer_qid,
+        )
+
+        result = await service.cleanup_non_terminal_jobs()
+
+        # Neither parent (stalled + live child) nor child (running, live)
+        parent_after = instance_repo.get(parent.instance_id)
+        assert parent_after.status == InstanceStatus.WAITING_CHILDREN.value
+        assert result["terminated_instances"] == 0
+
+    @pytest.mark.asyncio
+    async def test_18_running_task_still_protects_despite_defer_mirrors(
+        self,
+        service: JobQueueService,
+        instance_repo: SQLModelInstanceRepository,
+        engine: Engine,
+        project_id: str,
+    ):
+        """Genuinely-live mission: own queued defer mirrors AND a
+        running Task → NOT reaped (the task anti-join is independent
+        of the lens)."""
+        inst = make_instance(engine, status="running", project_id=project_id)
+        make_task(engine, instance_id=inst.instance_id, status="running")
+        defer_qid = make_queue(engine, project_id=project_id, queue_type="defer")
+        make_job_item(
+            engine,
+            instance_id=inst.instance_id,
+            admission_state="queued",
+            job_type="message",
+            project_id=project_id,
+            queue_id=defer_qid,
+        )
+
+        result = await service.cleanup_non_terminal_jobs()
+
+        assert result["terminated_instances"] == 0
+        inst_after = instance_repo.get(inst.instance_id)
+        assert inst_after.status == InstanceStatus.RUNNING.value
+
+    @pytest.mark.asyncio
+    async def test_19_preflight_split_reap_vs_live_and_defer_count(
+        self,
+        service: JobQueueService,
+        instance_repo: SQLModelInstanceRepository,
+        engine: Engine,
+        project_id: str,
+    ):
+        """Preflight live-vs-reap split: stalled holder = reap-eligible,
+        running-task mission = will-remain, deferred count = 1."""
+        stalled = make_instance(engine, status="running", project_id=project_id)
+        live = make_instance(engine, status="running", project_id=project_id)
+        make_instance(engine, status="terminated", project_id=project_id)
+        make_task(engine, instance_id=live.instance_id, status="running")
+        defer_qid = make_queue(engine, project_id=project_id, queue_type="defer")
+        make_job_item(
+            engine,
+            instance_id=stalled.instance_id,
+            admission_state="queued",
+            job_type="message",
+            project_id=project_id,
+            queue_id=defer_qid,
+        )
+
+        reap_ids = set(instance_repo.find_zombie_instances())
+        non_terminal = set(instance_repo.find_non_terminal_instance_ids())
+        live_ids = non_terminal - reap_ids
+
+        assert reap_ids == {stalled.instance_id}
+        assert live_ids == {live.instance_id}
+
+        from daemon.services.defer_block_resolver import _DEFER_PENDING_COUNT_SQL
+
+        with engine.connect() as conn:
+            defer_count = int(conn.execute(_DEFER_PENDING_COUNT_SQL).scalar_one())
+        assert defer_count == 1
+
+    @pytest.mark.asyncio
+    async def test_20_force_complete_refused_when_probe_busy(
+        self,
+        service: JobQueueService,
+        instance_repo: SQLModelInstanceRepository,
+        engine: Engine,
+        project_id: str,
+    ):
+        """Guard: a holder with LIVE non-defer work is refused (probe
+        busy → terminated=False; cascade never runs)."""
+        inst = make_instance(engine, status="running", project_id=project_id)
+        fifo_qid = make_queue(
+            engine, project_id=project_id, queue_type="fifo",
+            queue_name="system_parallel_queue",
+        )
+        # Live settled mirror on a NON-defer lane belonging to a
+        # DIFFERENT instance: the WS1 carve-out only excludes the
+        # REQUESTER's own mirrors, so probing with ``inst`` as the
+        # requester sees the other holder's mirror → busy → the guard
+        # must refuse (mixed stalled+live is structurally impossible
+        # per WS2 strict semantics, so a busy probe means NOT stalled).
+        other = make_instance(engine, status="running", project_id=project_id)
+        make_job_item(
+            engine,
+            instance_id=other.instance_id,
+            admission_state="done",
+            job_type="message",
+            project_id=project_id,
+            queue_id=fifo_qid,
+        )
+
+        result = await service.force_complete_defer_holder(inst.instance_id)
+
+        assert result == {
+            "instance_id": inst.instance_id,
+            "terminated": False,
+            "probe_busy": True,
+        }
+        service._instance_manager.terminate_instance.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_21_force_complete_succeeds_mirrors_only_and_rederives(
+        self,
+        service: JobQueueService,
+        instance_repo: SQLModelInstanceRepository,
+        engine: Engine,
+        project_id: str,
+    ):
+        """Guard success: mirrors-only holder → terminated; the probe
+        ran with the canonical binds (system scope + requester
+        carve-out), NOT the FE-reported kind."""
+        inst = make_instance(engine, status="running", project_id=project_id)
+        defer_qid = make_queue(engine, project_id=project_id, queue_type="defer")
+        # Settled mirror on the DEFER lane: the carve-out excludes the
+        # holder's own settled mirrors → probe False → stalled.
+        make_job_item(
+            engine,
+            instance_id=inst.instance_id,
+            admission_state="done",
+            job_type="message",
+            project_id=project_id,
+            queue_id=defer_qid,
+        )
+
+        probe = MagicMock(return_value=False)
+        service._repository.has_active_non_deferred_work = probe
+
+        result = await service.force_complete_defer_holder(inst.instance_id)
+
+        assert result["terminated"] is True
+        assert result["probe_busy"] is False
+        probe.assert_called_once_with(None, inst.instance_id)
+        service._instance_manager.terminate_instance.assert_awaited_once_with(
+            inst.instance_id
+        )
+
+    @pytest.mark.asyncio
+    async def test_22_force_complete_missing_instance_404(
+        self,
+        service: JobQueueService,
+    ):
+        """A missing holder raises LookupError (router maps to 404)."""
+        with pytest.raises(LookupError):
+            await service.force_complete_defer_holder("inst-missing")
+
+    @pytest.mark.asyncio
+    async def test_23_resend_cancels_defer_job_and_reenqueues_foreground(
+        self,
+        service: JobQueueService,
+        instance_repo: SQLModelInstanceRepository,
+        engine: Engine,
+        project_id: str,
+    ):
+        """Re-send-foreground: the queued defer job is cancelled (via
+        the existing cancel path → done/cancelled) and its message
+        content is re-enqueued as a NEW foreground message job through
+        the manager front primitive — NOT a mirror mutation."""
+        inst = make_instance(engine, status="running", project_id=project_id)
+        defer_qid = make_queue(engine, project_id=project_id, queue_type="defer")
+        jid = make_job_item(
+            engine,
+            instance_id=inst.instance_id,
+            admission_state="queued",
+            job_type="message",
+            project_id=project_id,
+            queue_id=defer_qid,
+            message="please run the deferred work",
+        )
+
+        from types import SimpleNamespace
+
+        service._instance_manager.enqueue_message_job = AsyncMock(
+            return_value=SimpleNamespace(job_id="new-job-1", message_id="msg-1")
+        )
+
+        result = await service.resend_deferred_foreground(inst.instance_id)
+
+        assert result["found_defer_jobs"] == 1
+        assert result["cancelled_defer_jobs"] == 1
+        assert result["skipped_empty_content"] == 0
+        assert result["resend_results"][0]["cancelled_job_id"] == jid
+        assert result["resend_results"][0]["job_id"] == "new-job-1"
+
+        # The cancelled row is terminal (done/cancelled) — the OLD
+        # mirror, mutated through the registered cancel writer.
+        job_after = get_job(engine, jid)
+        assert job_after["admission_state"] == "done"
+        assert job_after["terminal_reason"] == "cancelled"
+
+        # The NEW foreground job went through the public front
+        # primitive with the original content (is_deferred defaults
+        # False → foreground).
+        service._instance_manager.enqueue_message_job.assert_awaited_once_with(
+            instance_id=inst.instance_id,
+            message="please run the deferred work",
+            source="api",
+        )
+
+    @pytest.mark.asyncio
+    async def test_24_resend_ignores_active_and_non_defer_rows(
+        self,
+        service: JobQueueService,
+        instance_repo: SQLModelInstanceRepository,
+        engine: Engine,
+        project_id: str,
+    ):
+        """Re-send scope = QUEUED defer-lane rows only: active defer
+        rows, queued non-defer rows, and unknown-lane rows are left
+        alone (found=0 → the router maps to 400)."""
+        inst = make_instance(engine, status="running", project_id=project_id)
+        defer_qid = make_queue(engine, project_id=project_id, queue_type="defer")
+        fifo_qid = make_queue(
+            engine, project_id=project_id, queue_type="fifo",
+            queue_name="system_parallel_queue",
+        )
+        make_job_item(
+            engine, instance_id=inst.instance_id, admission_state="active",
+            job_type="message", project_id=project_id, queue_id=defer_qid,
+        )
+        make_job_item(
+            engine, instance_id=inst.instance_id, admission_state="queued",
+            job_type="message", project_id=project_id, queue_id=fifo_qid,
+        )
+        make_job_item(
+            engine, instance_id=inst.instance_id, admission_state="queued",
+            job_type="message", project_id=project_id,
+            queue_id=None,  # NULL lane — LEFT JOIN miss, fail-closed
+        )
+
+        result = await service.resend_deferred_foreground(inst.instance_id)
+
+        assert result["found_defer_jobs"] == 0
+        assert result["cancelled_defer_jobs"] == 0
+
+    @pytest.mark.asyncio
+    async def test_25_resend_empty_content_cancels_without_reenqueue(
+        self,
+        service: JobQueueService,
+        instance_repo: SQLModelInstanceRepository,
+        engine: Engine,
+        project_id: str,
+    ):
+        """A queued defer row with empty content is cancelled but
+        contributes nothing to the re-enqueue pass."""
+        inst = make_instance(engine, status="running", project_id=project_id)
+        defer_qid = make_queue(engine, project_id=project_id, queue_type="defer")
+        make_job_item(
+            engine, instance_id=inst.instance_id, admission_state="queued",
+            job_type="message", project_id=project_id, queue_id=defer_qid,
+            message="   ",
+        )
+
+        result = await service.resend_deferred_foreground(inst.instance_id)
+
+        assert result["cancelled_defer_jobs"] == 1
+        assert result["skipped_empty_content"] == 1
+        service._instance_manager.enqueue_message_job.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_26_resend_missing_instance_raises(self, service: JobQueueService):
+        with pytest.raises(LookupError):
+            await service.resend_deferred_foreground("inst-missing")
+
+
+def _only_job_id(engine: Engine) -> str:
+    """Return the single job_queue_items row's job_id (test helper)."""
+    with engine.begin() as conn:
+        rows = conn.execute(text("SELECT job_id FROM job_queue_items")).fetchall()
+    assert len(rows) == 1, f"expected exactly 1 job row, got {len(rows)}"
+    return rows[0][0]

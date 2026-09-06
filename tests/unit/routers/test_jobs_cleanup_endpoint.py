@@ -961,7 +961,7 @@ class TestCleanupPreflightEndpoint:
     ):
         """When the manager exposes neither ``_task_repo`` nor
         ``_instance_repository`` (e.g. very early boot), the
-        preflight returns zero for both counters rather than 500.
+        preflight returns zero for all counters rather than 500.
         """
         manager = MagicMock(spec=[])  # no ``_task_repo`` / ``_instance_repository``
         preflight_app.state.manager = manager
@@ -970,9 +970,14 @@ class TestCleanupPreflightEndpoint:
 
         assert response.status_code == 200
         body = response.json()
+        # WS4: the live-vs-reap split + the separate defer count
+        # default to their zero shapes alongside the legacy pair.
         assert body == {
             "bad_state_count": 0,
             "zombie_instance_count": 0,
+            "live_instance_count": 0,
+            "live_instance_ids": [],
+            "defer_blocked_count": 0,
         }
 
     def test_preflight_returns_both_counts_when_repos_available(
@@ -987,10 +992,17 @@ class TestCleanupPreflightEndpoint:
         task_repo.count_bad_state_tasks = MagicMock(return_value=7)
         instance_repo = MagicMock()
         instance_repo.count_zombie_instances = MagicMock(return_value=3)
+        instance_repo.find_zombie_instances = MagicMock(
+            return_value=["inst-1", "inst-2", "inst-3"]
+        )
+        instance_repo.find_non_terminal_instance_ids = MagicMock(
+            return_value=["inst-1", "inst-2", "inst-3"]
+        )
 
         manager = MagicMock()
         manager._task_repo = task_repo
         manager._instance_repository = instance_repo
+        manager._job_queue_service = None  # no defer-count source wired
         preflight_app.state.manager = manager
 
         with TestClient(preflight_app) as client:
@@ -1001,11 +1013,56 @@ class TestCleanupPreflightEndpoint:
         assert body == {
             "bad_state_count": 7,
             "zombie_instance_count": 3,
+            "live_instance_count": 0,
+            "live_instance_ids": [],
+            "defer_blocked_count": 0,
         }
         # Both repos were queried — the endpoint does not short-circuit
         # after the first one.
         task_repo.count_bad_state_tasks.assert_called_once_with()
         instance_repo.count_zombie_instances.assert_called_once_with()
+
+    def test_preflight_ws4_live_vs_reap_split_and_defer_count(
+        self, preflight_app
+    ):
+        """WS4: non-terminal instances NOT in the reap set surface as
+        the live ("will remain") split; pending defer-lane jobs are
+        counted SEPARATELY from bad_state via the canonical resolver
+        SQL."""
+        task_repo = MagicMock()
+        task_repo.count_bad_state_tasks = MagicMock(return_value=0)
+        instance_repo = MagicMock()
+        instance_repo.count_zombie_instances = MagicMock(return_value=1)
+        instance_repo.find_zombie_instances = MagicMock(return_value=["inst-stalled"])
+        instance_repo.find_non_terminal_instance_ids = MagicMock(
+            return_value=["inst-live", "inst-stalled"]
+        )
+        job_repo = MagicMock()
+        engine = MagicMock()
+        conn = MagicMock()
+        engine.connect.return_value.__enter__ = MagicMock(return_value=conn)
+        engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+        conn.execute.return_value.scalar_one.return_value = 4
+        job_repo.engine = engine
+        job_service = MagicMock()
+        job_service._repository = job_repo
+
+        manager = MagicMock()
+        manager._task_repo = task_repo
+        manager._instance_repository = instance_repo
+        manager._job_queue_service = job_service
+        preflight_app.state.manager = manager
+
+        with TestClient(preflight_app) as client:
+            response = client.get("/jobs/cleanup/preflight")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["zombie_instance_count"] == 1
+        assert body["live_instance_count"] == 1
+        assert body["live_instance_ids"] == ["inst-live"]
+        assert body["defer_blocked_count"] == 4
+        assert body["bad_state_count"] == 0
 
     def test_preflight_zombie_count_independent_of_task_repo(
         self, preflight_app
