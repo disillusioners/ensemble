@@ -243,14 +243,20 @@ def _resolve_defer_autopromote_enabled() -> bool:
         is unset / blank — the bounded unstick is enabled (detector
         flips ``task.is_deferred=False`` on the matched rows).
         ``False`` when the env is explicitly set to a falsy value
-        (``"0"`` / ``"false"`` / ``"no"`` / ``"off"``) — the escape
-        hatch; detection WARN fires, NO task writes (the OFF=no-writes
+        (``"0"`` / ``"00"`` / ``"-0"`` / ``"0."`` / ``"0x0"`` /
+        ``"false"`` / ``"no"`` / ``"off"``) — the escape hatch;
+        detection WARN fires, NO task writes (the OFF=no-writes
         contract).
 
-    Truthy values: ``("1", "true", "yes", "on")``. Falsy values:
-    ``("0", "false", "no", "off")``. The blank case falls into the
-    default-ON bucket — the parser does NOT raise on empty-string, it
-    just treats it as the default-ON value. Unknown non-blank values
+    Truthy values: ``("1", "true", "yes", "on")``. Falsy values include
+    zero-style spellings (``"0"`` / ``"00"`` / ``"-0"`` / ``"0."`` /
+    ``"0x0"``) AND the textual spellings (``"false"`` / ``"no"`` /
+    ``"off"``) — the zero-style variants cover operator intent for
+    forms that are numerically zero but lexically distinct from
+    ``"0"``. The blank case falls into the default-ON bucket — the
+    parser does NOT raise on empty-string, it just treats it as the
+    default-ON value. Unknown non-blank values (incl. the quoted form
+    ``"0"`` with the literal quote characters as part of the value)
     fall back to ON with a one-shot WARN — the consistent direction
     under the new default (a typo that does not parse as falsy is
     still ON, matching the operator's intent to enable the unstick;
@@ -267,8 +273,12 @@ def _resolve_defer_autopromote_enabled() -> bool:
     # Default ON: unset env var resolves to True (the bounded unstick
     # runs by default). Explicit falsy spellings disable; everything
     # else (truthy spellings, blank, unknowns) resolves to ON.
+    # Falsy set covers both textual (false/no/off) AND zero-style
+    # (0/00/-0/0./0x0) — operator intent for these is unambiguously
+    # "disable"; see MATRIX_A in
+    # tests/job_queue/test_defer_self_witness_watchdog.py.
     raw = os.environ.get(_DEFER_AUTOPROMOTE_ENABLED_ENV, "1").strip().lower()
-    if raw in ("0", "false", "no", "off"):
+    if raw in ("0", "00", "-0", "0.", "0x0", "false", "no", "off"):
         _DEFER_AUTOPROMOTE_ENABLED = False
     elif raw in ("1", "true", "yes", "on", ""):
         _DEFER_AUTOPROMOTE_ENABLED = True
@@ -276,8 +286,8 @@ def _resolve_defer_autopromote_enabled() -> bool:
         logger.warning(
             "%s=%r is not a recognized truthy/falsy value; falling "
             "back to ON (the default). Recognized falsy spellings: "
-            "0/false/no/off — set one of those + restart to disable "
-            "the bounded unstick.",
+            "0/00/-0/0./0x0/false/no/off — set one of those + "
+            "restart to disable the bounded unstick.",
             _DEFER_AUTOPROMOTE_ENABLED_ENV,
             raw,
         )
@@ -317,18 +327,19 @@ def emit_defer_autopromote_boot_log() -> None:
             "(default; %s unset or set to a truthy value) — "
             "matched deferred PENDING tasks in the self-witness "
             "blind-spot will be unstuck by flipping task.is_deferred="
-            "false on the drift cadence. Set %s=0 (or false/off) "
-            "+ restart to disable the bounded unstick",
+            "false on the drift cadence. Set %s=0 (or "
+            "00/-0/0./0x0/false/no/off) + restart to disable the "
+            "bounded unstick",
             _DEFER_AUTOPROMOTE_ENABLED_ENV,
             _DEFER_AUTOPROMOTE_ENABLED_ENV,
         )
     else:
         logger.info(
             "Pattern-g defer-self-witness autopromote DISABLED "
-            "(operator opted-out via %s=0/false/off) — detection "
-            "WARN fires, deferred PENDING tasks in the self-witness "
-            "blind-spot are NOT unstuck. Unset %s (or set it to "
-            "1/true/yes/on) + restart to re-enable the bounded "
+            "(operator opted-out via %s=0/00/-0/0./0x0/false/no/off) "
+            "— detection WARN fires, deferred PENDING tasks in the "
+            "self-witness blind-spot are NOT unstuck. Unset %s (or set "
+            "it to 1/true/yes/on) + restart to re-enable the bounded "
             "unstick",
             _DEFER_AUTOPROMOTE_ENABLED_ENV,
             _DEFER_AUTOPROMOTE_ENABLED_ENV,

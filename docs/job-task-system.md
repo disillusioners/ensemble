@@ -1354,9 +1354,13 @@ after soak):
 
 - **Default ON** — an unset / blank / unparseable `ENSEMBLE_DEFER_AUTOPROMOTE_ENABLED`
   resolves to ON. The bounded unstick runs by default on every drift sweep.
-- **Explicit OFF** — set `ENSEMBLE_DEFER_AUTOPROMOTE_ENABLED=0` (also accepts
+- **Explicit OFF** — set `ENSEMBLE_DEFER_AUTOPROMOTE_ENABLED=0` (also accepts the
+  zero-style spellings `00` / `-0` / `0.` / `0x0` AND the textual spellings
   `false` / `off` / `no`) and restart. Detection WARN still fires; the
-  `task.is_deferred` flip does NOT execute (`OFF=no-writes` contract).
+  `task.is_deferred` flip does NOT execute (`OFF=no-writes` contract). The
+  quoted form `"0"` (literal quote characters in the value) stays UNKNOWN and
+  falls through to the ON+WARN default — a documented decision, pinned by the
+  `quoted-zero-falls-through-on-with-warn` row in `MATRIX_A_TRUTH_TABLE`.
 - **Truthy spellings** (`1` / `true` / `yes` / `on`) are explicit ON — semantically
   identical to the unset default.
 - **Unknown non-blank values** fall back to ON with a one-shot WARN
@@ -1364,13 +1368,44 @@ after soak):
   default; explicit OFF always wins.
 - **Restart required** to re-evaluate (cached resolver, mirrors the
   `ENSEMBLE_ORPHAN_F1_ENABLED` discipline).
+- **Revert direction (operator note)** — the simpler revert is now the explicit
+  `=0` spelling **plus a restart**; an unset env no longer disables the bounded
+  unstick under the post-soak default-ON posture. Operators who relied on
+  "unset = previous-default behavior" must add the explicit
+  `ENSEMBLE_DEFER_AUTOPROMOTE_ENABLED=0` line to their environment before the
+  next restart to preserve the prior behavior. The CHANGELOG `[Unreleased]`
+  operator callout documents the same advice for cross-reference.
 
 The unstick writes `task.is_deferred` only — `job_queue_items.admission_state` is
 untouched, so the constitution census stays **23/1/0**. The boot-log helper
 (`emit_defer_autopromote_boot_log`, wired in `daemon/api.py` lifespan next to the
 f1 boot log) emits exactly one INFO line per process naming the resolved state.
-9-cell env matrix + the explicit-OFF zero-writes pin live in
-`tests/job_queue/test_defer_self_witness_watchdog.py`.
+The kill-switch is pinned by two disjoint matrices in
+`tests/job_queue/test_defer_self_witness_watchdog.py`:
+
+* **`MATRIX_A_TRUTH_TABLE` (16 rows, parse layer)** — direct truth-table probe of
+  `_resolve_defer_autopromote_enabled`. Pins the env-spelling contract: unset,
+  truthy, falsy (textual `false`/`no`/`off` AND zero-style `0`/`00`/`-0`/`0.`/
+  `0x0`), blank, and unknown non-blank (incl. the documented `'"0"'` quoted
+  form which stays UNKNOWN → ON+WARN). The third column pins whether the
+  one-shot WARN fires — explicit OFF and explicit ON are silent; blank and
+  unparseable values fall through to ON+WARN.
+
+* **`MATRIX_B_BEHAVIOR` (11 rows, real-service layer)** — drives a real
+  self-witness blind-spot through `reconcile_drift_states` under each env
+  spelling via `TestDeferAutopromoteReconcilerMatrix::test_kill_switch_matrix`
+  (the `defer_watchdog_engine` fixture, NO mocks of the kill-switch path).
+  Pins the `OFF=no-writes` contract end-to-end: detection WARN fires with
+  instance_id + task id named (flag-independent), but `task.is_deferred` is
+  NOT flipped under any documented falsy spelling. The
+  `garbage-detection-warn-flip` row pins that the unparseable-value fallback
+  UNSTUCKS — the kill-switch flips the row only when the fallback is the
+  safe direction.
+
+The two matrices are disjoint on purpose: MATRIX_A proves the *resolver* pins
+each spelling correctly, MATRIX_B proves the *reconciler* honors that resolver
+under real load. Drift in either side surfaces as a test failure before it
+can ship.
 
 #### The route + wiring
 

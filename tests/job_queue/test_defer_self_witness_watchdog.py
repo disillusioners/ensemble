@@ -325,11 +325,39 @@ MATRIX_A_TRUTH_TABLE = [
     # NOT to a falsy value. The parser must NOT raise on
     # empty-string — it just treats it as the default-ON value.
     pytest.param("", True, False, id="blank-is-on-empty-string-safe"),
+    # Zero-style falsy spellings (micro-round extension, 2026-09-06):
+    # operator intent for these is unambiguously "disable" — they are
+    # numerically zero but lexically distinct from the bare ``"0"``.
+    # Pinned individually so a future drift in the falsy set surfaces
+    # here rather than silently allowing a zero-style spelling through
+    # to the ON+WARN fallback.
+    pytest.param("00", False, False, id="zero-style-double-zero-is-off"),
+    pytest.param("-0", False, False, id="zero-style-minus-zero-is-off"),
+    pytest.param("0.", False, False, id="zero-style-trailing-dot-is-off"),
+    pytest.param("0x0", False, False, id="zero-style-hex-zero-is-off"),
+    # Documented DECISION — quoted form ``"0"`` (literal quote
+    # characters as part of the value) stays UNKNOWN. The resolver
+    # strips+lowers AFTER env-read, so the quote characters survive;
+    # ``'"0"'`` does not match any falsy/truthy spelling, so it falls
+    # through to the ON+WARN fallback (consistent with the
+    # "operator-typo-bias" posture — a quoting mistake should not
+    # silently disable the bounded unstick). Pinned so a future
+    # change to this policy surfaces explicitly.
+    pytest.param(
+        '"0"', True, True, id="quoted-zero-falls-through-on-with-warn",
+    ),
     # Unknown non-blank → ON with WARN (consistent with the new
     # "ON unless explicitly disabled" posture — explicit OFF always
     # wins; unparseable values fall through to the default).
     pytest.param("garbage", True, True, id="garbage-falls-through-on-with-warn"),
 ]
+# NOTE on case/whitespace rows: the resolver normalizes via
+# ``.strip().lower()`` (job_recovery_service.py:_resolve_defer_autopromote_enabled
+# line ~277) BEFORE the falsy/truthy set lookup. Spelling variants like
+# ``OFF`` / ``False`` / ``" 0 "`` / ``"  off "`` therefore all normalize
+# to existing covered cells (``"off"`` / ``"false"`` / ``"0"`` / ``"off"``).
+# Adding duplicate normalization rows would NOT exercise additional
+# code paths — they would just re-pin already-pinned semantics.
 
 
 class TestDeferAutopromoteResolverSyntax:
@@ -412,8 +440,8 @@ class TestDeferAutopromoteConfigParse:
             assert _jrs._resolve_defer_autopromote_enabled() is True, (
                 "Unset env var MUST default to ON — the bounded "
                 "unstick runs by default (operator decision "
-                "2026-09-06; explicit OFF = 0/false/off is the "
-                "escape hatch)."
+                "2026-09-06; explicit OFF = "
+                "0/00/-0/0./0x0/false/no/off is the escape hatch)."
             )
         finally:
             _jrs._reset_defer_autopromote_for_tests()
@@ -480,12 +508,27 @@ MATRIX_B_BEHAVIOR = [
     pytest.param("0", True, False, id="zero-detection-warn-no-flip"),
     pytest.param("false", True, False, id="false-detection-warn-no-flip"),
     pytest.param("off", True, False, id="off-detection-warn-no-flip"),
+    # ``no`` (textual OFF, bonus row in MATRIX_A) — same OFF contract
+    # as ``0``/``false``/``off``; pinned here so MATRIX_B's real-service
+    # rehearsal proves the OFF escape hatch works for every documented
+    # falsy spelling, not just the most-common three. Detection WARN
+    # fires (flag-independent), ``is_deferred`` is NOT flipped
+    # (OFF=no-writes contract).
+    pytest.param("no", True, False, id="no-detection-warn-no-flip"),
     pytest.param("", True, True, id="blank-detection-warn-flip"),
     # truthy ON → detection WARN fires, is_deferred flipped
     pytest.param("1", True, True, id="one-detection-warn-flip"),
     pytest.param("true", True, True, id="true-detection-warn-flip"),
     pytest.param("on", True, True, id="on-detection-warn-flip"),
     pytest.param("yes", True, True, id="yes-detection-warn-flip"),
+    # ``garbage`` (unparseable non-blank) — same fallback direction as
+    # the unset default: ON with WARN (consistent with the
+    # "operator-typo-bias" posture). Pinned here so MATRIX_B's real
+    # service proves the fallback actually unstucks the row, not just
+    # the unset-default cell.
+    pytest.param(
+        "garbage", True, True, id="garbage-detection-warn-flip",
+    ),
 ]
 
 

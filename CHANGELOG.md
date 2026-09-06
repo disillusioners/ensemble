@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — 2026-09-06
 
+> **⚠ Operator callout — `ENSEMBLE_DEFER_AUTOPROMOTE_ENABLED` default flipped
+> OFF → ON.** If you were relying on the previous "unset = OFF" posture as your
+> revert path, that is no longer the case: an unset (or blank) env now resolves
+> to ON, and the bounded unstick runs by default. **Set
+> `ENSEMBLE_DEFER_AUTOPROMOTE_ENABLED=0` (also accepts `00` / `-0` / `0.` /
+> `0x0` / `false` / `no` / `off`) *before restarting* the daemon** to land the
+> previous default behavior. Restart is required — the resolver is cached at
+> boot (`daemon/services/job_recovery_service.py::_resolve_defer_autopromote_enabled`).
+> Census unchanged (23/1/0): the unstick writes `task.is_deferred` only.
+
 ### Fixed — Unblock round (`fix/defer-self-witness-and-cleanup`)
 
 #### Preflight defer-count wiring (ITEM 1)
@@ -182,6 +192,30 @@ Operators who need to revert (or are mid-incident on this path) set
 `ENSEMBLE_DEFER_AUTOPROMOTE_ENABLED=0` (also accepts `false` / `off`)
 + restart; the explicit-OFF escape hatch is byte-identical to the
 previous default behaviour (WARN only, no `task.is_deferred` writes).
+
+### Notes — boot-log string change (operator grep alert migration)
+
+The one-shot boot INFO emitted by `emit_defer_autopromote_boot_log`
+(`daemon/services/job_recovery_service.py`) swapped its default-tag
+prefix in tandem with the default flip:
+
+* **Old (default-OFF posture)**: DISABLED state led with
+  `"Pattern-g defer-self-witness autopromote DISABLED (default; %s unset or set to a falsy value) — ..."`,
+  ENABLED state led with `"... ENABLED (operator opted-out via ...)"`
+  (rare on this path).
+* **New (default-ON posture)**: ENABLED state leads with
+  `"Pattern-g defer-self-witness autopromote ENABLED (default; %s unset or set to a truthy value) — ..."`,
+  DISABLED state leads with
+  `"... DISABLED (operator opted-out via %s=0/00/-0/0./0x0/false/no/off) — ..."`.
+
+**Operators with grep-based alert rules keyed on the old
+`DISABLED (default; …)` prefix must update those rules** — without
+the migration, the rule will go silent on a deployed instance where
+the kill-switch is in its explicit-OFF escape-hatch posture. The new
+substring is `DISABLED (operator opted-out via …)` (the path stays
+identifiable via the leading `Pattern-g defer-self-witness autopromote`
+token in either state). Boot-log emission cadence is unchanged: exactly
+one INFO line per process; restart required to re-evaluate the resolver.
 
 ---
 
