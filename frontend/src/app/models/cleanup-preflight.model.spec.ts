@@ -39,10 +39,16 @@ describe('cleanup-preflight.model — CLEANUP_TRUTH_SPLIT_COPY', () => {
    *   * this constant (single FE source of truth).
    */
   it('contains the canonical truth-split sentence VERBATIM', () => {
+    // Cap-exception micro-round (2026-09-06) — ITEM 2 tighten:
+    // the truth-survivor caption was broadened from "no live work"
+    // to "settled mirrors, or running Tasks without JobItems" so
+    // the caption matches the filter's TRUE semantics (a
+    // live-Task-only instance is a real survivor, NOT a
+    // contradiction of the literal "no live work" reading).
     expect(CLEANUP_TRUTH_SPLIT_COPY).toBe(
       'Every ACTIVE job is cancelled, together with its whole subtree. ' +
-        'Only missions holding nothing but settled mirrors — no live work ' +
-        '— are kept.'
+        'Only missions holding settled mirrors, or running Tasks without ' +
+        'JobItems — are kept.'
     );
   });
 
@@ -51,7 +57,17 @@ describe('cleanup-preflight.model — CLEANUP_TRUTH_SPLIT_COPY', () => {
   });
 
   it('ends with the canonical closing fragment', () => {
-    expect(CLEANUP_TRUTH_SPLIT_COPY.endsWith('— are kept.')).toBe(true);
+    expect(CLEANUP_TRUTH_SPLIT_COPY.endsWith('JobItems — are kept.')).toBe(true);
+  });
+
+  it('mentions both "settled mirrors" AND "running Tasks without JobItems"', () => {
+    // Tightened wording — both survival shapes named explicitly so
+    // the wording stays truthful to the truth-survivor filter
+    // (a live-Task-only instance is a survivor; a settled-mirror-
+    // only instance is a survivor; an active-mission-JobItem
+    // holder is NOT).
+    expect(CLEANUP_TRUTH_SPLIT_COPY).toContain('settled mirrors');
+    expect(CLEANUP_TRUTH_SPLIT_COPY).toContain('running Tasks without JobItems');
   });
 });
 
@@ -71,8 +87,16 @@ describe('cleanup-preflight.model — CLEANUP_TRUTH_SURVIVOR_NOTE', () => {
     expect(CLEANUP_TRUTH_SURVIVOR_NOTE).toContain('Truth-survivor');
   });
 
-  it('mentions "Bucket-2" so the source of the filter is documented', () => {
-    expect(CLEANUP_TRUTH_SURVIVOR_NOTE).toContain('Bucket-2');
+  it('mentions "cancellable" so the Bucket-1/2 semantics are documented', () => {
+    // Cap-exception micro-round fold (ITEM 5, 2026-09-06): the
+    // survivor-note phrasing was broadened from "Bucket-2-cancellable"
+    // to "cancellable active or queued (non-mirror) jobs" because
+    // BOTH Bucket 1 (queued batch UPDATE) and Bucket 2 (active
+    // per-row cancel) target the same set of rows this probe
+    // excludes. The new wording is grep-stable and aligns with the
+    // docstring on
+    // ``SQLModelInstanceRepository.has_real_active_or_queued_work``.
+    expect(CLEANUP_TRUTH_SURVIVOR_NOTE).toContain('cancellable');
   });
 });
 

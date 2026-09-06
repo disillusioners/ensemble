@@ -1490,7 +1490,7 @@ carries only the two facts + witnesses.
 > at 23. The cleanup preflight/dialog copy states the blindness
 > explicitly with the canonical operator copy (single source of truth — the canonical sentence also lives in `daemon/routers/jobs_management.py:cleanup_preflight` and in the FE exported `CLEANUP_TRUTH_SPLIT_COPY` (`frontend/src/app/models/cleanup-preflight.model.ts`); the plain-TS spec at `cleanup-preflight.model.spec.ts` and the docs grep-test in this repo pin the verbatim sentence on every surface, so a drift breaks one of the suites):
 >
-> > **Every ACTIVE job is cancelled, together with its whole subtree. Only missions holding nothing but settled mirrors — no live work — are kept.**
+> > **Every ACTIVE job is cancelled, together with its whole subtree. Only missions holding settled mirrors, or running Tasks without JobItems — are kept.**
 >
 > (the single-owner operator term is "stalled mission"; the technical `zombie_instance_count` wire field stays). `defer_blocked_count` is kept SEPARATE from `bad_state_count` (cleanup reconciles bad-state Tasks; it does not touch the defer lane).
 >

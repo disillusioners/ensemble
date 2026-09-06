@@ -125,11 +125,14 @@ a non-terminal child is now refused with
 #### Preflight copy truth (Round-2 ITEM 3 / T-H1)
 
 The cleanup preflight docstring replaces "Live missions will remain"
-with the canonical split sentence (FE + docs use the same):
+with the canonical split sentence (FE const + docs §8.5 use the
+same — cap-exception micro-round ITEM 2, 2026-09-06 broadens to
+"settled mirrors, or running Tasks without JobItems" so the
+sentence matches the truth-survivor filter's TRUE semantics):
 
 > Every ACTIVE job is cancelled, together with its whole subtree.
-> Only missions holding nothing but settled mirrors — no live work
-> — are kept.
+> Only missions holding settled mirrors, or running Tasks without
+> JobItems — are kept.
 
 Term single-owner: "stalled mission" (operator-facing). The
 `zombie_instance_count` wire field NAME stays technical (wire

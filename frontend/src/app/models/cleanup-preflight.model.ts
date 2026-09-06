@@ -44,8 +44,8 @@ export interface CleanupPreflight {
  */
 export const CLEANUP_TRUTH_SPLIT_COPY = [
   'Every ACTIVE job is cancelled, together with its whole subtree.',
-  'Only missions holding nothing but settled mirrors — no live work',
-  '— are kept.',
+  'Only missions holding settled mirrors, or running Tasks without',
+  'JobItems — are kept.',
 ].join(' ');
 
 /**
@@ -67,8 +67,8 @@ export const CLEANUP_TRUTH_SPLIT_COPY = [
  */
 export const CLEANUP_TRUTH_SURVIVOR_NOTE =
   'Truth-survivor listing: every ID below is a non-terminal ' +
-  'instance cleanup will NOT terminate (no Bucket-2-cancellable ' +
-  'mission JobItems; live Tasks or non-terminal children may ' +
+  'instance cleanup will NOT terminate (no cancellable active or ' +
+  'queued (non-mirror) jobs; live Tasks or non-terminal children may ' +
   'still anchor them).';
 
 /**

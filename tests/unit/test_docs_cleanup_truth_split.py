@@ -24,8 +24,8 @@ from pathlib import Path
 # docstring). The three surfaces MUST match this string byte-for-byte.
 CANONICAL_TRUTH_SPLIT_SENTENCE: str = (
     "Every ACTIVE job is cancelled, together with its whole subtree. "
-    "Only missions holding nothing but settled mirrors — no live work "
-    "— are kept."
+    "Only missions holding settled mirrors, or running Tasks without "
+    "JobItems — are kept."
 )
 
 # Project-root-relative docs file.
